@@ -165,9 +165,14 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 
 	// Monitors sub-fields
 	if mon, ok := updates["monitors"].(map[string]any); ok {
-		if v, ok := mon["max_feed_items"].(float64); ok {
+		if v, ok := mon["archive_window_days"].(float64); ok {
+			if v < 1 || v > 3650 {
+				errs["monitors.archive_window_days"] = "archive_window_days must be between 1 and 3650"
+			}
+		}
+		if v, ok := mon["archive_slots"].(float64); ok {
 			if v < 1 || v > 100 {
-				errs["monitors.max_feed_items"] = "max_feed_items must be between 1 and 100"
+				errs["monitors.archive_slots"] = "archive_slots must be between 1 and 100"
 			}
 		}
 		if v, ok := mon["decapi_check_interval"].(float64); ok {
@@ -400,8 +405,11 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 
 	// Monitors sub-fields
 	if mon, ok := updates["monitors"].(map[string]any); ok {
-		if v, ok := mon["max_feed_items"].(float64); ok {
-			cfg.Monitors.MaxFeedItems = int(v)
+		if v, ok := mon["archive_window_days"].(float64); ok {
+			cfg.Monitors.ArchiveWindowDays = int(v)
+		}
+		if v, ok := mon["archive_slots"].(float64); ok {
+			cfg.Monitors.ArchiveSlots = int(v)
 		}
 		if v, ok := mon["feed_check_interval"].(float64); ok {
 			cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: v}

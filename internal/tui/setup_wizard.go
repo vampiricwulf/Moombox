@@ -110,7 +110,8 @@ var advancedSetupSteps = []setupStepDef{
 		title:    "Monitors",
 		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
-			{"maxFeedItems", "Max feed items", "15", "RSS feed items to check per channel", setupFieldNumber, nil},
+			{"archiveWindowDays", "Archive window (days)", "3", "How many days back to archive; upcoming/live always covered", setupFieldNumber, nil},
+			{"archiveSlots", "Archive slots", "3", "Backlog downloads per channel at once; new content never waits", setupFieldNumber, nil},
 			{"feedCheckInterval", "Feed check interval", "10", "Minutes between feed checks", setupFieldNumber, nil},
 			{"hideAge", "Hide finished after (days)", "30", "Finished jobs older than this move to Archived", setupFieldNumber, nil},
 		},
@@ -1063,8 +1064,12 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		m.errorMsg = "Logs: Max files must be between 1 and 100"
 		return ""
 	}
-	if n := vNum("maxFeedItems"); n != 0 && (n < 1 || n > 100) {
-		m.errorMsg = "Monitors: Max feed items must be between 1 and 100"
+	if n := vNum("archiveWindowDays"); n != 0 && (n < 1 || n > 3650) {
+		m.errorMsg = "Monitors: Archive window must be between 1 and 3650 days"
+		return ""
+	}
+	if n := vNum("archiveSlots"); n != 0 && (n < 1 || n > 100) {
+		m.errorMsg = "Monitors: Archive slots must be between 1 and 100"
 		return ""
 	}
 	if n := vNum("feedCheckInterval"); n != 0 && (n < 1 || n > 1440) {
@@ -1136,8 +1141,11 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	}
 
 	// Monitors
-	if n := vNum("maxFeedItems"); n > 0 {
-		cfg.Monitors.MaxFeedItems = n
+	if n := vNum("archiveWindowDays"); n > 0 {
+		cfg.Monitors.ArchiveWindowDays = n
+	}
+	if n := vNum("archiveSlots"); n > 0 {
+		cfg.Monitors.ArchiveSlots = n
 	}
 	if n := vNum("feedCheckInterval"); n > 0 {
 		cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: float64(n)}

@@ -25,8 +25,8 @@ func TestDefaults(t *testing.T) {
 	if cfg.Downloader.MaxVideoResolution != 2160 {
 		t.Errorf("expected 2160, got %d", cfg.Downloader.MaxVideoResolution)
 	}
-	if cfg.Downloader.NumParallelDownloads != 2 {
-		t.Errorf("expected 2, got %d", cfg.Downloader.NumParallelDownloads)
+	if cfg.Downloader.NumParallelDownloads != 10 {
+		t.Errorf("expected 10, got %d", cfg.Downloader.NumParallelDownloads)
 	}
 	if !cfg.Downloader.DownloadChat {
 		t.Error("expected download_chat to be true")
@@ -46,90 +46,90 @@ func TestDefaults(t *testing.T) {
 }
 
 // TestValidateMonitorBounds verifies the new upper bounds on
-// MaxFeedItems / FeedCheckInterval / HideFinishedAgeDays.
+// ArchiveWindowDays / FeedCheckInterval / HideFinishedAgeDays.
 // Pre-Finding-13 only the lower bound was enforced — setting
-// max_feed_items = 1000000 was silently accepted.
+// max_feed_items = 1000000 (the field's predecessor) was silently accepted.
 func TestValidateMonitorBounds(t *testing.T) {
 	tests := []struct {
-		name             string
-		mutate           func(*MoomboxConfig)
-		wantMaxFeed      int
-		wantFeedInterval float64
-		wantHideAge      float64
+		name                  string
+		mutate                func(*MoomboxConfig)
+		wantArchiveWindowDays int
+		wantFeedInterval      float64
+		wantHideAge           float64
 	}{
 		{
 			name: "defaults pass through",
 			mutate: func(cfg *MoomboxConfig) {
 				// no mutation
 			},
-			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
-			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
-			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+			wantArchiveWindowDays: Defaults().Monitors.ArchiveWindowDays,
+			wantFeedInterval:      Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:           Defaults().Monitors.HideFinishedAgeDays.Value,
 		},
 		{
-			name: "max_feed_items above 1000 resets",
+			name: "archive_window_days above 3650 resets",
 			mutate: func(cfg *MoomboxConfig) {
-				cfg.Monitors.MaxFeedItems = 5000
+				cfg.Monitors.ArchiveWindowDays = 5000
 			},
-			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
-			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
-			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+			wantArchiveWindowDays: Defaults().Monitors.ArchiveWindowDays,
+			wantFeedInterval:      Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:           Defaults().Monitors.HideFinishedAgeDays.Value,
 		},
 		{
-			name: "max_feed_items at upper bound passes",
+			name: "archive_window_days at upper bound passes",
 			mutate: func(cfg *MoomboxConfig) {
-				cfg.Monitors.MaxFeedItems = 1000
+				cfg.Monitors.ArchiveWindowDays = 3650
 			},
-			wantMaxFeed:      1000,
-			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
-			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+			wantArchiveWindowDays: 3650,
+			wantFeedInterval:      Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:           Defaults().Monitors.HideFinishedAgeDays.Value,
 		},
 		{
 			name: "feed_check_interval > 1440 resets",
 			mutate: func(cfg *MoomboxConfig) {
 				cfg.Monitors.FeedCheckInterval = FlexDuration{Value: 5000}
 			},
-			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
-			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
-			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+			wantArchiveWindowDays: Defaults().Monitors.ArchiveWindowDays,
+			wantFeedInterval:      Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:           Defaults().Monitors.HideFinishedAgeDays.Value,
 		},
 		{
 			name: "feed_check_interval at upper bound passes",
 			mutate: func(cfg *MoomboxConfig) {
 				cfg.Monitors.FeedCheckInterval = FlexDuration{Value: 1440}
 			},
-			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
-			wantFeedInterval: 1440,
-			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+			wantArchiveWindowDays: Defaults().Monitors.ArchiveWindowDays,
+			wantFeedInterval:      1440,
+			wantHideAge:           Defaults().Monitors.HideFinishedAgeDays.Value,
 		},
 		{
 			name: "hide_finished_age_days > 365 resets",
 			mutate: func(cfg *MoomboxConfig) {
 				cfg.Monitors.HideFinishedAgeDays = FlexDuration{Value: 9999}
 			},
-			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
-			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
-			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+			wantArchiveWindowDays: Defaults().Monitors.ArchiveWindowDays,
+			wantFeedInterval:      Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:           Defaults().Monitors.HideFinishedAgeDays.Value,
 		},
 		{
 			name: "hide_finished_age_days at upper bound passes",
 			mutate: func(cfg *MoomboxConfig) {
 				cfg.Monitors.HideFinishedAgeDays = FlexDuration{Value: 365}
 			},
-			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
-			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
-			wantHideAge:      365,
+			wantArchiveWindowDays: Defaults().Monitors.ArchiveWindowDays,
+			wantFeedInterval:      Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:           365,
 		},
 		{
 			name: "all three above bounds reset together",
 			mutate: func(cfg *MoomboxConfig) {
-				cfg.Monitors.MaxFeedItems = 1000000
+				cfg.Monitors.ArchiveWindowDays = 1000000
 				cfg.Monitors.FeedCheckInterval = FlexDuration{Value: 99999}
 				cfg.Monitors.HideFinishedAgeDays = FlexDuration{Value: 99999}
 			},
-			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
-			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
-			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+			wantArchiveWindowDays: Defaults().Monitors.ArchiveWindowDays,
+			wantFeedInterval:      Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:           Defaults().Monitors.HideFinishedAgeDays.Value,
 		},
 	}
 	for _, tt := range tests {
@@ -137,8 +137,8 @@ func TestValidateMonitorBounds(t *testing.T) {
 			cfg := Defaults()
 			tt.mutate(cfg)
 			Normalize(cfg)
-			if cfg.Monitors.MaxFeedItems != tt.wantMaxFeed {
-				t.Errorf("MaxFeedItems = %d, want %d", cfg.Monitors.MaxFeedItems, tt.wantMaxFeed)
+			if cfg.Monitors.ArchiveWindowDays != tt.wantArchiveWindowDays {
+				t.Errorf("ArchiveWindowDays = %d, want %d", cfg.Monitors.ArchiveWindowDays, tt.wantArchiveWindowDays)
 			}
 			if cfg.Monitors.FeedCheckInterval.Value != tt.wantFeedInterval {
 				t.Errorf("FeedCheckInterval = %v, want %v", cfg.Monitors.FeedCheckInterval.Value, tt.wantFeedInterval)
@@ -277,7 +277,7 @@ func TestMembershipDiscoveryDefaultOnAndPersist(t *testing.T) {
 	// 1. An existing config WITHOUT the key must load as enabled (default on),
 	//    and normalization must make the pointer concrete (non-nil).
 	absent := filepath.Join(dir, "absent.toml")
-	if err := os.WriteFile(absent, []byte("[monitors]\nmax_feed_items = 5\n"), 0o644); err != nil {
+	if err := os.WriteFile(absent, []byte("[monitors]\nfeed_check_interval = 5\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(absent)
@@ -341,7 +341,6 @@ port = 8080
 network_access = "lan"
 log_level = "DEBUG"
 database_path = "./test.db"
-max_feed_items = 20
 hide_finished_age_days = 14
 
 [downloader]
@@ -406,9 +405,6 @@ name = "Test Channel"
 		t.Errorf("expected ./test-profile, got %s", cfg.Cookies.BrowserProfileDir)
 	}
 	// Verify Monitors
-	if cfg.Monitors.MaxFeedItems != 20 {
-		t.Errorf("expected 20, got %d", cfg.Monitors.MaxFeedItems)
-	}
 	if cfg.Monitors.HideFinishedAgeDays.Value != 14 {
 		t.Errorf("expected 14, got %f", cfg.Monitors.HideFinishedAgeDays.Value)
 	}
@@ -501,8 +497,8 @@ func TestValidation(t *testing.T) {
 	if cfg.Network.NetworkAccess != "localhost" {
 		t.Errorf("expected network_access reset to localhost, got %s", cfg.Network.NetworkAccess)
 	}
-	if cfg.Downloader.NumParallelDownloads != 2 {
-		t.Errorf("expected parallel downloads reset to 2, got %d", cfg.Downloader.NumParallelDownloads)
+	if cfg.Downloader.NumParallelDownloads != 10 {
+		t.Errorf("expected parallel downloads reset to 10, got %d", cfg.Downloader.NumParallelDownloads)
 	}
 	if cfg.Downloader.MaxVideoResolution != 2160 {
 		t.Errorf("expected resolution reset to 2160, got %d", cfg.Downloader.MaxVideoResolution)
@@ -876,5 +872,51 @@ func TestValidate_ConnectivityProbeTargets(t *testing.T) {
 	Normalize(norm)
 	if len(norm.Connectivity.ProbeTargets) == 0 || norm.Connectivity.ProbeTargets[0] == "not-a-host-port" {
 		t.Fatalf("Normalize should restore defaults, got %v", norm.Connectivity.ProbeTargets)
+	}
+}
+
+func TestArchiveSettingsDefaults(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Monitors.ArchiveWindowDays != 3 || cfg.Monitors.ArchiveSlots != 3 {
+		t.Fatalf("defaults %d/%d, want 3/3", cfg.Monitors.ArchiveWindowDays, cfg.Monitors.ArchiveSlots)
+	}
+	if cfg.Downloader.NumParallelDownloads != 10 {
+		t.Fatalf("num_parallel_downloads default %d, want 10", cfg.Downloader.NumParallelDownloads)
+	}
+}
+
+func TestArchiveSettingsValidation(t *testing.T) {
+	cfg := Defaults()
+	cfg.Monitors.ArchiveWindowDays = 5000 // > 3650
+	bad := 200                            // > 100
+	cfg.Channels = []ChannelConfig{{Name: "c", ArchiveSlots: &bad}}
+	Normalize(cfg)
+	if cfg.Monitors.ArchiveWindowDays != 3 {
+		t.Fatal("global out-of-range must warn-and-reset to default (config.go:490 contract)")
+	}
+	if cfg.Channels[0].ArchiveSlots != nil {
+		t.Fatal("out-of-range per-channel override must clear to nil (fall back to global) — spec §5: ONE validator covers overrides too")
+	}
+}
+
+func TestMaxFeedItemsIgnored(t *testing.T) {
+	// An existing TOML carrying max_feed_items must load without error and
+	// without effect (spec §5: dropped, not migrated). No `loadFromString`
+	// test helper exists in this package (grep: `func load\|toml.Decode` only
+	// matches the TOML round-trip test at TestChannelTermsTOMLRoundTrip) — use
+	// the write-temp-file-then-Load pattern already established by
+	// TestLoadFromFile/TestMembershipDiscoveryDefaultOnAndPersist above.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.toml")
+	content := "[monitors]\nmax_feed_items = 500\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("legacy key must not error: %v", err)
+	}
+	if cfg.Monitors.ArchiveWindowDays != 3 {
+		t.Fatal("defaults must apply")
 	}
 }

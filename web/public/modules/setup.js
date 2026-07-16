@@ -679,7 +679,8 @@ export class SetupController {
         log_max_files: num("setup-log-max-files"),
       },
       monitors: {
-        max_feed_items: num("setup-max-feed-items"),
+        archive_window_days: num("setup-archive-window-days"),
+        archive_slots: num("setup-archive-slots"),
         feed_check_interval: num("setup-feed-check-interval"),
         hide_finished_age_days: num("setup-hide-age"),
       },

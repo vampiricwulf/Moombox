@@ -80,7 +80,15 @@ type LogsConfig struct {
 
 // MonitorsConfig holds feed and monitor check settings.
 type MonitorsConfig struct {
-	MaxFeedItems        int          `toml:"max_feed_items" json:"max_feed_items"`
+	// ArchiveWindowDays is how many days back to archive: upcoming/live
+	// content is always covered regardless of this window (see
+	// ChannelConfig.ArchiveWindowDays for the per-channel override).
+	ArchiveWindowDays int `toml:"archive_window_days" json:"archive_window_days"`
+	// ArchiveSlots caps how many backlog (non-live) downloads a channel can
+	// have running at once, so new live/upcoming content never waits behind
+	// a backlog sweep (see ChannelConfig.ArchiveSlots for the per-channel
+	// override).
+	ArchiveSlots        int          `toml:"archive_slots" json:"archive_slots"`
 	FeedCheckInterval   FlexDuration `toml:"feed_check_interval" json:"feed_check_interval"`
 	DecapiCheckInterval *int         `toml:"decapi_check_interval,omitempty" json:"decapi_check_interval,omitempty"`
 	TwitchCheckInterval *int         `toml:"twitch_check_interval,omitempty" json:"twitch_check_interval,omitempty"`
@@ -262,8 +270,11 @@ type ChannelConfig struct {
 	NumDescLookbehind     *int         `toml:"num_desc_lookbehind,omitempty" json:"num_desc_lookbehind,omitempty"`
 	OutputDirectory       string       `toml:"output_directory,omitempty" json:"output_directory,omitempty"`
 	IncludeNonLiveContent bool         `toml:"include_non_live_content,omitempty" json:"include_non_live_content,omitempty"`
-	MaxFeedItems          *int         `toml:"max_feed_items,omitempty" json:"max_feed_items,omitempty"`
-	QualityPreference     string       `toml:"quality_preference,omitempty" json:"quality_preference,omitempty"`
+	// ArchiveWindowDays/ArchiveSlots override the global monitors settings
+	// for this channel. Nil or <= 0 falls back to the global value.
+	ArchiveWindowDays *int   `toml:"archive_window_days,omitempty" json:"archive_window_days,omitempty"`
+	ArchiveSlots      *int   `toml:"archive_slots,omitempty" json:"archive_slots,omitempty"`
+	QualityPreference string `toml:"quality_preference,omitempty" json:"quality_preference,omitempty"`
 }
 
 // IsEnabled returns whether the channel is enabled (defaults to true).

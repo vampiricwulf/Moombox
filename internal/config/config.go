@@ -55,7 +55,8 @@ func Defaults() *MoomboxConfig {
 			LogMaxFiles:    5,
 		},
 		Monitors: MonitorsConfig{
-			MaxFeedItems:        15,
+			ArchiveWindowDays:   3,
+			ArchiveSlots:        3,
 			FeedCheckInterval:   FlexDuration{Value: 10}, // minutes
 			HideFinishedAgeDays: FlexDuration{Value: 30},
 			ProbeCooldown:       FlexDuration{Value: 0}, // seconds; 0 = disabled
@@ -64,7 +65,7 @@ func Defaults() *MoomboxConfig {
 		Downloader: DownloaderConfig{
 			OutputTemplate:       "${channel}/${start_date} ${title} [${id}]",
 			MaxVideoResolution:   2160,
-			NumParallelDownloads: 2,
+			NumParallelDownloads: 10,
 			DownloadChat:         true,
 			Prefer60fps:          true,
 			MaximumTimeout:       600,
@@ -297,13 +298,6 @@ func migrateOldFormat(cfg *MoomboxConfig, raw map[string]any) {
 			cfg.Paths.DatabasePath = v
 		}
 	}
-	if v, ok := raw["max_feed_items"]; ok {
-		if monitorsRaw == nil || monitorsRaw["max_feed_items"] == nil {
-			if n, ok := toFloat64(v); ok {
-				cfg.Monitors.MaxFeedItems = int(n)
-			}
-		}
-	}
 	if v, ok := raw["feed_check_interval"]; ok {
 		if monitorsRaw == nil || monitorsRaw["feed_check_interval"] == nil {
 			cfg.Monitors.FeedCheckInterval = ParseFlexDuration(v, "minutes", cfg.Monitors.FeedCheckInterval.Value)
@@ -482,15 +476,21 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 	// Upper bounds derived from plausible operating envelopes — over-large
-	// values turn into per-tick scan costs (MaxFeedItems = O(N) per channel
+	// values turn into per-tick scan costs (ArchiveSlots = O(N) per channel
 	// per cycle), wall-clock latency (FeedCheckInterval > 24h means jobs
 	// would never get found before they finish), and storage retention
 	// shifts (HideFinishedAgeDays > 1y is a UI bug, not a feature). Audit
 	// reports/config.md Finding 13.
-	if cfg.Monitors.MaxFeedItems < 1 || cfg.Monitors.MaxFeedItems > 1000 {
-		fail("monitors.max_feed_items %d out of range 1..1000", cfg.Monitors.MaxFeedItems)
+	if cfg.Monitors.ArchiveWindowDays < 1 || cfg.Monitors.ArchiveWindowDays > 3650 {
+		fail("monitors.archive_window_days %d out of range 1..3650", cfg.Monitors.ArchiveWindowDays)
 		if !reportOnly {
-			cfg.Monitors.MaxFeedItems = defaults.Monitors.MaxFeedItems
+			cfg.Monitors.ArchiveWindowDays = defaults.Monitors.ArchiveWindowDays
+		}
+	}
+	if cfg.Monitors.ArchiveSlots < 1 || cfg.Monitors.ArchiveSlots > 100 {
+		fail("monitors.archive_slots %d out of range 1..100", cfg.Monitors.ArchiveSlots)
+		if !reportOnly {
+			cfg.Monitors.ArchiveSlots = defaults.Monitors.ArchiveSlots
 		}
 	}
 	// monitors.membership_discovery defaults to on: a nil pointer (the field is
@@ -690,12 +690,26 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
-	// Channel-level quality_preference (applies to both YouTube and Twitch).
+	// Channel-level quality_preference (applies to both YouTube and Twitch)
+	// and archive_window_days/archive_slots overrides.
 	for i := range cfg.Channels {
-		if cfg.Channels[i].QualityPreference != "" && !validQualityPreferences[cfg.Channels[i].QualityPreference] {
-			fail("channels[%d].quality_preference %q unknown", i, cfg.Channels[i].QualityPreference)
+		ch := &cfg.Channels[i]
+		if ch.QualityPreference != "" && !validQualityPreferences[ch.QualityPreference] {
+			fail("channels[%d].quality_preference %q unknown", i, ch.QualityPreference)
 			if !reportOnly {
-				cfg.Channels[i].QualityPreference = ""
+				ch.QualityPreference = ""
+			}
+		}
+		if ch.ArchiveWindowDays != nil && (*ch.ArchiveWindowDays < 1 || *ch.ArchiveWindowDays > 3650) {
+			fail("channel %q archive_window_days %d out of range 1..3650", ch.Name, *ch.ArchiveWindowDays)
+			if !reportOnly {
+				ch.ArchiveWindowDays = nil // clear override → falls back to global
+			}
+		}
+		if ch.ArchiveSlots != nil && (*ch.ArchiveSlots < 1 || *ch.ArchiveSlots > 100) {
+			fail("channel %q archive_slots %d out of range 1..100", ch.Name, *ch.ArchiveSlots)
+			if !reportOnly {
+				ch.ArchiveSlots = nil
 			}
 		}
 	}

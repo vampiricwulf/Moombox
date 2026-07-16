@@ -16,8 +16,8 @@ func TestNewJobQueue(t *testing.T) {
 	}{
 		{"positive value", 5, 5},
 		{"one", 1, 1},
-		{"zero defaults to 2", 0, 2},
-		{"negative defaults to 2", -1, 2},
+		{"zero defaults to 10", 0, 10},
+		{"negative defaults to 10", -1, 10},
 	}
 
 	for _, tt := range tests {

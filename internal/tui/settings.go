@@ -87,7 +87,8 @@ var sections = []settingsSection{
 	{
 		name: "Monitors",
 		fields: []fieldDef{
-			{"max_feed_items", "Max feed items", fieldNumber, nil, "RSS items per feed (default: 15)", nil},
+			{"archive_window_days", "Archive window (days)", fieldNumber, nil, "how many days back to archive; upcoming/live always covered (default: 3)", nil},
+			{"archive_slots", "Archive slots", fieldNumber, nil, "backlog downloads per channel at once; new content never waits (default: 3)", nil},
 			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes (default: 10)", nil},
 			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds, 15-3600 or empty for dynamic", nil},
 			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds (default: 15, range: 1-3600)", nil},
@@ -431,7 +432,8 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["log_max_files"] = strconv.Itoa(cfg.Logs.LogMaxFiles)
 
 	// Monitors
-	m.values["max_feed_items"] = strconv.Itoa(cfg.Monitors.MaxFeedItems)
+	m.values["archive_window_days"] = strconv.Itoa(cfg.Monitors.ArchiveWindowDays)
+	m.values["archive_slots"] = strconv.Itoa(cfg.Monitors.ArchiveSlots)
 	m.values["feed_check_interval"] = fmt.Sprintf("%.0f", cfg.Monitors.FeedCheckInterval.Minutes())
 	if cfg.Monitors.DecapiCheckInterval != nil {
 		m.values["decapi_check_interval"] = strconv.Itoa(*cfg.Monitors.DecapiCheckInterval)
@@ -541,7 +543,8 @@ func (m *SettingsModel) applyValues() {
 	}{
 		{"log_max_file_size", "Max log file size must be 1024-1073741824 bytes", 1024, 1073741824},
 		{"log_max_files", "Max log files must be 1-100", 1, 100},
-		{"max_feed_items", "Max feed items must be 1-1000", 1, 1000},
+		{"archive_window_days", "Archive window must be 1-3650 days", 1, 3650},
+		{"archive_slots", "Archive slots must be 1-100", 1, 100},
 		{"feed_check_interval", "Feed check interval must be 1-1440 minutes", 1, 1440},
 		{"probe_cooldown", "Probe cooldown must be >= 0 seconds (0 disables)", 0, math.MaxInt},
 		{"max_video_resolution", "Max resolution must be at least 1", 1, math.MaxInt},
@@ -619,7 +622,8 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Logs.LogMaxFiles, _ = strconv.Atoi(m.values["log_max_files"])
 
 	// Monitors
-	m.cfg.Monitors.MaxFeedItems, _ = strconv.Atoi(m.values["max_feed_items"])
+	m.cfg.Monitors.ArchiveWindowDays, _ = strconv.Atoi(m.values["archive_window_days"])
+	m.cfg.Monitors.ArchiveSlots, _ = strconv.Atoi(m.values["archive_slots"])
 	feedMin, _ := strconv.Atoi(m.values["feed_check_interval"])
 	m.cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: float64(feedMin)}
 	if v := m.values["decapi_check_interval"]; v != "" {

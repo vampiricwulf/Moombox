@@ -65,8 +65,13 @@
 # ─── Monitors ─────────────────────────────────────────────────────────────────
 [monitors]
 
-# Maximum RSS feed items to check per channel
-# max_feed_items = 15
+# How many days back to archive. Upcoming/live streams are always covered
+# regardless of this window.
+# archive_window_days = 3
+
+# How many backlog (non-live) downloads a channel can have running at once,
+# so new live/upcoming content never waits behind a backlog sweep.
+# archive_slots = 3
 
 # How often to check RSS feeds (in minutes, or duration string like "10m")
 # feed_check_interval = 10
@@ -100,8 +105,10 @@
 # are handled correctly (e.g., 2160 allows both 3840x2160 and 2160x3840).
 # max_video_resolution = 2160
 
-# Number of simultaneous download jobs
-# num_parallel_downloads = 2
+# Number of simultaneous download jobs. Peak concurrent downloads is
+# (live streams) + num_parallel_downloads, since live streams always
+# download immediately and never wait on this pool.
+# num_parallel_downloads = 10
 
 # Download live chat alongside streams
 # download_chat = true
@@ -205,7 +212,8 @@
 # terms = "(?i)karaoke|singing"              # Regex filter for title + description (optional)
 # include_non_live_content = false            # Also download regular uploads (default: false)
 # num_desc_lookbehind = 3                    # Compare descriptions with N older items (optional)
-# max_feed_items = 15                        # Override global max_feed_items (optional)
+# archive_window_days = 3                    # Override global archive_window_days (optional)
+# archive_slots = 3                          # Override global archive_slots (optional)
 # output_directory = "./output/special"      # Override output directory (optional)
 
 # Twitch channel:

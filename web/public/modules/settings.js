@@ -474,7 +474,8 @@ export class SettingsController {
     this.app.setInputValue("cfg-log-max-files", config.logs?.log_max_files);
 
     // Monitors settings
-    this.app.setInputValue("cfg-max-feed-items", config.monitors?.max_feed_items);
+    this.app.setInputValue("cfg-archive-window-days", config.monitors?.archive_window_days);
+    this.app.setInputValue("cfg-archive-slots", config.monitors?.archive_slots);
     this.app.setInputValue("cfg-feed-check-interval", config.monitors?.feed_check_interval);
     this.app.setInputValue("cfg-decapi-check-interval", config.monitors?.decapi_check_interval ?? "");
     this.app.setInputValue("cfg-twitch-check-interval", config.monitors?.twitch_check_interval ?? "");
@@ -655,7 +656,8 @@ export class SettingsController {
     const logMaxSize = this.app.getInputNumber("cfg-log-max-size");
     const logMaxFiles = this.app.getInputNumber("cfg-log-max-files");
 
-    const maxFeedItems = this.app.getInputNumber("cfg-max-feed-items");
+    const archiveWindowDays = this.app.getInputNumber("cfg-archive-window-days");
+    const archiveSlots = this.app.getInputNumber("cfg-archive-slots");
     const feedCheckInterval = this.app.getInputNumber("cfg-feed-check-interval");
     const decapiCheckInterval = this.app.getInputNumber("cfg-decapi-check-interval");
     const twitchCheckInterval = this.app.getInputNumber("cfg-twitch-check-interval");
@@ -732,7 +734,8 @@ export class SettingsController {
         log_max_files: logMaxFiles,
       },
       monitors: {
-        max_feed_items: maxFeedItems,
+        archive_window_days: archiveWindowDays,
+        archive_slots: archiveSlots,
         feed_check_interval: feedCheckInterval,
         hide_finished_age_days: hideFinishedDays,
         probe_cooldown: probeCooldown,
@@ -1344,7 +1347,8 @@ export class SettingsController {
     const isTwitch = platform === "twitch";
 
     // When editing, start from the existing channel to preserve fields
-    // the UI doesn't expose (num_desc_lookbehind, output_directory, max_feed_items).
+    // the UI doesn't expose (num_desc_lookbehind, output_directory,
+    // archive_window_days, archive_slots).
     const existingChannel = this.editingChannelId
       ? this.app.config?.channels?.find(c => c.id === this.editingChannelId)
       : null;

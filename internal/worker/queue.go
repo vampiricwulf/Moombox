@@ -54,7 +54,7 @@ type JobQueue struct {
 // NewJobQueue creates a new job queue.
 func NewJobQueue(maxDownloads int) *JobQueue {
 	if maxDownloads <= 0 {
-		maxDownloads = 2
+		maxDownloads = 10
 	}
 	return &JobQueue{
 		maxDownloads:  maxDownloads,

@@ -792,13 +792,22 @@
                         >
                             <h3>Monitors</h3>
                             <sl-input
-                                id="cfg-max-feed-items"
+                                id="cfg-archive-window-days"
+                                type="number"
+                                min="1"
+                                max="3650"
+                                label="Archive Window (days)"
+                                placeholder="3"
+                                help-text="How many days back to archive (upcoming/live streams are always covered)"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-archive-slots"
                                 type="number"
                                 min="1"
                                 max="100"
-                                label="Max Feed Items"
-                                placeholder="15"
-                                help-text="Maximum number of feed items to check per channel (1–100)"
+                                label="Archive Slots"
+                                placeholder="3"
+                                help-text="How many backlog downloads per channel at once (new content never waits)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-feed-check-interval"
@@ -1679,7 +1688,8 @@
                     <h2>Monitors</h2>
                     <p class="setup-help">Leave fields empty to use defaults.</p>
                     <sl-input id="setup-hide-age" type="number" label="Hide Finished After (days)" placeholder="30" min="0"></sl-input>
-                    <sl-input id="setup-max-feed-items" type="number" label="Max Feed Items" placeholder="15" min="1" max="100"></sl-input>
+                    <sl-input id="setup-archive-window-days" type="number" label="Archive Window (days)" placeholder="3" min="1" max="3650" help-text="Upcoming/live streams are always covered"></sl-input>
+                    <sl-input id="setup-archive-slots" type="number" label="Archive Slots" placeholder="3" min="1" max="100" help-text="Backlog downloads per channel at once; new content never waits"></sl-input>
                     <sl-input id="setup-feed-check-interval" type="number" label="Feed Check Interval (minutes)" placeholder="10" min="1" max="1440"></sl-input>
                     <div class="setup-nav">
                         <sl-button variant="default" id="setup-adv-back-4"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>

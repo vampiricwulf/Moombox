@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	feedFetchTimeout    = 15 * time.Second
-	feedProcessTimeout  = 60 * time.Second
-	defaultMaxFeedItems = 15
+	feedFetchTimeout         = 15 * time.Second
+	feedProcessTimeout       = 60 * time.Second
+	defaultArchiveWindowDays = 3
+	defaultArchiveSlots      = 3
 	// feedStagger spaces consecutive channel feed fetches. Decapi and Twitch
 	// already stagger; a tight loop of YouTube RSS fetches on a big channel
 	// list looks like scraping behavior from a single source IP.
@@ -461,7 +462,7 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 
 	// Merge: rank newest-first and cap so at most maxFeedItems of the channel's
 	// most-recent items (across BOTH sources) are probed.
-	candidates = mergeCandidates(candidates, fm.maxFeedItems(ch))
+	candidates = mergeCandidates(candidates, fm.archiveSlots(ch)) // PLAN3 replaces this call site
 
 	// ProbeVideo can be slow (retries + backoff); bound the whole channel's
 	// processing so one channel can't run past the cycle interval and starve
@@ -545,23 +546,38 @@ type atomMediaGroup struct {
 	Description string `xml:"http://search.yahoo.com/mrss/ description"`
 }
 
-// maxFeedItems is the per-channel cap on how many of the most-recent items —
-// across RSS AND membership merged — are processed each cycle: the channel's own
-// MaxFeedItems override, else the global monitors.max_feed_items, else
-// defaultMaxFeedItems. checkChannel ranks the merged candidate list by recency
-// and truncates it to this many (see mergeCandidates).
-func (fm *FeedMonitor) maxFeedItems(ch *config.ChannelConfig) int {
-	if ch.MaxFeedItems != nil && *ch.MaxFeedItems > 0 {
-		return *ch.MaxFeedItems
+// archiveWindowDays is the per-channel resolver for how many days back to
+// archive: the channel's own ArchiveWindowDays override, else the global
+// monitors.archive_window_days, else defaultArchiveWindowDays. Upcoming/live
+// content is always covered regardless of this window. Not yet consumed —
+// PLAN3 wires this into the backfill/history path.
+func (fm *FeedMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
+	if ch.ArchiveWindowDays != nil && *ch.ArchiveWindowDays > 0 {
+		return *ch.ArchiveWindowDays
 	}
-	var cfgMax int
-	fm.configStore.Read(func(c *config.MoomboxConfig) {
-		cfgMax = c.Monitors.MaxFeedItems
-	})
-	if cfgMax > 0 {
-		return cfgMax
+	var g int
+	fm.configStore.Read(func(c *config.MoomboxConfig) { g = c.Monitors.ArchiveWindowDays })
+	if g > 0 {
+		return g
 	}
-	return defaultMaxFeedItems
+	return defaultArchiveWindowDays
+}
+
+// archiveSlots is the per-channel cap on how many of the most-recent items —
+// across RSS AND membership merged — are processed each cycle: the channel's
+// own ArchiveSlots override, else the global monitors.archive_slots, else
+// defaultArchiveSlots. checkChannel ranks the merged candidate list by
+// recency and truncates it to this many (see mergeCandidates).
+func (fm *FeedMonitor) archiveSlots(ch *config.ChannelConfig) int {
+	if ch.ArchiveSlots != nil && *ch.ArchiveSlots > 0 {
+		return *ch.ArchiveSlots
+	}
+	var g int
+	fm.configStore.Read(func(c *config.MoomboxConfig) { g = c.Monitors.ArchiveSlots })
+	if g > 0 {
+		return g
+	}
+	return defaultArchiveSlots
 }
 
 // discoveredVideo is one candidate from any discovery source. RSS and
