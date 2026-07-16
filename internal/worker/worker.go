@@ -99,6 +99,7 @@ type DownloadWorker struct {
 	cfg          *config.MoomboxConfig // captured for early-init reads before SetConfigStore
 	configStore  *config.Store         // shared config store (set via SetConfigStore)
 	queue        *JobQueue
+	scheduler    *Scheduler
 	orchestrator *DownloadOrchestrator
 	streamProc   *StreamProcessor
 	notifier     *notifications.Manager
@@ -185,6 +186,7 @@ func NewDownloadWorker(
 		tw:           tw,
 		cfg:          cfg,
 		queue:        queue,
+		scheduler:    newScheduler(),
 		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn),
 		streamProc:   sp,
 		notifier:     nm,
@@ -239,6 +241,13 @@ func (w *DownloadWorker) EnqueueJob(jobID string) {
 	case w.notifyJob <- struct{}{}:
 	default:
 	}
+}
+
+// Scheduler returns the worker's archive-slots scheduler. Creation sites
+// call Scheduler().Wake() after inserting a Queued backlog job instead of
+// EnqueueJob — the scheduler, not the queue, admits backlog work.
+func (w *DownloadWorker) Scheduler() *Scheduler {
+	return w.scheduler
 }
 
 // StashTwitchStreamInfo forwards a fresh Twitch stream info hint to the

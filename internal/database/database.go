@@ -66,6 +66,7 @@ var fieldToColumn = map[string]string{
 	"resume_position":     "resume_position",
 	"chat_offset":         "chat_offset",
 	"auto_retry_count":    "auto_retry_count",
+	"queue_priority":      "queue_priority",
 }
 
 // dbLogger is the interface for database error logging.
@@ -305,7 +306,12 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 
 // insertJobExec performs an INSERT OR IGNORE INTO jobs using the provided
 // executor (either *sql.DB or *sql.Tx). Single implementation shared by
-// AddJob and ImportFromJSON so the 41-column INSERT only exists once.
+// AddJob and ImportFromJSON so the 43-column INSERT only exists once.
+//
+// channel_id and queue_priority are written on EVERY insert (spec §10):
+// a nil ChannelID stores NULL — never "" — and the Go zero QueuePriority
+// stores an explicit 0, so no creator ever inherits the schema's
+// fail-closed DEFAULT 1 (which exists only for pre-v16 legacy rows).
 func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, error) {
 	return exec.ExecContext(ctx, `INSERT OR IGNORE INTO jobs (id, video_id, url, title, channel_name, platform,
 		status, progress, percent, eta, speed, error, created_at, updated_at,
@@ -315,10 +321,10 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		thumbnail_file, description_file,
 		twitch_quality, twitch_category, channel_avatar_url,
 		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
-		quality_preference)
+		quality_preference, channel_id, queue_priority)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?)`,
+		?, ?, ?)`,
 		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 		job.CreatedAt, job.UpdatedAt,
@@ -331,7 +337,7 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt,
-		job.QualityPreference)
+		job.QualityPreference, job.ChannelID, job.QueuePriority)
 }
 
 // UpdateJobFields performs a partial update of a job using a map of field names to values.

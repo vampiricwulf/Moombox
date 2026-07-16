@@ -53,6 +53,31 @@ func siblingReachable(siblings []channelHealthReporter, channelID string, now ti
 	return false
 }
 
+// jobCreationForDisposition maps a monitor.JobDisposition to the created
+// job's initial state — spec §10's creator table:
+//
+//	Broadcast (live/upcoming) → Upcoming, queue_priority 0, enqueue now
+//	NewVOD                    → Upcoming, queue_priority 0, enqueue now
+//	BacklogVOD                → Queued,   queue_priority 1, NO enqueue (scheduler wake)
+//
+// Every creator writes queue_priority explicitly — the schema DEFAULT 1
+// exists only for pre-v16 legacy rows and must never be relied on.
+func jobCreationForDisposition(d monitor.JobDisposition) (status database.JobStatus, priority int, enqueueNow bool) {
+	switch d {
+	case monitor.DispositionBroadcast:
+		return database.StatusUpcoming, 0, true
+	case monitor.DispositionNewVOD:
+		return database.StatusUpcoming, 0, true
+	case monitor.DispositionBacklogVOD:
+		return database.StatusQueued, 1, false
+	default:
+		// Unknown disposition: fail open to immediate admission — a wrongly
+		// Queued job would rest until the scheduler noticed it; a wrongly
+		// admitted job merely downloads early (today's behavior).
+		return database.StatusUpcoming, 0, true
+	}
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -229,14 +254,27 @@ func (s *runState) wireMonitorCallbacks() {
 		return enabled && s.ytService.HasAuthCookies()
 	}
 
-	// createYouTubeJob creates a YouTube job and enqueues it. Stream-status
-	// classification is handled by the monitors via ProcessYouTubeVideo.
-	createYouTubeJob := func(videoID, title, videoURL string, ch *config.ChannelConfig, source string) {
-		s.log.Info("Video found", slog.String("source", source), slog.String("videoID", videoID), slog.String("title", title))
+	// createYouTubeJob creates a YouTube job per the disposition's creation
+	// semantics (spec §10's creator table, via jobCreationForDisposition).
+	// Stream-status classification is handled by the monitors via
+	// ProcessYouTubeVideo.
+	createYouTubeJob := func(videoID, title, videoURL string, ch *config.ChannelConfig, source string, d monitor.JobDisposition) {
+		s.log.Info("Video found", slog.String("source", source), slog.String("videoID", videoID),
+			slog.String("title", title), slog.String("disposition", d.String()))
 
 		includeNonLive := ch.IncludeNonLiveContent
 		outputDir := resolveOutputDir(ch, s.configStore)
 		thumbnailURL := youtubeThumbnailURL(videoID)
+
+		status, priority, enqueueNow := jobCreationForDisposition(d)
+		// The feed affiliation the scheduler groups by. Copied so the row
+		// never aliases live config memory; an empty ID (defensive — feed
+		// channels always carry one) stays nil and therefore stores NULL.
+		var channelID *string
+		if ch.ID != "" {
+			id := ch.ID
+			channelID = &id
+		}
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		job := &database.Job{
@@ -246,11 +284,13 @@ func (s *runState) wireMonitorCallbacks() {
 			Title:             title,
 			ChannelName:       ch.Name,
 			Platform:          "youtube",
-			Status:            database.StatusUpcoming,
+			Status:            status,
 			ThumbnailURL:      thumbnailURL,
 			OutputDirectory:   outputDir,
 			AllowNonStream:    includeNonLive,
 			QualityPreference: ch.QualityPreference,
+			ChannelID:         channelID,
+			QueuePriority:     priority,
 			CreatedAt:         now,
 			UpdatedAt:         now,
 		}
@@ -263,8 +303,17 @@ func (s *runState) wireMonitorCallbacks() {
 		if !added {
 			return // Duplicate job
 		}
+		// History fires for EVERY disposition — it is what makes
+		// HasProcessed mean "a job was created" (spec §10/§15).
 		s.db.AddToHistory(videoID)
-		s.dlWorker.EnqueueJob(videoID)
+		if enqueueNow {
+			s.dlWorker.EnqueueJob(videoID)
+		} else {
+			// Backlog VOD: rests in Queued until the archive-slots
+			// scheduler admits it (M per channel). Wake so a running
+			// scheduler sweeps now instead of on its next heartbeat.
+			s.dlWorker.Scheduler().Wake()
+		}
 		// AddJob's OnJobAdded handler (wired below) handles the WS
 		// broadcast for the new job; no explicit BroadcastJobsUpdate
 		// needed here. DECISIONS #21 consumer migration.
@@ -286,19 +335,15 @@ func (s *runState) wireMonitorCallbacks() {
 
 	// Monitor -> Worker: create jobs for found videos. Panic recovery
 	// prevents a single bad callback from killing the monitor goroutine.
-	//
-	// PLAN4: the JobDisposition is carried but not yet consumed — every
-	// disposition maps to today's behavior (StatusUpcoming + immediate
-	// enqueue). Plan 4 implements the real creation semantics per spec §10's
-	// creator table: DispositionBacklogVOD ⇒ Queued + queue_priority 1 (the
-	// scheduler's M pacing), everything else admitted at priority 0.
+	// The JobDisposition drives the creation semantics — see
+	// jobCreationForDisposition for spec §10's creator table.
 	s.feedMon.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig, d monitor.JobDisposition) {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("Panic in OnVideoFound (feed)", slog.Any("panic", r))
 			}
 		}()
-		createYouTubeJob(videoID, title, url, ch, "feed")
+		createYouTubeJob(videoID, title, url, ch, "feed", d)
 	}
 	s.decapiMon.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig, d monitor.JobDisposition) {
 		defer func() {
@@ -306,7 +351,7 @@ func (s *runState) wireMonitorCallbacks() {
 				s.log.Error("Panic in OnVideoFound (decapi)", slog.Any("panic", r))
 			}
 		}()
-		createYouTubeJob(videoID, title, url, ch, "decapi")
+		createYouTubeJob(videoID, title, url, ch, "decapi", d)
 	}
 	s.twitchMon.OnStreamFound = func(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig) {
 		defer func() {

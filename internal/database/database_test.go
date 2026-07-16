@@ -1,6 +1,7 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -1208,6 +1209,7 @@ func TestFieldToColumnCoverage(t *testing.T) {
 		"gaps":      true, // loaded via join
 		"trims":     true, // loaded via join
 		"segments":  true, // loaded via join
+		"channelId": true, // set at insert — feed affiliation never changes, and a partial write of "" would fake-empty a NULL
 	}
 
 	for field := range reflect.TypeFor[Job]().Fields() {
@@ -1353,4 +1355,58 @@ func TestJobsChangeSubscriberCanCallDatabaseFromCallback(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("OnJobsChange callback did not complete within 2s — likely deadlock on db.mu")
 	}
+}
+
+// TestAddJobWritesChannelIDAndQueuePriority pins Plan 4's creator-table
+// persistence (spec §10): AddJob writes channel_id and queue_priority
+// EXPLICITLY for every creator — the schema DEFAULT 1 exists only for
+// pre-v16 legacy rows and must never leak into new inserts. Three creator
+// shapes:
+//
+//   - backlog VOD (feed):        Queued,   priority 1, channel affiliation set
+//   - broadcast/new VOD (feed):  Upcoming, priority 0, channel affiliation set
+//   - Twitch/manual (no fields): channel_id stays NULL — never "" — and
+//     queue_priority is the explicit 0, NOT the column DEFAULT 1
+func TestAddJobWritesChannelIDAndQueuePriority(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+
+	chID := "UC_feed_channel"
+	for _, j := range []*Job{
+		{ID: "backlog1", VideoID: "backlog1", URL: "u", Status: StatusQueued, ChannelID: &chID, QueuePriority: 1},
+		{ID: "broadcast1", VideoID: "broadcast1", URL: "u", Status: StatusUpcoming, ChannelID: &chID, QueuePriority: 0},
+		{ID: "manual1", VideoID: "manual1", URL: "u", Status: StatusUpcoming},
+	} {
+		added, err := db.AddJob(j)
+		if err != nil || !added {
+			t.Fatalf("AddJob(%s): added=%v err=%v", j.ID, added, err)
+		}
+	}
+
+	assertRow := func(id string, wantStatus JobStatus, wantPriority int, wantChannel *string) {
+		t.Helper()
+		var status string
+		var qp int
+		var ch sql.NullString
+		if err := db.db.QueryRow(`SELECT status, queue_priority, channel_id FROM jobs WHERE id=?`, id).Scan(&status, &qp, &ch); err != nil {
+			t.Fatalf("row %s: %v", id, err)
+		}
+		if status != string(wantStatus) {
+			t.Errorf("%s: status = %q, want %q", id, status, wantStatus)
+		}
+		if qp != wantPriority {
+			t.Errorf("%s: queue_priority = %d, want %d — every creator writes it explicitly, never the column DEFAULT", id, qp, wantPriority)
+		}
+		if wantChannel == nil {
+			if ch.Valid {
+				t.Errorf("%s: channel_id = %q, want NULL — a fake-empty affiliation must not appear on Twitch/manual jobs", id, ch.String)
+			}
+		} else if !ch.Valid || ch.String != *wantChannel {
+			t.Errorf("%s: channel_id = (%q, valid=%v), want %q", id, ch.String, ch.Valid, *wantChannel)
+		}
+	}
+
+	assertRow("backlog1", StatusQueued, 1, &chID)
+	assertRow("broadcast1", StatusUpcoming, 0, &chID)
+	assertRow("manual1", StatusUpcoming, 0, nil)
 }

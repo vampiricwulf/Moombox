@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 )
 
@@ -50,6 +51,45 @@ func TestSiblingReachable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := siblingReachable(tc.siblings, ch, now); got != tc.want {
 				t.Errorf("siblingReachable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJobCreationForDisposition pins spec §10's creator table verbatim —
+// the mapping createYouTubeJob applies to every feed/DECAPI video:
+//
+//	Broadcast (live/upcoming) → Upcoming, queue_priority 0, enqueue now
+//	NewVOD                    → Upcoming, queue_priority 0, enqueue now
+//	BacklogVOD                → Queued,   queue_priority 1, NO enqueue (scheduler wake)
+//
+// An unknown disposition fails open to immediate admission — a wrongly
+// Queued job would wedge until the scheduler notices it; a wrongly admitted
+// job just downloads early.
+func TestJobCreationForDisposition(t *testing.T) {
+	cases := []struct {
+		name           string
+		d              monitor.JobDisposition
+		wantStatus     database.JobStatus
+		wantPriority   int
+		wantEnqueueNow bool
+	}{
+		{"broadcast admits immediately", monitor.DispositionBroadcast, database.StatusUpcoming, 0, true},
+		{"new VOD admits immediately", monitor.DispositionNewVOD, database.StatusUpcoming, 0, true},
+		{"backlog VOD rests in Queued", monitor.DispositionBacklogVOD, database.StatusQueued, 1, false},
+		{"unknown disposition fails open", monitor.JobDisposition(99), database.StatusUpcoming, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, priority, enqueueNow := jobCreationForDisposition(tc.d)
+			if status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", status, tc.wantStatus)
+			}
+			if priority != tc.wantPriority {
+				t.Errorf("queue_priority = %d, want %d", priority, tc.wantPriority)
+			}
+			if enqueueNow != tc.wantEnqueueNow {
+				t.Errorf("enqueueNow = %v, want %v", enqueueNow, tc.wantEnqueueNow)
 			}
 		})
 	}

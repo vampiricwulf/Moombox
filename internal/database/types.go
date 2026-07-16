@@ -86,6 +86,14 @@ type Job struct {
 	ChatOffset     float64  `json:"chatOffset"`
 	// Auto-recovery
 	AutoRetryCount int `json:"autoRetryCount,omitempty"`
+	// Archive-slots scheduling (spec §10). ChannelID is the monitored channel
+	// that created this job — set only by the feed/DECAPI creation path; nil
+	// (stored NULL) for Twitch/manual jobs, so an absent affiliation never
+	// reads as "". QueuePriority is written EXPLICITLY by every creator
+	// (broadcast/new-VOD 0, backlog 1) — the schema DEFAULT 1 exists only for
+	// pre-v16 legacy rows and must never be relied on.
+	ChannelID     *string `json:"channelId,omitempty"`
+	QueuePriority int     `json:"queuePriority,omitempty"`
 	// Trims (loaded via join)
 	Trims []TrimRecord `json:"trims,omitempty"`
 	// Segments (loaded via join, for multi-segment quality-split jobs)
