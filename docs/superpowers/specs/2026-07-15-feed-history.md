@@ -797,12 +797,16 @@ slot for its entire `Upcoming → Live → Downloading → Muxing` life: at the 
 M=3, three concurrent live/upcoming jobs would stall **all** backlog admission on
 the channel. That is the "never counted" rule, lost to a default.
 
-**A backlog job that turns out live keeps its slot.** An admitted backlog VOD whose
-worker probe finds it restarted live becomes status `Live` at `queue_priority = 1`
-and still counts toward M until it finishes. M bounds in-flight backlog-*originated*
-work, whatever it turns into; "live is never counted" applies to jobs that were
-never backlog. Rare — it requires a same-ID restart of an in-window ended stream —
-and self-resolving.
+**A backlog job that turns out live releases its M slot.** "Live is never counted"
+is absolute — it is the owner's rule, and a restarted stream must not slow the
+channel's backlog admission. The write that sets a job's status to `Live`
+(`stream_processor.go:208` for YouTube) also writes `queue_priority = 0` in the
+**same** `UpdateJobFields` call — one write site, permanent, one-way. The freed slot
+admits another backlog VOD while the live download runs, so M can transiently exceed
+its nominal bound by the number of restarted-live jobs; that is the intent, not a
+leak. (An orphaned priority-1 row in status `Live` would indicate a missed flip and
+still counts — fail-closed, consistent with the `DEFAULT 1` philosophy.) Rare — it
+requires a same-ID restart of an in-window ended stream.
 
 **Every creator still calls `AddToHistory` at job creation**
 (`monitor_callbacks.go:260`), unchanged — including for `Queued` rows. That is what
@@ -1444,6 +1448,9 @@ behaviour this design removes.
   going live still downloads
 - **Live/upcoming/DECAPI jobs carry `queue_priority = 0` and never hold an M slot** —
   a 5-day-out premiere plus M=1 must not stall backlog admission
+- **A backlog job that goes `Live` releases its M slot**: the `Live` status write
+  flips `queue_priority` to 0 in the same `UpdateJobFields` call, and another backlog
+  VOD admits while the stream runs
 - A new VOD is **never** `Queued`: created admitted and enqueued immediately, even
   with a full backlog at M=1 (this is also the only correct reading of "bypasses M")
 - `ShouldProcess(Queued) == false` — call `enqueueExistingJobs` (`worker.go:294`)
