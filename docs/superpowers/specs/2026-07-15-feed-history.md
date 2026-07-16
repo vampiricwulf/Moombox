@@ -1166,7 +1166,7 @@ assumed  <  coarse  <  day  <  exact  <  started
 |---|---|---|
 | `assumed` | listing, `itemAge` returned 0 | `now`. A claim of ignorance, not a date |
 | `coarse` | listing, `itemAge > 0` | `now - age`. **This date or older** |
-| `day` | probe: microformat `uploadDate`/`publishDate` | date-only |
+| `day` | probe: microformat `uploadDate`/`publishDate` | date-only, **normalized to `T23:59:59Z`** — the newest instant consistent with a date-only value, per the skew-new rule. Stored bare, a date compares as midnight (the OLDEST instant), which excludes boundary items in exactly the direction this section forbids |
 | `exact` | RSS `<published>` | second-granular. For a stream this is the **announcement** |
 | `started` | probe: `liveBroadcastDetails.startTimestamp` | the broadcast's actual start |
 
