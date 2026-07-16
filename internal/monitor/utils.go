@@ -219,6 +219,11 @@ type ProcessYouTubeVideoResult struct {
 	ShouldProcess bool   // true if the video should be queued as a job
 	Title         string // possibly updated title from metadata
 	ChannelName   string // possibly updated channel name from metadata
+	// StreamStatus is the probe's classification ("live", "upcoming", "vod",
+	// "post_live", "not_a_stream"); empty when no probe ran (the nil-probe
+	// passthrough) or the probe did not complete. DECAPI reads it to pick a
+	// JobDisposition (spec §10's creator table).
+	StreamStatus string
 }
 
 // nonLiveSkipReason decides whether a non-live classification (a VOD, post-live
@@ -486,6 +491,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		ShouldProcess: true,
 		Title:         title,
 		ChannelName:   channelName,
+		StreamStatus:  cr.StreamStatus,
 	}
 }
 

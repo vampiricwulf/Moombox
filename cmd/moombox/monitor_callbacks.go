@@ -286,7 +286,13 @@ func (s *runState) wireMonitorCallbacks() {
 
 	// Monitor -> Worker: create jobs for found videos. Panic recovery
 	// prevents a single bad callback from killing the monitor goroutine.
-	s.feedMon.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig) {
+	//
+	// PLAN4: the JobDisposition is carried but not yet consumed — every
+	// disposition maps to today's behavior (StatusUpcoming + immediate
+	// enqueue). Plan 4 implements the real creation semantics per spec §10's
+	// creator table: DispositionBacklogVOD ⇒ Queued + queue_priority 1 (the
+	// scheduler's M pacing), everything else admitted at priority 0.
+	s.feedMon.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig, d monitor.JobDisposition) {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("Panic in OnVideoFound (feed)", slog.Any("panic", r))
@@ -294,7 +300,7 @@ func (s *runState) wireMonitorCallbacks() {
 		}()
 		createYouTubeJob(videoID, title, url, ch, "feed")
 	}
-	s.decapiMon.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig) {
+	s.decapiMon.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig, d monitor.JobDisposition) {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("Panic in OnVideoFound (decapi)", slog.Any("panic", r))

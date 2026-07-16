@@ -3,10 +3,8 @@ package monitor
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
-	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // TestMembershipActive checks the gate: needs a fetcher, and honors the enabled
@@ -27,159 +25,6 @@ func TestMembershipActive(t *testing.T) {
 	fm.MembershipEnabled = func() bool { return true }
 	if !fm.membershipActive() {
 		t.Error("gate true -> active")
-	}
-}
-
-// TestMembershipCandidates checks Age -> published (recency) conversion and that
-// members items always carry authProbe.
-func TestMembershipCandidates(t *testing.T) {
-	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
-	vids := []MembershipVideo{
-		{VideoID: "liveVid0001", Title: "live", Age: 0},
-		{VideoID: "oldVid00002", Title: "old", Age: 2 * 365 * 24 * time.Hour},
-	}
-	cands := membershipCandidates(vids, now, true)
-	if len(cands) != 2 {
-		t.Fatalf("got %d", len(cands))
-	}
-	if !cands[0].published.Equal(now) {
-		t.Errorf("live item should be published=now, got %v", cands[0].published)
-	}
-	if !cands[1].published.Equal(now.Add(-2 * 365 * 24 * time.Hour)) {
-		t.Errorf("old item recency wrong: %v", cands[1].published)
-	}
-	for _, c := range cands {
-		if !c.authProbe {
-			t.Errorf("membership candidate %s must use auth probe", c.videoID)
-		}
-		if c.source != "membership" {
-			t.Errorf("source = %q", c.source)
-		}
-	}
-}
-
-// TestMergeCandidatesRecencyCap is the core of the user's model: RSS + membership
-// merged, ranked by recency, capped — a live members item (now) always makes the
-// cut; an old members VOD is crowded out by more-recent public uploads.
-func TestMergeCandidatesRecencyCap(t *testing.T) {
-	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
-	cands := []discoveredVideo{
-		{videoID: "rssRecent01", published: now.Add(-1 * time.Hour), source: "rss"},                                // recent public
-		{videoID: "rssOlder002", published: now.Add(-48 * time.Hour), source: "rss"},                               // older public
-		{videoID: "memLive0003", published: now, source: "membership", authProbe: true},                            // live members (now)
-		{videoID: "memOldVod04", published: now.Add(-700 * 24 * time.Hour), source: "membership", authProbe: true}, // ~2y old members VOD
-	}
-	got := mergeCandidates(cands, 2)
-	if len(got) != 2 {
-		t.Fatalf("cap=2, got %d", len(got))
-	}
-	// Newest two: live members (now) then recent RSS (-1h).
-	if got[0].videoID != "memLive0003" {
-		t.Errorf("live members item should rank first, got %s", got[0].videoID)
-	}
-	if got[1].videoID != "rssRecent01" {
-		t.Errorf("recent RSS should rank second, got %s", got[1].videoID)
-	}
-	// The 2-year-old members VOD must be crowded out.
-	for _, c := range got {
-		if c.videoID == "memOldVod04" {
-			t.Error("old members VOD should have been crowded out of the cap")
-		}
-	}
-}
-
-// TestProcessCandidate_AuthProbeSelection is the root-cause fix: members-only
-// candidates must be probed with the AUTHENTICATED probe (else members VODs
-// misclassify as upcoming).
-func TestProcessCandidate_AuthProbeSelection(t *testing.T) {
-	fm := newTestFeedMonitor(t, newTestDB(t))
-	usedAuth := map[string]bool{}
-	fm.ProbeVideo = func(ctx context.Context, id string) (*VideoProbeResult, error) {
-		usedAuth[id] = false
-		return &VideoProbeResult{StreamStatus: "vod", Title: "t"}, nil
-	}
-	fm.ProbeVideoAuth = func(ctx context.Context, id string) (*VideoProbeResult, error) {
-		usedAuth[id] = true
-		return &VideoProbeResult{StreamStatus: "vod", Title: "t"}, nil
-	}
-	fm.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig) {}
-	ch := &config.ChannelConfig{ID: "UCtest", Name: "Test", IncludeNonLiveContent: true}
-
-	fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "memberVid01", title: "m", source: "membership", authProbe: true})
-	fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "publicVid02", title: "p", source: "rss"})
-
-	if !usedAuth["memberVid01"] {
-		t.Error("members-only candidate must use the authenticated probe")
-	}
-	if usedAuth["publicVid02"] {
-		t.Error("public/RSS candidate must use the anonymous probe")
-	}
-}
-
-// TestProcessCandidate_ActiveJobDedup: a candidate with an active job is skipped
-// (shared dedup, so a video seen by two sources can't create two jobs).
-func TestProcessCandidate_ActiveJobDedup(t *testing.T) {
-	fm := newTestFeedMonitor(t, newTestDB(t))
-	probed := map[string]bool{}
-	fm.ProbeVideo = func(ctx context.Context, id string) (*VideoProbeResult, error) {
-		probed[id] = true
-		return &VideoProbeResult{StreamStatus: "live", Title: "t"}, nil
-	}
-	fm.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig) {}
-	if _, err := fm.db.AddJob(&database.Job{
-		ID: "activeVid01", VideoID: "activeVid01", Platform: "youtube",
-		Status: database.StatusDownloading, CreatedAt: "2026-07-13T00:00:00Z", UpdatedAt: "2026-07-13T00:00:00Z",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	ch := &config.ChannelConfig{ID: "UCtest", Name: "Test"}
-	fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "activeVid01", title: "x", source: "rss"})
-	if probed["activeVid01"] {
-		t.Error("candidate with an active job should be skipped before probing")
-	}
-}
-
-// TestProcessCandidate_MembersVodHonorsIncludeNonLive locks in the exact 2.7.1
-// bug: a members VOD must not flood the queue. Because it's probed with the
-// AUTHENTICATED probe it classifies as "vod" (not the anonymous probe's
-// "upcoming" misfire), so include_non_live_content is honored — skipped when off,
-// queued once when on. If the anon probe were used, it would return "upcoming"
-// and be queued even when off (the regression).
-func TestProcessCandidate_MembersVodHonorsIncludeNonLive(t *testing.T) {
-	run := func(includeNonLive bool) bool {
-		fm := newTestFeedMonitor(t, newTestDB(t))
-		fm.ProbeVideoAuth = func(ctx context.Context, id string) (*VideoProbeResult, error) {
-			return &VideoProbeResult{StreamStatus: "vod", Title: "t"}, nil
-		}
-		fm.ProbeVideo = func(ctx context.Context, id string) (*VideoProbeResult, error) {
-			return &VideoProbeResult{StreamStatus: "upcoming", Title: "t"}, nil // the bug's misclassification
-		}
-		found := false
-		fm.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig) { found = true }
-		ch := &config.ChannelConfig{ID: "UCtest", Name: "Test", IncludeNonLiveContent: includeNonLive}
-		fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "memberVod1", title: "m", source: "membership", authProbe: true})
-		return found
-	}
-	if run(false) {
-		t.Error("members VOD must NOT be queued when include_non_live_content is off")
-	}
-	if !run(true) {
-		t.Error("members VOD SHOULD be queued once when include_non_live_content is on")
-	}
-}
-
-// TestMembershipCandidates_DropsVodsWhenNonLiveOff: un-jobbable members VODs
-// don't take shared cap slots from public videos when the channel doesn't
-// archive uploads; live/upcoming (Age 0) always survive.
-func TestMembershipCandidates_DropsVodsWhenNonLiveOff(t *testing.T) {
-	now := time.Now()
-	vids := []MembershipVideo{{VideoID: "liveVid0001", Age: 0}, {VideoID: "oldVod00002", Age: 100 * time.Hour}}
-	off := membershipCandidates(vids, now, false)
-	if len(off) != 1 || off[0].videoID != "liveVid0001" {
-		t.Errorf("non-live off should drop VODs and keep live, got %+v", off)
-	}
-	if on := membershipCandidates(vids, now, true); len(on) != 2 {
-		t.Errorf("non-live on should keep all, got %d", len(on))
 	}
 }
 
@@ -214,8 +59,8 @@ func TestParseFeedCandidates(t *testing.T) {
 	if !cands[1].published.IsZero() {
 		t.Error("entry 1 (no <published>) should parse to zero time")
 	}
-	if cands[0].source != "rss" || cands[0].authProbe {
-		t.Errorf("RSS candidates must be source=rss, authProbe=false: %+v", cands[0])
+	if cands[0].source != "rss" {
+		t.Errorf("RSS candidates must be source=rss: %+v", cands[0])
 	}
 	if _, err := fm.parseFeedCandidates(ch, []byte("<not-xml")); err == nil {
 		t.Error("a malformed feed must return an error (health signal)")

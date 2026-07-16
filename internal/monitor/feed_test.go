@@ -276,7 +276,7 @@ func TestFeedMonitorSmoke(t *testing.T) {
 	)
 
 	var found []string
-	fm.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig) {
+	fm.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig, d JobDisposition) {
 		found = append(found, videoID)
 	}
 

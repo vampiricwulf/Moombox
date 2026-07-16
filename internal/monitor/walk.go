@@ -64,7 +64,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		}
 
 		// Title-only for store rows, like DECAPI — a store row carries no
-		// description (see processCandidate's comment in feed.go).
+		// description (§8: terms gate the probe on what the store has).
 		if !MatchesTerms(row.Title, ch) {
 			continue
 		}
@@ -126,10 +126,6 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		// on a transient fault.
 	}
 
-	// PLAN3-TASK5 removes the double-probe: until the ARCHIVE step is wired
-	// to consume this FRESH map instead of re-probing, checkChannel's legacy
-	// candidate loop (mergeCandidates/processCandidate) may probe the same
-	// videos again this cycle.
 	return fresh
 }
 

@@ -61,8 +61,12 @@ type DecapiMonitor struct {
 
 	health *healthTracker
 
-	OnSchedule      func(nextCheckAt int64)
-	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
+	OnSchedule func(nextCheckAt int64)
+	// OnVideoFound carries a JobDisposition like the feed monitor's (spec
+	// §10's creator table): DispositionBroadcast for live/upcoming probe
+	// results, DispositionNewVOD otherwise — DECAPI writes no feed_items row
+	// by design (§13), so it can never produce backlog.
+	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig, d JobDisposition)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
@@ -596,8 +600,16 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		return nil
 	}
 
+	// Disposition (spec §10's creator table): broadcasts for live/upcoming,
+	// new VOD for everything else. The nil-probe passthrough leaves
+	// StreamStatus empty and lands on the VOD arm — matching its pre-Plan3
+	// "just create the job" behavior.
+	d := DispositionNewVOD
+	if result.StreamStatus == "live" || result.StreamStatus == "upcoming" {
+		d = DispositionBroadcast
+	}
 	if dm.OnVideoFound != nil {
-		dm.OnVideoFound(videoID, result.Title, videoURL, ch)
+		dm.OnVideoFound(videoID, result.Title, videoURL, ch, d)
 	}
 
 	return nil

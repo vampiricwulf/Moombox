@@ -7,7 +7,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,9 +19,7 @@ import (
 
 const (
 	feedFetchTimeout         = 15 * time.Second
-	feedProcessTimeout       = 60 * time.Second
 	defaultArchiveWindowDays = 3
-	defaultArchiveSlots      = 3
 	// feedStagger spaces consecutive channel feed fetches. Decapi and Twitch
 	// already stagger; a tight loop of YouTube RSS fetches on a big channel
 	// list looks like scraping behavior from a single source IP.
@@ -126,8 +123,13 @@ type FeedMonitor struct {
 
 	health *healthTracker
 
-	OnSchedule   func(nextCheckAt int64)
-	OnVideoFound func(videoID, title, url string, channel *config.ChannelConfig)
+	OnSchedule func(nextCheckAt int64)
+	// OnVideoFound is fired by the ARCHIVE step (archive.go) for every item
+	// the §10 decision table admits. The disposition tells the host HOW to
+	// create the job (spec §10's creator table); Plan 4 implements those
+	// semantics — until then the host maps every disposition to today's
+	// Upcoming+enqueue behavior (see the PLAN4 marker in monitor_callbacks.go).
+	OnVideoFound func(videoID, title, url string, channel *config.ChannelConfig, d JobDisposition)
 	ProbeVideo   VideoProbeFunc
 	// ProbeVideoAuth is the AUTHENTICATED probe used only for members-only
 	// videos discovered via the /membership tab. An anonymous probe (ProbeVideo)
@@ -435,22 +437,22 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 //  1. FETCH   RSS and — when active — the authenticated /membership tab,
 //     independently; either may fail, neither is fatal to the other.
 //     An RSS transport SUCCESS writes channel_state.last_rss_ok_at
-//     immediately, here, not at cycle end — the established gate is
-//     read later THIS SAME cycle (PLAN3 Task 5's ARCHIVE step).
+//     immediately, here, not at cycle end — the ARCHIVE step reads the
+//     established gate later THIS SAME cycle, so a fresh install's first
+//     successful fetch opens the gate without waiting a poll interval.
 //  2. STORE   Upsert every item seen (db.UpsertFeedItem) with its
 //     listing-derived date/precision and collect the video IDs
 //     inserted (not merely re-sighted) THIS cycle into newIDs, for
 //     the ARCHIVE step to disposition as new-vs-backlog.
-//  3. WALK    the serial probe pass over the store's scope (walk.go, spec §8).
-//  4. ARCHIVE (PLAN3 Task 5) re-reads scope (the walk corrected dates) and
-//     decides jobs per item.
+//  3. WALK    the serial probe pass over the store's scope (walk.go, spec §8),
+//     returning the FRESH map of this cycle's successful probes.
+//  4. ARCHIVE re-read scope — the walk corrected dates and statuses, so rows
+//     may have entered or left it — and decide jobs per item against
+//     the §10 decision table (archive.go), reusing FRESH results so
+//     nothing is probed twice in one cycle.
 //
-// Until Task 5 lands, the tail of this function retains the pre-PLAN3
-// merge+process pipeline (mergeCandidates/processCandidate) against the SAME
-// fetch results, so probing and job creation keep working — at the cost of
-// re-probing rows the WALK already probed this cycle (see the
-// PLAN3-TASK5-removes-the-double-probe marker in walk.go). Task 5 deletes
-// that block along with processCandidate and mergeCandidates.
+// WALK and ARCHIVE run under separate budgets scaled to the scope they read
+// (passBudget) — a truncated walk must not also kill archival (§7).
 //
 // Returns the RSS fetch/parse error for channel-health accounting. A
 // membership failure is logged but never marks the RSS feed unhealthy — they
@@ -535,49 +537,27 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 		}
 	}
 
-	// 3. WALK — the serial probe pass over the store's scope (spec §8). Its DB
-	// writes (ApplyProbeToFeedItem) land regardless of whether checkChannel
-	// consumes the returned FRESH map; ARCHIVE (PLAN3 Task 5) is what wires
-	// that map in to avoid re-probing the same rows below.
+	// 3. WALK — the serial probe pass over the store's scope (spec §8).
 	scope, scopeErr := fm.db.FeedScope(chID, cutoff, fm.membershipDiscoveryEnabled())
 	if scopeErr != nil {
-		fm.logger.Warn("FeedScope query failed; walk skipped this cycle", "channel", ch.Name, "err", scopeErr)
-	} else {
-		walkCtx, walkCancel := context.WithTimeout(ctx, feedProcessTimeout)
-		fresh := fm.walk(walkCtx, ch, chID, cutoff, scope)
-		walkCancel()
-		_ = fresh // consumed by the ARCHIVE step (PLAN3 Task 5)
+		fm.logger.Warn("FeedScope query failed; walk+archive skipped this cycle", "channel", ch.Name, "err", scopeErr)
+		return rssErr
 	}
+	walkCtx, walkCancel := context.WithTimeout(ctx, passBudget(len(scope)))
+	fresh := fm.walk(walkCtx, ch, chID, cutoff, scope)
+	walkCancel()
 
-	// PLAN3-TASK5 archive pass here — ARCHIVE replaces everything below with
-	// a re-read of the store's scope (the walk's corrected dates) and the
-	// decision table from spec §10. Retained temporarily so probing/jobbing
-	// keeps working from THIS cycle's fetch results; the legacy loop below
-	// probing rows the walk already probed is an accepted double-probe until
-	// Task 5 removes it (see the PLAN3-TASK5 marker in walk.go).
-	var candidates []discoveredVideo
-	candidates = append(candidates, rssCandidates...)
-	if len(membVideos) > 0 {
-		candidates = append(candidates, membershipCandidates(membVideos, cycleNow, ch.IncludeNonLiveContent)...)
+	// 4. ARCHIVE — re-read scope (the walk corrected dates and statuses, so
+	// rows may have entered or left it) and decide jobs per item (spec §10).
+	scope, scopeErr = fm.db.FeedScope(chID, cutoff, fm.membershipDiscoveryEnabled())
+	if scopeErr != nil {
+		fm.logger.Warn("FeedScope re-read failed; archive skipped this cycle", "channel", ch.Name, "err", scopeErr)
+		return rssErr
 	}
+	archiveCtx, archiveCancel := context.WithTimeout(ctx, passBudget(len(scope)))
+	fm.archive(archiveCtx, ch, chID, cutoff, scope, newIDs, fresh)
+	archiveCancel()
 
-	// Merge: rank newest-first and cap so at most maxFeedItems of the channel's
-	// most-recent items (across BOTH sources) are probed.
-	candidates = mergeCandidates(candidates, fm.archiveSlots(ch))
-
-	// ProbeVideo can be slow (retries + backoff); bound the whole channel's
-	// processing so one channel can't run past the cycle interval and starve
-	// the others.
-	procCtx, cancel := context.WithTimeout(ctx, feedProcessTimeout)
-	defer cancel()
-	for i := range candidates {
-		select {
-		case <-procCtx.Done():
-			return rssErr
-		default:
-		}
-		fm.processCandidate(procCtx, ch, candidates[i])
-	}
 	return rssErr
 }
 
@@ -661,8 +641,8 @@ type atomMediaGroup struct {
 // archive: the channel's own ArchiveWindowDays override, else the global
 // monitors.archive_window_days, else defaultArchiveWindowDays. Upcoming/live
 // content is always covered regardless of this window. Read by checkChannel
-// to compute the cycle's cutoff; PLAN3 Task 5 wires cutoff into the ARCHIVE
-// step's window re-check.
+// to compute the cycle's cutoff, which both the walk's early exit and the
+// ARCHIVE step's window re-check (archive.go) test against.
 func (fm *FeedMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 	if ch.ArchiveWindowDays != nil && *ch.ArchiveWindowDays > 0 {
 		return *ch.ArchiveWindowDays
@@ -673,23 +653,6 @@ func (fm *FeedMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 		return g
 	}
 	return defaultArchiveWindowDays
-}
-
-// archiveSlots is the per-channel cap on how many of the most-recent items —
-// across RSS AND membership merged — are processed each cycle: the channel's
-// own ArchiveSlots override, else the global monitors.archive_slots, else
-// defaultArchiveSlots. checkChannel ranks the merged candidate list by
-// recency and truncates it to this many (see mergeCandidates).
-func (fm *FeedMonitor) archiveSlots(ch *config.ChannelConfig) int {
-	if ch.ArchiveSlots != nil && *ch.ArchiveSlots > 0 {
-		return *ch.ArchiveSlots
-	}
-	var g int
-	fm.configStore.Read(func(c *config.MoomboxConfig) { g = c.Monitors.ArchiveSlots })
-	if g > 0 {
-		return g
-	}
-	return defaultArchiveSlots
 }
 
 // membershipDiscoveryEnabled reports the operator's membership_discovery
@@ -704,18 +667,17 @@ func (fm *FeedMonitor) membershipDiscoveryEnabled() bool {
 	return enabled
 }
 
-// discoveredVideo is one candidate from any discovery source. RSS and
-// membership candidates are merged into a single per-channel list, ranked by
-// `published` (recency), and capped at maxFeedItems — so a channel probes at
-// most maxFeedItems of its most-recent items each cycle regardless of source.
+// discoveredVideo is one parsed RSS feed entry, as consumed by the STORE step
+// (spec §7): videoID/title/published feed the upsert. desc and url are parse
+// outputs the store does not persist — the store-driven passes term-match on
+// title only (§8) and synthesize canonical watch URLs (archive.go).
 type discoveredVideo struct {
 	videoID   string
 	title     string
-	desc      string    // RSS description (term matching); empty for membership
-	url       string    // RSS alternate link; empty → synthesized in processCandidate
-	published time.Time // recency key for the merged sort
-	source    string    // "rss" | "membership" (log label; also feed_items.source)
-	authProbe bool      // members-only content must be probed with cookies
+	desc      string    // RSS description (lookbehind-deduped); not stored
+	url       string    // RSS alternate link; not stored
+	published time.Time // RSS <published> — 'exact' precision in the store
+	source    string    // always "rss" (feed_items.source)
 }
 
 // parseFeedCandidates parses an Atom feed into discovery candidates. It returns
@@ -782,133 +744,6 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 		})
 	}
 	return out, nil
-}
-
-// mergeCandidates ranks discovery candidates newest-first (by published) and
-// caps the list to max, so at most max of the most-recent items across all
-// sources are processed. Stable so equal-recency items keep their source order.
-func mergeCandidates(candidates []discoveredVideo, max int) []discoveredVideo {
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].published.After(candidates[j].published)
-	})
-	if max > 0 && len(candidates) > max {
-		candidates = candidates[:max]
-	}
-	return candidates
-}
-
-// membershipCandidates converts members-only videos into discovery candidates.
-// The membership tab exposes no exact timestamp, so recency is derived from the
-// coarse Age (0 = live/upcoming → published "now", so it always sorts to the top
-// of the cap). These always carry authProbe=true — members-only content must be
-// probed with cookies or it misclassifies as "upcoming".
-//
-// When includeVODs is false (the channel does not archive uploads/premieres),
-// past members VODs (Age>0) are dropped: they could never become jobs on this
-// channel anyway, so letting them occupy shared cap slots would only crowd out
-// public videos that CAN be jobbed. Live/upcoming items (Age 0) are always kept.
-func membershipCandidates(vids []MembershipVideo, now time.Time, includeVODs bool) []discoveredVideo {
-	out := make([]discoveredVideo, 0, len(vids))
-	for _, v := range vids {
-		if !includeVODs && v.Age > 0 {
-			continue
-		}
-		out = append(out, discoveredVideo{
-			videoID:   v.VideoID,
-			title:     v.Title,
-			published: now.Add(-v.Age),
-			source:    "membership",
-			authProbe: true,
-		})
-	}
-	return out
-}
-
-// processCandidate runs a single merged candidate (RSS or membership) through
-// the shared pipeline: active-job dedup, term matching (title/description),
-// stream-status classification, and OnVideoFound. checkChannel's merged loop is
-// the sole caller, so dedup, probe, and job-creation semantics stay identical
-// across discovery sources — a video seen by two sources can never create two
-// jobs.
-//
-// c.desc may be empty (membership entries carry no description, so matching is
-// title-only, like DECAPI). c.url may be empty; a canonical watch URL is
-// synthesized. Members-only candidates (c.authProbe) are probed with cookies.
-func (fm *FeedMonitor) processCandidate(ctx context.Context, ch *config.ChannelConfig, c discoveredVideo) {
-	if c.videoID == "" {
-		return
-	}
-
-	// Skip if an active job exists (but not if merely finished — a stream may
-	// restart on the same URL).
-	active, err := fm.db.HasActiveJob(c.videoID)
-	if err != nil {
-		// Don't swallow DB errors — proceeding as if no active job could create
-		// duplicates if the DB was simply busy. Skip this entry for this cycle.
-		fm.logger.Debug("HasActiveJob query failed", "videoID", c.videoID, "err", err)
-		return
-	}
-	if active {
-		return
-	}
-
-	videoURL := c.url
-	if videoURL == "" {
-		videoURL = fmt.Sprintf("https://www.youtube.com/watch?v=%s", c.videoID)
-	}
-
-	// Term matching: title OR description can match independently.
-	titleMatch := MatchesTerms(c.title, ch)
-	descMatch := c.desc != "" && MatchesTerms(c.desc, ch)
-	if !titleMatch && !descMatch {
-		return
-	}
-
-	// Check if this is a re-probe of a previously processed video. Ignore the
-	// error — a DB-busy here is best treated as "not yet processed" so we probe
-	// and let upstream dedup (INSERT-OR-IGNORE) handle collisions.
-	reprobe, hpErr := fm.db.HasProcessed(c.videoID)
-	if hpErr != nil {
-		fm.logger.Debug("HasProcessed query failed", "videoID", c.videoID, "err", hpErr)
-	}
-
-	if reprobe {
-		fm.logger.Debug("feed match found (re-probe)",
-			"videoID", c.videoID, "title", c.title, "channel", ch.Name, "source", c.source)
-	} else {
-		fm.logger.Info("feed match found",
-			"videoID", c.videoID, "title", c.title, "channel", ch.Name, "source", c.source)
-	}
-
-	// Members-only content MUST be probed with cookies, or an anonymous probe
-	// gets no formats and the classifier misfires it as "upcoming" (bypassing
-	// include_non_live_content). Public/RSS content uses the lighter anonymous
-	// probe. Falls back to ProbeVideo if no authenticated probe is wired.
-	probe := fm.ProbeVideo
-	if c.authProbe && fm.ProbeVideoAuth != nil {
-		probe = fm.ProbeVideoAuth
-	}
-
-	// Probe video metadata to classify stream status before creating a job.
-	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
-		Ctx:          ctx,
-		VideoID:      c.videoID,
-		Title:        c.title,
-		Channel:      ch,
-		ProbeVideo:   probe,
-		AddToHistory: func(id string) error { return fm.db.AddToHistory(id) },
-		Tracker:      fm.MetadataTracker,
-		Cooldown:     fm.ProbeCooldown,
-		IsReprobe:    reprobe,
-		Logger:       fm.logger,
-	})
-	if !result.ShouldProcess {
-		return
-	}
-
-	if fm.OnVideoFound != nil {
-		fm.OnVideoFound(c.videoID, result.Title, videoURL, ch)
-	}
 }
 
 // descriptionLineSet builds the trimmed-line lookup set for a description.
