@@ -198,3 +198,21 @@ func TestExtractYtInitialData_Absent(t *testing.T) {
 		t.Error("expected extraction to fail when marker absent")
 	}
 }
+
+func TestItemAgeTruncatedLowerBound(t *testing.T) {
+	// Spec §12: itemAge returns n*unit — the LOWER bound of the true age — so
+	// now - itemAge() is the NEWEST instant consistent with the text. Do NOT
+	// "fix" this to a midpoint or upper bound: the window design depends on it.
+	item := map[string]any{"title": map[string]any{"simpleText": "x"},
+		"publishedTimeText": map[string]any{"simpleText": "1 week ago"}}
+	if got := itemAge(item); got != 7*24*time.Hour {
+		t.Fatalf("itemAge(1 week ago) = %v, want 168h", got)
+	}
+	// The live-badge short-circuit outranks the age regex: a live renderer
+	// carrying "Started streaming 2 hours ago" must return 0, not 2h.
+	live := map[string]any{"publishedTimeText": map[string]any{"simpleText": "Started streaming 2 hours ago"},
+		"thumbnailOverlays": []any{map[string]any{"thumbnailOverlayTimeStatusRenderer": map[string]any{"style": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"}}}}
+	if got := itemAge(live); got != 0 {
+		t.Fatalf("live badge must short-circuit to 0, got %v", got)
+	}
+}
