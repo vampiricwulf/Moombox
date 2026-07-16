@@ -64,8 +64,8 @@ func TestMembershipCandidates(t *testing.T) {
 func TestMergeCandidatesRecencyCap(t *testing.T) {
 	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
 	cands := []discoveredVideo{
-		{videoID: "rssRecent01", published: now.Add(-1 * time.Hour), source: "feed"},                               // recent public
-		{videoID: "rssOlder002", published: now.Add(-48 * time.Hour), source: "feed"},                              // older public
+		{videoID: "rssRecent01", published: now.Add(-1 * time.Hour), source: "rss"},                                // recent public
+		{videoID: "rssOlder002", published: now.Add(-48 * time.Hour), source: "rss"},                               // older public
 		{videoID: "memLive0003", published: now, source: "membership", authProbe: true},                            // live members (now)
 		{videoID: "memOldVod04", published: now.Add(-700 * 24 * time.Hour), source: "membership", authProbe: true}, // ~2y old members VOD
 	}
@@ -106,7 +106,7 @@ func TestProcessCandidate_AuthProbeSelection(t *testing.T) {
 	ch := &config.ChannelConfig{ID: "UCtest", Name: "Test", IncludeNonLiveContent: true}
 
 	fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "memberVid01", title: "m", source: "membership", authProbe: true})
-	fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "publicVid02", title: "p", source: "feed"})
+	fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "publicVid02", title: "p", source: "rss"})
 
 	if !usedAuth["memberVid01"] {
 		t.Error("members-only candidate must use the authenticated probe")
@@ -133,7 +133,7 @@ func TestProcessCandidate_ActiveJobDedup(t *testing.T) {
 		t.Fatal(err)
 	}
 	ch := &config.ChannelConfig{ID: "UCtest", Name: "Test"}
-	fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "activeVid01", title: "x", source: "feed"})
+	fm.processCandidate(context.Background(), ch, discoveredVideo{videoID: "activeVid01", title: "x", source: "rss"})
 	if probed["activeVid01"] {
 		t.Error("candidate with an active job should be skipped before probing")
 	}
@@ -214,8 +214,8 @@ func TestParseFeedCandidates(t *testing.T) {
 	if !cands[1].published.IsZero() {
 		t.Error("entry 1 (no <published>) should parse to zero time")
 	}
-	if cands[0].source != "feed" || cands[0].authProbe {
-		t.Errorf("feed candidates must be source=feed, authProbe=false: %+v", cands[0])
+	if cands[0].source != "rss" || cands[0].authProbe {
+		t.Errorf("RSS candidates must be source=rss, authProbe=false: %+v", cands[0])
 	}
 	if _, err := fm.parseFeedCandidates(ch, []byte("<not-xml")); err == nil {
 		t.Error("a malformed feed must return an error (health signal)")

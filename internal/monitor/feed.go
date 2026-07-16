@@ -154,6 +154,13 @@ type FeedMonitor struct {
 	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
 	// for tests. Nil uses the real fetch — see rssFetch.
 	FetchRSS RSSFetchFunc
+
+	// now returns the current time. checkChannel reads it exactly ONCE per
+	// cycle (spec §7's one-`now` rule) so every timestamp a cycle writes —
+	// last_rss_ok_at, the STORE step's coarse/assumed dates, the ARCHIVE
+	// cutoff — derives from a single instant. Defaults to time.Now; tests pin
+	// it via withNow (feed_test.go) for deterministic date math.
+	now func() time.Time
 }
 
 // Health returns the per-channel health snapshot for /api/status.
@@ -194,6 +201,7 @@ func NewFeedMonitor(store *config.Store, db *database.Database, logger interface
 		// refreshProbeCooldown (before any probe runs), so the zero here just
 		// means "disabled until the first cycle reads config".
 		ProbeCooldown: NewProbeCooldown(0),
+		now:           time.Now,
 	}
 }
 
@@ -422,57 +430,123 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 	}
 }
 
-// checkChannel fetches a channel's RSS feed and — when enabled — its
-// authenticated /membership tab, merges both into ONE candidate list ranked by
-// recency, caps it at maxFeedItems, and processes only the most-recent items.
-// This is why membership can't flood the queue: RSS + membership compete for
-// the same maxFeedItems slots, so at most that many of the channel's newest
-// items (across both sources) are probed each cycle. A live/upcoming members
-// item (recency "now") always makes the cut.
+// checkChannel runs one channel's monitor cycle (spec §7):
 //
-// Returns the RSS fetch error for channel-health accounting. A membership
-// failure is logged but never marks the RSS feed unhealthy — they are
-// independent signals.
+//  1. FETCH   RSS and — when active — the authenticated /membership tab,
+//     independently; either may fail, neither is fatal to the other.
+//     An RSS transport SUCCESS writes channel_state.last_rss_ok_at
+//     immediately, here, not at cycle end — the established gate is
+//     read later THIS SAME cycle (PLAN3 Task 5's ARCHIVE step).
+//  2. STORE   Upsert every item seen (db.UpsertFeedItem) with its
+//     listing-derived date/precision and collect the video IDs
+//     inserted (not merely re-sighted) THIS cycle into newIDs, for
+//     the ARCHIVE step to disposition as new-vs-backlog.
+//  3. WALK    (PLAN3 Task 3) the serial probe pass over the store's scope.
+//  4. ARCHIVE (PLAN3 Task 5) re-reads scope (the walk corrected dates) and
+//     decides jobs per item.
+//
+// Until Tasks 3-5 land, the tail of this function retains the pre-PLAN3
+// merge+process pipeline (mergeCandidates/processCandidate) against the SAME
+// fetch results, so probing and job creation keep working across Tasks 2-4;
+// Task 5 deletes that block along with processCandidate and mergeCandidates.
+//
+// Returns the RSS fetch/parse error for channel-health accounting. A
+// membership failure is logged but never marks the RSS feed unhealthy — they
+// are independent signals.
 func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfig) error {
-	data, rssErr := fm.rssFetch(ctx, ch)
+	chID := ch.ID
+	cycleNow := fm.now().UTC()
+	cutoff := cycleNow.Add(-time.Duration(fm.archiveWindowDays(ch)) * 24 * time.Hour).Format(time.RFC3339)
+	_ = cutoff // consumed by the ARCHIVE step (PLAN3 Task 5); computed here so every cycle timestamp derives from ONE cycleNow (spec §7)
 
-	var candidates []discoveredVideo
+	// 1. FETCH — independent; neither failure is fatal to the other.
+	data, rssErr := fm.rssFetch(ctx, ch)
+	if rssErr == nil {
+		// Transport success establishes the channel even on zero entries or an
+		// unparseable body (spec §11 residual) — a FETCH, not a parse, is the
+		// gate.
+		if err := fm.db.SetChannelRSSOK(chID, cycleNow.Format(time.RFC3339)); err != nil {
+			fm.logger.Warn("last_rss_ok_at write failed", "channel", ch.Name, "err", err)
+		}
+	}
+
+	var rssCandidates []discoveredVideo
 	if rssErr == nil {
 		// A parse failure (malformed 200 response) becomes the health error, so
 		// a persistently broken feed still surfaces as unhealthy rather than a
-		// silent success.
-		var parsed []discoveredVideo
-		parsed, rssErr = fm.parseFeedCandidates(ch, data)
-		candidates = append(candidates, parsed...)
+		// silent success. It does not retract the last_rss_ok_at write above.
+		rssCandidates, rssErr = fm.parseFeedCandidates(ch, data)
 	}
 
 	// Members-only discovery: RSS never lists members-only content, so this is
 	// the only source for members live/upcoming streams (and, with
-	// include_non_live_content, their VODs). Uses the authenticated probe
-	// downstream so a members VOD is seen as a VOD, not misfired as "upcoming".
+	// include_non_live_content, their VODs).
+	var membVideos []MembershipVideo
 	if fm.membershipActive() {
 		// defer cancel() inside the closure so a panic in FetchMembership can't
 		// leak the timeout timer, while still releasing it the moment the fetch
-		// returns (not held for the rest of checkChannel's candidate loop).
+		// returns (not held for the rest of checkChannel).
 		vids, mErr := func() ([]MembershipVideo, error) {
 			mctx, cancel := context.WithTimeout(ctx, feedFetchTimeout)
 			defer cancel()
-			return fm.FetchMembership(mctx, ch.ID)
+			return fm.FetchMembership(mctx, chID)
 		}()
 		if mErr != nil {
 			fm.logger.Debug("membership discovery failed", "channel", ch.Name, "err", mErr)
-		} else if len(vids) > 0 {
-			candidates = append(candidates, membershipCandidates(vids, time.Now(), ch.IncludeNonLiveContent)...)
+		} else {
+			membVideos = vids
 		}
 	}
 
-	if len(candidates) == 0 {
-		return rssErr
+	// 2. STORE — upsert every item seen; collect NEW ids for the ARCHIVE step.
+	newIDs := map[string]bool{}
+	first := cycleNow.Format(time.RFC3339)
+	for i, c := range rssCandidates {
+		ins, err := fm.db.UpsertFeedItem(database.FeedItem{
+			ChannelID: chID, VideoID: c.videoID, Title: c.title,
+			Published: c.published.UTC().Format(time.RFC3339), DatePrecision: "exact",
+			CatalogPos: i, Source: "rss", FirstSeen: first,
+		})
+		if err != nil {
+			fm.logger.Warn("upsert failed; skipping item this cycle", "id", c.videoID, "err", err)
+			continue
+		}
+		if ins {
+			newIDs[c.videoID] = true
+		}
+	}
+	for i, v := range membVideos {
+		pub, prec := first, "assumed"
+		if v.Age > 0 {
+			pub, prec = cycleNow.Add(-v.Age).Format(time.RFC3339), "coarse"
+		}
+		ins, err := fm.db.UpsertFeedItem(database.FeedItem{
+			ChannelID: chID, VideoID: v.VideoID, Title: v.Title,
+			Published: pub, DatePrecision: prec,
+			CatalogPos: i, Source: "membership", FirstSeen: first,
+		})
+		if err != nil {
+			fm.logger.Warn("upsert failed; skipping item this cycle", "id", v.VideoID, "err", err)
+			continue
+		}
+		if ins {
+			newIDs[v.VideoID] = true
+		}
+	}
+
+	// PLAN3-TASK5 archive pass here — the WALK (Task 3) and ARCHIVE (Task 5)
+	// steps replace everything below with a re-read of the store's scope.
+	// Retained temporarily so probing/jobbing keeps working from THIS cycle's
+	// fetch results.
+	var candidates []discoveredVideo
+	candidates = append(candidates, rssCandidates...)
+	if len(membVideos) > 0 {
+		candidates = append(candidates, membershipCandidates(membVideos, cycleNow, ch.IncludeNonLiveContent)...)
 	}
 
 	// Merge: rank newest-first and cap so at most maxFeedItems of the channel's
 	// most-recent items (across BOTH sources) are probed.
-	candidates = mergeCandidates(candidates, fm.archiveSlots(ch)) // PLAN3 replaces this call site
+	candidates = mergeCandidates(candidates, fm.archiveSlots(ch))
 
 	// ProbeVideo can be slow (retries + backoff); bound the whole channel's
 	// processing so one channel can't run past the cycle interval and starve
@@ -569,8 +643,9 @@ type atomMediaGroup struct {
 // archiveWindowDays is the per-channel resolver for how many days back to
 // archive: the channel's own ArchiveWindowDays override, else the global
 // monitors.archive_window_days, else defaultArchiveWindowDays. Upcoming/live
-// content is always covered regardless of this window. Not yet consumed —
-// PLAN3 wires this into the backfill/history path.
+// content is always covered regardless of this window. Read by checkChannel
+// to compute the cycle's cutoff; PLAN3 Task 5 wires cutoff into the ARCHIVE
+// step's window re-check.
 func (fm *FeedMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 	if ch.ArchiveWindowDays != nil && *ch.ArchiveWindowDays > 0 {
 		return *ch.ArchiveWindowDays
@@ -610,7 +685,7 @@ type discoveredVideo struct {
 	desc      string    // RSS description (term matching); empty for membership
 	url       string    // RSS alternate link; empty → synthesized in processCandidate
 	published time.Time // recency key for the merged sort
-	source    string    // "feed" | "membership" (log label)
+	source    string    // "rss" | "membership" (log label; also feed_items.source)
 	authProbe bool      // members-only content must be probed with cookies
 }
 
@@ -674,7 +749,7 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 			desc:      description,
 			url:       videoURL,
 			published: published,
-			source:    "feed",
+			source:    "rss",
 		})
 	}
 	return out, nil

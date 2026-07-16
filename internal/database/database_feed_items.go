@@ -69,6 +69,25 @@ WHERE channel_id = ? AND video_id = ?`, precisionRankCaseSQL("date_precision"))
 	return err
 }
 
+// GetFeedItem returns the feed_items row for (channelID, videoID), or nil (no
+// error) if no such row exists. A small exported read path alongside the
+// upsert/probe writers — used by tests and (Plan 5) the history API.
+func (db *Database) GetFeedItem(channelID, videoID string) (*FeedItem, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	it := &FeedItem{ChannelID: channelID, VideoID: videoID}
+	err := db.db.QueryRowContext(db.getCtx(), `SELECT title, published, date_precision, catalog_pos, source, status, first_seen
+  FROM feed_items WHERE channel_id = ? AND video_id = ?`, channelID, videoID).Scan(
+		&it.Title, &it.Published, &it.DatePrecision, &it.CatalogPos, &it.Source, &it.Status, &it.FirstSeen)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return it, nil
+}
+
 // SetFeedItemSource is the refusal's write (§9).
 func (db *Database) SetFeedItemSource(channelID, videoID, source string) error {
 	db.mu.Lock()
@@ -168,6 +187,23 @@ func (db *Database) SetChannelRSSOK(channelID, ts string) error {
 	_, err := db.db.ExecContext(db.getCtx(), `INSERT INTO channel_state (channel_id, last_rss_ok_at)
 VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET last_rss_ok_at = excluded.last_rss_ok_at`, channelID, ts)
 	return err
+}
+
+// GetChannelRSSOK returns channel_state.last_rss_ok_at for channelID, or "" if
+// unset or the channel_state row doesn't exist yet — mirrors SetChannelRSSOK.
+func (db *Database) GetChannelRSSOK(channelID string) (string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	var ts sql.NullString
+	err := db.db.QueryRowContext(db.getCtx(),
+		`SELECT last_rss_ok_at FROM channel_state WHERE channel_id = ?`, channelID).Scan(&ts)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return ts.String, nil
 }
 
 // DeleteChannelFeedData deletes feed_items + channel_state rows for channelID.

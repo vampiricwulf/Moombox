@@ -194,6 +194,36 @@ func TestDeleteChannelFeedData(t *testing.T) {
 	}
 }
 
+func TestGetFeedItem(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+	if it, err := db.GetFeedItem("UC1", "missing"); err != nil || it != nil {
+		t.Fatalf("missing row: it=%+v err=%v", it, err)
+	}
+	db.UpsertFeedItem(fi("UC1", "v1", "2026-07-10T00:00:00Z", "coarse", "rss", "unknown", 0))
+	it, err := db.GetFeedItem("UC1", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it == nil || it.DatePrecision != "coarse" || it.Source != "rss" {
+		t.Fatalf("got %+v", it)
+	}
+}
+
+func TestGetChannelRSSOK(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+	if ts, err := db.GetChannelRSSOK("UC1"); err != nil || ts != "" {
+		t.Fatalf("no row yet: ts=%q err=%v", ts, err)
+	}
+	if err := db.SetChannelRSSOK("UC1", "2026-07-16T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if ts, err := db.GetChannelRSSOK("UC1"); err != nil || ts != "2026-07-16T00:00:00Z" {
+		t.Fatalf("got ts=%q err=%v", ts, err)
+	}
+}
+
 func mustGetFeedItem(t *testing.T, db *Database, channelID, videoID string) FeedItem {
 	t.Helper()
 	it := FeedItem{ChannelID: channelID, VideoID: videoID}
