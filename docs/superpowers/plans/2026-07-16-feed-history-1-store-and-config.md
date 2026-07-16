@@ -614,14 +614,24 @@ VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET last_rss_ok_at = excluded.la
 }
 
 func (db *Database) DeleteChannelFeedData(channelID string) error {
+	// One transaction (BatchSetWatched pattern, database_jobs.go:191): a crash
+	// between the two deletes would orphan a channel_state row with a stale
+	// backfilled_at, and a re-added channel would silently skip its backfill.
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	ctx := db.getCtx()
-	if _, err := db.db.ExecContext(ctx, `DELETE FROM feed_items WHERE channel_id = ?`, channelID); err != nil {
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	_, err := db.db.ExecContext(ctx, `DELETE FROM channel_state WHERE channel_id = ?`, channelID)
-	return err
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM feed_items WHERE channel_id = ?`, channelID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_state WHERE channel_id = ?`, channelID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 ```
 
