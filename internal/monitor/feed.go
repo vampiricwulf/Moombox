@@ -77,8 +77,8 @@ func reportMonitorResult(tag string, failed bool) {
 // membership tab. It mirrors youtube.MembershipVideo but is declared here so
 // the monitor package stays decoupled from the youtube package (the wiring
 // closure in cmd/moombox adapts between the two, exactly like ProbeVideo does).
-// Age is a coarse recency estimate (0 = live/upcoming) used to rank membership
-// items against dated RSS items in the merged cap.
+// Age is a coarse recency estimate (0 = live/upcoming) the STORE step turns
+// into the row's skew-new 'coarse' date (or 'assumed' when zero and not live).
 type MembershipVideo struct {
 	VideoID string
 	Title   string
@@ -681,8 +681,8 @@ type discoveredVideo struct {
 }
 
 // parseFeedCandidates parses an Atom feed into discovery candidates. It returns
-// ALL entries (the merged cap is applied later, after membership items join),
-// carrying each entry's <published> date as the recency key. Description dedup
+// ALL entries; the STORE step upserts every one, carrying its <published> date
+// as the row's 'exact'-precision published. Description dedup
 // (NumDescLookbehind) is applied here because it depends on feed entry order. A
 // parse failure is returned so the caller can record it as channel-health.
 func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte) ([]discoveredVideo, error) {
