@@ -116,37 +116,6 @@ func TestHistory(t *testing.T) {
 	}
 }
 
-func TestLastVideos(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	db, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	// No last video
-	vid, _ := db.GetLastVideo("UC123")
-	if vid != "" {
-		t.Error("expected empty for unknown channel")
-	}
-
-	// Set and get
-	db.SetLastVideo("UC123", "vid1")
-	vid, _ = db.GetLastVideo("UC123")
-	if vid != "vid1" {
-		t.Errorf("expected vid1, got %s", vid)
-	}
-
-	// Update
-	db.SetLastVideo("UC123", "vid2")
-	vid, _ = db.GetLastVideo("UC123")
-	if vid != "vid2" {
-		t.Errorf("expected vid2, got %s", vid)
-	}
-}
-
 func TestGaps(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

@@ -123,30 +123,6 @@ func (db *Database) DeleteHistoryEntries(videoIDs []string) (int, error) {
 	return total, nil
 }
 
-// GetLastVideo returns the last known video ID for a channel.
-func (db *Database) GetLastVideo(channelID string) (string, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	var videoID string
-	err := db.db.QueryRowContext(db.getCtx(), "SELECT video_id FROM last_videos WHERE channel_id = ?", channelID).Scan(&videoID)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return videoID, err
-}
-
-// SetLastVideo updates the last known video ID for a channel.
-func (db *Database) SetLastVideo(channelID, videoID string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	_, err := db.db.ExecContext(db.getCtx(), `INSERT INTO last_videos (channel_id, video_id) VALUES (?, ?)
-		ON CONFLICT(channel_id) DO UPDATE SET video_id = excluded.video_id`,
-		channelID, videoID)
-	return err
-}
-
 // --- Client Token CRUD ---
 
 // AddClientToken inserts a new client token.

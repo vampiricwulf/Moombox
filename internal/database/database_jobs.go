@@ -719,12 +719,10 @@ func (db *Database) ImportFromJSON(path string) error {
 		}
 	}
 
-	// Import last videos
-	for channelID, videoID := range jsonDB.LastVideos {
-		if _, err := tx.ExecContext(db.getCtx(), `INSERT INTO last_videos (channel_id, video_id) VALUES (?, ?)
-			ON CONFLICT(channel_id) DO UPDATE SET video_id = excluded.video_id`,
-			channelID, videoID); err != nil && db.logger != nil {
-			db.logger.Warn("import: failed to insert last_video", "channelID", channelID, "err", err)
+	// Import last videos (dropped in v16, kept for backward compat; silently ignored)
+	for range jsonDB.LastVideos {
+		if db.logger != nil {
+			db.logger.Debug("legacy lastVideos ignored (dropped in v16)")
 		}
 	}
 
