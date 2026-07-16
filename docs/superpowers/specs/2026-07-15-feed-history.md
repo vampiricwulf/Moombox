@@ -797,16 +797,26 @@ slot for its entire `Upcoming → Live → Downloading → Muxing` life: at the 
 M=3, three concurrent live/upcoming jobs would stall **all** backlog admission on
 the channel. That is the "never counted" rule, lost to a default.
 
-**A backlog job that turns out live releases its M slot.** "Live is never counted"
-is absolute — it is the owner's rule, and a restarted stream must not slow the
-channel's backlog admission. The write that sets a job's status to `Live`
-(`stream_processor.go:208` for YouTube) also writes `queue_priority = 0` in the
-**same** `UpdateJobFields` call — one write site, permanent, one-way. The freed slot
-admits another backlog VOD while the live download runs, so M can transiently exceed
-its nominal bound by the number of restarted-live jobs; that is the intent, not a
-leak. (An orphaned priority-1 row in status `Live` would indicate a missed flip and
-still counts — fail-closed, consistent with the `DEFAULT 1` philosophy.) Rare — it
-requires a same-ID restart of an in-window ended stream.
+**A backlog job that turns out to be a broadcast releases its M slot.**
+"Live/upcoming are never counted" is absolute — the owner's rule — and a restarted
+or re-scheduled stream must not slow the channel's backlog admission. Two flip
+sites, both one-way writes of `queue_priority = 0`:
+
+- **Goes live:** the write that sets status `Live` (`stream_processor.go:208` for
+  YouTube) flips it in the **same** `UpdateJobFields` call.
+- **Turns out upcoming:** the `StreamUpcoming` classification
+  (`stream_processor.go:252-253`) routes the job into `waitForLive` with **no**
+  status write — it stays `Upcoming` for the whole wait, potentially days — so the
+  flip happens at that classification site, before the wait begins. Without it, a
+  backlog VOD rediscovered as a scheduled premiere holds an M slot until the
+  premiere airs.
+
+The freed slot admits another backlog VOD while the broadcast waits or runs, so M
+can transiently exceed its nominal bound by the number of such jobs; that is the
+intent, not a leak. (An orphaned priority-1 row parked in `Live` or in
+`waitForLive` would indicate a missed flip and still counts — fail-closed,
+consistent with the `DEFAULT 1` philosophy.) Rare — it requires a same-ID restart
+or re-schedule of an in-window ended stream.
 
 **Every creator still calls `AddToHistory` at job creation**
 (`monitor_callbacks.go:260`), unchanged — including for `Queued` rows. That is what
@@ -1451,6 +1461,10 @@ behaviour this design removes.
 - **A backlog job that goes `Live` releases its M slot**: the `Live` status write
   flips `queue_priority` to 0 in the same `UpdateJobFields` call, and another backlog
   VOD admits while the stream runs
+- **A backlog job classified `StreamUpcoming` releases its M slot at the
+  classification site** (`stream_processor.go:252-253`), before `waitForLive` — a
+  rediscovered premiere waiting days must not hold backlog admission; assert another
+  backlog VOD admits during the wait
 - A new VOD is **never** `Queued`: created admitted and enqueued immediately, even
   with a full backlog at M=1 (this is also the only correct reading of "bypasses M")
 - `ShouldProcess(Queued) == false` — call `enqueueExistingJobs` (`worker.go:294`)
