@@ -206,6 +206,24 @@ func (db *Database) GetChannelRSSOK(channelID string) (string, error) {
 	return ts.String, nil
 }
 
+// GetChannelEstablished reads the §11 established gate for channelID:
+// last_rss_ok_at IS NOT NULL OR backfilled_at IS NOT NULL. A missing
+// channel_state row is NOT established — a fresh install whose first RSS
+// cycle 404s must not treat its membership items as the whole channel.
+func (db *Database) GetChannelEstablished(channelID string) (bool, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	var one int
+	err := db.db.QueryRowContext(db.getCtx(),
+		`SELECT 1 FROM channel_state
+		  WHERE channel_id = ? AND (last_rss_ok_at IS NOT NULL OR backfilled_at IS NOT NULL)`,
+		channelID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // DeleteChannelFeedData deletes feed_items + channel_state rows for channelID.
 // Both DELETEs run in one transaction: a crash between independent commits
 // would leave an orphaned channel_state row (stale backfilled_at) for a

@@ -224,6 +224,36 @@ func TestGetChannelRSSOK(t *testing.T) {
 	}
 }
 
+func TestGetChannelEstablished(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+	// No channel_state row at all: NOT established (§11).
+	if est, err := db.GetChannelEstablished("UC1"); err != nil || est {
+		t.Fatalf("missing row: est=%v err=%v, want false", est, err)
+	}
+	// last_rss_ok_at alone establishes.
+	if err := db.SetChannelRSSOK("UC1", "2026-07-16T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if est, err := db.GetChannelEstablished("UC1"); err != nil || !est {
+		t.Fatalf("last_rss_ok_at set: est=%v err=%v, want true", est, err)
+	}
+	// backfilled_at alone establishes too (a channel whose RSS 404s forever).
+	if _, err := db.db.Exec(`INSERT INTO channel_state (channel_id, backfilled_at) VALUES ('UC2', '2026-07-16T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if est, err := db.GetChannelEstablished("UC2"); err != nil || !est {
+		t.Fatalf("backfilled_at set: est=%v err=%v, want true", est, err)
+	}
+	// A row present with BOTH keys NULL is still not established.
+	if _, err := db.db.Exec(`INSERT INTO channel_state (channel_id, backfill_state) VALUES ('UC3', '{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if est, err := db.GetChannelEstablished("UC3"); err != nil || est {
+		t.Fatalf("both keys NULL: est=%v err=%v, want false", est, err)
+	}
+}
+
 func mustGetFeedItem(t *testing.T, db *Database, channelID, videoID string) FeedItem {
 	t.Helper()
 	it := FeedItem{ChannelID: channelID, VideoID: videoID}
