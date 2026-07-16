@@ -519,7 +519,8 @@ func (m *JobDetailsModel) buildRows() {
 	// === Duration section (J1 - AFTER Timestamps, matching TS) ===
 	switch {
 	case j.Status == database.StatusLive || j.Status == database.StatusDownloading || j.Status == database.StatusMuxing:
-		// Active: show elapsed duration
+		// Active: show elapsed duration. StatusQueued is deliberately absent —
+		// a job waiting for an archive slot has no elapsed recording time.
 		startMs := parsedStreamStart
 		if startMs.IsZero() {
 			startMs = parsedCreatedAt

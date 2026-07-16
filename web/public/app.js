@@ -2039,6 +2039,10 @@ class MoomboxApp {
       return "Waiting for stream...";
     }
 
+    if (job.status === "Queued") {
+      return "Waiting in queue...";
+    }
+
     if (job.status === "Live" || job.status === "Downloading") {
       if (job.progress) return job.progress;
       if (job.lastVideoSeq !== undefined) {
@@ -3516,13 +3520,15 @@ class MoomboxApp {
   _sortJobs(jobs) {
     const STATUS_PRIORITY = {
       "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
-      "Live": 4, "Upcoming": 5, "Cancelled": 6, "Finished": 7,
+      "Live": 4, "Upcoming": 5, "Queued": 6, "Cancelled": 7, "Finished": 8,
     };
     return [...jobs].sort((a, b) => {
       const pa = STATUS_PRIORITY[a.status] ?? 99;
       const pb = STATUS_PRIORITY[b.status] ?? 99;
       if (pa !== pb) return pa - pb;
-      if (pa >= 6) return new Date(b.updatedAt) - new Date(a.updatedAt);
+      // Completed statuses (Cancelled/Finished) sort newest-first; everything
+      // else — including the Queued resting state — sorts by title below.
+      if (pa >= 7) return new Date(b.updatedAt) - new Date(a.updatedAt);
       return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
     });
   }

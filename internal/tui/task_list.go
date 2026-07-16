@@ -618,12 +618,14 @@ func statusPriority(status database.JobStatus) int {
 		return 4
 	case database.StatusUpcoming:
 		return 5
-	case database.StatusCancelled:
+	case database.StatusQueued:
 		return 6
-	case database.StatusFinished:
+	case database.StatusCancelled:
 		return 7
-	default:
+	case database.StatusFinished:
 		return 8
+	default:
+		return 9
 	}
 }
 
@@ -725,7 +727,9 @@ func (m *TaskListModel) rebuildVirtualList() {
 			}
 			return 1
 		}
-		if pa >= 6 {
+		// Completed statuses (Cancelled/Finished) sort newest-first; everything
+		// else — including the Queued resting state — sorts by title below.
+		if pa >= 7 {
 			if a.UpdatedAt > b.UpdatedAt {
 				return -1
 			}
@@ -954,6 +958,7 @@ func (m *TaskListModel) buildStatusSummary() string {
 		database.StatusDownloading,
 		database.StatusMuxing,
 		database.StatusUpcoming,
+		database.StatusQueued,
 		database.StatusError,
 		database.StatusCookies,
 		database.StatusCancelled,

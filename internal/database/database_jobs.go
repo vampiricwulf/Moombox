@@ -625,6 +625,7 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN platform = 'twitch' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
@@ -635,7 +636,7 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 		COALESCE(SUM(CASE WHEN status = '%s' THEN length_seconds ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN total_chat_messages ELSE 0 END), 0)
 		FROM jobs`,
-		StatusFinished, StatusDownloading, StatusLive, StatusMuxing, StatusError, StatusCancelled,
+		StatusFinished, StatusDownloading, StatusLive, StatusMuxing, StatusError, StatusCancelled, StatusQueued,
 		StatusFinished, StatusError, StatusCancelled,
 		StatusFinished, StatusFinished,
 	)
@@ -643,7 +644,7 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 	var s JobStats
 	err := db.db.QueryRowContext(db.getCtx(), statsQuery).Scan(
 		&s.FinishedCount, &s.ActiveCount, &s.MuxingCount,
-		&s.ErrorCount, &s.CancelledCount,
+		&s.ErrorCount, &s.CancelledCount, &s.QueuedCount,
 		&s.YouTubeCount, &s.TwitchCount,
 		&s.FinishedSize, &s.ErrorSize, &s.CancelledSize,
 		&s.YouTubeSize, &s.TwitchSize,

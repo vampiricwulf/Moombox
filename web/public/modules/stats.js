@@ -164,6 +164,8 @@ export class StatsController {
     const el = document.getElementById("active-indicator");
     if (!el) return;
 
+    // "Queued" is deliberately absent — a queued job is waiting for an
+    // archive slot, not an active download.
     const active = (jobs || []).filter(j =>
       j.status === "Downloading" || j.status === "Live" || j.status === "Muxing"
     ).length;

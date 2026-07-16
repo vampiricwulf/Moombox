@@ -500,6 +500,7 @@ func TestShouldProcess(t *testing.T) {
 		{"error", database.StatusError, false},
 		{"cancelled", database.StatusCancelled, false},
 		{"cookies", database.StatusCookies, false},
+		{"queued", database.StatusQueued, false},
 	}
 
 	for _, tt := range tests {
@@ -612,5 +613,72 @@ func TestAcquireDownloadSlotCascadingWakeup(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("waiter %d never acquired a free slot (lost wakeup)", i+1)
 		}
+	}
+}
+
+// TestQueuedIsRestingState pins the Queued resting-state guarantees:
+// ShouldProcess is an enqueuer predicate — both callers (worker.go
+// enqueueExistingJobs and the pollForJobs heartbeat) feed its true straight
+// into queue.Enqueue, which silently drops beyond 100 pending items — so
+// Queued must stay false there. It is also not a terminal state.
+func TestQueuedIsRestingState(t *testing.T) {
+	j := &database.Job{ID: "q1", Status: database.StatusQueued}
+	if ShouldProcess(j) {
+		t.Fatal("ShouldProcess(Queued) must be false — both callers Enqueue on true (worker.go startup + heartbeat)")
+	}
+	if j.IsTerminal() {
+		t.Fatal("Queued is waiting, not finished")
+	}
+}
+
+// TestEnqueueExistingJobsIgnoresQueued runs the startup scan against a DB
+// holding a Queued row and asserts the row is neither enqueued (it waits for
+// the archive-slots scheduler, not the worker's self-scan) nor mutated (only
+// interrupted Muxing jobs are rewritten at startup). An Upcoming control row
+// proves the scan actually enqueues eligible jobs, so the Queued assertions
+// can't pass vacuously.
+func TestEnqueueExistingJobsIgnoresQueued(t *testing.T) {
+	w, db := testWorkerSetup(t)
+
+	if _, err := db.AddJob(&database.Job{
+		ID: "q_rest", VideoID: "q_rest", URL: "u", Status: database.StatusQueued,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddJob(&database.Job{
+		ID: "u_ctrl", VideoID: "u_ctrl", URL: "u", Status: database.StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := db.GetJob("q_rest")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w.enqueueExistingJobs()
+
+	if got := w.queue.PendingCount(); got != 1 {
+		t.Fatalf("PendingCount = %d, want 1 (only the Upcoming control job)", got)
+	}
+	w.queue.mu.Lock()
+	_, queuedPending := w.queue.pendingSet["q_rest"]
+	_, upcomingPending := w.queue.pendingSet["u_ctrl"]
+	w.queue.mu.Unlock()
+	if queuedPending {
+		t.Error("Queued job was enqueued — it must wait for the scheduler")
+	}
+	if !upcomingPending {
+		t.Error("Upcoming control job was not enqueued — the scan didn't run as expected")
+	}
+
+	after, err := db.GetJob("q_rest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != database.StatusQueued {
+		t.Errorf("Queued job status mutated: got %s, want Queued", after.Status)
+	}
+	if after.UpdatedAt != before.UpdatedAt {
+		t.Errorf("Queued job row mutated: updated_at changed %q -> %q", before.UpdatedAt, after.UpdatedAt)
 	}
 }

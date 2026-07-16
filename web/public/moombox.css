@@ -8,6 +8,7 @@
     --status-finished: #1abc9c;
     --status-error: #e74c3c;
     --status-cancelled: #6b7280;
+    --status-queued: #7f8c8d;
     --status-cookies: #d946ef;
 
     /* Bottom-bar geometry — status bar is fixed at the viewport bottom and the
@@ -383,6 +384,11 @@ sl-badge.status.cancelled::part(base) {
     border-color: var(--status-cancelled);
 }
 
+sl-badge.status.queued::part(base) {
+    background-color: var(--status-queued);
+    border-color: var(--status-queued);
+}
+
 sl-badge.status.cookies::part(base) {
     background-color: var(--status-cookies);
     border-color: var(--status-cookies);
@@ -436,6 +442,7 @@ sl-badge.status.cookies::part(base) {
 .video-item[data-status="cookies"] .job-progress-bar { --indicator-color: var(--status-cookies); }
 .video-item[data-status="finished"] .job-progress-bar { --indicator-color: var(--status-finished); }
 .video-item[data-status="cancelled"] .job-progress-bar { --indicator-color: var(--status-cancelled); }
+.video-item[data-status="queued"] .job-progress-bar { --indicator-color: var(--status-queued); }
 
 /* Archived table - same layout as #video-table */
 .archived-table {
@@ -2230,6 +2237,7 @@ sl-progress-bar {
 .video-item[data-status="upcoming"] { border-left: 3px solid var(--status-upcoming); }
 .video-item[data-status="finished"] { border-left: 3px solid var(--status-finished); }
 .video-item[data-status="cancelled"] { border-left: 3px solid var(--status-cancelled); }
+.video-item[data-status="queued"] { border-left: 3px solid var(--status-queued); }
 
 /* Job card quick actions */
 .job-quick-actions {
@@ -2451,6 +2459,7 @@ html.sl-theme-light {
     --status-finished: #16a085;
     --status-error: #c0392b;
     --status-cancelled: #6b7280;
+    --status-queued: #707b7c;
     --status-cookies: #c026d3;
 }
 

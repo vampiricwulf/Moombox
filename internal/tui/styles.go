@@ -19,6 +19,7 @@ var (
 	ColorFinished    = lipgloss.Color("#1abc9c")
 	ColorError       = lipgloss.Color("#e74c3c")
 	ColorCancelled   = lipgloss.Color("#6b7280")
+	ColorQueued      = lipgloss.Color("#7f8c8d")
 	ColorCookies     = lipgloss.Color("#d946ef")
 	ColorTwitch      = lipgloss.Color("#e91e63")
 
@@ -140,6 +141,8 @@ func StatusColor(status string) color.Color {
 		return ColorMuxing
 	case database.StatusUpcoming:
 		return ColorUpcoming
+	case database.StatusQueued:
+		return ColorQueued
 	case database.StatusFinished:
 		return ColorFinished
 	case database.StatusError:
@@ -170,6 +173,8 @@ func StatusIcon(status string) string {
 		return "⊘"
 	case database.StatusUpcoming:
 		return "○"
+	case database.StatusQueued:
+		return "⋯"
 	default:
 		return "○"
 	}

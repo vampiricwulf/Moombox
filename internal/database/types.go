@@ -5,6 +5,10 @@ package database
 type JobStatus string
 
 const (
+	// StatusQueued is a resting state: the job waits for an archive slot and
+	// is admitted by the scheduler, never by the worker's startup/heartbeat
+	// self-scans (worker.ShouldProcess must stay false for it).
+	StatusQueued      JobStatus = "Queued"
 	StatusUpcoming    JobStatus = "Upcoming"
 	StatusLive        JobStatus = "Live"
 	StatusDownloading JobStatus = "Downloading"
@@ -109,6 +113,7 @@ type JobStats struct {
 	MuxingCount       int   `json:"muxingCount"`
 	ErrorCount        int   `json:"errorCount"`
 	CancelledCount    int   `json:"cancelledCount"`
+	QueuedCount       int   `json:"queuedCount"`
 	YouTubeCount      int   `json:"youtubeCount"`
 	TwitchCount       int   `json:"twitchCount"`
 	FinishedSize      int64 `json:"finishedSize"`

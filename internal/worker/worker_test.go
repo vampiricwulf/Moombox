@@ -35,6 +35,7 @@ func TestIsTerminalStatus(t *testing.T) {
 		{database.StatusDownloading, false},
 		{database.StatusMuxing, false},
 		{database.StatusCookies, false},
+		{database.StatusQueued, false},
 	}
 
 	for _, tt := range tests {

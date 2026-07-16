@@ -117,6 +117,41 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 	}
 }
 
+func TestJobStatsQueuedCount(t *testing.T) {
+	// Queued is a resting state: it surfaces in its own QueuedCount bucket
+	// and must NOT inflate ActiveCount (a waiting job is not a running
+	// download).
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, s := range []struct {
+		id     string
+		status JobStatus
+	}{
+		{"dl1", StatusDownloading},
+		{"q1", StatusQueued},
+	} {
+		if _, err := db.AddJob(&Job{ID: s.id, VideoID: s.id, URL: "u", Status: s.status}); err != nil {
+			t.Fatalf("AddJob %s: %v", s.id, err)
+		}
+	}
+
+	stats, err := db.GetJobStats()
+	if err != nil {
+		t.Fatalf("GetJobStats: %v", err)
+	}
+	if stats.ActiveCount != 1 {
+		t.Errorf("ActiveCount: want 1 (Downloading only), got %d", stats.ActiveCount)
+	}
+	if stats.QueuedCount != 1 {
+		t.Errorf("QueuedCount: want 1, got %d", stats.QueuedCount)
+	}
+}
+
 func TestGetJobStatsCachesResultsBriefly(t *testing.T) {
 	// jobStatsCacheTTL = 5s. A second call within the window returns
 	// the cached pointer; mutations between the two reads aren't

@@ -192,7 +192,8 @@ func (m *StatusBarModel) renderMetrics() string {
 		}
 	}
 
-	// Active download count
+	// Active download count (StatusQueued is deliberately absent — a queued
+	// job is waiting for an archive slot, not an active download)
 	activeCount := 0
 	for _, j := range m.jobs {
 		switch j.Status {

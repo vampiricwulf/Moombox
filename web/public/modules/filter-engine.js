@@ -4,7 +4,7 @@
  */
 
 const STATUS_FILTER_MAP = {
-  active: ["Downloading", "Live", "Upcoming", "Muxing"],
+  active: ["Downloading", "Live", "Upcoming", "Muxing", "Queued"],
   errors: ["Error", "COOKIES?"],
   finished: ["Finished", "Cancelled"],
 };
