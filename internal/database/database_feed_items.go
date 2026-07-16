@@ -148,6 +148,8 @@ func (db *Database) FeedScope(channelID, cutoff string, includeMembership bool) 
 }
 
 // HasAnyJob reports whether a jobs row exists for videoID, in ANY status (§8 restart).
+// Relies on jobs.id == jobs.video_id — true at every production creation site today,
+// but not schema-enforced; the restart carve-out depends on it.
 func (db *Database) HasAnyJob(videoID string) (bool, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -169,13 +171,24 @@ VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET last_rss_ok_at = excluded.la
 }
 
 // DeleteChannelFeedData deletes feed_items + channel_state rows for channelID.
+// Both DELETEs run in one transaction: a crash between independent commits
+// would leave an orphaned channel_state row (stale backfilled_at) for a
+// channel with no feed_items — a re-added channel would then be treated as
+// already-backfilled and skip its rescan.
 func (db *Database) DeleteChannelFeedData(channelID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	ctx := db.getCtx()
-	if _, err := db.db.ExecContext(ctx, `DELETE FROM feed_items WHERE channel_id = ?`, channelID); err != nil {
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	_, err := db.db.ExecContext(ctx, `DELETE FROM channel_state WHERE channel_id = ?`, channelID)
-	return err
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM feed_items WHERE channel_id = ?`, channelID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_state WHERE channel_id = ?`, channelID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

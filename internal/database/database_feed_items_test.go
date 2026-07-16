@@ -160,6 +160,40 @@ func TestFeedScope_QueryPlan(t *testing.T) {
 	assertPlan(feedScopeQ2SQL(false), []any{"UC1"}, "idx_feed_items_status")
 }
 
+func TestDeleteChannelFeedData(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+	db.UpsertFeedItem(fi("UC1", "v1", "2026-07-10T00:00:00Z", "coarse", "rss", "unknown", 0))
+	db.UpsertFeedItem(fi("UC2", "v2", "2026-07-10T00:00:00Z", "coarse", "rss", "unknown", 0))
+	if err := db.SetChannelRSSOK("UC1", "2026-07-16T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetChannelRSSOK("UC2", "2026-07-16T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteChannelFeedData("UC1"); err != nil {
+		t.Fatal(err)
+	}
+	// Both UC1 rows gone (the two DELETEs commit together); UC2 untouched.
+	var n int
+	db.db.QueryRow(`SELECT COUNT(*) FROM feed_items WHERE channel_id='UC1'`).Scan(&n)
+	if n != 0 {
+		t.Errorf("feed_items rows remain: %d", n)
+	}
+	db.db.QueryRow(`SELECT COUNT(*) FROM channel_state WHERE channel_id='UC1'`).Scan(&n)
+	if n != 0 {
+		t.Errorf("channel_state row remains: %d", n)
+	}
+	db.db.QueryRow(`SELECT COUNT(*) FROM feed_items WHERE channel_id='UC2'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("other channel's feed_items affected: %d", n)
+	}
+	db.db.QueryRow(`SELECT COUNT(*) FROM channel_state WHERE channel_id='UC2'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("other channel's channel_state affected: %d", n)
+	}
+}
+
 func mustGetFeedItem(t *testing.T, db *Database, channelID, videoID string) FeedItem {
 	t.Helper()
 	it := FeedItem{ChannelID: channelID, VideoID: videoID}
