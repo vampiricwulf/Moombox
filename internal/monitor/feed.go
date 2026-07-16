@@ -94,6 +94,12 @@ type MembershipVideo struct {
 // Typically wired to youtube.Service.FetchMembershipVideos.
 type MembershipFetchFunc func(ctx context.Context, channelID string) ([]MembershipVideo, error)
 
+// RSSFetchFunc fetches a channel's raw YouTube RSS feed body. Mirrors
+// MembershipFetchFunc: a named type so FeedMonitor.FetchRSS and test fixtures
+// (feed_test.go) share one signature. Typically wired to fm.fetchFeed (the
+// real HTTP GET); tests inject fixtures instead via rssFetch's nil check.
+type RSSFetchFunc func(ctx context.Context, ch *config.ChannelConfig) ([]byte, error)
+
 // FeedMonitor polls YouTube RSS feeds for new videos from monitored channels.
 type FeedMonitor struct {
 	mu          sync.Mutex
@@ -144,6 +150,10 @@ type FeedMonitor struct {
 	// "config flag on AND YouTube auth cookies present". Nil means "always
 	// enabled whenever FetchMembership is set".
 	MembershipEnabled func() bool
+
+	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
+	// for tests. Nil uses the real fetch — see rssFetch.
+	FetchRSS RSSFetchFunc
 }
 
 // Health returns the per-channel health snapshot for /api/status.
@@ -424,7 +434,7 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 // failure is logged but never marks the RSS feed unhealthy — they are
 // independent signals.
 func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfig) error {
-	data, rssErr := fm.fetchFeed(ctx, ch)
+	data, rssErr := fm.rssFetch(ctx, ch)
 
 	var candidates []discoveredVideo
 	if rssErr == nil {
@@ -478,6 +488,16 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 		fm.processCandidate(procCtx, ch, candidates[i])
 	}
 	return rssErr
+}
+
+// rssFetch is the injectable RSS-fetch seam: FetchRSS when a test has wired
+// one, else the real HTTP GET. Mirrors membershipActive's FetchMembership
+// indirection so checkChannel never calls fetchFeed directly.
+func (fm *FeedMonitor) rssFetch(ctx context.Context, ch *config.ChannelConfig) ([]byte, error) {
+	if fm.FetchRSS != nil {
+		return fm.FetchRSS(ctx, ch)
+	}
+	return fm.fetchFeed(ctx, ch)
 }
 
 // fetchFeed GETs the channel's RSS feed, reporting the transport outcome to the

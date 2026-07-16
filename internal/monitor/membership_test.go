@@ -2,9 +2,6 @@ package monitor
 
 import (
 	"context"
-	"io"
-	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,26 +9,10 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-func newTestFeedMonitor(t *testing.T) *FeedMonitor {
-	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return &FeedMonitor{
-		db:              db,
-		configStore:     config.NewStore(config.Defaults(), ""),
-		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-		MetadataTracker: NewMetadataFailureTracker(),
-		ProbeCooldown:   NewProbeCooldown(0),
-	}
-}
-
 // TestMembershipActive checks the gate: needs a fetcher, and honors the enabled
 // callback.
 func TestMembershipActive(t *testing.T) {
-	fm := newTestFeedMonitor(t)
+	fm := newTestFeedMonitor(t, newTestDB(t))
 	if fm.membershipActive() {
 		t.Error("no fetcher wired -> inactive")
 	}
@@ -111,7 +92,7 @@ func TestMergeCandidatesRecencyCap(t *testing.T) {
 // candidates must be probed with the AUTHENTICATED probe (else members VODs
 // misclassify as upcoming).
 func TestProcessCandidate_AuthProbeSelection(t *testing.T) {
-	fm := newTestFeedMonitor(t)
+	fm := newTestFeedMonitor(t, newTestDB(t))
 	usedAuth := map[string]bool{}
 	fm.ProbeVideo = func(ctx context.Context, id string) (*VideoProbeResult, error) {
 		usedAuth[id] = false
@@ -138,7 +119,7 @@ func TestProcessCandidate_AuthProbeSelection(t *testing.T) {
 // TestProcessCandidate_ActiveJobDedup: a candidate with an active job is skipped
 // (shared dedup, so a video seen by two sources can't create two jobs).
 func TestProcessCandidate_ActiveJobDedup(t *testing.T) {
-	fm := newTestFeedMonitor(t)
+	fm := newTestFeedMonitor(t, newTestDB(t))
 	probed := map[string]bool{}
 	fm.ProbeVideo = func(ctx context.Context, id string) (*VideoProbeResult, error) {
 		probed[id] = true
@@ -166,7 +147,7 @@ func TestProcessCandidate_ActiveJobDedup(t *testing.T) {
 // and be queued even when off (the regression).
 func TestProcessCandidate_MembersVodHonorsIncludeNonLive(t *testing.T) {
 	run := func(includeNonLive bool) bool {
-		fm := newTestFeedMonitor(t)
+		fm := newTestFeedMonitor(t, newTestDB(t))
 		fm.ProbeVideoAuth = func(ctx context.Context, id string) (*VideoProbeResult, error) {
 			return &VideoProbeResult{StreamStatus: "vod", Title: "t"}, nil
 		}
@@ -205,7 +186,7 @@ func TestMembershipCandidates_DropsVodsWhenNonLiveOff(t *testing.T) {
 // TestParseFeedCandidates covers the RSS-only path: videoId/title/url/published
 // extraction, a missing <published> → zero time, and a malformed feed → error.
 func TestParseFeedCandidates(t *testing.T) {
-	fm := newTestFeedMonitor(t)
+	fm := newTestFeedMonitor(t, newTestDB(t))
 	feed := `<?xml version="1.0"?>
 <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
   <entry><yt:videoId>vidRecent01</yt:videoId><title>recent</title>
