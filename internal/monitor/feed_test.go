@@ -71,6 +71,14 @@ func withProbe(fn VideoProbeFunc) feedMonitorOpt {
 	return func(fm *FeedMonitor) { fm.ProbeVideo = fn }
 }
 
+// withProbeAuth wires fm.ProbeVideoAuth to fn — the AUTHENTICATED probe
+// probeRow selects for source='membership' rows and for the same-cycle
+// members_only escalation (walk.go). Tests that never touch members-only
+// content leave it unset and everything falls back to withProbe's fixture.
+func withProbeAuth(fn VideoProbeFunc) feedMonitorOpt {
+	return func(fm *FeedMonitor) { fm.ProbeVideoAuth = fn }
+}
+
 // stubProbeErrored returns a VideoProbeFunc that always fails — the minimal
 // probe for tests that assert only FETCH/STORE outcomes. An errored probe
 // has no store effect (OutcomeErrored writes nothing, never exhausts), so

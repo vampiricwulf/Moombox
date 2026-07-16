@@ -134,14 +134,19 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 }
 
 // probeRow probes a single feed-scope row and returns its classification.
-// Simple form for Plan 3 Task 3: the probe choice is just row.Source — an
-// authenticated probe for membership rows (an anonymous probe gets no
-// formats on members-only content and the classifier misfires it as
-// "upcoming"), anonymous otherwise. No escalation yet.
+// The probe choice is row.Source — an authenticated probe for membership
+// rows (an anonymous probe gets no formats on members-only content and the
+// classifier misfires it as "upcoming"), anonymous otherwise.
 //
-// chID is threaded through even though this form doesn't use it, so Task
-// 4's escalation (which writes SetFeedItemSource(chID, ...) on a
-// members_only refusal) doesn't need a signature change.
+// A members_only refusal from ANY probe relabels the row's source to
+// 'membership' UNCONDITIONALLY — the refusal IS the sighting (§9). The
+// relabel is what routes the row to the authenticated probe on every later
+// cycle, and what lets the membership cookie gate park it when cookies
+// lapse. If the refused probe was anonymous and membership is active, the
+// authenticated probe retries the SAME cycle — a members-only premiere
+// discovered via RSS must not wait a poll interval to be admitted.
+// login_required does neither: on public videos it is anti-bot pushback,
+// not a membership signal (§9).
 func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem) ProbeClassifyResult {
 	probe := fm.ProbeVideo
 	if row.Source == "membership" && fm.ProbeVideoAuth != nil {
@@ -156,7 +161,30 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 		Cooldown:   fm.ProbeCooldown,
 		Logger:     fm.logger,
 	})
-	// PLAN3-TASK4 escalation lands here
+	if res.PlayabilityError != "members_only" {
+		// Covers OutcomeErrored/OutcomeCooldown too: both carry a
+		// zero-valued PlayabilityError, so neither can trigger a flip.
+		return res
+	}
+	if err := fm.db.SetFeedItemSource(chID, row.VideoID, "membership"); err != nil {
+		fm.logger.Warn("members_only source flip failed; row re-probes anonymously next cycle",
+			"id", row.VideoID, "err", err)
+	}
+	if row.Source != "membership" && fm.membershipActive() && fm.ProbeVideoAuth != nil {
+		// Same-cycle escalation, cooldown BYPASSED (Cooldown: nil): the
+		// refusal was a successful probe, so probeAndClassify just recorded
+		// fm.ProbeCooldown for this video — gating the retry on it would
+		// suppress escalation entirely for any probe_cooldown > 0 (§9).
+		res = probeAndClassify(ProbeClassifyParams{
+			Ctx:        ctx,
+			VideoID:    row.VideoID,
+			Channel:    ch,
+			ProbeVideo: fm.ProbeVideoAuth,
+			Tracker:    fm.MetadataTracker,
+			Cooldown:   nil,
+			Logger:     fm.logger,
+		})
+	}
 	return res
 }
 

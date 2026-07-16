@@ -314,6 +314,194 @@ func TestWalk_OrderingCheck(t *testing.T) {
 	}
 }
 
+// escalationProbes builds the paired anon/auth recorders the escalation
+// tests (spec §9/§17) share: each records every probed videoID in call order
+// and replies with its fixed result (or an error when err is non-nil).
+func escalationProbes(anonRes, authRes *VideoProbeResult, anonCalls, authCalls *[]string) (anon, auth VideoProbeFunc) {
+	anon = func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		*anonCalls = append(*anonCalls, videoID)
+		return anonRes, nil
+	}
+	auth = func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		*authCalls = append(*authCalls, videoID)
+		return authRes, nil
+	}
+	return anon, auth
+}
+
+// membersOnlyRefusal is the probe result of an anonymous probe hitting
+// members-only content: YouTube returns no formats and the playability
+// error names why. isDenied (upcoming + members_only) classifies it
+// OutcomeDenied — but PlayabilityError is carried either way, and the
+// escalation keys on it, not on the outcome.
+func membersOnlyRefusal() *VideoProbeResult {
+	return &VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "members_only"}
+}
+
+// TestEscalation_MembersOnlyFlipsAndEscalatesOnce covers spec §17's headline
+// escalation case: an anonymous probe's members_only refusal flips the row's
+// source to 'membership' in the store AND retries with the authenticated
+// probe the SAME cycle — with the probe cooldown ACTIVE, proving the retry
+// bypasses it (the refusal itself just recorded the cooldown; a retry gated
+// on it would suppress escalation entirely for any probe_cooldown > 0). The
+// auth probe classifies vod+started+date ⇒ OutcomeProbed ⇒ in the FRESH map
+// (jobbed later by the ARCHIVE step). Next cycle the flipped row costs
+// exactly ONE probe, authenticated.
+func TestEscalation_MembersOnlyFlipsAndEscalatesOnce(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "e1", now.Add(-1*time.Hour), "exact", "rss", "unknown")
+
+	var anonCalls, authCalls []string
+	anon, auth := escalationProbes(membersOnlyRefusal(), &VideoProbeResult{
+		StreamStatus: "vod", Title: "e1",
+		PublishedAt:        now.Add(-2 * time.Hour).UTC().Format(time.RFC3339),
+		PublishedPrecision: "started",
+	}, &anonCalls, &authCalls)
+
+	fm := newTestFeedMonitor(t, db, withProbe(anon), withProbeAuth(auth), withMembership(membWith()), withNow(now))
+	fm.ProbeCooldown.SetDuration(time.Hour) // make the same-cycle bypass observable
+
+	fresh := fm.walkForTest(t, chID)
+
+	if len(anonCalls) != 1 || anonCalls[0] != "e1" {
+		t.Fatalf("cycle 1 anonymous probes = %v, want [e1]", anonCalls)
+	}
+	if len(authCalls) != 1 || authCalls[0] != "e1" {
+		t.Fatalf("cycle 1 authenticated probes = %v, want [e1] — the refusal must escalate the SAME cycle, bypassing the just-recorded cooldown", authCalls)
+	}
+	if got := mustGetFeedItem(t, db, chID, "e1").Source; got != "membership" {
+		t.Fatalf("source after refusal = %q, want membership", got)
+	}
+	if res, ok := fresh["e1"]; !ok || res.Outcome != OutcomeProbed {
+		t.Fatalf("fresh[e1] = %+v (present=%v), want OutcomeProbed — the escalated result is the row's classification", res, ok)
+	}
+	if got := mustGetFeedItem(t, db, chID, "e1").Status; got != "vod" {
+		t.Fatalf("status after escalated probe = %q, want vod", got)
+	}
+
+	// Next cycle: the flipped row routes straight to the authenticated
+	// probe — exactly one probe, zero anonymous. (Cooldown back to the
+	// default 0 = disabled; leaving the 1h window on would suppress the
+	// probe outright and assert nothing about the choice.)
+	fm.ProbeCooldown.SetDuration(0)
+	anonCalls, authCalls = nil, nil
+	fm.walkForTest(t, chID)
+	if len(anonCalls) != 0 {
+		t.Fatalf("cycle 2 anonymous probes = %v, want none — membership rows probe authenticated", anonCalls)
+	}
+	if len(authCalls) != 1 || authCalls[0] != "e1" {
+		t.Fatalf("cycle 2 authenticated probes = %v, want exactly [e1]", authCalls)
+	}
+}
+
+// TestEscalation_FailedEscalationStillFlips covers spec §17: when the
+// authenticated retry ALSO returns members_only (cookies stale, or not that
+// channel's member), the row classifies OutcomeDenied — but the source flip
+// persists, so the next cycle costs one authenticated probe, not an
+// anon-then-auth pair every cycle forever.
+func TestEscalation_FailedEscalationStillFlips(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "e1", now.Add(-1*time.Hour), "exact", "rss", "unknown")
+
+	var anonCalls, authCalls []string
+	anon, auth := escalationProbes(membersOnlyRefusal(), membersOnlyRefusal(), &anonCalls, &authCalls)
+	fm := newTestFeedMonitor(t, db, withProbe(anon), withProbeAuth(auth), withMembership(membWith()), withNow(now))
+
+	fresh := fm.walkForTest(t, chID)
+
+	if len(anonCalls) != 1 || len(authCalls) != 1 {
+		t.Fatalf("cycle 1 probes anon=%v auth=%v, want one of each", anonCalls, authCalls)
+	}
+	if _, ok := fresh["e1"]; ok {
+		t.Fatal("a denied escalation must NOT enter the FRESH map — there is nothing to disposition")
+	}
+	row := mustGetFeedItem(t, db, chID, "e1")
+	if row.Source != "membership" {
+		t.Fatalf("source after failed escalation = %q, want membership — the flip is unconditional", row.Source)
+	}
+	if row.Status != "unknown" {
+		t.Fatalf("status after failed escalation = %q, want unknown — denied writes nothing", row.Status)
+	}
+
+	// Next cycle: already-membership row, denied again — ONE auth probe,
+	// no second (row.Source is already membership ⇒ no re-escalation).
+	anonCalls, authCalls = nil, nil
+	fm.walkForTest(t, chID)
+	if len(anonCalls) != 0 || len(authCalls) != 1 {
+		t.Fatalf("cycle 2 probes anon=%v auth=%v, want zero anon and exactly one auth", anonCalls, authCalls)
+	}
+}
+
+// TestEscalation_LoginRequiredNeverRelabels covers spec §9's other refusal:
+// login_required on a public video is anti-bot pushback, not a membership
+// signal — it must neither relabel the row nor burn an authenticated probe.
+func TestEscalation_LoginRequiredNeverRelabels(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "e2", now.Add(-1*time.Hour), "exact", "rss", "unknown")
+
+	var anonCalls, authCalls []string
+	anon, auth := escalationProbes(&VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "login_required"}, nil, &anonCalls, &authCalls)
+	// Membership fully active — the ONLY thing stopping escalation here must
+	// be the login_required rule itself.
+	fm := newTestFeedMonitor(t, db, withProbe(anon), withProbeAuth(auth), withMembership(membWith()), withNow(now))
+
+	fm.walkForTest(t, chID)
+
+	if len(anonCalls) != 1 {
+		t.Fatalf("anonymous probes = %v, want [e2]", anonCalls)
+	}
+	if len(authCalls) != 0 {
+		t.Fatalf("authenticated probes = %v, want none — login_required never escalates", authCalls)
+	}
+	if got := mustGetFeedItem(t, db, chID, "e2").Source; got != "rss" {
+		t.Fatalf("source after login_required = %q, want rss — never relabeled", got)
+	}
+}
+
+// TestEscalation_NoCookiesNoEscalation covers spec §17: with membership
+// inactive (no fetcher wired ⇒ no cookies), a members_only refusal still
+// flips the source — the sighting is real and must not be forgotten — but
+// no authenticated retry runs, and the next cycle the membership cookie
+// gate parks the row entirely (zero probes) until cookies return.
+func TestEscalation_NoCookiesNoEscalation(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "e3", now.Add(-1*time.Hour), "exact", "rss", "unknown")
+
+	var anonCalls, authCalls []string
+	anon, auth := escalationProbes(membersOnlyRefusal(), nil, &anonCalls, &authCalls)
+	// NO withMembership: membershipActive() is false. ProbeVideoAuth is
+	// still wired so a wrongly-issued escalation is caught, not nil-paniced.
+	fm := newTestFeedMonitor(t, db, withProbe(anon), withProbeAuth(auth), withNow(now))
+
+	fm.walkForTest(t, chID)
+
+	if len(anonCalls) != 1 {
+		t.Fatalf("cycle 1 anonymous probes = %v, want [e3]", anonCalls)
+	}
+	if len(authCalls) != 0 {
+		t.Fatalf("cycle 1 authenticated probes = %v, want none — no cookies, no escalation", authCalls)
+	}
+	if got := mustGetFeedItem(t, db, chID, "e3").Source; got != "membership" {
+		t.Fatalf("source after refusal = %q, want membership — the flip does not depend on cookies", got)
+	}
+
+	// Next cycle: the row is source='membership' and membership is inactive
+	// — the cookie gate skips it before any probe.
+	anonCalls, authCalls = nil, nil
+	fm.walkForTest(t, chID)
+	if len(anonCalls) != 0 || len(authCalls) != 0 {
+		t.Fatalf("cycle 2 probes anon=%v auth=%v, want none — the membership gate parks the row until cookies return", anonCalls, authCalls)
+	}
+}
+
 // TestWalk_RestartCarveOut covers spec §8's restart carve-out: a stream can
 // restart on the same video ID, so a store-driven vod+started row with NO
 // job row must still be probed (a stream that ended before we saw it live,
