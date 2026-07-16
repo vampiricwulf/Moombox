@@ -42,17 +42,6 @@ func dateOrdered(source string) bool { return source != "rss" }
 // re-probing.
 func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID, cutoff string, scope []database.FeedItem) map[string]ProbeClassifyResult {
 	fresh := map[string]ProbeClassifyResult{}
-	if fm.ProbeVideo == nil {
-		// No probe wired. probeAndClassify (called via probeRow below) panics
-		// on a nil ProbeVideo by design — it is a programming error in
-		// production, which always wires this before Start(). But checkChannel
-		// now calls walk() unconditionally, and ProcessYouTubeVideo's own
-		// "no probe function configured" case is a deliberately nil-safe
-		// passthrough (utils.go) that a few tests exercise to check
-		// FETCH/STORE in isolation without a probe. Mirror that here: nothing
-		// to walk without a probe.
-		return fresh
-	}
 	st := walkState{exhausted: map[string]bool{}, lastDate: map[string]time.Time{}, noExit: map[string]bool{}}
 
 	for _, row := range scope {
@@ -112,6 +101,16 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 					fm.logger.Warn("listing order violated; early exit disabled", "source", src, "channel", chID)
 				}
 				st.lastDate[src] = d
+				// The !st.noExit[src] conjunct is NOT redundant with the
+				// ordering check above — the two can trip on the SAME probe.
+				// Reachable edge: an assumed-precision row of this source is
+				// probed to a date outside the window WITHOUT exhausting (not
+				// coarse), setting lastDate[src]; the next coarse row's probe
+				// then returns a NEWER out-of-window date, tripping the
+				// ordering violation AND satisfying every other exhaustion
+				// conjunct in this same iteration. Without !noExit, a source
+				// whose ordering was just disproven would still be retired,
+				// skipping every row behind it. Do not "simplify" it away.
 				if res.PublishedAt < cutoff && dateOrdered(src) && row.DatePrecision == "coarse" && !st.noExit[src] {
 					// 'coarse' means the stored date came from a LISTING.
 					// Exhaustion is an inference from listing order, so it

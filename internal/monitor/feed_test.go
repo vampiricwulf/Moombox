@@ -61,8 +61,25 @@ func withNow(t time.Time) feedMonitorOpt {
 // ProbeVideoAuth is unset (as it is by default in tests) — so this one
 // fixture serves both anonymous and membership rows unless a test also
 // wires ProbeVideoAuth separately.
+//
+// A probe is NOT optional for a checkChannel cycle: the WALK step probes
+// unconditionally and probeAndClassify panics on a nil ProbeVideo by
+// design (fail-loud — a production wiring regression must panic visibly,
+// not silently stop archiving). Tests that only assert FETCH/STORE
+// outcomes wire withProbe(stubProbeErrored()).
 func withProbe(fn VideoProbeFunc) feedMonitorOpt {
 	return func(fm *FeedMonitor) { fm.ProbeVideo = fn }
+}
+
+// stubProbeErrored returns a VideoProbeFunc that always fails — the minimal
+// probe for tests that assert only FETCH/STORE outcomes. An errored probe
+// has no store effect (OutcomeErrored writes nothing, never exhausts), so
+// wiring it satisfies the WALK step's required-probe contract without
+// perturbing what those tests assert.
+func stubProbeErrored() VideoProbeFunc {
+	return func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		return nil, fmt.Errorf("stub probe: no probe behavior wired for this test")
+	}
 }
 
 // withWindowDays sets monitors.archive_window_days on the test monitor's
@@ -235,12 +252,19 @@ func mustGetFeedItem(t *testing.T, db *database.Database, channelID, videoID str
 // TestFeedMonitorSmoke proves the constructor + opts scaffold works
 // end-to-end, including the new FetchRSS seam: one checkChannel pass against
 // a fresh, empty store, with both fetchers faked, completes without a panic
-// or error and reaches OnVideoFound for the fixture's video.
+// or error and reaches OnVideoFound for the fixture's video. The probe stub
+// reports "live" — a successful classification — because this test's
+// assertion is the job pipeline's endpoint (OnVideoFound), which an errored
+// probe would legitimately never reach.
 func TestFeedMonitorSmoke(t *testing.T) {
 	db := newTestDB(t)
 	fm := newTestFeedMonitor(t, db,
 		withRSS(rssWith(rssItem{ID: "vidSmoke01", Title: "hello world", Published: "2026-07-14T00:00:00Z"})),
 		withMembership(membWith()),
+		withProbe(func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{StreamStatus: "live", Title: "hello world"}, nil
+		}),
+		withNow(time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)), // pins the fixture's <published> inside the window
 	)
 
 	var found []string
@@ -268,7 +292,11 @@ func TestStoreStep_UpsertsAndClassifiesDates(t *testing.T) {
 		withMembership(membWith(
 			memberVideo("m1", "3 weeks ago"), // coarse: now - 21d
 			memberVideo("m2", ""),            // undatable: assumed, published = cycle now
-		)))
+		)),
+		// This test asserts STORE outcomes only; an errored probe writes
+		// nothing to the store, so the WALK leaves these rows exactly as
+		// the STORE step wrote them.
+		withProbe(stubProbeErrored()))
 	fm.runCycleForTest(t, "UC1")
 
 	pub1 := mustGetFeedItem(t, db, "UC1", "pub1")
@@ -292,12 +320,12 @@ func TestStoreStep_UpsertsAndClassifiesDates(t *testing.T) {
 // gate).
 func TestFetchStep_RSSSuccessEstablishes_404DoesNot(t *testing.T) {
 	db := newTestDB(t)
-	fm := newTestFeedMonitor(t, db, withRSS(rss404()), withMembership(membWith()))
+	fm := newTestFeedMonitor(t, db, withRSS(rss404()), withMembership(membWith()), withProbe(stubProbeErrored()))
 	fm.runCycleForTest(t, "UC1")
 	if establishedForTest(t, db, "UC1") {
 		t.Fatal("404 must not establish")
 	}
-	fm2 := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()))
+	fm2 := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()), withProbe(stubProbeErrored()))
 	fm2.runCycleForTest(t, "UC1") // zero entries but 200 — still establishes (§11 residual)
 	if !establishedForTest(t, db, "UC1") {
 		t.Fatal("empty-but-200 RSS must establish")
