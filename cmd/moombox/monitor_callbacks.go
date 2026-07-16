@@ -172,9 +172,12 @@ func (s *runState) wireMonitorCallbacks() {
 			return nil, err
 		}
 		return &monitor.VideoProbeResult{
-			StreamStatus: string(meta.StreamStatus),
-			Title:        meta.Title,
-			ChannelName:  meta.ChannelName,
+			StreamStatus:       string(meta.StreamStatus),
+			Title:              meta.Title,
+			ChannelName:        meta.ChannelName,
+			PublishedAt:        meta.PublishedAt,
+			PublishedPrecision: meta.PublishedPrecision,
+			PlayabilityError:   string(meta.PlayabilityError),
 		}, nil
 	}
 	s.feedMon.ProbeVideo = probeVideoFunc
@@ -191,9 +194,12 @@ func (s *runState) wireMonitorCallbacks() {
 			return nil, err
 		}
 		return &monitor.VideoProbeResult{
-			StreamStatus: string(meta.StreamStatus),
-			Title:        meta.Title,
-			ChannelName:  meta.ChannelName,
+			StreamStatus:       string(meta.StreamStatus),
+			Title:              meta.Title,
+			ChannelName:        meta.ChannelName,
+			PublishedAt:        meta.PublishedAt,
+			PublishedPrecision: meta.PublishedPrecision,
+			PlayabilityError:   string(meta.PlayabilityError),
 		}, nil
 	}
 

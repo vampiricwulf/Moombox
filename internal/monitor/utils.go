@@ -30,9 +30,12 @@ const (
 
 // VideoProbeResult holds the stream status returned by a video probe.
 type VideoProbeResult struct {
-	StreamStatus string // "live", "upcoming", "vod", "post_live", "not_a_stream"
-	Title        string // metadata title (may be better than feed title)
-	ChannelName  string // metadata channel name
+	StreamStatus       string // "live", "upcoming", "vod", "post_live", "not_a_stream"
+	Title              string // metadata title (may be better than feed title)
+	ChannelName        string // metadata channel name
+	PublishedAt        string // probe's authoritative publish date (RFC3339, may be empty)
+	PublishedPrecision string // "started" or "day", empty when PublishedAt is empty
+	PlayabilityError   string // playability status from YouTube API (may be empty for OK videos)
 }
 
 // VideoProbeFunc probes a YouTube video and returns its stream status.
