@@ -49,10 +49,12 @@ type VideoInfo struct {
 	PlayabilityError   PlayabilityError `json:"playabilityError,omitempty"`
 	PlayabilityReason  string           `json:"playabilityReason,omitempty"`
 
-	// PublishedAt is the probe's authoritative publish date (RFC3339 for a
-	// real broadcast start, YYYY-MM-DD for a microformat upload/publish
-	// date), status-aware per spec §12 — see extractPublishedAt. Empty when
-	// the status can't yield one (upcoming/live) or no source was present.
+	// PublishedAt is the probe's authoritative publish date, status-aware
+	// per spec §12 — see extractPublishedAt. RFC3339: a real broadcast
+	// start carries its own time, and a bare-date microformat value is
+	// normalized to <date>T23:59:59Z (the newest instant consistent with
+	// the imprecise value, per the §12 skew-new rule). Empty when the
+	// status can't yield one (upcoming/live) or no source was present.
 	PublishedAt string `json:"publishedAt,omitempty"`
 	// PublishedPrecision describes what PublishedAt represents: "started"
 	// (a real liveBroadcastDetails.startTimestamp, vod/post_live only) or

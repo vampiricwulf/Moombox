@@ -176,11 +176,23 @@ func extractPublishedAt(status string, microformat map[string]any) (ts, precisio
 // microformatDate returns the microformat upload/publish date, preferring
 // uploadDate. microformat is already the unwrapped playerMicroformatRenderer
 // map (same shape classifyStream and extractScheduledStartTime consume).
+//
+// A bare YYYY-MM-DD is normalized to <date>T23:59:59Z — the NEWEST instant
+// consistent with the imprecise value. The ladder compares timestamps
+// lexically, and a bare date would compare as midnight (the OLDEST instant),
+// excluding boundary items in exactly the direction the spec §12 skew-new
+// rule forbids ("nothing is excluded on a date we have not verified").
+// Values that already carry a time component (some microformat dates are
+// full RFC3339 with offset) pass through unchanged.
 func microformatDate(microformat map[string]any) string {
-	if v := getStr(microformat, "uploadDate"); v != "" {
-		return v
+	v := getStr(microformat, "uploadDate")
+	if v == "" {
+		v = getStr(microformat, "publishDate")
 	}
-	return getStr(microformat, "publishDate")
+	if _, err := time.Parse(time.DateOnly, v); err == nil {
+		return v + "T23:59:59Z"
+	}
+	return v
 }
 
 // parseFormats extracts format metadata + raw stream URLs from a
