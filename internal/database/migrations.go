@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 15
+const schemaVersion = 16
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     watched INTEGER DEFAULT 0,
     resume_position REAL,
     chat_offset REAL NOT NULL DEFAULT 0,
-    auto_retry_count INTEGER NOT NULL DEFAULT 0
+    auto_retry_count INTEGER NOT NULL DEFAULT 0,
+    channel_id TEXT,
+    queue_priority INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -122,9 +124,26 @@ CREATE TABLE IF NOT EXISTS history (
     added_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS last_videos (
-    channel_id TEXT PRIMARY KEY,
-    video_id TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS feed_items (
+    channel_id     TEXT NOT NULL,
+    video_id       TEXT NOT NULL,
+    title          TEXT NOT NULL DEFAULT '',
+    published      TEXT NOT NULL,   -- RFC3339 UTC. Frozen at insert; only upgraded
+    date_precision TEXT NOT NULL,   -- assumed|coarse|day|exact|started
+    catalog_pos    INTEGER NOT NULL DEFAULT 0,
+    source         TEXT NOT NULL,   -- rss|membership|videos|streams
+    status         TEXT NOT NULL,   -- unknown|upcoming|live|vod|not_a_stream
+    first_seen     TEXT NOT NULL,
+    PRIMARY KEY (channel_id, video_id)
+);
+
+CREATE TABLE IF NOT EXISTS channel_state (
+    channel_id                 TEXT PRIMARY KEY,
+    backfilled_at              TEXT,
+    backfilled_window_days     INTEGER,
+    backfilled_with_membership INTEGER,
+    backfill_state             TEXT,
+    last_rss_ok_at             TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -162,6 +181,8 @@ CREATE INDEX IF NOT EXISTS idx_trims_job_id ON trims(job_id);
 CREATE INDEX IF NOT EXISTS idx_segments_job_id ON segments(job_id);
 CREATE INDEX IF NOT EXISTS idx_client_tokens_prefix ON client_tokens(token_prefix);
 CREATE INDEX IF NOT EXISTS idx_history_added_at ON history(added_at);
+CREATE INDEX IF NOT EXISTS idx_feed_items_window ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
+CREATE INDEX IF NOT EXISTS idx_feed_items_status ON feed_items(channel_id, status);
 `
 
 // readUserVersion reads SQLite's PRAGMA user_version. Returns 0 on a fresh DB.
@@ -590,10 +611,73 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 16 {
+		if err := db.migrateV16(); err != nil {
+			return err
+		}
+		return db.writeUserVersion(16)
+	}
+
 	return nil
 }
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+const createFeedItemsSQL = `
+CREATE TABLE IF NOT EXISTS feed_items (
+    channel_id     TEXT NOT NULL,
+    video_id       TEXT NOT NULL,
+    title          TEXT NOT NULL DEFAULT '',
+    published      TEXT NOT NULL,   -- RFC3339 UTC. Frozen at insert; only upgraded
+    date_precision TEXT NOT NULL,   -- assumed|coarse|day|exact|started
+    catalog_pos    INTEGER NOT NULL DEFAULT 0,
+    source         TEXT NOT NULL,   -- rss|membership|videos|streams
+    status         TEXT NOT NULL,   -- unknown|upcoming|live|vod|not_a_stream
+    first_seen     TEXT NOT NULL,
+    PRIMARY KEY (channel_id, video_id)
+)`
+
+const createFeedItemsWindowIdxSQL = `
+CREATE INDEX IF NOT EXISTS idx_feed_items_window
+    ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC)`
+
+const createFeedItemsStatusIdxSQL = `
+CREATE INDEX IF NOT EXISTS idx_feed_items_status
+    ON feed_items(channel_id, status)`
+
+const createChannelStateSQL = `
+CREATE TABLE IF NOT EXISTS channel_state (
+    channel_id                 TEXT PRIMARY KEY,
+    backfilled_at              TEXT,
+    backfilled_window_days     INTEGER,
+    backfilled_with_membership INTEGER,
+    backfill_state             TEXT,
+    last_rss_ok_at             TEXT
+)`
+
+func (db *Database) migrateV16() error {
+	ctx := db.getCtx()
+	for _, q := range []string{
+		createFeedItemsSQL, createFeedItemsWindowIdxSQL, createFeedItemsStatusIdxSQL,
+		createChannelStateSQL,
+		`DROP TABLE IF EXISTS last_videos`,
+	} {
+		if _, err := db.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("v16: %w", err)
+		}
+	}
+	// Guarded ALTERs: a crash mid-block re-runs the whole block (user_version is
+	// written last), so duplicate-column errors are expected and benign.
+	for _, q := range []string{
+		`ALTER TABLE jobs ADD COLUMN channel_id TEXT`,
+		`ALTER TABLE jobs ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 1`,
+	} {
+		if _, err := db.db.ExecContext(ctx, q); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("v16 alter: %w", err)
+		}
+	}
+	return nil
 }
