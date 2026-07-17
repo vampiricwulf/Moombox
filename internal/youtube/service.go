@@ -47,6 +47,10 @@ type Service struct {
 	visitorData      string    // Cached visitor data from watch page
 	visitorDataSetAt time.Time // When visitorData was last (re)populated; gates TTL-based refresh
 	vdMu             sync.RWMutex
+	// browse holds the /browse continuation client's per-(channel,tab) scan
+	// state — loop-detection token sets and per-page visitorData (browse.go).
+	// Zero value usable.
+	browse browseState
 	// initMu serialises Init runs; lastInitAt is read+written under this lock.
 	// The previous initOnce one-shot meant a transient startup network failure
 	// would leave the process with empty VisitorData forever — bad for a 24/7
