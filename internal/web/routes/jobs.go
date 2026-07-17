@@ -949,9 +949,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		// Only allow cancellation from specific active states (match TypeScript)
+		// Only allow cancellation from specific active states (match TypeScript).
+		// Queued cancels like Upcoming: the job was never enqueued, so there is
+		// no process to stop — the status write to Cancelled IS the cancellation
+		// (queue.Cancel is a safe no-op for a never-enqueued job).
 		switch job.Status {
-		case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing, database.StatusCookies:
+		case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusQueued, database.StatusMuxing, database.StatusCookies:
 			// OK to cancel
 		default:
 			jsonError(rw, "Job cannot be cancelled in current state", http.StatusBadRequest)

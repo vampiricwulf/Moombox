@@ -91,7 +91,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				}
 				// Filter by cancellable statuses (matches Web UI CANCEL_STATUSES)
 				switch j.Status {
-				case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing, database.StatusCookies:
+				case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusQueued, database.StatusMuxing, database.StatusCookies:
 					// OK
 				default:
 					continue

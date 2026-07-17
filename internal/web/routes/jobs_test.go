@@ -580,6 +580,25 @@ func TestJobCancelDownloadingState(t *testing.T) {
 	}
 }
 
+// TestJobCancelQueuedState: a Queued backlog job cancels exactly like an
+// Upcoming one — it was never enqueued, so there is no process to stop; the
+// status write to Cancelled is the whole cancellation. The cancelled row then
+// simply stops matching the scheduler's queries (not Queued, not in the M
+// allow-list).
+func TestJobCancelQueuedState(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "yt_queued", func(j *database.Job) { j.Status = database.StatusQueued })
+
+	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_queued/cancel", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel queued: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	got, _ := f.db.GetJob("yt_queued")
+	if got.Status != database.StatusCancelled {
+		t.Errorf("post-cancel status: want Cancelled, got %s", got.Status)
+	}
+}
+
 func TestJobCancel404(t *testing.T) {
 	f := newJobsFixture(t)
 	rec := doRequest(t, f.router, "POST", "/api/jobs/no-such/cancel", nil)

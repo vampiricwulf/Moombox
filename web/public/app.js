@@ -16,7 +16,7 @@ import { applyFilterTokens } from "./modules/filter-engine.js";
 const GITHUB_REPO_URL = "https://github.com/vampiricwulf/Moombox";
 
 // Status sets for quick action visibility (single source of truth)
-const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"]);
+const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
 const RESUME_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
 const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
 const MUX_STATUSES = new Set(["Cancelled", "Error"]);
