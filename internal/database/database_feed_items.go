@@ -206,6 +206,37 @@ func (db *Database) GetChannelRSSOK(channelID string) (string, error) {
 	return ts.String, nil
 }
 
+// SaveBackfillCursor upserts channel_state.backfill_state — the backfill's
+// per-tab resume cursor JSON (spec §11), saved by the scanner after every
+// good page. Mirrors SetChannelRSSOK's upsert shape (§6: neither
+// channel_state writer depends on the other having run, and nothing creates
+// rows up front).
+func (db *Database) SaveBackfillCursor(channelID, stateJSON string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	_, err := db.db.ExecContext(db.getCtx(), `INSERT INTO channel_state (channel_id, backfill_state)
+VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET backfill_state = excluded.backfill_state`, channelID, stateJSON)
+	return err
+}
+
+// LoadBackfillCursor returns channel_state.backfill_state for channelID, or
+// "" when unset or the channel_state row doesn't exist yet — either way a
+// fresh scan starts from page 1 of every tab. Mirrors GetChannelRSSOK.
+func (db *Database) LoadBackfillCursor(channelID string) (string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	var state sql.NullString
+	err := db.db.QueryRowContext(db.getCtx(),
+		`SELECT backfill_state FROM channel_state WHERE channel_id = ?`, channelID).Scan(&state)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return state.String, nil
+}
+
 // GetChannelEstablished reads the §11 established gate for channelID:
 // last_rss_ok_at IS NOT NULL OR backfilled_at IS NOT NULL. A missing
 // channel_state row is NOT established — a fresh install whose first RSS
