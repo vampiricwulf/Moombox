@@ -241,6 +241,65 @@ func TestArchive_UnknownNeverJobs_HasProcessedOnlyGatesVod(t *testing.T) {
 	})
 }
 
+// TestArchive_OrphanedHistoryClearRejobsInWindowOnly covers the spec §17
+// composite "clearing orphaned history re-jobs an in-window VOD, not an
+// out-of-window one" end-to-end. A history row with NO job row (the
+// orphaned-history shape: DECAPI give-up, legacy rows, deleted jobs) gates
+// vod content via HasProcessed — no job, and no probe wasted on the gated
+// row. Deleting the history rows (DeleteHistoryEntries — the same API the
+// A O overlay's clear path calls) lifts the gate: the next cycle re-jobs
+// the in-window VOD as backlog, while the out-of-window one stays out of
+// scope entirely — clearing history must never resurrect content the
+// window already excludes.
+func TestArchive_OrphanedHistoryClearRejobsInWindowOnly(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	// Two vod rows against the default 3-day window: one a day old, one 30.
+	seedRow(t, db, "UC1", "hIn", now.Add(-24*time.Hour), "day", "rss", "vod")
+	seedRow(t, db, "UC1", "hOut", now.Add(-30*24*time.Hour), "day", "rss", "vod")
+	for _, id := range []string{"hIn", "hOut"} {
+		if err := db.AddToHistory(id); err != nil { // history rows, NO job rows
+			t.Fatalf("AddToHistory(%s): %v", id, err)
+		}
+	}
+
+	var order []string
+	probe := probeReturningTrueAges(now, map[string]int{"hIn": 1, "hOut": 30}, &order)
+
+	// Cycle 1 (RSS 200-empty establishes in FETCH, before ARCHIVE reads the
+	// gate): HasProcessed holds — nothing jobbed, nothing probed.
+	fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()),
+		withProbe(probe), withNow(now))
+	found := recordVideoFound(fm)
+	fm.runCycleForTest(t, "UC1")
+	if len(*found) != 0 {
+		t.Fatalf("history-gated cycle jobbed %v, want none", *found)
+	}
+	if len(order) != 0 {
+		t.Fatalf("history-gated cycle probed %v — the gate precedes the refresh probe", order)
+	}
+
+	// Clear the orphaned history rows.
+	if n, err := db.DeleteHistoryEntries([]string{"hIn", "hOut"}); err != nil || n != 2 {
+		t.Fatalf("DeleteHistoryEntries: n=%d err=%v, want 2 rows deleted", n, err)
+	}
+
+	// Cycle 2, ten minutes later (cycles never share an instant): the
+	// in-window VOD is probed and re-jobbed as backlog (its row predates this
+	// cycle); the out-of-window one is outside Q1 and in neither Q2 arm —
+	// never probed, never jobbed, history clear or not.
+	fm2 := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()),
+		withProbe(probe), withNow(now.Add(10*time.Minute)))
+	found2 := recordVideoFound(fm2)
+	fm2.runCycleForTest(t, "UC1")
+	if len(*found2) != 1 || (*found2)[0].videoID != "hIn" || (*found2)[0].d != DispositionBacklogVOD {
+		t.Fatalf("post-clear cycle: found=%v, want [{hIn backlog_vod}]", *found2)
+	}
+	if len(order) != 1 || order[0] != "hIn" {
+		t.Fatalf("post-clear probes = %v, want exactly [hIn] — the out-of-window VOD must stay unprobed", order)
+	}
+}
+
 // TestArchive_CookieLapseLongerThanWindow covers §7/§9's lapse-outlasts-the-
 // window case: a members upcoming stream written assumed/unknown before a
 // cookie lapse must remain in scope through a lapse LONGER than the window
