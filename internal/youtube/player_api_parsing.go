@@ -154,12 +154,26 @@ func extractScheduledStartTime(microformat, playabilityStatus map[string]any) st
 // epoch that extractScheduledStartTime falls back to is never consulted
 // here — deliberately NOT reusing extractScheduledStartTime, which
 // conflates a future scheduled start with a publish date.
+//
+// Every returned timestamp is Z-normalized (RFC3339 UTC). YouTube emits
+// startTimestamp with a "+00:00" offset and microformat dates with local
+// offsets ("-07:00"), but every consumer compares this value
+// LEXICOGRAPHICALLY against a Z-format cutoff (the archive window re-check,
+// the walk's exhaustion math, DECAPI's window check) and stores it into
+// feed_items.published, whose contract is "RFC3339 UTC — lexicographic order
+// IS chronological order". An offset-bearing string mis-compares by hours at
+// every window boundary, and once stored at started/day rank it can never be
+// corrected (rank ties don't overwrite) — so normalization happens HERE, at
+// the one producer. An unparseable startTimestamp is treated as no-date
+// (fall through to the microformat date) rather than passed through.
 func extractPublishedAt(status string, microformat map[string]any) (ts, precision string) {
 	switch status {
 	case "vod", "post_live":
 		if lbd, ok := getNestedMap(microformat, "liveBroadcastDetails"); ok {
 			if v := getStr(lbd, "startTimestamp"); v != "" {
-				return v, "started"
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					return t.UTC().Format(time.RFC3339), "started"
+				}
 			}
 		}
 		if v := microformatDate(microformat); v != "" {
@@ -182,8 +196,11 @@ func extractPublishedAt(status string, microformat map[string]any) (ts, precisio
 // lexically, and a bare date would compare as midnight (the OLDEST instant),
 // excluding boundary items in exactly the direction the spec §12 skew-new
 // rule forbids ("nothing is excluded on a date we have not verified").
-// Values that already carry a time component (some microformat dates are
-// full RFC3339 with offset) pass through unchanged.
+// Values with a time component (some microformat dates are full RFC3339
+// with a local offset, e.g. "-07:00") are converted to UTC for the same
+// lexicographic seam — see extractPublishedAt's doc comment. Anything that
+// parses as neither is no-date (""): garbage stored at 'day' rank would
+// sort nonsensically forever.
 func microformatDate(microformat map[string]any) string {
 	v := getStr(microformat, "uploadDate")
 	if v == "" {
@@ -192,7 +209,10 @@ func microformatDate(microformat map[string]any) string {
 	if _, err := time.Parse(time.DateOnly, v); err == nil {
 		return v + "T23:59:59Z"
 	}
-	return v
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return ""
 }
 
 // parseFormats extracts format metadata + raw stream URLs from a

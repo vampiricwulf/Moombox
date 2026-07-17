@@ -793,14 +793,34 @@ func TestExtractPublishedAt(t *testing.T) {
 		name, status, wantTS, wantPrec string
 		microformat                    map[string]any
 	}{
-		{"post_live takes startTimestamp as started", "post_live", "2026-07-14T20:00:00+00:00", "started",
+		// YouTube emits startTimestamp offset-bearing ("+00:00"); it MUST come
+		// back Z-normalized. Consumers compare PublishedAt LEXICOGRAPHICALLY
+		// against Z-format cutoffs (the archive window re-check, the walk's
+		// exhaustion math, DECAPI's window check) and store it into
+		// feed_items.published, whose contract is "RFC3339 UTC — lexicographic
+		// order IS chronological order". An offset-bearing string mis-compares
+		// at every window boundary, and once stored at 'started' rank it can
+		// never be corrected (rank ties don't overwrite).
+		{"post_live takes startTimestamp as started, Z-normalized", "post_live", "2026-07-14T20:00:00Z", "started",
 			playerWith(map[string]any{"startTimestamp": "2026-07-14T20:00:00+00:00", "endTimestamp": "2026-07-14T22:00:00+00:00"}, "2026-07-01")},
 		{"vod without lbd falls back to uploadDate as day, normalized to end of day", "vod", "2026-07-01T23:59:59Z", "day",
 			playerWith(nil, "2026-07-01")},
 		{"not_a_stream takes uploadDate as day, normalized to end of day", "not_a_stream", "2026-07-01T23:59:59Z", "day",
 			playerWith(nil, "2026-07-01")},
-		{"day value with a time component passes through unchanged", "vod", "2026-07-01T13:00:00-07:00", "day",
+		// Microformat dates with a time component carry local offsets
+		// ("-07:00"). 13:00-07:00 IS 20:00Z, but the raw string sorts as 13:00
+		// against a Z cutoff — hours of error at the same lexicographic seam
+		// as above, unhealable once stored at 'day' rank. Convert to UTC.
+		{"day value with a time component is Z-normalized", "vod", "2026-07-01T20:00:00Z", "day",
 			playerWith(nil, "2026-07-01T13:00:00-07:00")},
+		// Unparseable values must become NO-date, not pass-through garbage: a
+		// non-chronological string stored at started/day rank would sort
+		// nonsensically forever. A bad startTimestamp falls back to the
+		// microformat date; a bad microformat date yields nothing.
+		{"unparseable startTimestamp falls back to the microformat day date", "post_live", "2026-07-01T23:59:59Z", "day",
+			playerWith(map[string]any{"startTimestamp": "garbage"}, "2026-07-01")},
+		{"unparseable microformat date with a time component yields nothing", "vod", "", "",
+			playerWith(nil, "2026-07-01T99:99:99")},
 		{"upcoming stores nothing — startTimestamp here is the FUTURE", "upcoming", "", "",
 			playerWith(map[string]any{"startTimestamp": "2027-01-01T00:00:00+00:00"}, "2026-07-01")},
 		{"live stores nothing", "live", "", "", playerWith(nil, "2026-07-01")},
