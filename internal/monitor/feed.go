@@ -157,6 +157,16 @@ type FeedMonitor struct {
 	// for tests. Nil uses the real fetch — see rssFetch.
 	FetchRSS RSSFetchFunc
 
+	// BackfillSweep, when non-nil, is invoked ONCE per monitor cycle (spec
+	// §11: the sweep condition is evaluated every cycle plus startup and
+	// kickMonitors — and both of those run a cycle, via Start's immediate
+	// first check and CheckNow, so this single site covers every trigger).
+	// The host wires it to the backfill worker's Sweep with freshly-resolved
+	// ChannelRefs. Only the TRIGGER runs in the cycle: scans run on the
+	// worker's own throttled serial queue, never through the monitor's
+	// per-video retry/backoff loop.
+	BackfillSweep func()
+
 	// now returns the current time. checkChannel reads it exactly ONCE per
 	// cycle (spec §7's one-`now` rule) so every timestamp a cycle writes —
 	// last_rss_ok_at, the STORE step's coarse/assumed dates, the ARCHIVE
@@ -395,6 +405,13 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 	if fm.IsOnline != nil && !fm.IsOnline() {
 		fm.logger.Debug("skipping feed poll — offline")
 		return
+	}
+	// Backfill sweep trigger (spec §11) — after the offline gate (scans
+	// would only fail offline) but BEFORE the no-channels early return: a
+	// sweep over an emptied channel list is how the worker learns every
+	// channel departed and prunes their data.
+	if fm.BackfillSweep != nil {
+		fm.BackfillSweep()
 	}
 	channels := fm.getYouTubeChannels()
 	if len(channels) == 0 {

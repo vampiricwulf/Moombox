@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -386,6 +387,73 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.feedMon = feedMon
 
 	// =========================================================================
+	// 12b. Feed-history backfill worker (spec §11)
+	// =========================================================================
+	// One serial scan queue + in-flight set behind the every-cycle sweep.
+	// Constructed here; started in run() just before the monitors, so the
+	// feed monitor's immediate first cycle fires the startup sweep. The
+	// tab-page adapter mirrors FetchMembership's decoupling shape
+	// (monitor_callbacks.go) and MUST translate youtube.ErrContinuationLoop
+	// into monitor.ErrTabContinuationLoop (errors.Is-compatible): the
+	// scanner tells a continuation loop (incomplete tab, loud log) from a
+	// transient fetch failure without importing the youtube package.
+	backfill := monitor.NewBackfillWorker(db, log)
+	backfill.FetchTabPage = func(ctx context.Context, channelID, tab, continuation string) (*monitor.TabPage, error) {
+		page, err := ytService.FetchChannelTabPage(ctx, channelID, tab, continuation)
+		if err != nil {
+			if errors.Is(err, youtube.ErrContinuationLoop) {
+				return nil, fmt.Errorf("%w: %s", monitor.ErrTabContinuationLoop, err)
+			}
+			return nil, err
+		}
+		items := make([]monitor.TabItem, len(page.Items))
+		for i, it := range page.Items {
+			items[i] = monitor.TabItem{VideoID: it.VideoID, Title: it.Title, Age: it.Age}
+		}
+		return &monitor.TabPage{Items: items, Continuation: page.Continuation}, nil
+	}
+	s.backfillWorker = backfill
+
+	// The sweep trigger rides the feed-monitor cycle — startup and
+	// kickMonitors both run a cycle, so every §11 trigger funnels through
+	// this one site. ChannelRefs carry CALLER-resolved values (§11): the
+	// per-channel archive_window_days override falling back to the global
+	// (the archive-slots resolver's shape, section 10), and
+	// membershipEligibleNow = MembershipDiscoveryEnabled() &&
+	// HasAuthCookies(), resolved fresh each sweep. YouTube channels only —
+	// the §11 ALLOW-list (a Twitch channel scanned as
+	// youtube.com/channel/<login> would 404 every tab and retry forever).
+	// Disabled channels are included so the worker treats them as PAUSED —
+	// kept in the active set (not pruned), but never scanned.
+	feedMon.BackfillSweep = func() {
+		var refs []monitor.ChannelRef
+		var membershipOn bool
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			membershipOn = c.Monitors.MembershipDiscoveryEnabled()
+			for i := range c.Channels {
+				ch := c.Channels[i] // copy — refs must not alias live config memory
+				if ch.GetPlatform() != "youtube" {
+					continue
+				}
+				days := c.Monitors.ArchiveWindowDays
+				if ch.ArchiveWindowDays != nil && *ch.ArchiveWindowDays > 0 {
+					days = *ch.ArchiveWindowDays
+				}
+				if days <= 0 {
+					days = 3 // resolveArchiveWindowDays' defensive default
+				}
+				refs = append(refs, monitor.ChannelRef{Ch: &ch, ChID: ch.ID, WindowDays: days})
+			}
+		})
+		if membershipOn && ytService.HasAuthCookies() {
+			for i := range refs {
+				refs[i].WithMembership = true
+			}
+		}
+		backfill.Sweep(refs)
+	}
+
+	// =========================================================================
 	// 13. DECAPI monitor
 	// =========================================================================
 	decapiMon := monitor.NewDecapiMonitor(s.configStore, db, log)
@@ -589,6 +657,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Shared callback to kick all monitors when channels change.
 	// Wakes monitors that went idle when they had no channels of their type.
+	// Also the backfill trigger (spec §11): feedMon.CheckNow() runs a cycle,
+	// and every cycle invokes BackfillSweep — add, remove, reorder, bulk PUT
+	// and TUI save all funnel here with NO discrimination, which is why the
+	// sweep is idempotent rather than event-driven.
 	s.kickMonitors = func() {
 		// Channels may have been added or REMOVED — drop health entries for
 		// gone channels so /api/status doesn't show phantom rows, then poll.

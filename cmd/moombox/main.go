@@ -230,7 +230,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		slog.String("network_access", cfg.Network.NetworkAccess),
 	)
 
-	// Start monitors
+	// Start monitors. The backfill worker starts FIRST: the feed monitor's
+	// immediate first cycle fires the startup backfill sweep (spec §11),
+	// and a sweep before the worker's consumer exists would no-op.
+	s.backfillWorker.Start(ctx)
 	feedMon.Start(ctx)
 	decapiMon.Start(ctx)
 	twitchMon.Start(ctx)

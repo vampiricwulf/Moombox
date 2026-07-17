@@ -194,6 +194,59 @@ func TestDeleteChannelFeedData(t *testing.T) {
 	}
 }
 
+// TestListFeedChannelIDs pins the sweep's departure census (spec §11): the
+// UNION of channel_state and feed_items owners, deduped — a channel present
+// in either table is listed once, and a pruned channel drops out entirely.
+func TestListFeedChannelIDs(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+
+	if ids, err := db.ListFeedChannelIDs(); err != nil || len(ids) != 0 {
+		t.Fatalf("empty db: ids=%v err=%v, want none", ids, err)
+	}
+
+	// UC1: feed_items only. UC2: channel_state only. UC3: both (must dedupe).
+	db.UpsertFeedItem(fi("UC1", "v1", "2026-07-10T00:00:00Z", "coarse", "rss", "unknown", 0))
+	if err := db.SetChannelRSSOK("UC2", "2026-07-16T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	db.UpsertFeedItem(fi("UC3", "v3", "2026-07-10T00:00:00Z", "coarse", "rss", "unknown", 0))
+	if err := db.SaveBackfillCursor("UC3", `{"tabs":{}}`); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := db.ListFeedChannelIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]int)
+	for _, id := range ids {
+		got[id]++
+	}
+	for _, want := range []string{"UC1", "UC2", "UC3"} {
+		if got[want] != 1 {
+			t.Errorf("%s listed %d times, want exactly 1 (ids=%v)", want, got[want], ids)
+		}
+	}
+	if len(ids) != 3 {
+		t.Errorf("len(ids) = %d, want 3 (%v)", len(ids), ids)
+	}
+
+	// After a prune the channel leaves the census — the sweep stops re-firing.
+	if err := db.DeleteChannelFeedData("UC3"); err != nil {
+		t.Fatal(err)
+	}
+	ids, err = db.ListFeedChannelIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if id == "UC3" {
+			t.Errorf("pruned channel still in census: %v", ids)
+		}
+	}
+}
+
 func TestGetFeedItem(t *testing.T) {
 	db := newTestDB(t)
 	defer db.Close()

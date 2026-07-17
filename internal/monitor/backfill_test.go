@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,12 +183,12 @@ func TestScanChannel_PageGranularWindowStop(t *testing.T) {
 		"videos": {
 			// page 1: v1 inside the 3-day window, v2 outside ⇒ mixed ⇒ keep paging.
 			{wantCont: "", page: &TabPage{
-				Items:        []TabItem{coarseItem("v1", 24 * time.Hour), coarseItem("v2", 240 * time.Hour)},
+				Items:        []TabItem{coarseItem("v1", 24*time.Hour), coarseItem("v2", 240*time.Hour)},
 				Continuation: "TOK2",
 			}},
 			// page 2: ALL items outside ⇒ arm (a) fires; TOK3 must never be followed.
 			{wantCont: "TOK2", page: &TabPage{
-				Items:        []TabItem{coarseItem("v3", 264 * time.Hour), coarseItem("v4", 288 * time.Hour)},
+				Items:        []TabItem{coarseItem("v3", 264*time.Hour), coarseItem("v4", 288*time.Hour)},
 				Continuation: "TOK3",
 			}},
 		},
@@ -294,7 +296,7 @@ func TestScanChannel_ResumesFromCursor(t *testing.T) {
 	fetch1 := newScriptedFetcher(t, map[string][]scriptedPage{
 		"videos": {
 			{wantCont: "", page: &TabPage{
-				Items:        []TabItem{coarseItem("v1", 24 * time.Hour), coarseItem("v2", 30 * time.Hour)},
+				Items:        []TabItem{coarseItem("v1", 24*time.Hour), coarseItem("v2", 30*time.Hour)},
 				Continuation: "TOK2",
 			}},
 			// page 2 fails mid-scan (transient) — the cursor already holds TOK2.
@@ -318,7 +320,7 @@ func TestScanChannel_ResumesFromCursor(t *testing.T) {
 	fetch2 := newScriptedFetcher(t, map[string][]scriptedPage{
 		"videos": {
 			{wantCont: "TOK2", page: &TabPage{
-				Items:        []TabItem{coarseItem("v3", 26 * 30 * time.Hour)},
+				Items:        []TabItem{coarseItem("v3", 26*30*time.Hour)},
 				Continuation: "TOK3",
 			}},
 		},
@@ -346,7 +348,7 @@ func TestScanChannel_LiveItemAmongDatable(t *testing.T) {
 	fetch := newScriptedFetcher(t, map[string][]scriptedPage{
 		"videos": {
 			{wantCont: "", page: &TabPage{
-				Items: []TabItem{undatedItem("live1"), coarseItem("v2", 2 * time.Hour)},
+				Items: []TabItem{undatedItem("live1"), coarseItem("v2", 2*time.Hour)},
 			}},
 		},
 		"streams": emptyTabScript(),
@@ -396,16 +398,16 @@ func TestScanChannel_CompletionOrdersAndRecords(t *testing.T) {
 		//     pos 2) ⇒ equal provisional pos falls through to video_id ASC.
 		"videos": {
 			{wantCont: "", page: &TabPage{Items: []TabItem{
-				coarseItem("vid-new", 1 * time.Hour),
-				coarseItem("tie-pos-b", 10 * time.Hour),
-				coarseItem("tie-id-b", 20 * time.Hour),
+				coarseItem("vid-new", 1*time.Hour),
+				coarseItem("tie-pos-b", 10*time.Hour),
+				coarseItem("tie-id-b", 20*time.Hour),
 			}}},
 		},
 		"streams": {
 			{wantCont: "", page: &TabPage{Items: []TabItem{
-				coarseItem("tie-pos-z", 10 * time.Hour),
-				coarseItem("vid-new", 1 * time.Hour),
-				coarseItem("tie-id-a", 20 * time.Hour),
+				coarseItem("tie-pos-z", 10*time.Hour),
+				coarseItem("vid-new", 1*time.Hour),
+				coarseItem("tie-id-a", 20*time.Hour),
 			}}},
 		},
 	})
@@ -466,7 +468,7 @@ func TestScanChannel_IncompleteTabBlocksCompletion(t *testing.T) {
 			// sits at provisional pos 1) — a renumber would flip them to 1/0,
 			// so the 0/1 assertions below are real evidence none ran.
 			{wantCont: "", page: &TabPage{
-				Items:        []TabItem{coarseItem("v1", 5 * time.Hour), coarseItem("v2", 1 * time.Hour)},
+				Items:        []TabItem{coarseItem("v1", 5*time.Hour), coarseItem("v2", 1*time.Hour)},
 				Continuation: "TOK2",
 			}},
 			// Page 2: non-empty with no datable item ⇒ arm (b), tab incomplete.
@@ -556,4 +558,467 @@ func TestScanChannel_EmptyChannelCompletesCleanly(t *testing.T) {
 	if raw, err := db.LoadBackfillCursor(backfillTestChannel); err != nil || raw != "" {
 		t.Errorf("backfill_state = %q (err %v), want cleared on completion", raw, err)
 	}
+}
+
+// ---- Task 4 scaffolding: sweep / in-flight / prune --------------------------
+
+// withScan replaces the worker's scan entrypoint (bw.scanChannel by default)
+// with a stub, via the scan seam — the sweep tests script scan OUTCOMES; the
+// scanner's own behavior is pinned by the scanChannel tests above.
+func withScan(fn scanFunc) backfillOpt {
+	return func(bw *BackfillWorker) { bw.scan = fn }
+}
+
+// startWorker runs the worker's single serial consumer for the test's
+// lifetime.
+func startWorker(t *testing.T, bw *BackfillWorker) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	bw.Start(ctx)
+}
+
+// refFor builds the resolved ChannelRef the host wiring (services.go) would:
+// WindowDays and WithMembership are CALLER-resolved values.
+func refFor(ch *config.ChannelConfig, windowDays int, withMembership bool) ChannelRef {
+	return ChannelRef{Ch: ch, ChID: ch.ID, WindowDays: windowDays, WithMembership: withMembership}
+}
+
+// recvWithin receives from ch or fails the test after a generous timeout —
+// scans run on the worker goroutine, so every expectation is a channel wait,
+// never a sleep.
+func recvWithin[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
+// inflightState snapshots the in-flight set and queue depth. Sweep's
+// enqueue decisions are synchronous, so tests can assert "nothing was
+// enqueued" deterministically right after a Sweep returns.
+func inflightState(bw *BackfillWorker) (inflight map[string]*inFlight, queued int) {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	return maps.Clone(bw.inflight), len(bw.queue)
+}
+
+// scanCall records one stub-scanner invocation.
+type scanCall struct {
+	chID           string
+	windowDays     int
+	withMembership bool
+}
+
+const backfillTestChannel2 = "UCbackfilltest000000000b"
+
+// ---- the five sweep tests (Plan 5 Task 4 brief) -----------------------------
+
+// The §11 sweep condition's four DB arms as a pure predicate, with SQL NULL
+// semantics pinned: a missing channel_state row reads all-NULL (never
+// backfilled); NULL < x is NULL, not true — without the second arm the widen
+// check never fires over a NULL window; NULL = 0 is NULL — a NULL
+// with_membership never triggers the membership arm on its own. Toggle-OFF
+// has no arm at all: a completed with-membership scan is a superset of what
+// is now eligible.
+func TestNeedsBackfill_FourArms(t *testing.T) {
+	iptr := func(v int) *int { return &v }
+	bptr := func(v bool) *bool { return &v }
+	cases := []struct {
+		name     string
+		cb       database.ChannelBackfill
+		window   int
+		eligible bool
+		want     bool
+	}{
+		{"arm 1: missing row / backfilled_at NULL", database.ChannelBackfill{}, 3, false, true},
+		{"arm 2: window NULL (NULL < x is NULL, not true)",
+			database.ChannelBackfill{At: "2026-07-15T12:00:00Z", WithMembership: bptr(false)}, 3, false, true},
+		{"arm 3: widen 3 -> 30",
+			database.ChannelBackfill{At: "2026-07-15T12:00:00Z", WindowDays: iptr(3), WithMembership: bptr(false)}, 30, false, true},
+		{"arm 4: membership newly eligible",
+			database.ChannelBackfill{At: "2026-07-15T12:00:00Z", WindowDays: iptr(30), WithMembership: bptr(false)}, 30, true, true},
+		{"narrow 30 -> 3 does NOT fire",
+			database.ChannelBackfill{At: "2026-07-15T12:00:00Z", WindowDays: iptr(30), WithMembership: bptr(false)}, 3, false, false},
+		{"membership toggle-off does NOT fire",
+			database.ChannelBackfill{At: "2026-07-15T12:00:00Z", WindowDays: iptr(30), WithMembership: bptr(true)}, 30, false, false},
+		{"completed with membership, still eligible: no-op",
+			database.ChannelBackfill{At: "2026-07-15T12:00:00Z", WindowDays: iptr(30), WithMembership: bptr(true)}, 30, true, false},
+		{"membership NULL never fires the membership arm (NULL = 0 is NULL)",
+			database.ChannelBackfill{At: "2026-07-15T12:00:00Z", WindowDays: iptr(30)}, 30, true, false},
+	}
+	for _, tc := range cases {
+		if got := needsBackfill(tc.cb, tc.window, tc.eligible); got != tc.want {
+			t.Errorf("%s: needsBackfill = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// (a) A fresh channel with NO channel_state row at all IS swept (LEFT-JOIN
+// semantics: a missing row reads as never-backfilled, not "no rows
+// returned") — and, the carried Task 2/3 pin: once backfilled_at is set and
+// neither the window nor membership eligibility changed, NO sweep ever
+// re-invokes the scanner again. kickMonitors fires on every add / remove /
+// reorder / bulk PUT / TUI save with no discrimination, so this no-op IS the
+// idempotence the funnel relies on.
+func TestSweep_FreshChannelScansOnce_CompletedNeverRescanned(t *testing.T) {
+	db := newTestDB(t)
+	calls := make(chan scanCall, 8)
+	bw := newTestBackfillWorker(t, db, withScan(func(_ context.Context, _ *config.ChannelConfig, chID string, wd int, wm bool) error {
+		calls <- scanCall{chID, wd, wm}
+		return nil
+	}))
+	startWorker(t, bw)
+	ch := backfillTestCh()
+	refs := []ChannelRef{refFor(ch, 3, false)}
+
+	bw.Sweep(refs)
+	if got := recvWithin(t, calls, "fresh channel's scan"); got != (scanCall{backfillTestChannel, 3, false}) {
+		t.Fatalf("scan invoked with %+v, want {%s 3 false}", got, backfillTestChannel)
+	}
+
+	// Completed — as Task 3's completeScan records it.
+	if err := db.SetChannelBackfilled(ch.ID, 3, false, "2026-07-15T12:00:00Z"); err != nil {
+		t.Fatalf("SetChannelBackfilled: %v", err)
+	}
+
+	// Repeated sweeps with unchanged conditions enqueue NOTHING — assert
+	// synchronously (Sweep's decisions happen before it returns).
+	for range 3 {
+		bw.Sweep(refs)
+	}
+	if inflight, queued := inflightState(bw); len(inflight) != 0 || queued != 0 {
+		t.Fatalf("completed channel re-enqueued: inflight=%d queued=%d, want 0/0", len(inflight), queued)
+	}
+
+	// FIFO cross-check: sweep the completed channel ALONGSIDE a fresh one.
+	// The queue is strictly serial and FIFO, so if the completed channel had
+	// been (wrongly) enqueued — in this sweep or any earlier one — its scan
+	// would arrive before the fresh channel's.
+	ch2 := &config.ChannelConfig{ID: backfillTestChannel2, Name: "Fresh Two"}
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false), refFor(ch2, 3, false)})
+	if got := recvWithin(t, calls, "second fresh channel's scan"); got.chID != backfillTestChannel2 {
+		t.Fatalf("scan invoked for %q, want %q (completed channel must NEVER be re-invoked)", got.chID, backfillTestChannel2)
+	}
+	select {
+	case got := <-calls:
+		t.Fatalf("unexpected extra scan %+v after the fresh channel's", got)
+	default:
+	}
+}
+
+// (b, positive) A widen 3 -> 30 mid-scan cancels the running scan, RESETS the
+// per-tab cursor, and restarts deeper. Mid-scan, backfilled_at IS NULL makes
+// the DB condition trivially true — the in-flight entry's recorded
+// windowDays is the ONLY signal a running scan is stale (§11).
+func TestSweep_WidenMidScanCancelsResetsCursorAndRestartsDeeper(t *testing.T) {
+	db := newTestDB(t)
+	started := make(chan int, 4)
+	firstCancelled := make(chan struct{})
+	bw := newTestBackfillWorker(t, db, withScan(func(ctx context.Context, _ *config.ChannelConfig, _ string, wd int, _ bool) error {
+		started <- wd
+		if wd == 3 {
+			<-ctx.Done()
+			close(firstCancelled)
+			return ctx.Err()
+		}
+		return nil
+	}))
+	startWorker(t, bw)
+	ch := backfillTestCh()
+
+	// A leftover shallow cursor the widen MUST reset: a deeper rescan
+	// resuming it would skip exactly the pages it was restarted to fetch.
+	if err := db.SaveBackfillCursor(ch.ID, `{"tabs":{"videos":{"continuation":"TOK2","next_pos":2}}}`); err != nil {
+		t.Fatalf("SaveBackfillCursor: %v", err)
+	}
+
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)})
+	if wd := recvWithin(t, started, "first scan"); wd != 3 {
+		t.Fatalf("first scan windowDays = %d, want 3", wd)
+	}
+
+	bw.Sweep([]ChannelRef{refFor(ch, 30, false)})
+	recvWithin(t, firstCancelled, "first scan's cancellation")
+	if wd := recvWithin(t, started, "restarted (deeper) scan"); wd != 30 {
+		t.Fatalf("restarted scan windowDays = %d, want 30", wd)
+	}
+	// The restart began, so the cancelled scan's cleanup already ran — the
+	// shallow cursor must be gone (§11: resume applies only to INTERRUPTED
+	// scans, never cancelled ones).
+	if raw, err := db.LoadBackfillCursor(ch.ID); err != nil || raw != "" {
+		t.Errorf("cursor = %q (err %v), want reset on widen-cancel", raw, err)
+	}
+}
+
+// (b, membership variant) Membership becoming eligible mid-scan restarts the
+// running scan the same way a widen does — the in-flight entry's recorded
+// withMembership is the only signal.
+func TestSweep_MembershipNewlyEligibleMidScanRestarts(t *testing.T) {
+	db := newTestDB(t)
+	started := make(chan bool, 4)
+	bw := newTestBackfillWorker(t, db, withScan(func(ctx context.Context, _ *config.ChannelConfig, _ string, _ int, wm bool) error {
+		started <- wm
+		if !wm {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}))
+	startWorker(t, bw)
+	ch := backfillTestCh()
+
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)})
+	if wm := recvWithin(t, started, "first scan"); wm {
+		t.Fatalf("first scan withMembership = true, want false")
+	}
+	bw.Sweep([]ChannelRef{refFor(ch, 3, true)})
+	if wm := recvWithin(t, started, "restarted scan"); !wm {
+		t.Fatalf("restarted scan withMembership = false, want true")
+	}
+}
+
+// (b, negative) Narrowing 30 -> 3 mid-scan does NOTHING: a running deeper
+// scan records a deeper depth, which satisfies every narrower window it will
+// be asked for. No cancel, no restart.
+func TestSweep_NarrowMidScanDoesNotRestart(t *testing.T) {
+	db := newTestDB(t)
+	started := make(chan int, 4)
+	block := make(chan struct{})
+	var gotCancel atomic.Bool
+	bw := newTestBackfillWorker(t, db, withScan(func(ctx context.Context, _ *config.ChannelConfig, _ string, wd int, _ bool) error {
+		started <- wd
+		select {
+		case <-block:
+			return nil
+		case <-ctx.Done():
+			gotCancel.Store(true)
+			return ctx.Err()
+		}
+	}))
+	startWorker(t, bw)
+	ch := backfillTestCh()
+
+	bw.Sweep([]ChannelRef{refFor(ch, 30, false)})
+	if wd := recvWithin(t, started, "deep scan"); wd != 30 {
+		t.Fatalf("scan windowDays = %d, want 30", wd)
+	}
+
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}) // narrower — must be a no-op
+	inflight, queued := inflightState(bw)
+	fl := inflight[ch.ID]
+	if fl == nil || fl.windowDays != 30 || queued != 0 {
+		t.Fatalf("narrow sweep disturbed the running scan: fl=%+v queued=%d, want windowDays 30, queue empty", fl, queued)
+	}
+
+	close(block) // let the deep scan finish cleanly
+	recvWithin(t, fl.done, "scan exit")
+	if gotCancel.Load() {
+		t.Error("narrow sweep cancelled the running deeper scan")
+	}
+	if inflight, queued := inflightState(bw); len(inflight) != 0 || queued != 0 {
+		t.Errorf("after clean finish: inflight=%d queued=%d, want 0/0", len(inflight), queued)
+	}
+	select {
+	case wd := <-started:
+		t.Fatalf("unexpected restart at windowDays %d after a narrow sweep", wd)
+	default:
+	}
+}
+
+// (c) Membership toggling ON after a completed without-membership scan
+// triggers a rescan (the backfilled_with_membership = 0 arm); toggling OFF
+// after a completed with-membership scan does not (no arm exists — the
+// completed scan is a superset, and members rows are hidden by the read arm,
+// not deleted).
+func TestSweep_MembershipToggleOnRescans_ToggleOffDoesNot(t *testing.T) {
+	db := newTestDB(t)
+	calls := make(chan scanCall, 8)
+	release := make(chan struct{})
+	bw := newTestBackfillWorker(t, db, withScan(func(_ context.Context, _ *config.ChannelConfig, chID string, wd int, wm bool) error {
+		calls <- scanCall{chID, wd, wm}
+		<-release
+		return nil
+	}))
+	startWorker(t, bw)
+	ch := backfillTestCh()
+	ch2 := &config.ChannelConfig{ID: backfillTestChannel2, Name: "With Members"}
+
+	// ch completed WITHOUT membership; ch2 completed WITH membership.
+	if err := db.SetChannelBackfilled(ch.ID, 30, false, "2026-07-15T12:00:00Z"); err != nil {
+		t.Fatalf("SetChannelBackfilled(ch): %v", err)
+	}
+	if err := db.SetChannelBackfilled(ch2.ID, 30, true, "2026-07-15T12:00:00Z"); err != nil {
+		t.Fatalf("SetChannelBackfilled(ch2): %v", err)
+	}
+
+	// Eligibility OFF: neither channel rescans (ch's recorded 0 needs
+	// membershipEligibleNow to fire; ch2's toggle-off has no arm).
+	bw.Sweep([]ChannelRef{refFor(ch, 30, false), refFor(ch2, 30, false)})
+	if inflight, queued := inflightState(bw); len(inflight) != 0 || queued != 0 {
+		t.Fatalf("eligibility-off sweep enqueued: inflight=%d queued=%d, want 0/0", len(inflight), queued)
+	}
+
+	// Eligibility ON: ch rescans (recorded without membership), ch2 does not
+	// (recorded with). The stub blocks, so the in-flight set is inspectable
+	// while ch's scan runs.
+	bw.Sweep([]ChannelRef{refFor(ch, 30, true), refFor(ch2, 30, true)})
+	got := recvWithin(t, calls, "toggle-on rescan")
+	if got != (scanCall{backfillTestChannel, 30, true}) {
+		t.Fatalf("rescan = %+v, want {%s 30 true}", got, backfillTestChannel)
+	}
+	inflight, queued := inflightState(bw)
+	if _, ok := inflight[ch2.ID]; ok || queued != 0 {
+		t.Fatalf("already-with-membership channel was re-enqueued (queued=%d)", queued)
+	}
+	close(release)
+}
+
+// (d) Removal mid-scan: the sweep whose channel list no longer carries the
+// channel cancels the in-flight scan, WAITS for it to observe, then prunes —
+// LAST, so even a stale page written in the cancel window is cleaned. Feed
+// rows and channel_state gone (no resurrected rows), Queued + Upcoming +
+// COOKIES? jobs AND their history rows gone, the Downloading job (and its
+// history) untouched.
+func TestSweep_RemovalMidScanCancelsThenPrunes(t *testing.T) {
+	db := newTestDB(t)
+	ch := backfillTestCh()
+	chID := ch.ID
+	now := "2026-07-15T12:00:00Z"
+
+	// Jobs as the monitor host creates them: AddToHistory at creation.
+	seed := func(id string, st database.JobStatus) {
+		t.Helper()
+		added, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "u", Status: st, ChannelID: &chID})
+		if err != nil || !added {
+			t.Fatalf("AddJob(%s): added=%v err=%v", id, added, err)
+		}
+		if err := db.AddToHistory(id); err != nil {
+			t.Fatalf("AddToHistory(%s): %v", id, err)
+		}
+	}
+	doomed := []string{"d-queued", "d-upcoming", "d-cookies"}
+	for i, st := range []database.JobStatus{database.StatusQueued, database.StatusUpcoming, database.StatusCookies} {
+		seed(doomed[i], st)
+	}
+	seed("k-downloading", database.StatusDownloading)
+
+	feedRow := func(id string) database.FeedItem {
+		return database.FeedItem{ChannelID: chID, VideoID: id, Title: id,
+			Published: now, DatePrecision: "coarse", Source: "videos", FirstSeen: now}
+	}
+	scanStarted := make(chan struct{})
+	staleWritten := make(chan struct{})
+	bw := newTestBackfillWorker(t, db, withScan(func(ctx context.Context, _ *config.ChannelConfig, _ string, _ int, _ bool) error {
+		if _, err := db.UpsertFeedItem(feedRow("mid-scan")); err != nil {
+			t.Errorf("mid-scan upsert: %v", err)
+		}
+		close(scanStarted)
+		<-ctx.Done()
+		// The §11 race, deliberately: one stale page lands AFTER the
+		// cancellation is observed but before the scan returns. The prune
+		// runs LAST, so even this write must be cleaned up.
+		if _, err := db.UpsertFeedItem(feedRow("stale-page")); err != nil {
+			t.Errorf("stale upsert: %v", err)
+		}
+		if err := db.SaveBackfillCursor(chID, `{"tabs":{"videos":{"continuation":"TOK9"}}}`); err != nil {
+			t.Errorf("stale cursor save: %v", err)
+		}
+		close(staleWritten)
+		return ctx.Err()
+	}))
+	startWorker(t, bw)
+
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)})
+	recvWithin(t, scanStarted, "scan start")
+
+	// The channel is REMOVED from config: the next sweep's list no longer
+	// carries it. Sweep is synchronous through the prune.
+	bw.Sweep(nil)
+
+	select {
+	case <-staleWritten:
+	default:
+		t.Fatal("prune returned before the cancelled scan exited the channel (wait-observed broken)")
+	}
+
+	for _, id := range []string{"mid-scan", "stale-page"} {
+		if it, err := db.GetFeedItem(chID, id); err != nil || it != nil {
+			t.Errorf("feed row %s survived the prune (%+v, err %v), want deleted", id, it, err)
+		}
+	}
+	if raw, err := db.LoadBackfillCursor(chID); err != nil || raw != "" {
+		t.Errorf("backfill_state = %q (err %v), want gone after prune", raw, err)
+	}
+	if cb, err := db.GetChannelBackfill(chID); err != nil || cb.At != "" || cb.WindowDays != nil || cb.WithMembership != nil {
+		t.Errorf("channel_state survived the prune: %+v (err %v)", cb, err)
+	}
+
+	assertJob := func(id string, wantJob, wantHistory bool) {
+		t.Helper()
+		job, err := db.GetJob(id)
+		if err != nil {
+			t.Fatalf("GetJob(%s): %v", id, err)
+		}
+		if got := job != nil; got != wantJob {
+			t.Errorf("%s: job exists = %v, want %v", id, got, wantJob)
+		}
+		has, err := db.HasProcessed(id)
+		if err != nil {
+			t.Fatalf("HasProcessed(%s): %v", id, err)
+		}
+		if has != wantHistory {
+			t.Errorf("%s: history exists = %v, want %v", id, has, wantHistory)
+		}
+	}
+	for _, id := range doomed {
+		assertJob(id, false, false) // job AND history gone — no orphan
+	}
+	assertJob("k-downloading", true, true) // running download keeps going
+
+	if inflight, queued := inflightState(bw); len(inflight) != 0 || queued != 0 {
+		t.Errorf("in-flight entry leaked past the prune: inflight=%d queued=%d", len(inflight), queued)
+	}
+}
+
+// (e) A scan that FAILS removes its in-flight entry — a leaked entry is a
+// permanent silent stall — so the next sweep retries the channel.
+func TestSweep_FailedScanRetriedByNextSweep(t *testing.T) {
+	db := newTestDB(t)
+	calls := make(chan int, 4)
+	hold := make(chan struct{})
+	var n atomic.Int32
+	bw := newTestBackfillWorker(t, db, withScan(func(_ context.Context, _ *config.ChannelConfig, _ string, _ int, _ bool) error {
+		calls <- int(n.Add(1))
+		<-hold
+		return errors.New("browse http 503")
+	}))
+	startWorker(t, bw)
+	ch := backfillTestCh()
+	refs := []ChannelRef{refFor(ch, 3, false)}
+
+	bw.Sweep(refs)
+	if got := recvWithin(t, calls, "first attempt"); got != 1 {
+		t.Fatalf("first attempt = %d, want 1", got)
+	}
+	inflight, _ := inflightState(bw)
+	fl := inflight[ch.ID]
+	if fl == nil {
+		t.Fatal("no in-flight entry while the scan is running")
+	}
+	hold <- struct{}{} // release attempt 1 -> it fails
+	recvWithin(t, fl.done, "failed scan's exit")
+	if inflight, queued := inflightState(bw); len(inflight) != 0 || queued != 0 {
+		t.Fatalf("failed scan leaked its in-flight entry: inflight=%d queued=%d", len(inflight), queued)
+	}
+
+	bw.Sweep(refs) // retry: backfilled_at is still NULL
+	if got := recvWithin(t, calls, "retry attempt"); got != 2 {
+		t.Fatalf("retry attempt = %d, want 2", got)
+	}
+	hold <- struct{}{}
 }

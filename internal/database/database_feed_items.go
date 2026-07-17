@@ -384,6 +384,34 @@ func (db *Database) GetChannelEstablished(channelID string) (bool, error) {
 	return err == nil, err
 }
 
+// ListFeedChannelIDs returns every channel ID that owns feed-history rows —
+// the UNION (deduped) of channel_state and feed_items owners. Either table
+// can exist without the other (an RSS-established channel has channel_state
+// before any feed row; a mid-scan crash can leave rows in one but not the
+// other), so neither alone is a complete census. The backfill sweep diffs
+// this against the config's active channel set to find DEPARTED channels
+// (spec §11 channel removal) — after CancelAndPrune deletes both tables'
+// rows, the channel drops out of this census and the prune stops re-firing.
+func (db *Database) ListFeedChannelIDs() ([]string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT channel_id FROM channel_state UNION SELECT channel_id FROM feed_items`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // DeleteChannelFeedData deletes feed_items + channel_state rows for channelID.
 // Both DELETEs run in one transaction: a crash between independent commits
 // would leave an orphaned channel_state row (stale backfilled_at) for a

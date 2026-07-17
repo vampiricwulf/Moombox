@@ -72,6 +72,11 @@ type runState struct {
 	feedMon   *monitor.FeedMonitor
 	decapiMon *monitor.DecapiMonitor
 	twitchMon *monitor.TwitchMonitor
+	// backfillWorker is the §11 feed-history backfill: the serial scan
+	// queue + in-flight set driven by feedMon.BackfillSweep. Started in
+	// run() just before the monitors; winds down with the run context (no
+	// explicit Stop — cancellation is observed within one page).
+	backfillWorker *monitor.BackfillWorker
 
 	// --- Cookie refresh ---
 	cookieRefresh     *cookies.RefreshService
