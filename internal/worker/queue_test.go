@@ -616,6 +616,78 @@ func TestAcquireDownloadSlotCascadingWakeup(t *testing.T) {
 	}
 }
 
+// TestAcquireDownloadSlot_GatesVodsOnly pins the VOD-only download pool
+// (spec §10/§14): num_parallel_downloads throttles VOD downloads only — a
+// broadcast passes the acquire site without waiting, because a missed slot
+// on a VOD delays a file that already exists while a missed slot on a
+// broadcast loses the recording. Also proves the release paths stay
+// balanced for a broadcast that never acquired: ReleaseDownloadSlot and
+// Complete are both keyed by holdingDlSlot, so neither corrupts
+// activeDownloads.
+func TestAcquireDownloadSlot_GatesVodsOnly(t *testing.T) {
+	w := &DownloadWorker{queue: NewJobQueue(1)} // pool of exactly one slot
+	q := w.queue
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	// Make the broadcast a processing job so Complete below exercises its
+	// full body — the defensive slot release sits inside the processing
+	// branch and would be skipped for a never-dequeued job.
+	q.Enqueue("live1", database.StatusLive)
+	if id, _, ok := q.Dequeue(ctx); !ok || id != "live1" {
+		t.Fatalf("Dequeue = %q, ok=%v, want live1/true", id, ok)
+	}
+
+	// A VOD takes the pool's only slot.
+	if !w.acquireDownloadSlot(ctx, "vod1", true) {
+		t.Fatal("first VOD should acquire the only download slot")
+	}
+	if q.ActiveCount() != 1 {
+		t.Fatalf("ActiveCount() after VOD acquire = %d, want 1", q.ActiveCount())
+	}
+
+	// A broadcast passes the acquire site without blocking even though the
+	// pool is full. Without the IsVod guard this blocks until the context
+	// expires and returns false — the exact regression this test pins.
+	liveCtx, liveCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer liveCancel()
+	if !w.acquireDownloadSlot(liveCtx, "live1", false) {
+		t.Fatal("broadcast blocked at the download pool — a live recording must never wait for a VOD slot")
+	}
+	if q.ActiveCount() != 1 {
+		t.Errorf("ActiveCount() after broadcast passed = %d, want 1 (a broadcast must not consume a slot)", q.ActiveCount())
+	}
+
+	// A second VOD still blocks: the pool gates VODs as before.
+	vodCtx, vodCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer vodCancel()
+	if w.acquireDownloadSlot(vodCtx, "vod2", true) {
+		t.Error("second VOD should block while the pool is full")
+	}
+	if q.ActiveCount() != 1 {
+		t.Errorf("ActiveCount() after second VOD blocked = %d, want 1", q.ActiveCount())
+	}
+
+	// Release paths for the never-acquired broadcast must be no-ops.
+	// ReleaseDownloadSlot is the orchestrators' post-download release:
+	q.ReleaseDownloadSlot("live1")
+	if q.ActiveCount() != 1 {
+		t.Errorf("ActiveCount() after releasing non-holder = %d, want 1", q.ActiveCount())
+	}
+	// Complete is processJob's deferred cleanup with its defensive release:
+	q.Complete("live1")
+	if q.ActiveCount() != 1 {
+		t.Errorf("ActiveCount() after completing broadcast = %d, want 1 (VOD still holds the slot)", q.ActiveCount())
+	}
+	q.mu.Lock()
+	vodHolds := q.holdingDlSlot["vod1"]
+	q.mu.Unlock()
+	if !vodHolds {
+		t.Error("vod1 no longer holds its slot — completing the broadcast corrupted holdingDlSlot")
+	}
+}
+
 // TestQueuedIsRestingState pins the Queued resting-state guarantees:
 // ShouldProcess is an enqueuer predicate — both callers (worker.go
 // enqueueExistingJobs and the pollForJobs heartbeat) feed its true straight

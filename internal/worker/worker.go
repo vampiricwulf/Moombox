@@ -393,6 +393,26 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 	}
 }
 
+// acquireDownloadSlot is the download pool's single acquire site. The pool
+// (num_parallel_downloads) gates VODs only (spec §10/§14): a broadcast is
+// never made to wait for a slot — missing a slot on a VOD delays a file
+// that already exists; missing it on a broadcast loses the recording. The
+// predicate is the probe result's IsVod, NOT job status, which disagrees in
+// two cases: not_a_stream + AllowNonStream/ManuallyAdded downloads a
+// non-stream upload as a VOD (handleStreamStatus), and a Twitch recovery
+// job can carry a live status while its download is the VOD
+// (processTwitchVod routes by the tw_v VideoID prefix). Twitch live is
+// therefore unbounded by this pool — intended (§14). No matching release
+// guard is needed: ReleaseDownloadSlot and Complete are both keyed by
+// holdingDlSlot, so a never-acquired broadcast's release calls are no-ops.
+// Returns false only when ctx was cancelled while waiting.
+func (w *DownloadWorker) acquireDownloadSlot(ctx context.Context, jobID string, isVod bool) bool {
+	if !isVod {
+		return true
+	}
+	return w.queue.AcquireDownloadSlot(ctx, jobID)
+}
+
 func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	defer func() {
 		w.queue.Complete(jobID)
@@ -480,10 +500,11 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
-	// Acquire download slot — blocks until a slot is available.
+	// Acquire download slot — for VODs, blocks until a slot is available;
+	// broadcasts pass through ungated (see acquireDownloadSlot).
 	// Lifecycle slot (from Dequeue) allows stream processing to proceed without
 	// consuming download slots; actual downloading requires a separate download slot.
-	if !w.queue.AcquireDownloadSlot(ctx, jobID) {
+	if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
 		// Context cancelled while waiting for download slot
 		w.handleCancellation(job, "")
 		return
