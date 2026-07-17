@@ -1,10 +1,12 @@
 package monitor
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -13,10 +15,10 @@ import (
 
 // This file is the feed-history backfill scanner (spec §11): populate the
 // feed_items list once per channel from /videos + /streams (+ /membership
-// when eligible), page by page, to the window depth. Task 2 of Plan 5 — it
-// scans and persists; the ordering pass + completion record (backfilled_at)
-// is Task 3's, and the sweep / in-flight set that drives scanChannel is
-// Task 4's.
+// when eligible), page by page, to the window depth, then — when every
+// eligible tab ended cleanly — renumber catalog_pos channel-globally and
+// write the completion record (backfilled_at). The sweep / in-flight set
+// that drives scanChannel is Task 4's.
 
 // backfillPageInterval is the global page throttle: one page per second,
 // globally — a constant, not config (spec §11 operational rules). Scans run
@@ -157,11 +159,12 @@ func NewBackfillWorker(db *database.Database, logger interface {
 
 // scanChannel runs one channel's backfill scan: each eligible tab, page by
 // page, persisting every page immediately and advancing the per-tab cursor
-// (spec §11 — buffering would break "resumable via cursor"). It returns nil
-// only when EVERY eligible tab ended cleanly; any incomplete tab (arm (b),
-// loop, fetch failure) surfaces as an error so the sweep (Task 4) retries,
-// resuming from the saved cursor. The completion record (ordering pass +
-// backfilled_at) is Task 3's and hangs off the all-Complete tabResults.
+// (spec §11 — buffering would break "resumable via cursor"). When EVERY
+// eligible tab ends cleanly it runs the ordering pass and writes the
+// completion record (completeScan), returning nil; any incomplete tab
+// (arm (b), loop, fetch failure) surfaces as an error instead — no renumber,
+// no backfilled_at — so the sweep (Task 4) retries, resuming from the saved
+// cursor.
 func (bw *BackfillWorker) scanChannel(ctx context.Context, ch *config.ChannelConfig, chID string, windowDays int, withMembership bool) error {
 	// YouTube channels only — an ALLOW-list, stricter than getYouTubeChannels'
 	// twitch-exclusion (spec §11 operational rules: a Twitch channel scanned
@@ -202,15 +205,65 @@ func (bw *BackfillWorker) scanChannel(ctx context.Context, ch *config.ChannelCon
 		results = append(results, tabResult{tab: tab, complete: err == nil, err: err})
 	}
 
-	// Task 3 lands here: when every tabResult is Complete, run the ordering
-	// pass (collect-then-update renumber) and write the completion record.
+	// The ordering pass + completion record (spec §11 steps 2–3) run only
+	// when EVERY eligible tab ended cleanly. Any incomplete tab (arm (b),
+	// loop, fetch/DB failure) writes nothing here — the cursors are already
+	// saved per page, backfilled_at stays NULL, and the sweep (Task 4)
+	// retries next cycle, resuming from the cursor.
 	var errs []error
 	for _, r := range results {
-		if r.err != nil {
+		if !r.complete {
 			errs = append(errs, r.err)
 		}
 	}
-	return errors.Join(errs...)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return bw.completeScan(chID, windowDays, withMembership, scanNow)
+}
+
+// completeScan is the §11 completion: ONE channel-global ordering pass over
+// the deduped feed_items set, then the completion record. Collect-then-update
+// is load-bearing (SetMaxOpenConns(1)): ListFeedOrderRows returns a fully
+// collected slice with its cursor closed before RenumberCatalog issues any
+// UPDATE. A failure anywhere here leaves backfilled_at NULL with the cursor's
+// all-done tab states intact, so the sweep-retry skips every fetch and
+// re-runs just this pass — the renumber and record writes are idempotent.
+func (bw *BackfillWorker) completeScan(chID string, windowDays int, withMembership bool, scanNow time.Time) error {
+	rows, err := bw.db.ListFeedOrderRows(chID)
+	if err != nil {
+		return fmt.Errorf("backfill %s: read ordering rows: %w", chID, err)
+	}
+	// The §11 sort key, exactly: published DESC, provisional catalog_pos ASC,
+	// video_id ASC. published is RFC3339 UTC everywhere in this codebase, so
+	// lexicographic order IS chronological order (the same comparison the
+	// idx_feed_items_window index and FeedScope's ORDER BY perform). The key
+	// is total — (channel_id, video_id) is the PK, so video_id never ties.
+	slices.SortFunc(rows, func(a, b database.FeedOrderRow) int {
+		if c := cmp.Compare(b.Published, a.Published); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.CatalogPos, b.CatalogPos); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.VideoID, b.VideoID)
+	})
+	ids := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i] = r.VideoID
+	}
+	if err := bw.db.RenumberCatalog(chID, ids); err != nil {
+		return fmt.Errorf("backfill %s: renumber: %w", chID, err)
+	}
+	// ts is the scan's one `now` (the one-`now` rule); SetChannelBackfilled
+	// clears backfill_state in the same statement — the cursor's lifecycle
+	// ends at completion (§11).
+	if err := bw.db.SetChannelBackfilled(chID, windowDays, withMembership, scanNow.Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("backfill %s: completion record: %w", chID, err)
+	}
+	bw.logger.Info("backfill complete", "channel", chID, "rows", len(rows),
+		"windowDays", windowDays, "withMembership", withMembership)
+	return nil
 }
 
 // scanTab pages one tab from its cursor position until a stop condition.

@@ -202,8 +202,10 @@ func TestScanChannel_PageGranularWindowStop(t *testing.T) {
 		t.Errorf("videos tab fetched %d times, want 2 (arm (a) must stop before TOK3)", got)
 	}
 
-	// Rows from BOTH pages persisted, with the §11 classification and the
-	// provisional per-tab catalog_pos running across pages.
+	// Rows from BOTH pages persisted, with the §11 classification. The
+	// catalog_pos values are post-ordering-pass — here identical to the
+	// provisional per-tab index, because the single tab listed newest-first
+	// (v1 > v2 > v3 > v4 by published, same order the pages arrived in).
 	for i, id := range []string{"v1", "v2", "v3", "v4"} {
 		it := mustFeedItem(t, db, backfillTestChannel, id)
 		if it.DatePrecision != "coarse" {
@@ -223,11 +225,14 @@ func TestScanChannel_PageGranularWindowStop(t *testing.T) {
 		t.Errorf("v1 published = %q, want now-24h", it.Published)
 	}
 
-	cur := loadTestCursor(t, db, backfillTestChannel)
-	for _, tab := range []string{"videos", "streams"} {
-		if tc := cur.Tabs[tab]; tc == nil || !tc.Done {
-			t.Errorf("cursor %s tab not marked done: %+v", tab, tc)
-		}
+	// Both tabs ended cleanly ⇒ the scan completed: backfilled_at is set and
+	// the cursor is cleared (Task 3 — the deep completion assertions live in
+	// TestScanChannel_CompletionOrdersAndRecords).
+	if cb, err := db.GetChannelBackfill(backfillTestChannel); err != nil || cb.At == "" {
+		t.Errorf("backfilled_at = %q (err %v), want set on a clean scan", cb.At, err)
+	}
+	if raw, err := db.LoadBackfillCursor(backfillTestChannel); err != nil || raw != "" {
+		t.Errorf("backfill_state = %q (err %v), want cleared on completion", raw, err)
 	}
 }
 
@@ -303,8 +308,8 @@ func TestScanChannel_ResumesFromCursor(t *testing.T) {
 	}
 
 	cur := loadTestCursor(t, db, backfillTestChannel)
-	if tc := cur.Tabs["videos"]; tc == nil || tc.Done || tc.Continuation != "TOK2" {
-		t.Fatalf("videos cursor after failure = %+v, want continuation TOK2, not done", tc)
+	if tc := cur.Tabs["videos"]; tc == nil || tc.Done || tc.Continuation != "TOK2" || tc.NextPos != 2 {
+		t.Fatalf("videos cursor after failure = %+v, want continuation TOK2, next_pos 2, not done", tc)
 	}
 
 	// New scanner, same DB. The videos script's wantCont pins the resume token;
@@ -323,9 +328,12 @@ func TestScanChannel_ResumesFromCursor(t *testing.T) {
 		t.Fatalf("resumed scanChannel: %v", err)
 	}
 
-	// The provisional per-tab index resumed too: v3 continues at 2 after v1/v2.
+	// v3's final position is 2 — both readings agree here: the provisional
+	// per-tab index resumed at 2 after v1/v2 (pinned via next_pos above), and
+	// the completed scan's ordering pass keeps it at 2 (v3 is the oldest of
+	// the three by published).
 	if it := mustFeedItem(t, db, backfillTestChannel, "v3"); it.CatalogPos != 2 {
-		t.Errorf("v3 catalog_pos = %d, want 2 (per-tab index resumes across scans)", it.CatalogPos)
+		t.Errorf("v3 catalog_pos = %d, want 2", it.CatalogPos)
 	}
 }
 
@@ -365,11 +373,152 @@ func TestScanChannel_LiveItemAmongDatable(t *testing.T) {
 	}
 }
 
+// ---- the two completion tests (Plan 5 Task 3 brief) -------------------------
+
+// (a/Task 3) Completion: when every eligible tab ends cleanly, the ordering
+// pass renumbers catalog_pos channel-globally over the DEDUPED row set by
+// (published DESC, provisional pos ASC, video_id ASC), and the completion
+// record is written — backfilled_at / backfilled_window_days /
+// backfilled_with_membership all set, backfill_state cleared in the same
+// statement (§11: the cursor's lifecycle ends at completion).
+func TestScanChannel_CompletionOrdersAndRecords(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	fetch := newScriptedFetcher(t, map[string][]scriptedPage{
+		// One page per tab, no continuation — natural exhaustion, all clean.
+		// "vid-new" appears in BOTH tabs (a past stream), so the deduped set
+		// is 5 rows, not 6; the streams upsert overwrites its provisional pos
+		// to 1. The two tie groups pin the lower sort-key arms:
+		//   published now-10h: tie-pos-z (streams pos 0) vs tie-pos-b (videos
+		//     pos 1) ⇒ provisional pos ASC must win over video_id ASC
+		//     (alphabetically "tie-pos-b" would come first).
+		//   published now-20h: tie-id-a (streams pos 2) vs tie-id-b (videos
+		//     pos 2) ⇒ equal provisional pos falls through to video_id ASC.
+		"videos": {
+			{wantCont: "", page: &TabPage{Items: []TabItem{
+				coarseItem("vid-new", 1 * time.Hour),
+				coarseItem("tie-pos-b", 10 * time.Hour),
+				coarseItem("tie-id-b", 20 * time.Hour),
+			}}},
+		},
+		"streams": {
+			{wantCont: "", page: &TabPage{Items: []TabItem{
+				coarseItem("tie-pos-z", 10 * time.Hour),
+				coarseItem("vid-new", 1 * time.Hour),
+				coarseItem("tie-id-a", 20 * time.Hour),
+			}}},
+		},
+	})
+	bw := newTestBackfillWorker(t, db, withTabFetch(fetch.fetch), withBackfillNow(now))
+
+	if err := bw.scanChannel(context.Background(), backfillTestCh(), backfillTestChannel, 3, false); err != nil {
+		t.Fatalf("scanChannel: %v", err)
+	}
+
+	// Channel-global catalog_pos over the deduped set, by the §11 sort key.
+	want := map[string]int{
+		"vid-new":   0, // newest (now-1h)
+		"tie-pos-z": 1, // now-10h, provisional pos 0 beats...
+		"tie-pos-b": 2, // ...pos 1, despite "b" < "z"
+		"tie-id-a":  3, // now-20h, equal provisional pos ⇒ video_id ASC
+		"tie-id-b":  4,
+	}
+	for id, pos := range want {
+		if it := mustFeedItem(t, db, backfillTestChannel, id); it.CatalogPos != pos {
+			t.Errorf("%s catalog_pos = %d, want %d", id, it.CatalogPos, pos)
+		}
+	}
+
+	// The completion record: all three backfilled_* columns set. ts is the
+	// scan's one `now`; with_membership records the scan's eligibility (false
+	// here — written as 0, NOT left NULL: Task 4's sweep arm depends on the
+	// distinction).
+	cb, err := db.GetChannelBackfill(backfillTestChannel)
+	if err != nil {
+		t.Fatalf("GetChannelBackfill: %v", err)
+	}
+	if cb.At != now.Format(time.RFC3339) {
+		t.Errorf("backfilled_at = %q, want %q (the scan's one now)", cb.At, now.Format(time.RFC3339))
+	}
+	if cb.WindowDays == nil || *cb.WindowDays != 3 {
+		t.Errorf("backfilled_window_days = %v, want 3", cb.WindowDays)
+	}
+	if cb.WithMembership == nil || *cb.WithMembership {
+		t.Errorf("backfilled_with_membership = %v, want false (set, not NULL)", cb.WithMembership)
+	}
+	// ...and the cursor cleared with it (§11 lifecycle: a completed scan's
+	// stale continuation token must not leak into the next one).
+	if raw, err := db.LoadBackfillCursor(backfillTestChannel); err != nil || raw != "" {
+		t.Errorf("backfill_state = %q (err %v), want cleared on completion", raw, err)
+	}
+}
+
+// (b/Task 3) An arm-(b) (parser-failure) tab blocks completion: no renumber
+// (persisted rows keep their provisional per-tab catalog_pos), no completion
+// record (every backfilled_* column stays NULL), and the cursor stays saved
+// for the sweep-retry.
+func TestScanChannel_IncompleteTabBlocksCompletion(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	fetch := newScriptedFetcher(t, map[string][]scriptedPage{
+		"videos": {
+			// Page 1 persists two rows OUT of published order (v2 is newer but
+			// sits at provisional pos 1) — a renumber would flip them to 1/0,
+			// so the 0/1 assertions below are real evidence none ran.
+			{wantCont: "", page: &TabPage{
+				Items:        []TabItem{coarseItem("v1", 5 * time.Hour), coarseItem("v2", 1 * time.Hour)},
+				Continuation: "TOK2",
+			}},
+			// Page 2: non-empty with no datable item ⇒ arm (b), tab incomplete.
+			{wantCont: "TOK2", page: &TabPage{
+				Items:        []TabItem{undatedItem("u1")},
+				Continuation: "TOK3",
+			}},
+		},
+		"streams": emptyTabScript(),
+	})
+	bw := newTestBackfillWorker(t, db, withTabFetch(fetch.fetch), withBackfillNow(now))
+
+	err := bw.scanChannel(context.Background(), backfillTestCh(), backfillTestChannel, 3, false)
+	if !errors.Is(err, errUndatablePage) {
+		t.Fatalf("scanChannel error = %v, want errUndatablePage", err)
+	}
+
+	// No renumber: the provisional per-tab positions are untouched.
+	if it := mustFeedItem(t, db, backfillTestChannel, "v1"); it.CatalogPos != 0 {
+		t.Errorf("v1 catalog_pos = %d, want provisional 0 (no renumber on incomplete scan)", it.CatalogPos)
+	}
+	if it := mustFeedItem(t, db, backfillTestChannel, "v2"); it.CatalogPos != 1 {
+		t.Errorf("v2 catalog_pos = %d, want provisional 1 (no renumber on incomplete scan)", it.CatalogPos)
+	}
+
+	// No completion record: every backfilled_* column still NULL.
+	cb, err := db.GetChannelBackfill(backfillTestChannel)
+	if err != nil {
+		t.Fatalf("GetChannelBackfill: %v", err)
+	}
+	if cb.At != "" || cb.WindowDays != nil || cb.WithMembership != nil {
+		t.Errorf("completion record written on incomplete scan: %+v", cb)
+	}
+
+	// The cursor survives — the sweep-retry resumes from it.
+	cur := loadTestCursor(t, db, backfillTestChannel)
+	if tc := cur.Tabs["videos"]; tc == nil || tc.Done || tc.Continuation != "TOK2" {
+		t.Errorf("videos cursor = %+v, want continuation TOK2, not done", tc)
+	}
+	if tc := cur.Tabs["streams"]; tc == nil || !tc.Done {
+		t.Errorf("streams tab should have completed independently: %+v", tc)
+	}
+}
+
 // (e) Empty channel: every tab returns zero items and no continuation —
-// NEITHER arm. All tabs complete CLEANLY (Task 3 will set backfilled_at over
-// zero rows), no parser failure is recorded, and a second scan does not
-// refetch anything (misreading the parser arm as vacuously true would rescan
-// empty channels every cycle, forever — spec §11).
+// NEITHER arm. All tabs complete CLEANLY, the ordering pass runs over zero
+// rows, and backfilled_at is set — establishing the channel (its RSS may 404
+// forever) for ~3 requests total (spec §11). Misreading the parser arm as
+// vacuously true of an empty page would instead report failure and rescan
+// empty channels every cycle, forever; not-rescanning-after-completion itself
+// is the sweep's backfilled_at arm (Task 4), which never re-invokes a
+// completed channel's scan.
 func TestScanChannel_EmptyChannelCompletesCleanly(t *testing.T) {
 	db := newTestDB(t)
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
@@ -387,21 +536,24 @@ func TestScanChannel_EmptyChannelCompletesCleanly(t *testing.T) {
 		t.Errorf("empty channel took %d requests, want 3 (one page per tab)", got)
 	}
 
-	cur := loadTestCursor(t, db, backfillTestChannel)
-	for _, tab := range []string{"videos", "streams", "membership"} {
-		if tc := cur.Tabs[tab]; tc == nil || !tc.Done {
-			t.Errorf("cursor %s tab not done after empty exhaustion: %+v", tab, tc)
-		}
+	// Completion over zero rows: the record is written (all three columns,
+	// with_membership true — all three tabs were eligible) and the cursor is
+	// cleared. This is the established gate's second key for a channel whose
+	// public feed legitimately carries nothing.
+	cb, err := db.GetChannelBackfill(backfillTestChannel)
+	if err != nil {
+		t.Fatalf("GetChannelBackfill: %v", err)
 	}
-
-	// Second scan over the same DB: every tab's cursor is done, so nothing may
-	// be refetched (the scripted fetcher fails the test on ANY call).
-	fetch2 := newScriptedFetcher(t, map[string][]scriptedPage{})
-	bw2 := newTestBackfillWorker(t, db, withTabFetch(fetch2.fetch), withBackfillNow(now))
-	if err := bw2.scanChannel(context.Background(), backfillTestCh(), backfillTestChannel, 3, true); err != nil {
-		t.Fatalf("second scanChannel: %v", err)
+	if cb.At != now.Format(time.RFC3339) {
+		t.Errorf("backfilled_at = %q, want %q (empty channel must complete and establish)", cb.At, now.Format(time.RFC3339))
 	}
-	if got := fetch2.totalCalls(); got != 0 {
-		t.Errorf("second scan issued %d fetches, want 0", got)
+	if cb.WindowDays == nil || *cb.WindowDays != 3 {
+		t.Errorf("backfilled_window_days = %v, want 3", cb.WindowDays)
+	}
+	if cb.WithMembership == nil || !*cb.WithMembership {
+		t.Errorf("backfilled_with_membership = %v, want true", cb.WithMembership)
+	}
+	if raw, err := db.LoadBackfillCursor(backfillTestChannel); err != nil || raw != "" {
+		t.Errorf("backfill_state = %q (err %v), want cleared on completion", raw, err)
 	}
 }

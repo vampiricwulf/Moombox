@@ -237,6 +237,135 @@ func (db *Database) LoadBackfillCursor(channelID string) (string, error) {
 	return state.String, nil
 }
 
+// FeedOrderRow is the §11 ordering pass's read shape: the sort-key
+// coordinates of one feed_items row — published, the provisional (per-tab)
+// catalog_pos the scan wrote, and video_id as the final tie-break.
+type FeedOrderRow struct {
+	VideoID    string
+	Published  string
+	CatalogPos int
+}
+
+// ListFeedOrderRows returns the sort-key coordinates of ALL of channelID's
+// feed_items rows, fully collected before returning. The §11 ordering pass
+// must collect-then-update: with SetMaxOpenConns(1), issuing UPDATEs under an
+// open SELECT cursor deadlocks on the single connection. FeedScope is not a
+// substitute reader — it is window-bounded, and the renumber must cover every
+// row the channel has.
+func (db *Database) ListFeedOrderRows(channelID string) ([]FeedOrderRow, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT video_id, published, catalog_pos FROM feed_items WHERE channel_id = ?`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FeedOrderRow
+	for rows.Next() {
+		var r FeedOrderRow
+		if err := rows.Scan(&r.VideoID, &r.Published, &r.CatalogPos); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RenumberCatalog writes catalog_pos = 0..n-1 over orderedVideoIDs, in order,
+// in ONE transaction (§11 ordering pass; BeginTx idiom per
+// DeleteChannelFeedData). The CALLER — scanChannel's completion path — has
+// already collected the rows, closed its cursor, and sorted (collect-then-
+// update; see ListFeedOrderRows). The UPDATE is deliberately unguarded: the
+// precision ladder governs the upsert only, and would reject writing a coarse
+// row's new position onto an exact RSS row.
+func (db *Database) RenumberCatalog(chID string, orderedVideoIDs []string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx,
+		`UPDATE feed_items SET catalog_pos = ? WHERE channel_id = ? AND video_id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for i, id := range orderedVideoIDs {
+		if _, err := stmt.ExecContext(ctx, i, chID, id); err != nil {
+			return fmt.Errorf("renumber %s pos %d: %w", id, i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// SetChannelBackfilled writes the §11 completion record — backfilled_at,
+// backfilled_window_days (the resolved archive_window_days the scan ran at)
+// and backfilled_with_membership (whether /membership was eligible for the
+// scan) — and clears backfill_state in the same statement: the cursor's
+// lifecycle ends at completion (§11 — a completed scan's stale continuation
+// token must not leak into the next one). Upsert shape per SetChannelRSSOK;
+// last_rss_ok_at is untouched (§6: neither writer depends on the other).
+func (db *Database) SetChannelBackfilled(chID string, windowDays int, withMembership bool, ts string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	m := 0
+	if withMembership {
+		m = 1
+	}
+	_, err := db.db.ExecContext(db.getCtx(), `INSERT INTO channel_state
+  (channel_id, backfilled_at, backfilled_window_days, backfilled_with_membership, backfill_state)
+VALUES (?, ?, ?, ?, NULL)
+ON CONFLICT(channel_id) DO UPDATE SET
+  backfilled_at = excluded.backfilled_at,
+  backfilled_window_days = excluded.backfilled_window_days,
+  backfilled_with_membership = excluded.backfilled_with_membership,
+  backfill_state = NULL`, chID, ts, windowDays, m)
+	return err
+}
+
+// ChannelBackfill is the completion record's read shape — the three
+// backfilled_* columns of channel_state. Zero values mean NULL (or a missing
+// row): At "" ⇒ the channel never completed a backfill. Read by tests and by
+// the sweep's arms (Task 4).
+type ChannelBackfill struct {
+	At             string // backfilled_at, "" when NULL
+	WindowDays     *int   // backfilled_window_days, nil when NULL
+	WithMembership *bool  // backfilled_with_membership, nil when NULL
+}
+
+// GetChannelBackfill returns channelID's completion record. A missing
+// channel_state row reads the same as an all-NULL one — never backfilled.
+func (db *Database) GetChannelBackfill(channelID string) (ChannelBackfill, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	var cb ChannelBackfill
+	var at sql.NullString
+	var wd, wm sql.NullInt64
+	err := db.db.QueryRowContext(db.getCtx(),
+		`SELECT backfilled_at, backfilled_window_days, backfilled_with_membership
+		   FROM channel_state WHERE channel_id = ?`, channelID).Scan(&at, &wd, &wm)
+	if err == sql.ErrNoRows {
+		return cb, nil
+	}
+	if err != nil {
+		return cb, err
+	}
+	cb.At = at.String
+	if wd.Valid {
+		v := int(wd.Int64)
+		cb.WindowDays = &v
+	}
+	if wm.Valid {
+		v := wm.Int64 != 0
+		cb.WithMembership = &v
+	}
+	return cb, nil
+}
+
 // GetChannelEstablished reads the §11 established gate for channelID:
 // last_rss_ok_at IS NOT NULL OR backfilled_at IS NOT NULL. A missing
 // channel_state row is NOT established — a fresh install whose first RSS
