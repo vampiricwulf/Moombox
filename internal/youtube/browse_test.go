@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ func decodeBrowseRequest(t *testing.T, r *http.Request) map[string]any {
 const browseVideosPage1 = `{
   "responseContext": {"visitorData": "vd-page1"},
   "contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
-    {"tabRenderer": {"title": "Videos", "selected": true, "tabIdentifier": "", "content": {"richGridRenderer": {"contents": [
+    {"tabRenderer": {"title": "Videos", "selected": true, "tabIdentifier": "", "endpoint": {"commandMetadata": {"webCommandMetadata": {"url": "/channel/UCbrowsetest0000000000ab/videos"}}}, "content": {"richGridRenderer": {"contents": [
       {"richItemRenderer": {"content": {"lockupViewModel": {"contentId": "K-rKAxqjAec", "metadata": {"lockupMetadataViewModel": {"title": {"content": "newest upload"}}}}}}},
       {"richItemRenderer": {"content": {"lockupViewModel": {"contentId": "gr-ZTohjwnQ", "meta": "Streamed 2 years ago", "metadata": {"lockupMetadataViewModel": {"title": {"content": "old stream vod"}}}}}}},
       {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "TOK2"}}}}
@@ -192,5 +193,147 @@ func TestFetchChannelTabPage_LoopDetected(t *testing.T) {
 	}
 	if !errors.Is(err, ErrContinuationLoop) {
 		t.Errorf("expected errors.Is(err, ErrContinuationLoop), got %v", err)
+	}
+}
+
+// browseHomeSelectedPage models a topic/auto-generated channel that lacks a
+// /videos tab: the videos-params browse falls back to a Home-selected tab
+// WITH content. The home shelf item must never leak into the videos scan.
+const browseHomeSelectedPage = `{
+  "contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
+    {"tabRenderer": {"title": "Home", "selected": true, "endpoint": {"commandMetadata": {"webCommandMetadata": {"url": "/channel/UCbrowsetest0000000000ab/featured"}}}, "content": {"richGridRenderer": {"contents": [
+      {"richItemRenderer": {"content": {"lockupViewModel": {"contentId": "homeShelf01", "metadata": {"lockupMetadataViewModel": {"title": {"content": "home shelf video"}}}}}}}
+    ]}}}}
+  ]}}
+}`
+
+// browseUploadsPlaylistPage is the VLUU… uploads-playlist browse response:
+// one selected tab (no /videos identity — playlists have none), classic
+// playlistVideoRenderer items plus a continuation.
+const browseUploadsPlaylistPage = `{
+  "contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
+    {"tabRenderer": {"selected": true, "content": {"sectionListRenderer": {"contents": [
+      {"itemSectionRenderer": {"contents": [{"playlistVideoListRenderer": {"contents": [
+        {"playlistVideoRenderer": {"videoId": "uploadVid01", "title": {"runs": [{"text": "upload one"}]}}},
+        {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "PLTOK2"}}}}
+      ]}}]}}
+    ]}}}}
+  ]}}
+}`
+
+// browseEmptyVideosTabPage is a REAL videos tab (identity matches the
+// request) that simply has no items — a channel that never uploaded.
+const browseEmptyVideosTabPage = `{
+  "contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
+    {"tabRenderer": {"title": "Videos", "selected": true, "endpoint": {"commandMetadata": {"webCommandMetadata": {"url": "/channel/UCbrowsetest0000000000ab/videos"}}}, "content": {"richGridRenderer": {"contents": []}}}}
+  ]}}
+}`
+
+// browseMembershipPage1 is a members-visible membership tab: identified by
+// TAB_ID_SPONSORSHIPS alone (no endpoint URL), exercising the identifier
+// fallback of the tab-identity check.
+const browseMembershipPage1 = `{
+  "contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
+    {"tabRenderer": {"title": "Membership", "selected": true, "tabIdentifier": "TAB_ID_SPONSORSHIPS", "content": {"richGridRenderer": {"contents": [
+      {"richItemRenderer": {"content": {"lockupViewModel": {"contentId": "K-rKAxqjAec", "metadata": {"lockupMetadataViewModel": {"title": {"content": "members karaoke"}}}}}}}
+    ]}}}}
+  ]}}
+}`
+
+// A channel LACKING /videos (Home-selected response) must redirect to the
+// UC→UU uploads playlist — and the Home items must not leak into the result.
+func TestFetchChannelTabPage_NoVideosTab_UploadsPlaylistFallback(t *testing.T) {
+	var calls atomic.Int32
+	s := newBrowseTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		body := decodeBrowseRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch n {
+		case 1:
+			if got := body["browseId"]; got != "UCbrowsetest0000000000ab" {
+				t.Errorf("request 1 browseId: want channel ID, got %v", got)
+			}
+			w.Write([]byte(browseHomeSelectedPage))
+		case 2:
+			if got := body["browseId"]; got != "VLUUbrowsetest0000000000ab" {
+				t.Errorf("request 2 browseId: want VLUU uploads playlist, got %v", got)
+			}
+			if _, hasParams := body["params"]; hasParams {
+				t.Error("uploads-playlist browse must not carry tab params")
+			}
+			w.Write([]byte(browseUploadsPlaylistPage))
+		default:
+			t.Errorf("unexpected request %d", n)
+		}
+	})
+
+	page, err := s.FetchChannelTabPage(context.Background(), "UCbrowsetest0000000000ab", "videos", "")
+	if err != nil {
+		t.Fatalf("FetchChannelTabPage: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected uploads-playlist redirect (2 requests), got %d", got)
+	}
+	if len(page.Items) != 1 || page.Items[0].VideoID != "uploadVid01" {
+		t.Fatalf("expected only the playlist item (home items must not leak), got %+v", page.Items)
+	}
+	if page.Items[0].Title != "upload one" {
+		t.Errorf("playlistVideoRenderer title.runs not read: %q", page.Items[0].Title)
+	}
+	if page.Continuation != "PLTOK2" {
+		t.Errorf("continuation: want PLTOK2 from the playlist page, got %q", page.Continuation)
+	}
+}
+
+// A real-but-EMPTY selected videos tab must NOT redirect to the uploads
+// playlist — the tab exists and is simply exhausted. Redirecting would, on a
+// streams-only channel, contaminate the videos scan with UU stream VODs.
+func TestFetchChannelTabPage_EmptyVideosTab_NoFallback(t *testing.T) {
+	var calls atomic.Int32
+	s := newBrowseTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(browseEmptyVideosTabPage))
+	})
+
+	page, err := s.FetchChannelTabPage(context.Background(), "UCbrowsetest0000000000ab", "videos", "")
+	if err != nil {
+		t.Fatalf("FetchChannelTabPage: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("real-but-empty videos tab must NOT redirect (1 request), got %d", got)
+	}
+	if len(page.Items) != 0 {
+		t.Errorf("expected no items, got %+v", page.Items)
+	}
+	if page.Continuation != "" {
+		t.Errorf("expected exhausted tab, got continuation %q", page.Continuation)
+	}
+}
+
+// The membership tab request must carry the derived membership params, and a
+// TAB_ID_SPONSORSHIPS-selected response must parse.
+func TestFetchChannelTabPage_MembershipParams(t *testing.T) {
+	s := newBrowseTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		body := decodeBrowseRequest(t, r)
+		if got := body["browseId"]; got != "UCbrowsetest0000000000ab" {
+			t.Errorf("browseId: want channel ID, got %v", got)
+		}
+		if got := body["params"]; got != "EgptZW1iZXJzaGlw" {
+			t.Errorf("params: want membership tab params EgptZW1iZXJzaGlw, got %v", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(browseMembershipPage1))
+	})
+
+	page, err := s.FetchChannelTabPage(context.Background(), "UCbrowsetest0000000000ab", "membership", "")
+	if err != nil {
+		t.Fatalf("FetchChannelTabPage: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].VideoID != "K-rKAxqjAec" {
+		t.Fatalf("expected the members item, got %+v", page.Items)
+	}
+	if page.Continuation != "" {
+		t.Errorf("expected exhausted tab, got continuation %q", page.Continuation)
 	}
 }

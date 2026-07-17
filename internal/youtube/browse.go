@@ -89,6 +89,18 @@ type browseSession struct {
 	visitorData string
 }
 
+// endpointOrDefault returns the /browse endpoint, honoring the test override.
+// Read under the same mutex as the rest of browseState so the seam carries no
+// latent race shape, even though tests only set it before any fetch.
+func (b *browseState) endpointOrDefault() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.endpoint != "" {
+		return b.endpoint
+	}
+	return constants.YouTubeURLs.API + "/browse"
+}
+
 // beginPage returns the visitorData to use for this page's request and
 // prepares the (channelID, tab) session. A page-1 call (continuation == "")
 // RESETS the session: the cursor-lifecycle rule (spec §11) says a restarted
@@ -201,32 +213,32 @@ func (s *Service) FetchChannelTabPage(ctx context.Context, channelID, tab, conti
 // fetchBrowseFirstPage POSTs browseId+params and parses the ytInitialData-
 // shaped response (the /browse page-1 body carries the same
 // contents.twoColumnBrowseResultsRenderer.tabs envelope the HTML page embeds).
-// When the videos tab yields nothing usable it falls back to browsing the
-// channel's UU uploads playlist — topic/auto-generated channels have no
-// /videos tab but do have the equivalent playlist (yt-dlp does the same
-// redirect; browseId "VL<playlist>" per _tab.py). walkVideoRenderers already
-// handles the playlist's playlistVideoRenderer items.
+//
+// UC→UU uploads-playlist fallback, videos tab only, fired on tab IDENTITY
+// mismatch — yt-dlp's model (_tab.py:2320-2326 redirects when the selected
+// tab is not the requested one): a topic/auto-generated channel has no
+// /videos tab, so the videos params come back Home-selected (usually WITH
+// shelf content — yield is no signal) and the UU uploads playlist is the only
+// video source. A real-but-empty selected videos tab must NOT redirect: its
+// identity matches, the tab is simply exhausted — and on a streams-only
+// channel the UU playlist would contaminate the videos scan with stream VODs.
+// "streams" and "membership" get no fallback at all: their absence is natural
+// exhaustion (never streamed / not a member), spec §11.
 func (s *Service) fetchBrowseFirstPage(ctx context.Context, channelID, tab, params, visitorData string) (items []MembershipVideo, token, newVD string, err error) {
 	body, err := s.browsePost(ctx, s.browseRequestBody(channelID, params, "", visitorData), visitorData)
 	if err != nil {
 		return nil, "", "", err
 	}
-	items, token, newVD, hasTab := parseBrowseTabPage(body, tab)
+	items, token, newVD, tabMatched := parseBrowseTabPage(body, tab)
 
-	// UC→UU uploads-playlist fallback, videos tab only: "streams" or
-	// "membership" legitimately not existing is natural exhaustion (a channel
-	// that never streamed / a non-member), never a reason to scan uploads. An
-	// empty-but-present videos tab also triggers the fallback — for a truly
-	// empty channel the playlist is empty too (one wasted request), and for a
-	// tab-less channel it is the only source. Selection depth cannot tell
-	// "channel lacks /videos" apart from "videos tab is empty", so the
-	// zero-yield trigger covers both.
-	if tab == "videos" && (!hasTab || (len(items) == 0 && token == "")) && strings.HasPrefix(channelID, "UC") {
+	if tab == "videos" && !tabMatched && strings.HasPrefix(channelID, "UC") {
 		plBody, plErr := s.browsePost(ctx, s.browseRequestBody("VLUU"+channelID[2:], "", "", visitorData), visitorData)
 		if plErr != nil {
 			return nil, "", "", fmt.Errorf("uploads-playlist fallback: %w", plErr)
 		}
-		if plItems, plToken, plVD, plOK := parseBrowseTabPage(plBody, tab); plOK {
+		// tab "" accepts the playlist page's selected tab as-is — a playlist
+		// response's tab carries no /videos identity to match.
+		if plItems, plToken, plVD, plOK := parseBrowseTabPage(plBody, ""); plOK {
 			items, token = plItems, plToken
 			if plVD != "" {
 				newVD = plVD
@@ -308,10 +320,7 @@ func (s *Service) browseRequestBody(browseID, params, continuation, visitorData 
 // request context. No internal retry: the scanner owns pacing and the sweep
 // retries a failed scan next cycle, mirroring chat's single-attempt fetchChat.
 func (s *Service) browsePost(ctx context.Context, reqBody map[string]any, visitorData string) ([]byte, error) {
-	endpoint := s.browse.endpoint
-	if endpoint == "" {
-		endpoint = constants.YouTubeURLs.API + "/browse"
-	}
+	endpoint := s.browse.endpointOrDefault()
 	if key := s.PlayerAPI.APIKey(); key != "" {
 		endpoint += "?key=" + key
 	}
@@ -351,55 +360,106 @@ func (s *Service) browsePost(ctx context.Context, reqBody map[string]any, visito
 	return body, nil
 }
 
+// browseTabHeader extends channel_membership.go's membershipTabHeader
+// (embedded, reused as-is: selected / tabIdentifier / lazy RawMessage content)
+// with the tab's endpoint URL — the identity signal yt-dlp keys its tab check
+// on (_tab.py:2214-2224 extracts the tab id from the endpoint URL's path
+// segment, falling back to tabIdentifier).
+type browseTabHeader struct {
+	membershipTabHeader
+	Endpoint struct {
+		CommandMetadata struct {
+			WebCommandMetadata struct {
+				URL string `json:"url"`
+			} `json:"webCommandMetadata"`
+		} `json:"commandMetadata"`
+	} `json:"endpoint"`
+}
+
 // browseFirstPageEnvelope decodes a page-1 /browse response in one pass:
-// responseContext for the per-page visitorData, plus the embedded
-// ytInitialTabs tab list (lazy RawMessage tab bodies, reused as-is from
-// channel_membership.go).
+// responseContext for the per-page visitorData, plus the channel tab list —
+// the same shape as ytInitialTabs, with browseTabHeader in place of the bare
+// membershipTabHeader so tab identity is visible.
 type browseFirstPageEnvelope struct {
 	ResponseContext struct {
 		VisitorData string `json:"visitorData"`
 	} `json:"responseContext"`
-	ytInitialTabs
+	Contents struct {
+		TwoColumnBrowseResultsRenderer struct {
+			Tabs []struct {
+				TabRenderer           *browseTabHeader `json:"tabRenderer"`
+				ExpandableTabRenderer *browseTabHeader `json:"expandableTabRenderer"`
+			} `json:"tabs"`
+		} `json:"twoColumnBrowseResultsRenderer"`
+	} `json:"contents"`
+}
+
+// browseTabID returns a tab's identity as one of the tab names this client
+// requests ("videos"/"streams"/"membership"), or "" for anything else (Home,
+// shorts, playlists…). Primary signal is the endpoint URL's last path segment
+// ("/channel/UC…/videos" → "videos"); fallback is the TAB_ID_SPONSORSHIPS →
+// "membership" identifier mapping — both per yt-dlp _tab.py:2214-2224.
+func browseTabID(h *browseTabHeader) string {
+	u := h.Endpoint.CommandMetadata.WebCommandMetadata.URL
+	if i := strings.IndexAny(u, "?#"); i >= 0 {
+		u = u[:i]
+	}
+	u = strings.TrimSuffix(u, "/")
+	if i := strings.LastIndex(u, "/"); i >= 0 {
+		switch seg := u[i+1:]; seg {
+		case "videos", "streams", "membership":
+			return seg
+		}
+	}
+	if h.TabIdentifier == membershipTabIdentifier {
+		return "membership"
+	}
+	return ""
 }
 
 // parseBrowseTabPage extracts items + continuation token from a page-1
-// /browse response. hasTab reports whether a usable selected tab was found at
-// all (false drives the videos-tab UU fallback; for membership it means "not
-// a member" — the same absent-TAB_ID_SPONSORSHIPS signal parseMembershipTab
-// keys on — which the caller treats as clean exhaustion, not an error).
-func parseBrowseTabPage(body []byte, tab string) (items []MembershipVideo, token, visitorData string, hasTab bool) {
+// /browse response. tabMatched reports whether the SELECTED tab's identity is
+// the tab that was requested (tab "" accepts any selected tab — the uploads-
+// playlist fallback response). A mismatch — e.g. a Home-selected response for
+// videos params on a channel lacking the tab, or the non-member Home fallback
+// parseMembershipTab keys on for membership — yields no items (the wrong
+// tab's content must not leak into the scan); the videos caller redirects to
+// the UU playlist, everyone else treats it as clean exhaustion. A MATCHED tab
+// with no items is a real-but-empty tab: tabMatched true, empty page.
+func parseBrowseTabPage(body []byte, tab string) (items []MembershipVideo, token, visitorData string, tabMatched bool) {
 	var env browseFirstPageEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, "", "", false
 	}
 	visitorData = env.ResponseContext.VisitorData
 
-	// Deep-parse ONLY the selected tab body (the lazy-decode rationale at
-	// ytInitialTabs). The membership tab must be the selected
-	// TAB_ID_SPONSORSHIPS tab, exactly like parseMembershipTab; videos and
-	// streams take whichever tab the params selected.
-	var content json.RawMessage
+	var selected *browseTabHeader
 	for _, t := range env.Contents.TwoColumnBrowseResultsRenderer.Tabs {
 		h := t.TabRenderer
 		if h == nil {
 			h = t.ExpandableTabRenderer
 		}
-		if h == nil || !h.Selected || len(h.Content) == 0 {
-			continue
+		if h != nil && h.Selected {
+			selected = h
+			break
 		}
-		if tab == "membership" && h.TabIdentifier != membershipTabIdentifier {
-			continue
-		}
-		content = h.Content
-		break
 	}
-	if len(content) == 0 {
+	if selected == nil {
+		return nil, "", visitorData, false
+	}
+	if tab != "" && browseTabID(selected) != tab {
 		return nil, "", visitorData, false
 	}
 
+	// Deep-parse ONLY the selected tab body (the lazy-decode rationale at
+	// ytInitialTabs). Missing/unparseable content on a matched tab is an
+	// empty page, not a mismatch — the channel HAS the tab.
+	if len(selected.Content) == 0 {
+		return nil, "", visitorData, true
+	}
 	var tree map[string]any
-	if err := json.Unmarshal(content, &tree); err != nil {
-		return nil, "", visitorData, false
+	if err := json.Unmarshal(selected.Content, &tree); err != nil {
+		return nil, "", visitorData, true
 	}
 	seen := make(map[string]struct{})
 	walkVideoRenderers(tree, seen, &items)
