@@ -112,7 +112,8 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 
 ### 11. Download Worker
 `worker.NewDownloadWorker()` creates the main job processing engine. Internally creates:
-- `JobQueue` with configurable max parallel downloads (default 2) and 100 lifecycle slots
+- `JobQueue` with configurable max parallel VOD downloads (default 10; broadcasts are never throttled by the pool) and 100 lifecycle slots
+- `Scheduler` that admits backlog (`Queued`) jobs at most `archive_slots` at a time per channel — the only path out of `Queued`
 - `StreamProcessor` for probing stream status and waiting for live
 - `DownloadOrchestrator` for the full download lifecycle
 
@@ -124,7 +125,11 @@ The `OnCookieRefreshNeeded` callback is wired to `autoCookieSvc.RefreshCookies()
 `worker.NewTrimService()` creates the FFmpeg-based clip creation service. Prevents concurrent trim operations on the same job via `activeOps` mutex map.
 
 ### 13. Feed Monitor (YouTube RSS + members-only)
-`monitor.NewFeedMonitor()` polls YouTube RSS feeds (`https://www.youtube.com/feeds/videos.xml?channel_id=...`) for new videos. Default interval from config. Immediate first check on startup, then timer-based with jitter. When `membership_discovery` is enabled (default) and YouTube auth cookies are present, `checkChannel` additionally fetches the channel's authenticated `/membership` tab (`youtube.FetchMembershipVideos`) — the only discovery source for members-only content, which RSS/DECAPI never list — and merges those items with the RSS entries into one recency-ranked candidate list capped at `max_feed_items` (so membership can't flood the queue). Members-only candidates are probed with the authenticated `ProbeVideoAuth` closure so a members VOD classifies correctly instead of misfiring as "upcoming". A membership fetch failure is logged but never marks the RSS feed unhealthy (independent signals).
+`monitor.NewFeedMonitor()` polls YouTube RSS feeds (`https://www.youtube.com/feeds/videos.xml?channel_id=...`) for new videos. Default interval from config. Immediate first check on startup, then timer-based with jitter. When `membership_discovery` is enabled (default) and YouTube auth cookies are present, `checkChannel` additionally fetches the channel's authenticated `/membership` tab (`youtube.FetchMembershipVideos`) — the only discovery source for members-only content, which RSS/DECAPI never list. Members-only candidates are probed with the authenticated `ProbeVideoAuth` closure so a members VOD classifies correctly instead of misfiring as "upcoming". A membership fetch failure is logged but never marks the RSS feed unhealthy (independent signals).
+
+`checkChannel` runs four steps per channel per cycle: **FETCH** (RSS + membership, independently fallible), **STORE** (upsert every listed item into the persistent `feed_items` table, tracking which IDs are new this cycle), **WALK** (a serial probe pass over the store's archive scope — everything published within `archive_window_days`, default 3 and per-channel overridable, plus ALL upcoming/live rows regardless of age — applying `HasActiveJob` dedup, term filtering, and probe-status rules, with per-source early exit once a date-ordered source falls entirely outside the window), and **ARCHIVE** (re-read the scope and decide job creation per row). ARCHIVE assigns each job a disposition: broadcasts (live/upcoming) and VODs first inserted this cycle are admitted immediately (`queue_priority` 0), while backlog VODs already known to the store are created as `Queued` (`queue_priority` 1) and paced by the worker's per-channel `archive_slots` scheduler — a backlog sweep never delays new or live content.
+
+A companion `monitor.NewBackfillWorker()` owns the full-catalog backfill (channel add, window widening, or a manual `R B` / `POST /api/backfill/rescan` re-run): it scans the channel's `videos`, `streams`, and (when membership is active) `membership` tabs to window depth via YouTube's `/browse` continuation API, upserting into the same store. Scans are strictly serial across channels on a single consumer goroutine, globally paced at 1 tab page/second, resumable via a cursor persisted in `channel_state.backfill_state`, and report progress to both UIs. The sweep that queues scans rides the feed-monitor cycle, so startup and `kickMonitors()` both trigger it.
 
 ### 14. DECAPI Monitor
 `monitor.NewDecapiMonitor()` uses the DECAPI API to find the latest video for YouTube channels. Rate-limited to 60 requests/minute (reads rate limit headers from responses). Stagger of 1 second between per-channel requests.
@@ -156,7 +161,8 @@ If TTY is detected and `--headless` is not set, creates and runs the BubbleTea t
 
 After all services are created, `main.go` wires the event callbacks:
 
-- `feedMon.OnVideoFound` / `decapiMon.OnVideoFound` -> creates YouTube job in database, enqueues in worker, broadcasts via WebSocket
+- `feedMon.OnVideoFound` / `decapiMon.OnVideoFound` -> creates YouTube job in database per the callback's `JobDisposition` (broadcasts and new VODs enqueue in the worker immediately; backlog VODs are created `Queued` for the scheduler), broadcasts via WebSocket
+- `feedMon.BackfillSweep` -> queues backfill scans for channels needing one; `s.backfillRescan` (TUI `R B` chord + `POST /api/backfill/rescan`) forces the same sweep for every channel
 - `twitchMon.OnStreamFound` -> creates Twitch job, enqueues, broadcasts
 - `feedMon.OnSchedule` / `decapiMon.OnSchedule` / `twitchMon.OnSchedule` -> broadcasts all three monitor timer values via WebSocket
 - `db.OnJobUpdate` -> `wsHub.BroadcastJobUpdate()` (per-job WebSocket messages)
@@ -449,9 +455,9 @@ The `JobQueue` implements a two-tier concurrency model:
 - A job holds a lifecycle slot from `Dequeue()` to `Complete()`
 - This means up to 100 jobs can be probing, waiting for live, downloading, or muxing at once
 
-**Download tier (configurable, default 2 slots):**
-- Gates how many jobs can be actively downloading segments in parallel
-- A job acquires a download slot via `AcquireDownloadSlot()` after stream processing
+**Download tier (configurable, default 10 slots):**
+- Gates how many VOD jobs can be actively downloading segments in parallel — VODs ONLY. Broadcasts pass through ungated (`acquireDownloadSlot` with `isVod=false` is a no-op): a missed slot on a VOD delays a file that already exists, a missed slot on a live broadcast loses footage. Peak concurrent downloads is therefore (live broadcasts) + `num_parallel_downloads`
+- A VOD job acquires a download slot via `AcquireDownloadSlot()` after stream processing
 - Released via `ReleaseDownloadSlot()` after download completes but before muxing
 - This allows muxing to proceed without blocking download slots (muxing is CPU-bound, not network-bound)
 
@@ -474,6 +480,15 @@ The `JobQueue` implements a two-tier concurrency model:
 - `notify` channel (capacity 1): signals that a pending job or lifecycle slot is available
 - `dlNotify` channel (capacity 1): signals that a download slot is available
 - Both use non-blocking sends to avoid producer blocking
+
+### Backlog Scheduler
+
+The worker-owned `Scheduler` (`internal/worker/scheduler.go`) admits backlog (`Queued`) jobs at most `archive_slots` at a time per channel — spec §10's archive-slots pacing. It is the only path out of `Queued`: `ShouldProcess(Queued)` is false by design, so neither startup recovery nor the worker's heartbeat poller ever touches a `Queued` row.
+
+- Single goroutine, woken by `Wake()` (backlog-job creation, job completion) or the worker's 60s heartbeat; wake signals coalesce through a capacity-1 channel
+- One admission sweep per wake: for each channel with `Queued` rows, admit `archive_slots − in-flight backlog jobs`, newest `published` first
+- Admission writes `status = Upcoming` durably FIRST (the in-flight count observes the DB), then enqueues in the JobQueue — a crash between the two steps self-heals because startup recovery re-enqueues `Upcoming` rows
+- `resolveSlots` is injected by `cmd/moombox` against the live config store, so per-channel `archive_slots` overrides hot-reload
 
 ### ProgressTracker
 
@@ -613,6 +628,9 @@ go func() {
 ## Job Status Lifecycle
 
 ```
+Queued (backlog VODs only)
+    |  admitted by the archive-slots scheduler
+    v
 Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
     |              |              |                  |
     |              |              |                  |
@@ -626,6 +644,7 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 
 | Status | Type | Meaning |
 |--------|------|---------|
+| `Queued` | `"Queued"` | Backlog VOD resting state: waiting for one of the channel's `archive_slots`. Only the scheduler moves it forward — `ShouldProcess` is false, so startup recovery and the heartbeat poller skip it. |
 | `Upcoming` | `"Upcoming"` | Stream is scheduled but not yet live. StreamProcessor is polling. |
 | `Live` | `"Live"` | Stream is confirmed live. About to download or actively downloading. |
 | `Downloading` | `"Downloading"` | Actively downloading segments. |
@@ -637,6 +656,7 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 
 ### Transition Rules
 
+- `Queued` -> `Upcoming`: Scheduler admitted the backlog VOD into one of its channel's `archive_slots` (backlog jobs only — broadcasts and newly discovered VODs are created directly as `Upcoming`/`Live`)
 - `Upcoming` -> `Live`: Stream went live (detected by probe)
 - `Upcoming` -> `Downloading`: Stream is a VOD or non-stream allowed for download
 - `Live` -> `Downloading`: Download slot acquired, segments being fetched

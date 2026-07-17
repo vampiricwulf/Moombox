@@ -105,9 +105,10 @@
 # are handled correctly (e.g., 2160 allows both 3840x2160 and 2160x3840).
 # max_video_resolution = 2160
 
-# Number of simultaneous download jobs. Peak concurrent downloads is
-# (live streams) + num_parallel_downloads, since live streams always
-# download immediately and never wait on this pool.
+# Peak concurrent VOD downloads across all channels. Live streams always
+# download immediately and never wait on this pool, so total concurrent
+# downloads can reach (live streams) + num_parallel_downloads. Per-channel
+# backlog pacing is governed by archive_slots; this is the global ceiling.
 # num_parallel_downloads = 10
 
 # Download live chat alongside streams

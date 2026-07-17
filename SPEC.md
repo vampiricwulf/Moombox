@@ -108,16 +108,16 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 1. **Config** — `config.Load()` reads TOML, applies defaults, runs legacy migrations
 2. **Logger** — slog wrapper with file rotation, ring buffer, pub/sub
 3. **Updater** — GitHub release checker, cleans up `.old` binary from previous update
-4. **Database** — SQLite WAL, 1 connection, migrations to schema v6, batch update goroutine
+4. **Database** — SQLite WAL, 1 connection, migrations to schema v16, batch update goroutine
 5. **CookieJar** — Netscape cookie file parsing, in-memory cookie store
 6. **YouTube Service** — PlayerAPI + Auth + format selector, fetches homepage for visitor data and API key
 7. **Twitch Service** — GQL API + Auth + EmoteResolver
 8. **PotProvider + Sidecar** — BotGuard/PO token generation. Primary path via embedded Node.js + JSDOM + bgutils-js subprocess (real integrity tokens); goja-only fallback when sidecar disabled or unhealthy. Triple in-process cache (session, minter, inflight).
 9. **CipherSolver** — YouTube signature/n-parameter decryption, 3-VM LRU, disk cache
 10. **NotificationManager** — Discord webhook dispatch
-11. **DownloadWorker** — Job queue (100 lifecycle + N download slots), stream processor, orchestrator
+11. **DownloadWorker** — Job queue (100 lifecycle + N VOD download slots), backlog scheduler, stream processor, orchestrator
 12. **TrimService** — FFmpeg-based clip extraction from finished recordings
-13. **FeedMonitor** — YouTube RSS polling
+13. **FeedMonitor + BackfillWorker** — YouTube RSS/membership discovery into the persistent feed-history store; serial full-catalog backfill scans
 14. **DECAPIMonitor** — DECAPI live-check polling for YouTube
 15. **TwitchMonitor** — Twitch GQL stream polling
 16. **CookieRefresh** — Periodic auth validation (30-minute interval)
@@ -207,7 +207,9 @@ internal/
 
 Three independent monitors detect new streams and create jobs:
 
-**FeedMonitor** (YouTube RSS + members-only) — Polls YouTube's RSS feed endpoint (`/feeds/videos.xml?channel_id={id}`) for each monitored YouTube channel. Runs on a configurable interval (default 10 minutes) with jitter. When `membership_discovery` is enabled (default on) and YouTube auth cookies are present, it ALSO fetches each channel's authenticated `/membership` tab — RSS and DECAPI never list members-only content, so this is the only discovery source for members-only live/upcoming streams (and, with `include_non_live_content`, their VODs). RSS and membership candidates are merged into ONE list ranked by recency and capped at `archive_slots` (default 3) per channel per cycle, so the two sources compete for the same slots and membership can't flood the queue (a live/upcoming members item ranks as "now" and always makes the cut). For each candidate not already tracked (`HasActiveJob` dedup), it calls `ProbeVideo()` — or the authenticated `ProbeVideoAuth()` for members-only items, so a members VOD isn't misfired as "upcoming" — to classify the video (live/upcoming/VOD/regular), applies channel term filtering (include/exclude), and if it passes, calls `OnVideoFound()` which creates a database job and enqueues it. The monitor uses a `MetadataFailureTracker` to stop retrying videos that consistently fail metadata probes.
+**FeedMonitor** (YouTube RSS + members-only) — Polls YouTube's RSS feed endpoint (`/feeds/videos.xml?channel_id={id}`) for each monitored YouTube channel. Runs on a configurable interval (default 10 minutes) with jitter. When `membership_discovery` is enabled (default on) and YouTube auth cookies are present, it ALSO fetches each channel's authenticated `/membership` tab — RSS and DECAPI never list members-only content, so this is the only discovery source for members-only live/upcoming streams (and, with `include_non_live_content`, their VODs). Discovery is store-driven: every item either source lists is upserted into the persistent per-channel `feed_items` table, so nothing is ever "crowded out" of a transient per-cycle list. Each cycle the monitor walks the store's archive scope — everything published within `archive_window_days` (default 3, per-channel overridable) plus ALL upcoming/live items regardless of age — serially probing candidates with `ProbeVideo()` — or the authenticated `ProbeVideoAuth()` for members-only items, so a members VOD isn't misfired as "upcoming" — to classify each (live/upcoming/VOD/regular), applying channel term filtering (include/exclude), and skipping anything already tracked (`HasActiveJob` dedup). Items that pass are archived via `OnVideoFound()`: broadcasts (live/upcoming) and VODs first seen this cycle become jobs immediately, while backlog VODs — older items already known to the store — are created as `Queued` and admitted at most `archive_slots` (default 3, per-channel overridable) at a time per channel by the worker's scheduler, so a backlog sweep never starves new or live content. The monitor uses a `MetadataFailureTracker` to stop retrying videos that consistently fail metadata probes.
+
+**Catalog backfill** — When a YouTube channel is added (or a manual re-scan is forced via the TUI `R B` chord or `POST /api/backfill/rescan`), a dedicated backfill worker scans the channel's `videos`, `streams`, and (when membership discovery is active) `membership` tabs down to the archive-window depth, feeding everything found into the `feed_items` store — the full-catalog seed that RSS's ~15-entry feed can never provide. Scans run strictly serially across channels, paced at one tab page per second, resume from a persisted cursor after interruption, and report per-channel progress in both UIs. An every-cycle sweep re-queues channels that were never backfilled or whose archive window has since widened.
 
 **DECAPIMonitor** — Polls DECAPI for the latest video from each monitored YouTube channel. This is a secondary detection mechanism that catches streams the RSS feed might miss (RSS updates can be delayed by minutes). Extracts video IDs from DECAPI responses, runs the same ProbeVideo + term filtering pipeline as FeedMonitor. Has its own rate limit tracking (respects DECAPI rate limit headers) and configurable check interval.
 
@@ -248,7 +250,9 @@ Muxing runs on `context.Background()` goroutines so it completes even if the par
 
 **Resume state** (`.resume.json` sidecar) stores `lastSeq`, `bytesWritten`, `timestamp`, and `baseUrl`. On startup, the downloader checks for a resume file, validates it, and resumes from the last checkpoint rather than starting over.
 
-**JobQueue** implements dual-layer concurrency: 100 lifecycle slots (`maxLifecycle`) gate how many jobs can be in the probe/wait/download pipeline simultaneously, while a configurable download semaphore (`maxDownloads`, default 2) gates how many jobs can be actively downloading segments. This design means stream probing, waiting-for-live, and auth negotiation do not consume download slots — only active segment downloading does. The download slot is acquired when the orchestrator begins segment downloads and released when it finishes (before muxing).
+**JobQueue** implements dual-layer concurrency: 100 lifecycle slots (`maxLifecycle`) gate how many jobs can be in the probe/wait/download pipeline simultaneously, while a configurable download semaphore (`maxDownloads`, default 10) gates how many VOD jobs can be actively downloading segments. The pool gates VODs ONLY: a broadcast is never made to wait for a slot — missing a slot on a VOD delays a file that already exists, while missing it on a live broadcast loses footage — so peak concurrent downloads is (live broadcasts) + `num_parallel_downloads`. This design means stream probing, waiting-for-live, and auth negotiation do not consume download slots — only active segment downloading does. The download slot is acquired when the orchestrator begins segment downloads and released when it finishes (before muxing).
+
+The worker also owns the **backlog Scheduler**: a single admission goroutine that is the only path out of `Queued`. Woken by backlog-job creation and job completion (with a heartbeat safety net), it admits per channel at most `archive_slots` minus that channel's in-flight backlog jobs, newest published first — writing `Upcoming` durably before enqueueing so a crash between the two steps self-heals on restart. `ShouldProcess(Queued)` is false by design, so neither startup recovery nor the heartbeat poller ever touches a `Queued` row.
 
 Priority ordering: Live=1 (highest), Upcoming/Downloading=0, Error=-1 (lowest). Live streams are always processed before upcoming or retried jobs. The pending queue caps at 100 entries; jobs beyond that are dropped with a warning log. Duplicate detection uses both the pending set and the processing map — a job that is already pending or actively processing is not re-enqueued.
 
@@ -301,6 +305,9 @@ This pattern is intentional for loose coupling — each package defines its own 
 ### Job Status Lifecycle
 
 ```
+Queued (backlog VODs only, admitted by the archive-slots scheduler)
+    |
+    v
 Upcoming -> Live -> Downloading -> Muxing -> Finished
     |         |         |            |
     +----+----+----+----+            +----> Error
@@ -312,7 +319,7 @@ Upcoming -> Live -> Downloading -> Muxing -> Finished
                 COOKIES?  (special error: auth needed)
 ```
 
-`JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings (RFC3339). Optional numeric fields use pointers. The `COOKIES?` status indicates the stream requires authentication that is not currently available.
+`JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings (RFC3339). Optional numeric fields use pointers. The `COOKIES?` status indicates the stream requires authentication that is not currently available. `Queued` is entered only by backlog VODs (older store items archived by the feed monitor); broadcasts and newly discovered content enter directly as `Upcoming`/`Live` and never wait in `Queued`.
 
 ### Error Hierarchy
 
@@ -628,15 +635,15 @@ db.UpdateJobFields(jobID, map[string]any{
     "progress": "V:1234 A:1234 C:5678",
 })
 ```
-Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 40-entry whitelist). Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers after write. Returns the updated `*Job`.
+Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 48-entry whitelist over `jobs` columns). Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers after write. Returns the updated `*Job`.
 
 **Pub/sub:** `OnJobUpdate(func(*Job))` fires when any field of a single job changes. `OnJobsChange(func([]*Job))` fires when the job list changes (add/delete). Both return an unsubscribe function. Multiple subscribers are supported — the WebSocket hub, TUI, and notification manager all subscribe independently. Callback invocation uses `safeCallJobUpdate`/`safeCallJobsChange` wrappers with panic recovery so one misbehaving subscriber does not affect others. The subscriber list is protected by a separate `subMu` RWMutex to avoid contention with the main database mutex.
 
 **Per-job log buffers:** The database maintains in-memory log buffers per job (max 200 lines, trimmed to 100 when exceeded). `RouteLogToJobs(line)` scans each log line for known job IDs and appends matching lines to the corresponding buffer. `TrackJobForLogs(jobID)` registers a job ID for log routing. `PruneJobLogs(activeIDs)` removes buffers for jobs that no longer exist. These per-job logs are served via `GET /api/jobs/{id}/logs` and displayed in the TUI job details panel.
 
-**Job table columns (49 fields):** id, video_id, url, title, channel_name, platform, status, progress, percent, eta, speed, error, created_at, updated_at, last_video_seq, last_audio_seq, total_video_seq, total_audio_seq, is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time, length_seconds, download_started_at, thumbnail_url, description, output_file, filename, output_directory, video_width, video_height, video_fps, file_size, chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file, twitch_quality, twitch_category, channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at, quality_preference.
+**Job table columns (55 fields):** id, video_id, url, title, channel_name, platform, status, progress, percent, eta, speed, error, created_at, updated_at, last_video_seq, last_audio_seq, total_video_seq, total_audio_seq, is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time, length_seconds, download_started_at, thumbnail_url, description, output_file, filename, output_directory, video_width, video_height, video_fps, file_size, chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file, twitch_quality, twitch_category, channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at, quality_preference, watched, resume_position, chat_offset, auto_retry_count, channel_id, queue_priority.
 
-**Additional tables:** `history` (video IDs seen by monitors, prevents re-adding), `segments` (multi-segment recordings, schema v5), `client_tokens` (persistent auth tokens, schema v6), `trims` (clip extractions from finished recordings).
+**Additional tables:** `history` (video IDs seen by monitors, prevents re-adding), `segments` (multi-segment recordings, schema v5), `client_tokens` (persistent auth tokens, schema v6), `trims` (clip extractions from finished recordings), `feed_items` (persistent per-channel discovery store, schema v16), `channel_state` (per-channel backfill/RSS bookkeeping, schema v16).
 
 ### Config
 

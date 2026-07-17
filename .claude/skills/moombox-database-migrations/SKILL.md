@@ -5,56 +5,62 @@ description: Use when adding database tables, columns, or indexes — covers sch
 
 # Database Migrations
 
-Schema changes use incremental version-based migrations in `internal/database/migrations.go`. Current schema version: **v6**.
+Schema changes use incremental version-based migrations in `internal/database/migrations.go`. Current schema version: **v16**. Versioning uses SQLite's built-in `PRAGMA user_version` (since v11), read via `readUserVersion()` and written via `writeUserVersion()` — the value is `%d`-interpolated because PRAGMA statements accept no bind parameters. Pre-v11 databases with the legacy `schema_version` table are carried forward automatically; a database NEWER than the binary is refused loudly (downgrade guard).
 
 ## Checklist
 
 ### 1. Bump Schema Version
-`internal/database/migrations.go` — Increment `schemaVersion` constant.
+`internal/database/migrations.go` — Increment the `schemaVersion` constant (exposed as `CurrentSchemaVersion()` for the `moombox add` side process).
 
-### 2. Add Migration Function
-Write an idempotent migration that only runs when `version < N`:
+### 2. Add Migration Block
+Append an idempotent `if version < N` block to `migrate()`. There is **no transaction** — statements run one at a time through `db.db.ExecContext(db.getCtx(), ...)`, and `writeUserVersion(N)` runs LAST. A crash mid-block therefore re-runs the whole block on next startup, so **every statement must be individually idempotent**:
+
 ```go
-if version < 7 {
-    // Use IF NOT EXISTS for tables
-    _, err = tx.Exec(`CREATE TABLE IF NOT EXISTS foo (...)`)
-    // For new columns, handle duplicate gracefully
-    _, err = tx.Exec(`ALTER TABLE jobs ADD COLUMN bar TEXT DEFAULT ''`)
-    if err != nil && strings.Contains(err.Error(), "duplicate column") {
-        err = nil // Column already exists, skip
+if version < 17 {
+    // Tables and indexes: IF NOT EXISTS
+    if _, err := db.db.ExecContext(db.getCtx(), `CREATE TABLE IF NOT EXISTS foo (...)`); err != nil {
+        return err
     }
-    // Bump version
-    _, err = tx.Exec(`UPDATE schema_version SET version = 7`)
+    // New columns: suppress duplicate-column (SQLite has no IF NOT EXISTS for columns)
+    if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN bar TEXT NOT NULL DEFAULT ''`); err != nil {
+        if !isDuplicateColumnErr(err) {
+            return err
+        }
+    }
+    if err := db.writeUserVersion(17); err != nil {
+        return err
+    }
 }
 ```
 
-**Idempotency patterns used in codebase:**
-- `CREATE TABLE IF NOT EXISTS` for new tables
-- `CREATE INDEX IF NOT EXISTS` for indexes
-- Error string matching `"duplicate column"` for `ALTER TABLE ADD COLUMN` (SQLite has no `IF NOT EXISTS` for columns)
+Larger migrations get their own method (see `migrateV16()`), called from the version block.
 
-### 3. Data Backfill (if needed)
-Derive new column values from existing data within the same migration. Examples from codebase:
-- v2: `chat_file` derived from `output_file` base path + `.chat.json`
-- v3: `thumbnail_file`/`description_file` backfilled by checking files on disk
+### 3. Update createSchema Too
+Fresh databases never run migrations — they execute the full `createSchema` constant and seed `PRAGMA user_version` at the current version. New tables, columns, and indexes must appear in **both** places (e.g. `segments`, `feed_items` are in `createSchema` AND in their migration blocks, by design).
 
-### 4. Update Field Maps (if adding updatable columns)
-`internal/database/database.go` — Add entry to `fieldToColumn` map so `UpdateJobFields()` can write to the new column. This map is intentionally a subset — only columns that change during the job lifecycle (status, progress, percent, speed, etc.) are included. Columns set once at creation (platform, manually_added, itags) are not in the map.
+### 4. Data Backfill (if needed)
+Derive new column values from existing data within the same block. **Collect-then-update is mandatory**: the pool runs `SetMaxOpenConns(1)`, so an `UPDATE` issued while a `SELECT` cursor is still open waits forever for the pool's only connection. Read all rows into a slice, `rows.Close()`, THEN loop the updates (see the v2 `chat_file` backfill). Log-and-continue on per-row failures; don't fail the migration.
 
-### 5. Update Queries
-Add the new column to relevant `SELECT` (prepared statements), `INSERT` (`AddJob`), and struct scan targets. The column order must match between INSERT and SELECT statements.
+### 5. Update Field Maps (jobs columns only)
+`internal/database/database.go` — `fieldToColumn` maps `UpdateJobFields()` keys to **`jobs` table** columns; it does not cover other tables (they have their own dedicated query functions, e.g. `database_feed_items.go`). `TestFieldToColumnCoverage` (database_test.go) enforces that every JSON-tagged `Job` field has an entry — when a new jobs column legitimately shouldn't go through `UpdateJobFields` (set once at insert, like `channel_id`), add it to the test's `excluded` set with a comment instead of skipping the map silently.
+
+### 6. Update Queries
+Add the new column to the relevant `SELECT` statements, `INSERT` (`AddJob`), and struct scan targets. Column order must match between INSERT and SELECT/scan. New tables get their own query file (pattern: `database_feed_items.go`).
 
 ## Key Constraints
 
-- Migrations use `if version < N` pattern (not switch/case)
-- SQLite limitations: no `DROP COLUMN` (before 3.35), no `ALTER COLUMN`, limited `ALTER TABLE`
+- Migrations use the `if version < N` pattern (not switch/case); `writeUserVersion(N)` is the last statement of each block
+- No transactions — idempotency per statement is the crash-safety mechanism
+- SQLite limitations: no `ALTER COLUMN`, limited `ALTER TABLE`; `DROP TABLE IF EXISTS` is fine (v16 dropped `last_videos`)
 - Non-destructive: never delete data that might be needed
 - Migration code stays forever (users may upgrade from any version)
-- `UpdateJobFields()` auto-appends `updated_at` with ISO 8601 timestamp on every call
+- `UpdateJobFields()` auto-appends `updated_at` on every call
 
 ## Common Mistakes
 
-- Forgetting `fieldToColumn` entry for a frequently-updated field — `UpdateJobFields` silently ignores it
-- Non-idempotent migration — crashes on re-run if partially applied (always handle `duplicate column` error)
-- Adding column without default — existing rows get NULL, may break queries
-- Column order mismatch between INSERT and SELECT/scan — causes wrong data in fields
+- Forgetting the `createSchema` half — fresh installs silently lack the new table/column
+- Forgetting `fieldToColumn` (or the coverage-test excluded set) for a new jobs column — `TestFieldToColumnCoverage` fails, or `UpdateJobFields` silently ignores the field
+- Non-idempotent statement — crashes on the re-run of a partially applied block (always `IF NOT EXISTS` / `isDuplicateColumnErr`)
+- Interleaving a backfill UPDATE inside an open SELECT cursor — deadlocks on the single connection
+- Adding a column without a default — existing rows get NULL, which may break scans expecting a value
+- Column order mismatch between INSERT and SELECT/scan — wrong data in fields

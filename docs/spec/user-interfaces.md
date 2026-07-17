@@ -230,6 +230,7 @@ The chord system is a three-state finite automaton:
 
 | Chord | Action | Condition |
 |-------|--------|-----------|
+| `R B` | Re-scan Feed History | Backfill rescan callback is configured. Forces a full-catalog backfill re-scan of every configured YouTube channel. |
 | `R C` | Recheck Cookies | Cookie recheck callback is configured |
 | `R F` | Force Cookie Refresh | Cookie force-refresh callback is configured |
 | `R V` | Check for Updates | Update check callback is configured |
@@ -411,6 +412,7 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 | `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes |
 | `log` | Log line string | When a new log line is emitted |
 | `check_timers` | `{ feed, decapi, twitch }` timestamps | When monitor check schedules change |
+| `backfill_status` | `{ channel, tab, pages, state }` | Feed-history backfill scan progress per channel (`state`: scanning / error / done / idle). Active scans are also seeded via `initial_state`. |
 | `pong` | Empty | Response to client `ping` messages |
 
 ### Client-to-Server Message Types
@@ -500,6 +502,12 @@ All routes use the `/api/` prefix unless otherwise noted. PO Token routes use ba
 | Method | Path | Notes |
 |--------|------|-------|
 | `GET` | `/api/status` | Aggregate status: version, uptime, active platforms, cookie status, Twitch auth, monitor timers, auto-cookie state. |
+
+### Backfill
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/api/backfill/rescan` | Force a feed-history backfill re-scan of every configured YouTube channel (same operation as the TUI `R B` chord). Debounced to one accepted run per 30s — a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}`. |
 
 ### Configuration
 

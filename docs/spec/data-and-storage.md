@@ -180,7 +180,7 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 
 ### Schema
 
-**Current version: 9**
+**Current version: 16**
 
 #### Tables
 
@@ -240,6 +240,9 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 | watched | INTEGER | 0 | Boolean (0/1), watched status (added v8) |
 | resume_position | REAL | NULL | Playback resume position in seconds (added v8) |
 | chat_offset | REAL | 0 | Chat timing offset in seconds, can be negative (added v9, migrated from player_prefs) |
+| auto_retry_count | INTEGER | NOT NULL, 0 | Monitor-driven Twitch flap auto-recovery attempts (added v13); reset by user-driven reinit/resume |
+| channel_id | TEXT | NULL | Config channel ID of the monitor channel that created the job (added v16). NULL for manually added and pre-v16 jobs. Set at insert, never updated. |
+| queue_priority | INTEGER | NOT NULL, 1 | Backlog marker (added v16): 0 = broadcast or newly discovered VOD (admitted immediately), 1 = backlog VOD (paced by the archive-slots scheduler) |
 
 **Indexes on jobs:** `idx_jobs_status(status)`, `idx_jobs_updated_at(updated_at)`, `idx_jobs_video_id(video_id)` (added v4).
 
@@ -317,12 +320,32 @@ Index: `idx_client_tokens_prefix(token_prefix)`.
 
 Capped at 10,000 entries; oldest pruned on insert.
 
-**last_videos:**
+**feed_items** (added v16) — the persistent per-channel discovery store. Every item any discovery source lists (RSS, membership tab, or the full-catalog backfill) is upserted here; the feed monitor's per-cycle walk and archive steps read their scope from this table rather than from a transient candidate list:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| channel_id | TEXT | PK (composite with video_id) |
+| video_id | TEXT | PK (composite with channel_id) |
+| title | TEXT | NOT NULL, `''` |
+| published | TEXT | RFC3339 UTC. Frozen at insert; only upgraded when a better-precision date arrives |
+| date_precision | TEXT | `assumed` / `coarse` / `day` / `exact` / `started` — how trustworthy `published` is; upgrades are monotonic |
+| catalog_pos | INTEGER | Position within the source listing; ordering tiebreaker for equal dates |
+| source | TEXT | `rss` / `membership` / `videos` / `streams` — which discovery source last claimed the row |
+| status | TEXT | `unknown` / `upcoming` / `live` / `vod` / `not_a_stream` — last probe classification |
+| first_seen | TEXT | RFC3339 — the cycle that first inserted the row (new-vs-backlog discriminator) |
+
+**Indexes on feed_items:** `idx_feed_items_window(channel_id, published DESC, catalog_pos ASC, video_id ASC)` (the archive-scope read), `idx_feed_items_status(channel_id, status)`.
+
+**channel_state** (added v16) — per-channel bookkeeping for the feed-history feature:
 
 | Column | Type | Notes |
 |--------|------|-------|
 | channel_id | TEXT | PRIMARY KEY |
-| video_id | TEXT | NOT NULL |
+| backfilled_at | TEXT | RFC3339 — when the full-catalog backfill last completed; NULL = never backfilled (sweep re-queues) |
+| backfilled_window_days | INTEGER | Window depth that backfill covered — a later, wider `archive_window_days` triggers a deeper rescan |
+| backfilled_with_membership | INTEGER | Boolean — whether the membership tab was included; enabling membership later triggers a rescan |
+| backfill_state | TEXT | Resumable scan cursor (JSON); cleared on completion or deliberate restart |
+| last_rss_ok_at | TEXT | RFC3339 — last successful RSS fetch; the "established channel" gate |
 
 **Schema version:**
 
@@ -334,7 +357,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 
 | Version | Changes |
 |---------|---------|
-| v1 | Initial schema (jobs, gaps, trims, history, last_videos) |
+| v1 | Initial schema (jobs, gaps, trims, history, and a last-video-per-channel table that v16 later dropped) |
 | v2 | Added `chat_file` column to jobs; backfilled from `output_file` + `.chat.json` extension |
 | v3 | Added `thumbnail_file` and `description_file` columns; backfilled by checking disk for `.jpg`/`.webp`/`.png` and `.description` files |
 | v4 | Added `idx_jobs_video_id` index (used by `HasActiveJob`, `AddToHistory`) |
@@ -349,6 +372,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 | v13 | Added `auto_retry_count INTEGER NOT NULL DEFAULT 0` column to `jobs`. Tracks monitor-driven Twitch flap auto-recovery attempts (capped at `worker.MaxTwitchAutoRetries`). User-driven `ReinitializeJob`/`ResumeJob` reset to 0; auto-recovery's `AutoReinitializeJob` increments |
 | v14 | Normalized NULLs in the v2/v3-added columns (`chat_file`, `thumbnail_file`, `description_file`) to `''` — pre-backfill legacy rows failed every scan and vanished from the UI. Swept orphaned `gaps`/`trims`/`segments` rows accumulated while foreign-key enforcement was silently off (the pre-fix DSN used parameters modernc ignores); job IDs are video IDs, so re-adding a deleted video would have resurrected the old job's child rows |
 | v15 | Added `chat_file` column to `segments` — Twitch live jobs roll the chat file at every part boundary (gap/quality split), and each part's chat is copied beside its video and recorded on the segment row |
+| v16 | Feed-history discovery store: created `feed_items` (with `idx_feed_items_window` + `idx_feed_items_status`) and `channel_state` tables; added `channel_id` and `queue_priority INTEGER NOT NULL DEFAULT 1` columns to `jobs` (backlog scheduling); dropped `last_videos` (superseded by the store). ALTERs are guarded by duplicate-column suppression — `user_version` is written after the block, so a crash mid-migration re-runs the whole block |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 
@@ -358,6 +382,7 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
+| `StatusQueued` | `"Queued"` | Backlog VOD resting state: waits for one of its channel's `archive_slots`; only the worker's scheduler admits it (never startup recovery or the heartbeat poller) |
 | `StatusUpcoming` | `"Upcoming"` | Stream is scheduled but not yet live |
 | `StatusLive` | `"Live"` | Stream detected as live, waiting to start download |
 | `StatusDownloading` | `"Downloading"` | Actively downloading segments |
@@ -368,6 +393,8 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 | `StatusCookies` | `"COOKIES?"` | Needs cookie refresh to continue (special auth-failure state) |
 
 **Normal flow:** `Upcoming` -> `Live` -> `Downloading` -> `Muxing` -> `Finished`
+
+**Backlog flow:** backlog VODs only enter as `Queued` and are admitted to `Upcoming` by the archive-slots scheduler; broadcasts and newly discovered content never wait in `Queued`.
 
 **Error paths:** Any status -> `Error`, `Cancelled`, or `COOKIES?`
 
@@ -397,7 +424,7 @@ The database maintains in-memory per-job log buffers (`jobLogs map[string][]stri
 ### Auxiliary Data Operations
 
 - **History:** `HasProcessed(videoID)` / `AddToHistory(videoID)` tracks previously seen video IDs (10,000 cap with LRU pruning).
-- **Last videos:** `GetLastVideo(channelID)` / `SetLastVideo(channelID, videoID)` tracks the most recent video per channel for deduplication.
+- **Feed-history store** (`database_feed_items.go`): `UpsertFeedItem` (insert-or-update, reports whether the row is new), `ApplyProbeToFeedItem` (probe writes status/title/date back), `FeedScope` (the window + always-covered upcoming/live read), `SetFeedItemSource`, `RenumberCatalog`/`ListFeedOrderRows` (backfill ordering pass), `SaveBackfillCursor`/`LoadBackfillCursor`, `SetChannelBackfilled`/`GetChannelBackfill`, `SetChannelRSSOK`/`GetChannelRSSOK`, `GetChannelEstablished`, `ListFeedChannelIDs`, `DeleteChannelFeedData` (channel-removal prune).
 - **Client tokens:** Full CRUD operations (`AddClientToken`, `GetClientTokenByPrefix`, `ListClientTokens`, `UpdateClientTokenUsage`, `DeleteClientToken`, `DeleteAllClientTokens`).
 - **Job stats:** `GetJobStats()` returns aggregate counts and sizes via a single SQL query with CASE expressions.
 - **JSON import:** `ImportFromJSON(path)` imports data from the TypeScript-era `moombox.json` format in a single transaction.
@@ -455,7 +482,8 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 
 | Field | Type | Default | TOML Key |
 |-------|------|---------|----------|
-| MaxFeedItems | int | 15 | `max_feed_items` | Min: 1. Caps the merged RSS + membership candidate list per channel per cycle. |
+| ArchiveWindowDays | int | 3 | `archive_window_days` | Valid: 1-3650. How many days back the monitor archives from the feed-history store; upcoming/live items are ALWAYS covered regardless of age. |
+| ArchiveSlots | int | 3 | `archive_slots` | Valid: 1-100. Max backlog (Queued) VOD downloads per channel running at once; new/live content never waits on a slot. |
 | FeedCheckInterval | FlexDuration | 10 (minutes) | `feed_check_interval` | |
 | DecapiCheckInterval | *int | nil | `decapi_check_interval` | Seconds, valid: 15-3600 |
 | TwitchCheckInterval | *int | nil | `twitch_check_interval` | Seconds, valid: 1-3600 |
@@ -469,7 +497,7 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 |-------|------|---------|----------|
 | OutputTemplate | string | `${channel}/${start_date} ${title} [${id}]` | `output_template` |
 | MaxVideoResolution | int | 2160 | `max_video_resolution` | |
-| NumParallelDownloads | int | 2 | `num_parallel_downloads` | Min: 1 |
+| NumParallelDownloads | int | 10 | `num_parallel_downloads` | Min: 1. Peak concurrent VOD downloads across all channels — broadcasts never wait on the pool, so total concurrent downloads can reach (live streams) + this. |
 | DownloadChat | bool | true | `download_chat` | |
 | Prefer60fps | bool | true | `prefer_60fps` | |
 | MaximumTimeout | int | 600 | `maximum_timeout` | Seconds; YouTube livestreams. Min: 30 |
@@ -523,7 +551,8 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 | NumDescLookbehind | *int | nil | `num_desc_lookbehind` | |
 | OutputDirectory | string | "" | `output_directory` | Per-channel override |
 | IncludeNonLiveContent | bool | false | `include_non_live_content` | |
-| MaxFeedItems | *int | nil | `max_feed_items` | Per-channel override |
+| ArchiveWindowDays | *int | nil | `archive_window_days` | Per-channel override (1-3650) |
+| ArchiveSlots | *int | nil | `archive_slots` | Per-channel override (1-100) |
 | QualityPreference | string | "" | `quality_preference` | e.g. "1080p60", "best", "audio_only" |
 
 #### [[notifications]] (array of tables)
@@ -576,7 +605,7 @@ Handles backward compatibility with older flat config formats. All migrations ar
 | Top-level `port`, `network_access`, `https_enabled`, `tls_cert_path`, `tls_key_path`, `password_hash` | `[network]` section | Always migrated (top-level takes precedence) |
 | Top-level `log_level`, `log_file_path`, `log_max_file_size`, `log_max_files` | `[logs]` / `[paths]` sections | Always migrated |
 | Top-level `database_path` | `paths.database_path` | Always migrated |
-| Top-level `max_feed_items`, `feed_check_interval`, `decapi_check_interval`, `twitch_check_interval`, `hide_finished_age_days` | `[monitors]` section | Always migrated |
+| Top-level `feed_check_interval`, `decapi_check_interval`, `twitch_check_interval`, `hide_finished_age_days` | `[monitors]` section | Always migrated. (The deleted per-cycle candidate-cap key that the archive window/slots settings replaced is silently ignored in old configs, not migrated.) |
 | `[downloader].output_directory`, `staging_directory`, `ffmpeg_path` | `[paths]` section | Only if `[paths]` doesn't exist |
 | `[downloader].cookie_file` | `[cookies]` section | Only if `[cookies]` doesn't exist |
 | `[auto_cookies]` section | `[cookies]` section | Only if `[cookies]` doesn't exist |
@@ -588,7 +617,8 @@ Handles backward compatibility with older flat config formats. All migrations ar
 - Port: 1-65535 (default: 774)
 - NetworkAccess: must be "localhost", "lan", or "external"
 - LogLevel: must be DEBUG/INFO/WARN/ERROR (default: INFO)
-- MaxFeedItems: min 1
+- ArchiveWindowDays: 1-3650 days (also enforced per-channel; an invalid override is cleared to fall back to the global)
+- ArchiveSlots: 1-100 (same per-channel treatment)
 - FeedCheckInterval: min 1 minute
 - HideFinishedAgeDays: min 0
 - DecapiCheckInterval: 15-3600 seconds (or nil)

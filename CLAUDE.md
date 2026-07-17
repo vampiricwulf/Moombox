@@ -98,14 +98,15 @@ Dynamically builds SET clauses. Auto-updates `updated_at`. Triggers `OnJobUpdate
 
 ### Job status lifecycle
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`
+Backlog VODs only: enter as `Queued` and are admitted to `Upcoming` by the worker's per-channel archive-slots scheduler (live/upcoming and newly published content never waits in `Queued`).
 Error paths: any → `Error`, `Cancelled`, or `COOKIES?`
 
 `JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings. Optional numerics use pointers.
 
 ### TUI chord system
-`buildMenuItems()` in `app.go` = single source of truth for chords, action menu, hints, and help. `dispatchAction(chord, job)` = unified handler. Adding a chord: one entry in `buildMenuItems()` + one case in `dispatchAction()`.
+`buildMenuItems()` in `internal/tui/app_actions.go` = single source of truth for chords, action menu, hints, and help. `dispatchAction(chord, job)` = unified handler. Adding a chord: one entry in `buildMenuItems()` + one case in `dispatchAction()`.
 
-Prefixes: **A** (Action), **R** (Request), **O** (Open), **Q** (Quit). Single keys: **F** (Filter), **M** (Menu), **`** (Settings), **?** (Help), **/** (Search logs — log panel only; `n`/`N` navigate matches, `Esc` clears). **O** chords include `O C` (Copy Stream URL to clipboard via OSC 52) and `O G` (Open GitHub Page). Confirm chords require a third keypress within 3s. **R** chords include `R N` (View Release Notes — shows pending-update notes when an update is available, otherwise fetches current version's notes from GitHub; from inside the overlay `U` applies the update).
+Prefixes: **A** (Action), **R** (Request), **O** (Open), **Q** (Quit). Single keys: **F** (Filter), **M** (Menu), **`** (Settings), **?** (Help), **/** (Search logs — log panel only; `n`/`N` navigate matches, `Esc` clears). **O** chords include `O C` (Copy Stream URL to clipboard via OSC 52) and `O G` (Open GitHub Page). Confirm chords require a third keypress within 3s. **R** chords include `R N` (View Release Notes — shows pending-update notes when an update is available, otherwise fetches current version's notes from GitHub; from inside the overlay `U` applies the update) and `R B` (Re-scan Feed History — forces a full-catalog backfill re-scan of every configured YouTube channel).
 
 ### Config migrations
 `migrateOldFormat()` in `config/config.go` handles backward compat — migrates flat fields into current sections, converts legacy flags. Non-destructive (only applies when new section doesn't exist). Add migration logic for any renamed/relocated fields.
