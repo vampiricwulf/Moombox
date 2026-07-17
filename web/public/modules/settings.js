@@ -1105,6 +1105,7 @@ export class SettingsController {
         }
         ${ch.include_non_live_content ? '<sl-badge variant="neutral">Include VODs</sl-badge>' : ""}
         ${ch.quality_preference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.quality_preference)}</sl-badge>` : ""}
+        <span class="channel-backfill" data-backfill-for="${this.app.escapeHtml(ch.id)}">${this._backfillBadgeHtml(ch.id)}</span>
       </div>
     `;
         },
@@ -1131,6 +1132,37 @@ export class SettingsController {
     }
 
     this.setupChannelDragDrop();
+  }
+
+  /**
+   * Badge markup for a channel's feed-history backfill state ("" when
+   * inactive). "scanning" shows tab + page progress; "error" shows the
+   * sweep-will-retry state. Data comes from app.backfillStatus (WS
+   * backfill_status events + the initial_state seed).
+   */
+  _backfillBadgeHtml(channelId) {
+    const bf = this.app.backfillStatus?.[channelId];
+    if (!bf) return "";
+    if (bf.state === "scanning") {
+      return `<sl-badge variant="primary" pill>Backfill: ${this.app.escapeHtml(bf.tab || "")} p${Number(bf.pages) || 0}</sl-badge>`;
+    }
+    if (bf.state === "error") {
+      return `<sl-badge variant="warning" pill>Backfill failed — will retry</sl-badge>`;
+    }
+    return "";
+  }
+
+  /** Patch one channel card's backfill badge in place (no-op when the card isn't rendered). */
+  updateChannelBackfillBadge(channelId) {
+    const slot = document.querySelector(`#channels-list [data-backfill-for="${CSS.escape(channelId)}"]`);
+    if (slot) slot.innerHTML = this._backfillBadgeHtml(channelId);
+  }
+
+  /** Refresh every rendered card's backfill badge (initial_state seed / reconnect). */
+  refreshBackfillBadges() {
+    document.querySelectorAll("#channels-list [data-backfill-for]").forEach((slot) => {
+      slot.innerHTML = this._backfillBadgeHtml(slot.dataset.backfillFor);
+    });
   }
 
   setupChannelDragDrop() {

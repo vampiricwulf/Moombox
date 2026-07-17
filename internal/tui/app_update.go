@@ -278,6 +278,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusBar.SetDiskStatus(msg.Free, msg.UsedPct, msg.Warn)
 		return a, a.listenForUpdates()
 
+	case BackfillStatusMsg:
+		a.statusBar.SetBackfillStatus(msg.Channel, a.channelDisplayName(msg.Channel), msg.Tab, msg.Pages, msg.State)
+		return a, a.listenForUpdates()
+
 	case ConnectivityMsg:
 		a.statusBar.offline = !msg.Online
 		return a, nil
@@ -931,4 +935,24 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 		return a.details.UpdateViewport(msg)
 	}
 	return nil
+}
+
+// channelDisplayName resolves a configured channel's display name for the
+// status bar's backfill indicator, falling back to the raw channel ID for
+// channels without a name (or no longer in the config).
+func (a *App) channelDisplayName(chID string) string {
+	name := chID
+	if a.configStore != nil {
+		a.configStore.Read(func(c *config.MoomboxConfig) {
+			for i := range c.Channels {
+				if c.Channels[i].ID == chID {
+					if c.Channels[i].Name != "" {
+						name = c.Channels[i].Name
+					}
+					return
+				}
+			}
+		})
+	}
+	return name
 }

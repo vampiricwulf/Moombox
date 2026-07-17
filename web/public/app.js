@@ -29,6 +29,12 @@ class MoomboxApp {
     this.archivedJobs = [];
     this.logs = [];
     this.config = null;
+    // Per-channel feed-history backfill progress, keyed by channel ID.
+    // Seeded from `initial_state` (payload.backfill) and updated by
+    // `backfill_status` events; holds only active states ("scanning",
+    // "error") — "done"/"idle" delete the entry. Rendered as a badge on the
+    // Settings channel cards.
+    this.backfillStatus = {};
     this.selectedJobId = null;
     this._selectedTaskJobs = new Set();
     this._selectedArchivedJobs = new Set();
@@ -1158,6 +1164,17 @@ class MoomboxApp {
         if (typeof p.hideFinishedAgeDays === "number") {
           this.hideFinishedAgeDays = p.hideFinishedAgeDays;
         }
+        // Backfill snapshot: a scan pages for minutes, so connecting
+        // mid-flight is the common case — rebuild the map from the server's
+        // per-channel entries (reconnects drop states that ended while the
+        // socket was down).
+        this.backfillStatus = {};
+        for (const b of p.backfill || []) {
+          if (b && b.channel && (b.state === "scanning" || b.state === "error")) {
+            this.backfillStatus[b.channel] = b;
+          }
+        }
+        this.settings.refreshBackfillBadges();
         // On a reconnect the archived list may carry rows the fresh active
         // list now owns again — prune them so neither panel double-counts.
         const archivedPruned = this._pruneArchivedAgainstActive();
@@ -1316,6 +1333,10 @@ class MoomboxApp {
         this.stats.updateDiskIndicator(p);
         break;
 
+      case "backfill_status":
+        this.handleBackfillStatus(p);
+        break;
+
       case "update_available":
         this._updateAvailable = p;
         this.updateVersionIndicator();
@@ -1339,6 +1360,21 @@ class MoomboxApp {
     } else {
       banner.classList.add("show");
     }
+  }
+
+  /**
+   * Track a per-channel backfill_status event: "scanning"/"error" store the
+   * state, "done"/"idle" clear it. The Settings channel card badge (the only
+   * renderer) is patched in place when that card is on screen.
+   */
+  handleBackfillStatus(p) {
+    if (!p || !p.channel) return;
+    if (p.state === "scanning" || p.state === "error") {
+      this.backfillStatus[p.channel] = p;
+    } else {
+      delete this.backfillStatus[p.channel];
+    }
+    this.settings.updateChannelBackfillBadge(p.channel);
   }
 
   /**

@@ -62,6 +62,16 @@ type (
 		UsedPct float64
 		Warn    string // "ok", "warn", "critical"
 	}
+	// BackfillStatusMsg mirrors the backfill_status WebSocket payload (spec
+	// §11 progress surfacing): one message per completed scan page (state
+	// "scanning") and one per scan-state change ("done", "error", "idle" —
+	// those carry Tab "" and Pages 0).
+	BackfillStatusMsg struct {
+		Channel string // channel ID
+		Tab     string // "videos", "streams", "membership"
+		Pages   int    // pages completed for Tab this scan session
+		State   string // "scanning", "done", "error", "idle"
+	}
 	UpdateStatusMsg struct {
 		Version      string
 		TagName      string
@@ -325,6 +335,7 @@ type App struct {
 	checkTimersCh     <-chan CheckTimersMsg
 	cookieStatusCh    <-chan CookieStatusMsg
 	diskStatusCh      <-chan DiskStatusMsg
+	backfillStatusCh  <-chan BackfillStatusMsg
 	updateStatusCh    <-chan UpdateStatusMsg
 
 	// Update status
@@ -538,6 +549,7 @@ func (a *App) SetUpdateChannels(
 	checkTimers <-chan CheckTimersMsg,
 	cookieStatus <-chan CookieStatusMsg,
 	diskStatus <-chan DiskStatusMsg,
+	backfillStatus <-chan BackfillStatusMsg,
 	updateStatus <-chan UpdateStatusMsg,
 ) {
 	a.jobUpdateCh = jobUpdate
@@ -549,6 +561,7 @@ func (a *App) SetUpdateChannels(
 	a.checkTimersCh = checkTimers
 	a.cookieStatusCh = cookieStatus
 	a.diskStatusCh = diskStatus
+	a.backfillStatusCh = backfillStatus
 	a.updateStatusCh = updateStatus
 }
 
@@ -694,7 +707,7 @@ func (a *App) listenForUpdates() tea.Cmd {
 		a.jobTrimsChangedCh == nil &&
 		a.jobsUpdateCh == nil && a.logCh == nil &&
 		a.checkTimersCh == nil && a.cookieStatusCh == nil && a.diskStatusCh == nil &&
-		a.updateStatusCh == nil {
+		a.backfillStatusCh == nil && a.updateStatusCh == nil {
 		return nil
 	}
 	return func() tea.Msg {
@@ -758,6 +771,11 @@ func (a *App) listenForUpdates() tea.Cmd {
 				return channelClosedMsg{Name: "diskStatus"}
 			}
 			return ds
+		case bs, ok := <-a.backfillStatusCh:
+			if !ok {
+				return channelClosedMsg{Name: "backfillStatus"}
+			}
+			return bs
 		case us, ok := <-a.updateStatusCh:
 			if !ok {
 				return channelClosedMsg{Name: "updateStatus"}

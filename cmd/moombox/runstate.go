@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -132,6 +133,21 @@ type runState struct {
 	// reference them before tui_wiring fires) ---
 	tuiUpdateStatusCh chan tui.UpdateStatusMsg
 	tuiDiskStatusCh   chan tui.DiskStatusMsg
+	tuiBackfillCh     chan tui.BackfillStatusMsg
+
+	// --- Backfill progress snapshot ---
+	// backfillProgress holds the last backfill OnProgress emission per
+	// channel — the disk_status snapshot role (routes.SharedDiskStatus) for
+	// backfill_status: read by the ws InitialState provider and the TUI seed
+	// so a mid-flight connect (the common case during a long scan, §11) sees
+	// the in-flight scan. Only ACTIVE states are retained ("scanning",
+	// "error" — error means the sweep will retry); "done" and "idle" delete
+	// the entry, so the map never leaks departed channels and completion
+	// state stays with the DB, not this ephemeral cache. Guarded by
+	// backfillMu: writes come from the worker's consumer goroutine and the
+	// sweep's prune path, reads from WS connects and TUI startup.
+	backfillMu       sync.Mutex
+	backfillProgress map[string]backfillProgressState
 
 	// --- Subscription handles (assigned by monitor_callbacks wiring; needed
 	// by shutdown to unsubscribe cleanly before the database closes) ---
@@ -141,4 +157,12 @@ type runState struct {
 	unsubWSJobDeleted   func()
 	unsubWSTrimsChanged func()
 	unsubWSJobsChange   func()
+}
+
+// backfillProgressState is one channel's entry in runState.backfillProgress —
+// the non-channel fields of the backfill_status payload.
+type backfillProgressState struct {
+	Tab   string
+	Pages int
+	State string
 }

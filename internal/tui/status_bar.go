@@ -44,6 +44,15 @@ type StatusBarModel struct {
 	diskFree    uint64
 	diskUsedPct float64
 	diskWarn    string // "ok", "warn", "critical"
+	// In-flight backfill scan (spec §11 progress surfacing). Scans are
+	// strictly serial, so one slot IS the whole "scanning" state; empty
+	// backfillChannel hides the indicator. Terminal states clear the slot —
+	// done/idle are quiet by design and error is already loud in the log
+	// panel (the R B overlay owns detailed per-channel state).
+	backfillChannel string // channel ID of the in-flight scan ("" = none)
+	backfillName    string // display name resolved by the App handler
+	backfillTab     string
+	backfillPages   int
 	// ShowChordHint shows a newcomer hint instead of the full chord reference.
 	ShowChordHint bool
 	// SelectedCount tracks batch-selected jobs for status bar display.
@@ -84,6 +93,26 @@ func (m *StatusBarModel) SetDiskStatus(free uint64, usedPct float64, warn string
 	m.diskFree = free
 	m.diskUsedPct = usedPct
 	m.diskWarn = warn
+}
+
+// SetBackfillStatus updates the backfill scan indicator from a
+// BackfillStatusMsg. "scanning" occupies the single slot; any other state
+// clears it — but only for the channel that owns it, so a seeded terminal
+// state for another channel can't blank an in-flight scan's display.
+func (m *StatusBarModel) SetBackfillStatus(chID, name, tab string, pages int, state string) {
+	if state == "scanning" {
+		m.backfillChannel = chID
+		m.backfillName = name
+		m.backfillTab = tab
+		m.backfillPages = pages
+		return
+	}
+	if m.backfillChannel == chID {
+		m.backfillChannel = ""
+		m.backfillName = ""
+		m.backfillTab = ""
+		m.backfillPages = 0
+	}
 }
 
 // View renders the status bar.
@@ -169,6 +198,22 @@ func (m *StatusBarModel) renderMetrics() string {
 	if m.SelectedCount > 0 {
 		selText := fmt.Sprintf("%d selected", m.SelectedCount)
 		parts = append(parts, statusBarYelStyle.Render(selText))
+	}
+
+	// Backfill scan in flight (green, like the Active indicator — a routine
+	// background activity, not a warning). Compact drops the channel name.
+	if m.backfillChannel != "" {
+		if compact {
+			parts = append(parts, statusBarGrnStyle.Render(
+				fmt.Sprintf("BF:%s p%d", m.backfillTab, m.backfillPages)))
+		} else {
+			name := m.backfillName
+			if r := []rune(name); len(r) > 16 {
+				name = string(r[:15]) + "…"
+			}
+			parts = append(parts, statusBarGrnStyle.Render(
+				fmt.Sprintf("Backfill %s: %s p%d", name, m.backfillTab, m.backfillPages)))
+		}
 	}
 
 	// Disk indicator (only shown once we have data)

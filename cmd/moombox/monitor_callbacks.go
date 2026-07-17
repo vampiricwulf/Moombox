@@ -11,6 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
@@ -448,6 +449,47 @@ func (s *runState) wireMonitorCallbacks() {
 			slog.String("jobID", jobID),
 			slog.String("channel", info.ChannelDisplayName),
 			slog.String("streamID", info.StreamID))
+	}
+
+	// Backfill worker -> UIs: progress surfacing (spec §11), modeled on the
+	// disk_status pipeline in main.go — generic hub.Broadcast for web
+	// clients, non-blocking channel push for the TUI — plus the snapshot
+	// write InitialState and the TUI seed read (disk_status keeps its
+	// snapshot in routes.SharedDiskStatus; backfill's lives on runState).
+	// The worker never imports web/tui; this closure is the seam.
+	s.backfillWorker.OnProgress = func(chID, tab string, pages int, state string) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("Panic in backfill OnProgress", slog.Any("panic", r))
+			}
+		}()
+		// Snapshot first, broadcast second, so a client connecting between
+		// the two sees this state in InitialState rather than missing it.
+		// Active states are stored; "done" and "idle" clear the entry (see
+		// the backfillProgress field doc).
+		s.backfillMu.Lock()
+		switch state {
+		case "scanning", "error":
+			s.backfillProgress[chID] = backfillProgressState{Tab: tab, Pages: pages, State: state}
+		default: // "done", "idle"
+			delete(s.backfillProgress, chID)
+		}
+		s.backfillMu.Unlock()
+
+		// Broadcast to web clients — the exact Task 5 payload shape.
+		s.wsHub.Broadcast("backfill_status", map[string]any{
+			"channel": chID,
+			"tab":     tab,
+			"pages":   pages,
+			"state":   state,
+		})
+
+		// Push to TUI (drop-on-full like tuiDiskStatusCh — a dropped page
+		// tick is superseded by the next one within a second).
+		select {
+		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: tab, Pages: pages, State: state}:
+		default:
+		}
 	}
 
 	// Monitor -> WebSocket: broadcast timer updates. TypeScript broadcasts

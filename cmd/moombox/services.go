@@ -705,9 +705,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// TUI-only channels created here so routes_wiring can reference
 	// tuiUpdateStatusCh in the UpdateRoutes OnFound closure before
-	// tui_wiring assigns the consumer side.
+	// tui_wiring assigns the consumer side. tuiBackfillCh likewise exists
+	// before wireMonitorCallbacks wires the backfill OnProgress producer.
 	s.tuiUpdateStatusCh = make(chan tui.UpdateStatusMsg, 2)
 	s.tuiDiskStatusCh = make(chan tui.DiskStatusMsg, 5)
+	s.tuiBackfillCh = make(chan tui.BackfillStatusMsg, 16)
+	s.backfillProgress = make(map[string]backfillProgressState)
 
 	return nil
 }

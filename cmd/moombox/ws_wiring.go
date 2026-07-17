@@ -99,6 +99,21 @@ func (s *runState) wireWebSocket() {
 			hideAge = c.Monitors.HideFinishedAgeDays.Value
 		})
 		jobs = filterJobsByAgeThreshold(jobs, hideAge)
+		// Backfill progress snapshot (spec §11): a scan pages for minutes at
+		// 1 page/sec, so connecting MID-FLIGHT is the common case — without
+		// this seed a client would see nothing until the next page event.
+		// Same per-channel objects the backfill_status broadcasts carry.
+		s.backfillMu.Lock()
+		backfill := make([]map[string]any, 0, len(s.backfillProgress))
+		for chID, p := range s.backfillProgress {
+			backfill = append(backfill, map[string]any{
+				"channel": chID,
+				"tab":     p.Tab,
+				"pages":   p.Pages,
+				"state":   p.State,
+			})
+		}
+		s.backfillMu.Unlock()
 		return map[string]any{
 			"jobs":                jobs,
 			"logs":                s.log.GetRecentLines(),
@@ -107,6 +122,7 @@ func (s *runState) wireWebSocket() {
 			"nextTwitchCheck":     s.twitchMon.GetNextCheckAt(),
 			"connectivity":        s.connMon.IsOnline(),
 			"hideFinishedAgeDays": hideAge,
+			"backfill":            backfill,
 		}
 	}
 

@@ -1099,3 +1099,119 @@ func TestSweep_FailedScanRetriedByNextSweep(t *testing.T) {
 	}
 	hold <- struct{}{}
 }
+
+// ---- the Task 5 progress-emission tests -------------------------------------
+
+// progressEmission records one OnProgress call — the Task 5 seam the host
+// wires to the WS broadcast and the TUI channel.
+type progressEmission struct {
+	chID  string
+	tab   string
+	pages int
+	state string
+}
+
+// recordProgress wires bw.OnProgress to a recorder channel.
+func recordProgress(bw *BackfillWorker) chan progressEmission {
+	emitted := make(chan progressEmission, 32)
+	bw.OnProgress = func(chID, tab string, pages int, state string) {
+		emitted <- progressEmission{chID, tab, pages, state}
+	}
+	return emitted
+}
+
+// assertEmissions receives exactly want from emitted, in order, then asserts
+// silence.
+func assertEmissions(t *testing.T, emitted chan progressEmission, want []progressEmission) {
+	t.Helper()
+	for i, w := range want {
+		got := recvWithin(t, emitted, fmt.Sprintf("emission %d (%+v)", i, w))
+		if got != w {
+			t.Errorf("emission %d = %+v, want %+v", i, got, w)
+		}
+	}
+	select {
+	case extra := <-emitted:
+		t.Errorf("unexpected extra emission %+v", extra)
+	default:
+	}
+}
+
+// A clean scripted scan emits "scanning" once per COMPLETED page — per-tab
+// session page counts, including the empty page of an exhausted tab — and one
+// scan-level "done" (tab "", pages 0) after completion.
+func TestBackfillProgress_PagesAndDone(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	fetch := newScriptedFetcher(t, map[string][]scriptedPage{
+		"videos": {
+			// page 1 mixed (keeps paging), page 2 all-older (arm (a) stop).
+			{wantCont: "", page: &TabPage{
+				Items:        []TabItem{coarseItem("v1", 24*time.Hour), coarseItem("v2", 240*time.Hour)},
+				Continuation: "TOK2",
+			}},
+			{wantCont: "TOK2", page: &TabPage{
+				Items:        []TabItem{coarseItem("v3", 264*time.Hour)},
+				Continuation: "TOK3",
+			}},
+		},
+		"streams": emptyTabScript(),
+	})
+	bw := newTestBackfillWorker(t, db, withTabFetch(fetch.fetch), withBackfillNow(now))
+	emitted := recordProgress(bw)
+	startWorker(t, bw)
+
+	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)})
+	assertEmissions(t, emitted, []progressEmission{
+		{backfillTestChannel, "videos", 1, "scanning"},
+		{backfillTestChannel, "videos", 2, "scanning"},
+		{backfillTestChannel, "streams", 1, "scanning"},
+		{backfillTestChannel, "", 0, "done"},
+	})
+}
+
+// A failed page emits NO "scanning" (the page did not complete); the scan
+// ends in one scan-level "error" — never "done" — so the UIs report the
+// sweep-will-retry state honestly.
+func TestBackfillProgress_FetchFailureEmitsError(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	fetch := newScriptedFetcher(t, map[string][]scriptedPage{
+		"videos":  {{wantCont: "", err: errors.New("browse http 503")}},
+		"streams": emptyTabScript(),
+	})
+	bw := newTestBackfillWorker(t, db, withTabFetch(fetch.fetch), withBackfillNow(now))
+	emitted := recordProgress(bw)
+	startWorker(t, bw)
+
+	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)})
+	assertEmissions(t, emitted, []progressEmission{
+		// videos page 1 failed — nothing; streams still scans (tab
+		// independence) before the scan-level error.
+		{backfillTestChannel, "streams", 1, "scanning"},
+		{backfillTestChannel, "", 0, "error"},
+	})
+}
+
+// Removal mid-scan emits "idle" twice, in order: once from the cancelled
+// scan's runScan exit, once from CancelAndPrune after the prune — the second
+// covers the spliced-queued and boot-prune paths where no runScan exit fires.
+func TestBackfillProgress_PruneEmitsIdle(t *testing.T) {
+	db := newTestDB(t)
+	scanStarted := make(chan struct{})
+	bw := newTestBackfillWorker(t, db, withScan(func(ctx context.Context, _ *config.ChannelConfig, _ string, _ int, _ bool) error {
+		close(scanStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}))
+	emitted := recordProgress(bw)
+	startWorker(t, bw)
+
+	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)})
+	recvWithin(t, scanStarted, "scan start")
+	bw.Sweep(nil) // channel removed from config — cancel, wait, prune
+	assertEmissions(t, emitted, []progressEmission{
+		{backfillTestChannel, "", 0, "idle"},
+		{backfillTestChannel, "", 0, "idle"},
+	})
+}

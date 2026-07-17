@@ -171,6 +171,18 @@ type BackfillWorker struct {
 	// FetchTabPage is the injected tab-page fetch — see TabPageFetchFunc.
 	FetchTabPage TabPageFetchFunc
 
+	// OnProgress, when set, surfaces scan progress to the host (the monitor
+	// package's callback-field idiom — OnVideoFound in feed.go): one call per
+	// completed page (state "scanning", pages = pages fetched for that tab
+	// THIS session) and one per scan-state change — "done" (clean completion,
+	// backfilled_at written), "error" (incomplete — arm (b), a continuation
+	// loop, or a fetch/DB failure; the sweep retries), "idle" (scan cancelled
+	// or channel pruned — no scan in flight). State-change calls carry tab ""
+	// and pages 0: they describe the whole scan, not a tab. Nil-safe; set
+	// before Start, like FetchTabPage. Scanning/done/error fire on the serial
+	// consumer goroutine; idle can also fire on CancelAndPrune's caller.
+	OnProgress func(chID, tab string, pages int, state string)
+
 	// mu guards inflight, queue and baseCtx. Sweep holds it across each
 	// channel's check-and-enqueue, so concurrent sweeps (a monitor cycle
 	// racing a kickMonitors re-run) can never double-enqueue one channel.
@@ -305,19 +317,34 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 	}()
 
 	if item.ctx.Err() != nil {
-		return // cancelled while still queued (superseded by a widen, or pruned)
+		// Cancelled while still queued (superseded by a widen, or pruned) —
+		// no scan ran, but the state change is still surfaced so a stale
+		// entry from an earlier session of this channel is cleared.
+		bw.emitProgress(chID, "", 0, "idle")
+		return
 	}
 	err := bw.scan(item.ctx, item.ref.Ch, chID, item.ref.WindowDays, item.ref.WithMembership)
 	switch {
 	case err == nil:
 		// Completed — completeScan wrote backfilled_at; the sweep's first
 		// arm goes quiet for this channel.
+		bw.emitProgress(chID, "", 0, "done")
 	case item.ctx.Err() != nil:
 		bw.logger.Info("backfill scan cancelled", "channel", chID)
+		bw.emitProgress(chID, "", 0, "idle")
 	default:
 		// Incomplete: the cursor was saved per page; the sweep retries
 		// next cycle (backfilled_at is still NULL) and resumes from it.
 		bw.logger.Warn("backfill scan incomplete; sweep will retry", "channel", chID, "err", err)
+		bw.emitProgress(chID, "", 0, "error")
+	}
+}
+
+// emitProgress invokes OnProgress when wired — see the field doc for the
+// call contract.
+func (bw *BackfillWorker) emitProgress(chID, tab string, pages int, state string) {
+	if bw.OnProgress != nil {
+		bw.OnProgress(chID, tab, pages, state)
 	}
 }
 
@@ -522,6 +549,11 @@ func (bw *BackfillWorker) CancelAndPrune(chID string) {
 		return // ditto — census entry survives, next sweep re-prunes
 	}
 	bw.logger.Info("backfill pruned departed channel", "channel", chID, "jobsDeleted", n)
+	// The channel is gone: clear any progress state the UIs still hold for
+	// it. Covers the spliced-queued prune and the no-in-flight boot prune,
+	// where no runScan exit ever fires — for a cancelled RUNNING scan this
+	// duplicates runScan's idle, which clears an already-clear entry.
+	bw.emitProgress(chID, "", 0, "idle")
 }
 
 // scanChannel runs one channel's backfill scan: each eligible tab, page by
@@ -649,6 +681,11 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 	// claim of ignorance, not a listing coordinate (same reason the walk's
 	// exhaustion only draws from coarse rows).
 	var lastDatable time.Time
+	// pages counts the pages COMPLETED (written + cursor saved) for this tab
+	// this session, for the OnProgress "scanning" emissions. Session-local
+	// like lastDatable — a resumed tab restarts at 1, honestly reporting
+	// this session's work rather than reconstructing history.
+	pages := 0
 
 	for {
 		if err := bw.waitPage(ctx); err != nil {
@@ -778,6 +815,12 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 		if err := bw.saveCursor(chID, cur); err != nil {
 			return fmt.Errorf("backfill %s/%s: save cursor: %w", chID, tab, err)
 		}
+		// Page completion (spec §11 progress surfacing): emitted only after
+		// the write + cursor save landed — a failed or parser-arm page is not
+		// a completed page and emits nothing (the scan-level "error" from
+		// runScan covers those endings).
+		pages++
+		bw.emitProgress(chID, tab, pages, "scanning")
 		if tc.Done {
 			bw.logger.Debug("backfill tab complete",
 				"channel", chID, "tab", tab, "rows", tc.NextPos, "windowStop", allOlder)

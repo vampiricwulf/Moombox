@@ -401,7 +401,7 @@ func (s *runState) runTUI() {
 	checkTimersCh := make(chan tui.CheckTimersMsg, 10)
 	cookieStatusCh := make(chan tui.CookieStatusMsg, 5)
 
-	app.SetUpdateChannels(jobUpdateCh, jobAddedCh, jobDeletedCh, jobTrimsChangedCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, s.tuiDiskStatusCh, s.tuiUpdateStatusCh)
+	app.SetUpdateChannels(jobUpdateCh, jobAddedCh, jobDeletedCh, jobTrimsChangedCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, s.tuiDiskStatusCh, s.tuiBackfillCh, s.tuiUpdateStatusCh)
 
 	// Dropped-message counters — track silent drops on TUI channels
 	var tuiDroppedJobs, tuiDroppedLogs atomic.Int64
@@ -413,6 +413,19 @@ func (s *runState) runTUI() {
 		default:
 		}
 	}
+
+	// Seed the backfill progress snapshot (the disk seed's shape): a scan
+	// started before the TUI came up — mid-flight attach is the common case
+	// during a long scan (§11) — is visible immediately instead of after the
+	// next page event.
+	s.backfillMu.Lock()
+	for chID, p := range s.backfillProgress {
+		select {
+		case s.tuiBackfillCh <- tui.BackfillStatusMsg{Channel: chID, Tab: p.Tab, Pages: p.Pages, State: p.State}:
+		default:
+		}
+	}
+	s.backfillMu.Unlock()
 
 	// Forward DB events to TUI channels. OnJobChange (not OnJobUpdate)
 	// gives us the changed-columns list, which the TUI uses to gate
