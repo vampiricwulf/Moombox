@@ -446,23 +446,50 @@ func (bw *BackfillWorker) enqueueLocked(ref ChannelRef) {
 
 // CancelAndPrune removes a departed channel's feed-history footprint (§11
 // channel removal): cancel any in-flight scan, WAIT until it has observed
-// the cancellation and fully left the channel, then delete the feed data
-// (feed_items + channel_state) and the channel's never-started jobs —
-// Queued, Upcoming, COOKIES? — together with their history rows (an
-// orphaned history row would make HasProcessed lie forever and block the
-// rename-and-re-add path). The prune runs LAST, so a stale page written in
-// the cancel window is cleaned up too. Live/Downloading/Muxing jobs keep
+// the cancellation and fully left the channel, then prune — the channel's
+// never-started jobs (Queued, Upcoming, COOKIES? — together with their
+// history rows: an orphaned history row would make HasProcessed lie forever
+// and block the rename-and-re-add path) and its feed data (feed_items +
+// channel_state). Both deletes run AFTER the wait, so a stale page written
+// in the cancel window is cleaned up too. Live/Downloading/Muxing jobs keep
 // running; terminal rows stay.
+//
+// A QUEUED-but-not-running scan is settled directly — spliced out of the
+// queue, entry removed, done closed — rather than waited on: its done only
+// closes when the serial consumer REACHES the item, which means every scan
+// ahead of it running to completion first at 1 page/sec, and CancelAndPrune
+// executes synchronously on the feed monitor's cycle goroutine — waiting
+// would stall RSS polling and live detection for minutes on a full queue.
+// The blocking wait applies only to a genuinely RUNNING scan, which
+// observes cancellation within one page.
 func (bw *BackfillWorker) CancelAndPrune(chID string) {
 	for {
 		bw.mu.Lock()
 		fl := bw.inflight[chID]
-		base := bw.baseCtx
-		bw.mu.Unlock()
 		if fl == nil {
+			bw.mu.Unlock()
 			break
 		}
-		fl.cancel()
+		spliced := false
+		for i := range bw.queue {
+			if bw.queue[i].fl == fl {
+				// Still queued: the splice-vs-pop race is settled by bw.mu —
+				// the consumer pops under the same lock, so the item is
+				// either fully ours (never runs, we close done) or fully the
+				// consumer's (runScan closes done; we wait below).
+				bw.queue = append(bw.queue[:i], bw.queue[i+1:]...)
+				delete(bw.inflight, chID) // fl was read under this same lock
+				spliced = true
+				break
+			}
+		}
+		base := bw.baseCtx
+		bw.mu.Unlock()
+		fl.cancel() // release the derived context either way
+		if spliced {
+			close(fl.done)
+			continue // re-check: a concurrent sweep may have re-enqueued
+		}
 		select {
 		case <-fl.done:
 		case <-base.Done():
@@ -473,16 +500,26 @@ func (bw *BackfillWorker) CancelAndPrune(chID string) {
 		}
 		// Loop: a concurrent widen may have replaced the entry.
 	}
-	if err := bw.db.DeleteChannelFeedData(chID); err != nil {
-		// Rows survive, so the next sweep's departure scan retries.
-		bw.logger.Error("backfill prune: delete feed data failed", "channel", chID, "err", err)
-		return
-	}
+	// Delete order (controller-adjudicated, deviating from the brief's
+	// listing order): jobs+history FIRST, feed data SECOND. The spec lists
+	// the two deletes as unordered bullets, and feed-data-first manufactures
+	// the one UN-RETRYABLE orphan class on partial failure: the feed-data
+	// delete removes the channel from ListFeedChannelIDs' census, so a
+	// failed jobs delete would never be retried — Upcoming jobs re-enqueue
+	// every 60s against a deleted channel and history rows block
+	// rename-and-re-add forever (the exact §11 harms). Jobs-first is
+	// self-healing: the jobs delete is idempotent on retry, and a failed
+	// feed-data delete leaves the channel in the census so the next sweep
+	// re-runs the whole prune.
 	n, err := bw.db.DeleteJobsAndHistoryForChannel(chID,
 		[]database.JobStatus{database.StatusQueued, database.StatusUpcoming, database.StatusCookies})
 	if err != nil {
 		bw.logger.Error("backfill prune: delete jobs failed", "channel", chID, "err", err)
-		return
+		return // channel still in the census — the next sweep retries the whole prune
+	}
+	if err := bw.db.DeleteChannelFeedData(chID); err != nil {
+		bw.logger.Error("backfill prune: delete feed data failed", "channel", chID, "err", err)
+		return // ditto — census entry survives, next sweep re-prunes
 	}
 	bw.logger.Info("backfill pruned departed channel", "channel", chID, "jobsDeleted", n)
 }

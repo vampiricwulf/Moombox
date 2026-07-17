@@ -435,12 +435,17 @@ func (s *runState) initServices(logLevelOverride string) error {
 				if ch.GetPlatform() != "youtube" {
 					continue
 				}
+				// Mirrors resolveArchiveWindowDays (internal/monitor/feed.go)
+				// — THE shared per-channel window resolver both monitors use.
+				// Inlined because that helper takes the store lock itself and
+				// this closure already holds it via Read; if the resolver's
+				// rules ever change, change this block in lockstep.
 				days := c.Monitors.ArchiveWindowDays
 				if ch.ArchiveWindowDays != nil && *ch.ArchiveWindowDays > 0 {
 					days = *ch.ArchiveWindowDays
 				}
 				if days <= 0 {
-					days = 3 // resolveArchiveWindowDays' defensive default
+					days = 3 // resolveArchiveWindowDays' defaultArchiveWindowDays
 				}
 				refs = append(refs, monitor.ChannelRef{Ch: &ch, ChID: ch.ID, WindowDays: days})
 			}

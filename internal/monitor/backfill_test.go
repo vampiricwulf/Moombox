@@ -985,6 +985,83 @@ func TestSweep_RemovalMidScanCancelsThenPrunes(t *testing.T) {
 	}
 }
 
+// (d, queued variant — review fix 1) Pruning a channel that is QUEUED
+// behind a long-running scan must settle it directly (splice + close done)
+// and return promptly — NOT wait for the consumer to reach the item, which
+// would stall the feed monitor's cycle goroutine behind every scan ahead in
+// the queue. The running scan is untouched: never cancelled, completes
+// cleanly. Channel-synced throughout; no sleeps.
+func TestSweep_PruneOfQueuedChannelDoesNotWaitBehindRunningScan(t *testing.T) {
+	db := newTestDB(t)
+	chA := backfillTestCh()
+	chB := &config.ChannelConfig{ID: backfillTestChannel2, Name: "Queued Behind"}
+	now := "2026-07-15T12:00:00Z"
+
+	startedA := make(chan struct{})
+	releaseA := make(chan struct{})
+	var cancelledA atomic.Bool
+	bw := newTestBackfillWorker(t, db, withScan(func(ctx context.Context, _ *config.ChannelConfig, chID string, _ int, _ bool) error {
+		if chID != chA.ID {
+			t.Errorf("queued channel %s must never scan (it was pruned while queued)", chID)
+			return nil
+		}
+		close(startedA)
+		select {
+		case <-releaseA:
+			return nil
+		case <-ctx.Done():
+			cancelledA.Store(true)
+			return ctx.Err()
+		}
+	}))
+	startWorker(t, bw)
+
+	// chB owns a feed row so the prune's effect is observable.
+	if _, err := db.UpsertFeedItem(database.FeedItem{ChannelID: chB.ID, VideoID: "b1", Title: "b1",
+		Published: now, DatePrecision: "coarse", Source: "videos", FirstSeen: now}); err != nil {
+		t.Fatalf("UpsertFeedItem: %v", err)
+	}
+
+	// chA starts scanning (and blocks); chB sits QUEUED behind it.
+	bw.Sweep([]ChannelRef{refFor(chA, 3, false), refFor(chB, 3, false)})
+	recvWithin(t, startedA, "long-running scan start")
+	inflight, queued := inflightState(bw)
+	if inflight[chB.ID] == nil || queued != 1 {
+		t.Fatalf("precondition: chB should be queued (inflight=%v queued=%d)", inflight[chB.ID] != nil, queued)
+	}
+
+	// chB removed from config. The prune-sweep must complete while chA's
+	// scan is still blocked — a wait on chB's done would hang here forever.
+	pruned := make(chan struct{})
+	go func() {
+		bw.Sweep([]ChannelRef{refFor(chA, 3, false)})
+		close(pruned)
+	}()
+	recvWithin(t, pruned, "prune of the queued channel (must not wait behind the running scan)")
+
+	inflight, queued = inflightState(bw)
+	if inflight[chB.ID] != nil || queued != 0 {
+		t.Errorf("queued entry not spliced: inflight[chB]=%v queued=%d", inflight[chB.ID] != nil, queued)
+	}
+	if inflight[chA.ID] == nil {
+		t.Error("running scan's entry disturbed by the queued prune")
+	}
+	if it, err := db.GetFeedItem(chB.ID, "b1"); err != nil || it != nil {
+		t.Errorf("chB feed row survived the prune (%+v, err %v)", it, err)
+	}
+	if cancelledA.Load() {
+		t.Error("running scan was cancelled by a prune of a DIFFERENT channel")
+	}
+
+	// The running scan finishes cleanly, uncancelled.
+	flA := inflight[chA.ID]
+	close(releaseA)
+	recvWithin(t, flA.done, "running scan's clean exit")
+	if cancelledA.Load() {
+		t.Error("running scan observed a cancellation it should never have gotten")
+	}
+}
+
 // (e) A scan that FAILS removes its in-flight entry — a leaked entry is a
 // permanent silent stall — so the next sweep retries the channel.
 func TestSweep_FailedScanRetriedByNextSweep(t *testing.T) {
