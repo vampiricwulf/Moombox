@@ -24,6 +24,13 @@ import (
 // continuationItemRenderer.continuationEndpoint.continuationCommand.token,
 // page-2+ items under
 // onResponseReceivedActions[].appendContinuationItemsAction.continuationItems[].
+//
+// Page-1 tab selection sends `params` harvested from the channel's OWN tab
+// strip (fetchBrowseFirstPage) — never derived constants, and yt-dlp has none
+// to borrow (it navigates by URL): real tab params carry protobuf payload
+// beyond the bare field-2 path encoding, and bare-derived blobs came back with
+// a different tab selected in production — streams and membership silently
+// empty on every channel.
 
 // ErrContinuationLoop reports that a /browse page handed back a continuation
 // token this scan has already seen. YouTube feeds occasionally loop instead of
@@ -35,17 +42,13 @@ var ErrContinuationLoop = errors.New("browse continuation loop detected")
 // far smaller than watch pages; 10 MB matches the player API's cap.
 const maxBrowseResponseBytes = 10 << 20
 
-// browseTabParams maps a tab name to the /browse `params` blob that selects
-// it: a protobuf with field 2 (string) = the tab's URL path segment,
-// base64-encoded. "EgZ2aWRlb3M=" (videos) and "EgdzdHJlYW1z" (streams) are the
-// long-standing public InnerTube constants; "EgptZW1iZXJzaGlw" (membership) is
-// the same derivation applied to the /membership path that
-// channel_membership.go fetches as HTML (`\x12\x0a` + "membership").
-var browseTabParams = map[string]string{
-	"videos":     "EgZ2aWRlb3M=",
-	"streams":    "EgdzdHJlYW1z",
-	"membership": "EgptZW1iZXJzaGlw",
-}
+// browseStripTTL bounds the per-channel harvested-params cache (browseState.
+// strips). Long enough to cover one channel's three-tab scan at the
+// backfill's 1 page/sec pacing; short enough that a later re-scan (widen,
+// manual re-run) re-harvests instead of trusting week-old params — stale
+// params silently deselect tabs, the exact failure the harvest exists to
+// prevent. Expiry costs one extra harvest request, never correctness.
+const browseStripTTL = 30 * time.Minute
 
 // TabItem is one video listed on a channel tab page. Age comes from itemAge
 // (spec §11 classification): 0 means live/upcoming/undatable — "now" — via the
@@ -75,18 +78,60 @@ type TabPage struct {
 //     recovery exists for the same underlying failure; see also
 //     ytdl-org/youtube-dl#28702, referenced by yt-dlp's _tab.py).
 //
+// It also carries the PER-CHANNEL harvested tab-strip params cache (strips):
+// one no-params harvest serves page 1 of all three tabs of a channel's scan
+// (see fetchBrowseFirstPage). TTL-evicted, so a 24/7 process holds at most a
+// few tiny entries per browseStripTTL window of scanned channels.
+//
 // The zero value is usable (tests build bare Services). Sessions are dropped
 // when a tab exhausts or loops, so a 24/7 process holds at most one small
 // entry per actively-scanning (channel, tab).
 type browseState struct {
 	mu       sync.Mutex
 	sessions map[string]*browseSession
-	endpoint string // test override; "" = constants.YouTubeURLs.API + "/browse"
+	strips   map[string]harvestedStrip // channelID → harvested tab params
+	endpoint string                    // test override; "" = constants.YouTubeURLs.API + "/browse"
 }
 
 type browseSession struct {
 	seen        map[string]struct{}
 	visitorData string
+}
+
+// harvestedStrip is one channel's tabName → params map harvested from its own
+// tab strip, stamped for TTL eviction. The params map is read-only after
+// store — safe to hand out under the lock and read outside it.
+type harvestedStrip struct {
+	params    map[string]string
+	harvested time.Time
+}
+
+// cachedStrip returns the channel's harvested tab params when present and
+// fresh (within browseStripTTL).
+func (b *browseState) cachedStrip(channelID string) (map[string]string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e, ok := b.strips[channelID]
+	if !ok || time.Since(e.harvested) > browseStripTTL {
+		return nil, false
+	}
+	return e.params, true
+}
+
+// storeStrip caches a channel's harvested tab params, opportunistically
+// pruning expired entries so the map stays bounded on a 24/7 process.
+func (b *browseState) storeStrip(channelID string, params map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.strips == nil {
+		b.strips = make(map[string]harvestedStrip)
+	}
+	for id, e := range b.strips {
+		if time.Since(e.harvested) > browseStripTTL {
+			delete(b.strips, id)
+		}
+	}
+	b.strips[channelID] = harvestedStrip{params: params, harvested: time.Now()}
 }
 
 // endpointOrDefault returns the /browse endpoint, honoring the test override.
@@ -155,23 +200,24 @@ func (b *browseState) finishPage(key, token, visitorData string) error {
 
 // FetchChannelTabPage fetches ONE page of a channel tab via the InnerTube
 // /browse API. tab ∈ {"videos", "streams", "membership"}. Pass continuation ""
-// for the first page (browseId + per-tab params); pass the previous page's
-// Continuation for the next. Continuation "" in the result means the tab is
-// exhausted.
+// for the first page — selected by params harvested from the channel's own
+// tab strip, see fetchBrowseFirstPage; pass the previous page's Continuation
+// for the next. Continuation "" in the result means the tab is exhausted.
 //
 // Auth: cookies ride every request via GenerateAPIHeaders — that is what
 // unlocks members content on the membership tab, exactly like
 // FetchMembershipVideos' authed page fetch. The HasAuthCookies eligibility
 // gate deliberately stays the CALLER's job (the scanner gates which tabs are
-// eligible, spec §11); called without cookies the membership tab simply has no
-// selected TAB_ID_SPONSORSHIPS tab and returns an empty, exhausted page.
+// eligible, spec §11); called without cookies the channel's strip simply
+// carries no membership tab and the page comes back empty, exhausted.
 //
 // A page handing back an already-seen continuation token returns
 // ErrContinuationLoop (wrapped); the scan session for that tab is dropped so a
 // retry starts clean.
 func (s *Service) FetchChannelTabPage(ctx context.Context, channelID, tab, continuation string) (*TabPage, error) {
-	params, ok := browseTabParams[tab]
-	if !ok {
+	switch tab {
+	case "videos", "streams", "membership":
+	default:
 		return nil, fmt.Errorf("unknown channel tab %q", tab)
 	}
 
@@ -191,7 +237,7 @@ func (s *Service) FetchChannelTabPage(ctx context.Context, channelID, tab, conti
 		fetchErr error
 	)
 	if continuation == "" {
-		items, token, newVD, fetchErr = s.fetchBrowseFirstPage(ctx, channelID, tab, params, visitorData)
+		items, token, newVD, fetchErr = s.fetchBrowseFirstPage(ctx, channelID, tab, visitorData)
 	} else {
 		items, token, newVD, fetchErr = s.fetchBrowseContinuation(ctx, continuation, visitorData)
 	}
@@ -210,35 +256,81 @@ func (s *Service) FetchChannelTabPage(ctx context.Context, channelID, tab, conti
 	return page, nil
 }
 
-// fetchBrowseFirstPage POSTs browseId+params and parses the ytInitialData-
-// shaped response (the /browse page-1 body carries the same
-// contents.twoColumnBrowseResultsRenderer.tabs envelope the HTML page embeds).
+// fetchBrowseFirstPage fetches page 1 of a channel tab. Tab selection uses
+// `params` harvested from the channel's OWN tab strip — never derived
+// constants: real tab params carry protobuf payload beyond the bare field-2
+// path encoding, and a bare-derived request comes back with a different tab
+// selected, which the identity check below correctly reads as mismatch —
+// streams and membership silently empty everywhere (first production run).
+// Flow:
 //
-// UC→UU uploads-playlist fallback, videos tab only, fired on tab IDENTITY
-// mismatch — yt-dlp's model (_tab.py:2320-2326 redirects when the selected
-// tab is not the requested one): a topic/auto-generated channel has no
-// /videos tab, so the videos params come back Home-selected (usually WITH
-// shelf content — yield is no signal) and the UU uploads playlist is the only
-// video source. A real-but-empty selected videos tab must NOT redirect: its
-// identity matches, the tab is simply exhausted — and on a streams-only
-// channel the UU playlist would contaminate the videos scan with stream VODs.
-// "streams" and "membership" get no fallback at all: their absence is natural
-// exhaustion (never streamed / not a member), spec §11.
-func (s *Service) fetchBrowseFirstPage(ctx context.Context, channelID, tab, params, visitorData string) (items []MembershipVideo, token, newVD string, err error) {
-	body, err := s.browsePost(ctx, s.browseRequestBody(channelID, params, "", visitorData), visitorData)
-	if err != nil {
-		return nil, "", "", err
+//  1. No cached strip → POST {browseId} with NO params. Every page-1 response
+//     carries the full tab strip; harvest it into the per-channel cache. Cost:
+//     one extra request per channel scan, amortized across the channel's
+//     three tabs by the cache. When the response's SELECTED tab is already
+//     the wanted one, parse it directly — no second request.
+//  2. Strip has the tab → POST {browseId, params: harvested}; the selected-
+//     tab identity check still guards the response.
+//  3. Strip lacks the tab (or the harvested-params response still came back
+//     mismatched): streams/membership — clean empty exhaustion, exactly the
+//     absent-tab semantics of a channel that never streamed or an account
+//     that is not a member (spec §11); videos — the UC→UU fallback below.
+//
+// UC→UU uploads-playlist fallback, videos tab only — yt-dlp's model
+// (_tab.py:2320-2326 redirects when the selected tab is not the requested
+// one): a topic/auto-generated channel has no /videos tab, so the UU uploads
+// playlist is the only video source. A real-but-empty selected videos tab
+// must NOT take it: its identity matches (step 1's short-circuit or step 2),
+// the tab is simply exhausted — and on a streams-only channel the UU playlist
+// would contaminate the videos scan with stream VODs.
+func (s *Service) fetchBrowseFirstPage(ctx context.Context, channelID, tab, visitorData string) (items []MembershipVideo, token, newVD string, err error) {
+	strip, haveStrip := s.browse.cachedStrip(channelID)
+	if !haveStrip {
+		body, harvestErr := s.browsePost(ctx, s.browseRequestBody(channelID, "", "", visitorData), visitorData)
+		if harvestErr != nil {
+			return nil, "", "", fmt.Errorf("tab-strip harvest: %w", harvestErr)
+		}
+		env := decodeBrowseEnvelope(body)
+		if harvested, ok := harvestTabStrip(env); ok {
+			// An empty-but-present strip (topic channel: Home only) is cached
+			// too — "the channel lacks the tab" is itself the answer. Only a
+			// strip-less envelope (error/alert page) is NOT cached, so the
+			// next tab's page 1 retries the harvest.
+			s.browse.storeStrip(channelID, harvested)
+			strip = harvested
+		}
+		var matched bool
+		if items, token, newVD, matched = parseBrowseTabPage(env, tab); matched {
+			return items, token, newVD, nil
+		}
+		// Mismatch guarantees items == nil, token == "" (parseBrowseTabPage
+		// never leaks the wrong tab's content); newVD is kept for finishPage.
 	}
-	items, token, newVD, tabMatched := parseBrowseTabPage(body, tab)
 
-	if tab == "videos" && !tabMatched && strings.HasPrefix(channelID, "UC") {
+	if params := strip[tab]; params != "" {
+		body, postErr := s.browsePost(ctx, s.browseRequestBody(channelID, params, "", visitorData), visitorData)
+		if postErr != nil {
+			return nil, "", "", postErr
+		}
+		var vd string
+		var matched bool
+		items, token, vd, matched = parseBrowseTabPage(decodeBrowseEnvelope(body), tab)
+		if vd != "" {
+			newVD = vd
+		}
+		if matched {
+			return items, token, newVD, nil
+		}
+	}
+
+	if tab == "videos" && strings.HasPrefix(channelID, "UC") {
 		plBody, plErr := s.browsePost(ctx, s.browseRequestBody("VLUU"+channelID[2:], "", "", visitorData), visitorData)
 		if plErr != nil {
 			return nil, "", "", fmt.Errorf("uploads-playlist fallback: %w", plErr)
 		}
 		// tab "" accepts the playlist page's selected tab as-is — a playlist
 		// response's tab carries no /videos identity to match.
-		if plItems, plToken, plVD, plOK := parseBrowseTabPage(plBody, ""); plOK {
+		if plItems, plToken, plVD, plOK := parseBrowseTabPage(decodeBrowseEnvelope(plBody), ""); plOK {
 			items, token = plItems, plToken
 			if plVD != "" {
 				newVD = plVD
@@ -362,12 +454,16 @@ func (s *Service) browsePost(ctx context.Context, reqBody map[string]any, visito
 
 // browseTabHeader extends channel_membership.go's membershipTabHeader
 // (embedded, reused as-is: selected / tabIdentifier / lazy RawMessage content)
-// with the tab's endpoint URL — the identity signal yt-dlp keys its tab check
-// on (_tab.py:2214-2224 extracts the tab id from the endpoint URL's path
-// segment, falling back to tabIdentifier).
+// with the tab's endpoint: the URL is the identity signal yt-dlp keys its tab
+// check on (_tab.py:2214-2224 extracts the tab id from the endpoint URL's
+// path segment, falling back to tabIdentifier), and browseEndpoint.params is
+// the tab's OWN selection blob — what harvestTabStrip collects.
 type browseTabHeader struct {
 	membershipTabHeader
 	Endpoint struct {
+		BrowseEndpoint struct {
+			Params string `json:"params"`
+		} `json:"browseEndpoint"`
 		CommandMetadata struct {
 			WebCommandMetadata struct {
 				URL string `json:"url"`
@@ -417,18 +513,59 @@ func browseTabID(h *browseTabHeader) string {
 	return ""
 }
 
-// parseBrowseTabPage extracts items + continuation token from a page-1
-// /browse response. tabMatched reports whether the SELECTED tab's identity is
-// the tab that was requested (tab "" accepts any selected tab — the uploads-
-// playlist fallback response). A mismatch — e.g. a Home-selected response for
-// videos params on a channel lacking the tab, or the non-member Home fallback
-// parseMembershipTab keys on for membership — yields no items (the wrong
-// tab's content must not leak into the scan); the videos caller redirects to
-// the UU playlist, everyone else treats it as clean exhaustion. A MATCHED tab
-// with no items is a real-but-empty tab: tabMatched true, empty page.
-func parseBrowseTabPage(body []byte, tab string) (items []MembershipVideo, token, visitorData string, tabMatched bool) {
+// decodeBrowseEnvelope decodes a page-1 /browse body into the shared
+// envelope; nil when the body is not the ytInitialData shape. Decoding once
+// lets one response feed both harvestTabStrip and parseBrowseTabPage.
+func decodeBrowseEnvelope(body []byte) *browseFirstPageEnvelope {
 	var env browseFirstPageEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
+		return nil
+	}
+	return &env
+}
+
+// harvestTabStrip walks a page-1 envelope's tab strip and returns tabName →
+// the tab's own browseEndpoint.params, for the tab names this client scans
+// (browseTabID identity; tabs without a recognized identity or without params
+// are skipped). ok is false when the envelope carries no strip at all —
+// error/alert responses — which callers must NOT cache as "the channel has no
+// tabs"; an empty-but-present strip IS a cacheable answer.
+func harvestTabStrip(env *browseFirstPageEnvelope) (map[string]string, bool) {
+	if env == nil {
+		return nil, false
+	}
+	tabs := env.Contents.TwoColumnBrowseResultsRenderer.Tabs
+	if len(tabs) == 0 {
+		return nil, false
+	}
+	strip := make(map[string]string, 3)
+	for _, t := range tabs {
+		h := t.TabRenderer
+		if h == nil {
+			h = t.ExpandableTabRenderer
+		}
+		if h == nil {
+			continue
+		}
+		if id := browseTabID(h); id != "" && h.Endpoint.BrowseEndpoint.Params != "" {
+			strip[id] = h.Endpoint.BrowseEndpoint.Params
+		}
+	}
+	return strip, true
+}
+
+// parseBrowseTabPage extracts items + continuation token from a page-1
+// /browse envelope (nil env — undecodable body — parses as nothing).
+// tabMatched reports whether the SELECTED tab's identity is the tab that was
+// requested (tab "" accepts any selected tab — the uploads-playlist fallback
+// response). A mismatch — e.g. a Home-selected response on a channel lacking
+// the tab, or the non-member Home fallback parseMembershipTab keys on for
+// membership — yields no items (the wrong tab's content must not leak into
+// the scan); the videos caller redirects to the UU playlist, everyone else
+// treats it as clean exhaustion. A MATCHED tab with no items is a
+// real-but-empty tab: tabMatched true, empty page.
+func parseBrowseTabPage(env *browseFirstPageEnvelope, tab string) (items []MembershipVideo, token, visitorData string, tabMatched bool) {
+	if env == nil {
 		return nil, "", "", false
 	}
 	visitorData = env.ResponseContext.VisitorData
