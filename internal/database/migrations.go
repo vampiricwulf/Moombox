@@ -615,7 +615,9 @@ func (db *Database) migrate() error {
 		if err := db.migrateV16(); err != nil {
 			return err
 		}
-		return db.writeUserVersion(16)
+		if err := db.writeUserVersion(16); err != nil {
+			return err
+		}
 	}
 
 	return nil
