@@ -328,6 +328,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case backfillRescanQueuedMsg:
+		a.setFeedback("Feed history re-scan queued")
+		return a, nil
+
 	case cookieRecheckResultMsg:
 		var parts []string
 		if a.statusBar.ytActive {

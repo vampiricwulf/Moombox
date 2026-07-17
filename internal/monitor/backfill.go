@@ -357,7 +357,16 @@ func (bw *BackfillWorker) emitProgress(chID, tab string, pages int, state string
 // already-in-flight, not-stale channel and a completed, condition-false
 // channel are both no-ops. Triggered once per feed-monitor cycle — which
 // startup and kickMonitors both run — plus the manual re-run.
-func (bw *BackfillWorker) Sweep(channels []ChannelRef) {
+//
+// force is the manual re-run (§11): treat every channel's backfilled_at as
+// NULL — the DB condition (needsBackfill, and its GetChannelBackfill read)
+// is skipped entirely and every eligible channel rescans. The IN-FLIGHT
+// rules above it are deliberately untouched: an already-queued/running,
+// non-stale scan is still skipped (a double-tapped re-run must not cancel a
+// scan already doing the work), and only the existing widen/stale logic
+// cancels. The monitor cycle passes false; the R B chord and
+// POST /api/backfill/rescan pass true.
+func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 	bw.mu.Lock()
 	if bw.baseCtx == nil || bw.baseCtx.Err() != nil {
 		bw.mu.Unlock()
@@ -393,13 +402,15 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef) {
 			bw.enqueueLocked(ref)
 			continue
 		}
-		cb, err := bw.db.GetChannelBackfill(ref.ChID)
-		if err != nil {
-			bw.logger.Warn("backfill sweep: completion read failed", "channel", ref.ChID, "err", err)
-			continue
-		}
-		if !needsBackfill(cb, ref.WindowDays, ref.WithMembership) {
-			continue
+		if !force {
+			cb, err := bw.db.GetChannelBackfill(ref.ChID)
+			if err != nil {
+				bw.logger.Warn("backfill sweep: completion read failed", "channel", ref.ChID, "err", err)
+				continue
+			}
+			if !needsBackfill(cb, ref.WindowDays, ref.WithMembership) {
+				continue
+			}
 		}
 		bw.enqueueLocked(ref)
 	}

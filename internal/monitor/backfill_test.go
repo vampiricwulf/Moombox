@@ -676,7 +676,7 @@ func TestSweep_FreshChannelScansOnce_CompletedNeverRescanned(t *testing.T) {
 	ch := backfillTestCh()
 	refs := []ChannelRef{refFor(ch, 3, false)}
 
-	bw.Sweep(refs)
+	bw.Sweep(refs, false)
 	if got := recvWithin(t, calls, "fresh channel's scan"); got != (scanCall{backfillTestChannel, 3, false}) {
 		t.Fatalf("scan invoked with %+v, want {%s 3 false}", got, backfillTestChannel)
 	}
@@ -689,7 +689,7 @@ func TestSweep_FreshChannelScansOnce_CompletedNeverRescanned(t *testing.T) {
 	// Repeated sweeps with unchanged conditions enqueue NOTHING — assert
 	// synchronously (Sweep's decisions happen before it returns).
 	for range 3 {
-		bw.Sweep(refs)
+		bw.Sweep(refs, false)
 	}
 	if inflight, queued := inflightState(bw); len(inflight) != 0 || queued != 0 {
 		t.Fatalf("completed channel re-enqueued: inflight=%d queued=%d, want 0/0", len(inflight), queued)
@@ -700,7 +700,7 @@ func TestSweep_FreshChannelScansOnce_CompletedNeverRescanned(t *testing.T) {
 	// been (wrongly) enqueued — in this sweep or any earlier one — its scan
 	// would arrive before the fresh channel's.
 	ch2 := &config.ChannelConfig{ID: backfillTestChannel2, Name: "Fresh Two"}
-	bw.Sweep([]ChannelRef{refFor(ch, 3, false), refFor(ch2, 3, false)})
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false), refFor(ch2, 3, false)}, false)
 	if got := recvWithin(t, calls, "second fresh channel's scan"); got.chID != backfillTestChannel2 {
 		t.Fatalf("scan invoked for %q, want %q (completed channel must NEVER be re-invoked)", got.chID, backfillTestChannel2)
 	}
@@ -737,12 +737,12 @@ func TestSweep_WidenMidScanCancelsResetsCursorAndRestartsDeeper(t *testing.T) {
 		t.Fatalf("SaveBackfillCursor: %v", err)
 	}
 
-	bw.Sweep([]ChannelRef{refFor(ch, 3, false)})
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}, false)
 	if wd := recvWithin(t, started, "first scan"); wd != 3 {
 		t.Fatalf("first scan windowDays = %d, want 3", wd)
 	}
 
-	bw.Sweep([]ChannelRef{refFor(ch, 30, false)})
+	bw.Sweep([]ChannelRef{refFor(ch, 30, false)}, false)
 	recvWithin(t, firstCancelled, "first scan's cancellation")
 	if wd := recvWithin(t, started, "restarted (deeper) scan"); wd != 30 {
 		t.Fatalf("restarted scan windowDays = %d, want 30", wd)
@@ -772,11 +772,11 @@ func TestSweep_MembershipNewlyEligibleMidScanRestarts(t *testing.T) {
 	startWorker(t, bw)
 	ch := backfillTestCh()
 
-	bw.Sweep([]ChannelRef{refFor(ch, 3, false)})
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}, false)
 	if wm := recvWithin(t, started, "first scan"); wm {
 		t.Fatalf("first scan withMembership = true, want false")
 	}
-	bw.Sweep([]ChannelRef{refFor(ch, 3, true)})
+	bw.Sweep([]ChannelRef{refFor(ch, 3, true)}, false)
 	if wm := recvWithin(t, started, "restarted scan"); !wm {
 		t.Fatalf("restarted scan withMembership = false, want true")
 	}
@@ -803,12 +803,12 @@ func TestSweep_NarrowMidScanDoesNotRestart(t *testing.T) {
 	startWorker(t, bw)
 	ch := backfillTestCh()
 
-	bw.Sweep([]ChannelRef{refFor(ch, 30, false)})
+	bw.Sweep([]ChannelRef{refFor(ch, 30, false)}, false)
 	if wd := recvWithin(t, started, "deep scan"); wd != 30 {
 		t.Fatalf("scan windowDays = %d, want 30", wd)
 	}
 
-	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}) // narrower — must be a no-op
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}, false) // narrower — must be a no-op
 	inflight, queued := inflightState(bw)
 	fl := inflight[ch.ID]
 	if fl == nil || fl.windowDays != 30 || queued != 0 {
@@ -858,7 +858,7 @@ func TestSweep_MembershipToggleOnRescans_ToggleOffDoesNot(t *testing.T) {
 
 	// Eligibility OFF: neither channel rescans (ch's recorded 0 needs
 	// membershipEligibleNow to fire; ch2's toggle-off has no arm).
-	bw.Sweep([]ChannelRef{refFor(ch, 30, false), refFor(ch2, 30, false)})
+	bw.Sweep([]ChannelRef{refFor(ch, 30, false), refFor(ch2, 30, false)}, false)
 	if inflight, queued := inflightState(bw); len(inflight) != 0 || queued != 0 {
 		t.Fatalf("eligibility-off sweep enqueued: inflight=%d queued=%d, want 0/0", len(inflight), queued)
 	}
@@ -866,7 +866,7 @@ func TestSweep_MembershipToggleOnRescans_ToggleOffDoesNot(t *testing.T) {
 	// Eligibility ON: ch rescans (recorded without membership), ch2 does not
 	// (recorded with). The stub blocks, so the in-flight set is inspectable
 	// while ch's scan runs.
-	bw.Sweep([]ChannelRef{refFor(ch, 30, true), refFor(ch2, 30, true)})
+	bw.Sweep([]ChannelRef{refFor(ch, 30, true), refFor(ch2, 30, true)}, false)
 	got := recvWithin(t, calls, "toggle-on rescan")
 	if got != (scanCall{backfillTestChannel, 30, true}) {
 		t.Fatalf("rescan = %+v, want {%s 30 true}", got, backfillTestChannel)
@@ -876,6 +876,85 @@ func TestSweep_MembershipToggleOnRescans_ToggleOffDoesNot(t *testing.T) {
 		t.Fatalf("already-with-membership channel was re-enqueued (queued=%d)", queued)
 	}
 	close(release)
+}
+
+// (Task 6, manual re-run) force=true treats every channel's backfilled_at as
+// NULL: a COMPLETED channel — for which the normal sweep is a pinned no-op —
+// is rescanned. The in-flight rules are NOT part of force's remit; the
+// companion test below pins that half.
+func TestSweep_ForceRescansCompletedChannel(t *testing.T) {
+	db := newTestDB(t)
+	calls := make(chan scanCall, 8)
+	bw := newTestBackfillWorker(t, db, withScan(func(_ context.Context, _ *config.ChannelConfig, chID string, wd int, wm bool) error {
+		calls <- scanCall{chID, wd, wm}
+		return nil
+	}))
+	startWorker(t, bw)
+	ch := backfillTestCh()
+	refs := []ChannelRef{refFor(ch, 3, false)}
+
+	// Completed at the same window + membership — every DB arm false, so the
+	// normal sweep enqueues nothing (assert synchronously, as the fresh-
+	// channel test does).
+	if err := db.SetChannelBackfilled(ch.ID, 3, false, "2026-07-15T12:00:00Z"); err != nil {
+		t.Fatalf("SetChannelBackfilled: %v", err)
+	}
+	bw.Sweep(refs, false)
+	if inflight, queued := inflightState(bw); len(inflight) != 0 || queued != 0 {
+		t.Fatalf("normal sweep of a completed channel enqueued: inflight=%d queued=%d, want 0/0", len(inflight), queued)
+	}
+
+	bw.Sweep(refs, true)
+	if got := recvWithin(t, calls, "forced rescan"); got != (scanCall{backfillTestChannel, 3, false}) {
+		t.Fatalf("forced rescan = %+v, want {%s 3 false}", got, backfillTestChannel)
+	}
+}
+
+// (Task 6, manual re-run) force leaves the IN-FLIGHT rules untouched: an
+// already-running, non-stale scan is skipped, not cancelled — a user
+// double-tapping the manual re-run must never restart a scan that is already
+// doing the work. (A STALE running scan still restarts via the existing
+// widen logic, force or no force.)
+func TestSweep_ForceDoesNotCancelRunningScan(t *testing.T) {
+	db := newTestDB(t)
+	started := make(chan int, 4)
+	block := make(chan struct{})
+	var gotCancel atomic.Bool
+	bw := newTestBackfillWorker(t, db, withScan(func(ctx context.Context, _ *config.ChannelConfig, _ string, wd int, _ bool) error {
+		started <- wd
+		select {
+		case <-block:
+			return nil
+		case <-ctx.Done():
+			gotCancel.Store(true)
+			return ctx.Err()
+		}
+	}))
+	startWorker(t, bw)
+	ch := backfillTestCh()
+
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}, true) // the manual re-run starts the scan
+	if wd := recvWithin(t, started, "first scan"); wd != 3 {
+		t.Fatalf("scan windowDays = %d, want 3", wd)
+	}
+
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}, true) // double-tap — must be a no-op
+	inflight, queued := inflightState(bw)
+	fl := inflight[ch.ID]
+	if fl == nil || queued != 0 {
+		t.Fatalf("forced re-sweep disturbed the running scan: fl=%+v queued=%d, want in-flight entry intact, queue empty", fl, queued)
+	}
+
+	close(block) // let the scan finish cleanly
+	recvWithin(t, fl.done, "scan exit")
+	if gotCancel.Load() {
+		t.Error("forced re-sweep cancelled the running non-stale scan")
+	}
+	select {
+	case wd := <-started:
+		t.Fatalf("unexpected second scan at windowDays %d after a forced re-sweep", wd)
+	default:
+	}
 }
 
 // (d) Removal mid-scan: the sweep whose channel list no longer carries the
@@ -933,12 +1012,12 @@ func TestSweep_RemovalMidScanCancelsThenPrunes(t *testing.T) {
 	}))
 	startWorker(t, bw)
 
-	bw.Sweep([]ChannelRef{refFor(ch, 3, false)})
+	bw.Sweep([]ChannelRef{refFor(ch, 3, false)}, false)
 	recvWithin(t, scanStarted, "scan start")
 
 	// The channel is REMOVED from config: the next sweep's list no longer
 	// carries it. Sweep is synchronous through the prune.
-	bw.Sweep(nil)
+	bw.Sweep(nil, false)
 
 	select {
 	case <-staleWritten:
@@ -1023,7 +1102,7 @@ func TestSweep_PruneOfQueuedChannelDoesNotWaitBehindRunningScan(t *testing.T) {
 	}
 
 	// chA starts scanning (and blocks); chB sits QUEUED behind it.
-	bw.Sweep([]ChannelRef{refFor(chA, 3, false), refFor(chB, 3, false)})
+	bw.Sweep([]ChannelRef{refFor(chA, 3, false), refFor(chB, 3, false)}, false)
 	recvWithin(t, startedA, "long-running scan start")
 	inflight, queued := inflightState(bw)
 	if inflight[chB.ID] == nil || queued != 1 {
@@ -1034,7 +1113,7 @@ func TestSweep_PruneOfQueuedChannelDoesNotWaitBehindRunningScan(t *testing.T) {
 	// scan is still blocked — a wait on chB's done would hang here forever.
 	pruned := make(chan struct{})
 	go func() {
-		bw.Sweep([]ChannelRef{refFor(chA, 3, false)})
+		bw.Sweep([]ChannelRef{refFor(chA, 3, false)}, false)
 		close(pruned)
 	}()
 	recvWithin(t, pruned, "prune of the queued channel (must not wait behind the running scan)")
@@ -1078,7 +1157,7 @@ func TestSweep_FailedScanRetriedByNextSweep(t *testing.T) {
 	ch := backfillTestCh()
 	refs := []ChannelRef{refFor(ch, 3, false)}
 
-	bw.Sweep(refs)
+	bw.Sweep(refs, false)
 	if got := recvWithin(t, calls, "first attempt"); got != 1 {
 		t.Fatalf("first attempt = %d, want 1", got)
 	}
@@ -1093,7 +1172,7 @@ func TestSweep_FailedScanRetriedByNextSweep(t *testing.T) {
 		t.Fatalf("failed scan leaked its in-flight entry: inflight=%d queued=%d", len(inflight), queued)
 	}
 
-	bw.Sweep(refs) // retry: backfilled_at is still NULL
+	bw.Sweep(refs, false) // retry: backfilled_at is still NULL
 	if got := recvWithin(t, calls, "retry attempt"); got != 2 {
 		t.Fatalf("retry attempt = %d, want 2", got)
 	}
@@ -1161,7 +1240,7 @@ func TestBackfillProgress_PagesAndDone(t *testing.T) {
 	emitted := recordProgress(bw)
 	startWorker(t, bw)
 
-	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)})
+	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)}, false)
 	assertEmissions(t, emitted, []progressEmission{
 		{backfillTestChannel, "videos", 1, "scanning"},
 		{backfillTestChannel, "videos", 2, "scanning"},
@@ -1184,7 +1263,7 @@ func TestBackfillProgress_FetchFailureEmitsError(t *testing.T) {
 	emitted := recordProgress(bw)
 	startWorker(t, bw)
 
-	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)})
+	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)}, false)
 	assertEmissions(t, emitted, []progressEmission{
 		// videos page 1 failed — nothing; streams still scans (tab
 		// independence) before the scan-level error.
@@ -1207,9 +1286,9 @@ func TestBackfillProgress_PruneEmitsIdle(t *testing.T) {
 	emitted := recordProgress(bw)
 	startWorker(t, bw)
 
-	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)})
+	bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 3, false)}, false)
 	recvWithin(t, scanStarted, "scan start")
-	bw.Sweep(nil) // channel removed from config — cancel, wait, prune
+	bw.Sweep(nil, false) // channel removed from config — cancel, wait, prune
 	assertEmissions(t, emitted, []progressEmission{
 		{backfillTestChannel, "", 0, "idle"},
 		{backfillTestChannel, "", 0, "idle"},

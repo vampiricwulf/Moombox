@@ -227,6 +227,11 @@ func (s *runState) runTUI() {
 			s.kickMonitors()
 		}
 	}
+	app.OnBackfillRescan = func() {
+		if s.backfillRescan != nil {
+			s.backfillRescan()
+		}
+	}
 	if s.upd != nil {
 		app.OnCheckUpdate = func() (*tui.UpdateStatusMsg, error) {
 			s.log.Info("Update check requested from TUI")

@@ -107,6 +107,11 @@ type runState struct {
 	triggerRestart     func(source string)
 	kickMonitors       func()
 	getActivePlatforms func() map[string]bool
+	// backfillRescan is the §11 manual re-run: a forced backfill sweep
+	// (every channel treated as never-backfilled; in-flight, non-stale
+	// scans still skipped). Front doors: the TUI R B chord and
+	// POST /api/backfill/rescan.
+	backfillRescan func()
 
 	// --- Atomic callback slots ---
 	// Set before cookieRefresh.Start(); TUI section Store()s a concrete func

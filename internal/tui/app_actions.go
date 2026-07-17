@@ -152,6 +152,15 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.clientTokensDlg.Open()
 			return a, tea.Batch(a.fetchClientTokensCmd(), a.clientTokensDlg.SpinnerInit())
 		}
+	case "R B":
+		if a.OnBackfillRescan != nil {
+			a.setFeedback("Re-scanning feed history...")
+			rescanFn := a.OnBackfillRescan
+			return a, safeCmd(func() tea.Msg {
+				rescanFn()
+				return backfillRescanQueuedMsg{}
+			})
+		}
 	case "R C":
 		if a.OnRecheckCookies != nil {
 			a.setFeedback("Rechecking cookies...")
@@ -477,6 +486,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	}
 
 	// Request — conditional on callbacks being set
+	if a.OnBackfillRescan != nil {
+		items = append(items, ActionMenuItem{Chord: "R B", Label: "Re-scan Feed History", HintLabel: "Backfill", Category: "Request"})
+	}
 	if a.OnRecheckCookies != nil {
 		items = append(items, ActionMenuItem{Chord: "R C", Label: "Recheck Cookies", HintLabel: "Cookies", Category: "Request"})
 	}

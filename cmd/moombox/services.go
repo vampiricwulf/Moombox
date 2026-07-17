@@ -425,7 +425,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// youtube.com/channel/<login> would 404 every tab and retry forever).
 	// Disabled channels are included so the worker treats them as PAUSED —
 	// kept in the active set (not pruned), but never scanned.
-	feedMon.BackfillSweep = func() {
+	//
+	// ONE ref-building closure serves both sweep flavors: the cycle sweep
+	// (force=false, via feedMon.BackfillSweep) and the manual re-run
+	// (force=true, via s.backfillRescan — the R B chord and
+	// POST /api/backfill/rescan front doors).
+	sweepBackfill := func(force bool) {
 		var refs []monitor.ChannelRef
 		var membershipOn bool
 		s.configStore.Read(func(c *config.MoomboxConfig) {
@@ -455,8 +460,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 				refs[i].WithMembership = true
 			}
 		}
-		backfill.Sweep(refs)
+		backfill.Sweep(refs, force)
 	}
+	feedMon.BackfillSweep = func() { sweepBackfill(false) }
+	s.backfillRescan = func() { sweepBackfill(true) }
 
 	// =========================================================================
 	// 13. DECAPI monitor

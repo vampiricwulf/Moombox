@@ -183,6 +183,11 @@ type (
 		Action string
 	}
 
+	// Async result for the R B feed-history re-scan: the forced sweep
+	// returned — every scan it decided on is queued (progress then flows
+	// through BackfillStatusMsg into the status bar).
+	backfillRescanQueuedMsg struct{}
+
 	// Async results for cookie refresh
 	cookieRecheckResultMsg struct {
 		YouTubeAuth bool
@@ -420,6 +425,7 @@ type App struct {
 	// Update callbacks
 	OnCheckUpdate     func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
 	OnForceCheck      func()                           // force an immediate monitor poll of all sources
+	OnBackfillRescan  func()                           // force a feed-history backfill re-scan of all channels (R B)
 	OnApplyUpdate     func(version string) string      // returns error string (empty on success, process exits)
 	OnVerifySignature func() error                     // verify current binary's signature
 	// OnFetchReleaseNotes fetches release notes for a specific version from GitHub.

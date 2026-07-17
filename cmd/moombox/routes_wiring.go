@@ -105,6 +105,13 @@ func (s *runState) wireRoutes() func() {
 			s.kickMonitors()
 		}
 	}})
+	routes.BackfillRoutes(s.r, &routes.BackfillRouteDeps{Rescan: func() {
+		// Read at call time — backfillRescan is populated in initServices;
+		// the closure avoids capturing a nil field at wiring time.
+		if s.backfillRescan != nil {
+			s.backfillRescan()
+		}
+	}})
 	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors)
 	routes.FileRoutes(s.r, &routes.FileRoutesDeps{
 		DB:     s.db,
