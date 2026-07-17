@@ -354,6 +354,101 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 	return ids, rows.Err()
 }
 
+// DeleteJobsAndHistoryForChannel deletes the channel's jobs in the given
+// statuses AND their processing-history rows, returning the number of jobs
+// deleted. Plan 5's backfill prune calls it with {Queued, Upcoming, COOKIES?}
+// (spec §11): pre-download states with nothing on disk. AddToHistory fires at
+// job CREATION, so deleting the job while its history row survives
+// manufactures an orphan — HasProcessed keeps answering true and the re-added
+// channel can never re-archive the video (the exact class that re-armed
+// gr-ZTohjwnQ).
+//
+// Statement order is load-bearing: the history delete's subquery reads the
+// jobs table, so it must run BEFORE the jobs delete. Both run in one
+// transaction so a crash between them can't strand a half-pruned channel.
+// The subquery matches on jobs.video_id — history rows are keyed by job ID,
+// and for the YouTube jobs this helper targets (the only ones carrying a
+// channel_id) the job ID IS the video ID (see ListOrphanedHistory).
+//
+// jobs.channel_id is nullable; SQL `channel_id = ?` never matches NULL, so
+// Twitch/manual jobs (no channel affiliation) are untouchable here.
+func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []JobStatus) (int, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+
+	ids, deleted, err := db.deleteJobsAndHistoryForChannelLocked(channelID, statuses)
+	if err != nil {
+		return 0, err
+	}
+	// Post-unlock, one OnJobDeleted per pruned job — the same lifecycle
+	// dispatch DeleteJob fires, so the WS broadcaster and TUI drop the rows
+	// instead of ghosting them until the next full refresh.
+	for _, id := range ids {
+		db.notifyJobDeleted(id)
+	}
+	return deleted, nil
+}
+
+func (db *Database) deleteJobsAndHistoryForChannelLocked(channelID string, statuses []JobStatus) (ids []string, deleted int, err error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+	match := "channel_id = ? AND status IN (" + placeholders + ")"
+	args := make([]any, 0, len(statuses)+1)
+	args = append(args, channelID)
+	for _, s := range statuses {
+		args = append(args, string(s))
+	}
+
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback()
+
+	// Collect the doomed job IDs first (fully drained before the next
+	// statement — the Tx is bound to a single connection) so the caller can
+	// fire per-job deletion events after commit.
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM jobs WHERE "+match, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, 0, err
+	}
+	rows.Close()
+
+	// History FIRST — the subquery reads jobs.
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM history WHERE video_id IN (SELECT video_id FROM jobs WHERE "+match+")",
+		args...); err != nil {
+		return nil, 0, err
+	}
+
+	res, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE "+match, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	n, _ := res.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return nil, 0, err
+	}
+	return ids, int(n), nil
+}
+
 // AddGap adds a gap record for a job.
 func (db *Database) AddGap(jobID string, from, to int, stream string) error {
 	db.mu.Lock()

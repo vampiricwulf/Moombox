@@ -1410,3 +1410,81 @@ func TestAddJobWritesChannelIDAndQueuePriority(t *testing.T) {
 	assertRow("broadcast1", StatusUpcoming, 0, &chID)
 	assertRow("manual1", StatusUpcoming, 0, nil)
 }
+
+// TestDeleteJobsAndHistoryForChannel pins the Plan-5 channel prune: the
+// channel's pre-download jobs ({Queued, Upcoming, COOKIES?}) AND their history
+// rows are deleted together. A deleted job whose history row survives makes
+// HasProcessed lie ("a job was created") and blocks re-add forever — the exact
+// orphan class that re-armed gr-ZTohjwnQ. Started/terminal jobs keep their
+// history, other channels are untouched, and NULL-channel jobs (Twitch/manual,
+// no affiliation) must never match.
+func TestDeleteJobsAndHistoryForChannel(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+
+	chID := "UC_prune_me"
+	otherCh := "UC_other"
+
+	// ID == VideoID mirrors how monitor/backfill-created YouTube jobs are
+	// keyed — history rows are keyed by job ID, which for YouTube IS the
+	// video ID (see ListOrphanedHistory).
+	seed := func(id string, status JobStatus, ch *string) {
+		t.Helper()
+		added, err := db.AddJob(&Job{ID: id, VideoID: id, URL: "u", Status: status, ChannelID: ch})
+		if err != nil || !added {
+			t.Fatalf("AddJob(%s): added=%v err=%v", id, added, err)
+		}
+		// AddToHistory fires at job creation for every disposition,
+		// exactly as the host does (monitor_callbacks).
+		if err := db.AddToHistory(id); err != nil {
+			t.Fatalf("AddToHistory(%s): %v", id, err)
+		}
+	}
+
+	pruneStatuses := []JobStatus{StatusQueued, StatusUpcoming, StatusCookies}
+	doomed := []string{"doomed_queued", "doomed_upcoming", "doomed_cookies"}
+	for i, st := range pruneStatuses {
+		seed(doomed[i], st, &chID)
+	}
+	kept := []string{"kept_live", "kept_downloading", "kept_finished"}
+	for i, st := range []JobStatus{StatusLive, StatusDownloading, StatusFinished} {
+		seed(kept[i], st, &chID)
+	}
+	seed("other_channel", StatusQueued, &otherCh) // pruned status, different channel
+	seed("null_channel", StatusQueued, nil)       // pruned status, NULL channel_id
+
+	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, pruneStatuses)
+	if err != nil {
+		t.Fatalf("DeleteJobsAndHistoryForChannel: %v", err)
+	}
+	if deleted != len(doomed) {
+		t.Errorf("deleted = %d, want %d (the jobs statement's RowsAffected)", deleted, len(doomed))
+	}
+
+	assertState := func(id string, wantJob, wantHistory bool) {
+		t.Helper()
+		job, err := db.GetJob(id)
+		if err != nil {
+			t.Fatalf("GetJob(%s): %v", id, err)
+		}
+		if got := job != nil; got != wantJob {
+			t.Errorf("%s: job exists = %v, want %v", id, got, wantJob)
+		}
+		has, err := db.HasProcessed(id)
+		if err != nil {
+			t.Fatalf("HasProcessed(%s): %v", id, err)
+		}
+		if has != wantHistory {
+			t.Errorf("%s: history exists = %v, want %v", id, has, wantHistory)
+		}
+	}
+
+	for _, id := range doomed {
+		assertState(id, false, false) // job AND history gone — no orphan
+	}
+	for _, id := range kept {
+		assertState(id, true, true) // started/terminal: job AND history intact
+	}
+	assertState("other_channel", true, true) // channel-scoped
+	assertState("null_channel", true, true)  // NULL channel_id never matches
+}
