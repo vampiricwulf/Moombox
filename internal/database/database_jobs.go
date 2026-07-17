@@ -281,6 +281,79 @@ func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	return true, nil
 }
 
+// QueuedChannels returns the distinct channel IDs that currently have Queued
+// (un-admitted backlog) jobs. NULL channel_id rows are excluded: Twitch and
+// manual adds have no channel affiliation and are never scheduler-paced, and
+// a defensive NULL-channel Queued row must not wedge the admission sweep.
+func (db *Database) QueuedChannels() ([]string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT DISTINCT channel_id FROM jobs WHERE status = ? AND channel_id IS NOT NULL`,
+		StatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []string
+	for rows.Next() {
+		var ch string
+		if err := rows.Scan(&ch); err != nil {
+			return nil, err
+		}
+		channels = append(channels, ch)
+	}
+	return channels, rows.Err()
+}
+
+// CountBacklogInFlight returns the channel's admitted-backlog count — the M
+// count of spec §10.
+//
+// M count: ALLOW-list. NOT IN would leak COOKIES? — neither Queued nor terminal —
+// and a channel whose cookies lapse would silently lose its throughput forever.
+func (db *Database) CountBacklogInFlight(channelID string) (int, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var n int
+	err := db.db.QueryRowContext(db.getCtx(), `SELECT COUNT(*) FROM jobs
+ WHERE channel_id = ? AND queue_priority = 1
+   AND status IN ('Upcoming','Live','Downloading','Muxing');`, channelID).Scan(&n)
+	return n, err
+}
+
+// NextQueuedJobs returns up to limit Queued job IDs for the channel, in the
+// order the scheduler admits them.
+//
+// Admission order: published DESC — no priority term (only backlog is ever Queued).
+// INNER JOIN is guaranteed to hit: only the archival pass creates Queued rows.
+func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(), `SELECT j.id FROM jobs j
+  JOIN feed_items f ON f.channel_id = j.channel_id AND f.video_id = j.video_id
+ WHERE j.channel_id = ? AND j.status = 'Queued'
+ ORDER BY f.published DESC
+ LIMIT ?;`, channelID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // AddGap adds a gap record for a job.
 func (db *Database) AddGap(jobID string, from, to int, stream string) error {
 	db.mu.Lock()

@@ -45,7 +45,9 @@ var ErrNonActionable = errors.New("non-actionable error")
 var ErrCancelled = errors.New("cancelled")
 
 // heartbeatInterval is the safety-net poll interval for catching missed jobs.
-// Normal job discovery is signal-driven via NotifyNewJob.
+// Normal job discovery is signal-driven via NotifyNewJob. The backlog
+// scheduler reuses it as its sweep heartbeat (spec §10) — its normal path is
+// also signal-driven, via Scheduler.Wake.
 const heartbeatInterval = 60 * time.Second
 
 // MaxTwitchAutoRetries caps how many times the Twitch monitor's auto-recovery
@@ -186,7 +188,7 @@ func NewDownloadWorker(
 		tw:           tw,
 		cfg:          cfg,
 		queue:        queue,
-		scheduler:    newScheduler(),
+		scheduler:    newScheduler(db, queue, logger),
 		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn),
 		streamProc:   sp,
 		notifier:     nm,
@@ -204,6 +206,11 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 
 	// Poll for new jobs periodically
 	go w.pollForJobs(ctx)
+
+	// Backlog admission (spec §10). The scheduler owns the only path out of
+	// Queued — pollForJobs never touches those rows (ShouldProcess is false
+	// for Queued by design) — so Run carries its own restart-on-panic wrapper.
+	go w.scheduler.Run(ctx)
 
 	// Process jobs from queue
 	for {
@@ -248,6 +255,15 @@ func (w *DownloadWorker) EnqueueJob(jobID string) {
 // EnqueueJob — the scheduler, not the queue, admits backlog work.
 func (w *DownloadWorker) Scheduler() *Scheduler {
 	return w.scheduler
+}
+
+// SetArchiveSlotsResolver injects the per-channel archive_slots resolver the
+// backlog scheduler consults on every admission sweep (spec §10). The host
+// (cmd/moombox) builds it against the live config store so config edits take
+// effect without restart. Must be called before Start — the field is only
+// read from the scheduler's Run goroutine, which Start launches.
+func (w *DownloadWorker) SetArchiveSlotsResolver(fn func(channelID string) int) {
+	w.scheduler.resolveSlots = fn
 }
 
 // StashTwitchStreamInfo forwards a fresh Twitch stream info hint to the
@@ -371,7 +387,15 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 }
 
 func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
-	defer w.queue.Complete(jobID)
+	defer func() {
+		w.queue.Complete(jobID)
+		// Every job exit funnels through here — Finished, Error, Cancelled,
+		// COOKIES? — and all of those drop out of the scheduler's M
+		// allow-list, so a freed archive slot may exist. Wake the scheduler
+		// to admit the channel's next backlog VOD now rather than on its
+		// heartbeat. Coalesced + non-blocking; harmless when nothing freed.
+		w.scheduler.Wake()
+	}()
 
 	job, err := w.db.GetJob(jobID)
 	if err != nil {

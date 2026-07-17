@@ -325,6 +325,30 @@ func (s *runState) initServices(logLevelOverride string) error {
 	})
 	s.dlWorker = dlWorker
 
+	// Archive-slots resolver (spec §10): the backlog scheduler asks "how many
+	// backlog downloads may channel X run" on every admission sweep. The
+	// per-channel archive_slots override falls back to monitors.archive_slots,
+	// and the config store is re-read on every call so config edits take
+	// effect without restart — channels are few, the scan is cheap. A channel
+	// with no config entry (a removed channel with leftover Queued rows) gets
+	// the global default.
+	dlWorker.SetArchiveSlotsResolver(func(channelID string) int {
+		slots := 0
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			slots = c.Monitors.ArchiveSlots
+			for i := range c.Channels {
+				ch := &c.Channels[i]
+				if ch.ID == channelID {
+					if ch.ArchiveSlots != nil && *ch.ArchiveSlots > 0 {
+						slots = *ch.ArchiveSlots
+					}
+					break
+				}
+			}
+		})
+		return slots
+	})
+
 	// =========================================================================
 	// 11. Trim service
 	// =========================================================================
