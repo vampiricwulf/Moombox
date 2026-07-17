@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // TestSchedulerWakeIsSafeNoOp pins the Task 2 stub contract: creation sites
@@ -428,4 +429,187 @@ func TestScheduler_IgnoresNullChannel(t *testing.T) {
 		t.Fatalf("NULL-channel job = %+v, %v; want untouched in Queued", j, err)
 	}
 	assertAdmissionInvariants(t, log)
+}
+
+// ---------------------------------------------------------------------------
+// Task 4 slot-release flips (spec §10): a priority-1 backlog job that turns
+// out to be a BROADCAST stops holding its channel's archive slot — at the
+// Live status write, or on entering the upcoming wait (which can last days).
+// ---------------------------------------------------------------------------
+
+// TestBroadcastFlip_LiveReleasesSlot: a priority-1 job whose processor writes
+// Live flips queue_priority to 0 in the SAME UpdateJobFields call, so it no
+// longer counts in CountBacklogInFlight. Also pins the scan side: the flip
+// guard reads Job.QueuePriority off the DB scan path, so GetJob must return
+// what AddJob wrote (channel_id and queue_priority round-trip together).
+func TestBroadcastFlip_LiveReleasesSlot(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	chID := "UC_flip_live"
+	addSchedJob(t, db, &chID, "flip_live", database.StatusUpcoming, 1)
+
+	// Scan side: the processor's job comes from the DB scan path — the guard
+	// is blind unless both v16 columns round-trip through the SELECT lists.
+	job, err := db.GetJob("flip_live")
+	if err != nil || job == nil {
+		t.Fatalf("GetJob = %+v, %v", job, err)
+	}
+	if job.QueuePriority != 1 {
+		t.Fatalf("scan side: QueuePriority = %d, want 1 — the flip guard reads the scanned value", job.QueuePriority)
+	}
+	if job.ChannelID == nil || *job.ChannelID != chID {
+		t.Fatalf("scan side: ChannelID = %v, want %q", job.ChannelID, chID)
+	}
+	if n, err := db.CountBacklogInFlight(chID); err != nil || n != 1 {
+		t.Fatalf("pre-flip CountBacklogInFlight = %d, %v; want 1", n, err)
+	}
+
+	res, err := w.streamProc.handleStreamStatus(context.Background(), job,
+		&youtube.VideoInfo{StreamStatus: youtube.StreamLive})
+	if err != nil {
+		t.Fatalf("handleStreamStatus: %v", err)
+	}
+	if !res.ShouldDownload || res.IsVod {
+		t.Fatalf("live result = %+v; want ShouldDownload && !IsVod", res)
+	}
+
+	if n, err := db.CountBacklogInFlight(chID); err != nil || n != 0 {
+		t.Fatalf("post-Live CountBacklogInFlight = %d, %v; want 0 — the Live write must release the M slot", n, err)
+	}
+	got, err := db.GetJob("flip_live")
+	if err != nil || got == nil {
+		t.Fatalf("GetJob after flip = %+v, %v", got, err)
+	}
+	if got.Status != database.StatusLive {
+		t.Fatalf("status = %s, want Live", got.Status)
+	}
+	if got.QueuePriority != 0 {
+		t.Fatalf("queue_priority = %d, want 0 (one-way flip at the Live write)", got.QueuePriority)
+	}
+}
+
+// TestBroadcastFlip_UpcomingReleasesSlotBeforeWait: a priority-1 job routed
+// into the upcoming path flips BEFORE the wait. Asserted through the M query
+// (the durable DB value) while waitForLive is still blocking on its probe
+// timer, minutes away from the first probe — the job stays Upcoming through
+// the whole wait, so only the queue_priority flip can drop the count.
+func TestBroadcastFlip_UpcomingReleasesSlotBeforeWait(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	chID := "UC_flip_up"
+	addSchedJob(t, db, &chID, "flip_up", database.StatusUpcoming, 1)
+
+	job, err := db.GetJob("flip_up")
+	if err != nil || job == nil {
+		t.Fatalf("GetJob = %+v, %v", job, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resCh := make(chan *StreamProcessResult, 1)
+	go func() {
+		res, _ := w.streamProc.handleStreamStatus(ctx, job,
+			&youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming})
+		resCh <- res
+	}()
+
+	// The first probe is ~5 minutes out; the flip must already be durable
+	// while the wait blocks.
+	waitForCond(t, 5*time.Second, "queue_priority 0 in the DB while the wait blocks", func() bool {
+		n, err := db.CountBacklogInFlight(chID)
+		return err == nil && n == 0
+	})
+	// The wait is still in progress — the flip preceded it, not followed it.
+	select {
+	case res := <-resCh:
+		t.Fatalf("waitForLive returned before cancel: %+v", res)
+	default:
+	}
+	got, err := db.GetJob("flip_up")
+	if err != nil || got == nil {
+		t.Fatalf("GetJob during wait = %+v, %v", got, err)
+	}
+	if got.QueuePriority != 0 {
+		t.Fatalf("queue_priority = %d, want 0 before the wait", got.QueuePriority)
+	}
+	if got.Status != database.StatusUpcoming {
+		t.Fatalf("status = %s, want still Upcoming through the wait (this path has no status write)", got.Status)
+	}
+
+	cancel()
+	select {
+	case res := <-resCh:
+		if res == nil || res.Error != "cancelled" {
+			t.Fatalf("result = %+v; want the cancelled wait result", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForLive did not return after cancel")
+	}
+}
+
+// TestBroadcastFlips_WakeScheduler: each slot-release flip pokes the
+// scheduler's coalesced wake signal — through the PRODUCTION wiring
+// (NewDownloadWorker hands Scheduler.Wake to the stream processor) — so the
+// freed slot admits the channel's next backlog VOD promptly instead of on the
+// heartbeat. A priority-0 broadcast must NOT wake: no slot was held.
+func TestBroadcastFlips_WakeScheduler(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	chID := "UC_wake"
+
+	drain := func() {
+		select {
+		case <-w.scheduler.wake:
+		default:
+		}
+	}
+	wakeFired := func() bool {
+		select {
+		case <-w.scheduler.wake:
+			return true
+		default:
+			return false
+		}
+	}
+	mustGetJob := func(id string) *database.Job {
+		t.Helper()
+		j, err := db.GetJob(id)
+		if err != nil || j == nil {
+			t.Fatalf("GetJob(%s) = %+v, %v", id, j, err)
+		}
+		return j
+	}
+
+	// Live flip wakes.
+	addSchedJob(t, db, &chID, "wake_live", database.StatusUpcoming, 1)
+	drain()
+	if _, err := w.streamProc.handleStreamStatus(context.Background(), mustGetJob("wake_live"),
+		&youtube.VideoInfo{StreamStatus: youtube.StreamLive}); err != nil {
+		t.Fatal(err)
+	}
+	if !wakeFired() {
+		t.Fatal("Live flip did not Wake the scheduler — the freed slot would wait for the heartbeat")
+	}
+
+	// Upcoming flip wakes. A pre-cancelled ctx returns the wait immediately —
+	// the flip + wake happen before waitForLive is entered.
+	addSchedJob(t, db, &chID, "wake_up", database.StatusUpcoming, 1)
+	drain()
+	cctx, ccancel := context.WithCancel(context.Background())
+	ccancel()
+	if _, err := w.streamProc.handleStreamStatus(cctx, mustGetJob("wake_up"),
+		&youtube.VideoInfo{StreamStatus: youtube.StreamUpcoming}); err != nil {
+		t.Fatal(err)
+	}
+	if !wakeFired() {
+		t.Fatal("upcoming flip did not Wake the scheduler")
+	}
+
+	// Priority-0 broadcast going live: nothing to release, no wake.
+	addSchedJob(t, db, &chID, "wake_p0", database.StatusUpcoming, 0)
+	drain()
+	if _, err := w.streamProc.handleStreamStatus(context.Background(), mustGetJob("wake_p0"),
+		&youtube.VideoInfo{StreamStatus: youtube.StreamLive}); err != nil {
+		t.Fatal(err)
+	}
+	if wakeFired() {
+		t.Fatal("priority-0 live transition woke the scheduler — no slot was freed")
+	}
 }

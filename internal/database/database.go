@@ -231,7 +231,7 @@ func (db *Database) prepareStatements() error {
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
-		auto_retry_count
+		auto_retry_count, channel_id, queue_priority
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -504,7 +504,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
-		&j.AutoRetryCount,
+		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority,
 	)
 	if err != nil {
 		return nil, err

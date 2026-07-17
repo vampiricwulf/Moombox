@@ -83,6 +83,13 @@ type StreamProcessor struct {
 	logger      logger
 	isOnline    func() bool
 
+	// wakeScheduler pokes the backlog scheduler after a slot-release flip
+	// (queue_priority 1→0, spec §10) so the freed archive slot admits the
+	// channel's next backlog VOD promptly instead of waiting for the
+	// heartbeat. Wired by NewDownloadWorker via SetWakeScheduler; nil-guarded
+	// at call sites.
+	wakeScheduler func()
+
 	twitchHints *twitchHintCache // populated by OnStreamFound; consumed by processTwitchLive
 
 	mu          sync.Mutex
@@ -125,6 +132,21 @@ func (sp *StreamProcessor) SetNotifier(nm *notifications.Manager) {
 // SetIsOnline sets the connectivity check function.
 func (sp *StreamProcessor) SetIsOnline(fn func() bool) {
 	sp.isOnline = fn
+}
+
+// SetWakeScheduler wires the backlog scheduler's Wake onto the stream
+// processor. Called by NewDownloadWorker during construction.
+func (sp *StreamProcessor) SetWakeScheduler(fn func()) {
+	sp.wakeScheduler = fn
+}
+
+// releaseArchiveSlot wakes the scheduler after a slot-release flip when the
+// job actually held a slot (priority 1). Ordinary broadcasts (priority 0)
+// free nothing, so no sweep is provoked for them.
+func (sp *StreamProcessor) releaseArchiveSlot(job *database.Job) {
+	if job.QueuePriority == 1 && sp.wakeScheduler != nil {
+		sp.wakeScheduler()
+	}
 }
 
 // Stop gracefully stops the stream processor and any active chat downloaders.
@@ -204,10 +226,16 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 			info.ScheduledStartTime = now
 		}
 		sp.updateJobMetadata(job, info, true)
+		// Slot-release flip (spec §10): a backlog job that turns out to be a
+		// live BROADCAST stops holding its channel's archive slot. One-way
+		// write joined onto the existing status update — one call, one row
+		// touch; a no-op for jobs already at priority 0.
 		sp.db.UpdateJobFields(job.ID, map[string]any{
-			"status": database.StatusLive,
-			"is_vod": false,
+			"status":         database.StatusLive,
+			"is_vod":         false,
+			"queue_priority": 0,
 		})
+		sp.releaseArchiveSlot(job)
 		return &StreamProcessResult{
 			VideoInfo:      info,
 			ShouldDownload: true,
@@ -250,6 +278,16 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 		}, nil
 
 	case youtube.StreamUpcoming:
+		// Slot-release flip (spec §10): the upcoming wait can last days, and
+		// a broadcast waiting to start isn't backlog work — it must not
+		// starve the channel's backlog throughput. This path has NO status
+		// write (the job stays Upcoming through the whole wait), so the flip
+		// is its own one-way write, guarded so ordinary broadcasts don't pay
+		// an extra row touch on every upcoming discovery.
+		if job.QueuePriority == 1 {
+			sp.db.UpdateJobFields(job.ID, map[string]any{"queue_priority": 0})
+			sp.releaseArchiveSlot(job)
+		}
 		return sp.waitForLive(ctx, job, info)
 
 	default:

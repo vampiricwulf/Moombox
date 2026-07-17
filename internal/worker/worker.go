@@ -182,13 +182,20 @@ func NewDownloadWorker(
 		sp.SetIsOnline(conn.IsOnline)
 	}
 
+	sched := newScheduler(db, queue, logger)
+	// Slot-release flips (spec §10) free an archive slot mid-flight — a
+	// backlog job going Live or entering the upcoming wait stops counting in
+	// M. The wake lets the scheduler admit the channel's next backlog VOD
+	// promptly instead of on the heartbeat.
+	sp.SetWakeScheduler(sched.Wake)
+
 	return &DownloadWorker{
 		db:           db,
 		yt:           yt,
 		tw:           tw,
 		cfg:          cfg,
 		queue:        queue,
-		scheduler:    newScheduler(db, queue, logger),
+		scheduler:    sched,
 		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn),
 		streamProc:   sp,
 		notifier:     nm,
