@@ -67,7 +67,12 @@ type DecapiMonitor struct {
 	// results, DispositionNewVOD otherwise — DECAPI writes no feed_items row
 	// by design (§13), so it can never produce backlog.
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig, d JobDisposition)
-	ProbeVideo      VideoProbeFunc
+	ProbeVideo VideoProbeFunc
+	// ProbeDate is the date-completing half of the two-phase probe (§9),
+	// shared with the feed monitor: the ANDROID_VR status probe carries no
+	// microformat, so a vod-family result arrives dateless and the §13
+	// window check below could never pass without this second fetch.
+	ProbeDate       func(ctx context.Context, videoID string) (publishedAt, precision string, err error)
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
 	IsOnline        func() bool    // nil = always online
@@ -603,11 +608,26 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// IS the RSS redundancy, and a date must never block it — their probes
 	// supply no date at all, §12). `post_live` reaches here un-normalized
 	// (the store normalization lives in the feed path's applyProbe), hence
-	// the three-status list. A dateless past result cannot verify the window
-	// ⇒ treated as outside; unlike the feed path there is no self-healing
-	// 'unknown' store row (DECAPI writes none, §13), so log at Info to keep
-	// the final skip visible.
+	// the three-status list. A dateless result first tries the §9 date
+	// fetch below; if the date remains unknowable it cannot verify the
+	// window ⇒ treated as outside — unlike the feed path there is no
+	// self-healing 'unknown' store row (DECAPI writes none, §13), so log at
+	// Info to keep the final skip visible.
 	if result.ShouldProcess && (result.StreamStatus == "vod" || result.StreamStatus == "post_live" || result.StreamStatus == "not_a_stream") {
+		if result.PublishedAt == "" && dm.ProbeDate != nil {
+			// Two-phase probe (§9): the status probe carries no microformat,
+			// so in production EVERY vod-family result lands here dateless.
+			// One WEB date fetch decides the window honestly; a fetch failure
+			// falls through to the treated-as-outside arm below, which was
+			// always this path's failure mode — but now it is the exception,
+			// not the rule.
+			if pub, _, err := dm.ProbeDate(ctx, videoID); err == nil {
+				result.PublishedAt = pub
+			} else {
+				dm.logger.Warn("decapi: date fetch failed; window unverifiable this sighting",
+					"videoID", videoID, "err", err)
+			}
+		}
 		cutoff := time.Now().UTC().Add(-time.Duration(dm.archiveWindowDays(ch)) * 24 * time.Hour).Format(time.RFC3339)
 		if result.PublishedAt == "" || result.PublishedAt < cutoff {
 			dm.logger.Info("decapi: newest video is outside the archive window; skipping",

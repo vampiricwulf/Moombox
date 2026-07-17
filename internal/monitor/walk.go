@@ -43,6 +43,11 @@ func dateOrdered(source string) bool { return source != "rss" }
 func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID, cutoff string, scope []database.FeedItem) map[string]ProbeClassifyResult {
 	fresh := map[string]ProbeClassifyResult{}
 	st := walkState{exhausted: map[string]bool{}, lastDate: map[string]time.Time{}, noExit: map[string]bool{}}
+	// Per-pass tallies for the summary line below — a healthy walk's probes
+	// are individually silent (success writes no log), which made the first
+	// production failure invisible for hours. The summary is the walk's
+	// heartbeat: it must appear once per channel per cycle, whatever happened.
+	var skipped, probed, applied, denied, errored, cooldown, dateFetchFailed int
 
 	for _, row := range scope {
 		// src is the source the row carried when the walk read it. A
@@ -56,20 +61,24 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 			// assumed rows unconditionally, and their published is an insert
 			// or sighting instant, not a listing position — "everything
 			// behind the boundary is older" says nothing about them.
+			skipped++
 			continue
 		}
 
 		if active, err := fm.db.HasActiveJob(row.VideoID); err != nil || active {
+			skipped++
 			continue // DB read error ⇒ skip the item, continue the cycle (§7)
 		}
 
 		// Title-only for store rows, like DECAPI — a store row carries no
 		// description (§8: terms gate the probe on what the store has).
 		if !MatchesTerms(row.Title, ch) {
+			skipped++
 			continue
 		}
 
 		if src == "membership" && !fm.membershipActive() {
+			skipped++
 			continue
 		}
 
@@ -79,15 +88,34 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		case "vod":
 			hasJob, err := fm.db.HasAnyJob(row.VideoID)
 			if err != nil || hasJob || row.DatePrecision != "started" {
+				skipped++
 				continue // restart carve-out only: vod + started + no job row (§8)
 			}
 		default:
+			skipped++
 			continue // not_a_stream
 		}
 
-		res := fm.probeRow(ctx, ch, chID, row) // Task 4: probe choice + escalation
+		probed++
+		res, ok := fm.probeRowDated(ctx, ch, chID, row)
+		if !ok {
+			// The date fetch failed (transport error): a transient fault, not
+			// a classification. Nothing written, not FRESH, never exhausts —
+			// exactly the errored-probe contract; retried next cycle.
+			dateFetchFailed++
+			continue
+		}
+		switch res.Outcome {
+		case OutcomeDenied:
+			denied++
+		case OutcomeErrored:
+			errored++
+		case OutcomeCooldown:
+			cooldown++
+		}
 		if res.Outcome == OutcomeProbed {
-			fm.applyProbe(chID, row.VideoID, res) // normalization + terminal invariant, below
+			applied++
+			fm.applyProbe(chID, row.VideoID, row.DatePrecision, res) // normalization + terminal invariant, below
 			fresh[row.VideoID] = res
 			if res.PublishedAt != "" {
 				d, _ := time.Parse(time.RFC3339, res.PublishedAt)
@@ -126,7 +154,47 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		// on a transient fault.
 	}
 
+	fm.logger.Debug("walk done", "channel", chID, "scope", len(scope),
+		"skipped", skipped, "probed", probed, "applied", applied,
+		"denied", denied, "errored", errored, "cooldown", cooldown,
+		"dateFetchFailed", dateFetchFailed, "exhausted", len(st.exhausted))
 	return fresh
+}
+
+// probeRowDated is the walk's and the archive-refresh's shared probe entry —
+// probeRow plus the date-completing second phase (§9). The status probes
+// (ANDROID_VR/TV clients) carry no microformat, so a successful vod-family
+// classification arrives DATELESS in production. When the row's own date is
+// only an estimate (coarse/assumed) — the rows the §10 window re-check and
+// the §8 exhaustion inference actually need truth for — one ProbeDate call
+// (an anonymous WEB player fetch) supplies it; the ladder makes the upgrade
+// one-time per video. Rows already holding day/exact/started dates never
+// fetch: their date is authoritative and the probe's absence costs nothing.
+//
+// ok=false means the date fetch itself FAILED (transport error): callers
+// treat the row like an errored probe — no write, no FRESH, no exhaustion,
+// retried next cycle. A fetch that succeeds but finds no date (YouTube has
+// none) returns ok=true with the result still dateless: applyProbe's
+// invariant and the archive's row-date fallback handle that honestly.
+func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem) (ProbeClassifyResult, bool) {
+	res := fm.probeRow(ctx, ch, chID, row)
+	if res.Outcome != OutcomeProbed || res.PublishedAt != "" || fm.ProbeDate == nil {
+		return res, true
+	}
+	vodFamily := res.StreamStatus == "vod" || res.StreamStatus == "post_live" || res.StreamStatus == "not_a_stream"
+	if !vodFamily {
+		return res, true // broadcasts are never windowed — no date needed (§12)
+	}
+	if row.DatePrecision != "coarse" && row.DatePrecision != "assumed" && row.DatePrecision != "" {
+		return res, true // the row's own date is already authoritative
+	}
+	pub, prec, err := fm.ProbeDate(ctx, row.VideoID)
+	if err != nil {
+		fm.logger.Warn("date fetch failed; row retried next cycle", "id", row.VideoID, "err", err)
+		return res, false
+	}
+	res.PublishedAt, res.PublishedPrecision = pub, prec
+	return res, true
 }
 
 // probeRow probes a single feed-scope row and returns its classification.
@@ -188,16 +256,21 @@ func (fm *FeedMonitor) probeRow(ctx context.Context, ch *config.ChannelConfig, c
 // post_live normalizes to vod on write (§12 — the store's status enum has
 // no post_live; the DVR distinction is a download-strategy concern the
 // worker re-probes for anyway). The terminal invariant (§12) then runs:
-// never write a terminal status (vod/not_a_stream) without a rankable
-// date — if the probe supplies none, the row stays 'unknown' instead, so a
-// later probe still corrects it rather than the row sitting forever inside
-// the window on a fabricated 'assumed' date.
-func (fm *FeedMonitor) applyProbe(chID, videoID string, r ProbeClassifyResult) {
+// never let a row END UP with a terminal status (vod/not_a_stream) and no
+// rankable date. The invariant is about the ROW, not the probe: a row
+// already holding a coarse-or-better date satisfies it with a dateless
+// probe (production status probes carry no microformat, so dateless is the
+// NORM, not the exception). Only when the probe supplies no date AND the
+// row's own date is a fabrication ('assumed' = published:=sighting instant)
+// does the terminal status demote to 'unknown', keeping the row in Q2's
+// unresolved arm until some probe dates it.
+func (fm *FeedMonitor) applyProbe(chID, videoID, rowPrecision string, r ProbeClassifyResult) {
 	status := r.StreamStatus
 	if status == "post_live" {
 		status = "vod"
 	}
-	if (status == "vod" || status == "not_a_stream") && r.PublishedAt == "" {
+	if (status == "vod" || status == "not_a_stream") && r.PublishedAt == "" &&
+		(rowPrecision == "assumed" || rowPrecision == "") {
 		status = "unknown"
 	}
 	if err := fm.db.ApplyProbeToFeedItem(chID, videoID, status, r.Title, r.PublishedAt, r.PublishedPrecision); err != nil {

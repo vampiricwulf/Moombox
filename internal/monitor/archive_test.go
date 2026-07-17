@@ -352,3 +352,31 @@ func TestArchive_CookieLapseLongerThanWindow(t *testing.T) {
 		t.Fatalf("cookie-return cycle: found=%v, want [{mup1 broadcast}]", *found3)
 	}
 }
+
+// TestArchive_DatelessFreshFallsBackToRowDate: production status probes are
+// dateless (ANDROID_VR carries no microformat) — an in-window row holding a
+// real date (RSS 'exact') must still archive: the §10 window re-check falls
+// back to the row's stored date when the probe supplies none. This is the
+// end-to-end half of the hg9j1c9-Z8A reproduction (walk half:
+// TestWalk_DatelessProbeHonorsRowDate).
+func TestArchive_DatelessFreshFallsBackToRowDate(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	pub := now.Add(-6 * time.Hour).UTC().Format(time.RFC3339)
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith(rssItem{ID: "dl1", Title: "dateless vod", Published: pub})),
+		withMembership(membWith()),
+		withProbe(func(ctx context.Context, id string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{StreamStatus: "vod", Title: "dateless vod"}, nil
+		}),
+		withNow(now))
+	found := recordVideoFound(fm)
+	fm.runCycleForTest(t, "UC1")
+
+	if len(*found) != 1 || (*found)[0].videoID != "dl1" || (*found)[0].d != DispositionNewVOD {
+		t.Fatalf("found=%v, want [{dl1 new_vod}] — the row's exact date proves the window", *found)
+	}
+	if got := mustGetFeedItem(t, db, "UC1", "dl1").Status; got != "vod" {
+		t.Fatalf("status = %q, want vod", got)
+	}
+}

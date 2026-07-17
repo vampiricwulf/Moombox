@@ -137,7 +137,15 @@ type FeedMonitor struct {
 	// then misfires it as "upcoming" (which bypasses include_non_live_content).
 	// The authenticated probe sees the real formats and classifies correctly
 	// (vod/live/upcoming). Nil falls back to ProbeVideo.
-	ProbeVideoAuth  VideoProbeFunc
+	ProbeVideoAuth VideoProbeFunc
+	// ProbeDate is the date-completing half of the two-phase probe (§9).
+	// The status probes (ANDROID_VR/TV) carry no microformat and therefore
+	// no publish dates; when a vod-family probe returns dateless on a row
+	// whose own date is only an estimate (coarse/assumed), the walk calls
+	// this once — an anonymous WEB player fetch — to date the row. The
+	// ladder makes the upgrade one-time per video. Nil disables the second
+	// phase (rows with rankable dates still classify; see applyProbe).
+	ProbeDate       func(ctx context.Context, videoID string) (publishedAt, precision string, err error)
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
 	IsOnline        func() bool    // nil = always online

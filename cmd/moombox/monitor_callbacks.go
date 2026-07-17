@@ -209,6 +209,16 @@ func (s *runState) wireMonitorCallbacks() {
 	s.feedMon.ProbeVideo = probeVideoFunc
 	s.decapiMon.ProbeVideo = probeVideoFunc
 
+	// Date-completing fetch for the two-phase probe (§9): the ANDROID_VR/TV
+	// status probes carry no microformat, so vod-family results arrive
+	// dateless; both monitors call this (one anonymous WEB player fetch)
+	// when a date is actually needed for a window decision.
+	probeDateFunc := func(ctx context.Context, videoID string) (string, string, error) {
+		return s.ytService.ProbeVideoDate(ctx, videoID)
+	}
+	s.feedMon.ProbeDate = probeDateFunc
+	s.decapiMon.ProbeDate = probeDateFunc
+
 	// Authenticated probe for members-only videos: an anonymous probe can't see
 	// members-only content, gets no formats, and misclassifies it as "upcoming"
 	// (which bypasses include_non_live_content). The TV_DOWNGRADED+cookies probe

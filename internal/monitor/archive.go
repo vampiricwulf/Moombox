@@ -71,6 +71,11 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 		established = false
 	}
 
+	// Per-pass tallies for the summary line below — same rationale as the
+	// walk's: the pass's individual decisions are mostly silent by design,
+	// and the summary is the heartbeat that proves the pass ran.
+	var jobs, gated, history, retries, unknown int
+
 	for _, row := range scope {
 		select {
 		case <-ctx.Done():
@@ -82,9 +87,11 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 		// the walk's (the store and jobs table may have changed between the
 		// passes, and archive must stand alone when the walk was truncated).
 		if active, err := fm.db.HasActiveJob(row.VideoID); err != nil || active {
+			gated++
 			continue // DB read error ⇒ skip the item, continue the cycle (§7)
 		}
 		if !MatchesTerms(row.Title, ch) {
+			gated++
 			continue
 		}
 
@@ -97,24 +104,32 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 			// upcoming/live row the walk could not probe this cycle
 			// (cooldown, error, cookie gate) waits for the next one.
 			if res, isFresh := fresh[row.VideoID]; isFresh {
-				fm.emitJob(ch, row, res, cutoff, newIDs)
+				if fm.emitJob(ch, row, res, cutoff, newIDs) {
+					jobs++
+				}
+			} else {
+				retries++
 			}
 
 		case "vod", "not_a_stream":
 			// Past content: the archival gates, in table order (§10).
 			if done, err := fm.db.HasProcessed(row.VideoID); err != nil || done {
+				history++
 				continue // the history gate — vod/not_a_stream ONLY
 			}
 			if !ch.IncludeNonLiveContent {
+				gated++
 				continue // BEFORE probing: an unjobbable VOD is not worth a request
 			}
 			if !established {
 				// §11: until an RSS success or a completed backfill proves we
 				// can see the channel, membership items must not be treated
 				// as the whole channel.
+				gated++
 				continue
 			}
 			if row.Source == "membership" && !fm.membershipActive() {
+				gated++
 				continue // the probe gate: skip a request we know is refused; scope is untouched (§9)
 			}
 			// Reuse the walk's FRESH result; refresh-probe otherwise. The
@@ -124,9 +139,14 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 			// members_only escalation (§9) applies here too.
 			res, isFresh := fresh[row.VideoID]
 			if !isFresh {
-				res = fm.probeRow(ctx, ch, chID, row)
+				var ok bool
+				res, ok = fm.probeRowDated(ctx, ch, chID, row)
+				if !ok {
+					retries++ // date fetch failed — the errored-probe contract
+					continue
+				}
 				if res.Outcome == OutcomeProbed {
-					fm.applyProbe(chID, row.VideoID, res)
+					fm.applyProbe(chID, row.VideoID, row.DatePrecision, res)
 				}
 			}
 			switch res.Outcome {
@@ -135,24 +155,33 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 				// definition, so a table that reaches the live/upcoming arm
 				// before this one launders the 2.7.2 misfire into a job.
 				// No job; retry next cycle.
+				retries++
 				continue
 			case OutcomeErrored, OutcomeCooldown:
+				retries++
 				continue // the boundary was not learned — retry next cycle
 			}
-			fm.emitJob(ch, row, res, cutoff, newIDs)
+			if fm.emitJob(ch, row, res, cutoff, newIDs) {
+				jobs++
+			}
 
 		default:
 			// unknown → never a job. We do not know what it is; it stays in
 			// scope (Q1, or Q2's unresolved arm) for the next walk (§10).
+			unknown++
 		}
 	}
+
+	fm.logger.Debug("archive done", "channel", chID, "scope", len(scope),
+		"jobs", jobs, "history", history, "gated", gated, "retries", retries,
+		"unknown", unknown)
 }
 
 // emitJob is the tail of the §10 decision table for one successfully-probed
 // result — the caller has already routed denied/errored/cooldown away.
 // Live/upcoming job as broadcasts; past content re-checks the window against
 // the probe's date, then dispositions new-vs-backlog from newIDs.
-func (fm *FeedMonitor) emitJob(ch *config.ChannelConfig, row database.FeedItem, res ProbeClassifyResult, cutoff string, newIDs map[string]bool) {
+func (fm *FeedMonitor) emitJob(ch *config.ChannelConfig, row database.FeedItem, res ProbeClassifyResult, cutoff string, newIDs map[string]bool) bool {
 	d := DispositionBacklogVOD
 	switch res.StreamStatus {
 	case "live", "upcoming":
@@ -165,15 +194,21 @@ func (fm *FeedMonitor) emitJob(ch *config.ChannelConfig, row database.FeedItem, 
 		// vod / post_live / not_a_stream: RE-CHECK THE WINDOW against the
 		// probe's date — the §10 crux. A coarse row was admitted on an upper
 		// bound ("1 week ago" can be 13 days old); the probe's real date
-		// decides. Outside ⇒ no job, ever: the date just written back
-		// (applyProbe) drops the row out of Q1 from the next cycle. A
-		// dateless past result cannot verify the window ⇒ treated as
-		// outside — the §12 terminal invariant kept such a row 'unknown',
-		// so it self-heals on a later dated probe rather than being lost.
-		if res.PublishedAt == "" || res.PublishedAt < cutoff {
+		// decides, completed by the §9 date fetch when the status probe had
+		// none. A result STILL dateless here falls back to the row's stored
+		// date: reaching this arm requires stored status vod/not_a_stream,
+		// which the §12 invariant only permits on rows whose date is coarse
+		// or better — a rankable estimate, and Q1 admission already proved
+		// it in-window. (An 'assumed' row can never arrive here dated-less:
+		// dateless probes demote it to 'unknown', the default arm.)
+		checkDate := res.PublishedAt
+		if checkDate == "" {
+			checkDate = row.Published
+		}
+		if checkDate == "" || checkDate < cutoff {
 			fm.logger.Debug("archive: outside window on the probe's date; no job",
-				"videoID", row.VideoID, "published", res.PublishedAt, "cutoff", cutoff)
-			return
+				"videoID", row.VideoID, "published", checkDate, "cutoff", cutoff)
+			return false
 		}
 		if newIDs[row.VideoID] {
 			d = DispositionNewVOD
@@ -181,7 +216,7 @@ func (fm *FeedMonitor) emitJob(ch *config.ChannelConfig, row database.FeedItem, 
 	}
 
 	if fm.OnVideoFound == nil {
-		return
+		return false
 	}
 	// Prefer the probe's title, but never let an API fallback placeholder
 	// overwrite the listing title (same rule as the store's title arm, §6).
@@ -193,4 +228,5 @@ func (fm *FeedMonitor) emitJob(ch *config.ChannelConfig, row database.FeedItem, 
 		"status", res.StreamStatus, "disposition", d.String(), "channel", ch.Name)
 	fm.OnVideoFound(row.VideoID, title,
 		fmt.Sprintf("https://www.youtube.com/watch?v=%s", row.VideoID), ch, d)
+	return true
 }

@@ -1268,15 +1268,31 @@ today's `nonLiveSkipReason` is reached from a single `case "post_live", "vod":`
 (`utils.go:326`). The DVR distinction is a download-strategy concern and the worker re-probes
 for it anyway. The date rule above runs *before* this normalization.
 
-**Invariant: never write a terminal status without a rankable date.** If the probe classifies a
-past item but supplies no date, the row stays **`unknown`**.
+**Invariant: a row never ENDS UP with a terminal status and no rankable date.** The invariant
+is about the row, not the probe: a row already holding a coarse-or-better date satisfies it even
+when the probe supplies none — and in production the probe usually supplies none, because the
+status probes (ANDROID_VR/TV clients) return no `microformat`, the sole source of publish dates.
+Only when the probe is dateless AND the row's own date is a fabrication (`assumed` =
+`published := sighting instant`) does the terminal status demote to **`unknown`**.
 
-Without it, a row becomes `vod` + `assumed`: `published = now`, so it sits in the window claiming
-to be new for a full `archive_window_days`, while `vod` is terminal so no discovery probe
-revisits it — and on `include_non_live_content = false` the refresh probe never fires either.
-The archival pass would job it on a fabricated date. Keeping it `unknown` costs a probe per cycle
-and buys self-healing: the moment any probe returns a date, the row takes it. A terminal status
-is a promise that we know enough to stop looking.
+Without the demotion arm, an assumed row becomes `vod` + `assumed`: `published = now`, so it sits
+in the window claiming to be new for a full `archive_window_days`, while `vod` is terminal so no
+discovery probe revisits it — and on `include_non_live_content = false` the refresh probe never
+fires either. The archival pass would job it on a fabricated date. Keeping it `unknown` costs a
+probe per cycle and buys self-healing: the moment any probe returns a date, the row takes it. A
+terminal status is a promise that we know enough to stop looking.
+
+**The two-phase probe.** Because the status probes are structurally dateless, a vod-family
+classification on a row whose date is only an estimate (`coarse`/`assumed`) triggers ONE
+date-completing fetch (`ProbeDate` — an anonymous WEB player call, whose response does carry
+`microformat`): the §10 window re-check and §8 exhaustion inference get a real date exactly
+where estimates could lie, and the ladder makes the upgrade one-time per video. Rows already
+holding `day`/`exact`/`started` dates never fetch. A FAILED fetch (transport error) is treated
+like an errored probe — nothing written, nothing exhausted, retried next cycle; a fetch that
+succeeds but finds no date proceeds dateless, and the archive's window re-check then falls back
+to the row's stored date (Q1 admission already proved it in-window). DECAPI uses the same fetch
+before its §13 window decision — without it, every DECAPI vod sighting would be
+window-unverifiable.
 
 ---
 

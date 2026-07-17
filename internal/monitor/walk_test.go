@@ -143,9 +143,10 @@ func addFinishedJob(t *testing.T, db *database.Database, videoID string) {
 // every caller runs it synchronously in the test goroutine.
 type warnRecordingLogger struct {
 	warnings []string
+	debugs   []string
 }
 
-func (l *warnRecordingLogger) Debug(msg string, args ...any) {}
+func (l *warnRecordingLogger) Debug(msg string, args ...any) { l.debugs = append(l.debugs, msg) }
 func (l *warnRecordingLogger) Info(msg string, args ...any)  {}
 func (l *warnRecordingLogger) Warn(msg string, args ...any)  { l.warnings = append(l.warnings, msg) }
 func (l *warnRecordingLogger) Error(msg string, args ...any) {}
@@ -311,6 +312,108 @@ func TestWalk_OrderingCheck(t *testing.T) {
 	}
 	if contains(order, "b4") {
 		t.Fatalf("membership2 must still retire normally despite membership's disabled early exit; order=%v", order)
+	}
+}
+
+// TestWalk_DatelessProbeHonorsRowDate is the hg9j1c9-Z8A production
+// reproduction: the ANDROID_VR status probe carries no microformat, so every
+// probe result is dateless — and the terminal invariant as first shipped
+// demoted EVERY dateless vod write back to 'unknown', even on a row already
+// holding a rank-4 'exact' RSS date. The store never advanced: a silent
+// infinite no-op loop. §12's invariant is about the ROW ending up dated — a
+// coarse-or-better stored date satisfies it without any probe date.
+func TestWalk_DatelessProbeHonorsRowDate(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	pub := now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	seedRow(t, db, "UC1", "d1", now.Add(-2*time.Hour), "exact", "rss", "unknown")
+
+	fm := newTestFeedMonitor(t, db, withProbe(func(ctx context.Context, id string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "vod", Title: "d1"}, nil // dateless, like production
+	}), withNow(now))
+	rec := &warnRecordingLogger{}
+	fm.logger = rec
+	fm.walkForTest(t, "UC1")
+
+	row := mustGetFeedItem(t, db, "UC1", "d1")
+	if row.Status != "vod" {
+		t.Fatalf("status = %q, want vod — a dateless probe must not demote a row that already holds an exact date", row.Status)
+	}
+	if row.Published != pub || row.DatePrecision != "exact" {
+		t.Fatalf("row date must be untouched: got %s/%s, want %s/exact", row.Published, row.DatePrecision, pub)
+	}
+	if !contains(rec.debugs, "walk done") {
+		t.Fatalf("walk must emit its per-channel summary; debugs=%v", rec.debugs)
+	}
+}
+
+// TestWalk_TwoPhaseDateFetch covers §9's date-completing fetch: a vod-family
+// probe with no date on a row whose own date is an ESTIMATE (coarse/assumed)
+// triggers exactly one ProbeDate call, and the fetched date upgrades the row
+// through the ladder. Rows already holding day/exact/started dates never
+// fetch — their date is authoritative.
+func TestWalk_TwoPhaseDateFetch(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "t1", now.Add(-1*time.Hour), "coarse", "videos", "unknown")
+	seedRow(t, db, chID, "t2", now.Add(-2*time.Hour), "exact", "rss", "unknown")
+
+	trueDate := now.Add(-30 * time.Hour).UTC().Format(time.RFC3339)
+	var fetched []string
+	fm := newTestFeedMonitor(t, db,
+		withProbe(func(ctx context.Context, id string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{StreamStatus: "vod", Title: id}, nil // dateless
+		}),
+		withProbeDate(func(ctx context.Context, id string) (string, string, error) {
+			fetched = append(fetched, id)
+			return trueDate, "day", nil
+		}),
+		withNow(now))
+	fm.walkForTest(t, chID)
+
+	if len(fetched) != 1 || fetched[0] != "t1" {
+		t.Fatalf("date-fetch calls = %v, want exactly [t1] — day/exact/started rows never fetch", fetched)
+	}
+	r1 := mustGetFeedItem(t, db, chID, "t1")
+	if r1.Status != "vod" || r1.Published != trueDate || r1.DatePrecision != "day" {
+		t.Fatalf("t1 = %s %s/%s, want vod %s/day — the fetched date upgrades the row", r1.Status, r1.Published, r1.DatePrecision, trueDate)
+	}
+	if got := mustGetFeedItem(t, db, chID, "t2").Status; got != "vod" {
+		t.Fatalf("t2 status = %q, want vod (its exact date already satisfies §12)", got)
+	}
+}
+
+// TestWalk_DateFetchErrorRetries: a FAILED date fetch is a transient fault —
+// treated like an errored probe: nothing written, not in FRESH, the source
+// not exhausted; the row retries next cycle.
+func TestWalk_DateFetchErrorRetries(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	const chID = "UC1"
+	seedRow(t, db, chID, "e1", now.Add(-1*time.Hour), "coarse", "videos", "unknown")
+	seedRow(t, db, chID, "e2", now.Add(-2*time.Hour), "coarse", "videos", "unknown")
+
+	var order []string
+	fm := newTestFeedMonitor(t, db,
+		withProbe(func(ctx context.Context, id string) (*VideoProbeResult, error) {
+			order = append(order, id)
+			return &VideoProbeResult{StreamStatus: "vod", Title: id}, nil
+		}),
+		withProbeDate(func(ctx context.Context, id string) (string, string, error) {
+			return "", "", fmt.Errorf("boom")
+		}),
+		withNow(now))
+	fresh := fm.walkForTest(t, chID)
+
+	if got := mustGetFeedItem(t, db, chID, "e1").Status; got != "unknown" {
+		t.Fatalf("e1 status = %q, want unknown — a failed date fetch must not write", got)
+	}
+	if _, ok := fresh["e1"]; ok {
+		t.Fatal("a date-fetch-failed row must not enter FRESH")
+	}
+	if !contains(order, "e2") {
+		t.Fatalf("e2 not probed — a date-fetch failure must not exhaust the source; order=%v", order)
 	}
 }
 

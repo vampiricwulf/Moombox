@@ -79,6 +79,14 @@ func withProbeAuth(fn VideoProbeFunc) feedMonitorOpt {
 	return func(fm *FeedMonitor) { fm.ProbeVideoAuth = fn }
 }
 
+// withProbeDate wires fm.ProbeDate — the date-completing half of the
+// two-phase probe (§9): called when a vod-family probe returns no date and
+// the row's own date is only an estimate (coarse/assumed). Tests whose
+// probes always carry dates leave it nil.
+func withProbeDate(fn func(ctx context.Context, videoID string) (string, string, error)) feedMonitorOpt {
+	return func(fm *FeedMonitor) { fm.ProbeDate = fn }
+}
+
 // stubProbeErrored returns a VideoProbeFunc that always fails — the minimal
 // probe for tests that assert only FETCH/STORE outcomes. An errored probe
 // has no store effect (OutcomeErrored writes nothing, never exhausts), so

@@ -116,3 +116,52 @@ func TestDecapi_DatelessVodTreatedAsOutside(t *testing.T) {
 		t.Fatalf("a dateless VOD was jobbed: %v — the window cannot be verified, and DECAPI has no store row to self-heal from", *found)
 	}
 }
+
+// TestDecapi_TwoPhaseDateFetch: production status probes are dateless, so
+// without the §9 date fetch EVERY DECAPI vod sighting would be window-
+// unverifiable and skipped. An in-window fetched date must job.
+func TestDecapi_TwoPhaseDateFetch(t *testing.T) {
+	db := newTestDB(t)
+	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "vod", Title: "fresh vod"}, nil // dateless
+	})
+	var fetched []string
+	dm.ProbeDate = func(ctx context.Context, videoID string) (string, string, error) {
+		fetched = append(fetched, videoID)
+		return time.Now().UTC().Add(-6 * time.Hour).Format(time.RFC3339), "day", nil
+	}
+	found := recordDecapiVideoFound(dm)
+
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
+	if err := dm.processResponse(context.Background(), decapiBody("vidDecTpf04", "fresh vod"), ch); err != nil {
+		t.Fatalf("processResponse: %v", err)
+	}
+	if len(fetched) != 1 || fetched[0] != "vidDecTpf04" {
+		t.Fatalf("date-fetch calls = %v, want exactly [vidDecTpf04]", fetched)
+	}
+	if len(*found) != 1 || (*found)[0].videoID != "vidDecTpf04" {
+		t.Fatalf("an in-window fetched date must job: %v", *found)
+	}
+}
+
+// TestDecapi_DateFetchErrorSkips: a FAILED date fetch leaves the window
+// unverifiable ⇒ the §13 treated-as-outside arm (no job, Info-logged);
+// a later sighting retries.
+func TestDecapi_DateFetchErrorSkips(t *testing.T) {
+	db := newTestDB(t)
+	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "vod", Title: "fresh vod"}, nil
+	})
+	dm.ProbeDate = func(ctx context.Context, videoID string) (string, string, error) {
+		return "", "", fmt.Errorf("boom")
+	}
+	found := recordDecapiVideoFound(dm)
+
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
+	if err := dm.processResponse(context.Background(), decapiBody("vidDecTpe05", "fresh vod"), ch); err != nil {
+		t.Fatalf("processResponse: %v", err)
+	}
+	if len(*found) != 0 {
+		t.Fatalf("a window-unverifiable vod must not job: %v", *found)
+	}
+}

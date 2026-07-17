@@ -21,6 +21,30 @@ func (p *PlayerAPI) ProbeVideoStatus(ctx context.Context, videoID string, visito
 	return p.fetchWithAndroidVR(ctx, videoID, visitorData)
 }
 
+// ProbeVideoDate fetches ONLY a video's publish date via one anonymous
+// WEB-family player call. The status probes cannot supply dates: microformat
+// (the source of publishDate AND liveBroadcastDetails.startTimestamp) is a
+// WEB-client response feature, and ANDROID_VR/TV probe responses omit it
+// entirely — verified against live YouTube. The date parse rides the normal
+// parsePlayerResponse → extractPublishedAt path, so precision semantics
+// ("started"/"day", Z-normalized) are identical to every other probe.
+//
+// A response without a microformat date returns ""/"" with a nil error —
+// "YouTube has no date" is a result, not a failure; only transport-level
+// errors are errors. Callers gate the retry-vs-proceed decision on that
+// distinction (spec §9's two-phase probe).
+func (p *PlayerAPI) ProbeVideoDate(ctx context.Context, videoID, visitorData string) (publishedAt, precision string, err error) {
+	ytcfg := DefaultYtcfg()
+	if visitorData != "" {
+		ytcfg.VisitorData = visitorData
+	}
+	info, err := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, 0)
+	if err != nil {
+		return "", "", err
+	}
+	return info.PublishedAt, info.PublishedPrecision, nil
+}
+
 // ProbeVideoStatusAuthenticated performs a lightweight authenticated status probe
 // using the TV_DOWNGRADED client with cookies (no watch page, no STS, no cipher).
 // Used for polling members-only upcoming streams. Pass an empty string for
