@@ -366,31 +366,41 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 // Statement order is load-bearing: the history delete's subquery reads the
 // jobs table, so it must run BEFORE the jobs delete. Both run in one
 // transaction so a crash between them can't strand a half-pruned channel.
-// The subquery matches on jobs.video_id — history rows are keyed by job ID,
-// and for the YouTube jobs this helper targets (the only ones carrying a
-// channel_id) the job ID IS the video ID (see ListOrphanedHistory).
+// The subquery keys on jobs.id: history rows are keyed by JOB ID, and the
+// package rule (see ListOrphanedHistory) is that history-vs-jobs matching
+// MUST be against jobs.id, never jobs.video_id. The plan text originally
+// wrote the subquery over video_id — equivalent for every job this helper
+// can currently match (channel-affiliated jobs are YouTube-only, where
+// ID == VideoID), but jobs.id stays correct even if a channel-affiliated
+// job class with a prefixed ID ever appears.
 //
 // jobs.channel_id is nullable; SQL `channel_id = ?` never matches NULL, so
 // Twitch/manual jobs (no channel affiliation) are untouchable here.
+//
+// Dispatch: one OnJobsChange full-list refresh after commit — the
+// BatchSetWatched bulk pattern, and for the same reason: a deep prune can
+// drop 100+ jobs at once, and per-job OnJobDeleted would amplify into N
+// full jobs fetches in the WS subscriber and can overflow the TUI's bounded
+// drop-on-full channel. A prune that deleted nothing dispatches nothing
+// (DeleteJob's rowsAffected guard).
 func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []JobStatus) (int, error) {
 	if len(statuses) == 0 {
 		return 0, nil
 	}
 
-	ids, deleted, err := db.deleteJobsAndHistoryForChannelLocked(channelID, statuses)
+	deleted, jobs, err := db.deleteJobsAndHistoryForChannelTx(channelID, statuses)
 	if err != nil {
 		return 0, err
 	}
-	// Post-unlock, one OnJobDeleted per pruned job — the same lifecycle
-	// dispatch DeleteJob fires, so the WS broadcaster and TUI drop the rows
-	// instead of ghosting them until the next full refresh.
-	for _, id := range ids {
-		db.notifyJobDeleted(id)
-	}
+	db.dispatchJobsChange(jobs) // no-op on nil (nothing deleted, or no subscribers)
 	return deleted, nil
 }
 
-func (db *Database) deleteJobsAndHistoryForChannelLocked(channelID string, statuses []JobStatus) (ids []string, deleted int, err error) {
+// deleteJobsAndHistoryForChannelTx runs the two-statement prune transaction
+// under db.mu and, when rows were deleted, snapshots the post-delete jobs
+// list for the caller's OnJobsChange dispatch (the snapshot must be taken
+// while the lock is still held).
+func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses []JobStatus) (deleted int, snapshot []*Job, err error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -405,48 +415,30 @@ func (db *Database) deleteJobsAndHistoryForChannelLocked(channelID string, statu
 	ctx := db.getCtx()
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, 0, err
+		return 0, nil, err
 	}
 	defer tx.Rollback()
 
-	// Collect the doomed job IDs first (fully drained before the next
-	// statement — the Tx is bound to a single connection) so the caller can
-	// fire per-job deletion events after commit.
-	rows, err := tx.QueryContext(ctx, "SELECT id FROM jobs WHERE "+match, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, 0, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, 0, err
-	}
-	rows.Close()
-
 	// History FIRST — the subquery reads jobs.
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM history WHERE video_id IN (SELECT video_id FROM jobs WHERE "+match+")",
+		"DELETE FROM history WHERE video_id IN (SELECT id FROM jobs WHERE "+match+")",
 		args...); err != nil {
-		return nil, 0, err
+		return 0, nil, err
 	}
 
 	res, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE "+match, args...)
 	if err != nil {
-		return nil, 0, err
+		return 0, nil, err
 	}
 	n, _ := res.RowsAffected()
 
 	if err := tx.Commit(); err != nil {
-		return nil, 0, err
+		return 0, nil, err
 	}
-	return ids, int(n), nil
+	if n == 0 {
+		return 0, nil, nil
+	}
+	return int(n), db.snapshotJobsChange(), nil
 }
 
 // AddGap adds a gap record for a job.

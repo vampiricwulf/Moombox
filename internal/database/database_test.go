@@ -1488,3 +1488,75 @@ func TestDeleteJobsAndHistoryForChannel(t *testing.T) {
 	assertState("other_channel", true, true) // channel-scoped
 	assertState("null_channel", true, true)  // NULL channel_id never matches
 }
+
+// TestDeleteJobsAndHistoryForChannelDispatch pins the prune's event shape:
+// exactly ONE OnJobsChange dispatch — the BatchSetWatched bulk pattern — and
+// ZERO OnJobDeleted events. A deep prune can drop 100+ jobs at once; per-job
+// OnJobDeleted would amplify into N full jobs fetches in the WS subscriber
+// and can overflow the TUI's bounded drop-on-full channel. Also pins the
+// empty-statuses early return: zero deleted, no error, no dispatch.
+func TestDeleteJobsAndHistoryForChannelDispatch(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+
+	chID := "UC_dispatch"
+	for _, id := range []string{"disp1", "disp2", "disp3"} {
+		if _, err := db.AddJob(&Job{ID: id, VideoID: id, URL: "u", Status: StatusQueued, ChannelID: &chID}); err != nil {
+			t.Fatalf("AddJob(%s): %v", id, err)
+		}
+		if err := db.AddToHistory(id); err != nil {
+			t.Fatalf("AddToHistory(%s): %v", id, err)
+		}
+	}
+
+	listHits := make(chan []*Job, 4)
+	deletedHits := make(chan *JobDeleted, 4)
+	uL := db.OnJobsChange(func(jobs []*Job) { listHits <- jobs })
+	defer uL()
+	uD := db.OnJobDeleted(func(ev *JobDeleted) { deletedHits <- ev })
+	defer uD()
+
+	// Empty statuses: a pure no-op — zero deleted, no error, no dispatch.
+	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, nil)
+	if err != nil || deleted != 0 {
+		t.Fatalf("empty statuses: deleted=%d err=%v, want 0, nil", deleted, err)
+	}
+	select {
+	case <-listHits:
+		t.Fatal("empty statuses must not dispatch OnJobsChange")
+	case <-time.After(200 * time.Millisecond):
+		// expected
+	}
+
+	deleted, err = db.DeleteJobsAndHistoryForChannel(chID, []JobStatus{StatusQueued})
+	if err != nil {
+		t.Fatalf("DeleteJobsAndHistoryForChannel: %v", err)
+	}
+	if deleted != 3 {
+		t.Errorf("deleted = %d, want 3", deleted)
+	}
+
+	// Exactly ONE OnJobsChange dispatch fires for the whole prune…
+	select {
+	case jobs := <-listHits:
+		if len(jobs) != 0 {
+			t.Errorf("snapshot carries %d jobs, want 0 (everything was pruned)", len(jobs))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobsChange did not fire within 2s")
+	}
+	select {
+	case <-listHits:
+		t.Error("OnJobsChange fired more than once for a single prune")
+	case <-time.After(200 * time.Millisecond):
+		// expected
+	}
+
+	// …and ZERO OnJobDeleted events — bulk dispatch, not per-job fan-out.
+	select {
+	case ev := <-deletedHits:
+		t.Errorf("OnJobDeleted must not fire on prune; got %q", ev.JobID)
+	case <-time.After(200 * time.Millisecond):
+		// expected
+	}
+}
