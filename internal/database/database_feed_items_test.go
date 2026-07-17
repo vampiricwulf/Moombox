@@ -307,6 +307,102 @@ func TestGetChannelEstablished(t *testing.T) {
 	}
 }
 
+// TestFeedItems_PublishedFirstSeenAlwaysZ is the permanent guard on the
+// Z-suffix invariant: every published/first_seen string entering feed_items
+// is RFC3339 UTC ("Z"-suffixed), because the schema's contract is
+// "lexicographic order IS chronological order" — FeedScope's Q1 window
+// compare, the idx_feed_items_window ORDER BY, the archive window re-check
+// and the walk's exhaustion math all compare these strings lexically against
+// Z-format cutoffs. An offset-bearing value ("+00:00", "-07:00") mis-orders
+// by hours and, at day/started rank, can never be corrected (rank ties don't
+// overwrite).
+//
+// All three production writers funnel through UpsertFeedItem or
+// ApplyProbeToFeedItem, so the guard exercises representative inputs from
+// each, built with the writers' own expressions:
+//   - the STORE step's RSS arm (time.Parse(<published>).UTC().Format — the
+//     offset input here is the shape YouTube feeds actually emit), its
+//     membership coarse/assumed arms, and its zero-date assumed arm;
+//   - the backfill's tab-page writes (scanNow-derived coarse/assumed);
+//   - the probe write (extractPublishedAt's Z-normalized started/day output —
+//     the seam the youtube-side producer fix closes).
+//
+// This is a TEST-ONLY invariant by design: the DB layer deliberately carries
+// no runtime validation, so this test is the tripwire for any future writer
+// (or writer change) that would smuggle a non-Z string into the table.
+func TestFeedItems_PublishedFirstSeenAlwaysZ(t *testing.T) {
+	db := newTestDB(t)
+	defer db.Close()
+	cycleNow := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC) // checkChannel: fm.now().UTC()
+	first := cycleNow.Format(time.RFC3339)
+
+	// STORE, RSS arm: feeds emit offset-bearing <published> ("+00:00"); the
+	// step parses then re-formats via .UTC() — production's exact expression.
+	rssPub, err := time.Parse(time.RFC3339, "2026-07-13T04:00:00+00:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upsert := func(vid, pub, prec, src string, pos int) {
+		t.Helper()
+		if _, err := db.UpsertFeedItem(FeedItem{
+			ChannelID: "UC1", VideoID: vid, Title: vid,
+			Published: pub, DatePrecision: prec,
+			CatalogPos: pos, Source: src, FirstSeen: first,
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", vid, err)
+		}
+	}
+	upsert("rssExact", rssPub.UTC().Format(time.RFC3339), "exact", "rss", 0)
+	upsert("rssNoDate", first, "assumed", "rss", 1) // zero-date arm: assumed/cycle-now
+	// STORE, membership arms: coarse now-Age / assumed now.
+	upsert("membCoarse", cycleNow.Add(-21*24*time.Hour).Format(time.RFC3339), "coarse", "membership", 2)
+	upsert("membAssumed", first, "assumed", "membership", 3)
+	// Backfill writes: scanNow-derived, same shapes, tab-name sources.
+	scanNow := cycleNow.Add(30 * time.Minute)
+	upsert("bfCoarse", scanNow.Add(-7*24*time.Hour).Format(time.RFC3339), "coarse", "videos", 4)
+	upsert("bfAssumed", scanNow.Format(time.RFC3339), "assumed", "streams", 5)
+
+	// Probe writes: extractPublishedAt's Z-normalized output — 'started' is
+	// the normalized form of YouTube's "+00:00" startTimestamp, 'day' covers
+	// both the bare-date T23:59:59Z arm and the normalized "-07:00" form.
+	probes := map[string][2]string{
+		"rssExact":   {"2026-07-13T02:00:00Z", "started"},
+		"membCoarse": {"2026-06-24T23:59:59Z", "day"},
+		"bfCoarse":   {"2026-07-08T20:00:00Z", "day"},
+	}
+	for vid, p := range probes {
+		if err := db.ApplyProbeToFeedItem("UC1", vid, "vod", vid, p[0], p[1]); err != nil {
+			t.Fatalf("probe write %s: %v", vid, err)
+		}
+	}
+
+	rows, err := db.db.Query(`SELECT video_id, published, first_seen FROM feed_items`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var vid, pub, seen string
+		if err := rows.Scan(&vid, &pub, &seen); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		if !strings.HasSuffix(pub, "Z") {
+			t.Errorf("%s: published %q is not Z-suffixed — lexicographic order is no longer chronological", vid, pub)
+		}
+		if !strings.HasSuffix(seen, "Z") {
+			t.Errorf("%s: first_seen %q is not Z-suffixed", vid, seen)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if n != 6 {
+		t.Fatalf("scanned %d rows, want 6 — the guard must see every writer's row", n)
+	}
+}
+
 func mustGetFeedItem(t *testing.T, db *Database, channelID, videoID string) FeedItem {
 	t.Helper()
 	it := FeedItem{ChannelID: channelID, VideoID: videoID}
