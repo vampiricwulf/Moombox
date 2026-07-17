@@ -522,9 +522,19 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	newIDs := map[string]bool{}
 	first := cycleNow.Format(time.RFC3339)
 	for i, c := range rssCandidates {
+		// A zero published (missing/unparseable <published> — see
+		// parseFeedCandidates) stores as 'assumed'/cycle-now: a claim of
+		// ignorance Q2's unresolved arm keeps in scope until a probe dates it.
+		// 'exact'/0001-01-01T00:00:00Z would be a permanent sink — outside Q1
+		// forever, in neither Q2 arm, and rank-4 'exact' blocks any later
+		// correction (§12: nothing is excluded on a date we have not verified).
+		pub, prec := c.published.UTC().Format(time.RFC3339), "exact"
+		if c.published.IsZero() {
+			pub, prec = first, "assumed"
+		}
 		ins, err := fm.db.UpsertFeedItem(database.FeedItem{
 			ChannelID: chID, VideoID: c.videoID, Title: c.title,
-			Published: c.published.UTC().Format(time.RFC3339), DatePrecision: "exact",
+			Published: pub, DatePrecision: prec,
 			CatalogPos: i, Source: "rss", FirstSeen: first,
 		})
 		if err != nil {
@@ -701,13 +711,14 @@ type discoveredVideo struct {
 	title     string
 	desc      string    // RSS description (lookbehind-deduped); not stored
 	url       string    // RSS alternate link; not stored
-	published time.Time // RSS <published> — 'exact' precision in the store
+	published time.Time // RSS <published> — 'exact' in the store; zero ⇒ 'assumed'/cycle-now
 	source    string    // always "rss" (feed_items.source)
 }
 
 // parseFeedCandidates parses an Atom feed into discovery candidates. It returns
 // ALL entries; the STORE step upserts every one, carrying its <published> date
-// as the row's 'exact'-precision published. Description dedup
+// as the row's 'exact'-precision published (zero time ⇒ 'assumed'/cycle-now —
+// see the STORE step). Description dedup
 // (NumDescLookbehind) is applied here because it depends on feed entry order. A
 // parse failure is returned so the caller can record it as channel-health.
 func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte) ([]discoveredVideo, error) {
@@ -754,9 +765,12 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 			}
 		}
 
-		// A missing/invalid <published> parses to the zero time, sinking the
-		// entry below dated ones in the recency sort — acceptable, and YouTube
-		// RSS always supplies it.
+		// A missing/invalid <published> parses to the zero time. The zero
+		// value is a SIGNAL, not a date: the STORE step (checkChannel) maps
+		// it to precision 'assumed' with published = the cycle's now, never
+		// 'exact'/zero — which would sink the row outside every window with
+		// no path to correction (§12). YouTube RSS always supplies the field;
+		// this is the defensive arm.
 		published, _ := time.Parse(time.RFC3339, entry.Published)
 
 		out = append(out, discoveredVideo{

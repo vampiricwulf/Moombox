@@ -321,6 +321,32 @@ func TestStoreStep_UpsertsAndClassifiesDates(t *testing.T) {
 	}
 }
 
+// TestStoreStep_MissingPublishedStoresAssumedNow covers the STORE step's
+// zero-date arm (spec §12): an RSS entry with a missing (or unparseable)
+// <published> parses to the zero time, and the store must record it as
+// precision 'assumed' with published = the cycle's now — a claim of
+// ignorance that Q2's unresolved arm keeps in scope until a probe supplies
+// a real date. Writing it as 'exact'/0001-01-01T00:00:00Z instead would be
+// a permanent unhealable sink: outside Q1 forever, in neither Q2 arm, and
+// rank-4 'exact' blocks every later correction — violating §12's "nothing
+// is excluded on a date we have not verified".
+func TestStoreStep_MissingPublishedStoresAssumedNow(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith(rssItem{ID: "nodate1", Title: "no date"})), // Published "" omits <published>
+		withMembership(membWith()),
+		withProbe(stubProbeErrored()),
+		withNow(now))
+	fm.runCycleForTest(t, "UC1")
+
+	got := mustGetFeedItem(t, db, "UC1", "nodate1")
+	if got.DatePrecision != "assumed" || got.Published != now.Format(time.RFC3339) {
+		t.Fatalf("dateless RSS row = %+v, want precision=assumed published=%s (the cycle's now)",
+			got, now.Format(time.RFC3339))
+	}
+}
+
 // TestFetchStep_RSSSuccessEstablishes_404DoesNot covers the FETCH step's
 // established-gate write (spec §7/§11): last_rss_ok_at is written on a
 // transport SUCCESS, immediately in FETCH — a 404 must not establish, and an
