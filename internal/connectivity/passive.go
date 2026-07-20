@@ -52,19 +52,28 @@ func (pt *PassiveTracker) ReportFailure(tag string) {
 	}
 }
 
-// ReportSuccess removes failure entries for the given tag. The tracker
-// triggers when multiple distinct tags have piled up failures within the
-// window, so clearing per-tag gives the threshold logic a truthful picture
-// rather than the prior "any success clears everything" behaviour — which
-// let a single subsystem's intermittent-success pattern mask a genuine
-// multi-subsystem outage.
+// ReportSuccessAndCleared removes failure entries for the given tag and reports
+// whether doing so cleared the triggered latch (latched before this call, no
+// longer latched after). Monitor uses the return to drive an immediate online
+// transition. Folding the was-triggered read, the per-tag drain, the latch
+// clear, and the did-it-clear check into a SINGLE lock acquisition makes the
+// result atomic with respect to a concurrent ReportFailure — closing the window
+// the prior IsTriggered()/ReportSuccess()/IsTriggered() call sequence left open.
 //
-// The triggered flag is cleared only when the pruned failure set can no
-// longer meet the trigger threshold, so callers that rely on
-// IsTriggered() state see a stable signal.
-func (pt *PassiveTracker) ReportSuccess(tag string) {
+// The tracker triggers when multiple distinct tags have piled up failures within
+// the window, so clearing per-tag gives the threshold logic a truthful picture
+// rather than the prior "any success clears everything" behaviour — which let a
+// single subsystem's intermittent-success pattern mask a genuine multi-subsystem
+// outage.
+//
+// The triggered flag is cleared only when the pruned failure set can no longer
+// meet the trigger threshold, so callers that rely on IsTriggered() state see a
+// stable signal.
+func (pt *PassiveTracker) ReportSuccessAndCleared(tag string) bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
+
+	wasTriggered := pt.triggered
 
 	// Remove entries for this specific tag.
 	filtered := pt.failures[:0]
@@ -81,6 +90,8 @@ func (pt *PassiveTracker) ReportSuccess(tag string) {
 	if pt.triggered && !pt.meetsThresholdLocked() {
 		pt.triggered = false
 	}
+
+	return wasTriggered && !pt.triggered
 }
 
 // ShouldTriggerOffline returns true when the failure window has piled up

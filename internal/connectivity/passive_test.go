@@ -36,7 +36,11 @@ func TestPassiveTracker_SuccessClearsTrigger(t *testing.T) {
 	pt.ReportFailure("monitor/feed")
 	pt.ReportFailure("monitor/feed")
 
-	pt.ReportSuccess("engine/fetch")
+	// The latch was never set (ShouldTriggerOffline not called yet), so the
+	// success reports no clear edge even though it drops the set below threshold.
+	if cleared := pt.ReportSuccessAndCleared("engine/fetch"); cleared {
+		t.Fatal("reported a latch-clear edge, but the latch was never set")
+	}
 
 	if pt.ShouldTriggerOffline() {
 		t.Fatal("should not trigger after success")
@@ -63,8 +67,11 @@ func TestPassiveTracker_SuccessPerTag(t *testing.T) {
 
 	// engine/fetch recovers but monitor/feed is still failing — the trigger
 	// should clear because the remaining failures come from only one tag,
-	// but monitor/feed's failures must NOT be erased.
-	pt.ReportSuccess("engine/fetch")
+	// but monitor/feed's failures must NOT be erased. The latch was set above
+	// (ShouldTriggerOffline), so this success reports the triggered→cleared edge.
+	if !pt.ReportSuccessAndCleared("engine/fetch") {
+		t.Error("expected the success to report clearing the latch (survivors dropped below minTags)")
+	}
 	if pt.IsTriggered() {
 		t.Error("triggered flag should clear after per-tag success drops us below minTags")
 	}

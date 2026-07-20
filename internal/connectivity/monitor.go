@@ -159,8 +159,6 @@ func (m *Monitor) ReportFailure(tag string) {
 }
 
 func (m *Monitor) ReportSuccess(tag string) {
-	wasPassiveOffline := m.passive.IsTriggered()
-	m.passive.ReportSuccess(tag)
 	// A real successful request is direct proof of connectivity, so once it
 	// clears the passive latch we transition online immediately — without an
 	// extra active probe. Calling checkFn() here would block the CALLER's
@@ -168,7 +166,11 @@ func (m *Monitor) ReportSuccess(tag string) {
 	// path) for up to probeRaceTimeout, and is redundant: the 5s poll loop
 	// re-confirms reachability via the active probe regardless. Speed-first
 	// recovery (design Layer 2).
-	if wasPassiveOffline && !m.passive.IsTriggered() {
+	//
+	// ReportSuccessAndCleared reports the triggered→cleared edge under a single
+	// passive lock, so a concurrent ReportFailure can't flip the latch between a
+	// separate read and mutate.
+	if m.passive.ReportSuccessAndCleared(tag) {
 		m.transition(true)
 	}
 }
