@@ -682,8 +682,8 @@ func (bw *BackfillWorker) completeScan(chID string, windowDays int, withMembersh
 // last good position, so the sweep-retry resumes exactly there.
 func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *backfillCursor, tc *backfillTabCursor, cutoff, scanNow time.Time) error {
 	firstSeen := scanNow.Format(time.RFC3339)
-	// lastDatable drives the ordering-evidence check (spec §11: log any item
-	// dated NEWER than an earlier item in the same tab — a violation is
+	// lastDatable drives the ordering-evidence check (spec §11: an item
+	// dated NEWER than an earlier item in the same tab is a violation —
 	// evidence the arm-(a) stop's newest-first premise is broken). It is
 	// per scan SESSION, deliberately not persisted in the cursor: a resumed
 	// scan computes dates from a fresh `now`, and comparing against an
@@ -692,6 +692,15 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 	// claim of ignorance, not a listing coordinate (same reason the walk's
 	// exhaustion only draws from coarse rows).
 	var lastDatable time.Time
+	// orderViolated latches when the ordering check fires: the arm-(a)
+	// window stop is DISABLED for the rest of the tab session — exactly the
+	// walk's noExit rule (walk.go), for the same reason: exhaustion/stop is
+	// an inference from listing order, and once the order is disproven the
+	// inference would strand whatever in-window content the broken ordering
+	// hid deeper in the tab. Natural exhaustion (empty continuation) still
+	// ends the tab cleanly; the cost of a violation is paging to the end.
+	// Session-local like lastDatable, and for the same resume reason.
+	var orderViolated bool
 	// pages counts the pages COMPLETED (written + cursor saved) for this tab
 	// this session, for the OnProgress "scanning" emissions. Session-local
 	// like lastDatable — a resumed tab restarts at 1, honestly reporting
@@ -782,7 +791,8 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 				// is older than every real date and would never fire anyway,
 				// but keep the shape explicit.
 				if !lastDatable.IsZero() && pub.After(lastDatable) {
-					bw.logger.Warn("backfill listing order violated",
+					orderViolated = true
+					bw.logger.Warn("backfill listing order violated; arm-(a) window stop disabled for this tab",
 						"channel", chID, "tab", tab, "id", it.VideoID)
 				}
 				lastDatable = pub
@@ -820,9 +830,13 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 		//   - allOlder ⇒ arm (a), the page-granular window stop: a whole page
 		//     older than the window is the "window depth + margin" evidence
 		//     the newest-first assumption makes strong (spec §11) — the
-		//     remaining continuation is deliberately not followed.
+		//     remaining continuation is deliberately not followed. The
+		//     !orderViolated conjunct is the walk's noExit rule: a session
+		//     that has disproven the tab's ordering may not draw the
+		//     inference, this page included (the violation and allOlder can
+		//     trip on the same page).
 		tc.Continuation = page.Continuation
-		tc.Done = page.Continuation == "" || allOlder
+		tc.Done = page.Continuation == "" || (allOlder && !orderViolated)
 		if err := bw.saveCursor(chID, cur); err != nil {
 			return fmt.Errorf("backfill %s/%s: save cursor: %w", chID, tab, err)
 		}

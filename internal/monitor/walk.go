@@ -50,6 +50,16 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 	var skipped, probed, applied, denied, errored, cooldown, dateFetchFailed int
 
 	for _, row := range scope {
+		if ctx.Err() != nil {
+			// The pass budget expired (or shutdown): stop the pass — the
+			// remaining rows retry next cycle. archive() carries the same
+			// guard; without it the loop would churn every remaining row's
+			// gates and a fast-failing probe after the budget is spent.
+			// break, not return: the summary below is the walk's heartbeat
+			// and must appear however the pass ended.
+			break
+		}
+
 		// src is the source the row carried when the walk read it. A
 		// members_only refusal can relabel a row mid-walk (§9); the relabel
 		// takes effect next cycle — otherwise a row could exhaust a source it

@@ -476,8 +476,10 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 	// Upper bounds derived from plausible operating envelopes — over-large
-	// values turn into per-tick scan costs (ArchiveSlots = O(N) per channel
-	// per cycle), wall-clock latency (FeedCheckInterval > 24h means jobs
+	// values turn into per-cycle scan costs (ArchiveWindowDays sets the
+	// FeedScope cutoff every WALK/ARCHIVE pass re-reads — O(rows in window)
+	// per channel per cycle; ArchiveSlots only caps concurrent backlog
+	// downloads), wall-clock latency (FeedCheckInterval > 24h means jobs
 	// would never get found before they finish), and storage retention
 	// shifts (HideFinishedAgeDays > 1y is a UI bug, not a feature). Audit
 	// reports/config.md Finding 13.

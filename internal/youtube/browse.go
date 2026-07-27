@@ -291,14 +291,22 @@ func (s *Service) fetchBrowseFirstPage(ctx context.Context, channelID, tab, visi
 			return nil, "", "", fmt.Errorf("tab-strip harvest: %w", harvestErr)
 		}
 		env := decodeBrowseEnvelope(body)
-		if harvested, ok := harvestTabStrip(env); ok {
-			// An empty-but-present strip (topic channel: Home only) is cached
-			// too — "the channel lacks the tab" is itself the answer. Only a
-			// strip-less envelope (error/alert page) is NOT cached, so the
-			// next tab's page 1 retries the harvest.
-			s.browse.storeStrip(channelID, harvested)
-			strip = harvested
+		harvested, ok := harvestTabStrip(env)
+		if !ok {
+			// A strip-less envelope (error/alert/interstitial 200-OK page)
+			// carries no strip to cache AND no tab identity to parse. FAIL
+			// the page — falling through would return a nil-error empty
+			// exhausted page, which the backfill scanner can only read as
+			// the tab cleanly finishing (and, on the last outstanding tab,
+			// the channel completing its backfill) off a response that had
+			// no tab content at all. Nothing was cached, so the sweep-retry
+			// re-harvests.
+			return nil, "", "", fmt.Errorf("tab-strip harvest: envelope carries no tab strip")
 		}
+		// An empty-but-present strip (topic channel: Home only) is cached
+		// too — "the channel lacks the tab" is itself the answer.
+		s.browse.storeStrip(channelID, harvested)
+		strip = harvested
 		var matched bool
 		if items, token, newVD, matched = parseBrowseTabPage(env, tab); matched {
 			return items, token, newVD, nil

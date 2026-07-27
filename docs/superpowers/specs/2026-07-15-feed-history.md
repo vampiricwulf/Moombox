@@ -940,10 +940,13 @@ deduped, ordered by recency, **to the window depth**.
 `archive_window_days`, then stop.** Page-granular, not item-granular: the stop
 inherits the newest-first listing assumption (§19), and a whole page of out-of-window
 items is far stronger evidence than one item — the extra page is the owner's "window
-depth + margin", made concrete. The scan also logs any item dated *newer* than an
-item earlier in the same tab (the walk's ordering check, at scan granularity); a
-violation is evidence the stop condition's premise is broken for that tab. At the
-3-day default this is ~1–2 pages per tab: **~3–6 requests per channel**.
+depth + margin", made concrete. Any item dated *newer* than an item earlier in the
+same tab (the walk's ordering check, at scan granularity) is a violation: evidence
+the stop condition's premise is broken for that tab. A violation is logged AND
+**disables the window stop for the rest of that tab's scan session** — the walk's
+noExit rule at scan granularity; once the order is disproven, the inference may not
+be drawn, and the tab pages on to natural exhaustion. At the 3-day default the
+no-violation case is ~1–2 pages per tab: **~3–6 requests per channel**.
 
 Coarse dates need no margin of their own: `now - itemAge()` is the *newest* instant
 consistent with the text, so an item whose coarse date is outside is outside on any

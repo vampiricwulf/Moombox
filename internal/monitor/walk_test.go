@@ -636,3 +636,39 @@ func TestWalk_RestartCarveOut(t *testing.T) {
 		t.Fatal("vod+started WITH a job row must not be probed — AddJob dedups re-jobs anyway")
 	}
 }
+
+// The WALK pass runs under a passBudget-scoped context (checkChannel, §7).
+// Once that context is done — budget expired or shutdown — the loop must
+// stop instead of churning through every remaining scope row's gates and
+// probe. archive() has the same guard; the two passes are deliberately
+// symmetric.
+func TestWalk_CancelledContextStopsPass(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	chID := "UCwalkcancel0000000000a"
+	seedCoarseLump(t, db, chID, now, "videos", "c1", "c2", "c3")
+
+	var probed []string
+	fm := newTestFeedMonitor(t, db, withProbe(recordingProbe(&probed)), withNow(now), withWindowDays(30))
+
+	ch := &config.ChannelConfig{ID: chID, Name: chID, IncludeNonLiveContent: true}
+	cutoff := now.Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	scope, err := db.FeedScope(chID, cutoff, false)
+	if err != nil {
+		t.Fatalf("FeedScope: %v", err)
+	}
+	if len(scope) != 3 {
+		t.Fatalf("scope = %d rows, want 3 (fixture must be in-window)", len(scope))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fresh := fm.walk(ctx, ch, chID, cutoff, scope)
+
+	if len(probed) != 0 {
+		t.Errorf("cancelled context probed %v, want no probes — the pass budget is over", probed)
+	}
+	if len(fresh) != 0 {
+		t.Errorf("fresh = %d rows, want 0 on a cancelled pass", len(fresh))
+	}
+}

@@ -536,3 +536,35 @@ func TestFetchChannelTabPage_MembershipSelectedShortCircuit(t *testing.T) {
 		t.Errorf("expected exhausted tab, got continuation %q", page.Continuation)
 	}
 }
+
+// A 200-OK body that carries NO tab strip at all — an error/alert or
+// interstitial envelope — must surface as an ERROR from the page-1 harvest
+// path, never as a nil-error empty page: upstream, an empty page with no
+// continuation reads as clean natural exhaustion (the backfill scanner marks
+// the tab Done and, on the last outstanding tab, records the channel as
+// backfilled), silently classifying content YouTube never returned as
+// absent. harvestTabStrip's own contract says ok=false must not be cached;
+// this pins that it must not be *scanned* either.
+func TestFetchChannelTabPage_AlertEnvelopeIsError(t *testing.T) {
+	const alertEnvelope = `{
+	  "responseContext": {"visitorData": "vd-alert"},
+	  "alerts": [{"alertRenderer": {"type": "ERROR", "text": {"simpleText": "This channel does not exist."}}}]
+	}`
+	var calls atomic.Int32
+	s := newBrowseTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write([]byte(alertEnvelope))
+	})
+
+	page, err := s.FetchChannelTabPage(context.Background(), "UCbrowsetest0000000000ab", "streams", "")
+	if err == nil {
+		t.Fatalf("want error on a strip-less alert envelope, got nil (page %+v)", page)
+	}
+	// Nothing cached: the next page-1 call must retry the harvest.
+	if _, ok := s.browse.cachedStrip("UCbrowsetest0000000000ab"); ok {
+		t.Error("alert envelope must not be cached as the channel's tab strip")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 request (the failed harvest), got %d", got)
+	}
+}

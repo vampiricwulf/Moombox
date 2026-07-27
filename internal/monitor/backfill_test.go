@@ -1294,3 +1294,57 @@ func TestBackfillProgress_PruneEmitsIdle(t *testing.T) {
 		{backfillTestChannel, "", 0, "idle"},
 	})
 }
+
+// A listing-order violation is evidence the arm-(a) window stop's
+// newest-first premise is broken for the tab (spec §11) — so the stop must
+// be DISABLED for the rest of that tab's scan session, exactly as the walk's
+// noExit disables its early exit (walk.go). Page 2 carries the violation
+// (v3 dated newer than v2) while every item computes older than the cutoff;
+// without the disable, allOlder would mark the tab Done and TOK3 would never
+// be followed — permanently stranding whatever in-window content the broken
+// ordering hid deeper in the tab. Page 3 is all-older WITH clean ordering:
+// the disable must persist for the session, so the scan keeps paging to
+// natural exhaustion (page 4) and still completes CLEANLY.
+func TestScanChannel_OrderingViolationDisablesWindowStop(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	fetch := newScriptedFetcher(t, map[string][]scriptedPage{
+		"videos": {
+			// page 1: in-window, ordered — no violation, no stop.
+			{wantCont: "", page: &TabPage{
+				Items:        []TabItem{coarseItem("v1", 24*time.Hour)},
+				Continuation: "TOK2",
+			}},
+			// page 2: ALL older than the 3-day cutoff, but v3 (10d) is NEWER
+			// than v2 (11d) — the violation and allOlder trip on the same page.
+			{wantCont: "TOK2", page: &TabPage{
+				Items:        []TabItem{coarseItem("v2", 264*time.Hour), coarseItem("v3", 240*time.Hour)},
+				Continuation: "TOK3",
+			}},
+			// page 3: all older, cleanly ordered — the disable must persist.
+			{wantCont: "TOK3", page: &TabPage{
+				Items:        []TabItem{coarseItem("v4", 300*time.Hour)},
+				Continuation: "TOK4",
+			}},
+			// page 4: natural exhaustion — the only clean ending left.
+			{wantCont: "TOK4", page: &TabPage{}},
+		},
+		"streams": emptyTabScript(),
+	})
+	bw := newTestBackfillWorker(t, db, withTabFetch(fetch.fetch), withBackfillNow(now))
+
+	if err := bw.scanChannel(context.Background(), backfillTestCh(), backfillTestChannel, 3, false); err != nil {
+		t.Fatalf("scanChannel: %v", err)
+	}
+
+	if got := fetch.tabCalls("videos"); got != 4 {
+		t.Errorf("videos tab fetched %d times, want 4 (violation must disable arm (a) for the session)", got)
+	}
+	// Every page's rows persisted; natural exhaustion still completes cleanly.
+	for _, id := range []string{"v1", "v2", "v3", "v4"} {
+		mustFeedItem(t, db, backfillTestChannel, id)
+	}
+	if cb, err := db.GetChannelBackfill(backfillTestChannel); err != nil || cb.At == "" {
+		t.Errorf("backfilled_at = %q (err %v), want set — natural exhaustion is a clean ending", cb.At, err)
+	}
+}

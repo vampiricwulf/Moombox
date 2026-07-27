@@ -27,8 +27,7 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "connectivity_pause", label: "Download Paused (Offline)" },
       { id: "connectivity_resume", label: "Download Resumed" },
       { id: "connectivity_split", label: "Finalized During Outage" },
-      { id: "connectivity_lost", label: "Connectivity Lost" },
-      { id: "connectivity_restored", label: "Connectivity Restored" },
+      { id: "connectivity_restored", label: "Outage Alert" },
     ],
   },
   {

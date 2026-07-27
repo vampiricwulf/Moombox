@@ -373,8 +373,7 @@ These are the event strings used for filtering. A target with no event filter re
 | `connectivity_pause` | Twitch live download paused — connectivity lost, waiting to resume |
 | `connectivity_resume` | Connectivity restored; same job resumed |
 | `connectivity_split` | Broadcast/VOD lost during the outage; captured data finalized |
-| `connectivity_lost` | Global internet outage detected (no download required) |
-| `connectivity_restored` | Global connectivity restored; embed carries outage duration |
+| `connectivity_restored` | Global connectivity restored — fires the "Outage Alert": start/end as Discord dynamic timestamps plus the duration. Deliberately the ONLY global-outage event: a lost-connectivity webhook has no connectivity to deliver over, so there is no `connectivity_lost` (removed in v2.8; stale filter entries warn at startup and strip on the next UI save) |
 | `trim_created` | Trim clip created |
 | `trim_deleted` | Trim clip deleted |
 | `trim_error` | Trim operation failed |

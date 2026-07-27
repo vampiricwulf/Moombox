@@ -94,3 +94,35 @@ func TestJobCreationForDisposition(t *testing.T) {
 		})
 	}
 }
+
+// TestOutageAlert pins the "Outage Alert" notification sent on connectivity
+// restore (the only connectivity webhook that can actually deliver — a
+// "lost" notification has, by definition, no connectivity to ride). Start
+// and end render as Discord dynamic timestamps (<t:unix:f> — each viewer's
+// local timezone); duration is a plain second-rounded string.
+func TestOutageAlert(t *testing.T) {
+	start := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+	end := start.Add(4*time.Minute + 32*time.Second + 600*time.Millisecond)
+
+	title, _, fields := outageAlert(start, end)
+
+	if title != "Outage Alert" {
+		t.Errorf("title = %q, want \"Outage Alert\"", title)
+	}
+	want := []struct{ name, value string }{
+		{"Started", "<t:1785146400:f>"},
+		{"Ended", "<t:1785146672:f>"},
+		{"Duration", "4m33s"},
+	}
+	if len(fields) != len(want) {
+		t.Fatalf("fields = %d, want %d (%+v)", len(fields), len(want), fields)
+	}
+	for i, w := range want {
+		if fields[i].Name != w.name || fields[i].Value != w.value {
+			t.Errorf("field[%d] = %q=%q, want %q=%q", i, fields[i].Name, fields[i].Value, w.name, w.value)
+		}
+		if !fields[i].Inline {
+			t.Errorf("field[%d] %q must be inline — the three cells read as one row", i, w.name)
+		}
+	}
+}

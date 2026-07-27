@@ -691,6 +691,12 @@ func (s *runState) wireMonitorCallbacks() {
 	// an operator who was away during an outage previously had NO trace
 	// that monitoring was down (streams silently missed). Transitions are
 	// already debounced by the connectivity monitor, so this can't flap-spam.
+	//
+	// ONE notification, on restore only: a "lost" webhook has, by
+	// definition, no connectivity to ride — it either dies in the sender's
+	// bounded retries or lands late and out of order, so the offline
+	// transition just stamps outageStart and the restore sends the whole
+	// story (start, end, duration) as a single Outage Alert.
 	// outageStart is guarded by a mutex — OnStateChange serializes today,
 	// but this closure must not silently depend on that.
 	var connNotifyMu sync.Mutex
@@ -707,25 +713,34 @@ func (s *runState) wireMonitorCallbacks() {
 		defer connNotifyMu.Unlock()
 		if !online {
 			outageStart = time.Now()
-			s.notifyMgr.Send("Connectivity Lost",
-				"Internet connectivity lost — channel monitoring is paused and active downloads are waiting",
-				notifications.TypeWarning, nil,
-				notifications.SendOptions{Event: "connectivity_lost"},
-			)
 			return
 		}
 		if outageStart.IsZero() {
 			return // startup/initial online state — nothing to report
 		}
-		outage := time.Since(outageStart).Round(time.Second)
+		title, desc, fields := outageAlert(outageStart, time.Now())
 		outageStart = time.Time{}
-		s.notifyMgr.Send("Connectivity Restored",
-			"Internet connectivity restored — monitors re-checking now",
-			notifications.TypeSuccess,
-			[]notifications.Field{
-				{Name: "Outage Duration", Value: outage.String(), Inline: true},
-			},
+		// Event key stays "connectivity_restored": the alert still fires on
+		// the restore transition, and existing target allowlists must keep
+		// working (the UIs relabel the toggle "Outage alert").
+		s.notifyMgr.Send(title, desc, notifications.TypeWarning, fields,
 			notifications.SendOptions{Event: "connectivity_restored"},
 		)
 	})
+}
+
+// outageAlert builds the Outage Alert notification for a connectivity
+// outage spanning [start, end]: title, description, and the three embed
+// fields. Start/end render as Discord dynamic timestamps (<t:unix:f> —
+// Discord shows each viewer's local timezone; Discord webhooks are the only
+// notification target type, so the markup never reaches a renderer that
+// can't display it). Duration is a plain second-rounded string.
+func outageAlert(start, end time.Time) (title, description string, fields []notifications.Field) {
+	return "Outage Alert",
+		"Internet connectivity was lost — channel monitoring paused and downloads waited; monitors are re-checking now",
+		[]notifications.Field{
+			{Name: "Started", Value: fmt.Sprintf("<t:%d:f>", start.Unix()), Inline: true},
+			{Name: "Ended", Value: fmt.Sprintf("<t:%d:f>", end.Unix()), Inline: true},
+			{Name: "Duration", Value: end.Sub(start).Round(time.Second).String(), Inline: true},
+		}
 }
