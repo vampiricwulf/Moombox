@@ -59,7 +59,7 @@ jobs:
             internal/bgutils/embed/node-linux-arm64.gz
           key: embed-${{ hashFiles('internal/bgutils/embed/version.txt', 'bgutil-sidecar/package-lock.json', 'bgutil-sidecar/build.mjs', 'tools/fetch-node/main.go') }}
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
