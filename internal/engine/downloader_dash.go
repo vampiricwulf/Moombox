@@ -192,6 +192,9 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		sameHeadRetryDelay = 0
 		sameSegRetries = 0
 		hasStartedDownloading = true
+		// Re-arm end verification: a landed segment proves the burst that
+		// latched the verdict (if any) was transient.
+		d.streamEndVerified = false
 
 		// Emit progress + aggregate health snapshot. The health update
 		// piggy-backs on the same cadence so the UI sees throughput /
@@ -337,8 +340,11 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 			return nil // Continue loop
 		}
 		d.emitActivity(ActivityVerifyingEnd)
-		// Check if stream is actually ended, or if our format just disappeared
-		if d.opts.CheckStreamStatus != nil {
+		// Check if stream is actually ended, or if our format just disappeared.
+		// The verdict latches (streamEndVerified) so the behind-head retry loop
+		// below doesn't re-probe the API on every gone iteration; a landed
+		// segment re-arms it.
+		if !d.streamEndVerified && d.opts.CheckStreamStatus != nil {
 			ended, checkErr := d.opts.CheckStreamStatus(ctx)
 			if checkErr != nil {
 				d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
@@ -346,6 +352,22 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 				return ErrQualityLost
 			}
 		}
+		d.streamEndVerified = true
+		// Behind-head guard (yt-dlp 8c1f07d81 port): X-Head-Seqnum harvested
+		// from segment responses says how many segments exist. An "ended"
+		// verdict while currentSeq is still strictly below head means the 403
+		// burst is URL/POT staleness or a CDN blip — the unfetched tail
+		// demonstrably exists (post-live segments stay fetchable for hours
+		// while YouTube processes the VOD). Finalizing here was the silent-
+		// truncation bug: keep retrying until the MaxTimeout budget runs out.
+		// OnCipherFailure has already had its shot at swapping in a fresh URL
+		// (it fires at postBytes403CipherThreshold, below the gone threshold).
+		if d.behindHeadTailPending() {
+			d.emitActivity(ActivityWaitingForSegment)
+			utils.Sleep(ctx, singleGoneRetryDelay)
+			return nil // Continue loop
+		}
+		d.warnIfFinalizingBehindHead()
 		d.streamEnded.Store(true)
 		return errStreamDone
 	}
@@ -364,6 +386,33 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 	d.emitActivity(ActivityWaitingForSegment)
 	utils.Sleep(ctx, singleGoneRetryDelay)
 	return nil // Continue loop
+}
+
+// behindHeadTailPending reports whether the known head sequence implies
+// unfetched segments remain (currentSeq strictly below head) and the
+// MaxTimeout budget since the last written segment hasn't expired — i.e.
+// an "ended" verdict should be deferred rather than acted on. head == 0 or
+// unknown (-1) disables the guard: with no head knowledge we can't
+// distinguish a truncation from a clean end, so legacy behavior applies.
+func (d *SegmentDownloader) behindHeadTailPending() bool {
+	head := int(d.headSeq.Load())
+	cur := int(d.currentSeq.Load())
+	return head > 0 && cur < head && d.lastSegTime.Since() < d.opts.MaxTimeout
+}
+
+// warnIfFinalizingBehindHead logs loudly when the downloader is about to
+// finalize with currentSeq still below the known head — the recording is
+// missing a tail that existed at some point. This keeps an unavoidable
+// truncation (segments permanently gone, MaxTimeout exhausted) visible
+// instead of masquerading as a clean finish.
+func (d *SegmentDownloader) warnIfFinalizingBehindHead() {
+	head := int(d.headSeq.Load())
+	cur := int(d.currentSeq.Load())
+	if head > 0 && cur < head {
+		d.logger.Warn("[Downloader] finalizing with unfetched tail — segments below head stayed unavailable",
+			"currentSeq", cur, "headSeq", head, "missing", head-cur,
+			"gapSinceLastSegment", d.lastSegTime.Since().Round(time.Second))
+	}
 }
 
 func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRetryDelay *int, delayCap int) error {
@@ -468,7 +517,15 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		if checkErr != nil {
 			d.logger.Warn("stream status check failed while waiting for segment", "err", checkErr)
 		} else if ended {
-			return errStreamDone
+			// Behind-head guard — same rationale as handleGoneError: an ended
+			// stream whose head says more segments exist shouldn't finalize on
+			// a stall; the tail stays fetchable through the post-live window.
+			// Fall through to the backoff below until MaxTimeout expires (the
+			// backstop further down owns the eventual force-finalize).
+			if !d.behindHeadTailPending() {
+				d.warnIfFinalizingBehindHead()
+				return errStreamDone
+			}
 		} else if behindHead && hasStartedDownloading {
 			// Still live, but a segment we KNOW exists (curSeq < head) won't
 			// come — the format/URL likely rotated; refresh via ErrQualityLost.
@@ -508,6 +565,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		}
 		d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 			"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
+		d.warnIfFinalizingBehindHead()
 		return errStreamDone
 	}
 

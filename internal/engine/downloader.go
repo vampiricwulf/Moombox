@@ -249,6 +249,15 @@ type SegmentDownloader struct {
 	logger                DownloaderLogger
 	cipherFailureFired    atomic.Bool
 
+	// streamEndVerified latches an "ended" verdict from CheckStreamStatus
+	// within one continuous gone-burst so the behind-head retry loop in
+	// handleGoneError doesn't re-probe the API every iteration. Reset when
+	// a segment lands (only the download-loop goroutine touches it, so a
+	// plain bool suffices). An ended verdict is sticky in reality —
+	// post-live streams don't come back — but re-arming on recovery keeps
+	// a spurious verdict from suppressing a later ErrQualityLost refresh.
+	streamEndVerified bool
+
 	// baseURLOverride is set by SetBaseURL when a cipher rotation
 	// requires swapping the stream URL mid-download. nil = use
 	// opts.BaseURL (the construction-time URL); non-nil = use the

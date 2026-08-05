@@ -82,24 +82,41 @@ func TestSelectDownloadStrategy(t *testing.T) {
 			want: "vod",
 		},
 		{
-			// A post-live stream that DOES expose a dash manifest should still
-			// use the manifest-driven DASH path, not the manifestless fallback.
-			name:  "post-live with dash manifest uses DashStrategy",
+			// Routing inversion (yt-dlp 8c1f07d81): post-live prefers the
+			// manifest-free path even when a dash manifest is present —
+			// post-live manifests only cover the trailing ~2h window.
+			name:  "post-live with dash manifest prefers manifestless DASH",
 			isVod: true,
 			info: &youtube.VideoInfo{
 				StreamStatus:    youtube.StreamPostLive,
 				DashManifestURL: "https://manifest.example/dash.mpd",
 				Formats:         manifestlessFormats,
 			},
-			want: "dash",
+			want: "manifestless_dash",
 		},
 		{
-			name:  "live with dash manifest uses DashStrategy",
+			// Routing inversion (yt-dlp 8c1f07d81): live streams with split
+			// adaptive URLs use manifest-free DASH even when a manifest is
+			// present — yt-dlp declared live DASH manifests "no longer
+			// properly supported" as of 2026-07.
+			name:  "live with dash manifest prefers manifestless DASH",
 			isVod: false,
 			info: &youtube.VideoInfo{
 				StreamStatus:    youtube.StreamLive,
 				DashManifestURL: "https://manifest.example/dash.mpd",
 				Formats:         manifestlessFormats,
+			},
+			want: "manifestless_dash",
+		},
+		{
+			// The manifest-driven path survives as the fallback when the
+			// format pool lacks usable split adaptive URLs.
+			name:  "live with dash manifest but no split formats falls back to DashStrategy",
+			isVod: false,
+			info: &youtube.VideoInfo{
+				StreamStatus:    youtube.StreamLive,
+				DashManifestURL: "https://manifest.example/dash.mpd",
+				Formats:         []youtube.Format{progressive()},
 			},
 			want: "dash",
 		},

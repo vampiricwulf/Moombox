@@ -455,16 +455,17 @@ streamEnded:
 
 // refreshDownload re-creates downloaders for an in-progress live stream from
 // freshly fetched video info, mirroring the initial strategy selection in
-// ExecuteWithChat: HLS jobs stay HLS; DASH jobs prefer the manifest but fall
-// back to manifest-free DASH when the refreshed response withholds
-// dashManifestUrl (YouTube's yt-dlp#15274 experiment). Without the fallback,
-// a manifestless job's first transient quality blip or stall refresh would
-// fail with "no DASH manifest URL" and end the recording mid-live.
+// ExecuteWithChat: HLS jobs stay HLS; DASH jobs prefer manifest-free DASH
+// whenever the refreshed response ships split adaptive URLs (the primary
+// live path since yt-dlp 8c1f07d81), falling back to the manifest-driven
+// downloader otherwise. Without the manifestless branch, a manifestless
+// job's first transient quality blip or stall refresh would fail with "no
+// DASH manifest URL" and end the recording mid-live.
 func (o *DownloadOrchestrator) refreshDownload(ctx context.Context, jobCtx *JobContext, freshInfo *youtube.VideoInfo, isHls bool) (*DownloadResult, error) {
 	if isHls {
 		return DownloadHls(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 	}
-	if freshInfo.DashManifestURL == "" && HasManifestlessDashFormats(freshInfo.Formats) {
+	if HasManifestlessDashFormats(freshInfo.Formats) {
 		return DownloadManifestlessDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 	}
 	return DownloadDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
@@ -506,14 +507,13 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 			return nil, fmt.Errorf("probe returned nil info without error")
 		}
 
-		// Recovery: ANDROID_VR usually returns DASH for public streams, but
-		// YouTube's account-based experiments could plausibly extend to it
-		// (already strips DASH from cookied clients — yt-dlp issue #15274).
-		// If the cookieless probe lacks a DASH URL, fall back once to the
+		// Recovery: if the cookieless probe returned neither a DASH manifest
+		// nor a usable split-adaptive format pool, fall back once to the
 		// authenticated path so quality changes don't go silently undetected.
-		// Auth-required streams already use GetVideoInfo, so the fallback is
-		// a no-op for them.
-		if info.DashManifestURL == "" && !requiresAuth {
+		// (A manifest-less response WITH adaptive formats is the normal
+		// manifest-free case and needs no fallback.) Auth-required streams
+		// already use GetVideoInfo, so the fallback is a no-op for them.
+		if info.DashManifestURL == "" && !HasManifestlessDashFormats(info.Formats) && !requiresAuth {
 			info, err = jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
 			if err != nil {
 				return nil, fmt.Errorf("probe fallback to authenticated: %w", err)
@@ -523,14 +523,15 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 			}
 		}
 
-		// Manifestless DASH path: when the experiment strips
-		// dashManifestUrl from the response but the format pool still
-		// contains split video+audio adaptive entries, pick the best
-		// video format directly from the pool. Skips the manifest
-		// fetch entirely — the format metadata (width/height/fps) is
-		// already in videoInfo.Formats[], so a quality probe on a
-		// manifestless DASH stream is just an in-memory selection.
-		if info.DashManifestURL == "" && HasManifestlessDashFormats(info.Formats) {
+		// Manifestless DASH path — the primary live path (yt-dlp
+		// 8c1f07d81): when the format pool contains split video+audio
+		// adaptive entries, pick the best video format directly from
+		// the pool. Skips the manifest fetch entirely — the format
+		// metadata (width/height/fps) is already in videoInfo.Formats[],
+		// so a quality probe on a manifest-free DASH stream is just an
+		// in-memory selection (and one fewer MPD round-trip every probe
+		// interval).
+		if HasManifestlessDashFormats(info.Formats) {
 			var streamInfos []DashStreamInfo
 			for i := range info.Formats {
 				f := &info.Formats[i]

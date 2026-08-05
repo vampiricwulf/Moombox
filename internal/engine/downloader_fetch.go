@@ -144,6 +144,12 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 	reportSuccess("engine/fetch")
 	defer resp.Body.Close()
 
+	// Harvest the live-head sequence YouTube attaches to GVS segment
+	// responses — ordinary fetches then keep headSeq fresh for free and
+	// the dedicated probe only fires when segment traffic has gone quiet
+	// (yt-dlp 8c1f07d81 reads the same header via dedicated HEAD requests).
+	d.noteHeadSeqFromResponse(resp)
+
 	if resp.StatusCode >= 400 {
 		// Read a short body snippet for diagnostic error messages. YouTube
 		// returns useful JSON on 403 (cipher issues, pot-token rejection)
@@ -211,6 +217,27 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		}
 	}
 	return nil, ErrSegmentRetriesExhausted
+}
+
+// noteHeadSeqFromResponse harvests the X-Head-Seqnum header from a segment
+// response. YouTube's GVS attaches the current head sequence to segment
+// responses for live/post-live content, so every ordinary fetch doubles as
+// a head probe. Bumping lastHeadProbeTime here makes the dedicated probes
+// in runDashLoop / handleHTTPError fire only when no segment has refreshed
+// head within HeadProbeInterval (cold start, stall) — saving one probe
+// round-trip per interval per downloader on a healthy stream. Non-GVS
+// responses (Twitch HLS, error pages) simply lack the header — no-op.
+func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
+	v := resp.Header.Get("X-Head-Seqnum")
+	if v == "" {
+		return
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return
+	}
+	d.headSeq.Store(int64(n))
+	d.lastHeadProbeTime.StoreNow()
 }
 
 // probeHeadSequence discovers the current live head segment using a high sequence GET probe.

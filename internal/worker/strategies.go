@@ -68,32 +68,39 @@ func selectDownloadStrategy(isVod bool, info *youtube.VideoInfo) (DownloadStrate
 	useDirectVod := isVod && (info.StreamStatus == youtube.StreamNotAStream || info.DashManifestURL == "")
 	switch {
 	// Post-live "manifestless DASH": a was-live stream that just ended is
-	// classified StreamPostLive (and folded into isVod), but YouTube serves it
-	// with segment-only adaptive URLs (&sq=N) and no dashManifestUrl. A
-	// whole-file VodStrategy GET of those returns a single moov-less fragment
-	// ("moov atom not found"); the segment-addressed manifestless path — the
-	// same one the live downloader uses — fetches sq=0's ftyp+moov init and
-	// terminates cleanly once the already-ended stream's segments are
-	// exhausted (CheckStreamStatus reports a post-live stream as ended).
+	// classified StreamPostLive (and folded into isVod), but its open-ended
+	// adaptive URLs are segment-addressed (&sq=N). A whole-file VodStrategy
+	// GET of those returns a single moov-less fragment ("moov atom not
+	// found"); the segment-addressed manifestless path — the same one the
+	// live downloader uses — fetches sq=0's ftyp+moov init and terminates
+	// once currentSeq passes the head harvested from X-Head-Seqnum.
 	// Scoped to StreamPostLive specifically so a genuine finished StreamVOD —
 	// whose adaptive URLs DO serve whole files — keeps using VodStrategy.
+	// Preferred over DashStrategy even when a dashManifestUrl is present:
+	// yt-dlp 8c1f07d81 migrated post-live off DASH manifests entirely
+	// (post-live manifests only cover the trailing ~2h window).
 	case isVod && info.StreamStatus == youtube.StreamPostLive &&
-		info.DashManifestURL == "" && HasManifestlessDashFormats(info.Formats):
+		HasManifestlessDashFormats(info.Formats):
 		return ManifestlessDashStrategy, nil
 	case useDirectVod && len(info.Formats) > 0:
 		return VodStrategy, nil
-	case info.DashManifestURL != "":
-		return DashStrategy, nil
 	case !isVod && HasManifestlessDashFormats(info.Formats):
-		// Manifest-free DASH: live stream where YouTube withheld
-		// dashManifestUrl from cookied clients (yt-dlp issue #15274
-		// experiment) but still shipped split video+audio adaptive formats
-		// with direct URLs in streamingData.adaptiveFormats[]. Fetch each
-		// itag's URL with `&sq=N` from broadcast start, same shape as the
-		// manifest-driven DASH downloader. Preempts HLS because DASH gives
+		// Manifest-free DASH — the PRIMARY live path since yt-dlp 8c1f07d81
+		// declared live DASH manifests "no longer properly supported"
+		// (2026-07): fetch each selected itag's adaptiveFormats[] URL with
+		// `&sq=N` appended, discovering the live edge from the
+		// X-Head-Seqnum response header instead of refetching an MPD.
+		// Originally built for the yt-dlp#15274 experiment where YouTube
+		// withheld dashManifestUrl from cookied clients; now routed ahead
+		// of DashStrategy for every live stream that ships split
+		// video+audio adaptive URLs. Preempts HLS because DASH gives
 		// per-itag selection, separate audio (cleaner mux), and
 		// live-from-start segment addressability that HLS can't do.
 		return ManifestlessDashStrategy, nil
+	case info.DashManifestURL != "":
+		// Manifest-driven DASH survives as the fallback for responses whose
+		// format pool lacks usable split adaptive URLs.
+		return DashStrategy, nil
 	case info.HlsManifestURL != "":
 		return HlsStrategy, nil
 	case len(info.Formats) > 0:
