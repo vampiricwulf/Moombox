@@ -339,8 +339,8 @@ The `DownloadOrchestrator` manages the complete download lifecycle for a single 
 7. Set up progress tracking via `ProgressTracker`
 8. Start chat downloader in parallel (or adopt pre-started one from `StreamProcessor`)
 9. Execute download:
-   - VOD: `runDownloaders()` (one-shot via `errgroup`)
-   - Live: `runLiveStreamDownload()` (loop with stream-end verification and quality monitoring)
+   - VOD: `runVodDownloadWithRefresh()` — wraps `runDownloaders()` (one-shot via `errgroup`) in a bounded re-extraction loop for YouTube jobs that finalize behind head (see below)
+   - Live: `runLiveStreamDownload()` (loop with stream-end verification and quality monitoring); returns the final `*DownloadResult`, since a quality refresh/split reassigns the downloader pair inside the loop and the caller's original pointer would otherwise go stale
 10. After download completes: finalize progress, sync total sequence counts
 11. Signal chat to finish, wait up to 2 minutes for chat completion
 12. Release download slot (muxing is CPU-bound, not a download)
@@ -379,6 +379,10 @@ else:
    - If stream is still live, re-fetches formats and restarts download
    - `ErrQualityLost` triggers format re-fetch and restart at available quality
 6. Stream-end verification prevents premature termination from transient network issues
+
+**VOD-branch bounded refresh loop (`runVodDownloadWithRefresh`):** googlevideo URLs live ~6h; a post-live download whose wall clock outlives that grant finalizes with `FinalizedBehindHead()` true on the video and/or audio downloader instead of erroring outright. The live branch has had URL-expiry recovery via `ErrQualityLost` -> `refreshDownload` from the start; the VOD branch used to run `runDownloaders()` exactly once. It now re-extracts via `GetVideoInfo`, seeds `VideoStartSeq`/`AudioStartSeq` from the last written sequence, and rebuilds through the same `refreshDownload` — provided the prior attempt actually made progress and the fresh extraction still offers manifestless DASH formats (a stream that finished processing into a true VOD is left to the incomplete-tail flag + manual retry instead). Bounded by `maxVodRefreshAttempts` (4, ~24h of wall clock); past that, or on no progress, the loop stops and returns whatever was captured.
+
+**Eviction diagnosis (`diagnoseEvictedStart`):** both branches run this check after a nil download error. If a YouTube manifestless download finished having written zero bytes and its `HeadSeq()` is implausibly deep (past `minEvictionHead`, ~28h of segments), an ordinary failed start is an unlikely explanation — YouTube's ~120h retention window may have scrolled segment 0 out from under a marathon stream. The check bisects `[0, head]` for the oldest segment the CDN still serves (`engine.FindOldestAvailableSeq`), fetches that boundary segment, and inspects its box structure (`engine.InspectSegment`) to log a full diagnosis. A confirmed eviction (oldest available segment > 0) fails the job with a precise "exceeds YouTube's retention window" error instead of the generic empty-download failure; a dead-URL bisection or an oldest of 0 leaves the ordinary failure path to run unchanged. Diagnosis only — no download jump; that is gated future work (docs/plans/2026-08-05-incomplete-tail-and-marathon-streams.md Phase D).
 
 ### SegmentDownloader
 

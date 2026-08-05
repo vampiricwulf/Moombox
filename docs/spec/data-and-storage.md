@@ -180,7 +180,7 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 
 ### Schema
 
-**Current version: 16**
+**Current version: 17**
 
 #### Tables
 
@@ -243,6 +243,7 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 | auto_retry_count | INTEGER | NOT NULL, 0 | Monitor-driven Twitch flap auto-recovery attempts (added v13); reset by user-driven reinit/resume |
 | channel_id | TEXT | NULL | Config channel ID of the monitor channel that created the job (added v16). NULL for manually added and pre-v16 jobs. Set at insert, never updated. |
 | queue_priority | INTEGER | NOT NULL, 1 | Backlog marker (added v16): 0 = broadcast or newly discovered VOD (admitted immediately), 1 = backlog VOD (paced by the archive-slots scheduler) |
+| incomplete_tail | INTEGER | NOT NULL, 0 | Boolean (0/1), added v17. Marks a `Finished` job whose recording is known to be missing tail segments (finalized behind head after the VOD-branch refresh loop's retries). Staging dir + resume sidecar are preserved instead of cleaned up; Retry/Resume are allowed and unconditionally rewrite this column, so a clean re-run clears it. |
 
 **Indexes on jobs:** `idx_jobs_status(status)`, `idx_jobs_updated_at(updated_at)`, `idx_jobs_video_id(video_id)` (added v4).
 
@@ -373,6 +374,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 | v14 | Normalized NULLs in the v2/v3-added columns (`chat_file`, `thumbnail_file`, `description_file`) to `''` — pre-backfill legacy rows failed every scan and vanished from the UI. Swept orphaned `gaps`/`trims`/`segments` rows accumulated while foreign-key enforcement was silently off (the pre-fix DSN used parameters modernc ignores); job IDs are video IDs, so re-adding a deleted video would have resurrected the old job's child rows |
 | v15 | Added `chat_file` column to `segments` — Twitch live jobs roll the chat file at every part boundary (gap/quality split), and each part's chat is copied beside its video and recorded on the segment row |
 | v16 | Feed-history discovery store: created `feed_items` (with `idx_feed_items_window` + `idx_feed_items_status`) and `channel_state` tables; added `channel_id` and `queue_priority INTEGER NOT NULL DEFAULT 1` columns to `jobs` (backlog scheduling); dropped `last_videos` (superseded by the store). ALTERs are guarded by duplicate-column suppression — `user_version` is written after the block, so a crash mid-migration re-runs the whole block |
+| v17 | Added `incomplete_tail INTEGER NOT NULL DEFAULT 0` column to `jobs`: flags a `Finished` job whose recording is known to be missing tail segments; Retry/Resume clear it on a clean re-run |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 

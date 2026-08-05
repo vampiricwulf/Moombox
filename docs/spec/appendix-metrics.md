@@ -8,8 +8,8 @@
 
 - **Go version:** 1.25.5
 - **Module path:** github.com/vampiricwulf/Moombox
-- **Current app version:** 2.6.32
-- **Database schema version:** 16
+- **Current app version:** 2.7.6
+- **Database schema version:** 17
 - **Default port:** 774
 
 ## Key Dependencies
