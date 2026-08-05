@@ -18,6 +18,10 @@ const GITHUB_REPO_URL = "https://github.com/vampiricwulf/Moombox";
 // Status sets for quick action visibility (single source of truth)
 const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
 const RESUME_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
+// A Finished job flagged incompleteTail (recording missing tail segments,
+// staging preserved for the resume/retry path) is resumable too, even
+// though "Finished" isn't itself one of the RESUME_STATUSES.
+const canResumeStatus = (job) => RESUME_STATUSES.has(job.status) || (job.status === "Finished" && job.incompleteTail);
 const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
 const MUX_STATUSES = new Set(["Cancelled", "Error"]);
 const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
@@ -1867,6 +1871,16 @@ class MoomboxApp {
     return "";
   }
 
+  /** Returns a warning overlay for a Finished job missing tail segments (resumable), or empty string. */
+  incompleteIndicatorHtml(job) {
+    // incompleteTail can stay stale (true) in the DB through an active
+    // resume/retry download until it recomputes at completion — gate on
+    // Finished so the "missing tail" warning doesn't show on a job that's
+    // already downloading again.
+    if (job.status !== "Finished" || !job.incompleteTail) return "";
+    return `<span class="incomplete-indicator" title="Recording is missing its tail — Resume to fetch it"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5m.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2"/></svg></span>`;
+  }
+
   renderJobItem(job) {
     const statusClass = job.status.toLowerCase().replace("?", "");
     const isTwitch = job.platform === "twitch";
@@ -1941,6 +1955,7 @@ class MoomboxApp {
                ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}
                ${fallbackIsAvatar ? `data-fallback-avatar="true"` : ""}>` : ""}
           ${this.watchIndicatorHtml(job)}
+          ${this.incompleteIndicatorHtml(job)}
         </div>
         <div class="stream-info">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>
@@ -2289,7 +2304,7 @@ class MoomboxApp {
 
   updateDetailsButtons(job) {
     const canCancel = CANCEL_STATUSES.has(job.status);
-    const canResume = RESUME_STATUSES.has(job.status) && job.platform === "youtube" && job.hasStaging;
+    const canResume = canResumeStatus(job) && job.platform === "youtube" && job.hasStaging;
     const canReinit = REINIT_STATUSES.has(job.status);
     const canMux = MUX_STATUSES.has(job.status) && job.hasSegments;
     const canDelete = DELETE_STATUSES.has(job.status);
@@ -2418,6 +2433,11 @@ class MoomboxApp {
             </span>
           </div>`;
           })() : ""}
+          ${job.status === "Finished" && job.incompleteTail ? `
+          <div class="details-row">
+            <span class="details-label"></span>
+            <span class="details-value" data-field="incomplete-tail"><sl-badge variant="warning">Incomplete tail</sl-badge></span>
+          </div>` : ""}
           ${
             job.isVod
               ? `
@@ -4541,7 +4561,7 @@ class MoomboxApp {
 
     const selectedJobs = this._getSelectedJobs();
     const canCancel = selectedJobs.some(j => CANCEL_STATUSES.has(j.status));
-    const canResume = selectedJobs.some(j => RESUME_STATUSES.has(j.status));
+    const canResume = selectedJobs.some(j => canResumeStatus(j));
     const canReinit = selectedJobs.some(j => REINIT_STATUSES.has(j.status));
     const canDelete = selectedJobs.some(j => DELETE_STATUSES.has(j.status));
 
@@ -4580,7 +4600,7 @@ class MoomboxApp {
         apiCall = (id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
         break;
       case "resume":
-        targets = eligibleJobs.filter(j => RESUME_STATUSES.has(j.status));
+        targets = eligibleJobs.filter(j => canResumeStatus(j));
         confirmMsg = `Resume ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/resume`, { method: "POST" });
         break;
