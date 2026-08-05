@@ -401,8 +401,26 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			})
 		}
 	} else {
-		// Live: run with stream-end verification (A2)
-		err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker)
+		// Live: run with stream-end verification (A2). runLiveStreamDownload
+		// returns the FINAL *DownloadResult (see its doc comment) — the loop
+		// reassigns result locally on every quality refresh/split, so the
+		// pre-call `result` variable would otherwise go stale the moment a
+		// single refresh happens.
+		result, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker)
+
+		if err == nil {
+			// Same eviction guard as the VOD branch (see its call site
+			// comment): a marathon channel that's still nominally "live" but
+			// has already scrolled its earliest segments out of the ~120h
+			// retention window hits this via a different route — the fresh
+			// downloader's first-segment hunt exhausts, runLiveStreamDownload
+			// treats that as "no progress" and gives up after
+			// maxConsecutiveLiveChecks still-live re-verifications, and
+			// finalizes cleanly with zero bytes. Setting err here routes
+			// through the same err!=nil handling below as every other
+			// download failure in this function.
+			err = o.diagnoseEvictedStart(ctx, jobCtx, videoInfo, result)
+		}
 	}
 
 	if err != nil {

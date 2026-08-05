@@ -28,6 +28,17 @@ import (
 // this session: such a part must never be classified "short" by the
 // session-local timer (a quality flap right after a restart would otherwise
 // skip muxing hours of footage and append mixed-codec data into it).
+//
+// Returns the FINAL *DownloadResult — every return site echoes back
+// whatever `result` currently points to at that moment. This matters
+// because the loop locally reassigns `result` on every quality
+// refresh/split (`result = refreshResult`), and Go passes the initial
+// result argument by value: without returning the final pointer, the
+// caller's own result variable would go stale after the first refresh,
+// pointing at cancelled/superseded downloaders instead of the ones that
+// actually finished the recording. The caller needs the real final
+// downloaders to run diagnoseEvictedStart's post-download checks
+// (BytesWritten/HeadSeq) against.
 func (o *DownloadOrchestrator) runLiveStreamDownload(
 	ctx context.Context,
 	jobCtx *JobContext,
@@ -37,7 +48,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	videoInfo *youtube.VideoInfo,
 	result *DownloadResult,
 	tracker *ProgressTracker,
-) error {
+) (*DownloadResult, error) {
 	var lastSegTime atomic.Int64
 	lastSegTime.Store(time.Now().UnixNano())
 	var consecutiveLiveChecks atomic.Int32
@@ -125,7 +136,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 	for {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return result, ctx.Err()
 		}
 
 		// Run segment downloaders in a goroutine so we can also listen for quality changes.
@@ -157,7 +168,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		)
 
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return result, ctx.Err()
 		}
 
 		// Check for reactive quality loss (download loop returned ErrQualityLost)
@@ -174,7 +185,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
 			if err != nil {
 				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
-				return fmt.Errorf("refresh after quality change: %w", err)
+				return result, fmt.Errorf("refresh after quality change: %w", err)
 			}
 
 			// Cancel old downloaders (safe to call multiple times)
@@ -209,7 +220,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Return nil to exit the live loop; muxAndFinalize will process
 				// whatever video/audio data was captured before the refresh failed.
-				return nil
+				return result, nil
 			}
 
 			newQuality := o.extractQualityFromResult(refreshResult)
@@ -264,7 +275,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// to the old staging dir and was used only to check quality — discard it.
 			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
 			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
-				return fmt.Errorf("create segment staging dir: %w", err)
+				return result, fmt.Errorf("create segment staging dir: %w", err)
 			}
 			if shortSegment && segStagingDir == curCtx.StagingDir {
 				// Short-span discard reusing the same index/dir: physically
@@ -296,7 +307,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Return nil to exit the live loop; muxAndFinalize will process
 				// whatever video/audio data was captured in the current staging dir.
-				return nil
+				return result, nil
 			}
 
 			// The new segment's staging dir is now the current one for all
@@ -373,7 +384,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			utils.Sleep(ctx, streamEndVerifyInterval)
 
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return result, ctx.Err()
 			}
 
 			// Cancel old downloaders before refreshing
@@ -450,7 +461,7 @@ streamEnded:
 		}
 	}
 
-	return nil
+	return result, nil
 }
 
 // refreshDownload re-creates downloaders for an in-progress live stream from
