@@ -319,3 +319,45 @@ func TestHandleHTTPErrorEndedBehindHeadDefers(t *testing.T) {
 		t.Fatalf("handleHTTPError = %v, want nil (defer while tail exists)", err)
 	}
 }
+
+// TestFinalizedBehindHeadAccessor pins the precise incomplete signal: it is
+// set exactly when a finalize fires the unfetched-tail warning, and NOT on a
+// clean past-head finalize.
+func TestFinalizedBehindHeadAccessor(t *testing.T) {
+	// Incomplete finalize: behind head, budget exhausted.
+	d := NewSegmentDownloader(DownloaderOptions{
+		OutputFile:        filepath.Join(t.TempDir(), "v"),
+		MaxTimeout:        time.Minute,
+		CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+	})
+	d.currentSeq.Store(50)
+	d.headSeq.Store(100)
+	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute))
+	n := goneRetryDuringDownload + 1
+	if err := d.handleGoneError(context.Background(), &n, true); err != errStreamDone {
+		t.Fatalf("handleGoneError = %v, want errStreamDone", err)
+	}
+	if !d.FinalizedBehindHead() {
+		t.Error("FinalizedBehindHead() = false after behind-head finalize")
+	}
+	if got := d.HeadSeq(); got != 100 {
+		t.Errorf("HeadSeq() = %d, want 100", got)
+	}
+
+	// Clean finalize: past head — flag must stay false.
+	d2 := NewSegmentDownloader(DownloaderOptions{
+		OutputFile:        filepath.Join(t.TempDir(), "v"),
+		MaxTimeout:        time.Minute,
+		CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+	})
+	d2.currentSeq.Store(101)
+	d2.headSeq.Store(100)
+	d2.lastSegTime.StoreNow()
+	n2 := goneRetryDuringDownload + 1
+	if err := d2.handleGoneError(context.Background(), &n2, true); err != errStreamDone {
+		t.Fatalf("clean handleGoneError = %v, want errStreamDone", err)
+	}
+	if d2.FinalizedBehindHead() {
+		t.Error("FinalizedBehindHead() = true after clean finalize")
+	}
+}

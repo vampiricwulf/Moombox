@@ -258,6 +258,14 @@ type SegmentDownloader struct {
 	// a spurious verdict from suppressing a later ErrQualityLost refresh.
 	streamEndVerified bool
 
+	// finalizedBehindHead latches when a finalize fired the
+	// unfetched-tail warning (currentSeq < headSeq at errStreamDone) —
+	// the precise "known-incomplete recording" signal the worker
+	// persists as the job's incomplete_tail flag. streamEnded alone is
+	// too broad: cancels and live-edge MaxTimeout stalls also leave it
+	// unset without implying a missing tail.
+	finalizedBehindHead atomic.Bool
+
 	// baseURLOverride is set by SetBaseURL when a cipher rotation
 	// requires swapping the stream URL mid-download. nil = use
 	// opts.BaseURL (the construction-time URL); non-nil = use the
@@ -580,6 +588,13 @@ func (d *SegmentDownloader) LastSeq() int {
 func (d *SegmentDownloader) CurrentSeq() int {
 	return int(d.currentSeq.Load())
 }
+
+// FinalizedBehindHead reports whether the downloader finalized knowing
+// segments below head were left unfetched. Valid after Start returns nil.
+func (d *SegmentDownloader) FinalizedBehindHead() bool { return d.finalizedBehindHead.Load() }
+
+// HeadSeq returns the last known head sequence (-1 if never learned).
+func (d *SegmentDownloader) HeadSeq() int { return int(d.headSeq.Load()) }
 
 // BytesWritten returns total bytes written (lock-free).
 func (d *SegmentDownloader) BytesWritten() int64 {

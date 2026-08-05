@@ -401,6 +401,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 			return nil // Continue loop
 		}
 		if d.warnIfFinalizingBehindHead() {
+			d.finalizedBehindHead.Store(true)
 			// Known-incomplete finalize: leave streamEnded unset so the
 			// runDashLoop defer keeps the resume sidecar — a later retry
 			// appends the missing tail instead of truncating the recording
@@ -576,7 +577,9 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 			// Fall through to the backoff below until MaxTimeout expires (the
 			// backstop further down owns the eventual force-finalize).
 			if !d.behindHeadTailPending() {
-				d.warnIfFinalizingBehindHead()
+				if d.warnIfFinalizingBehindHead() {
+					d.finalizedBehindHead.Store(true)
+				}
 				return errStreamDone
 			}
 		} else if behindHead && hasStartedDownloading {
@@ -618,7 +621,9 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		}
 		d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 			"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
-		d.warnIfFinalizingBehindHead()
+		if d.warnIfFinalizingBehindHead() {
+			d.finalizedBehindHead.Store(true)
+		}
 		return errStreamDone
 	}
 
