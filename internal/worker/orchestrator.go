@@ -26,6 +26,11 @@ const (
 	chatWaitTimeout          = 2 * time.Minute
 	qualityMonitorInterval   = 30 * time.Second
 	minSegmentDuration       = 10 * time.Second // Don't split segments shorter than this
+	// maxVodRefreshAttempts bounds the post-live URL-refresh loop. Googlevideo
+	// URLs live ~6h; a marathon post-live backfill can need several refreshes
+	// to finish. 4 attempts ≈ 24h of wall clock, past which the incomplete_tail
+	// flag + manual retry take over.
+	maxVodRefreshAttempts = 4
 )
 
 // Connectivity is the subset of *connectivity.Monitor the orchestrator uses.
@@ -318,12 +323,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger)
 	defer tracker.Close()
 
-	if result.VideoDownloader != nil {
-		tracker.AttachVideoDownloader(result.VideoDownloader)
-	}
-	if result.AudioDownloader != nil {
-		tracker.AttachAudioDownloader(result.AudioDownloader)
-	}
+	o.attachTrackerAndProgress(tracker, result)
 
 	// A3: Start chat downloader in parallel
 	chatDl := existingChat
@@ -354,8 +354,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Run download loop
 	if isVod {
-		// VOD: run downloaders once
-		err = o.runDownloaders(ctx, result)
+		// VOD: run downloaders, refreshing URLs across the ~6h googlevideo
+		// lifetime for post-live jobs whose wall clock outlives one grant.
+		result, err = o.runVodDownloadWithRefresh(ctx, jobCtx, result, tracker)
 
 		// Set 100% progress after VOD download completes (finishVodWithChat equivalent)
 		// Include audio percentage and chat count to match TS format
@@ -518,4 +519,95 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	}
 
 	return nil
+}
+
+// attachTrackerAndProgress attaches the progress tracker to whatever
+// downloaders `result` holds. Mechanical extraction of the block that used
+// to run once inline in ExecuteWithChat before the isVod/live branch split —
+// the VOD-refresh loop needs to re-run it after every rebuilt downloader
+// pair, not just at job start.
+func (o *DownloadOrchestrator) attachTrackerAndProgress(tracker *ProgressTracker, result *DownloadResult) {
+	if result.VideoDownloader != nil {
+		tracker.AttachVideoDownloader(result.VideoDownloader)
+	}
+	if result.AudioDownloader != nil {
+		tracker.AttachAudioDownloader(result.AudioDownloader)
+	}
+}
+
+// shouldRefreshVodDownload is the pure decision for one more refresh pass:
+// the run must have ended knowing a tail is missing, must have actually
+// advanced (a zero-progress rebuild would spin extraction calls against a
+// dead stream), must have budget left, and the fresh extraction must still
+// offer segment-addressable formats (a stream that finished processing into
+// a true VOD is handled by the flag + retry path instead).
+func shouldRefreshVodDownload(behindHead, progressed bool, attempt int, manifestlessStillAvailable bool) bool {
+	return behindHead && progressed && attempt < maxVodRefreshAttempts && manifestlessStillAvailable
+}
+
+// runVodDownloadWithRefresh runs the VOD-branch downloaders, and — for
+// YouTube post-live jobs that finalize behind head (URL expiry, POT decay)
+// — re-extracts fresh URLs and continues from the last written segment,
+// bounded by maxVodRefreshAttempts. The live branch has had this recovery
+// via ErrQualityLost→refreshDownload since the beginning; the VOD branch
+// ran exactly once, so any download whose wall clock outlived the ~6h URL
+// lifetime was truncated.
+func (o *DownloadOrchestrator) runVodDownloadWithRefresh(ctx context.Context, jobCtx *JobContext, result *DownloadResult, tracker *ProgressTracker) (*DownloadResult, error) {
+	for attempt := 1; ; attempt++ {
+		preVideo, preAudio := downloaderSeq(result.VideoDownloader), downloaderSeq(result.AudioDownloader)
+		if err := o.runDownloaders(ctx, result); err != nil {
+			return result, err
+		}
+		if jobCtx.Job.Platform != "youtube" || ctx.Err() != nil {
+			return result, nil
+		}
+		behindHead := downloaderBehindHead(result.VideoDownloader) || downloaderBehindHead(result.AudioDownloader)
+		progressed := downloaderSeq(result.VideoDownloader) > preVideo || downloaderSeq(result.AudioDownloader) > preAudio
+		if !behindHead {
+			return result, nil
+		}
+		freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+		if err != nil || freshInfo == nil {
+			o.logger.Warn("VOD refresh: re-extraction failed; keeping incomplete result", "err", err, "jobID", jobCtx.Job.ID)
+			return result, nil
+		}
+		if !shouldRefreshVodDownload(behindHead, progressed, attempt, HasManifestlessDashFormats(freshInfo.Formats)) {
+			return result, nil
+		}
+		if result.VideoDownloader != nil {
+			jobCtx.VideoStartSeq = downloaderSeq(result.VideoDownloader)
+		}
+		if result.AudioDownloader != nil {
+			jobCtx.AudioStartSeq = downloaderSeq(result.AudioDownloader)
+		}
+		o.logger.Info("VOD refresh: tail incomplete, re-extracting and continuing",
+			"attempt", attempt, "videoSeq", jobCtx.VideoStartSeq, "audioSeq", jobCtx.AudioStartSeq, "jobID", jobCtx.Job.ID)
+		fresh, err := o.refreshDownload(ctx, jobCtx, freshInfo, false)
+		// Single-use seeds, same invariant as every other refreshDownload call
+		// site in this file: a stale forced seq surviving on jobCtx would
+		// rewind a later attempt to this attempt's start position.
+		jobCtx.VideoStartSeq = 0
+		jobCtx.AudioStartSeq = 0
+		if err != nil {
+			o.logger.Warn("VOD refresh: rebuild failed; keeping incomplete result", "err", err, "jobID", jobCtx.Job.ID)
+			return result, nil
+		}
+		o.attachTrackerAndProgress(tracker, fresh)
+		result = fresh
+	}
+}
+
+// downloaderSeq returns d.CurrentSeq(), or 0 for a nil downloader (audio-only
+// or video-only jobs leave the other slot nil).
+func downloaderSeq(d *engine.SegmentDownloader) int {
+	if d == nil {
+		return 0
+	}
+	return d.CurrentSeq()
+}
+
+// downloaderBehindHead reports whether d finalized knowing more segments
+// were available at the head — false (not true) for a nil downloader.
+func downloaderBehindHead(d *engine.SegmentDownloader) bool {
+	return d != nil && d.FinalizedBehindHead()
 }
