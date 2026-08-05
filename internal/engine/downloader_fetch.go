@@ -227,6 +227,13 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 // head within HeadProbeInterval (cold start, stall) — saving one probe
 // round-trip per interval per downloader on a healthy stream. Non-GVS
 // responses (Twitch HLS, error pages) simply lack the header — no-op.
+//
+// Monotonic-max CAS rather than a raw Store: parallel catch-up workers call
+// fetchSegment concurrently, and out-of-order response arrival could
+// otherwise regress headSeq below an already-observed value — downstream
+// consumers (handleHTTPError's backoff reset, behindHeadTailPending)
+// assume head only advances. The dedicated probeHeadSequence path keeps
+// its direct Store as the escape hatch for a genuine head reset.
 func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
 	v := resp.Header.Get("X-Head-Seqnum")
 	if v == "" {
@@ -236,7 +243,15 @@ func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
 	if err != nil || n < 0 {
 		return
 	}
-	d.headSeq.Store(int64(n))
+	for {
+		cur := d.headSeq.Load()
+		if int64(n) <= cur {
+			break
+		}
+		if d.headSeq.CompareAndSwap(cur, int64(n)) {
+			break
+		}
+	}
 	d.lastHeadProbeTime.StoreNow()
 }
 

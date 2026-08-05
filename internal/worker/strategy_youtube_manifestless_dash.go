@@ -32,9 +32,11 @@ import (
 // (a premiere classified StreamPostLive filled the disk with hundreds of GB
 // this way before this guard).
 //
-// Used by the orchestrator strategy switch to detect the experiment case where
-// YouTube withholds dashManifestUrl but still ships adaptiveFormats[] in the
-// watch-page player response (yt-dlp issue #15274).
+// Used by the orchestrator strategy switch as the primary-path routing
+// signal: any live/post-live response shipping split adaptive URLs takes the
+// manifest-free path regardless of whether dashManifestUrl is present
+// (yt-dlp 8c1f07d81). Originally built to detect the narrower yt-dlp#15274
+// experiment where YouTube withheld dashManifestUrl from cookied clients.
 func HasManifestlessDashFormats(formats []youtube.Format) bool {
 	hasAudio, hasVideo := false, false
 	for i := range formats {
@@ -103,12 +105,12 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 	return video, audio
 }
 
-// DownloadManifestlessDash sets up a download for streams that ship adaptive
-// formats with direct URLs but no DASH manifest. Triggered by the YouTube
-// account experiment that strips dashManifestUrl from cookied responses
-// (yt-dlp issue #15274) — the watch-page player response still carries
-// streamingData.adaptiveFormats[] with full URLs that we can fetch with
-// `&sq=N` appended.
+// DownloadManifestlessDash sets up a manifest-free DASH download from the
+// streamingData.adaptiveFormats[] direct URLs, fetched with `&sq=N`
+// appended. The PRIMARY live/post-live path since yt-dlp 8c1f07d81 declared
+// live DASH manifests "no longer properly supported" (2026-07); originally
+// built for the yt-dlp#15274 experiment that stripped dashManifestUrl from
+// cookied responses.
 //
 // Pipeline:
 //  1. Filter videoInfo.Formats[] into video and audio adaptive entries.
@@ -119,8 +121,9 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 //     this during player-response parsing, but we re-route here so that any
 //     orchestrator-driven URL refresh on cipher rotation goes through the
 //     same path.
-//  4. Mint a POT bound to videoID — the experiment's GVS POT policy for
-//     cookied clients is video-id-bound, not visitor-data-bound.
+//  4. Mint a POT — bound per manifestlessPotBinding: videoID when the
+//     response withheld dashManifestUrl (the experiment's video-id-bound
+//     GVS policy), standard visitorData binding otherwise.
 //  5. Build engine.SegmentDownloader instances. The downloader's
 //     buildSegmentURL auto-detects query-style adaptive URLs and appends
 //     `&sq=N`, while applyPoTokenQuery appends `&pot=POT` per fetch. No
@@ -363,12 +366,18 @@ func DownloadManifestlessDash(
 // primary live path since the yt-dlp 8c1f07d81 routing change, not because
 // of the experiment), the standard GVS binding applies: visitorData, same
 // as the DASH/HLS manifest strategies use. Returns the binding value and a
-// short label for logging.
+// short label for logging; the label reports "channelID" when
+// poTokenBinding actually took its ChannelID fallback (visitorData
+// unavailable) so the log line doesn't misattribute the binding source.
 func manifestlessPotBinding(job *JobContext, videoInfo *youtube.VideoInfo) (string, string) {
 	if videoInfo.DashManifestURL == "" {
 		return job.Job.VideoID, "videoID"
 	}
-	return poTokenBinding(job, videoInfo), "visitorData"
+	binding := poTokenBinding(job, videoInfo)
+	if binding == videoInfo.ChannelID {
+		return binding, "channelID"
+	}
+	return binding, "visitorData"
 }
 
 // dbResumeSeq returns the DB-persisted last sequence to resume a crashed LIVE

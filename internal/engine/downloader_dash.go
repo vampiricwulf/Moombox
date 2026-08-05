@@ -137,6 +137,15 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				// segments are permanently evicted) — only bytes on disk turn
 				// off the first-segment hunt in handleGoneError.
 				hasStartedDownloading = d.bytesWritten.Load() > 0
+				// Catch-up progress is the same recovery signal as a
+				// sequential write: the gone streak is broken and any latched
+				// "ended" verdict was proven transient — re-arm both so a
+				// later burst re-verifies with the API instead of finalizing
+				// a still-live stream on a stale verdict.
+				if nextSeq > preCatchupSeq {
+					consecutiveGoneErrors = 0
+					d.streamEndVerified = false
+				}
 				// Re-probe head after catch-up so the next iteration sees
 				// the updated head position rather than the pre-catch-up
 				// snapshot — head can advance significantly during a long

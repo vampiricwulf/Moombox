@@ -22,7 +22,7 @@ import { solveCipher } from "./cipher.js";
 // ---------------------------------------------------------------------------
 // One-time DOM bootstrap. Must run before any module that inspects globalThis
 // for a window/document. bgutils-js itself reads globalThis at create() time
-// (via its `globalObj` arg), but JSDOM's own internals (mutationobserver,
+// (via its `globalObject` arg), but JSDOM's own internals (mutationobserver,
 // classList Symbol.toStringTag, etc.) want to be the first to touch the
 // global namespace.
 // ---------------------------------------------------------------------------

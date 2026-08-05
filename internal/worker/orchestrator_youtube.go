@@ -479,9 +479,9 @@ func (o *DownloadOrchestrator) refreshDownload(ctx context.Context, jobCtx *JobC
 // path with cookies + POT) — required for members-only, age-restricted, and
 // login-required streams. When false, the probe uses ProbeVideoStatus
 // (ANDROID_VR, cookieless, no POT) which is much cheaper and avoids the
-// per-probe sidecar mint. ANDROID_VR returns DashManifestURL for any
-// publicly accessible stream, which covers the vast majority of monitored
-// content.
+// per-probe sidecar mint. Either response works: the common case is a
+// split-adaptive format pool (the manifest-free primary path — in-memory
+// selection below), with DashManifestURL as the manifest-parsing fallback.
 func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresAuth bool) func(context.Context) (*QualityInfo, error) {
 	maxRes := jobCtx.Config.MaxVideoResolution
 	videoItag := jobCtx.Config.VideoItag
@@ -532,15 +532,14 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 		// in-memory selection (and one fewer MPD round-trip every probe
 		// interval).
 		if HasManifestlessDashFormats(info.Formats) {
-			var streamInfos []DashStreamInfo
-			for i := range info.Formats {
-				f := &info.Formats[i]
-				if f.IsAudio() || f.URL == "" {
-					continue
-				}
-				streamInfos = append(streamInfos, formatToDashStreamInfo(f))
-			}
-			best := SelectBestDashStream(streamInfos, videoItag, maxRes, true, qualityPref)
+			// Build the pool via partitionManifestlessFormats — NOT an ad-hoc
+			// loop — so the probe inherits its ContentLength exclusion. A
+			// whole-file format slipping into a contentLength-blind
+			// SelectBestDashStream has caused two prior bugs (the premiere
+			// disk-runaway class); an unguarded probe pool here would
+			// mis-report quality and churn refresh cycles every probe tick.
+			videoPool, _ := partitionManifestlessFormats(info.Formats)
+			best := SelectBestDashStream(videoPool, videoItag, maxRes, true, qualityPref)
 			if best == nil {
 				return nil, fmt.Errorf("manifestless DASH probe: no video stream selected")
 			}

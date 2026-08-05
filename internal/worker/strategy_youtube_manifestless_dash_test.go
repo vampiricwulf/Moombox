@@ -142,10 +142,11 @@ func TestManifestlessPotBinding(t *testing.T) {
 
 	// Manifest present: falls through to poTokenBinding — with no YT session
 	// wired, that resolves to the ChannelID fallback, which is precisely the
-	// point: NOT the videoID.
+	// point: NOT the videoID. The label must report the actual source
+	// ("channelID"), not claim visitorData when the fallback fired.
 	info := &youtube.VideoInfo{DashManifestURL: "https://manifest.example/dash.mpd", ChannelID: "chan9"}
 	binding, label = manifestlessPotBinding(job, info)
-	if binding != "chan9" || label != "visitorData" {
-		t.Errorf("manifest present: binding=%q label=%q, want chan9/visitorData", binding, label)
+	if binding != "chan9" || label != "channelID" {
+		t.Errorf("manifest present: binding=%q label=%q, want chan9/channelID", binding, label)
 	}
 }

@@ -39,6 +39,14 @@ func TestFetchSegmentHarvestsHeadSeq(t *testing.T) {
 	if d.lastHeadProbeTime.Since() > time.Second {
 		t.Errorf("lastHeadProbeTime not refreshed by harvest — dedicated probe would still fire")
 	}
+
+	// Monotonic-max: a lower value from an out-of-order concurrent response
+	// (parallel catch-up workers share fetchSegment) must not regress head.
+	resp := &http.Response{Header: http.Header{"X-Head-Seqnum": []string{"900"}}}
+	d.noteHeadSeqFromResponse(resp)
+	if got := d.headSeq.Load(); got != 1234 {
+		t.Errorf("headSeq regressed to %d after lower harvest, want 1234 (monotonic max)", got)
+	}
 }
 
 // TestFetchSegmentIgnoresMissingOrInvalidHeadSeq pins that responses without
