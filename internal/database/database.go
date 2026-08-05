@@ -67,6 +67,7 @@ var fieldToColumn = map[string]string{
 	"chat_offset":         "chat_offset",
 	"auto_retry_count":    "auto_retry_count",
 	"queue_priority":      "queue_priority",
+	"incomplete_tail":     "incomplete_tail",
 }
 
 // dbLogger is the interface for database error logging.
@@ -231,7 +232,7 @@ func (db *Database) prepareStatements() error {
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
-		auto_retry_count, channel_id, queue_priority
+		auto_retry_count, channel_id, queue_priority, incomplete_tail
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -489,7 +490,7 @@ type rowScanner interface {
 // list used by prepareStatements() and getAllJobsUnlocked().
 func scanJobRow(r rowScanner) (*Job, error) {
 	var j Job
-	var isVod, manuallyAdded, allowNonStream, watched int
+	var isVod, manuallyAdded, allowNonStream, watched, incompleteTail int
 	err := r.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
 		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
@@ -504,7 +505,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
-		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority,
+		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority, &incompleteTail,
 	)
 	if err != nil {
 		return nil, err
@@ -513,6 +514,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 	j.ManuallyAdded = intToBool(manuallyAdded)
 	j.AllowNonStream = intToBool(allowNonStream)
 	j.Watched = intToBool(watched)
+	j.IncompleteTail = intToBool(incompleteTail)
 	return &j, nil
 }
 

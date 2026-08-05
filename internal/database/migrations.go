@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 16
+const schemaVersion = 17
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -97,7 +97,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     chat_offset REAL NOT NULL DEFAULT 0,
     auto_retry_count INTEGER NOT NULL DEFAULT 0,
     channel_id TEXT,
-    queue_priority INTEGER NOT NULL DEFAULT 1
+    queue_priority INTEGER NOT NULL DEFAULT 1,
+    incomplete_tail INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -620,6 +621,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 17 {
+		if err := db.migrateV17(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(17); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -680,6 +690,19 @@ func (db *Database) migrateV16() error {
 		if _, err := db.db.ExecContext(ctx, q); err != nil && !isDuplicateColumnErr(err) {
 			return fmt.Errorf("v16 alter: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateV17 adds incomplete_tail to jobs: a flag marking a Finished job
+// whose recording is known to be missing tail segments. See the Job.IncompleteTail
+// doc comment in types.go for the full semantics.
+func (db *Database) migrateV17() error {
+	ctx := db.getCtx()
+	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is
+	// written last), so a duplicate-column error is expected and benign.
+	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN incomplete_tail INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v17 alter: %w", err)
 	}
 	return nil
 }

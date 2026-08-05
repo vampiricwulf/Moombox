@@ -94,6 +94,11 @@ type Job struct {
 	// pre-v16 legacy rows and must never be relied on.
 	ChannelID     *string `json:"channelId,omitempty"`
 	QueuePriority int     `json:"queuePriority,omitempty"`
+	// IncompleteTail marks a Finished job whose recording is known to be missing
+	// tail segments (finalized behind head after refresh attempts). Staging +
+	// resume sidecar are preserved; Retry/Resume are allowed and clear the flag
+	// on a complete re-run.
+	IncompleteTail bool `json:"incompleteTail,omitempty"`
 	// Trims (loaded via join)
 	Trims []TrimRecord `json:"trims,omitempty"`
 	// Segments (loaded via join, for multi-segment quality-split jobs)
