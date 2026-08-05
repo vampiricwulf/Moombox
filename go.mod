@@ -17,7 +17,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.24
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/sahilm/fuzzy v0.1.3
-	github.com/ulikunitz/xz v0.5.15
+	github.com/ulikunitz/xz v0.5.16
 	github.com/yuin/goldmark v1.8.4
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sync v0.22.0
