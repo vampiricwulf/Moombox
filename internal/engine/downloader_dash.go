@@ -111,7 +111,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		// "no segments downloaded recently" stale-detection clock.
 		if d.headSeq.Load() < 0 || d.lastHeadProbeTime.Since() > HeadProbeInterval {
 			if headSeq, err := d.probeHeadSequence(ctx); err == nil {
-				d.noteHeadSeq(headSeq)
+				d.noteHeadSeqFromProbe(headSeq)
 			}
 			d.lastHeadProbeTime.StoreNow()
 		}
@@ -151,7 +151,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				// snapshot — head can advance significantly during a long
 				// catch-up window.
 				if headSeq, err := d.probeHeadSequence(ctx); err == nil {
-					d.noteHeadSeq(headSeq)
+					d.noteHeadSeqFromProbe(headSeq)
 				}
 				d.lastHeadProbeTime.StoreNow()
 				curHead := int(d.headSeq.Load())
@@ -400,7 +400,15 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 			utils.Sleep(ctx, singleGoneRetryDelay)
 			return nil // Continue loop
 		}
-		d.warnIfFinalizingBehindHead()
+		if d.warnIfFinalizingBehindHead() {
+			// Known-incomplete finalize: leave streamEnded unset so the
+			// runDashLoop defer keeps the resume sidecar — a later retry
+			// appends the missing tail instead of truncating the recording
+			// and starting over. (handleHTTPError's errStreamDone exits
+			// never set streamEnded either; only a confirmed-complete end
+			// clears resume.)
+			return errStreamDone
+		}
 		d.streamEnded.Store(true)
 		return errStreamDone
 	}
@@ -436,16 +444,23 @@ func (d *SegmentDownloader) behindHeadTailPending() bool {
 // warnIfFinalizingBehindHead logs loudly when the downloader is about to
 // finalize with currentSeq still below the known head — the recording is
 // missing a tail that existed at some point. This keeps an unavoidable
-// truncation (segments permanently gone, MaxTimeout exhausted) visible
-// instead of masquerading as a clean finish.
-func (d *SegmentDownloader) warnIfFinalizingBehindHead() {
+// truncation (segments unavailable, MaxTimeout exhausted) visible instead
+// of masquerading as a clean finish. Returns true when finalizing behind
+// head so callers can keep the resume sidecar: post-live jobs have no
+// other resume mechanism (dbResumeSeq returns 0 for non-live), and a
+// cleared sidecar would make a later retry O_TRUNC the file and restart
+// from scratch — while a KEPT sidecar lets the retry append exactly the
+// missing tail once YouTube finishes processing.
+func (d *SegmentDownloader) warnIfFinalizingBehindHead() bool {
 	head := int(d.headSeq.Load())
 	cur := int(d.currentSeq.Load())
 	if head > 0 && cur < head {
 		d.logger.Warn("[Downloader] finalizing with unfetched tail — segments below head stayed unavailable",
 			"currentSeq", cur, "headSeq", head, "missing", head-cur,
 			"gapSinceLastSegment", d.lastSegTime.Since().Round(time.Second))
+		return true
 	}
+	return false
 }
 
 func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRetryDelay *int, delayCap int) error {
@@ -490,7 +505,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	// discovers new segments), at worst a marginally slower backoff reset.
 	if d.lastHeadProbeTime.Since() > HeadProbeInterval {
 		if headSeq, probeErr := d.probeHeadSequence(ctx); probeErr == nil {
-			d.noteHeadSeq(headSeq)
+			d.noteHeadSeqFromProbe(headSeq)
 		}
 		d.lastHeadProbeTime.StoreNow()
 	}
@@ -550,6 +565,11 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		if checkErr != nil {
 			d.logger.Warn("stream status check failed while waiting for segment", "err", checkErr)
 		} else if ended {
+			// Share the confirmed verdict with handleGoneError's latch so a
+			// mixed 403/other-error burst doesn't re-spend a CheckStreamStatus
+			// call learning what this path already knows (both handlers run on
+			// the single download-loop goroutine).
+			d.streamEndVerified = true
 			// Behind-head guard — same rationale as handleGoneError: an ended
 			// stream whose head says more segments exist shouldn't finalize on
 			// a stall; the tail stays fetchable through the post-live window.

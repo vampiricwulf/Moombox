@@ -248,15 +248,14 @@ func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
 }
 
 // noteHeadSeq advances headSeq to n when greater (monotonic max) and
-// reports whether it advanced. ALL head updates route through here —
-// harvested headers (concurrent catch-up workers can deliver them
-// out-of-order) and the dedicated probes alike. Within one
-// SegmentDownloader's lifetime head only moves forward: URL/quality
-// refreshes construct a NEW downloader, so a genuine stream reset never
-// needs a decrease here, while an unguarded Store from a stale CDN edge
-// could drop head below currentSeq and silently disarm
-// behindHeadTailPending / warnIfFinalizingBehindHead at the exact moment
-// they matter.
+// reports whether it advanced. Harvested headers route through here —
+// concurrent catch-up workers can deliver them out-of-order, and an
+// unguarded Store from a stale CDN edge could drop head below currentSeq
+// and silently disarm behindHeadTailPending / warnIfFinalizingBehindHead
+// at the exact moment they matter. Within one SegmentDownloader's
+// lifetime head never genuinely decreases (URL/quality refreshes
+// construct a NEW downloader); the dedicated probes use
+// noteHeadSeqFromProbe, which can additionally correct a poisoned value.
 func (d *SegmentDownloader) noteHeadSeq(n int) bool {
 	if n < 0 {
 		return false
@@ -268,6 +267,44 @@ func (d *SegmentDownloader) noteHeadSeq(n int) bool {
 		}
 		if d.headSeq.CompareAndSwap(cur, int64(n)) {
 			return true
+		}
+	}
+}
+
+// headProbeCorrectionSlack is how far below the tracked head an
+// authoritative probe reading may sit before the tracked value is treated
+// as poisoned (a bogus-high header that the monotonic ratchet captured)
+// rather than the probe as merely stale. Edge staleness spans seconds — a
+// handful of segments — so a discrepancy this large means the ratchet is
+// wrong and must correct downward: a permanently inflated head would turn
+// every stall into an ErrQualityLost refresh and every finalize into a
+// full MaxTimeout defer.
+const headProbeCorrectionSlack = 100
+
+// noteHeadSeqFromProbe records a dedicated-probe head reading. Probes ask
+// GVS for the head directly, so they may both advance the ratchet and —
+// unlike harvested headers — correct it DOWNWARD when the discrepancy
+// exceeds headProbeCorrectionSlack. Small dips inside the slack are
+// ignored as ordinary edge staleness. Self-healing is automatic: a
+// poisoned-high head stops harvests from advancing it, which stops
+// lastHeadProbeTime refreshes, which un-suppresses the dedicated probe
+// within HeadProbeInterval.
+func (d *SegmentDownloader) noteHeadSeqFromProbe(n int) {
+	if n < 0 {
+		return
+	}
+	for {
+		cur := d.headSeq.Load()
+		delta := cur - int64(n)
+		if delta >= 0 && delta < headProbeCorrectionSlack {
+			return // within staleness slack — keep the ratchet
+		}
+		if d.headSeq.CompareAndSwap(cur, int64(n)) {
+			if delta >= headProbeCorrectionSlack {
+				d.logger.Warn("[Downloader] head corrected downward — previous value looks bogus",
+					"from", cur, "to", n)
+			}
+			return
 		}
 	}
 }

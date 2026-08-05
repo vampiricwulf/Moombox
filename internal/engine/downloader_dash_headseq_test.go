@@ -154,6 +154,9 @@ func TestHandleGoneErrorBehindHeadTimeoutFinalizes(t *testing.T) {
 	if err := d.handleGoneError(context.Background(), &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (MaxTimeout exhausted)", err)
 	}
+	if d.streamEnded.Load() {
+		t.Error("streamEnded latched on a known-incomplete finalize — resume sidecar would be cleared, destroying the retry path")
+	}
 }
 
 // TestHandleGoneErrorBehindHeadStillRefreshesLive pins that the guard does
@@ -265,6 +268,29 @@ func TestNoteHeadSeqProbeCannotRegress(t *testing.T) {
 	}
 	if got := d.headSeq.Load(); got != 5000 {
 		t.Errorf("headSeq = %d, want 5000", got)
+	}
+}
+
+// TestNoteHeadSeqFromProbeCorrectsPoisonedHead pins the poison escape
+// hatch: a dedicated probe may correct the ratchet DOWNWARD when the
+// discrepancy exceeds the staleness slack — without it, one bogus-high
+// header would permanently inflate head, turning every stall into an
+// ErrQualityLost refresh and every finalize into a full MaxTimeout defer.
+func TestNoteHeadSeqFromProbeCorrectsPoisonedHead(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{OutputFile: filepath.Join(t.TempDir(), "v")})
+	d.noteHeadSeqFromProbe(5000)
+	if got := d.headSeq.Load(); got != 5000 {
+		t.Fatalf("headSeq = %d, want 5000", got)
+	}
+	// Small dip: ordinary edge staleness — the ratchet holds.
+	d.noteHeadSeqFromProbe(4990)
+	if got := d.headSeq.Load(); got != 5000 {
+		t.Errorf("headSeq = %d after small-dip probe, want 5000 (within slack)", got)
+	}
+	// Huge dip: the tracked head was poisoned — the probe corrects it.
+	d.noteHeadSeqFromProbe(500)
+	if got := d.headSeq.Load(); got != 500 {
+		t.Errorf("headSeq = %d after correction probe, want 500", got)
 	}
 }
 
