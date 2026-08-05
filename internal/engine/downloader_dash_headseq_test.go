@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -172,6 +173,98 @@ func TestHandleGoneErrorBehindHeadStillRefreshesLive(t *testing.T) {
 	n := goneRetryDuringDownload + 1
 	if err := d.handleGoneError(context.Background(), &n, true); err != ErrQualityLost {
 		t.Fatalf("handleGoneError = %v, want ErrQualityLost (live stream refresh)", err)
+	}
+}
+
+// TestHandleGoneErrorCheckErrorDefersWithoutLatching pins that a status-check
+// ERROR does not latch the "ended" verdict: the downloader defers (retries)
+// and re-asks after the throttle window, so a still-live stream whose probe
+// blipped keeps its ErrQualityLost refresh path instead of burning the whole
+// MaxTimeout budget — or finalizing — on an assumption.
+func TestHandleGoneErrorCheckErrorDefersWithoutLatching(t *testing.T) {
+	checks := 0
+	fail := true
+	d := NewSegmentDownloader(DownloaderOptions{
+		OutputFile: filepath.Join(t.TempDir(), "v"),
+		MaxTimeout: time.Hour,
+		CheckStreamStatus: func(context.Context) (bool, error) {
+			checks++
+			if fail {
+				return false, errors.New("innertube probe blip")
+			}
+			return false, nil // still live
+		},
+	})
+	d.currentSeq.Store(50)
+	d.headSeq.Store(100)
+	d.lastSegTime.StoreNow()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // defer sleeps return immediately
+
+	n := goneRetryDuringDownload + 1
+	if err := d.handleGoneError(ctx, &n, true); err != nil {
+		t.Fatalf("first escalation = %v, want nil (defer on check error)", err)
+	}
+	if d.streamEndVerified {
+		t.Fatal("check error latched streamEndVerified — a transient probe failure must not stick")
+	}
+	n++
+	if err := d.handleGoneError(ctx, &n, true); err != nil {
+		t.Fatalf("throttled escalation = %v, want nil", err)
+	}
+	if checks != 1 {
+		t.Fatalf("checks = %d, want 1 (re-checks throttled to streamStatusCheckInterval)", checks)
+	}
+	// Throttle re-opens, the probe recovers, stream still live -> the
+	// refresh path must be reachable again.
+	fail = false
+	d.lastStreamStatusCheck.Store(time.Now().Add(-(streamStatusCheckInterval + time.Second)))
+	n++
+	if err := d.handleGoneError(ctx, &n, true); err != ErrQualityLost {
+		t.Fatalf("recovered escalation = %v, want ErrQualityLost (still-live refresh reachable)", err)
+	}
+}
+
+// TestHandleGoneErrorOfflinePausesTimeoutClock pins the offline-clock parity
+// with handleHTTPError: an outage longer than MaxTimeout must not consume
+// the behind-head retry budget — lastSegTime resets on reconnect so the
+// tail-recovery guard starts from a fresh budget.
+func TestHandleGoneErrorOfflinePausesTimeoutClock(t *testing.T) {
+	calls := 0
+	d := NewSegmentDownloader(DownloaderOptions{
+		OutputFile: filepath.Join(t.TempDir(), "v"),
+		MaxTimeout: time.Minute,
+		IsOnline:   func() bool { calls++; return calls > 1 }, // offline once, then back
+	})
+	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // aged past MaxTimeout during the outage
+
+	n := goneRetryDuringDownload + 1
+	if err := d.handleGoneError(context.Background(), &n, true); err != nil {
+		t.Fatalf("offline escalation = %v, want nil (reconnect continues)", err)
+	}
+	if d.lastSegTime.Since() > time.Second {
+		t.Error("lastSegTime not reset on reconnect — MaxTimeout budget not refreshed")
+	}
+	if n != 0 {
+		t.Errorf("consecutiveGoneErrors = %d, want 0 after reconnect", n)
+	}
+}
+
+// TestNoteHeadSeqProbeCannotRegress pins that the dedicated-probe update
+// path shares the monotonic-max guard: a stale CDN edge answering a probe
+// below an already-harvested head must not lower it (which would silently
+// disarm behindHeadTailPending at finalize time).
+func TestNoteHeadSeqProbeCannotRegress(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{OutputFile: filepath.Join(t.TempDir(), "v")})
+	if !d.noteHeadSeq(5000) {
+		t.Fatal("first noteHeadSeq(5000) should advance")
+	}
+	if d.noteHeadSeq(4990) {
+		t.Error("noteHeadSeq(4990) advanced over 5000 — monotonic max violated")
+	}
+	if got := d.headSeq.Load(); got != 5000 {
+		t.Errorf("headSeq = %d, want 5000", got)
 	}
 }
 

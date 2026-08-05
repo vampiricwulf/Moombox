@@ -228,12 +228,6 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 // round-trip per interval per downloader on a healthy stream. Non-GVS
 // responses (Twitch HLS, error pages) simply lack the header — no-op.
 //
-// Monotonic-max CAS rather than a raw Store: parallel catch-up workers call
-// fetchSegment concurrently, and out-of-order response arrival could
-// otherwise regress headSeq below an already-observed value — downstream
-// consumers (handleHTTPError's backoff reset, behindHeadTailPending)
-// assume head only advances. The dedicated probeHeadSequence path keeps
-// its direct Store as the escape hatch for a genuine head reset.
 func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
 	v := resp.Header.Get("X-Head-Seqnum")
 	if v == "" {
@@ -243,16 +237,39 @@ func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
 	if err != nil || n < 0 {
 		return
 	}
+	if d.noteHeadSeq(n) {
+		// Refresh the probe-pacing clock only when the harvest ADVANCED
+		// head: a healthy live edge keeps advancing (dedicated probes stay
+		// suppressed), while a stall — or a stuck edge echoing the same
+		// stale value — lets the dedicated probe re-arm after
+		// HeadProbeInterval as the correctness backstop.
+		d.lastHeadProbeTime.StoreNow()
+	}
+}
+
+// noteHeadSeq advances headSeq to n when greater (monotonic max) and
+// reports whether it advanced. ALL head updates route through here —
+// harvested headers (concurrent catch-up workers can deliver them
+// out-of-order) and the dedicated probes alike. Within one
+// SegmentDownloader's lifetime head only moves forward: URL/quality
+// refreshes construct a NEW downloader, so a genuine stream reset never
+// needs a decrease here, while an unguarded Store from a stale CDN edge
+// could drop head below currentSeq and silently disarm
+// behindHeadTailPending / warnIfFinalizingBehindHead at the exact moment
+// they matter.
+func (d *SegmentDownloader) noteHeadSeq(n int) bool {
+	if n < 0 {
+		return false
+	}
 	for {
 		cur := d.headSeq.Load()
 		if int64(n) <= cur {
-			break
+			return false
 		}
 		if d.headSeq.CompareAndSwap(cur, int64(n)) {
-			break
+			return true
 		}
 	}
-	d.lastHeadProbeTime.StoreNow()
 }
 
 // probeHeadSequence discovers the current live head segment using a high sequence GET probe.

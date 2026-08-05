@@ -111,7 +111,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		// "no segments downloaded recently" stale-detection clock.
 		if d.headSeq.Load() < 0 || d.lastHeadProbeTime.Since() > HeadProbeInterval {
 			if headSeq, err := d.probeHeadSequence(ctx); err == nil {
-				d.headSeq.Store(int64(headSeq))
+				d.noteHeadSeq(headSeq)
 			}
 			d.lastHeadProbeTime.StoreNow()
 		}
@@ -151,7 +151,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				// snapshot — head can advance significantly during a long
 				// catch-up window.
 				if headSeq, err := d.probeHeadSequence(ctx); err == nil {
-					d.headSeq.Store(int64(headSeq))
+					d.noteHeadSeq(headSeq)
 				}
 				d.lastHeadProbeTime.StoreNow()
 				curHead := int(d.headSeq.Load())
@@ -345,23 +345,38 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 				return err
 			}
+			// Offline pauses the clock (mirrors handleHTTPError's offline
+			// branches): behindHeadTailPending charges its MaxTimeout budget
+			// against lastSegTime, so an outage longer than MaxTimeout would
+			// otherwise finalize a behind-head recording on the first
+			// post-reconnect gone instead of granting a fresh budget.
+			d.lastSegTime.StoreNow()
 			*consecutiveGoneErrors = 0
 			return nil // Continue loop
 		}
 		d.emitActivity(ActivityVerifyingEnd)
-		// Check if stream is actually ended, or if our format just disappeared.
-		// The verdict latches (streamEndVerified) so the behind-head retry loop
-		// below doesn't re-probe the API on every gone iteration; a landed
-		// segment re-arms it.
-		if !d.streamEndVerified && d.opts.CheckStreamStatus != nil {
+		// Verify the stream's status. A CONFIRMED "ended" latches
+		// (streamEndVerified) so the behind-head retry loop below doesn't
+		// re-spend the API call every gone iteration; a landed segment
+		// re-arms it. A check ERROR does NOT latch — the next interval
+		// re-asks, keeping the ErrQualityLost refresh reachable for a
+		// still-live stream that hit a transient status-probe failure.
+		// Re-checks are throttled to streamStatusCheckInterval within a
+		// burst.
+		verdictKnown := d.streamEndVerified || d.opts.CheckStreamStatus == nil
+		if !verdictKnown && d.lastStreamStatusCheck.Since() >= streamStatusCheckInterval {
+			d.lastStreamStatusCheck.StoreNow()
 			ended, checkErr := d.opts.CheckStreamStatus(ctx)
-			if checkErr != nil {
-				d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
-			} else if !ended {
+			switch {
+			case checkErr != nil:
+				d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
+			case !ended:
 				return ErrQualityLost
+			default:
+				d.streamEndVerified = true
+				verdictKnown = true
 			}
 		}
-		d.streamEndVerified = true
 		// Behind-head guard (yt-dlp 8c1f07d81 port): X-Head-Seqnum harvested
 		// from segment responses says how many segments exist. An "ended"
 		// verdict while currentSeq is still strictly below head means the 403
@@ -372,6 +387,15 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 		// OnCipherFailure has already had its shot at swapping in a fresh URL
 		// (it fires at postBytes403CipherThreshold, below the gone threshold).
 		if d.behindHeadTailPending() {
+			d.emitActivity(ActivityWaitingForSegment)
+			utils.Sleep(ctx, singleGoneRetryDelay)
+			return nil // Continue loop
+		}
+		if !verdictKnown && d.lastSegTime.Since() < d.opts.MaxTimeout {
+			// No confirmed end and budget remains — keep retrying rather
+			// than finalizing on an assumption (the pre-guard behavior
+			// treated a failed status check as "ended", which silently
+			// truncated on a transient probe failure).
 			d.emitActivity(ActivityWaitingForSegment)
 			utils.Sleep(ctx, singleGoneRetryDelay)
 			return nil // Continue loop
@@ -466,7 +490,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	// discovers new segments), at worst a marginally slower backoff reset.
 	if d.lastHeadProbeTime.Since() > HeadProbeInterval {
 		if headSeq, probeErr := d.probeHeadSequence(ctx); probeErr == nil {
-			d.headSeq.Store(int64(headSeq))
+			d.noteHeadSeq(headSeq)
 		}
 		d.lastHeadProbeTime.StoreNow()
 	}
