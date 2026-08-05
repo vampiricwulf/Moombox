@@ -13,7 +13,7 @@
         "smoke": "node src/server.js"
     },
     "dependencies": {
-        "bgutils-js": "^3.2.0",
+        "bgutils-js": "^4.0.2",
         "jsdom": "^30.0.1"
     },
     "devDependencies": {
