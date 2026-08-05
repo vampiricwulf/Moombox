@@ -13,7 +13,9 @@
 // invalidateIT, ping, solveCipher, shutdown, triggerGC.
 
 import { JSDOM } from "jsdom";
-import { BG, USER_AGENT, buildURL, getHeaders } from "bgutils-js";
+import { BotGuardClient } from "bgutils-js/botguard";
+import { WebPoMinter } from "bgutils-js/webpo";
+import { USER_AGENT, buildURL, getHeaders } from "bgutils-js/utils";
 import { createInterface } from "node:readline";
 import { solveCipher } from "./cipher.js";
 
@@ -132,10 +134,10 @@ async function generateMinter() {
     new Function(interpJS)();
 
     // 4. Spin up the BotGuard client, take its snapshot.
-    const bgClient = await BG.BotGuardClient.create({
+    const bgClient = await BotGuardClient.create({
         program: challenge.program,
         globalName: challenge.globalName,
-        globalObj: globalThis,
+        globalObject: globalThis,
     });
     const webPoSignalOutput = [];
     const botguardResponse = await bgClient.snapshot({ webPoSignalOutput });
@@ -163,7 +165,7 @@ async function generateMinter() {
     }
 
     // 6. Build the per-binding minter once; reuse for every binding until expiry.
-    const minter = await BG.WebPoMinter.create(
+    const minter = await WebPoMinter.create(
         { integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken },
         webPoSignalOutput,
     );
