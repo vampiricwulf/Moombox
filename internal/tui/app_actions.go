@@ -41,7 +41,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if a.HasStagingFiles != nil && !a.HasStagingFiles(id) {
 					continue
 				}
-				if j.Status != database.StatusCancelled && j.Status != database.StatusError && j.Status != database.StatusCookies {
+				if j.Status != database.StatusCancelled && j.Status != database.StatusError && j.Status != database.StatusCookies && !(j.Status == database.StatusFinished && j.IncompleteTail) {
 					continue
 				}
 				a.OnResumeJob(id)
@@ -445,7 +445,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A R", Label: "Resume Job", HintLabel: "Resume", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no resumable jobs",
 			JobFilter: func(j *database.Job) bool {
-				canResume := (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies) &&
+				canResume := (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies || (j.Status == database.StatusFinished && j.IncompleteTail)) &&
 					j.Platform == "youtube"
 				if canResume && a.HasStagingFiles != nil {
 					return a.HasStagingFiles(j.ID)

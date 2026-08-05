@@ -1067,11 +1067,13 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 
 	// Status icon (retains status color even when selected, per TS)
 	iconStyle := lipgloss.NewStyle().Foreground(color)
-	switch job.Status {
-	case database.StatusError:
+	switch {
+	case job.Status == database.StatusError:
 		iconStyle = iconStyle.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorError)
-	case database.StatusCookies:
+	case job.Status == database.StatusCookies:
 		iconStyle = iconStyle.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorCookies)
+	case job.Status == database.StatusFinished && job.IncompleteTail:
+		iconStyle = iconStyle.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorWarning)
 	}
 	if dimmed {
 		iconStyle = iconStyle.Faint(true)
