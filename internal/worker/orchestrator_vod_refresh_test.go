@@ -2,6 +2,15 @@ package worker
 
 import "testing"
 
+func TestComputeIncompleteTail(t *testing.T) {
+	if !computeIncompleteTail(true, false) || !computeIncompleteTail(false, true) {
+		t.Error("either downloader behind head must flag the job")
+	}
+	if computeIncompleteTail(false, false) {
+		t.Error("clean finish must not flag")
+	}
+}
+
 func TestVodRefreshDecision(t *testing.T) {
 	cases := []struct {
 		name                       string

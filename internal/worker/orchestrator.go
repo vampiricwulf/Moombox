@@ -358,6 +358,21 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// lifetime for post-live jobs whose wall clock outlives one grant.
 		result, err = o.runVodDownloadWithRefresh(ctx, jobCtx, result, tracker)
 
+		if err == nil {
+			incomplete := computeIncompleteTail(
+				downloaderBehindHead(result.VideoDownloader),
+				downloaderBehindHead(result.AudioDownloader))
+			// Unconditional write: a retry that completes cleanly clears the
+			// flag by writing false through the same path.
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"incomplete_tail": incomplete})
+			if incomplete {
+				o.logger.Warn("recording finished with an unfetched tail — staging preserved; Retry will append the missing segments",
+					"jobID", jobCtx.Job.ID,
+					"videoSeq", downloaderSeq(result.VideoDownloader), "videoHead", downloaderHead(result.VideoDownloader),
+					"audioSeq", downloaderSeq(result.AudioDownloader), "audioHead", downloaderHead(result.AudioDownloader))
+			}
+		}
+
 		// Set 100% progress after VOD download completes (finishVodWithChat equivalent)
 		// Include audio percentage and chat count to match TS format
 		if err == nil {
@@ -611,3 +626,17 @@ func downloaderSeq(d *engine.SegmentDownloader) int {
 func downloaderBehindHead(d *engine.SegmentDownloader) bool {
 	return d != nil && d.FinalizedBehindHead()
 }
+
+// downloaderHead returns d.HeadSeq(), or -1 for a nil downloader — used only
+// for diagnostic logging alongside downloaderSeq.
+func downloaderHead(d *engine.SegmentDownloader) int {
+	if d == nil {
+		return -1
+	}
+	return d.HeadSeq()
+}
+
+// computeIncompleteTail: the job is incomplete if EITHER stream finalized
+// behind head — video and audio are independent downloaders with
+// independent head tracking, and a missing tail on one truncates the mux.
+func computeIncompleteTail(videoBehind, audioBehind bool) bool { return videoBehind || audioBehind }

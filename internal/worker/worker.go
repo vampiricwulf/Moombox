@@ -581,8 +581,13 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	// footage from a job now marked Finished; preserve it so the Mux action
 	// can recover it.
 	if jobCtx.StagingDir != "" {
+		fresh, _ := w.db.GetJob(job.ID)
+		preserveForTail := fresh != nil && fresh.IncompleteTail
 		if w.hasUnmuxedParts(job.ID, jobCtx.StagingDir) {
 			w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
+				"path", jobCtx.StagingDir, "jobID", job.ID)
+		} else if preserveForTail {
+			w.logger.Warn("preserving staging dir: recording tail incomplete; Retry will resume from the sidecar",
 				"path", jobCtx.StagingDir, "jobID", job.ID)
 		} else if err := os.RemoveAll(jobCtx.StagingDir); err != nil {
 			w.logger.Warn("failed to remove staging directory", "path", jobCtx.StagingDir, "err", err)
