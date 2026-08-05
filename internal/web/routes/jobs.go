@@ -1007,11 +1007,17 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		// Only allow retry from terminal/cookies states
+		// Only allow retry from terminal/cookies states — plus a Finished
+		// job flagged IncompleteTail, whose preserved staging + resume
+		// sidecar make the tail recoverable (see Job.IncompleteTail).
+		allowed := false
 		switch job.Status {
 		case database.StatusError, database.StatusCancelled, database.StatusCookies:
-			// OK to retry
-		default:
+			allowed = true
+		case database.StatusFinished:
+			allowed = job.IncompleteTail
+		}
+		if !allowed {
 			jsonError(rw, "Job cannot be retried in current state", http.StatusBadRequest)
 			return
 		}
@@ -1032,10 +1038,16 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
+		// Same gate as retry above — a Finished job flagged IncompleteTail
+		// is recoverable via the preserved staging + resume sidecar.
+		allowed := false
 		switch job.Status {
 		case database.StatusError, database.StatusCancelled, database.StatusCookies:
-			// OK
-		default:
+			allowed = true
+		case database.StatusFinished:
+			allowed = job.IncompleteTail
+		}
+		if !allowed {
 			jsonError(rw, "Job cannot be resumed in current state", http.StatusBadRequest)
 			return
 		}

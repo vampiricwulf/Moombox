@@ -629,6 +629,39 @@ func TestJobRetryRejectsActiveState(t *testing.T) {
 	}
 }
 
+func TestJobRetryAllowsFinishedWithIncompleteTail(t *testing.T) {
+	// A Finished job flagged IncompleteTail is missing tail segments but
+	// preserves its staging + resume sidecar — retry (via Reinitialize)
+	// must be reachable from this state, not just from terminal errors.
+	f := newJobsFixture(t)
+	f.addJob(t, "yt_finished_tail", func(j *database.Job) { j.Status = database.StatusFinished })
+	// insertJobExec doesn't carry incomplete_tail — only UpdateJobFields
+	// flips it (see database.TestMigrateV17IncompleteTail), matching how
+	// Task 4 actually sets the flag on a real job.
+	if updated := f.db.UpdateJobFields("yt_finished_tail", map[string]any{"incomplete_tail": true}); updated == nil {
+		t.Fatal("UpdateJobFields(incomplete_tail) returned nil")
+	}
+
+	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_finished_tail/retry", nil)
+	if rec.Code != http.StatusOK {
+		t.Errorf("retry finished+incompleteTail: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJobRetryRejectsFinishedWithoutIncompleteTail(t *testing.T) {
+	// A cleanly Finished job (no incomplete-tail flag) must keep hitting
+	// the existing rejection — only the flagged case opens the gate.
+	f := newJobsFixture(t)
+	f.addJob(t, "yt_finished_clean", func(j *database.Job) {
+		j.Status = database.StatusFinished
+	})
+
+	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_finished_clean/retry", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("retry finished-clean: want 400, got %d", rec.Code)
+	}
+}
+
 // --- POST /api/jobs/{id}/resume ---
 
 func TestJobResumeRejectsTwitch(t *testing.T) {
@@ -662,6 +695,48 @@ func TestJobResume404(t *testing.T) {
 	rec := doRequest(t, f.router, "POST", "/api/jobs/no-such/resume", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("resume unknown: want 404, got %d", rec.Code)
+	}
+}
+
+func TestJobResumeAllowsFinishedWithIncompleteTail(t *testing.T) {
+	// Mirrors TestJobRetryAllowsFinishedWithIncompleteTail for the resume
+	// route: the status gate must open for a flagged Finished job. Resume
+	// also requires staging files to exist, so seed the fixture directory
+	// the same way HasStagingFiles checks it (non-empty jobID subdir).
+	f := newJobsFixture(t)
+	f.addJob(t, "yt_finished_tail_resume", func(j *database.Job) { j.Status = database.StatusFinished })
+	// insertJobExec doesn't carry incomplete_tail — only UpdateJobFields
+	// flips it (see database.TestMigrateV17IncompleteTail), matching how
+	// Task 4 actually sets the flag on a real job.
+	if updated := f.db.UpdateJobFields("yt_finished_tail_resume", map[string]any{"incomplete_tail": true}); updated == nil {
+		t.Fatal("UpdateJobFields(incomplete_tail) returned nil")
+	}
+
+	stageDir := filepath.Join(f.stagingDir, "yt_finished_tail_resume")
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatalf("mkdir staging fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, "seg_0.ts"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("write staging fixture: %v", err)
+	}
+
+	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_finished_tail_resume/resume", nil)
+	if rec.Code != http.StatusOK {
+		t.Errorf("resume finished+incompleteTail: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJobResumeRejectsFinishedWithoutIncompleteTail(t *testing.T) {
+	// A cleanly Finished job (no incomplete-tail flag) must keep hitting
+	// the existing status-gate rejection.
+	f := newJobsFixture(t)
+	f.addJob(t, "yt_finished_clean_resume", func(j *database.Job) {
+		j.Status = database.StatusFinished
+	})
+
+	rec := doRequest(t, f.router, "POST", "/api/jobs/yt_finished_clean_resume/resume", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("resume finished-clean: want 400, got %d", rec.Code)
 	}
 }
 
