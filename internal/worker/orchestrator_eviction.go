@@ -20,6 +20,20 @@ import (
 // unrelated failure from paying for a bisection.
 const minEvictionHead = 100_000
 
+// maxEvictionHuntAdvance bounds how far CurrentSeq may have moved from its
+// starting position for a zero-byte finish to still be considered a
+// candidate evicted-start hunt. The engine's own first-segment hunt
+// (handleGoneError, goneRetryBeforeFirstSegment in
+// internal/engine/downloader_dash.go) advances currentSeq by +1 per 403/410
+// up to 20 attempts before giving up — a genuine evicted-start failure
+// never exceeds that. The engine exports no constant for it, so this value
+// is kept comfortably above 20 by hand. Without this guard, a quality-split
+// final part — a fresh seg_N downloader seeded deep via ForceStartSeq that
+// happens to write zero bytes for an unrelated reason — would present a
+// deep HeadSeq alongside a zero-byte finish and get misdiagnosed as
+// eviction, even though CurrentSeq never moved from its (deep) seeded start.
+const maxEvictionHuntAdvance = 32
+
 // diagnoseEvictedStart runs after a YouTube manifestless VOD download
 // finishes having written zero bytes (see the minEvictionHead guard for why
 // most zero-byte finishes never reach this point at all). It bisects for
@@ -43,6 +57,19 @@ func (o *DownloadOrchestrator) diagnoseEvictedStart(ctx context.Context, jobCtx 
 		return nil
 	}
 	if totalBytesWritten(result) != 0 {
+		return nil
+	}
+	// A quality-split final part starts its own fresh SegmentDownloader
+	// seeded deep via ForceStartSeq, continuing from wherever the prior
+	// quality segment left off. If that part exits having written zero
+	// bytes (e.g. the stream ended before it fetched a single segment),
+	// HeadSeq legitimately reads deep — it reflects the real, deep stream
+	// position, not eviction — and CurrentSeq never left its seeded start
+	// because the first-segment hunt (which is the only thing that advances
+	// it) never ran. Only a downloader that hasn't advanced past the
+	// engine's own hunt window is a candidate for genuine evicted-start
+	// diagnosis.
+	if result.VideoDownloader.CurrentSeq() > maxEvictionHuntAdvance {
 		return nil
 	}
 	head := result.VideoDownloader.HeadSeq()

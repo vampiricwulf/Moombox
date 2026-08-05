@@ -1021,6 +1021,7 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 		"selected_video_itag": nil,
 		"selected_audio_itag": nil,
 		"auto_retry_count":    0,
+		"incomplete_tail":     false,
 	})
 	w.EnqueueJob(jobID)
 }
@@ -1092,6 +1093,7 @@ func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
 		"selected_video_itag": nil,
 		"selected_audio_itag": nil,
 		"auto_retry_count":    newCount,
+		"incomplete_tail":     false,
 	})
 	w.EnqueueJob(jobID)
 }

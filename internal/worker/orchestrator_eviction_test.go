@@ -131,6 +131,44 @@ func TestDiagnoseEvictedStart_GuardSkipsNonCandidates(t *testing.T) {
 			t.Errorf("HeadSeq below minEvictionHead must skip diagnosis, got err: %v", err)
 		}
 	})
+
+	// Quality-split final part: a fresh SegmentDownloader for the last part
+	// is seeded deep via ForceStartSeq/StartSeq (continuing from the prior
+	// part's position), then exits having written zero bytes (e.g. the
+	// stream ended before it fetched a single segment in this part). HeadSeq
+	// legitimately reads deep here — it's the real stream position, not
+	// eviction — so without the CurrentSeq guard this would misfire as a
+	// confirmed eviction.
+	t.Run("quality-split final part: CurrentSeq seeded deep, zero bytes", func(t *testing.T) {
+		const deepStart = 120_000
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Head-Seqnum", "150000")
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer srv.Close()
+
+		videoDl := engine.NewSegmentDownloader(engine.DownloaderOptions{
+			BaseURL:       srv.URL + "/videoplayback?id=split-part-test&itag=137",
+			StartSeq:      deepStart,
+			ForceStartSeq: true,
+		})
+		if _, _, err := videoDl.ProbeSegmentAvailable(context.Background(), deepStart); err != nil {
+			t.Fatalf("priming probe failed: %v", err)
+		}
+		if got := videoDl.CurrentSeq(); got != deepStart {
+			t.Fatalf("CurrentSeq priming: got %d, want %d (probe must not advance it)", got, deepStart)
+		}
+		if got := videoDl.BytesWritten(); got != 0 {
+			t.Fatalf("priming probe must not write bytes, got %d", got)
+		}
+
+		jobCtx := &JobContext{Job: &database.Job{ID: "j1", Platform: "youtube"}}
+		result := &DownloadResult{VideoDownloader: videoDl}
+		if err := o.diagnoseEvictedStart(ctx, jobCtx, nil, result); err != nil {
+			t.Errorf("deep-seeded CurrentSeq (quality-split final part) must skip diagnosis, got err: %v", err)
+		}
+	})
 }
 
 // TestDiagnoseEvictedStart_ConfirmedEviction is the end-to-end happy path:

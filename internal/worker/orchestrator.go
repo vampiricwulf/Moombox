@@ -637,6 +637,21 @@ func (o *DownloadOrchestrator) runVodDownloadWithRefresh(ctx context.Context, jo
 			o.logger.Warn("VOD refresh: rebuild failed; keeping incomplete result", "err", err, "jobID", jobCtx.Job.ID)
 			return result, nil
 		}
+		if !refreshFormatMatches(result, fresh) {
+			// The fresh extraction picked a different itag/resolution/fps than
+			// the one already on disk (SelectBestDashStream silently falls
+			// back when the pinned itag vanished from the refreshed pool).
+			// Appending fresh's segments now would splice a different codec
+			// under the existing init — a silent, unrecoverable mixed-codec
+			// file. Keep the old (incomplete) result instead; the
+			// incomplete_tail flag path above reports the truncation
+			// truthfully so Retry can pick it up later.
+			o.logger.Warn("refresh selected a different format; keeping incomplete result rather than appending mixed codecs",
+				"attempt", attempt, "jobID", jobCtx.Job.ID,
+				"oldWidth", result.VideoWidth, "oldHeight", result.VideoHeight, "oldFps", result.VideoFps,
+				"freshWidth", fresh.VideoWidth, "freshHeight", fresh.VideoHeight, "freshFps", fresh.VideoFps)
+			return result, nil
+		}
 		o.attachTrackerAndProgress(tracker, fresh)
 		result = fresh
 	}
@@ -670,3 +685,48 @@ func downloaderHead(d *engine.SegmentDownloader) int {
 // behind head — video and audio are independent downloaders with
 // independent head tracking, and a missing tail on one truncates the mux.
 func computeIncompleteTail(videoBehind, audioBehind bool) bool { return videoBehind || audioBehind }
+
+// refreshFormatMatches guards against appending a DIFFERENT codec/quality
+// into the same staging file across a VOD refresh pass. Each attempt
+// re-runs format selection against a freshly re-extracted pool
+// (runVodDownloadWithRefresh -> refreshDownload -> DownloadManifestlessDash
+// / DownloadDash / DownloadHls -> SelectBestDashStream), which silently
+// falls back to a different itag when the previously pinned one has
+// disappeared from the pool. The engine's ForceStartSeq append path has no
+// codec awareness — it will happily write new-codec fragments under the
+// old init, producing a silently corrupt mixed-codec file. Returns false
+// (never a match) whenever that can't be ruled out, so the caller's
+// "discard fresh, keep the old incomplete result" fallback is the default,
+// not the exception.
+//
+// Identity comparison is necessarily conservative: DownloadResult carries
+// no itag/codec identity for the three strategies this loop actually
+// refreshes through — DownloadHls, DownloadDash, and DownloadManifestlessDash
+// all populate only VideoWidth/VideoHeight/VideoFps (VideoFormat/AudioFormat
+// are exclusively set by the whole-file VOD strategy, which never reaches
+// this loop — see each strategy's Download function). So video identity is
+// compared on the width/height/fps tuple, a workable proxy since a real
+// itag swap virtually always changes the encoded resolution or frame rate.
+// VideoFormat/AudioFormat.Itag are compared too whenever BOTH sides happen
+// to carry them (cheap struct-field reads, no new plumbing) so a future
+// strategy that does populate them gets the stronger check for free.
+func refreshFormatMatches(old, fresh *DownloadResult) bool {
+	if old == nil || fresh == nil {
+		return false
+	}
+	if old.HasVideo != fresh.HasVideo || old.HasAudio != fresh.HasAudio {
+		return false
+	}
+	if old.HasVideo {
+		if old.VideoWidth != fresh.VideoWidth || old.VideoHeight != fresh.VideoHeight || old.VideoFps != fresh.VideoFps {
+			return false
+		}
+		if old.VideoFormat != nil && fresh.VideoFormat != nil && old.VideoFormat.Itag != fresh.VideoFormat.Itag {
+			return false
+		}
+	}
+	if old.HasAudio && old.AudioFormat != nil && fresh.AudioFormat != nil && old.AudioFormat.Itag != fresh.AudioFormat.Itag {
+		return false
+	}
+	return true
+}
