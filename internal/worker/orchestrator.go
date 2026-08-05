@@ -359,6 +359,18 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		result, err = o.runVodDownloadWithRefresh(ctx, jobCtx, result, tracker)
 
 		if err == nil {
+			// A zero-byte YouTube finish with a deep HeadSeq is checked for
+			// confirmed segment eviction (marathon stream past the ~120h
+			// retention window) before the ordinary incomplete-tail
+			// accounting below, which assumes a ranging-but-incomplete
+			// download rather than a from-the-start failure. Setting err
+			// here routes through the normal err!=nil handling further
+			// down in this function (chat cleanup, "download: %w" wrap) —
+			// the two guards below then no-op for a non-nil err.
+			err = o.diagnoseEvictedStart(ctx, jobCtx, videoInfo, result)
+		}
+
+		if err == nil {
 			incomplete := computeIncompleteTail(
 				downloaderBehindHead(result.VideoDownloader),
 				downloaderBehindHead(result.AudioDownloader))

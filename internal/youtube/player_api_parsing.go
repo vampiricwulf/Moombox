@@ -304,6 +304,9 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 			format.QualityLabel = getStr(f, "qualityLabel")
 			format.AudioQuality = getStr(f, "audioQuality")
 			format.AudioSampleRate = getStr(f, "audioSampleRate")
+			if td := getInt(f, "targetDurationSec"); td > 0 {
+				format.TargetDurationSec = td
+			}
 
 			formats = append(formats, format)
 		}

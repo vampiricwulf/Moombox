@@ -422,12 +422,13 @@ func TestParseFormats_DefersCipherDecryption(t *testing.T) {
 	streamingData := map[string]any{
 		"adaptiveFormats": []any{
 			map[string]any{
-				"itag":            float64(137),
-				"mimeType":        `video/mp4; codecs="avc1.640028"`,
-				"bitrate":         float64(2500000),
-				"width":           float64(1920),
-				"height":          float64(1080),
-				"signatureCipher": "url=https%3A%2F%2Fr1---sn-test.googlevideo.com%2Fvideoplayback%3Fexpire%3D123%26n%3DENC_N%26itag%3D137&s=ENC_SIG&sp=signature",
+				"itag":              float64(137),
+				"mimeType":          `video/mp4; codecs="avc1.640028"`,
+				"bitrate":           float64(2500000),
+				"width":             float64(1920),
+				"height":            float64(1080),
+				"targetDurationSec": float64(5),
+				"signatureCipher":   "url=https%3A%2F%2Fr1---sn-test.googlevideo.com%2Fvideoplayback%3Fexpire%3D123%26n%3DENC_N%26itag%3D137&s=ENC_SIG&sp=signature",
 			},
 			map[string]any{
 				"itag":     float64(140),
@@ -458,6 +459,9 @@ func TestParseFormats_DefersCipherDecryption(t *testing.T) {
 	}
 	if video.SigKey != "signature" {
 		t.Errorf("video SigKey: want signature got %q", video.SigKey)
+	}
+	if video.TargetDurationSec != 5 {
+		t.Errorf("video TargetDurationSec: want 5 got %d", video.TargetDurationSec)
 	}
 	// URL must not yet contain the decrypted sig — the strategy resolves
 	// it later via cipher.ResolveFormatURL.

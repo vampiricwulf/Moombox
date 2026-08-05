@@ -101,6 +101,15 @@ type Format struct {
 	// "signature" when absent. Used as the URL parameter name when
 	// appending the decrypted sig.
 	SigKey string `json:"sigKey,omitempty"`
+
+	// TargetDurationSec is the per-segment duration (seconds) YouTube
+	// advertises for an OTF/live adaptive format — the same value that
+	// yt-dlp reads to compute a manifest-free DASH format's segment count.
+	// Used by the worker's eviction diagnosis (Task 9) to convert a
+	// bisected evicted-segment count into an approximate evicted duration.
+	// Zero when the source format omitted it (a whole-file / non-OTF
+	// format never carries this field).
+	TargetDurationSec int `json:"targetDurationSec,omitempty"`
 }
 
 // IsVideo returns true if this format contains video.
