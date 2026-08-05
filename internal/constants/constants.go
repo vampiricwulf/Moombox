@@ -16,12 +16,12 @@ const ProjectRepoURL = "https://github.com/vampiricwulf/Moombox"
 // =============================================================================
 
 // Chrome-major window for the randomized desktop Web UA. Keep in lockstep
-// with yt-dlp's random_user_agent() range (utils/_utils.py — 143-149 as of
-// 2026-06) so live Google/Twitch endpoints never see an implausibly stale or
+// with yt-dlp's random_user_agent() range (utils/_utils.py — 145-151 as of
+// 2026-07) so live Google/Twitch endpoints never see an implausibly stale or
 // not-yet-released browser. Bump both bounds when yt-dlp's window moves.
 const (
-	chromeMajorMin = 143
-	chromeMajorMax = 149
+	chromeMajorMin = 145
+	chromeMajorMax = 151
 )
 
 // randomizedWebUA builds the desktop Web UA with a Chrome major picked
@@ -55,10 +55,10 @@ var UserAgents = struct {
 	// fingerprint rather than blend into one.
 	Web:       randomizedWebUA(),
 	WebSafari: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
-	Android:   "com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip",
+	Android:   "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip",
 	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 	TV:        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
-	IOS:       "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+	IOS:       "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
 }
 
 // =============================================================================
@@ -101,12 +101,12 @@ type YouTubeClientConfig struct {
 // TVDowngradedClient is the primary authenticated client (TVHTML5).
 var TVDowngradedClient = YouTubeClientConfig{
 	ClientName:    "TVHTML5",
-	ClientVersion: "5.20260114",
+	ClientVersion: "5.20260707",
 	ClientID:      "7",
 	UserAgent:     UserAgents.TV,
 	Context: map[string]any{
 		"clientName":    "TVHTML5",
-		"clientVersion": "5.20260114",
+		"clientVersion": "5.20260707",
 		"hl":            "en",
 	},
 }
@@ -114,12 +114,12 @@ var TVDowngradedClient = YouTubeClientConfig{
 // WebCreatorClient is a fallback for member content.
 var WebCreatorClient = YouTubeClientConfig{
 	ClientName:    "WEB_CREATOR",
-	ClientVersion: "1.20260120.01.00",
+	ClientVersion: "1.20260708.06.00",
 	ClientID:      "62",
 	UserAgent:     UserAgents.Web,
 	Context: map[string]any{
 		"clientName":    "WEB_CREATOR",
-		"clientVersion": "1.20260120.01.00",
+		"clientVersion": "1.20260708.06.00",
 		"hl":            "en",
 	},
 }
@@ -127,26 +127,29 @@ var WebCreatorClient = YouTubeClientConfig{
 // WebClient is for watch page fetching.
 var WebClient = YouTubeClientConfig{
 	ClientName:    "WEB",
-	ClientVersion: "2.20260120.01.00",
+	ClientVersion: "2.20260708.00.00",
 	ClientID:      "1",
 	UserAgent:     UserAgents.Web,
 	Context: map[string]any{
 		"clientName":    "WEB",
-		"clientVersion": "2.20260120.01.00",
+		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
 	},
 }
 
 // WebSafariClient is the primary WEB client with Safari UA.
-// Returns pre-merged HLS formats; more reliable for unauthenticated use.
+// Returns pre-merged HLS formats. Since 2026-07 YouTube only serves those
+// HLS formats to some logged-in or "trusted" sessions (yt-dlp demoted
+// web_safari from its defaults for this reason, 69ea20006); logged-out
+// sessions get the same adaptive formats a plain WEB client would.
 var WebSafariClient = YouTubeClientConfig{
 	ClientName:    "WEB",
-	ClientVersion: "2.20260120.01.00",
+	ClientVersion: "2.20260708.00.00",
 	ClientID:      "1",
 	UserAgent:     UserAgents.WebSafari,
 	Context: map[string]any{
 		"clientName":    "WEB",
-		"clientVersion": "2.20260120.01.00",
+		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
 	},
 }
@@ -155,17 +158,23 @@ var WebSafariClient = YouTubeClientConfig{
 // Uses a non-YouTube embedUrl per yt-dlp requirements.
 var WebEmbeddedClient = YouTubeClientConfig{
 	ClientName:    "WEB_EMBEDDED_PLAYER",
-	ClientVersion: "1.20260115.01.00",
+	ClientVersion: "2.20260708.00.00",
 	ClientID:      "56",
 	UserAgent:     UserAgents.Web,
 	Context: map[string]any{
 		"clientName":    "WEB_EMBEDDED_PLAYER",
-		"clientVersion": "1.20260115.01.00",
+		"clientVersion": "2.20260708.00.00",
 		"hl":            "en",
 	},
 }
 
 // AndroidVRClient is for VOD downloads without cookies.
+// clientVersion is deliberately held at 1.65.10 — versions >1.65 may return
+// SABR-only streams (yt-dlp keeps the same pin). Since 2026-07 yt-dlp
+// reports intermittent/selective PO-token enforcement on android_vr's
+// non-HLS formats (69ea20006 added a GVS PO-token policy for it); if VOD
+// fetches through this client start failing with 403s, attaching a PO token
+// is the fix to reach for.
 var AndroidVRClient = YouTubeClientConfig{
 	ClientName:    "ANDROID_VR",
 	ClientVersion: "1.65.10",
@@ -187,12 +196,12 @@ var AndroidVRClient = YouTubeClientConfig{
 // formats. Audit reports/youtube.md T2.
 var IOSClient = YouTubeClientConfig{
 	ClientName:    "IOS",
-	ClientVersion: "21.02.3",
+	ClientVersion: "21.26.4",
 	ClientID:      "5",
 	UserAgent:     UserAgents.IOS,
 	Context: map[string]any{
 		"clientName":    "IOS",
-		"clientVersion": "21.02.3",
+		"clientVersion": "21.26.4",
 		"deviceMake":    "Apple",
 		"deviceModel":   "iPhone16,2",
 		"osName":        "iPhone",
@@ -207,12 +216,12 @@ var IOSClient = YouTubeClientConfig{
 // rejection reasons. Audit reports/youtube.md T2.
 var WebRemixClient = YouTubeClientConfig{
 	ClientName:    "WEB_REMIX",
-	ClientVersion: "1.20260120.01.00",
+	ClientVersion: "1.20260707.12.00",
 	ClientID:      "67",
 	UserAgent:     UserAgents.WebSafari,
 	Context: map[string]any{
 		"clientName":    "WEB_REMIX",
-		"clientVersion": "1.20260120.01.00",
+		"clientVersion": "1.20260707.12.00",
 		"hl":            "en",
 	},
 }

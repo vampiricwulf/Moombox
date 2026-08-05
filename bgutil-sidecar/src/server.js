@@ -50,7 +50,7 @@ if (!Reflect.has(globalThis, "navigator")) {
 // hard-codes; safe to bump if YouTube starts rejecting older versions.
 // ---------------------------------------------------------------------------
 const REQUEST_KEY = "O43z0dpjhgX20SCx4KAo";
-const CLIENT_VERSION = "2.20260227.01.00";
+const CLIENT_VERSION = "2.20260708.00.00";
 const ATT_GET_URL =
     "https://www.youtube.com/youtubei/v1/att/get?prettyPrint=false";
 // Per-fetch ceiling for the BotGuard network round-trips. Node's fetch (undici)

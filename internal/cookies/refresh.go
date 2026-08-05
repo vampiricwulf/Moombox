@@ -33,7 +33,7 @@ const (
 	// youtubeClientVersion is the WEB client version sent in Innertube API requests.
 	// Update this when YouTube bumps the client version — it's used in auth check
 	// and session refresh requests. Format: "2.YYYYMMDD.00.00".
-	youtubeClientVersion = "2.20260301.00.00"
+	youtubeClientVersion = "2.20260708.00.00"
 
 	// authBodyFallbackLimit caps how much of the response body we promote to a
 	// Go string for the JSON-parse-failed fallback path. The real
