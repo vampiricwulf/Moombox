@@ -22,6 +22,12 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # meriyah and astring are version-lockstepped with the vendored ejs
+      # solver (bgutil-sidecar/vendor/ejs/) — bumped manually whenever
+      # upstream ejs moves its own pins, never independently.
+      - dependency-name: meriyah
+      - dependency-name: astring
 
   - package-ecosystem: github-actions
     directory: /
