@@ -2259,6 +2259,27 @@ class MoomboxApp {
       }
     }
 
+    // Update incomplete-tail badge — its presence is conditional (job.status ===
+    // "Finished" && job.incompleteTail), like the error div below, so it needs
+    // create/remove handling rather than a plain value patch.
+    const incompleteTailValue = content.querySelector('[data-field="incomplete-tail"]');
+    const shouldShowIncompleteTail = job.status === "Finished" && job.incompleteTail;
+    if (shouldShowIncompleteTail && !incompleteTailValue) {
+      let typeRow = null;
+      for (const row of content.querySelectorAll(".details-row")) {
+        const label = row.querySelector(".details-label");
+        if (label && label.textContent === "Type:") { typeRow = row; break; }
+      }
+      if (typeRow) {
+        const newRow = document.createElement("div");
+        newRow.className = "details-row";
+        newRow.innerHTML = '<span class="details-label"></span><span class="details-value" data-field="incomplete-tail"><sl-badge variant="warning">Incomplete tail</sl-badge></span>';
+        typeRow.parentNode.insertBefore(newRow, typeRow);
+      }
+    } else if (!shouldShowIncompleteTail && incompleteTailValue) {
+      incompleteTailValue.closest(".details-row")?.remove();
+    }
+
     // Update speed if present
     const speedRow = document.getElementById("speed-row");
     const speedValue = content.querySelector('[data-field="speed"]');
