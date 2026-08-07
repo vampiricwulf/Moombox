@@ -257,3 +257,65 @@ func TestRefreshFormatMatches(t *testing.T) {
 		})
 	}
 }
+
+// TestKeepIncompleteTailProgressPreservesHonestValues locks in the finalize
+// half of FIX 4: the honest progress/percent written when a download gave up
+// behind head must survive muxAndFinalize/finalizeMultiSegmentJob, which
+// otherwise hard-code percent=100 for every job that muxes successfully. A
+// clean job's update map must pass through untouched.
+func TestKeepIncompleteTailProgressPreservesHonestValues(t *testing.T) {
+	dir := t.TempDir()
+	db, err := database.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
+
+	newJob := func(id string, incomplete bool) string {
+		job := &database.Job{
+			ID:      id,
+			VideoID: id,
+			URL:     "https://youtube.com/watch?v=" + id,
+			Status:  database.StatusMuxing,
+		}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+		if incomplete {
+			if updated := db.UpdateJobFields(id, map[string]any{"incomplete_tail": true}); updated == nil {
+				t.Fatal("UpdateJobFields(incomplete_tail) returned nil")
+			}
+		}
+		return id
+	}
+
+	// Flagged job: the finalize overwrites must be stripped so the honest
+	// values already in the row survive.
+	flagged := map[string]any{"status": "Finished", "progress": "", "percent": 100.0}
+	o.keepIncompleteTailProgress(newJob("flaggedTailJob", true), flagged)
+	if _, ok := flagged["percent"]; ok {
+		t.Error("percent overwrite not stripped for a flagged job — bar would read 100% on a truncated recording")
+	}
+	if _, ok := flagged["progress"]; ok {
+		t.Error("progress overwrite not stripped for a flagged job")
+	}
+	if flagged["status"] != "Finished" {
+		t.Error("unrelated keys must be left alone")
+	}
+
+	// Clean job: untouched.
+	clean := map[string]any{"status": "Finished", "progress": "", "percent": 100.0}
+	o.keepIncompleteTailProgress(newJob("cleanTailJob", false), clean)
+	if clean["percent"] != 100.0 || clean["progress"] != "" {
+		t.Errorf("clean job's finalize map was modified: %+v", clean)
+	}
+
+	// Unknown job (DB read fails): fall back to pre-existing behavior.
+	unknown := map[string]any{"percent": 100.0}
+	o.keepIncompleteTailProgress("nonexistent-job", unknown)
+	if unknown["percent"] != 100.0 {
+		t.Error("a failed job lookup must leave the map untouched (pre-existing 100% behavior)")
+	}
+}

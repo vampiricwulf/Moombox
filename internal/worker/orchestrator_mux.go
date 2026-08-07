@@ -227,6 +227,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// Copy assets (chat, description, thumbnail) to output directory
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, false)
 
+	o.keepIncompleteTailProgress(jobCtx.Job.ID, updates)
 	finishedJob := o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
 	// Send "Download Finished" notification
@@ -234,6 +235,32 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 
 	o.logger.Info("download complete", "jobID", jobCtx.Job.ID, "output", outputFile)
 	return nil
+}
+
+// keepIncompleteTailProgress strips the progress/percent overwrites from a
+// finalize update map when the job's recording is known to be missing tail
+// segments, so the honest values written when the download gave up survive
+// into the Finished row.
+//
+// Both finalize paths otherwise hard-code percent=100 (and blank the progress
+// string) for every job that muxes successfully — which is right for a clean
+// capture but would put a full progress bar under a knowingly-truncated one
+// (the Web UI renders percent unconditionally, so the bar would contradict
+// the "Incomplete tail" badge sitting beside it). Deleting the keys rather
+// than recomputing them keeps the single source of truth in the orchestrator
+// where the seq/head numbers actually live.
+//
+// The flag is re-read rather than threaded through: it is written after the
+// download loop returns but before finalize runs, so the in-memory
+// jobCtx.Job copy predates it. A read failure leaves the map untouched —
+// i.e. falls back to the pre-existing 100% behavior.
+func (o *DownloadOrchestrator) keepIncompleteTailProgress(jobID string, updates map[string]any) {
+	fresh, err := o.db.GetJob(jobID)
+	if err != nil || fresh == nil || !fresh.IncompleteTail {
+		return
+	}
+	delete(updates, "progress")
+	delete(updates, "percent")
 }
 
 // finalizeMultiSegmentJob handles the finalization path for jobs with quality-split segments.
@@ -322,6 +349,7 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// Copy assets
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, anyPartChat)
 
+	o.keepIncompleteTailProgress(jobCtx.Job.ID, updates)
 	o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
 	// Send notification
