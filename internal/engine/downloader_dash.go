@@ -400,8 +400,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 			utils.Sleep(ctx, singleGoneRetryDelay)
 			return nil // Continue loop
 		}
-		if d.warnIfFinalizingBehindHead() {
-			d.finalizedBehindHead.Store(true)
+		if d.finalizeBehindHead() {
 			// Known-incomplete finalize: leave streamEnded unset so the
 			// runDashLoop defer keeps the resume sidecar — a later retry
 			// appends the missing tail instead of truncating the recording
@@ -459,6 +458,19 @@ func (d *SegmentDownloader) warnIfFinalizingBehindHead() bool {
 		d.logger.Warn("[Downloader] finalizing with unfetched tail — segments below head stayed unavailable",
 			"currentSeq", cur, "headSeq", head, "missing", head-cur,
 			"gapSinceLastSegment", d.lastSegTime.Since().Round(time.Second))
+		return true
+	}
+	return false
+}
+
+// finalizeBehindHead calls warnIfFinalizingBehindHead and, when it fires,
+// latches finalizedBehindHead in the same step — the three errStreamDone
+// escalation sites (handleGoneError, and handleHTTPError's confirmed-end and
+// MaxTimeout-backstop branches) all route through this single call so the
+// warning and the worker-visible flag can never drift apart.
+func (d *SegmentDownloader) finalizeBehindHead() bool {
+	if d.warnIfFinalizingBehindHead() {
+		d.finalizedBehindHead.Store(true)
 		return true
 	}
 	return false
@@ -577,9 +589,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 			// Fall through to the backoff below until MaxTimeout expires (the
 			// backstop further down owns the eventual force-finalize).
 			if !d.behindHeadTailPending() {
-				if d.warnIfFinalizingBehindHead() {
-					d.finalizedBehindHead.Store(true)
-				}
+				d.finalizeBehindHead()
 				return errStreamDone
 			}
 		} else if behindHead && hasStartedDownloading {
@@ -621,9 +631,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		}
 		d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 			"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
-		if d.warnIfFinalizingBehindHead() {
-			d.finalizedBehindHead.Store(true)
-		}
+		d.finalizeBehindHead()
 		return errStreamDone
 	}
 
