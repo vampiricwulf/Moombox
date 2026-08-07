@@ -370,34 +370,35 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			err = o.diagnoseEvictedStart(ctx, jobCtx, videoInfo, result)
 		}
 
+		var incomplete bool
+		var vSeq, vHead, aSeq, aHead int
 		if err == nil {
-			incomplete := computeIncompleteTail(
-				downloaderBehindHead(result.VideoDownloader),
-				downloaderBehindHead(result.AudioDownloader))
-			// Unconditional write: a retry that completes cleanly clears the
-			// flag by writing false through the same path.
-			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"incomplete_tail": incomplete})
-			if incomplete {
-				o.logger.Warn("recording finished with an unfetched tail — staging preserved; Retry will append the missing segments",
-					"jobID", jobCtx.Job.ID,
-					"videoSeq", downloaderSeq(result.VideoDownloader), "videoHead", downloaderHead(result.VideoDownloader),
-					"audioSeq", downloaderSeq(result.AudioDownloader), "audioHead", downloaderHead(result.AudioDownloader))
-			}
+			incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result)
 		}
 
 		// Set 100% progress after VOD download completes (finishVodWithChat equivalent)
-		// Include audio percentage and chat count to match TS format
+		// Include audio percentage and chat count to match TS format. A
+		// recording known to be missing its tail (incomplete) must NOT claim
+		// 100% here — write an honest progress string instead (FIX 4).
 		if err == nil {
-			progressStr := "V:100% A:100%"
+			chatCount := 0
 			if chatDl != nil {
-				chatCount := chatDl.MessageCount()
+				chatCount = chatDl.MessageCount()
+			}
+			var progressStr string
+			var percent float64
+			if incomplete {
+				progressStr, percent = incompleteProgressString(vSeq, vHead, aSeq, aHead, chatCount)
+			} else {
+				progressStr = "V:100% A:100%"
+				percent = 100.0
 				if chatCount > 0 {
 					progressStr += fmt.Sprintf(" C: %d", chatCount)
 				}
 			}
 			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 				"progress": progressStr,
-				"percent":  100.0,
+				"percent":  percent,
 			})
 		}
 	} else {
@@ -420,6 +421,18 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			// through the same err!=nil handling below as every other
 			// download failure in this function.
 			err = o.diagnoseEvictedStart(ctx, jobCtx, videoInfo, result)
+		}
+
+		// Mirror the VOD branch's flag write (see finalizeIncompleteTail):
+		// a live YouTube job whose MaxTimeout backstop fires behind head
+		// finishes silently otherwise — the staging + resume sidecar it
+		// needs for Resume to append the missing tail would be cleaned up
+		// like any other cleanly-Finished job. Gated on the SAME err == nil
+		// check as the eviction guard above (now possibly re-set by
+		// diagnoseEvictedStart) so an eviction error still takes precedence
+		// and is never overwritten by a flag write.
+		if err == nil {
+			o.finalizeIncompleteTail(jobCtx.Job.ID, result)
 		}
 	}
 
@@ -685,6 +698,71 @@ func downloaderHead(d *engine.SegmentDownloader) int {
 // behind head — video and audio are independent downloaders with
 // independent head tracking, and a missing tail on one truncates the mux.
 func computeIncompleteTail(videoBehind, audioBehind bool) bool { return videoBehind || audioBehind }
+
+// finalizeIncompleteTail computes and unconditionally persists the
+// incomplete_tail flag once a download (VOD or live) has returned with
+// err == nil. Shared by both branches of ExecuteWithChat's isVod switch — a
+// downloader can only report FinalizedBehindHead()==true on the run that
+// naturally finalized: quality/gap splits always Cancel() the prior
+// downloader, and a cancelled downloader returns via cancelErr before ever
+// reaching the finalize path, so it can never set that flag. That means the
+// *DownloadResult each branch holds at its call site — VOD's after its
+// refresh loop, live's after runLiveStreamDownload — is always the right,
+// final downloader to inspect, for both branches alike.
+//
+// Returns the computed flag plus the seq/head values used, so a caller that
+// also needs to render an honest (non-100%) progress string for an
+// incomplete finish (see incompleteProgressString) can reuse them without
+// re-deriving.
+func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *DownloadResult) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
+	vSeq = downloaderSeq(result.VideoDownloader)
+	vHead = downloaderHead(result.VideoDownloader)
+	aSeq = downloaderSeq(result.AudioDownloader)
+	aHead = downloaderHead(result.AudioDownloader)
+	incomplete = computeIncompleteTail(
+		downloaderBehindHead(result.VideoDownloader),
+		downloaderBehindHead(result.AudioDownloader))
+	// Unconditional write: a retry that completes cleanly clears the flag by
+	// writing false through the same path.
+	o.db.UpdateJobFields(jobID, map[string]any{"incomplete_tail": incomplete})
+	if incomplete {
+		o.logger.Warn("recording finished with an unfetched tail — staging preserved; Resume will append the missing segments",
+			"jobID", jobID,
+			"videoSeq", vSeq, "videoHead", vHead,
+			"audioSeq", aSeq, "audioHead", aHead)
+	}
+	return incomplete, vSeq, vHead, aSeq, aHead
+}
+
+// incompleteProgressString builds an honest, non-100% progress string +
+// percent for a job whose download finalized with a known-incomplete tail —
+// used in place of the flat "V:100% A:100%"/100.0 write so a knowingly-
+// truncated recording doesn't show a full bar while muxing. Mirrors the
+// DASH-style "(A: x/y V: x/y)" shape ProgressTracker.buildProgressString
+// (progress.go) already uses — and that app.js's dashMatch regex already
+// parses — omitting the "/head" part when head <= 0 (downloaderHead returns
+// -1 for a nil downloader).
+func incompleteProgressString(vSeq, vHead, aSeq, aHead, chatCount int) (string, float64) {
+	vPart := fmt.Sprintf("%d", vSeq)
+	if vHead > 0 {
+		vPart = fmt.Sprintf("%d/%d", vSeq, vHead)
+	}
+	aPart := fmt.Sprintf("%d", aSeq)
+	if aHead > 0 {
+		aPart = fmt.Sprintf("%d/%d", aSeq, aHead)
+	}
+	s := fmt.Sprintf("(A: %s V: %s", aPart, vPart)
+	if chatCount > 0 {
+		s += fmt.Sprintf(" C: %d", chatCount)
+	}
+	s += ")"
+
+	percent := 0.0
+	if vHead > 0 {
+		percent = float64(vSeq) / float64(vHead) * 100
+	}
+	return s, percent
+}
 
 // refreshFormatMatches guards against appending a DIFFERENT codec/quality
 // into the same staging file across a VOD refresh pass. Each attempt

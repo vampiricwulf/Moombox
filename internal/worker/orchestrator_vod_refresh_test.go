@@ -1,8 +1,11 @@
 package worker
 
 import (
+	"path/filepath"
+	"regexp"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -12,6 +15,90 @@ func TestComputeIncompleteTail(t *testing.T) {
 	}
 	if computeIncompleteTail(false, false) {
 		t.Error("clean finish must not flag")
+	}
+}
+
+// TestFinalizeIncompleteTailWritesAndSelfClears locks in the shared helper
+// FIX 3 introduces for both the VOD and live branches of ExecuteWithChat: a
+// clean finish (both downloaders nil, i.e. neither ever behind head) must
+// write incomplete_tail=false unconditionally — the same write path a
+// previously-flagged job's successful retry/resume relies on to self-clear
+// the flag.
+func TestFinalizeIncompleteTailWritesAndSelfClears(t *testing.T) {
+	dir := t.TempDir()
+	db, err := database.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	jobID := "yt_finalizeIncompleteTailTest"
+	job := &database.Job{
+		ID:      jobID,
+		VideoID: "finalizeIncompleteTailTest",
+		URL:     "https://youtube.com/watch?v=finalizeIncompleteTailTest",
+		Status:  database.StatusDownloading,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	// Seed the job as previously flagged, to prove the write below is
+	// unconditional and self-clears it on a clean finish.
+	if updated := db.UpdateJobFields(jobID, map[string]any{"incomplete_tail": true}); updated == nil {
+		t.Fatal("UpdateJobFields(incomplete_tail) returned nil")
+	}
+
+	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
+
+	incomplete, vSeq, vHead, aSeq, aHead := o.finalizeIncompleteTail(jobID, &DownloadResult{})
+	if incomplete {
+		t.Error("both downloaders nil must never be reported incomplete")
+	}
+	if vSeq != 0 || aSeq != 0 || vHead != -1 || aHead != -1 {
+		t.Errorf("nil-downloader seq/head values = (%d,%d,%d,%d), want (0,-1,0,-1)", vSeq, vHead, aSeq, aHead)
+	}
+
+	got, err := db.GetJob(jobID)
+	if err != nil || got == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.IncompleteTail {
+		t.Error("finalizeIncompleteTail must self-clear a previously-flagged job on a clean finish")
+	}
+}
+
+// TestIncompleteProgressString pins FIX 4's honest-progress format: the same
+// DASH-style "(A: x/y V: x/y[ C: n])" shape ProgressTracker.buildProgressString
+// (progress.go) uses, omitting the "/head" part when head <= 0 (downloaderHead
+// returns -1 for a nil downloader), and — per the fix's explicit compatibility
+// note — still matching the exact regex app.js's dashMatch uses to parse it.
+func TestIncompleteProgressString(t *testing.T) {
+	dashMatch := regexp.MustCompile(`\(A:\s*(\S+)\s+V:\s*(\S+)(?:\s+C:\s*(\d+))?\)`)
+
+	cases := []struct {
+		name                                string
+		vSeq, vHead, aSeq, aHead, chatCount int
+		wantStr                             string
+		wantPercent                         float64
+	}{
+		{"both heads known", 500, 1200, 500, 1200, 0, "(A: 500/1200 V: 500/1200)", float64(500) / 1200 * 100},
+		{"unknown head (-1) omits slash, percent 0", 500, -1, 500, -1, 0, "(A: 500 V: 500)", 0},
+		{"video head 0 omits slash, percent stays 0", 10, 0, 10, 20, 0, "(A: 10/20 V: 10)", 0},
+		{"chat count appended", 500, 1200, 480, 1200, 42, "(A: 480/1200 V: 500/1200 C: 42)", float64(500) / 1200 * 100},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotStr, gotPercent := incompleteProgressString(c.vSeq, c.vHead, c.aSeq, c.aHead, c.chatCount)
+			if gotStr != c.wantStr {
+				t.Errorf("string = %q, want %q", gotStr, c.wantStr)
+			}
+			if gotPercent != c.wantPercent {
+				t.Errorf("percent = %v, want %v", gotPercent, c.wantPercent)
+			}
+			if !dashMatch.MatchString(gotStr) {
+				t.Errorf("%q does not match app.js's dashMatch regex", gotStr)
+			}
+		})
 	}
 }
 
