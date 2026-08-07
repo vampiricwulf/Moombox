@@ -604,11 +604,18 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 // Returns false for single-file jobs (no seg_N dirs), whose root media was
 // muxed via the normal path.
 func (w *DownloadWorker) hasUnmuxedParts(jobID, stagingDir string) bool {
+	return hasUnmuxedPartsForJob(w.db, jobID, stagingDir)
+}
+
+// hasUnmuxedPartsForJob is the free-function core of hasUnmuxedParts, split
+// out so the orphan scanner (internal/worker/orphans.go) can reuse the exact
+// same check — it only has a *database.Database, not a *DownloadWorker.
+func hasUnmuxedPartsForJob(db *database.Database, jobID, stagingDir string) bool {
 	segDirs := stagedSegDirs(stagingDir)
 	if len(segDirs) == 0 {
 		return false // no part splits — single-file cleanup is safe
 	}
-	segs, err := w.db.GetSegments(jobID)
+	segs, err := db.GetSegments(jobID)
 	if err != nil {
 		// Can't verify what's recorded — preserve rather than risk deleting
 		// footage that was never persisted.

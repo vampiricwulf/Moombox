@@ -321,7 +321,7 @@ Upcoming -> Live -> Downloading -> Muxing -> Finished
 
 `JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings (RFC3339). Optional numeric fields use pointers. The `COOKIES?` status indicates the stream requires authentication that is not currently available. `Queued` is entered only by backlog VODs (older store items archived by the feed monitor); broadcasts and newly discovered content enter directly as `Upcoming`/`Live` and never wait in `Queued`.
 
-A YouTube post-live download that still finalizes behind head after the VOD-branch refresh loop exhausts its retries does not become `Error` — it completes as `Finished` with `Job.IncompleteTail` set. The flag is not a status: staging directory and resume sidecar are preserved instead of being cleaned up, Retry/Resume are permitted on the flagged job (normally gated to `Error`/`Cancelled`/`COOKIES?`), and a clean re-run appends the missing tail and self-clears the flag via the same unconditional write that set it.
+A YouTube post-live download that still finalizes behind head after the VOD-branch refresh loop exhausts its retries does not become `Error` — it completes as `Finished` with `Job.IncompleteTail` set. The flag is not a status: staging directory and resume sidecar are preserved instead of being cleaned up, and Resume (only — not Retry, which gates the flagged job out because it deletes staging via ReinitializeJob) is permitted on the flagged job (normally gated to `Error`/`Cancelled`/`COOKIES?`); a clean re-run appends the missing tail and self-clears the flag via the same unconditional write that set it.
 
 ### Error Hierarchy
 

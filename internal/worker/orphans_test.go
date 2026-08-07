@@ -122,3 +122,55 @@ func TestDeleteOrphanedFileRefusesActiveJob(t *testing.T) {
 		t.Errorf("staging dir should be gone after successful delete, got err=%v", err)
 	}
 }
+
+// TestDeleteOrphanedFileRefusesFinishedIncompleteTail verifies that a Finished
+// job flagged IncompleteTail is protected the same way an active job is: its
+// staging directory + resume sidecar are deliberately preserved (see
+// Job.IncompleteTail) so Resume can append the missing tail, and the orphan
+// scanner's pre-delete recheck must not let that preserved state be deleted.
+// This pins the fix for the data-loss path where findActiveJobForPath's
+// activeJobStatuses set omitted StatusFinished entirely.
+func TestDeleteOrphanedFileRefusesFinishedIncompleteTail(t *testing.T) {
+	dir := t.TempDir()
+	stagingDir := filepath.Join(dir, "staging")
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{StagingDirectory: stagingDir}}
+
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	jobID := "yt_incompleteTailOrphanTest"
+	job := &database.Job{
+		ID:      jobID,
+		VideoID: "incompleteTailOrphanTest",
+		URL:     "https://youtube.com/watch?v=incompleteTailOrphanTest",
+		Status:  database.StatusFinished,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	// insertJobExec doesn't carry incomplete_tail — only UpdateJobFields
+	// flips it (see database.TestMigrateV17IncompleteTail).
+	if updated := db.UpdateJobFields(jobID, map[string]any{"incomplete_tail": true}); updated == nil {
+		t.Fatal("UpdateJobFields(incomplete_tail) returned nil")
+	}
+
+	jobStagingPath := filepath.Join(stagingDir, jobID)
+	if err := os.MkdirAll(jobStagingPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := DeleteOrphanedFile(jobStagingPath, db, cfg); err == nil {
+		t.Fatal("expected DeleteOrphanedFile to refuse Finished+IncompleteTail job's staging dir, got nil error")
+	}
+
+	if _, err := os.Stat(jobStagingPath); err != nil {
+		t.Errorf("staging dir should still exist after refused delete: %v", err)
+	}
+}

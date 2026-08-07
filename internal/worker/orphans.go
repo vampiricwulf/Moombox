@@ -71,6 +71,24 @@ var activeJobStatuses = map[database.JobStatus]bool{
 	database.StatusMuxing:      true,
 }
 
+// jobNeedsStaging reports whether a Finished job's staging directory was
+// deliberately preserved rather than cleaned up, and so must NOT be offered
+// (or allowed) as a deletable orphan. Mirrors the exact carve-out applied at
+// job-finish time (see (*DownloadWorker) finishDownload's cleanup block in
+// worker.go): a Finished job's staging only survives cleanup for two
+// reasons — it's flagged IncompleteTail (tail is Resume-able) or it still
+// has an unmuxed captured part (recoverable via the Mux action).
+//
+// This predicate must stay precise: any OTHER Finished job's staging is a
+// genuine orphan (e.g. a stale dir left by an old/removed job) and must
+// remain cleanable, so this does NOT protect Finished jobs unconditionally.
+func jobNeedsStaging(db *database.Database, job *database.Job, jobStagingDir string) bool {
+	if job == nil || job.Status != database.StatusFinished {
+		return false
+	}
+	return job.IncompleteTail || hasUnmuxedPartsForJob(db, job.ID, jobStagingDir)
+}
+
 // DeleteOrphanedFile safely deletes a file or directory if it's under the configured directories.
 // Re-queries the database immediately before deletion and refuses if any currently-active job owns
 // the path — closes the race window between ScanOrphanedFiles and the user's delete click during
@@ -132,8 +150,11 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 			if err != nil {
 				return "", err
 			}
-			if job != nil && activeJobStatuses[job.Status] {
-				return jobID, nil
+			if job != nil {
+				jobStagingDir := filepath.Join(stagingDir, jobID)
+				if activeJobStatuses[job.Status] || jobNeedsStaging(db, job, jobStagingDir) {
+					return jobID, nil
+				}
 			}
 		}
 		return "", nil
@@ -267,9 +288,16 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 
 		// Check if job exists and its status
 		job, err := db.GetJob(jobID)
-		if err == nil && job != nil && activeStatuses[job.Status] {
-			// Active job — skip, staging is in use
-			continue
+		if err == nil && job != nil {
+			if activeStatuses[job.Status] {
+				// Active job — skip, staging is in use
+				continue
+			}
+			if jobNeedsStaging(db, job, absPath) {
+				// Finished but deliberately preserved (IncompleteTail or an
+				// unmuxed part) — not a genuine orphan, skip.
+				continue
+			}
 		}
 
 		// Compute directory size and modified time
