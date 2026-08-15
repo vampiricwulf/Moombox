@@ -80,6 +80,10 @@ const (
 	// O(batch); runDashLoop re-enters catch-up back-to-back to drain a larger
 	// gap without losing throughput.
 	maxCatchupBatch = 8 * ParallelDownloads
+
+	// catchUpRegrowInterval is how much elapsed time restores one segment of
+	// catch-up batch width after a failure episode.
+	catchUpRegrowInterval = 10 * time.Second
 )
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
@@ -310,6 +314,12 @@ type SegmentDownloader struct {
 	// lastCredentialRefresh gates OnCredentialRefresh to one call per
 	// credentialRefreshCooldown.
 	lastCredentialRefresh atomicTime
+
+	// lastCatchUpFailure timestamps the most recent catch-up failure episode.
+	// The batch ceiling is throttled relative to it so a 403 burst stops
+	// being answered with 48 simultaneous requests (moonarchive damps its
+	// batch the same way and regrows it over time).
+	lastCatchUpFailure atomicTime
 
 	// startedAt + transientRetries + lastTransientErr feed HealthUpdate
 	// snapshots. transientRetries / lastTransientErrMu are read-mostly

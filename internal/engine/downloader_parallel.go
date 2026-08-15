@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // runParallelCatchUp downloads segments in parallel to catch up to the live edge.
@@ -18,7 +19,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// Bound the batch so the reorder buffer below can't grow to the whole
 	// gap on a far-behind resume (see maxCatchupBatch). runDashLoop loops
 	// back into catch-up to drain a larger gap in bounded chunks.
-	targetSeq = min(targetSeq, curSeq+maxCatchupBatch)
+	targetSeq = min(targetSeq, curSeq+d.catchUpBatchLimit())
 	// Respect endSeq limit (for timestamp-based trimming)
 	if d.opts.EndSeq >= 0 && targetSeq > d.opts.EndSeq+1 {
 		targetSeq = d.opts.EndSeq + 1
@@ -92,9 +93,11 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				// gap-detection downstream isn't blind to "transient" vs "gone".
 				switch {
 				case errors.Is(fetchErr, ErrSegmentPermanent):
+					d.noteCatchUpFailureEpisode()
 					d.logger.Debug("[Downloader] catch-up segment permanently gone (403/410)",
 						"seq", item.seq)
 				case errors.Is(fetchErr, ErrSegmentRetriesExhausted):
+					d.noteCatchUpFailureEpisode()
 					d.logger.Debug("[Downloader] catch-up segment retries exhausted",
 						"seq", item.seq)
 				}
@@ -218,4 +221,23 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	}
 
 	return nextSeq, nil
+}
+
+// noteCatchUpFailureEpisode records that catch-up just hit failures, which
+// throttles the next batches via catchUpBatchLimit.
+func (d *SegmentDownloader) noteCatchUpFailureEpisode() {
+	d.lastCatchUpFailure.StoreNow()
+}
+
+// catchUpBatchLimit is the per-call segment ceiling for parallel catch-up:
+// the full maxCatchupBatch normally, and a throttled value that regrows by 1
+// every catchUpRegrowInterval after a failure episode. Mirrors moonarchive's
+// batch_count = min(1 + time_since_check/10, batch_count).
+func (d *SegmentDownloader) catchUpBatchLimit() int {
+	since := d.lastCatchUpFailure.Since()
+	if since >= time.Duration(maxCatchupBatch)*catchUpRegrowInterval {
+		return maxCatchupBatch
+	}
+	limit := 1 + int(since/catchUpRegrowInterval)
+	return min(limit, maxCatchupBatch)
 }
