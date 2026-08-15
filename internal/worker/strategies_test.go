@@ -10,6 +10,27 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
+// orderedSolver is a cipher.Solver double whose N() is caller-controlled —
+// unlike job.YT (a concrete *youtube.Service with no stub seam), the
+// cipher.Solver interface lets a test make the URL half's cipher call
+// arbitrarily slow and ctx-oblivious, standing in for "a deliberately slow
+// URL-fetch path" without needing real network access.
+type orderedSolver struct {
+	onN func(ctx context.Context, playerID, encryptedN string) (string, error)
+}
+
+func (s *orderedSolver) Sig(ctx context.Context, playerID, encryptedSig string) (string, error) {
+	return "", errors.New("orderedSolver: Sig not implemented")
+}
+
+func (s *orderedSolver) N(ctx context.Context, playerID, encryptedN string) (string, error) {
+	return s.onN(ctx, playerID, encryptedN)
+}
+
+func (s *orderedSolver) Batch(ctx context.Context, playerID string, sigs, ns []string) (map[string]string, map[string]string, error) {
+	return nil, nil, errors.New("orderedSolver: Batch not implemented")
+}
+
 // fakePotProvider is a minimal gvsTokenMinter double — it does NOT satisfy
 // *bgutils.PotProvider, so refreshGvsCredentials's asPotProvider() helper
 // resolves it to nil (nothing to invalidate) and minterUsable() reports it
@@ -274,5 +295,77 @@ func TestRefreshGvsCredentialsSkipsURLHalfWithoutSolver(t *testing.T) {
 	}
 	if token != "fresh-token" {
 		t.Errorf("token = %q, want fresh-token — the mint half must still run without a solver", token)
+	}
+}
+
+// TestRefreshGvsCredentialsMintsBeforeSlowURLFetch pins the ordering fix:
+// the token re-mint must run BEFORE the URL half (player-response re-fetch
+// + cipher resolve) on their shared refreshCtx deadline, so a slow URL
+// half can never starve the mint of budget. Without this ordering, a tight
+// clamped window (credentialRefreshTimeoutFor can go as low as ~10s at the
+// 30s MaxTimeout floor) plus an honestly-slow player-response fetch could
+// exhaust the whole window before the mint even started, handing
+// GeneratePoTokenString an already-expired context — killing the re-mint,
+// which is the credential that actually went stale (a stale URL still
+// serves until its own expiry; a stale/cached token is the exact thing
+// that just earned the 403).
+//
+// job.YT is deliberately left nil so the (un-fakeable, concrete-typed)
+// player-response re-fetch is skipped, isolating the URL half to its one
+// controllable piece: cipher resolution via a cipher.Solver double
+// (orderedSolver) whose N() is made deliberately slow and ctx-oblivious —
+// the worst case for a URL half that would run after the mint. The outer
+// ctx is given a short deadline to stand in for a tight clamped budget,
+// without re-testing credentialRefreshTimeoutFor's own arithmetic (that's
+// TestCredentialRefreshTimeoutFor's job) — context.WithTimeout composes,
+// so a short outer deadline is exactly as binding on refreshCtx as a low
+// clamp would be.
+func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
+	var trace []string
+	var mintCtxErr error
+
+	fake := &fakePotProvider{
+		generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
+			trace = append(trace, "mint")
+			mintCtxErr = ctx.Err()
+			return "fresh-token", nil
+		},
+	}
+	slowSolver := &orderedSolver{
+		onN: func(ctx context.Context, playerID, encryptedN string) (string, error) {
+			trace = append(trace, "urlresolve")
+			// Ignores ctx entirely and blocks well past the short outer
+			// deadline below — the worst-case "honestly slow, doesn't even
+			// respect cancellation" URL fetch the ordering fix protects
+			// against. If mint ran first, it already returned before this
+			// call even started, so this can't have starved it.
+			time.Sleep(300 * time.Millisecond)
+			return "decrypted-n", nil
+		},
+	}
+
+	job := &JobContext{
+		Job: &database.Job{ID: "test-job", VideoID: "vid1"},
+		// job.YT stays nil — see the doc comment above.
+		Logger: &discardLogger{},
+	}
+	videoInfo := &youtube.VideoInfo{
+		PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
+		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1&n=abc123"}},
+	}
+
+	shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, token := refreshGvsCredentials(shortCtx, job, videoInfo, 140, slowSolver, nil, fake, "vd-123", "test")
+
+	if token != "fresh-token" {
+		t.Fatalf("token = %q, want fresh-token — the mint must succeed despite the slow URL half that runs after it", token)
+	}
+	if mintCtxErr != nil {
+		t.Errorf("mint's context was already expired (%v) at call time — the URL half must not run before the mint and starve its budget", mintCtxErr)
+	}
+	if len(trace) != 2 || trace[0] != "mint" || trace[1] != "urlresolve" {
+		t.Errorf("call order = %v, want [mint urlresolve] — the mint must run before the URL half", trace)
 	}
 }

@@ -368,8 +368,25 @@ func minterUsable(m gvsTokenMinter) bool {
 // resolveFormatURLByItag still runs cipher resolution afterward exactly as
 // before, just against fresh formats instead of stale ones.
 //
-// The whole call (re-fetch + resolve + mint) is bounded by a per-job
-// timeout derived from ctx — see credentialRefreshTimeoutFor.
+// The whole call (mint + re-fetch + resolve) is bounded by a per-job
+// timeout derived from ctx — see credentialRefreshTimeoutFor. The mint runs
+// FIRST, against that full remaining budget, and the URL half (re-fetch +
+// resolve) spends whatever is left on the SAME shared deadline. This order
+// is deliberate, not incidental: credentialRefreshTimeoutFor's clamp can
+// take the whole budget as low as ~1/3 of a 30s-floor MaxTimeout (10s), and
+// a cold BotGuard mint can genuinely need tens of seconds — the sidecar's
+// own RequestTimeout budgets 90s for exactly that case. If the player-
+// response re-fetch ran first on a tight budget, a slow-but-honest fetch
+// could exhaust the whole window and hand GeneratePoTokenString an
+// already-expired context, killing the re-mint — which is the half this
+// entire recovery path exists for; a stale URL still fetches the same
+// (still-valid-until-expiry) bytes, but a stale/cached token is the exact
+// credential that just earned the 403. Minting first guarantees it gets a
+// full shot at the budget regardless of how slow the URL half turns out to
+// be; the URL half degrading to "" under a starved remainder is the
+// acceptable half to lose, matching the manual cancel-and-resume workaround
+// this callback replaces — a fresh mint alone is a genuine (if partial)
+// recovery, a fresh URL alone with a stale token is not.
 //
 // binding is the GVS content binding to mint under, resolved ONCE by the
 // caller (poTokenBinding, at strategy setup) rather than recomputed here.
@@ -414,6 +431,21 @@ func refreshGvsCredentials(
 
 	invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, asPotProvider(potProvider), tag)
 
+	// Mint FIRST — before the URL half spends any of the shared refreshCtx
+	// deadline. See the doc comment above for why: the clamp can leave as
+	// little as ~10s, a cold mint can need tens of seconds, and the token is
+	// the credential that actually went stale.
+	if minterUsable(potProvider) {
+		// bypassCache: the cached token is the credential that just 403'd —
+		// handing it back unchanged would make this refresh a no-op.
+		if token, err := potProvider.GeneratePoTokenString(refreshCtx, binding, true); err != nil {
+			job.Logger.Warn("[POT] credential refresh: re-mint failed",
+				"jobID", job.Job.ID, "tag", tag, "err", err)
+		} else {
+			poToken = token
+		}
+	}
+
 	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
 		formats := videoInfo.Formats
 		playerURL := videoInfo.PlayerURL
@@ -433,17 +465,6 @@ func refreshGvsCredentials(
 				"jobID", job.Job.ID, "tag", tag, "err", err)
 		} else {
 			baseURL = fresh
-		}
-	}
-
-	if minterUsable(potProvider) {
-		// bypassCache: the cached token is the credential that just 403'd —
-		// handing it back unchanged would make this refresh a no-op.
-		if token, err := potProvider.GeneratePoTokenString(refreshCtx, binding, true); err != nil {
-			job.Logger.Warn("[POT] credential refresh: re-mint failed",
-				"jobID", job.Job.ID, "tag", tag, "err", err)
-		} else {
-			poToken = token
 		}
 	}
 
