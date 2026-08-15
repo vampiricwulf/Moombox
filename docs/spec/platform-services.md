@@ -697,7 +697,7 @@ JSON-RPC-style, line-delimited (one JSON object per line, separated by `\n`). Al
 | Method | Params | Result | Notes |
 |---|---|---|---|
 | `ping` | (none) | `"pong"` | startup health check |
-| `generatePoToken` | `{binding, challenge?, freshMinter?}` | `{poToken, binding, expiresAt, minterSource, minterFresh}` | hot path; `challenge`/`freshMinter` are used only by GVS mints (see "GVS (Segment-URL) PO Tokens" below) — player-API mints omit both and get the cached minter |
+| `generatePoToken` | `{binding, challenge?, freshMinter?}` | `{poToken, binding, expiresAt, minterSource, minterFresh}` | hot path; both GVS and player mints send `challenge`, only GVS sets `freshMinter` (see "GVS (Segment-URL) PO Tokens" below). The interpreter URL inside `challenge` is origin-gated before any fetch |
 | `invalidateCaches` | (none) | `"ok"` | wipes sidecar's session + minter caches |
 | `invalidateIT` | (none) | `"ok"` | wipes only minter cache (force fresh BotGuard) |
 | `getStats` | (none) | `{cachedMinters, cachedSessions, mintsTotal, mintsErrored}` | observability |
@@ -799,11 +799,15 @@ Expired entries are cleaned up in two ways:
 
 ### GVS (Segment-URL) PO Tokens
 
-Player-API tokens (`GeneratePoToken` / `GeneratePoTokenString`, used by `fetchWithClient` / `fetchWithEmbedded`) are unchanged from everything above: cached minter, visitorData content binding, 6-hour session cache. GVS (segment-URL) tokens are a separate population minted under a different, deliberately cache-hostile policy — moonarchive parity, added 2026-08-14 (attestation POT coherence) after a premiere broadcast 403'd every segment for its full runtime because the minting session had no tie to the watch-page session that resolved the stream.
+Moombox mints two populations of PO token, and they follow different rules because upstream treats them differently.
+
+**Player-API tokens** (`GeneratePlayerPoToken`, used by `fetchWithClient` / `fetchWithEmbedded`) bind to the **video ID** and are minted from the watch page's attestation challenge, but keep normal session caching. yt-dlp binds `PoTokenContext.PLAYER` to the video ID unconditionally (`pot/utils.py`), and moonarchive mints one challenge-sourced videoID-bound token that serves both the player request and GVS. Caching is retained deliberately: player calls fire on every probe and refresh (several per live job per hour, plus monitor polls), so fresh-minting each one would cost a multi-second BotGuard pass on the hot path. Note this token is injected whenever a video ID is available — it no longer requires visitor data, since the binding no longer derives from it.
+
+**GVS (segment-URL) tokens** are minted under a deliberately cache-hostile policy — moonarchive parity, added 2026-08-14 (attestation POT coherence) after a premiere broadcast 403'd every segment for its full runtime because the minting session had no tie to the watch-page session that resolved the stream.
 
 `PotProvider.GenerateGvsPoToken(ctx, binding, challenge) (GvsMint, error)` is called once per download start by each segment-download strategy (`internal/worker/strategy_youtube_dash.go`, `strategy_youtube_manifestless_dash.go`, `strategy_youtube_hls.go`):
 
-- **Binding**: always the video ID (`job.Job.VideoID`) — supersedes the former visitorData/channelID binding scheme.
+- **Binding**: resolved by `youtube.GvsContentBinding` (`internal/youtube/pot_binding.go`), a port of yt-dlp's `get_webpo_content_binding`, and carried on `VideoInfo.GvsBinding`/`GvsBindingKind` so every strategy asks once and cannot drift. The rule, in order: the **video ID** when the page's player configs carry `html5_generate_content_po_token=true` (the experiment under which YouTube switches GVS binding to the video ID — active as of 2026-08-15, verified against a live watch page); otherwise the **datasync ID** for an authenticated session; otherwise **visitor data**. A last-resort video-ID/channel-ID fallback covers a session where none of those survived extraction, so a mint is never bound to an empty string. Moombox hardcoded the video ID until 2026-08-15; that was correct only while the experiment stays on, and a session with it off needs datasync binding or earns silent 403s.
 - **Challenge**: `videoInfo.AttestationChallenge`, extracted from the watch page's own `window.ytAtN(...)` blob (see below). Empty when the page carried none, in which case the sidecar falls back to its own `/att/get` fetch — today's prior behavior, preserved exactly as the degraded case.
 - **Cache policy**: bypasses the session cache entirely (no read, no write) — every call mints fresh, and the sidecar is told `freshMinter: true` so it regenerates its BotGuard minter for this call rather than reuse an already-cached one. The fresh minter **replaces** the sidecar's cached minter, so subsequent player-API mints passively pick up the more session-coherent one. Concurrent GVS mints share the sidecar's single in-flight regeneration (`minterPromise`); no provider-side inflight entry is added — per-binding minting off a shared minter is cheap, and adding provider-level dedup here would hand a stale (non-fresh) result to whichever caller lost the race.
 - **Fallback**: sidecar unavailable → runs the existing goja mint-and-cache flow with the challenge ignored, reported as `minterSource=goja-fallback`.
@@ -812,14 +816,31 @@ Player-API tokens (`GeneratePoToken` / `GeneratePoTokenString`, used by `fetchWi
 
 #### Watch-page challenge extraction (`internal/youtube/watch_page.go`)
 
-`extractAttestationChallenge(html)` captures the JS object literal passed to `window.ytAtN(...)` — regex `window\.ytAtN\(\s*(\{[\s\S]*?\})\s*\)`, RE2-safe (no lookarounds), mirroring moonarchive's `INITIAL_ATTESTATION_PATTERN`. The match is run through `JSToJSON` (a faithful Go port of yt-dlp's `js_to_json`, `internal/utils/jsjson.go`) to reach valid JSON, unmarshaled, and its `R` key — itself a JSON string — is unmarshaled again to pull out `bgChallenge`, which is re-marshaled compact as the challenge payload. An absent blob, a `JSToJSON` failure, or a missing `R`/`bgChallenge` key all resolve to `""` with a Debug log, never an error — absence is a normal result that the sidecar's `/att/get` fallback already handles. The value rides on `WatchPageResult.AttestationChallenge` → `VideoInfo.AttestationChallenge`, assigned on every return path of both `GetVideoInfoAuthenticated` and `GetVideoInfoPublic` (including the ANDROID_VR / web_embedded / web_creator / watch-page-fallback routes that skip `mergeWatchPageMetadata`) so no extraction path silently drops it. The live quality-monitor refresh loop re-extracts every few minutes, so a re-mint after a downloader restart uses the freshest available challenge.
+`extractAttestationChallenge(html)` locates `window.ytAtN(` and then walks the argument with a **string-aware balanced-brace scan** (`scanBalancedObject`) rather than a non-greedy regex. moonarchive's `INITIAL_ATTESTATION_PATTERN` uses the regex form, but a `})` sequence anywhere inside the opaque payload truncates that match into an unbalanced fragment that then fails to parse — indistinguishable from "the page had no challenge". The captured literal runs through `JSToJSON` (a faithful Go port of yt-dlp's `js_to_json`, `internal/utils/jsjson.go`), is unmarshaled, and its `R` key — itself a JSON string, delivered with `\xNN` escapes on real pages — is unmarshaled again to pull out the top-level `bgChallenge`, re-marshaled compact as the challenge payload.
+
+Every failure resolves to `""` with a **distinct reason** (the `atn*` constants, surfaced as `WatchPageResult.AttestationReason` and logged as `reason=`): no call on the page, unbalanced argument, JS-to-JSON failure, outer parse failure, no `R` key, `R` not JSON, no `bgChallenge`, bad challenge shape, no `interpreterUrl`, or disallowed interpreter host. A single catch-all reason would let a silently-broken extractor masquerade as a genuine absence, which is precisely the confusion this subsystem exists to eliminate. Absence is never an error — the sidecar's `/att/get` fallback handles it.
+
+The value rides on `WatchPageResult.AttestationChallenge` → `VideoInfo.AttestationChallenge` via `withAttestation`, applied at every return path of both `GetVideoInfoAuthenticated` and `GetVideoInfoPublic` (including the ANDROID_VR / web_embedded / web_creator / watch-page-fallback routes that skip `mergeWatchPageMetadata`), which also resolves the GVS binding at the same point. The live quality-monitor refresh loop re-extracts every few minutes, so a re-mint after a downloader restart uses the freshest available challenge.
+
+#### Interpreter-origin gate (security boundary)
+
+The sidecar **executes** the interpreter body it fetches (`new Function(js)()`), and watch-page HTML embeds attacker-authored video metadata verbatim — JSON escaping leaves braces, parens and single quotes intact, so a crafted description can present itself as a `ytAtN` challenge, and on a real page the description precedes the genuine blob (verified 2026-08-15: description at byte ~740k, real call at ~802k). Before this gate, that reached `new Function()` with an attacker-chosen host.
+
+Two independent checks now enforce the same rule — `validateChallengeOrigin` in `internal/youtube/watch_page.go` (so a hostile challenge never leaves the Go process) and `assertGoogleHost` in `bgutil-sidecar/src/server.js` (so the sidecar never trusts its caller):
+
+- The interpreter URL must be `https:` on a Google-**authored-code** host: `google.com`, `gstatic.com`, `googleapis.com`, `youtube.com`, `youtube-nocookie.com`, `google.cn`, regional `google.<tld>` domains, plus the exact hosts `s.ytimg.com` / `www.ytimg.com`. Suffix matches are dot-anchored, so `evilgoogle.com` and `google.com.evil.tld` fail.
+- Google-owned domains carrying **user-uploaded** bytes are excluded on purpose — `googleusercontent.com`, `ggpht.com`, `googlevideo.com`, and `i.ytimg.com`. A third party chooses those bytes, and an image/JS polyglot uploaded there would sail through a naive "is it Google?" test.
+- A page-sourced challenge carrying inline `interpreterJavascript` instead of a URL is **refused**, even though bgutils-js treats the two as interchangeable: inline script scraped from HTML has no origin to check at all. Those fall back to `/att/get`, whose response is a genuine YouTube API result; the sidecar honors inline script only for challenges it fetched itself (`trusted = minterSource === "att_get"`). Live YouTube ships `interpreterUrl` and never inline (verified 2026-08-15), so this costs nothing today.
+
+A rejected host is reported by name in the reason string, so a genuinely-Google host missing from the list surfaces as "add this name" rather than an unexplained loss of session coherence.
 
 #### Sidecar RPC additions
 
 `generatePoToken` gained two optional params and three result fields (also reflected in the IPC protocol table above):
 
-- `challenge` (param, string) — a parsed `bgChallenge` JSON string. When present and well-formed (has `program` and `interpreterUrl`), `generateMinter` builds the BotGuard minter from it instead of fetching its own via `/att/get`. Malformed or absent challenges fall back to `/att/get` with a Warn-level log.
-- `freshMinter` (param, bool) — forces `getOrCreateMinter` to regenerate even when the cached minter is still valid.
+- `challenge` (param, string) — a `bgChallenge` JSON string. When present and well-formed (has `program` and `interpreterUrl`, and its host passes `assertGoogleHost`), `generateMinter` builds the BotGuard minter from it instead of fetching its own via `/att/get`. Malformed, disallowed, or absent challenges fall back to `/att/get` with a Warn-level log. Sent by both the GVS and player mints.
+- `freshMinter` (param, bool) — forces `getOrCreateMinter` to regenerate even when the cached minter is still valid. Set by GVS mints; player mints omit it and take the cached minter.
+- In-flight regenerations are **keyed by challenge**: a caller joins an in-flight BotGuard pass only when it supplied the same challenge. A caller with a different challenge waits and then regenerates its own rather than silently inheriting another session's minter — the earlier shared-promise behavior reported `minterSource=challenge` for a minter built from a *different* video's page, which is worse than no provenance at all. The cost is that two jobs starting within the same BotGuard window serialize.
 - `minterSource` (result, string) — `"challenge"` or `"att_get"`, whichever input built the minter that served this specific mint.
 - `minterFresh` (result, bool) — whether this mint triggered a fresh BotGuard regeneration (`true`) or reused an already-warm minter (`false`).
 
@@ -830,14 +851,16 @@ Each GVS mint attempt logs one line at Info (`[POT] GVS mint`) on success or War
 | Field | Meaning |
 |---|---|
 | `jobID` | the job that requested the mint |
-| `binding` | always `"videoID"` today |
+| `binding` | which rule produced the content binding: `"videoID"` \| `"datasyncID"` \| `"visitorData"` \| `"channelID"` |
 | `challenge` | `"page"` if the watch page carried a `ytAtN` challenge, else `"none"` (`challengeLabel` helper, `internal/worker/strategies.go`) |
 | `minterSource` | `"challenge"` \| `"att_get"` \| `"goja-fallback"` |
 | `minterFresh` | whether this call triggered a fresh BotGuard run |
 | `sidecar` | whether the mint went through the sidecar (`true`) or the goja fallback (`false`) |
 | `tokenLength` | length of the minted PO token string — a cheap sanity signal without logging the token itself |
 
-The line exists so that if a future premiere still 403s, the log alone identifies the exact configuration in play — no reproduction needed. If POT-enforced media 403s despite challenge-sourced minters, the next suspect is datasync-ID binding: yt-dlp binds GVS tokens to the account's datasync ID when cookies ride along with media requests (Moombox does send account cookies on segment fetches), while this path binds to video ID.
+The line exists so that if a future premiere still 403s, the log alone identifies the exact configuration in play — no reproduction needed. Datasync-ID binding is no longer a pending suspect: the full yt-dlp rule is implemented (see **Binding** above), so an authenticated session without the experiment already binds to its datasync ID.
+
+The remaining known divergence from upstream, should POT-enforced media still 403: yt-dlp's `WEBPO_CLIENTS` list does **not** include ANDROID_VR, meaning upstream never mints a WebPO GVS token for formats sourced from that client — android_vr's policy is `not_required_with_player_token=True`, i.e. a *player* token satisfies GVS for it. Moombox's ANDROID_VR DASH-fallback formats do receive a WebPO GVS token. That is now paired with a correctly-bound player token, which is the combination upstream relies on, but it remains the first place to look.
 
 #### Mid-job re-mint: none
 
