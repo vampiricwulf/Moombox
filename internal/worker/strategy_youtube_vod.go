@@ -199,7 +199,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			StartSeq:    0,
 			EndSeq:      0, // Single file download
 			IsDirectURL: true,
-			Logger:      job.Logger,
+			Logger:      newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 		})
 	}
 
@@ -210,7 +210,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			StartSeq:    0,
 			EndSeq:      0,
 			IsDirectURL: true,
-			Logger:      job.Logger,
+			Logger:      newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 		})
 	}
 

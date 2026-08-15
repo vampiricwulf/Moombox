@@ -233,7 +233,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			// (waits instead of erroring) so a flap right after an outage
 			// resume can't burn the retry budget and end the session.
 			IsOnline: connIsOnline(o.conn),
-			Logger:   o.logger,
+			Logger:   newScopedLogger(jobCtx.Logger, "jobID", jobCtx.Job.ID, "stream", "video"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				if isVod {
 					return false, nil

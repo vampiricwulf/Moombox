@@ -281,7 +281,7 @@ func DownloadManifestlessDash(
 			CookieHeader:    cookieHeader,
 			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
 			IsOnline:        isOnline,
-			Logger:          job.Logger,
+			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				if err != nil {
@@ -335,7 +335,7 @@ func DownloadManifestlessDash(
 			CookieHeader:    cookieHeader,
 			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
 			IsOnline:        isOnline,
-			Logger:          job.Logger,
+			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				if err != nil {
