@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -215,5 +216,63 @@ func TestDashLoopBehindHeadBudgetExhaustionWarns(t *testing.T) {
 	// append the missing tail instead of truncating and starting over.
 	if _, err := os.Stat(out + ".resume.json"); err != nil {
 		t.Errorf("resume sidecar missing after incomplete finalize (stat err = %v) — retry would restart from scratch", err)
+	}
+}
+
+// TestDashLoopRecoversFromCredentialExpiry reproduces the 2026-08-15
+// mid-stream-join stall end to end: segments below the head start 403ing
+// after N successes -- the credentials went stale mid-download, the stream
+// itself did not end -- and the loop must refresh credentials via
+// OnCredentialRefresh and carry on rather than escalating to ErrQualityLost
+// (which would tear the downloader down for a full restart). Before the
+// fix, handleGoneError never called OnCredentialRefresh, so the burst rides
+// past goneRetryDuringDownload and CheckStreamStatus's "still live" verdict
+// turns it into ErrQualityLost -- see the report for how that was confirmed.
+//
+// head is kept below stayBehindSegments+CatchupThreshold so segsBehind
+// never crosses the parallel-catch-up gate: every fetch, including the
+// recovery, flows through the single-segment path (handleGoneError) rather
+// than the catch-up worker pool's own fetchSegmentWithRetry recovery, which
+// TestForbiddenBehindHeadRefreshesAndRetries already covers directly. This
+// test is the missing end-to-end proof that runDashLoop's sequential loop
+// wires the same recovery through handleGoneError.
+func TestDashLoopRecoversFromCredentialExpiry(t *testing.T) {
+	t.Parallel()
+	const expireAfter = 20 // seq 0..19 succeed; 20+ 403 until refreshed
+	const head = 35        // < stayBehindSegments(30)+CatchupThreshold(10): no catch-up
+	const endSeq = 34
+	var refreshed atomic.Bool
+
+	_, srv := newFakeGVS(t, head, func(seq, attempt int) int {
+		// Credentials go stale after `expireAfter` segments and only a
+		// refresh revives them -- exactly what production showed (~60-100
+		// segments per credential, then 403 until a fresh token arrived).
+		if seq >= expireAfter && !refreshed.Load() {
+			return http.StatusForbidden
+		}
+		return http.StatusOK
+	})
+
+	out := filepath.Join(t.TempDir(), "v")
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/videoplayback?id=itest.4&itag=140",
+		OutputFile: out,
+		EndSeq:     endSeq,
+		MaxTimeout: 30 * time.Second,
+		// Still live, not post-live: this models a mid-stream join, the
+		// scenario that actually failed in production.
+		CheckStreamStatus: func(context.Context) (bool, error) { return false, nil },
+		OnCredentialRefresh: func() (string, string) {
+			refreshed.Store(true)
+			return "", "fresh-token"
+		},
+	})
+
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start = %v, want nil (credential refresh should have recovered the download)", err)
+	}
+	wantSegments(t, out, 0, endSeq)
+	if !refreshed.Load() {
+		t.Error("OnCredentialRefresh never fired")
 	}
 }
