@@ -41,6 +41,10 @@ var (
 	// continuation token extraction. Mirrors the same regex used by
 	// internal/chat/api.go for its standalone watch-page fetch path.
 	ytInitialDataRegex = regexp.MustCompile(`(?s)var ytInitialData = ({.+?});</script>`)
+	// ytAtNRe captures the JS object literal passed to window.ytAtN(...).
+	// Mirrors moonarchive's INITIAL_ATTESTATION_PATTERN; RE2-safe (no
+	// lookarounds), non-greedy so it stops at the first plausible close.
+	ytAtNRe = regexp.MustCompile(`window\.ytAtN\(\s*(\{[\s\S]*?\})\s*\)`)
 )
 
 // WatchPageResult contains data extracted from a YouTube watch page.
@@ -62,6 +66,13 @@ type WatchPageResult struct {
 	// continuation token. Non-nil + empty ChatContinuation means "no chat
 	// available" with diagnostic context for the caller's debug log.
 	ChatErr error
+	// AttestationChallenge is the compact JSON of the BotGuard bgChallenge
+	// YouTube embedded in this page load via window.ytAtN(...) — the
+	// session's own attestation challenge, used to mint session-coherent
+	// GVS PO tokens (moonarchive 96344fe parity). Empty when the page did
+	// not carry one or it failed to parse; consumers must treat empty as
+	// "fall back to the sidecar's /att/get flow".
+	AttestationChallenge string
 }
 
 // FetchWatchPage fetches and parses a YouTube watch page.
@@ -87,14 +98,16 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 
 	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(html)
 	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(html)
+	attestationChallenge := extractAttestationChallenge(html)
 
 	return &WatchPageResult{
-		Ytcfg:            ytcfg,
-		IsLoggedIn:       isLoggedIn,
-		PlayerResponse:   playerResponse,
-		ChatContinuation: chatContinuation,
-		ChatIsReplay:     chatIsReplay,
-		ChatErr:          chatErr,
+		Ytcfg:                  ytcfg,
+		IsLoggedIn:             isLoggedIn,
+		PlayerResponse:         playerResponse,
+		ChatContinuation:       chatContinuation,
+		ChatIsReplay:           chatIsReplay,
+		ChatErr:                chatErr,
+		AttestationChallenge:   attestationChallenge,
 	}, nil
 }
 
@@ -288,4 +301,35 @@ func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, erro
 	}
 
 	return result, nil
+}
+
+// extractAttestationChallenge pulls the BotGuard bgChallenge out of a watch
+// page's window.ytAtN(...) blob. The blob is a JS object literal whose "R"
+// key holds a JSON string; inside that is bgChallenge. Returns compact JSON
+// of bgChallenge, or "" on any miss/parse failure — absence is a normal
+// result (the POT sidecar falls back to /att/get), never an error.
+func extractAttestationChallenge(html string) string {
+	m := ytAtNRe.FindStringSubmatch(html)
+	if m == nil {
+		return ""
+	}
+	jsonStr, err := utils.JSToJSON(m[1], nil, false)
+	if err != nil {
+		return ""
+	}
+	var outer map[string]any
+	if json.Unmarshal([]byte(jsonStr), &outer) != nil {
+		return ""
+	}
+	rStr, ok := outer["R"].(string)
+	if !ok {
+		return ""
+	}
+	var r struct {
+		BgChallenge json.RawMessage `json:"bgChallenge"`
+	}
+	if json.Unmarshal([]byte(rStr), &r) != nil || len(r.BgChallenge) == 0 {
+		return ""
+	}
+	return string(r.BgChallenge)
 }
