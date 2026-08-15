@@ -29,6 +29,12 @@ var (
 	sessionIndexRegex     = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
 	delegatedSessionRegex = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
 	dataSyncIDRegex       = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
+	// gvsBindVideoIDRegex detects the html5_generate_content_po_token
+	// experiment inside WEB_PLAYER_CONTEXT_CONFIGS' serializedExperimentFlags.
+	// Those flags are a query string embedded in a JSON string, so '=' arrives
+	// backslash-u-escaped on real pages (verified 2026-08-15); accept the
+	// escaped and literal forms.
+	gvsBindVideoIDRegex = regexp.MustCompile(`html5_generate_content_po_token(?:=|\\u003d)true`)
 	// Matches encryptedHostFlags in flat JSON objects. May fail if nested objects
 	// precede the field (YouTube's embed page config is typically flat here).
 	encryptedHostFlagsRegex = regexp.MustCompile(`"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":\{[^}]*"encryptedHostFlags":"([^"]+)"`)
@@ -296,6 +302,13 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
 	if m := dataSyncIDRegex.FindStringSubmatch(html); m != nil {
 		ytcfg.DataSyncID = strings.Clone(m[1])
 	}
+
+	// Detect the experiment that switches GVS PO-token binding to the video
+	// ID (see GvsContentBinding). Presence of the flag anywhere in the page's
+	// player configs is sufficient — yt-dlp parses each config's
+	// serializedExperimentFlags and takes the last value, but YouTube ships
+	// the same value across all of them.
+	ytcfg.GvsBindToVideoID = gvsBindVideoIDRegex.MatchString(html)
 
 	// Extract ytInitialPlayerResponse (try multiple patterns)
 	var playerResponse map[string]any

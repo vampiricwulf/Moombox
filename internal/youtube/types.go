@@ -54,6 +54,14 @@ type VideoInfo struct {
 	// download strategies can mint session-coherent GVS PO tokens.
 	AttestationChallenge string `json:"-"`
 
+	// GvsBinding is the content binding GVS (segment-URL) PO tokens for this
+	// video must carry, and GvsBindingKind names the rule that produced it
+	// ("videoID", "datasyncID", "visitorData", "channelID"). Resolved once in
+	// withAttestation per yt-dlp's get_webpo_content_binding — see
+	// GvsContentBinding — so download strategies never re-derive it.
+	GvsBinding     string `json:"-"`
+	GvsBindingKind string `json:"-"`
+
 	// PublishedAt is the probe's authoritative publish date, status-aware
 	// per spec §12 — see extractPublishedAt. RFC3339: a real broadcast
 	// start carries its own time, and a bare-date microformat value is
@@ -153,11 +161,16 @@ type YtcfgData struct {
 	SessionIndex       *int
 	DelegatedSessionID string
 	DataSyncID         string
-	Title              string
-	Author             string
-	ChannelID          string
-	Description        string
-	ThumbnailURL       string
+	// GvsBindToVideoID mirrors yt-dlp's gvs_bind_to_video_id: true when the
+	// page's player configs carry html5_generate_content_po_token=true, the
+	// experiment under which GVS PO tokens bind to the video ID instead of
+	// the datasync ID / visitor data. See GvsContentBinding.
+	GvsBindToVideoID bool
+	Title            string
+	Author           string
+	ChannelID        string
+	Description      string
+	ThumbnailURL     string
 }
 
 // AuthLevel constants for format deduplication. Lower = preferred during

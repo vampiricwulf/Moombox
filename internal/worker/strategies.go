@@ -251,6 +251,22 @@ func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher
 	}
 }
 
+// gvsBinding returns the content binding a GVS mint must use for this job,
+// plus the label the provenance log reports. The value is resolved once
+// during extraction (youtube.GvsContentBinding, mirroring yt-dlp's
+// get_webpo_content_binding) and carried on VideoInfo, so every strategy asks
+// the same question and gets the same answer.
+//
+// The videoID fallback covers VideoInfo values that never passed through a
+// watch-page fetch (probe-only paths); it matches what the experiment branch
+// would have chosen and is never empty.
+func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind string) {
+	if videoInfo != nil && videoInfo.GvsBinding != "" {
+		return videoInfo.GvsBinding, videoInfo.GvsBindingKind
+	}
+	return job.Job.VideoID, youtube.BindingVideoID
+}
+
 // challengeLabel compresses a challenge value to the label the provenance
 // log line reports: "page" (watch-page ytAtN challenge present) or "none".
 //

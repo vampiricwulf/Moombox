@@ -105,15 +105,16 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// see spec 2026-08-14 attestation POT coherence §3.
 	var dashPoToken string
 	if potProvider != nil {
-		mint, err := potProvider.GenerateGvsPoToken(ctx, job.Job.VideoID, videoInfo.AttestationChallenge)
+		bindingValue, bindingKind := gvsBinding(job, videoInfo)
+		mint, err := potProvider.GenerateGvsPoToken(ctx, bindingValue, videoInfo.AttestationChallenge)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
-				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge), "err", err)
+				"binding", bindingKind, "challenge", challengeLabel(videoInfo.AttestationChallenge), "err", err)
 		} else if mint.PoToken != "" {
 			dashPoToken = mint.PoToken
 			dashURL = strings.TrimRight(dashURL, "/") + "/pot/" + mint.PoToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge),
+				"binding", bindingKind, "challenge", challengeLabel(videoInfo.AttestationChallenge),
 				"minterSource", mint.MinterSource, "minterFresh", mint.MinterFresh,
 				"sidecar", mint.ViaSidecar, "tokenLength", len(mint.PoToken))
 		} else {

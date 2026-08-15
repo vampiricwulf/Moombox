@@ -16,14 +16,27 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// withAttestation stamps the watch page's attestation challenge onto the
-// VideoInfo being returned. Applied at every GetVideoInfo* return site
-// explicitly — NOT via mergeWatchPageMetadata, which several early returns
-// skip or call with a nil source.
-func withAttestation(info *VideoInfo, wp *WatchPageResult) *VideoInfo {
-	if info != nil && wp != nil {
-		info.AttestationChallenge = wp.AttestationChallenge
+// withAttestation stamps the watch page's attestation challenge and the GVS
+// PO-token content binding onto the VideoInfo being returned. Applied at
+// every GetVideoInfo* return site explicitly — NOT via
+// mergeWatchPageMetadata, which several early returns skip or call with a nil
+// source.
+//
+// The binding is resolved here, at the one point that holds all three inputs
+// (the experiment flag and datasync ID from ytcfg, the login state from the
+// page), so download strategies never re-derive it and cannot drift apart.
+func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *VideoInfo {
+	if info == nil {
+		return info
 	}
+	if wp != nil {
+		info.AttestationChallenge = wp.AttestationChallenge
+		info.GvsBinding, info.GvsBindingKind = GvsContentBinding(videoID, wp.Ytcfg, wp.IsLoggedIn, info.ChannelID)
+		return info
+	}
+	// No watch page at all (fetch failed): still produce a usable binding
+	// rather than leaving the strategies to invent one.
+	info.GvsBinding, info.GvsBindingKind = GvsContentBinding(videoID, nil, false, info.ChannelID)
 	return info
 }
 
@@ -199,7 +212,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 			mergeWatchPageMetadata(embResult, wpParsed)
 			embResult.Formats = deduplicateFormats(formatPool)
-			return withAttestation(embResult, wp), nil
+			return withAttestation(embResult, wp, videoID), nil
 		} else {
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 		}
@@ -232,7 +245,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 					if vrResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(vrResult) {
 						mergeWatchPageMetadata(vrResult, wpParsed)
 						vrResult.Formats = deduplicateFormats(formatPool)
-						return withAttestation(vrResult, wp), nil
+						return withAttestation(vrResult, wp, videoID), nil
 					}
 				}
 			}
@@ -240,7 +253,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			// Fall back to watch page if all clients failed
 			if wpParsed != nil {
 				wpParsed.Formats = deduplicateFormats(formatPool)
-				return withAttestation(wpParsed, wp), nil
+				return withAttestation(wpParsed, wp, videoID), nil
 			}
 		}
 
@@ -248,10 +261,10 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			mergeWatchPageMetadata(wcResult, wpParsed)
 		}
 		wcResult.Formats = deduplicateFormats(formatPool)
-		return withAttestation(wcResult, wp), nil
+		return withAttestation(wcResult, wp, videoID), nil
 	}
 
-	return withAttestation(finalizeVideoInfo(result, wpParsed, formatPool), wp), nil
+	return withAttestation(finalizeVideoInfo(result, wpParsed, formatPool), wp, videoID), nil
 }
 
 // GetVideoInfoPublic fetches video info without authentication.
@@ -282,7 +295,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	if err != nil {
 		if wpParsed != nil {
 			wpParsed.Formats = deduplicateFormats(formatPool)
-			return withAttestation(wpParsed, wp), nil
+			return withAttestation(wpParsed, wp, videoID), nil
 		}
 		return nil, err
 	}
@@ -299,7 +312,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 			mergeWatchPageMetadata(embResult, wpParsed)
 			embResult.Formats = deduplicateFormats(formatPool)
-			return withAttestation(embResult, wp), nil
+			return withAttestation(embResult, wp, videoID), nil
 		} else {
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 		}
@@ -312,13 +325,13 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 			if vrResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(vrResult) {
 				mergeWatchPageMetadata(vrResult, wpParsed)
 				vrResult.Formats = deduplicateFormats(formatPool)
-				return withAttestation(vrResult, wp), nil
+				return withAttestation(vrResult, wp, videoID), nil
 			}
 		}
 
 		if wpParsed != nil {
 			wpParsed.Formats = deduplicateFormats(formatPool)
-			return withAttestation(wpParsed, wp), nil
+			return withAttestation(wpParsed, wp, videoID), nil
 		}
 	}
 
@@ -342,7 +355,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
-	return withAttestation(finalizeVideoInfo(result, wpParsed, formatPool), wp), nil
+	return withAttestation(finalizeVideoInfo(result, wpParsed, formatPool), wp, videoID), nil
 }
 
 // finalizeVideoInfo applies the not_a_stream override + merge + dedup tail
