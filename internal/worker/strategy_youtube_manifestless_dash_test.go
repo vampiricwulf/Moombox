@@ -3,7 +3,6 @@ package worker
 import (
 	"testing"
 
-	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -124,29 +123,5 @@ func TestPartitionManifestlessFormatsExcludesContentLength(t *testing.T) {
 	}
 	if len(audio) != 1 || audio[0].Itag != 140 {
 		t.Fatalf("audio pool = %+v, want exactly the OTF itag 140", audio)
-	}
-}
-
-// TestManifestlessPotBinding pins the GVS PO-token binding choice: the
-// videoID binding belongs to the manifest-withholding experiment only; a
-// response that DOES carry a dashManifestUrl (routed here because
-// manifest-free is the primary live path since yt-dlp 8c1f07d81) must use
-// the standard visitorData-style binding the manifest strategies use.
-func TestManifestlessPotBinding(t *testing.T) {
-	job := &JobContext{Job: &database.Job{ID: "j1", VideoID: "vid123"}}
-
-	binding, label := manifestlessPotBinding(job, &youtube.VideoInfo{DashManifestURL: ""})
-	if binding != "vid123" || label != "videoID" {
-		t.Errorf("manifest withheld: binding=%q label=%q, want vid123/videoID", binding, label)
-	}
-
-	// Manifest present: falls through to poTokenBinding — with no YT session
-	// wired, that resolves to the ChannelID fallback, which is precisely the
-	// point: NOT the videoID. The label must report the actual source
-	// ("channelID"), not claim visitorData when the fallback fired.
-	info := &youtube.VideoInfo{DashManifestURL: "https://manifest.example/dash.mpd", ChannelID: "chan9"}
-	binding, label = manifestlessPotBinding(job, info)
-	if binding != "chan9" || label != "channelID" {
-		t.Errorf("manifest present: binding=%q label=%q, want chan9/channelID", binding, label)
 	}
 }

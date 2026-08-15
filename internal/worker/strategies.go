@@ -235,7 +235,7 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 // `tag` is a short label included in the log line for triage (e.g. "DASH
 // video", "DASH audio", "HLS").
 func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, tag string) {
-	job.Logger.Warn("[Cipher] "+tag+" 403 signal — invalidating solver and POT", "playerURL", playerURL)
+	job.Logger.Warn("[Cipher] "+tag+" 403 signal — invalidating solver and POT", "jobID", job.Job.ID, "playerURL", playerURL)
 	playerID := cipher.PlayerIDFromURL(playerURL)
 	if cipherSolver != nil {
 		cipherSolver.InvalidateSolver(playerURL)
@@ -251,18 +251,15 @@ func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher
 	}
 }
 
-// poTokenBinding returns the content binding value to pass to the PO token provider.
-// Prefers visitorData (matches yt-dlp and bgutil-ytdlp-pot-provider upstream), falling
-// back to ChannelID if visitor data extraction failed. Logs a warning on fallback so
-// the underlying extraction issue is surfaced rather than silently degrading caching.
-func poTokenBinding(job *JobContext, videoInfo *youtube.VideoInfo) string {
-	if job != nil && job.YT != nil {
-		if vd := job.YT.GetVisitorData(); vd != "" {
-			return vd
-		}
+// challengeLabel compresses a challenge value to the label the provenance
+// log line reports: "page" (watch-page ytAtN challenge present) or "none".
+//
+// GVS binding is videoID (moonarchive parity). If premieres 403 again
+// despite challenge-sourced minters, see GenerateGvsPoToken's doc comment —
+// datasync-ID binding is the next suspect.
+func challengeLabel(challenge string) string {
+	if challenge != "" {
+		return "page"
 	}
-	if job != nil && job.Logger != nil {
-		job.Logger.Warn("[POT] visitor data unavailable; falling back to channelID for content binding")
-	}
-	return videoInfo.ChannelID
+	return "none"
 }

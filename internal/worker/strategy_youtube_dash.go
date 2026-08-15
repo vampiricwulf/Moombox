@@ -28,7 +28,11 @@ import (
 // routedSolver is the composite cipher.Solver; it is tried first so
 // the sidecar V8 ejs path handles n on cb017549-family players.
 // Falls back to the goja resolver (cipherSolver) if nil or on error.
-func resolveFreshDashURL(ctx context.Context, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL, origURL string, logger interface {
+//
+// jobID is included as the first key-value pair on every log line so a
+// 403-triage grep by job stays complete even when the retry path is the
+// only place that logged (audit: OnCipherFailure lines gain jobID).
+func resolveFreshDashURL(ctx context.Context, jobID string, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL, origURL string, logger interface {
 	Warn(msg string, args ...any)
 	Info(msg string, args ...any)
 }) string {
@@ -42,21 +46,21 @@ func resolveFreshDashURL(ctx context.Context, routedSolver cipher.Solver, cipher
 		// same warning coverage as before.
 		fresh, err := cipherSolver.GetSolvers(ctx, playerURL)
 		if err != nil {
-			logger.Warn("[Cipher] retry: GetSolvers failed", "err", err)
+			logger.Warn("[Cipher] retry: GetSolvers failed", "jobID", jobID, "err", err)
 			return ""
 		}
 		if fresh == nil || fresh.N == nil {
-			logger.Warn("[Cipher] retry: solver missing N callable")
+			logger.Warn("[Cipher] retry: solver missing N callable", "jobID", jobID)
 			return ""
 		}
 		var decErr error
 		decrypted, decErr = decryptNParamInURL(origURL, fresh.DecryptN)
 		if decErr != nil {
-			logger.Warn("[Cipher] retry: n-param decrypt failed", "err", decErr)
+			logger.Warn("[Cipher] retry: n-param decrypt failed", "jobID", jobID, "err", decErr)
 			return ""
 		}
 	}
-	logger.Info("[Cipher] retry: fresh n-param decryption succeeded; engine will swap BaseURL")
+	logger.Info("[Cipher] retry: fresh n-param decryption succeeded; engine will swap BaseURL", "jobID", jobID)
 	return decrypted
 }
 
@@ -94,17 +98,26 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// Step 2: Generate PO token once, used for both manifest URL injection and segment URLs.
 	// Per audit reports/worker.md F29: previously generated twice (steps 2 and 5),
 	// which was a cache hit but redundant work and confusing duplicate logging.
+	//
+	// GVS PO token: unconditional videoID binding (moonarchive parity),
+	// minted from the watch-page challenge riding on videoInfo when present.
+	// Supersedes the former poTokenBinding visitorData/channelID scheme —
+	// see spec 2026-08-14 attestation POT coherence §3.
 	var dashPoToken string
 	if potProvider != nil {
-		poToken, err := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
+		mint, err := potProvider.GenerateGvsPoToken(ctx, job.Job.VideoID, videoInfo.AttestationChallenge)
 		if err != nil {
-			job.Logger.Warn("[POT] failed to generate PO token", "err", err)
-		} else if poToken != "" {
-			dashPoToken = poToken
-			dashURL = strings.TrimRight(dashURL, "/") + "/pot/" + poToken
-			job.Logger.Info("[POT] PO token ready (added to manifest URL, will be used for segment URLs)", "tokenLength", len(poToken))
+			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
+				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge), "err", err)
+		} else if mint.PoToken != "" {
+			dashPoToken = mint.PoToken
+			dashURL = strings.TrimRight(dashURL, "/") + "/pot/" + mint.PoToken
+			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
+				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge),
+				"minterSource", mint.MinterSource, "minterFresh", mint.MinterFresh,
+				"sidecar", mint.ViaSidecar, "tokenLength", len(mint.PoToken))
 		} else {
-			job.Logger.Warn("[POT] generator returned empty token")
+			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}
 	}
 
@@ -278,7 +291,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			origURL := originalBaseURLs[videoStream.Itag]
 			result.VideoDownloader.OnCipherFailure = func() string {
 				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "DASH video")
-				return resolveFreshDashURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
+				return resolveFreshDashURL(ctx, job.Job.ID, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}
 	}
@@ -309,7 +322,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			origURL := originalBaseURLs[audioStream.Itag]
 			result.AudioDownloader.OnCipherFailure = func() string {
 				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "DASH audio")
-				return resolveFreshDashURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
+				return resolveFreshDashURL(ctx, job.Job.ID, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}
 	}

@@ -121,9 +121,9 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 //     this during player-response parsing, but we re-route here so that any
 //     orchestrator-driven URL refresh on cipher rotation goes through the
 //     same path.
-//  4. Mint a POT — bound per manifestlessPotBinding: videoID when the
-//     response withheld dashManifestUrl (the experiment's video-id-bound
-//     GVS policy), standard visitorData binding otherwise.
+//  4. Mint a GVS POT unconditionally bound to videoID (moonarchive parity,
+//     spec 2026-08-14 attestation POT coherence §3), sourced from the
+//     watch-page challenge riding on videoInfo when present.
 //  5. Build engine.SegmentDownloader instances. The downloader's
 //     buildSegmentURL auto-detects query-style adaptive URLs and appends
 //     `&sq=N`, while applyPoTokenQuery appends `&pot=POT` per fetch. No
@@ -207,16 +207,22 @@ func DownloadManifestlessDash(
 		audioStream.BaseURL = resolved
 	}
 
-	binding, bindingLabel := manifestlessPotBinding(job, videoInfo)
+	// GVS PO token: unconditional videoID binding (moonarchive parity),
+	// minted from the watch-page challenge riding on videoInfo when present.
+	// Supersedes the former manifest-presence-conditional binding — see
+	// spec 2026-08-14 attestation POT coherence §3.
 	var pot string
 	if potProvider != nil {
-		token, err := potProvider.GeneratePoTokenString(ctx, binding, false)
+		mint, err := potProvider.GenerateGvsPoToken(ctx, job.Job.VideoID, videoInfo.AttestationChallenge)
 		if err != nil {
-			job.Logger.Warn("manifestless DASH: PO token mint failed", "err", err)
-		} else if token != "" {
-			pot = token
-			job.Logger.Info("[POT] PO token ready for manifestless DASH",
-				"binding", bindingLabel, "tokenLength", len(token))
+			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
+				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge), "err", err)
+		} else if mint.PoToken != "" {
+			pot = mint.PoToken
+			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
+				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge),
+				"minterSource", mint.MinterSource, "minterFresh", mint.MinterFresh,
+				"sidecar", mint.ViaSidecar, "tokenLength", len(mint.PoToken))
 		}
 	}
 
@@ -296,10 +302,10 @@ func DownloadManifestlessDash(
 				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "manifestless DASH video")
 				fresh, err := resolveFormatURLByItag(ctx, videoInfo.Formats, videoItagChosen, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger)
 				if err != nil {
-					job.Logger.Warn("manifestless DASH video: fresh URL re-resolve failed", "err", err)
+					job.Logger.Warn("manifestless DASH video: fresh URL re-resolve failed", "jobID", job.Job.ID, "err", err)
 					return ""
 				}
-				job.Logger.Info("[Cipher] manifestless DASH video: fresh URL resolved; engine will swap BaseURL")
+				job.Logger.Info("[Cipher] manifestless DASH video: fresh URL resolved; engine will swap BaseURL", "jobID", job.Job.ID)
 				return fresh
 			}
 		}
@@ -344,40 +350,16 @@ func DownloadManifestlessDash(
 				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "manifestless DASH audio")
 				fresh, err := resolveFormatURLByItag(ctx, videoInfo.Formats, audioItagChosen, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger)
 				if err != nil {
-					job.Logger.Warn("manifestless DASH audio: fresh URL re-resolve failed", "err", err)
+					job.Logger.Warn("manifestless DASH audio: fresh URL re-resolve failed", "jobID", job.Job.ID, "err", err)
 					return ""
 				}
-				job.Logger.Info("[Cipher] manifestless DASH audio: fresh URL resolved; engine will swap BaseURL")
+				job.Logger.Info("[Cipher] manifestless DASH audio: fresh URL resolved; engine will swap BaseURL", "jobID", job.Job.ID)
 				return fresh
 			}
 		}
 	}
 
 	return result, nil
-}
-
-// manifestlessPotBinding picks the GVS PO-token content binding for a
-// manifest-free DASH download. The choice depends on WHY we're on the
-// manifestless path. When the response withheld dashManifestUrl, that's the
-// account experiment that also switches GVS POT enforcement to
-// videoID-binding (yt-dlp logs "Detected experiment to bind GVS PO Token to
-// video id") — a visitorData-bound token would be rejected on every segment
-// fetch. When a manifest IS present (we're here because manifestless is the
-// primary live path since the yt-dlp 8c1f07d81 routing change, not because
-// of the experiment), the standard GVS binding applies: visitorData, same
-// as the DASH/HLS manifest strategies use. Returns the binding value and a
-// short label for logging; the label reports "channelID" when
-// poTokenBinding actually took its ChannelID fallback (visitorData
-// unavailable) so the log line doesn't misattribute the binding source.
-func manifestlessPotBinding(job *JobContext, videoInfo *youtube.VideoInfo) (string, string) {
-	if videoInfo.DashManifestURL == "" {
-		return job.Job.VideoID, "videoID"
-	}
-	binding := poTokenBinding(job, videoInfo)
-	if binding == videoInfo.ChannelID {
-		return binding, "channelID"
-	}
-	return binding, "visitorData"
 }
 
 // dbResumeSeq returns the DB-persisted last sequence to resume a crashed LIVE

@@ -552,6 +552,13 @@ type GvsMint struct {
 // (minterPromise), so no provider-side inflight entry is needed. When the
 // sidecar is unavailable the goja flow runs with the challenge ignored —
 // today's (session-incoherent) behavior, flagged as "goja-fallback".
+//
+// If POT-enforced media (premieres) still 403s with challenge-sourced
+// minters, the next suspect is datasync-ID binding: yt-dlp binds GVS
+// tokens to the account's datasync ID when cookies are sent with media
+// requests (Moombox sends account cookies on segment fetches), while this
+// path binds to videoID. See docs history: 2026-08-14 attestation POT
+// coherence spec §3.
 func (pp *PotProvider) GenerateGvsPoToken(ctx context.Context, contentBinding, challenge string) (GvsMint, error) {
 	pp.gvsMints.Add(1)
 	if challenge != "" {

@@ -48,15 +48,24 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 
 	// Generate PO token once and reuse for master URL, variant URL, and
 	// segment URLs (audit reports/worker.md F30; same dedup as F29 for DASH).
+	//
+	// GVS PO token: unconditional videoID binding (moonarchive parity),
+	// minted from the watch-page challenge riding on videoInfo when present.
+	// Supersedes the former poTokenBinding visitorData/channelID scheme —
+	// see spec 2026-08-14 attestation POT coherence §3.
 	var hlsPoToken string
 	if potProvider != nil {
-		poToken, err := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
+		mint, err := potProvider.GenerateGvsPoToken(ctx, job.Job.VideoID, videoInfo.AttestationChallenge)
 		if err != nil {
-			job.Logger.Warn("pot: failed to generate PO token for HLS", "err", err)
-		} else if poToken != "" {
-			hlsPoToken = poToken
-			hlsURL = strings.TrimRight(hlsURL, "/") + "/pot/" + poToken
-			job.Logger.Debug("pot: added PO token to HLS manifest URL")
+			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
+				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge), "err", err)
+		} else if mint.PoToken != "" {
+			hlsPoToken = mint.PoToken
+			hlsURL = strings.TrimRight(hlsURL, "/") + "/pot/" + mint.PoToken
+			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
+				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge),
+				"minterSource", mint.MinterSource, "minterFresh", mint.MinterFresh,
+				"sidecar", mint.ViaSidecar, "tokenLength", len(mint.PoToken))
 		}
 	}
 
