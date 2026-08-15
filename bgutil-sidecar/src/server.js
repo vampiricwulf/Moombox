@@ -93,27 +93,33 @@ function logWarn(msg) {
 // upstream session_manager.generateTokenMinter pattern, but stripped of
 // proxy / axios / Innertube fallbacks (Moombox always supplies a binding).
 // ---------------------------------------------------------------------------
-async function generateMinter() {
-    // 1. Fetch the BotGuard challenge from YouTube's /att/get endpoint.
-    const attResp = await fetch(ATT_GET_URL, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
-        },
-        body: JSON.stringify({
-            context: { client: { clientName: "WEB", clientVersion: CLIENT_VERSION } },
-            engagementType: "ENGAGEMENT_TYPE_UNBOUND",
-        }),
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!attResp.ok) {
-        throw new Error(`att/get HTTP ${attResp.status}`);
-    }
-    const attBody = await attResp.json();
-    const challenge = attBody && attBody.bgChallenge;
+// challenge: a parsed bgChallenge object from the caller's watch page, or
+// null → fetch our own from /att/get (the legacy, session-incoherent path).
+async function generateMinter(challenge) {
+    let minterSource = "challenge";
     if (!challenge) {
-        throw new Error("att/get response missing bgChallenge");
+        minterSource = "att_get";
+        // 1. Fetch the BotGuard challenge from YouTube's /att/get endpoint.
+        const attResp = await fetch(ATT_GET_URL, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+            body: JSON.stringify({
+                context: { client: { clientName: "WEB", clientVersion: CLIENT_VERSION } },
+                engagementType: "ENGAGEMENT_TYPE_UNBOUND",
+            }),
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (!attResp.ok) {
+            throw new Error(`att/get HTTP ${attResp.status}`);
+        }
+        const attBody = await attResp.json();
+        challenge = attBody && attBody.bgChallenge;
+        if (!challenge) {
+            throw new Error("att/get response missing bgChallenge");
+        }
     }
 
     // 2. Fetch the BotGuard interpreter JS by URL given in the challenge.
@@ -176,6 +182,7 @@ async function generateMinter() {
         // Tracked so getOrCreateMinter can free the stale interpreter VM when
         // YouTube rotates globalName between regenerations (see below).
         globalName: challenge.globalName,
+        minterSource,
     };
 }
 
@@ -186,12 +193,16 @@ async function generateMinter() {
 // cross-contaminate the resulting minter.
 let minterPromise = null;
 
-async function getOrCreateMinter() {
-    if (cachedMinter && Date.now() < cachedMinter.expiresAt) {
-        return cachedMinter;
+// freshMinter forces a regeneration even when the cache is valid (the
+// fresh-per-GVS-mint policy). Concurrent regens share one in-flight
+// generateMinter via minterPromise — a joiner may therefore get a minter
+// built from ANOTHER request's challenge; same session, acceptable.
+async function getOrCreateMinter(challenge, freshMinter) {
+    if (!freshMinter && cachedMinter && Date.now() < cachedMinter.expiresAt) {
+        return { m: cachedMinter, fresh: false };
     }
     if (!minterPromise) {
-        minterPromise = generateMinter().finally(() => {
+        minterPromise = generateMinter(challenge).finally(() => {
             minterPromise = null;
         });
     }
@@ -213,14 +224,30 @@ async function getOrCreateMinter() {
         }
     }
     stats.cachedMinters = 1;
-    return cachedMinter;
+    return { m: cachedMinter, fresh: true };
 }
 
-async function generatePoToken(binding) {
+async function generatePoToken(binding, challengeJSON, freshMinter) {
     if (!binding || typeof binding !== "string") {
         throw new Error("missing or invalid binding");
     }
-    const m = await getOrCreateMinter();
+    let challenge = null;
+    if (challengeJSON && typeof challengeJSON === "string") {
+        try {
+            const parsed = JSON.parse(challengeJSON);
+            // Defensive shape check: a challenge missing its program or
+            // interpreter URL would crash generateMinter mid-flight; treat
+            // it as absent so the /att/get fallback runs instead.
+            if (parsed && parsed.program && parsed.interpreterUrl) {
+                challenge = parsed;
+            } else {
+                logWarn("challenge missing program/interpreterUrl; using /att/get");
+            }
+        } catch (e) {
+            logWarn(`invalid challenge JSON ignored: ${e?.message ?? e}`);
+        }
+    }
+    const { m, fresh } = await getOrCreateMinter(challenge, !!freshMinter);
     const poToken = await m.minter.mintAsWebsafeString(binding);
     if (!poToken) {
         throw new Error("WebPoMinter returned empty poToken");
@@ -229,6 +256,8 @@ async function generatePoToken(binding) {
         poToken,
         binding,
         expiresAt: m.expiresAt,
+        minterSource: m.minterSource,
+        minterFresh: fresh,
     };
 }
 
@@ -252,7 +281,11 @@ async function dispatch(req) {
                 const params = req.params || {};
                 stats.mintsTotal += 1;
                 try {
-                    const result = await generatePoToken(params.binding);
+                    const result = await generatePoToken(
+                        params.binding,
+                        params.challenge,
+                        params.freshMinter,
+                    );
                     return writeResponse({ id, result });
                 } catch (e) {
                     stats.mintsErrored += 1;
