@@ -53,6 +53,13 @@ const (
 	// YouTube harder than the failure did. yt-dlp gates its equivalent
 	// (url_feed's delay argument) at 5s once fragments start failing.
 	credentialRefreshCooldown = 5 * time.Second
+
+	// forbiddenRefreshAttempts bounds how many times one segment is retried
+	// through a credential refresh before it is reported permanently gone.
+	// Kept small: the refresh itself is cooldown-gated, so a higher number
+	// mostly buys sleep, and the caller (catch-up or the sequential loop)
+	// re-attempts the segment on its next pass anyway.
+	forbiddenRefreshAttempts = 3
 )
 
 // runDashLoop is the main DASH download loop.

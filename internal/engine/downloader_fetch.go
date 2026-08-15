@@ -201,8 +201,37 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		if err == nil && status < 400 {
 			return body, nil
 		}
-		if status == 403 || status == 410 {
+		if status == 410 {
+			// Genuinely evicted. Never retried, never refreshed.
 			return nil, ErrSegmentPermanent
+		}
+		if status == 403 {
+			// 403 is overloaded. Past the head it is how a finished stream
+			// signals "no such segment" and MUST stay terminal — VOD and
+			// post-live finalization are built on it. BELOW the head the
+			// segment demonstrably exists (X-Head-Seqnum told us so), so a
+			// 403 there means our credentials went stale, which is exactly
+			// what a manual cancel-and-resume fixes. Refresh them and retry
+			// rather than declaring live segments permanently gone (the
+			// 2026-08-15 mid-stream-join stall).
+			if !d.behindHeadTailPending() {
+				return nil, ErrSegmentPermanent
+			}
+			if attempt >= forbiddenRefreshAttempts-1 {
+				// Out of refresh attempts for this segment — report it the
+				// way we always did so no caller hangs. The caller re-attempts
+				// the segment on its next pass, by which point the cooldown
+				// may have allowed another refresh.
+				return nil, ErrSegmentPermanent
+			}
+			// Best-effort: a false return means the cooldown is still open or
+			// no callback is installed. Retry anyway — a refresh fired by the
+			// previous failing segment may already have installed working
+			// credentials that this attempt will pick up.
+			d.refreshCredentials()
+			d.emitActivity(ActivityRetrying)
+			utils.Sleep(ctx, singleGoneRetryDelay)
+			continue
 		}
 		// Surface the backoff in the progress line — the tracker's grace
 		// window suppresses this while other segments are still landing, so
