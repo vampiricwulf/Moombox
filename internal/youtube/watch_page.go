@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,10 +43,79 @@ var (
 	// continuation token extraction. Mirrors the same regex used by
 	// internal/chat/api.go for its standalone watch-page fetch path.
 	ytInitialDataRegex = regexp.MustCompile(`(?s)var ytInitialData = ({.+?});</script>`)
-	// ytAtNRe captures the JS object literal passed to window.ytAtN(...).
-	// Mirrors moonarchive's INITIAL_ATTESTATION_PATTERN; RE2-safe (no
-	// lookarounds), non-greedy so it stops at the first plausible close.
-	ytAtNRe = regexp.MustCompile(`window\.ytAtN\(\s*(\{[\s\S]*?\})\s*\)`)
+	// ytAtNOpenRe locates the opening of a window.ytAtN(...) call. Only the
+	// call prefix is matched here; the object literal's extent is found by
+	// scanning balanced braces (scanBalancedObject) rather than by a
+	// non-greedy regex. moonarchive's INITIAL_ATTESTATION_PATTERN uses the
+	// regex form, but a `})` sequence anywhere inside the opaque challenge
+	// payload truncates that match into an unbalanced fragment, which then
+	// fails to parse and is indistinguishable from "page had no challenge".
+	ytAtNOpenRe = regexp.MustCompile(`window\.ytAtN\(\s*\{`)
+)
+
+// allowedInterpreterDomains gates which hosts may serve a BotGuard interpreter
+// referenced by a page-sourced challenge. The sidecar EXECUTES the fetched
+// body, and watch-page HTML embeds attacker-authored video metadata, so a
+// challenge is only forwarded when its interpreter lives on a Google-owned
+// host. The sidecar re-checks this independently (bgutil-sidecar/src/server.js
+// assertGoogleHost) — this copy stops a hostile challenge from ever leaving
+// the Go process. Suffix matches are dot-anchored so "evilgoogle.com" and
+// "google.com.evil.tld" cannot pass.
+//
+// Regional Google properties (google.de, google.co.uk, …) are matched
+// separately by regionalGoogleRe rather than enumerated. A host that is
+// genuinely Google's but missing here does not break downloads — the
+// challenge is dropped and the sidecar's /att/get flow runs — but it does
+// silently disable session coherence, so rejections are logged with the host
+// (atnBadInterpHost) precisely so an unlisted host shows up as a name to add
+// instead of an unexplained regression.
+// The list holds only domains that serve GOOGLE-AUTHORED code. Google-owned
+// domains whose bytes are USER-uploaded are deliberately excluded even though
+// they are equally "Google": googleusercontent.com, ggpht.com (avatars),
+// googlevideo.com (media), and i.ytimg.com (thumbnails) all let a third party
+// choose the response body, and the fetched body is executed — an image/JS
+// polyglot uploaded there would be indistinguishable from an interpreter.
+// ytimg.com is therefore admitted by exact static hosts only (see
+// allowedInterpreterHosts), never as a suffix.
+var allowedInterpreterDomains = []string{
+	"google.com",
+	"gstatic.com",
+	"googleapis.com",
+	"youtube.com",
+	"youtube-nocookie.com",
+	"google.cn",
+}
+
+// allowedInterpreterHosts are exact hosts admitted individually because their
+// parent domain also serves user content. s.ytimg.com is YouTube's static
+// script origin (it serves base.js); i.ytimg.com, which serves user-uploaded
+// thumbnails, is intentionally absent.
+var allowedInterpreterHosts = []string{
+	"s.ytimg.com",
+	"www.ytimg.com",
+}
+
+// regionalGoogleRe matches Google's country domains: google.de, google.co.uk,
+// google.com.au, google.co.jp. Anchored at both ends and applied to the
+// registrable domain only, so it can never match "google.de.evil.tld".
+var regionalGoogleRe = regexp.MustCompile(`^google\.[a-z]{2,3}(\.[a-z]{2})?$`)
+
+// Attestation-challenge extraction outcomes. Every failure mode is distinct so
+// a silently-disabled feature is never mistaken for "YouTube sent no
+// challenge" — the whole point of the challenge plumbing is diagnosing 403s,
+// which a single catch-all reason would defeat.
+const (
+	atnOK             = "ok"
+	atnNoCall         = "no ytAtN call on page"
+	atnUnbalanced     = "ytAtN argument never closes"
+	atnJSConvert      = "JS-to-JSON conversion failed"
+	atnOuterParse     = "outer object is not JSON"
+	atnNoRKey         = "no R string key"
+	atnRParse         = "R payload is not JSON"
+	atnNoChallenge    = "no bgChallenge in R payload"
+	atnChallengeShape = "bgChallenge is not an object"
+	atnNoInterpURL    = "bgChallenge has no interpreterUrl (inline interpreterJavascript is refused from page-sourced challenges)"
+	atnBadInterpHost  = "bgChallenge interpreter host not allowed"
 )
 
 // WatchPageResult contains data extracted from a YouTube watch page.
@@ -73,6 +144,11 @@ type WatchPageResult struct {
 	// not carry one or it failed to parse; consumers must treat empty as
 	// "fall back to the sidecar's /att/get flow".
 	AttestationChallenge string
+	// AttestationReason names WHY AttestationChallenge is empty (one of the
+	// atn* constants). A genuine absence and a silently-broken extractor both
+	// yield "", and this feature exists to diagnose 403s — so the two must be
+	// distinguishable in a log line.
+	AttestationReason string
 }
 
 // FetchWatchPage fetches and parses a YouTube watch page.
@@ -98,7 +174,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 
 	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(html)
 	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(html)
-	attestationChallenge := extractAttestationChallenge(html)
+	attestationChallenge, attestationReason := extractAttestationChallenge(html)
 
 	return &WatchPageResult{
 		Ytcfg:                ytcfg,
@@ -108,6 +184,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		ChatIsReplay:         chatIsReplay,
 		ChatErr:              chatErr,
 		AttestationChallenge: attestationChallenge,
+		AttestationReason:    attestationReason,
 	}, nil
 }
 
@@ -308,28 +385,137 @@ func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, erro
 // key holds a JSON string; inside that is bgChallenge. Returns compact JSON
 // of bgChallenge, or "" on any miss/parse failure — absence is a normal
 // result (the POT sidecar falls back to /att/get), never an error.
-func extractAttestationChallenge(html string) string {
-	m := ytAtNRe.FindStringSubmatch(html)
-	if m == nil {
-		return ""
+func extractAttestationChallenge(html string) (challenge, reason string) {
+	loc := ytAtNOpenRe.FindStringIndex(html)
+	if loc == nil {
+		return "", atnNoCall
 	}
-	jsonStr, err := utils.JSToJSON(m[1], nil, false)
+	// The regex ends on the literal '{'; rescan from there so the object's
+	// true extent comes from brace balancing, not from the first `})`.
+	obj, ok := scanBalancedObject(html[loc[1]-1:])
+	if !ok {
+		return "", atnUnbalanced
+	}
+	jsonStr, err := utils.JSToJSON(obj, nil, false)
 	if err != nil {
-		return ""
+		return "", atnJSConvert
 	}
 	var outer map[string]any
 	if json.Unmarshal([]byte(jsonStr), &outer) != nil {
-		return ""
+		return "", atnOuterParse
 	}
 	rStr, ok := outer["R"].(string)
 	if !ok {
-		return ""
+		return "", atnNoRKey
 	}
 	var r struct {
 		BgChallenge json.RawMessage `json:"bgChallenge"`
 	}
-	if json.Unmarshal([]byte(rStr), &r) != nil || len(r.BgChallenge) == 0 {
-		return ""
+	if json.Unmarshal([]byte(rStr), &r) != nil {
+		return "", atnRParse
 	}
-	return string(r.BgChallenge)
+	if len(r.BgChallenge) == 0 {
+		return "", atnNoChallenge
+	}
+	if reason := validateChallengeOrigin(r.BgChallenge); reason != atnOK {
+		return "", reason
+	}
+	return string(r.BgChallenge), atnOK
+}
+
+// validateChallengeOrigin enforces that a page-sourced challenge points its
+// interpreter at a Google host. A challenge carrying inline
+// interpreterJavascript instead is REFUSED rather than honoured: bgutils-js
+// treats the two fields as interchangeable, but inline script from HTML we
+// scraped would be executed with no origin to check at all. Such a challenge
+// falls back to the sidecar's /att/get flow, whose response is a real YouTube
+// API result and may carry inline script safely.
+func validateChallengeOrigin(raw json.RawMessage) string {
+	var ch struct {
+		InterpreterURL *struct {
+			Value string `json:"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue"`
+		} `json:"interpreterUrl"`
+	}
+	if json.Unmarshal(raw, &ch) != nil {
+		return atnChallengeShape
+	}
+	if ch.InterpreterURL == nil || ch.InterpreterURL.Value == "" {
+		return atnNoInterpURL
+	}
+	// YouTube ships this protocol-relative ("//host/path"); the sidecar
+	// prefixes "https:" before fetching, so parse it the same way.
+	u, err := url.Parse("https:" + ch.InterpreterURL.Value)
+	if err != nil || u.Hostname() == "" {
+		return atnBadInterpHost
+	}
+	if isGoogleOwnedHost(u.Hostname()) {
+		return atnOK
+	}
+	return atnBadInterpHost + ": " + u.Hostname()
+}
+
+// isGoogleOwnedHost reports whether host is, or is a subdomain of, a
+// Google-owned domain (allowedInterpreterDomains or a regional google.<tld>).
+// Shared by the challenge-origin gate; kept as one predicate so the Go and
+// sidecar copies stay comparable line-for-line.
+func isGoogleOwnedHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" {
+		return false
+	}
+	if slices.Contains(allowedInterpreterHosts, host) {
+		return true
+	}
+	for _, d := range allowedInterpreterDomains {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			return true
+		}
+	}
+	// Regional Google: match the registrable tail so subdomains
+	// (www.google.co.uk) pass while lookalikes (google.co.uk.evil.tld) do not.
+	labels := strings.Split(host, ".")
+	for i := range labels {
+		if regionalGoogleRe.MatchString(strings.Join(labels[i:], ".")) {
+			return true
+		}
+	}
+	return false
+}
+
+// scanBalancedObject returns the complete `{...}` literal starting at s[0],
+// tracking JS string state so braces inside quoted payloads never affect the
+// depth count. Returns ok=false when the literal never closes.
+func scanBalancedObject(s string) (string, bool) {
+	if len(s) == 0 || s[0] != '{' {
+		return "", false
+	}
+	depth := 0
+	var quote byte
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == quote:
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[:i+1], true
+			}
+		}
+	}
+	return "", false
 }

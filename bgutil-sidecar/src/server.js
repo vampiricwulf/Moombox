@@ -89,6 +89,61 @@ function logWarn(msg) {
 }
 
 // ---------------------------------------------------------------------------
+// Interpreter-URL origin gate.
+//
+// generateMinter executes the interpreter body it fetches (`new Function(js)()`),
+// so the URL's host is a code-execution boundary, not a hint. Only Google-owned
+// hosts may serve it. Suffix matches are anchored to a leading dot so
+// "evilgoogle.com" and "google.com.evil.tld" cannot pass.
+// ---------------------------------------------------------------------------
+// Keep this list in sync with allowedInterpreterDomains in
+// internal/youtube/watch_page.go — both gates enforce the same rule, one
+// before the challenge leaves Go and one before this process executes code.
+// Only domains serving GOOGLE-AUTHORED code. Domains whose bytes are
+// user-uploaded (googleusercontent.com, ggpht.com, googlevideo.com,
+// i.ytimg.com) are excluded on purpose: the fetched body is executed, and an
+// image/JS polyglot uploaded to such a host would pass a naive "is it Google?"
+// check. ytimg.com is admitted by exact static host only.
+const ALLOWED_INTERPRETER_DOMAINS = [
+    "google.com",
+    "gstatic.com",
+    "googleapis.com",
+    "youtube.com",
+    "youtube-nocookie.com",
+    "google.cn",
+];
+const ALLOWED_INTERPRETER_HOSTS = ["s.ytimg.com", "www.ytimg.com"];
+// Regional Google properties (google.de, google.co.uk, google.com.au).
+const REGIONAL_GOOGLE_RE = /^google\.[a-z]{2,3}(\.[a-z]{2})?$/;
+
+function isGoogleOwnedHost(hostname) {
+    const host = hostname.toLowerCase().replace(/\.$/, "");
+    if (!host) return false;
+    if (ALLOWED_INTERPRETER_HOSTS.includes(host)) return true;
+    if (ALLOWED_INTERPRETER_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) {
+        return true;
+    }
+    const labels = host.split(".");
+    return labels.some((_, i) => REGIONAL_GOOGLE_RE.test(labels.slice(i).join(".")));
+}
+
+function assertGoogleHost(rawUrl) {
+    let parsed;
+    try {
+        parsed = new URL(rawUrl);
+    } catch {
+        throw new Error("interpreter URL is not a valid URL");
+    }
+    if (parsed.protocol !== "https:") {
+        throw new Error(`interpreter URL protocol not allowed: ${parsed.protocol}`);
+    }
+    if (!isGoogleOwnedHost(parsed.hostname)) {
+        throw new Error(`interpreter URL host not allowed: ${parsed.hostname}`);
+    }
+    return parsed.href;
+}
+
+// ---------------------------------------------------------------------------
 // Core: full BotGuard fetch + interpreter + minter mint flow. Mirrors the
 // upstream session_manager.generateTokenMinter pattern, but stripped of
 // proxy / axios / Innertube fallbacks (Moombox always supplies a binding).
@@ -123,7 +178,13 @@ async function generateMinter(challenge) {
     }
 
     // 2. Fetch the BotGuard interpreter JS by URL given in the challenge.
+    // The URL is HARD-GATED to Google-owned hosts: step 3 executes whatever
+    // this fetch returns, and since v2.7.8 a challenge can originate from a
+    // watch page (window.ytAtN), whose HTML embeds attacker-authored video
+    // metadata. Without this gate a crafted description could point the
+    // interpreter at any host and get its JavaScript executed in this process.
     const interpUrl = `https:${challenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue}`;
+    assertGoogleHost(interpUrl);
     const interpResp = await fetch(interpUrl, {
         headers: { "User-Agent": USER_AGENT },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),

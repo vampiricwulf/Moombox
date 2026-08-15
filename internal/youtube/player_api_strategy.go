@@ -83,7 +83,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	ytcfg := wp.Ytcfg
 
 	if wp.AttestationChallenge == "" {
-		p.logger.Debug("[PlayerApi] watch page carried no attestation challenge", "videoID", videoID)
+		p.logger.Debug("[PlayerApi] no attestation challenge from watch page", "videoID", videoID, "reason", wp.AttestationReason)
 	}
 
 	// Capture visitor data for future probe calls
@@ -259,7 +259,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	}
 
 	if wp.AttestationChallenge == "" {
-		p.logger.Debug("[PlayerApi] watch page carried no attestation challenge", "videoID", videoID)
+		p.logger.Debug("[PlayerApi] no attestation challenge from watch page", "videoID", videoID, "reason", wp.AttestationReason)
 	}
 
 	formatPool := []Format{}

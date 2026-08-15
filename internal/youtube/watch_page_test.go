@@ -79,9 +79,12 @@ func TestExtractAttestationChallenge(t *testing.T) {
 	atn, _ := json.Marshal(string(rPayload))
 	page := `<html><script>window.ytAtN({R: ` + string(atn) + `, other: 1});</script></html>`
 
-	got := extractAttestationChallenge(page)
+	got, reason := extractAttestationChallenge(page)
 	if got == "" {
-		t.Fatal("expected challenge, got empty")
+		t.Fatalf("expected challenge, got empty (reason=%s)", reason)
+	}
+	if reason != atnOK {
+		t.Errorf("reason = %q, want %q", reason, atnOK)
 	}
 	var back map[string]any
 	if err := json.Unmarshal([]byte(got), &back); err != nil {
@@ -98,8 +101,103 @@ func TestExtractAttestationChallenge(t *testing.T) {
 		"R_not_json":        `<html><script>window.ytAtN({R: "not json"});</script></html>`,
 		"missing_challenge": `<html><script>window.ytAtN({R: "{\"noChallenge\":1}"});</script></html>`,
 	} {
-		if got := extractAttestationChallenge(html); got != "" {
+		if got, _ := extractAttestationChallenge(html); got != "" {
 			t.Errorf("%s: expected empty, got %q", name, got)
 		}
+	}
+}
+
+// TestExtractAttestationChallengeRejectsHostileOrigin pins the security gate
+// added after the 2026-08-15 review: watch-page HTML embeds attacker-authored
+// video metadata verbatim (JSON escaping leaves braces, parens and single
+// quotes intact), so a crafted description can present itself as a ytAtN
+// challenge. The sidecar EXECUTES the interpreter body it fetches, so a
+// challenge naming a non-Google interpreter host must never leave this
+// process.
+func TestExtractAttestationChallengeRejectsHostileOrigin(t *testing.T) {
+	hostile := `window.ytAtN({R:'{\"bgChallenge\":{\"program\":\"P\",\"globalName\":\"g\",` +
+		`\"interpreterUrl\":{\"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue\":\"//evil.tld/p.js\"}}}'})`
+	page := `<html><script>var ytInitialPlayerResponse = {"shortDescription":"` + hostile + `"};</script></html>`
+
+	got, reason := extractAttestationChallenge(page)
+	if got != "" {
+		t.Fatalf("hostile challenge was accepted: %s", got)
+	}
+	if !strings.HasPrefix(reason, atnBadInterpHost) {
+		t.Errorf("reason = %q, want prefix %q", reason, atnBadInterpHost)
+	}
+}
+
+// TestIsGoogleOwnedHost pins the allowlist semantics, including the
+// lookalike-domain cases the dot anchoring exists to defeat and the
+// user-content hosts deliberately excluded (their bytes are third-party
+// controlled, and the fetched body is executed).
+func TestIsGoogleOwnedHost(t *testing.T) {
+	for _, h := range []string{
+		"www.google.com", "google.com", "www.gstatic.com", "s.ytimg.com",
+		"www.youtube.com", "google.de", "www.google.co.uk", "google.com.au",
+		"jnn-pa.googleapis.com",
+	} {
+		if !isGoogleOwnedHost(h) {
+			t.Errorf("%s should be allowed", h)
+		}
+	}
+	for _, h := range []string{
+		"evil.tld", "evilgoogle.com", "google.com.evil.tld", "notgstatic.com",
+		"i.ytimg.com",                // user-uploaded thumbnails
+		"lh3.googleusercontent.com",  // user content
+		"yt3.ggpht.com",              // user avatars
+		"rr2---sn-x.googlevideo.com", // user media
+		"", "google.co.uk.evil.tld",
+	} {
+		if isGoogleOwnedHost(h) {
+			t.Errorf("%s should be rejected", h)
+		}
+	}
+}
+
+// TestExtractAttestationChallengeBalancedScan covers the payload shapes the
+// old non-greedy regex mis-handled: a `})` sequence inside the opaque
+// challenge truncated the capture into an unbalanced fragment, which then
+// failed to parse and was indistinguishable from "page carried no challenge".
+func TestExtractAttestationChallengeBalancedScan(t *testing.T) {
+	inner := `{"bgChallenge":{"program":"AA})BB","globalName":"g",` +
+		`"interpreterUrl":{"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":"//www.google.com/js/th/a.js"}}}`
+	rJSON, _ := json.Marshal(inner)
+	page := `<html><script>window.ytAtN({R: ` + string(rJSON) + `});</script></html>`
+
+	got, reason := extractAttestationChallenge(page)
+	if got == "" {
+		t.Fatalf("balanced scan failed on `})` payload (reason=%s)", reason)
+	}
+	var back map[string]any
+	if err := json.Unmarshal([]byte(got), &back); err != nil {
+		t.Fatalf("result not JSON: %v", err)
+	}
+	if back["program"] != "AA})BB" {
+		t.Errorf("program mangled: %v", back["program"])
+	}
+
+	if got, reason := extractAttestationChallenge(`<script>window.ytAtN({R: "unclosed`); got != "" || reason != atnUnbalanced {
+		t.Errorf("unclosed literal: got %q reason %q, want empty/%s", got, reason, atnUnbalanced)
+	}
+}
+
+// TestExtractAttestationChallengeRefusesInlineInterpreter pins the deliberate
+// asymmetry with bgutils-js: interpreterJavascript and interpreterUrl are
+// interchangeable upstream, but inline script arriving from scraped HTML has
+// no origin to check, so a page-sourced challenge carrying it is refused and
+// the sidecar's /att/get flow (a real YouTube API response) runs instead.
+func TestExtractAttestationChallengeRefusesInlineInterpreter(t *testing.T) {
+	inner := `{"bgChallenge":{"program":"P","globalName":"g","interpreterJavascript":{"privateDoNotAccessOrElseSafeScriptWrappedValue":"alert(1)"}}}`
+	rJSON, _ := json.Marshal(inner)
+	page := `<html><script>window.ytAtN({R: ` + string(rJSON) + `});</script></html>`
+
+	got, reason := extractAttestationChallenge(page)
+	if got != "" {
+		t.Fatalf("inline-interpreter challenge accepted: %s", got)
+	}
+	if reason != atnNoInterpURL {
+		t.Errorf("reason = %q, want %q", reason, atnNoInterpURL)
 	}
 }
