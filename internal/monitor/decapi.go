@@ -66,8 +66,8 @@ type DecapiMonitor struct {
 	// §10's creator table): DispositionBroadcast for live/upcoming probe
 	// results, DispositionNewVOD otherwise — DECAPI writes no feed_items row
 	// by design (§13), so it can never produce backlog.
-	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig, d JobDisposition)
-	ProbeVideo VideoProbeFunc
+	OnVideoFound func(videoID, title, url string, channel *config.ChannelConfig, d JobDisposition)
+	ProbeVideo   VideoProbeFunc
 	// ProbeDate is the date-completing half of the two-phase probe (§9),
 	// shared with the feed monitor: the ANDROID_VR status probe carries no
 	// microformat, so a vod-family result arrives dateless and the §13

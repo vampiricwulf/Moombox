@@ -36,11 +36,11 @@ func TestJSToJSONExact(t *testing.T) {
 		// Python: js_to_json('{1.077:5}') == '{1.63:5}'.
 		{"octal_dot_lookbehind_fallthrough", `{1.077:5}`, `{1.63:5}`},
 		{"template_iife", "{a: `${e(\"\")}`}", `{"a": "\"e\"(\"\")"}`},
-		{"template_var", "`Hello ${name}`", `"Hello world"`}, // vars: name -> "world" (set below)
-		{"template_var_twice", "`${name}${name}`", `"XX"`},   // vars: name -> "X"
-		{"template_num_twice", "`${name}${name}`", `"55"`},   // vars: name -> 5
+		{"template_var", "`Hello ${name}`", `"Hello world"`},        // vars: name -> "world" (set below)
+		{"template_var_twice", "`${name}${name}`", `"XX"`},          // vars: name -> "X"
+		{"template_num_twice", "`${name}${name}`", `"55"`},          // vars: name -> 5
 		{"template_num_quoted", "`${name}\"${name}\"`", `"5\"5\""`}, // vars: name -> 5
-		{"template_unresolved", "`${name}`", `"name"`}, // no vars
+		{"template_unresolved", "`${name}`", `"name"`},              // no vars
 	}
 	vars := map[string]map[string]string{
 		"template_var":        {"name": `"world"`},

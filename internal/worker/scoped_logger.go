@@ -27,9 +27,10 @@ func newScopedLogger(inner logger, args ...any) *scopedLogger {
 	return &scopedLogger{inner: inner, args: args}
 }
 
-// The variadic slice is freshly allocated per call, so appending the fixed
-// args to it cannot alias a caller's backing array.
-func (s *scopedLogger) Debug(msg string, args ...any) { s.inner.Debug(msg, append(args, s.args...)...) }
-func (s *scopedLogger) Info(msg string, args ...any)  { s.inner.Info(msg, append(args, s.args...)...) }
-func (s *scopedLogger) Warn(msg string, args ...any)  { s.inner.Warn(msg, append(args, s.args...)...) }
-func (s *scopedLogger) Error(msg string, args ...any) { s.inner.Error(msg, append(args, s.args...)...) }
+// Merged slice is built with an explicit copy to avoid aliasing a spread
+// caller's backing array when they call logger.Info(msg, kv...) and kv
+// has spare capacity.
+func (s *scopedLogger) Debug(msg string, args ...any) { merged := append(append([]any(nil), args...), s.args...); s.inner.Debug(msg, merged...) }
+func (s *scopedLogger) Info(msg string, args ...any)  { merged := append(append([]any(nil), args...), s.args...); s.inner.Info(msg, merged...) }
+func (s *scopedLogger) Warn(msg string, args ...any)  { merged := append(append([]any(nil), args...), s.args...); s.inner.Warn(msg, merged...) }
+func (s *scopedLogger) Error(msg string, args ...any) { merged := append(append([]any(nil), args...), s.args...); s.inner.Error(msg, merged...) }

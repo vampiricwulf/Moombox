@@ -227,7 +227,6 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 // head within HeadProbeInterval (cold start, stall) — saving one probe
 // round-trip per interval per downloader on a healthy stream. Non-GVS
 // responses (Twitch HLS, error pages) simply lack the header — no-op.
-//
 func (d *SegmentDownloader) noteHeadSeqFromResponse(resp *http.Response) {
 	v := resp.Header.Get("X-Head-Seqnum")
 	if v == "" {

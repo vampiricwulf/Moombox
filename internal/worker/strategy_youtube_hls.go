@@ -66,6 +66,8 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 				"binding", "videoID", "challenge", challengeLabel(videoInfo.AttestationChallenge),
 				"minterSource", mint.MinterSource, "minterFresh", mint.MinterFresh,
 				"sidecar", mint.ViaSidecar, "tokenLength", len(mint.PoToken))
+		} else {
+			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}
 	}
 

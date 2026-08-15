@@ -101,13 +101,13 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	attestationChallenge := extractAttestationChallenge(html)
 
 	return &WatchPageResult{
-		Ytcfg:                  ytcfg,
-		IsLoggedIn:             isLoggedIn,
-		PlayerResponse:         playerResponse,
-		ChatContinuation:       chatContinuation,
-		ChatIsReplay:           chatIsReplay,
-		ChatErr:                chatErr,
-		AttestationChallenge:   attestationChallenge,
+		Ytcfg:                ytcfg,
+		IsLoggedIn:           isLoggedIn,
+		PlayerResponse:       playerResponse,
+		ChatContinuation:     chatContinuation,
+		ChatIsReplay:         chatIsReplay,
+		ChatErr:              chatErr,
+		AttestationChallenge: attestationChallenge,
 	}, nil
 }
 
