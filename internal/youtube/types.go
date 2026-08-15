@@ -49,6 +49,11 @@ type VideoInfo struct {
 	PlayabilityError   PlayabilityError `json:"playabilityError,omitempty"`
 	PlayabilityReason  string           `json:"playabilityReason,omitempty"`
 
+	// AttestationChallenge is the session's watch-page BotGuard challenge
+	// (see WatchPageResult.AttestationChallenge). Rides on VideoInfo so
+	// download strategies can mint session-coherent GVS PO tokens.
+	AttestationChallenge string `json:"-"`
+
 	// PublishedAt is the probe's authoritative publish date, status-aware
 	// per spec §12 — see extractPublishedAt. RFC3339: a real broadcast
 	// start carries its own time, and a bare-date microformat value is
