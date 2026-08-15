@@ -140,7 +140,7 @@ func jsCreateMap(inner string, vars map[string]string, strict bool) (string, err
 		if len(p) != 2 {
 			return "", fmt.Errorf("js_to_json: new Map: pair of length %d", len(p))
 		}
-		key := fmt.Sprint(p[0]) // json.Number and string both print verbatim
+		key := jsMapKeyString(p[0])
 		if i, ok := seen[key]; ok {
 			out[i].v = p[1]
 			continue
@@ -165,6 +165,31 @@ func jsCreateMap(inner string, vars map[string]string, strict bool) (string, err
 	}
 	sb.WriteByte('}')
 	return sb.String(), nil
+}
+
+// jsMapKeyString ports Python's json.dumps dict-key coercion (json/encoder.py
+// _iterencode_dict): str keys pass through as-is, and the non-string JSON
+// scalars that can appear as a decoded Map-pair key get Python's fixed
+// string forms — notably None → "null", not Go's fmt-default "<nil>".
+// json.Number (int/float) round-trips through its original source text,
+// matching Python's int()/float repr for the common case where the source
+// text is unchanged by decoding.
+func jsMapKeyString(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	case json.Number:
+		return t.String()
+	case string:
+		return t
+	default:
+		return fmt.Sprint(t)
+	}
 }
 
 // jsFixKV is the port of Python's fix_kv closure. code+start give access to
@@ -220,12 +245,31 @@ func jsFixKV(code string, start int, v string, vars map[string]string, strict bo
 		return jsIntOut(n, m[2] == ":"), nil
 	}
 	if m := jsOctKeyRe.FindStringSubmatch(v); m != nil {
-		if start > 0 && code[start-1] == '.' {
-			return v, nil // Python (?<!\.): fraction digits, not an octal
-		}
 		n, err := strconv.ParseInt(m[1], 8, 64)
 		if err != nil {
 			return "", fmt.Errorf("js_to_json: octal %q: %w", m[1], err)
+		}
+		if start > 0 && code[start-1] == '.' {
+			if m[2] != ":" {
+				// Python (?<!\.): the outer octal alternative doesn't match
+				// at all here, and the decimal-key alternative's lookahead
+				// for a trailing ":" also fails with nothing to look ahead
+				// at — so Python's whole regex leaves these digits entirely
+				// unmatched (no conversion).
+				return v, nil
+			}
+			// Python (?<!\.): the outer octal alternative doesn't match, but
+			// the decimal-key alternative's lookahead still finds the ":"
+			// and matches just the digits (its match never includes the
+			// skip+":" — that's a lookahead, not a consumption). fix_kv then
+			// re-tests those bare digits against INTEGER_TABLE, which has no
+			// dot guard, and still recognizes the octal shape — so the
+			// *value* stays base-8 — but since Python's match never included
+			// skip+":", it was never folded into a quoted `"N":` key; it
+			// stays raw, unmatched source text. Go's regex has no lookbehind
+			// so it greedily consumed skip+":" as part of this match;
+			// splice it back in unconverted instead of producing a key form.
+			return strconv.FormatInt(n, 10) + v[len(m[1]):], nil
 		}
 		return jsIntOut(n, m[2] == ":"), nil
 	}

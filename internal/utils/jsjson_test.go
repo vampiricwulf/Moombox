@@ -27,6 +27,14 @@ func TestJSToJSONExact(t *testing.T) {
 		{"scientific_notation", `{segments: [{"offset":-3.885780586188048e-16,"duration":39.75000000000001}]}`, `{"segments": [{"offset":-3.885780586188048e-16,"duration":39.75000000000001}]}`},
 		{"malformed_42a1", `42a1`, `42"a1"`},
 		{"malformed_42a-1", `42a-1`, `42"a"-1`},
+		// Regression: Python's (?<!\.) blocks the outer octal alternative
+		// here, but the decimal-key alternative's lookahead still finds the
+		// trailing ':' and matches just the digits; INTEGER_TABLE re-tests
+		// those bare digits (no dot guard there) and still resolves them as
+		// octal (63), while the ':' itself passes through unmatched/raw —
+		// so the value stays base-8 but is never folded into a quoted key.
+		// Python: js_to_json('{1.077:5}') == '{1.63:5}'.
+		{"octal_dot_lookbehind_fallthrough", `{1.077:5}`, `{1.63:5}`},
 		{"template_iife", "{a: `${e(\"\")}`}", `{"a": "\"e\"(\"\")"}`},
 		{"template_var", "`Hello ${name}`", `"Hello world"`}, // vars: name -> "world" (set below)
 		{"template_var_twice", "`${name}${name}`", `"XX"`},   // vars: name -> "X"
@@ -85,6 +93,11 @@ func TestJSToJSONLoads(t *testing.T) {
 		{"date_and_paren_string", `[new Date("spam"), '("eggs")']`, `["spam", "(\"eggs\")"]`},
 		{"float_zeroes", `[0.077, 7.06, 29.064, 169.0072]`, `[0.077, 7.06, 29.064, 169.0072]`},
 		{"map_ctor", `new Map([["a", 5]])`, `{"a": 5}`},
+		// Regression: Python's json.dumps coerces a None dict key to the
+		// string "null" (json/encoder.py _iterencode_dict), not Go's
+		// fmt-default "<nil>". Python: js_to_json('new Map([[null, 5]])')
+		// == '{"null": 5}'.
+		{"map_null_key", `new Map([[null, 5]])`, `{"null": 5}`},
 		{"array_ctor_bare", `Array(5, 10)`, `[5, 10]`},
 		{"array_ctor_new", `new Array(15,5)`, `[15, 5]`},
 		{"map_of_arrays", `new Map([Array(5, 10),new Array(15,5)])`, `{"5": 10, "15": 5}`},
