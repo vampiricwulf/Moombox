@@ -242,6 +242,23 @@ func (a *atomicTime) Load() time.Time {
 func (a *atomicTime) StoreNow()            { a.v.Store(time.Now().UnixNano()) }
 func (a *atomicTime) Since() time.Duration { return time.Since(a.Load()) }
 
+// TryClaim atomically claims the next slot when at least cooldown has
+// elapsed since the last claim, returning true to exactly ONE caller per
+// window. A plain Since()+StoreNow() pair is check-then-act: concurrent
+// callers can all pass the check before any of them stores.
+func (a *atomicTime) TryClaim(cooldown time.Duration) bool {
+	for {
+		old := a.v.Load()
+		now := time.Now()
+		if old != 0 && now.Sub(time.Unix(0, old)) < cooldown {
+			return false
+		}
+		if a.v.CompareAndSwap(old, now.UnixNano()) {
+			return true
+		}
+	}
+}
+
 // SegmentDownloader downloads DASH or HLS segments sequentially/in parallel.
 type SegmentDownloader struct {
 	opts                  DownloaderOptions
@@ -416,10 +433,9 @@ func (d *SegmentDownloader) refreshCredentials() bool {
 	if d.opts.OnCredentialRefresh == nil {
 		return false
 	}
-	if d.lastCredentialRefresh.Since() < credentialRefreshCooldown {
+	if !d.lastCredentialRefresh.TryClaim(credentialRefreshCooldown) {
 		return false
 	}
-	d.lastCredentialRefresh.StoreNow()
 
 	freshURL, freshToken := d.opts.OnCredentialRefresh()
 	installed := false

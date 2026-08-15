@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -813,5 +815,68 @@ func TestRefreshCredentialsNilCallback(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: "https://example.invalid/v", OutputFile: "x"})
 	if d.refreshCredentials() {
 		t.Error("refreshCredentials with no callback should report false")
+	}
+}
+
+// TestRefreshCredentialsConcurrentClaims verifies that TryClaim provides
+// mutual exclusion: when many goroutines call refreshCredentials()
+// concurrently at the moment the cooldown expires, exactly ONE gets through
+// to invoke the callback. Without atomic Compare-and-Swap, a TOCTOU race
+// lets all of them pass the check and hammer the callback.
+func TestRefreshCredentialsConcurrentClaims(t *testing.T) {
+	var callCount atomic.Int32
+	const numGoroutines = 20
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.invalid/old",
+		OutputFile: "x",
+		PoToken:    "old-token",
+		OnCredentialRefresh: func() (string, string) {
+			callCount.Add(1)
+			// Sleep long enough that if other goroutines reached here,
+			// they would increment the counter before we return.
+			time.Sleep(20 * time.Millisecond)
+			return "https://example.invalid/new", "new-token"
+		},
+	})
+
+	// Barrier: launch all goroutines, then signal them to proceed together
+	// so they arrive at TryClaim as nearly simultaneously as possible.
+	var wg sync.WaitGroup
+	readySync := make(chan struct{})
+	resultSync := make([]chan bool, numGoroutines)
+	for i := range resultSync {
+		resultSync[i] = make(chan bool, 1)
+	}
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-readySync // Wait for signal
+			result := d.refreshCredentials()
+			resultSync[idx] <- result
+		}(i)
+	}
+
+	// Signal all goroutines to proceed at once
+	close(readySync)
+
+	// Collect results
+	successCount := 0
+	for i := 0; i < numGoroutines; i++ {
+		if <-resultSync[i] {
+			successCount++
+		}
+	}
+
+	wg.Wait()
+
+	// Exactly one goroutine should have won the TryClaim race
+	if callCount.Load() != 1 {
+		t.Errorf("callback called %d times, want exactly 1 (race condition detected)", callCount.Load())
+	}
+	if successCount != 1 {
+		t.Errorf("%d goroutines reported successful refresh, want exactly 1", successCount)
 	}
 }
