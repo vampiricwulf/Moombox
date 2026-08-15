@@ -768,3 +768,50 @@ func TestSetPoTokenOverridesOptions(t *testing.T) {
 		t.Errorf("getPoToken() = %q, want the previous token retained after an empty SetPoToken", got)
 	}
 }
+
+// TestRefreshCredentialsInstallsAndCoolsDown pins the two properties the 403
+// recovery path relies on: a refresh installs whatever the callback returns,
+// and repeated 403s inside the cooldown window cannot turn the callback into
+// a hot loop (yt-dlp gates its url_feed refetch the same way).
+func TestRefreshCredentialsInstallsAndCoolsDown(t *testing.T) {
+	var calls int
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.invalid/old",
+		OutputFile: "x",
+		PoToken:    "old-token",
+		OnCredentialRefresh: func() (string, string) {
+			calls++
+			return "https://example.invalid/new", "new-token"
+		},
+	})
+
+	if !d.refreshCredentials() {
+		t.Fatal("first refresh should report that credentials were installed")
+	}
+	if calls != 1 {
+		t.Fatalf("callback calls = %d, want 1", calls)
+	}
+	if got := d.getPoToken(); got != "new-token" {
+		t.Errorf("token = %q, want new-token", got)
+	}
+	if got := d.getBaseURL(); got != "https://example.invalid/new" {
+		t.Errorf("baseURL = %q, want the refreshed URL", got)
+	}
+
+	// Second call inside the cooldown must not re-invoke the callback.
+	if d.refreshCredentials() {
+		t.Error("refresh inside the cooldown window should report no new install")
+	}
+	if calls != 1 {
+		t.Errorf("callback calls = %d, want still 1 (cooldown)", calls)
+	}
+}
+
+// TestRefreshCredentialsNilCallback: downloaders without the callback (Twitch
+// HLS, VOD) must be unaffected.
+func TestRefreshCredentialsNilCallback(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{BaseURL: "https://example.invalid/v", OutputFile: "x"})
+	if d.refreshCredentials() {
+		t.Error("refreshCredentials with no callback should report false")
+	}
+}

@@ -140,7 +140,17 @@ type DownloaderOptions struct {
 	EnforceMaxTimeout bool
 	CheckStreamStatus func(ctx context.Context) (bool, error) // Returns true if stream ended
 	IsOnline          func() bool                             // Returns false if device has no internet
-	Logger            DownloaderLogger
+	// OnCredentialRefresh is called when segments 403 while the downloader is
+	// still behind the live head — i.e. the segments demonstrably exist and
+	// our credentials, not the stream, are the problem. The callback should
+	// re-fetch the player response and return a freshly-resolved BaseURL and
+	// a freshly-minted GVS PO token; either may be "" to leave that half
+	// unchanged. Both upstreams recover this way rather than treating the
+	// 403 as terminal (see docs/superpowers/plans/2026-08-15-live-403-
+	// credential-recovery.md). Optional; nil disables recovery, restoring
+	// the previous behaviour exactly.
+	OnCredentialRefresh func() (baseURL string, poToken string)
+	Logger              DownloaderLogger
 }
 
 // DownloadActivity describes what the downloader is currently WAITING ON when
@@ -280,6 +290,10 @@ type SegmentDownloader struct {
 	// Mirrors baseURLOverride exactly.
 	poTokenOverride atomic.Pointer[string]
 
+	// lastCredentialRefresh gates OnCredentialRefresh to one call per
+	// credentialRefreshCooldown.
+	lastCredentialRefresh atomicTime
+
 	// startedAt + transientRetries + lastTransientErr feed HealthUpdate
 	// snapshots. transientRetries / lastTransientErrMu are read-mostly
 	// in the segment fetcher (each non-terminal error is one increment
@@ -391,6 +405,37 @@ func (d *SegmentDownloader) getBaseURL() string {
 		return *p
 	}
 	return d.opts.BaseURL
+}
+
+// refreshCredentials asks the owner for fresh download credentials and
+// installs whatever it returns. Returns true when a refresh actually ran and
+// installed at least one value. Cooldown-gated: a 403 burst can call this on
+// every failed segment, but only one player-response round trip per
+// credentialRefreshCooldown is allowed through.
+func (d *SegmentDownloader) refreshCredentials() bool {
+	if d.opts.OnCredentialRefresh == nil {
+		return false
+	}
+	if d.lastCredentialRefresh.Since() < credentialRefreshCooldown {
+		return false
+	}
+	d.lastCredentialRefresh.StoreNow()
+
+	freshURL, freshToken := d.opts.OnCredentialRefresh()
+	installed := false
+	if freshURL != "" {
+		d.SetBaseURL(freshURL)
+		installed = true
+	}
+	if freshToken != "" {
+		d.SetPoToken(freshToken)
+		installed = true
+	}
+	if installed && d.logger != nil {
+		d.logger.Info("[Downloader] credentials refreshed after 403",
+			"newURL", freshURL != "", "newToken", freshToken != "")
+	}
+	return installed
 }
 
 // NewSegmentDownloader creates a new segment downloader.

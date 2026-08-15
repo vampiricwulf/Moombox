@@ -45,6 +45,14 @@ const (
 	// transientFailureRetryDelay is used when behind head but not stuck on
 	// a single segment — treated as a quick transient.
 	transientFailureRetryDelay = 1 * time.Second
+
+	// credentialRefreshCooldown is the minimum gap between two
+	// OnCredentialRefresh invocations. Each refresh costs a player-response
+	// round trip plus a PO-token mint, and a 403 burst produces hundreds of
+	// failures per second, so without this the recovery path would hammer
+	// YouTube harder than the failure did. yt-dlp gates its equivalent
+	// (url_feed's delay argument) at 5s once fragments start failing.
+	credentialRefreshCooldown = 5 * time.Second
 )
 
 // runDashLoop is the main DASH download loop.
