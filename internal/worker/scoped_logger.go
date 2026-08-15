@@ -30,7 +30,19 @@ func newScopedLogger(inner logger, args ...any) *scopedLogger {
 // Merged slice is built with an explicit copy to avoid aliasing a spread
 // caller's backing array when they call logger.Info(msg, kv...) and kv
 // has spare capacity.
-func (s *scopedLogger) Debug(msg string, args ...any) { merged := append(append([]any(nil), args...), s.args...); s.inner.Debug(msg, merged...) }
-func (s *scopedLogger) Info(msg string, args ...any)  { merged := append(append([]any(nil), args...), s.args...); s.inner.Info(msg, merged...) }
-func (s *scopedLogger) Warn(msg string, args ...any)  { merged := append(append([]any(nil), args...), s.args...); s.inner.Warn(msg, merged...) }
-func (s *scopedLogger) Error(msg string, args ...any) { merged := append(append([]any(nil), args...), s.args...); s.inner.Error(msg, merged...) }
+func (s *scopedLogger) Debug(msg string, args ...any) {
+	merged := append(append([]any(nil), args...), s.args...)
+	s.inner.Debug(msg, merged...)
+}
+func (s *scopedLogger) Info(msg string, args ...any) {
+	merged := append(append([]any(nil), args...), s.args...)
+	s.inner.Info(msg, merged...)
+}
+func (s *scopedLogger) Warn(msg string, args ...any) {
+	merged := append(append([]any(nil), args...), s.args...)
+	s.inner.Warn(msg, merged...)
+}
+func (s *scopedLogger) Error(msg string, args ...any) {
+	merged := append(append([]any(nil), args...), s.args...)
+	s.inner.Error(msg, merged...)
+}
