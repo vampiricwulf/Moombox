@@ -155,11 +155,21 @@ async function generateMinter(challenge) {
     if (!challenge) {
         minterSource = "att_get";
         // 1. Fetch the BotGuard challenge from YouTube's /att/get endpoint.
+        // Header keys below are deliberately lowercase to match getHeaders()'s
+        // own casing (content-type, user-agent) and OVERWRITE those entries
+        // rather than duplicate them: native fetch's Headers treats
+        // case-varied keys as the SAME header and joins their values with
+        // ", " (verified against Node's undici), so a differently-cased
+        // "Content-Type" here would silently corrupt the request into
+        // "application/json+protobuf, application/json". getHeaders() also
+        // contributes x-goog-api-key / x-user-agent, matching upstream
+        // session_manager.ts's /att/get call.
         const attResp = await fetch(ATT_GET_URL, {
             method: "POST",
             headers: {
-                "Content-Type": "application/json",
-                "User-Agent": USER_AGENT,
+                ...getHeaders(),
+                "content-type": "application/json",
+                "user-agent": USER_AGENT,
             },
             body: JSON.stringify({
                 context: { client: { clientName: "WEB", clientVersion: CLIENT_VERSION } },
@@ -177,22 +187,56 @@ async function generateMinter(challenge) {
         }
     }
 
-    // 2. Fetch the BotGuard interpreter JS by URL given in the challenge.
-    // The URL is HARD-GATED to Google-owned hosts: step 3 executes whatever
-    // this fetch returns, and since v2.7.8 a challenge can originate from a
-    // watch page (window.ytAtN), whose HTML embeds attacker-authored video
-    // metadata. Without this gate a crafted description could point the
-    // interpreter at any host and get its JavaScript executed in this process.
-    const interpUrl = `https:${challenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue}`;
-    assertGoogleHost(interpUrl);
-    const interpResp = await fetch(interpUrl, {
-        headers: { "User-Agent": USER_AGENT },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!interpResp.ok) {
-        throw new Error(`interpreter fetch HTTP ${interpResp.status}`);
+    // 2. Resolve the interpreter JS. bgutils-js types interpreterJavascript
+    // (inline) and interpreterUrl independently optional, and YouTube's own
+    // player checks the inline form FIRST. Inline execution skips a fetch
+    // entirely, but is only trusted when this challenge came from OUR OWN
+    // /att/get fetch above (a real, verified YouTube API response) --
+    // `minterSource === "att_get"` is exactly that condition. A challenge
+    // supplied over the RPC (page-scraped, attacker-adjacent) carrying
+    // inline JS has no origin we can check, so it is refused outright and we
+    // regenerate from /att/get instead -- the Go side already refuses to
+    // forward such challenges; this is defense in depth, not the primary
+    // control. (generatePoToken's shape check independently requires
+    // interpreterUrl on RPC-supplied challenges, so in practice this branch
+    // only fires if that gate is ever bypassed or weakened.)
+    const trusted = minterSource === "att_get";
+    const inline = challenge.interpreterJavascript;
+    const inlineJS =
+        inline && typeof inline.privateDoNotAccessOrElseSafeScriptWrappedValue === "string"
+            ? inline.privateDoNotAccessOrElseSafeScriptWrappedValue
+            : null;
+
+    let interpJS;
+    if (inlineJS !== null && !trusted) {
+        logWarn(
+            "RPC-supplied challenge carried inline interpreterJavascript; refusing and regenerating from /att/get",
+        );
+        return generateMinter(null);
+    } else if (inlineJS !== null) {
+        interpJS = inlineJS;
+    } else {
+        if (!challenge.interpreterUrl) {
+            throw new Error("challenge has neither interpreterJavascript nor interpreterUrl");
+        }
+        // Fetch the BotGuard interpreter JS by URL given in the challenge.
+        // The URL is HARD-GATED to Google-owned hosts: step 3 executes
+        // whatever this fetch returns, and since v2.7.8 a challenge can
+        // originate from a watch page (window.ytAtN), whose HTML embeds
+        // attacker-authored video metadata. Without this gate a crafted
+        // description could point the interpreter at any host and get its
+        // JavaScript executed in this process.
+        const interpUrl = `https:${challenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue}`;
+        assertGoogleHost(interpUrl);
+        const interpResp = await fetch(interpUrl, {
+            headers: { "User-Agent": USER_AGENT },
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (!interpResp.ok) {
+            throw new Error(`interpreter fetch HTTP ${interpResp.status}`);
+        }
+        interpJS = await interpResp.text();
     }
-    const interpJS = await interpResp.text();
 
     // 3. Install the interpreter into globalThis. `new Function(...)()` runs
     // the script in module-isolated scope but with globalThis access -- which
@@ -247,45 +291,104 @@ async function generateMinter(challenge) {
     };
 }
 
-// In-flight dedup for minter regeneration. Each generateMinter() run is a
+// In-flight dedup + serialization for minter regeneration.
+//
+// At most one generateMinter() call ever actually executes at a time: it's a
 // full multi-second BotGuard pass that installs its interpreter onto the
-// shared globalThis — two interleaved runs (concurrent mints on a cold or
-// just-expired cache) can capture each other's VM mid-flight and
-// cross-contaminate the resulting minter.
-let minterPromise = null;
+// shared globalThis via `new Function(interpJS)()`, and two interleaved runs
+// would capture each other's VM mid-flight and cross-contaminate the
+// resulting minter. But callers that share the SAME challenge legitimately
+// share one execution and one honest provenance report; callers with
+// DIFFERENT challenges must NOT share one — a joiner reporting
+// "minterSource: challenge, minterFresh: true" for a minter actually built
+// from a DIFFERENT job's watch-page challenge would assert session coherence
+// it doesn't have, and that log line is specifically what's relied on to
+// diagnose premiere 403s months from now.
+//
+// `minterInflight` names the challenge key currently being generated for; a
+// caller with a matching key joins it. `serializeChain` is the ordering
+// backbone — every generation (matched or not) chains onto it, so a caller
+// with a non-matching key waits for whatever's currently running to finish
+// before starting its own: one generateMinter() execution at a time, no
+// exceptions. (Named distinctly from the unrelated `inflight` request
+// counter in the stdin loop below, which tracks in-progress RPC dispatches.)
+let minterInflight = null; // { key, promise } | null
+let serializeChain = Promise.resolve();
+
+// /att/get callers (challenge === null) legitimately share one minter —
+// there's no per-session challenge to keep coherent on that path; it's
+// already documented above as session-incoherent by design. Give them one
+// stable key so they still dedup/join against each other. Not valid JSON
+// (a raw challenge string always starts with "{"), so it can never collide
+// with a real challenge.
+const ATT_GET_KEY = "att_get:no-challenge";
+function normalizeChallengeKey(rawKey) {
+    return rawKey || ATT_GET_KEY;
+}
 
 // freshMinter forces a regeneration even when the cache is valid (the
-// fresh-per-GVS-mint policy). Concurrent regens share one in-flight
-// generateMinter via minterPromise — a joiner may therefore get a minter
-// built from ANOTHER request's challenge; same session, acceptable.
-async function getOrCreateMinter(challenge, freshMinter) {
+// fresh-per-GVS-mint policy). challengeKey is the RAW challenge JSON string
+// generatePoToken parsed `challenge` from (or null for the /att/get path) —
+// used only for equality against the in-flight key, never re-derived from
+// `challenge` itself, so it exactly reflects what the caller sent.
+// minterFactory defaults to the real generateMinter; overridable so tests can
+// exercise the keying/serialization logic without real network/BotGuard work.
+export async function getOrCreateMinter(challenge, challengeKey, freshMinter, minterFactory = generateMinter) {
     if (!freshMinter && cachedMinter && Date.now() < cachedMinter.expiresAt) {
         return { m: cachedMinter, fresh: false };
     }
-    if (!minterPromise) {
-        minterPromise = generateMinter(challenge).finally(() => {
-            minterPromise = null;
-        });
+
+    const key = normalizeChallengeKey(challengeKey);
+
+    if (minterInflight && minterInflight.key === key) {
+        // Same challenge as the generation already in flight: the minter it
+        // resolves to really was built from OUR challenge, so reporting
+        // fresh+matching provenance is honest.
+        const m = await minterInflight.promise;
+        return { m, fresh: true };
     }
-    const prev = cachedMinter;
-    cachedMinter = await minterPromise;
-    // Free the previous interpreter's VM when YouTube rotates globalName.
-    // generateMinter runs `new Function(interpJS)()`, which attaches the VM
-    // under globalThis[globalName]. A stable name is overwritten in place (the
-    // old VM becomes GC-eligible), but a ROTATED name leaves globalThis[oldName]
-    // pinned forever — one leaked VM per rotation over a days-long run. The live
-    // minter keeps its own VM reachable via the mintCallback closure (not via
-    // globalThis), so deleting the stale property is safe even for an in-flight
-    // mint that captured the old minter.
-    if (prev && prev.globalName && prev.globalName !== cachedMinter.globalName) {
-        try {
-            delete globalThis[prev.globalName];
-        } catch (e) {
-            logWarn(`could not free stale interpreter global: ${e?.message ?? e}`);
+
+    // Different challenge (or nothing in flight yet). Queue behind whatever
+    // is currently running so generateMinter() never overlaps with itself,
+    // then run our own — independent of, and never shared with, whatever was
+    // queued ahead of it.
+    const runAfter = serializeChain;
+    const generation = (async () => {
+        await runAfter;
+        const prev = cachedMinter;
+        const m = await minterFactory(challenge);
+        cachedMinter = m;
+        // Free the previous interpreter's VM when YouTube rotates globalName.
+        // generateMinter runs `new Function(interpJS)()`, which attaches the VM
+        // under globalThis[globalName]. A stable name is overwritten in place (the
+        // old VM becomes GC-eligible), but a ROTATED name leaves globalThis[oldName]
+        // pinned forever — one leaked VM per rotation over a days-long run. The live
+        // minter keeps its own VM reachable via the mintCallback closure (not via
+        // globalThis), so deleting the stale property is safe even for an in-flight
+        // mint that captured the old minter.
+        if (prev && prev.globalName && prev.globalName !== m.globalName) {
+            try {
+                delete globalThis[prev.globalName];
+            } catch (e) {
+                logWarn(`could not free stale interpreter global: ${e?.message ?? e}`);
+            }
         }
-    }
-    stats.cachedMinters = 1;
-    return { m: cachedMinter, fresh: true };
+        stats.cachedMinters = 1;
+        return m;
+    })();
+
+    // Chain future generations behind this one regardless of outcome; a
+    // rejected generation must not wedge the serialization queue.
+    serializeChain = generation.catch(() => {});
+    minterInflight = { key, promise: generation };
+    generation.finally(() => {
+        if (minterInflight && minterInflight.promise === generation) {
+            minterInflight = null;
+        }
+    });
+
+    const m = await generation;
+    return { m, fresh: true };
 }
 
 async function generatePoToken(binding, challengeJSON, freshMinter) {
@@ -293,14 +396,24 @@ async function generatePoToken(binding, challengeJSON, freshMinter) {
         throw new Error("missing or invalid binding");
     }
     let challenge = null;
+    // The raw JSON string `challenge` was parsed from, used only as the
+    // in-flight/join key (see getOrCreateMinter) — never re-derived from
+    // `challenge` itself so it exactly reflects what this caller sent. Stays
+    // null unless a challenge actually passed the shape check below.
+    let challengeKey = null;
     if (challengeJSON && typeof challengeJSON === "string") {
         try {
             const parsed = JSON.parse(challengeJSON);
             // Defensive shape check: a challenge missing its program or
             // interpreter URL would crash generateMinter mid-flight; treat
-            // it as absent so the /att/get fallback runs instead.
+            // it as absent so the /att/get fallback runs instead. Deliberately
+            // requires interpreterUrl, not the inline interpreterJavascript
+            // form — inline JS arriving over the RPC has no verifiable
+            // origin, and generateMinter refuses it independently too (see
+            // its "trusted" check) as defense in depth.
             if (parsed && parsed.program && parsed.interpreterUrl) {
                 challenge = parsed;
+                challengeKey = challengeJSON;
             } else {
                 logWarn("challenge missing program/interpreterUrl; using /att/get");
             }
@@ -308,7 +421,7 @@ async function generatePoToken(binding, challengeJSON, freshMinter) {
             logWarn(`invalid challenge JSON ignored: ${e?.message ?? e}`);
         }
     }
-    const { m, fresh } = await getOrCreateMinter(challenge, !!freshMinter);
+    const { m, fresh } = await getOrCreateMinter(challenge, challengeKey, !!freshMinter);
     const poToken = await m.minter.mintAsWebsafeString(binding);
     if (!poToken) {
         throw new Error("WebPoMinter returned empty poToken");
