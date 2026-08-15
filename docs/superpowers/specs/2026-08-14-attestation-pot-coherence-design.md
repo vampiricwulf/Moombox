@@ -264,13 +264,19 @@ serves the player-API path via the (replaced) cached minter.
 - Worker: `scopedLogger` arg-append behavior; downloader construction passes
   scoped loggers.
 
-## 7. Open question (verify during implementation)
+## 7. Open question — resolved (Task 7)
 
 Whether the mid-job 403-invalidation chain re-mints the segment POT or only
-swaps the URL (`DownloaderOptions.PoToken` appears static after construction).
-If it does not re-mint, do **not** add rotation here — note it in the deferred
-blanket-403 failover work. If it does, that path must use `GenerateGvsPoToken`
-with the job's challenge.
+swaps the URL. Verified: it only swaps the URL. `invalidate403Caches`
+(`internal/worker/strategies.go`) wipes the cipher solver, POT caches, and
+visitor data, but the `OnCipherFailure` closures it feeds into (built in each
+`strategy_youtube_*.go`) return only a freshly re-resolved format URL —
+`DownloaderOptions.PoToken` is set once at downloader construction and never
+reassigned afterward. There is **no** mid-job POT re-mint today.
+
+Per the decision rule above, no rotation was added. It remains part of the
+deferred blanket-403 failover work; if that work is picked up, the re-mint
+call is `GenerateGvsPoToken` with the job's challenge (`videoInfo.AttestationChallenge`).
 
 ## 8. Rollout & verification
 

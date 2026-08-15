@@ -697,7 +697,7 @@ JSON-RPC-style, line-delimited (one JSON object per line, separated by `\n`). Al
 | Method | Params | Result | Notes |
 |---|---|---|---|
 | `ping` | (none) | `"pong"` | startup health check |
-| `generatePoToken` | `{binding}` | `{poToken, binding, expiresAt}` | hot path |
+| `generatePoToken` | `{binding, challenge?, freshMinter?}` | `{poToken, binding, expiresAt, minterSource, minterFresh}` | hot path; `challenge`/`freshMinter` are used only by GVS mints (see "GVS (Segment-URL) PO Tokens" below) — player-API mints omit both and get the cached minter |
 | `invalidateCaches` | (none) | `"ok"` | wipes sidecar's session + minter caches |
 | `invalidateIT` | (none) | `"ok"` | wipes only minter cache (force fresh BotGuard) |
 | `getStats` | (none) | `{cachedMinters, cachedSessions, mintsTotal, mintsErrored}` | observability |
@@ -796,6 +796,52 @@ Expired entries are cleaned up in two ways:
 1. **Lazy cleanup**: `cleanupExpired()` is called at the start of every `GeneratePoToken` call while the mutex is held. It iterates all session and minter entries, removing expired ones and calling `Cleanup()` on expired minters.
 2. **Proactive auto-eviction**: `time.AfterFunc` on minter creation schedules exact-TTL cleanup.
 3. **Manual invalidation**: `InvalidateCaches()` clears everything and shuts down all VMs. `InvalidateIntegrityTokens()` clears only the minter cache (forces BotGuard re-run but preserves session cache).
+
+### GVS (Segment-URL) PO Tokens
+
+Player-API tokens (`GeneratePoToken` / `GeneratePoTokenString`, used by `fetchWithClient` / `fetchWithEmbedded`) are unchanged from everything above: cached minter, visitorData content binding, 6-hour session cache. GVS (segment-URL) tokens are a separate population minted under a different, deliberately cache-hostile policy — moonarchive parity, added 2026-08-14 (attestation POT coherence) after a premiere broadcast 403'd every segment for its full runtime because the minting session had no tie to the watch-page session that resolved the stream.
+
+`PotProvider.GenerateGvsPoToken(ctx, binding, challenge) (GvsMint, error)` is called once per download start by each segment-download strategy (`internal/worker/strategy_youtube_dash.go`, `strategy_youtube_manifestless_dash.go`, `strategy_youtube_hls.go`):
+
+- **Binding**: always the video ID (`job.Job.VideoID`) — supersedes the former visitorData/channelID binding scheme.
+- **Challenge**: `videoInfo.AttestationChallenge`, extracted from the watch page's own `window.ytAtN(...)` blob (see below). Empty when the page carried none, in which case the sidecar falls back to its own `/att/get` fetch — today's prior behavior, preserved exactly as the degraded case.
+- **Cache policy**: bypasses the session cache entirely (no read, no write) — every call mints fresh, and the sidecar is told `freshMinter: true` so it regenerates its BotGuard minter for this call rather than reuse an already-cached one. The fresh minter **replaces** the sidecar's cached minter, so subsequent player-API mints passively pick up the more session-coherent one. Concurrent GVS mints share the sidecar's single in-flight regeneration (`minterPromise`); no provider-side inflight entry is added — per-binding minting off a shared minter is cheap, and adding provider-level dedup here would hand a stale (non-fresh) result to whichever caller lost the race.
+- **Fallback**: sidecar unavailable → runs the existing goja mint-and-cache flow with the challenge ignored, reported as `minterSource=goja-fallback`.
+- **Result**: `GvsMint{PoToken, MinterSource, MinterFresh, ViaSidecar}` — the fields the provenance log line below reports. `MinterSource` is `"challenge"` (built from the page's own challenge), `"att_get"` (sidecar fetched its own), or `"goja-fallback"`.
+- **Counters**: `PotStats.GvsMints` (every attempt) and `GvsMintsChallenge` (the subset that carried a non-empty page challenge).
+
+#### Watch-page challenge extraction (`internal/youtube/watch_page.go`)
+
+`extractAttestationChallenge(html)` captures the JS object literal passed to `window.ytAtN(...)` — regex `window\.ytAtN\(\s*(\{[\s\S]*?\})\s*\)`, RE2-safe (no lookarounds), mirroring moonarchive's `INITIAL_ATTESTATION_PATTERN`. The match is run through `JSToJSON` (a faithful Go port of yt-dlp's `js_to_json`, `internal/utils/jsjson.go`) to reach valid JSON, unmarshaled, and its `R` key — itself a JSON string — is unmarshaled again to pull out `bgChallenge`, which is re-marshaled compact as the challenge payload. An absent blob, a `JSToJSON` failure, or a missing `R`/`bgChallenge` key all resolve to `""` with a Debug log, never an error — absence is a normal result that the sidecar's `/att/get` fallback already handles. The value rides on `WatchPageResult.AttestationChallenge` → `VideoInfo.AttestationChallenge`, assigned on every return path of both `GetVideoInfoAuthenticated` and `GetVideoInfoPublic` (including the ANDROID_VR / web_embedded / web_creator / watch-page-fallback routes that skip `mergeWatchPageMetadata`) so no extraction path silently drops it. The live quality-monitor refresh loop re-extracts every few minutes, so a re-mint after a downloader restart uses the freshest available challenge.
+
+#### Sidecar RPC additions
+
+`generatePoToken` gained two optional params and three result fields (also reflected in the IPC protocol table above):
+
+- `challenge` (param, string) — a parsed `bgChallenge` JSON string. When present and well-formed (has `program` and `interpreterUrl`), `generateMinter` builds the BotGuard minter from it instead of fetching its own via `/att/get`. Malformed or absent challenges fall back to `/att/get` with a Warn-level log.
+- `freshMinter` (param, bool) — forces `getOrCreateMinter` to regenerate even when the cached minter is still valid.
+- `minterSource` (result, string) — `"challenge"` or `"att_get"`, whichever input built the minter that served this specific mint.
+- `minterFresh` (result, bool) — whether this mint triggered a fresh BotGuard regeneration (`true`) or reused an already-warm minter (`false`).
+
+#### Mint provenance logging
+
+Each GVS mint attempt logs one line at Info (`[POT] GVS mint`) on success or Warn (`[POT] GVS mint failed`) on error, emitted by the calling strategy immediately after `GenerateGvsPoToken` returns:
+
+| Field | Meaning |
+|---|---|
+| `jobID` | the job that requested the mint |
+| `binding` | always `"videoID"` today |
+| `challenge` | `"page"` if the watch page carried a `ytAtN` challenge, else `"none"` (`challengeLabel` helper, `internal/worker/strategies.go`) |
+| `minterSource` | `"challenge"` \| `"att_get"` \| `"goja-fallback"` |
+| `minterFresh` | whether this call triggered a fresh BotGuard run |
+| `sidecar` | whether the mint went through the sidecar (`true`) or the goja fallback (`false`) |
+| `tokenLength` | length of the minted PO token string — a cheap sanity signal without logging the token itself |
+
+The line exists so that if a future premiere still 403s, the log alone identifies the exact configuration in play — no reproduction needed. If POT-enforced media 403s despite challenge-sourced minters, the next suspect is datasync-ID binding: yt-dlp binds GVS tokens to the account's datasync ID when cookies ride along with media requests (Moombox does send account cookies on segment fetches), while this path binds to video ID.
+
+#### Mid-job re-mint: none
+
+The 403-invalidation chain (`invalidate403Caches` in `internal/worker/strategies.go`, triggered from each strategy's `OnCipherFailure` closure) wipes the cipher solver, POT caches, and visitor data on a 403 burst, but does not re-mint a GVS token: `OnCipherFailure` returns only a freshly re-resolved format URL, and `DownloaderOptions.PoToken` is set once at downloader construction and never reassigned. A stale-minter or stale-token 403 mid-download is therefore only fixed by a full downloader restart (which re-mints via `GenerateGvsPoToken` with a fresh challenge), not by the invalidation path itself. This is a deliberate scope boundary, not an oversight — it stays part of the deferred blanket-403 failover work rather than being addressed here.
 
 ---
 
