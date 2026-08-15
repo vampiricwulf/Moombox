@@ -121,6 +121,7 @@ const (
 	atnChallengeShape = "bgChallenge is not an object"
 	atnNoInterpURL    = "bgChallenge has no interpreterUrl (inline interpreterJavascript is refused from page-sourced challenges)"
 	atnBadInterpHost  = "bgChallenge interpreter host not allowed"
+	atnBadInterpPath  = "bgChallenge interpreter URL is not a static script"
 )
 
 // WatchPageResult contains data extracted from a YouTube watch page.
@@ -498,6 +499,23 @@ func canonicalizeChallenge(raw json.RawMessage) (canonical, reason string) {
 	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
 	if !slices.Contains(allowedInterpreterHosts, host) {
 		return "", atnBadInterpHost + ": " + host
+	}
+	// An allowlisted host is NOT the same as Google-authored bytes. www.google.com
+	// serves JSONP endpoints that reflect an attacker-supplied callback back at
+	// HTTP 200 — e.g. /complete/search?client=firefox&jsonp=<payload> — and the
+	// sidecar executes whatever it fetches. That reached RCE through a fully
+	// "valid" allowlisted host with no redirect involved (adversarial review,
+	// round 2, 2026-08-15).
+	//
+	// The genuine interpreter is a static TrustedResourceUrl: a bare .js path
+	// with no query and no fragment (observed //www.google.com/js/th/<hash>.js).
+	// Requiring exactly that shape removes every reflection endpoint on the
+	// allowlisted hosts, since reflection needs a query to reflect.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", atnBadInterpPath + ": carries a query or fragment"
+	}
+	if !strings.HasSuffix(strings.ToLower(u.Path), ".js") {
+		return "", atnBadInterpPath + ": " + u.Path
 	}
 
 	out, err := json.Marshal(map[string]any{

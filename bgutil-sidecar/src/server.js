@@ -142,6 +142,19 @@ function assertGoogleHost(rawUrl) {
     if (!isGoogleOwnedHost(parsed.hostname)) {
         throw new Error(`interpreter URL host not allowed: ${parsed.hostname}`);
     }
+    // An allowlisted host is NOT the same as Google-authored bytes:
+    // www.google.com serves JSONP endpoints that reflect an attacker-supplied
+    // callback at HTTP 200 (e.g. /complete/search?client=firefox&jsonp=...),
+    // and step 3 executes whatever this fetch returns. The genuine interpreter
+    // is a static TrustedResourceUrl — a bare .js path, no query, no fragment
+    // (observed //www.google.com/js/th/<hash>.js) — and reflection requires a
+    // query to reflect, so demanding that shape removes the whole class.
+    if (parsed.search !== "" || parsed.hash !== "") {
+        throw new Error("interpreter URL carries a query or fragment");
+    }
+    if (!parsed.pathname.toLowerCase().endsWith(".js")) {
+        throw new Error(`interpreter URL is not a static script: ${parsed.pathname}`);
+    }
     return parsed.href;
 }
 
@@ -191,6 +204,11 @@ async function generateMinter(challenge) {
         // session_manager.ts's /att/get call.
         const attResp = await fetch(ATT_GET_URL, {
             method: "POST",
+            // No redirects: this response is treated as TRUSTED (its inline
+            // interpreterJavascript is executed without an origin check), so
+            // it must come from the constant URL above and nowhere a redirect
+            // could point.
+            redirect: "manual",
             headers: {
                 ...getHeaders(),
                 "content-type": "application/json",
@@ -276,6 +294,10 @@ async function generateMinter(challenge) {
     // 5. POST the snapshot to GenerateIT to receive an integrity token.
     const itResp = await fetch(buildURL("GenerateIT"), {
         method: "POST",
+        // Fixed Google endpoint; refuse redirects so a hijacked hop can never
+        // observe the BotGuard snapshot we post or answer for the integrity
+        // token. Consistent with the other two fetches in this file.
+        redirect: "manual",
         headers: getHeaders(),
         body: JSON.stringify([REQUEST_KEY, botguardResponse]),
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),

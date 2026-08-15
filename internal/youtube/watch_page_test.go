@@ -269,3 +269,46 @@ func TestExtractAttestationChallengeRefusesInlineInterpreter(t *testing.T) {
 		t.Errorf("reason = %q, want %q", reason, atnNoInterpURL)
 	}
 }
+
+// TestCanonicalizeChallengeRejectsReflectionEndpoints pins the round-2
+// adversarial finding: an allowlisted HOST is not the same as
+// Google-AUTHORED bytes. www.google.com serves JSONP endpoints that reflect
+// an attacker-supplied callback back at HTTP 200 — no redirect, no
+// look-alike domain, a genuinely allowlisted host — and the sidecar executes
+// whatever it fetches. The reviewer drove real code execution through
+// /complete/search?client=firefox&jsonp=<payload>.
+//
+// The genuine interpreter is a static TrustedResourceUrl (bare .js path, no
+// query, no fragment), and reflection requires a query to reflect, so the
+// shape requirement removes the class rather than this one endpoint.
+func TestCanonicalizeChallengeRejectsReflectionEndpoints(t *testing.T) {
+	hostile := []struct{ name, value string }{
+		{
+			"jsonp reflection (proven RCE)",
+			"//www.google.com/complete/search?client=firefox&q=z&jsonp=eval(String.fromCharCode(1,2));Object",
+		},
+		{"any query at all", "//www.google.com/js/th/a.js?cb=payload"},
+		{"bare query marker", "//www.google.com/js/th/a.js?"},
+		{"fragment", "//www.google.com/js/th/a.js#payload"},
+		{"non-script path", "//www.google.com/complete/search"},
+		{"html path", "//www.google.com/index.html"},
+	}
+	for _, tc := range hostile {
+		raw := `{"program":"P","globalName":"g","interpreterUrl":{` +
+			`"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":"` + tc.value + `"}}`
+		got, reason := canonicalizeChallenge(json.RawMessage(raw))
+		if got != "" {
+			t.Errorf("%s: accepted (%s)", tc.name, tc.value)
+		}
+		if !strings.HasPrefix(reason, atnBadInterpPath) {
+			t.Errorf("%s: reason = %q, want prefix %q", tc.name, reason, atnBadInterpPath)
+		}
+	}
+
+	// The genuine shape must still pass, or the gate has eaten the feature.
+	raw := `{"program":"P","globalName":"g","interpreterUrl":{` +
+		`"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":"//www.google.com/js/th/qtyJVB4UpQW6ehm0.js"}}`
+	if got, reason := canonicalizeChallenge(json.RawMessage(raw)); got == "" {
+		t.Errorf("genuine interpreter URL rejected: %s", reason)
+	}
+}
