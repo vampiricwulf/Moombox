@@ -277,6 +277,13 @@ func DownloadManifestlessDash(
 		if forceVideoSeq && videoStartSeq > 0 {
 			videoInitURL = manifestlessSq0URL(videoStream.BaseURL)
 		}
+		// Captured before NewSegmentDownloader — OnCredentialRefresh below is
+		// built into the DownloaderOptions literal itself (unlike
+		// OnCipherFailure, which is assigned after construction), so the
+		// itag must be snapshotted here rather than at the later
+		// OnCipherFailure site. Both closures share this one local so
+		// neither can observe a later mutation of the videoStream pointer.
+		videoItagChosen := videoStream.Itag
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:         videoStream.BaseURL,
 			OutputFile:      result.VideoPath,
@@ -289,6 +296,9 @@ func DownloadManifestlessDash(
 			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
 			IsOnline:        isOnline,
 			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
+			OnCredentialRefresh: func() (string, string) {
+				return refreshGvsCredentials(ctx, job, videoInfo, videoItagChosen, routedSolver, cipherSolver, potProvider, "manifestless DASH video")
+			},
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				if err != nil {
@@ -304,7 +314,6 @@ func DownloadManifestlessDash(
 		// invalidated solver — videoInfo.Formats keeps raw URLs; only the
 		// DashStreamInfo copy was mutated with the resolved one.
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
-			videoItagChosen := videoStream.Itag
 			result.VideoDownloader.OnCipherFailure = func() string {
 				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "manifestless DASH video")
 				fresh, err := resolveFormatURLByItag(ctx, videoInfo.Formats, videoItagChosen, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger)
@@ -331,6 +340,10 @@ func DownloadManifestlessDash(
 		if forceAudioSeq && audioStartSeq > 0 {
 			audioInitURL = manifestlessSq0URL(audioStream.BaseURL)
 		}
+		// See the video block's identical comment: captured here (before the
+		// DownloaderOptions literal) so OnCredentialRefresh and the later
+		// OnCipherFailure share one immutable snapshot of the chosen itag.
+		audioItagChosen := audioStream.Itag
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:         audioStream.BaseURL,
 			OutputFile:      result.AudioPath,
@@ -343,6 +356,9 @@ func DownloadManifestlessDash(
 			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
 			IsOnline:        isOnline,
 			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
+			OnCredentialRefresh: func() (string, string) {
+				return refreshGvsCredentials(ctx, job, videoInfo, audioItagChosen, routedSolver, cipherSolver, potProvider, "manifestless DASH audio")
+			},
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				if err != nil {
@@ -352,7 +368,6 @@ func DownloadManifestlessDash(
 			},
 		})
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
-			audioItagChosen := audioStream.Itag
 			result.AudioDownloader.OnCipherFailure = func() string {
 				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "manifestless DASH audio")
 				fresh, err := resolveFormatURLByItag(ctx, videoInfo.Formats, audioItagChosen, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger)
