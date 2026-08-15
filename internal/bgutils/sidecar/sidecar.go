@@ -380,6 +380,36 @@ func (s *Sidecar) GeneratePoToken(ctx context.Context, binding string) (string, 
 	return result.PoToken, nil
 }
 
+// GeneratePlayerPoToken asks the sidecar to mint a PO token for the
+// Innertube PLAYER request, bound to a videoID (yt-dlp's
+// PoTokenContext.PLAYER -> (video_id, VIDEO_ID) mapping). Unlike
+// GenerateGvsPoToken this does NOT set freshMinter: player calls happen on
+// every probe/refresh (every live job re-fetches every few minutes, plus
+// monitor polls), so forcing a fresh BotGuard run per call would be a
+// severe regression. The sidecar's own cached minter (~6h TTL, shared
+// across bindings) still serves this call when valid; challenge, when
+// non-empty (the watch page's attestation challenge), is only consulted by
+// the sidecar WHEN it actually has to build a new minter — keeping player
+// tokens session-coherent with GVS tokens without adding mint cost. Pass ""
+// when no watch-page challenge is available (falls back to the sidecar's
+// /att/get flow, today's behavior).
+func (s *Sidecar) GeneratePlayerPoToken(ctx context.Context, binding, challenge string) (string, error) {
+	params := map[string]any{"binding": binding}
+	if challenge != "" {
+		params["challenge"] = challenge
+	}
+	var result struct {
+		PoToken string `json:"poToken"`
+	}
+	if err := s.call(ctx, "generatePoToken", params, &result); err != nil {
+		return "", err
+	}
+	if result.PoToken == "" {
+		return "", errors.New("sidecar returned empty poToken")
+	}
+	return result.PoToken, nil
+}
+
 // GvsMintResult carries a minted GVS PO token plus the provenance fields the
 // worker's "[POT] GVS mint" log line reports (spec §4.6): which challenge
 // source built the minter and whether it was regenerated for this mint.

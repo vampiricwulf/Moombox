@@ -176,6 +176,43 @@ func (pp *PotProvider) SetSidecar(s *sidecar.Sidecar) {
 // GeneratePoToken generates or retrieves a cached PO token for the given content binding.
 // If contentBinding is empty, a default visitor data value is used.
 func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding string, bypassCache bool) (*SessionData, error) {
+	return pp.generatePoTokenChallenge(ctx, contentBinding, bypassCache, "")
+}
+
+// GeneratePlayerPoToken generates a PO token for the Innertube PLAYER
+// request, bound to videoID rather than visitor data — matching yt-dlp's
+// PoTokenContext.PLAYER -> (video_id, VIDEO_ID) content-binding mapping
+// (yt_dlp/extractor/youtube/pot/utils.py) and moonarchive's single
+// challenge-sourced, videoID-bound token reused across both the player call
+// and GVS. Unlike GenerateGvsPoToken this is NOT a fresh-minter-per-call
+// path: player calls happen on every probe/refresh (every live job
+// re-fetches every few minutes, plus monitor polls), so forcing a fresh
+// multi-second BotGuard run per call would be a severe regression. Normal
+// session + minter caching applies (see GeneratePoToken); challenge (the
+// watch page's WatchPageResult.AttestationChallenge, or "" when
+// unavailable) is threaded through to the sidecar and only consulted WHEN
+// the cache actually needs to build a new minter, so it rides along "for
+// free" on the existing cache economics instead of costing an extra mint.
+func (pp *PotProvider) GeneratePlayerPoToken(ctx context.Context, videoID, challenge string) (string, error) {
+	if videoID == "" {
+		return "", fmt.Errorf("bgutils: GeneratePlayerPoToken requires a non-empty videoID")
+	}
+	session, err := pp.generatePoTokenChallenge(ctx, videoID, false, challenge)
+	if err != nil {
+		return "", err
+	}
+	return session.PoToken, nil
+}
+
+// generatePoTokenChallenge is the shared core behind GeneratePoToken and
+// GeneratePlayerPoToken. challenge is threaded through to the sidecar mint
+// call (generateAndMint) so that IF a fresh minter must be built — no live
+// session or process-wide cached minter satisfies this call — it is built
+// from the watch page's own BotGuard attestation challenge instead of the
+// sidecar's /att/get fallback. challenge has no effect when a cached minter
+// already satisfies the request, which is the common case and exactly why
+// GeneratePlayerPoToken can afford to supply it on every call.
+func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBinding string, bypassCache bool, challenge string) (*SessionData, error) {
 	if contentBinding == "" {
 		// Generate visitor-data-like value: base64("{timestamp}-{random}")
 		raw := fmt.Sprintf("%d-%s", time.Now().UnixMilli(), randomAlphaNum(13))
@@ -262,7 +299,7 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 			return pp.mintPoToken(minter, contentBinding)
 		}
 		pp.logger.Debug("[PotProvider] generating new minter", "binding", bindingPrefix)
-		return pp.generateAndMint(ctx, contentBinding, bypassCache)
+		return pp.generateAndMint(ctx, contentBinding, bypassCache, challenge)
 	}()
 
 	if err != nil {
@@ -406,19 +443,22 @@ func (pp *PotProvider) mintPoToken(minter *TokenMinter, contentBinding string) (
 	}, nil
 }
 
-func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding string, bypassCache bool) (*SessionData, error) {
+func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding string, bypassCache bool, challenge string) (*SessionData, error) {
 	// Sidecar path: a real Node + V8 + JSDOM subprocess that passes
 	// BotGuard's timing fingerprint and returns real integrity tokens.
 	// Bypasses the goja minterCache entirely (the sidecar maintains its
 	// own internal minter cache, ~6h TTL). On any sidecar error we fall
 	// through to the goja path so token generation never goes dark.
+	// challenge (non-fresh: no freshMinter flag) is only consulted by the
+	// sidecar when IT has no valid cached minter of its own — see
+	// Sidecar.GeneratePlayerPoToken.
 	pp.mu.Lock()
 	sc := pp.sidecar
 	pp.mu.Unlock()
 	if sc != nil && sc.IsHealthy() {
 		bindingPrefix := contentBinding[:min(len(contentBinding), 20)]
 		pp.logger.Debug("[PotProvider] minting via sidecar", "binding", bindingPrefix)
-		token, err := sc.GeneratePoToken(ctx, contentBinding)
+		token, err := sc.GeneratePlayerPoToken(ctx, contentBinding, challenge)
 		if err == nil {
 			pp.sidecarMintsHit.Add(1)
 			return &SessionData{
@@ -431,15 +471,24 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 		pp.logger.Warn("[PotProvider] sidecar mint failed; falling through to goja", "err", err)
 	}
 
+	// The goja fallback can't consume a challenge-sourced minter today
+	// (documented limitation shared with GenerateGvsPoToken's
+	// "goja-fallback" path) — it always mints from its own generated
+	// challenge via WebPoClient. bypassCache still controls whether that
+	// fallback touches the shared minterCache.
 	return pp.gojaGenerateAndMint(ctx, contentBinding, bypassCache)
 }
 
-// gojaGenerateAndMint is the goja fallback: serialize minter creation, then
-// generate + cache + schedule eviction/refresh, then mint. Split out of
-// generateAndMint so the GVS path can reuse it without re-attempting the
-// sidecar. bypassCache=true skips the under-lock cache re-check AND forces a
-// fresh minter (matching upstream TS bypass_cache semantics).
+// gojaGenerateAndMint is the goja fallback. bypassCache=true routes to
+// gojaGenerateEphemeralMint, which builds a standalone minter for exactly
+// this one mint and never touches the shared minterCache (see that
+// function's doc for why). bypassCache=false serializes minter creation,
+// then generates + caches + schedules eviction/refresh, then mints.
 func (pp *PotProvider) gojaGenerateAndMint(ctx context.Context, contentBinding string, bypassCache bool) (*SessionData, error) {
+	if bypassCache {
+		return pp.gojaGenerateEphemeralMint(ctx, contentBinding)
+	}
+
 	// Goja fallback path. Serialize minter creation across goroutines:
 	// every "first request" goroutine sees an empty minterCache and
 	// would otherwise race to spin up a BotGuard VM, with the losers
@@ -451,18 +500,13 @@ func (pp *PotProvider) gojaGenerateAndMint(ctx context.Context, contentBinding s
 	defer pp.minterCreatingMu.Unlock()
 
 	// Re-check the cache under the creation lock. Another goroutine may
-	// have just stored a minter while we waited. Skip the re-check on
-	// bypassCache=true — the caller explicitly asked us to generate
-	// fresh, and matching upstream's TS bypass_cache semantics means
-	// honouring that even when a cached minter is available.
-	if !bypassCache {
-		pp.mu.Lock()
-		if cached, ok := pp.minterCache[defaultMinterKey]; ok && time.Now().Before(cached.ExpiresAt) {
-			pp.mu.Unlock()
-			return pp.mintPoToken(cached, contentBinding)
-		}
+	// have just stored a minter while we waited.
+	pp.mu.Lock()
+	if cached, ok := pp.minterCache[defaultMinterKey]; ok && time.Now().Before(cached.ExpiresAt) {
 		pp.mu.Unlock()
+		return pp.mintPoToken(cached, contentBinding)
 	}
+	pp.mu.Unlock()
 
 	client := NewWebPoClient(pp.config, pp.logger)
 
@@ -535,6 +579,42 @@ func (pp *PotProvider) gojaGenerateAndMint(ctx context.Context, contentBinding s
 	return pp.mintPoToken(minter, contentBinding)
 }
 
+// gojaGenerateEphemeralMint builds a standalone minter for exactly one mint
+// under the goja fallback and tears it down immediately afterward — used by
+// gojaGenerateAndMint's bypassCache=true branch (today, that's
+// GenerateGvsPoToken's fresh-minter-per-GVS-mint policy on a sidecar-down
+// goja fallback). It deliberately never writes to pp.minterCache and never
+// schedules refresh/eviction timers:
+//
+//   - Writing to minterCache here would replace (and safeCleanup) the
+//     long-lived (~6h) minter the player-API / GeneratePoToken path
+//     depends on every time the sidecar happens to be down for a GVS
+//     mint — the exact churn the single-minter design exists to prevent —
+//     and could race a concurrent GeneratePoToken call that already read
+//     the old minter pointer and is mid-mint against it when this
+//     goroutine's safeCleanup shuts that VM down underneath it.
+//   - Scheduling refresh/eviction time.AfterFunc timers against a minter
+//     nobody else can reach would just pin its ~1-3MB goja VM to the heap
+//     for up to ~6h with nothing left to free it early.
+//
+// No minterCreatingMu either: that lock only serializes writers to the
+// shared minterCache, which this path never touches, so concurrent
+// ephemeral mints (rare — GVS mints once per job start) don't need to
+// queue behind each other or behind an unrelated cache-populating mint.
+func (pp *PotProvider) gojaGenerateEphemeralMint(ctx context.Context, contentBinding string) (*SessionData, error) {
+	client := NewWebPoClient(pp.config, pp.logger)
+
+	minter, err := client.GenerateTokenMinter(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("generate minter: %w", err)
+	}
+	defer pp.safeCleanup(minter, "ephemeral bypass-cache mint")
+
+	pp.logger.Debug("[PotProvider] minted ephemeral bypass-cache minter (goja fallback)")
+
+	return pp.mintPoToken(minter, contentBinding)
+}
+
 // GvsMint is a GVS (segment-URL) PO-token mint result with the provenance
 // the worker's "[POT] GVS mint" log line reports.
 type GvsMint struct {
@@ -546,12 +626,18 @@ type GvsMint struct {
 
 // GenerateGvsPoToken mints a segment-URL PO token under the
 // fresh-minter-per-GVS-mint policy (spec §4.3): the session cache is fully
-// bypassed (no read, no write), and the sidecar builds a fresh minter from
-// the supplied watch-page challenge ("" → its /att/get fallback). The
-// expensive BotGuard regeneration is deduplicated inside the sidecar
-// (minterPromise), so no provider-side inflight entry is needed. When the
-// sidecar is unavailable the goja flow runs with the challenge ignored —
-// today's (session-incoherent) behavior, flagged as "goja-fallback".
+// bypassed (no read, no write), and the minter itself is ephemeral — built
+// fresh, minted once, and torn down immediately after, never entering the
+// shared process-wide minterCache. On the sidecar path the sidecar builds
+// its fresh minter from the supplied watch-page challenge ("" → its
+// /att/get fallback); the expensive BotGuard regeneration is deduplicated
+// inside the sidecar (minterPromise), so no provider-side inflight entry is
+// needed. On the goja fallback (sidecar unavailable), gojaGenerateAndMint's
+// bypassCache=true routes to gojaGenerateEphemeralMint, which builds its
+// own fresh goja minter (challenge ignored — today's session-incoherent
+// goja-fallback limitation) and safeCleanups it before returning, so a
+// sidecar-down GVS mint can never evict or race the long-lived (~6h)
+// minter the player-API / GeneratePoToken path depends on.
 //
 // If POT-enforced media (premieres) still 403s with challenge-sourced
 // minters, the next suspect is datasync-ID binding: yt-dlp binds GVS

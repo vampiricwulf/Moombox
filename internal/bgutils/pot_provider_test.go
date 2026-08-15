@@ -1138,3 +1138,176 @@ func TestGenerateGvsPoTokenNilSidecar(t *testing.T) {
 		t.Error("session cache mutated by GVS mint")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PotProvider.GeneratePlayerPoToken
+// ---------------------------------------------------------------------------
+
+// TestGeneratePlayerPoToken_BindsToVideoID locks in the Finding-1 fix: the
+// PLAYER PO token must be bound to the videoID (yt-dlp PoTokenContext.PLAYER
+// -> (video_id, VIDEO_ID), pot/utils.py), not visitor data. A cached minter
+// is pre-seeded so the mint is satisfied without any network call — what's
+// under test is which contentBinding reaches MintFunc.
+func TestGeneratePlayerPoToken_BindsToVideoID(t *testing.T) {
+	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
+
+	var gotBinding string
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		MintFunc: func(cb string) (string, error) {
+			gotBinding = cb
+			return "tok-for-" + cb, nil
+		},
+	}
+
+	const videoID = "dQw4w9WgXcQ"
+	// visitorData-shaped binding must NOT be what reaches the minter — the
+	// whole point of this fix is dropping visitor-data binding for PLAYER.
+	token, err := pp.GeneratePlayerPoToken(context.Background(), videoID, `{"program":"p"}`)
+	if err != nil {
+		t.Fatalf("GeneratePlayerPoToken: %v", err)
+	}
+	if gotBinding != videoID {
+		t.Errorf("MintFunc contentBinding = %q, want videoID %q", gotBinding, videoID)
+	}
+	if token != "tok-for-"+videoID {
+		t.Errorf("token = %q, want %q", token, "tok-for-"+videoID)
+	}
+}
+
+// TestGeneratePlayerPoToken_EmptyVideoIDErrors verifies the defensive guard:
+// an empty videoID (a caller bug — every real call site has one) errors
+// immediately rather than silently falling back to a random binding.
+func TestGeneratePlayerPoToken_EmptyVideoIDErrors(t *testing.T) {
+	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
+	_, err := pp.GeneratePlayerPoToken(context.Background(), "", "challenge")
+	if err == nil {
+		t.Fatal("expected error for empty videoID, got nil")
+	}
+}
+
+// TestGeneratePlayerPoToken_ChallengeOnlyMattersOnFreshMint verifies the
+// cost-constraint half of Finding 1: when a valid minter is already cached
+// (the overwhelmingly common case — player calls happen on every
+// probe/refresh), GeneratePlayerPoToken must NOT force a fresh mint just
+// because a challenge was supplied. Proven by asserting the minter cache is
+// left untouched (same pointer, same size) after the call.
+func TestGeneratePlayerPoToken_ChallengeOnlyMattersOnFreshMint(t *testing.T) {
+	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
+
+	cached := &TokenMinter{
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		MintFunc: func(cb string) (string, error) {
+			return "tok", nil
+		},
+	}
+	pp.minterCache[defaultMinterKey] = cached
+
+	if _, err := pp.GeneratePlayerPoToken(context.Background(), "vid123", `{"program":"p"}`); err != nil {
+		t.Fatalf("GeneratePlayerPoToken: %v", err)
+	}
+
+	pp.mu.Lock()
+	stillCached := pp.minterCache[defaultMinterKey]
+	size := len(pp.minterCache)
+	pp.mu.Unlock()
+
+	if stillCached != cached {
+		t.Error("GeneratePlayerPoToken with a challenge replaced the cached minter despite a valid cache hit")
+	}
+	if size != 1 {
+		t.Errorf("minterCache size = %d, want 1", size)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PotProvider bypassCache — ephemeral minter (Finding 2)
+// ---------------------------------------------------------------------------
+
+// TestBypassCache_DoesNotDisturbCachedMinter locks in the Finding-2 fix:
+// bypassCache=true (the GVS fresh-minter-per-mint policy, on the goja
+// fallback) must never write to, evict, or Cleanup the shared
+// minterCache[defaultMinterKey] entry that the player-API / GeneratePoToken
+// path depends on. A short context deadline bounds the (network-dependent)
+// ephemeral WebPoClient mint attempt so the test stays fast regardless of
+// whether it succeeds or fails — either way, the pre-seeded cached minter's
+// identity, the cache size, and whether its Cleanup ran are what's under
+// test, not the ephemeral mint's outcome.
+func TestBypassCache_DoesNotDisturbCachedMinter(t *testing.T) {
+	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
+
+	cachedCleanedUp := false
+	cachedUsed := false
+	cached := &TokenMinter{
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		MintFunc: func(cb string) (string, error) {
+			cachedUsed = true
+			return "cached-token", nil
+		},
+		Cleanup: func() { cachedCleanedUp = true },
+	}
+	pp.minterCache[defaultMinterKey] = cached
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	_, err := pp.GeneratePoToken(ctx, "bypass-binding", true)
+	t.Logf("bypassCache mint result: err=%v (either outcome is fine; asserting cache isolation)", err)
+
+	pp.mu.Lock()
+	stillCached := pp.minterCache[defaultMinterKey]
+	size := len(pp.minterCache)
+	pp.mu.Unlock()
+
+	if stillCached != cached {
+		t.Error("bypassCache=true replaced the cached minter under defaultMinterKey — must be left untouched (ephemeral minters never enter minterCache)")
+	}
+	if size != 1 {
+		t.Errorf("minterCache size after bypassCache mint = %d, want 1 (only the pre-seeded entry, no leaked ephemeral entry)", size)
+	}
+	if cachedCleanedUp {
+		t.Error("bypassCache=true ran Cleanup on the pre-seeded cached minter — the whole point of ephemeral mints is to never touch the shared minter")
+	}
+	if cachedUsed {
+		t.Error("bypassCache=true used the cached minter's MintFunc — bypassCache must build its own ephemeral minter, not reuse the cache")
+	}
+}
+
+// TestGvsPoToken_BypassDoesNotDisturbCachedMinter is the same assertion as
+// TestBypassCache_DoesNotDisturbCachedMinter but exercised through
+// GenerateGvsPoToken directly (the actual production caller of the
+// ephemeral bypass path via its goja fallback), with no sidecar attached.
+func TestGvsPoToken_BypassDoesNotDisturbCachedMinter(t *testing.T) {
+	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
+
+	cachedCleanedUp := false
+	cached := &TokenMinter{
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		MintFunc: func(cb string) (string, error) {
+			return "cached-token", nil
+		},
+		Cleanup: func() { cachedCleanedUp = true },
+	}
+	pp.minterCache[defaultMinterKey] = cached
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	_, err := pp.GenerateGvsPoToken(ctx, "gvs-binding", "")
+	t.Logf("GVS mint result: err=%v (either outcome is fine; asserting cache isolation)", err)
+
+	pp.mu.Lock()
+	stillCached := pp.minterCache[defaultMinterKey]
+	size := len(pp.minterCache)
+	pp.mu.Unlock()
+
+	if stillCached != cached {
+		t.Error("GenerateGvsPoToken's goja fallback replaced the long-lived cached minter — must never evict it")
+	}
+	if size != 1 {
+		t.Errorf("minterCache size after GVS mint = %d, want 1", size)
+	}
+	if cachedCleanedUp {
+		t.Error("GenerateGvsPoToken's goja fallback ran Cleanup on the cached minter the player-API path depends on")
+	}
+}

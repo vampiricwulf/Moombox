@@ -26,6 +26,13 @@ var apiClient = httpx.Client(30 * time.Second)
 // satisfies this interface.
 type PotTokenProvider interface {
 	GeneratePoTokenString(ctx context.Context, contentBinding string, bypassCache bool) (string, error)
+	// GeneratePlayerPoToken mints a PLAYER-context PO token bound to
+	// videoID (yt-dlp PoTokenContext.PLAYER -> (video_id, VIDEO_ID)),
+	// minted from the watch page's attestation challenge when one is
+	// available ("" otherwise). Normal provider-side caching applies —
+	// this is NOT a fresh-mint-per-call path. See
+	// bgutils.PotProvider.GeneratePlayerPoToken.
+	GeneratePlayerPoToken(ctx context.Context, videoID, challenge string) (string, error)
 }
 
 // PlayerAPI handles interactions with YouTube's Innertube player API.

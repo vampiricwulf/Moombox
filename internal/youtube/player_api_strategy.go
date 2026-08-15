@@ -49,7 +49,10 @@ func (p *PlayerAPI) ProbeVideoDate(ctx context.Context, videoID, visitorData str
 	if visitorData != "" {
 		ytcfg.VisitorData = visitorData
 	}
-	info, err := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, 0)
+	// No watch page fetched on this probe-only path, so no attestation
+	// challenge is available; GeneratePlayerPoToken falls back to the
+	// sidecar's own /att/get flow when it needs a fresh minter.
+	info, err := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, 0, "")
 	if err != nil {
 		return "", "", err
 	}
@@ -65,7 +68,7 @@ func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, 
 	if visitorData != "" {
 		ytcfg.VisitorData = visitorData
 	}
-	return p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0)
+	return p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0, "")
 }
 
 // GetVideoInfoAuthenticated fetches video info using the full multi-client strategy.
@@ -106,7 +109,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Try TV client
-	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, sts)
+	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, sts, wp.AttestationChallenge)
 	if err != nil {
 		// HTTP error (not a playability error) — log warning and continue to try
 		// WEB_CREATOR / ANDROID_VR instead of returning immediately.
@@ -122,13 +125,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Try web_safari client for DASH manifest (preferred over web)
-	webResult, webErr := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts)
+	webResult, webErr := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts, wp.AttestationChallenge)
 	webLabel := "web_safari"
 	webAuthLevel := AuthLevelWebSafari // preferred over standard web
 	if webErr != nil {
 		p.logger.Warn("[PlayerApi] web_safari client failed, trying web fallback", slog.String("error", webErr.Error()))
 		// Fall back to standard web client
-		webResult, webErr = p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts)
+		webResult, webErr = p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts, wp.AttestationChallenge)
 		webLabel = "web"
 		webAuthLevel = AuthLevelWeb
 		if webErr != nil {
@@ -188,7 +191,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// Try web_embedded for age-restricted content
 	if result.PlayabilityError == PlayabilityAgeRestricted {
 		p.logger.Info("[PlayerApi] Age-restricted content detected, trying web_embedded", "videoID", videoID)
-		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, ytcfg, sts)
+		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, wp.AttestationChallenge)
 		if embErr != nil {
 			p.logger.Warn("[PlayerApi] web_embedded failed", slog.String("error", embErr.Error()))
 		} else if embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
@@ -207,7 +210,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		result.PlayabilityError == PlayabilityLoginRequired ||
 		len(result.Formats) == 0 {
 
-		wcResult, wcErr := p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts)
+		wcResult, wcErr := p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts, wp.AttestationChallenge)
 		if wcErr != nil {
 			p.logger.Warn("[PlayerApi] WEB_CREATOR failed, will try other clients", slog.String("error", wcErr.Error()))
 			// Fall through to ANDROID_VR / watch page below
@@ -275,7 +278,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
-	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, wp.Ytcfg, stsPublic)
+	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, wp.Ytcfg, stsPublic, wp.AttestationChallenge)
 	if err != nil {
 		if wpParsed != nil {
 			wpParsed.Formats = deduplicateFormats(formatPool)
@@ -288,7 +291,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// Try web_embedded for age-restricted content (public path)
 	if result.PlayabilityError == PlayabilityAgeRestricted {
 		p.logger.Info("[PlayerApi] Age-restricted content detected (public), trying web_embedded", "videoID", videoID)
-		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, wp.Ytcfg, stsPublic)
+		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, wp.Ytcfg, stsPublic, wp.AttestationChallenge)
 		if embErr != nil {
 			p.logger.Warn("[PlayerApi] web_embedded failed", slog.String("error", embErr.Error()))
 		} else if embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
@@ -386,7 +389,7 @@ func (p *PlayerAPI) extractSTS(ctx context.Context, playerURL string) int {
 	return n
 }
 
-func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client constants.YouTubeClientConfig, ytcfg *YtcfgData, sts int) (*VideoInfo, error) {
+func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client constants.YouTubeClientConfig, ytcfg *YtcfgData, sts int, challenge string) (*VideoInfo, error) {
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 	headers := p.auth.GenerateAPIHeaders(client, ytcfg)
 
@@ -418,11 +421,16 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 	}
 
 	// Inject PO token (serviceIntegrityDimensions.poToken) for WEB-family clients.
-	// Failure is non-fatal — the request still runs without it; PLAYER_PO_TOKEN_POLICY
-	// is not yet required upstream, but supplying a token is future-proof and matches
-	// yt-dlp's behaviour.
-	if p.potProvider != nil && clientAcceptsPlayerPoToken(client) && ytcfg != nil && ytcfg.VisitorData != "" {
-		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, ytcfg.VisitorData, false); err == nil && poToken != "" {
+	// Bound to videoID, not visitor data — yt-dlp's PoTokenContext.PLAYER maps
+	// to (video_id, VIDEO_ID), not visitor data (pot/utils.py). challenge (the
+	// watch page's attestation challenge, "" when unavailable) rides along so
+	// the provider mints from it whenever it actually has to build a new
+	// minter — see GeneratePlayerPoToken. Failure is non-fatal — the request
+	// still runs without it; PLAYER_PO_TOKEN_POLICY is not yet required
+	// upstream, but supplying a token is future-proof and matches yt-dlp's
+	// behaviour.
+	if p.potProvider != nil && clientAcceptsPlayerPoToken(client) && videoID != "" {
+		if poToken, err := p.potProvider.GeneratePlayerPoToken(ctx, videoID, challenge); err == nil && poToken != "" {
 			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
 		} else if err != nil {
 			p.logger.Debug("[PlayerApi] PO token generation failed, continuing without", slog.String("client", client.ClientName), slog.String("error", err.Error()))
@@ -479,7 +487,7 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 	return p.doRetryRequest(ctx, apiURL, body, headers, nil, "ANDROID_VR")
 }
 
-func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int) (*VideoInfo, error) {
+func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int, challenge string) (*VideoInfo, error) {
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 
 	// Fetch embed page for encryptedHostFlags
@@ -526,9 +534,11 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		"contentPlaybackContext": pbCtx,
 	}
 
-	// Inject PO token for WEB_EMBEDDED (same rationale as fetchWithClient).
-	if p.potProvider != nil && ytcfg != nil && ytcfg.VisitorData != "" {
-		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, ytcfg.VisitorData, false); err == nil && poToken != "" {
+	// Inject PO token for WEB_EMBEDDED (same rationale as fetchWithClient):
+	// bound to videoID, minted from the watch page's attestation challenge
+	// when available.
+	if p.potProvider != nil && videoID != "" {
+		if poToken, err := p.potProvider.GeneratePlayerPoToken(ctx, videoID, challenge); err == nil && poToken != "" {
 			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
 		} else if err != nil {
 			p.logger.Debug("[PlayerApi] PO token generation failed for WEB_EMBEDDED, continuing without", slog.String("error", err.Error()))
