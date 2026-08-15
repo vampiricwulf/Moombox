@@ -1105,7 +1105,9 @@ git add internal/bgutils/pot_provider.go internal/bgutils/pot_provider_test.go i
 git commit -m "feat(bgutils): GenerateGvsPoToken — fresh challenge-sourced GVS mints"
 ```
 
----### Task 7: Strategy wiring — videoID binding, challenge, provenance log, jobID on 403 lines
+---
+
+### Task 7: Strategy wiring — videoID binding, challenge, provenance log, jobID on 403 lines
 
 **Files:**
 - Modify: `internal/worker/strategy_youtube_manifestless_dash.go` (:210-221 mint, :359-381 delete `manifestlessPotBinding`, :295-304 + :343-352 OnCipherFailure logs)
