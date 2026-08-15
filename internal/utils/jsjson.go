@@ -3,6 +3,7 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -238,14 +239,14 @@ func jsFixKV(code string, start int, v string, vars map[string]string, strict bo
 		return `"` + escaped + `"`, nil
 	}
 	if m := jsHexKeyRe.FindStringSubmatch(v); m != nil {
-		n, err := strconv.ParseInt(m[1][2:], 16, 64)
+		n, err := parseJSInt(m[1][2:], 16)
 		if err != nil {
 			return "", fmt.Errorf("js_to_json: hex %q: %w", m[1], err)
 		}
 		return jsIntOut(n, m[2] == ":"), nil
 	}
 	if m := jsOctKeyRe.FindStringSubmatch(v); m != nil {
-		n, err := strconv.ParseInt(m[1], 8, 64)
+		n, err := parseJSInt(m[1], 8)
 		if err != nil {
 			return "", fmt.Errorf("js_to_json: octal %q: %w", m[1], err)
 		}
@@ -269,7 +270,7 @@ func jsFixKV(code string, start int, v string, vars map[string]string, strict bo
 			// stays raw, unmatched source text. Go's regex has no lookbehind
 			// so it greedily consumed skip+":" as part of this match;
 			// splice it back in unconverted instead of producing a key form.
-			return strconv.FormatInt(n, 10) + v[len(m[1]):], nil
+			return n + v[len(m[1]):], nil
 		}
 		return jsIntOut(n, m[2] == ":"), nil
 	}
@@ -293,11 +294,29 @@ func jsFixKV(code string, start int, v string, vars map[string]string, strict bo
 	return "", fmt.Errorf("js_to_json: unknown value: %s", v)
 }
 
-func jsIntOut(n int64, isKey bool) string {
-	if isKey {
-		return `"` + strconv.FormatInt(n, 10) + `":`
+// parseJSInt mirrors Python's int(text, base): arbitrary precision, so a
+// hex/octal literal of any width converts to its exact decimal digits and
+// never errors on magnitude alone (only on malformed digits, which the
+// caller's regex already excludes). The fast path handles the overwhelming
+// common case — literals that fit in 64 bits — at strconv cost; math/big
+// only engages for oversized literals like 0xFFFFFFFFFFFFFFFFF that exceed
+// even uint64's range.
+func parseJSInt(digits string, base int) (string, error) {
+	if n, err := strconv.ParseUint(digits, base, 64); err == nil {
+		return strconv.FormatUint(n, 10), nil
 	}
-	return strconv.FormatInt(n, 10)
+	bi, ok := new(big.Int).SetString(digits, base)
+	if !ok {
+		return "", fmt.Errorf("invalid integer literal %q (base %d)", digits, base)
+	}
+	return bi.String(), nil
+}
+
+func jsIntOut(n string, isKey bool) string {
+	if isKey {
+		return `"` + n + `":`
+	}
+	return n
 }
 
 // jsProcessEscape ports Python's process_escape: m is either a bare `"` or a

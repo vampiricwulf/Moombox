@@ -1,7 +1,10 @@
 package worker
 
-// nopLogger is a no-op logger used when inner is nil, preserving graceful
-// no-op behavior when scopedLogger wraps a nil inner.
+import "reflect"
+
+// nopLogger is a no-op logger used when inner is nil (including a non-nil
+// interface wrapping a nil concrete value — see isNilLogger), preserving
+// graceful no-op behavior when scopedLogger wraps a nil inner.
 type nopLogger struct{}
 
 func (nopLogger) Debug(msg string, args ...any) {}
@@ -21,10 +24,28 @@ type scopedLogger struct {
 }
 
 func newScopedLogger(inner logger, args ...any) *scopedLogger {
-	if inner == nil {
+	if isNilLogger(inner) {
 		inner = nopLogger{}
 	}
 	return &scopedLogger{inner: inner, args: args}
+}
+
+// isNilLogger reports whether inner is nil in either sense that matters
+// here: the untyped nil interface (inner == nil), or a non-nil interface
+// wrapping a nil concrete value — e.g. `var l *someLogger; jobCtx.Logger = l`
+// — which passes a plain `== nil` check but nil-derefs on first use. The
+// untyped case is checked first so the common (non-nil) path costs nothing
+// beyond that comparison; reflection only runs for the rarer typed case.
+func isNilLogger(inner logger) bool {
+	if inner == nil {
+		return true
+	}
+	switch v := reflect.ValueOf(inner); v.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // Merged slice is built with an explicit copy to avoid aliasing a spread

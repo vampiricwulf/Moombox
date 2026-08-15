@@ -41,6 +41,18 @@ func TestJSToJSONExact(t *testing.T) {
 		{"template_num_twice", "`${name}${name}`", `"55"`},          // vars: name -> 5
 		{"template_num_quoted", "`${name}\"${name}\"`", `"5\"5\""`}, // vars: name -> 5
 		{"template_unresolved", "`${name}`", `"name"`},              // no vars
+		// Regression: Python's int() is arbitrary-precision, so hex/octal
+		// literals beyond int64/uint64 range still convert to their exact
+		// decimal digits instead of aborting the whole conversion with a
+		// range error (see js_to_json fix_kv: i = int(im.group(1), base)).
+		// 0xFFFFFFFFFFFFFFFF (16 Fs) == 2**64-1 as a KEY -> quoted decimal.
+		{"hex_key_huge", `{0xFFFFFFFFFFFFFFFF:1}`, `{"18446744073709551615":1}`},
+		// Same magnitude (> 2**63, the old int64 ceiling) as a VALUE ->
+		// bare decimal, unquoted.
+		{"hex_value_large", `{a:0xFFFFFFFFFFFFFFFF}`, `{"a":18446744073709551615}`},
+		// Octal literal exceeding even uint64's range (> 2**64-1),
+		// forcing the math/big fallback rather than the uint64 fast path.
+		{"octal_key_beyond_uint64", `{07777777777777777777777:1}`, `{"73786976294838206463":1}`},
 	}
 	vars := map[string]map[string]string{
 		"template_var":        {"name": `"world"`},
