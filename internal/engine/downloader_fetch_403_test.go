@@ -59,6 +59,44 @@ func TestForbiddenBehindHeadRefreshesAndRetries(t *testing.T) {
 	}
 }
 
+// TestForbiddenBehindHeadNoCallbackStaysPermanent pins the gating fix: a
+// strategy that harvests X-Head-Seqnum (behindHeadTailPending can be true)
+// but wires no OnCredentialRefresh callback — the manifest-based DASH path —
+// has no possible recovery from a 403. Without the gate,
+// fetchSegmentWithRetry still paid the full forbiddenRefreshAttempts retries
+// (each with its own singleGoneRetryDelay sleep) per segment for a
+// refreshCredentials() call that could only ever no-op. With the gate, a 403
+// below head with no callback installed must return ErrSegmentPermanent on
+// the very first HTTP attempt, exactly as it did before credential recovery
+// was added.
+func TestForbiddenBehindHeadNoCallbackStaysPermanent(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("X-Head-Seqnum", "5000")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/v?x=1",
+		OutputFile: "x",
+		PoToken:    "stale",
+		// OnCredentialRefresh intentionally left nil.
+	})
+	d.noteHeadSeq(5000)
+	d.currentSeq.Store(10) // well behind head
+	d.lastSegTime.StoreNow()
+
+	_, err := d.fetchSegmentWithRetry(context.Background(), d.buildSegmentURL(10), nil)
+	if err != ErrSegmentPermanent {
+		t.Fatalf("err = %v, want ErrSegmentPermanent (no callback installed)", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("HTTP attempts = %d, want exactly 1 (no retry loop without a callback)", got)
+	}
+}
+
 // TestForbiddenAtHeadStaysPermanent guards end-of-stream detection: a 403 at
 // or past the head is how a finished stream terminates, and VOD/post-live
 // finalization depends on it. Recovery must not touch that case.

@@ -103,7 +103,7 @@ func TestHandleGoneErrorBehindHeadDefersEnd(t *testing.T) {
 	n := goneRetryDuringDownload + 1
 	for i := range 3 {
 		n++
-		if err := d.handleGoneError(ctx, &n, true); err != nil {
+		if err := d.handleGoneError(ctx, 403, &n, true); err != nil {
 			t.Fatalf("iteration %d: handleGoneError = %v, want nil (defer while tail exists)", i, err)
 		}
 	}
@@ -146,7 +146,7 @@ func TestHandleGoneErrorBehindHeadRefreshesCredentials(t *testing.T) {
 	n := 0
 	// Ramp up to (but not including) the threshold: no refresh yet.
 	for n < postBytes403CipherThreshold-1 {
-		if err := d.handleGoneError(ctx, &n, true); err != nil {
+		if err := d.handleGoneError(ctx, 403, &n, true); err != nil {
 			t.Fatalf("iteration n=%d: handleGoneError = %v, want nil", n, err)
 		}
 	}
@@ -155,11 +155,49 @@ func TestHandleGoneErrorBehindHeadRefreshesCredentials(t *testing.T) {
 	}
 
 	// One more failure crosses the threshold: refresh must fire.
-	if err := d.handleGoneError(ctx, &n, true); err != nil {
+	if err := d.handleGoneError(ctx, 403, &n, true); err != nil {
 		t.Fatalf("iteration n=%d: handleGoneError = %v, want nil", n, err)
 	}
 	if got := refreshCalls.Load(); got != 1 {
 		t.Errorf("refresh calls = %d at threshold (n=%d), want 1", got, n)
+	}
+}
+
+// TestHandleGoneErrorEvictionDoesNotRefreshCredentials pins the 410
+// discrimination fix: handleGoneError is the shared handler for both 403 and
+// 410 (handleDashError routes both here), but only a 403 means stale
+// credentials. A 410 burst below head is a real documented scenario
+// (marathon-stream eviction) where the segments are genuinely gone — a
+// refresh there is a doomed call (watch-page fetch + cold BotGuard mint +
+// cipher-solver invalidation) that cannot recover an evicted segment and
+// only burns the stall budget during the exact event where retries matter.
+// Even with the threshold crossed and behindHeadTailPending() true —
+// conditions that DO fire a refresh for 403 in
+// TestHandleGoneErrorBehindHeadRefreshesCredentials — a 410 burst must never
+// call OnCredentialRefresh.
+func TestHandleGoneErrorEvictionDoesNotRefreshCredentials(t *testing.T) {
+	var refreshCalls atomic.Int32
+	d := NewSegmentDownloader(DownloaderOptions{
+		OutputFile: filepath.Join(t.TempDir(), "v"),
+		MaxTimeout: time.Hour,
+		OnCredentialRefresh: func() (string, string) {
+			refreshCalls.Add(1)
+			return "", "fresh"
+		},
+	})
+	d.currentSeq.Store(50)
+	d.headSeq.Store(100)
+	d.lastSegTime.StoreNow()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // retry sleeps return immediately
+
+	n := postBytes403CipherThreshold + 5 // already well past the refresh threshold
+	if err := d.handleGoneError(ctx, 410, &n, true); err != nil {
+		t.Fatalf("handleGoneError = %v, want nil (defer while tail exists)", err)
+	}
+	if got := refreshCalls.Load(); got != 0 {
+		t.Errorf("refresh calls = %d on a 410 burst, want 0 (410 = evicted, not stale credentials)", got)
 	}
 }
 
@@ -186,7 +224,7 @@ func TestHandleGoneErrorPastHeadDoesNotRefreshCredentials(t *testing.T) {
 	d.lastSegTime.StoreNow()
 
 	n := postBytes403CipherThreshold + 5 // already well past the refresh threshold
-	if err := d.handleGoneError(context.Background(), &n, true); err != errStreamDone {
+	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (past head, ended)", err)
 	}
 	if got := refreshCalls.Load(); got != 0 {
@@ -208,7 +246,7 @@ func TestHandleGoneErrorPastHeadFinalizes(t *testing.T) {
 	d.lastSegTime.StoreNow()
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), &n, true); err != errStreamDone {
+	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (past head, ended)", err)
 	}
 	if !d.streamEnded.Load() {
@@ -231,7 +269,7 @@ func TestHandleGoneErrorBehindHeadTimeoutFinalizes(t *testing.T) {
 	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // budget exhausted
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), &n, true); err != errStreamDone {
+	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (MaxTimeout exhausted)", err)
 	}
 	if d.streamEnded.Load() {
@@ -254,7 +292,7 @@ func TestHandleGoneErrorBehindHeadStillRefreshesLive(t *testing.T) {
 	d.lastSegTime.StoreNow()
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), &n, true); err != ErrQualityLost {
+	if err := d.handleGoneError(context.Background(), 403, &n, true); err != ErrQualityLost {
 		t.Fatalf("handleGoneError = %v, want ErrQualityLost (live stream refresh)", err)
 	}
 }
@@ -286,14 +324,14 @@ func TestHandleGoneErrorCheckErrorDefersWithoutLatching(t *testing.T) {
 	cancel() // defer sleeps return immediately
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(ctx, &n, true); err != nil {
+	if err := d.handleGoneError(ctx, 403, &n, true); err != nil {
 		t.Fatalf("first escalation = %v, want nil (defer on check error)", err)
 	}
 	if d.streamEndVerified {
 		t.Fatal("check error latched streamEndVerified — a transient probe failure must not stick")
 	}
 	n++
-	if err := d.handleGoneError(ctx, &n, true); err != nil {
+	if err := d.handleGoneError(ctx, 403, &n, true); err != nil {
 		t.Fatalf("throttled escalation = %v, want nil", err)
 	}
 	if checks != 1 {
@@ -304,7 +342,7 @@ func TestHandleGoneErrorCheckErrorDefersWithoutLatching(t *testing.T) {
 	fail = false
 	d.lastStreamStatusCheck.Store(time.Now().Add(-(streamStatusCheckInterval + time.Second)))
 	n++
-	if err := d.handleGoneError(ctx, &n, true); err != ErrQualityLost {
+	if err := d.handleGoneError(ctx, 403, &n, true); err != ErrQualityLost {
 		t.Fatalf("recovered escalation = %v, want ErrQualityLost (still-live refresh reachable)", err)
 	}
 }
@@ -323,7 +361,7 @@ func TestHandleGoneErrorOfflinePausesTimeoutClock(t *testing.T) {
 	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // aged past MaxTimeout during the outage
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), &n, true); err != nil {
+	if err := d.handleGoneError(context.Background(), 403, &n, true); err != nil {
 		t.Fatalf("offline escalation = %v, want nil (reconnect continues)", err)
 	}
 	if d.lastSegTime.Since() > time.Second {
@@ -414,7 +452,7 @@ func TestFinalizedBehindHeadAccessor(t *testing.T) {
 	d.headSeq.Store(100)
 	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute))
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), &n, true); err != errStreamDone {
+	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone", err)
 	}
 	if !d.FinalizedBehindHead() {
@@ -434,7 +472,7 @@ func TestFinalizedBehindHeadAccessor(t *testing.T) {
 	d2.headSeq.Store(100)
 	d2.lastSegTime.StoreNow()
 	n2 := goneRetryDuringDownload + 1
-	if err := d2.handleGoneError(context.Background(), &n2, true); err != errStreamDone {
+	if err := d2.handleGoneError(context.Background(), 403, &n2, true); err != errStreamDone {
 		t.Fatalf("clean handleGoneError = %v, want errStreamDone", err)
 	}
 	if d2.FinalizedBehindHead() {

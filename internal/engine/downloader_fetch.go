@@ -226,7 +226,18 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			// what a manual cancel-and-resume fixes. Refresh them and retry
 			// rather than declaring live segments permanently gone (the
 			// 2026-08-15 mid-stream-join stall).
-			if !d.behindHeadTailPending() {
+			if !d.behindHeadTailPending() || d.opts.OnCredentialRefresh == nil {
+				// OnCredentialRefresh == nil: a strategy that harvests
+				// X-Head-Seqnum but wires no refresh callback (the
+				// manifest-based DASH path) has no possible recovery here —
+				// refreshCredentials() would just no-op every time (it
+				// checks the same nil internally). Without this gate, every
+				// 403 below head would still pay the full
+				// forbiddenRefreshAttempts retries (3 attempts, 2x
+				// singleGoneRetryDelay) per segment across every catch-up
+				// worker for a callback that can never fire. Falling through
+				// here restores the pre-refresh immediate ErrSegmentPermanent
+				// for callers that never opted in.
 				return nil, ErrSegmentPermanent
 			}
 			if attempt >= forbiddenRefreshAttempts-1 {

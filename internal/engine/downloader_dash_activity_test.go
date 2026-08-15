@@ -17,7 +17,7 @@ func newActivityDownloader(t *testing.T) (*SegmentDownloader, *DownloadActivity)
 func TestHandleGoneErrorEmitsFindingFirstSegment(t *testing.T) {
 	d, got := newActivityDownloader(t)
 	n := 1 // first-segment hunt: !hasStartedDownloading, n <= goneRetryBeforeFirstSegment
-	if err := d.handleGoneError(context.Background(), &n, false); err != nil {
+	if err := d.handleGoneError(context.Background(), 403, &n, false); err != nil {
 		t.Fatalf("handleGoneError returned %v, want nil (continue)", err)
 	}
 	if *got != ActivityFindingFirstSegment {
@@ -29,7 +29,7 @@ func TestHandleGoneErrorEmitsVerifyingEnd(t *testing.T) {
 	d, got := newActivityDownloader(t)
 	n := goneRetryDuringDownload + 1 // sustained gones while downloading
 	// IsOnline nil + CheckStreamStatus nil -> emits VerifyingEnd, then declares ended.
-	if err := d.handleGoneError(context.Background(), &n, true); err != errStreamDone {
+	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError returned %v, want errStreamDone", err)
 	}
 	if *got != ActivityVerifyingEnd {
@@ -42,7 +42,7 @@ func TestHandleGoneErrorEmitsWaitingForSegment(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled so the single-gone retry sleep returns immediately
 	n := 1   // one gone while downloading — below the verify threshold
-	if err := d.handleGoneError(ctx, &n, true); err != nil {
+	if err := d.handleGoneError(ctx, 403, &n, true); err != nil {
 		t.Fatalf("handleGoneError returned %v, want nil (continue)", err)
 	}
 	if *got != ActivityWaitingForSegment {

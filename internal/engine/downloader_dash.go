@@ -297,7 +297,7 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 				}
 			}
 		}
-		return d.handleGoneError(ctx, consecutiveGoneErrors, hasStartedDownloading)
+		return d.handleGoneError(ctx, statusCode, consecutiveGoneErrors, hasStartedDownloading)
 	}
 
 	if statusCode == 429 {
@@ -350,24 +350,36 @@ func is403LikelyCipher(fetchErr error) bool {
 	return true
 }
 
-func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGoneErrors *int, hasStartedDownloading bool) error {
+func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int, consecutiveGoneErrors *int, hasStartedDownloading bool) error {
 	*consecutiveGoneErrors++
 
 	// The sequential loop calls fetchSegment directly (runDashLoop), not
 	// fetchSegmentWithRetry, so it never gets that function's behind-head
 	// credential-refresh retry on its own — only the parallel catch-up
-	// worker does. Mirror the recovery here: once a 403/410 burst has
-	// persisted past postBytes403CipherThreshold — the same threshold that
-	// already gates the cipher-solver invalidation above in
-	// handleDashError, so "persisted" means the same thing in both places
-	// — AND behindHeadTailPending() confirms the segments demonstrably
-	// exist, ask for fresh credentials before the existing retry/sleep
-	// below. refreshCredentials is cooldown-gated (credentialRefreshCooldown),
-	// so calling it again on every remaining gone iteration in the burst is
+	// worker does. Mirror the recovery here: once a 403 burst has persisted
+	// past postBytes403CipherThreshold — the same threshold that already
+	// gates the cipher-solver invalidation above in handleDashError, so
+	// "persisted" means the same thing in both places — AND
+	// behindHeadTailPending() confirms the segments demonstrably exist, ask
+	// for fresh credentials before the existing retry/sleep below.
+	// refreshCredentials is cooldown-gated (credentialRefreshCooldown), so
+	// calling it again on every remaining gone iteration in the burst is
 	// safe: at most one player-response round trip actually goes out per
 	// cooldown window. This does not touch the finalize/verdict logic below
 	// — it only runs a side effect before it.
-	if hasStartedDownloading && *consecutiveGoneErrors >= postBytes403CipherThreshold && d.behindHeadTailPending() {
+	//
+	// statusCode == 403 only: handleGoneError is the shared handler for
+	// both 403 and 410 (handleDashError routes both here), but a refresh
+	// only makes sense for 403 — stale credentials are a 403 signature.
+	// 410 means genuinely evicted (marathon-stream eviction is a documented
+	// real scenario below head, not a credential problem), and firing a
+	// refresh on every 410 in an eviction burst would be a doomed call each
+	// time: a watch-page fetch plus a cold BotGuard mint plus
+	// invalidate403Caches wiping the shared cipher solver (forcing a
+	// player-JS recompile that also hits the sibling downloader), burning
+	// the stall budget on retries that cannot possibly help during exactly
+	// the event where retries matter most.
+	if statusCode == 403 && hasStartedDownloading && *consecutiveGoneErrors >= postBytes403CipherThreshold && d.behindHeadTailPending() {
 		d.refreshCredentials()
 	}
 

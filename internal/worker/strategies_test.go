@@ -298,6 +298,58 @@ func TestRefreshGvsCredentialsSkipsURLHalfWithoutSolver(t *testing.T) {
 	}
 }
 
+// TestRefreshGvsCredentialsSkipsWholeFileFormat pins the corruption-avoidance
+// fix: when the itag being refreshed has, by the time this call resolves,
+// become a whole-file format (YouTube finished VOD processing mid-job — a
+// real event during the post-live tail this refresh exists to survive),
+// installing its URL would feed a &sq=N-addressed segment loop a byte-range
+// URL. YouTube ignores &sq on a whole-file URL and returns the ENTIRE file
+// for every sequence number — the same disk-filling runaway
+// HasManifestlessDashFormats' doc comment describes at strategy-selection
+// time; this is the mid-download instance of that same check. The fix must
+// detect the ContentLength discriminator and skip the URL install entirely
+// (never even call the cipher solver) while still returning the freshly
+// minted token.
+//
+// job.YT is left nil so refreshGvsCredentials resolves directly against
+// videoInfo.Formats without a network round trip — standing in for "the
+// itag's fresh format," matching how TestRefreshGvsCredentialsSkipsURLHalfWithoutSolver
+// avoids the same round trip for its own gate.
+func TestRefreshGvsCredentialsSkipsWholeFileFormat(t *testing.T) {
+	fake := &fakePotProvider{
+		generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
+			return "fresh-token", nil
+		},
+	}
+	routedSolver := &orderedSolver{
+		onN: func(ctx context.Context, playerID, encryptedN string) (string, error) {
+			t.Fatal("N() must not be called — the whole-file guard must skip resolution before any cipher call")
+			return "", nil
+		},
+	}
+
+	job := &JobContext{
+		Job:    &database.Job{ID: "test-job", VideoID: "vid1"},
+		YT:     nil,
+		Logger: &discardLogger{},
+	}
+	videoInfo := &youtube.VideoInfo{
+		PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
+		Formats: []youtube.Format{
+			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", ContentLength: "123456789"},
+		},
+	}
+
+	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, routedSolver, nil, fake, "vd-123", "test")
+
+	if baseURL != "" {
+		t.Errorf("baseURL = %q, want empty — itag 140 now carries ContentLength (whole-file), never &sq-addressable", baseURL)
+	}
+	if token != "fresh-token" {
+		t.Errorf("token = %q, want fresh-token — the token half must still run even when the URL half is skipped", token)
+	}
+}
+
 // TestRefreshGvsCredentialsMintsBeforeSlowURLFetch pins the ordering fix:
 // the token re-mint must run BEFORE the URL half (player-response re-fetch
 // + cipher resolve) on their shared refreshCtx deadline, so a slow URL

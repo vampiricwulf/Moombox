@@ -460,7 +460,24 @@ func refreshGvsCredentials(
 				}
 			}
 		}
-		if fresh, err := resolveFormatURLByItag(refreshCtx, formats, itag, routedSolver, cipherSolver, playerURL, job.Logger); err != nil {
+		if formatBecameWholeFile(formats, itag) {
+			// The itag that was segmented (OTF/live, no contentLength) at
+			// strategy setup has since resolved to a complete-file format —
+			// YouTube finished VOD processing mid-job, which happens exactly
+			// during the post-live tail where behind-head 403 bursts (and
+			// this refresh) occur. SetBaseURL would install it and
+			// buildSegmentURL would append &sq=N to a byte-range URL:
+			// YouTube ignores &sq on a whole-file URL and returns the ENTIRE
+			// file for every sequence number — the disk-filling runaway
+			// HasManifestlessDashFormats' doc comment describes (it guards
+			// the same discriminator at strategy-selection time; this is the
+			// same check applied mid-download, after the itag was already
+			// chosen). OnCipherFailure cannot hit this because it resolves
+			// against the cached live formats, never a fresh player-response
+			// fetch. Skip the URL install; the token half above still ran.
+			job.Logger.Warn("[POT] credential refresh: itag now resolves to a whole-file format (VOD processing finished mid-job) — skipping URL install to avoid feeding a non-segmented URL to the &sq loop",
+				"jobID", job.Job.ID, "tag", tag, "itag", itag)
+		} else if fresh, err := resolveFormatURLByItag(refreshCtx, formats, itag, routedSolver, cipherSolver, playerURL, job.Logger); err != nil {
 			job.Logger.Warn("[POT] credential refresh: URL re-resolve failed",
 				"jobID", job.Job.ID, "tag", tag, "err", err)
 		} else {
@@ -471,6 +488,25 @@ func refreshGvsCredentials(
 	job.Logger.Info("[POT] credential refresh", "jobID", job.Job.ID, "tag", tag,
 		"newURL", baseURL != "", "newToken", poToken != "")
 	return baseURL, poToken
+}
+
+// formatBecameWholeFile reports whether the format matching itag in formats
+// now carries a non-empty ContentLength — the same discriminator
+// HasManifestlessDashFormats (strategy_youtube_manifestless_dash.go) uses at
+// strategy-selection time to identify a complete-file format that is served
+// by byte-range and never &sq=N-addressable. A live itag can cross that
+// boundary mid-job: YouTube can finish VOD processing while a post-live tail
+// is still downloading, at which point the same itag's OTF/live entry is
+// replaced by a whole-file one. Returns false (safe to resolve) when the
+// itag isn't present in formats at all; resolveFormatURLByItag's own
+// not-found error handles that case.
+func formatBecameWholeFile(formats []youtube.Format, itag int) bool {
+	for i := range formats {
+		if formats[i].Itag == itag {
+			return formats[i].ContentLength != ""
+		}
+	}
+	return false
 }
 
 // poTokenBinding returns the GVS content binding: visitorData, falling back
