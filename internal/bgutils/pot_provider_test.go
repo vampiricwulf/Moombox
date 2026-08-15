@@ -1099,3 +1099,42 @@ func TestBGError_WithInfo(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, err.Error())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PotProvider.GenerateGvsPoToken
+// ---------------------------------------------------------------------------
+
+// TestGenerateGvsPoTokenNilSidecar: with no sidecar attached the GVS path
+// must fall through to the goja flow (which will fail fast in a unit test —
+// no network — but MUST NOT touch the session cache).
+func TestGenerateGvsPoTokenNilSidecar(t *testing.T) {
+	pp := NewPotProvider(&BgConfig{}, &testLogger{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Seed the session cache for this binding: a GVS mint must NOT return it.
+	pp.mu.Lock()
+	pp.sessionCache["bind1"] = &SessionData{PoToken: "cached-token", ContentBinding: "bind1", ExpiresAt: time.Now().Add(time.Hour)}
+	pp.mu.Unlock()
+
+	res, err := pp.GenerateGvsPoToken(ctx, "bind1", "")
+	if err == nil {
+		// Goja path unexpectedly succeeded (needs network) — even then the
+		// result must not be the session-cached token.
+		if res.PoToken == "cached-token" {
+			t.Fatal("GVS mint returned session-cached token; cache must be bypassed")
+		}
+		if res.MinterSource != "goja-fallback" {
+			t.Errorf("MinterSource = %q, want goja-fallback", res.MinterSource)
+		}
+		return
+	}
+	// Expected in unit-test conditions: goja mint fails (no network).
+	// The session cache must be untouched and un-consulted.
+	pp.mu.Lock()
+	cached := pp.sessionCache["bind1"].PoToken
+	pp.mu.Unlock()
+	if cached != "cached-token" {
+		t.Error("session cache mutated by GVS mint")
+	}
+}

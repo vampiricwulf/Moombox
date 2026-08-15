@@ -120,8 +120,13 @@ func (pp *PotProvider) GenerateGvsPoToken(ctx context.Context, binding, challeng
 
 Semantics (owner's "fresh minter per GVS mint" choice):
 
-- Bypasses the session cache entirely — no read, no write. Inflight dedup keyed
-  on binding still applies so concurrent same-binding GVS calls share one mint.
+- Bypasses the session cache entirely — no read, no write. Concurrent GVS
+  mints are deduplicated inside the sidecar (`minterPromise` shares the
+  expensive BotGuard regeneration); the provider adds no inflight entry of
+  its own — per-binding token minting on a shared minter is cheap.
+  (Implementation found the provider-side inflight entry would return a
+  non-fresh result to the second caller, contradicting fresh-per-mint
+  semantics.)
 - Sidecar path: RPC with `freshMinter: true` and the challenge (when non-empty).
 - Sidecar unhealthy / errors: falls through to the existing goja flow with the
   challenge ignored — degrades to exactly today's behavior (log this: §4.6).

@@ -1,6 +1,7 @@
 package bgutils
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -126,5 +127,25 @@ func TestStatsCountersAreMonotonic(t *testing.T) {
 	got := pp.Stats()
 	if got.MintersInvalidated != 5 {
 		t.Errorf("MintersInvalidated after 5 invalidations: want 5, got %d", got.MintersInvalidated)
+	}
+}
+
+// TestGvsMintCounters exercises PotProvider.GenerateGvsPoToken's counters:
+// every call increments GvsMints, and only calls carrying a non-empty
+// watch-page challenge increment GvsMintsChallenge. No sidecar is attached,
+// so both calls fall through to the (network-less, failing) goja path — the
+// counters increment regardless of the mint's outcome.
+func TestGvsMintCounters(t *testing.T) {
+	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, _ = pp.GenerateGvsPoToken(ctx, "b", "")
+	_, _ = pp.GenerateGvsPoToken(ctx, "b", `{"program":"p"}`)
+	s := pp.Stats()
+	if s.GvsMints != 2 {
+		t.Errorf("GvsMints = %d, want 2", s.GvsMints)
+	}
+	if s.GvsMintsChallenge != 1 {
+		t.Errorf("GvsMintsChallenge = %d, want 1", s.GvsMintsChallenge)
 	}
 }

@@ -83,6 +83,12 @@ type PotProvider struct {
 	sidecar         *sidecar.Sidecar
 	sidecarMintsHit atomic.Uint64
 	sidecarMintsErr atomic.Uint64
+
+	// gvsMints / gvsMintsChallenge count GenerateGvsPoToken calls: every
+	// attempt (regardless of outcome or path) and the subset that carried a
+	// non-empty watch-page challenge, respectively. Spec §4.3.
+	gvsMints          atomic.Uint64
+	gvsMintsChallenge atomic.Uint64
 }
 
 // PotStats is a snapshot of PotProvider counters. The numeric fields are
@@ -109,6 +115,8 @@ type PotStats struct {
 	CachedMinters      int    `json:"cached_minters"`
 	SidecarMintsHit    uint64 `json:"sidecar_mints_hit"`
 	SidecarMintsErr    uint64 `json:"sidecar_mints_err"`
+	GvsMints           uint64 `json:"gvs_mints"`
+	GvsMintsChallenge  uint64 `json:"gvs_mints_challenge"`
 }
 
 // Stats returns a snapshot of the provider's observability counters.
@@ -131,6 +139,8 @@ func (pp *PotProvider) Stats() PotStats {
 		CachedMinters:      cached,
 		SidecarMintsHit:    pp.sidecarMintsHit.Load(),
 		SidecarMintsErr:    pp.sidecarMintsErr.Load(),
+		GvsMints:           pp.gvsMints.Load(),
+		GvsMintsChallenge:  pp.gvsMintsChallenge.Load(),
 	}
 }
 
@@ -421,6 +431,15 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 		pp.logger.Warn("[PotProvider] sidecar mint failed; falling through to goja", "err", err)
 	}
 
+	return pp.gojaGenerateAndMint(ctx, contentBinding, bypassCache)
+}
+
+// gojaGenerateAndMint is the goja fallback: serialize minter creation, then
+// generate + cache + schedule eviction/refresh, then mint. Split out of
+// generateAndMint so the GVS path can reuse it without re-attempting the
+// sidecar. bypassCache=true skips the under-lock cache re-check AND forces a
+// fresh minter (matching upstream TS bypass_cache semantics).
+func (pp *PotProvider) gojaGenerateAndMint(ctx context.Context, contentBinding string, bypassCache bool) (*SessionData, error) {
 	// Goja fallback path. Serialize minter creation across goroutines:
 	// every "first request" goroutine sees an empty minterCache and
 	// would otherwise race to spin up a BotGuard VM, with the losers
@@ -514,6 +533,56 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	}
 
 	return pp.mintPoToken(minter, contentBinding)
+}
+
+// GvsMint is a GVS (segment-URL) PO-token mint result with the provenance
+// the worker's "[POT] GVS mint" log line reports.
+type GvsMint struct {
+	PoToken      string
+	MinterSource string // "challenge" | "att_get" | "goja-fallback"
+	MinterFresh  bool
+	ViaSidecar   bool
+}
+
+// GenerateGvsPoToken mints a segment-URL PO token under the
+// fresh-minter-per-GVS-mint policy (spec §4.3): the session cache is fully
+// bypassed (no read, no write), and the sidecar builds a fresh minter from
+// the supplied watch-page challenge ("" → its /att/get fallback). The
+// expensive BotGuard regeneration is deduplicated inside the sidecar
+// (minterPromise), so no provider-side inflight entry is needed. When the
+// sidecar is unavailable the goja flow runs with the challenge ignored —
+// today's (session-incoherent) behavior, flagged as "goja-fallback".
+func (pp *PotProvider) GenerateGvsPoToken(ctx context.Context, contentBinding, challenge string) (GvsMint, error) {
+	pp.gvsMints.Add(1)
+	if challenge != "" {
+		pp.gvsMintsChallenge.Add(1)
+	}
+	pp.mu.Lock()
+	sc := pp.sidecar
+	pp.mu.Unlock()
+	if sc != nil && sc.IsHealthy() {
+		res, err := sc.GenerateGvsPoToken(ctx, contentBinding, challenge)
+		if err == nil {
+			pp.sidecarMintsHit.Add(1)
+			return GvsMint{PoToken: res.PoToken, MinterSource: res.MinterSource, MinterFresh: res.MinterFresh, ViaSidecar: true}, nil
+		}
+		pp.sidecarMintsErr.Add(1)
+		pp.logger.Warn("[PotProvider] sidecar GVS mint failed; falling through to goja", "err", err)
+	}
+	session, err := func() (s *SessionData, e error) {
+		defer func() {
+			if r := recover(); r != nil {
+				s, e = nil, fmt.Errorf("bgutils GVS mint panic: %v", r)
+				pp.logger.Error("[PotProvider] GVS mint panic", "panic", r)
+			}
+		}()
+		return pp.gojaGenerateAndMint(ctx, contentBinding, true)
+	}()
+	if err != nil {
+		pp.generateErrors.Add(1)
+		return GvsMint{}, err
+	}
+	return GvsMint{PoToken: session.PoToken, MinterSource: "goja-fallback", MinterFresh: true}, nil
 }
 
 // minterRefreshLead is how far before a cached minter's expiry the proactive
