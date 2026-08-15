@@ -273,6 +273,13 @@ type SegmentDownloader struct {
 	// segment-fetch path. DECISIONS #7.
 	baseURLOverride atomic.Pointer[string]
 
+	// poTokenOverride carries a re-minted GVS PO token. opts.PoToken is the
+	// value the downloader STARTED with; credential recovery replaces it in
+	// place rather than tearing the downloader down (both upstreams refresh
+	// credentials inside the segment loop — see the plan's background).
+	// Mirrors baseURLOverride exactly.
+	poTokenOverride atomic.Pointer[string]
+
 	// startedAt + transientRetries + lastTransientErr feed HealthUpdate
 	// snapshots. transientRetries / lastTransientErrMu are read-mostly
 	// in the segment fetcher (each non-terminal error is one increment
@@ -315,6 +322,27 @@ type SegmentDownloader struct {
 // DECISIONS #7.
 func (d *SegmentDownloader) SetBaseURL(url string) {
 	d.baseURLOverride.Store(&url)
+}
+
+// SetPoToken atomically replaces the PO token used for subsequent segment
+// fetches. An empty token is ignored: a failed re-mint must not blank a
+// credential that is still working. Nothing in flight is interrupted — the
+// swap is visible to the next getPoToken() call.
+func (d *SegmentDownloader) SetPoToken(token string) {
+	if token == "" {
+		return
+	}
+	d.poTokenOverride.Store(&token)
+}
+
+// getPoToken returns the current PO token: the refreshed override when one
+// has been installed, otherwise the token the downloader was constructed
+// with.
+func (d *SegmentDownloader) getPoToken() string {
+	if p := d.poTokenOverride.Load(); p != nil {
+		return *p
+	}
+	return d.opts.PoToken
 }
 
 // emitHealthUpdate fires OnHealthUpdate with a snapshot of the current

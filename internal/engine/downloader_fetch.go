@@ -128,7 +128,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 	defer cancel()
 
 	// Apply GVS PO token to segment URL (query mode: ?pot=token)
-	segURL = applyPoTokenQuery(segURL, d.opts.PoToken)
+	segURL = applyPoTokenQuery(segURL, d.getPoToken())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 	if err != nil {
@@ -340,7 +340,7 @@ func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) 
 // and parses the X-Head-Seqnum response header.
 func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int, error) {
 	probeURL := d.buildSegmentURL(probeSeq)
-	probeURL = applyPoTokenQuery(probeURL, d.opts.PoToken)
+	probeURL = applyPoTokenQuery(probeURL, d.getPoToken())
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

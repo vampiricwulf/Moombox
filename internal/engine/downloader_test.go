@@ -744,3 +744,27 @@ func TestForceStartSeq_MissingFile(t *testing.T) {
 		t.Errorf("CurrentSeq() = %d, want 100", got)
 	}
 }
+
+// TestSetPoTokenOverridesOptions pins the mutable-token seam that credential
+// recovery depends on: opts.PoToken is the initial value only, and a later
+// SetPoToken must be what subsequent fetches use. Mirrors SetBaseURL.
+func TestSetPoTokenOverridesOptions(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.invalid/v",
+		OutputFile: "x",
+		PoToken:    "initial",
+	})
+	if got := d.getPoToken(); got != "initial" {
+		t.Fatalf("getPoToken() = %q, want the options value %q", got, "initial")
+	}
+	d.SetPoToken("refreshed")
+	if got := d.getPoToken(); got != "refreshed" {
+		t.Errorf("getPoToken() = %q, want %q after SetPoToken", got, "refreshed")
+	}
+	// An empty refresh must not blank a working token — a failed re-mint
+	// returns "" and must leave the existing credential in place.
+	d.SetPoToken("")
+	if got := d.getPoToken(); got != "refreshed" {
+		t.Errorf("getPoToken() = %q, want the previous token retained after an empty SetPoToken", got)
+	}
+}

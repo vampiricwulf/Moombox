@@ -116,7 +116,7 @@ func (d *SegmentDownloader) ProbeSegmentAvailable(ctx context.Context, seq int) 
 	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
 	defer cancel()
 
-	segURL := applyPoTokenQuery(d.buildSegmentURL(seq), d.opts.PoToken)
+	segURL := applyPoTokenQuery(d.buildSegmentURL(seq), d.getPoToken())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 	if err != nil {
