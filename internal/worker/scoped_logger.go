@@ -1,5 +1,14 @@
 package worker
 
+// nopLogger is a no-op logger used when inner is nil, preserving graceful
+// no-op behavior when scopedLogger wraps a nil inner.
+type nopLogger struct{}
+
+func (nopLogger) Debug(msg string, args ...any) {}
+func (nopLogger) Info(msg string, args ...any)  {}
+func (nopLogger) Warn(msg string, args ...any)  {}
+func (nopLogger) Error(msg string, args ...any) {}
+
 // scopedLogger wraps a job logger, appending fixed key-value pairs to every
 // call, so engine components — which know nothing about jobs — emit
 // attributable lines. Motivated by the 2026-08-14 premiere investigation,
@@ -12,6 +21,9 @@ type scopedLogger struct {
 }
 
 func newScopedLogger(inner logger, args ...any) *scopedLogger {
+	if inner == nil {
+		inner = nopLogger{}
+	}
 	return &scopedLogger{inner: inner, args: args}
 }
 

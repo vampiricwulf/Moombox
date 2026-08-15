@@ -32,3 +32,15 @@ func TestScopedLoggerAppendsFixedArgs(t *testing.T) {
 		t.Errorf("got %v, want %v", cap.msgs[1], want)
 	}
 }
+
+func TestScopedLoggerNilInnerDoesNotPanic(t *testing.T) {
+	// Regression test: nil inner logger must not panic on log calls.
+	// The engine's nil-check is bypassed by a non-nil interface wrapping
+	// a nil value, so scopedLogger must substitute a no-op logger.
+	sl := newScopedLogger(nil, "jobID", "x")
+	// These must not panic.
+	sl.Debug("test message")
+	sl.Info("test message")
+	sl.Warn("test message")
+	sl.Error("test message")
+}
