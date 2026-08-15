@@ -600,7 +600,10 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				data = nil // gap sentinel — the index must still emit a result
 			}
 		}()
-		data, fetchErr := d.fetchSegmentWithRetry(ctx, item.segURL)
+		// No rebuild closure: HLS segment URLs are opaque literals lifted
+		// from the playlist, not derived from d.getBaseURL()+seq, so a
+		// refreshed base URL has nothing to rebuild here.
+		data, fetchErr := d.fetchSegmentWithRetry(ctx, item.segURL, nil)
 		if fetchErr != nil {
 			// Audit reports/engine.md #17: distinguish CDN-evicted
 			// segments from retries-exhausted so silent gaps are debuggable.

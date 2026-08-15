@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -111,6 +112,85 @@ func TestHandleGoneErrorBehindHeadDefersEnd(t *testing.T) {
 	}
 	if checks != 1 {
 		t.Errorf("CheckStreamStatus called %d times across retries, want 1 (latched verdict)", checks)
+	}
+}
+
+// TestHandleGoneErrorBehindHeadRefreshesCredentials is the regression test
+// for the sequential-loop gap in the 2026-08-15 live-403 recovery work:
+// runDashLoop calls fetchSegment directly (not fetchSegmentWithRetry), so
+// without this wiring it got NO credential-refresh recovery on a behind-head
+// 403/410 burst — only the parallel catch-up worker did, meaning a stream
+// stuck in the sequential loop (not far enough behind to trigger catch-up)
+// would stall exactly like the original bug. Once the burst persists past
+// postBytes403CipherThreshold — the same threshold that already gates the
+// cipher-solver invalidation in handleDashError, so "persisted" means the
+// same thing in both places — while behindHeadTailPending() is true,
+// handleGoneError must ask for fresh credentials before its retry/sleep.
+func TestHandleGoneErrorBehindHeadRefreshesCredentials(t *testing.T) {
+	var refreshCalls atomic.Int32
+	d := NewSegmentDownloader(DownloaderOptions{
+		OutputFile: filepath.Join(t.TempDir(), "v"),
+		MaxTimeout: time.Hour,
+		OnCredentialRefresh: func() (string, string) {
+			refreshCalls.Add(1)
+			return "", "fresh"
+		},
+	})
+	d.currentSeq.Store(50)
+	d.headSeq.Store(100)
+	d.lastSegTime.StoreNow()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // retry sleeps return immediately
+
+	n := 0
+	// Ramp up to (but not including) the threshold: no refresh yet.
+	for n < postBytes403CipherThreshold-1 {
+		if err := d.handleGoneError(ctx, &n, true); err != nil {
+			t.Fatalf("iteration n=%d: handleGoneError = %v, want nil", n, err)
+		}
+	}
+	if got := refreshCalls.Load(); got != 0 {
+		t.Errorf("refresh calls = %d before threshold (n=%d), want 0", got, n)
+	}
+
+	// One more failure crosses the threshold: refresh must fire.
+	if err := d.handleGoneError(ctx, &n, true); err != nil {
+		t.Fatalf("iteration n=%d: handleGoneError = %v, want nil", n, err)
+	}
+	if got := refreshCalls.Load(); got != 1 {
+		t.Errorf("refresh calls = %d at threshold (n=%d), want 1", got, n)
+	}
+}
+
+// TestHandleGoneErrorPastHeadDoesNotRefreshCredentials pins the boundary the
+// gap fix must not cross: once currentSeq is at/past head,
+// behindHeadTailPending() is false (the segment is legitimately gone, not
+// stale-credentialed), so even a long-persisted burst must never call
+// OnCredentialRefresh — that would fire a refresh on every ordinary
+// end-of-stream 403/410, which is exactly the double-duty hazard this whole
+// task exists to avoid.
+func TestHandleGoneErrorPastHeadDoesNotRefreshCredentials(t *testing.T) {
+	var refreshCalls atomic.Int32
+	d := NewSegmentDownloader(DownloaderOptions{
+		OutputFile:        filepath.Join(t.TempDir(), "v"),
+		MaxTimeout:        time.Hour,
+		CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+		OnCredentialRefresh: func() (string, string) {
+			refreshCalls.Add(1)
+			return "", "fresh"
+		},
+	})
+	d.currentSeq.Store(101)
+	d.headSeq.Store(100) // past head
+	d.lastSegTime.StoreNow()
+
+	n := postBytes403CipherThreshold + 5 // already well past the refresh threshold
+	if err := d.handleGoneError(context.Background(), &n, true); err != errStreamDone {
+		t.Fatalf("handleGoneError = %v, want errStreamDone (past head, ended)", err)
+	}
+	if got := refreshCalls.Load(); got != 0 {
+		t.Errorf("refresh calls = %d past head, want 0", got)
 	}
 }
 

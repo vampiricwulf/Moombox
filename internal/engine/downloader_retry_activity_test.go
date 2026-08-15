@@ -26,7 +26,7 @@ func TestFetchSegmentWithRetryEmitsRetrying(t *testing.T) {
 	// under test happens before the sleep.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	_, err := d.fetchSegmentWithRetry(ctx, srv.URL+"/seg")
+	_, err := d.fetchSegmentWithRetry(ctx, srv.URL+"/seg", nil)
 
 	if !errors.Is(err, ErrSegmentRetriesExhausted) && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("fetchSegmentWithRetry err = %v, want retries-exhausted or deadline", err)

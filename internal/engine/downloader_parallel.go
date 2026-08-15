@@ -73,8 +73,13 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				if d.isCancelled() || ctx.Err() != nil {
 					continue // drain channel
 				}
-				segURL := d.buildSegmentURL(item.seq)
-				data, fetchErr := d.fetchSegmentWithRetry(ctx, segURL)
+				seq := item.seq
+				segURL := d.buildSegmentURL(seq)
+				// Rebuild from the CURRENT base on a mid-retry credential
+				// refresh (Task 3 follow-up) — a sig/n-param rotation only
+				// helps once the retry actually re-derives the URL from the
+				// refreshed base, not just the refreshed PO token.
+				data, fetchErr := d.fetchSegmentWithRetry(ctx, segURL, func() string { return d.buildSegmentURL(seq) })
 				if fetchErr == nil {
 					select {
 					case results <- segResult{seq: item.seq, data: data}:

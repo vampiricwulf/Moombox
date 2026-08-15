@@ -353,6 +353,24 @@ func is403LikelyCipher(fetchErr error) bool {
 func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGoneErrors *int, hasStartedDownloading bool) error {
 	*consecutiveGoneErrors++
 
+	// The sequential loop calls fetchSegment directly (runDashLoop), not
+	// fetchSegmentWithRetry, so it never gets that function's behind-head
+	// credential-refresh retry on its own — only the parallel catch-up
+	// worker does. Mirror the recovery here: once a 403/410 burst has
+	// persisted past postBytes403CipherThreshold — the same threshold that
+	// already gates the cipher-solver invalidation above in
+	// handleDashError, so "persisted" means the same thing in both places
+	// — AND behindHeadTailPending() confirms the segments demonstrably
+	// exist, ask for fresh credentials before the existing retry/sleep
+	// below. refreshCredentials is cooldown-gated (credentialRefreshCooldown),
+	// so calling it again on every remaining gone iteration in the burst is
+	// safe: at most one player-response round trip actually goes out per
+	// cooldown window. This does not touch the finalize/verdict logic below
+	// — it only runs a side effect before it.
+	if hasStartedDownloading && *consecutiveGoneErrors >= postBytes403CipherThreshold && d.behindHeadTailPending() {
+		d.refreshCredentials()
+	}
+
 	if hasStartedDownloading && *consecutiveGoneErrors > goneRetryDuringDownload {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 			d.emitActivity(ActivityReconnecting)

@@ -183,7 +183,19 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 // the function returned `(body, permanent bool)` which forced every
 // caller to handle nil-vs-flag explicitly; the sentinel form is more
 // composable and lets callers route through `errors.Is`.
-func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string) ([]byte, error) {
+//
+// rebuildURL, when non-nil, recomputes segURL from the CURRENT base URL
+// after a behind-head 403 triggers refreshCredentials(). Without this, a
+// refreshed base URL (sig/n-param rotation — exactly what SetBaseURL and
+// OnCredentialRefresh are for) never reaches the in-flight retry: segURL
+// is otherwise a snapshot taken before this function was called, and only
+// the PO token is re-read per attempt (getPoToken() inside fetchSegment).
+// Callers whose segURL is derived from d.buildSegmentURL(seq) — the
+// parallel DASH catch-up worker — should pass a closure over that seq.
+// Callers whose segURL is an opaque absolute URL unrelated to any base
+// (HLS, which reads literal URLs out of the playlist) pass nil; a base
+// URL refresh has nothing to rebuild there.
+func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string, rebuildURL func() string) ([]byte, error) {
 	// d.opts.MaxRetries (defaulted to MaxSegmentRetries in the constructor) —
 	// previously this loop used the constant directly, silently ignoring the
 	// documented DownloaderOptions.MaxRetries knob.
@@ -229,6 +241,14 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			// previous failing segment may already have installed working
 			// credentials that this attempt will pick up.
 			d.refreshCredentials()
+			// Rebuild unconditionally on refreshCredentials()'s own return:
+			// a concurrent catch-up worker's refresh (same cooldown claim)
+			// may have installed the new base a moment before this call
+			// checked, and rebuildURL() picking up d.getBaseURL() fresh is
+			// what actually matters, not who won the cooldown race.
+			if rebuildURL != nil {
+				segURL = rebuildURL()
+			}
 			d.emitActivity(ActivityRetrying)
 			utils.Sleep(ctx, singleGoneRetryDelay)
 			continue
