@@ -152,7 +152,14 @@ function assertGoogleHost(rawUrl) {
     if (parsed.search !== "" || parsed.hash !== "") {
         throw new Error("interpreter URL carries a query or fragment");
     }
-    if (!parsed.pathname.toLowerCase().endsWith(".js")) {
+    // Validate the still-encoded path against an unreserved alphabet rather
+    // than just checking the .js suffix. Go decodes %3F into its path while
+    // this parser keeps it encoded, so a crafted
+    // /complete/search%3Fjsonp=<payload>.js reads differently on each side;
+    // excluding '%' removes the disagreement instead of relying on Google
+    // returning 404 for it. Keep in sync with staticScriptPathRe in
+    // internal/youtube/watch_page.go.
+    if (!/^\/[A-Za-z0-9._~/-]+\.[Jj][Ss]$/.test(parsed.pathname)) {
         throw new Error(`interpreter URL is not a static script: ${parsed.pathname}`);
     }
     return parsed.href;

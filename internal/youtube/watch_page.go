@@ -94,6 +94,13 @@ var (
 // fails closed — the challenge is dropped, the sidecar's /att/get flow runs,
 // and the rejected host is named in the reason string so it can be added
 // deliberately rather than guessed at by a pattern.
+// staticScriptPathRe is the shape a genuine interpreter path takes: an
+// unreserved-character path ending in .js (observed
+// /js/th/qtyJVB4UpQW6ehm0Eb6anVy7Y_bU8GitWVbp9gjCikM.js). Percent-encoding is
+// excluded deliberately — see the call site — as are query and fragment
+// markers, which cannot appear in a path this alphabet allows.
+var staticScriptPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~/-]+\.[Jj][Ss]$`)
+
 var allowedInterpreterHosts = []string{
 	"www.google.com",
 	"google.com",
@@ -514,8 +521,15 @@ func canonicalizeChallenge(raw json.RawMessage) (canonical, reason string) {
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", atnBadInterpPath + ": carries a query or fragment"
 	}
-	if !strings.HasSuffix(strings.ToLower(u.Path), ".js") {
-		return "", atnBadInterpPath + ": " + u.Path
+	// Validate the RAW (still-encoded) path, not the decoded one. Go decodes
+	// %3F into u.Path while JS keeps it encoded, so a URL like
+	// /complete/search%3Fjsonp=<payload>.js reads as a query-less .js path to
+	// Go and as a literal-percent path to the sidecar. That particular URL
+	// 404s at Google today, which is the only reason it is not exploitable —
+	// safety should not rest on the origin's decoding behaviour, so the
+	// allowed alphabet simply excludes '%' (adversarial review round 3).
+	if !staticScriptPathRe.MatchString(u.EscapedPath()) {
+		return "", atnBadInterpPath + ": " + u.EscapedPath()
 	}
 
 	out, err := json.Marshal(map[string]any{

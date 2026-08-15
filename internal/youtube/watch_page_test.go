@@ -312,3 +312,39 @@ func TestCanonicalizeChallengeRejectsReflectionEndpoints(t *testing.T) {
 		t.Errorf("genuine interpreter URL rejected: %s", reason)
 	}
 }
+
+// TestCanonicalizeChallengeRejectsEncodedPaths pins the round-3
+// defense-in-depth rule: the interpreter path is validated in its ENCODED
+// form against an unreserved alphabet. Go decodes %3F into url.Path while
+// JS's URL keeps it encoded, so /complete/search%3Fjsonp=X.js looks like a
+// query-less .js path to Go and a literal-percent path to the sidecar. That
+// URL 404s at Google today, which is the only thing that made it harmless —
+// excluding '%' means correctness no longer depends on the origin's decoding.
+func TestCanonicalizeChallengeRejectsEncodedPaths(t *testing.T) {
+	for _, value := range []string{
+		"//www.google.com/complete/search%3Fclient=firefox&jsonp=payload.js",
+		"//www.google.com/js/th/a%2Fb.js",
+		"//www.google.com/js/th/a%00.js",
+		"//www.google.com/js/th/%252Fx.js",
+		"//www.google.com/js/th/a.js%20",
+		"//www.google.com/js/th/a b.js",
+	} {
+		raw := `{"program":"P","globalName":"g","interpreterUrl":{` +
+			`"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":"` + value + `"}}`
+		if got, reason := canonicalizeChallenge(json.RawMessage(raw)); got != "" {
+			t.Errorf("accepted encoded path %q (reason %q)", value, reason)
+		}
+	}
+
+	// The genuine shape — and the real captured URL — must still pass.
+	for _, value := range []string{
+		"//www.google.com/js/th/qtyJVB4UpQW6ehm0Eb6anVy7Y_bU8GitWVbp9gjCikM.js",
+		"//www.gstatic.com/js/a-b_c.JS",
+	} {
+		raw := `{"program":"P","globalName":"g","interpreterUrl":{` +
+			`"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":"` + value + `"}}`
+		if got, reason := canonicalizeChallenge(json.RawMessage(raw)); got == "" {
+			t.Errorf("genuine URL %q rejected: %s", value, reason)
+		}
+	}
+}
