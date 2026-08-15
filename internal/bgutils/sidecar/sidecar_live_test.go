@@ -95,6 +95,33 @@ func TestSidecarLivePoToken(t *testing.T) {
 	t.Logf("SUCCESS: sidecar minted a real PO token via Google's WAA endpoint")
 }
 
+// TestSidecarLiveGvsMint exercises the freshMinter + provenance path against
+// real YouTube endpoints. No page challenge is supplied (none is available in
+// a test), so provenance must report the /att/get source and a fresh minter.
+func TestSidecarLiveGvsMint(t *testing.T) {
+	if os.Getenv("MOOMBOX_LIVE_BG_TEST") == "" {
+		t.Skip("set MOOMBOX_LIVE_BG_TEST=1 to run live BotGuard tests")
+	}
+	s := startSidecar(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	res, err := s.GenerateGvsPoToken(ctx, "dQw4w9WgXcQ", "")
+	if err != nil {
+		t.Fatalf("GenerateGvsPoToken: %v", err)
+	}
+	if res.PoToken == "" || res.MinterSource != "att_get" || !res.MinterFresh {
+		t.Errorf("unexpected result: %+v", res)
+	}
+	// Second fresh mint must regenerate again (freshMinter honored).
+	res2, err := s.GenerateGvsPoToken(ctx, "dQw4w9WgXcQ", "")
+	if err != nil {
+		t.Fatalf("second GenerateGvsPoToken: %v", err)
+	}
+	if !res2.MinterFresh {
+		t.Error("second GVS mint reused the cached minter; freshMinter not honored")
+	}
+}
+
 // trimMid abbreviates a long token to "<head>...<tail>" for log-friendly
 // output without leaking the full credential.
 func trimMid(s string, head int) string {

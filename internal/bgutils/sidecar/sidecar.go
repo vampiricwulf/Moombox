@@ -380,6 +380,34 @@ func (s *Sidecar) GeneratePoToken(ctx context.Context, binding string) (string, 
 	return result.PoToken, nil
 }
 
+// GvsMintResult carries a minted GVS PO token plus the provenance fields the
+// worker's "[POT] GVS mint" log line reports (spec §4.6): which challenge
+// source built the minter and whether it was regenerated for this mint.
+type GvsMintResult struct {
+	PoToken      string `json:"poToken"`
+	MinterSource string `json:"minterSource"` // "challenge" | "att_get"
+	MinterFresh  bool   `json:"minterFresh"`
+}
+
+// GenerateGvsPoToken mints a GVS (segment-URL) PO token with the
+// fresh-minter-per-mint policy: the sidecar regenerates its BotGuard minter
+// for this call, building it from the supplied watch-page challenge when
+// non-empty (session-coherent) or its own /att/get fetch otherwise.
+func (s *Sidecar) GenerateGvsPoToken(ctx context.Context, binding, challenge string) (GvsMintResult, error) {
+	params := map[string]any{"binding": binding, "freshMinter": true}
+	if challenge != "" {
+		params["challenge"] = challenge
+	}
+	var result GvsMintResult
+	if err := s.call(ctx, "generatePoToken", params, &result); err != nil {
+		return GvsMintResult{}, err
+	}
+	if result.PoToken == "" {
+		return GvsMintResult{}, errors.New("sidecar returned empty poToken")
+	}
+	return result, nil
+}
+
 // InvalidateCaches wipes the sidecar's session + minter caches. Mirrors
 // PotProvider.InvalidateCaches.
 func (s *Sidecar) InvalidateCaches(ctx context.Context) error {
