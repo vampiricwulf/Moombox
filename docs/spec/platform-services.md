@@ -860,6 +860,8 @@ Each GVS mint attempt logs one line at Info (`[POT] GVS mint`) on success or War
 
 The line exists so that if a future premiere still 403s, the log alone identifies the exact configuration in play — no reproduction needed. Datasync-ID binding is no longer a pending suspect: the full yt-dlp rule is implemented (see **Binding** above), so an authenticated session without the experiment already binds to its datasync ID.
 
+A second deliberate divergence: `strategy_youtube_vod.go` attaches **no** GVS token to VOD format URLs, on the inherited claim that doing so causes 403s, while yt-dlp marks GVS POT `required=True` for HTTPS (progressive) formats on WEB clients. VOD downloads work today, so the working path is left alone rather than changed on upstream theory; revisit here first if VODs ever start 403ing.
+
 The remaining known divergence from upstream, should POT-enforced media still 403: yt-dlp's `WEBPO_CLIENTS` list does **not** include ANDROID_VR, meaning upstream never mints a WebPO GVS token for formats sourced from that client — android_vr's policy is `not_required_with_player_token=True`, i.e. a *player* token satisfies GVS for it. Moombox's ANDROID_VR DASH-fallback formats do receive a WebPO GVS token. That is now paired with a correctly-bound player token, which is the combination upstream relies on, but it remains the first place to look.
 
 #### Mid-job re-mint: none
