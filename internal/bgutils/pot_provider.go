@@ -457,8 +457,21 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	pp.mu.Unlock()
 	if sc != nil && sc.IsHealthy() {
 		bindingPrefix := contentBinding[:min(len(contentBinding), 20)]
-		pp.logger.Debug("[PotProvider] minting via sidecar", "binding", bindingPrefix)
-		token, err := sc.GeneratePlayerPoToken(ctx, contentBinding, challenge)
+		pp.logger.Debug("[PotProvider] minting via sidecar", "binding", bindingPrefix, "bypassCache", bypassCache)
+		// bypassCache must reach the sidecar too, or the caller's explicit
+		// "generate fresh" is silently answered from a minter that may be
+		// hours old. The GVS entry point is the one that sets freshMinter,
+		// so a bypassing caller routes through it; the token is identical in
+		// kind, only its minter's freshness differs.
+		var token string
+		var err error
+		if bypassCache {
+			var res sidecar.GvsMintResult
+			res, err = sc.GenerateGvsPoToken(ctx, contentBinding, challenge)
+			token = res.PoToken
+		} else {
+			token, err = sc.GeneratePlayerPoToken(ctx, contentBinding, challenge)
+		}
 		if err == nil {
 			pp.sidecarMintsHit.Add(1)
 			return &SessionData{
@@ -609,6 +622,10 @@ func (pp *PotProvider) gojaGenerateEphemeralMint(ctx context.Context, contentBin
 		return nil, fmt.Errorf("generate minter: %w", err)
 	}
 	defer pp.safeCleanup(minter, "ephemeral bypass-cache mint")
+	// Counted like any other minter creation: these are full BotGuard runs,
+	// and leaving them out made a sidecar-down GVS storm — the case where
+	// this path fires most — invisible in PotStats.
+	pp.mintersCreated.Add(1)
 
 	pp.logger.Debug("[PotProvider] minted ephemeral bypass-cache minter (goja fallback)")
 
