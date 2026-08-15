@@ -99,7 +99,7 @@ func TestSidecarLivePoToken(t *testing.T) {
 // real YouTube endpoints. No page challenge is supplied (none is available in
 // a test), so provenance must report the /att/get source and a fresh minter.
 func TestSidecarLiveGvsMint(t *testing.T) {
-	if os.Getenv("MOOMBOX_LIVE_BG_TEST") == "" {
+	if os.Getenv("MOOMBOX_LIVE_BG_TEST") != "1" {
 		t.Skip("set MOOMBOX_LIVE_BG_TEST=1 to run live BotGuard tests")
 	}
 	s := startSidecar(t)
