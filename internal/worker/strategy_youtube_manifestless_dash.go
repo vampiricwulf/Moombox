@@ -211,6 +211,18 @@ func DownloadManifestlessDash(
 	// minted from the watch-page challenge riding on videoInfo when present.
 	// Supersedes the former manifest-presence-conditional binding — see
 	// spec 2026-08-14 attestation POT coherence §3.
+	//
+	// Resolved ONCE here — not re-derived per mint — so every subsequent
+	// credential refresh (video, audio, 1st, 2nd, Nth) binds under the
+	// same identity as this initial mint. Re-deriving via poTokenBinding
+	// inside refreshGvsCredentials would drift: invalidate403Caches clears
+	// job.YT's visitor data on every refresh and nothing repopulates it
+	// mid-download, so a second call would silently fall back to the
+	// degraded channelID/videoID binding while the first call (or the
+	// sibling video/audio downloader's refresh, which shares job.YT) still
+	// used visitorData — two live downloaders minting under two different
+	// binding schemes for the same stream.
+	bindingValue := poTokenBinding(job, videoInfo)
 	var pot string
 	if potProvider != nil {
 		// REVERTED 2026-08-15: visitorData binding + cached /att/get minter,
@@ -219,7 +231,6 @@ func DownloadManifestlessDash(
 		// policy stalled the first live capture at segment ~72 with a 403
 		// storm. Reintroduce one variable at a time; live streams give
 		// same-day feedback.
-		bindingValue := poTokenBinding(job, videoInfo)
 		poToken, err := potProvider.GeneratePoTokenString(ctx, bindingValue, false)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
@@ -297,7 +308,7 @@ func DownloadManifestlessDash(
 			IsOnline:        isOnline,
 			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			OnCredentialRefresh: func() (string, string) {
-				return refreshGvsCredentials(ctx, job, videoInfo, videoItagChosen, routedSolver, cipherSolver, potProvider, "manifestless DASH video")
+				return refreshGvsCredentials(ctx, job, videoInfo, videoItagChosen, routedSolver, cipherSolver, potProvider, bindingValue, "manifestless DASH video")
 			},
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
@@ -357,7 +368,7 @@ func DownloadManifestlessDash(
 			IsOnline:        isOnline,
 			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			OnCredentialRefresh: func() (string, string) {
-				return refreshGvsCredentials(ctx, job, videoInfo, audioItagChosen, routedSolver, cipherSolver, potProvider, "manifestless DASH audio")
+				return refreshGvsCredentials(ctx, job, videoInfo, audioItagChosen, routedSolver, cipherSolver, potProvider, bindingValue, "manifestless DASH audio")
 			},
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)

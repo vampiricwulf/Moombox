@@ -269,13 +269,14 @@ type gvsTokenMinter interface {
 	GeneratePoTokenString(ctx context.Context, contentBinding string, bypassCache bool) (string, error)
 }
 
-// credentialRefreshTimeout bounds refreshGvsCredentials' entire round trip
-// (cipher URL re-resolve + GVS token re-mint). The engine calls
-// OnCredentialRefresh SYNCHRONOUSLY on the download-loop goroutine and does
-// NOT reset lastSegTime around it (internal/engine/downloader.go
-// refreshCredentials) — an unbounded refresh would silently spend the
-// operator's MaxTimeout stall budget on network calls instead of segment
-// retries, defeating the recovery it exists to provide.
+// credentialRefreshTimeout is the CEILING refreshGvsCredentials' entire
+// round trip (player-response re-fetch + cipher URL re-resolve + GVS token
+// re-mint) is bounded by. The engine calls OnCredentialRefresh
+// SYNCHRONOUSLY on the download-loop goroutine and does NOT reset
+// lastSegTime around it (internal/engine/downloader.go refreshCredentials)
+// — an unbounded refresh would silently spend the operator's MaxTimeout
+// stall budget on network calls instead of segment retries, defeating the
+// recovery it exists to provide.
 //
 // 45s sits comfortably above a normal mint: invalidate403Caches wipes the
 // POT cache on every call, so the mint this function triggers is always at
@@ -286,14 +287,38 @@ type gvsTokenMinter interface {
 // needs the full 90s. 45s leaves a cold mint about half that ceiling while
 // costing at most 7.5% of config.MaximumTimeout's 600s default.
 //
-// This is NOT free at config.MaximumTimeout's validated 30s floor — a
-// single refresh attempt at that setting can consume the whole stall
-// budget on its own. That floor already leaves little room for any
-// recovery path (sidecar round trips, cipher re-resolve) to complete, so
-// it is called out here as a known limitation rather than solved: raising
-// this constant would not meaningfully help a 30s-budget job, and lowering
-// it would start truncating legitimate cold-path mints for everyone else.
+// This ceiling is clamped per-job by credentialRefreshTimeoutFor against
+// job.Config.MaximumTimeout, specifically so a job running near the 30s
+// validated floor can't have one refresh attempt consume its ENTIRE stall
+// budget — see that function's doc for why a flat 45s was unsafe there
+// (behindHeadTailPending would read false right as working credentials
+// arrived, and the very next 403 would force-finalize the recording).
 const credentialRefreshTimeout = 45 * time.Second
+
+// credentialRefreshTimeoutFor clamps credentialRefreshTimeout to at most
+// MaxTimeout/3, keyed off job.Config.MaximumTimeout (the same value that
+// seeds engine.DownloaderOptions.MaxTimeout for this job).
+//
+// At the operator-configured floor (config.MaximumTimeout validated to a
+// 30s minimum), a flat 45s ceiling would let one refresh attempt consume
+// the WHOLE stall budget by itself — worse, since the engine doesn't reset
+// lastSegTime around the callback, behindHeadTailPending's
+// `lastSegTime.Since() < MaxTimeout` check would read false the moment the
+// refresh returns, so a subsequent 403 force-finalizes the recording at
+// the exact instant working credentials arrived. MaxTimeout/3 leaves at
+// least two more retry cycles' worth of budget after a refresh lands,
+// whatever MaxTimeout is configured to. A missing/zero Config leaves the
+// flat ceiling in place (tests that don't wire JobConfig get the documented
+// 45s default rather than a divide-by-zero-shaped clamp to 0).
+func credentialRefreshTimeoutFor(cfg *JobConfig) time.Duration {
+	if cfg == nil || cfg.MaximumTimeout <= 0 {
+		return credentialRefreshTimeout
+	}
+	if third := time.Duration(cfg.MaximumTimeout) * time.Second / 3; third < credentialRefreshTimeout {
+		return third
+	}
+	return credentialRefreshTimeout
+}
 
 // asPotProvider extracts the concrete *bgutils.PotProvider from a
 // gvsTokenMinter for invalidate403Caches, which needs the concrete type
@@ -330,25 +355,41 @@ func minterUsable(m gvsTokenMinter) bool {
 //
 // Both upstreams recover the same way — yt-dlp's url_feed and moonarchive's
 // "stream access expired? retrieve a fresh manifest" both go back to the
-// player response rather than refreshing the URL alone, because the PO
-// token is the half that actually went stale.
+// player response rather than refreshing the URL alone, because the URL's
+// own expiry/session parameters (`expire`, `ei`, …) come from the player
+// response, not from cipher decryption — re-resolving a cached, already-
+// expired Format through a freshly invalidated cipher solver still
+// reproduces the SAME expired URL byte-for-byte. So this function re-fetches
+// the player response (job.YT.GetVideoInfo — the same call the job-start and
+// quality-recovery paths use to obtain VideoInfo) and resolves the chosen
+// itag from ITS formats, falling back to the caller's cached
+// videoInfo.Formats/PlayerURL only if that fetch fails. GetVideoInfo itself
+// does not decrypt sig/n — parsing leaves Format.URL raw — so
+// resolveFormatURLByItag still runs cipher resolution afterward exactly as
+// before, just against fresh formats instead of stale ones.
 //
-// The whole call is bounded by credentialRefreshTimeout (derived from ctx)
-// so a slow mint can't silently eat the caller's MaxTimeout stall budget —
-// see that constant's doc for the reasoning.
+// The whole call (re-fetch + resolve + mint) is bounded by a per-job
+// timeout derived from ctx — see credentialRefreshTimeoutFor.
 //
-// The content binding is captured BEFORE invalidate403Caches runs, not
-// after. invalidate403Caches unconditionally clears job.YT's visitor data
-// as one of its steps, and nothing else in this synchronous call
-// repopulates it (no watch-page fetch happens here — only cipher URL
-// resolution and a direct POT mint). Reading poTokenBinding after
-// invalidation would therefore always observe empty visitor data and
-// silently fall back to the channelID/videoID binding — swapping the
-// GVS binding SCHEME mid-download as a side effect of cache-clearing,
-// not a deliberate choice. The proven-good binding for this job is
-// whatever poTokenBinding already resolved to before the 403; refreshing
-// the TOKEN under that same binding (via bypassCache) is what "refresh
-// credentials" means here, not migrating to the degraded fallback.
+// binding is the GVS content binding to mint under, resolved ONCE by the
+// caller (poTokenBinding, at strategy setup) rather than recomputed here.
+// invalidate403Caches unconditionally clears job.YT's visitor data as one
+// of its steps, and nothing repopulates it before a same-call mint would
+// read it — recomputing per call would make the FIRST refresh (whichever
+// downloader's cooldown fires first) mint under the real visitorData
+// binding and every refresh after it — on either downloader, since they
+// share job.YT — silently drift onto the degraded channelID/videoID
+// fallback. Passing the caller's stable value keeps every mint, across
+// both downloaders and every retry, under the one binding scheme the job
+// started with.
+//
+// The URL half (re-fetch + resolve) only runs when a cipher solver is
+// actually wired and the job has a PlayerURL to route through — mirroring
+// OnCipherFailure's install guard. Without a solver, resolution can only
+// fail (RoutedResolveURL requires one even for solver-less passthrough),
+// so skipping it avoids a wasted GetVideoInfo call and a Warn on every
+// single attempt for work that cannot succeed; the token half still runs
+// unconditionally.
 //
 // Never returns an error: a failed refresh yields empty strings, the engine
 // keeps its existing credentials, and the download fails the same way it
@@ -361,20 +402,38 @@ func refreshGvsCredentials(
 	routedSolver cipher.Solver,
 	cipherSolver *cipher.GojaResolver,
 	potProvider gvsTokenMinter,
+	binding string,
 	tag string,
 ) (baseURL string, poToken string) {
-	refreshCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeout)
+	var cfg *JobConfig
+	if job != nil {
+		cfg = job.Config
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeoutFor(cfg))
 	defer cancel()
-
-	binding := poTokenBinding(job, videoInfo)
 
 	invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, asPotProvider(potProvider), tag)
 
-	if fresh, err := resolveFormatURLByItag(refreshCtx, videoInfo.Formats, itag, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger); err != nil {
-		job.Logger.Warn("[POT] credential refresh: URL re-resolve failed",
-			"jobID", job.Job.ID, "tag", tag, "err", err)
-	} else {
-		baseURL = fresh
+	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
+		formats := videoInfo.Formats
+		playerURL := videoInfo.PlayerURL
+		if job.YT != nil {
+			if fresh, err := job.YT.GetVideoInfo(refreshCtx, job.Job.VideoID); err != nil {
+				job.Logger.Warn("[POT] credential refresh: player response re-fetch failed; resolving against cached formats",
+					"jobID", job.Job.ID, "tag", tag, "err", err)
+			} else if fresh != nil {
+				formats = fresh.Formats
+				if fresh.PlayerURL != "" {
+					playerURL = fresh.PlayerURL
+				}
+			}
+		}
+		if fresh, err := resolveFormatURLByItag(refreshCtx, formats, itag, routedSolver, cipherSolver, playerURL, job.Logger); err != nil {
+			job.Logger.Warn("[POT] credential refresh: URL re-resolve failed",
+				"jobID", job.Job.ID, "tag", tag, "err", err)
+		} else {
+			baseURL = fresh
+		}
 	}
 
 	if minterUsable(potProvider) {
