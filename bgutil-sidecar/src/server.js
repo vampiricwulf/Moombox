@@ -104,27 +104,26 @@ function logWarn(msg) {
 // i.ytimg.com) are excluded on purpose: the fetched body is executed, and an
 // image/JS polyglot uploaded to such a host would pass a naive "is it Google?"
 // check. ytimg.com is admitted by exact static host only.
-const ALLOWED_INTERPRETER_DOMAINS = [
+// EXACT hosts only. Keep in sync with allowedInterpreterHosts in
+// internal/youtube/watch_page.go, which documents why suffix matching and
+// regional patterns were both removed: `.googleapis.com` re-admitted
+// storage.googleapis.com (anyone's uploaded bucket objects) and
+// `^google\.[a-z]{2,3}…$` matched registrable third-party domains such as
+// google.com.se. Both were proven to reach code execution.
+const ALLOWED_INTERPRETER_HOSTS = [
+    "www.google.com",
     "google.com",
+    "www.gstatic.com",
+    "ssl.gstatic.com",
     "gstatic.com",
-    "googleapis.com",
+    "s.ytimg.com",
+    "www.youtube.com",
     "youtube.com",
-    "youtube-nocookie.com",
-    "google.cn",
 ];
-const ALLOWED_INTERPRETER_HOSTS = ["s.ytimg.com", "www.ytimg.com"];
-// Regional Google properties (google.de, google.co.uk, google.com.au).
-const REGIONAL_GOOGLE_RE = /^google\.[a-z]{2,3}(\.[a-z]{2})?$/;
 
 function isGoogleOwnedHost(hostname) {
     const host = hostname.toLowerCase().replace(/\.$/, "");
-    if (!host) return false;
-    if (ALLOWED_INTERPRETER_HOSTS.includes(host)) return true;
-    if (ALLOWED_INTERPRETER_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) {
-        return true;
-    }
-    const labels = host.split(".");
-    return labels.some((_, i) => REGIONAL_GOOGLE_RE.test(labels.slice(i).join(".")));
+    return host !== "" && ALLOWED_INTERPRETER_HOSTS.includes(host);
 }
 
 function assertGoogleHost(rawUrl) {
@@ -137,10 +136,36 @@ function assertGoogleHost(rawUrl) {
     if (parsed.protocol !== "https:") {
         throw new Error(`interpreter URL protocol not allowed: ${parsed.protocol}`);
     }
+    if (parsed.username || parsed.password) {
+        throw new Error("interpreter URL carries userinfo");
+    }
     if (!isGoogleOwnedHost(parsed.hostname)) {
         throw new Error(`interpreter URL host not allowed: ${parsed.hostname}`);
     }
     return parsed.href;
+}
+
+// Fetch the interpreter with redirects DISABLED. undici follows redirects by
+// default and only the pre-redirect URL passed the host gate, so an
+// allowlisted host answering 302 → attacker.tld handed us a body we then
+// executed (proven against live local servers, 2026-08-15). Refusing 3xx
+// outright is safer than re-gating response.url: YouTube serves the
+// interpreter directly, so a redirect here is already anomalous.
+async function fetchInterpreterScript(interpUrl) {
+    const resp = await fetch(interpUrl, {
+        headers: { "User-Agent": USER_AGENT },
+        redirect: "manual",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (resp.status >= 300 && resp.status < 400) {
+        throw new Error(
+            `interpreter fetch redirected (${resp.status} → ${resp.headers.get("location") ?? "?"}); refusing to follow`,
+        );
+    }
+    if (!resp.ok) {
+        throw new Error(`interpreter fetch HTTP ${resp.status}`);
+    }
+    return resp.text();
 }
 
 // ---------------------------------------------------------------------------
@@ -227,15 +252,10 @@ async function generateMinter(challenge) {
         // description could point the interpreter at any host and get its
         // JavaScript executed in this process.
         const interpUrl = `https:${challenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue}`;
-        assertGoogleHost(interpUrl);
-        const interpResp = await fetch(interpUrl, {
-            headers: { "User-Agent": USER_AGENT },
-            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        });
-        if (!interpResp.ok) {
-            throw new Error(`interpreter fetch HTTP ${interpResp.status}`);
-        }
-        interpJS = await interpResp.text();
+        // Gate the host, then fetch WITHOUT following redirects — an
+        // allowlisted host answering 302 → attacker would otherwise deliver
+        // the body we execute. See fetchInterpreterScript.
+        interpJS = await fetchInterpreterScript(assertGoogleHost(interpUrl));
     }
 
     // 3. Install the interpreter into globalThis. `new Function(...)()` runs
@@ -305,14 +325,18 @@ async function generateMinter(challenge) {
 // it doesn't have, and that log line is specifically what's relied on to
 // diagnose premiere 403s months from now.
 //
-// `minterInflight` names the challenge key currently being generated for; a
-// caller with a matching key joins it. `serializeChain` is the ordering
-// backbone — every generation (matched or not) chains onto it, so a caller
-// with a non-matching key waits for whatever's currently running to finish
-// before starting its own: one generateMinter() execution at a time, no
-// exceptions. (Named distinctly from the unrelated `inflight` request
-// counter in the stdin loop below, which tracks in-progress RPC dispatches.)
-let minterInflight = null; // { key, promise } | null
+// `minterInflight` maps EVERY in-flight challenge key to its generation
+// promise; a caller with a matching key joins it. It is a map rather than a
+// single slot because a queued different-challenge call would otherwise evict
+// the running key, so a later caller sharing that challenge would miss the
+// generation it should have joined and pay for a redundant BotGuard pass.
+// `serializeChain` is the ordering backbone — every generation (matched or
+// not) chains onto it, so a caller with a non-matching key waits for whatever
+// is currently running before starting its own: one generateMinter()
+// execution at a time, no exceptions. (Named distinctly from the unrelated
+// `inflight` request counter in the stdin loop below, which tracks
+// in-progress RPC dispatches.)
+const minterInflight = new Map(); // challengeKey -> Promise
 let serializeChain = Promise.resolve();
 
 // /att/get callers (challenge === null) legitimately share one minter —
@@ -340,11 +364,18 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
 
     const key = normalizeChallengeKey(challengeKey);
 
-    if (minterInflight && minterInflight.key === key) {
-        // Same challenge as the generation already in flight: the minter it
+    const running = minterInflight.get(key);
+    if (running) {
+        // Same challenge as a generation already in flight: the minter it
         // resolves to really was built from OUR challenge, so reporting
         // fresh+matching provenance is honest.
-        const m = await minterInflight.promise;
+        //
+        // Tracking EVERY in-flight key (not just the most recent) matters:
+        // with a single slot, a different-challenge call queued in between
+        // evicted the first key, so a third caller sharing the first
+        // challenge missed the running generation and paid for a redundant
+        // BotGuard pass.
+        const m = await running;
         return { m, fresh: true };
     }
 
@@ -380,10 +411,10 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
     // Chain future generations behind this one regardless of outcome; a
     // rejected generation must not wedge the serialization queue.
     serializeChain = generation.catch(() => {});
-    minterInflight = { key, promise: generation };
+    minterInflight.set(key, generation);
     generation.finally(() => {
-        if (minterInflight && minterInflight.promise === generation) {
-            minterInflight = null;
+        if (minterInflight.get(key) === generation) {
+            minterInflight.delete(key);
         }
     });
 

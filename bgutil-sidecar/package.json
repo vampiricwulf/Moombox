@@ -10,7 +10,8 @@
     },
     "scripts": {
         "build": "node build.mjs",
-        "smoke": "node src/server.js"
+        "smoke": "node src/server.js",
+        "test": "node --test --test-force-exit test/"
     },
     "dependencies": {
         "bgutils-js": "^4.0.3",

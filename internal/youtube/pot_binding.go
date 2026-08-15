@@ -21,6 +21,14 @@ package youtube
 //
 // PLAYER-context tokens are NOT covered here: upstream binds those to the
 // video ID unconditionally (PoTokenContext.PLAYER → VIDEO_ID).
+//
+// One deliberate deviation from upstream: when a session is authenticated but
+// its datasync ID did not survive extraction, yt-dlp warns and sends no
+// binding at all, whereas this returns visitor data (and, failing that, the
+// video ID). Moombox has no user to warn and no way to pass one in by hand,
+// so an empty binding would simply mint a token bound to nothing; a
+// second-best real binding is strictly more useful, and the provenance log
+// names which rule fired.
 
 // Binding kinds, used as the `binding` value in the "[POT] GVS mint" log line
 // so a months-later 403 investigation can see which rule produced the token.

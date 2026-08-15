@@ -75,36 +75,35 @@ var (
 // silently disable session coherence, so rejections are logged with the host
 // (atnBadInterpHost) precisely so an unlisted host shows up as a name to add
 // instead of an unexplained regression.
-// The list holds only domains that serve GOOGLE-AUTHORED code. Google-owned
-// domains whose bytes are USER-uploaded are deliberately excluded even though
-// they are equally "Google": googleusercontent.com, ggpht.com (avatars),
-// googlevideo.com (media), and i.ytimg.com (thumbnails) all let a third party
-// choose the response body, and the fetched body is executed — an image/JS
-// polyglot uploaded there would be indistinguishable from an interpreter.
-// ytimg.com is therefore admitted by exact static hosts only (see
-// allowedInterpreterHosts), never as a suffix.
-var allowedInterpreterDomains = []string{
-	"google.com",
-	"gstatic.com",
-	"googleapis.com",
-	"youtube.com",
-	"youtube-nocookie.com",
-	"google.cn",
-}
-
-// allowedInterpreterHosts are exact hosts admitted individually because their
-// parent domain also serves user content. s.ytimg.com is YouTube's static
-// script origin (it serves base.js); i.ytimg.com, which serves user-uploaded
-// thumbnails, is intentionally absent.
+// EXACT hosts only — never suffix matches, never patterns. An adversarial
+// review (2026-08-15) defeated both weaker forms:
+//
+//   - Suffix matching `.googleapis.com` / `.google.com` re-admitted the very
+//     user-content class it was meant to exclude: storage.googleapis.com and
+//     firebasestorage.googleapis.com serve anyone's uploaded bucket objects,
+//     and sites/script/drive.google.com host third-party content. Registering
+//     a bucket and pointing a video description at it reached
+//     new Function() end-to-end.
+//   - A "regional Google" pattern (^google\.[a-z]{2,3}(\.[a-z]{2})?$) matched
+//     SHAPE, not ownership: google.com.se is a live third-party site, as are
+//     google.co.nl and google.org.ru. Anyone can register one.
+//
+// So the rule is now membership in this list and nothing else. Regional
+// Google domains are unsupported: the interpreter is served from a global
+// host (observed: www.google.com), and a genuinely-Google host missing here
+// fails closed — the challenge is dropped, the sidecar's /att/get flow runs,
+// and the rejected host is named in the reason string so it can be added
+// deliberately rather than guessed at by a pattern.
 var allowedInterpreterHosts = []string{
+	"www.google.com",
+	"google.com",
+	"www.gstatic.com",
+	"ssl.gstatic.com",
+	"gstatic.com",
 	"s.ytimg.com",
-	"www.ytimg.com",
+	"www.youtube.com",
+	"youtube.com",
 }
-
-// regionalGoogleRe matches Google's country domains: google.de, google.co.uk,
-// google.com.au, google.co.jp. Anchored at both ends and applied to the
-// registrable domain only, so it can never match "google.de.evil.tld".
-var regionalGoogleRe = regexp.MustCompile(`^google\.[a-z]{2,3}(\.[a-z]{2})?$`)
 
 // Attestation-challenge extraction outcomes. Every failure mode is distinct so
 // a silently-disabled feature is never mistaken for "YouTube sent no
@@ -430,10 +429,11 @@ func extractAttestationChallenge(html string) (challenge, reason string) {
 	if len(r.BgChallenge) == 0 {
 		return "", atnNoChallenge
 	}
-	if reason := validateChallengeOrigin(r.BgChallenge); reason != atnOK {
+	canonical, reason := canonicalizeChallenge(r.BgChallenge)
+	if reason != atnOK {
 		return "", reason
 	}
-	return string(r.BgChallenge), atnOK
+	return canonical, atnOK
 }
 
 // validateChallengeOrigin enforces that a page-sourced challenge points its
@@ -443,56 +443,74 @@ func extractAttestationChallenge(html string) (challenge, reason string) {
 // scraped would be executed with no origin to check at all. Such a challenge
 // falls back to the sidecar's /att/get flow, whose response is a real YouTube
 // API result and may carry inline script safely.
-func validateChallengeOrigin(raw json.RawMessage) string {
-	var ch struct {
-		InterpreterURL *struct {
-			Value string `json:"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue"`
-		} `json:"interpreterUrl"`
+// canonicalizeChallenge validates a page-sourced challenge and REBUILDS it
+// from only the fields the sidecar actually consumes, rather than forwarding
+// the attacker-adjacent original.
+//
+// Rebuilding is the point. Forwarding the raw object made the Go gate's
+// guarantee false: Go's encoding/json matches field names case-insensitively
+// and lets the LAST match win, so a decoy `PRIVATEDONOTACCESS…` key placed
+// after the real one had Go validate www.google.com while the sidecar's
+// JSON.parse (case-sensitive, also last-wins) read a different host from the
+// same bytes. Every such parser differential — and any extra key, including
+// an inline interpreterJavascript riding alongside a valid URL — disappears
+// when the sidecar receives a freshly-marshaled object containing exactly the
+// three fields it uses and nothing else.
+//
+// Keys are looked up EXACTLY (case-sensitively) via a RawMessage map, so a
+// case-variant decoy is ignored rather than preferred.
+func canonicalizeChallenge(raw json.RawMessage) (canonical, reason string) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return "", atnChallengeShape
 	}
-	if json.Unmarshal(raw, &ch) != nil {
-		return atnChallengeShape
+
+	var program, globalName string
+	if json.Unmarshal(fields["program"], &program) != nil || program == "" {
+		return "", atnChallengeShape
 	}
-	if ch.InterpreterURL == nil || ch.InterpreterURL.Value == "" {
-		return atnNoInterpURL
+	// globalName is optional in bgutils-js's type; absence is not fatal.
+	_ = json.Unmarshal(fields["globalName"], &globalName)
+
+	rawURL, ok := fields["interpreterUrl"]
+	if !ok {
+		return "", atnNoInterpURL
+	}
+	var urlFields map[string]json.RawMessage
+	if json.Unmarshal(rawURL, &urlFields) != nil {
+		return "", atnChallengeShape
+	}
+	var value string
+	if json.Unmarshal(urlFields["privateDoNotAccessOrElseTrustedResourceUrlWrappedValue"], &value) != nil || value == "" {
+		return "", atnNoInterpURL
 	}
 	// YouTube ships this protocol-relative ("//host/path"); the sidecar
 	// prefixes "https:" before fetching, so parse it the same way.
-	u, err := url.Parse("https:" + ch.InterpreterURL.Value)
+	u, err := url.Parse("https:" + value)
 	if err != nil || u.Hostname() == "" {
-		return atnBadInterpHost
+		return "", atnBadInterpHost
 	}
-	if isGoogleOwnedHost(u.Hostname()) {
-		return atnOK
+	if u.User != nil {
+		// Userinfo means the authority's host is not what a careless reader
+		// sees; refuse rather than reason about it.
+		return "", atnBadInterpHost + ": userinfo present"
 	}
-	return atnBadInterpHost + ": " + u.Hostname()
-}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if !slices.Contains(allowedInterpreterHosts, host) {
+		return "", atnBadInterpHost + ": " + host
+	}
 
-// isGoogleOwnedHost reports whether host is, or is a subdomain of, a
-// Google-owned domain (allowedInterpreterDomains or a regional google.<tld>).
-// Shared by the challenge-origin gate; kept as one predicate so the Go and
-// sidecar copies stay comparable line-for-line.
-func isGoogleOwnedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "" {
-		return false
+	out, err := json.Marshal(map[string]any{
+		"program":    program,
+		"globalName": globalName,
+		"interpreterUrl": map[string]string{
+			"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue": value,
+		},
+	})
+	if err != nil {
+		return "", atnChallengeShape
 	}
-	if slices.Contains(allowedInterpreterHosts, host) {
-		return true
-	}
-	for _, d := range allowedInterpreterDomains {
-		if host == d || strings.HasSuffix(host, "."+d) {
-			return true
-		}
-	}
-	// Regional Google: match the registrable tail so subdomains
-	// (www.google.co.uk) pass while lookalikes (google.co.uk.evil.tld) do not.
-	labels := strings.Split(host, ".")
-	for i := range labels {
-		if regionalGoogleRe.MatchString(strings.Join(labels[i:], ".")) {
-			return true
-		}
-	}
-	return false
+	return string(out), atnOK
 }
 
 // scanBalancedObject returns the complete `{...}` literal starting at s[0],

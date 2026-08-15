@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -128,31 +129,98 @@ func TestExtractAttestationChallengeRejectsHostileOrigin(t *testing.T) {
 	}
 }
 
-// TestIsGoogleOwnedHost pins the allowlist semantics, including the
-// lookalike-domain cases the dot anchoring exists to defeat and the
-// user-content hosts deliberately excluded (their bytes are third-party
-// controlled, and the fetched body is executed).
-func TestIsGoogleOwnedHost(t *testing.T) {
+// TestAllowedInterpreterHosts pins the EXACT-host rule. Every rejected case
+// below was a live bypass proven against the previous suffix/pattern gate on
+// 2026-08-15: storage.googleapis.com serves anyone's uploaded bucket objects,
+// sites/script.google.com host third-party content, and google.com.se /
+// google.co.nl are registrable third-party domains that merely look Google-ish.
+func TestAllowedInterpreterHosts(t *testing.T) {
 	for _, h := range []string{
-		"www.google.com", "google.com", "www.gstatic.com", "s.ytimg.com",
-		"www.youtube.com", "google.de", "www.google.co.uk", "google.com.au",
-		"jnn-pa.googleapis.com",
+		"www.google.com", "google.com", "www.gstatic.com", "ssl.gstatic.com",
+		"s.ytimg.com", "www.youtube.com",
 	} {
-		if !isGoogleOwnedHost(h) {
+		if !slices.Contains(allowedInterpreterHosts, strings.ToLower(h)) {
 			t.Errorf("%s should be allowed", h)
 		}
 	}
 	for _, h := range []string{
+		"storage.googleapis.com",         // anyone's GCS bucket objects
+		"firebasestorage.googleapis.com", // anyone's Firebase uploads
+		"commondatastorage.googleapis.com",
+		"www.googleapis.com",
+		"sites.google.com",  // third-party site builder
+		"script.google.com", // third-party Apps Script
+		"drive.google.com",  // user files
+		"google.com.se",     // live third-party domain
+		"google.co.nl", "google.org.ru", "google.pp.ru", "google.com.de",
+		"google.de", "www.google.co.uk", // regional support intentionally dropped
+		"i.ytimg.com", // user-uploaded thumbnails
+		"lh3.googleusercontent.com", "yt3.ggpht.com",
+		"rr2---sn-x.googlevideo.com",
 		"evil.tld", "evilgoogle.com", "google.com.evil.tld", "notgstatic.com",
-		"i.ytimg.com",                // user-uploaded thumbnails
-		"lh3.googleusercontent.com",  // user content
-		"yt3.ggpht.com",              // user avatars
-		"rr2---sn-x.googlevideo.com", // user media
-		"", "google.co.uk.evil.tld",
+		"",
 	} {
-		if isGoogleOwnedHost(h) {
-			t.Errorf("%s should be rejected", h)
+		if slices.Contains(allowedInterpreterHosts, strings.ToLower(h)) {
+			t.Errorf("%s must NOT be allowed", h)
 		}
+	}
+}
+
+// TestCanonicalizeChallengeDefeatsParserDifferential pins the rebuild-don't-
+// forward rule. Go's encoding/json matches keys case-insensitively with the
+// last match winning, so a decoy key placed after the real one made Go
+// validate an allowlisted host while the sidecar's case-sensitive JSON.parse
+// read a different one from the same bytes. Canonicalization removes the
+// class: the sidecar only ever sees fields this function rebuilt.
+func TestCanonicalizeChallengeDefeatsParserDifferential(t *testing.T) {
+	raw := `{"program":"P","globalName":"g",` +
+		`"interpreterUrl":{"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":"//www.google.com/js/th/a.js",` +
+		`"PRIVATEDONOTACCESSORELSETRUSTEDRESOURCEURLWRAPPEDVALUE":"//evil.tld/p.js"},` +
+		`"interpreterJavascript":{"privateDoNotAccessOrElseSafeScriptWrappedValue":"alert(1)"},` +
+		`"unexpectedExtra":"dropped"}`
+
+	got, reason := canonicalizeChallenge(json.RawMessage(raw))
+	if reason != atnOK {
+		t.Fatalf("expected canonicalization to succeed, got reason %q", reason)
+	}
+	if strings.Contains(got, "evil.tld") {
+		t.Errorf("decoy host survived canonicalization: %s", got)
+	}
+	if strings.Contains(got, "interpreterJavascript") || strings.Contains(got, "alert(1)") {
+		t.Errorf("inline interpreter survived canonicalization: %s", got)
+	}
+	if strings.Contains(got, "unexpectedExtra") {
+		t.Errorf("unknown field survived canonicalization: %s", got)
+	}
+	if !strings.Contains(got, "//www.google.com/js/th/a.js") {
+		t.Errorf("validated URL missing from canonical output: %s", got)
+	}
+}
+
+// TestCanonicalizeChallengeRejectsHostileHosts walks the concrete hosts the
+// adversarial review used to reach code execution.
+func TestCanonicalizeChallengeRejectsHostileHosts(t *testing.T) {
+	for _, host := range []string{
+		"storage.googleapis.com", "google.com.se", "evil.tld",
+		"sites.google.com", "i.ytimg.com",
+	} {
+		raw := `{"program":"P","globalName":"g","interpreterUrl":{` +
+			`"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":"//` + host + `/p.js"}}`
+		got, reason := canonicalizeChallenge(json.RawMessage(raw))
+		if got != "" {
+			t.Errorf("%s: challenge accepted", host)
+		}
+		if !strings.HasPrefix(reason, atnBadInterpHost) {
+			t.Errorf("%s: reason = %q, want prefix %q", host, reason, atnBadInterpHost)
+		}
+	}
+
+	// Userinfo must be refused rather than reasoned about: the authority's
+	// real host is not the one a careless reader sees.
+	raw := `{"program":"P","globalName":"g","interpreterUrl":{` +
+		`"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue":"//www.google.com@evil.tld/p.js"}}`
+	if got, reason := canonicalizeChallenge(json.RawMessage(raw)); got != "" {
+		t.Errorf("userinfo host accepted (reason %q)", reason)
 	}
 }
 
