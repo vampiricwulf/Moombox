@@ -251,6 +251,28 @@ func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher
 	}
 }
 
+// poTokenBinding returns the GVS content binding: visitorData, falling back
+// to the channel ID when visitor-data extraction failed.
+//
+// RESTORED 2026-08-15. This is the binding every live capture through
+// 2026-08-13 used, with zero segment 403s recorded. It was replaced by
+// gvsBinding (yt-dlp's experiment-aware videoID/datasyncID/visitorData rule)
+// on 2026-08-15, and the very next live capture stalled at segment ~72 under
+// a 403 storm. gvsBinding is retained below for the staged reintroduction —
+// it is upstream-correct on paper — but nothing calls it until one live
+// stream has proven each variable in isolation.
+func poTokenBinding(job *JobContext, videoInfo *youtube.VideoInfo) string {
+	if job != nil && job.YT != nil {
+		if vd := job.YT.GetVisitorData(); vd != "" {
+			return vd
+		}
+	}
+	if job != nil && job.Logger != nil {
+		job.Logger.Warn("[POT] visitor data unavailable; falling back to channelID for content binding")
+	}
+	return videoInfo.ChannelID
+}
+
 // gvsBinding returns the content binding a GVS mint must use for this job,
 // plus the label the provenance log reports. The value is resolved once
 // during extraction (youtube.GvsContentBinding, mirroring yt-dlp's

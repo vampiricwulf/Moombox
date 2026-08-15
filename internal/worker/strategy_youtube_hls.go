@@ -55,18 +55,22 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// see spec 2026-08-14 attestation POT coherence §3.
 	var hlsPoToken string
 	if potProvider != nil {
-		bindingValue, bindingKind := gvsBinding(job, videoInfo)
-		mint, err := potProvider.GenerateGvsPoToken(ctx, bindingValue, videoInfo.AttestationChallenge)
+		// REVERTED 2026-08-15: visitorData binding + cached /att/get minter,
+		// the last GVS configuration observed downloading a live stream with
+		// zero 403s. The videoID-bound, challenge-sourced, fresh-per-mint
+		// policy stalled the first live capture at segment ~72 with a 403
+		// storm. Reintroduce one variable at a time; live streams give
+		// same-day feedback.
+		bindingValue := poTokenBinding(job, videoInfo)
+		poToken, err := potProvider.GeneratePoTokenString(ctx, bindingValue, false)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
-				"binding", bindingKind, "challenge", challengeLabel(videoInfo.AttestationChallenge), "err", err)
-		} else if mint.PoToken != "" {
-			hlsPoToken = mint.PoToken
-			hlsURL = strings.TrimRight(hlsURL, "/") + "/pot/" + mint.PoToken
+				"binding", "visitorData", "err", err)
+		} else if poToken != "" {
+			hlsPoToken = poToken
+			hlsURL = strings.TrimRight(hlsURL, "/") + "/pot/" + poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", bindingKind, "challenge", challengeLabel(videoInfo.AttestationChallenge),
-				"minterSource", mint.MinterSource, "minterFresh", mint.MinterFresh,
-				"sidecar", mint.ViaSidecar, "tokenLength", len(mint.PoToken))
+				"binding", "visitorData", "tokenLength", len(poToken))
 		} else {
 			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}
