@@ -10,28 +10,57 @@ import (
 
 // reorderBuffer accumulates out-of-order segments fetched by catch-up's
 // worker pool until they can be written to disk in ascending sequence
-// order. admit caps resident bytes at limit so raising SegmentWorkers costs
-// connections, not memory (see catchUpBufferBytes) — but the segment
-// matching head is ALWAYS admitted immediately regardless of fullness:
-// refusing it would deadlock the whole buffer, since nothing can ever free
-// room without it landing and flushing.
+// order. admit blocks a non-head segment once resident bytes reach limit,
+// so raising SegmentWorkers costs connections, not memory (see
+// catchUpBufferBytes) — but the segment matching head is ALWAYS admitted
+// immediately regardless of fullness: refusing it would deadlock the whole
+// buffer, since nothing can ever free room without it landing and
+// flushing. The ceiling check runs BEFORE the admitted segment's bytes are
+// added, so resident bytes can transiently overshoot limit by up to one
+// segment's size — and a worker that hasn't reached admit() yet (still
+// fetching, or blocked waiting for room) holds its slice on its own stack,
+// uncounted by residentBytes. True peak process memory for one catch-up
+// call is therefore closer to limit + workers*maxSegmentSize than to limit
+// alone.
 //
-// release permanently disables the ceiling (every future admit returns
-// immediately) and wakes any blocked callers. It exists for the cases where
-// nothing will ever free room by flushing further: the segment currently
-// required (head) has demonstrably failed — permanently gone, retries
-// exhausted, or the download was cancelled — so this catch-up call is
-// already going to end at a gap. maxCatchupBatch still bounds total memory
-// for what remains of the call; continuing to enforce the byte ceiling past
-// that point would risk deadlocking whichever worker is holding data for a
-// segment that will never become head.
+// markFailed / minFailedSeq record the lowest sequence known to be
+// permanently unavailable in this batch — gone, retries exhausted, or
+// skipped because the download was cancelled. Once set, admit() drops
+// (does not buffer) any segment above that point instead of blocking for
+// room: nothing can ever flush past a permanent hole in a single catch-up
+// call, so buffering data beyond it is guaranteed waste, discarded at
+// return either way. This also closes a deadlock: a worker already
+// blocked waiting for room for a segment above the failure point would
+// otherwise wait forever, since nothing will ever free room by flushing
+// past a gap that will never fill in. This is deliberately a targeted
+// drop keyed on seq, not a blanket ceiling bypass — a 403 episode is
+// exactly the kind of head-stall condition that fills the buffer in the
+// first place, so disabling the ceiling entirely on any single failure
+// would reopen the full pre-ceiling exposure (up to maxCatchupBatch *
+// segment size) for the remainder of the call. minFailedSeq only ever
+// decreases: the lowest failure seen is what governs what's still worth
+// buffering.
+//
+// release permanently disables the ceiling for every seq (every future
+// admit returns immediately without storing) and wakes any blocked
+// callers. It is reserved for teardown unrelated to any specific
+// segment's availability — the consumer returning early (e.g. a disk
+// write error) has nothing to do with which seq failed, so there's no
+// seq to hand markFailed. Once nothing will ever read from this buffer
+// again, no worker should be left stranded waiting for room.
 type reorderBuffer struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	seg      map[int][]byte
-	bytes    int
-	limit    int
-	head     int
+	mu    sync.Mutex
+	cond  *sync.Cond
+	seg   map[int][]byte
+	bytes int
+	limit int
+	head  int
+
+	// failed / minFailedSeq: see the type doc.
+	failed       bool
+	minFailedSeq int
+
+	// released: see the type doc.
 	released bool
 }
 
@@ -41,17 +70,33 @@ func newReorderBuffer(limit, head int) *reorderBuffer {
 	return rb
 }
 
-// admit blocks until there is room for a non-head segment, then stores it.
-// The segment matching the buffer's current head is stored immediately no
-// matter how full the buffer is.
-func (b *reorderBuffer) admit(seq int, data []byte) {
+// admit blocks until there is room for a non-head segment, then stores it
+// and returns true. Returns false without storing when the segment is
+// provably unflushable in this batch (see markFailed) or the buffer has
+// been released for teardown (see release) — callers must treat a false
+// return as "this data can be discarded, nothing will ever read it," not
+// as an error. The segment matching the buffer's current head is always
+// stored immediately, no matter how full the buffer is or whether the
+// buffer has a recorded failure: head can never itself sit above
+// minFailedSeq, since nothing flushes past a gap, so head simply stops
+// advancing there.
+func (b *reorderBuffer) admit(seq int, data []byte) bool {
 	b.mu.Lock()
-	for b.bytes >= b.limit && seq != b.head && !b.released {
+	defer b.mu.Unlock()
+	for {
+		if b.released {
+			return false
+		}
+		if b.failed && seq > b.minFailedSeq && seq != b.head {
+			return false
+		}
+		if seq == b.head || b.bytes < b.limit {
+			b.seg[seq] = data
+			b.bytes += len(data)
+			return true
+		}
 		b.cond.Wait()
 	}
-	b.seg[seq] = data
-	b.bytes += len(data)
-	b.mu.Unlock()
 }
 
 // take removes and returns the segment for seq, if present, freeing its
@@ -88,8 +133,26 @@ func (b *reorderBuffer) setHead(seq int) {
 	b.cond.Broadcast()
 }
 
-// release permanently disables the ceiling, waking every blocked admit()
-// call. Idempotent and safe to call more than once.
+// markFailed records seq as permanently unavailable in this batch,
+// tightening the lowest known failure point when seq is lower than any
+// previously recorded value. Wakes every blocked admit() so a segment
+// above the (possibly new, lower) threshold drops out immediately instead
+// of waiting for room that will never come — see the type doc for why
+// this is scoped to seq rather than a blanket ceiling bypass.
+func (b *reorderBuffer) markFailed(seq int) {
+	b.mu.Lock()
+	if !b.failed || seq < b.minFailedSeq {
+		b.failed = true
+		b.minFailedSeq = seq
+	}
+	b.mu.Unlock()
+	b.cond.Broadcast()
+}
+
+// release permanently disables the ceiling for every seq, waking every
+// blocked admit() call regardless of how it relates to any failure.
+// Reserved for teardown unrelated to any specific segment's availability
+// — see the type doc. Idempotent and safe to call more than once.
 func (b *reorderBuffer) release() {
 	b.mu.Lock()
 	b.released = true
@@ -156,8 +219,12 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// into it (blocking there, not on `results`, once resident bytes reach
 	// catchUpBufferBytes) and the consumer below drains it in ascending
 	// order. See reorderBuffer's doc for the head-always-admitted and
-	// release() deadlock-avoidance guarantees.
-	rb := newReorderBuffer(catchUpBufferBytes, curSeq)
+	// markFailed/release deadlock-avoidance guarantees.
+	bufLimit := catchUpBufferBytes
+	if d.catchUpBufferBytesOverride > 0 {
+		bufLimit = d.catchUpBufferBytesOverride
+	}
+	rb := newReorderBuffer(bufLimit, curSeq)
 	// done is closed when this function returns so workers blocked on
 	// `results <-` can unblock and exit. Without it, an early consumer
 	// return (e.g. write error below) would leave workers wedged on a
@@ -167,8 +234,16 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	defer close(done)
 	// A worker can also be blocked inside rb.admit() waiting for buffer
 	// room rather than on `results <-`. release() wakes those too, so wire
-	// it to the same teardown signal.
+	// it to the same teardown signal. This is the ONE place release() (the
+	// blanket bypass) is correct rather than markFailed: the consumer
+	// returning early has nothing to do with any specific seq's
+	// availability, so there's no seq to hand markFailed.
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.logger != nil {
+				d.logger.Error("catch-up buffer-release watcher panic", "panic", r)
+			}
+		}()
 		<-done
 		rb.release()
 	}()
@@ -184,6 +259,17 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			}()
 			for item := range work {
 				if d.isCancelled() || ctx.Err() != nil {
+					// This exact seq will never be fetched (each seq maps
+					// to exactly one worker) — mark it failed so any OTHER
+					// worker already blocked in admit() for a higher seq
+					// drops out instead of waiting forever for room a
+					// cancelled download will never free. Without this,
+					// this branch was the one path in the whole pool that
+					// could strand a blocked worker permanently: it's the
+					// only place a work item is abandoned without ever
+					// calling fetchSegmentWithRetry, so the failure-path
+					// markFailed call below never ran for it.
+					rb.markFailed(item.seq)
 					continue // drain channel
 				}
 				seq := item.seq
@@ -196,26 +282,32 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				if fetchErr == nil {
 					// Blocks here (not on `results <-`) once rb is at its
 					// byte ceiling, unless seq is the current head — see
-					// reorderBuffer.admit.
-					rb.admit(seq, data)
-					select {
-					case results <- seq:
-					case <-done:
-						return
+					// reorderBuffer.admit. A false return means the data
+					// was dropped (provably unflushable, or the batch is
+					// tearing down) — nothing to notify the consumer about.
+					if rb.admit(seq, data) {
+						select {
+						case results <- seq:
+						case <-done:
+							return
+						}
 					}
 					continue
 				}
 				// Any fetch failure — permanent, retries exhausted, or a
 				// cancelled download — means this exact seq will not arrive
 				// in this batch (each seq is fetched by exactly one
-				// worker). If it was the segment the buffer is waiting on,
-				// nothing will ever free room by flushing past it, so keep
-				// enforcing the ceiling would risk deadlocking whoever is
-				// holding data for a segment that can never become head.
-				// release() is a no-op once this batch is already ending
-				// cleanly. maxCatchupBatch still bounds memory for what's
-				// left of this call either way.
-				rb.release()
+				// worker). Record it as the (possibly new, lower) point
+				// beyond which nothing can ever flush, so admit() drops
+				// later segments instead of buffering data that's
+				// guaranteed to be discarded at return, and wakes any
+				// worker already blocked waiting for room past this point.
+				// Deliberately NOT a blanket release(): a 403 episode is
+				// exactly the head-stall condition that fills the buffer,
+				// so disabling the ceiling for every seq on any single
+				// failure would reopen the full pre-ceiling exposure this
+				// type exists to close.
+				rb.markFailed(item.seq)
 				// Audit reports/engine.md #17: surface the failure mode so the
 				// gap-detection downstream isn't blind to "transient" vs "gone".
 				switch {

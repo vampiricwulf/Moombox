@@ -323,6 +323,13 @@ type SegmentDownloader struct {
 	// batch the same way and regrows it over time).
 	lastCatchUpFailure atomicTime
 
+	// catchUpBufferBytesOverride lets tests shrink the reorder buffer's byte
+	// ceiling below production's 256 MB catchUpBufferBytes, so a test can
+	// saturate it with a handful of small fake segments instead of waiting
+	// on real production-scale transfers. Zero (the default) means "use
+	// catchUpBufferBytes" — production code never sets this.
+	catchUpBufferBytesOverride int
+
 	// startedAt + transientRetries + lastTransientErr feed HealthUpdate
 	// snapshots. transientRetries / lastTransientErrMu are read-mostly
 	// in the segment fetcher (each non-terminal error is one increment

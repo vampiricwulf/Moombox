@@ -3,9 +3,12 @@ package engine
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -131,6 +134,13 @@ func TestReorderBufferBlocksNonHeadWhenFull(t *testing.T) {
 // this would let all of them through: 40 workers * 5 MB = 200 MB resident
 // against a 30 MB ceiling. With the ceiling enforced, residency must
 // plateau at (approximately) the limit regardless of worker count.
+//
+// The assertion allows up to one extra segment over the nominal limit:
+// admit() checks `bytes < limit` BEFORE adding the segment being admitted
+// (see reorderBuffer's doc), so the LAST segment that squeezes in can push
+// resident bytes up to limit+segSize-1. Asserting the exact limit would
+// only happen to pass here because segSize evenly divides limit (5 MB into
+// 30 MB) -- a coincidence of these two constants, not a real invariant.
 func TestReorderBufferManyWorkersStayBounded(t *testing.T) {
 	const limit = 30 << 20  // 30 MB
 	const segSize = 5 << 20 // 5 MB -- in the 3.7-6.2 MB range measured on a 1080p60 stream
@@ -151,10 +161,10 @@ func TestReorderBufferManyWorkersStayBounded(t *testing.T) {
 	// ceiling should land well within this window.
 	time.Sleep(300 * time.Millisecond)
 
-	if got := rb.residentBytes(); got > limit {
-		t.Errorf("residentBytes = %d (%d workers of %d bytes each), want <= %d (ceiling limit) — "+
+	if got := rb.residentBytes(); got > limit+segSize {
+		t.Errorf("residentBytes = %d (%d workers of %d bytes each), want <= limit+segSize (%d) — "+
 			"a wider worker pool must not multiply buffered memory",
-			got, numWorkers, segSize, limit)
+			got, numWorkers, segSize, limit+segSize)
 	}
 
 	// Release so the still-blocked goroutines don't leak past the test.
@@ -236,7 +246,7 @@ func TestRunParallelCatchUpOrdersCorrectlyWithByteCeiling(t *testing.T) {
 // TestRunParallelCatchUpNoDeadlockOnPermanentGap is the end-to-end version
 // of the deadlock-avoidance guarantee: a segment inside the batch 410s
 // permanently (never retried) while a wide worker pool races ahead of it.
-// Before rb.release() was wired to every fetch failure, workers holding
+// Without rb.markFailed() wired to every fetch failure, workers holding
 // later, already-fetched segments could stay parked in admit() forever once
 // the buffer filled, because the dead segment can never become head and
 // free room. This must complete promptly and report the gap exactly like
@@ -244,7 +254,7 @@ func TestRunParallelCatchUpOrdersCorrectlyWithByteCeiling(t *testing.T) {
 func TestRunParallelCatchUpNoDeadlockOnPermanentGap(t *testing.T) {
 	t.Parallel()
 	const head = 200
-	const failSeq = 20 // permanently gone -- forces rb.release() before the gap
+	const failSeq = 20 // permanently gone -- forces rb.markFailed(failSeq) before the gap
 	_, srv := newFakeGVS(t, head, func(seq, attempt int) int {
 		if seq == failSeq {
 			return http.StatusGone // 410: ErrSegmentPermanent, never retried
@@ -303,5 +313,193 @@ func TestRunParallelCatchUpNoDeadlockOnPermanentGap(t *testing.T) {
 	defer gapMu.Unlock()
 	if len(gaps) != 1 || gaps[0].From != failSeq {
 		t.Errorf("gaps reported = %+v, want exactly one gap starting at %d", gaps, failSeq)
+	}
+}
+
+// TestReorderBufferMarkFailedDropsSegmentsAboveIt is the direct,
+// deterministic test of the CRITICAL fix: a worker already blocked in
+// admit() for a higher seq must unblock (and drop, not store) once some
+// OTHER, lower seq is marked failed -- even though nothing ever flushed and
+// no room was freed. This is exactly what runParallelCatchUp's
+// cancellation-skip branch relies on: a worker that skips its work item
+// because the download was cancelled never calls fetchSegmentWithRetry, so
+// it has to be the one calling markFailed directly, precisely to rescue any
+// OTHER worker already parked waiting for room that a cancelled download
+// will never free (the scenario that could hang the whole call before this
+// fix, since the success path never itself checks cancellation).
+func TestReorderBufferMarkFailedDropsSegmentsAboveIt(t *testing.T) {
+	const limit = 10
+	rb := newReorderBuffer(limit, 0)
+	rb.admit(0, make([]byte, limit)) // fills the buffer; head 0 never advances in this test
+
+	blocked := make(chan bool, 1)
+	go func() {
+		stored := rb.admit(5, make([]byte, 1)) // not head; buffer already at the ceiling
+		blocked <- stored
+	}()
+
+	select {
+	case <-blocked:
+		t.Fatal("admit(5) returned before anything freed the buffer or recorded a failure")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: still blocked.
+	}
+
+	// A DIFFERENT, lower seq (2) is marked failed -- e.g. a worker skipped
+	// it because the download was cancelled before it ever attempted a
+	// fetch. Nothing has flushed and no room has freed; markFailed alone
+	// must be enough to release the blocked admit(5).
+	rb.markFailed(2)
+
+	select {
+	case stored := <-blocked:
+		if stored {
+			t.Error("admit(5) reported stored=true after seq 2 was marked failed — it should have been dropped, not buffered")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("admit(5) never unblocked after markFailed(2) — this is the CRITICAL cancel-while-blocked permanent hang")
+	}
+
+	if rb.has(5) {
+		t.Error("seq 5 is stored in the buffer after being dropped by markFailed — it should have been discarded")
+	}
+}
+
+// TestReorderBufferFailureDoesNotReopenUnboundedGrowth is the direct proof
+// of the Important-severity fix: a single failure must NOT reopen the
+// buffer to unlimited growth for the rest of the batch. The original
+// implementation called a blanket release() on any failure -- disabling
+// the ceiling entirely -- which meant the FIRST failing batch of exactly
+// the head-stall conditions that fill the buffer (a 403 episode) restored
+// the full pre-ceiling exposure (up to maxCatchupBatch * segment size,
+// GBs at high worker counts) on hosts the ceiling exists to protect. The
+// fix drops (never stores) anything above the known failure point instead
+// of admitting it, so residency must stay flat regardless of how many
+// segments arrive afterward.
+func TestReorderBufferFailureDoesNotReopenUnboundedGrowth(t *testing.T) {
+	const limit = 1 << 20 // 1 MB
+	rb := newReorderBuffer(limit, 0)
+	rb.markFailed(5) // some low seq is known permanently unavailable
+
+	// 100 segments at 100 KB each = 10 MB if buffered -- ten times the
+	// ceiling, and nowhere near a real 403 episode's actual segment count
+	// or size. None of it may be stored.
+	for seq := 6; seq < 106; seq++ {
+		if stored := rb.admit(seq, make([]byte, 100<<10)); stored {
+			t.Fatalf("admit(%d) stored data after markFailed(5) — want dropped, memory bound reopened", seq)
+		}
+	}
+	if got := rb.residentBytes(); got != 0 {
+		t.Errorf("residentBytes = %d, want 0 — nothing above a known failure point should ever be buffered", got)
+	}
+}
+
+// TestRunParallelCatchUpCancelWhileBlockedAtCeilingUnwinds is an
+// end-to-end regression test for the general "cancel while a worker is
+// genuinely blocked at the byte ceiling must unwind cleanly" property. The
+// head segment never answers (an httptest handler that blocks on its own
+// request context, simulating a permanently stuck live segment); every
+// other segment succeeds immediately and is sized to saturate the test's
+// tiny buffer ceiling almost instantly, so by the time the test cancels,
+// at least one worker is provably parked in admit() waiting for room the
+// stuck head can never free on its own.
+//
+// IMPORTANT CAVEAT: this test resolves via the stuck head's OWN
+// fetchSegmentWithRetry call returning an error once its in-flight HTTP
+// request is aborted by the cancelled ctx, which routes through the
+// (already-present) fetch-failure branch's rb.markFailed(item.seq) --
+// NOT through the cancellation-skip branch the CRITICAL finding was about
+// (`if d.isCancelled() || ctx.Err() != nil { ...; continue }`, hit BEFORE
+// a fetch is even attempted). I could not construct a deterministic
+// end-to-end reproduction of that exact branch: it only matters when a
+// worker has already dequeued a work item but the Go scheduler hasn't yet
+// run its cancellation check -- a sub-microsecond preemption race that
+// wall-clock HTTP timing can't reliably force (and by the time any OTHER
+// item is dispatched after such a race could occur, FIFO dispatch order
+// guarantees every lower seq is already claimed, so a "still queued"
+// item can never be the one that rescues an already-blocked worker; only
+// a same-wave item whose goroutine simply hasn't run yet can be, and that
+// is exactly the unforceable part). TestReorderBufferMarkFailedDropsSegmentsAboveIt
+// is the deterministic, honest proof of the mechanism the skip branch's
+// rb.markFailed(item.seq) call relies on -- that markFailed(lowerSeq)
+// unblocks admit(higherSeq) even when nothing has ever flushed and no
+// fetch for the higher seq ever failed. This test still has value as
+// end-to-end coverage of the same overall failure mode via a reliably
+// reproducible path, and would have caught any regression that broke
+// rb.markFailed's wiring into the fetch-failure branch too.
+func TestRunParallelCatchUpCancelWhileBlockedAtCeilingUnwinds(t *testing.T) {
+	t.Parallel()
+	const headSeq = 0
+	var headRequests atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Head-Seqnum", "999")
+		seq, _ := strconv.Atoi(r.URL.Query().Get("sq"))
+		if seq == headSeq {
+			headRequests.Add(1)
+			// Never answers on its own -- only unblocks when the CLIENT's
+			// context is cancelled, which net/http propagates down to
+			// r.Context(). That's the exact unstick this test verifies:
+			// cancelling runParallelCatchUp's ctx must be what breaks this
+			// request, not a response from the server.
+			<-r.Context().Done()
+			return
+		}
+		w.Write(make([]byte, 200<<10)) // 200 KB -- oversized relative to the ceiling below
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "v")
+	f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	defer f.Close()
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:        srv.URL + "/videoplayback?id=rb.cancel&itag=140",
+		OutputFile:     out,
+		SegmentWorkers: 6,
+	})
+	d.outputFile = f
+	d.currentSeq.Store(int64(headSeq))
+	d.headSeq.Store(200)
+	// Shrink the ceiling (see catchUpBufferBytesOverride's doc) so one
+	// 200 KB non-head segment saturates it -- no need to wait on real
+	// production-scale (256 MB) transfers to reach the blocked state this
+	// test is exercising.
+	d.catchUpBufferBytesOverride = 256 << 10
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type result struct {
+		nextSeq int
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		nextSeq, err := d.runParallelCatchUp(ctx)
+		done <- result{nextSeq, err}
+	}()
+
+	// Wait until the head request has actually landed (proves the stall is
+	// in effect), then give the other workers a moment to race ahead and
+	// saturate the tiny ceiling.
+	deadline := time.Now().Add(3 * time.Second)
+	for headRequests.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if headRequests.Load() == 0 {
+		t.Fatal("head request never arrived — test setup didn't stall the head as intended")
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runParallelCatchUp did not return within 10s after cancel — permanent hang (the CRITICAL cancel-while-blocked bug)")
 	}
 }
