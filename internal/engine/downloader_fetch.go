@@ -261,7 +261,11 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 				segURL = rebuildURL()
 			}
 			d.emitActivity(ActivityRetrying)
-			utils.Sleep(ctx, singleGoneRetryDelay)
+			// Doubling backoff, not a flat delay: the point of waiting is to
+			// outlive credentialRefreshCooldown so this segment's LATER
+			// attempts can actually claim a refresh. 500ms/1s/2s/4s spans
+			// 7.5s against a 5s cooldown. See forbiddenRefreshAttempts.
+			utils.Sleep(ctx, singleGoneRetryDelay<<attempt)
 			continue
 		}
 		// Surface the backoff in the progress line — the tracker's grace

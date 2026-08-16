@@ -59,7 +59,19 @@ const (
 	// Kept small: the refresh itself is cooldown-gated, so a higher number
 	// mostly buys sleep, and the caller (catch-up or the sequential loop)
 	// re-attempts the segment on its next pass anyway.
-	forbiddenRefreshAttempts = 3
+	// INVARIANT: the retry window this produces MUST exceed
+	// credentialRefreshCooldown, or a segment can burn every attempt inside a
+	// closed cooldown and be declared permanently gone without ever seeing
+	// fresh credentials. The first version violated it — 3 attempts with a
+	// flat 500ms delay is a 1s window against a 5s cooldown, so a segment
+	// that started failing in the ~4s after a refresh never got one, became a
+	// gap, and left the sequential loop to grind it out. Measured cost: live
+	// catch-up ran at 0.80 seg/s against the 3.1 seg/s it manages on fresh
+	// credentials (field data, 2026-08-15).
+	//
+	// 5 attempts with the doubling delay below span 7.5s, so every failing
+	// segment now outlives one full cooldown and gets a real refresh.
+	forbiddenRefreshAttempts = 5
 )
 
 // runDashLoop is the main DASH download loop.
