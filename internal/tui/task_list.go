@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 	"github.com/sahilm/fuzzy"
 
@@ -1146,20 +1147,21 @@ func formatCountdown(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
+// truncateString clips s to maxW display columns, appending an ellipsis
+// when it had to cut. Delegates to x/ansi -- the same helper the Charm
+// stack uses internally -- rather than hand-rolling the width walk.
+//
+// Verified equivalent to the previous implementation across ASCII, wide
+// (CJK) runes, pre-existing ellipses and every width from 1 up, with one
+// deliberate difference at maxW <= 0: the old code returned an ellipsis
+// there, emitting a column of output into a space with no columns to give.
+// Empty is the correct answer, and callers do pass non-positive widths on
+// narrow terminals (action_menu.go's contentW-17, for one).
+//
+// The ANSI-awareness is insurance rather than a fix: every current caller
+// styles AFTER truncating, so none can sever an escape sequence today --
+// but a future caller passing styled text now gets a correct line instead
+// of a corrupted one.
 func truncateString(s string, maxW int) string {
-	if runewidth.StringWidth(s) <= maxW {
-		return s
-	}
-	if maxW <= 1 {
-		return "\u2026" // …
-	}
-	w := 0
-	for i, r := range s {
-		rw := runewidth.RuneWidth(r)
-		if w+rw > maxW-1 {
-			return s[:i] + "\u2026"
-		}
-		w += rw
-	}
-	return s
+	return ansi.Truncate(s, maxW, "…")
 }

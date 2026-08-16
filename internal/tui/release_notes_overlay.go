@@ -20,14 +20,19 @@ type releaseNotesOverlay struct {
 	rawNotes string
 	width    int
 	height   int
-	vp       viewport.Model
+	// isDark mirrors App.isDark (terminal background detection) so the
+	// markdown renderer matches the terminal, exactly as the huh themes
+	// already do. Defaults true: dark is Moombox's historical assumption
+	// and the value BackgroundColorMsg installs before any overlay opens.
+	isDark bool
+	vp     viewport.Model
 }
 
 // newReleaseNotesOverlay returns a closed overlay ready for use.
 func newReleaseNotesOverlay() *releaseNotesOverlay {
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	vp.KeyMap = helpViewportKeyMap() // reuse help.go's safe key map (no letter keys)
-	return &releaseNotesOverlay{vp: vp}
+	return &releaseNotesOverlay{vp: vp, isDark: true}
 }
 
 // isOpen reports whether the overlay is currently visible.
@@ -144,17 +149,24 @@ func (o *releaseNotesOverlay) View() string {
 
 // renderBody runs glamour over the raw markdown to produce ANSI text
 // sized to the given width. Returns a fallback message for empty notes.
-// WithStandardStyle("dark") is used instead of WithAutoStyle() so that
+// An explicit standard style is used instead of WithAutoStyle() so that
 // glamour always produces styled output — WithAutoStyle falls back to
 // no-op ASCII mode when no TTY is detected (e.g. in tests or when
 // TERM is unset), which would leave raw "## Heading" syntax visible.
-// Moombox always runs in a terminal and defaults to a dark theme.
+// Which style is chosen follows the detected terminal background: the
+// dark palette on a light terminal renders low-contrast body text, and
+// the app already routes the same signal into its huh themes, so the
+// release notes were the one themed surface ignoring it.
 func (o *releaseNotesOverlay) renderBody(width int) string {
 	if strings.TrimSpace(o.rawNotes) == "" {
 		return "No release notes available for this update."
 	}
+	style := "light"
+	if o.isDark {
+		style = "dark"
+	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStandardStyle(style),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {

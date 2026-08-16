@@ -27,10 +27,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.isDark = msg.IsDark()
 		a.setupWiz.isDark = a.isDark
 		a.ffmpegCheck.isDark = a.isDark
+		if a.releaseNotesPopup != nil {
+			a.releaseNotesPopup.isDark = a.isDark
+		}
 		return a, nil
 
 	case tea.ColorProfileMsg:
-		a.colorProfile = msg.Profile
+		// Deliberately ignored: Bubble Tea's renderer holds the profile and
+		// downsamples every colour it writes (cursed_renderer.setColorProfile),
+		// so a copy here would be a field nothing could act on. The case stays
+		// so the message is consumed rather than falling through to the
+		// component router below.
 		return a, nil
 
 	case tickMsg:
