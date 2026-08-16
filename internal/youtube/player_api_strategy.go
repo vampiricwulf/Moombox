@@ -195,8 +195,15 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			p.logger.Info("[PlayerApi] DASH manifest sourced via ANDROID_VR fallback",
 				"videoID", videoID, "vrFormats", len(vrResult.Formats))
 			result.DashManifestURL = vrResult.DashManifestURL
-			// Merge ANDROID_VR formats with auth-level dedup; cookied
-			// formats win same-itag ties via deduplicateFormats.
+			// Merge ANDROID_VR formats with auth-level dedup. TV/WEB formats
+			// win same-itag ties via deduplicateFormats — this comment
+			// claimed that from the start, but until 2026-08-15 the ranking
+			// said the opposite (AuthLevelAndroidVR was 0, the most
+			// preferred), so android_vr silently displaced every WEB format
+			// it shared an itag with. It is now the last-resort tier, per
+			// yt-dlp's client priority; see the AuthLevel block in types.go.
+			// Its formats still fill genuine gaps, they just no longer
+			// evict a matching WEB/TV entry.
 			collectFormats(&formatPool, vrResult.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
 		}
 	}

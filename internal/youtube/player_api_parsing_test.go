@@ -389,7 +389,7 @@ func TestDeduplicateFormats(t *testing.T) {
 
 	pool := []Format{
 		{Itag: 137, URL: "https://example.com/v1", AuthLevel: &webAuth},
-		{Itag: 137, URL: "https://example.com/v2", AuthLevel: &vrAuth}, // lower auth level
+		{Itag: 137, URL: "https://example.com/v2", AuthLevel: &vrAuth}, // android tier: must LOSE
 		{Itag: 140, URL: "https://example.com/a1", AuthLevel: &webAuth},
 		{Itag: 999, URL: "", AuthLevel: &webAuth}, // no URL, should be filtered
 	}
@@ -400,11 +400,20 @@ func TestDeduplicateFormats(t *testing.T) {
 		t.Fatalf("expected 2 deduplicated formats, got %d", len(result))
 	}
 
-	// itag 137 should prefer lower auth level (VR=0 < Web=5)
+	// itag 137 must resolve to the WEB entry, not the ANDROID_VR one. Ranking
+	// android_vr last mirrors yt-dlp's client priority (android tier, below
+	// web); ranking it first is what put live segment downloads on ANDROID_VR
+	// URLs while carrying a WebPO token that does not apply to that client —
+	// a 403 every ~20s in the field (2026-08-15). See the AuthLevel block in
+	// types.go.
 	for _, f := range result {
 		if f.Itag == 137 {
-			if *f.AuthLevel != AuthLevelAndroidVR {
-				t.Errorf("expected itag 137 to prefer lower auth level (AndroidVR), got %d", *f.AuthLevel)
+			if *f.AuthLevel != AuthLevelWeb {
+				t.Errorf("itag 137 auth level = %d, want AuthLevelWeb (%d): a WEB format must beat an ANDROID_VR one",
+					*f.AuthLevel, AuthLevelWeb)
+			}
+			if f.URL != "https://example.com/v1" {
+				t.Errorf("itag 137 URL = %q, want the WEB url", f.URL)
 			}
 		}
 	}

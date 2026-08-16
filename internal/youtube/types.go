@@ -173,20 +173,52 @@ type YtcfgData struct {
 	ThumbnailURL     string
 }
 
-// AuthLevel constants for format deduplication. Lower = preferred during
-// dedup tiebreaks (more direct / less rewrapped). Public watch-page formats
-// rank ahead of authenticated watch-page formats so cookie-bearing fetches
-// can win the dedup against a stray un-cookied parse (audit I5).
+// AuthLevel constants for format deduplication. Lower = preferred when two
+// clients return the same itag.
+//
+// The tier order mirrors yt-dlp's client priority
+// (references/yt-dlp/yt_dlp/extractor/youtube/_base.py, build_innertube_clients):
+//
+//	BASE_CLIENTS = ('tv', 'web', 'mweb', 'android', 'ios')  # highest→lowest
+//	priority = 10 * index  =>  tv 40, web 30, mweb 20, android 10, ios 0
+//
+// android_vr's base client is `android`, so upstream ranks it near the
+// BOTTOM. Moombox ranked it at the TOP until 2026-08-15, which meant every
+// same-itag tie went to android_vr and live segment downloads ran off
+// ANDROID_VR URLs.
+//
+// That is not a cosmetic difference. ANDROID_VR is absent from yt-dlp's
+// WEBPO_CLIENTS, so get_webpo_content_binding produces no WebPO for it at
+// all — upstream never attaches one, relying instead on that client's
+// not_required_with_player_token policy. Moombox was attaching a
+// visitorData-bound WebPO to android_vr URLs, a token type that does not
+// apply to them, against a client yt-dlp documents as having "intermittent,
+// selective POT enforcement" since 2026.07. Field result: a 403 every ~20s
+// on a live archive, each one costing a credential refresh, holding catch-up
+// to a quarter of its healthy rate. The same mismatch is the leading
+// explanation for the 2026-08-14 premiere that 403'd every segment.
+//
+// The ANDROID_VR fallback still earns its place — it is the only source of a
+// dashManifestUrl when the account experiment withholds one, and the only
+// source of formats at all for some restricted videos — it simply must not
+// displace a WEB/TV format that carries the same itag.
+//
+// Within a tier the previous relative order is preserved: public watch-page
+// formats still rank ahead of authenticated ones (audit I5).
 const (
-	AuthLevelAndroidVR       = 0
-	AuthLevelWatchPagePublic = 1
-	AuthLevelWatchPageAuth   = 2
-	AuthLevelTVPublic        = 3
-	AuthLevelTVAuth          = 4
-	AuthLevelWebSafari       = 5
-	AuthLevelWeb             = 6
-	AuthLevelWebEmbedded     = 7
-	AuthLevelWebCreator      = 8
+	// TV tier — upstream priority 40. TVHTML5 is a WEBPO client, so its URLs
+	// and our WebPO tokens are the matched pair.
+	AuthLevelTVPublic = 0
+	AuthLevelTVAuth   = 1
+	// WEB tier — upstream priority 30. The watch page IS the web client.
+	AuthLevelWatchPagePublic = 2
+	AuthLevelWatchPageAuth   = 3
+	AuthLevelWebSafari       = 4
+	AuthLevelWeb             = 5
+	AuthLevelWebEmbedded     = 6
+	AuthLevelWebCreator      = 7
+	// ANDROID tier — upstream priority 10. Last resort: not a WebPO client.
+	AuthLevelAndroidVR = 8
 )
 
 // Sentinel values written by parsePlayerResponse when metadata is missing.

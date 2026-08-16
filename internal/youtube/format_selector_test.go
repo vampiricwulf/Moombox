@@ -103,7 +103,9 @@ func TestExtractCodec(t *testing.T) {
 
 func TestSelectBestFormats_AuthLevelTiebreaker(t *testing.T) {
 	// Two identical formats at the same resolution/fps/codec/bitrate,
-	// differing only in AuthLevel — lower auth level should win.
+	// differing only in AuthLevel — the lower value wins, and since
+	// 2026-08-15 android_vr carries the HIGHEST value (upstream ranks its
+	// android tier below web; see types.go), so the WEB format wins.
 	vrAuth := AuthLevelAndroidVR
 	webAuth := AuthLevelWeb
 
@@ -119,16 +121,17 @@ func TestSelectBestFormats_AuthLevelTiebreaker(t *testing.T) {
 	if result.Video == nil {
 		t.Fatal("expected video format")
 	}
-	// Lower auth level should win the tiebreaker
-	if result.Video.Itag != 138 {
-		t.Errorf("expected itag 138 (lower auth level), got %d", result.Video.Itag)
+	// The WEB format (itag 137) must win over the ANDROID_VR one (138).
+	if result.Video.Itag != 137 {
+		t.Errorf("expected itag 137 (WEB beats ANDROID_VR), got %d", result.Video.Itag)
 	}
 
 	if result.Audio == nil {
 		t.Fatal("expected audio format")
 	}
-	if result.Audio.Itag != 141 {
-		t.Errorf("expected itag 141 (lower auth level), got %d", result.Audio.Itag)
+	// Same rule on the audio side: 140 is WEB, 141 is ANDROID_VR.
+	if result.Audio.Itag != 140 {
+		t.Errorf("expected itag 140 (WEB beats ANDROID_VR), got %d", result.Audio.Itag)
 	}
 }
 
