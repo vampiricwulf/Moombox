@@ -117,7 +117,7 @@ What this means in practice:
 Optimize hot paths — segment downloads, manifest parsing, database queries. But never sacrifice correctness (no skipping verification for speed), reliability (no removing error handling for throughput), or resource efficiency (no caching everything in RAM for lower latency) to achieve it.
 
 What this means in practice:
-- Catch-up downloading uses 6 parallel segment fetches when falling behind, but only when needed.
+- Catch-up downloading uses a configurable pool of parallel segment fetches (`segment_workers`, 12 by default) when falling behind, but only when needed.
 - Cipher solving caches compiled VMs to avoid recompilation, but caps the cache at 3 entries to limit memory.
 - Database queries use prepared statements and indexes, but the single-connection model is retained for simplicity and correctness.
 - The TUI reduces its progress tick interval from 16ms (active) to 500ms (idle) to avoid unnecessary rendering work.
@@ -342,7 +342,7 @@ When YouTube or Twitch changes something (a new cipher obfuscation pattern, a ne
 
 Moombox diverges significantly from upstream projects in several areas:
 
-- **Download strategy.** yt-dlp downloads one format at a time. Moombox downloads segments concurrently (DASH sequential, HLS polling, VOD parallel with catch-up at 6 parallel), monitors quality in real-time, and splits segments on quality changes.
+- **Download strategy.** yt-dlp downloads one format at a time. Moombox downloads segments concurrently (DASH sequential, HLS polling, VOD parallel, and a configurable `segment_workers` pool — 12 by default, no upper limit — for catch-up), monitors quality in real-time, and splits segments on quality changes.
 - **Concurrency model.** yt-dlp is single-threaded per download. Moombox orchestrates multiple concurrent downloaders (video, audio, chat) per stream, with a worker pool managing multiple simultaneous streams.
 - **Error recovery.** yt-dlp retries at the download level. Moombox has layered recovery: segment-level retry, stream-level retry with auth upgrade, job-level error state with user notification, and process-level restart via the launcher.
 - **Caching.** yt-dlp does not cache BotGuard minters or cipher VMs across invocations (it is a CLI tool that exits after each download). Moombox runs continuously and maintains multi-layer caches with TTL-based eviction.

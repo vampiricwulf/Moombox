@@ -246,7 +246,7 @@ Muxing runs on `context.Background()` goroutines so it completes even if the par
 - **HLS polling** — Re-fetches the media playlist, identifies new segments by URL comparison, downloads them in order. YouTube HLS honors the same `maximum_timeout` backstop; Twitch HLS relies on its GQL end-detection instead. Saves resume state at the same interval as DASH.
 - **VOD parallel** — Knows the total size, downloads in 5MB chunks with up to 3 retries per chunk. Reports percentage progress throttled to 500ms intervals to avoid flooding the UI.
 
-**Catch-up mode** activates when the downloader falls more than 10 segments behind the live head (`CatchupThreshold`). It downloads up to 6 segments in parallel (`ParallelDownloads`) until caught up, then resumes sequential downloading. This prevents permanent drift during transient slowdowns.
+**Catch-up mode** activates when the downloader falls more than 10 segments behind the live head (`CatchupThreshold`), past a 30-segment (`stayBehindSegments`) buffer that avoids racing in-flight segments. It hands off to a rolling window of `segment_workers` parallel workers (default 12, configurable, no upper limit — distinct from `num_parallel_downloads`, which gates concurrent VOD jobs and never applies to a live broadcast) until caught up, then resumes sequential downloading. Workers claim sequences continuously and flush completed segments in strict ascending order as they arrive, rather than waiting on per-batch barriers. This prevents permanent drift during transient slowdowns.
 
 **Resume state** (`.resume.json` sidecar) stores `lastSeq`, `bytesWritten`, `timestamp`, and `baseUrl`. On startup, the downloader checks for a resume file, validates it, and resumes from the last checkpoint rather than starting over.
 

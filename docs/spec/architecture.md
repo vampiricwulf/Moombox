@@ -395,12 +395,12 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 - Performs HEAD probes every 5 seconds to discover the head sequence number
 - Saves resume state every 50 segments (`ResumeSeqInterval`)
 - Gap detection: if a segment returns 204/empty, records it and continues
+- Catch-up mode (`runParallelCatchUp`): once `stayBehindSegments`+`CatchupThreshold` (40) segments behind the live head, hands off to a rolling window of `segment_workers` parallel fetches (default 12, configurable via `downloader.segment_workers`, no upper limit — see the config table in data-and-storage.md) instead of `ParallelDownloads`' historical fixed 6. Workers claim sequences continuously and flush completed segments in strict ascending order as they arrive — there is no per-batch barrier. See "Catch-up: rolling window and byte-bounded buffer" below for the buffer and damping mechanics.
 
 **HLS live mode (`runHlsLoop`):**
 - Polls the HLS playlist URL periodically
 - Downloads new segments as they appear
-- Follows the live edge (media sequence numbers)
-- Catch-up mode: if more than 10 segments behind (`CatchupThreshold`), launches 6 parallel workers
+- Follows the live edge (media sequence numbers); no parallel catch-up path — a stalled poller simply requests the next playlist snapshot, which already reflects whatever segments the CDN still has
 
 **VOD direct download mode (`runDirectDownload`):**
 - Probes total file size via `Range: bytes=0-0` HEAD request
@@ -418,9 +418,9 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 **Key constants:**
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `CatchupThreshold` | 10 | Segments behind before parallel catch-up |
+| `CatchupThreshold` | 10 | Segments behind `stayBehindSegments` (30) before parallel catch-up engages |
 | `MaxSegmentRetries` | 5 | Per-segment retry limit |
-| `ParallelDownloads` | 6 | Concurrent workers during catch-up |
+| `ParallelDownloads` | 6 | Fallback catch-up worker count when a caller leaves `DownloaderOptions.SegmentWorkers` unset (0). Live downloads are always given the operator's `downloader.segment_workers` (default 12) by the worker layer, so this constant is effectively only a test/library default now. |
 | `SegmentTimeout` | 30s | HTTP timeout per segment request |
 | `DefaultMaxTimeout` | 10min | Fallback for `maximum_timeout` (force-finalize when no segment arrives for this long, even if YouTube reports live) |
 | `streamStatusCheckInterval` | 30s | No-segment gap that triggers a stream-status check (re-checked at most once per interval) |
@@ -431,6 +431,15 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 | `MaxChunkRetries` | 3 | Per-chunk retry limit for VOD |
 | `ProgressThrottle` | 500ms | Throttle VOD progress emission |
 | `DefaultRetryDelayCap` | 60s | Max retry delay (exponential backoff cap) |
+
+#### Catch-up: rolling window and byte-bounded buffer
+
+Parallel catch-up (`runParallelCatchUp`, `internal/engine/downloader_parallel.go`) is a rolling window, not per-batch barriers: workers claim sequences continuously off a shared cursor and completed segments flush to disk in strict ascending order as they arrive, rather than waiting for an entire batch of `segment_workers` fetches to land before the next batch starts. The prior per-batch design paid a full HEAD-probe round trip between every batch; the synthetic-latency harness for this path (`TestCatchUpRollingWindowThroughput`, `downloader_parallel_test.go`) measured a batched run at 4.888s dropping to 0.84s for the same segment count under the rolling window.
+
+- **Claim window width** (`maxCatchupBatch`, `catchUpBatchLimit`) — normally `8 * segmentWorkers()`, so a wider configured pool gets a proportionally deeper pipeline instead of starving against a fixed ceiling (the pre-`segment_workers` code had this fixed at 48, i.e. `8 * ParallelDownloads`). After a failure episode (`noteCatchUpFailureEpisode`, fired on 403/permanent-error bursts) the window damps to a floor of one full parallel wave — `segmentWorkers()` — and regrows by one segment per `catchUpRegrowInterval` (1s) back to the full width. The floor and 1s interval were retuned 2026-08-15 after field evidence: the original floor of 1 segment regrowing at 10s (copied from moonarchive's heartbeat-driven damping) collapsed real catch-up throughput to 1-3 segments wide for the whole duration of a 403 storm, because refresh-and-retry (see "Mid-job re-mint" in platform-services.md) already answers 403 bursts directly — the hard damp no longer needed to shoulder that job alone.
+- **Reorder buffer ceiling** (`catchUpBufferBytes`, 256 MB) — bounds the buffer by bytes rather than segment count, because a wider `segment_workers` pool would otherwise scale buffered memory with a throughput setting (at 1080p60's 3.7-6.2 MB segments, sixteen workers on a count-bounded buffer held ~250 MB regardless of the count chosen). A worker blocks rather than buffering past the ceiling; the head-of-window segment is always admitted so the flush position can never deadlock; segments above the lowest known-failed sequence are dropped rather than held, since they cannot flush until that failure resolves. Resident memory is therefore roughly ceiling + `segment_workers` × segment size, not a function of the claim window width.
+- **Head freshness** — no longer solely the per-batch HEAD probe (`HeadProbeInterval`, 5s). Every segment response's `X-Head-Seqnum` is harvested opportunistically to update the known head, since the rolling window has no natural per-batch checkpoint to probe from; the interval probe still runs as a backstop.
+- **HTTP transport ceiling** (`engineMaxIdleConnsPerHost`, 64, `downloader_fetch.go`) is a fixed idle-connection-pool size per host, not derived from `segment_workers`, because the HTTP client is a package-level singleton built before any worker count is known. A configured `segment_workers` comfortably above this (past `config.SegmentWorkersWarnThreshold`, 16) degrades to per-segment TCP+TLS handshakes instead of connection reuse rather than failing outright — the first place to look if throughput stops scaling with a higher `segment_workers` value.
 
 ### QualityMonitor
 
@@ -461,6 +470,7 @@ The `JobQueue` implements a two-tier concurrency model:
 
 **Download tier (configurable, default 10 slots):**
 - Gates how many VOD jobs can be actively downloading segments in parallel — VODs ONLY. Broadcasts pass through ungated (`acquireDownloadSlot` with `isVod=false` is a no-op): a missed slot on a VOD delays a file that already exists, a missed slot on a live broadcast loses footage. Peak concurrent downloads is therefore (live broadcasts) + `num_parallel_downloads`
+- **Not the same knob as `downloader.segment_workers`.** `num_parallel_downloads` gates concurrent VOD **jobs**; `segment_workers` (default 12, no upper limit — see the constants table under SegmentDownloader below) gates concurrent **segment fetches within one download**, live or VOD. Because broadcasts bypass the download tier entirely, `num_parallel_downloads` has zero effect on a live stream's catch-up rate — confusing the two cost real debugging time when the owner had it set to 1000 with no observable change to catch-up throughput. Segment-level concurrency is what `segment_workers` controls.
 - A VOD job acquires a download slot via `AcquireDownloadSlot()` after stream processing
 - Released via `ReleaseDownloadSlot()` after download completes but before muxing
 - This allows muxing to proceed without blocking download slots (muxing is CPU-bound, not network-bound)

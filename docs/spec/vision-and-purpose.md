@@ -61,7 +61,7 @@ This is the end-to-end lifecycle of how Moombox archives a stream:
 3. **Stream Probing** — Before downloading, Moombox probes the stream to determine its status, available qualities, and required authentication. For YouTube, this involves the Innertube Player API across multiple client types (TV_DOWNGRADED, WEB, WEB_CREATOR, ANDROID_VR) to find the best available formats. For Twitch, this involves GQL queries to get HLS playlist URLs.
 
 4. **Segment Download** — Moombox downloads the stream as it happens:
-   - **YouTube DASH** — Sequential segment download, requesting the next segment as soon as the current one completes. Supports catch-up mode (6 parallel downloads) when falling behind.
+   - **YouTube DASH** — Sequential segment download, requesting the next segment as soon as the current one completes. Supports catch-up mode (a configurable pool of parallel segment workers, `segment_workers`, 12 by default) when falling behind.
    - **YouTube HLS** — Playlist polling to discover new segments as they appear.
    - **Twitch HLS** — Playlist polling with segment deduplication.
    - **VOD** — Parallel segment download for already-completed videos.
