@@ -73,6 +73,14 @@ const (
 	// catchUpRegrowInterval is how much elapsed time restores one segment of
 	// catch-up batch width after a failure episode.
 	catchUpRegrowInterval = 1 * time.Second
+
+	// catchUpBufferBytes caps the RAM held by catch-up's out-of-order reorder
+	// buffer. The buffer was previously bounded only by segment COUNT
+	// (segmentWorkers*3), so memory scaled with a throughput setting: at the
+	// 3.7-6.2 MB segments of a 1080p60 live stream, sixteen workers would
+	// hold ~250 MB. Bounding by bytes means a wider pool costs connections,
+	// not memory — workers simply wait for the head segment to land.
+	catchUpBufferBytes = 256 << 20
 )
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
