@@ -165,12 +165,10 @@ func (m *StatusBarModel) View() string {
 // fitTiers picks the richest (left, right) tier pair whose combined width
 // fits m.width, including the one-column gap between them.
 //
-// Degradation ALTERNATES between the halves rather than exhausting one
-// first: a moderately narrow window loses verbosity evenly instead of
-// amputating either side. The chord hints take the first step down, since
-// their top tier is the widest and the least information-dense; from then
-// on the two sides trade off. Both ladders end at tierNone, so the loop
-// always terminates — with an empty bar in the degenerate case.
+// The right half yields first and the two then alternate, so a narrow
+// window loses status verbosity before it loses keybinds — but neither
+// side is amputated outright. Both ladders end at tierNone, so the loop
+// always terminates, with an empty bar in the degenerate case.
 func (m *StatusBarModel) fitTiers() (string, string) {
 	lefts := m.controlTiers()
 	rights := m.metricTiers()
@@ -182,13 +180,16 @@ func (m *StatusBarModel) fitTiers() (string, string) {
 	li, ri := tierFull, tierFull
 	for !fits(li, ri) {
 		switch {
-		// li <= ri alternates the steps: left, right, left, right… The
-		// ri == tierNone arm lets the left keep degrading alone once the
-		// right has nothing left to give.
-		case li < tierNone && (li <= ri || ri == tierNone):
-			li++
-		case ri < tierNone:
+		// The RIGHT half yields first, then the two alternate (ri <= li
+		// flips the turn each step). The chord hints are the reason this
+		// bar exists — losing "Tab Focus" costs the operator a keybind
+		// they may not know, while losing "Backfill Foo: videos p3" costs
+		// them a detail they can read in the log panel. The li == tierNone
+		// arm lets the right keep degrading alone once the left is spent.
+		case ri < tierNone && (ri <= li || li == tierNone):
 			ri++
+		case li < tierNone:
+			li++
 		default:
 			// Even tierNone/tierNone overflows (a 1-2 column window).
 			// View's MaxWidth clamp is the backstop.
@@ -201,8 +202,8 @@ func (m *StatusBarModel) fitTiers() (string, string) {
 	// first fitting pair is not always the richest fitting pair (at 120
 	// columns the chord hints lost their labels with 37 columns still
 	// empty). Re-upgrade greedily against the width that is actually left,
-	// chord hints first — a window that can seat the full keybind names
-	// should show them, which is the whole point of this bar.
+	// chord hints first — same priority as the descent, so leftover room
+	// buys back keybind names before it buys back status verbosity.
 	for li > tierFull && fits(li-1, ri) {
 		li--
 	}
