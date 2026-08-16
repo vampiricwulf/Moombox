@@ -230,14 +230,29 @@ func (d *SegmentDownloader) noteCatchUpFailureEpisode() {
 }
 
 // catchUpBatchLimit is the per-call segment ceiling for parallel catch-up:
-// the full maxCatchupBatch normally, and a throttled value that regrows by 1
-// every catchUpRegrowInterval after a failure episode. Mirrors moonarchive's
-// batch_count = min(1 + time_since_check/10, batch_count).
+// the full maxCatchupBatch normally, and after a failure episode a value that
+// starts at catchUpDampedFloor and regrows by one segment per
+// catchUpRegrowInterval.
+//
+// The floor and interval were retuned on 2026-08-15 after field evidence. The
+// first version collapsed to a single segment and regrew one per 10s, copying
+// moonarchive's constants — but moonarchive damps against its HEARTBEAT clock,
+// while this resets on every failed segment. With real 403 episodes arriving
+// every ~15-30s the ceiling never climbed out of 1-3, and observed catch-up
+// batches ran 0-2 segments wide against the 48 they had before, i.e. roughly
+// 20-40x slower on exactly the mid-stream-join path this subsystem exists to
+// serve.
+//
+// A hard damp is also no longer what stops a 403 storm: refresh-and-retry is
+// (403 volume fell from ~1100 in 18s to ~12 per MINUTE once it landed). So the
+// floor is one full parallel wave — narrower than that just serialises the
+// worker pool without reducing pressure meaningfully — and the ceiling
+// recovers in ~42s instead of ~8 minutes.
 func (d *SegmentDownloader) catchUpBatchLimit() int {
 	since := d.lastCatchUpFailure.Since()
-	if since >= time.Duration(maxCatchupBatch)*catchUpRegrowInterval {
+	if since >= time.Duration(maxCatchupBatch-catchUpDampedFloor)*catchUpRegrowInterval {
 		return maxCatchupBatch
 	}
-	limit := 1 + int(since/catchUpRegrowInterval)
+	limit := catchUpDampedFloor + int(since/catchUpRegrowInterval)
 	return min(limit, maxCatchupBatch)
 }

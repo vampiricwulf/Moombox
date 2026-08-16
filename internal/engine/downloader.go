@@ -83,7 +83,13 @@ const (
 
 	// catchUpRegrowInterval is how much elapsed time restores one segment of
 	// catch-up batch width after a failure episode.
-	catchUpRegrowInterval = 10 * time.Second
+	catchUpRegrowInterval = 1 * time.Second
+
+	// catchUpDampedFloor is the narrowest catch-up batch a failure episode can
+	// impose: one full parallel wave. Below this the worker pool is idle by
+	// construction and catch-up degrades to sequential throughput without
+	// meaningfully lowering request pressure. See catchUpBatchLimit.
+	catchUpDampedFloor = ParallelDownloads
 )
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
