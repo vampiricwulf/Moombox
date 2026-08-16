@@ -305,6 +305,7 @@ func DownloadManifestlessDash(
 			PoToken:         pot,
 			CookieHeader:    cookieHeader,
 			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:  job.Config.SegmentWorkers,
 			IsOnline:        isOnline,
 			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			OnCredentialRefresh: func() (string, string) {
@@ -365,6 +366,7 @@ func DownloadManifestlessDash(
 			PoToken:         pot,
 			CookieHeader:    cookieHeader,
 			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:  job.Config.SegmentWorkers,
 			IsOnline:        isOnline,
 			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			OnCredentialRefresh: func() (string, string) {

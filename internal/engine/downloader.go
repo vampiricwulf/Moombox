@@ -70,26 +70,9 @@ const (
 	// during parallel catch-up, avoiding download of in-flight segments.
 	stayBehindSegments = 30
 
-	// maxCatchupBatch caps how many segments one runParallelCatchUp call
-	// fetches. Without a cap, a resume far behind the live edge sizes the
-	// batch to the whole gap (thousands of segments); the out-of-order
-	// reorder buffer then holds the entire window in RAM if the
-	// head-of-window segment is stuck or CDN-evicted (oldest-first eviction
-	// makes that the *likely* alignment on a long resume) — a multi-GB spike
-	// that can OOM a low-RAM arm64 host. Bounding the batch makes peak memory
-	// O(batch); runDashLoop re-enters catch-up back-to-back to drain a larger
-	// gap without losing throughput.
-	maxCatchupBatch = 8 * ParallelDownloads
-
 	// catchUpRegrowInterval is how much elapsed time restores one segment of
 	// catch-up batch width after a failure episode.
 	catchUpRegrowInterval = 1 * time.Second
-
-	// catchUpDampedFloor is the narrowest catch-up batch a failure episode can
-	// impose: one full parallel wave. Below this the worker pool is idle by
-	// construction and catch-up degrades to sequential throughput without
-	// meaningfully lowering request pressure. See catchUpBatchLimit.
-	catchUpDampedFloor = ParallelDownloads
 )
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
@@ -161,6 +144,11 @@ type DownloaderOptions struct {
 	// the previous behaviour exactly.
 	OnCredentialRefresh func() (baseURL string, poToken string)
 	Logger              DownloaderLogger
+	// SegmentWorkers is how many segments this download fetches
+	// concurrently. Zero means ParallelDownloads, preserving the historical
+	// behaviour for callers that do not set it. No upper limit is enforced —
+	// see config.SegmentWorkersWarnThreshold for why that is deliberate.
+	SegmentWorkers int
 }
 
 // DownloadActivity describes what the downloader is currently WAITING ON when
@@ -468,6 +456,32 @@ func (d *SegmentDownloader) refreshCredentials() bool {
 			"newURL", freshURL != "", "newToken", freshToken != "")
 	}
 	return installed
+}
+
+// segmentWorkers is the operative concurrency for this download: the
+// configured DownloaderOptions.SegmentWorkers when the caller opted in, or
+// ParallelDownloads otherwise. No upper clamp — a caller asking for an
+// extreme value gets it; config.SegmentWorkersWarnThreshold is where that
+// tradeoff is surfaced to the operator, not here.
+func (d *SegmentDownloader) segmentWorkers() int {
+	if d.opts.SegmentWorkers > 0 {
+		return d.opts.SegmentWorkers
+	}
+	return ParallelDownloads
+}
+
+// maxCatchupBatch caps how many segments one runParallelCatchUp call
+// fetches, derived from the operative worker count so a wider pool gets a
+// proportionally wider window instead of starving against a fixed ceiling.
+// Without a cap, a resume far behind the live edge sizes the batch to the
+// whole gap (thousands of segments); the out-of-order reorder buffer then
+// holds the entire window in RAM if the head-of-window segment is stuck or
+// CDN-evicted (oldest-first eviction makes that the *likely* alignment on a
+// long resume) — a multi-GB spike that can OOM a low-RAM arm64 host.
+// Bounding the batch makes peak memory O(batch); runDashLoop re-enters
+// catch-up back-to-back to drain a larger gap without losing throughput.
+func (d *SegmentDownloader) maxCatchupBatch() int {
+	return 8 * d.segmentWorkers()
 }
 
 // NewSegmentDownloader creates a new segment downloader.

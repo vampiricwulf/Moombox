@@ -199,6 +199,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		IsHls:             true,
 		PoToken:           hlsPoToken,
 		MaxTimeout:        time.Duration(job.Config.MaximumTimeout) * time.Second,
+		SegmentWorkers:    job.Config.SegmentWorkers,
 		EnforceMaxTimeout: true, // YouTube status can stick; Twitch HLS opts out
 		IsOnline:          isOnline,
 		Logger:            newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),

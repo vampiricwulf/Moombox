@@ -50,8 +50,12 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		data []byte
 	}
 
-	bufferCap := ParallelDownloads * 3
-	work := make(chan segWork, ParallelDownloads)
+	// workers is the operative concurrency for this download (see
+	// segmentWorkers) — computed once so the channel sizing and worker-pool
+	// spawn below agree with each other and with catchUpBatchLimit's ceiling.
+	workers := d.segmentWorkers()
+	bufferCap := workers * 3
+	work := make(chan segWork, workers)
 	results := make(chan segResult, bufferCap)
 	// done is closed when this function returns so workers blocked on
 	// `results <-` can unblock and exit. Without it, an early consumer
@@ -63,7 +67,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	var wg sync.WaitGroup
 
 	// Spawn fixed worker pool
-	for range ParallelDownloads {
+	for range workers {
 		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil && d.logger != nil {
@@ -230,9 +234,9 @@ func (d *SegmentDownloader) noteCatchUpFailureEpisode() {
 }
 
 // catchUpBatchLimit is the per-call segment ceiling for parallel catch-up:
-// the full maxCatchupBatch normally, and after a failure episode a value that
-// starts at catchUpDampedFloor and regrows by one segment per
-// catchUpRegrowInterval.
+// the full maxCatchupBatch() normally, and after a failure episode a value
+// that starts at the damped floor — one full parallel wave, i.e.
+// d.segmentWorkers() — and regrows by one segment per catchUpRegrowInterval.
 //
 // The floor and interval were retuned on 2026-08-15 after field evidence. The
 // first version collapsed to a single segment and regrew one per 10s, copying
@@ -247,12 +251,16 @@ func (d *SegmentDownloader) noteCatchUpFailureEpisode() {
 // (403 volume fell from ~1100 in 18s to ~12 per MINUTE once it landed). So the
 // floor is one full parallel wave — narrower than that just serialises the
 // worker pool without reducing pressure meaningfully — and the ceiling
-// recovers in ~42s instead of ~8 minutes.
+// recovers in ~42s instead of ~8 minutes (at the ParallelDownloads=6 default;
+// a wider configured pool takes proportionally longer to regrow its wider
+// ceiling, at the same one-segment-per-second rate).
 func (d *SegmentDownloader) catchUpBatchLimit() int {
+	full := d.maxCatchupBatch()
+	floor := d.segmentWorkers()
 	since := d.lastCatchUpFailure.Since()
-	if since >= time.Duration(maxCatchupBatch-catchUpDampedFloor)*catchUpRegrowInterval {
-		return maxCatchupBatch
+	if since >= time.Duration(full-floor)*catchUpRegrowInterval {
+		return full
 	}
-	limit := catchUpDampedFloor + int(since/catchUpRegrowInterval)
-	return min(limit, maxCatchupBatch)
+	limit := floor + int(since/catchUpRegrowInterval)
+	return min(limit, full)
 }

@@ -91,6 +91,12 @@ type JobConfig struct {
 	FilenameTemplate   string
 	DownloadChat       bool
 	MaximumTimeout     int
+	// SegmentWorkers is the configured concurrent-segment-fetch count
+	// (config.Downloader.SegmentWorkers), threaded into engine.DownloaderOptions
+	// by every strategy that builds a segment downloader. Zero means the
+	// strategies pass it straight through to the engine unchanged, which
+	// falls back to engine.ParallelDownloads — see DownloaderOptions.SegmentWorkers.
+	SegmentWorkers int
 }
 
 // DownloadWorker manages the job processing loop.
@@ -691,7 +697,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	// Snapshot all config fields under lock
 	var (
 		cfgOutputDir, cfgStagingDir, cfgTemplate string
-		cfgMaxRes, cfgMaxTimeout                 int
+		cfgMaxRes, cfgMaxTimeout, cfgSegWorkers  int
 		cfgPrefer60, cfgChat                     bool
 	)
 	w.readConfig(func(c *config.MoomboxConfig) {
@@ -702,6 +708,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgPrefer60 = c.Downloader.Prefer60fps
 		cfgChat = c.Downloader.DownloadChat
 		cfgMaxTimeout = c.Downloader.MaximumTimeout
+		cfgSegWorkers = c.Downloader.SegmentWorkers
 	})
 
 	outputDir := cfgOutputDir
@@ -753,6 +760,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 			FilenameTemplate:   template,
 			DownloadChat:       cfgChat,
 			MaximumTimeout:     cfgMaxTimeout,
+			SegmentWorkers:     cfgSegWorkers,
 		},
 		YT:         w.yt,
 		StagingDir: stagingDir,

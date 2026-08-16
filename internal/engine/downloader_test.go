@@ -70,6 +70,33 @@ func TestNewSegmentDownloader_NilLogger(t *testing.T) {
 	d.logger.Error("test")
 }
 
+// TestSegmentWorkersOption pins the fallback contract: an unset option keeps
+// the historical ParallelDownloads behaviour, so every downloader that does
+// not opt in (Twitch, VOD) is unaffected.
+func TestSegmentWorkersOption(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{BaseURL: "https://example.invalid/v", OutputFile: "x"})
+	if got := d.segmentWorkers(); got != ParallelDownloads {
+		t.Errorf("unset SegmentWorkers = %d, want the ParallelDownloads default %d", got, ParallelDownloads)
+	}
+	if got := d.maxCatchupBatch(); got != 8*ParallelDownloads {
+		t.Errorf("unset maxCatchupBatch = %d, want %d", got, 8*ParallelDownloads)
+	}
+
+	d2 := NewSegmentDownloader(DownloaderOptions{BaseURL: "https://example.invalid/v", OutputFile: "x", SegmentWorkers: 20})
+	if got := d2.segmentWorkers(); got != 20 {
+		t.Errorf("SegmentWorkers = %d, want 20", got)
+	}
+	if got := d2.maxCatchupBatch(); got != 160 {
+		t.Errorf("maxCatchupBatch = %d, want 8*20", got)
+	}
+
+	// No upper clamp anywhere in the engine either.
+	d3 := NewSegmentDownloader(DownloaderOptions{BaseURL: "https://example.invalid/v", OutputFile: "x", SegmentWorkers: 500})
+	if got := d3.segmentWorkers(); got != 500 {
+		t.Errorf("SegmentWorkers = %d, want 500 (the engine must not clamp)", got)
+	}
+}
+
 func TestSegmentDownloader_Cancel(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    "https://example.com/sq/$Number$",

@@ -14,13 +14,29 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
+// engineMaxIdleConnsPerHost bounds the idle-connection pool per host for
+// engineHTTPClient below. engineHTTPClient is a package-level singleton
+// built once at package init — long before any download's operative worker
+// count (DownloaderOptions.SegmentWorkers, ultimately
+// config.Downloader.SegmentWorkers) is known — so it cannot be sized per
+// download the way the worker-pool channels in downloader_parallel.go and
+// downloader_hls.go are. It is instead sized generously up front: 64
+// comfortably exceeds config.SegmentWorkersWarnThreshold (16, the point
+// past which the config layer already warns operators about resource
+// tradeoffs) with headroom for HEAD probes and playlist fetches sharing the
+// same host. A downloader configured with more workers than this still
+// downloads correctly — connections beyond the idle pool's capacity simply
+// aren't kept alive, so those workers degrade to paying a fresh TCP+TLS
+// handshake per segment rather than failing outright.
+const engineMaxIdleConnsPerHost = 64
+
 // engineHTTPClient is a shared HTTP client for segment and chunk downloads.
 //
 // Transport config: the Go default caps idle connections per host at 2,
-// which causes TCP-handshake churn during high-concurrency catch-up with
-// ParallelDownloads (6) workers plus HEAD probes and playlist fetches.
-// Bump idle-per-host to ParallelDownloads+2 so the workers reuse sockets,
-// and keep them alive for 90 s (matches http.DefaultTransport's value).
+// which causes TCP-handshake churn during high-concurrency catch-up. Bump
+// idle-per-host to engineMaxIdleConnsPerHost (see its doc) so workers reuse
+// sockets, and keep them alive for 90 s (matches http.DefaultTransport's
+// value).
 //
 // Timeout: context-based cancellation at every callsite is the primary
 // deadline mechanism (each request has its own ctx with SegmentTimeout /
@@ -28,14 +44,12 @@ import (
 // pathological "ctx never fires AND server keeps the socket open forever"
 // case; 5 minutes is generous enough for multi-MB segments on slow
 // connections without becoming a hang vector.
-// MaxIdleConnsPerHost is bumped beyond httpx's default of 8 because
-// engine fans out parallel segment fetches at ParallelDownloads + 2.
 // Built via httpx.NewTransport so the keep-alive tuning stays in sync
 // with the rest of the codebase.
 var engineHTTPClient = httpx.ClientWithTransport(
 	5*time.Minute,
 	httpx.NewTransport(httpx.TransportOptions{
-		MaxIdleConnsPerHost: ParallelDownloads + 2,
+		MaxIdleConnsPerHost: engineMaxIdleConnsPerHost,
 	}),
 )
 

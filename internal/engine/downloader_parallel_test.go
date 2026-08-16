@@ -11,9 +11,11 @@ import (
 // so a single blip doesn't cripple catch-up for the rest of the archive.
 func TestCatchUpBatchLimitDamping(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: "https://example.invalid/v", OutputFile: "x"})
+	fullBatch := d.maxCatchupBatch()
+	dampedFloor := d.segmentWorkers()
 
-	if got := d.catchUpBatchLimit(); got != maxCatchupBatch {
-		t.Errorf("fresh limit = %d, want the full %d", got, maxCatchupBatch)
+	if got := d.catchUpBatchLimit(); got != fullBatch {
+		t.Errorf("fresh limit = %d, want the full %d", got, fullBatch)
 	}
 
 	// A failure damps to one full parallel wave, never below it. Collapsing
@@ -21,14 +23,14 @@ func TestCatchUpBatchLimitDamping(t *testing.T) {
 	// (field evidence, 2026-08-15) while 403 episodes arrived every ~15-30s.
 	d.noteCatchUpFailureEpisode()
 	got := d.catchUpBatchLimit()
-	if got != catchUpDampedFloor {
-		t.Errorf("limit immediately after a failure = %d, want the floor %d", got, catchUpDampedFloor)
+	if got != dampedFloor {
+		t.Errorf("limit immediately after a failure = %d, want the floor %d", got, dampedFloor)
 	}
 
 	// 10s later the ceiling has regrown (1 per second) but not to full.
 	d.lastCatchUpFailure.Store(time.Now().Add(-10 * time.Second))
 	got = d.catchUpBatchLimit()
-	if want := catchUpDampedFloor + 10; got != want {
+	if want := dampedFloor + 10; got != want {
 		t.Errorf("limit 10s after a failure = %d, want %d", got, want)
 	}
 
@@ -42,7 +44,7 @@ func TestCatchUpBatchLimitDamping(t *testing.T) {
 
 	// Long after, the full batch is available again.
 	d.lastCatchUpFailure.Store(time.Now().Add(-2 * time.Hour))
-	if got := d.catchUpBatchLimit(); got != maxCatchupBatch {
-		t.Errorf("limit long after a failure = %d, want the full %d", got, maxCatchupBatch)
+	if got := d.catchUpBatchLimit(); got != fullBatch {
+		t.Errorf("limit long after a failure = %d, want the full %d", got, fullBatch)
 	}
 }

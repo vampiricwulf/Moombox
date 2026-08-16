@@ -194,23 +194,25 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// what the engine fetches.
 	if result.HasVideo && result.VideoPath != "" && videoResolved != "" {
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:     videoResolved,
-			OutputFile:  result.VideoPath,
-			StartSeq:    0,
-			EndSeq:      0, // Single file download
-			IsDirectURL: true,
-			Logger:      newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
+			BaseURL:        videoResolved,
+			OutputFile:     result.VideoPath,
+			StartSeq:       0,
+			EndSeq:         0, // Single file download
+			IsDirectURL:    true,
+			SegmentWorkers: job.Config.SegmentWorkers,
+			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 		})
 	}
 
 	if result.HasAudio && result.AudioPath != "" && audioResolved != "" {
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:     audioResolved,
-			OutputFile:  result.AudioPath,
-			StartSeq:    0,
-			EndSeq:      0,
-			IsDirectURL: true,
-			Logger:      newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
+			BaseURL:        audioResolved,
+			OutputFile:     result.AudioPath,
+			StartSeq:       0,
+			EndSeq:         0,
+			IsDirectURL:    true,
+			SegmentWorkers: job.Config.SegmentWorkers,
+			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 		})
 	}
 

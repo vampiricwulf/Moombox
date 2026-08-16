@@ -219,12 +219,13 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	createDownloader := func(variantURL, stagingDir string, startSeq int, forceStartSeq bool) (*engine.SegmentDownloader, string) {
 		videoPath := filepath.Join(stagingDir, "video_stream")
 		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:       variantURL,
-			OutputFile:    videoPath,
-			StartSeq:      startSeq,
-			ForceStartSeq: forceStartSeq,
-			IsHls:         true,
-			StreamID:      variant.StreamID,
+			BaseURL:        variantURL,
+			OutputFile:     videoPath,
+			StartSeq:       startSeq,
+			ForceStartSeq:  forceStartSeq,
+			IsHls:          true,
+			StreamID:       variant.StreamID,
+			SegmentWorkers: jobCtx.Config.SegmentWorkers,
 			// Twitch live has no DVR: segments that left the playlist window
 			// are gone. Stop at real gaps so every part file stays internally
 			// gapless — the loop below muxes the part and starts the next.

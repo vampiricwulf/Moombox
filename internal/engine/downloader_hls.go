@@ -556,7 +556,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 }
 
 // runHlsVodParallel downloads all VOD HLS segments in parallel with bounded concurrency.
-// Uses a worker pool pattern: ParallelDownloads workers pull from a work channel,
+// Uses a worker pool pattern: segmentWorkers() workers pull from a work channel,
 // avoiding N goroutines sitting in memory for large VODs.
 func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlaylist) error {
 	totalSegs := len(pl.Segments)
@@ -573,8 +573,12 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 		data []byte
 	}
 
-	work := make(chan segWork, ParallelDownloads)
-	results := make(chan segResult, ParallelDownloads*3)
+	// workers is the operative concurrency for this download (see
+	// segmentWorkers) — computed once so channel sizing and the worker-pool
+	// spawn below agree.
+	workers := d.segmentWorkers()
+	work := make(chan segWork, workers)
+	results := make(chan segResult, workers*3)
 	// done unblocks workers stuck on a full results channel when the
 	// consumer below returns early on write error; without it wg.Wait
 	// would never complete and the entire worker pool would leak.
@@ -621,7 +625,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	}
 
 	// Spawn fixed worker pool
-	for range ParallelDownloads {
+	for range workers {
 		wg.Go(func() {
 			defer func() {
 				// Backstop only (channel ops below): per-item panics are
@@ -679,7 +683,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	// Stream write: buffer out-of-order segments, write in order as they
 	// arrive. Every index produces exactly one result (segment data or a
 	// nil GAP SENTINEL from a failed worker), so the reorder buffer is
-	// bounded by the in-flight window (~ParallelDownloads + results cap) —
+	// bounded by the in-flight window (~workers + results cap) —
 	// a failed segment can no longer wedge nextIdx and accumulate the whole
 	// VOD in RAM. gapStart coalesces consecutive missing indices into one
 	// OnGap range and persists across the outer loop.

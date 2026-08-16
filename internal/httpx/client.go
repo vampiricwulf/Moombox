@@ -25,9 +25,9 @@ import (
 //   - IdleConnTimeout: 90s — keep idle conns warm long enough that
 //     periodic monitor/refresh ticks reuse them.
 //
-// Engine downloads use a custom-built transport with ParallelDownloads-
-// aware MaxIdleConnsPerHost (~ParallelDownloads + 2) — see engine
-// package for that. All other packages should use this default via
+// Engine downloads use a custom-built transport with a fixed, generously
+// sized MaxIdleConnsPerHost (engineMaxIdleConnsPerHost = 64) — see the
+// engine package for that. All other packages should use this default via
 // Client() or ClientWithTimeout().
 //
 // The transport is package-private so callers can't mutate it; if a
