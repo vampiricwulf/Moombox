@@ -22,7 +22,7 @@ So the line sustains at least 11.3 MB/s at the same connection count Moombox use
 
 Two independent causes, one task group each:
 
-1. **`ParallelDownloads = 6` is a compile-time constant** (`internal/engine/downloader.go:46`) with no way to change it. The setting that *looks* like the knob, `downloader.num_parallel_downloads`, feeds `NewJobQueue` (`internal/worker/worker.go:159`) and controls how many **jobs** run at once — the owner had it at 1000 with no effect on segment throughput.
+1. **`ParallelDownloads = 6` is a compile-time constant** (`internal/engine/downloader.go:46`) with no way to change it. The setting that *looks* like the knob, `downloader.num_parallel_downloads`, feeds `NewJobQueue` (`internal/worker/worker.go:159`) and gates how many **VOD jobs** download at once — and per `docs/spec/architecture.md:463` live broadcasts bypass that pool entirely (`acquireDownloadSlot` is a no-op for them, because a missed slot on a live stream loses footage). So for a live archive the setting is doubly inert: wrong layer, and not even applied. The owner had it at 1000 with no effect on segment throughput.
 2. **Catch-up drains its pool at every batch.** `runParallelCatchUp` feeds exactly `targetSeq - curSeq` items, waits for every worker, returns, and `runDashLoop` then runs `probeHeadSequence` before re-entering. Segment writes already stream in order as results arrive (the buffer/flush loop is fine) — the stall is the boundary itself, plus a head probe per batch.
 
 ## Global Constraints
@@ -125,9 +125,10 @@ Expected: FAIL — `SegmentWorkers` undefined.
 
 ```go
 	// SegmentWorkers is how many segments are fetched CONCURRENTLY within a
-	// single download. Distinct from NumParallelDownloads, which is how many
-	// jobs run at once — a distinction that cost real debugging time on
-	// 2026-08-15, when a value of 1000 there had no effect on catch-up speed.
+	// single download. Distinct from NumParallelDownloads, which gates how
+	// many VOD jobs download at once and which live broadcasts bypass
+	// entirely — a distinction that cost real debugging time on 2026-08-15,
+	// when a value of 1000 there had no effect on a live stream's catch-up.
 	//
 	// Higher values catch up faster on an in-progress stream (measured: six
 	// connections sustained 11.3 MB/s where Moombox managed 5.96 MB/s), at
@@ -396,7 +397,7 @@ git commit -m "perf(engine): rolling-window catch-up instead of per-batch barrie
 
 - [ ] **Step 1: Document the setting and the distinction**
 
-State plainly that `num_parallel_downloads` = concurrent **jobs** and `segment_workers` = concurrent **segments within one download**; that `segment_workers` has no upper limit and warns above 16 because a wide fan-out attracts bot detection; and record the measurements from this plan's Background so the default's rationale survives.
+Update the config table at `docs/spec/data-and-storage.md:502` (beside the `NumParallelDownloads` row) and the note at `docs/spec/architecture.md:463`. State plainly that `num_parallel_downloads` gates concurrent **VOD jobs** (live broadcasts bypass it) while `segment_workers` is concurrent **segments within one download**; that `segment_workers` has no upper limit and warns above 16 because a wide fan-out attracts bot detection; and record the measurements from this plan's Background so the default's rationale survives.
 
 - [ ] **Step 2: Full verification**
 
