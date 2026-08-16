@@ -99,28 +99,28 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// Per audit reports/worker.md F29: previously generated twice (steps 2 and 5),
 	// which was a cache hit but redundant work and confusing duplicate logging.
 	//
-	// GVS PO token: unconditional videoID binding (moonarchive parity),
-	// minted from the watch-page challenge riding on videoInfo when present.
-	// Supersedes the former poTokenBinding visitorData/channelID scheme —
-	// see spec 2026-08-14 attestation POT coherence §3.
+	// GVS PO token: bound per yt-dlp's get_webpo_content_binding rule —
+	// experiment flag → videoID, authenticated → datasyncID, otherwise
+	// visitorData — resolved once at extraction (withAttestation) and carried
+	// on videoInfo, so every strategy mints under the same identity. Minted
+	// via the cached /att/get minter, the same sourcing
+	// bgutil-ytdlp-pot-provider uses; the challenge-sourced fresh-per-mint
+	// minters exceed upstream and stay dormant (see GenerateGvsPoToken).
+	// Activated 2026-08-16 after the 10c2efd revert's suspect — the bundled
+	// token-policy change — was exonerated (the stall reproduced on baseline;
+	// root cause was the ANDROID_VR client ranking, fixed in e9d1388).
 	var dashPoToken string
 	if potProvider != nil {
-		// REVERTED 2026-08-15: visitorData binding + cached /att/get minter,
-		// the last GVS configuration observed downloading a live stream with
-		// zero 403s. The videoID-bound, challenge-sourced, fresh-per-mint
-		// policy stalled the first live capture at segment ~72 with a 403
-		// storm. Reintroduce one variable at a time; live streams give
-		// same-day feedback.
-		bindingValue := poTokenBinding(job, videoInfo)
+		bindingValue, bindingKind := gvsBinding(job, videoInfo)
 		poToken, err := potProvider.GeneratePoTokenString(ctx, bindingValue, false)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
-				"binding", "visitorData", "err", err)
+				"binding", bindingKind, "err", err)
 		} else if poToken != "" {
 			dashPoToken = poToken
 			dashURL = strings.TrimRight(dashURL, "/") + "/pot/" + poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", "visitorData", "tokenLength", len(poToken))
+				"binding", bindingKind, "tokenLength", len(poToken))
 		} else {
 			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}

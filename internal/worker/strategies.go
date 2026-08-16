@@ -389,16 +389,15 @@ func minterUsable(m gvsTokenMinter) bool {
 // recovery, a fresh URL alone with a stale token is not.
 //
 // binding is the GVS content binding to mint under, resolved ONCE by the
-// caller (poTokenBinding, at strategy setup) rather than recomputed here.
-// invalidate403Caches unconditionally clears job.YT's visitor data as one
-// of its steps, and nothing repopulates it before a same-call mint would
-// read it — recomputing per call would make the FIRST refresh (whichever
-// downloader's cooldown fires first) mint under the real visitorData
-// binding and every refresh after it — on either downloader, since they
-// share job.YT — silently drift onto the degraded channelID/videoID
-// fallback. Passing the caller's stable value keeps every mint, across
-// both downloaders and every retry, under the one binding scheme the job
-// started with.
+// caller (gvsBinding, at strategy setup) rather than recomputed here. The
+// current binding source (VideoInfo.GvsBinding, stamped at extraction) is
+// immune to cache invalidation, but the pass-the-stable-value contract
+// stays: invalidate403Caches clears job.YT's visitor data mid-refresh, and
+// any future binding source that reads live session state would silently
+// drift between refreshes — or between the two downloaders sharing job.YT —
+// if it were recomputed per call. One resolution at setup keeps every mint,
+// across both downloaders and every retry, under the one binding scheme the
+// job started with.
 //
 // The URL half (re-fetch + resolve) only runs when a cipher solver is
 // actually wired and the job has a PlayerURL to route through — mirroring
@@ -509,33 +508,22 @@ func formatBecameWholeFile(formats []youtube.Format, itag int) bool {
 	return false
 }
 
-// poTokenBinding returns the GVS content binding: visitorData, falling back
-// to the channel ID when visitor-data extraction failed.
-//
-// RESTORED 2026-08-15. This is the binding every live capture through
-// 2026-08-13 used, with zero segment 403s recorded. It was replaced by
-// gvsBinding (yt-dlp's experiment-aware videoID/datasyncID/visitorData rule)
-// on 2026-08-15, and the very next live capture stalled at segment ~72 under
-// a 403 storm. gvsBinding is retained below for the staged reintroduction —
-// it is upstream-correct on paper — but nothing calls it until one live
-// stream has proven each variable in isolation.
-func poTokenBinding(job *JobContext, videoInfo *youtube.VideoInfo) string {
-	if job != nil && job.YT != nil {
-		if vd := job.YT.GetVisitorData(); vd != "" {
-			return vd
-		}
-	}
-	if job != nil && job.Logger != nil {
-		job.Logger.Warn("[POT] visitor data unavailable; falling back to channelID for content binding")
-	}
-	return videoInfo.ChannelID
-}
-
 // gvsBinding returns the content binding a GVS mint must use for this job,
 // plus the label the provenance log reports. The value is resolved once
 // during extraction (youtube.GvsContentBinding, mirroring yt-dlp's
-// get_webpo_content_binding) and carried on VideoInfo, so every strategy asks
-// the same question and gets the same answer.
+// get_webpo_content_binding — experiment flag → videoID, authenticated →
+// datasyncID, otherwise visitorData) and carried on VideoInfo, so every
+// strategy asks the same question and gets the same answer.
+//
+// ACTIVE since 2026-08-16 — yt-dlp's rule is the golden standard. The
+// interim visitorData-always policy (poTokenBinding, removed; see 10c2efd
+// and git history) existed because the rule's first live trial stalled, but
+// that stall reproduced on baseline and traced to the ANDROID_VR client
+// ranking (e9d1388), exonerating the binding. visitorData-always survived
+// only while YouTube wasn't enforcing bindings on GVS: the
+// html5_generate_content_po_token experiment (verified ON, 2026-08-15) is
+// exactly how enforcement rolls out, and authenticated sessions upstream
+// bind datasyncID, which visitorData-always never did.
 //
 // The videoID fallback covers VideoInfo values that never passed through a
 // watch-page fetch (probe-only paths); it matches what the experiment branch
@@ -550,9 +538,11 @@ func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind stri
 // challengeLabel compresses a challenge value to the label the provenance
 // log line reports: "page" (watch-page ytAtN challenge present) or "none".
 //
-// GVS binding is videoID (moonarchive parity). If premieres 403 again
-// despite challenge-sourced minters, see GenerateGvsPoToken's doc comment —
-// datasync-ID binding is the next suspect.
+// Currently unreferenced by the active mint path: GVS mints use the cached
+// /att/get minter (upstream provider parity), and the challenge-sourced
+// minters (GenerateGvsPoToken) stay dormant — they exceed what yt-dlp does.
+// If premieres 403 despite the yt-dlp-parity bindings, those minters are the
+// next variable to trial, and this label joins the provenance log then.
 func challengeLabel(challenge string) string {
 	if challenge != "" {
 		return "page"

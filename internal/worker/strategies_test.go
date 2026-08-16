@@ -64,7 +64,7 @@ func TestRefreshGvsCredentialsBypassesTokenCache(t *testing.T) {
 	// job.YT is a real *youtube.Service (JobContext.YT is concrete, not an
 	// interface — there is no stub seam), constructed with a nil cookie jar
 	// and populated with visitor data the same way a watch-page fetch would
-	// via SetVisitorData. poTokenBinding reads it through GetVisitorData.
+	// via SetVisitorData (refreshGvsCredentials invalidates it internally).
 	ytSvc := youtube.NewService(nil, &discardLogger{})
 	ytSvc.SetVisitorData("vd-123")
 
@@ -73,7 +73,11 @@ func TestRefreshGvsCredentialsBypassesTokenCache(t *testing.T) {
 		YT:     ytSvc,
 		Logger: &discardLogger{},
 	}
+	// GvsBinding stamped the way withAttestation would after a watch-page
+	// fetch that resolved visitorData binding under yt-dlp's rule.
 	videoInfo := &youtube.VideoInfo{
+		GvsBinding:     "vd-123",
+		GvsBindingKind: youtube.BindingVisitorData,
 		Formats: []youtube.Format{
 			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1"},
 		},
@@ -82,7 +86,7 @@ func TestRefreshGvsCredentialsBypassesTokenCache(t *testing.T) {
 	// Mirrors the real caller (strategy_youtube_manifestless_dash.go):
 	// resolved once, before the binding-clearing invalidate403Caches step
 	// refreshGvsCredentials runs internally.
-	binding := poTokenBinding(job, videoInfo)
+	binding, _ := gvsBinding(job, videoInfo)
 
 	_, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, fake, binding, "test")
 
@@ -108,7 +112,7 @@ func TestRefreshGvsCredentialsBypassesTokenCache(t *testing.T) {
 // visitorData binding: two live downloaders on the same stream, two
 // different binding schemes.
 //
-// The caller now resolves the binding ONCE (poTokenBinding, at strategy
+// The caller now resolves the binding ONCE (gvsBinding, at strategy
 // setup) and passes it into every refreshGvsCredentials call for the
 // lifetime of the download. This test simulates that: it calls
 // refreshGvsCredentials twice with one caller-supplied binding — standing
@@ -133,10 +137,12 @@ func TestRefreshGvsCredentialsBindingStableAcrossRefreshes(t *testing.T) {
 		Logger: &discardLogger{},
 	}
 	videoInfo := &youtube.VideoInfo{
-		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1"}},
+		GvsBinding:     "vd-123",
+		GvsBindingKind: youtube.BindingVisitorData,
+		Formats:        []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1"}},
 	}
 
-	binding := poTokenBinding(job, videoInfo)
+	binding, _ := gvsBinding(job, videoInfo)
 	if binding != "vd-123" {
 		t.Fatalf("test setup: binding = %q, want vd-123", binding)
 	}

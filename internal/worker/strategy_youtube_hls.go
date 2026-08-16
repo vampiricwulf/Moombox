@@ -49,28 +49,23 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// Generate PO token once and reuse for master URL, variant URL, and
 	// segment URLs (audit reports/worker.md F30; same dedup as F29 for DASH).
 	//
-	// GVS PO token: unconditional videoID binding (moonarchive parity),
-	// minted from the watch-page challenge riding on videoInfo when present.
-	// Supersedes the former poTokenBinding visitorData/channelID scheme —
-	// see spec 2026-08-14 attestation POT coherence §3.
+	// GVS PO token: bound per yt-dlp's get_webpo_content_binding rule,
+	// resolved once at extraction (withAttestation) and carried on
+	// videoInfo; minted via the cached /att/get minter (upstream provider
+	// parity). See strategy_youtube_dash.go's mint block for the full
+	// rationale and the 2026-08-16 activation note.
 	var hlsPoToken string
 	if potProvider != nil {
-		// REVERTED 2026-08-15: visitorData binding + cached /att/get minter,
-		// the last GVS configuration observed downloading a live stream with
-		// zero 403s. The videoID-bound, challenge-sourced, fresh-per-mint
-		// policy stalled the first live capture at segment ~72 with a 403
-		// storm. Reintroduce one variable at a time; live streams give
-		// same-day feedback.
-		bindingValue := poTokenBinding(job, videoInfo)
+		bindingValue, bindingKind := gvsBinding(job, videoInfo)
 		poToken, err := potProvider.GeneratePoTokenString(ctx, bindingValue, false)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
-				"binding", "visitorData", "err", err)
+				"binding", bindingKind, "err", err)
 		} else if poToken != "" {
 			hlsPoToken = poToken
 			hlsURL = strings.TrimRight(hlsURL, "/") + "/pot/" + poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", "visitorData", "tokenLength", len(poToken))
+				"binding", bindingKind, "tokenLength", len(poToken))
 		} else {
 			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}

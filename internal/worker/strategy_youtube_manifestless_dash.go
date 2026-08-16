@@ -121,9 +121,9 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 //     this during player-response parsing, but we re-route here so that any
 //     orchestrator-driven URL refresh on cipher rotation goes through the
 //     same path.
-//  4. Mint a GVS POT unconditionally bound to videoID (moonarchive parity,
-//     spec 2026-08-14 attestation POT coherence §3), sourced from the
-//     watch-page challenge riding on videoInfo when present.
+//  4. Mint a GVS POT bound per yt-dlp's get_webpo_content_binding rule
+//     (gvsBinding, resolved at extraction and carried on videoInfo), via
+//     the cached /att/get minter.
 //  5. Build engine.SegmentDownloader instances. The downloader's
 //     buildSegmentURL auto-detects query-style adaptive URLs and appends
 //     `&sq=N`, while applyPoTokenQuery appends `&pot=POT` per fetch. No
@@ -207,38 +207,30 @@ func DownloadManifestlessDash(
 		audioStream.BaseURL = resolved
 	}
 
-	// GVS PO token: unconditional videoID binding (moonarchive parity),
-	// minted from the watch-page challenge riding on videoInfo when present.
-	// Supersedes the former manifest-presence-conditional binding — see
-	// spec 2026-08-14 attestation POT coherence §3.
+	// GVS PO token: bound per yt-dlp's get_webpo_content_binding rule,
+	// resolved once at extraction (withAttestation) and carried on
+	// videoInfo; minted via the cached /att/get minter (upstream provider
+	// parity). See strategy_youtube_dash.go's mint block for the full
+	// rationale and the 2026-08-16 activation note.
 	//
 	// Resolved ONCE here — not re-derived per mint — so every subsequent
 	// credential refresh (video, audio, 1st, 2nd, Nth) binds under the
-	// same identity as this initial mint. Re-deriving via poTokenBinding
-	// inside refreshGvsCredentials would drift: invalidate403Caches clears
-	// job.YT's visitor data on every refresh and nothing repopulates it
-	// mid-download, so a second call would silently fall back to the
-	// degraded channelID/videoID binding while the first call (or the
-	// sibling video/audio downloader's refresh, which shares job.YT) still
-	// used visitorData — two live downloaders minting under two different
-	// binding schemes for the same stream.
-	bindingValue := poTokenBinding(job, videoInfo)
+	// same identity as this initial mint. gvsBinding reads the binding
+	// stamped on videoInfo at extraction, which no cache invalidation
+	// touches — but passing the resolved value keeps the refresh contract
+	// (refreshGvsCredentials takes the caller's stable binding) uniform and
+	// future-proof against a binding source that IS invalidated mid-job.
+	bindingValue, bindingKind := gvsBinding(job, videoInfo)
 	var pot string
 	if potProvider != nil {
-		// REVERTED 2026-08-15: visitorData binding + cached /att/get minter,
-		// the last GVS configuration observed downloading a live stream with
-		// zero 403s. The videoID-bound, challenge-sourced, fresh-per-mint
-		// policy stalled the first live capture at segment ~72 with a 403
-		// storm. Reintroduce one variable at a time; live streams give
-		// same-day feedback.
 		poToken, err := potProvider.GeneratePoTokenString(ctx, bindingValue, false)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
-				"binding", "visitorData", "err", err)
+				"binding", bindingKind, "err", err)
 		} else if poToken != "" {
 			pot = poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", "visitorData", "tokenLength", len(poToken))
+				"binding", bindingKind, "tokenLength", len(poToken))
 		} else {
 			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}

@@ -442,19 +442,18 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 
 	// Inject PO token (serviceIntegrityDimensions.poToken) for WEB-family clients.
 	//
-	// REVERTED 2026-08-15 to visitorData binding + cached /att/get minter.
-	// yt-dlp binds PoTokenContext.PLAYER to the video ID (pot/utils.py) and we
-	// followed it, but the first live capture on that build stalled at segment
-	// ~72 with a 403 storm where the previous configuration had recorded zero
-	// 403s across a whole stream. Three token variables changed at once
-	// (player binding, GVS binding, challenge-sourced minters), so the token
-	// policy is back to the last configuration observed working end-to-end and
-	// the premiere fix gets reintroduced one variable at a time — live streams
-	// are frequent enough to test each in a day.
+	// Bound to the VIDEO ID: yt-dlp binds PoTokenContext.PLAYER to the video
+	// ID unconditionally (pot/utils.py get_webpo_content_binding), and it is
+	// the golden standard here. Re-activated 2026-08-16 — the 10c2efd revert's
+	// suspicion of this binding was exonerated when the stall reproduced on
+	// baseline (root cause: ANDROID_VR client ranking, fixed in e9d1388).
+	// Minted via the cached /att/get minter (upstream provider parity); the
+	// visitorData gate stays as the "session established" precondition it
+	// always was, not as the binding.
 	//
 	// Failure is non-fatal: the request still runs without a token.
 	if p.potProvider != nil && clientAcceptsPlayerPoToken(client) && ytcfg != nil && ytcfg.VisitorData != "" {
-		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, ytcfg.VisitorData, false); err == nil && poToken != "" {
+		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, videoID, false); err == nil && poToken != "" {
 			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
 		} else if err != nil {
 			p.logger.Debug("[PlayerApi] PO token generation failed, continuing without", slog.String("client", client.ClientName), slog.String("error", err.Error()))
@@ -559,10 +558,10 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	}
 
 	// Inject PO token for WEB_EMBEDDED (same rationale as fetchWithClient):
-	// bound to videoID, minted from the watch page's attestation challenge
-	// when available.
+	// bound to the video ID per upstream's PLAYER-context rule, minted via
+	// the cached /att/get minter.
 	if p.potProvider != nil && ytcfg != nil && ytcfg.VisitorData != "" {
-		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, ytcfg.VisitorData, false); err == nil && poToken != "" {
+		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, videoID, false); err == nil && poToken != "" {
 			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
 		} else if err != nil {
 			p.logger.Debug("[PlayerApi] PO token generation failed for WEB_EMBEDDED, continuing without", slog.String("error", err.Error()))
