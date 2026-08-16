@@ -74,9 +74,9 @@ type TransportOptions struct {
 }
 
 // NewTransport builds a fresh *http.Transport from the given options.
-// Callers that need fine-grained tuning (e.g. engine's
-// ParallelDownloads-aware MaxIdleConnsPerHost) use this; everyone else
-// should use Client() with the shared default.
+// Callers that need fine-grained tuning (e.g. engine's fixed, generous
+// MaxIdleConnsPerHost sizing for high-concurrency segment downloads)
+// use this; everyone else should use Client() with the shared default.
 func NewTransport(opts TransportOptions) *http.Transport {
 	t := newDefaultTransport()
 	if opts.MaxIdleConns > 0 {
