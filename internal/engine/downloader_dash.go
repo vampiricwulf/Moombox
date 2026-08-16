@@ -218,6 +218,11 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			continue // nil means retry
 		}
 
+		// Segment body in hand — record the arrival before the write so the
+		// fetched-bytes signal covers every path uniformly (the parallel
+		// catch-up workers record theirs inside fetchSegmentWithRetry).
+		d.noteFetch(len(data))
+
 		// Write segment
 		writeSeq := int(d.currentSeq.Load())
 		n, writeErr := d.outputFile.Write(data)

@@ -274,6 +274,7 @@ type SegmentDownloader struct {
 	streamEnded           atomic.Bool
 	outputFile            *os.File
 	bytesWritten          atomic.Int64
+	bytesFetched          atomic.Int64 // media bytes ARRIVED off the network — see noteFetch
 	currentSeq            atomic.Int64
 	headSeq               atomic.Int64
 	lastSegTime           atomicTime
@@ -358,6 +359,15 @@ type SegmentDownloader struct {
 	// OnActivity reports the downloader's current wait reason (or
 	// ActivityNone when it resumes downloading). Optional; nil to opt out.
 	OnActivity func(a DownloadActivity)
+	// OnFetch reports n bytes of media payload ARRIVING off the network —
+	// fired at every successful segment/chunk body read, including catch-up
+	// workers whose data sits in the reorder buffer long before it flushes
+	// (OnProgress only fires on the ordered flush, which goes quiet for the
+	// whole clump while a wide worker pool is saturating the connection).
+	// May be invoked concurrently from multiple worker goroutines; the
+	// consumer must do its own locking. Assign before Start, like every
+	// other callback. Optional; nil to opt out.
+	OnFetch func(n int64)
 }
 
 // SetBaseURL atomically replaces the URL used for subsequent segment
@@ -431,6 +441,23 @@ func (d *SegmentDownloader) emitHealthUpdate(p DownloadProgress) {
 func (d *SegmentDownloader) emitActivity(a DownloadActivity) {
 	if d.OnActivity != nil {
 		d.OnActivity(a)
+	}
+}
+
+// noteFetch records n bytes of media payload arriving off the network and
+// fires OnFetch. Called at every successful segment/chunk body read — the
+// answer to "is data arriving?", which is a different question from the
+// flush-driven counters: bytesWritten, lastSegTime, resume, and the
+// finalize budget deliberately stay keyed on what is durably on disk (a
+// fetch that lands in the reorder buffer above a permanent gap is
+// discarded, and crediting it to the finalize clock would keep a stuck-gap
+// catch-up cycle alive forever). Playlist and head-probe fetches are
+// excluded: they are not stream payload, and counting them would keep
+// "data arriving" true through an outage in which every real segment 403s.
+func (d *SegmentDownloader) noteFetch(n int) {
+	d.bytesFetched.Add(int64(n))
+	if d.OnFetch != nil {
+		d.OnFetch(int64(n))
 	}
 }
 
@@ -797,6 +824,7 @@ func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
 	if err != nil || status >= 400 {
 		return fmt.Errorf("init segment: status=%d: %w", status, err)
 	}
+	d.noteFetch(len(data))
 	if d.opts.InitFromSegment {
 		// InitURL is a full sq=0 media segment (manifest-free DASH); keep only
 		// its ftyp+moov init so segment 0's media doesn't prefix this part.

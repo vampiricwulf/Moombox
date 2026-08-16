@@ -436,7 +436,10 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				segFailed = true
 				break
 			}
-			// Success — reset stuck tracking.
+			// Success — reset stuck tracking. Record the arrival for the
+			// fetched-bytes signal (the playlist fetch above deliberately
+			// does not — it is not stream payload).
+			d.noteFetch(len(segData))
 			stuckSeq = -1
 			stuckSeqRetries = 0
 			consecutiveStuckSkips = 0

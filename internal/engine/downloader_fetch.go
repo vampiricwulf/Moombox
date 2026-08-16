@@ -225,6 +225,10 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		}
 		body, status, err := d.fetchSegment(ctx, segURL)
 		if err == nil && status < 400 {
+			// Every caller of this function fetches MEDIA payload (catch-up
+			// workers, parallel HLS) — playlists and probes use fetchSegment
+			// directly — so the arrival signal fires here unconditionally.
+			d.noteFetch(len(body))
 			return body, nil
 		}
 		if status == 410 {

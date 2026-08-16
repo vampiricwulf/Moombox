@@ -35,6 +35,31 @@ func jobProgress(t *testing.T, db *database.Database) (progress, speed, eta stri
 	return job.Progress, job.Speed, job.ETA
 }
 
+// TestSpeedUsesArrivalCounter pins the speed readout's data source: once any
+// fetch has been reported, speed derives from the ARRIVAL counter
+// (fetchedTotal), not the ordered-flush counter (bytesTotal) — the flush
+// goes quiet for whole clumps during wide catch-up, which used to render a
+// saturated connection as 0 B/s between clumps.
+func TestSpeedUsesArrivalCounter(t *testing.T) {
+	pt, db := newDBProgressTracker(t)
+	defer pt.Close()
+
+	pt.mu.Lock()
+	pt.lastUpdate = time.Now().Add(-100 * time.Millisecond) // pass the 16ms throttle
+	pt.lastBytesTime = time.Now().Add(-1 * time.Second)     // ~1s measurement window
+	pt.fetchedTotal = 5 << 20                               // ~5 MB arrived off the network
+	pt.bytesTotal = 0                                       // nothing flushed yet — old source read 0 B/s
+	pt.videoReported = true
+	pt.mu.Unlock()
+
+	pt.maybeUpdate()
+
+	_, speed, _ := jobProgress(t, db)
+	if !strings.Contains(speed, "MB/s") {
+		t.Errorf("speed = %q, want a ~5 MB/s reading sourced from fetched bytes (flush counter is 0)", speed)
+	}
+}
+
 // TestSetWaitActivityWritesAndTickerRefreshes pins the two behaviors the
 // refresh loop exists for: an orchestrator-level wait reaches the progress
 // line immediately, and its elapsed counter keeps advancing WITHOUT any

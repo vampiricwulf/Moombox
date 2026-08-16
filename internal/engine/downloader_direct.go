@@ -112,6 +112,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		if len(data) == 0 {
 			break
 		}
+		d.noteFetch(len(data))
 
 		n, writeErr := d.outputFile.Write(data)
 		if writeErr != nil {
@@ -214,6 +215,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			d.noteFetch(n)
 			written, writeErr := d.outputFile.Write(buf[:n])
 			if writeErr != nil {
 				return fmt.Errorf("write: %w", writeErr)

@@ -244,6 +244,58 @@ func TestRunParallelCatchUpOrdersCorrectlyWithByteCeiling(t *testing.T) {
 	wantSegments(t, out, 0, nextSeq-1)
 }
 
+// TestCatchUpReportsFetchArrival pins the arrival signal: every media
+// segment a catch-up worker successfully fetches must be counted in
+// bytesFetched and reported through OnFetch (concurrently, from the worker
+// goroutines) — this is the signal the UI's speed readout and wait
+// suppression key on while the ordered flush goes quiet between clumps. In
+// a clean run everything fetched also flushes, so both counters must equal
+// the bytes on disk.
+func TestCatchUpReportsFetchArrival(t *testing.T) {
+	t.Parallel()
+	const head = 100
+	_, srv := newFakeGVS(t, head, func(seq, attempt int) int {
+		return http.StatusOK
+	})
+
+	out := filepath.Join(t.TempDir(), "v")
+	f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	defer f.Close()
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:        srv.URL + "/videoplayback?id=fetch.1&itag=140",
+		OutputFile:     out,
+		SegmentWorkers: 12,
+	})
+	var onFetchSum atomic.Int64
+	d.OnFetch = func(n int64) { onFetchSum.Add(n) }
+	d.outputFile = f
+	d.currentSeq.Store(0)
+	d.headSeq.Store(head)
+
+	if _, err := d.runParallelCatchUp(context.Background()); err != nil {
+		t.Fatalf("runParallelCatchUp error = %v, want nil", err)
+	}
+
+	fetched := d.bytesFetched.Load()
+	if fetched <= 0 {
+		t.Fatalf("bytesFetched = %d, want > 0", fetched)
+	}
+	if got := onFetchSum.Load(); got != fetched {
+		t.Errorf("OnFetch delta sum = %d, bytesFetched = %d — must match", got, fetched)
+	}
+	st, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("stat output: %v", err)
+	}
+	if fetched != st.Size() {
+		t.Errorf("bytesFetched = %d, bytes on disk = %d — clean run must fetch exactly what it flushes", fetched, st.Size())
+	}
+}
+
 // TestRunParallelCatchUpNoDeadlockOnPermanentGap is the end-to-end version
 // of the deadlock-avoidance guarantee: a segment inside the batch 410s
 // permanently (never retried) while a wide worker pool races ahead of it.

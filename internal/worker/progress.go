@@ -54,10 +54,20 @@ type ProgressTracker struct {
 	lastAudioBytes int64 // last p.Bytes for audio downloader delta accumulation
 	speedLastBytes int64 // last bytesTotal snapshot for speed calculation
 	lastBytesTime  time.Time
-	startTime      time.Time // B8: for ETA calculation
-	vodPercent     float64   // VOD download progress percentage (from chunked download)
-	vodTotalBytes  int64     // Total file size for VOD chunked download (0 if not VOD)
-	gaps           []database.Gap
+
+	// Arrival signal (engine OnFetch): media bytes read off the network,
+	// including catch-up fetches still sitting in the reorder buffer. The
+	// speed readout and wait suppression key on ARRIVAL — the flush-driven
+	// counters (bytesTotal, lastSegmentAt) go quiet for a whole clump while
+	// a wide worker pool is saturating the connection, which used to render
+	// a busy download as "Waiting..." with a blank speed.
+	fetchedTotal     int64     // cumulative fetched bytes across both streams
+	speedLastFetched int64     // last fetchedTotal snapshot for speed calculation
+	lastFetchAt      time.Time // when the most recent fetch landed
+	startTime        time.Time // B8: for ETA calculation
+	vodPercent       float64   // VOD download progress percentage (from chunked download)
+	vodTotalBytes    int64     // Total file size for VOD chunked download (0 if not VOD)
+	gaps             []database.Gap
 
 	// Per-stream wait activity. Video and audio downloaders share this tracker
 	// but can stall independently, so each keeps its own reason + start; the
@@ -162,6 +172,7 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 	}
 
 	dl.OnActivity = func(a engine.DownloadActivity) { pt.setActivity(streamVideo, a) }
+	dl.OnFetch = pt.noteFetch
 }
 
 // AttachAudioDownloader attaches progress callbacks to an audio segment downloader.
@@ -207,6 +218,22 @@ func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 	}
 
 	dl.OnActivity = func(a engine.DownloadActivity) { pt.setActivity(streamAudio, a) }
+	dl.OnFetch = pt.noteFetch
+}
+
+// noteFetch accumulates the engine's arrival signal (see the fetchedTotal
+// field docs). Called concurrently from catch-up worker goroutines — the
+// engine documents OnFetch that way — so all state moves under pt.mu.
+func (pt *ProgressTracker) noteFetch(n int64) {
+	pt.mu.Lock()
+	if pt.closed {
+		pt.mu.Unlock()
+		return
+	}
+	pt.fetchedTotal += n
+	pt.lastFetchAt = time.Now()
+	pt.mu.Unlock()
+	pt.maybeUpdate()
 }
 
 // SetChatCount updates the chat message count.
@@ -290,8 +317,9 @@ func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActiv
 // show). When several slots wait, the longest-running wait wins so the elapsed
 // reflects the true stall, not the most recent slot to stall. Caller holds mu.
 func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActivity, time.Time) {
-	haveSeg := !pt.lastSegmentAt.IsZero()
-	sinceSeg := now.Sub(pt.lastSegmentAt)
+	last := pt.lastDeliveryLocked()
+	haveSeg := !last.IsZero()
+	sinceSeg := now.Sub(last)
 	if haveSeg && sinceSeg < activitySegmentGrace {
 		return engine.ActivityNone, time.Time{}
 	}
@@ -327,10 +355,25 @@ func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActiv
 // with) — while the other waits show how long the wait itself has been running.
 // Caller holds mu.
 func (pt *ProgressTracker) activityElapsedLocked(act engine.DownloadActivity, start, now time.Time) time.Duration {
-	if (act == engine.ActivityVerifyingEnd || act == engine.ActivityWaitingForSegment) && !pt.lastSegmentAt.IsZero() {
-		return now.Sub(pt.lastSegmentAt)
+	if act == engine.ActivityVerifyingEnd || act == engine.ActivityWaitingForSegment {
+		if last := pt.lastDeliveryLocked(); !last.IsZero() {
+			return now.Sub(last)
+		}
 	}
 	return now.Sub(start)
+}
+
+// lastDeliveryLocked is the most recent time stream data ARRIVED — a flushed
+// segment (lastSegmentAt) or a fetched-but-not-yet-flushed one (lastFetchAt).
+// Wait display keys on arrival: during a wide catch-up clump the flush stamp
+// goes quiet for many seconds while the network is saturated, and one
+// worker's transient-retry activity surfacing there read as a frozen job.
+// Caller holds mu.
+func (pt *ProgressTracker) lastDeliveryLocked() time.Time {
+	if pt.lastFetchAt.After(pt.lastSegmentAt) {
+		return pt.lastFetchAt
+	}
+	return pt.lastSegmentAt
 }
 
 // pendingActivityLocked reports whether any slot holds a wait. Caller holds mu.
@@ -426,13 +469,24 @@ func (pt *ProgressTracker) maybeUpdate() {
 	}
 	pt.lastUpdate = now
 
-	// Calculate instantaneous speed (bytes delta / time delta, matching TS)
+	// Calculate instantaneous speed (bytes delta / time delta, matching TS).
+	// Source is the ARRIVAL counter (fetchedTotal) once any fetch has been
+	// reported: the flush counter (bytesTotal) sawtooths with catch-up's
+	// ordered-flush clumps — zero for seconds, then a whole clump at once —
+	// while arrival tracks the network. The bytesTotal fallback keeps a
+	// non-zero readout for any path that never reports fetches. A side
+	// benefit: resume-seeded file bytes inflate bytesTotal's first delta but
+	// never the arrival counter.
 	elapsed := now.Sub(pt.lastBytesTime).Seconds()
 	if elapsed > 0 {
-		bytesDelta := pt.bytesTotal - pt.speedLastBytes
-		speed := float64(bytesDelta) / elapsed
+		src, last := pt.bytesTotal, pt.speedLastBytes
+		if pt.fetchedTotal > 0 {
+			src, last = pt.fetchedTotal, pt.speedLastFetched
+		}
+		speed := float64(src-last) / elapsed
 		pt.speedSmooth.Update(speed)
 		pt.speedLastBytes = pt.bytesTotal
+		pt.speedLastFetched = pt.fetchedTotal
 		pt.lastBytesTime = now
 	}
 

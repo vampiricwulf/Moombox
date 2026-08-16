@@ -149,6 +149,32 @@ func TestDominantActivity(t *testing.T) {
 		}
 	})
 
+	t.Run("recent FETCH suppresses waits while the flush is stale", func(t *testing.T) {
+		// The wide-catch-up clump case: workers are pulling data (arrival is
+		// fresh) but the ordered flush hasn't advanced in a while, and one
+		// worker's transient retry latched an activity. The line must keep
+		// showing the counter, not "retrying".
+		pt := newTestProgressTracker()
+		pt.videoActivity = engine.ActivityRetrying
+		pt.videoActivityStart = base.Add(-10 * time.Second)
+		pt.lastSegmentAt = base.Add(-30 * time.Second)     // flush quiet
+		pt.lastFetchAt = base.Add(-200 * time.Millisecond) // network busy
+		if a, _ := pt.dominantActivity(base); a != engine.ActivityNone {
+			t.Errorf("recent fetch: got %v, want ActivityNone", a)
+		}
+	})
+
+	t.Run("stale fetch AND stale flush still surface the wait", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.videoActivity = engine.ActivityRetrying
+		pt.videoActivityStart = base.Add(-10 * time.Second)
+		pt.lastSegmentAt = base.Add(-30 * time.Second)
+		pt.lastFetchAt = base.Add(-10 * time.Second) // a genuine stall
+		if a, _ := pt.dominantActivity(base); a != engine.ActivityRetrying {
+			t.Errorf("genuine stall: got %v, want ActivityRetrying", a)
+		}
+	})
+
 	t.Run("waiting-for-segment grace is specific — other waits still show", func(t *testing.T) {
 		pt := newTestProgressTracker()
 		pt.videoActivity = engine.ActivityWaitingForSegment
