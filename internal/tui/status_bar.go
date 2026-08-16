@@ -9,7 +9,24 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-const statusBarCompactThreshold = 100
+// Status-bar density tiers, richest to poorest. Both halves of the bar
+// carry a tier ladder and View picks the richest pair that actually fits
+// the measured width (see fitTiers), so the bar adapts to real content —
+// a long backfill channel name, "12 selected", OFFLINE — instead of to a
+// guessed column count. The previous rule was a cliff: one width
+// threshold flipped both halves between two renderings, and any remaining
+// overflow dropped the ENTIRE chord-hint half, so a narrow window showed
+// no keybinds at all.
+type barTier int
+
+const (
+	tierFull      barTier = iota // full labels: "Tab Focus", "Disk 45% (120G free)"
+	tierCompact                  // shortened labels: "Tab", "D:45% 120G"
+	tierKeys                     // chords lose their names; right keeps alerts + counts
+	tierTight                    // chords space-separated; right keeps alerts only
+	tierEssential                // only the chords that lead everywhere else; right only if warning
+	tierNone                     // half omitted entirely — last resort
+)
 
 // Package-level styles for status bar rendering (avoid alloc per render).
 var (
@@ -121,89 +138,183 @@ func (m *StatusBarModel) View() string {
 		return ""
 	}
 
-	bg := statusBarBgStyle
-
-	left := m.renderControls()
-	right := m.renderMetrics() + m.renderCookieStatus()
+	left, right := m.fitTiers()
 
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
 
-	// If both sides don't fit, drop the left controls so the disk/cookie
-	// indicators stay visible (mirrors the task-list header overflow drop).
-	if leftW+1+rightW > m.width {
-		left = ""
-		leftW = 0
-	}
-
+	// At least one column between the halves so they never abut; fitTiers
+	// budgeted for it. max() also keeps Repeat's count non-negative in the
+	// pathological case where even tierNone/tierNone overflows (a width of
+	// 1-2 columns), which the MaxWidth clamp below then trims.
 	padding := max(m.width-leftW-rightW, 1)
 
 	bar := left + strings.Repeat(" ", padding) + right
 
-	barW := lipgloss.Width(bar)
-	if barW < m.width {
+	if barW := lipgloss.Width(bar); barW < m.width {
 		bar += strings.Repeat(" ", m.width-barW)
 	}
 
-	return bg.Render(bar)
+	// MaxWidth is the hard guard: an over-wide bar used to WRAP, pushing a
+	// second line into the terminal and corrupting the frame below it.
+	// Clamping (ANSI-aware, so styled runs are cut without severing escape
+	// sequences) degrades to a clipped bar instead of a broken layout.
+	return statusBarBgStyle.MaxWidth(m.width).Render(bar)
 }
 
-// renderControls renders uniform chord hints in the status bar.
-func (m *StatusBarModel) renderControls() string {
+// fitTiers picks the richest (left, right) tier pair whose combined width
+// fits m.width, including the one-column gap between them.
+//
+// Degradation ALTERNATES between the halves rather than exhausting one
+// first: a moderately narrow window loses verbosity evenly instead of
+// amputating either side. The chord hints take the first step down, since
+// their top tier is the widest and the least information-dense; from then
+// on the two sides trade off. Both ladders end at tierNone, so the loop
+// always terminates — with an empty bar in the degenerate case.
+func (m *StatusBarModel) fitTiers() (string, string) {
+	lefts := m.controlTiers()
+	rights := m.metricTiers()
+
+	fits := func(l, r barTier) bool {
+		return lipgloss.Width(lefts[l])+1+lipgloss.Width(rights[r]) <= m.width
+	}
+
+	li, ri := tierFull, tierFull
+	for !fits(li, ri) {
+		switch {
+		// li <= ri alternates the steps: left, right, left, right… The
+		// ri == tierNone arm lets the left keep degrading alone once the
+		// right has nothing left to give.
+		case li < tierNone && (li <= ri || ri == tierNone):
+			li++
+		case ri < tierNone:
+			ri++
+		default:
+			// Even tierNone/tierNone overflows (a 1-2 column window).
+			// View's MaxWidth clamp is the backstop.
+			return lefts[tierNone], rights[tierNone]
+		}
+	}
+
+	// Climb back. Alternating descent can OVERSHOOT: it steps one side down
+	// when the other side's step alone would have freed enough room, so the
+	// first fitting pair is not always the richest fitting pair (at 120
+	// columns the chord hints lost their labels with 37 columns still
+	// empty). Re-upgrade greedily against the width that is actually left,
+	// chord hints first — a window that can seat the full keybind names
+	// should show them, which is the whole point of this bar.
+	for li > tierFull && fits(li-1, ri) {
+		li--
+	}
+	for ri > tierFull && fits(li, ri-1) {
+		ri--
+	}
+	return lefts[li], rights[ri]
+}
+
+// controlTiers renders the chord hints at every density, richest first,
+// indexed by barTier. Every tier keeps the leading space that separates the
+// hints from the terminal edge.
+//
+// The ladder drops, in order: the long labels on the single-glyph chords
+// ("Tab Focus" → "Tab"), then the remaining chord names ("A Action" → "A"),
+// then the pipe separators, then all but the two chords that reach every
+// other feature — M opens the menu and ? opens help, so those two survive
+// longest. Only tierNone hides the keybinds outright, and fitTiers reaches
+// it only when the window cannot seat even a single glyph plus the gap.
+func (m *StatusBarModel) controlTiers() []string {
 	if m.ShowChordHint {
-		return " " + DimStyle.Render("Press ? for help · M for menu · A for actions")
+		// Newcomer hint: same ladder shape, prose instead of chords.
+		return []string{
+			" " + DimStyle.Render("Press ? for help · M for menu · A for actions"),
+			" " + DimStyle.Render("? help · M menu · A actions"),
+			" " + DimStyle.Render("? help · M menu"),
+			" " + DimStyle.Render("? for help"),
+			" " + DimStyle.Render("?"),
+			"",
+		}
 	}
 
-	compact := m.width < statusBarCompactThreshold
 	key := statusBarKeyStyle
-
-	var parts []string
-	if compact {
-		parts = append(parts,
-			key.Render("A")+" Action",
-			key.Render("R")+" Request",
-			key.Render("O")+" Open",
-			key.Render("F")+" Filter",
-			key.Render("M")+" Menu",
-			key.Render("Tab"),
-			key.Render("`"),
-			key.Render("?"),
-		)
-	} else {
-		parts = append(parts,
-			key.Render("A")+" Action",
-			key.Render("R")+" Request",
-			key.Render("O")+" Open",
-			key.Render("F")+" Filter",
-			key.Render("M")+" Menu",
-			key.Render("Tab")+" Focus",
-			key.Render("`")+" Settings",
-			key.Render("?")+" Help",
-		)
+	named := []string{
+		key.Render("A") + " Action",
+		key.Render("R") + " Request",
+		key.Render("O") + " Open",
+		key.Render("F") + " Filter",
+		key.Render("M") + " Menu",
 	}
-	return " " + strings.Join(parts, " | ")
+	glyphs := []string{key.Render("Tab"), key.Render("`"), key.Render("?")}
+	bare := []string{
+		key.Render("A"), key.Render("R"), key.Render("O"),
+		key.Render("F"), key.Render("M"),
+	}
+
+	full := append(append([]string{}, named...),
+		key.Render("Tab")+" Focus",
+		key.Render("`")+" Settings",
+		key.Render("?")+" Help",
+	)
+	compact := append(append([]string{}, named...), glyphs...)
+	keysOnly := append(append([]string{}, bare...), glyphs...)
+
+	return []string{
+		" " + strings.Join(full, " | "),
+		" " + strings.Join(compact, " | "),
+		" " + strings.Join(keysOnly, " | "),
+		" " + strings.Join(keysOnly, " "),
+		" " + key.Render("M") + " " + key.Render("?"),
+		"",
+	}
 }
 
-// renderMetrics renders disk usage and active download count indicators.
-func (m *StatusBarModel) renderMetrics() string {
-	var parts []string
-	compact := m.width < statusBarCompactThreshold
+// metricTiers renders the right half (metrics + auth indicators) at every
+// density, richest first, indexed by barTier.
+//
+// What survives longest is what the operator cannot afford to miss:
+// OFFLINE, a disk warning, and a re-login prompt are alerts, while the
+// backfill scan, the selection count, and the active-download tally are
+// informational. So the informational items drop first, then the routine
+// (non-warning) disk and cookie readouts, leaving a bar that is silent
+// when everything is healthy and still shouts when it isn't.
+func (m *StatusBarModel) metricTiers() []string {
+	tiers := make([]string, tierNone+1)
+	for t := tierFull; t <= tierNone; t++ {
+		tiers[t] = m.renderMetrics(t) + m.renderCookieStatus(t)
+	}
+	return tiers
+}
 
-	// Connectivity indicator
+// renderMetrics renders disk usage and activity indicators at tier t.
+func (m *StatusBarModel) renderMetrics(t barTier) string {
+	if t >= tierNone {
+		return ""
+	}
+	var parts []string
+
+	// Connectivity indicator — an alert, so it outlives every counter and
+	// only abbreviates.
 	if m.offline {
-		parts = append(parts, statusBarRedStyle.Render("OFFLINE"))
+		if t >= tierTight {
+			parts = append(parts, statusBarRedStyle.Render("OFF"))
+		} else {
+			parts = append(parts, statusBarRedStyle.Render("OFFLINE"))
+		}
 	}
 
-	// Batch selection count
-	if m.SelectedCount > 0 {
-		selText := fmt.Sprintf("%d selected", m.SelectedCount)
-		parts = append(parts, statusBarYelStyle.Render(selText))
+	// Batch selection count — informational; the count itself is the point,
+	// so it abbreviates to a bare number before disappearing.
+	if m.SelectedCount > 0 && t <= tierKeys {
+		if t == tierKeys {
+			parts = append(parts, statusBarYelStyle.Render(fmt.Sprintf("%d sel", m.SelectedCount)))
+		} else {
+			parts = append(parts, statusBarYelStyle.Render(fmt.Sprintf("%d selected", m.SelectedCount)))
+		}
 	}
 
 	// Backfill scan in flight (green, like the Active indicator — a routine
-	// background activity, not a warning). Compact drops the channel name.
-	if m.backfillChannel != "" {
-		if compact {
+	// background activity, not a warning), so it is the first thing dropped.
+	if m.backfillChannel != "" && t <= tierCompact {
+		if t == tierCompact {
 			parts = append(parts, statusBarGrnStyle.Render(
 				fmt.Sprintf("BF:%s p%d", m.backfillTab, m.backfillPages)))
 		} else {
@@ -216,8 +327,11 @@ func (m *StatusBarModel) renderMetrics() string {
 		}
 	}
 
-	// Disk indicator (only shown once we have data)
-	if m.diskFree > 0 || m.diskUsedPct > 0 {
+	// Disk indicator (only shown once we have data). At tierEssential only a
+	// warning/critical reading is worth the columns — a healthy disk says
+	// nothing there.
+	warning := m.diskWarn == "warn" || m.diskWarn == "critical"
+	if (m.diskFree > 0 || m.diskUsedPct > 0) && (t < tierEssential || warning) {
 		var style lipgloss.Style
 		switch m.diskWarn {
 		case "critical":
@@ -230,28 +344,32 @@ func (m *StatusBarModel) renderMetrics() string {
 
 		freeGB := float64(m.diskFree) / (1024 * 1024 * 1024)
 		pct := int(m.diskUsedPct)
-		if compact {
+		switch {
+		case t >= tierTight:
+			parts = append(parts, style.Render(fmt.Sprintf("D:%d%%", pct)))
+		case t >= tierCompact:
 			parts = append(parts, style.Render(fmt.Sprintf("D:%d%% %.0fG", pct, freeGB)))
-		} else {
+		default:
 			parts = append(parts, style.Render(fmt.Sprintf("Disk %d%% (%.0fG free)", pct, freeGB)))
 		}
 	}
 
 	// Active download count (StatusQueued is deliberately absent — a queued
-	// job is waiting for an archive slot, not an active download)
-	activeCount := 0
-	for _, j := range m.jobs {
-		switch j.Status {
-		case database.StatusDownloading, database.StatusLive, database.StatusMuxing:
-			activeCount++
+	// job is waiting for an archive slot, not an active download).
+	if t <= tierKeys {
+		activeCount := 0
+		for _, j := range m.jobs {
+			switch j.Status {
+			case database.StatusDownloading, database.StatusLive, database.StatusMuxing:
+				activeCount++
+			}
 		}
-	}
-	if activeCount > 0 {
-		style := statusBarGrnStyle
-		if compact {
-			parts = append(parts, style.Render(fmt.Sprintf("▶%d", activeCount)))
-		} else {
-			parts = append(parts, style.Render(fmt.Sprintf("Active: %d", activeCount)))
+		if activeCount > 0 {
+			if t >= tierCompact {
+				parts = append(parts, statusBarGrnStyle.Render(fmt.Sprintf("▶%d", activeCount)))
+			} else {
+				parts = append(parts, statusBarGrnStyle.Render(fmt.Sprintf("Active: %d", activeCount)))
+			}
 		}
 	}
 
@@ -261,9 +379,14 @@ func (m *StatusBarModel) renderMetrics() string {
 	return strings.Join(parts, " ") + " "
 }
 
-// renderCookieStatus renders auth indicators and warnings (B2).
-func (m *StatusBarModel) renderCookieStatus() string {
-	if !m.ytActive && !m.twActive {
+// renderCookieStatus renders auth indicators and warnings (B2) at tier t.
+//
+// A platform whose auth is HEALTHY is dropped at tierEssential — the green
+// "YT" is reassurance, not information — while a re-login prompt or a
+// rejected-cookie indicator survives to the last tier, abbreviated. That
+// keeps the narrowest useful bar showing only what needs acting on.
+func (m *StatusBarModel) renderCookieStatus(t barTier) string {
+	if t >= tierNone || (!m.ytActive && !m.twActive) {
 		return ""
 	}
 
@@ -278,19 +401,33 @@ func (m *StatusBarModel) renderCookieStatus() string {
 		}
 	}
 
+	// healthy reports whether a platform's indicator is pure reassurance —
+	// dropped once space is scarce (tierEssential).
+	healthy := t < tierEssential
+
 	// YouTube status (only if active)
 	if m.ytActive {
 		switch {
 		case m.ytCookie == CookieStatusRelogin:
-			parts = append(parts, statusBarRedStyle.Render("YT: Re-login"))
-		case m.ytCookie == CookieStatusNone:
-			parts = append(parts, statusBarYelStyle.Render("YT"))
+			if t >= tierTight {
+				parts = append(parts, statusBarRedStyle.Render("YT!"))
+			} else {
+				parts = append(parts, statusBarRedStyle.Render("YT: Re-login"))
+			}
 		case cookiesRejected || m.ytCookie == CookieStatusCookiesOnly:
 			parts = append(parts, statusBarRedStyle.Render("YT"))
+		case m.ytCookie == CookieStatusNone:
+			if healthy {
+				parts = append(parts, statusBarYelStyle.Render("YT"))
+			}
 		case m.ytCookie == CookieStatusOK:
-			parts = append(parts, statusBarGrnStyle.Render("YT"))
+			if healthy {
+				parts = append(parts, statusBarGrnStyle.Render("YT"))
+			}
 		default:
-			parts = append(parts, DimStyle.Render("YT"))
+			if healthy {
+				parts = append(parts, DimStyle.Render("YT"))
+			}
 		}
 	}
 
@@ -298,15 +435,26 @@ func (m *StatusBarModel) renderCookieStatus() string {
 	if m.twActive {
 		switch m.twCookie {
 		case CookieStatusRelogin:
-			parts = append(parts, statusBarRedStyle.Render("TW: Re-login"))
+			if t >= tierTight {
+				parts = append(parts, statusBarRedStyle.Render("TW!"))
+			} else {
+				parts = append(parts, statusBarRedStyle.Render("TW: Re-login"))
+			}
 		case CookieStatusCookiesOnly:
 			parts = append(parts, statusBarRedStyle.Render("TW"))
 		case CookieStatusOK:
-			parts = append(parts, statusBarGrnStyle.Render("TW"))
+			if healthy {
+				parts = append(parts, statusBarGrnStyle.Render("TW"))
+			}
 		default:
-			parts = append(parts, DimStyle.Render("TW"))
+			if healthy {
+				parts = append(parts, DimStyle.Render("TW"))
+			}
 		}
 	}
 
+	if len(parts) == 0 {
+		return ""
+	}
 	return strings.Join(parts, " ") + " "
 }
