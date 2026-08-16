@@ -920,3 +920,43 @@ func TestMaxFeedItemsIgnored(t *testing.T) {
 		t.Fatal("defaults must apply")
 	}
 }
+
+// TestSegmentWorkersValidation pins the owner's explicit requirement: no
+// upper clamp. A high value is the operator's call — YouTube may treat a
+// large fan-out as bot-like, so it warns, but it must not be silently
+// rewritten (a clamp would look like the setting did nothing, which is
+// exactly the trap num_parallel_downloads already set).
+func TestSegmentWorkersValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"zero falls back to the default", 0, 12},
+		{"negative falls back to the default", -4, 12},
+		{"one is honoured", 1, 1},
+		{"default", 12, 12},
+		{"far above the warn threshold is NOT clamped", 256, 256},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Downloader.SegmentWorkers = tc.in
+			// validateOrNormalize (config.go) is unexported; Normalize is the
+			// public entry point that runs it with reportOnly=false, i.e. it
+			// mutates cfg in place exactly like the brief's `cfg.validate()`
+			// would — replacing invalid values with defaults, never clamping
+			// valid-but-high ones.
+			Normalize(cfg)
+			if got := cfg.Downloader.SegmentWorkers; got != tc.want {
+				t.Errorf("SegmentWorkers = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSegmentWorkersDefault(t *testing.T) {
+	if got := Defaults().Downloader.SegmentWorkers; got != 12 {
+		t.Errorf("default SegmentWorkers = %d, want 12", got)
+	}
+}

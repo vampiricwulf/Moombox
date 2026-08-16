@@ -123,8 +123,21 @@ type DownloaderConfig struct {
 	OutputTemplate       string `toml:"output_template" json:"output_template"`
 	MaxVideoResolution   int    `toml:"max_video_resolution" json:"max_video_resolution"`
 	NumParallelDownloads int    `toml:"num_parallel_downloads" json:"num_parallel_downloads"`
-	DownloadChat         bool   `toml:"download_chat" json:"download_chat"`
-	Prefer60fps          bool   `toml:"prefer_60fps" json:"prefer_60fps"`
+	// SegmentWorkers is how many segments are fetched CONCURRENTLY within a
+	// single download. Distinct from NumParallelDownloads, which gates how
+	// many VOD jobs download at once and which live broadcasts bypass
+	// entirely — a distinction that cost real debugging time on 2026-08-15,
+	// when a value of 1000 there had no effect on a live stream's catch-up.
+	//
+	// Higher values catch up faster on an in-progress stream (measured: six
+	// connections sustained 11.3 MB/s where Moombox managed 5.96 MB/s), at
+	// the cost of a wider fan-out to YouTube. There is deliberately no upper
+	// limit; past SegmentWorkersWarnThreshold a warning is logged because a
+	// large simultaneous fan-out is the kind of traffic shape that attracts
+	// bot detection.
+	SegmentWorkers int  `toml:"segment_workers" json:"segment_workers"`
+	DownloadChat   bool `toml:"download_chat" json:"download_chat"`
+	Prefer60fps    bool `toml:"prefer_60fps" json:"prefer_60fps"`
 	// MaximumTimeout (seconds, YouTube livestreams only) is how long to keep
 	// retrying — checking every 30s whether the stream has ended — before
 	// force-finalizing the recording, even if YouTube still reports the stream

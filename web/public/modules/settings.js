@@ -491,6 +491,7 @@ export class SettingsController {
     this._wireTemplatePreview();
     this.app.setInputValue("cfg-max-resolution", config.downloader?.max_video_resolution);
     this.app.setInputValue("cfg-parallel-downloads", config.downloader?.num_parallel_downloads);
+    this.app.setInputValue("cfg-segment-workers", config.downloader?.segment_workers);
     // Download chat switch
     const downloadChatSwitch = document.getElementById("cfg-download-chat");
     if (downloadChatSwitch) {
@@ -668,6 +669,7 @@ export class SettingsController {
     const outputTemplate = this.app.getInputValue("cfg-output-template");
     const maxResolution = this.app.getInputNumber("cfg-max-resolution");
     const parallelDownloads = this.app.getInputNumber("cfg-parallel-downloads");
+    const segmentWorkers = this.app.getInputNumber("cfg-segment-workers");
     const maximumTimeout = this.app.getInputNumber("cfg-maximum-timeout");
     const downloadChatSwitch = document.getElementById("cfg-download-chat");
     const downloadChat = downloadChatSwitch ? downloadChatSwitch.checked : true;
@@ -746,6 +748,7 @@ export class SettingsController {
         output_template: outputTemplate,
         max_video_resolution: maxResolution,
         num_parallel_downloads: parallelDownloads,
+        segment_workers: segmentWorkers,
         download_chat: downloadChat,
         prefer_60fps: prefer60fps,
         maximum_timeout: maximumTimeout,

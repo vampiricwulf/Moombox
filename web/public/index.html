@@ -898,6 +898,14 @@
                                 placeholder="2"
                                 help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."
                             ></sl-input>
+                            <sl-input
+                                id="cfg-segment-workers"
+                                type="number"
+                                min="1"
+                                label="Segment Workers"
+                                placeholder="12"
+                                help-text="Segments fetched at once within one download (not the number of concurrent downloads). Higher is faster on catch-up; very high values raise bot-detection risk. Default 12, no maximum; values above 16 are flagged as risky."
+                            ></sl-input>
                             <sl-switch id="cfg-download-chat" checked>
                                 Download Live Chat
                                 <span slot="help-text"

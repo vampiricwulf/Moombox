@@ -81,6 +81,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
 
+	// segment_workers has no upper limit by design (DECISIONS: owner-mandated,
+	// no silent clamp — see config.SegmentWorkers doc). Past
+	// SegmentWorkersWarnThreshold, warn: a large simultaneous fan-out to
+	// YouTube is the kind of traffic shape that attracts bot detection.
+	if sw := cfg.Downloader.SegmentWorkers; sw > config.SegmentWorkersWarnThreshold {
+		log.Warn(fmt.Sprintf("downloader.segment_workers %d is high — a large simultaneous fan-out to YouTube raises bot-detection risk; reduce it if downloads start returning 403", sw))
+	}
+
 	// Apply Go runtime soft memory limit. SetMemoryLimit is a SOFT cap:
 	// Go's GC runs more aggressively as the heap approaches the limit, but
 	// allocations that genuinely need more memory still succeed (vs OOM).

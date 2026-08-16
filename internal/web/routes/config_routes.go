@@ -221,6 +221,13 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["downloader.num_parallel_downloads"] = "num_parallel_downloads must be at least 1"
 			}
 		}
+		// segment_workers: no upper bound — a high value is honoured exactly
+		// as written (DECISIONS: owner-mandated). Only < 1 is rejected.
+		if v, ok := dl["segment_workers"].(float64); ok {
+			if v < 1 {
+				errs["downloader.segment_workers"] = "must be >= 1"
+			}
+		}
 		if v, ok := dl["max_video_resolution"].(float64); ok {
 			if v < 1 {
 				errs["downloader.max_video_resolution"] = "max_video_resolution must be at least 1"
@@ -457,6 +464,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 		if v, ok := dl["num_parallel_downloads"].(float64); ok {
 			cfg.Downloader.NumParallelDownloads = int(v)
+		}
+		if v, ok := dl["segment_workers"].(float64); ok {
+			cfg.Downloader.SegmentWorkers = int(v)
 		}
 		if v, ok := dl["download_chat"].(bool); ok {
 			cfg.Downloader.DownloadChat = v

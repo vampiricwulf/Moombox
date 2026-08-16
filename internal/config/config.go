@@ -21,6 +21,10 @@ import (
 // Kept in sync with connectivity/probe.go's in-package fallback.
 var DefaultProbeTargets = []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
 
+// SegmentWorkersWarnThreshold is the point past which segment_workers is
+// reported as risky. Not a cap: the value is honoured as written.
+const SegmentWorkersWarnThreshold = 16
+
 // dacledDirs memoises the set of dirs that have had their DACL tightened
 // this process lifetime. icacls shells out (~30-80ms on Windows); without
 // memoisation every config Save under Store.Update's write lock pays that
@@ -66,6 +70,7 @@ func Defaults() *MoomboxConfig {
 			OutputTemplate:       "${channel}/${start_date} ${title} [${id}]",
 			MaxVideoResolution:   2160,
 			NumParallelDownloads: 10,
+			SegmentWorkers:       12,
 			DownloadChat:         true,
 			Prefer60fps:          true,
 			MaximumTimeout:       600,
@@ -562,6 +567,19 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		fail("downloader.num_parallel_downloads %d must be >= 1", d.NumParallelDownloads)
 		if !reportOnly {
 			d.NumParallelDownloads = defaults.Downloader.NumParallelDownloads
+		}
+	}
+	// segment_workers: below 1 falls back to the default. There is
+	// deliberately no upper bound here — a high value is honoured exactly as
+	// written (DECISIONS: owner-mandated, no silent clamp). The bot-detection
+	// risk warning for values above SegmentWorkersWarnThreshold is emitted at
+	// the load site that has a logger (cmd/moombox/services.go), not here —
+	// validateOrNormalize's fail() only records genuine errors/reset-to-
+	// default cases, and a high segment_workers is valid config, not an error.
+	if d.SegmentWorkers < 1 {
+		fail("downloader.segment_workers %d must be >= 1", d.SegmentWorkers)
+		if !reportOnly {
+			d.SegmentWorkers = defaults.Downloader.SegmentWorkers
 		}
 	}
 	if d.MaxVideoResolution < 1 {
