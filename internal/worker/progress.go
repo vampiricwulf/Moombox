@@ -25,6 +25,13 @@ const (
 	// "verifying end" escalation. Applies only to ActivityWaitingForSegment —
 	// other waits keep the 2s activitySegmentGrace.
 	waitingForSegmentGrace = 5 * time.Second
+	// speedAvgWindow is the span of the sliding window the displayed speed
+	// averages over. The previous EMA (alpha 0.7) smoothed instantaneous
+	// deltas sampled at the ~60Hz update cadence — windows of a few
+	// milliseconds, where one landing segment reads as a huge spike and an
+	// empty tick as 0, so the readout jittered with the arrival pattern
+	// instead of showing the transfer rate.
+	speedAvgWindow = 5 * time.Second
 	// activityTickerIdleStop is how many consecutive quiet refresh ticks
 	// (nothing to show) the refresh goroutine tolerates before parking
 	// itself. Comfortably outlives activitySegmentGrace so a wait recorded
@@ -47,13 +54,10 @@ type ProgressTracker struct {
 	audioTotal     int
 	chatCount      int
 	bytesTotal     int64
-	speedSmooth    *utils.SmoothValue
 	lastUpdate     time.Time
 	lastPersist    time.Time
 	lastVideoBytes int64 // last p.Bytes for video downloader delta accumulation
 	lastAudioBytes int64 // last p.Bytes for audio downloader delta accumulation
-	speedLastBytes int64 // last bytesTotal snapshot for speed calculation
-	lastBytesTime  time.Time
 
 	// Arrival signal (engine OnFetch): media bytes read off the network,
 	// including catch-up fetches still sitting in the reorder buffer. The
@@ -61,13 +65,22 @@ type ProgressTracker struct {
 	// counters (bytesTotal, lastSegmentAt) go quiet for a whole clump while
 	// a wide worker pool is saturating the connection, which used to render
 	// a busy download as "Waiting..." with a blank speed.
-	fetchedTotal     int64     // cumulative fetched bytes across both streams
-	speedLastFetched int64     // last fetchedTotal snapshot for speed calculation
-	lastFetchAt      time.Time // when the most recent fetch landed
-	startTime        time.Time // B8: for ETA calculation
-	vodPercent       float64   // VOD download progress percentage (from chunked download)
-	vodTotalBytes    int64     // Total file size for VOD chunked download (0 if not VOD)
-	gaps             []database.Gap
+	fetchedTotal int64     // cumulative fetched bytes across both streams
+	lastFetchAt  time.Time // when the most recent fetch landed
+
+	// speedWin holds (time, cumulative-bytes) samples spanning the last
+	// ~speedAvgWindow; the displayed speed is delta over span across the
+	// whole window (see sampleSpeedLocked). speedWinFetched records which
+	// counter the samples came from — fetchedTotal once any fetch has been
+	// reported, bytesTotal as the fallback — so a source switch resets the
+	// window rather than mixing incomparable counters.
+	speedWin        []speedSample
+	speedWinFetched bool
+
+	startTime     time.Time // B8: for ETA calculation
+	vodPercent    float64   // VOD download progress percentage (from chunked download)
+	vodTotalBytes int64     // Total file size for VOD chunked download (0 if not VOD)
+	gaps          []database.Gap
 
 	// Per-stream wait activity. Video and audio downloaders share this tracker
 	// but can stall independently, so each keeps its own reason + start; the
@@ -90,6 +103,12 @@ type ProgressTracker struct {
 	closed             bool      // Finalize ran — no further activity writes or tickers
 }
 
+// speedSample is one (time, cumulative-bytes) reading in the speed window.
+type speedSample struct {
+	t     time.Time
+	bytes int64
+}
+
 // streamKind identifies which downloader an activity/progress event came from.
 // streamOrch is the orchestrator itself (waits between downloader sessions).
 type streamKind int
@@ -104,14 +123,12 @@ const (
 func NewProgressTracker(db *database.Database, jobID string, logger logger) *ProgressTracker {
 	now := time.Now()
 	return &ProgressTracker{
-		db:            db,
-		logger:        logger,
-		jobID:         jobID,
-		speedSmooth:   utils.NewSmoothValue(0.7),
-		lastUpdate:    now,
-		lastPersist:   now,
-		lastBytesTime: now,
-		startTime:     now,
+		db:          db,
+		logger:      logger,
+		jobID:       jobID,
+		lastUpdate:  now,
+		lastPersist: now,
+		startTime:   now,
 	}
 }
 
@@ -469,26 +486,9 @@ func (pt *ProgressTracker) maybeUpdate() {
 	}
 	pt.lastUpdate = now
 
-	// Calculate instantaneous speed (bytes delta / time delta, matching TS).
-	// Source is the ARRIVAL counter (fetchedTotal) once any fetch has been
-	// reported: the flush counter (bytesTotal) sawtooths with catch-up's
-	// ordered-flush clumps — zero for seconds, then a whole clump at once —
-	// while arrival tracks the network. The bytesTotal fallback keeps a
-	// non-zero readout for any path that never reports fetches. A side
-	// benefit: resume-seeded file bytes inflate bytesTotal's first delta but
-	// never the arrival counter.
-	elapsed := now.Sub(pt.lastBytesTime).Seconds()
-	if elapsed > 0 {
-		src, last := pt.bytesTotal, pt.speedLastBytes
-		if pt.fetchedTotal > 0 {
-			src, last = pt.fetchedTotal, pt.speedLastFetched
-		}
-		speed := float64(src-last) / elapsed
-		pt.speedSmooth.Update(speed)
-		pt.speedLastBytes = pt.bytesTotal
-		pt.speedLastFetched = pt.fetchedTotal
-		pt.lastBytesTime = now
-	}
+	// Sample the byte counter into the sliding window and average across it
+	// — see sampleSpeedLocked for the source choice and window mechanics.
+	speedBps := pt.sampleSpeedLocked(now)
 
 	// Build progress string (A3: includes chat count like "V:1234 A:1234 C:5678")
 	progress := pt.buildProgressString()
@@ -509,7 +509,7 @@ func (pt *ProgressTracker) maybeUpdate() {
 	// stale speed over the activity message — render the wait here too, so
 	// the two writers agree instead of alternating once a second. The seq
 	// columns and chat count below still persist normally.
-	speed := utils.FormatSpeed(pt.speedSmooth.Value())
+	speed := utils.FormatSpeed(speedBps)
 	activityShown := false
 	if act, start := pt.dominantActivity(now); act != engine.ActivityNone {
 		progress = activityMessage(act, pt.activityElapsedLocked(act, start, now))
@@ -567,8 +567,45 @@ func (pt *ProgressTracker) maybeUpdate() {
 	}
 }
 
+// sampleSpeedLocked appends the current cumulative byte reading to the
+// sliding speed window and returns the average bytes/sec across it — the
+// user-facing speed. Source is the ARRIVAL counter (fetchedTotal) once any
+// fetch has been reported: the flush counter (bytesTotal) sawtooths with
+// catch-up's ordered-flush clumps — zero for seconds, then a whole clump
+// at once — while arrival tracks the network (and resume-seeded file bytes
+// inflate bytesTotal's baseline but never the arrival counter). bytesTotal
+// remains the fallback for any path that never reports fetches; the window
+// resets on a source switch because the two counters share no baseline.
+// Fewer than two samples (first tick, or right after a reset) reads as 0.
+// Caller holds mu.
+func (pt *ProgressTracker) sampleSpeedLocked(now time.Time) float64 {
+	src, fromFetched := pt.bytesTotal, false
+	if pt.fetchedTotal > 0 {
+		src, fromFetched = pt.fetchedTotal, true
+	}
+	if fromFetched != pt.speedWinFetched {
+		pt.speedWin = pt.speedWin[:0]
+		pt.speedWinFetched = fromFetched
+	}
+	pt.speedWin = append(pt.speedWin, speedSample{t: now, bytes: src})
+	// Evict from the front only while the SECOND sample still covers the
+	// full window, so the retained span stays ~speedAvgWindow instead of
+	// shrinking (the oldest kept sample may sit just outside the window).
+	for len(pt.speedWin) >= 2 && now.Sub(pt.speedWin[1].t) >= speedAvgWindow {
+		pt.speedWin = pt.speedWin[1:]
+	}
+	if n := len(pt.speedWin); n >= 2 {
+		if span := pt.speedWin[n-1].t.Sub(pt.speedWin[0].t).Seconds(); span > 0 {
+			return float64(pt.speedWin[n-1].bytes-pt.speedWin[0].bytes) / span
+		}
+	}
+	return 0
+}
+
 // buildProgressString builds the progress display string.
-// Format matches TypeScript: "(A: X V: Y C: Z)" for DASH, "Seq: X" for HLS, "V:95.3%" for VOD.
+// Format: "(V: X A: Y C: Z)" for DASH — video first, matching the details
+// panes' "V: x | A: y" Segments row so the two never read as different
+// counts — "Seq: X" for HLS, "V:95.3%" for VOD.
 func (pt *ProgressTracker) buildProgressString() string {
 	// VOD chunked download: show percentage instead of segment counts
 	if pt.vodTotalBytes > 0 {
@@ -588,7 +625,7 @@ func (pt *ProgressTracker) buildProgressString() string {
 		if pt.audioTotal > 0 {
 			aPart = strconv.Itoa(pt.audioSeq) + "/" + strconv.Itoa(pt.audioTotal)
 		}
-		s := fmt.Sprintf("(A: %s V: %s", aPart, vPart)
+		s := fmt.Sprintf("(V: %s A: %s", vPart, aPart)
 		if pt.chatCount > 0 {
 			s += fmt.Sprintf(" C: %d", pt.chatCount)
 		}

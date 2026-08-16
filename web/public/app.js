@@ -3961,10 +3961,12 @@ class MoomboxApp {
     if (job.status === "Error" && job.error) return job.error;
 
     const p = job.progress || "";
-    // DASH: (A: 123/456 V: 789/1000 C: 50)
-    const dashMatch = p.match(/\(A:\s*(\S+)\s+V:\s*(\S+)(?:\s+C:\s*(\d+))?\)/);
+    // DASH: (V: 789/1000 A: 123/456 C: 50) — video first since v2.7.8;
+    // pre-flip "(A: ... V: ...)" strings on old rows fall through to the
+    // lastVideoSeq fallback below, which renders the same information.
+    const dashMatch = p.match(/\(V:\s*(\S+)\s+A:\s*(\S+)(?:\s+C:\s*(\d+))?\)/);
     if (dashMatch) {
-      let tip = `Audio: ${dashMatch[1]} segments, Video: ${dashMatch[2]} segments`;
+      let tip = `Video: ${dashMatch[1]} segments, Audio: ${dashMatch[2]} segments`;
       if (dashMatch[3]) tip += `, Chat: ${parseInt(dashMatch[3]).toLocaleString()} messages`;
       return tip;
     }

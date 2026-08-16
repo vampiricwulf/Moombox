@@ -188,6 +188,57 @@ func TestDominantActivity(t *testing.T) {
 	})
 }
 
+// TestSampleSpeedWindow pins the sliding-window speed average: delta over
+// span across ~speedAvgWindow of samples, 0 until two samples exist, old
+// samples evicted so a stall decays to 0 within the window, and a source
+// switch (bytesTotal fallback → fetchedTotal) resetting the window rather
+// than mixing incomparable counters.
+func TestSampleSpeedWindow(t *testing.T) {
+	base := time.Now()
+
+	t.Run("averages delta over span", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.fetchedTotal = 1 // arrival source active from the first sample
+		if got := pt.sampleSpeedLocked(base); got != 0 {
+			t.Errorf("single sample: speed = %v, want 0", got)
+		}
+		pt.fetchedTotal = 1 + 3<<20
+		if got := pt.sampleSpeedLocked(base.Add(1 * time.Second)); got != float64(3<<20) {
+			t.Errorf("3 MB over 1s = %v, want %v", got, float64(3<<20))
+		}
+		pt.fetchedTotal = 1 + 6<<20
+		if got := pt.sampleSpeedLocked(base.Add(2 * time.Second)); got != float64(3<<20) {
+			t.Errorf("6 MB over 2s = %v, want steady %v", got, float64(3<<20))
+		}
+	})
+
+	t.Run("stall decays to zero once the window slides past the transfer", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.speedWinFetched = true
+		pt.fetchedTotal = 6 << 20
+		pt.sampleSpeedLocked(base)
+		// No new bytes for longer than the window: everything before the
+		// stall evicts and the average must read 0, not a stale rate.
+		if got := pt.sampleSpeedLocked(base.Add(speedAvgWindow + 2*time.Second)); got != 0 {
+			t.Errorf("post-stall speed = %v, want 0", got)
+		}
+	})
+
+	t.Run("source switch resets the window", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.bytesTotal = 50 << 20 // flush-counter samples (fallback source)
+		pt.sampleSpeedLocked(base)
+		pt.fetchedTotal = 1 << 20 // first fetch reported — source switches
+		if got := pt.sampleSpeedLocked(base.Add(1 * time.Second)); got != 0 {
+			t.Errorf("switch tick: speed = %v, want 0 (fresh window, one sample)", got)
+		}
+		pt.fetchedTotal = 3 << 20
+		if got := pt.sampleSpeedLocked(base.Add(2 * time.Second)); got != float64(2<<20) {
+			t.Errorf("post-switch: speed = %v, want %v from fetched samples only", got, float64(2<<20))
+		}
+	})
+}
+
 // TestBuildProgressStringVODChunked covers the "vodTotalBytes > 0"
 // branch — the function must return a percentage rather than segment
 // counts. Audit reports/worker.md F69.
@@ -219,7 +270,7 @@ func TestBuildProgressStringSegmentedAV(t *testing.T) {
 	pt.videoTotal = 200
 
 	got := pt.buildProgressString()
-	want := "(A: 100/200 V: 50/200)"
+	want := "(V: 50/200 A: 100/200)"
 	if got != want {
 		t.Errorf("segmented A+V: want %q, got %q", want, got)
 	}
@@ -233,7 +284,7 @@ func TestBuildProgressStringSegmentedAVUnknownTotal(t *testing.T) {
 	pt.videoSeq = 50
 
 	got := pt.buildProgressString()
-	want := "(A: 100 V: 50)"
+	want := "(V: 50 A: 100)"
 	if got != want {
 		t.Errorf("segmented A+V no totals: want %q, got %q", want, got)
 	}

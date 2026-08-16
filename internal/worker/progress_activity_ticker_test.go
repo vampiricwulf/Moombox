@@ -46,9 +46,12 @@ func TestSpeedUsesArrivalCounter(t *testing.T) {
 
 	pt.mu.Lock()
 	pt.lastUpdate = time.Now().Add(-100 * time.Millisecond) // pass the 16ms throttle
-	pt.lastBytesTime = time.Now().Add(-1 * time.Second)     // ~1s measurement window
-	pt.fetchedTotal = 5 << 20                               // ~5 MB arrived off the network
-	pt.bytesTotal = 0                                       // nothing flushed yet — old source read 0 B/s
+	pt.fetchedTotal = 10 << 20                              // ~10 MB arrived off the network
+	pt.bytesTotal = 0                                       // nothing flushed yet — the flush source read 0 B/s
+	// Seed the window with a fetched-source baseline ~2s back so this tick's
+	// sample yields a ~5 MB/s average without sleeping in the test.
+	pt.speedWinFetched = true
+	pt.speedWin = []speedSample{{t: time.Now().Add(-2 * time.Second), bytes: 0}}
 	pt.videoReported = true
 	pt.mu.Unlock()
 

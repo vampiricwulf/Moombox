@@ -68,12 +68,12 @@ func TestFinalizeIncompleteTailWritesAndSelfClears(t *testing.T) {
 }
 
 // TestIncompleteProgressString pins FIX 4's honest-progress format: the same
-// DASH-style "(A: x/y V: x/y[ C: n])" shape ProgressTracker.buildProgressString
+// DASH-style "(V: x/y A: x/y[ C: n])" shape ProgressTracker.buildProgressString
 // (progress.go) uses, omitting the "/head" part when head <= 0 (downloaderHead
 // returns -1 for a nil downloader), and — per the fix's explicit compatibility
 // note — still matching the exact regex app.js's dashMatch uses to parse it.
 func TestIncompleteProgressString(t *testing.T) {
-	dashMatch := regexp.MustCompile(`\(A:\s*(\S+)\s+V:\s*(\S+)(?:\s+C:\s*(\d+))?\)`)
+	dashMatch := regexp.MustCompile(`\(V:\s*(\S+)\s+A:\s*(\S+)(?:\s+C:\s*(\d+))?\)`)
 
 	cases := []struct {
 		name                                string
@@ -81,10 +81,10 @@ func TestIncompleteProgressString(t *testing.T) {
 		wantStr                             string
 		wantPercent                         float64
 	}{
-		{"both heads known", 500, 1200, 500, 1200, 0, "(A: 500/1200 V: 500/1200)", float64(500) / 1200 * 100},
-		{"unknown head (-1) omits slash, percent 0", 500, -1, 500, -1, 0, "(A: 500 V: 500)", 0},
-		{"video head 0 omits slash, percent stays 0", 10, 0, 10, 20, 0, "(A: 10/20 V: 10)", 0},
-		{"chat count appended", 500, 1200, 480, 1200, 42, "(A: 480/1200 V: 500/1200 C: 42)", float64(500) / 1200 * 100},
+		{"both heads known", 500, 1200, 500, 1200, 0, "(V: 500/1200 A: 500/1200)", float64(500) / 1200 * 100},
+		{"unknown head (-1) omits slash, percent 0", 500, -1, 500, -1, 0, "(V: 500 A: 500)", 0},
+		{"video head 0 omits slash, percent stays 0", 10, 0, 10, 20, 0, "(V: 10 A: 10/20)", 0},
+		{"chat count appended", 500, 1200, 480, 1200, 42, "(V: 500/1200 A: 480/1200 C: 42)", float64(500) / 1200 * 100},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

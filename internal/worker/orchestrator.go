@@ -738,7 +738,7 @@ func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *Down
 // percent for a job whose download finalized with a known-incomplete tail —
 // used in place of the flat "V:100% A:100%"/100.0 write so a knowingly-
 // truncated recording doesn't show a full bar while muxing. Mirrors the
-// DASH-style "(A: x/y V: x/y)" shape ProgressTracker.buildProgressString
+// DASH-style "(V: x/y A: x/y)" shape ProgressTracker.buildProgressString
 // (progress.go) already uses — and that app.js's dashMatch regex already
 // parses — omitting the "/head" part when head <= 0 (downloaderHead returns
 // -1 for a nil downloader).
@@ -751,7 +751,7 @@ func incompleteProgressString(vSeq, vHead, aSeq, aHead, chatCount int) (string, 
 	if aHead > 0 {
 		aPart = fmt.Sprintf("%d/%d", aSeq, aHead)
 	}
-	s := fmt.Sprintf("(A: %s V: %s", aPart, vPart)
+	s := fmt.Sprintf("(V: %s A: %s", vPart, aPart)
 	if chatCount > 0 {
 		s += fmt.Sprintf(" C: %d", chatCount)
 	}
