@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -391,6 +392,88 @@ func TestReorderBufferFailureDoesNotReopenUnboundedGrowth(t *testing.T) {
 	}
 	if got := rb.residentBytes(); got != 0 {
 		t.Errorf("residentBytes = %d, want 0 — nothing above a known failure point should ever be buffered", got)
+	}
+}
+
+// TestCatchUpRollingWindowThroughput is the throughput-shaped regression
+// test for the rolling-window catch-up: a far-behind download must drain its
+// whole span in ONE continuously-fed pool rather than batch-quantised waves
+// with a dedicated head probe between each. It drives the real runDashLoop
+// (d.Start) against a fake GVS where every segment costs a small fixed delay
+// and every dedicated head probe costs a large fixed delay, then asserts
+// total wall clock well under what the batched structure must pay.
+//
+// The numbers, and why the margin cannot flake on a busy machine:
+//
+//	240 segments, 4 workers, so catchUpBatchLimit = 8*4 = 32 -> the batched
+//	structure needs ceil(240/32) = 8 runParallelCatchUp calls, and its
+//	runDashLoop ran an UNCONDITIONAL probeHeadSequence after every one of
+//	them, plus the initial head-discovery probe: 9 serial probes at 500ms
+//	each is >= 4.5s of wall clock before a single segment's 5ms delay is
+//	counted (batched model total: 9*500ms + 240/4*5ms = 4.8s). The rolling
+//	window pays exactly ONE probe (initial head discovery -- segment-header
+//	harvests keep head fresh afterward), so its nominal time is
+//	500ms + 240/4*5ms + overhead, comfortably under 1.5s even with coarse
+//	Windows timers. The 2.5s budget sits >= 2s below the batched floor and
+//	>= 1s above the rolling nominal -- it discriminates on structure, not
+//	scheduler luck.
+func TestCatchUpRollingWindowThroughput(t *testing.T) {
+	t.Parallel()
+	const (
+		head       = 400
+		endSeq     = 239 // 240 segments: 0..239 (EndSeq clamp ends the run)
+		numWorkers = 4
+		segDelay   = 5 * time.Millisecond
+		probeDelay = 500 * time.Millisecond
+		budget     = 2500 * time.Millisecond
+	)
+	var probes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Head-Seqnum", strconv.Itoa(head))
+		seq, err := strconv.Atoi(r.URL.Query().Get("sq"))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if seq > head {
+			// Dedicated head-discovery probe (sq=999999999): models the real
+			// round trip each probe costs. The batched structure paid this
+			// between every batch; the rolling window only at entry.
+			probes.Add(1)
+			time.Sleep(probeDelay)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		time.Sleep(segDelay)
+		fmt.Fprintf(w, "seg-%05d;", seq)
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "v")
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:        srv.URL + "/videoplayback?id=t4.throughput&itag=140",
+		OutputFile:     out,
+		EndSeq:         endSeq,
+		SegmentWorkers: numWorkers,
+		MaxTimeout:     time.Minute,
+		// Still live -- the loop must exit via the EndSeq clamp, never via
+		// end-verification (no gone bursts occur: every seq <= endSeq serves).
+		CheckStreamStatus: func(context.Context) (bool, error) { return false, nil },
+	})
+
+	start := time.Now()
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start = %v, want nil", err)
+	}
+	elapsed := time.Since(start)
+
+	// Correctness first: the speed is worthless if the recording has a hole.
+	wantSegments(t, out, 0, endSeq)
+
+	if elapsed > budget {
+		t.Errorf("caught up %d segments in %v, want < %v -- the pool is draining at batch boundaries "+
+			"and paying a head probe per batch (%d probes observed) instead of rolling continuously",
+			endSeq+1, elapsed.Round(time.Millisecond), budget, probes.Load())
 	}
 }
 

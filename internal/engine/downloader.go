@@ -485,16 +485,17 @@ func (d *SegmentDownloader) segmentWorkers() int {
 	return ParallelDownloads
 }
 
-// maxCatchupBatch caps how many segments one runParallelCatchUp call
-// fetches, derived from the operative worker count so a wider pool gets a
-// proportionally wider window instead of starving against a fixed ceiling.
-// Without a cap, a resume far behind the live edge sizes the batch to the
-// whole gap (thousands of segments); the out-of-order reorder buffer then
-// holds the entire window in RAM if the head-of-window segment is stuck or
-// CDN-evicted (oldest-first eviction makes that the *likely* alignment on a
-// long resume) — a multi-GB spike that can OOM a low-RAM arm64 host.
-// Bounding the batch makes peak memory O(batch); runDashLoop re-enters
-// catch-up back-to-back to drain a larger gap without losing throughput.
+// maxCatchupBatch is the full (undamped) width of catch-up's rolling claim
+// window — how far runParallelCatchUp's workers may fetch ahead of the
+// flush position — derived from the operative worker count so a wider pool
+// gets a proportionally deeper pipeline instead of starving against a
+// fixed ceiling. Without the window, a resume far behind the live edge
+// lets fetches run arbitrarily ahead of a stuck head-of-window segment
+// (CDN oldest-first eviction makes that the *likely* alignment on a long
+// resume); the byte ceiling caps what those fetches hold resident, and
+// this caps how much work is dispatched past a potential failure point
+// only to be discarded. See catchUpBatchLimit for the post-failure damped
+// value.
 func (d *SegmentDownloader) maxCatchupBatch() int {
 	return 8 * d.segmentWorkers()
 }

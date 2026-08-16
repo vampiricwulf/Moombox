@@ -173,23 +173,25 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 					consecutiveGoneErrors = 0
 					d.streamEndVerified = false
 				}
-				// Re-probe head after catch-up so the next iteration sees
-				// the updated head position rather than the pre-catch-up
-				// snapshot — head can advance significantly during a long
-				// catch-up window.
-				if headSeq, err := d.probeHeadSequence(ctx); err == nil {
-					d.noteHeadSeqFromProbe(headSeq)
-				}
-				d.lastHeadProbeTime.StoreNow()
+				// No dedicated head probe here: catch-up's workers harvest
+				// X-Head-Seqnum from every segment response
+				// (noteHeadSeqFromResponse), so headSeq is at most one
+				// segment-response stale when catch-up returns — and the
+				// rolling window chased that live head internally, so a
+				// still-far-behind return means a gap stopped it, not that
+				// the batch ended. The probe that used to sit here ran once
+				// per batch, an out-of-band round trip on the hot path; the
+				// HeadProbeInterval-paced probe at the top of the loop
+				// remains the backstop for a stalled/quiet edge.
 				curHead := int(d.headSeq.Load())
 				curSeqNow := int(d.currentSeq.Load())
 				stillFarBehind := curHead > 0 && (curHead-curSeqNow) >= stayBehindSegments+CatchupThreshold
-				// Re-enter catch-up back-to-back while it keeps making progress
-				// and a real window remains — batches are bounded by
-				// maxCatchupBatch, so draining a large gap means several
-				// bounded catch-up cycles rather than one giant in-memory one,
-				// and parallel is faster than sequential when head races ahead.
-				// Fall through to the sequential path ONLY on ZERO progress: the
+				// Re-enter catch-up while it keeps making progress and a real
+				// window remains — after a mid-span gap (the only way a
+				// rolling catch-up returns still-far-behind with progress),
+				// re-entering retries the gap sequence as the new
+				// head-of-window with a fresh damped window. Fall through to
+				// the sequential path ONLY on ZERO progress: the
 				// head-of-window segment is stuck/gone and handleGoneError's
 				// backoff + first-segment hunt is what's designed to break it.
 				if !stillFarBehind || nextSeq > preCatchupSeq {

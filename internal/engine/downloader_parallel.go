@@ -48,6 +48,20 @@ import (
 // write error) has nothing to do with which seq failed, so there's no
 // seq to hand markFailed. Once nothing will ever read from this buffer
 // again, no worker should be left stranded waiting for room.
+//
+// claim / beginClaims turn the buffer into the rolling-window work source
+// for catch-up's worker pool: instead of a feeder goroutine pushing one
+// fixed batch, each worker asks claim() for the next sequence to fetch.
+// Claims are handed out contiguously, gated by a sliding window anchored
+// at the flush position (head): a worker may claim seq S only while
+// S < head + window(). Because the consumer advances head via setHead()
+// after every write, the window refills as segments land on disk — the
+// pool never waits for a batch boundary. Claims end (claim returns false,
+// permanently) when the target is reached, when any failure is recorded
+// (nothing can flush past a permanent hole, so fetching beyond it is
+// guaranteed waste), or on release. target and window are read live under
+// the buffer's own lock, so the target chases a head that advances during
+// catch-up and a post-failure damped window regrows mid-call.
 type reorderBuffer struct {
 	mu    sync.Mutex
 	cond  *sync.Cond
@@ -62,6 +76,14 @@ type reorderBuffer struct {
 
 	// released: see the type doc.
 	released bool
+
+	// claimNext / claimTarget / claimWindow / claimsOver: see the type doc.
+	// claimTarget and claimWindow must be lock-free (they are called with
+	// mu held); both closures read only atomics and immutable options.
+	claimNext   int
+	claimTarget func() int
+	claimWindow func() int
+	claimsOver  bool
 }
 
 func newReorderBuffer(limit, head int) *reorderBuffer {
@@ -167,23 +189,103 @@ func (b *reorderBuffer) residentBytes() int {
 	return b.bytes
 }
 
-// runParallelCatchUp downloads segments in parallel to catch up to the live edge.
-// Stays stayBehindSegments behind the live edge to avoid downloading in-flight segments.
+// beginClaims arms the rolling claim window (see the type doc): claims
+// start at next and are handed out while claimNext < target() (exclusive)
+// and claimNext < head + window(). Must be called before any claim().
+func (b *reorderBuffer) beginClaims(next int, target, window func() int) {
+	b.mu.Lock()
+	b.claimNext = next
+	b.claimTarget = target
+	b.claimWindow = window
+	b.mu.Unlock()
+}
+
+// claim hands out the next sequence for a worker to fetch, blocking while
+// the sliding window is full (claimNext >= head + window()). Returns
+// (seq, true) with a claim the caller MUST resolve — by admitting the
+// fetched data or by markFailed(seq) — or (0, false) permanently once
+// claiming is over: the target was reached, a failure was recorded, or the
+// buffer was released for teardown. An unresolved claim stalls the flush
+// (and therefore the window) forever, so even a worker that abandons its
+// item (cancellation, panic) must mark it failed.
+//
+// Liveness: a claim() blocked on a full window is woken by the same
+// broadcasts that rescue a blocked admit() — setHead (a flush advanced the
+// window), take (room freed), markFailed, and release (both of which flip
+// claim() to its false return). Every sequence below claimNext is owned by
+// exactly one past claim, and each owner either flushes it (window slides),
+// fails it (claims end), or is itself blocked in admit() and rescued by the
+// head-always-admitted / drop-above-failure guarantees — so a blocked
+// claim() can never be stranded.
+func (b *reorderBuffer) claim() (int, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for {
+		if b.released || b.failed || b.claimsOver || b.claimTarget == nil {
+			return 0, false
+		}
+		if b.claimNext >= b.claimTarget() {
+			// Latch rather than re-check later: the pool winds down as one
+			// once the span is covered, instead of thinning worker by worker
+			// while in-flight harvests nudge the target forward. The caller
+			// re-enters catch-up if the head has meaningfully advanced.
+			b.claimsOver = true
+			b.cond.Broadcast() // wake window-blocked siblings so they exit too
+			return 0, false
+		}
+		if b.claimNext < b.head+b.claimWindow() {
+			seq := b.claimNext
+			b.claimNext++
+			return seq, true
+		}
+		b.cond.Wait()
+	}
+}
+
+// claimedUpTo reports the exclusive upper bound of handed-out claims.
+// Stable once every worker has exited (nothing else calls claim()); the
+// consumer uses it as the bound for gap reporting — sequences above it
+// were never attempted, so they are future work, not a gap.
+func (b *reorderBuffer) claimedUpTo() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.claimNext
+}
+
+// runParallelCatchUp downloads segments in parallel to catch up to the live
+// edge, staying stayBehindSegments behind it to avoid in-flight segments.
+//
+// One worker pool stays alive across the whole catch-up span: workers claim
+// the next sequence from rb's rolling window (see reorderBuffer.claim) and
+// the consumer flushes to disk in strictly ascending order as segments
+// arrive, advancing the window with every write. The previous structure fed
+// exactly one catchUpBatchLimit-sized batch, waited for EVERY worker, and
+// returned — so the slowest segment in a batch idled the whole pool at each
+// boundary and runDashLoop paid a dedicated head probe per batch (measured
+// ~55% of the throughput the same connection count sustains). The target
+// chases the live head as workers harvest X-Head-Seqnum from segment
+// responses, so one call drains an arbitrarily-far-behind gap; memory stays
+// bounded exactly as before because the claim window (catchUpBatchLimit,
+// read live so post-failure damping and regrowth still apply) caps how far
+// fetches may run ahead of the flush position, and rb's byte ceiling caps
+// what those fetches may hold resident.
+//
+// Returns nextSeq = the first sequence NOT written: the (exclusive) end of
+// the covered span when it completes, or the sequence AT a permanent gap —
+// with OnGap / "stopping at gap" reporting — so the sequential loop's
+// full-retry recovery re-engages exactly as it always has.
 func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error) {
 	curSeq := int(d.currentSeq.Load())
 	head := int(d.headSeq.Load())
-	// targetSeq is EXCLUSIVE: the catch-up downloads seqs [curSeq, targetSeq).
-	targetSeq := head - stayBehindSegments
-	targetSeq = max(targetSeq, curSeq+1) // At least catch up 1 segment
-	// Bound the batch so the reorder buffer below can't grow to the whole
-	// gap on a far-behind resume (see maxCatchupBatch). runDashLoop loops
-	// back into catch-up to drain a larger gap in bounded chunks.
-	targetSeq = min(targetSeq, curSeq+d.catchUpBatchLimit())
+	// initialTarget is EXCLUSIVE and is the floor of the live target below:
+	// the span [curSeq, initialTarget) is committed even if head never
+	// advances again.
+	initialTarget := max(head-stayBehindSegments, curSeq+1) // at least 1 segment
 	// Respect endSeq limit (for timestamp-based trimming)
-	if d.opts.EndSeq >= 0 && targetSeq > d.opts.EndSeq+1 {
-		targetSeq = d.opts.EndSeq + 1
+	if d.opts.EndSeq >= 0 && initialTarget > d.opts.EndSeq+1 {
+		initialTarget = d.opts.EndSeq + 1
 	}
-	if targetSeq <= curSeq {
+	if initialTarget <= curSeq {
 		return curSeq, nil
 	}
 
@@ -201,15 +303,10 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		})
 	}
 
-	type segWork struct {
-		seq int
-	}
-
 	// workers is the operative concurrency for this download (see
-	// segmentWorkers) — computed once so the channel sizing and worker-pool
-	// spawn below agree with each other and with catchUpBatchLimit's ceiling.
+	// segmentWorkers) — computed once so the results-channel sizing and the
+	// worker-pool spawn below agree with each other.
 	workers := d.segmentWorkers()
-	work := make(chan segWork, workers)
 	// results only carries a notification that SOME segment landed in rb —
 	// the data itself lives in rb, admitted by the worker before it sends
 	// here, so the consumer doesn't need the payload to decide what to
@@ -225,6 +322,27 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		bufLimit = d.catchUpBufferBytesOverride
 	}
 	rb := newReorderBuffer(bufLimit, curSeq)
+	// The live target the rolling window chases: how far catch-up may fetch
+	// right now, re-read on every claim. Workers harvest X-Head-Seqnum from
+	// every segment response (noteHeadSeqFromResponse), so d.headSeq — and
+	// with it this target — keeps advancing while catch-up runs, and one
+	// call can drain an arbitrarily-far-behind gap without ever draining the
+	// pool at a batch boundary. Floored at initialTarget (headSeq is
+	// monotonic within a downloader, so the target never shrinks below what
+	// was committed at entry) and always clamped to EndSeq.
+	target := func() int {
+		t := int(d.headSeq.Load()) - stayBehindSegments
+		t = max(t, initialTarget)
+		if d.opts.EndSeq >= 0 {
+			t = min(t, d.opts.EndSeq+1)
+		}
+		return t
+	}
+	// The window width is catchUpBatchLimit read LIVE: the post-failure
+	// damping floor (one full parallel wave) and its one-segment-per-
+	// interval regrowth apply to the rolling window exactly as they did to
+	// the per-call batch — a call entered damped widens as it goes.
+	rb.beginClaims(curSeq, target, d.catchUpBatchLimit)
 	// done is closed when this function returns so workers blocked on
 	// `results <-` can unblock and exit. Without it, an early consumer
 	// return (e.g. write error below) would leave workers wedged on a
@@ -249,30 +367,47 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	}()
 	var wg sync.WaitGroup
 
-	// Spawn fixed worker pool
+	// Spawn fixed worker pool. Workers pull claims from rb's rolling window
+	// until claiming ends (target reached, failure recorded, or teardown) —
+	// there is no feeder goroutine and no batch to drain between.
 	for range workers {
 		wg.Go(func() {
+			// A claimed sequence MUST resolve — flush or markFailed — or the
+			// flush position stalls there forever and with it the rolling
+			// window, wedging every other worker. claimed tracks the one
+			// in-flight claim so the recover below can resolve it even on a
+			// panic; -1 means nothing is pending.
+			claimed := -1
 			defer func() {
-				if r := recover(); r != nil && d.logger != nil {
-					d.logger.Error("catch-up parallel download worker panic", "panic", r)
+				if r := recover(); r != nil {
+					if claimed >= 0 {
+						rb.markFailed(claimed)
+					}
+					if d.logger != nil {
+						d.logger.Error("catch-up parallel download worker panic", "panic", r)
+					}
 				}
 			}()
-			for item := range work {
-				if d.isCancelled() || ctx.Err() != nil {
-					// This exact seq will never be fetched (each seq maps
-					// to exactly one worker) — mark it failed so any OTHER
-					// worker already blocked in admit() for a higher seq
-					// drops out instead of waiting forever for room a
-					// cancelled download will never free. Without this,
-					// this branch was the one path in the whole pool that
-					// could strand a blocked worker permanently: it's the
-					// only place a work item is abandoned without ever
-					// calling fetchSegmentWithRetry, so the failure-path
-					// markFailed call below never ran for it.
-					rb.markFailed(item.seq)
-					continue // drain channel
+			for {
+				seq, ok := rb.claim()
+				if !ok {
+					return
 				}
-				seq := item.seq
+				claimed = seq
+				if d.isCancelled() || ctx.Err() != nil {
+					// This exact seq will never be fetched (each claim is
+					// owned by exactly one worker) — mark it failed so any
+					// OTHER worker already blocked in admit() for a higher
+					// seq drops out instead of waiting forever for room a
+					// cancelled download will never free, and so claim()
+					// starts returning false pool-wide. This is the only
+					// path that abandons a claim without ever calling
+					// fetchSegmentWithRetry, so the failure-path markFailed
+					// below never runs for it.
+					rb.markFailed(seq)
+					claimed = -1
+					continue // next claim() observes the failure and exits
+				}
 				segURL := d.buildSegmentURL(seq)
 				// Rebuild from the CURRENT base on a mid-retry credential
 				// refresh (Task 3 follow-up) — a sig/n-param rotation only
@@ -283,9 +418,15 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 					// Blocks here (not on `results <-`) once rb is at its
 					// byte ceiling, unless seq is the current head — see
 					// reorderBuffer.admit. A false return means the data
-					// was dropped (provably unflushable, or the batch is
+					// was dropped (provably unflushable, or the call is
 					// tearing down) — nothing to notify the consumer about.
-					if rb.admit(seq, data) {
+					// Either way the claim is resolved: stored data flushes
+					// or is discarded at return, and a drop implies a
+					// recorded failure/release already stalls the flush
+					// below this seq.
+					stored := rb.admit(seq, data)
+					claimed = -1
+					if stored {
 						select {
 						case results <- seq:
 						case <-done:
@@ -296,55 +437,34 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				}
 				// Any fetch failure — permanent, retries exhausted, or a
 				// cancelled download — means this exact seq will not arrive
-				// in this batch (each seq is fetched by exactly one
-				// worker). Record it as the (possibly new, lower) point
-				// beyond which nothing can ever flush, so admit() drops
-				// later segments instead of buffering data that's
-				// guaranteed to be discarded at return, and wakes any
-				// worker already blocked waiting for room past this point.
+				// in this call (each claim is owned by exactly one worker).
+				// Record it as the (possibly new, lower) point beyond which
+				// nothing can ever flush, so admit() drops later segments
+				// instead of buffering data that's guaranteed to be
+				// discarded at return, wakes any worker already blocked
+				// waiting for room past this point, and ends claiming.
 				// Deliberately NOT a blanket release(): a 403 episode is
 				// exactly the head-stall condition that fills the buffer,
 				// so disabling the ceiling for every seq on any single
 				// failure would reopen the full pre-ceiling exposure this
 				// type exists to close.
-				rb.markFailed(item.seq)
+				rb.markFailed(seq)
+				claimed = -1
 				// Audit reports/engine.md #17: surface the failure mode so the
 				// gap-detection downstream isn't blind to "transient" vs "gone".
 				switch {
 				case errors.Is(fetchErr, ErrSegmentPermanent):
 					d.noteCatchUpFailureEpisode()
 					d.logger.Debug("[Downloader] catch-up segment permanently gone (403/410)",
-						"seq", item.seq)
+						"seq", seq)
 				case errors.Is(fetchErr, ErrSegmentRetriesExhausted):
 					d.noteCatchUpFailureEpisode()
 					d.logger.Debug("[Downloader] catch-up segment retries exhausted",
-						"seq", item.seq)
+						"seq", seq)
 				}
 			}
 		})
 	}
-
-	// Feed work to workers. The send must select on done: when the consumer
-	// below returns early (write error), the workers drain away and nothing
-	// reads work anymore — a bare send would block this goroutine forever.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil && d.logger != nil {
-				d.logger.Error("catch-up feeder goroutine panic", "panic", r)
-			}
-		}()
-		defer close(work)
-		for seq := curSeq; seq < targetSeq; seq++ {
-			if d.isCancelled() || ctx.Err() != nil {
-				return
-			}
-			select {
-			case work <- segWork{seq: seq}:
-			case <-done:
-				return
-			}
-		}
-	}()
 
 	// Close results when all workers complete
 	go func() {
@@ -420,12 +540,19 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// fetchSegmentWithRetry used by catch-up workers. We still report the
 	// gap range so callers can track what's about to be retried.
 	// (Audit reports/engine.md Finding 4.)
-	if nextSeq < targetSeq {
+	//
+	// The bound is what was actually CLAIMED, not the live target: claims
+	// are contiguous, so every sequence below claimedUpTo was attempted and
+	// an unflushed one is a real hole — while sequences at/above it were
+	// never handed to a worker and are simply future work. Every claim
+	// flushed means nextSeq == claimedUpTo and no gap fires.
+	claimedUpTo := rb.claimedUpTo()
+	if nextSeq < claimedUpTo {
 		// Find how far the gap extends so the gap event covers the whole
 		// contiguous missing range up to the next buffered segment (or the
-		// end of the catch-up target if the tail is all missing).
+		// end of the claimed span if the tail is all missing).
 		gapEnd := nextSeq
-		for gapEnd < targetSeq {
+		for gapEnd < claimedUpTo {
 			if rb.has(gapEnd) {
 				break
 			}
@@ -442,15 +569,19 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 }
 
 // noteCatchUpFailureEpisode records that catch-up just hit failures, which
-// throttles the next batches via catchUpBatchLimit.
+// narrows the rolling claim window via catchUpBatchLimit.
 func (d *SegmentDownloader) noteCatchUpFailureEpisode() {
 	d.lastCatchUpFailure.StoreNow()
 }
 
-// catchUpBatchLimit is the per-call segment ceiling for parallel catch-up:
-// the full maxCatchupBatch() normally, and after a failure episode a value
-// that starts at the damped floor — one full parallel wave, i.e.
-// d.segmentWorkers() — and regrows by one segment per catchUpRegrowInterval.
+// catchUpBatchLimit is the width of parallel catch-up's rolling claim
+// window — how far fetches may run ahead of the flush position (see
+// reorderBuffer.claim; before the rolling window this same value bounded
+// the size of one whole catch-up batch): the full maxCatchupBatch()
+// normally, and after a failure episode a value that starts at the damped
+// floor — one full parallel wave, i.e. d.segmentWorkers() — and regrows by
+// one segment per catchUpRegrowInterval. Read live on every claim, so a
+// catch-up call entered damped widens as it runs.
 //
 // The floor and interval were retuned on 2026-08-15 after field evidence. The
 // first version collapsed to a single segment and regrew one per 10s, copying
