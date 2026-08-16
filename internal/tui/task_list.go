@@ -905,9 +905,10 @@ func (m *TaskListModel) renderHeader(w int) string {
 		timers = append(timers, s)
 	}
 
-	right := strings.Join(timers, " ")
+	timerStr := strings.Join(timers, " ")
 
 	// Scroll range display
+	var scrollFull, scrollShort string
 	total := len(m.list.Items())
 	contentH := m.contentHeight()
 	if total > contentH {
@@ -917,26 +918,41 @@ func (m *TaskListModel) renderHeader(w int) string {
 		}
 		start := m.list.Paginator.Page*perPage + 1
 		end := min(start+perPage-1, total)
-		scrollInfo := fmt.Sprintf("[%d-%d/%d]", start, end, total)
-		if right != "" {
-			right += " "
-		}
-		right += scrollInfo
+		scrollFull = fmt.Sprintf("[%d-%d/%d]", start, end, total)
+		scrollShort = fmt.Sprintf("[%d/%d]", end, total)
+	}
+
+	// Right-hand content, richest first. The old rule dropped ALL of it the
+	// moment it didn't fit, taking the scroll position with it — but that
+	// range is navigational (it says where you are in a list you are
+	// actively paging through), while the monitor countdowns are
+	// informational and repeated in the settings view. So the timers go
+	// first, then the range abbreviates, and only then does the side empty.
+	rightTiers := []string{
+		strings.TrimSpace(timerStr + " " + scrollFull),
+		scrollFull,
+		scrollShort,
+		"",
 	}
 
 	leftW := lipgloss.Width(left)
-	rightW := lipgloss.Width(right)
-
-	// If right side doesn't fit, drop it to prevent header from wrapping
-	// (wrapping adds an extra line, causing vertical shifting via Height truncation)
-	if leftW+1+rightW > w {
-		right = ""
-		rightW = 0
+	right := ""
+	for _, cand := range rightTiers {
+		if leftW+1+lipgloss.Width(cand) <= w {
+			right = cand
+			break
+		}
 	}
+	padding := max(w-leftW-lipgloss.Width(right), 1)
 
-	padding := max(w-leftW-rightW, 1)
-
-	return TitleStyle.Render(left) + strings.Repeat(" ", padding) + DimStyle.Render(right)
+	header := TitleStyle.Render(left) + strings.Repeat(" ", padding) + DimStyle.Render(right)
+	// Hard clamp: the left side alone can exceed w (a long filter or search
+	// indicator on a narrow window), and the pre-existing comment here was
+	// right about the consequence — a wrapped header adds a line and shifts
+	// the whole panel via Height truncation. Dropping the right side never
+	// prevented that, since nothing bounded the left. MaxWidth is
+	// ANSI-aware, so styled runs are cut without severing escape sequences.
+	return lipgloss.NewStyle().MaxWidth(w).Render(header)
 }
 
 // buildStatusSummary generates status summary with icons like "3● 2▼ 1⚙" (T1).

@@ -162,55 +162,51 @@ func (m *StatusBarModel) View() string {
 	return statusBarBgStyle.MaxWidth(m.width).Render(bar)
 }
 
-// fitTiers picks the richest (left, right) tier pair whose combined width
-// fits m.width, including the one-column gap between them.
+// statusBarDescent is the fixed order in which the two halves give up
+// density, richest pair first. Three phases:
 //
-// The right half yields first and the two then alternate, so a narrow
-// window loses status verbosity before it loses keybinds — but neither
-// side is amputated outright. Both ladders end at tierNone, so the loop
-// always terminates, with an empty bar in the degenerate case.
+//  1. The RIGHT steps down alone to tierKeys. Status verbosity is the
+//     cheapest thing to lose — the backfill line and the long disk label
+//     are the widest, least urgent content on the bar — so the chord hints
+//     keep their full labels through the first two steps.
+//  2. The LEFT follows down to tierKeys, shedding its labels.
+//  3. From there the two ALTERNATE, right first, down to tierNone.
+//
+// Because every entry lowers exactly one side by exactly one rung and both
+// ladders narrow monotonically (pinned by TestStatusBarTiersNarrowMonotonically),
+// widths along this path are non-increasing — so the FIRST entry that fits
+// is also the richest one that fits. That is what lets fitTiers be a plain
+// scan: an earlier greedy version had to climb back out of overshoot, where
+// stepping one side down hid content the other side's step alone would have
+// freed room for.
+var statusBarDescent = [...]struct{ left, right barTier }{
+	{tierFull, tierFull},
+	{tierFull, tierCompact},
+	{tierFull, tierKeys},
+	{tierCompact, tierKeys},
+	{tierKeys, tierKeys},
+	{tierKeys, tierTight},
+	{tierTight, tierTight},
+	{tierTight, tierEssential},
+	{tierEssential, tierEssential},
+	{tierEssential, tierNone},
+	{tierNone, tierNone},
+}
+
+// fitTiers picks the richest (left, right) tier pair whose combined width
+// fits m.width, including the one-column gap between them, by walking
+// statusBarDescent. Falls through to the fully-empty pair when even that
+// overflows (a 1-2 column window); View's MaxWidth clamp is the backstop.
 func (m *StatusBarModel) fitTiers() (string, string) {
 	lefts := m.controlTiers()
 	rights := m.metricTiers()
 
-	fits := func(l, r barTier) bool {
-		return lipgloss.Width(lefts[l])+1+lipgloss.Width(rights[r]) <= m.width
-	}
-
-	li, ri := tierFull, tierFull
-	for !fits(li, ri) {
-		switch {
-		// The RIGHT half yields first, then the two alternate (ri <= li
-		// flips the turn each step). The chord hints are the reason this
-		// bar exists — losing "Tab Focus" costs the operator a keybind
-		// they may not know, while losing "Backfill Foo: videos p3" costs
-		// them a detail they can read in the log panel. The li == tierNone
-		// arm lets the right keep degrading alone once the left is spent.
-		case ri < tierNone && (ri <= li || li == tierNone):
-			ri++
-		case li < tierNone:
-			li++
-		default:
-			// Even tierNone/tierNone overflows (a 1-2 column window).
-			// View's MaxWidth clamp is the backstop.
-			return lefts[tierNone], rights[tierNone]
+	for _, step := range statusBarDescent {
+		if lipgloss.Width(lefts[step.left])+1+lipgloss.Width(rights[step.right]) <= m.width {
+			return lefts[step.left], rights[step.right]
 		}
 	}
-
-	// Climb back. Alternating descent can OVERSHOOT: it steps one side down
-	// when the other side's step alone would have freed enough room, so the
-	// first fitting pair is not always the richest fitting pair (at 120
-	// columns the chord hints lost their labels with 37 columns still
-	// empty). Re-upgrade greedily against the width that is actually left,
-	// chord hints first — same priority as the descent, so leftover room
-	// buys back keybind names before it buys back status verbosity.
-	for li > tierFull && fits(li-1, ri) {
-		li--
-	}
-	for ri > tierFull && fits(li, ri-1) {
-		ri--
-	}
-	return lefts[li], rights[ri]
+	return lefts[tierNone], rights[tierNone]
 }
 
 // controlTiers renders the chord hints at every density, richest first,

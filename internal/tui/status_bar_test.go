@@ -112,6 +112,58 @@ func TestStatusBarTiersNarrowMonotonically(t *testing.T) {
 	}
 }
 
+// TestStatusBarDescentSchedule pins the agreed degradation order, which is
+// a deliberate product decision rather than an emergent property of the
+// fitting loop: the right half steps down ALONE to tierKeys, the left then
+// follows to tierKeys, and from there the two alternate — right first —
+// down to tierNone. Every step must lower exactly one side by exactly one
+// rung, or the "first fit is the richest fit" property that lets fitTiers
+// be a plain scan no longer holds.
+func TestStatusBarDescentSchedule(t *testing.T) {
+	want := []struct{ left, right barTier }{
+		{tierFull, tierFull},
+		{tierFull, tierCompact},
+		{tierFull, tierKeys},
+		{tierCompact, tierKeys},
+		{tierKeys, tierKeys},
+		{tierKeys, tierTight},
+		{tierTight, tierTight},
+		{tierTight, tierEssential},
+		{tierEssential, tierEssential},
+		{tierEssential, tierNone},
+		{tierNone, tierNone},
+	}
+	if len(statusBarDescent) != len(want) {
+		t.Fatalf("descent has %d steps, want %d", len(statusBarDescent), len(want))
+	}
+	for i, w := range want {
+		if statusBarDescent[i] != w {
+			t.Errorf("step %d = (%v,%v), want (%v,%v)",
+				i, statusBarDescent[i].left, statusBarDescent[i].right, w.left, w.right)
+		}
+	}
+
+	// Exactly one side moves down exactly one rung per step, never up.
+	for i := 1; i < len(statusBarDescent); i++ {
+		prev, cur := statusBarDescent[i-1], statusBarDescent[i]
+		dl, dr := cur.left-prev.left, cur.right-prev.right
+		if dl < 0 || dr < 0 {
+			t.Errorf("step %d moves a side UP: (%v,%v) -> (%v,%v)", i, prev.left, prev.right, cur.left, cur.right)
+		}
+		if dl+dr != 1 {
+			t.Errorf("step %d changes %d rungs, want exactly 1", i, dl+dr)
+		}
+	}
+
+	// The right must reach tierKeys before the left leaves tierFull — the
+	// "status verbosity is the cheapest thing to lose" rule.
+	for _, step := range statusBarDescent {
+		if step.left > tierFull && step.right < tierKeys {
+			t.Errorf("left degraded to %v while right was still at %v (richer than tierKeys)", step.left, step.right)
+		}
+	}
+}
+
 // TestStatusBarAlertsOutliveCounters pins the priority rule: when space is
 // scarce the informational indicators (backfill scan, selection count,
 // active tally) go first and the alerts (OFFLINE, re-login) stay. An
