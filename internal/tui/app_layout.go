@@ -57,6 +57,9 @@ func (a *App) recalcLayout() {
 	a.ffmpegCheck.SetSize(a.width, a.height)
 	a.actionMenu.SetSize(a.width, a.height)
 	a.settings.SetSize(a.width, a.height)
+	if a.releaseNotesPopup != nil {
+		a.releaseNotesPopup.setSize(a.width, a.height)
+	}
 
 	// Store regions for mouse (offset by the restart banner when shown)
 	a.taskRegion = PanelRegion{X: 0, Y: bannerH, Width: taskW, Height: topH}

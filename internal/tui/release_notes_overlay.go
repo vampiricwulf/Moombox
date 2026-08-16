@@ -39,19 +39,45 @@ func (o *releaseNotesOverlay) open(tag, rawNotes string, width, height int) {
 	o.open_ = true
 	o.tag = tag
 	o.rawNotes = rawNotes
+	o.applySize(width, height)
+	o.vp.GotoTop()
+}
+
+// applySize sizes the viewport for the given terminal dimensions and
+// re-renders the body at that width (glamour bakes its word wrap into the
+// rendered text, so the content must be regenerated whenever the width
+// changes — resizing the viewport alone would leave the old wrap points).
+//
+// The min() against the terminal is what keeps the box on screen. The ~80%
+// target has a floor (40 columns wide, 8 rows tall) so the notes stay
+// readable on a normal terminal, but that floor used to be applied without
+// any upper bound, so a 30-column window produced a 46-column box — and
+// centerBox can only pad, never clip, so it spilled past the right edge.
+func (o *releaseNotesOverlay) applySize(width, height int) {
 	o.width = width
 	o.height = height
 
-	vpWidth := max(width*8/10, 40)
-	vpWidth -= 4 // account for borders + padding
-
-	vpHeight := max(height*8/10, 8)
-	vpHeight -= 6 // account for borders + title + footer
+	// -4 borders + padding, -6 borders + title + footer.
+	vpWidth := max(min(max(width*8/10, 40), width)-4, 1)
+	vpHeight := max(min(max(height*8/10, 8), height)-6, 1)
 
 	o.vp.SetWidth(vpWidth)
 	o.vp.SetHeight(vpHeight)
 	o.vp.SetContent(o.renderBody(vpWidth))
-	o.vp.GotoTop()
+}
+
+// setSize reflows an open overlay for a new terminal size, preserving the
+// reader's scroll position. recalcLayout calls this on every resize: the
+// overlay used to size itself only in open(), so resizing the terminal
+// while the notes were up left the text wrapped for the old width.
+func (o *releaseNotesOverlay) setSize(width, height int) {
+	if !o.open_ {
+		o.width, o.height = width, height
+		return
+	}
+	off := o.vp.YOffset()
+	o.applySize(width, height)
+	o.vp.SetYOffset(off)
 }
 
 // close hides the overlay and clears its state.
@@ -84,14 +110,36 @@ func (o *releaseNotesOverlay) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorGreen)
 
-	title := titleStyle.Render("Release Notes — " + o.tag)
-	footer := footerStyle.Render("U: Apply update  ↑/↓: Scroll  Esc/Q: Close")
+	// The title and footer are laid out beside a viewport that was already
+	// sized to the terminal, so THEY decide the box width whenever they are
+	// the widest line — and the full footer is 44 columns, which is what
+	// made a 30-column terminal render a 46-column box. Both now shrink to
+	// the viewport's width: the footer steps down through shorter spellings
+	// (keeping Esc, the one binding a reader must not be stranded without)
+	// and the title truncates.
+	inner := o.vp.Width()
+	footerText := "U: Apply update  ↑/↓: Scroll  Esc/Q: Close"
+	for _, cand := range []string{
+		footerText,
+		"U update · ↑/↓ scroll · Esc close",
+		"U · ↑/↓ · Esc",
+		"Esc",
+	} {
+		footerText = cand
+		if lipgloss.Width(cand)+2 <= inner { // +2 for the style's horizontal padding
+			break
+		}
+	}
+	title := titleStyle.Render(truncateString("Release Notes — "+o.tag, max(inner-2, 1)))
+	footer := footerStyle.Render(footerText)
 
 	body := o.vp.View()
-	inner := lipgloss.JoinVertical(lipgloss.Left, title, body, footer)
-	box := borderStyle.Render(inner)
+	joined := lipgloss.JoinVertical(lipgloss.Left, title, body, footer)
+	box := borderStyle.Render(joined)
 
-	return centerBox(box, o.width, o.height)
+	// Backstop: centerBox pads but never clips, so anything still too wide
+	// would spill off-screen rather than being cut.
+	return centerBox(lipgloss.NewStyle().MaxWidth(o.width).Render(box), o.width, o.height)
 }
 
 // renderBody runs glamour over the raw markdown to produce ANSI text
