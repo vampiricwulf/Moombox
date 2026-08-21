@@ -960,3 +960,37 @@ func TestSegmentWorkersDefault(t *testing.T) {
 		t.Errorf("default SegmentWorkers = %d, want 12", got)
 	}
 }
+
+// TestInterruptionTimeoutDefault pins the default of 120 minutes (2 hours).
+func TestInterruptionTimeoutDefault(t *testing.T) {
+	if got := Defaults().Downloader.InterruptionTimeout.Value; got != 120 {
+		t.Errorf("default InterruptionTimeout = %v, want 120", got)
+	}
+}
+
+// TestInterruptionTimeoutValidation mirrors ProbeCooldown's clamp style: 0 is
+// legal (disables the resume stall — finalize never waits) and must survive
+// Normalize unchanged; only a negative value is invalid and resets to the
+// default. There is deliberately no upper bound.
+func TestInterruptionTimeoutValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		{"negative falls back to the default", -30, 120},
+		{"zero survives round-trip (disabled)", 0, 0},
+		{"default", 120, 120},
+		{"far above the default is NOT clamped", 10080, 10080},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Downloader.InterruptionTimeout = FlexDuration{Value: tc.in}
+			Normalize(cfg)
+			if got := cfg.Downloader.InterruptionTimeout.Value; got != tc.want {
+				t.Errorf("InterruptionTimeout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

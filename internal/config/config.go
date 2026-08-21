@@ -74,6 +74,7 @@ func Defaults() *MoomboxConfig {
 			DownloadChat:         true,
 			Prefer60fps:          true,
 			MaximumTimeout:       600,
+			InterruptionTimeout:  FlexDuration{Value: 120}, // minutes
 		},
 		Cookies: CookiesConfig{
 			CookieFile:        "./cookies.txt",
@@ -598,6 +599,16 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		fail("downloader.maximum_timeout %d must be at least 30 seconds", d.MaximumTimeout)
 		if !reportOnly {
 			d.MaximumTimeout = defaults.Downloader.MaximumTimeout
+		}
+	}
+	// interruption_timeout: 0 disables the resume stall (finalize never
+	// waits); there is deliberately no maximum. Only a negative value is
+	// invalid, and it means the same as 0, so normalize it back to the
+	// default (mirrors monitors.probe_cooldown's clamp style).
+	if d.InterruptionTimeout.Value < 0 {
+		fail("downloader.interruption_timeout %v must be >= 0 minutes (0 disables)", d.InterruptionTimeout.Value)
+		if !reportOnly {
+			d.InterruptionTimeout = defaults.Downloader.InterruptionTimeout
 		}
 	}
 

@@ -930,6 +930,14 @@
                                 placeholder="600"
                                 help-text="YouTube livestreams only: how long to keep retrying — re-checking every 30s whether the stream has ended — before finalizing the recording even if YouTube still reports it live. The clock resets whenever a segment arrives (default: 600, minimum: 30, no maximum). ⚠ Very large values keep polling YouTube for a long time, which can risk negative consequences on your account. Applies to new downloads."
                             ></sl-input>
+                            <sl-input
+                                id="cfg-interruption-timeout"
+                                type="number"
+                                min="0"
+                                label="Interruption Resume Timeout (minutes)"
+                                placeholder="120"
+                                help-text="How long finalize may stall waiting for an interrupted broadcast to resume before finalizing with what was captured so far. Default 120 minutes, no maximum. 0 disables the stall — finalize never waits."
+                            ></sl-input>
                         </div>
 
                         <!-- Cookies Settings -->

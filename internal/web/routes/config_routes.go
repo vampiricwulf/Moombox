@@ -238,6 +238,14 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["downloader.maximum_timeout"] = "maximum_timeout must be at least 30 seconds"
 			}
 		}
+		// interruption_timeout: 0 disables the resume stall, no maximum —
+		// only a negative value is invalid. Match config.Validate so a
+		// hand-edited TOML can't sneak past the API.
+		if raw, exists := dl["interruption_timeout"]; exists {
+			if v, ok := flexDurationValue(raw, "minutes"); ok && v < 0 {
+				errs["downloader.interruption_timeout"] = "interruption_timeout must be >= 0 minutes (0 disables)"
+			}
+		}
 	}
 
 	// Disk sub-fields
@@ -476,6 +484,11 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 		if v, ok := dl["maximum_timeout"].(float64); ok {
 			cfg.Downloader.MaximumTimeout = int(v)
+		}
+		if v, ok := dl["interruption_timeout"].(float64); ok {
+			cfg.Downloader.InterruptionTimeout = config.FlexDuration{Value: v}
+		} else if vs, ok := dl["interruption_timeout"].(string); ok {
+			cfg.Downloader.InterruptionTimeout = config.ParseFlexDuration(vs, "minutes", cfg.Downloader.InterruptionTimeout.Value)
 		}
 		if v, ok := dl["po_token"].(string); ok {
 			cfg.Downloader.PoToken = v
