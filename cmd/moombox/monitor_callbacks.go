@@ -54,6 +54,19 @@ func siblingReachable(siblings []channelHealthReporter, channelID string, now ti
 	return false
 }
 
+// resumeOnRedetect decides what a live re-detection of an EXISTING job does.
+// Only a Finished job with preserved resume data (incomplete_tail) resumes;
+// Cancelled is a human decision; everything else keeps today's silent drop.
+func resumeOnRedetect(existing *database.Job, disposition monitor.JobDisposition, lastAutoResume time.Time, now time.Time) bool {
+	if existing == nil || disposition != monitor.DispositionBroadcast {
+		return false
+	}
+	if existing.Status != database.StatusFinished || !existing.IncompleteTail {
+		return false
+	}
+	return now.Sub(lastAutoResume) >= 5*time.Minute
+}
+
 // jobCreationForDisposition maps a monitor.JobDisposition to the created
 // job's initial state — spec §10's creator table:
 //
@@ -107,6 +120,16 @@ func (s *runState) wireMonitorCallbacks() {
 			notifications.SendOptions{Event: "auth"},
 		)
 	}
+
+	// Cooldown for auto-resume on broadcast re-detection: a restarted
+	// broadcast can be re-detected on every monitor cycle (as often as
+	// every 15s per the field case that motivated this) while a previous
+	// resume is still spinning up — coalesce to at most one auto-resume
+	// attempt per window per job. Guarded by a mutex — createYouTubeJob
+	// runs on the feed/DECAPI monitor goroutines. Same pattern as
+	// lastAuthFailNotify above.
+	var resumeMu sync.Mutex
+	lastAutoResume := make(map[string]time.Time)
 
 	s.cookieRefresh.OnRecoveryNeeded = func(platform string) {
 		var autoEnabled bool
@@ -312,7 +335,51 @@ func (s *runState) wireMonitorCallbacks() {
 			return
 		}
 		if !added {
-			return // Duplicate job
+			// Duplicate job — but a broadcast that dropped and came back
+			// under the SAME video ID (interrupted stream, re-detected
+			// live) may be sitting Finished with preserved staging
+			// (incomplete_tail). Re-arm exactly that case; everything
+			// else (still active, Cancelled, no preserved tail, VOD
+			// re-detection, or within the cooldown of a prior auto-resume)
+			// stays a silent drop, unchanged from today.
+			existing, _ := s.db.GetJob(videoID)
+			resumeMu.Lock()
+			shouldResume := resumeOnRedetect(existing, d, lastAutoResume[videoID], time.Now())
+			if shouldResume {
+				lastAutoResume[videoID] = time.Now()
+			}
+			resumeMu.Unlock()
+			if !shouldResume {
+				return
+			}
+			if title != "" && title != existing.Title {
+				s.db.UpdateJobFields(videoID, map[string]any{"title": title})
+			}
+			s.dlWorker.ResumeJob(videoID)
+			s.log.Info("broadcast re-detected live — auto-resuming preserved job",
+				slog.String("source", source), slog.String("videoID", videoID), slog.String("title", title))
+			if s.notifyMgr.HasTargets() {
+				s.notifyMgr.Send("Stream Resumed",
+					fmt.Sprintf("Broadcast re-detected live — resuming preserved recording: %s", title),
+					notifications.TypeInfo,
+					[]notifications.Field{
+						{Name: "Channel", Value: ch.Name, Inline: true},
+						{Name: "Video ID", Value: videoID, Inline: true},
+					},
+					notifications.SendOptions{
+						// "downloading" (not a bespoke "download" key) so the
+						// event is actually filterable: it's the same
+						// registered Job Lifecycle event orchestrator.go
+						// sends for every other job entering Downloading —
+						// see notifications.EventGroups/KnownEvents, which
+						// documents that an unregistered Event is silently
+						// unfilterable and gets stripped from configs.
+						Event:     "downloading",
+						URL:       videoURL,
+						Thumbnail: thumbnailURL,
+					})
+			}
+			return
 		}
 		// History fires for EVERY disposition — it is what makes
 		// HasProcessed mean "a job was created" (spec §10/§15).
