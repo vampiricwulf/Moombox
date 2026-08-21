@@ -133,21 +133,30 @@ all.
   timestamped, so ordering is mechanical).
 - **Timeline gaps** between merged parts become playback jumps — identical
   to how a mid-part gap already plays.
+- **Platform gate:** `finalizeMultiSegmentJob` only calls into Tier 4 when
+  `jobCtx.Job.Platform == "youtube"` — Twitch is gated out entirely at the
+  call site, not merely left unmergeable by a chat-schema mismatch. Twitch
+  gap-split parts carry deliberate gapless-part semantics that a merge
+  would destroy when chat is off; when every part's chat happens to be
+  empty, a schema-blind merge would "succeed" and replace the per-part
+  `twitch.TwitchChatData` files with a YouTube-shaped `chat.ChatData` husk;
+  and when chat is present, a schema-mismatch abort (see below) would still
+  cost a full throwaway video concat first. The gate avoids all three by
+  never attempting Tier 4 for Twitch, full stop.
 - **Failure-safe:** any probe disagreement, concat error, or DB-replace
   error leaves the parts exactly as today; the merge is an opportunistic
   improvement, never a gate on finalize. A chat-merge failure aborts that
   RUN specifically (its own identity — video included, not just chat: the
   run's parts, rows, and per-part chat files are all left exactly as they
   were), while every other run in the same finalize still merges
-  independently. This is the only case that reaches production today:
-  Twitch gap-split parts are the sole rows carrying a per-part `ChatFile`,
-  their chat is `twitch.TwitchChatData` (`message` a string), and the merge
-  path unmarshals `chat.ChatData` (`message` a `[]MessagePart`) — the schema
-  mismatch always errors, so a Twitch job's parts simply never merge today
-  (they stay split with every chat file intact — the pre-branch behavior).
-  A prior fallback ("keep the media merge, blank the row's `ChatFile`")
-  orphaned the per-part chat files and lost chat replay; it no longer
-  exists.
+  independently. Before the platform gate existed, this was the only path
+  by which a Twitch gap-split run avoided merging: `mergeChatFiles`
+  unmarshals `chat.ChatData` (`message` a `[]MessagePart`) while Twitch's
+  chat is `twitch.TwitchChatData` (`message` a string), so the unmarshal
+  always errored. That schema mismatch is now moot for Twitch — the
+  platform gate means Tier 4 is never reached — but the abort-the-run
+  behavior itself remains load-bearing for any future non-YouTube chat
+  shape that reaches this path some other way.
 
 ## Rider — steady-state dead-auth recovery
 
@@ -166,13 +175,18 @@ existing 30-minute notification cooldown applies unchanged.
 - No auto-resurrection of Cancelled jobs.
 - Twitch: out of scope (different interruption model; monitor recovery
   already handles stream flap).
-- Twitch chat schema merge: Tier 4's `mergeChatFiles` only understands
-  `chat.ChatData` (YouTube's shape). A Twitch gap-split run's chat
-  (`twitch.TwitchChatData`) always fails to unmarshal into it, which is by
-  design given the point above — Twitch parts never merge today. Teaching
-  the merge path a second chat schema (or a shared intermediate shape) so
-  Twitch runs can eventually merge losslessly, chat included, is explicit
-  follow-up work, not part of this design.
+- Tier 4 is YouTube-only, gated entirely: `finalizeMultiSegmentJob` only
+  calls `mergeSameFormatParts` when `jobCtx.Job.Platform == "youtube"`.
+  This is a platform gate, not merely a consequence of the chat-schema
+  mismatch (`mergeChatFiles` only understands `chat.ChatData`, YouTube's
+  shape, while Twitch's per-part chat is `twitch.TwitchChatData`) — Twitch
+  gap-split parts carry deliberate gapless-part semantics a merge would
+  destroy even with chat off, and an all-empty-chat run would otherwise
+  "succeed" through the schema check and clobber Twitch's chat shape with a
+  YouTube-shaped husk. Teaching the merge path a second chat schema (or a
+  shared intermediate shape) and lifting the platform gate so Twitch runs
+  can eventually merge losslessly, chat included, is explicit follow-up
+  work, not part of this design.
 
 ## Testing
 

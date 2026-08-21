@@ -111,14 +111,16 @@ func TestPerPlatformEverConcludedNotMaskedBySibling(t *testing.T) {
 		t.Fatalf("twEverConcluded: want false (twitch was never seeded or checked), got true")
 	}
 
-	// Twitch's real first conclusive check: dead auth, no network error.
-	if !shouldFireRecovery(twConcluded, prevTW, false, nil) {
-		t.Error("shouldFireRecovery(twEverConcluded, ...): want true for twitch's first-ever dead check, got false")
+	// Twitch's real first conclusive check: dead auth, no network error,
+	// cookies present on disk (per this test's premise — see the doc
+	// comment above) but never verified.
+	if !shouldFireRecovery(twConcluded, prevTW, false, nil, true) {
+		t.Error("shouldFireRecovery(twEverConcluded, ...): want true for twitch's first-ever dead check with cookies present, got false")
 	}
 
 	// Demonstrate what the bug looked like: driving the decision off the
 	// shared hasCheckedOnce instead would wrongly suppress it.
-	if shouldFireRecovery(hasChecked, prevTW, false, nil) {
+	if shouldFireRecovery(hasChecked, prevTW, false, nil, true) {
 		t.Error("shouldFireRecovery(hasCheckedOnce, ...) unexpectedly fired — this was the buggy shared-flag behavior, not what we assert as correct")
 	}
 }
@@ -281,76 +283,112 @@ func TestShouldFireRecovery(t *testing.T) {
 	netErr := errors.New("network error")
 
 	tests := []struct {
-		name          string
-		everConcluded bool
-		prevAuth      bool
-		nowAuth       bool
-		checkErr      error
-		want          bool
+		name           string
+		everConcluded  bool
+		prevAuth       bool
+		nowAuth        bool
+		checkErr       error
+		cookiesPresent bool
+		want           bool
 	}{
 		{
-			name:          "first check dead auth fires",
-			everConcluded: false,
-			prevAuth:      false, // zero value: never seeded
-			nowAuth:       false,
-			checkErr:      nil,
-			want:          true,
+			name:           "first check dead auth fires (cookies present)",
+			everConcluded:  false,
+			prevAuth:       false, // zero value: never seeded
+			nowAuth:        false,
+			checkErr:       nil,
+			cookiesPresent: true,
+			want:           true,
 		},
 		{
-			name:          "first check dead auth with network error does not fire",
-			everConcluded: false,
-			prevAuth:      false,
-			nowAuth:       false,
-			checkErr:      netErr,
-			want:          false,
+			// I6 fix: a never-configured platform returns (false, nil) from
+			// checkAndRefreshYouTube/checkTwitchAuth for the trivial reason
+			// that they bail out on an empty jar — that is NOT dead auth,
+			// and must not launch startup recovery for a platform the user
+			// never set up.
+			name:           "first check dead auth does NOT fire when the platform was never configured (no cookies)",
+			everConcluded:  false,
+			prevAuth:       false,
+			nowAuth:        false,
+			checkErr:       nil,
+			cookiesPresent: false,
+			want:           false,
 		},
 		{
-			name:          "first check healthy never fires",
-			everConcluded: false,
-			prevAuth:      false,
-			nowAuth:       true,
-			checkErr:      nil,
-			want:          false,
+			name:           "first check dead auth with network error does not fire",
+			everConcluded:  false,
+			prevAuth:       false,
+			nowAuth:        false,
+			checkErr:       netErr,
+			cookiesPresent: true,
+			want:           false,
 		},
 		{
-			name:          "second check same dead state does not re-fire",
-			everConcluded: true,
-			prevAuth:      false, // previous check already recorded not-authed
-			nowAuth:       false,
-			checkErr:      nil,
-			want:          false,
+			name:           "first check healthy never fires",
+			everConcluded:  false,
+			prevAuth:       false,
+			nowAuth:        true,
+			checkErr:       nil,
+			cookiesPresent: true,
+			want:           false,
 		},
 		{
-			name:          "witnessed transition still fires",
-			everConcluded: true,
-			prevAuth:      true, // was authed on the previous check
-			nowAuth:       false,
-			checkErr:      nil,
-			want:          true,
+			name:           "second check same dead state does not re-fire",
+			everConcluded:  true,
+			prevAuth:       false, // previous check already recorded not-authed
+			nowAuth:        false,
+			checkErr:       nil,
+			cookiesPresent: true,
+			want:           false,
 		},
 		{
-			name:          "witnessed transition with network error does not fire",
-			everConcluded: true,
-			prevAuth:      true,
-			nowAuth:       false,
-			checkErr:      netErr,
-			want:          false,
+			name:           "witnessed transition still fires",
+			everConcluded:  true,
+			prevAuth:       true, // was authed on the previous check
+			nowAuth:        false,
+			checkErr:       nil,
+			cookiesPresent: true,
+			want:           true,
 		},
 		{
-			name:          "subsequent check healthy never fires",
-			everConcluded: true,
-			prevAuth:      true,
-			nowAuth:       true,
-			checkErr:      nil,
-			want:          false,
+			// The witnessed-transition case is NOT gated on cookiesPresent:
+			// a real authenticated->not transition (e.g. the user just
+			// deleted their cookie file) must still fire even though the
+			// jar is now empty. Only the first-conclusive "was this ever
+			// configured at all" case cares about cookie presence.
+			name:           "witnessed transition still fires even if cookies are now absent",
+			everConcluded:  true,
+			prevAuth:       true,
+			nowAuth:        false,
+			checkErr:       nil,
+			cookiesPresent: false,
+			want:           true,
+		},
+		{
+			name:           "witnessed transition with network error does not fire",
+			everConcluded:  true,
+			prevAuth:       true,
+			nowAuth:        false,
+			checkErr:       netErr,
+			cookiesPresent: true,
+			want:           false,
+		},
+		{
+			name:           "subsequent check healthy never fires",
+			everConcluded:  true,
+			prevAuth:       true,
+			nowAuth:        true,
+			checkErr:       nil,
+			cookiesPresent: true,
+			want:           false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldFireRecovery(tc.everConcluded, tc.prevAuth, tc.nowAuth, tc.checkErr)
+			got := shouldFireRecovery(tc.everConcluded, tc.prevAuth, tc.nowAuth, tc.checkErr, tc.cookiesPresent)
 			if got != tc.want {
-				t.Errorf("shouldFireRecovery(everConcluded=%v, prevAuth=%v, nowAuth=%v, checkErr=%v) = %v, want %v",
-					tc.everConcluded, tc.prevAuth, tc.nowAuth, tc.checkErr, got, tc.want)
+				t.Errorf("shouldFireRecovery(everConcluded=%v, prevAuth=%v, nowAuth=%v, checkErr=%v, cookiesPresent=%v) = %v, want %v",
+					tc.everConcluded, tc.prevAuth, tc.nowAuth, tc.checkErr, tc.cookiesPresent, got, tc.want)
 			}
 		})
 	}

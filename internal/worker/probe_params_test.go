@@ -13,9 +13,13 @@ func TestStreamParamsEqual(t *testing.T) {
 		Width:      1920,
 		Height:     1080,
 		FrameRate:  "30/1",
+		VProfile:   "High",
+		PixFmt:     "yuv420p",
 		ACodec:     "aac",
 		SampleRate: "44100",
 		Channels:   2,
+		AProfile:   "LC",
+		ASampleFmt: "fltp",
 	}
 
 	t.Run("identical", func(t *testing.T) {
@@ -53,10 +57,27 @@ func TestStreamParamsEqual(t *testing.T) {
 		{"Width differs", func(p *streamParams) { p.Width = 1280 }},
 		{"Height differs", func(p *streamParams) { p.Height = 720 }},
 		{"FrameRate differs", func(p *streamParams) { p.FrameRate = "60/1" }},
+		{"VProfile differs", func(p *streamParams) { p.VProfile = "High 4:4:4 Predictive" }},
+		{"PixFmt differs", func(p *streamParams) { p.PixFmt = "yuv444p" }},
 		{"ACodec differs", func(p *streamParams) { p.ACodec = "opus" }},
 		{"SampleRate differs", func(p *streamParams) { p.SampleRate = "48000" }},
 		{"Channels differs", func(p *streamParams) { p.Channels = 1 }},
+		{"AProfile differs", func(p *streamParams) { p.AProfile = "HE-AAC" }},
+		{"ASampleFmt differs", func(p *streamParams) { p.ASampleFmt = "s16" }},
 	}
+
+	// H.264 High vs High 4:4:4 Predictive at identical codec/dimensions/
+	// frame-rate/audio params is the empirically proven regression this
+	// task closes: without VProfile+PixFmt in the comparison, this pair
+	// probed "equal" and a -c copy concat produced an internally
+	// inconsistent file (differing chroma subsampling mid-stream).
+	t.Run("H.264 High vs High 4:4:4 (yuv420p vs yuv444p) must not be merge-compatible", func(t *testing.T) {
+		high420 := &streamParams{VCodec: "h264", Width: 1920, Height: 1080, FrameRate: "30/1", VProfile: "High", PixFmt: "yuv420p", ACodec: "aac", SampleRate: "44100", Channels: 2}
+		high444 := &streamParams{VCodec: "h264", Width: 1920, Height: 1080, FrameRate: "30/1", VProfile: "High 4:4:4 Predictive", PixFmt: "yuv444p", ACodec: "aac", SampleRate: "44100", Channels: 2}
+		if high420.equal(high444) {
+			t.Error("High (yuv420p) and High 4:4:4 Predictive (yuv444p) must not compare equal")
+		}
+	})
 
 	for _, tc := range fieldCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -128,6 +149,12 @@ func TestProbeStreamParams_Fixture(t *testing.T) {
 	}
 	if params.FrameRate == "" {
 		t.Error("expected non-empty FrameRate")
+	}
+	if params.VProfile == "" {
+		t.Error("expected non-empty VProfile")
+	}
+	if params.PixFmt == "" {
+		t.Error("expected non-empty PixFmt")
 	}
 	if params.ACodec == "" {
 		t.Error("expected non-empty ACodec")

@@ -1047,6 +1047,289 @@ func TestPartMergerMerge_MultiRunBatch(t *testing.T) {
 	}
 }
 
+// --- adoptMergedFinal / merge()'s I7 crash re-entry repair pass --------
+//
+// Scenario: merge() committed a run's row at its temp path
+// ("<base> - mergedN.mp4"), then successfully renamed the file onto the
+// run's first part's original name ("<base> - part<SegmentIndex+1>.mp4"),
+// then the process crashed BEFORE the follow-up UpdateSegmentFile call
+// persisted that new path back to the row. On re-entry, the row still
+// names the (now-vanished) temp path while the real file sits unreferenced
+// under its run-head name.
+
+// TestAdoptMergedFinal_PatternMismatchNotAdopted confirms a normal
+// (non-merge-temp) filename is never touched — no stat, no probe, no
+// updateFile call.
+func TestAdoptMergedFinal_PatternMismatchNotAdopted(t *testing.T) {
+	pm := newTestPartMerger(t)
+	probeCalled := false
+	pm.probe = func(context.Context, string, string) (*streamParams, error) {
+		probeCalled = true
+		return matchingParams(context.Background(), "", "")
+	}
+	updateCalled := false
+	pm.updateFile = func(int, string, string, string) error {
+		updateCalled = true
+		return nil
+	}
+
+	seg := database.Segment{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: "/x/base - part1.mp4"}
+	if pm.adoptMergedFinal(context.Background(), &seg) {
+		t.Error("a normal part filename must never be adopted")
+	}
+	if probeCalled || updateCalled {
+		t.Error("no probe or updateFile call should happen for a filename that doesn't match the merge-temp pattern")
+	}
+}
+
+// TestAdoptMergedFinal_FinalNameAbsentNotAdopted confirms a merge-temp
+// filename whose reconstructed run-head final name does NOT exist on disk
+// is left alone — this is the ordinary "file is just gone" case, not the
+// crash-repair signature.
+func TestAdoptMergedFinal_FinalNameAbsentNotAdopted(t *testing.T) {
+	dir := t.TempDir()
+	pm := newTestPartMerger(t)
+	pm.probe = matchingParams
+	updateCalled := false
+	pm.updateFile = func(int, string, string, string) error {
+		updateCalled = true
+		return nil
+	}
+
+	seg := database.Segment{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - merged0.mp4", FilePath: filepath.Join(dir, "base - merged0.mp4")}
+	if pm.adoptMergedFinal(context.Background(), &seg) {
+		t.Error("must not adopt when the run-head final name does not exist on disk either")
+	}
+	if updateCalled {
+		t.Error("updateFile must not be called when there is no candidate file to adopt")
+	}
+	if seg.FilePath != filepath.Join(dir, "base - merged0.mp4") {
+		t.Errorf("seg must be left untouched: FilePath = %q", seg.FilePath)
+	}
+}
+
+// TestAdoptMergedFinal_CandidateProbeFailsNotAdopted confirms a candidate
+// that exists but doesn't probe cleanly is refused — an adopt-and-repair
+// must never point the row at something unverified.
+func TestAdoptMergedFinal_CandidateProbeFailsNotAdopted(t *testing.T) {
+	dir := t.TempDir()
+	finalVideo := filepath.Join(dir, "base - part1.mp4")
+	if err := os.WriteFile(finalVideo, []byte("not really playable"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pm := newTestPartMerger(t)
+	pm.probe = func(context.Context, string, string) (*streamParams, error) {
+		return nil, errors.New("ffprobe: boom")
+	}
+	updateCalled := false
+	pm.updateFile = func(int, string, string, string) error {
+		updateCalled = true
+		return nil
+	}
+
+	seg := database.Segment{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - merged0.mp4", FilePath: filepath.Join(dir, "base - merged0.mp4")}
+	if pm.adoptMergedFinal(context.Background(), &seg) {
+		t.Error("must not adopt a candidate that fails to probe cleanly")
+	}
+	if updateCalled {
+		t.Error("updateFile must not be called when the candidate fails to probe")
+	}
+}
+
+// TestAdoptMergedFinal_HappyPathRepairsRowAndSeg is the core I7 regression
+// test: a crash-orphaned row (temp path gone, run-head final name present
+// and playable) is repaired both in the DB (via updateFile) and in the
+// caller's in-memory seg.
+func TestAdoptMergedFinal_HappyPathRepairsRowAndSeg(t *testing.T) {
+	dir := t.TempDir()
+	finalVideo := filepath.Join(dir, "base - part2.mp4") // SegmentIndex 1 -> part2
+	if err := os.WriteFile(finalVideo, []byte("real playable media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	finalChat := filepath.Join(dir, "base - part2.chat.json")
+	if err := os.WriteFile(finalChat, []byte(`{"videoId":"v1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pm := newTestPartMerger(t)
+	pm.probe = matchingParams
+	var gotID int
+	var gotFilename, gotFilePath, gotChatFile string
+	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
+		gotID, gotFilename, gotFilePath, gotChatFile = id, filename, filePath, chatFile
+		return nil
+	}
+
+	vanishedTemp := filepath.Join(dir, "base - merged0.mp4")
+	vanishedChat := filepath.Join(dir, "base - merged0.chat.json")
+	seg := database.Segment{ID: 77, JobID: "job1", SegmentIndex: 1, Filename: "base - merged0.mp4", FilePath: vanishedTemp, ChatFile: vanishedChat}
+
+	if !pm.adoptMergedFinal(context.Background(), &seg) {
+		t.Fatal("expected adoption to succeed")
+	}
+
+	if gotID != 77 || gotFilename != "base - part2.mp4" || gotFilePath != finalVideo || gotChatFile != finalChat {
+		t.Errorf("updateFile called with (%d, %q, %q, %q), want (77, %q, %q, %q)",
+			gotID, gotFilename, gotFilePath, gotChatFile, "base - part2.mp4", finalVideo, finalChat)
+	}
+	if seg.FilePath != finalVideo || seg.Filename != "base - part2.mp4" || seg.ChatFile != finalChat {
+		t.Errorf("seg after adoption = %+v, want FilePath=%q Filename=%q ChatFile=%q", seg, finalVideo, "base - part2.mp4", finalChat)
+	}
+}
+
+// TestAdoptMergedFinal_MissingChatSiblingClearsChatFile confirms that when
+// the video adopts successfully but no chat sibling exists at the adopted
+// name, ChatFile is cleared to "" in BOTH the persisted row and seg itself
+// — never left pointing at the vanished temp chat path in one place while
+// the other says something different.
+func TestAdoptMergedFinal_MissingChatSiblingClearsChatFile(t *testing.T) {
+	dir := t.TempDir()
+	finalVideo := filepath.Join(dir, "base - part1.mp4")
+	if err := os.WriteFile(finalVideo, []byte("real playable media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately no "base - part1.chat.json" sibling written.
+
+	pm := newTestPartMerger(t)
+	pm.probe = matchingParams
+	var gotChatFile string
+	chatFileSet := false
+	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
+		gotChatFile = chatFile
+		chatFileSet = true
+		return nil
+	}
+
+	seg := database.Segment{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - merged0.mp4", FilePath: filepath.Join(dir, "base - merged0.mp4"), ChatFile: filepath.Join(dir, "base - merged0.chat.json")}
+
+	if !pm.adoptMergedFinal(context.Background(), &seg) {
+		t.Fatal("expected adoption to succeed (video-only)")
+	}
+	if !chatFileSet || gotChatFile != "" {
+		t.Errorf("updateFile ChatFile arg = %q, want empty (no sibling found)", gotChatFile)
+	}
+	if seg.ChatFile != "" {
+		t.Errorf("seg.ChatFile = %q, want cleared to empty, matching what was persisted", seg.ChatFile)
+	}
+}
+
+// TestPartMergerMerge_AdoptsCrashOrphanedSingleRow is the I7 end-to-end
+// test for the len==1 (fully-collapsed-to-one-row) case: merge()'s repair
+// pass must run BEFORE the len<2 short-circuit, since a job that already
+// merged down to a single row on a prior run carries exactly the same
+// crash signature and would otherwise never reach a probe here at all —
+// nor get recognized by finalizeMultiSegmentJob's renameSinglePartToPlain,
+// which looks for a different (plain job-level) final name.
+func TestPartMergerMerge_AdoptsCrashOrphanedSingleRow(t *testing.T) {
+	dir := t.TempDir()
+	finalVideo := filepath.Join(dir, "base - part1.mp4")
+	if err := os.WriteFile(finalVideo, []byte("real playable media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pm := newTestPartMerger(t)
+	pm.probe = matchingParams
+	updateFileCalls := 0
+	pm.updateFile = func(int, string, string, string) error {
+		updateFileCalls++
+		return nil
+	}
+	replaceCalled := false
+	pm.replace = func(string, []database.Segment) error {
+		replaceCalled = true
+		return nil
+	}
+
+	segments := []database.Segment{
+		{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - merged0.mp4", FilePath: filepath.Join(dir, "base - merged0.mp4")},
+	}
+	got := pm.merge(context.Background(), "job1", "", segments)
+
+	if len(got) != 1 {
+		t.Fatalf("merge() = %d rows, want 1 (repaired in place, not merged with anything)", len(got))
+	}
+	if got[0].FilePath != finalVideo {
+		t.Errorf("FilePath = %q, want adopted run-head name %q", got[0].FilePath, finalVideo)
+	}
+	if updateFileCalls != 1 {
+		t.Errorf("updateFile called %d times, want 1 (the repair pass)", updateFileCalls)
+	}
+	if replaceCalled {
+		t.Error("db.ReplaceJobSegments must not be called for a single-row repair -- only UpdateSegmentFile")
+	}
+}
+
+// TestPartMergerMerge_AdoptsCrashOrphanedRowThenContinuesMultiRun proves the
+// repair composes with the rest of merge(): a crash-orphaned row (index 0,
+// SegmentIndex 0) is repaired in place, and an UNRELATED mergeable pair
+// (indices 1,2) still merges normally in the same call — the repair pass
+// does not abort or otherwise disturb the rest of the batch.
+func TestPartMergerMerge_AdoptsCrashOrphanedRowThenContinuesMultiRun(t *testing.T) {
+	dir := t.TempDir()
+	orphanFinal := filepath.Join(dir, "base - part1.mp4")
+	if err := os.WriteFile(orphanFinal, []byte("real playable media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	part2 := filepath.Join(dir, "orig - part2.mp4")
+	part3 := filepath.Join(dir, "orig - part3.mp4")
+	if err := os.WriteFile(part2, []byte("orig2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part3, []byte("orig3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pm := newTestPartMerger(t)
+	// The repaired orphan probes as a DISTINCT codec from parts 2+3, so
+	// groupMergeRuns keeps it a singleton run instead of grouping it in
+	// with the contiguous, actually-matching [1,2] run.
+	pm.probe = func(_ context.Context, _, filePath string) (*streamParams, error) {
+		if filePath == orphanFinal {
+			return &streamParams{VCodec: "vp9", ACodec: "opus"}, nil
+		}
+		return &streamParams{VCodec: "h264", ACodec: "aac"}, nil
+	}
+	pm.concat = writeConcatStub([]byte("merged-bytes"))
+	updateFileCalls := 0
+	pm.updateFile = func(int, string, string, string) error {
+		updateFileCalls++
+		return nil
+	}
+	pm.replace = func(jobID string, segs []database.Segment) error {
+		for i := range segs {
+			segs[i].ID = 3000 + i
+			segs[i].JobID = jobID
+		}
+		return nil
+	}
+
+	segments := []database.Segment{
+		{ID: 1, JobID: "job1", SegmentIndex: 0, Filename: "base - merged0.mp4", FilePath: filepath.Join(dir, "base - merged0.mp4")},
+		{ID: 2, JobID: "job1", SegmentIndex: 1, Filename: "orig - part2.mp4", FilePath: part2, DurationSeconds: 100},
+		{ID: 3, JobID: "job1", SegmentIndex: 2, Filename: "orig - part3.mp4", FilePath: part3, DurationSeconds: 100},
+	}
+	got := pm.merge(context.Background(), "job1", "", segments)
+
+	if len(got) != 2 {
+		t.Fatalf("merge() = %d rows, want 2 (repaired orphan + one merged run)", len(got))
+	}
+	if got[0].FilePath != orphanFinal {
+		t.Errorf("repaired orphan FilePath = %q, want %q", got[0].FilePath, orphanFinal)
+	}
+	// updateFile is called once for the repair pass, once more for the
+	// post-commit rename-onto-final-name step of the [1,2] merge run.
+	if updateFileCalls != 2 {
+		t.Errorf("updateFile called %d times, want 2 (1 repair + 1 normal merge commit)", updateFileCalls)
+	}
+	if got[1].FilePath != part2 {
+		t.Errorf("merged run FilePath = %q, want %q (renamed onto its first part)", got[1].FilePath, part2)
+	}
+	if b, err := os.ReadFile(part2); err != nil || string(b) != "merged-bytes" {
+		t.Errorf("merged run content = %q err=%v, want merged-bytes", b, err)
+	}
+}
+
 // requireFFmpegTools is defined in probe_params_test.go (same package).
 
 // TestMergeSameFormatParts_RealFFmpegEndToEnd exercises

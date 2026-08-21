@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,6 +62,40 @@ func TestInterruptionSignalRecordsZeroFormatsLive(t *testing.T) {
 		sig.observe(&youtube.VideoInfo{StreamStatus: youtube.StreamLive, Formats: nil}) // must not panic
 		if sig.fresh() {
 			t.Error("a nil *interruptionSignal must never report fresh")
+		}
+	})
+
+	// I4 fix: the auth-wall guard used to live only in
+	// observeYouTubeStatusProbe (the cookieless CheckStreamStatus path).
+	// Moved centrally into observe() itself so every call site -- including
+	// the three AUTHENTICATED sites (orchestrator_youtube.go's
+	// quality-refresh and still-live re-verification paths, and
+	// strategies.go's credential-refresh re-probe) that arm on a bit-
+	// identical live+zero-formats shape when cookies die mid-stream -- is
+	// covered via the one central path, not by each site duplicating the
+	// check.
+	for _, tc := range []struct {
+		name string
+		err  youtube.PlayabilityError
+	}{
+		{"members-only", youtube.PlayabilityMembersOnly},
+		{"age-restricted", youtube.PlayabilityAgeRestricted},
+		{"login-required", youtube.PlayabilityLoginRequired},
+	} {
+		t.Run("auth-walled live+zero-formats ("+tc.name+") must not mark fresh, via the central observe() path", func(t *testing.T) {
+			sig := &interruptionSignal{}
+			sig.observe(&youtube.VideoInfo{StreamStatus: youtube.StreamLive, Formats: nil, PlayabilityError: tc.err})
+			if sig.fresh() {
+				t.Error("an auth-walled live+zero-formats observation must NOT mark the signal fresh -- this could be a healthy auth-walled stream OR cookies that died mid-stream, neither of which is resume evidence")
+			}
+		})
+	}
+
+	t.Run("non-auth-walled live+zero-formats still marks fresh (the guard must not swallow the real signature)", func(t *testing.T) {
+		sig := &interruptionSignal{}
+		sig.observe(&youtube.VideoInfo{StreamStatus: youtube.StreamLive, Formats: nil, PlayabilityError: youtube.PlayabilityOK})
+		if !sig.fresh() {
+			t.Error("a non-auth-walled live+zero-formats observation must still mark the signal fresh")
 		}
 	})
 
@@ -335,15 +370,91 @@ func TestResumeEvidence(t *testing.T) {
 	}
 }
 
+// TestSegmentProgressResetsStallCounters is the I3 fix's dedicated
+// coverage for the echo-suppression decision extracted from
+// runLiveStreamDownload's onSegmentProgress closure: a deferred final
+// progress report from an already-cancelled downloader repeats the EXACT
+// SAME cumulative Bytes as its last live report, and that echo must NOT be
+// treated as fresh progress (it must not reset consecutiveLiveChecks /
+// lastSegTime), or maxConsecutiveLiveChecks is defeated and a stuck-live
+// abandoned broadcast livelocks the job in Downloading forever.
+func TestSegmentProgressResetsStallCounters(t *testing.T) {
+	t.Run("Bytes=0 is never progress (catch-up bookend / failed-download echo)", func(t *testing.T) {
+		var lastBytes atomic.Int64
+		if segmentProgressResetsStallCounters(engine.DownloadProgress{Bytes: 0}, &lastBytes) {
+			t.Error("Bytes=0 must never reset the stall counters")
+		}
+	})
+
+	t.Run("first real progress report is a delta from zero and resets", func(t *testing.T) {
+		var lastBytes atomic.Int64
+		if !segmentProgressResetsStallCounters(engine.DownloadProgress{Bytes: 1024}, &lastBytes) {
+			t.Error("a fresh stream's first Bytes>0 report must reset the stall counters")
+		}
+		if lastBytes.Load() != 1024 {
+			t.Errorf("lastBytes = %d, want 1024 (stored after a genuine delta)", lastBytes.Load())
+		}
+	})
+
+	t.Run("a strictly increasing follow-up report is progress and resets", func(t *testing.T) {
+		var lastBytes atomic.Int64
+		lastBytes.Store(1024)
+		if !segmentProgressResetsStallCounters(engine.DownloadProgress{Bytes: 2048}, &lastBytes) {
+			t.Error("Bytes increasing from 1024 to 2048 must reset the stall counters")
+		}
+		if lastBytes.Load() != 2048 {
+			t.Errorf("lastBytes = %d, want 2048", lastBytes.Load())
+		}
+	})
+
+	// This is the exact regression: re-running an already-cancelled
+	// downloader hits its own deferred final OnProgress again, reporting
+	// the SAME cumulative Bytes as its last live report. That echo must be
+	// silently ignored -- no reset, no lastBytes mutation.
+	t.Run("a same-cumulative-Bytes echo (deferred final report from a re-run cancelled downloader) does NOT reset", func(t *testing.T) {
+		var lastBytes atomic.Int64
+		lastBytes.Store(5_000_000)
+		if segmentProgressResetsStallCounters(engine.DownloadProgress{Bytes: 5_000_000}, &lastBytes) {
+			t.Error("a byte-identical echo of the last observed cumulative Bytes must NOT reset the stall counters -- this is the I3 livelock bug")
+		}
+		if lastBytes.Load() != 5_000_000 {
+			t.Errorf("lastBytes = %d, want unchanged 5000000", lastBytes.Load())
+		}
+	})
+
+	t.Run("a decreasing Bytes report (should never happen, but defensively) does NOT reset", func(t *testing.T) {
+		var lastBytes atomic.Int64
+		lastBytes.Store(5_000_000)
+		if segmentProgressResetsStallCounters(engine.DownloadProgress{Bytes: 1_000_000}, &lastBytes) {
+			t.Error("a Bytes value lower than the last observed total must NOT reset the stall counters")
+		}
+	})
+
+	t.Run("per-stream independence: a fresh downloader's tracker starts at 0 regardless of another stream's peak", func(t *testing.T) {
+		// Simulates attachProgress resetting lastVideoBytes to 0 for a
+		// brand-new video downloader instance while an unrelated audio
+		// stream's tracker sits at a much higher cumulative total -- the
+		// two must never be conflated.
+		var lastVideoBytes, lastAudioBytes atomic.Int64
+		lastAudioBytes.Store(9_000_000)
+		if !segmentProgressResetsStallCounters(engine.DownloadProgress{Bytes: 100}, &lastVideoBytes) {
+			t.Error("a fresh video downloader's first report (100 bytes) must count as progress even though the UNRELATED audio tracker sits far higher")
+		}
+	})
+}
+
 // TestShouldWaitForResume is the table-driven test for the C2 fix's
 // decision function: a failed live-refresh should wait-and-retry instead
 // of ending the recording immediately, but only when the stall is enabled
 // AND there's resume evidence. Signature updated for I1: takes the
 // already-computed evidence bool (see resumeEvidence) rather than
 // signalFresh+mayResume directly -- shouldWaitForResume is now PERMISSION
-// only.
+// only. Further updated for I3: also takes a *waitDeadline + now, since
+// permission is now ALSO bounded by the episode's own hard deadline (see
+// TestShouldWaitForResume_Deadline below for that dimension specifically).
 func TestShouldWaitForResume(t *testing.T) {
 	errRefresh := errors.New("refresh failed")
+	now := time.Unix(1_700_000_000, 0)
 
 	cases := []struct {
 		name                string
@@ -360,12 +471,77 @@ func TestShouldWaitForResume(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := shouldWaitForResume(c.refreshErr, c.evidence, c.interruptionTimeout)
+			var d waitDeadline
+			got := shouldWaitForResume(c.refreshErr, c.evidence, c.interruptionTimeout, &d, now)
 			if got != c.want {
 				t.Errorf("shouldWaitForResume(...) = %v, want %v", got, c.want)
 			}
 		})
 	}
+}
+
+// TestShouldWaitForResume_Deadline is the I3 fix's dedicated coverage for
+// the deadline-refusal dimension: shouldWaitForResume/waitDeadline compose
+// to bound the wait branch's total retries to interruptionTimeout, closing
+// the gap where maxConsecutiveLiveChecks (a DIFFERENT branch's bound) never
+// applied here and evidence holding indefinitely (a stuck-live abandoned
+// broadcast) could retry this branch forever.
+func TestShouldWaitForResume_Deadline(t *testing.T) {
+	errRefresh := errors.New("refresh failed")
+	const timeout = 10 * time.Minute
+	episodeStart := time.Unix(1_700_000_000, 0)
+
+	t.Run("first call within budget waits and latches the episode start", func(t *testing.T) {
+		var d waitDeadline
+		if !shouldWaitForResume(errRefresh, true, timeout, &d, episodeStart) {
+			t.Fatal("first call within budget must wait")
+		}
+		if d.start != episodeStart {
+			t.Errorf("waitDeadline.start = %v, want latched to the first call's now (%v)", d.start, episodeStart)
+		}
+	})
+
+	t.Run("repeated calls before the deadline keep waiting without moving the latched start", func(t *testing.T) {
+		var d waitDeadline
+		if !shouldWaitForResume(errRefresh, true, timeout, &d, episodeStart) {
+			t.Fatal("first call must wait")
+		}
+		later := episodeStart.Add(timeout / 2)
+		if !shouldWaitForResume(errRefresh, true, timeout, &d, later) {
+			t.Error("a retry still within the budget must still wait")
+		}
+		if d.start != episodeStart {
+			t.Errorf("waitDeadline.start moved to %v, want it to stay latched at the FIRST call's now (%v)", d.start, episodeStart)
+		}
+	})
+
+	t.Run("a call at or past the deadline refuses to wait", func(t *testing.T) {
+		var d waitDeadline
+		if !shouldWaitForResume(errRefresh, true, timeout, &d, episodeStart) {
+			t.Fatal("first call must wait")
+		}
+		atDeadline := episodeStart.Add(timeout)
+		if shouldWaitForResume(errRefresh, true, timeout, &d, atDeadline) {
+			t.Error("a call at the deadline must refuse to wait -- the episode's budget is exhausted")
+		}
+		pastDeadline := episodeStart.Add(timeout + time.Minute)
+		if shouldWaitForResume(errRefresh, true, timeout, &d, pastDeadline) {
+			t.Error("a call past the deadline must refuse to wait")
+		}
+	})
+
+	t.Run("reset gives a later episode a fresh budget", func(t *testing.T) {
+		var d waitDeadline
+		shouldWaitForResume(errRefresh, true, timeout, &d, episodeStart)
+		pastDeadline := episodeStart.Add(timeout + time.Minute)
+		if shouldWaitForResume(errRefresh, true, timeout, &d, pastDeadline) {
+			t.Fatal("sanity: the first episode's budget must already be exhausted before reset")
+		}
+		d.reset()
+		if !shouldWaitForResume(errRefresh, true, timeout, &d, pastDeadline) {
+			t.Error("after reset, a call must wait again -- a later episode gets its own fresh budget, not the expired clock of a resolved earlier one")
+		}
+	})
 }
 
 // TestNoteRefreshFailure (I1 fix) is the exact granularity the coordinator's
@@ -380,10 +556,12 @@ func TestNoteRefreshFailure(t *testing.T) {
 	errRefresh := errors.New("refresh failed")
 	alwaysTrue := func() bool { return true }
 	alwaysFalse := func() bool { return false }
+	now := time.Unix(1_700_000_000, 0)
 
 	t.Run("nil refreshErr: no latch, no wait", func(t *testing.T) {
 		var l resumeWaitLatch
-		wait := noteRefreshFailure(&l, nil, true, alwaysTrue, time.Minute)
+		var d waitDeadline
+		wait := noteRefreshFailure(&l, &d, nil, true, alwaysTrue, time.Minute, now)
 		if wait {
 			t.Error("wait = true for a nil refreshErr, want false")
 		}
@@ -394,7 +572,8 @@ func TestNoteRefreshFailure(t *testing.T) {
 
 	t.Run("config-0 + evidence: latches WITHOUT waiting", func(t *testing.T) {
 		var l resumeWaitLatch
-		wait := noteRefreshFailure(&l, errRefresh, true, alwaysFalse, 0)
+		var d waitDeadline
+		wait := noteRefreshFailure(&l, &d, errRefresh, true, alwaysFalse, 0, now)
 		if wait {
 			t.Error("wait = true with the stall disabled (config 0), want false -- interruption_timeout=0 must never actually stall")
 		}
@@ -405,7 +584,8 @@ func TestNoteRefreshFailure(t *testing.T) {
 
 	t.Run("config-0 + no evidence: neither latches nor waits", func(t *testing.T) {
 		var l resumeWaitLatch
-		wait := noteRefreshFailure(&l, errRefresh, false, alwaysFalse, 0)
+		var d waitDeadline
+		wait := noteRefreshFailure(&l, &d, errRefresh, false, alwaysFalse, 0, now)
 		if wait {
 			t.Error("wait = true, want false")
 		}
@@ -416,7 +596,8 @@ func TestNoteRefreshFailure(t *testing.T) {
 
 	t.Run("config>0 + evidence: latches AND waits (unchanged pre-I1 behavior)", func(t *testing.T) {
 		var l resumeWaitLatch
-		wait := noteRefreshFailure(&l, errRefresh, true, alwaysFalse, time.Minute)
+		var d waitDeadline
+		wait := noteRefreshFailure(&l, &d, errRefresh, true, alwaysFalse, time.Minute, now)
 		if !wait {
 			t.Error("wait = false, want true -- an enabled stall with evidence must still wait")
 		}
@@ -427,12 +608,35 @@ func TestNoteRefreshFailure(t *testing.T) {
 
 	t.Run("config>0 + no evidence: neither latches nor waits", func(t *testing.T) {
 		var l resumeWaitLatch
-		wait := noteRefreshFailure(&l, errRefresh, false, alwaysFalse, time.Minute)
+		var d waitDeadline
+		wait := noteRefreshFailure(&l, &d, errRefresh, false, alwaysFalse, time.Minute, now)
 		if wait {
 			t.Error("wait = true, want false")
 		}
 		if l.value() {
 			t.Error("latch must not fire")
+		}
+	})
+
+	// I3: evidence holding forever (e.g. a stuck-live abandoned broadcast
+	// whose chat continuation never closes) must still stop WAITING once
+	// the episode's deadline passes, even though it keeps LATCHING —
+	// mirroring the config-0 split (wait disabled, latch not) but driven by
+	// elapsed time instead of config.
+	t.Run("config>0 + evidence + deadline exceeded: latches WITHOUT waiting", func(t *testing.T) {
+		var l resumeWaitLatch
+		var d waitDeadline
+		const timeout = 10 * time.Minute
+		if wait := noteRefreshFailure(&l, &d, errRefresh, true, alwaysFalse, timeout, now); !wait {
+			t.Fatal("first call within budget must wait")
+		}
+		later := now.Add(timeout + time.Minute)
+		wait := noteRefreshFailure(&l, &d, errRefresh, true, alwaysFalse, timeout, later)
+		if wait {
+			t.Error("wait = true after the episode's deadline passed, want false")
+		}
+		if !l.value() {
+			t.Error("latch must still fire past the deadline -- Tier-2 evidence preservation is independent of the wait-permission deadline")
 		}
 	})
 }

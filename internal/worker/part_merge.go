@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -52,7 +53,7 @@ func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx 
 	pm := &partMerger{
 		ffprobePath: o.muxer.FFprobePath(),
 		logger:      o.logger,
-		probe:       probeStreamParams,
+		probe:       probeStreamParamsFn,
 		concat:      o.muxer.ConcatCopy,
 		replace:     o.db.ReplaceJobSegments,
 		updateFile:  o.db.UpdateSegmentFile,
@@ -145,6 +146,22 @@ type mergeRun struct {
 // cosmetic space win the normal end-of-job staging cleanup already captures
 // once every remaining part is accounted for.
 func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segments []database.Segment) []database.Segment {
+	// Crash re-entry repair pass (I7 fix) — runs BEFORE the len<2
+	// short-circuit below and regardless of segment count, because a job
+	// that already fully collapsed to ONE row on a prior run carries
+	// exactly the same crash signature and would otherwise never reach a
+	// probe at all here (len<2 returns first) nor get recognized by
+	// finalizeMultiSegmentJob's renameSinglePartToPlain (which looks for
+	// the PLAIN job name, a different final name than a merge run-head's).
+	// mergeTempRe is checked before ever touching disk, so a normal,
+	// never-crashed segment (the overwhelming common case) costs nothing
+	// extra here. See adoptMergedFinal's doc comment for the full repair.
+	for i := range segments {
+		if mergeTempRe.MatchString(segments[i].Filename) && !fileExists(segments[i].FilePath) {
+			pm.adoptMergedFinal(ctx, &segments[i])
+		}
+	}
+
 	if len(segments) < 2 {
 		return segments
 	}
@@ -336,6 +353,17 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 				// required, not cosmetic.
 				if stagingDir != "" {
 					segDir := filepath.Join(stagingDir, fmt.Sprintf("seg_%d", seg.SegmentIndex))
+					// Tombstone BEFORE attempting removal (I7 fix): a crash
+					// mid-RemoveAll, or a locked-dir failure below, must
+					// still leave a durable marker behind so
+					// stagedSegDirs' three consumers never resurrect this
+					// dir's already-merged content. Best-effort — if the
+					// dir is already gone (or write fails for some other
+					// reason) there's nothing left to resurrect anyway, so
+					// this doesn't block the removal attempt that follows.
+					if err := os.WriteFile(filepath.Join(segDir, mergeTombstoneFile), []byte(time.Now().UTC().Format(time.RFC3339)), 0o644); err != nil && !os.IsNotExist(err) {
+						pm.logger.Warn("part merge: failed to write tombstone marker before removing superseded part's staging dir", "err", err, "jobID", jobID, "dir", segDir)
+					}
 					if err := os.RemoveAll(segDir); err != nil {
 						pm.logger.Warn("part merge: failed to delete superseded part's staging dir", "err", err, "jobID", jobID, "dir", segDir)
 					}
@@ -422,6 +450,86 @@ func mergeBaseName(filename string) string {
 		return m[1]
 	}
 	return strings.TrimSuffix(filename, filepath.Ext(filename))
+}
+
+// mergeTempRe matches a Tier 4 merge's temp output filename ("<base> -
+// mergedN.mp4") — the shape videoTemp carries from the moment merge()
+// commits its row (db.ReplaceJobSegments) until the post-commit rename
+// lands it on the run's first part's original name (merge's doc comment,
+// "Crash-consistency choice"). Used by adoptMergedFinal to recognize a
+// crashed re-entry.
+var mergeTempRe = regexp.MustCompile(`^(.+) - merged\d+\.mp4$`)
+
+// adoptMergedFinal attempts the I7 crash re-entry repair for a segment row
+// whose probe just failed because its recorded FilePath doesn't exist:
+// if the row's Filename LOOKS like a Tier 4 merge temp AND the run-head's
+// final name — the run's first part's ORIGINAL filename, reconstructed as
+// "<base> - part<SegmentIndex+1>.mp4" (mergedSegmentRow keeps
+// SegmentIndex as the run's first part's — see its doc comment; muxSegment
+// numbers parts as segIdx+1 — see partBase in orchestrator_mux.go) — exists
+// on disk, this is exactly the signature merge's own doc comment warns
+// about: a crash between the successful rename(videoTemp -> finalVideo)
+// and the follow-up UpdateSegmentFile call, leaving the committed row
+// naming a path that no longer exists while the real, already-renamed file
+// sits unreferenced (and orphan-scanner-deletable). Mirrors
+// renameSinglePartToPlain's adopt-and-repair for the single-part case
+// (same crash window, different finalize path).
+//
+// On success, repairs the DB row AND seg itself (the caller's segments
+// slice entry, via pointer) to the adopted final video/chat names — the
+// caller's own subsequent probe pass then verifies the adopted file for
+// real, rather than this function's own probe check (used only as an
+// adopt/don't-adopt gate) being trusted as the final answer twice. On any
+// failure to adopt (pattern mismatch, final name absent, adopted file
+// doesn't probe cleanly, or the row update fails), returns false and
+// leaves seg completely untouched, so the caller's normal probe-failure
+// abort proceeds exactly as it would have without this repair attempt.
+func (pm *partMerger) adoptMergedFinal(ctx context.Context, seg *database.Segment) bool {
+	m := mergeTempRe.FindStringSubmatch(seg.Filename)
+	if m == nil {
+		return false
+	}
+	base := m[1]
+	dir := filepath.Dir(seg.FilePath)
+	finalVideo := filepath.Join(dir, fmt.Sprintf("%s - part%d.mp4", base, seg.SegmentIndex+1))
+	if !fileExists(finalVideo) {
+		return false
+	}
+
+	// A missing chat sibling doesn't block adopting the video — the row's
+	// ChatFile just stays whatever it was (already-vanished temp path);
+	// the video recovery is the load-bearing half here.
+	finalChat := ""
+	if seg.ChatFile != "" {
+		if candidate := mergedChatPath(finalVideo); fileExists(candidate) {
+			finalChat = candidate
+		}
+	}
+
+	// Verify the candidate is actually a playable file before repairing
+	// the row onto it — an adopt-and-repair that pointed the row at
+	// something unverified would be worse than leaving the crash for
+	// manual recovery.
+	if _, err := pm.probe(ctx, pm.ffprobePath, finalVideo); err != nil {
+		pm.logger.Debug("part merge: adopt-and-repair candidate found but does not probe cleanly, not adopting", "err", err, "jobID", seg.JobID, "segmentID", seg.ID, "candidate", finalVideo)
+		return false
+	}
+
+	if err := pm.updateFile(seg.ID, filepath.Base(finalVideo), finalVideo, finalChat); err != nil {
+		pm.logger.Warn("part merge: adopt-and-repair found the run-head's final file but failed to update the row", "err", err, "jobID", seg.JobID, "segmentID", seg.ID, "adopted", finalVideo)
+		return false
+	}
+
+	pm.logger.Info("part merge: adopted crash-orphaned merge output onto its run-head final name", "jobID", seg.JobID, "segmentID", seg.ID, "from", seg.FilePath, "to", finalVideo)
+
+	seg.FilePath = finalVideo
+	seg.Filename = filepath.Base(finalVideo)
+	// Unconditional, matching exactly what was just persisted above —
+	// including clearing to "" when the chat sibling couldn't be found, so
+	// seg never disagrees with the row about a chat reference that no
+	// longer resolves.
+	seg.ChatFile = finalChat
+	return true
 }
 
 // mergedChatPath derives a merged media file's chat sibling path, matching

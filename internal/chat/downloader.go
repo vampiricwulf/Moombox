@@ -199,6 +199,13 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.running = true
 	cd.cancelFlag = false
 	cd.streamEnded = false
+	// A fresh run starts with no resume signal, not whatever a PRIOR run on
+	// this same instance last left behind (e.g. a completed run that ended
+	// with the signal open, then this same *ChatDownloader gets Start()
+	// called again). Closed = no information by design (see
+	// LiveContinuationOpen's doc comment) — a run that hasn't polled yet
+	// has none, same as a run that just died.
+	cd.liveContinuationOpen = false
 	cd.done = make(chan struct{})
 	// Propagate Logger to the API so parse-level drift diagnostics are captured.
 	if cd.api != nil {
@@ -318,10 +325,20 @@ func (cd *ChatDownloader) MarkStreamEnded() {
 }
 
 // Stop cancels the chat download (for shutdown/cancellation).
+//
+// This is a PERMANENT exit (I5 fix): closes the resume signal directly,
+// rather than relying on the loop to notice the cancellation and close it
+// on its way out — Stop() can be called while the loop is sleeping between
+// polls, not just mid-fetch, and setting it here covers every case
+// uniformly. Not an "ended" inference (we don't know whether the broadcast
+// is still live) — a stopped downloader carries no information any more,
+// and closed is what "no information" means by design (see
+// LiveContinuationOpen's doc comment).
 func (cd *ChatDownloader) Stop() {
 	cd.mu.Lock()
 	cd.running = false
 	cd.cancelFlag = true
+	cd.liveContinuationOpen = false
 	if cd.cancelCtx != nil {
 		cd.cancelCtx() // Wake up any sleeping poll
 	}
@@ -359,7 +376,14 @@ func (cd *ChatDownloader) shouldStop() bool {
 // issuing continuations — the "chat is open" resume signal (interruption
 // spec). Directional by design: true means the broadcast may resume; false
 // means NOTHING (streamers disable chat independently, and a downloader
-// that never started has no information). Fetch errors do not change it.
+// that never started, or has permanently stopped, has no information).
+// A TRANSIENT fetch error does not change it — only a definitive
+// end-of-stream (handleEndOfStream) or a PERMANENT loop exit closes it:
+// ErrAuthRequired, the consecutive-error budget exhausting (both I5 fix,
+// handleFetchError), or Stop() (I5 fix) — a downloader that has stopped
+// polling for good carries no information any more, and closed is what
+// "no information" means here, by design, not an inference that the
+// broadcast ended.
 func (cd *ChatDownloader) LiveContinuationOpen() bool {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
@@ -506,7 +530,17 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 	// Auth failure — cookies are expired / never worked. Abort immediately
 	// rather than burning the consecutive-error budget on a credential state
 	// that will not recover without a refresh (audit chat.md T5).
+	//
+	// This is a PERMANENT loop exit (I5 fix): the downloader stops polling
+	// for good here, so it must close the resume signal. This is NOT an
+	// "ended" inference — we have no idea whether the broadcast is still
+	// live — it's the opposite: a downloader that stopped polling carries
+	// NO information any more, and closed is what "no information" means
+	// by design (LiveContinuationOpen's doc comment). Leaving it latched
+	// true would hand the engine permanent (wrong) MayResume evidence from
+	// a downloader that will never observe anything again.
 	if errors.Is(err, ErrAuthRequired) {
+		cd.setLiveContinuationOpen(false)
 		if cd.OnError != nil {
 			cd.OnError(err)
 		}
@@ -524,6 +558,10 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 		maxErrors = maxConsecErrorsLive
 	}
 	if *consecutiveErrors > maxErrors {
+		// Same permanent-exit reasoning as the ErrAuthRequired branch above
+		// — the consecutive-error budget is exhausted, this downloader is
+		// done for good, and its resume signal must close with it.
+		cd.setLiveContinuationOpen(false)
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("too many consecutive chat API errors"))
 		}

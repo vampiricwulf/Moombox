@@ -28,6 +28,39 @@ func (a *atomicTimeValue) Load() time.Time {
 }
 func (a *atomicTimeValue) StoreNow() { a.v.Store(time.Now().UnixNano()) }
 
+// segmentProgressResetsStallCounters reports whether p represents genuine
+// NEW progress for one stream (video or audio) relative to lastBytes — the
+// last cumulative Bytes value already observed for that exact stream — and,
+// if so, updates lastBytes to p.Bytes (I3 fix).
+//
+// Extracted from runLiveStreamDownload's onSegmentProgress closure purely
+// so this echo-suppression decision is directly unit-testable without a
+// live download loop: Bytes>0 alone is NOT sufficient, because
+// re-running an already-CANCELLED SegmentDownloader — which
+// runLiveStreamDownload's noteRefreshFailure wait branch does on every
+// retry, since a failed refresh leaves `result` pointing at the SAME
+// cancelled downloaders and the outer loop's next iteration calls
+// runDownloaders on them again — makes it immediately hit its own
+// deferred end-of-Start final OnProgress a second (or Nth) time,
+// reporting the EXACT SAME cumulative Bytes as its last live report (no
+// new bytes were written since). Treating that echo as fresh progress
+// used to reset consecutiveLiveChecks/lastSegTime on every such retry,
+// defeating maxConsecutiveLiveChecks entirely — a stuck-live abandoned
+// broadcast could livelock the job in Downloading forever.
+//
+// Callers key lastBytes PER STREAM (a video and an audio downloader each
+// get their own counter, since they're independent cumulative totals) and
+// reset it to 0 whenever a brand-new downloader instance is attached for
+// that stream, so a genuinely fresh downloader's first real report (delta
+// from 0) still counts as progress.
+func segmentProgressResetsStallCounters(p engine.DownloadProgress, lastBytes *atomic.Int64) bool {
+	if p.Bytes <= 0 || p.Bytes <= lastBytes.Load() {
+		return false
+	}
+	lastBytes.Store(p.Bytes)
+	return true
+}
+
 // interruptionSignalStaleAfter bounds trust in a signature the observation
 // sites stopped re-confirming. The cadences actually feeding observe(),
 // fastest to slowest:
@@ -68,8 +101,30 @@ type interruptionSignal struct{ lastSeen atomicTimeValue }
 // initialized — e.g. many test fixtures — is simply a no-op) and info (a
 // failed re-fetch passes nil here and leaves the previous freshness, or
 // lack of it, unchanged).
+//
+// Guarded by isAuthWalledPlayability (I4 fix): a members-only,
+// age-restricted, or login-required response is bit-identical to the
+// interruption signature (live + zero formats + that PlayabilityError) but
+// means something completely different depending on HOW it was fetched.
+// An unauthenticated (cookieless) probe against a healthy auth-walled
+// stream reliably produces exactly this shape — not an interruption, just
+// a probe that can't see formats it was never entitled to — which is why
+// observeYouTubeStatusProbe (the cookieless CheckStreamStatus path) always
+// needed this guard. But every AUTHENTICATED call site that fetches with
+// live cookies (job.YT.GetVideoInfo from the quality-refresh path, the
+// still-live re-verification path, and the credential-refresh re-probe)
+// can hit the SAME shape for a different reason: the cookies died mid-
+// stream. That is a real, distinct failure — but it is not resume
+// evidence, and arming the signal on it would tell shouldWaitForResume to
+// wait out a broadcast that was never actually interrupted. The guard
+// lives HERE, centrally, rather than at each call site, so every present
+// and future observe() caller is covered by construction instead of by
+// remembering to duplicate the check.
 func (s *interruptionSignal) observe(info *youtube.VideoInfo) {
 	if s == nil || info == nil {
+		return
+	}
+	if isAuthWalledPlayability(info.PlayabilityError) {
 		return
 	}
 	if info.StreamStatus == youtube.StreamLive && len(info.Formats) == 0 {
@@ -177,6 +232,44 @@ func resumeEvidence(signalFresh bool, mayResume func() bool) bool {
 	return signalFresh || (mayResume != nil && mayResume())
 }
 
+// waitDeadline bounds ONE stall episode's total wait-branch lifetime to
+// the job's InterruptionTimeout ceiling (I3 fix).
+//
+// Why this exists: maxConsecutiveLiveChecks bounds a DIFFERENT branch — the
+// still-live re-verification loop in runLiveStreamDownload's "normal
+// download stop" section — and never applies to this one. The wait branch
+// (shouldWaitForResume returning true) retries on its own five-minute
+// sleep for as long as resume evidence keeps holding, with no counter of
+// its own; a stuck-live abandoned broadcast whose evidence never lapses
+// (e.g. a chat continuation that never closes) can hold this branch
+// forever, livelocking the job in Downloading. This gives the branch its
+// own independent ceiling.
+//
+// start is latched by exceeded() the first time it is called for an
+// episode (zero value) and is NOT touched by later calls — the episode's
+// budget is fixed at first entry, not extended by every retry. reset()
+// clears it, called wherever a later refresh SUCCEEDS (the same moment
+// resumeWaitLatch.resolved() fires): a resumed broadcast, or an unrelated
+// LATER stall episode, must get its own fresh budget rather than
+// inheriting an already-expired clock from a resolved earlier one.
+type waitDeadline struct{ start time.Time }
+
+// exceeded reports whether the episode's budget (interruptionTimeout) has
+// run out as of now, latching start on first call. Callers only reach
+// this once interruptionTimeout is already known > 0 (shouldWaitForResume
+// refuses to wait at all at config <= 0, so the deadline is simply never
+// consulted there — "unreachable," not defensively zero-checked here).
+func (d *waitDeadline) exceeded(now time.Time, interruptionTimeout time.Duration) bool {
+	if d.start.IsZero() {
+		d.start = now
+		return false
+	}
+	return now.Sub(d.start) >= interruptionTimeout
+}
+
+// reset clears the latched episode start.
+func (d *waitDeadline) reset() { d.start = time.Time{} }
+
 // shouldWaitForResume decides whether a failed live-refresh (refreshErr)
 // should wait-and-retry instead of ending the recording immediately — the
 // PERMISSION half of the decision, now that resume evidence (see
@@ -196,27 +289,43 @@ func resumeEvidence(signalFresh bool, mayResume func() bool) bool {
 // hold and get latched elsewhere, see noteRefreshFailure, but this
 // function itself never permits an actual wait for it) and on evidence
 // holding. A nil refreshErr never waits — there is nothing to retry.
-func shouldWaitForResume(refreshErr error, evidence bool, interruptionTimeout time.Duration) bool {
+//
+// I3 fix: also refuses once deadline reports the episode's budget
+// (interruptionTimeout, the same duration used as the enable/disable gate)
+// has run out — closing the gap where evidence holding indefinitely (a
+// stuck-live abandoned broadcast) retried this branch forever with no
+// bound of its own. A refused wait falls through to the caller's normal
+// bounded verify path exactly like a permission-denied (evidence=false)
+// call would.
+func shouldWaitForResume(refreshErr error, evidence bool, interruptionTimeout time.Duration, deadline *waitDeadline, now time.Time) bool {
 	if refreshErr == nil || interruptionTimeout <= 0 {
 		return false
 	}
-	return evidence
+	if !evidence {
+		return false
+	}
+	if deadline.exceeded(now, interruptionTimeout) {
+		return false
+	}
+	return true
 }
 
-// noteRefreshFailure is runLiveStreamDownload's full I1-fixed response to
-// one failed live-refresh: it ALWAYS latches Tier-2 resume evidence onto
+// noteRefreshFailure is runLiveStreamDownload's full I1+I3-fixed response
+// to one failed live-refresh: it ALWAYS latches Tier-2 resume evidence onto
 // latch (via latch.wait()) when resumeEvidence holds — regardless of
 // whether the config permits an actual stall — and separately reports
 // whether the loop should actually wait-and-retry (shouldWaitForResume's
-// permission gate). A nil refreshErr is a safe no-op: nothing latches,
-// nothing waits.
+// permission gate, now also bounded by deadline).
 //
-// Extracted (rather than left as three lines inlined at the one call site)
+// A nil refreshErr is a safe no-op: nothing latches, nothing waits, and
+// deadline is left untouched.
+//
+// Extracted (rather than left as a few lines inlined at the one call site)
 // so the composition itself — latch independent of permission — is
 // directly unit-testable at the exact granularity the config-0 fix needs:
 // config-0 + evidence still latches even though it never waits; config-0 +
 // no evidence does neither.
-func noteRefreshFailure(latch *resumeWaitLatch, refreshErr error, signalFresh bool, mayResume func() bool, interruptionTimeout time.Duration) bool {
+func noteRefreshFailure(latch *resumeWaitLatch, deadline *waitDeadline, refreshErr error, signalFresh bool, mayResume func() bool, interruptionTimeout time.Duration, now time.Time) bool {
 	if refreshErr == nil {
 		return false
 	}
@@ -224,7 +333,7 @@ func noteRefreshFailure(latch *resumeWaitLatch, refreshErr error, signalFresh bo
 	if evidence {
 		latch.wait()
 	}
-	return shouldWaitForResume(refreshErr, evidence, interruptionTimeout)
+	return shouldWaitForResume(refreshErr, evidence, interruptionTimeout, deadline, now)
 }
 
 // resumeWaitLatch tracks runLiveStreamDownload's worker-level Tier 2
@@ -279,7 +388,7 @@ func isAuthWalledPlayability(err youtube.PlayabilityError) bool {
 // package only runs after the downloader has already exited. See
 // interruptionSignalStaleAfter's doc comment for the full cadence picture.
 //
-// Two guards protect this from mis-arming the signal:
+// One guard protects this from mis-arming the signal on a bad probe:
 //
 //   - info == nil: ProbeVideoStatus can return (nil, nil) in a shutdown
 //     race (every Innertube client failing without surfacing a hard error —
@@ -290,22 +399,20 @@ func isAuthWalledPlayability(err youtube.PlayabilityError) bool {
 //     "confirmed still live" — which would itself trigger an unwarranted
 //     ErrQualityLost in handleGoneError.
 //
-//   - info.PlayabilityError is members-only / age-restricted /
-//     login-required: CheckStreamStatus ALWAYS probes via the COOKIELESS
-//     ANDROID_VR client (ProbeVideoStatus's own doc comment), regardless of
-//     whether the job itself is authenticated. For an auth-walled stream,
-//     classifyStream (internal/youtube/player_api_parsing.go) derives
-//     StreamStatus purely from videoDetails.isLive — BEFORE any
-//     playability/formats check — so a HEALTHY members-only/age-restricted/
-//     login-required live stream reliably probes as StreamStatus=live with
-//     zero Formats (this unauthenticated request simply can't see them),
-//     which is bit-for-bit the interruption signature. Observing it would
-//     self-sustain a perpetually "fresh" signal — re-armed by the engine's
-//     own ~30s stall-driven re-probe — for the ENTIRE run of any such
-//     stream, silently converting every ordinary MaxTimeout finalize into
-//     an up-to-InterruptionTimeout wrongful stall. isAuthWalledPlayability
-//     is the same predicate requiresAuthProbe uses to route these to the
-//     authenticated probe instead.
+// A second guard — auth-walled PlayabilityError — used to live here too,
+// since CheckStreamStatus ALWAYS probes via the COOKIELESS ANDROID_VR
+// client (ProbeVideoStatus's own doc comment) regardless of whether the
+// job itself is authenticated, and classifyStream
+// (internal/youtube/player_api_parsing.go) derives StreamStatus purely
+// from videoDetails.isLive — BEFORE any playability/formats check — so a
+// HEALTHY members-only/age-restricted/login-required live stream reliably
+// probes as StreamStatus=live with zero Formats here, bit-for-bit the
+// interruption signature. That guard now lives centrally inside
+// interruptionSignal.observe itself (I4 fix) — every call site, this one
+// included, is covered by construction rather than by each site
+// remembering to duplicate the check. isAuthWalledPlayability is the same
+// predicate requiresAuthProbe uses to route these to the authenticated
+// probe instead.
 func observeYouTubeStatusProbe(job *JobContext, info *youtube.VideoInfo, err error) (bool, error) {
 	if err != nil {
 		return false, err
@@ -313,9 +420,7 @@ func observeYouTubeStatusProbe(job *JobContext, info *youtube.VideoInfo, err err
 	if info == nil {
 		return false, errNilStatusProbe
 	}
-	if !isAuthWalledPlayability(info.PlayabilityError) {
-		job.Interruption.observe(info)
-	}
+	job.Interruption.observe(info)
 	return info.StreamStatus != youtube.StreamLive, nil
 }
 

@@ -264,10 +264,16 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	ytConcluded := rs.ytEverConcluded
 	twConcluded := rs.twEverConcluded
 
+	// Captured once here (not re-read at the shouldFireRecovery call sites
+	// below) so the "cookies present" snapshot lines up with the rest of
+	// this check's other snapshots, all taken under the same lock.
+	hasYTCookies := rs.jar.HasYouTubeAuthCookies()
+	hasTWCookies := rs.jar.HasTwitchAuthCookies()
+
 	rs.status = AuthStatus{
 		YouTubeAuthenticated: ytAuth,
 		TwitchAuthenticated:  twAuth,
-		HasYouTubeCookies:    rs.jar.HasYouTubeAuthCookies(),
+		HasYouTubeCookies:    hasYTCookies,
 		LastCheck:            time.Now().UTC().Format(time.RFC3339),
 		YouTubeError:         ytErrStr,
 		TwitchError:          twErrStr,
@@ -323,11 +329,11 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	// list (e.g. Platforms=["youtube"] with unverified Twitch cookies on
 	// disk).
 	if rs.OnRecoveryNeeded != nil {
-		if shouldFireRecovery(ytConcluded, prevYT, ytAuth, ytErr) {
+		if shouldFireRecovery(ytConcluded, prevYT, ytAuth, ytErr, hasYTCookies) {
 			rs.logger.Warn("youtube auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("youtube")
 		}
-		if shouldFireRecovery(twConcluded, prevTW, twAuth, twErr) {
+		if shouldFireRecovery(twConcluded, prevTW, twAuth, twErr, hasTWCookies) {
 			rs.logger.Warn("twitch auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("twitch")
 		}
@@ -363,28 +369,42 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 // per-platform, not the service-wide hasCheckedOnce, or one platform's
 // presence in the persisted list masks a sibling platform that was never
 // actually checked (see the ytEverConcluded/twEverConcluded field comment
-// on RefreshService). nowAuth/checkErr are this check's result. Two cases
-// fire:
+// on RefreshService). nowAuth/checkErr are this check's result.
+// cookiesPresent is whether THIS PLATFORM currently has any auth cookies in
+// the jar at all (jar.HasYouTubeAuthCookies / jar.HasTwitchAuthCookies).
+// Two cases fire:
 //
 //   - Witnessed transition: everConcluded is true and prevAuth was true —
 //     the platform was authenticated on its previous conclusive check and
-//     isn't now.
+//     isn't now. Fires regardless of cookiesPresent — a REAL transition
+//     from authenticated to not (cookies expired, wiped, or removed
+//     entirely) is exactly what this case exists to catch.
 //   - Startup dead-auth: everConcluded is false, meaning this is the first
 //     conclusive check this platform has ever completed. Auth that was
 //     already dead when the process started never produces a witnessed
 //     transition (there's no "prev" state to fall from), so without this
 //     case recovery silently never fires — field case 2026-08-20:
 //     youtube=false on every half-hourly check all day, zero recovery
-//     attempts, zero notifications.
+//     attempts, zero notifications. Gated on cookiesPresent (I6 fix): a
+//     platform the user never configured has nowAuth=false and checkErr=nil
+//     for the trivial reason that checkAndRefreshYouTube/checkTwitchAuth
+//     return early on an empty jar — that is NOT dead auth, and firing
+//     startup recovery for it launches a spurious headless-browser
+//     credential-recovery attempt (and possibly a user-facing warning) for
+//     a platform nobody set up. Dead-but-PRESENT cookies still fire —
+//     that's the whole point of this case; only the never-configured
+//     (absent) case is newly excluded.
 //
 // In both cases checkErr must be nil (a network error is not auth loss) and
 // nowAuth must be false (the platform must actually be unauthenticated).
-func shouldFireRecovery(everConcluded, prevAuth, nowAuth bool, checkErr error) bool {
+func shouldFireRecovery(everConcluded, prevAuth, nowAuth bool, checkErr error, cookiesPresent bool) bool {
 	if checkErr != nil || nowAuth {
 		return false
 	}
-	firstConclusive := !everConcluded
-	return (everConcluded && prevAuth) || firstConclusive
+	if everConcluded {
+		return prevAuth // witnessed transition
+	}
+	return cookiesPresent // first conclusive check — only for a configured platform
 }
 
 // setYouTubeHeaders applies the standard YouTube API headers for cookie-authenticated requests.

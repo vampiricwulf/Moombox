@@ -213,12 +213,22 @@ func (m *Muxer) ConcatCopy(ctx context.Context, inputs []string, outputPath stri
 }
 
 // buildConcatList generates the FFmpeg concat demuxer file list content.
-// Converts backslashes to forward slashes and escapes single quotes for Windows compatibility.
+// Converts backslashes to forward slashes and escapes single quotes for
+// Windows compatibility.
+//
+// ffconcat quoting is shell-style, not C-style: a single quote inside a
+// single-quoted string cannot be escaped with a leading backslash (`\'` is
+// not a recognized escape and breaks parsing) — the correct sequence is
+// close the quote, place a backslash-escaped literal quote OUTSIDE any
+// quoting, then reopen the quote: close-backslash-quote-quote. A path like
+// "It's a stream.mp4" must become close-backslash-quote-quote-escaped
+// ("'It'\”s a stream.mp4'"), not the invalid "'It\'s a stream.mp4'" the
+// naive replacement used to produce.
 func buildConcatList(paths []string) string {
 	var b strings.Builder
 	for _, p := range paths {
 		escaped := strings.ReplaceAll(p, "\\", "/")
-		escaped = strings.ReplaceAll(escaped, "'", "\\'")
+		escaped = strings.ReplaceAll(escaped, "'", `'\''`)
 		fmt.Fprintf(&b, "file '%s'\n", escaped)
 	}
 	return b.String()

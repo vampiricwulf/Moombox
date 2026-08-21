@@ -17,14 +17,30 @@ import (
 // "44100") rather than parsed to float/int — string equality is exactly
 // what merge-compatibility needs and avoids float traps like 29.97 vs
 // 30000/1001 comparing unequal after lossy conversion.
+//
+// VProfile/PixFmt/AProfile/ASampleFmt are also kept as ffprobe's raw
+// strings, empty-string tolerant (some inputs/codecs don't report a
+// profile). They exist because VCodec/Width/Height/FrameRate/ACodec/
+// SampleRate/Channels alone are not sufficient to guarantee a safe -c copy
+// concat: H.264 High profile and High 4:4:4 Predictive both probe as
+// codec_name "h264" at the same dimensions/frame rate, but carry
+// pix_fmt yuv420p vs yuv444p respectively — concatenating them with -c
+// copy today probes "equal", succeeds, and produces an internally
+// inconsistent file (differing chroma subsampling mid-stream), after which
+// cleanup deletes the intact original parts. Comparing profile and pix_fmt
+// (video) / profile and sample_fmt (audio) closes that gap.
 type streamParams struct {
 	VCodec     string
 	Width      int
 	Height     int
 	FrameRate  string
+	VProfile   string
+	PixFmt     string
 	ACodec     string
 	SampleRate string
 	Channels   int
+	AProfile   string
+	ASampleFmt string
 }
 
 // equal reports whether p and q describe merge-compatible streams. A nil
@@ -39,10 +55,20 @@ func (p *streamParams) equal(q *streamParams) bool {
 		p.Width == q.Width &&
 		p.Height == q.Height &&
 		p.FrameRate == q.FrameRate &&
+		p.VProfile == q.VProfile &&
+		p.PixFmt == q.PixFmt &&
 		p.ACodec == q.ACodec &&
 		p.SampleRate == q.SampleRate &&
-		p.Channels == q.Channels
+		p.Channels == q.Channels &&
+		p.AProfile == q.AProfile &&
+		p.ASampleFmt == q.ASampleFmt
 }
+
+// probeStreamParamsFn is mergeSameFormatParts' probe implementation,
+// indirected through a package var so tests can substitute a spy (to prove,
+// e.g., that a platform gate skips probing entirely) without a real ffprobe
+// toolchain. Production code never reassigns this.
+var probeStreamParamsFn = probeStreamParams
 
 // probeStreamParams probes filePath's primary video and audio streams via
 // ffprobe. Unlike probeAudioBitrate (which falls back to a default when
@@ -73,10 +99,13 @@ func probeStreamParams(ctx context.Context, ffprobePath, filePath string) (*stre
 		Streams []struct {
 			CodecType  string `json:"codec_type"`
 			CodecName  string `json:"codec_name"`
+			Profile    string `json:"profile"`
 			Width      int    `json:"width"`
 			Height     int    `json:"height"`
 			RFrameRate string `json:"r_frame_rate"`
+			PixFmt     string `json:"pix_fmt"`
 			SampleRate string `json:"sample_rate"`
+			SampleFmt  string `json:"sample_fmt"`
 			Channels   int    `json:"channels"`
 		} `json:"streams"`
 	}
@@ -97,6 +126,8 @@ func probeStreamParams(ctx context.Context, ffprobePath, filePath string) (*stre
 			params.Width = s.Width
 			params.Height = s.Height
 			params.FrameRate = s.RFrameRate
+			params.VProfile = s.Profile
+			params.PixFmt = s.PixFmt
 			haveVideo = true
 		case "audio":
 			if haveAudio {
@@ -105,6 +136,8 @@ func probeStreamParams(ctx context.Context, ffprobePath, filePath string) (*stre
 			params.ACodec = s.CodecName
 			params.SampleRate = s.SampleRate
 			params.Channels = s.Channels
+			params.AProfile = s.Profile
+			params.ASampleFmt = s.SampleFmt
 			haveAudio = true
 		}
 	}

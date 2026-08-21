@@ -464,6 +464,9 @@ func refreshGvsCredentials(
 			// under a stall — success or formats-empty, either way the
 			// signal should observe it so a fresh signature stays trusted
 			// across the whole interruption, not just the moment it started.
+			// AUTHENTICATED fetch — dead cookies mid-stream can produce the
+			// same shape as a healthy auth-walled stream; observe() itself
+			// guards against arming on that (I4 fix).
 			job.Interruption.observe(fresh)
 		}
 		if formatBecameWholeFile(formats, itag) {

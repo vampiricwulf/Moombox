@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -36,6 +37,132 @@ func TestLiveContinuationOpenReplayNeverOpens(t *testing.T) {
 	cd.noteLivePollResult(true) // even a "successful poll" on replay
 	if cd.LiveContinuationOpen() {
 		t.Fatal("replay chat must never report live-open")
+	}
+}
+
+// --- I5 fix: permanent loop exits must close the signal ------------------
+//
+// A dead chat downloader that leaves liveContinuationOpen latched true
+// forever supplies PERMANENT (and wrong) MayResume evidence to the engine
+// — the "full-ceiling stalls" the coordinator's report described. Every
+// exit that means "this downloader will never poll again" must close the
+// signal: ErrAuthRequired, the consecutive-error budget exhausting (both
+// inside handleFetchError), and Stop(). This is NOT an "ended" inference —
+// closed means "no information", by design, the same directional contract
+// LiveContinuationOpen's doc comment already states for a downloader that
+// never started.
+
+// TestStopClosesLiveContinuationOpen is the I5(a) regression test for the
+// Stop() call site specifically: Stop() must close the signal directly,
+// not rely on the loop noticing cancellation on its way out (Stop() can be
+// called while the loop is asleep between polls, not just mid-fetch).
+func TestStopClosesLiveContinuationOpen(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true) // simulate a healthy in-progress live poll
+
+	cd.Stop()
+
+	if cd.LiveContinuationOpen() {
+		t.Error("Stop() must close the resume signal -- a stopped downloader carries no information any more")
+	}
+}
+
+// TestHandleFetchErrorAuthRequiredClosesSignal is the I5(a) regression test
+// for handleFetchError's ErrAuthRequired branch: cookies died, the
+// downloader aborts for good, and the signal must close with it.
+func TestHandleFetchErrorAuthRequiredClosesSignal(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true)
+
+	n := 0
+	shouldBreak := cd.handleFetchError(context.Background(), ErrAuthRequired, &n)
+
+	if !shouldBreak {
+		t.Fatal("ErrAuthRequired must break the loop")
+	}
+	if cd.LiveContinuationOpen() {
+		t.Error("ErrAuthRequired must close the resume signal -- the downloader aborts for good and carries no further information")
+	}
+}
+
+// TestHandleFetchErrorConsecutiveBudgetExceededClosesSignal is the I5(a)
+// regression test for handleFetchError's consecutive-error-budget branch:
+// once the budget is exhausted the downloader gives up for good, and the
+// signal must close with it.
+func TestHandleFetchErrorConsecutiveBudgetExceededClosesSignal(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: false}) // VOD budget (maxConsecErrorsVod=5), fewer calls needed
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true)
+	cd.testBackoffOverride = time.Millisecond // keep the sub-budget calls fast
+
+	genericErr := errors.New("transient fetch failure")
+	n := 0
+	var shouldBreak bool
+	for i := 0; i < maxConsecErrorsVod+1; i++ {
+		shouldBreak = cd.handleFetchError(context.Background(), genericErr, &n)
+		if shouldBreak {
+			break
+		}
+	}
+
+	if !shouldBreak {
+		t.Fatal("the consecutive-error budget must eventually break the loop")
+	}
+	if cd.LiveContinuationOpen() {
+		t.Error("the consecutive-error budget exhausting must close the resume signal -- the downloader gives up for good")
+	}
+}
+
+// TestHandleEndOfStreamClosesSignalOnDefiniteUnrecoveredEnd is the I5(b)
+// injection-proven regression test the coordinator's report specifically
+// asked for: deleting setLiveContinuationOpen(false) from
+// handleEndOfStream must fail THIS test. Drives handleEndOfStream directly
+// with recovery forced to fail (a definitive, unrecovered end) and asserts
+// the signal reads false afterward.
+func TestHandleEndOfStreamClosesSignalOnDefiniteUnrecoveredEnd(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.setLiveContinuationOpen(true) // simulate the signal being open right before end-of-stream
+	cd.testRecoveryOverride = func(ctx context.Context) bool { return false }
+
+	recovered := cd.handleEndOfStream(context.Background())
+
+	if recovered {
+		t.Fatal("test setup: recovery override must report failure")
+	}
+	if cd.LiveContinuationOpen() {
+		t.Error("handleEndOfStream must close the resume signal on a definitive, unrecovered end")
+	}
+}
+
+// TestStartResetsLiveContinuationOpenOnFreshRun is the I5(a) coverage for
+// "verify Start() also resets the signal appropriately on a fresh run": a
+// *ChatDownloader whose signal was left open by an EARLIER run (or set
+// directly, standing in for any such leftover state) must not carry that
+// stale value into a new Start() call. No InitialContinuation is set, so
+// the loop's very first check (`if cd.continuation == "" { return }`)
+// exits immediately without ever touching the signal itself -- any change
+// observed here comes from Start()'s own reset, not the loop.
+func TestStartResetsLiveContinuationOpenOnFreshRun(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:    "v1",
+		OutputFile: filepath.Join(t.TempDir(), "chat.json"),
+	})
+	cd.setLiveContinuationOpen(true) // stale leftover state
+
+	if err := cd.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if cd.LiveContinuationOpen() {
+		t.Error("Start() must reset the resume signal to closed at the start of a fresh run, not carry over a stale value")
 	}
 }
 
