@@ -139,8 +139,14 @@ type DownloaderOptions struct {
 	// would otherwise apply). Only the YouTube HLS strategy sets this true, so
 	// Twitch recordings are never force-finalized by the timeout.
 	EnforceMaxTimeout bool
-	CheckStreamStatus func(ctx context.Context) (bool, error) // Returns true if stream ended
-	IsOnline          func() bool                             // Returns false if device has no internet
+	// InterruptionTimeout bounds how long stallForPossibleResume defers a
+	// budget-expired finalize while MayResume keeps returning true. Zero
+	// means no engine-side ceiling — the stall is unbounded here, gated only
+	// by the worker's own resume-eligibility window. Sourced from
+	// config.InterruptionTimeout.
+	InterruptionTimeout time.Duration
+	CheckStreamStatus   func(ctx context.Context) (bool, error) // Returns true if stream ended
+	IsOnline            func() bool                             // Returns false if device has no internet
 	// OnCredentialRefresh is called when segments 403 while the downloader is
 	// still behind the live head — i.e. the segments demonstrably exist and
 	// our credentials, not the stream, are the problem. The callback should
@@ -172,6 +178,7 @@ const (
 	ActivityFindingFirstSegment                         // pre-first-byte hunt for the first valid segment
 	ActivityRetrying                                    // segment/playlist fetch failing; retrying
 	ActivityWaitingForSegment                           // caught up at the live edge; the next segment isn't published yet
+	ActivityWaitingResume                               // broadcast interrupted; deferring finalize while resume is plausible
 )
 
 // DownloadProgress holds progress information for event callbacks.
@@ -300,6 +307,19 @@ type SegmentDownloader struct {
 	// unset without implying a missing tail.
 	finalizedBehindHead atomic.Bool
 
+	// finalizedDuringInterruption latches when a budget-expired finalize was
+	// deferred at least once by stallForPossibleResume (Tier 1: MayResume
+	// reported true) before ultimately finalizing — either MayResume flipped
+	// false or the InterruptionTimeout ceiling expired (Tier 2). The worker
+	// consumes this to preserve resume data instead of the usual cleanup.
+	finalizedDuringInterruption atomic.Bool
+
+	// interruptionStallStart latches the moment stallForPossibleResume first
+	// observes MayResume()==true for the current gone/timeout burst — the
+	// clock InterruptionTimeout measures against. Zero (IsZero()) means no
+	// stall is in progress. Only the download-loop goroutine touches it.
+	interruptionStallStart atomicTime
+
 	// baseURLOverride is set by SetBaseURL when a cipher rotation
 	// requires swapping the stream URL mid-download. nil = use
 	// opts.BaseURL (the construction-time URL); non-nil = use the
@@ -359,6 +379,9 @@ type SegmentDownloader struct {
 	// OnActivity reports the downloader's current wait reason (or
 	// ActivityNone when it resumes downloading). Optional; nil to opt out.
 	OnActivity func(a DownloadActivity)
+	// MayResume reports whether the broadcast may resume — stall evidence.
+	// Called only from the download-loop goroutine. nil = feature off.
+	MayResume func() bool
 	// OnFetch reports n bytes of media payload ARRIVING off the network —
 	// fired at every successful segment/chunk body read, including catch-up
 	// workers whose data sits in the reorder buffer long before it flushes
@@ -498,6 +521,33 @@ func (d *SegmentDownloader) refreshCredentials() bool {
 			"newURL", freshURL != "", "newToken", freshToken != "")
 	}
 	return installed
+}
+
+// stallForPossibleResume reports whether a budget-expired finalize should
+// defer because the broadcast may resume (interruption spec Tier 1). The
+// FIRST true observation latches the stall clock; the configured ceiling
+// (opts.InterruptionTimeout, 0 = no engine ceiling) bounds the total stall.
+// A false MayResume (or expired ceiling) that follows a true observation
+// latches finalizedDuringInterruption so the worker preserves resume data
+// (Tier 2). Confirmed-ended callers must not consult this at all.
+func (d *SegmentDownloader) stallForPossibleResume() bool {
+	if d.MayResume == nil || !d.MayResume() {
+		if !d.interruptionStallStart.Load().IsZero() {
+			d.finalizedDuringInterruption.Store(true) // stalled earlier, evidence gone
+		}
+		return false
+	}
+	if d.interruptionStallStart.Load().IsZero() {
+		d.interruptionStallStart.StoreNow()
+		d.logger.Info("[Downloader] stream interrupted — deferring finalize while resume is plausible")
+	}
+	if d.opts.InterruptionTimeout > 0 && d.interruptionStallStart.Since() >= d.opts.InterruptionTimeout {
+		d.finalizedDuringInterruption.Store(true)
+		d.logger.Warn("[Downloader] interruption ceiling expired; finalizing with resume data preserved",
+			"ceiling", d.opts.InterruptionTimeout)
+		return false
+	}
+	return true
 }
 
 // segmentWorkers is the operative concurrency for this download: the
@@ -754,6 +804,15 @@ func (d *SegmentDownloader) CurrentSeq() int {
 // FinalizedBehindHead reports whether the downloader finalized knowing
 // segments below head were left unfetched. Valid after Start returns nil.
 func (d *SegmentDownloader) FinalizedBehindHead() bool { return d.finalizedBehindHead.Load() }
+
+// FinalizedDuringInterruption reports whether the downloader deferred a
+// budget-expired finalize at least once because MayResume reported the
+// broadcast could resume, before ultimately finalizing anyway (either
+// MayResume flipped false or the InterruptionTimeout ceiling expired).
+// Valid after Start returns nil.
+func (d *SegmentDownloader) FinalizedDuringInterruption() bool {
+	return d.finalizedDuringInterruption.Load()
+}
 
 // HeadSeq returns the last known head sequence (-1 if never learned).
 func (d *SegmentDownloader) HeadSeq() int { return int(d.headSeq.Load()) }

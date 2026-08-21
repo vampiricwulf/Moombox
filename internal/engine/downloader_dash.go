@@ -464,6 +464,14 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			utils.Sleep(ctx, singleGoneRetryDelay)
 			return nil // Continue loop
 		}
+		// Interruption spec Tier 1/2: a confirmed-ended verdict (streamEndVerified)
+		// must finalize immediately regardless of MayResume — only an
+		// UNCONFIRMED budget expiry defers for possible resume.
+		if !d.streamEndVerified && d.stallForPossibleResume() {
+			d.emitActivity(ActivityWaitingResume)
+			utils.Sleep(ctx, singleGoneRetryDelay)
+			return nil // Continue loop — the refresh path revives in place on resume
+		}
 		if d.finalizeBehindHead() {
 			// Known-incomplete finalize: leave streamEnded unset so the
 			// runDashLoop defer keeps the resume sidecar — a later retry
@@ -692,6 +700,15 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 			d.lastSegTime.StoreNow() // reset the timeout clock on recovery
 			*sameHeadRetryDelay = 0
 			return nil
+		}
+		// Interruption spec Tier 1/2: same deferral as handleGoneError's
+		// backstop — only an unconfirmed budget expiry stalls; a confirmed
+		// end (streamEndVerified) above already routed to errStreamDone
+		// before reaching here.
+		if !d.streamEndVerified && d.stallForPossibleResume() {
+			d.emitActivity(ActivityWaitingResume)
+			utils.Sleep(ctx, singleGoneRetryDelay)
+			return nil // Continue loop — the refresh path revives in place on resume
 		}
 		d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 			"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
