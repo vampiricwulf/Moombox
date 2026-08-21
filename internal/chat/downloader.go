@@ -47,18 +47,19 @@ type ChatDownloaderOptions struct {
 
 // ChatDownloader downloads YouTube live chat messages.
 type ChatDownloader struct {
-	opts          ChatDownloaderOptions
-	api           *ChatAPI
-	mu            sync.Mutex
-	running       bool
-	cancelFlag    bool
-	streamEnded   bool
-	messages      []ChatMessage // Unwritten messages in memory
-	messageCount  int
-	dedup         *utils.OrderedDedup[string]
-	continuation  string
-	streamStartMs int64
-	flushedToDisk bool
+	opts                 ChatDownloaderOptions
+	api                  *ChatAPI
+	mu                   sync.Mutex
+	running              bool
+	cancelFlag           bool
+	streamEnded          bool
+	liveContinuationOpen bool
+	messages             []ChatMessage // Unwritten messages in memory
+	messageCount         int
+	dedup                *utils.OrderedDedup[string]
+	continuation         string
+	streamStartMs        int64
+	flushedToDisk        bool
 	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
 	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
 	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
@@ -345,6 +346,35 @@ func (cd *ChatDownloader) shouldStop() bool {
 	return !cd.running || cd.cancelFlag || cd.streamEnded
 }
 
+// LiveContinuationOpen reports whether the LIVE chat endpoint is still
+// issuing continuations — the "chat is open" resume signal (interruption
+// spec). Directional by design: true means the broadcast may resume; false
+// means NOTHING (streamers disable chat independently, and a downloader
+// that never started has no information). Fetch errors do not change it.
+func (cd *ChatDownloader) LiveContinuationOpen() bool {
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	return cd.liveContinuationOpen
+}
+
+// setLiveContinuationOpen records the definitive open/closed state.
+func (cd *ChatDownloader) setLiveContinuationOpen(open bool) {
+	cd.mu.Lock()
+	cd.liveContinuationOpen = open
+	cd.mu.Unlock()
+}
+
+// noteLivePollResult is the runChatLoop hook: a successful LIVE poll with a
+// continuation opens the signal; replay polls never do.
+func (cd *ChatDownloader) noteLivePollResult(hasContinuation bool) {
+	if cd.opts.IsReplay {
+		return
+	}
+	if hasContinuation {
+		cd.setLiveContinuationOpen(true)
+	}
+}
+
 // wasCancelledOrShutdown returns true if the download was stopped by user
 // cancellation or application shutdown. Context cancellation without Stop()
 // is a shutdown race — the parent context was cancelled but Stop() hasn't
@@ -413,6 +443,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			if !cd.isStreamActive() {
 				break // VOD/replay complete
 			}
+			cd.setLiveContinuationOpen(false)
 			if !cd.recoverStaleContinuation(ctx) {
 				break
 			}
@@ -421,6 +452,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		}
 
 		cd.continuation = resp.NextContinuation
+		cd.noteLivePollResult(true)
 		if delay := cd.computePollDelay(resp); delay > 0 {
 			cd.sleep(ctx, delay)
 		}
