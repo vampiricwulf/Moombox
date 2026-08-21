@@ -506,14 +506,19 @@ func TestPartMergerMerge_HappyPath(t *testing.T) {
 	}
 }
 
-// TestPartMergerMerge_ChatMergeFailurePreservesPerPartChat is the C1
-// regression test: when mergeChatFiles fails for a run (here, part2's chat
-// JSON is corrupt), the media merge still lands but the row's ChatFile
-// clears to "" AND every per-part chat file in the run — including the
-// superseded part2's — survives on disk untouched. Deleting it would have
-// permanently lost part2's chat messages, since they were never captured
-// anywhere else.
-func TestPartMergerMerge_ChatMergeFailurePreservesPerPartChat(t *testing.T) {
+// TestPartMergerMerge_ChatMergeFailureAbortsRun is the coordinator's C1
+// (Tier-4 twitch chat orphan) regression test: when mergeChatFiles fails for
+// a run (here, part2's chat JSON is corrupt — standing in for the real
+// production case, a Twitch part whose chat is twitch.TwitchChatData,
+// unmarshaled here as chat.ChatData, which always errors on the schema
+// mismatch), the WHOLE run aborts in full identity: media is NOT merged
+// either, db.ReplaceJobSegments/UpdateSegmentFile are never called, and
+// every original file (video + chat, both parts) is left byte-for-byte
+// untouched. This replaces the old "keep the media merge, blank the row's
+// ChatFile" fallback, which orphaned the per-part chat files' rows and lost
+// chat replay for exactly the one production case (Twitch) that ever
+// carries per-part ChatFile.
+func TestPartMergerMerge_ChatMergeFailureAbortsRun(t *testing.T) {
 	dir := t.TempDir()
 	part1 := filepath.Join(dir, "base - part1.mp4")
 	part2 := filepath.Join(dir, "base - part2.mp4")
@@ -538,14 +543,16 @@ func TestPartMergerMerge_ChatMergeFailurePreservesPerPartChat(t *testing.T) {
 	pm := newTestPartMerger(t)
 	pm.probe = matchingParams
 	pm.concat = writeConcatStub([]byte("merged-bytes"))
+	replaceCalled := false
 	pm.replace = func(jobID string, segs []database.Segment) error {
-		for i := range segs {
-			segs[i].ID = 700 + i
-			segs[i].JobID = jobID
-		}
+		replaceCalled = true
 		return nil
 	}
-	pm.updateFile = func(id int, filename, filePath, chatFile string) error { return nil }
+	updateFileCalled := false
+	pm.updateFile = func(id int, filename, filePath, chatFile string) error {
+		updateFileCalled = true
+		return nil
+	}
 
 	segments := []database.Segment{
 		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: part1, DurationSeconds: 100, ChatFile: chat1},
@@ -553,31 +560,128 @@ func TestPartMergerMerge_ChatMergeFailurePreservesPerPartChat(t *testing.T) {
 	}
 	got := pm.merge(context.Background(), "job1", "", segments)
 
-	if len(got) != 1 {
-		t.Fatalf("merged output = %d rows, want 1 (media merge must still land)", len(got))
+	// Full identity: the run (here, the entire batch — its only run) is
+	// returned completely untouched, and neither DB call ever fires.
+	if !reflect.DeepEqual(got, segments) {
+		t.Errorf("merge with a failed chat merge = %+v, want input unchanged (C1 run-abort)", got)
 	}
-	if got[0].ChatFile != "" {
-		t.Errorf("ChatFile = %q, want empty after a failed chat merge", got[0].ChatFile)
+	if replaceCalled {
+		t.Error("db.ReplaceJobSegments must not be called when the only run's chat merge fails (C1 run-abort)")
 	}
-	// Media merge still succeeded: part1 holds the merged bytes, part2's
-	// video is superseded and removed as usual.
-	if b, err := os.ReadFile(part1); err != nil || string(b) != "merged-bytes" {
-		t.Errorf("part1 after merge: content=%q err=%v, want merged-bytes", b, err)
+	if updateFileCalled {
+		t.Error("db.UpdateSegmentFile must not be called when the only run's chat merge fails (C1 run-abort)")
 	}
-	if _, err := os.Stat(part2); !os.IsNotExist(err) {
-		t.Errorf("superseded part2 video should still be deleted even on chat-merge failure: stat err = %v", err)
+
+	// Media is NOT merged: both parts hold their original bytes.
+	if b, err := os.ReadFile(part1); err != nil || string(b) != "orig1" {
+		t.Errorf("part1 must be untouched (media must not merge on a chat-merge failure): content=%q err=%v", b, err)
 	}
-	// C1: BOTH per-part chat files must survive — part1's (untouched, never
-	// referenced by the failed merge) and part2's (would otherwise have been
-	// deleted as "superseded" despite never being incorporated anywhere).
-	if _, err := os.Stat(chat1); err != nil {
-		t.Errorf("part1 chat file must survive a failed chat merge: stat err = %v", err)
+	if b, err := os.ReadFile(part2); err != nil || string(b) != "orig2" {
+		t.Errorf("part2 must be untouched: content=%q err=%v", b, err)
 	}
-	if _, err := os.Stat(chat2); err != nil {
-		t.Errorf("part2 chat file must survive a failed chat merge (C1): stat err = %v", err)
+	// Both per-part chat files survive on disk, byte-identical.
+	if b, err := os.ReadFile(chat1); err != nil || string(b) != string(validChat) {
+		t.Errorf("part1 chat file must survive untouched: content=%q err=%v", b, err)
 	}
 	if b, err := os.ReadFile(chat2); err != nil || string(b) != "{not valid json" {
-		t.Errorf("part2 chat file content changed: content=%q err=%v", b, err)
+		t.Errorf("part2 chat file must survive untouched: content=%q err=%v", b, err)
+	}
+	// The orphaned merge temp output must not be left behind either.
+	if _, err := os.Stat(filepath.Join(dir, "base - merged0.mp4")); !os.IsNotExist(err) {
+		t.Errorf("temp concat output must be cleaned up after a chat-merge-failure run-abort: stat err = %v", err)
+	}
+}
+
+// TestPartMergerMerge_ChatMergeFailureRunIsolatesFromOtherRuns is the C1
+// two-run test: run A ([0,1], chat fails) must abort in full identity while
+// run B ([2,3], no chat) still merges — proving the abort is per-RUN, not
+// whole-batch, exactly as the ruling requires ("other runs in the batch
+// proceed independently").
+func TestPartMergerMerge_ChatMergeFailureRunIsolatesFromOtherRuns(t *testing.T) {
+	dir := t.TempDir()
+	paths := make([]string, 4)
+	for i := range paths {
+		paths[i] = filepath.Join(dir, fmt.Sprintf("base - part%d.mp4", i+1))
+		if err := os.WriteFile(paths[i], []byte(fmt.Sprintf("orig%d", i+1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	chatA1 := filepath.Join(dir, "base - part1.chat.json")
+	chatA2 := filepath.Join(dir, "base - part2.chat.json")
+	if err := os.WriteFile(chatA1, []byte(`{"videoId":"v1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// part2's chat is corrupt — run A's chat merge fails.
+	if err := os.WriteFile(chatA2, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	paramA := &streamParams{VCodec: "h264"}
+	paramB := &streamParams{VCodec: "vp9"}
+
+	pm := newTestPartMerger(t)
+	pm.probe = func(_ context.Context, _, filePath string) (*streamParams, error) {
+		if filePath == paths[2] || filePath == paths[3] {
+			return paramB, nil
+		}
+		return paramA, nil
+	}
+	concatCalls := 0
+	pm.concat = func(_ context.Context, inputs []string, outputPath string) error {
+		concatCalls++
+		return os.WriteFile(outputPath, []byte(fmt.Sprintf("merged:%d", len(inputs))), 0o644)
+	}
+	pm.replace = func(jobID string, segs []database.Segment) error {
+		for i := range segs {
+			segs[i].ID = 1900 + i
+			segs[i].JobID = jobID
+		}
+		return nil
+	}
+	pm.updateFile = func(id int, filename, filePath, chatFile string) error { return nil }
+
+	segments := []database.Segment{
+		{SegmentIndex: 0, Filename: "base - part1.mp4", FilePath: paths[0], DurationSeconds: 100, ChatFile: chatA1},
+		{SegmentIndex: 1, Filename: "base - part2.mp4", FilePath: paths[1], DurationSeconds: 100, ChatFile: chatA2},
+		{SegmentIndex: 2, Filename: "base - part3.mp4", FilePath: paths[2], DurationSeconds: 100},
+		{SegmentIndex: 3, Filename: "base - part4.mp4", FilePath: paths[3], DurationSeconds: 100},
+	}
+	got := pm.merge(context.Background(), "job1", "", segments)
+
+	if concatCalls != 2 {
+		t.Errorf("concat called %d times, want 2 (run A's attempt + run B's)", concatCalls)
+	}
+	if len(got) != 3 {
+		t.Fatalf("merged output = %d rows, want 3 (run A's 2 original parts + run B's 1 merged row)", len(got))
+	}
+
+	// Run A: aborted in full identity — both original rows present,
+	// unchanged content, files untouched.
+	if got[0].FilePath != paths[0] || got[0].DurationSeconds != 100 {
+		t.Errorf("run A part1 = %+v, want unchanged original", got[0])
+	}
+	if got[1].FilePath != paths[1] || got[1].DurationSeconds != 100 {
+		t.Errorf("run A part2 = %+v, want unchanged original", got[1])
+	}
+	if b, err := os.ReadFile(paths[0]); err != nil || string(b) != "orig1" {
+		t.Errorf("run A part1 file must be untouched: content=%q err=%v", b, err)
+	}
+	if b, err := os.ReadFile(paths[1]); err != nil || string(b) != "orig2" {
+		t.Errorf("run A part2 file must be untouched: content=%q err=%v", b, err)
+	}
+	if b, err := os.ReadFile(chatA2); err != nil || string(b) != "{not valid json" {
+		t.Errorf("run A part2 chat file must survive: content=%q err=%v", b, err)
+	}
+
+	// Run B: merged normally, independent of run A's failure.
+	if got[2].FilePath != paths[2] {
+		t.Errorf("run B merged FilePath = %q, want %q", got[2].FilePath, paths[2])
+	}
+	if b, err := os.ReadFile(paths[2]); err != nil || string(b) != "merged:2" {
+		t.Errorf("run B part3 content = %q err=%v, want merged:2", b, err)
+	}
+	if _, err := os.Stat(paths[3]); !os.IsNotExist(err) {
+		t.Errorf("run B's superseded part4 should be deleted: stat err = %v", err)
 	}
 }
 

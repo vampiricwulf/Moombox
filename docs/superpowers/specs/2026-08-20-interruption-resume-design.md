@@ -133,9 +133,21 @@ all.
   timestamped, so ordering is mechanical).
 - **Timeline gaps** between merged parts become playback jumps — identical
   to how a mid-part gap already plays.
-- **Failure-safe:** any probe disagreement or concat error leaves the
-  parts exactly as today; the merge is an opportunistic improvement, never
-  a gate on finalize.
+- **Failure-safe:** any probe disagreement, concat error, or DB-replace
+  error leaves the parts exactly as today; the merge is an opportunistic
+  improvement, never a gate on finalize. A chat-merge failure aborts that
+  RUN specifically (its own identity — video included, not just chat: the
+  run's parts, rows, and per-part chat files are all left exactly as they
+  were), while every other run in the same finalize still merges
+  independently. This is the only case that reaches production today:
+  Twitch gap-split parts are the sole rows carrying a per-part `ChatFile`,
+  their chat is `twitch.TwitchChatData` (`message` a string), and the merge
+  path unmarshals `chat.ChatData` (`message` a `[]MessagePart`) — the schema
+  mismatch always errors, so a Twitch job's parts simply never merge today
+  (they stay split with every chat file intact — the pre-branch behavior).
+  A prior fallback ("keep the media merge, blank the row's `ChatFile`")
+  orphaned the per-part chat files and lost chat replay; it no longer
+  exists.
 
 ## Rider — steady-state dead-auth recovery
 
@@ -154,6 +166,13 @@ existing 30-minute notification cooldown applies unchanged.
 - No auto-resurrection of Cancelled jobs.
 - Twitch: out of scope (different interruption model; monitor recovery
   already handles stream flap).
+- Twitch chat schema merge: Tier 4's `mergeChatFiles` only understands
+  `chat.ChatData` (YouTube's shape). A Twitch gap-split run's chat
+  (`twitch.TwitchChatData`) always fails to unmarshal into it, which is by
+  design given the point above — Twitch parts never merge today. Teaching
+  the merge path a second chat schema (or a shared intermediate shape) so
+  Twitch runs can eventually merge losslessly, chat included, is explicit
+  follow-up work, not part of this design.
 
 ## Testing
 
@@ -168,9 +187,11 @@ existing 30-minute notification cooldown applies unchanged.
   ResumeJob once per cooldown; Cancelled / flagless / non-broadcast →
   dropped as today.
 - Merge: run-grouping matrix (identical run merges; format change splits
-  runs; single part no-ops), ffprobe-disagreement and concat-failure
-  fallbacks leave parts untouched, Segment-row collapse arithmetic, chat
-  concatenation ordering. FFmpeg-dependent cases behind the same live-tool
-  gating the muxer tests already use.
+  runs; single part no-ops), ffprobe-disagreement/concat/db-replace
+  failures leave parts untouched, Segment-row collapse arithmetic, chat
+  concatenation ordering. A chat-merge failure leaves its own run in full
+  identity (media untouched too) while an unrelated run in the same batch
+  still merges. FFmpeg-dependent cases behind the same live-tool gating the
+  muxer tests already use.
 - Cookies: startup-dead-auth fires recovery once; network-error first
   check does not.

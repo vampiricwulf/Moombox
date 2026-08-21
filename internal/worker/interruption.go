@@ -114,27 +114,73 @@ func buildMayResume(sig *interruptionSignal, chatDl *chat.ChatDownloader) func()
 	}
 }
 
+// engineInterruptionTimeout maps the worker's config-facing
+// InterruptionTimeout (JobConfig.InterruptionTimeout: 0 = "stall disabled"
+// per the config contract, > 0 = the stall ceiling) onto the value passed
+// to engine.DownloaderOptions.InterruptionTimeout at construction time
+// (I1 fix). A positive value passes through unchanged as the engine's
+// ceiling. A non-positive value — 0 from a normally-loaded config, or a
+// negative value defensively, though config validation already clamps
+// negative InterruptionTimeout back to the default before it can reach
+// here — maps onto engine.InterruptionNoStall rather than straight
+// through: engine's own zero means "no ceiling" (unbounded), the exact
+// opposite of the config contract's "disabled," so passing 0 unmapped
+// would silently turn a disabled stall into an unbounded one for any job
+// whose resume evidence holds. Every LIVE YouTube strategy site that also
+// wires SegmentWorkers + CheckStreamStatus (and, via attachMayResume,
+// MayResume) must route job.Config.InterruptionTimeout through this
+// rather than passing it straight through.
+func engineInterruptionTimeout(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	return engine.InterruptionNoStall
+}
+
 // attachMayResume installs mayResume onto dl as its engine MayResume
-// callback — UNLESS interruptionTimeout <= 0, in which case dl.MayResume is
-// left nil. This is the config-contract gate: interruption_timeout=0 means
-// "finalize must never wait" (config/types.go's doc comment), but the
-// engine's own semantics are "InterruptionTimeout=0 means no CEILING" (an
-// unbounded stall) and "nil MayResume means no stall at all" — two
-// different zero values with opposite meanings. Passing a non-nil
-// MayResume through with a zero ceiling would silently invert the config
-// contract into an unbounded stall for any job whose chat is still open
-// (or whose interruption signal is fresh) — the exact "opted out but
-// stalls forever" bug this gate exists to prevent. dl == nil is a safe
-// no-op (VOD downloaders / a strategy that didn't build one).
-func attachMayResume(dl *engine.SegmentDownloader, mayResume func() bool, interruptionTimeout time.Duration) {
-	if dl == nil || interruptionTimeout <= 0 {
+// callback whenever dl is non-nil — REGARDLESS of the configured
+// InterruptionTimeout (I1 fix; this used to gate on interruptionTimeout > 0
+// and is the one piece of this fix that inverts an existing test's
+// assertion, deliberately — see TestAttachMayResumeAlwaysInstalls).
+// Installing MayResume no longer needs to depend on the config value: the
+// config→engine mapping now happens once, at construction time, via
+// engineInterruptionTimeout (see its doc comment) — a disabled-stall
+// (config 0) job's downloader is built with
+// InterruptionTimeout: engine.InterruptionNoStall, and the engine's own
+// InterruptionNoStall branch of stallForPossibleResume consults MayResume
+// exactly once per call and never actually stalls. So a disabled-stall job
+// still gets its Tier-2 evidence latched (FinalizedDuringInterruption)
+// without ever blocking finalize's latency, and attachMayResume itself no
+// longer needs to know the config value at all. dl == nil is a safe no-op
+// (VOD downloaders / a strategy that didn't build one).
+func attachMayResume(dl *engine.SegmentDownloader, mayResume func() bool) {
+	if dl == nil {
 		return
 	}
 	dl.MayResume = mayResume
 }
 
+// resumeEvidence reports whether interruption resume evidence holds —
+// EITHER this exact refresh's player-response fetch just showed the
+// interruption signature (signalFresh), OR the job's chat continuation
+// says the broadcast may still resume (mayResume) — independent of
+// whether the config permits the loop to actually wait on it.
+//
+// Split out from shouldWaitForResume (I1 fix): the config contract is
+// "interruption_timeout=0 disables the STALL," not "disables Tier-2
+// preservation" (config/types.go's doc comment) — a genuinely-interrupted
+// config-0 job must still be able to latch resumeWaitLatch even though
+// shouldWaitForResume(..., 0) below always returns false for it. See
+// noteRefreshFailure, which composes this with shouldWaitForResume exactly
+// that way.
+func resumeEvidence(signalFresh bool, mayResume func() bool) bool {
+	return signalFresh || (mayResume != nil && mayResume())
+}
+
 // shouldWaitForResume decides whether a failed live-refresh (refreshErr)
-// should wait-and-retry instead of ending the recording immediately.
+// should wait-and-retry instead of ending the recording immediately — the
+// PERMISSION half of the decision, now that resume evidence (see
+// resumeEvidence) is a separate concern (I1 fix).
 //
 // Why this exists: when the interruption signature (live status + zero
 // formats) appears, EVERY download strategy's format selection fails on
@@ -146,21 +192,39 @@ func attachMayResume(dl *engine.SegmentDownloader, mayResume func() bool, interr
 // cause (zero formats on a still-live response) IS the resume evidence.
 //
 // Gated on the stall being enabled at all (interruptionTimeout <= 0 means
-// "finalize must never wait" per the config contract — same gate
-// attachMayResume enforces, so a refresh failure falls straight back to
-// the old immediate-return behavior) and on some resume evidence: either
-// this exact refresh's player-response fetch just showed the interruption
-// signature (signalFresh), or the job's chat continuation says the
-// broadcast may still resume (mayResume). A nil refreshErr never waits —
-// there is nothing to retry.
-func shouldWaitForResume(refreshErr error, signalFresh bool, mayResume func() bool, interruptionTimeout time.Duration) bool {
+// "finalize must never wait" per the config contract — evidence may still
+// hold and get latched elsewhere, see noteRefreshFailure, but this
+// function itself never permits an actual wait for it) and on evidence
+// holding. A nil refreshErr never waits — there is nothing to retry.
+func shouldWaitForResume(refreshErr error, evidence bool, interruptionTimeout time.Duration) bool {
 	if refreshErr == nil || interruptionTimeout <= 0 {
 		return false
 	}
-	if signalFresh {
-		return true
+	return evidence
+}
+
+// noteRefreshFailure is runLiveStreamDownload's full I1-fixed response to
+// one failed live-refresh: it ALWAYS latches Tier-2 resume evidence onto
+// latch (via latch.wait()) when resumeEvidence holds — regardless of
+// whether the config permits an actual stall — and separately reports
+// whether the loop should actually wait-and-retry (shouldWaitForResume's
+// permission gate). A nil refreshErr is a safe no-op: nothing latches,
+// nothing waits.
+//
+// Extracted (rather than left as three lines inlined at the one call site)
+// so the composition itself — latch independent of permission — is
+// directly unit-testable at the exact granularity the config-0 fix needs:
+// config-0 + evidence still latches even though it never waits; config-0 +
+// no evidence does neither.
+func noteRefreshFailure(latch *resumeWaitLatch, refreshErr error, signalFresh bool, mayResume func() bool, interruptionTimeout time.Duration) bool {
+	if refreshErr == nil {
+		return false
 	}
-	return mayResume != nil && mayResume()
+	evidence := resumeEvidence(signalFresh, mayResume)
+	if evidence {
+		latch.wait()
+	}
+	return shouldWaitForResume(refreshErr, evidence, interruptionTimeout)
 }
 
 // resumeWaitLatch tracks runLiveStreamDownload's worker-level Tier 2
@@ -169,8 +233,10 @@ func shouldWaitForResume(refreshErr error, signalFresh bool, mayResume func() bo
 // an unresolved wait-for-resume, not "a wait fired at some point during
 // this call."
 //
-// wait() latches it true — called where shouldWaitForResume's branch
-// fires. resolved() clears it — called at every point a SUBSEQUENT
+// wait() latches it true — called by noteRefreshFailure whenever resume
+// evidence holds on a failed refresh (regardless of whether
+// shouldWaitForResume itself permitted an actual wait for it — I1 fix).
+// resolved() clears it — called at every point a SUBSEQUENT
 // refreshDownload SUCCEEDS (`result = refreshResult`), because a
 // broadcast that actually resumed, or a transient failure that
 // self-healed, must not permanently taint a clean multi-hour finish with

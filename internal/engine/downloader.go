@@ -52,6 +52,20 @@ const (
 	// waiting/verifying for the next segment before force-finalizing, even when
 	// YouTube still reports the stream live.
 	DefaultMaxTimeout = 10 * time.Minute
+	// InterruptionNoStall is a sentinel DownloaderOptions.InterruptionTimeout
+	// value distinct from both a positive ceiling and the zero "unbounded"
+	// default: stallForPossibleResume consults MayResume exactly once per
+	// call, latches finalizedDuringInterruption when it reports true, and
+	// always returns false — finalize proceeds immediately, with no stall
+	// and no clock started. Lets a caller latch Tier-2 evidence
+	// (incomplete_tail preservation) WITHOUT ever blocking finalize, which
+	// InterruptionTimeout's own zero value can't express — zero already
+	// means "no ceiling" (unbounded). The worker maps its
+	// interruption_timeout=0 config value ("stall disabled" per the config
+	// contract) onto this sentinel rather than passing 0 straight through,
+	// since a wired live downloader's 0 would otherwise collide with the
+	// engine's own unrelated "unbounded" meaning for 0.
+	InterruptionNoStall time.Duration = -1
 	// streamStatusCheckInterval bounds how often the DASH loop re-checks the
 	// stream's status while waiting for the next segment. A live segment is ~1s
 	// of media arriving about once a second, so a gap this long is the signal to
@@ -142,8 +156,14 @@ type DownloaderOptions struct {
 	// InterruptionTimeout bounds how long stallForPossibleResume defers a
 	// budget-expired finalize while MayResume keeps returning true. Zero
 	// means no engine-side ceiling — the stall is unbounded here, gated only
-	// by the worker's own resume-eligibility window. Sourced from
-	// config.InterruptionTimeout.
+	// by the worker's own resume-eligibility window. InterruptionNoStall (a
+	// negative sentinel — see its doc comment) means the opposite of
+	// unbounded: MayResume is still consulted once per finalize decision to
+	// latch Tier-2 evidence, but the helper never actually stalls at all.
+	// Sourced from config.InterruptionTimeout; the worker maps its own 0
+	// ("stall disabled" per the config contract) onto InterruptionNoStall
+	// rather than passing 0 straight through, since 0 here means something
+	// different (unbounded, not disabled).
 	InterruptionTimeout time.Duration
 	CheckStreamStatus   func(ctx context.Context) (bool, error) // Returns true if stream ended
 	IsOnline            func() bool                             // Returns false if device has no internet
@@ -536,7 +556,19 @@ func (d *SegmentDownloader) refreshCredentials() bool {
 // A false MayResume (or expired ceiling) that follows a true observation
 // latches finalizedDuringInterruption so the worker preserves resume data
 // (Tier 2). Confirmed-ended callers must not consult this at all.
+//
+// InterruptionTimeout == InterruptionNoStall is a distinct third mode (I1
+// fix): consult MayResume exactly once, latch finalizedDuringInterruption
+// when it's true, and always return false — no stall clock is ever
+// started, so finalize proceeds on this same call. Lets a caller latch
+// Tier-2 evidence without ever blocking finalize's latency.
 func (d *SegmentDownloader) stallForPossibleResume() bool {
+	if d.opts.InterruptionTimeout == InterruptionNoStall {
+		if d.MayResume != nil && d.MayResume() {
+			d.finalizedDuringInterruption.Store(true)
+		}
+		return false
+	}
 	if d.MayResume == nil || !d.MayResume() {
 		if !d.interruptionStallStart.Load().IsZero() {
 			d.finalizedDuringInterruption.Store(true) // stalled earlier, evidence gone

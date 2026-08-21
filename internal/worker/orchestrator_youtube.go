@@ -43,26 +43,36 @@ import (
 // mayResume (built once by ExecuteWithChat via buildMayResume) is installed
 // as engine.SegmentDownloader.MayResume on every downloader this function
 // attaches progress to — the initial result AND every refresh/split
-// replacement, since attachProgress is the single call site for both,
-// via attachMayResume. VOD downloads never call this function, so
-// MayResume is never set there — only live YouTube downloads get the
-// interruption stall. attachMayResume itself further gates on
-// jobCtx.Config.InterruptionTimeout > 0 — a job with the stall disabled
-// (config contract: 0 = finalize must never wait) gets a nil MayResume,
-// not a non-nil one with a zero (i.e. unbounded, in engine semantics)
-// ceiling.
+// replacement, since attachProgress is the single call site for both, via
+// attachMayResume. VOD downloads never call this function, so MayResume is
+// never set there — only live YouTube downloads get the interruption
+// stall. attachMayResume installs MayResume unconditionally (I1 fix) — the
+// config→engine mapping for a disabled stall (config contract: 0 =
+// finalize must never wait) now happens once, at construction time, in
+// each strategy's engine.DownloaderOptions.InterruptionTimeout via
+// engineInterruptionTimeout, which maps 0 onto engine.InterruptionNoStall
+// rather than passing 0 straight through (engine's own zero means
+// "unbounded," the opposite of "disabled"). A disabled-stall job's
+// downloader is thus built with the sentinel, still gets MayResume
+// installed, and still latches Tier-2 evidence — it just never actually
+// stalls (see engine.SegmentDownloader.stallForPossibleResume's
+// InterruptionNoStall branch).
 //
 // The second return value, waitedForResume, is worker-level Tier 2
 // evidence — FINALIZE-scoped, not history-scoped: true only when the loop
 // is CURRENTLY in (or gives up directly out of) an unresolved
-// shouldWaitForResume wait. It exists because that branch can retry,
+// noteRefreshFailure evidence-latch — which fires whenever resume evidence
+// holds on a failed refresh, whether or not shouldWaitForResume actually
+// permitted a wait for it (I1 fix: interruptionTimeout<=0 disables the
+// WAIT, not this latch). It exists because the wait branch can retry,
 // exhaust maxConsecutiveLiveChecks, and finalize WITHOUT any engine
 // downloader ever reaching its own stallForPossibleResume (the loop dies
 // from the outside — repeated refresh failures — not from an engine-side
 // budget expiry), so FinalizedDuringInterruption would otherwise stay
-// false even though the job deliberately waited for a resume. It latches
-// true when the wait branch fires and is CLEARED again at every later
-// successful refresh (`result = refreshResult`) — a broadcast that
+// false even though the job deliberately waited for (or, config
+// permitting, evidenced) a resume. It latches true when
+// noteRefreshFailure's evidence check fires and is CLEARED again at every
+// later successful refresh (`result = refreshResult`) — a broadcast that
 // resumed, or a transient failure that self-healed, must not permanently
 // taint a clean multi-hour finish. The caller threads the final value into
 // finalizeIncompleteTail so a genuine gave-up-mid-stall wait is not
@@ -147,7 +157,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					origOnProgress(p)
 				}
 			}
-			attachMayResume(res.VideoDownloader, mayResume, jobCtx.Config.InterruptionTimeout)
+			attachMayResume(res.VideoDownloader, mayResume)
 		}
 		if res.AudioDownloader != nil {
 			tracker.AttachAudioDownloader(res.AudioDownloader)
@@ -158,7 +168,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					origOnProgress(p)
 				}
 			}
-			attachMayResume(res.AudioDownloader, mayResume, jobCtx.Config.InterruptionTimeout)
+			attachMayResume(res.AudioDownloader, mayResume)
 		}
 	}
 
@@ -271,11 +281,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// like, not just an ended stream. Without this check, that
 				// failure used to be treated as "the stream is done" and
 				// finalized immediately, discarding a recording that could
-				// still resume. shouldWaitForResume falls back to the old
-				// immediate-return behavior when the stall is disabled
-				// (config InterruptionTimeout <= 0) or there's no resume
-				// evidence at all.
-				if shouldWaitForResume(refreshErr, jobCtx.Interruption.fresh(), mayResume, jobCtx.Config.InterruptionTimeout) {
+				// still resume. noteRefreshFailure (I1 fix) ALWAYS latches
+				// waitedForResume when resume evidence holds, even when the
+				// stall is disabled (config InterruptionTimeout <= 0) and it
+				// therefore returns false below — a disabled-stall job must
+				// never actually wait, but a genuinely-interrupted one must
+				// still preserve staging at finalize. See noteRefreshFailure
+				// and resumeEvidence's doc comments.
+				if noteRefreshFailure(&waitedForResume, refreshErr, jobCtx.Interruption.fresh(), mayResume, jobCtx.Config.InterruptionTimeout) {
 					// Finalize-scoped, not history-scoped: this latches
 					// true here, but every later SUCCESSFUL refresh
 					// (`result = refreshResult`, below and in the
@@ -289,7 +302,6 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					// the still-live verify branch), this stays true —
 					// exactly the Tier 2 evidence finalizeIncompleteTail
 					// needs for a genuine gave-up-mid-stall finalize.
-					waitedForResume.wait()
 					o.logger.Warn("refresh failed but the broadcast may resume — waiting instead of ending the recording",
 						"err", refreshErr, "jobID", jobCtx.Job.ID)
 					tracker.SetWaitActivity(engine.ActivityWaitingResume)

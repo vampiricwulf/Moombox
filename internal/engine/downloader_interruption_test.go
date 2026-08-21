@@ -409,3 +409,226 @@ func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 	}
 	wantSegments(t, out, 0, head)
 }
+
+// TestStallForPossibleResumeNoStallSentinel (I1 fix) calls
+// stallForPossibleResume directly against InterruptionTimeout ==
+// InterruptionNoStall -- no goroutines, no fake server, deterministic and
+// fast. Pins the exact contract: MayResume is consulted exactly once per
+// call, finalizedDuringInterruption latches iff that one consult reports
+// true, and the return value is ALWAYS false (no stall is ever entered,
+// regardless of evidence). The last subtest re-confirms InterruptionTimeout
+// == 0 (a direct engine caller, distinct from the worker's mapping) still
+// means unbounded, unaffected by the new sentinel branch.
+func TestStallForPossibleResumeNoStallSentinel(t *testing.T) {
+	t.Run("evidence true latches without stalling", func(t *testing.T) {
+		d := NewSegmentDownloader(DownloaderOptions{OutputFile: "x", InterruptionTimeout: InterruptionNoStall})
+		var calls int
+		d.MayResume = func() bool { calls++; return true }
+
+		if d.stallForPossibleResume() {
+			t.Error("stallForPossibleResume() = true, want false -- InterruptionNoStall must never stall")
+		}
+		if !d.FinalizedDuringInterruption() {
+			t.Error("FinalizedDuringInterruption() = false, want true -- evidence must still latch")
+		}
+		if calls != 1 {
+			t.Errorf("MayResume called %d times, want exactly 1", calls)
+		}
+	})
+
+	t.Run("evidence false does not latch", func(t *testing.T) {
+		d := NewSegmentDownloader(DownloaderOptions{OutputFile: "x", InterruptionTimeout: InterruptionNoStall})
+		d.MayResume = func() bool { return false }
+
+		if d.stallForPossibleResume() {
+			t.Error("stallForPossibleResume() = true, want false")
+		}
+		if d.FinalizedDuringInterruption() {
+			t.Error("FinalizedDuringInterruption() = true, want false -- no evidence must not latch")
+		}
+	})
+
+	t.Run("nil MayResume does not latch and does not panic", func(t *testing.T) {
+		d := NewSegmentDownloader(DownloaderOptions{OutputFile: "x", InterruptionTimeout: InterruptionNoStall})
+		// d.MayResume intentionally left nil.
+
+		if d.stallForPossibleResume() {
+			t.Error("stallForPossibleResume() = true, want false")
+		}
+		if d.FinalizedDuringInterruption() {
+			t.Error("FinalizedDuringInterruption() = true, want false")
+		}
+	})
+
+	t.Run("repeated calls each consult independently -- no stall state accumulates", func(t *testing.T) {
+		d := NewSegmentDownloader(DownloaderOptions{OutputFile: "x", InterruptionTimeout: InterruptionNoStall})
+		var calls int
+		d.MayResume = func() bool { calls++; return true }
+
+		for i := 0; i < 3; i++ {
+			if d.stallForPossibleResume() {
+				t.Fatalf("call %d: stallForPossibleResume() = true, want false", i)
+			}
+		}
+		if calls != 3 {
+			t.Errorf("MayResume called %d times, want 3 (one fresh consult per call, no caching)", calls)
+		}
+		if !d.FinalizedDuringInterruption() {
+			t.Error("FinalizedDuringInterruption() = false, want true")
+		}
+	})
+
+	t.Run("0 remains unbounded -- unaffected by the new sentinel branch", func(t *testing.T) {
+		// Pinned by Task 3; a direct regression guard that adding the
+		// InterruptionNoStall branch above did not disturb the pre-existing
+		// 0 == unbounded path for a caller that still passes 0 directly
+		// (the engine's own contract, distinct from the worker's mapping
+		// of its disabled-stall config value onto InterruptionNoStall).
+		d := NewSegmentDownloader(DownloaderOptions{OutputFile: "x", InterruptionTimeout: 0})
+		d.MayResume = func() bool { return true }
+
+		if !d.stallForPossibleResume() {
+			t.Error("stallForPossibleResume() = false, want true -- InterruptionTimeout=0 must remain unbounded for a direct engine caller")
+		}
+		if d.FinalizedDuringInterruption() {
+			t.Error("FinalizedDuringInterruption() = true, want false -- a still-stalling call must not latch yet")
+		}
+	})
+}
+
+// TestInterruptionNoStallPromptFinalize (I1 fix) drives the real runDashLoop
+// (via Start) against handleGoneError's fallthrough (403 past head) with
+// InterruptionTimeout == InterruptionNoStall and MayResume permanently
+// true -- proving the sentinel's "no stall, no clock" contract holds at the
+// full Start()-loop level, not just at a direct stallForPossibleResume
+// call. Same fake-GVS shape as TestBackstopCeilingExpires (which this test
+// is the direct counterpart to): reaching the budget-expired block still
+// costs the same ~5.5s goneRetryDuringDownload escalation floor regardless
+// of this fix, but unlike TestBackstopCeilingExpires (which adds a further
+// ceiling wait) and TestGoneErrorStallReachedViaStatusCheckError (which
+// adds an unbounded stall until MayResume flips), this must finalize on
+// the SAME iteration it first reaches stallForPossibleResume -- no
+// interruptionStallRetryDelay (5s) sleep, no ceiling. A regression back to
+// treating InterruptionNoStall as an ordinary ceiling (or as 0/unbounded)
+// would either add a further 5s+ delay or hang outright, either of which
+// this test's tight elapsed bound catches.
+func TestInterruptionNoStallPromptFinalize(t *testing.T) {
+	t.Parallel()
+	const head = 2
+	_, srv := newFakeGVS(t, head, func(seq, attempt int) int {
+		if seq <= head {
+			return http.StatusOK
+		}
+		return http.StatusForbidden // routes to handleGoneError
+	})
+
+	out := filepath.Join(t.TempDir(), "v")
+	const maxTimeout = 1 * time.Second
+	statusCheckErr := errors.New("status check unavailable")
+	var mayResumeCalls atomic.Int64
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:             srv.URL + "/videoplayback?id=itest.interrupt6&itag=140",
+		OutputFile:          out,
+		MaxTimeout:          maxTimeout,
+		InterruptionTimeout: InterruptionNoStall,
+		CheckStreamStatus: func(context.Context) (bool, error) {
+			return false, statusCheckErr // defers the verdict -- handleGoneError's checkErr branch
+		},
+	})
+	d.MayResume = func() bool {
+		mayResumeCalls.Add(1)
+		return true // evidence holds throughout -- must still never stall
+	}
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(context.Background()) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start = %v, want nil", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Start did not return -- InterruptionNoStall must never stall, even with MayResume permanently true")
+	}
+	elapsed := time.Since(start)
+
+	// The ~5.5s escalation to reach the budget-expired block is an
+	// unavoidable floor shared with every sibling test in this file; what
+	// this bound actually catches is the ABSENCE of any further delay on
+	// top of it -- a real stall would add at least one
+	// interruptionStallRetryDelay (5s) cycle, pushing this past ~10.5s.
+	if elapsed > 9*time.Second {
+		t.Errorf("finalized after %v -- InterruptionNoStall must skip the stall entirely (no interruptionStallRetryDelay cycle on top of the ~5.5s escalation floor)", elapsed)
+	}
+	if !d.FinalizedDuringInterruption() {
+		t.Error("FinalizedDuringInterruption() = false, want true (evidence held on the one consult)")
+	}
+	if mayResumeCalls.Load() != 1 {
+		t.Errorf("MayResume consulted %d times, want exactly 1", mayResumeCalls.Load())
+	}
+	// Tier 2: the resume sidecar must survive exactly like a genuine
+	// ceiling-expiry finalize (TestBackstopCeilingExpires) -- latched
+	// evidence means preserved staging even though there was no stall.
+	if d.streamEnded.Load() {
+		t.Error("streamEnded = true, want false -- a finalizedDuringInterruption exit must not clear the resume sidecar")
+	}
+	if _, err := os.Stat(out + ".resume.json"); err != nil {
+		t.Errorf("resume sidecar missing after a latched-but-unstalled finalize (stat err = %v)", err)
+	}
+	wantSegments(t, out, 0, head)
+}
+
+// TestInterruptionNoStallNoEvidenceFinalizesNormally is
+// TestInterruptionNoStallPromptFinalize's no-evidence companion: MayResume
+// false (config-0 job whose downloader nonetheless qualifies for
+// attachMayResume, but the resume signal never fires). Must finalize just
+// as promptly, WITHOUT latching finalizedDuringInterruption -- a clean
+// finish, not a preserved one.
+func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
+	t.Parallel()
+	const head = 2
+	_, srv := newFakeGVS(t, head, func(seq, attempt int) int {
+		if seq <= head {
+			return http.StatusOK
+		}
+		return http.StatusForbidden
+	})
+
+	out := filepath.Join(t.TempDir(), "v")
+	const maxTimeout = 1 * time.Second
+	statusCheckErr := errors.New("status check unavailable")
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:             srv.URL + "/videoplayback?id=itest.interrupt7&itag=140",
+		OutputFile:          out,
+		MaxTimeout:          maxTimeout,
+		InterruptionTimeout: InterruptionNoStall,
+		CheckStreamStatus: func(context.Context) (bool, error) {
+			return false, statusCheckErr
+		},
+	})
+	d.MayResume = func() bool { return false }
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(context.Background()) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start = %v, want nil", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	if elapsed := time.Since(start); elapsed > 9*time.Second {
+		t.Errorf("finalized after %v, want promptly (same bound as the evidence-true sibling test)", elapsed)
+	}
+	if d.FinalizedDuringInterruption() {
+		t.Error("FinalizedDuringInterruption() = true, want false -- no evidence must not latch")
+	}
+	wantSegments(t, out, 0, head)
+}

@@ -243,10 +243,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// Select download strategy (A1: pass cipher/pot to strategies)
 	var result *DownloadResult
 	// waitedForResume is worker-level Tier 2 evidence, finalize-scoped: true
-	// when the live loop's shouldWaitForResume branch is CURRENTLY in (or
-	// gave up directly out of) an unresolved wait — cleared again by
-	// runLiveStreamDownload at every later successful refresh, so a
-	// broadcast that actually resumed doesn't permanently taint a clean
+	// when the live loop's noteRefreshFailure evidence-latch is CURRENTLY
+	// armed (or gave up directly out of an unresolved one) — this fires
+	// whenever resume evidence held on a failed refresh, whether or not
+	// shouldWaitForResume itself actually permitted a wait for it (I1 fix:
+	// interruption_timeout=0 disables the WAIT, not this latch) — cleared
+	// again by runLiveStreamDownload at every later successful refresh, so
+	// a broadcast that actually resumed doesn't permanently taint a clean
 	// finish. Set by runLiveStreamDownload below; always false on the VOD
 	// branch.
 	var waitedForResume bool
@@ -751,15 +754,19 @@ func computeIncompleteTail(videoBehind, audioBehind, interrupted bool) bool {
 //
 // workerWaitedForResume is worker-level Tier 2 evidence (only ever true
 // from the live branch), FINALIZE-scoped: true when the live loop's
-// shouldWaitForResume branch is still unresolved at the moment the loop
-// gives up — NOT "fired at some point during this call" (runLiveStreamDownload
-// clears it again at every later successful refresh, so a broadcast that
-// actually resumed doesn't taint a clean finish). This is deliberately
-// SEPARATE from downloaderInterrupted's engine-latched evidence
-// (FinalizedDuringInterruption) — a live loop that repeatedly hit
-// ErrQualityLost/refresh-failure and waited via shouldWaitForResume, then
-// eventually gave up when maxConsecutiveLiveChecks exhausted without an
-// intervening successful refresh, never once reaches the engine's own
+// noteRefreshFailure evidence-latch is still unresolved at the moment the
+// loop gives up — NOT "fired at some point during this call"
+// (runLiveStreamDownload clears it again at every later successful
+// refresh, so a broadcast that actually resumed doesn't taint a clean
+// finish). Latches whenever resume evidence held on a failed refresh, even
+// when shouldWaitForResume itself never permitted an actual wait
+// (interruption_timeout=0 disables the WAIT, not Tier-2 preservation — I1
+// fix). This is deliberately SEPARATE from downloaderInterrupted's
+// engine-latched evidence (FinalizedDuringInterruption) — a live loop that
+// repeatedly hit ErrQualityLost/refresh-failure and waited (or, config
+// permitting, evidenced) via noteRefreshFailure, then eventually gave up
+// when maxConsecutiveLiveChecks exhausted without an intervening
+// successful refresh, never once reaches the engine's own
 // stallForPossibleResume on any downloader (the loop dies from the
 // OUTSIDE, not from an engine-side budget expiry), so
 // FinalizedDuringInterruption stays false on every downloader even though

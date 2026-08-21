@@ -107,12 +107,19 @@ type JobConfig struct {
 	// falls back to engine.ParallelDownloads — see DownloaderOptions.SegmentWorkers.
 	SegmentWorkers int
 	// InterruptionTimeout (config.Downloader.InterruptionTimeout, minutes,
-	// converted once here via FlexDuration.AsDuration) mirrors SegmentWorkers'
-	// plumbing: threaded into engine.DownloaderOptions.InterruptionTimeout by
-	// every LIVE strategy that also wires SegmentWorkers + CheckStreamStatus
-	// (the VOD-only strategy never sets it — the engine's interruption stall
-	// is gated on MayResume being non-nil, which VOD downloaders never get,
-	// so an unset zero value there is inert either way).
+	// converted once here via FlexDuration.AsDuration) is the RAW config
+	// value: 0 means "stall disabled" per the config contract, > 0 is the
+	// stall ceiling in minutes. Every LIVE strategy that also wires
+	// SegmentWorkers + CheckStreamStatus threads it into
+	// engine.DownloaderOptions.InterruptionTimeout through
+	// engineInterruptionTimeout (internal/worker/interruption.go), NOT
+	// straight through — that helper maps 0 onto engine.InterruptionNoStall
+	// so a disabled-stall job still latches Tier-2 evidence without ever
+	// colliding with the engine's own "0 = unbounded" meaning for a literal
+	// zero (I1 fix). attachMayResume installs MayResume unconditionally on
+	// every downloader it's called for, regardless of this value — the
+	// VOD-only strategy simply never calls it, so an unset zero value there
+	// is inert either way.
 	InterruptionTimeout time.Duration
 }
 

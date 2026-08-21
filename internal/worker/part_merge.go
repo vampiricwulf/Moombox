@@ -33,18 +33,21 @@ type partMerger struct {
 // mergeSameFormatParts opportunistically concat-copies contiguous runs of
 // parts whose stream parameters are identical (Tier 4 of the interruption
 // spec). Decisions come from ffprobe on the actual files — the Segment
-// rows' quality metadata lacks audio parameters — and any probe or concat
-// failure returns the input untouched: the merge is an improvement, never
-// a gate on finalize. Merged media is written next to the parts as
-// "<base> - merged<runIndex>.mp4", committed to the DB at that temp path,
-// then best-effort renamed onto the run's first part's name once that
-// commit succeeds. Only once the row is confirmed to resolve to a real
+// rows' quality metadata lacks audio parameters — and any probe, concat, or
+// db-replace failure returns the input untouched: the merge is an
+// improvement, never a gate on finalize. A per-run chat-merge failure is a
+// narrower, run-scoped version of the same identity guarantee: THAT run's
+// media is not merged either, so its parts/rows/chat files all stay exactly
+// as they were, while any OTHER run in the same finalize still merges
+// independently (see merge's doc comment). Merged media is written next to
+// the parts as "<base> - merged<runIndex>.mp4", committed to the DB at that
+// temp path, then best-effort renamed onto the run's first part's name once
+// that commit succeeds. Only once the row is confirmed to resolve to a real
 // file does cleanup remove the now-superseded later parts: their output
-// files, their chat files (but only when THIS run's chat actually merged —
-// a failed chat merge always leaves every per-part chat file in place),
-// and their pre-mux seg_N staging directories (removing those is what
-// stops a later finalize re-entry from resurrecting and re-merging
-// already-consumed content — see merge's doc comment for the full chain).
+// files, their chat files, and their pre-mux seg_N staging directories
+// (removing those is what stops a later finalize re-entry from
+// resurrecting and re-merging already-consumed content — see merge's doc
+// comment for the full chain).
 func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx *JobContext, segments []database.Segment) []database.Segment {
 	pm := &partMerger{
 		ffprobePath: o.muxer.FFprobePath(),
@@ -65,9 +68,12 @@ func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx 
 // after that commit succeeds are they best-effort renamed onto the run's
 // first part's original name and the superseded later parts removed.
 //
-// chatTemp doubles as the "did this run's chat actually merge" flag: it is
-// "" both when no part in the run had chat AND when mergeChatFiles failed —
-// either way, no per-part chat file may be deleted for this run.
+// A run only ever becomes a mergeRun (i.e. reaches `pending`) once its
+// video AND (if any part carried one) chat merge have both already
+// succeeded — a chat-merge failure aborts the run before this struct is
+// ever built (see merge's doc comment). So chatTemp here is simply "" when
+// no part in the run had chat, and the merged chat's path whenever one did;
+// it can no longer mean "chat merge failed" the way it once did.
 type mergeRun struct {
 	indices        []int // indices into the ORIGINAL segments slice
 	videoTemp      string
@@ -105,6 +111,22 @@ type mergeRun struct {
 // run's superseded-part cleanup entirely: at that point there is no
 // reliable pointer to the merged content, and the later parts' still-intact
 // independent files are the last remaining copy of their span.
+//
+// Chat-merge failure aborts the RUN, not the batch: if any part in a run
+// carries a ChatFile and mergeChatFiles fails on it (the only production
+// case today is a Twitch gap-split run — its chat is twitch.TwitchChatData,
+// whose "message" field is a string, while mergeChatFiles unmarshals
+// chat.ChatData, whose "message" is []MessagePart, so the unmarshal always
+// errors), that run's video is discarded too (its temp concat output is
+// removed) and its ORIGINAL per-part segments are pushed back into the
+// replacement slice unchanged — identical to a len(run)==1 passthrough.
+// Nothing about that run's parts, rows, or chat files is ever touched, and
+// the run never reaches `pending` so post-commit cleanup never runs for it
+// either. Other runs in the same finalize call are unaffected and still
+// merge normally. If EVERY run in a batch aborts this way, `pending` ends
+// up empty and merge returns `segments` untouched without ever calling
+// db.ReplaceJobSegments at all — true whole-call identity, not just
+// per-row.
 //
 // Superseded-part cleanup — deleting the later parts' output files, chat
 // files, and pre-mux seg_N staging directories — only runs once the row is
@@ -191,8 +213,6 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 		}
 		size := info.Size()
 
-		row := mergedSegmentRow(runSegs, videoTemp, size)
-
 		var chatPaths []string
 		for _, s := range runSegs {
 			if s.ChatFile != "" {
@@ -203,14 +223,29 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 		if len(chatPaths) > 0 {
 			candidate := mergedChatPath(videoTemp)
 			if err := mergeChatFiles(chatPaths, candidate); err != nil {
-				pm.logger.Warn("part merge: chat merge failed, keeping media merge without chat", "err", err, "jobID", jobID, "run", runIdx)
-				row.ChatFile = ""
-			} else {
-				chatTemp = candidate
-				tempFiles = append(tempFiles, candidate)
-				row.ChatFile = candidate
+				// C1 ruling: chat-merge failure aborts THIS RUN's identity
+				// entirely, not just its chat -- media is not merged
+				// either, so the parts, their rows, and every per-part
+				// chat file all stay exactly as they were. This is the
+				// only way a Twitch gap-split run (the sole production
+				// case with per-part ChatFile) ever reaches here today,
+				// since its chat is twitch.TwitchChatData ("message" a
+				// string) and mergeChatFiles unmarshals chat.ChatData
+				// ("message" a []MessagePart) -- the schema mismatch
+				// always errors. Other runs in this same finalize proceed
+				// independently; see merge's doc comment.
+				pm.logger.Warn("part merge: chat merge failed, aborting this run's merge -- media left split, every per-part chat file untouched", "err", err, "jobID", jobID, "run", runIdx)
+				os.Remove(videoTemp) // this run never reaches pending, so nothing else will clean up its orphaned temp output
+				for _, idx := range run {
+					replacement = append(replacement, segments[idx])
+				}
+				continue
 			}
+			chatTemp = candidate
+			tempFiles = append(tempFiles, candidate)
 		}
+
+		row := mergedSegmentRow(runSegs, videoTemp, size)
 
 		replacement = append(replacement, row)
 		pending = append(pending, mergeRun{
@@ -220,6 +255,16 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 			bytes:          size,
 			replacementIdx: len(replacement) - 1,
 		})
+	}
+
+	if len(pending) == 0 {
+		// Every mergeable run aborted (chat-merge failure) or none existed
+		// beyond the len(run)==1 passthroughs already folded into
+		// replacement unchanged -- there is nothing to commit. Return the
+		// ORIGINAL segments slice directly rather than the reconstructed
+		// (but content-identical) replacement: true whole-call identity,
+		// with no db.ReplaceJobSegments call and no row restamping at all.
+		return segments
 	}
 
 	if err := pm.replace(jobID, replacement); err != nil {
@@ -271,11 +316,15 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 					}
 				}
 				// Only remove a superseded part's own chat file when THIS
-				// run's chat actually merged (pr.chatTemp != "") — a failed
-				// chat merge already reset the row's ChatFile to "" and must
-				// leave every per-part chat file exactly where it was (see
-				// mergeChatFiles' contract), or those messages have nowhere
-				// left to live.
+				// run's chat actually merged (pr.chatTemp != ""). A run
+				// whose chat merge FAILED never reaches this loop at all
+				// any more (C1: the whole run aborts before pending is
+				// built — see merge's doc comment), so in practice
+				// pr.chatTemp == "" here only when no part in the run ever
+				// had a chat file, in which case seg.ChatFile is already
+				// "" too and this check is defensive belt-and-suspenders,
+				// not load-bearing against a cleared-but-unmerged ChatFile
+				// the way it once was.
 				if pr.chatTemp != "" && seg.ChatFile != "" {
 					if err := os.Remove(seg.ChatFile); err != nil && !os.IsNotExist(err) {
 						pm.logger.Warn("part merge: failed to delete superseded part chat file", "err", err, "jobID", jobID, "file", seg.ChatFile)
@@ -327,9 +376,11 @@ func groupMergeRuns(params []*streamParams) [][]int {
 // job/segment identity fields come from the run's first part (struct copy);
 // UnixEnd and DurationSeconds are recomputed across the whole run. ChatFile
 // is set to outPath's chat sibling (mergedChatPath) whenever ANY part in the
-// run carried a chat file, or "" when none did — the caller (merge) may
-// still clear it back to "" afterward if the actual chat-merge I/O fails,
-// without needing to rebuild the row.
+// run carried a chat file, or "" when none did. Callers only reach this
+// once any chat merge the run needed has already succeeded (a chat-merge
+// failure aborts the whole run before mergedSegmentRow is ever called for
+// it — see merge's doc comment), so the ChatFile this computes is always
+// the row's final value, never provisional.
 func mergedSegmentRow(run []database.Segment, outPath string, size int64) database.Segment {
 	first := run[0]
 	last := run[len(run)-1]
@@ -384,9 +435,13 @@ func mergedChatPath(mediaPath string) string {
 // file order, MessageCount is summed, and the first file's identity fields
 // (VideoID, VideoTitle, ChannelName, StreamStartTime) are kept. DownloadedAt
 // is refreshed to the merge time. A missing or corrupt input file aborts
-// with an error and writes nothing — the caller falls back to no chat merge
-// (media merge still proceeds, ChatFile "" on the row, and the per-part
-// chat files are left on disk untouched).
+// with an error and writes nothing. Every part this package sees carrying a
+// ChatFile in production is a Twitch part (twitch.TwitchChatData, whose
+// "message" field is a string), while this unmarshals into chat.ChatData
+// (whose "message" is []MessagePart) — so that case ALWAYS errors here.
+// merge's caller-side response to an error is to abort the WHOLE run this
+// chat merge belongs to (media included), not just fall back to a
+// chat-less media merge — see merge's doc comment.
 func mergeChatFiles(paths []string, outPath string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("no chat files to merge")

@@ -238,82 +238,203 @@ func TestFinalizeIncompleteTailInterruption(t *testing.T) {
 	}
 }
 
-// TestAttachMayResumeGatedByInterruptionTimeout pins the config contract
-// (C1 fix): InterruptionTimeout <= 0 means "finalize must never wait" --
-// attachMayResume must leave dl.MayResume nil in that case, NOT install a
-// non-nil callback with a zero ceiling (which the engine treats as "no
-// ceiling", i.e. an UNBOUNDED stall for as long as MayResume keeps
-// returning true -- the exact inversion this test guards against). This
-// calls the actual function attachProgress delegates to, so it exercises
-// the real wiring rather than a re-implementation of the gate.
-func TestAttachMayResumeGatedByInterruptionTimeout(t *testing.T) {
+// TestAttachMayResumeAlwaysInstalls (I1 fix) REPLACES the pre-I1 gate test
+// (formerly TestAttachMayResumeGatedByInterruptionTimeout): its old
+// "InterruptionTimeout<=0 leaves MayResume nil" assertion is DELIBERATELY
+// INVERTED here. attachMayResume no longer looks at InterruptionTimeout at
+// all -- it installs mayResume onto any non-nil downloader unconditionally.
+// The config-0 ("stall disabled") contract is now upheld at construction
+// time instead, via engineInterruptionTimeout mapping the value that goes
+// into engine.DownloaderOptions.InterruptionTimeout (see
+// TestEngineInterruptionTimeoutMapping) -- not by withholding MayResume.
+// This calls the actual function attachProgress delegates to, so it
+// exercises the real wiring rather than a re-implementation of the gate.
+func TestAttachMayResumeAlwaysInstalls(t *testing.T) {
 	mayResume := func() bool { return true }
 
-	t.Run("disabled (0) leaves MayResume nil", func(t *testing.T) {
-		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{OutputFile: "x"})
-		attachMayResume(dl, mayResume, 0)
-		if dl.MayResume != nil {
-			t.Error("InterruptionTimeout=0 must leave MayResume nil -- installing it would let the engine stall unbounded (a zero ceiling means no ceiling, not already-expired) even though the config contract says 0 disables the stall entirely")
-		}
-	})
-
-	t.Run("disabled (negative) leaves MayResume nil", func(t *testing.T) {
-		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{OutputFile: "x"})
-		attachMayResume(dl, mayResume, -1*time.Second)
-		if dl.MayResume != nil {
-			t.Error("a negative InterruptionTimeout must also leave MayResume nil")
-		}
-	})
-
-	t.Run("enabled installs the real closure", func(t *testing.T) {
-		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{OutputFile: "x"})
-		attachMayResume(dl, mayResume, time.Minute)
+	t.Run("installs regardless of the downloader's own InterruptionTimeout (0)", func(t *testing.T) {
+		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{OutputFile: "x", InterruptionTimeout: 0})
+		attachMayResume(dl, mayResume)
 		if dl.MayResume == nil {
-			t.Fatal("InterruptionTimeout > 0 must install MayResume")
+			t.Fatal("attachMayResume must install MayResume unconditionally (I1 fix) -- the config-0 gate moved to construction time (engineInterruptionTimeout), not here")
 		}
 		if !dl.MayResume() {
 			t.Error("the installed MayResume must be the passed-in closure, not a stand-in")
 		}
 	})
 
-	t.Run("nil downloader is a safe no-op", func(t *testing.T) {
-		attachMayResume(nil, mayResume, time.Minute) // must not panic
+	t.Run("installs regardless of a positive InterruptionTimeout", func(t *testing.T) {
+		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{OutputFile: "x", InterruptionTimeout: time.Minute})
+		attachMayResume(dl, mayResume)
+		if dl.MayResume == nil {
+			t.Fatal("MayResume must be installed")
+		}
 	})
+
+	t.Run("nil downloader is a safe no-op", func(t *testing.T) {
+		attachMayResume(nil, mayResume) // must not panic
+	})
+}
+
+// TestEngineInterruptionTimeoutMapping (I1 fix) pins engineInterruptionTimeout
+// -- the helper every LIVE YouTube strategy site now routes
+// job.Config.InterruptionTimeout through before it reaches
+// engine.DownloaderOptions.InterruptionTimeout, so "config-0 job ⇒
+// MayResume installed with the InterruptionNoStall sentinel" holds:
+// attachMayResume (tested above) installs MayResume unconditionally, and
+// THIS mapping is what keeps a config-0 downloader from colliding with the
+// engine's own "0 = unbounded" meaning.
+func TestEngineInterruptionTimeoutMapping(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{"config-0 (stall disabled) maps to the sentinel", 0, engine.InterruptionNoStall},
+		{"a negative config value also maps to the sentinel (defensive)", -1 * time.Second, engine.InterruptionNoStall},
+		{"a positive config value passes through unchanged", time.Minute, time.Minute},
+		{"the default 2h passes through unchanged", 2 * time.Hour, 2 * time.Hour},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := engineInterruptionTimeout(c.configured)
+			if got != c.want {
+				t.Errorf("engineInterruptionTimeout(%v) = %v, want %v", c.configured, got, c.want)
+			}
+		})
+	}
+}
+
+// TestResumeEvidence (I1 fix) pins resumeEvidence -- the evidence half of
+// the config-independent evidence/permission split. Unlike the old
+// shouldWaitForResume, this never looks at interruptionTimeout at all.
+func TestResumeEvidence(t *testing.T) {
+	alwaysTrue := func() bool { return true }
+	alwaysFalse := func() bool { return false }
+
+	cases := []struct {
+		name        string
+		signalFresh bool
+		mayResume   func() bool
+		want        bool
+	}{
+		{"fresh signal alone is evidence", true, nil, true},
+		{"mayResume true alone is evidence", false, alwaysTrue, true},
+		{"both true is evidence", true, alwaysTrue, true},
+		{"fresh signal wins even if mayResume is false", true, alwaysFalse, true},
+		{"nil mayResume + stale signal is no evidence", false, nil, false},
+		{"mayResume false + stale signal is no evidence", false, alwaysFalse, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := resumeEvidence(c.signalFresh, c.mayResume)
+			if got != c.want {
+				t.Errorf("resumeEvidence(%v, ...) = %v, want %v", c.signalFresh, got, c.want)
+			}
+		})
+	}
 }
 
 // TestShouldWaitForResume is the table-driven test for the C2 fix's
 // decision function: a failed live-refresh should wait-and-retry instead
 // of ending the recording immediately, but only when the stall is enabled
-// AND there's resume evidence.
+// AND there's resume evidence. Signature updated for I1: takes the
+// already-computed evidence bool (see resumeEvidence) rather than
+// signalFresh+mayResume directly -- shouldWaitForResume is now PERMISSION
+// only.
 func TestShouldWaitForResume(t *testing.T) {
 	errRefresh := errors.New("refresh failed")
-	alwaysTrue := func() bool { return true }
-	alwaysFalse := func() bool { return false }
 
 	cases := []struct {
 		name                string
 		refreshErr          error
-		signalFresh         bool
-		mayResume           func() bool
+		evidence            bool
 		interruptionTimeout time.Duration
 		want                bool
 	}{
-		{"nil refreshErr never waits, even with every other signal true", nil, true, alwaysTrue, time.Minute, false},
-		{"disabled (0) falls back to old behavior despite fresh signal", errRefresh, true, alwaysTrue, 0, false},
-		{"disabled (negative) falls back to old behavior despite mayResume", errRefresh, false, alwaysTrue, -1 * time.Second, false},
-		{"enabled + fresh signal waits", errRefresh, true, alwaysFalse, time.Minute, true},
-		{"enabled + mayResume true waits (signal not fresh)", errRefresh, false, alwaysTrue, time.Minute, true},
-		{"enabled + nil mayResume + stale signal does not wait", errRefresh, false, nil, time.Minute, false},
-		{"enabled + neither signal nor mayResume does not wait", errRefresh, false, alwaysFalse, time.Minute, false},
+		{"nil refreshErr never waits, even with evidence", nil, true, time.Minute, false},
+		{"disabled (0) never waits despite evidence", errRefresh, true, 0, false},
+		{"disabled (negative) never waits despite evidence", errRefresh, true, -1 * time.Second, false},
+		{"enabled + evidence waits", errRefresh, true, time.Minute, true},
+		{"enabled + no evidence does not wait", errRefresh, false, time.Minute, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := shouldWaitForResume(c.refreshErr, c.signalFresh, c.mayResume, c.interruptionTimeout)
+			got := shouldWaitForResume(c.refreshErr, c.evidence, c.interruptionTimeout)
 			if got != c.want {
 				t.Errorf("shouldWaitForResume(...) = %v, want %v", got, c.want)
 			}
 		})
 	}
+}
+
+// TestNoteRefreshFailure (I1 fix) is the exact granularity the coordinator's
+// test plan asked for: config-0 + evidence must still LATCH (Tier-2
+// preservation) even though it never WAITS; config-0 + no evidence does
+// neither; config>0 behaves exactly like the pre-I1 shouldWaitForResume
+// (latch and wait together). This is the composition
+// runLiveStreamDownload's refresh-failure branch actually calls, not a
+// hand-assembly of resumeEvidence+shouldWaitForResume+latch.wait() by the
+// test.
+func TestNoteRefreshFailure(t *testing.T) {
+	errRefresh := errors.New("refresh failed")
+	alwaysTrue := func() bool { return true }
+	alwaysFalse := func() bool { return false }
+
+	t.Run("nil refreshErr: no latch, no wait", func(t *testing.T) {
+		var l resumeWaitLatch
+		wait := noteRefreshFailure(&l, nil, true, alwaysTrue, time.Minute)
+		if wait {
+			t.Error("wait = true for a nil refreshErr, want false")
+		}
+		if l.value() {
+			t.Error("latch must not fire for a nil refreshErr")
+		}
+	})
+
+	t.Run("config-0 + evidence: latches WITHOUT waiting", func(t *testing.T) {
+		var l resumeWaitLatch
+		wait := noteRefreshFailure(&l, errRefresh, true, alwaysFalse, 0)
+		if wait {
+			t.Error("wait = true with the stall disabled (config 0), want false -- interruption_timeout=0 must never actually stall")
+		}
+		if !l.value() {
+			t.Error("latch must still fire when evidence holds, even with the stall disabled -- interruption_timeout=0 disables the WAIT, not Tier-2 preservation")
+		}
+	})
+
+	t.Run("config-0 + no evidence: neither latches nor waits", func(t *testing.T) {
+		var l resumeWaitLatch
+		wait := noteRefreshFailure(&l, errRefresh, false, alwaysFalse, 0)
+		if wait {
+			t.Error("wait = true, want false")
+		}
+		if l.value() {
+			t.Error("latch must not fire when there is no resume evidence at all")
+		}
+	})
+
+	t.Run("config>0 + evidence: latches AND waits (unchanged pre-I1 behavior)", func(t *testing.T) {
+		var l resumeWaitLatch
+		wait := noteRefreshFailure(&l, errRefresh, true, alwaysFalse, time.Minute)
+		if !wait {
+			t.Error("wait = false, want true -- an enabled stall with evidence must still wait")
+		}
+		if !l.value() {
+			t.Error("latch must fire")
+		}
+	})
+
+	t.Run("config>0 + no evidence: neither latches nor waits", func(t *testing.T) {
+		var l resumeWaitLatch
+		wait := noteRefreshFailure(&l, errRefresh, false, alwaysFalse, time.Minute)
+		if wait {
+			t.Error("wait = true, want false")
+		}
+		if l.value() {
+			t.Error("latch must not fire")
+		}
+	})
 }
 
 // TestObserveYouTubeStatusProbe (I1 fix) pins observeYouTubeStatusProbe --

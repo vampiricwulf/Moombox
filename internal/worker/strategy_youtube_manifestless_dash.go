@@ -298,7 +298,7 @@ func DownloadManifestlessDash(
 			CookieHeader:        cookieHeader,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
-			InterruptionTimeout: job.Config.InterruptionTimeout,
+			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
 			IsOnline:            isOnline,
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			OnCredentialRefresh: func() (string, string) {
@@ -357,7 +357,7 @@ func DownloadManifestlessDash(
 			CookieHeader:        cookieHeader,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
-			InterruptionTimeout: job.Config.InterruptionTimeout,
+			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
 			IsOnline:            isOnline,
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			OnCredentialRefresh: func() (string, string) {

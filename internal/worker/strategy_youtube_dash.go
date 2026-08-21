@@ -283,7 +283,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			CookieHeader:        dashCookieHeader,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
-			InterruptionTimeout: job.Config.InterruptionTimeout,
+			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
 			IsOnline:            isOnline,
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
@@ -313,7 +313,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			CookieHeader:        dashCookieHeader,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
-			InterruptionTimeout: job.Config.InterruptionTimeout,
+			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
 			IsOnline:            isOnline,
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
