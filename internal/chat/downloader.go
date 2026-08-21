@@ -74,6 +74,10 @@ type ChatDownloader struct {
 	cancelCtx       context.CancelFunc // for aborting sleep on stop/markStreamEnded
 	done            chan struct{}      // closed when Start() completes; nil if never started
 
+	// testRecoveryOverride allows tests to inject a recovery function instead of
+	// calling recoverStaleContinuation. Only set in tests; nil in production.
+	testRecoveryOverride func(ctx context.Context) bool
+
 	OnStart  func(messageCount int, resuming bool)
 	OnFinish func()
 	OnError  func(err error)
@@ -443,8 +447,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			if !cd.isStreamActive() {
 				break // VOD/replay complete
 			}
-			cd.setLiveContinuationOpen(false)
-			if !cd.recoverStaleContinuation(ctx) {
+			if !cd.handleEndOfStream(ctx) {
 				break
 			}
 			switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
@@ -616,6 +619,23 @@ func (cd *ChatDownloader) recoverStaleContinuation(ctx context.Context) bool {
 		contRetryDelay = min(contRetryDelay*2, 5*time.Minute)
 	}
 	return false
+}
+
+// handleEndOfStream processes the end-of-stream / stale continuation case.
+// CRITICAL: the signal must be closed (setLiveContinuationOpen(false)) BEFORE
+// attempting recovery. This ordering guarantees that the signal state is
+// observable even if recovery fails.
+// Returns true if recovery succeeded and polling should resume, false if the
+// loop should break.
+func (cd *ChatDownloader) handleEndOfStream(ctx context.Context) bool {
+	cd.setLiveContinuationOpen(false)
+	recovered := false
+	if cd.testRecoveryOverride != nil {
+		recovered = cd.testRecoveryOverride(ctx)
+	} else {
+		recovered = cd.recoverStaleContinuation(ctx)
+	}
+	return recovered
 }
 
 // computePollDelay returns how long to wait before the next chat fetch,
