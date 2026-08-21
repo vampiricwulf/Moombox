@@ -352,6 +352,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}()
 	}
 
+	// Interruption spec Tier 1 evidence (built once chatDl is resolved so it
+	// closes over the final chatDl, not a pre-resolution nil/stale value).
+	// Only consulted by the live branch below — VOD downloads never set
+	// engine.SegmentDownloader.MayResume, so building this unconditionally
+	// here is harmless for the VOD branch (simply unused).
+	mayResume := buildMayResume(jobCtx.Interruption, chatDl)
+
 	// Run download loop
 	if isVod {
 		// VOD: run downloaders, refreshing URLs across the ~6h googlevideo
@@ -407,7 +414,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// reassigns result locally on every quality refresh/split, so the
 		// pre-call `result` variable would otherwise go stale the moment a
 		// single refresh happens.
-		result, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker)
+		result, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker, mayResume)
 
 		if err == nil {
 			// Same eviction guard as the VOD branch (see its call site
@@ -694,10 +701,26 @@ func downloaderHead(d *engine.SegmentDownloader) int {
 	return d.HeadSeq()
 }
 
+// downloaderInterrupted reports whether d finalized after latching a Tier-2
+// interruption finalize (engine.SegmentDownloader.FinalizedDuringInterruption:
+// stallForPossibleResume deferred at least once believing the broadcast
+// could resume, then gave up when MayResume flipped false or the
+// InterruptionTimeout ceiling expired) — false (not true) for a nil
+// downloader.
+func downloaderInterrupted(d *engine.SegmentDownloader) bool {
+	return d != nil && d.FinalizedDuringInterruption()
+}
+
 // computeIncompleteTail: the job is incomplete if EITHER stream finalized
 // behind head — video and audio are independent downloaders with
-// independent head tracking, and a missing tail on one truncates the mux.
-func computeIncompleteTail(videoBehind, audioBehind bool) bool { return videoBehind || audioBehind }
+// independent head tracking, and a missing tail on one truncates the mux —
+// OR either stream finalized during an interruption (Tier 2): the resume
+// sidecar was deliberately preserved for that case, and treating the job as
+// complete would let ordinary cleanup discard it before the broadcast gets
+// a chance to resume.
+func computeIncompleteTail(videoBehind, audioBehind, interrupted bool) bool {
+	return videoBehind || audioBehind || interrupted
+}
 
 // finalizeIncompleteTail computes and unconditionally persists the
 // incomplete_tail flag once a download (VOD or live) has returned with
@@ -719,9 +742,10 @@ func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *Down
 	vHead = downloaderHead(result.VideoDownloader)
 	aSeq = downloaderSeq(result.AudioDownloader)
 	aHead = downloaderHead(result.AudioDownloader)
-	incomplete = computeIncompleteTail(
-		downloaderBehindHead(result.VideoDownloader),
-		downloaderBehindHead(result.AudioDownloader))
+	videoBehind := downloaderBehindHead(result.VideoDownloader)
+	audioBehind := downloaderBehindHead(result.AudioDownloader)
+	interrupted := downloaderInterrupted(result.VideoDownloader) || downloaderInterrupted(result.AudioDownloader)
+	incomplete = computeIncompleteTail(videoBehind, audioBehind, interrupted)
 	// Unconditional write: a retry that completes cleanly clears the flag by
 	// writing false through the same path.
 	o.db.UpdateJobFields(jobID, map[string]any{"incomplete_tail": incomplete})
@@ -729,7 +753,8 @@ func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *Down
 		o.logger.Warn("recording finished with an unfetched tail — staging preserved; Resume will append the missing segments",
 			"jobID", jobID,
 			"videoSeq", vSeq, "videoHead", vHead,
-			"audioSeq", aSeq, "audioHead", aHead)
+			"audioSeq", aSeq, "audioHead", aHead,
+			"videoBehindHead", videoBehind, "audioBehindHead", audioBehind, "interrupted", interrupted)
 	}
 	return incomplete, vSeq, vHead, aSeq, aHead
 }

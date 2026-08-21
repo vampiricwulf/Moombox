@@ -373,6 +373,17 @@ func (cd *ChatDownloader) setLiveContinuationOpen(open bool) {
 	cd.mu.Unlock()
 }
 
+// SetLiveContinuationOpenForTesting force-sets the live-continuation signal
+// without driving a real poll loop. Exported ONLY so cross-package tests
+// (internal/worker's MayResume truth table, which consults the real
+// LiveContinuationOpen() accessor against a real *ChatDownloader) can put
+// one in a known open/closed state — liveContinuationOpen has no other
+// exported setter, and production code must never call this; the real
+// signal path is noteLivePollResult via the live poll loop.
+func (cd *ChatDownloader) SetLiveContinuationOpenForTesting(open bool) {
+	cd.setLiveContinuationOpen(open)
+}
+
 // noteLivePollResult is the runChatLoop hook: a successful LIVE poll with a
 // continuation opens the signal; replay polls never do.
 func (cd *ChatDownloader) noteLivePollResult(hasContinuation bool) {

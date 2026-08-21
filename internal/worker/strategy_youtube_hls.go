@@ -187,17 +187,18 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	}
 
 	result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-		BaseURL:           variantURL,
-		OutputFile:        result.VideoPath,
-		StartSeq:          hlsStartSeq,
-		ForceStartSeq:     hlsForceSeq,
-		IsHls:             true,
-		PoToken:           hlsPoToken,
-		MaxTimeout:        time.Duration(job.Config.MaximumTimeout) * time.Second,
-		SegmentWorkers:    job.Config.SegmentWorkers,
-		EnforceMaxTimeout: true, // YouTube status can stick; Twitch HLS opts out
-		IsOnline:          isOnline,
-		Logger:            newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
+		BaseURL:             variantURL,
+		OutputFile:          result.VideoPath,
+		StartSeq:            hlsStartSeq,
+		ForceStartSeq:       hlsForceSeq,
+		IsHls:               true,
+		PoToken:             hlsPoToken,
+		MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
+		SegmentWorkers:      job.Config.SegmentWorkers,
+		InterruptionTimeout: job.Config.InterruptionTimeout,
+		EnforceMaxTimeout:   true, // YouTube status can stick; Twitch HLS opts out
+		IsOnline:            isOnline,
+		Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 		CheckStreamStatus: func(ctx context.Context) (bool, error) {
 			info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 			if err != nil {

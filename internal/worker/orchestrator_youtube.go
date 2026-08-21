@@ -39,6 +39,13 @@ import (
 // actually finished the recording. The caller needs the real final
 // downloaders to run diagnoseEvictedStart's post-download checks
 // (BytesWritten/HeadSeq) against.
+//
+// mayResume (built once by ExecuteWithChat via buildMayResume) is installed
+// as engine.SegmentDownloader.MayResume on every downloader this function
+// attaches progress to — the initial result AND every refresh/split
+// replacement, since attachProgress is the single call site for both. VOD
+// downloads never call this function, so MayResume is never set there —
+// only live YouTube downloads get the interruption stall.
 func (o *DownloadOrchestrator) runLiveStreamDownload(
 	ctx context.Context,
 	jobCtx *JobContext,
@@ -48,6 +55,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	videoInfo *youtube.VideoInfo,
 	result *DownloadResult,
 	tracker *ProgressTracker,
+	mayResume func() bool,
 ) (*DownloadResult, error) {
 	var lastSegTime atomic.Int64
 	lastSegTime.Store(time.Now().UnixNano())
@@ -111,6 +119,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					origOnProgress(p)
 				}
 			}
+			res.VideoDownloader.MayResume = mayResume
 		}
 		if res.AudioDownloader != nil {
 			tracker.AttachAudioDownloader(res.AudioDownloader)
@@ -121,6 +130,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					origOnProgress(p)
 				}
 			}
+			res.AudioDownloader.MayResume = mayResume
 		}
 	}
 
@@ -187,6 +197,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
 				return result, fmt.Errorf("refresh after quality change: %w", err)
 			}
+			// Interruption spec Tier 1 evidence: a 403-family interruption
+			// often exits the downloader via ErrQualityLost into exactly this
+			// refresh rather than stalling inside the engine, so this
+			// player-response fetch — feeding the refreshDownload call below
+			// — must observe the signature too, or the signal would go stale
+			// mid-interruption every time this path (rather than
+			// refreshGvsCredentials) is the one that keeps firing.
+			jobCtx.Interruption.observe(freshInfo)
 
 			// Cancel old downloaders (safe to call multiple times)
 			if result.VideoDownloader != nil {
@@ -360,6 +378,12 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		}
 
 		o.logger.Info("YouTube reports stream status", "status", freshInfo.StreamStatus, "jobID", jobCtx.Job.ID)
+
+		// Interruption spec Tier 1 evidence: this is also a live-loop
+		// player-response fetch feeding a refreshDownload call (the
+		// StreamLive case just below) — see the identical observe() call at
+		// the ErrQualityLost site above for why this path needs it too.
+		jobCtx.Interruption.observe(freshInfo)
 
 		switch freshInfo.StreamStatus {
 		case youtube.StreamPostLive, youtube.StreamVOD, youtube.StreamNotAStream:

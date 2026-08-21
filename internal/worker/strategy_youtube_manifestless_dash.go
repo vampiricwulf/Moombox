@@ -288,18 +288,19 @@ func DownloadManifestlessDash(
 		// neither can observe a later mutation of the videoStream pointer.
 		videoItagChosen := videoStream.Itag
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:         videoStream.BaseURL,
-			OutputFile:      result.VideoPath,
-			StartSeq:        videoStartSeq,
-			ForceStartSeq:   forceVideoSeq,
-			InitURL:         videoInitURL,
-			InitFromSegment: videoInitURL != "",
-			PoToken:         pot,
-			CookieHeader:    cookieHeader,
-			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
-			SegmentWorkers:  job.Config.SegmentWorkers,
-			IsOnline:        isOnline,
-			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
+			BaseURL:             videoStream.BaseURL,
+			OutputFile:          result.VideoPath,
+			StartSeq:            videoStartSeq,
+			ForceStartSeq:       forceVideoSeq,
+			InitURL:             videoInitURL,
+			InitFromSegment:     videoInitURL != "",
+			PoToken:             pot,
+			CookieHeader:        cookieHeader,
+			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			InterruptionTimeout: job.Config.InterruptionTimeout,
+			IsOnline:            isOnline,
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			OnCredentialRefresh: func() (string, string) {
 				return refreshGvsCredentials(ctx, job, videoInfo, videoItagChosen, routedSolver, cipherSolver, potProvider, bindingValue, "manifestless DASH video")
 			},
@@ -349,18 +350,19 @@ func DownloadManifestlessDash(
 		// OnCipherFailure share one immutable snapshot of the chosen itag.
 		audioItagChosen := audioStream.Itag
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:         audioStream.BaseURL,
-			OutputFile:      result.AudioPath,
-			StartSeq:        audioStartSeq,
-			ForceStartSeq:   forceAudioSeq,
-			InitURL:         audioInitURL,
-			InitFromSegment: audioInitURL != "",
-			PoToken:         pot,
-			CookieHeader:    cookieHeader,
-			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
-			SegmentWorkers:  job.Config.SegmentWorkers,
-			IsOnline:        isOnline,
-			Logger:          newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
+			BaseURL:             audioStream.BaseURL,
+			OutputFile:          result.AudioPath,
+			StartSeq:            audioStartSeq,
+			ForceStartSeq:       forceAudioSeq,
+			InitURL:             audioInitURL,
+			InitFromSegment:     audioInitURL != "",
+			PoToken:             pot,
+			CookieHeader:        cookieHeader,
+			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			InterruptionTimeout: job.Config.InterruptionTimeout,
+			IsOnline:            isOnline,
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			OnCredentialRefresh: func() (string, string) {
 				return refreshGvsCredentials(ctx, job, videoInfo, audioItagChosen, routedSolver, cipherSolver, potProvider, bindingValue, "manifestless DASH audio")
 			},

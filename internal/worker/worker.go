@@ -78,6 +78,15 @@ type JobContext struct {
 	VideoStartSeq int // Orchestrator-set: exact next video seq to download (0 = use DB fallback)
 	AudioStartSeq int // Orchestrator-set: exact next audio seq to download (0 = use DB fallback)
 	Logger        logger
+	// Interruption tracks the broadcast-interrupted signature (interruption
+	// spec Tier 1) observed across every player-response fetch for this
+	// job. Shared by POINTER — strategyCtx/segCtx/segJobCtx value-copies
+	// of JobContext (segCtx := *jobCtx and friends throughout orchestrator*.go)
+	// must all observe the SAME signal, not independent copies. Set once in
+	// buildJobContext; nil in JobContext literals built directly by tests
+	// (interruptionSignal's methods and buildMayResume are all nil-safe, so
+	// this is never a required field).
+	Interruption *interruptionSignal
 }
 
 // JobConfig holds per-job configuration derived from the global config.
@@ -97,6 +106,14 @@ type JobConfig struct {
 	// strategies pass it straight through to the engine unchanged, which
 	// falls back to engine.ParallelDownloads — see DownloaderOptions.SegmentWorkers.
 	SegmentWorkers int
+	// InterruptionTimeout (config.Downloader.InterruptionTimeout, minutes,
+	// converted once here via FlexDuration.AsDuration) mirrors SegmentWorkers'
+	// plumbing: threaded into engine.DownloaderOptions.InterruptionTimeout by
+	// every LIVE strategy that also wires SegmentWorkers + CheckStreamStatus
+	// (the VOD-only strategy never sets it — the engine's interruption stall
+	// is gated on MayResume being non-nil, which VOD downloaders never get,
+	// so an unset zero value there is inert either way).
+	InterruptionTimeout time.Duration
 }
 
 // DownloadWorker manages the job processing loop.
@@ -699,6 +716,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgOutputDir, cfgStagingDir, cfgTemplate string
 		cfgMaxRes, cfgMaxTimeout, cfgSegWorkers  int
 		cfgPrefer60, cfgChat                     bool
+		cfgInterruptionTimeout                   config.FlexDuration
 	)
 	w.readConfig(func(c *config.MoomboxConfig) {
 		cfgOutputDir = c.Paths.OutputDirectory
@@ -709,6 +727,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgChat = c.Downloader.DownloadChat
 		cfgMaxTimeout = c.Downloader.MaximumTimeout
 		cfgSegWorkers = c.Downloader.SegmentWorkers
+		cfgInterruptionTimeout = c.Downloader.InterruptionTimeout
 	})
 
 	outputDir := cfgOutputDir
@@ -753,20 +772,22 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		Job: job,
 		DB:  w.db,
 		Config: &JobConfig{
-			MaxVideoResolution: cfgMaxRes,
-			Prefer60fps:        cfgPrefer60,
-			OutputDirectory:    outputDir,
-			StagingDirectory:   stagingDir,
-			FilenameTemplate:   template,
-			DownloadChat:       cfgChat,
-			MaximumTimeout:     cfgMaxTimeout,
-			SegmentWorkers:     cfgSegWorkers,
+			MaxVideoResolution:  cfgMaxRes,
+			Prefer60fps:         cfgPrefer60,
+			OutputDirectory:     outputDir,
+			StagingDirectory:    stagingDir,
+			FilenameTemplate:    template,
+			DownloadChat:        cfgChat,
+			MaximumTimeout:      cfgMaxTimeout,
+			SegmentWorkers:      cfgSegWorkers,
+			InterruptionTimeout: cfgInterruptionTimeout.AsDuration(time.Minute),
 		},
-		YT:         w.yt,
-		StagingDir: stagingDir,
-		OutputDir:  outputDir,
-		Filename:   filename,
-		Logger:     w.logger,
+		YT:           w.yt,
+		StagingDir:   stagingDir,
+		OutputDir:    outputDir,
+		Filename:     filename,
+		Logger:       w.logger,
+		Interruption: &interruptionSignal{},
 	}
 }
 
