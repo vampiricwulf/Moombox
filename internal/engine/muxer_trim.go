@@ -191,6 +191,27 @@ func (m *Muxer) concatIntermediates(ctx context.Context, intermediates []string,
 	return nil
 }
 
+// ConcatCopy concatenates inputs into outputPath using FFmpeg's concat
+// demuxer with codec copy (lossless, no re-encode). It is the exported
+// entry point for the Tier 4 same-format part merge: callers are expected
+// to have already confirmed the inputs share compatible stream params (see
+// probeStreamParams / streamParams.equal in internal/worker) — concat
+// demuxer copy mode silently produces a broken file if inputs disagree on
+// codec, resolution, framerate, or audio params.
+func (m *Muxer) ConcatCopy(ctx context.Context, inputs []string, outputPath string) error {
+	if len(inputs) == 0 {
+		return fmt.Errorf("no inputs to concat")
+	}
+
+	tempDir, err := os.MkdirTemp("", "moombox-concat-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	return m.concatIntermediates(ctx, inputs, outputPath, tempDir)
+}
+
 // buildConcatList generates the FFmpeg concat demuxer file list content.
 // Converts backslashes to forward slashes and escapes single quotes for Windows compatibility.
 func buildConcatList(paths []string) string {
