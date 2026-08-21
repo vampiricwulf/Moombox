@@ -15,10 +15,10 @@ import (
 )
 
 // partMerger implements the Tier 4 same-format part merge with its I/O calls
-// (ffprobe, ffmpeg concat, DB replace/update) as function fields, defaulting
-// to the real implementations in mergeSameFormatParts. Tests inject stubs so
-// the grouping/row-building/fallback logic runs without a live ffmpeg
-// toolchain — see part_merge_test.go.
+// (ffprobe, ffmpeg concat, filesystem rename, DB replace/update) as function
+// fields, defaulting to the real implementations in mergeSameFormatParts.
+// Tests inject stubs so the grouping/row-building/fallback/failure-recovery
+// logic runs without a live ffmpeg toolchain — see part_merge_test.go.
 type partMerger struct {
 	ffprobePath string
 	logger      logger
@@ -27,6 +27,7 @@ type partMerger struct {
 	concat     func(ctx context.Context, inputs []string, outputPath string) error
 	replace    func(jobID string, segs []database.Segment) error
 	updateFile func(id int, filename, filePath, chatFile string) error
+	rename     func(oldpath, newpath string) error
 }
 
 // mergeSameFormatParts opportunistically concat-copies contiguous runs of
@@ -35,9 +36,15 @@ type partMerger struct {
 // rows' quality metadata lacks audio parameters — and any probe or concat
 // failure returns the input untouched: the merge is an improvement, never
 // a gate on finalize. Merged media is written next to the parts as
-// "<base> - merged<runIndex>.mp4", then renamed over the run's first part
-// name after row replacement succeeds; obsolete later-part files and their
-// chat siblings are removed only after the DB replace commits.
+// "<base> - merged<runIndex>.mp4", committed to the DB at that temp path,
+// then best-effort renamed onto the run's first part's name once that
+// commit succeeds. Only once the row is confirmed to resolve to a real
+// file does cleanup remove the now-superseded later parts: their output
+// files, their chat files (but only when THIS run's chat actually merged —
+// a failed chat merge always leaves every per-part chat file in place),
+// and their pre-mux seg_N staging directories (removing those is what
+// stops a later finalize re-entry from resurrecting and re-merging
+// already-consumed content — see merge's doc comment for the full chain).
 func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx *JobContext, segments []database.Segment) []database.Segment {
 	pm := &partMerger{
 		ffprobePath: o.muxer.FFprobePath(),
@@ -46,8 +53,9 @@ func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx 
 		concat:      o.muxer.ConcatCopy,
 		replace:     o.db.ReplaceJobSegments,
 		updateFile:  o.db.UpdateSegmentFile,
+		rename:      os.Rename,
 	}
-	return pm.merge(ctx, jobCtx.Job.ID, segments)
+	return pm.merge(ctx, jobCtx.Job.ID, jobCtx.StagingDir, segments)
 }
 
 // mergeRun tracks one contiguous multi-part run through the merge/commit/
@@ -56,6 +64,10 @@ func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx 
 // single db.ReplaceJobSegments call alongside every other row, and only
 // after that commit succeeds are they best-effort renamed onto the run's
 // first part's original name and the superseded later parts removed.
+//
+// chatTemp doubles as the "did this run's chat actually merge" flag: it is
+// "" both when no part in the run had chat AND when mergeChatFiles failed —
+// either way, no per-part chat file may be deleted for this run.
 type mergeRun struct {
 	indices        []int // indices into the ORIGINAL segments slice
 	videoTemp      string
@@ -65,26 +77,52 @@ type mergeRun struct {
 }
 
 // merge is the injectable core of mergeSameFormatParts. See that method's
-// doc comment for the overall algorithm and crash-consistency notes.
+// doc comment for the overall algorithm.
 //
 // Crash-consistency choice: every part-merge row is committed to the DB
 // BEFORE any original filename is touched. The merged row initially points
 // at the (already-written, already-valid) temp concat output — never at a
 // name that doesn't exist yet — so a crash or error at any point before the
 // single db.ReplaceJobSegments call leaves the original parts completely
-// untouched (the true "return input unchanged" contract). Once that call
-// commits, the rename-onto-the-first-part-name + delete-superseded-files
-// steps are best-effort polish: a crash mid-rename either leaves the
-// committed row pointing at the (still valid) temp file, or — once the
-// rename lands but before the follow-up updateFile call — leaves the row
-// pointing at a name that no longer exists while the correct merged bytes
-// sit safely under the final name (recoverable, not data loss). The
-// alternative (rename the temp file onto the first part's original name
-// BEFORE committing the DB row) was rejected: it would silently overwrite
-// an original part's file the moment any LATER run in the same batch failed
-// to concat, breaking the "input unchanged on failure" guarantee for the
+// untouched (the true "return input unchanged" contract). The alternative
+// (rename the temp file onto the first part's original name BEFORE
+// committing the DB row) was rejected: it would silently overwrite an
+// original part's file the moment any LATER run in the same batch failed to
+// concat, breaking the "input unchanged on failure" guarantee for the
 // earlier, already-succeeded runs.
-func (pm *partMerger) merge(ctx context.Context, jobID string, segments []database.Segment) []database.Segment {
+//
+// Once the commit succeeds, the rename-onto-the-first-part-name step is
+// best-effort polish, but the follow-up UpdateSegmentFile call is not
+// treated as equally disposable: if the rename lands but UpdateSegmentFile
+// fails, the committed row would be left naming a path that no longer
+// exists (the file just moved out from under it) — the only copy of the
+// recording sitting under a name nothing references. Rather than accept
+// that dangling reference, this renames the file BACK onto its temp path so
+// the already-committed row (which still names that temp path, since it was
+// never updated) resolves to a real file again — at the cost of losing the
+// pretty final name until a later successful merge or manual repair. Only
+// when that undo ALSO fails (a narrow double-fault) does this skip the
+// run's superseded-part cleanup entirely: at that point there is no
+// reliable pointer to the merged content, and the later parts' still-intact
+// independent files are the last remaining copy of their span.
+//
+// Superseded-part cleanup — deleting the later parts' output files, chat
+// files, and pre-mux seg_N staging directories — only runs once the row is
+// confirmed to resolve to a real file (see above). The seg_N staging
+// cleanup specifically is what prevents a later finalize re-entry (a
+// restart mid-finalize, the Mux action, an IncompleteTail Resume) from
+// finding a superseded part's raw pre-mux media still sitting in staging
+// with no segment row (ReplaceJobSegments just deleted that row),
+// concluding via muxUnrecordedSegments that it was never muxed, and
+// re-persisting + re-merging it — duplicating content that's already
+// inside the merged output. The run's FIRST part keeps its own row
+// identity (mergedSegmentRow keeps SegmentIndex = first's), so its own
+// seg_N staging dir is never mistaken for unmuxed and is deliberately left
+// alone here: cleaning it up too would need to special-case SegmentIndex 0
+// living at the staging ROOT rather than a seg_N subdirectory, for a purely
+// cosmetic space win the normal end-of-job staging cleanup already captures
+// once every remaining part is accounted for.
+func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segments []database.Segment) []database.Segment {
 	if len(segments) < 2 {
 		return segments
 	}
@@ -192,13 +230,15 @@ func (pm *partMerger) merge(ctx context.Context, jobID string, segments []databa
 	for _, pr := range pending {
 		first := segments[pr.indices[0]]
 		finalVideo := first.FilePath
-		if err := os.Rename(pr.videoTemp, finalVideo); err != nil {
+		safeToCleanup := true
+
+		if err := pm.rename(pr.videoTemp, finalVideo); err != nil {
 			pm.logger.Warn("part merge: rename merged file to final name failed, leaving temp name", "err", err, "jobID", jobID, "from", pr.videoTemp, "to", finalVideo)
 		} else {
 			finalChat := ""
 			if pr.chatTemp != "" {
 				finalChat = mergedChatPath(finalVideo)
-				if err := os.Rename(pr.chatTemp, finalChat); err != nil {
+				if err := pm.rename(pr.chatTemp, finalChat); err != nil {
 					pm.logger.Warn("part merge: rename merged chat to final name failed, leaving temp name", "err", err, "jobID", jobID, "from", pr.chatTemp, "to", finalChat)
 					finalChat = pr.chatTemp
 				}
@@ -206,7 +246,15 @@ func (pm *partMerger) merge(ctx context.Context, jobID string, segments []databa
 
 			merged := &replacement[pr.replacementIdx]
 			if err := pm.updateFile(merged.ID, filepath.Base(finalVideo), finalVideo, finalChat); err != nil {
-				pm.logger.Warn("part merge: failed to update segment row to final path", "err", err, "jobID", jobID, "segmentID", merged.ID)
+				pm.logger.Warn("part merge: failed to update segment row to final path; restoring merged file to its committed temp path so the row stays resolvable", "err", err, "jobID", jobID, "segmentID", merged.ID)
+				if undoErr := pm.rename(finalVideo, pr.videoTemp); undoErr != nil {
+					pm.logger.Warn("part merge: failed to restore merged file after a failed row update; the committed row may point at a missing file — leaving this run's superseded parts in place for manual recovery", "err", undoErr, "jobID", jobID, "segmentID", merged.ID, "wantPath", pr.videoTemp)
+					safeToCleanup = false
+				} else if finalChat != "" && finalChat != pr.chatTemp {
+					if chatUndoErr := pm.rename(finalChat, pr.chatTemp); chatUndoErr != nil {
+						pm.logger.Warn("part merge: failed to restore merged chat file after a failed row update", "err", chatUndoErr, "jobID", jobID, "segmentID", merged.ID)
+					}
+				}
 			} else {
 				merged.Filename = filepath.Base(finalVideo)
 				merged.FilePath = finalVideo
@@ -214,18 +262,39 @@ func (pm *partMerger) merge(ctx context.Context, jobID string, segments []databa
 			}
 		}
 
-		for _, idx := range pr.indices[1:] {
-			seg := segments[idx]
-			if seg.FilePath != "" {
-				if err := os.Remove(seg.FilePath); err != nil && !os.IsNotExist(err) {
-					pm.logger.Warn("part merge: failed to delete superseded part file", "err", err, "jobID", jobID, "file", seg.FilePath)
+		if safeToCleanup {
+			for _, idx := range pr.indices[1:] {
+				seg := segments[idx]
+				if seg.FilePath != "" {
+					if err := os.Remove(seg.FilePath); err != nil && !os.IsNotExist(err) {
+						pm.logger.Warn("part merge: failed to delete superseded part file", "err", err, "jobID", jobID, "file", seg.FilePath)
+					}
+				}
+				// Only remove a superseded part's own chat file when THIS
+				// run's chat actually merged (pr.chatTemp != "") — a failed
+				// chat merge already reset the row's ChatFile to "" and must
+				// leave every per-part chat file exactly where it was (see
+				// mergeChatFiles' contract), or those messages have nowhere
+				// left to live.
+				if pr.chatTemp != "" && seg.ChatFile != "" {
+					if err := os.Remove(seg.ChatFile); err != nil && !os.IsNotExist(err) {
+						pm.logger.Warn("part merge: failed to delete superseded part chat file", "err", err, "jobID", jobID, "file", seg.ChatFile)
+					}
+				}
+				// The superseded part's pre-mux staging dir, keyed by its own
+				// SegmentIndex (not its position in this slice — merges can
+				// leave index gaps). See merge's doc comment for why this is
+				// required, not cosmetic.
+				if stagingDir != "" {
+					segDir := filepath.Join(stagingDir, fmt.Sprintf("seg_%d", seg.SegmentIndex))
+					if err := os.RemoveAll(segDir); err != nil {
+						pm.logger.Warn("part merge: failed to delete superseded part's staging dir", "err", err, "jobID", jobID, "dir", segDir)
+					}
 				}
 			}
-			if seg.ChatFile != "" {
-				if err := os.Remove(seg.ChatFile); err != nil && !os.IsNotExist(err) {
-					pm.logger.Warn("part merge: failed to delete superseded part chat file", "err", err, "jobID", jobID, "file", seg.ChatFile)
-				}
-			}
+		} else {
+			pm.logger.Warn("part merge: skipping superseded-part cleanup for this run after a row-update failure",
+				"jobID", jobID, "supersededParts", len(pr.indices)-1)
 		}
 
 		pm.logger.Info(fmt.Sprintf("merged %d same-format parts", len(pr.indices)),
