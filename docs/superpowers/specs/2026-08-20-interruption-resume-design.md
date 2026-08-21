@@ -105,6 +105,38 @@ into the correct part staging, DB-sequence seeding continues at
 the re-ingest becomes an ordinary part split, and resume-append + re-mux
 produce one seamless recording.
 
+## Tier 4 — lossless merge of same-format parts
+
+When a resume lands on the *part* path rather than a same-staging append
+(sidecar unusable, or quality bounced and returned), the job finalizes as
+multiple part mp4s today. When adjacent parts share identical stream
+parameters, merge them losslessly so the output is still one seamless file
+— closing the last gap in "continue exactly where it left off." This also
+benefits ordinary gap-split jobs, which usually never changed format at
+all.
+
+- **Mechanism:** FFmpeg concat demuxer with `-c copy` directly on the part
+  mp4s — the same join `concatIntermediates` (muxer_trim.go) already
+  performs, minus the trim pipeline's lossy libx264 re-encode that today
+  manufactures the uniformity this tier instead verifies. No transcode:
+  bit-identical media, I/O-bound speed.
+- **Mergeability:** contiguous runs only, decided from the Segment rows'
+  `Quality`/`VideoWidth`/`VideoHeight`/`VideoFps` and confirmed by ffprobe
+  on the actual files (exact video codec string + audio codec, sample
+  rate, channel count — the DB does not record audio parameters). A
+  1080p → 720p → 1080p job merges each run, never across the differing
+  middle.
+- **Placement:** `finalizeMultiSegmentJob`, after parts are muxed: group
+  contiguous same-format runs, concat-copy each run to a single file,
+  collapse the run's Segment rows into one (summed duration/size, span
+  timestamps), and concatenate the parts' chat JSON files (messages are
+  timestamped, so ordering is mechanical).
+- **Timeline gaps** between merged parts become playback jumps — identical
+  to how a mid-part gap already plays.
+- **Failure-safe:** any probe disagreement or concat error leaves the
+  parts exactly as today; the merge is an opportunistic improvement, never
+  a gate on finalize.
+
 ## Rider — steady-state dead-auth recovery
 
 Found during this investigation: `OnRecoveryNeeded` fires only on a
@@ -135,5 +167,10 @@ existing 30-minute notification cooldown applies unchanged.
 - Monitor callbacks: duplicate-path matrix — Finished+flag+live →
   ResumeJob once per cooldown; Cancelled / flagless / non-broadcast →
   dropped as today.
+- Merge: run-grouping matrix (identical run merges; format change splits
+  runs; single part no-ops), ffprobe-disagreement and concat-failure
+  fallbacks leave parts untouched, Segment-row collapse arithmetic, chat
+  concatenation ordering. FFmpeg-dependent cases behind the same live-tool
+  gating the muxer tests already use.
 - Cookies: startup-dead-auth fires recovery once; network-error first
   check does not.
