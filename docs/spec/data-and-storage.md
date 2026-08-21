@@ -504,6 +504,7 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | DownloadChat | bool | true | `download_chat` | |
 | Prefer60fps | bool | true | `prefer_60fps` | |
 | MaximumTimeout | int | 600 | `maximum_timeout` | Seconds; YouTube livestreams. Min: 30 |
+| InterruptionTimeout | FlexDuration | 120 (minutes) | `interruption_timeout` | Min: 0, no max. How long a live YouTube download's MaxTimeout-backstop finalize may keep deferring while `engine.SegmentDownloader.MayResume` reports the broadcast may still resume (`stallForPossibleResume`, `internal/engine/downloader.go`) — the interruption-resume design's Tier 1 stall. `0` disables the stall entirely: `attachMayResume` (`internal/worker/interruption.go`) leaves `MayResume` nil when this is `<= 0`, so a MaxTimeout-backstop finalize never waits. Tier 2 preservation (resume sidecar + staging left in place on an interrupted-but-unresumed finish) applies regardless of this setting — it only bounds how long finalize is willing to wait, not whether preservation happens. Snapshotted per job start (`buildJobContext`), like `MaximumTimeout`/`SegmentWorkers` above; not restart-required. |
 | PoToken | string | "" | `po_token` | Manual PO token override |
 | VisitorData | string | "" | `visitor_data` | Manual visitor data override |
 | PotProviderURL | string | "" | `pot_provider_url` | External PO token provider |
