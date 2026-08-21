@@ -613,6 +613,44 @@ func (db *Database) ClearJobSegmentsAndGaps(jobID string) error {
 	return nil
 }
 
+// ReplaceJobSegments atomically replaces all segment rows for a job with segs:
+// existing rows are deleted, then segs are re-inserted using the same column
+// list as AddSegment, all inside one transaction. Used by the part-merge row
+// collapse (quality-split part rows folded together on resume/finalize).
+// Unlike ClearJobSegmentsAndGaps, gap rows are left untouched — this replaces
+// segments only. Fires no job-update notification (AddSegment fires none).
+func (db *Database) ReplaceJobSegments(jobID string, segs []Segment) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM segments WHERE job_id = ?", jobID); err != nil {
+		return err
+	}
+
+	for i := range segs {
+		seg := &segs[i]
+		result, err := tx.ExecContext(ctx, `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			seg.JobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
+			seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds,
+			seg.ChatFile)
+		if err != nil {
+			return err
+		}
+		id, _ := result.LastInsertId()
+		seg.ID = int(id)
+	}
+
+	return tx.Commit()
+}
+
 // GetSegments returns all segments for a given job, ordered by segment_index.
 func (db *Database) GetSegments(jobID string) ([]Segment, error) {
 	db.mu.RLock()
