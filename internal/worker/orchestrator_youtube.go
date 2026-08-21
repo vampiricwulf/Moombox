@@ -51,6 +51,17 @@ import (
 // (config contract: 0 = finalize must never wait) gets a nil MayResume,
 // not a non-nil one with a zero (i.e. unbounded, in engine semantics)
 // ceiling.
+//
+// The second return value, waitedForResume, is worker-level Tier 2
+// evidence: true once shouldWaitForResume's branch fires at least once in
+// this call, regardless of how the loop eventually exits. It exists
+// because that branch can retry, exhaust maxConsecutiveLiveChecks, and
+// finalize WITHOUT any engine downloader ever reaching its own
+// stallForPossibleResume (the loop dies from the outside — repeated
+// refresh failures — not from an engine-side budget expiry), so
+// FinalizedDuringInterruption would otherwise stay false even though the
+// job deliberately waited for a resume. The caller threads this into
+// finalizeIncompleteTail so that wait is not silently discarded.
 func (o *DownloadOrchestrator) runLiveStreamDownload(
 	ctx context.Context,
 	jobCtx *JobContext,
@@ -61,10 +72,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	result *DownloadResult,
 	tracker *ProgressTracker,
 	mayResume func() bool,
-) (*DownloadResult, error) {
+) (*DownloadResult, bool, error) {
 	var lastSegTime atomic.Int64
 	lastSegTime.Store(time.Now().UnixNano())
 	var consecutiveLiveChecks atomic.Int32
+	// waitedForResume latches true the first time shouldWaitForResume's
+	// branch fires below — see the doc comment above for why this must
+	// survive independently of any engine downloader's own latch.
+	waitedForResume := false
 
 	// Quality monitoring state
 	segmentIndex := startSegmentIndex
@@ -89,10 +104,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		// that was causing a sidecar mint every 30s). Streams that
 		// genuinely need authentication (members-only, age-restricted,
 		// login-required) keep using the authenticated GetVideoInfo path
-		// since ANDROID_VR will 401 on those.
-		requiresAuthProbe := videoInfo.PlayabilityError == youtube.PlayabilityMembersOnly ||
-			videoInfo.PlayabilityError == youtube.PlayabilityAgeRestricted ||
-			videoInfo.PlayabilityError == youtube.PlayabilityLoginRequired
+		// since ANDROID_VR will 401 on those. Same predicate
+		// observeYouTubeStatusProbe uses to skip arming the interruption
+		// signal on these — kept as one function so the two checks cannot
+		// drift apart.
+		requiresAuthProbe := isAuthWalledPlayability(videoInfo.PlayabilityError)
 		probeFn := o.buildYouTubeProbeFn(jobCtx, requiresAuthProbe)
 		monitor = NewQualityMonitor(qualityMonitorInterval, currentQuality, probeFn, o.logger)
 		go monitor.Run(monitorCtx, qualityChangeCh)
@@ -151,7 +167,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 	for {
 		if ctx.Err() != nil {
-			return result, ctx.Err()
+			return result, waitedForResume, ctx.Err()
 		}
 
 		// Run segment downloaders in a goroutine so we can also listen for quality changes.
@@ -183,7 +199,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		)
 
 		if ctx.Err() != nil {
-			return result, ctx.Err()
+			return result, waitedForResume, ctx.Err()
 		}
 
 		// Check for reactive quality loss (download loop returned ErrQualityLost)
@@ -200,7 +216,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
 			if err != nil {
 				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
-				return result, fmt.Errorf("refresh after quality change: %w", err)
+				return result, waitedForResume, fmt.Errorf("refresh after quality change: %w", err)
 			}
 			// Interruption spec Tier 1 evidence: a 403-family interruption
 			// (handleGoneError) exits the downloader via ErrQualityLost into
@@ -253,6 +269,13 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// (config InterruptionTimeout <= 0) or there's no resume
 				// evidence at all.
 				if shouldWaitForResume(refreshErr, jobCtx.Interruption.fresh(), mayResume, jobCtx.Config.InterruptionTimeout) {
+					// Latched, not reset elsewhere: even if a LATER refresh
+					// attempt in this same call gives up for good (signal
+					// went stale, mayResume flipped false), the job still
+					// genuinely waited for a resume at least once — Tier 2
+					// evidence finalizeIncompleteTail must see regardless of
+					// how this call eventually returns.
+					waitedForResume = true
 					o.logger.Warn("refresh failed but the broadcast may resume — waiting instead of ending the recording",
 						"err", refreshErr, "jobID", jobCtx.Job.ID)
 					tracker.SetWaitActivity(engine.ActivityWaitingResume)
@@ -262,7 +285,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Return nil to exit the live loop; muxAndFinalize will process
 				// whatever video/audio data was captured before the refresh failed.
-				return result, nil
+				return result, waitedForResume, nil
 			}
 
 			newQuality := o.extractQualityFromResult(refreshResult)
@@ -317,7 +340,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// to the old staging dir and was used only to check quality — discard it.
 			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
 			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
-				return result, fmt.Errorf("create segment staging dir: %w", err)
+				return result, waitedForResume, fmt.Errorf("create segment staging dir: %w", err)
 			}
 			if shortSegment && segStagingDir == curCtx.StagingDir {
 				// Short-span discard reusing the same index/dir: physically
@@ -349,7 +372,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Return nil to exit the live loop; muxAndFinalize will process
 				// whatever video/audio data was captured in the current staging dir.
-				return result, nil
+				return result, waitedForResume, nil
 			}
 
 			// The new segment's staging dir is now the current one for all
@@ -432,7 +455,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			utils.Sleep(ctx, streamEndVerifyInterval)
 
 			if ctx.Err() != nil {
-				return result, ctx.Err()
+				return result, waitedForResume, ctx.Err()
 			}
 
 			// Cancel old downloaders before refreshing
@@ -509,7 +532,7 @@ streamEnded:
 		}
 	}
 
-	return result, nil
+	return result, waitedForResume, nil
 }
 
 // refreshDownload re-creates downloaders for an in-progress live stream from

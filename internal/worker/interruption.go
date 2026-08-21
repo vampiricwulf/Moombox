@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -162,6 +163,18 @@ func shouldWaitForResume(refreshErr error, signalFresh bool, mayResume func() bo
 	return mayResume != nil && mayResume()
 }
 
+// isAuthWalledPlayability reports whether err is one of the playability
+// errors that make YouTube withhold formats/streamingData from an
+// UNAUTHENTICATED (cookieless) request even for an otherwise perfectly
+// healthy live stream. Shared with runLiveStreamDownload's requiresAuthProbe
+// predicate (orchestrator_youtube.go) — kept as one function so the two
+// checks cannot drift apart.
+func isAuthWalledPlayability(err youtube.PlayabilityError) bool {
+	return err == youtube.PlayabilityMembersOnly ||
+		err == youtube.PlayabilityAgeRestricted ||
+		err == youtube.PlayabilityLoginRequired
+}
+
 // observeYouTubeStatusProbe is the shared decision behind every YouTube
 // strategy's CheckStreamStatus closure (HLS, DASH, and manifestless-DASH
 // all wire job.YT.ProbeVideoStatus into this exact shape). Split out from
@@ -176,10 +189,47 @@ func shouldWaitForResume(refreshErr error, signalFresh bool, mayResume func() bo
 // internal/engine/downloader.go); every other observe() call site in this
 // package only runs after the downloader has already exited. See
 // interruptionSignalStaleAfter's doc comment for the full cadence picture.
+//
+// Two guards protect this from mis-arming the signal:
+//
+//   - info == nil: ProbeVideoStatus can return (nil, nil) in a shutdown
+//     race (every Innertube client failing without surfacing a hard error —
+//     the same defensive case buildYouTubeProbeFn already guards). Reported
+//     as an error (not "not ended") so the engine's CheckStreamStatus
+//     caller treats it as an inconclusive check (checkErr != nil: defers
+//     the verdict, does not latch anything) rather than as a false
+//     "confirmed still live" — which would itself trigger an unwarranted
+//     ErrQualityLost in handleGoneError.
+//
+//   - info.PlayabilityError is members-only / age-restricted /
+//     login-required: CheckStreamStatus ALWAYS probes via the COOKIELESS
+//     ANDROID_VR client (ProbeVideoStatus's own doc comment), regardless of
+//     whether the job itself is authenticated. For an auth-walled stream,
+//     classifyStream (internal/youtube/player_api_parsing.go) derives
+//     StreamStatus purely from videoDetails.isLive — BEFORE any
+//     playability/formats check — so a HEALTHY members-only/age-restricted/
+//     login-required live stream reliably probes as StreamStatus=live with
+//     zero Formats (this unauthenticated request simply can't see them),
+//     which is bit-for-bit the interruption signature. Observing it would
+//     self-sustain a perpetually "fresh" signal — re-armed by the engine's
+//     own ~30s stall-driven re-probe — for the ENTIRE run of any such
+//     stream, silently converting every ordinary MaxTimeout finalize into
+//     an up-to-InterruptionTimeout wrongful stall. isAuthWalledPlayability
+//     is the same predicate requiresAuthProbe uses to route these to the
+//     authenticated probe instead.
 func observeYouTubeStatusProbe(job *JobContext, info *youtube.VideoInfo, err error) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	job.Interruption.observe(info)
+	if info == nil {
+		return false, errNilStatusProbe
+	}
+	if !isAuthWalledPlayability(info.PlayabilityError) {
+		job.Interruption.observe(info)
+	}
 	return info.StreamStatus != youtube.StreamLive, nil
 }
+
+// errNilStatusProbe is returned by observeYouTubeStatusProbe when
+// ProbeVideoStatus returns (nil, nil) — see its doc comment.
+var errNilStatusProbe = errors.New("status probe returned nil info without error")

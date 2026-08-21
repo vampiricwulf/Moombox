@@ -242,6 +242,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Select download strategy (A1: pass cipher/pot to strategies)
 	var result *DownloadResult
+	// waitedForResume is worker-level Tier 2 evidence: true once the live
+	// loop's shouldWaitForResume branch fires at least once, even if the
+	// broadcast never actually resumed and the loop eventually gave up
+	// (maxConsecutiveLiveChecks exhausted) without any engine downloader
+	// ever latching its own FinalizedDuringInterruption. Set by
+	// runLiveStreamDownload below; always false on the VOD branch.
+	var waitedForResume bool
 
 	strategy, err := selectDownloadStrategy(isVod, videoInfo)
 	if err != nil {
@@ -380,7 +387,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		var incomplete bool
 		var vSeq, vHead, aSeq, aHead int
 		if err == nil {
-			incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result)
+			// false: the VOD refresh loop never takes the live loop's
+			// wait-for-resume branch — that evidence only applies to
+			// runLiveStreamDownload's own call site below.
+			incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result, false)
 		}
 
 		// Set 100% progress after VOD download completes (finishVodWithChat equivalent)
@@ -414,7 +424,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// reassigns result locally on every quality refresh/split, so the
 		// pre-call `result` variable would otherwise go stale the moment a
 		// single refresh happens.
-		result, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker, mayResume)
+		result, waitedForResume, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker, mayResume)
 
 		if err == nil {
 			// Same eviction guard as the VOD branch (see its call site
@@ -439,7 +449,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// diagnoseEvictedStart) so an eviction error still takes precedence
 		// and is never overwritten by a flag write.
 		if err == nil {
-			o.finalizeIncompleteTail(jobCtx.Job.ID, result)
+			o.finalizeIncompleteTail(jobCtx.Job.ID, result, waitedForResume)
 		}
 	}
 
@@ -737,14 +747,29 @@ func computeIncompleteTail(videoBehind, audioBehind, interrupted bool) bool {
 // also needs to render an honest (non-100%) progress string for an
 // incomplete finish (see incompleteProgressString) can reuse them without
 // re-deriving.
-func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *DownloadResult) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
+//
+// workerWaitedForResume is worker-level Tier 2 evidence (only ever true
+// from the live branch): the live loop's shouldWaitForResume branch fired
+// at least once. This is deliberately SEPARATE from
+// downloaderInterrupted's engine-latched evidence
+// (FinalizedDuringInterruption) — a live loop that repeatedly hit
+// ErrQualityLost/refresh-failure and waited via shouldWaitForResume, then
+// eventually gave up when maxConsecutiveLiveChecks exhausted, never once
+// reaches the engine's own stallForPossibleResume on any downloader (the
+// loop dies from the OUTSIDE, not from an engine-side budget expiry), so
+// FinalizedDuringInterruption stays false on every downloader even though
+// the job genuinely waited for a resume that never came. Without ORing
+// this in, that case would self-clear incomplete_tail and let ordinary
+// cleanup discard staging + the resume sidecar right after deliberately
+// waiting for exactly the resume that data was preserved for.
+func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *DownloadResult, workerWaitedForResume bool) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
 	vSeq = downloaderSeq(result.VideoDownloader)
 	vHead = downloaderHead(result.VideoDownloader)
 	aSeq = downloaderSeq(result.AudioDownloader)
 	aHead = downloaderHead(result.AudioDownloader)
 	videoBehind := downloaderBehindHead(result.VideoDownloader)
 	audioBehind := downloaderBehindHead(result.AudioDownloader)
-	interrupted := downloaderInterrupted(result.VideoDownloader) || downloaderInterrupted(result.AudioDownloader)
+	interrupted := downloaderInterrupted(result.VideoDownloader) || downloaderInterrupted(result.AudioDownloader) || workerWaitedForResume
 	incomplete = computeIncompleteTail(videoBehind, audioBehind, interrupted)
 	// Unconditional write: a retry that completes cleanly clears the flag by
 	// writing false through the same path.
@@ -754,7 +779,8 @@ func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *Down
 			"jobID", jobID,
 			"videoSeq", vSeq, "videoHead", vHead,
 			"audioSeq", aSeq, "audioHead", aHead,
-			"videoBehindHead", videoBehind, "audioBehindHead", audioBehind, "interrupted", interrupted)
+			"videoBehindHead", videoBehind, "audioBehindHead", audioBehind,
+			"interrupted", interrupted, "workerWaitedForResume", workerWaitedForResume)
 	}
 	return incomplete, vSeq, vHead, aSeq, aHead
 }

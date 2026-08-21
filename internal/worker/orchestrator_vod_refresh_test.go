@@ -53,7 +53,7 @@ func TestFinalizeIncompleteTailWritesAndSelfClears(t *testing.T) {
 
 	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
 
-	incomplete, vSeq, vHead, aSeq, aHead := o.finalizeIncompleteTail(jobID, &DownloadResult{})
+	incomplete, vSeq, vHead, aSeq, aHead := o.finalizeIncompleteTail(jobID, &DownloadResult{}, false)
 	if incomplete {
 		t.Error("both downloaders nil must never be reported incomplete")
 	}

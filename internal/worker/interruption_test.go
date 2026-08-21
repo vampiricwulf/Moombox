@@ -224,7 +224,7 @@ func TestFinalizeIncompleteTailInterruption(t *testing.T) {
 
 	dl := newInterruptedTestDownloader(t)
 
-	incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, &DownloadResult{VideoDownloader: dl})
+	incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, &DownloadResult{VideoDownloader: dl}, false)
 	if !incomplete {
 		t.Fatal("a downloader that latched a Tier-2 interruption finalize must flag incomplete_tail even with both behind-head false")
 	}
@@ -406,4 +406,112 @@ func TestObserveYouTubeStatusProbe(t *testing.T) {
 			t.Error("ended = true for StreamLive, want false")
 		}
 	})
+
+	// Auth-walled mis-arm: CheckStreamStatus always probes via the
+	// cookieless ANDROID_VR client, so a HEALTHY members-only/age-restricted/
+	// login-required live stream reliably classifies as live+zero-formats
+	// too (classifyStream derives StreamStatus from videoDetails.isLive
+	// alone, before any playability/formats check) -- the SAME shape as a
+	// genuine interruption. Without the PlayabilityError guard this would
+	// arm the signal every ~30s for the entire run of any such stream.
+	for _, tc := range []struct {
+		name string
+		err  youtube.PlayabilityError
+	}{
+		{"members-only", youtube.PlayabilityMembersOnly},
+		{"age-restricted", youtube.PlayabilityAgeRestricted},
+		{"login-required", youtube.PlayabilityLoginRequired},
+	} {
+		t.Run("auth-walled live+zero-formats ("+tc.name+") does not arm the signal", func(t *testing.T) {
+			job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
+			info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, Formats: nil, PlayabilityError: tc.err}
+
+			ended, err := observeYouTubeStatusProbe(job, info, nil)
+
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if ended {
+				t.Error("ended = true for StreamLive, want false")
+			}
+			if job.Interruption.fresh() {
+				t.Error("an auth-walled live+zero-formats probe must NOT arm the interruption signal -- this is a healthy stream this unauthenticated probe simply can't see formats for, not an interruption")
+			}
+		})
+	}
+
+	// PlayabilityOK (or the zero value) with zero formats must still arm --
+	// the guard above must not accidentally swallow the real signature.
+	t.Run("non-auth-walled live+zero-formats still arms the signal", func(t *testing.T) {
+		job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, Formats: nil, PlayabilityError: youtube.PlayabilityOK}
+
+		if _, err := observeYouTubeStatusProbe(job, info, nil); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if !job.Interruption.fresh() {
+			t.Error("a non-auth-walled live+zero-formats probe must still arm the signal -- the auth guard must not swallow the real interruption signature")
+		}
+	})
+
+	t.Run("nil info without error is a safe no-op, not a panic", func(t *testing.T) {
+		job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
+
+		ended, err := observeYouTubeStatusProbe(job, nil, nil) // must not panic on info.StreamStatus
+
+		if err == nil {
+			t.Error("err = nil, want a non-nil error -- a nil info without an error must be treated as inconclusive, not as a confirmed verdict")
+		}
+		if ended {
+			t.Error("ended = true for nil info, want false -- must not read as a confirmed 'still live' verdict (that would trigger an unwarranted ErrQualityLost upstream)")
+		}
+		if job.Interruption.fresh() {
+			t.Error("nil info must not arm the interruption signal")
+		}
+	})
+}
+
+// TestFinalizeIncompleteTailWorkerWaitedForResume (residual Tier-2 fix)
+// pins that workerWaitedForResume -- true when the live loop's
+// shouldWaitForResume branch fired at least once, even if it eventually
+// exhausted maxConsecutiveLiveChecks and gave up -- flags incomplete_tail
+// even when NEITHER downloader ever latched FinalizedDuringInterruption
+// itself (the whole point: that engine-side latch is never reached when
+// the loop dies from repeated refresh failures rather than an engine-side
+// budget expiry).
+func TestFinalizeIncompleteTailWorkerWaitedForResume(t *testing.T) {
+	dir := t.TempDir()
+	db, err := database.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	jobID := "yt_finalizeIncompleteTailWorkerWaited"
+	job := &database.Job{
+		ID:      jobID,
+		VideoID: jobID,
+		URL:     "https://youtube.com/watch?v=" + jobID,
+		Status:  database.StatusDownloading,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	o := &DownloadOrchestrator{db: db, logger: &discardLogger{}}
+
+	// Both downloaders nil (no FinalizedDuringInterruption evidence at all)
+	// -- only workerWaitedForResume=true should flag this.
+	incomplete, _, _, _, _ := o.finalizeIncompleteTail(jobID, &DownloadResult{}, true)
+	if !incomplete {
+		t.Fatal("workerWaitedForResume=true must flag incomplete_tail even with no downloader evidence at all")
+	}
+
+	got, err := db.GetJob(jobID)
+	if err != nil || got == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if !got.IncompleteTail {
+		t.Error("finalizeIncompleteTail did not persist incomplete_tail=true for workerWaitedForResume=true")
+	}
 }
