@@ -53,15 +53,21 @@ import (
 // ceiling.
 //
 // The second return value, waitedForResume, is worker-level Tier 2
-// evidence: true once shouldWaitForResume's branch fires at least once in
-// this call, regardless of how the loop eventually exits. It exists
-// because that branch can retry, exhaust maxConsecutiveLiveChecks, and
-// finalize WITHOUT any engine downloader ever reaching its own
-// stallForPossibleResume (the loop dies from the outside — repeated
-// refresh failures — not from an engine-side budget expiry), so
-// FinalizedDuringInterruption would otherwise stay false even though the
-// job deliberately waited for a resume. The caller threads this into
-// finalizeIncompleteTail so that wait is not silently discarded.
+// evidence — FINALIZE-scoped, not history-scoped: true only when the loop
+// is CURRENTLY in (or gives up directly out of) an unresolved
+// shouldWaitForResume wait. It exists because that branch can retry,
+// exhaust maxConsecutiveLiveChecks, and finalize WITHOUT any engine
+// downloader ever reaching its own stallForPossibleResume (the loop dies
+// from the outside — repeated refresh failures — not from an engine-side
+// budget expiry), so FinalizedDuringInterruption would otherwise stay
+// false even though the job deliberately waited for a resume. It latches
+// true when the wait branch fires and is CLEARED again at every later
+// successful refresh (`result = refreshResult`) — a broadcast that
+// resumed, or a transient failure that self-healed, must not permanently
+// taint a clean multi-hour finish. The caller threads the final value into
+// finalizeIncompleteTail so a genuine gave-up-mid-stall wait is not
+// silently discarded, without also mis-flagging a recording that finished
+// cleanly after an earlier, since-resolved wait.
 func (o *DownloadOrchestrator) runLiveStreamDownload(
 	ctx context.Context,
 	jobCtx *JobContext,
@@ -76,10 +82,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	var lastSegTime atomic.Int64
 	lastSegTime.Store(time.Now().UnixNano())
 	var consecutiveLiveChecks atomic.Int32
-	// waitedForResume latches true the first time shouldWaitForResume's
-	// branch fires below — see the doc comment above for why this must
-	// survive independently of any engine downloader's own latch.
-	waitedForResume := false
+	// waitedForResume latches true when shouldWaitForResume's branch fires
+	// below and clears again at every later successful refresh — see the
+	// doc comment above and resumeWaitLatch's own doc comment for the full
+	// finalize-scoped rationale.
+	var waitedForResume resumeWaitLatch
 
 	// Quality monitoring state
 	segmentIndex := startSegmentIndex
@@ -167,7 +174,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 	for {
 		if ctx.Err() != nil {
-			return result, waitedForResume, ctx.Err()
+			return result, waitedForResume.value(), ctx.Err()
 		}
 
 		// Run segment downloaders in a goroutine so we can also listen for quality changes.
@@ -199,7 +206,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		)
 
 		if ctx.Err() != nil {
-			return result, waitedForResume, ctx.Err()
+			return result, waitedForResume.value(), ctx.Err()
 		}
 
 		// Check for reactive quality loss (download loop returned ErrQualityLost)
@@ -216,7 +223,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
 			if err != nil {
 				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
-				return result, waitedForResume, fmt.Errorf("refresh after quality change: %w", err)
+				return result, waitedForResume.value(), fmt.Errorf("refresh after quality change: %w", err)
 			}
 			// Interruption spec Tier 1 evidence: a 403-family interruption
 			// (handleGoneError) exits the downloader via ErrQualityLost into
@@ -269,13 +276,20 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// (config InterruptionTimeout <= 0) or there's no resume
 				// evidence at all.
 				if shouldWaitForResume(refreshErr, jobCtx.Interruption.fresh(), mayResume, jobCtx.Config.InterruptionTimeout) {
-					// Latched, not reset elsewhere: even if a LATER refresh
-					// attempt in this same call gives up for good (signal
-					// went stale, mayResume flipped false), the job still
-					// genuinely waited for a resume at least once — Tier 2
-					// evidence finalizeIncompleteTail must see regardless of
-					// how this call eventually returns.
-					waitedForResume = true
+					// Finalize-scoped, not history-scoped: this latches
+					// true here, but every later SUCCESSFUL refresh
+					// (`result = refreshResult`, below and in the
+					// still-live verify branch) clears it again — a
+					// broadcast that resumed, or a transient failure that
+					// self-healed, must not permanently taint a clean
+					// multi-hour finish with incomplete_tail=true. If the
+					// loop instead gives up for good with no intervening
+					// success (this same branch again on a later
+					// iteration, or maxConsecutiveLiveChecks exhausting via
+					// the still-live verify branch), this stays true —
+					// exactly the Tier 2 evidence finalizeIncompleteTail
+					// needs for a genuine gave-up-mid-stall finalize.
+					waitedForResume.wait()
 					o.logger.Warn("refresh failed but the broadcast may resume — waiting instead of ending the recording",
 						"err", refreshErr, "jobID", jobCtx.Job.ID)
 					tracker.SetWaitActivity(engine.ActivityWaitingResume)
@@ -285,7 +299,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Return nil to exit the live loop; muxAndFinalize will process
 				// whatever video/audio data was captured before the refresh failed.
-				return result, waitedForResume, nil
+				return result, waitedForResume.value(), nil
 			}
 
 			newQuality := o.extractQualityFromResult(refreshResult)
@@ -297,6 +311,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					"quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 
 				result = refreshResult
+				// Finalize-scoped, not history-scoped: a successful refresh
+				// means the broadcast resumed (or the earlier failure was
+				// transient) — the earlier wait is resolved, so it must not
+				// keep taint incomplete_tail on a clean finish that happens
+				// later. A later unresolved wait re-latches this on its own;
+				// the engine-side latches (FinalizedDuringInterruption)
+				// independently carry evidence for a genuine gave-up-mid-
+				// stall finalize, so clearing this here doesn't affect that.
+				waitedForResume.resolved()
 
 				if monitor != nil {
 					select {
@@ -340,7 +363,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// to the old staging dir and was used only to check quality — discard it.
 			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
 			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
-				return result, waitedForResume, fmt.Errorf("create segment staging dir: %w", err)
+				return result, waitedForResume.value(), fmt.Errorf("create segment staging dir: %w", err)
 			}
 			if shortSegment && segStagingDir == curCtx.StagingDir {
 				// Short-span discard reusing the same index/dir: physically
@@ -372,7 +395,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Return nil to exit the live loop; muxAndFinalize will process
 				// whatever video/audio data was captured in the current staging dir.
-				return result, waitedForResume, nil
+				return result, waitedForResume.value(), nil
 			}
 
 			// The new segment's staging dir is now the current one for all
@@ -385,6 +408,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			currentQuality = newQuality
 			result = refreshResult
+			// See the identical clear + comment at the same-quality
+			// success path above — a successful refresh resolves any
+			// earlier wait-for-resume.
+			waitedForResume.resolved()
 			segmentStartTime = time.Now().Unix()
 			partResumed = false // the next span is watched from birth
 
@@ -455,7 +482,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			utils.Sleep(ctx, streamEndVerifyInterval)
 
 			if ctx.Err() != nil {
-				return result, waitedForResume, ctx.Err()
+				return result, waitedForResume.value(), ctx.Err()
 			}
 
 			// Cancel old downloaders before refreshing
@@ -482,6 +509,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// downloader pointers were swapped, leaving stale VideoFormat metadata
 			// that downstream muxing could pick up as a fallback.
 			result = refreshResult
+			// See the identical clear + comment at the isQualityLost/
+			// quality-change success paths above — a successful refresh
+			// resolves any earlier wait-for-resume.
+			waitedForResume.resolved()
 
 			attachProgress(result)
 
@@ -532,7 +563,7 @@ streamEnded:
 		}
 	}
 
-	return result, waitedForResume, nil
+	return result, waitedForResume.value(), nil
 }
 
 // refreshDownload re-creates downloaders for an in-progress live stream from

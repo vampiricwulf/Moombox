@@ -242,12 +242,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Select download strategy (A1: pass cipher/pot to strategies)
 	var result *DownloadResult
-	// waitedForResume is worker-level Tier 2 evidence: true once the live
-	// loop's shouldWaitForResume branch fires at least once, even if the
-	// broadcast never actually resumed and the loop eventually gave up
-	// (maxConsecutiveLiveChecks exhausted) without any engine downloader
-	// ever latching its own FinalizedDuringInterruption. Set by
-	// runLiveStreamDownload below; always false on the VOD branch.
+	// waitedForResume is worker-level Tier 2 evidence, finalize-scoped: true
+	// when the live loop's shouldWaitForResume branch is CURRENTLY in (or
+	// gave up directly out of) an unresolved wait — cleared again by
+	// runLiveStreamDownload at every later successful refresh, so a
+	// broadcast that actually resumed doesn't permanently taint a clean
+	// finish. Set by runLiveStreamDownload below; always false on the VOD
+	// branch.
 	var waitedForResume bool
 
 	strategy, err := selectDownloadStrategy(isVod, videoInfo)
@@ -749,14 +750,18 @@ func computeIncompleteTail(videoBehind, audioBehind, interrupted bool) bool {
 // re-deriving.
 //
 // workerWaitedForResume is worker-level Tier 2 evidence (only ever true
-// from the live branch): the live loop's shouldWaitForResume branch fired
-// at least once. This is deliberately SEPARATE from
-// downloaderInterrupted's engine-latched evidence
+// from the live branch), FINALIZE-scoped: true when the live loop's
+// shouldWaitForResume branch is still unresolved at the moment the loop
+// gives up — NOT "fired at some point during this call" (runLiveStreamDownload
+// clears it again at every later successful refresh, so a broadcast that
+// actually resumed doesn't taint a clean finish). This is deliberately
+// SEPARATE from downloaderInterrupted's engine-latched evidence
 // (FinalizedDuringInterruption) — a live loop that repeatedly hit
 // ErrQualityLost/refresh-failure and waited via shouldWaitForResume, then
-// eventually gave up when maxConsecutiveLiveChecks exhausted, never once
-// reaches the engine's own stallForPossibleResume on any downloader (the
-// loop dies from the OUTSIDE, not from an engine-side budget expiry), so
+// eventually gave up when maxConsecutiveLiveChecks exhausted without an
+// intervening successful refresh, never once reaches the engine's own
+// stallForPossibleResume on any downloader (the loop dies from the
+// OUTSIDE, not from an engine-side budget expiry), so
 // FinalizedDuringInterruption stays false on every downloader even though
 // the job genuinely waited for a resume that never came. Without ORing
 // this in, that case would self-clear incomplete_tail and let ordinary

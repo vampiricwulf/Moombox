@@ -163,6 +163,29 @@ func shouldWaitForResume(refreshErr error, signalFresh bool, mayResume func() bo
 	return mayResume != nil && mayResume()
 }
 
+// resumeWaitLatch tracks runLiveStreamDownload's worker-level Tier 2
+// evidence for one live-loop call — FINALIZE-scoped, not history-scoped:
+// true only while the loop is CURRENTLY in (or gives up directly out of)
+// an unresolved wait-for-resume, not "a wait fired at some point during
+// this call."
+//
+// wait() latches it true — called where shouldWaitForResume's branch
+// fires. resolved() clears it — called at every point a SUBSEQUENT
+// refreshDownload SUCCEEDS (`result = refreshResult`), because a
+// broadcast that actually resumed, or a transient failure that
+// self-healed, must not permanently taint a clean multi-hour finish with
+// incomplete_tail=true. A later unresolved wait calls wait() again on its
+// own. value() reads the final state for runLiveStreamDownload's return —
+// threaded into finalizeIncompleteTail by the caller.
+//
+// The zero value starts not-waiting (false), matching a call that never
+// takes the wait branch at all.
+type resumeWaitLatch struct{ waiting bool }
+
+func (l *resumeWaitLatch) wait()       { l.waiting = true }
+func (l *resumeWaitLatch) resolved()   { l.waiting = false }
+func (l *resumeWaitLatch) value() bool { return l.waiting }
+
 // isAuthWalledPlayability reports whether err is one of the playability
 // errors that make YouTube withhold formats/streamingData from an
 // UNAUTHENTICATED (cookieless) request even for an otherwise perfectly
