@@ -78,6 +78,11 @@ type ChatDownloader struct {
 	// calling recoverStaleContinuation. Only set in tests; nil in production.
 	testRecoveryOverride func(ctx context.Context) bool
 
+	// testBackoffOverride, when > 0, replaces the computed exponential-backoff
+	// duration in handleFetchError so tests don't have to sleep for real
+	// (5s-60s) intervals. Only set in tests; zero (disabled) in production.
+	testBackoffOverride time.Duration
+
 	OnStart  func(messageCount int, resuming bool)
 	OnFinish func()
 	OnError  func(err error)
@@ -520,7 +525,11 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 		maxBackoff = 60000
 	}
 	backoffMs := min(5000*(*consecutiveErrors), maxBackoff)
-	cd.sleep(ctx, time.Duration(backoffMs)*time.Millisecond)
+	backoff := time.Duration(backoffMs) * time.Millisecond
+	if cd.testBackoffOverride > 0 {
+		backoff = cd.testBackoffOverride
+	}
+	cd.sleep(ctx, backoff)
 	return false
 }
 

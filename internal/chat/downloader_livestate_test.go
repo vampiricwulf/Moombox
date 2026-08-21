@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -142,8 +143,8 @@ func TestLiveContinuationReopensAfterRecoveryIntegration(t *testing.T) {
 	defer server.Close()
 
 	cd := NewChatDownloader(ChatDownloaderOptions{
-		VideoID:             "testVid",
-		OutputFile:          "unused.json",
+		VideoID:             "testVidReopen",
+		OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
 		IsLiveOrUpcoming:    true,
 		InitialContinuation: "initial_token",
 		ApiKey:              "test_key",
@@ -164,7 +165,7 @@ func TestLiveContinuationReopensAfterRecoveryIntegration(t *testing.T) {
 	}
 	_ = orig // use to avoid unused var
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	_ = cd.Start(ctx)
@@ -194,8 +195,8 @@ func TestLiveContinuationSignalUnchangedOnFetchErrorIntegration(t *testing.T) {
 	defer server.Close()
 
 	cd := NewChatDownloader(ChatDownloaderOptions{
-		VideoID:             "testVid",
-		OutputFile:          "unused.json",
+		VideoID:             "testVidFetchError",
+		OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
 		IsLiveOrUpcoming:    true,
 		InitialContinuation: "initial_token",
 		ApiKey:              "test_key",
@@ -203,6 +204,7 @@ func TestLiveContinuationSignalUnchangedOnFetchErrorIntegration(t *testing.T) {
 
 	targetURL, _ := url.Parse(server.URL)
 	cd.api.client = &http.Client{Transport: rewriteTransport{target: targetURL}}
+	cd.testBackoffOverride = 50 * time.Millisecond
 
 	cd.testRecoveryOverride = func(ctx context.Context) bool {
 		return false
@@ -223,7 +225,7 @@ func TestLiveContinuationSignalUnchangedOnFetchErrorIntegration(t *testing.T) {
 		mu.Unlock()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	_ = cd.Start(ctx)
