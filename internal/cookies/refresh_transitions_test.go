@@ -1,6 +1,7 @@
 package cookies
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -199,4 +200,95 @@ func TestRefreshServiceStopBeforeStartIsSafe(t *testing.T) {
 	rs := newTransitionService(nil)
 	rs.Stop() // no panic
 	rs.Stop() // double-stop safe
+}
+
+// TestShouldFireRecovery table-tests the extracted decision helper behind
+// the OnRecoveryNeeded branch in doRefresh. checkAndRefreshYouTube and
+// checkTwitchAuth make real HTTP calls with no stub hook, so this is the
+// package's established fallback for testing the decision without a
+// network seam (see refresh.go doRefresh comment above the
+// shouldFireRecovery call sites).
+//
+// Field case 2026-08-20: youtube=false on every half-hourly check all day,
+// zero recovery attempts, zero notifications — auth was dead before the
+// process even started, so the witnessed-transition condition
+// (hasChecked && prevAuth) never fired. The "first conclusive check"
+// case below is what catches that.
+func TestShouldFireRecovery(t *testing.T) {
+	netErr := errors.New("network error")
+
+	tests := []struct {
+		name       string
+		hasChecked bool
+		prevAuth   bool
+		nowAuth    bool
+		checkErr   error
+		want       bool
+	}{
+		{
+			name:       "first check dead auth fires",
+			hasChecked: false,
+			prevAuth:   false, // zero value: never seeded
+			nowAuth:    false,
+			checkErr:   nil,
+			want:       true,
+		},
+		{
+			name:       "first check dead auth with network error does not fire",
+			hasChecked: false,
+			prevAuth:   false,
+			nowAuth:    false,
+			checkErr:   netErr,
+			want:       false,
+		},
+		{
+			name:       "first check healthy never fires",
+			hasChecked: false,
+			prevAuth:   false,
+			nowAuth:    true,
+			checkErr:   nil,
+			want:       false,
+		},
+		{
+			name:       "second check same dead state does not re-fire",
+			hasChecked: true,
+			prevAuth:   false, // previous check already recorded not-authed
+			nowAuth:    false,
+			checkErr:   nil,
+			want:       false,
+		},
+		{
+			name:       "witnessed transition still fires",
+			hasChecked: true,
+			prevAuth:   true, // was authed on the previous check
+			nowAuth:    false,
+			checkErr:   nil,
+			want:       true,
+		},
+		{
+			name:       "witnessed transition with network error does not fire",
+			hasChecked: true,
+			prevAuth:   true,
+			nowAuth:    false,
+			checkErr:   netErr,
+			want:       false,
+		},
+		{
+			name:       "subsequent check healthy never fires",
+			hasChecked: true,
+			prevAuth:   true,
+			nowAuth:    true,
+			checkErr:   nil,
+			want:       false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldFireRecovery(tc.hasChecked, tc.prevAuth, tc.nowAuth, tc.checkErr)
+			if got != tc.want {
+				t.Errorf("shouldFireRecovery(hasChecked=%v, prevAuth=%v, nowAuth=%v, checkErr=%v) = %v, want %v",
+					tc.hasChecked, tc.prevAuth, tc.nowAuth, tc.checkErr, got, tc.want)
+			}
+		})
+	}
 }

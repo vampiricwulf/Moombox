@@ -278,15 +278,21 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 
 	// Detect auth loss transitions: previously authenticated -> not authenticated,
 	// and the failure is genuine auth loss (err == nil), not a network error.
-	// Only trigger after the first check so we can distinguish "was authed" from "never checked".
-	if hasChecked && rs.OnRecoveryNeeded != nil {
-		// YouTube: was authenticated, now not authenticated, and it's a genuine auth failure (no network error)
-		if prevYT && !ytAuth && ytErr == nil {
+	//
+	// Startup case: auth already dead when the process began never produces
+	// a witnessed transition, so it previously stayed silent forever
+	// (field case 2026-08-20: youtube=false on every check, all day, no
+	// recovery, no notification). The first CONCLUSIVE check that finds a
+	// platform unauthenticated fires the same recovery path once;
+	// subsequent checks return to transition-only. shouldFireRecovery
+	// encodes both cases so the decision can be table-tested without a
+	// network seam.
+	if rs.OnRecoveryNeeded != nil {
+		if shouldFireRecovery(hasChecked, prevYT, ytAuth, ytErr) {
 			rs.logger.Warn("youtube auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("youtube")
 		}
-		// Twitch: was authenticated, now not authenticated, and it's a genuine auth failure (no network error)
-		if prevTW && !twAuth && twErr == nil {
+		if shouldFireRecovery(hasChecked, prevTW, twAuth, twErr) {
 			rs.logger.Warn("twitch auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("twitch")
 		}
@@ -308,6 +314,36 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	rs.logger.Debug("cookie refresh done",
 		"youtube", ytAuth,
 		"twitch", twAuth)
+}
+
+// shouldFireRecovery reports whether OnRecoveryNeeded should fire for a
+// single platform's just-completed check. Pulled out of doRefresh as a pure
+// function so the decision can be table-tested without a network seam
+// (checkAndRefreshYouTube/checkTwitchAuth make real HTTP calls and have no
+// stub hook).
+//
+// hasChecked and prevAuth are the pre-check snapshot values (read under
+// rs.mu before rs.hasCheckedOnce/rs.prev*Auth were updated for this check).
+// nowAuth/checkErr are this check's result. Two cases fire:
+//
+//   - Witnessed transition: hasChecked is true and prevAuth was true — the
+//     platform was authenticated on the previous check and isn't now.
+//   - Startup dead-auth: hasChecked is false, meaning this is the first
+//     conclusive check the service has ever completed. Auth that was
+//     already dead when the process started never produces a witnessed
+//     transition (there's no "prev" state to fall from), so without this
+//     case recovery silently never fires — field case 2026-08-20:
+//     youtube=false on every half-hourly check all day, zero recovery
+//     attempts, zero notifications.
+//
+// In both cases checkErr must be nil (a network error is not auth loss) and
+// nowAuth must be false (the platform must actually be unauthenticated).
+func shouldFireRecovery(hasChecked, prevAuth, nowAuth bool, checkErr error) bool {
+	if checkErr != nil || nowAuth {
+		return false
+	}
+	firstConclusive := !hasChecked
+	return (hasChecked && prevAuth) || firstConclusive
 }
 
 // setYouTubeHeaders applies the standard YouTube API headers for cookie-authenticated requests.
