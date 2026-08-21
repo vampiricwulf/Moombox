@@ -299,10 +299,16 @@ func TestReplaceJobSegmentsEmptySlice(t *testing.T) {
 	}
 }
 
-// TestReplaceJobSegmentsRollback confirms a failed insert mid-transaction
-// rolls back the whole replace, leaving the original rows unchanged. The
-// second row's JobID references a job that does not exist, tripping the
-// segments.job_id foreign key (foreign_keys=on per the DSN in database.go).
+// TestReplaceJobSegmentsRollback confirms a replace against a jobID that
+// does not reference an existing job fails atomically (segments.job_id
+// foreign key, foreign_keys=on per the DSN in database.go) and leaves every
+// other job's rows completely untouched — nothing leaks into segments under
+// the nonexistent job_id, and the DELETE (which matched zero rows, since
+// "yt_ghost" has none) has no observable effect either. Since the INSERT now
+// binds the jobID parameter (not each row's own JobID field — see
+// TestReplaceJobSegmentsCrossJobRows for that fix), every row fails
+// identically here; that still exercises rollback leaving prior state
+// unchanged.
 func TestReplaceJobSegmentsRollback(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -315,23 +321,88 @@ func TestReplaceJobSegmentsRollback(t *testing.T) {
 	db.AddSegment(&Segment{JobID: "yt_rollback", SegmentIndex: 1, Quality: "720p60", Filename: "b.mp4"})
 
 	badRows := []Segment{
-		{JobID: "yt_rollback", SegmentIndex: 0, Quality: "1080p60", Filename: "merged.mp4"},
-		{JobID: "yt_does_not_exist", SegmentIndex: 1, Quality: "720p60", Filename: "orphan.mp4"},
+		{SegmentIndex: 0, Quality: "1080p60", Filename: "x.mp4"},
+		{SegmentIndex: 1, Quality: "720p60", Filename: "y.mp4"},
 	}
 
-	if err := db.ReplaceJobSegments("yt_rollback", badRows); err == nil {
-		t.Fatal("expected error from foreign key violation, got nil")
+	if err := db.ReplaceJobSegments("yt_ghost", badRows); err == nil {
+		t.Fatal("expected error from foreign key violation against nonexistent job, got nil")
 	}
 
+	ghostSegs, err := db.GetSegments("yt_ghost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ghostSegs) != 0 {
+		t.Errorf("segments under nonexistent job = %d, want 0 (failed insert must not leak)", len(ghostSegs))
+	}
+
+	// Unrelated job's rows must be completely unaffected by the failed call.
 	segs, err := db.GetSegments("yt_rollback")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(segs) != 2 {
-		t.Fatalf("segments after failed replace = %d, want 2 (unchanged)", len(segs))
+		t.Fatalf("unrelated job segments after failed replace = %d, want 2 (unchanged)", len(segs))
 	}
 	if segs[0].Filename != "a.mp4" || segs[1].Filename != "b.mp4" {
-		t.Errorf("segments after failed replace = %+v, want original rows preserved", segs)
+		t.Errorf("unrelated job segments after failed replace = %+v, want original rows preserved", segs)
+	}
+}
+
+// TestReplaceJobSegmentsCrossJobRows pins the source-of-truth fix: the
+// INSERT must bind the jobID PARAMETER, not each row's own JobID field.
+// Otherwise a row whose JobID field names a DIFFERENT existing job would
+// delete jobA's rows but insert them under jobB — silent cross-job data
+// corruption with a nil error. Seeds two real jobs, calls
+// ReplaceJobSegments(jobA, rows stamped with jobB's ID), and asserts the
+// rows land under jobA (re-stamped, including write-back onto the caller's
+// slice) while jobB's original row is completely untouched.
+func TestReplaceJobSegmentsCrossJobRows(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.AddJob(&Job{ID: "yt_jobA", VideoID: "jobA", URL: "u", Status: StatusMuxing})
+	db.AddJob(&Job{ID: "yt_jobB", VideoID: "jobB", URL: "u", Status: StatusMuxing})
+	db.AddSegment(&Segment{JobID: "yt_jobA", SegmentIndex: 0, Quality: "1080p60", Filename: "a-orig.mp4"})
+	db.AddSegment(&Segment{JobID: "yt_jobB", SegmentIndex: 0, Quality: "1080p60", Filename: "b-orig.mp4"})
+
+	// Rows stamped with jobB's ID, but passed to ReplaceJobSegments for jobA.
+	stampedForB := []Segment{
+		{JobID: "yt_jobB", SegmentIndex: 0, Quality: "1080p60", Filename: "merged.mp4"},
+	}
+
+	if err := db.ReplaceJobSegments("yt_jobA", stampedForB); err != nil {
+		t.Fatalf("ReplaceJobSegments: %v", err)
+	}
+
+	// jobA must have the merged row, correctly re-stamped to jobA.
+	segsA, err := db.GetSegments("yt_jobA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segsA) != 1 || segsA[0].Filename != "merged.mp4" {
+		t.Fatalf("jobA segments = %+v, want 1 row (merged.mp4)", segsA)
+	}
+	if segsA[0].JobID != "yt_jobA" {
+		t.Errorf("jobA segment JobID = %q, want yt_jobA (must not inherit the stamped row's JobID)", segsA[0].JobID)
+	}
+
+	// jobB's original row must be completely untouched.
+	segsB, err := db.GetSegments("yt_jobB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segsB) != 1 || segsB[0].Filename != "b-orig.mp4" {
+		t.Errorf("jobB segments = %+v, want unchanged 1 row (b-orig.mp4)", segsB)
+	}
+
+	// The caller's slice must be corrected too (write-back).
+	if stampedForB[0].JobID != "yt_jobA" {
+		t.Errorf("caller slice JobID not written back: got %q, want yt_jobA", stampedForB[0].JobID)
 	}
 }
 
