@@ -43,9 +43,14 @@ import (
 // mayResume (built once by ExecuteWithChat via buildMayResume) is installed
 // as engine.SegmentDownloader.MayResume on every downloader this function
 // attaches progress to — the initial result AND every refresh/split
-// replacement, since attachProgress is the single call site for both. VOD
-// downloads never call this function, so MayResume is never set there —
-// only live YouTube downloads get the interruption stall.
+// replacement, since attachProgress is the single call site for both,
+// via attachMayResume. VOD downloads never call this function, so
+// MayResume is never set there — only live YouTube downloads get the
+// interruption stall. attachMayResume itself further gates on
+// jobCtx.Config.InterruptionTimeout > 0 — a job with the stall disabled
+// (config contract: 0 = finalize must never wait) gets a nil MayResume,
+// not a non-nil one with a zero (i.e. unbounded, in engine semantics)
+// ceiling.
 func (o *DownloadOrchestrator) runLiveStreamDownload(
 	ctx context.Context,
 	jobCtx *JobContext,
@@ -119,7 +124,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					origOnProgress(p)
 				}
 			}
-			res.VideoDownloader.MayResume = mayResume
+			attachMayResume(res.VideoDownloader, mayResume, jobCtx.Config.InterruptionTimeout)
 		}
 		if res.AudioDownloader != nil {
 			tracker.AttachAudioDownloader(res.AudioDownloader)
@@ -130,7 +135,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					origOnProgress(p)
 				}
 			}
-			res.AudioDownloader.MayResume = mayResume
+			attachMayResume(res.AudioDownloader, mayResume, jobCtx.Config.InterruptionTimeout)
 		}
 	}
 
@@ -198,12 +203,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				return result, fmt.Errorf("refresh after quality change: %w", err)
 			}
 			// Interruption spec Tier 1 evidence: a 403-family interruption
-			// often exits the downloader via ErrQualityLost into exactly this
-			// refresh rather than stalling inside the engine, so this
-			// player-response fetch — feeding the refreshDownload call below
-			// — must observe the signature too, or the signal would go stale
-			// mid-interruption every time this path (rather than
-			// refreshGvsCredentials) is the one that keeps firing.
+			// (handleGoneError) exits the downloader via ErrQualityLost into
+			// exactly this refresh as soon as the engine's own
+			// CheckStreamStatus consult confirms "still live" — it does not
+			// wait for the engine's internal stall the way a 500-family
+			// error (handleHTTPError) does. So THIS player-response fetch,
+			// immediately below, is very often the freshest look at the
+			// signature this job gets; observe it so shouldWaitForResume
+			// (right after refreshDownload) sees it.
 			jobCtx.Interruption.observe(freshInfo)
 
 			// Cancel old downloaders (safe to call multiple times)
@@ -235,6 +242,23 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			curCtx.AudioStartSeq = 0
 
 			if refreshErr != nil {
+				// The interruption signature (live + zero formats) makes
+				// EVERY strategy's format selection fail on freshInfo — so a
+				// refresh failure here is exactly what an interruption looks
+				// like, not just an ended stream. Without this check, that
+				// failure used to be treated as "the stream is done" and
+				// finalized immediately, discarding a recording that could
+				// still resume. shouldWaitForResume falls back to the old
+				// immediate-return behavior when the stall is disabled
+				// (config InterruptionTimeout <= 0) or there's no resume
+				// evidence at all.
+				if shouldWaitForResume(refreshErr, jobCtx.Interruption.fresh(), mayResume, jobCtx.Config.InterruptionTimeout) {
+					o.logger.Warn("refresh failed but the broadcast may resume — waiting instead of ending the recording",
+						"err", refreshErr, "jobID", jobCtx.Job.ID)
+					tracker.SetWaitActivity(engine.ActivityWaitingResume)
+					utils.Sleep(ctx, streamEndVerifyInterval)
+					continue
+				}
 				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Return nil to exit the live loop; muxAndFinalize will process
 				// whatever video/audio data was captured before the refresh failed.

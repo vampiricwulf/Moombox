@@ -288,10 +288,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
-				if err != nil {
-					return false, err
-				}
-				return info.StreamStatus != youtube.StreamLive, nil
+				return observeYouTubeStatusProbe(job, info, err)
 			},
 		})
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
@@ -321,10 +318,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
-				if err != nil {
-					return false, err
-				}
-				return info.StreamStatus != youtube.StreamLive, nil
+				return observeYouTubeStatusProbe(job, info, err)
 			},
 		})
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {

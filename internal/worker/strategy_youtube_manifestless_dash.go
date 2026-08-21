@@ -306,10 +306,7 @@ func DownloadManifestlessDash(
 			},
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
-				if err != nil {
-					return false, err
-				}
-				return info.StreamStatus != youtube.StreamLive, nil
+				return observeYouTubeStatusProbe(job, info, err)
 			},
 		})
 		// Same 403 invalidation chain as DASH-manifest path, plus a fresh-URL
@@ -368,10 +365,7 @@ func DownloadManifestlessDash(
 			},
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
-				if err != nil {
-					return false, err
-				}
-				return info.StreamStatus != youtube.StreamLive, nil
+				return observeYouTubeStatusProbe(job, info, err)
 			},
 		})
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
