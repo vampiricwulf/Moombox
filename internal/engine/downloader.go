@@ -255,6 +255,12 @@ func (a *atomicTime) Load() time.Time {
 func (a *atomicTime) StoreNow()            { a.v.Store(time.Now().UnixNano()) }
 func (a *atomicTime) Since() time.Duration { return time.Since(a.Load()) }
 
+// Clear resets the atomicTime to the zero value (Load().IsZero() becomes
+// true). NOT the same as Store(time.Time{}): time.Time{}.UnixNano() is a
+// large negative number, not 0, so that Store call would NOT produce a zero
+// value here — only a direct v.Store(0) does.
+func (a *atomicTime) Clear() { a.v.Store(0) }
+
 // TryClaim atomically claims the next slot when at least cooldown has
 // elapsed since the last claim, returning true to exactly ONE caller per
 // window. A plain Since()+StoreNow() pair is check-then-act: concurrent
