@@ -30,19 +30,31 @@ func newTransitionService(platforms []string) *RefreshService {
 // TestSetExpectedPlatformsSeedsState verifies SetExpectedPlatforms
 // flips the prev-auth flags so the FIRST refresh check can detect
 // auth loss without a "first check is non-conclusive" caveat.
+//
+// It also pins the seeding ASYMMETRY between hasCheckedOnce (service-wide:
+// true as soon as ANY platform is in the list — see "unknown platform
+// ignored" and "youtube seeds yt only" below, where hasCheckedOnce is true
+// but Twitch was never seeded) and ytEverConcluded/twEverConcluded
+// (strictly per-platform). shouldFireRecovery must be driven by the
+// per-platform fields, not hasCheckedOnce, or a platform absent from the
+// persisted list silently never gets a first-conclusive-check recovery
+// fire while a sibling platform is present (see
+// TestPerPlatformEverConcludedNotMaskedBySibling below).
 func TestSetExpectedPlatformsSeedsState(t *testing.T) {
 	tests := []struct {
-		name        string
-		platforms   []string
-		wantYTPrev  bool
-		wantTWPrev  bool
-		wantChecked bool
+		name            string
+		platforms       []string
+		wantYTPrev      bool
+		wantTWPrev      bool
+		wantChecked     bool
+		wantYTConcluded bool
+		wantTWConcluded bool
 	}{
-		{"empty leaves all false", nil, false, false, false},
-		{"youtube seeds yt only", []string{"youtube"}, true, false, true},
-		{"twitch seeds tw only", []string{"twitch"}, false, true, true},
-		{"both seed both", []string{"youtube", "twitch"}, true, true, true},
-		{"unknown platform ignored", []string{"vimeo"}, false, false, true},
+		{"empty leaves all false", nil, false, false, false, false, false},
+		{"youtube seeds yt only", []string{"youtube"}, true, false, true, true, false},
+		{"twitch seeds tw only", []string{"twitch"}, false, true, true, false, true},
+		{"both seed both", []string{"youtube", "twitch"}, true, true, true, true, true},
+		{"unknown platform ignored", []string{"vimeo"}, false, false, true, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +63,8 @@ func TestSetExpectedPlatformsSeedsState(t *testing.T) {
 			gotYT := rs.prevYouTubeAuth
 			gotTW := rs.prevTwitchAuth
 			gotChecked := rs.hasCheckedOnce
+			gotYTConcluded := rs.ytEverConcluded
+			gotTWConcluded := rs.twEverConcluded
 			rs.mu.RUnlock()
 			if gotYT != tc.wantYTPrev {
 				t.Errorf("prevYouTubeAuth: want %v, got %v", tc.wantYTPrev, gotYT)
@@ -61,7 +75,51 @@ func TestSetExpectedPlatformsSeedsState(t *testing.T) {
 			if gotChecked != tc.wantChecked {
 				t.Errorf("hasCheckedOnce: want %v, got %v", tc.wantChecked, gotChecked)
 			}
+			if gotYTConcluded != tc.wantYTConcluded {
+				t.Errorf("ytEverConcluded: want %v, got %v", tc.wantYTConcluded, gotYTConcluded)
+			}
+			if gotTWConcluded != tc.wantTWConcluded {
+				t.Errorf("twEverConcluded: want %v, got %v", tc.wantTWConcluded, gotTWConcluded)
+			}
 		})
+	}
+}
+
+// TestPerPlatformEverConcludedNotMaskedBySibling is the regression pin for
+// the seeding-asymmetry bug: Platforms=["youtube"] seeds hasCheckedOnce
+// service-wide (from YouTube's presence alone) while Twitch cookies can
+// exist on disk but were never verified. If shouldFireRecovery were driven
+// by the shared hasCheckedOnce instead of the per-platform twEverConcluded,
+// Twitch's actual first check (dead auth, no network error) would be
+// wrongly classified as a "subsequent" check with prevTwitchAuth still the
+// false zero value — the witnessed-transition condition
+// (everConcluded && prevAuth) doesn't hold either, so recovery would
+// silently never fire for Twitch. The per-platform field must fire.
+func TestPerPlatformEverConcludedNotMaskedBySibling(t *testing.T) {
+	rs := newTransitionService([]string{"youtube"})
+
+	rs.mu.RLock()
+	hasChecked := rs.hasCheckedOnce
+	twConcluded := rs.twEverConcluded
+	prevTW := rs.prevTwitchAuth
+	rs.mu.RUnlock()
+
+	if !hasChecked {
+		t.Fatalf("hasCheckedOnce: want true (seeded by youtube's presence), got false")
+	}
+	if twConcluded {
+		t.Fatalf("twEverConcluded: want false (twitch was never seeded or checked), got true")
+	}
+
+	// Twitch's real first conclusive check: dead auth, no network error.
+	if !shouldFireRecovery(twConcluded, prevTW, false, nil) {
+		t.Error("shouldFireRecovery(twEverConcluded, ...): want true for twitch's first-ever dead check, got false")
+	}
+
+	// Demonstrate what the bug looked like: driving the decision off the
+	// shared hasCheckedOnce instead would wrongly suppress it.
+	if shouldFireRecovery(hasChecked, prevTW, false, nil) {
+		t.Error("shouldFireRecovery(hasCheckedOnce, ...) unexpectedly fired — this was the buggy shared-flag behavior, not what we assert as correct")
 	}
 }
 
@@ -209,85 +267,90 @@ func TestRefreshServiceStopBeforeStartIsSafe(t *testing.T) {
 // network seam (see refresh.go doRefresh comment above the
 // shouldFireRecovery call sites).
 //
+// The first parameter is deliberately PER-PLATFORM (ytEverConcluded /
+// twEverConcluded on RefreshService), not the service-wide hasCheckedOnce —
+// see TestPerPlatformEverConcludedNotMaskedBySibling for why the shared
+// flag is wrong here.
+//
 // Field case 2026-08-20: youtube=false on every half-hourly check all day,
 // zero recovery attempts, zero notifications — auth was dead before the
 // process even started, so the witnessed-transition condition
-// (hasChecked && prevAuth) never fired. The "first conclusive check"
+// (everConcluded && prevAuth) never fired. The "first conclusive check"
 // case below is what catches that.
 func TestShouldFireRecovery(t *testing.T) {
 	netErr := errors.New("network error")
 
 	tests := []struct {
-		name       string
-		hasChecked bool
-		prevAuth   bool
-		nowAuth    bool
-		checkErr   error
-		want       bool
+		name          string
+		everConcluded bool
+		prevAuth      bool
+		nowAuth       bool
+		checkErr      error
+		want          bool
 	}{
 		{
-			name:       "first check dead auth fires",
-			hasChecked: false,
-			prevAuth:   false, // zero value: never seeded
-			nowAuth:    false,
-			checkErr:   nil,
-			want:       true,
+			name:          "first check dead auth fires",
+			everConcluded: false,
+			prevAuth:      false, // zero value: never seeded
+			nowAuth:       false,
+			checkErr:      nil,
+			want:          true,
 		},
 		{
-			name:       "first check dead auth with network error does not fire",
-			hasChecked: false,
-			prevAuth:   false,
-			nowAuth:    false,
-			checkErr:   netErr,
-			want:       false,
+			name:          "first check dead auth with network error does not fire",
+			everConcluded: false,
+			prevAuth:      false,
+			nowAuth:       false,
+			checkErr:      netErr,
+			want:          false,
 		},
 		{
-			name:       "first check healthy never fires",
-			hasChecked: false,
-			prevAuth:   false,
-			nowAuth:    true,
-			checkErr:   nil,
-			want:       false,
+			name:          "first check healthy never fires",
+			everConcluded: false,
+			prevAuth:      false,
+			nowAuth:       true,
+			checkErr:      nil,
+			want:          false,
 		},
 		{
-			name:       "second check same dead state does not re-fire",
-			hasChecked: true,
-			prevAuth:   false, // previous check already recorded not-authed
-			nowAuth:    false,
-			checkErr:   nil,
-			want:       false,
+			name:          "second check same dead state does not re-fire",
+			everConcluded: true,
+			prevAuth:      false, // previous check already recorded not-authed
+			nowAuth:       false,
+			checkErr:      nil,
+			want:          false,
 		},
 		{
-			name:       "witnessed transition still fires",
-			hasChecked: true,
-			prevAuth:   true, // was authed on the previous check
-			nowAuth:    false,
-			checkErr:   nil,
-			want:       true,
+			name:          "witnessed transition still fires",
+			everConcluded: true,
+			prevAuth:      true, // was authed on the previous check
+			nowAuth:       false,
+			checkErr:      nil,
+			want:          true,
 		},
 		{
-			name:       "witnessed transition with network error does not fire",
-			hasChecked: true,
-			prevAuth:   true,
-			nowAuth:    false,
-			checkErr:   netErr,
-			want:       false,
+			name:          "witnessed transition with network error does not fire",
+			everConcluded: true,
+			prevAuth:      true,
+			nowAuth:       false,
+			checkErr:      netErr,
+			want:          false,
 		},
 		{
-			name:       "subsequent check healthy never fires",
-			hasChecked: true,
-			prevAuth:   true,
-			nowAuth:    true,
-			checkErr:   nil,
-			want:       false,
+			name:          "subsequent check healthy never fires",
+			everConcluded: true,
+			prevAuth:      true,
+			nowAuth:       true,
+			checkErr:      nil,
+			want:          false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldFireRecovery(tc.hasChecked, tc.prevAuth, tc.nowAuth, tc.checkErr)
+			got := shouldFireRecovery(tc.everConcluded, tc.prevAuth, tc.nowAuth, tc.checkErr)
 			if got != tc.want {
-				t.Errorf("shouldFireRecovery(hasChecked=%v, prevAuth=%v, nowAuth=%v, checkErr=%v) = %v, want %v",
-					tc.hasChecked, tc.prevAuth, tc.nowAuth, tc.checkErr, got, tc.want)
+				t.Errorf("shouldFireRecovery(everConcluded=%v, prevAuth=%v, nowAuth=%v, checkErr=%v) = %v, want %v",
+					tc.everConcluded, tc.prevAuth, tc.nowAuth, tc.checkErr, got, tc.want)
 			}
 		})
 	}

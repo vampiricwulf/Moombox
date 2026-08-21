@@ -78,6 +78,22 @@ type RefreshService struct {
 	prevTwitchAuth  bool
 	hasCheckedOnce  bool
 
+	// ytEverConcluded / twEverConcluded track, per platform, whether THAT
+	// platform has ever completed a conclusive (checkErr == nil) check.
+	// This is deliberately NOT the same thing as hasCheckedOnce, which is
+	// service-wide: Cookies.Platforms is a monotonic per-platform union
+	// that only grows on successful verification, so SetExpectedPlatforms
+	// can seed hasCheckedOnce=true from YouTube's presence alone while
+	// Twitch cookies exist on disk but were never verified. Using the
+	// shared hasCheckedOnce for the "first conclusive check" decision in
+	// shouldFireRecovery would then treat Twitch's actual first check as a
+	// "subsequent" one (prevTwitchAuth is the false zero value, so the
+	// witnessed-transition condition never fires either) — silently
+	// swallowing recovery for any platform absent from the persisted list
+	// while a sibling platform is present. See shouldFireRecovery.
+	ytEverConcluded bool
+	twEverConcluded bool
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -130,8 +146,10 @@ func (rs *RefreshService) SetExpectedPlatforms(platforms []string) {
 		switch p {
 		case "youtube":
 			rs.prevYouTubeAuth = true
+			rs.ytEverConcluded = true
 		case "twitch":
 			rs.prevTwitchAuth = true
+			rs.twEverConcluded = true
 		}
 	}
 	// If we have persisted platforms, consider the first check as a "subsequent"
@@ -243,6 +261,8 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	prevYT := rs.prevYouTubeAuth
 	prevTW := rs.prevTwitchAuth
 	hasChecked := rs.hasCheckedOnce
+	ytConcluded := rs.ytEverConcluded
+	twConcluded := rs.twEverConcluded
 
 	rs.status = AuthStatus{
 		YouTubeAuthenticated: ytAuth,
@@ -255,11 +275,17 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 
 	// Update previous auth state tracking.
 	// Only update previous state when the check was conclusive (no network error).
+	// A network-error check deliberately does NOT mark the platform
+	// "concluded" — the next conclusive check still counts as that
+	// platform's first, so shouldFireRecovery's startup-dead-auth case
+	// still applies to it.
 	if ytErr == nil {
 		rs.prevYouTubeAuth = ytAuth
+		rs.ytEverConcluded = true
 	}
 	if twErr == nil {
 		rs.prevTwitchAuth = twAuth
+		rs.twEverConcluded = true
 	}
 	rs.hasCheckedOnce = true
 
@@ -287,12 +313,21 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	// subsequent checks return to transition-only. shouldFireRecovery
 	// encodes both cases so the decision can be table-tested without a
 	// network seam.
+	//
+	// Note this uses the PER-PLATFORM ytConcluded/twConcluded snapshots,
+	// not the service-wide hasChecked: SetExpectedPlatforms seeds
+	// hasCheckedOnce=true as soon as ANY platform is in the persisted
+	// list, so using the shared flag here would treat a sibling platform's
+	// presence as proof THIS platform was already checked, masking the
+	// same silent-forever bug for whichever platform is absent from the
+	// list (e.g. Platforms=["youtube"] with unverified Twitch cookies on
+	// disk).
 	if rs.OnRecoveryNeeded != nil {
-		if shouldFireRecovery(hasChecked, prevYT, ytAuth, ytErr) {
+		if shouldFireRecovery(ytConcluded, prevYT, ytAuth, ytErr) {
 			rs.logger.Warn("youtube auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("youtube")
 		}
-		if shouldFireRecovery(hasChecked, prevTW, twAuth, twErr) {
+		if shouldFireRecovery(twConcluded, prevTW, twAuth, twErr) {
 			rs.logger.Warn("twitch auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("twitch")
 		}
@@ -322,14 +357,20 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 // (checkAndRefreshYouTube/checkTwitchAuth make real HTTP calls and have no
 // stub hook).
 //
-// hasChecked and prevAuth are the pre-check snapshot values (read under
-// rs.mu before rs.hasCheckedOnce/rs.prev*Auth were updated for this check).
-// nowAuth/checkErr are this check's result. Two cases fire:
+// everConcluded and prevAuth are THIS PLATFORM's pre-check snapshot values
+// (read under rs.mu before rs.ytEverConcluded/rs.twEverConcluded and
+// rs.prev*Auth were updated for this check) — everConcluded must be
+// per-platform, not the service-wide hasCheckedOnce, or one platform's
+// presence in the persisted list masks a sibling platform that was never
+// actually checked (see the ytEverConcluded/twEverConcluded field comment
+// on RefreshService). nowAuth/checkErr are this check's result. Two cases
+// fire:
 //
-//   - Witnessed transition: hasChecked is true and prevAuth was true — the
-//     platform was authenticated on the previous check and isn't now.
-//   - Startup dead-auth: hasChecked is false, meaning this is the first
-//     conclusive check the service has ever completed. Auth that was
+//   - Witnessed transition: everConcluded is true and prevAuth was true —
+//     the platform was authenticated on its previous conclusive check and
+//     isn't now.
+//   - Startup dead-auth: everConcluded is false, meaning this is the first
+//     conclusive check this platform has ever completed. Auth that was
 //     already dead when the process started never produces a witnessed
 //     transition (there's no "prev" state to fall from), so without this
 //     case recovery silently never fires — field case 2026-08-20:
@@ -338,12 +379,12 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 //
 // In both cases checkErr must be nil (a network error is not auth loss) and
 // nowAuth must be false (the platform must actually be unauthenticated).
-func shouldFireRecovery(hasChecked, prevAuth, nowAuth bool, checkErr error) bool {
+func shouldFireRecovery(everConcluded, prevAuth, nowAuth bool, checkErr error) bool {
 	if checkErr != nil || nowAuth {
 		return false
 	}
-	firstConclusive := !hasChecked
-	return (hasChecked && prevAuth) || firstConclusive
+	firstConclusive := !everConcluded
+	return (everConcluded && prevAuth) || firstConclusive
 }
 
 // setYouTubeHeaders applies the standard YouTube API headers for cookie-authenticated requests.
