@@ -266,6 +266,12 @@ func (o *DownloadOrchestrator) keepIncompleteTailProgress(jobID string, updates 
 // finalizeMultiSegmentJob handles the finalization path for jobs with quality-split segments.
 // Individual segment .mp4 files are already muxed; this method copies assets and updates the job.
 func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobCtx *JobContext, segments []database.Segment) error {
+	// Tier 4: opportunistically collapse contiguous same-format parts into
+	// one file BEFORE anything below decides the finalize shape, so a
+	// fully-merged job takes the plain output name (the len==1 check just
+	// below) exactly like a never-split job.
+	segments = o.mergeSameFormatParts(ctx, jobCtx, segments)
+
 	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"status": database.StatusMuxing,
 	})
