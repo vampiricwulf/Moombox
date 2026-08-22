@@ -632,3 +632,28 @@ func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
 	}
 	wantSegments(t, out, 0, head)
 }
+
+// TestNoteOfflineRecoveryRelatchesStallClock pins the offline rule (owner
+// ruling 2026-08-21): a connectivity outage must not consume the
+// interruption ceiling — recovery re-latches an ACTIVE episode's clock to
+// now (mirroring the lastSegTime reset that pauses MaxTimeout) — while a
+// downloader with no episode in progress stays at zero (recovery must never
+// START an episode).
+func TestNoteOfflineRecoveryRelatchesStallClock(t *testing.T) {
+	t.Parallel()
+
+	d := NewSegmentDownloader(DownloaderOptions{OutputFile: "unused"})
+
+	// No episode: recovery keeps the clock zero.
+	d.noteOfflineRecovery()
+	if !d.interruptionStallStart.Load().IsZero() {
+		t.Fatal("recovery started a stall episode on a downloader with none")
+	}
+
+	// Active episode latched 30 minutes ago: recovery re-latches to now.
+	d.interruptionStallStart.Store(time.Now().Add(-30 * time.Minute))
+	d.noteOfflineRecovery()
+	if since := d.interruptionStallStart.Since(); since > 5*time.Second {
+		t.Fatalf("active episode not re-latched: clock still %v old", since)
+	}
+}

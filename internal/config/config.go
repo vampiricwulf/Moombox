@@ -67,14 +67,15 @@ func Defaults() *MoomboxConfig {
 			MembershipDiscovery: boolPtr(true),
 		},
 		Downloader: DownloaderConfig{
-			OutputTemplate:       "${channel}/${start_date} ${title} [${id}]",
-			MaxVideoResolution:   2160,
-			NumParallelDownloads: 10,
-			SegmentWorkers:       12,
-			DownloadChat:         true,
-			Prefer60fps:          true,
-			MaximumTimeout:       600,
-			InterruptionTimeout:  FlexDuration{Value: 120}, // minutes
+			OutputTemplate:              "${channel}/${start_date} ${title} [${id}]",
+			MaxVideoResolution:          2160,
+			NumParallelDownloads:        10,
+			SegmentWorkers:              12,
+			DownloadChat:                true,
+			Prefer60fps:                 true,
+			MaximumTimeout:              600,
+			InterruptionTimeout:         FlexDuration{Value: 120}, // minutes
+			IncompleteStagingExpiryDays: FlexDuration{Value: 7},   // days
 		},
 		Cookies: CookiesConfig{
 			CookieFile:        "./cookies.txt",
@@ -609,6 +610,15 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		fail("downloader.interruption_timeout %v must be >= 0 minutes (0 disables)", d.InterruptionTimeout.Value)
 		if !reportOnly {
 			d.InterruptionTimeout = defaults.Downloader.InterruptionTimeout
+		}
+	}
+
+	// incomplete_staging_expiry_days: 0 = preserve incomplete-tail staging
+	// forever; negative is invalid and normalizes to the default.
+	if d.IncompleteStagingExpiryDays.Value < 0 {
+		fail("downloader.incomplete_staging_expiry_days %v must be >= 0 days (0 preserves forever)", d.IncompleteStagingExpiryDays.Value)
+		if !reportOnly {
+			d.IncompleteStagingExpiryDays = defaults.Downloader.IncompleteStagingExpiryDays
 		}
 	}
 

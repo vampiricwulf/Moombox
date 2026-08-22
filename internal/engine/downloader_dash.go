@@ -433,6 +433,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			// otherwise finalize a behind-head recording on the first
 			// post-reconnect gone instead of granting a fresh budget.
 			d.lastSegTime.StoreNow()
+			d.noteOfflineRecovery()
 			*consecutiveGoneErrors = 0
 			return nil // Continue loop
 		}
@@ -670,6 +671,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 			// outage detected here first would leave lastSegTime aged and could
 			// force-finalize a still-live stream on the next non-gone HTTP error.
 			d.lastSegTime.StoreNow()
+			d.noteOfflineRecovery()
 			d.lastStreamStatusCheck.StoreNow()
 			*sameHeadRetryDelay = 0
 			return nil
@@ -727,6 +729,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 				return err
 			}
 			d.lastSegTime.StoreNow() // reset the timeout clock on recovery
+			d.noteOfflineRecovery()
 			*sameHeadRetryDelay = 0
 			return nil
 		}

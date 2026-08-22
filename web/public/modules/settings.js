@@ -504,6 +504,7 @@ export class SettingsController {
     }
     this.app.setInputValue("cfg-maximum-timeout", config.downloader?.maximum_timeout);
     this.app.setInputValue("cfg-interruption-timeout", config.downloader?.interruption_timeout);
+    this.app.setInputValue("cfg-incomplete-staging-expiry", config.downloader?.incomplete_staging_expiry_days);
 
     // Cookies settings
     this.app.setInputValue("cfg-cookie-file", config.cookies?.cookie_file);
@@ -673,6 +674,7 @@ export class SettingsController {
     const segmentWorkers = this.app.getInputNumber("cfg-segment-workers");
     const maximumTimeout = this.app.getInputNumber("cfg-maximum-timeout");
     const interruptionTimeout = this.app.getInputNumber("cfg-interruption-timeout");
+    const incompleteStagingExpiry = this.app.getInputNumber("cfg-incomplete-staging-expiry");
     const downloadChatSwitch = document.getElementById("cfg-download-chat");
     const downloadChat = downloadChatSwitch ? downloadChatSwitch.checked : true;
     const prefer60fpsSwitch = document.getElementById("cfg-prefer-60fps");
@@ -755,6 +757,7 @@ export class SettingsController {
         prefer_60fps: prefer60fps,
         maximum_timeout: maximumTimeout,
         interruption_timeout: interruptionTimeout,
+        incomplete_staging_expiry_days: incompleteStagingExpiry,
       },
       cookies: {
         cookie_file: cookieFile,

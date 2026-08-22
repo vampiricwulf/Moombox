@@ -493,6 +493,20 @@ func (d *SegmentDownloader) emitActivity(a DownloadActivity) {
 	}
 }
 
+// noteOfflineRecovery re-arms the interruption stall clock after a
+// connectivity outage, alongside the caller's lastSegTime reset (MaxTimeout
+// pauses for offline; owner ruling 2026-08-21 gives the interruption
+// ceiling the same treatment): an ACTIVE stall episode is re-latched to
+// now, so the ceiling measures time actually spent waiting on YouTube —
+// time with no internet is nobody's resume-plausibility evidence. A zero
+// clock (no episode in progress) stays zero: recovery must never START an
+// episode.
+func (d *SegmentDownloader) noteOfflineRecovery() {
+	if !d.interruptionStallStart.Load().IsZero() {
+		d.interruptionStallStart.StoreNow()
+	}
+}
+
 // noteFetch records n bytes of media payload arriving off the network and
 // fires OnFetch. Called at every successful segment/chunk body read — the
 // answer to "is data arriving?", which is a different question from the

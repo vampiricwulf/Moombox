@@ -938,6 +938,14 @@
                                 placeholder="120"
                                 help-text="How long finalize may stall waiting for an interrupted broadcast to resume before finalizing with what was captured so far. Default 120 minutes, no maximum. 0 disables the stall — finalize never waits."
                             ></sl-input>
+                            <sl-input
+                                id="cfg-incomplete-staging-expiry"
+                                type="number"
+                                min="0"
+                                label="Incomplete Staging Expiry (days)"
+                                placeholder="7"
+                                help-text="How long a finished recording flagged with an incomplete tail keeps its staging files preserved for Resume. After this many days the staging becomes eligible for orphan cleanup — the incomplete badge itself never expires. Default 7 days, no maximum. 0 preserves staging forever."
+                            ></sl-input>
                         </div>
 
                         <!-- Cookies Settings -->

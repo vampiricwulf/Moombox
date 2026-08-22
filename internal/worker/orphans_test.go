@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -172,5 +173,69 @@ func TestDeleteOrphanedFileRefusesFinishedIncompleteTail(t *testing.T) {
 
 	if _, err := os.Stat(jobStagingPath); err != nil {
 		t.Errorf("staging dir should still exist after refused delete: %v", err)
+	}
+}
+
+// TestIncompleteStagingExpired pins the expiry rule (owner ruling
+// 2026-08-21): only the disk-heavy staging shield expires — never the flag —
+// and every ambiguous input errs toward preservation.
+func TestIncompleteStagingExpired(t *testing.T) {
+	cfgDays := func(d float64) *config.MoomboxConfig {
+		return &config.MoomboxConfig{Downloader: config.DownloaderConfig{
+			IncompleteStagingExpiryDays: config.FlexDuration{Value: d},
+		}}
+	}
+	old := time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	fresh := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+
+	cases := []struct {
+		name string
+		cfg  *config.MoomboxConfig
+		upd  string
+		want bool
+	}{
+		{"nil cfg preserves", nil, old, false},
+		{"zero days preserves forever", cfgDays(0), old, false},
+		{"fresh job preserved", cfgDays(7), fresh, false},
+		{"aged job expired", cfgDays(7), old, true},
+		{"unparseable timestamp preserves", cfgDays(7), "not-a-time", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := incompleteStagingExpired(c.cfg, &database.Job{UpdatedAt: c.upd})
+			if got != c.want {
+				t.Errorf("incompleteStagingExpired = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestJobNeedsStagingExpiryGate: an aged incomplete-tail job's staging is no
+// longer shielded (becomes an ordinary orphan candidate), while a fresh one
+// stays protected — and the unmuxed-parts shield is independent of expiry.
+func TestJobNeedsStagingExpiryGate(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	cfg := &config.MoomboxConfig{Downloader: config.DownloaderConfig{
+		IncompleteStagingExpiryDays: config.FlexDuration{Value: 7},
+	}}
+	old := time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	fresh := time.Now().UTC().Format(time.RFC3339)
+	stagingDir := filepath.Join(dir, "staging", "j1")
+
+	flagged := func(upd string) *database.Job {
+		return &database.Job{ID: "j1", Status: database.StatusFinished, IncompleteTail: true, UpdatedAt: upd}
+	}
+	if !jobNeedsStaging(db, cfg, flagged(fresh), stagingDir) {
+		t.Error("fresh incomplete-tail job must stay shielded")
+	}
+	if jobNeedsStaging(db, cfg, flagged(old), stagingDir) {
+		t.Error("aged incomplete-tail job must no longer be shielded")
 	}
 }

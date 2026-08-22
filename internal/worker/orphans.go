@@ -82,11 +82,37 @@ var activeJobStatuses = map[database.JobStatus]bool{
 // This predicate must stay precise: any OTHER Finished job's staging is a
 // genuine orphan (e.g. a stale dir left by an old/removed job) and must
 // remain cleanable, so this does NOT protect Finished jobs unconditionally.
-func jobNeedsStaging(db *database.Database, job *database.Job, jobStagingDir string) bool {
+func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *database.Job, jobStagingDir string) bool {
 	if job == nil || job.Status != database.StatusFinished {
 		return false
 	}
-	return job.IncompleteTail || hasUnmuxedPartsForJob(db, job.ID, jobStagingDir)
+	return (job.IncompleteTail && !incompleteStagingExpired(cfg, job)) ||
+		hasUnmuxedPartsForJob(db, job.ID, jobStagingDir)
+}
+
+// incompleteStagingExpired reports whether an incomplete_tail job's staging
+// preservation window has lapsed (downloader.incomplete_staging_expiry_days;
+// 0 = never expires). Only the disk-heavy staging shield expires — the flag
+// itself, the honest "may be missing its tail" badge, is never cleared here:
+// YouTube cannot resume a broadcast days later, so week-old interruption
+// staging has zero resume value, while the badge's information keeps its
+// value indefinitely (owner ruling 2026-08-21). Age is measured from the
+// job's last update: any activity — an auto-resume attempt, a title
+// refresh — restarts the window, which errs toward preservation. An
+// unparseable timestamp also errs toward preservation (never expires).
+func incompleteStagingExpired(cfg *config.MoomboxConfig, job *database.Job) bool {
+	if cfg == nil {
+		return false
+	}
+	days := cfg.Downloader.IncompleteStagingExpiryDays.Days()
+	if days <= 0 {
+		return false
+	}
+	updated, err := time.Parse(time.RFC3339, job.UpdatedAt)
+	if err != nil {
+		return false
+	}
+	return time.Since(updated) >= time.Duration(days*24)*time.Hour
 }
 
 // DeleteOrphanedFile safely deletes a file or directory if it's under the configured directories.
@@ -152,7 +178,7 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 			}
 			if job != nil {
 				jobStagingDir := filepath.Join(stagingDir, jobID)
-				if activeJobStatuses[job.Status] || jobNeedsStaging(db, job, jobStagingDir) {
+				if activeJobStatuses[job.Status] || jobNeedsStaging(db, cfg, job, jobStagingDir) {
 					return jobID, nil
 				}
 			}
@@ -293,7 +319,7 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 				// Active job — skip, staging is in use
 				continue
 			}
-			if jobNeedsStaging(db, job, absPath) {
+			if jobNeedsStaging(db, cfg, job, absPath) {
 				// Finished but deliberately preserved (IncompleteTail or an
 				// unmuxed part) — not a genuine orphan, skip.
 				continue
