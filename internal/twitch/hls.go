@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -257,6 +258,23 @@ func parseQualityPref(pref string) (height int, fps int) {
 	return 0, 0
 }
 
+// isRestrictedEntitlementBody reports whether an usher error body carries a
+// subscriber-only restriction code. yt-dlp twitch.py parity: the body is a
+// JSON array whose first object's error_code is vod_manifest_restricted or
+// unauthorized_entitlements — "You must be logged into an account that has
+// access to this subscriber-only content". Anything else (geoblock, offline,
+// malformed) is not a restriction match.
+func isRestrictedEntitlementBody(body []byte) bool {
+	var entries []struct {
+		ErrorCode string `json:"error_code"`
+	}
+	if err := json.Unmarshal(body, &entries); err != nil || len(entries) == 0 {
+		return false
+	}
+	return entries[0].ErrorCode == "vod_manifest_restricted" ||
+		entries[0].ErrorCode == "unauthorized_entitlements"
+}
+
 // FetchHLSMasterPlaylist fetches and parses an HLS master playlist from a URL.
 func FetchHLSMasterPlaylist(ctx context.Context, url string) ([]TwitchHLSVariant, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -281,6 +299,12 @@ func FetchHLSMasterPlaylist(ctx context.Context, url string) ([]TwitchHLSVariant
 		// twitch.py). Drain the rest for connection reuse.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10)) // 4 KB prefix
 		io.Copy(io.Discard, resp.Body)
+		// Subscriber-only restriction gets its sentinel so the worker can
+		// route the job to COOKIES? with an actionable message instead of
+		// parking it in Error with a raw JSON body.
+		if isRestrictedEntitlementBody(body) {
+			return nil, fmt.Errorf("hls playlist http %d: %w", resp.StatusCode, ErrSubscriberOnly)
+		}
 		bodyStr := strings.TrimSpace(string(body))
 		if bodyStr != "" {
 			return nil, fmt.Errorf("hls playlist http %d: %s", resp.StatusCode, bodyStr)

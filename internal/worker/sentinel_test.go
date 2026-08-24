@@ -47,6 +47,17 @@ func TestCheckPlayabilitySentinels(t *testing.T) {
 			wantMsgFrag:  "Age restricted",
 		},
 		{
+			// Age-restricted for a cookie-less user is suppressed
+			// (ErrNonActionable) even though cookies are precisely the fix —
+			// the display string must say so or the user gets a dead-end
+			// Error with no hint.
+			name:         "AgeRestricted message hints that cookies would fix it",
+			playability:  youtube.PlayabilityAgeRestricted,
+			reason:       "This video may be inappropriate for some users",
+			wantSentinel: ErrNonActionable,
+			wantMsgFrag:  "cookies",
+		},
+		{
 			name:         "Unknown playability error → no sentinel",
 			playability:  "SomeNewYouTubeCategory",
 			reason:       "Unsupported in this region",
@@ -198,6 +209,17 @@ func TestTwitchAuthSentinel(t *testing.T) {
 		}
 	})
 
+	t.Run("wrapped twitch.ErrSubscriberOnly → ErrCookiesRequired", func(t *testing.T) {
+		// Usher 403 with error_code unauthorized_entitlements /
+		// vod_manifest_restricted (sub-only content) — logging into an
+		// account with access IS the fix, so it routes to StatusCookies
+		// like YouTube members-only, not to a generic Error.
+		err := fmt.Errorf("twitch VOD HLS error: %w", twitch.ErrSubscriberOnly)
+		if got := twitchAuthSentinel(err); got != ErrCookiesRequired {
+			t.Errorf("subscriber-only: want ErrCookiesRequired, got %v", got)
+		}
+	})
+
 	t.Run("doubly-wrapped twitch.ErrTwitchAuthExpired → ErrCookiesRequired", func(t *testing.T) {
 		// errors.Is walks the wrap chain; a fmt.Errorf around an
 		// already-wrapped sentinel still resolves correctly.
@@ -208,6 +230,34 @@ func TestTwitchAuthSentinel(t *testing.T) {
 			t.Errorf("doubly-wrapped: want ErrCookiesRequired, got %v", got)
 		}
 	})
+}
+
+// TestCookiesStatusError pins setJobError's status routing: which error
+// chains park a job at StatusCookies (user action on cookie auth is the
+// fix) versus generic StatusError. The Twitch LIVE path matters here —
+// processTwitchLive returns its HLS error %w-wrapped straight to
+// setJobError with no ErrSentinel attached, so the routing predicate
+// itself must recognize twitch.ErrSubscriberOnly for a sub-only live
+// stream to land on COOKIES?.
+func TestCookiesStatusError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"wrapped ErrCookiesRequired", fmt.Errorf("x: %w", ErrCookiesRequired), true},
+		{"wrapped twitch.ErrTwitchAuthExpired", fmt.Errorf("x: %w", twitch.ErrTwitchAuthExpired), true},
+		{"wrapped twitch.ErrSubscriberOnly (live path)", fmt.Errorf("twitch HLS: %w", fmt.Errorf("hls playlist http 403: %w", twitch.ErrSubscriberOnly)), true},
+		{"plain error", errors.New("network timeout"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cookiesStatusError(tc.err); got != tc.want {
+				t.Errorf("cookiesStatusError = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestStreamProcessResultPropagatesTwitchAuth documents the end-to-end

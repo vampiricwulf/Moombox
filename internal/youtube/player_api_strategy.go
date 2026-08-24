@@ -84,6 +84,17 @@ func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, 
 	return p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0, "")
 }
 
+// captureVisitorData forwards watch-page visitor data to the service cache
+// (OnVisitorData → Service.SetVisitorData). Shared by the authenticated AND
+// public extraction paths — the public call is load-bearing for anonymous
+// users: after invalidate403Caches clears the cache, Init() never re-runs
+// (startup-only call site), so this hand-off is the only refill source.
+func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData) {
+	if ytcfg != nil && ytcfg.VisitorData != "" && p.OnVisitorData != nil {
+		p.OnVisitorData(ytcfg.VisitorData)
+	}
+}
+
 // GetVideoInfoAuthenticated fetches video info using the full multi-client strategy.
 func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// Fetch watch page
@@ -103,9 +114,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Capture visitor data for future probe calls
-	if ytcfg.VisitorData != "" && p.OnVisitorData != nil {
-		p.OnVisitorData(ytcfg.VisitorData)
-	}
+	p.captureVisitorData(ytcfg)
 
 	formatPool := []Format{}
 
@@ -278,12 +287,22 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*VideoInfo, error) {
 	wp, err := FetchWatchPage(ctx, videoID, "")
 	if err != nil {
+		// Not fatal (the Innertube clients below carry the extraction), but
+		// silence here previously hid consent-wall and network failures on
+		// the anonymous path entirely — the authenticated path has always
+		// logged this.
+		p.logger.Warn("[PlayerApi] Could not fetch watch page (public)", slog.String("error", err.Error()))
 		wp = &WatchPageResult{Ytcfg: DefaultYtcfg()}
 	}
 
 	if wp.AttestationChallenge == "" {
 		p.logger.Debug("[PlayerApi] no attestation challenge from watch page", "videoID", videoID, "reason", wp.AttestationReason)
 	}
+
+	// Capture visitor data for future probe calls (parity with the
+	// authenticated path). Load-bearing for anonymous users: after a 403
+	// credential refresh clears the service cache, this is the only refill.
+	p.captureVisitorData(wp.Ytcfg)
 
 	formatPool := []Format{}
 

@@ -45,12 +45,15 @@ func sameBroadcastStart(knownStartISO, currentStartISO string) bool {
 }
 
 // twitchAuthSentinel returns ErrCookiesRequired when err is (or wraps)
-// twitch.ErrTwitchAuthExpired so VOD/HLS errors that lost their wrap
-// via %v formatting still get classified as auth-required by the
-// downstream consumer. Returns nil for non-auth errors so plain
-// failures don't get spuriously routed to StatusCookies.
+// twitch.ErrTwitchAuthExpired or twitch.ErrSubscriberOnly so VOD/HLS
+// errors that lost their wrap via %v formatting still get classified as
+// auth-required by the downstream consumer. Subscriber-only restrictions
+// route the same way as expired auth: logging into an account that has
+// access is the fix, so StatusCookies (not a generic Error) is the right
+// resting state. Returns nil for non-auth errors so plain failures don't
+// get spuriously routed to StatusCookies.
 func twitchAuthSentinel(err error) error {
-	if errors.Is(err, twitch.ErrTwitchAuthExpired) {
+	if errors.Is(err, twitch.ErrTwitchAuthExpired) || errors.Is(err, twitch.ErrSubscriberOnly) {
 		return ErrCookiesRequired
 	}
 	return nil
