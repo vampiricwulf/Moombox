@@ -579,7 +579,18 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 // Returns the first result with OK playability and adequate formats, or nil
 // when neither client produced one (the pool still holds whatever partial
 // formats were fetched). Shared by the authenticated and public paths.
+//
+// One wrinkle keeps the chain from silently costing a capability: VISIONOS
+// serves HLS but NEVER a dashManifestUrl for live streams (verified
+// 2026-08-24), while ANDROID_VR does. Returning the first adequate result
+// would therefore hand back an HLS-only live stream and skip the callers'
+// DASH-enrichment step, losing --live-from-start segment addressability for
+// every anonymous live capture — caught by TestLivePublicExtraction the day
+// this chain landed. So for live/upcoming content missing a DASH manifest,
+// the chain keeps going and adopts a later client's manifest into the
+// already-chosen result rather than stopping early.
 func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitorData string, formatPool *[]Format) *VideoInfo {
+	var chosen *VideoInfo
 	for _, fb := range []struct {
 		client constants.YouTubeClientConfig
 		label  string
@@ -595,11 +606,28 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 			continue
 		}
 		collectFormats(formatPool, fbResult.Formats, fb.label, fb.level)
+
+		if chosen != nil {
+			// Already have a usable result; this client is only still being
+			// consulted for a DASH manifest it might carry.
+			if fbResult.PlayabilityError == PlayabilityOK && fbResult.DashManifestURL != "" {
+				p.logger.Info("[PlayerApi] DASH manifest sourced from cookieless fallback",
+					"videoID", videoID, "client", fb.label)
+				chosen.DashManifestURL = fbResult.DashManifestURL
+			}
+			break
+		}
+
 		if fbResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(fbResult) {
-			return fbResult
+			chosen = fbResult
+			needsDash := (fbResult.StreamStatus == StreamLive || fbResult.StreamStatus == StreamUpcoming) &&
+				fbResult.DashManifestURL == ""
+			if !needsDash {
+				break
+			}
 		}
 	}
-	return nil
+	return chosen
 }
 
 // fetchWithEmbedded performs a WEB_EMBEDDED_PLAYER request. fetchEmbedPage
