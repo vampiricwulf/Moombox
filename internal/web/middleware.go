@@ -2,10 +2,12 @@ package web
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -259,6 +261,129 @@ func ExtractIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// trustedProxySet is the parsed form of network.trusted_proxies, cached so
+// the per-request path doesn't re-parse CIDR strings. Rebuilt lazily whenever
+// the raw config value changes, which makes the setting hot-reloadable with
+// no restart hook.
+type trustedProxySet struct {
+	raw  string       // joined source entries — the cache key
+	nets []*net.IPNet // parsed entries; bare IPs become /32 or /128
+}
+
+var trustedProxyCache atomic.Pointer[trustedProxySet]
+
+func loadTrustedProxies(store *config.Store) *trustedProxySet {
+	var entries []string
+	store.Read(func(c *config.MoomboxConfig) {
+		entries = c.Network.TrustedProxies
+	})
+	raw := strings.Join(entries, ",")
+	if cached := trustedProxyCache.Load(); cached != nil && cached.raw == raw {
+		return cached
+	}
+	set := &trustedProxySet{raw: raw}
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if !strings.Contains(e, "/") {
+			if ip := net.ParseIP(e); ip != nil {
+				bits := 32
+				if ip.To4() == nil {
+					bits = 128
+				}
+				e = fmt.Sprintf("%s/%d", e, bits)
+			}
+		}
+		// Invalid entries were dropped by config validation; skip any
+		// stragglers rather than trusting garbage.
+		if _, n, err := net.ParseCIDR(e); err == nil {
+			set.nets = append(set.nets, n)
+		}
+	}
+	trustedProxyCache.Store(set)
+	return set
+}
+
+func (s *trustedProxySet) contains(ipStr string) bool {
+	if s == nil || len(s.nets) == 0 {
+		return false
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	for _, n := range s.nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectiveClientIP returns the address every trust decision (network_access
+// gate, auth skip, rate-limit keying) treats as the client. Identical to
+// ExtractIP unless the DIRECT peer is listed in network.trusted_proxies —
+// only then is X-Forwarded-For consulted, walking right-to-left past trusted
+// hops to the first address the proxy chain did not vouch for. A client-
+// forged XFF header never matters: either the direct peer is untrusted (the
+// header is ignored) or the trusted proxy appended the client's real address
+// to the right of the forgery.
+//
+// Loopback-gated surfaces (LoopbackOnly, IsLoopbackRequest, first-time
+// password setup, the setup wizard) intentionally keep using the direct peer
+// address: "arrived over this machine's loopback interface" is a physical-
+// access signal that a forwarded header must never confer.
+func EffectiveClientIP(store *config.Store, r *http.Request) string {
+	direct := ExtractIP(r)
+	proxies := loadTrustedProxies(store)
+	if !proxies.contains(direct) {
+		return direct
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return direct
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		hop := canonicalizeForwardedIP(parts[i])
+		if !proxies.contains(hop) {
+			// First hop the chain didn't vouch for. An unparseable value
+			// is returned verbatim on purpose: isLoopback/isPrivateIP both
+			// reject garbage, so downstream fails CLOSED (treated as a
+			// non-local client) instead of falling back to the proxy's own
+			// private address.
+			return hop
+		}
+	}
+	// Every listed hop is itself a trusted proxy — the connection originated
+	// inside the trusted set (health checks, proxy self-calls).
+	return direct
+}
+
+// canonicalizeForwardedIP normalizes one X-Forwarded-For entry: surrounding
+// whitespace, an optional port, IPv6 brackets, and zone suffixes are
+// stripped. Unparseable entries come back trimmed-but-verbatim so callers
+// fail closed on them.
+func canonicalizeForwardedIP(entry string) string {
+	e := strings.TrimSpace(entry)
+	if e == "" {
+		return e
+	}
+	if host, _, err := net.SplitHostPort(e); err == nil {
+		e = host
+	}
+	e = strings.Trim(e, "[]")
+	if i := strings.IndexByte(e, '%'); i >= 0 {
+		e = e[:i]
+	}
+	if ip := net.ParseIP(e); ip != nil {
+		return ip.String()
+	}
+	return strings.TrimSpace(entry)
 }
 
 func isLoopback(ipStr string) bool {

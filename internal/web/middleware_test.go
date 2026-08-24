@@ -543,3 +543,57 @@ func TestCSRFMiddleware(t *testing.T) {
 		})
 	}
 }
+
+func storeWithProxies(proxies ...string) *config.Store {
+	cfg := config.Defaults()
+	cfg.Network.TrustedProxies = proxies
+	return config.NewStore(cfg, "")
+}
+
+func TestEffectiveClientIP(t *testing.T) {
+	tests := []struct {
+		name       string
+		proxies    []string
+		remoteAddr string
+		xff        string
+		expected   string
+	}{
+		// No proxies configured: identical to ExtractIP, XFF ignored.
+		{"no proxies, forged xff ignored", nil, "203.0.113.9:5000", "127.0.0.1", "203.0.113.9"},
+		// Direct peer is NOT a trusted proxy: XFF ignored even when configured.
+		{"untrusted peer, xff ignored", []string{"172.18.0.2"}, "203.0.113.9:5000", "10.0.0.1", "203.0.113.9"},
+		// Trusted proxy, single-hop XFF: real client returned.
+		{"proxy forwards wan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "203.0.113.9", "203.0.113.9"},
+		{"proxy forwards lan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "192.168.1.50", "192.168.1.50"},
+		// Client-forged private prefix through the proxy: proxy appends the
+		// real address to the RIGHT, and the rightmost-untrusted walk finds it.
+		{"forged private prefix defeated", []string{"172.18.0.2"}, "172.18.0.2:41000", "10.0.0.1, 203.0.113.9", "203.0.113.9"},
+		// Two chained trusted proxies (CIDR), then the client.
+		{"cidr proxy chain", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "203.0.113.9, 172.18.0.3", "203.0.113.9"},
+		// Trusted proxy but no XFF at all: fall back to the proxy address.
+		{"proxy without xff", []string{"172.18.0.2"}, "172.18.0.2:41000", "", "172.18.0.2"},
+		// Every hop trusted (proxy self-call / health check): direct peer.
+		{"all hops trusted", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "172.18.0.3", "172.18.0.2"},
+		// Malformed rightmost entry fails CLOSED (returned verbatim → treated
+		// as neither loopback nor private downstream), not open.
+		{"malformed entry fails closed", []string{"172.18.0.2"}, "172.18.0.2:41000", "garbage-value", "garbage-value"},
+		// IPv6: bracketed with port, plus zone stripping.
+		{"ipv6 bracketed with port", []string{"172.18.0.2"}, "172.18.0.2:41000", "[2001:db8::1]:443", "2001:db8::1"},
+		{"ipv6 zone stripped", []string{"172.18.0.2"}, "172.18.0.2:41000", "fe80::1%eth0", "fe80::1"},
+		// IPv6 trusted proxy.
+		{"ipv6 proxy", []string{"fd77:4d42::/64"}, "[fd77:4d42::2]:41000", "203.0.113.9", "203.0.113.9"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = tt.remoteAddr
+			if tt.xff != "" {
+				r.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			got := EffectiveClientIP(storeWithProxies(tt.proxies...), r)
+			if got != tt.expected {
+				t.Errorf("EffectiveClientIP() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
