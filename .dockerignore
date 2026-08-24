@@ -1,0 +1,50 @@
+# Keep the build context small and reproducible. Anchored paths refer to
+# the repo root; unanchored patterns apply everywhere.
+
+# VCS / tooling state
+.git
+.github
+.claude
+.superpowers
+.idea
+.vscode
+
+# Upstream reference checkouts (gitignored, can be gigabytes locally)
+references/
+
+# Docs and repo meta not needed to compile
+docs/
+screenshots/
+/*.md
+
+# Build outputs and binaries
+*.exe
+*.syso
+/moombox
+/dist/
+/build/
+bgutil-sidecar/dist/
+
+# Dependencies rebuilt inside the image (sidecar stage runs npm ci)
+bgutil-sidecar/node_modules/
+bgutil-sidecar/vendor/ejs.bundle.js
+
+# Embed blobs are regenerated inside the image (fetch-node + build.mjs);
+# excluding local copies keeps the build reproducible regardless of what a
+# dev checkout happens to contain. version.txt stays (committed).
+internal/bgutils/embed/*.gz
+
+# Runtime data a local checkout may have accumulated
+config.toml
+cookies.txt
+moombox.db
+*.log
+staging/
+output/
+browser-profile/
+.cache/
+
+# Docker files themselves are not needed inside the context
+Dockerfile
+docker-compose.yml
+.dockerignore

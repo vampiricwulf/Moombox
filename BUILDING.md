@@ -54,6 +54,17 @@ GOOS=linux GOARCH=arm64 go build -o moombox-linux-arm64 ./cmd/moombox
 
 Cross-compiling Linux binaries from a Windows dev box uses the same env vars — Go handles the toolchain transparently because Moombox uses `CGO_ENABLED=0`.
 
+### Docker image
+
+The `Dockerfile` runs the whole pipeline (sidecar payload build, fetch-node, Go cross-compile) inside the image build — no local Go or Node toolchain needed:
+
+```bash
+docker build -t moombox .
+docker build --platform linux/arm64 -t moombox:arm64 .   # cross-build via buildx
+```
+
+The runtime stage is Debian (glibc required by the embedded Node binary) with FFmpeg installed, and an entrypoint that seeds a container-appropriate `config.toml` (`network_access = "lan"`, all state under `/data`) on first run. See `docker-compose.yml` for the recommended run configuration.
+
 ## Windows Resource Embedding (optional)
 
 Moombox.exe ships with an embedded icon, manifest, and version info on Windows. CI generates these at build time via `go-winres`. For local Windows builds with the icon:
@@ -97,6 +108,7 @@ go vet ./...                                        # static analysis
 
 - **`.github/workflows/release.yml`** — runs on tag push (`v*`). Builds and signs all three platforms, creates a GitHub release with the matching assets and a body listing all download links.
 - **`.github/workflows/linux-test.yml`** — runs on every PR/push to `main`. Builds for both Linux arches and runs tests for amd64. Catches Linux compilation regressions before they reach a release tag.
+- **`.github/workflows/docker-publish.yml`** — runs on tag push (`v*`) and manual dispatch. Builds the multi-arch (linux/amd64 + linux/arm64) Docker image and pushes it to `ghcr.io/vampiricwulf/moombox` (release tags → `X.Y.Z`, `X.Y`, `latest`; manual dispatch on `main` → `edge`).
 
 ## Profiling
 

@@ -88,6 +88,23 @@ Resolution order for the FFmpeg binary path:
 
 The first-run setup wizard checks for FFmpeg and offers to install it via chocolatey (`choco install ffmpeg`) or winget. If FFmpeg is missing, Moombox can still start but download jobs will fail at the mux step.
 
+### Docker Image
+
+**Files:** `Dockerfile`, `docker/entrypoint.sh`, `docker-compose.yml`, `.dockerignore`
+**Registry:** `ghcr.io/vampiricwulf/moombox` (published by `.github/workflows/docker-publish.yml`)
+
+Three-stage build that runs the entire pipeline inside the image build — no host Go/Node toolchain needed:
+
+1. **sidecar** (`node:22-bookworm-slim`): `npm ci --ignore-scripts` + `node build.mjs` → `sidecar.tar.gz` (mirrors release.yml).
+2. **build** (`golang:1.26-bookworm`): `go run ./tools/fetch-node`, then `CGO_ENABLED=0` cross-compile for `$TARGETOS/$TARGETARCH`. Both stages run on `$BUILDPLATFORM`, so multi-arch builds don't emulate the compile.
+3. **runtime** (`debian:bookworm-slim` + ffmpeg + ca-certificates + tzdata): must be glibc — the sidecar extracts an official nodejs.org Linux binary at runtime, and those are glibc-linked (Alpine/musl won't run it).
+
+Container conventions:
+- All state under a single `/data` volume (config, DB, logs, staging, output, sidecar cache — `HOME=/data` keeps the one-time sidecar extraction on the volume). `WORKDIR /data` so the binary's cwd-relative defaults land there too.
+- `MOOMBOX_NO_TUI=1` baked in; the launcher/supervisor runs as usual and forwards SIGTERM for graceful `docker stop`.
+- The entrypoint seeds `/data/config.toml` on first run, then execs the binary. The seed is mandatory, not cosmetic: with the `"localhost"` default the server binds `127.0.0.1` (unreachable through a published port), and the first-run web setup wizard cannot run either — `/api/setup/complete` is loopback-gated, and requests through Docker's bridge never appear as loopback. Seeding a config sets `ConfigLoaded`, which intentionally skips the wizard. An existing config is never touched.
+- Seeded values (each with an explanatory comment in the generated file): `network_access = "lan"`, `port = 774` (paired with `EXPOSE` and the compose healthcheck), absolute `/data` paths, `cookie_file = "/data/cookies.txt"` (matches the compose cookie-mount example), and `updates.auto_check_updates = false` — an in-app update swaps the binary inside the container and is silently reverted when the container is recreated from its image, so the update path is pulling a new image; the manual "Check for updates" button still works. Everything else keeps the binary's normal defaults (notably `use_sidecar = true` — the Debian runtime runs the glibc sidecar Node binary fine — and stdout logging, which `docker logs` picks up alongside the rotating `/data/moombox.log`).
+
 ---
 
 ## Memory Limits
@@ -165,6 +182,14 @@ When `RELEASE_NOTES.md` is present, the release body is assembled as:
 
 <contents of RELEASE_NOTES.md>
 ```
+
+### Docker Publish Workflow
+
+**File:** `.github/workflows/docker-publish.yml`
+**Trigger:** Same `v*` tag push as release.yml (runs in parallel with it), plus `workflow_dispatch` for testing image changes without cutting a release.
+**Permissions:** `contents: read`, `packages: write`
+
+Builds the multi-arch (linux/amd64 + linux/arm64) image via buildx and pushes to `ghcr.io/vampiricwulf/moombox`. Release tags produce `X.Y.Z`, `X.Y`, and `latest` (pre-release tags containing `-` skip `latest`, matching release.yml's pre-release handling); manual dispatch on `main` produces `edge`. `VERSION`/`COMMIT` build args mirror release.yml's ldflags. QEMU is only used for the small Debian runtime stage of the arm64 image — the Go compile cross-compiles natively.
 
 ---
 
