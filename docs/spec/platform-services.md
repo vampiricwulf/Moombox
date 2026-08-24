@@ -8,7 +8,7 @@ This document provides a comprehensive, implementation-level reference for every
 
 These are hard rules that govern all platform service integrations:
 
-- **YouTube uses multi-client Innertube fallback.** The authenticated request order is: TV_DOWNGRADED (best format coverage) then WEB (DASH manifest) then WEB_CREATOR (member content) then ANDROID_VR (last-resort public). The public request order drops WEB_CREATOR. TV_DOWNGRADED and WEB are always tried; WEB_CREATOR and ANDROID_VR are conditional fallbacks (tried only when earlier clients return members-only, login-required, or no formats).
+- **YouTube uses multi-client Innertube fallback.** The authenticated request order is: WEB_EMBEDDED (format/DASH contributor) then TV_DOWNGRADED (best format coverage, and the playability authority) then WEB (DASH manifest) then WEB_CREATOR (member content) then the cookieless chain VISIONOS → ANDROID_VR (last resort). The public request order drops WEB_CREATOR. WEB_EMBEDDED, TV_DOWNGRADED and WEB are always tried; WEB_CREATOR and the cookieless chain are conditional fallbacks (tried only when earlier clients return members-only, login-required, or no formats).
 - **Format priority is lexicographic across five dimensions.** For video: resolution (higher wins) > FPS (prefer60fps setting) > codec score (higher wins) > bitrate (lower wins, indicating better compression) > auth level (lower preferred). For audio: codec score (higher wins) > bitrate (higher wins) > auth level (lower preferred). This ordering is absolute and implemented in `SelectBestFormats`.
 - **Twitch uses GQL API with SHA256 persisted query hashing (version 1).** All structured queries (stream metadata, video metadata, VOD comments) use persisted queries with hardcoded SHA256 hashes. Access token queries use inline GraphQL. The Client-ID header (`kimne78kx3ncx6brgo4mv6wki5h1ko`) is required on every GQL request.
 - **BotGuard has a triple cache with auto-eviction.** Session cache (6-hour TTL, keyed by contentBinding), minter cache (dynamic TTL from Google's API, keyed by contentBinding, auto-evicted via `time.AfterFunc`), and inflight dedup (concurrent requests for the same key wait on a shared channel). Minters hold live Goja VMs that must be explicitly shut down on eviction.
@@ -58,16 +58,22 @@ When a watch page is fetched, the following values are regex-extracted from the 
 
 #### Auth Levels
 
-Formats collected from different clients are tagged with an auth level. When deduplicating formats by itag, the format with the **lowest** auth level wins (lower = less privileged = more widely accessible URL):
+Formats collected from different clients are tagged with an auth level. When deduplicating formats by itag, the format with the **lowest** auth level wins. The tier order mirrors yt-dlp's client priority (`build_innertube_clients`: tv > web > mweb > android > ios), NOT "least privileged first" — a WEBPO client's URLs and Moombox's WebPO tokens are the matched pair, so TV and WEB formats must win same-itag ties against the cookieless clients:
 
 | Level | Constant | Client | Description |
 |-------|----------|--------|-------------|
-| 0 | `AuthLevelAndroidVR` | ANDROID_VR | Public, no cookies required. Provides direct URLs without cipher. |
-| 1 | `AuthLevelWatchPage` | Watch page embed | Extracted from ytInitialPlayerResponse in the watch page HTML. |
-| 2 | `AuthLevelTVPublic` | TV_DOWNGRADED (no cookies) | Public TV client request. |
-| 3 | `AuthLevelTVAuth` | TV_DOWNGRADED (with cookies) | Authenticated TV client request. |
-| 4 | `AuthLevelWeb` | WEB | Standard web client. Provides DASH manifest URLs. |
-| 5 | `AuthLevelWebCreator` | WEB_CREATOR | Creator Studio client. Access to member-only content. |
+| 0 | `AuthLevelTVPublic` | TV_DOWNGRADED (no cookies) | Public TV client request. |
+| 1 | `AuthLevelTVAuth` | TV_DOWNGRADED (with cookies) | Authenticated TV client request. |
+| 2 | `AuthLevelWatchPagePublic` | Watch page (no cookies) | Extracted from ytInitialPlayerResponse in the watch page HTML. |
+| 3 | `AuthLevelWatchPageAuth` | Watch page (with cookies) | Same, from an authenticated page load. |
+| 4 | `AuthLevelWebSafari` | WEB (Safari UA) | Pre-merged HLS formats when YouTube serves them. |
+| 5 | `AuthLevelWeb` | WEB | Standard web client. Provides DASH manifest URLs. |
+| 6 | `AuthLevelWebEmbedded` | WEB_EMBEDDED_PLAYER | Embedded player. Age-gate bypass; leads the authed cascade. |
+| 7 | `AuthLevelWebCreator` | WEB_CREATOR | Creator Studio client. Access to member-only content. |
+| 8 | `AuthLevelVisionOS` | VISIONOS | Cookieless last resort. Direct URLs without cipher. |
+| 9 | `AuthLevelAndroidVR` | ANDROID_VR | Cookieless last resort, ranked below VISIONOS (see below). |
+
+VISIONOS ranks above ANDROID_VR deliberately. yt-dlp removed android_vr from every default client list in 2026.08.19 after YouTube began 403'ing all of its format URLs (2026-08-17). Moombox retains it because that enforcement is selective — verified still fully working 2026-08-24 — but under selective enforcement a 403-dead android_vr URL must never displace a working VISIONOS one.
 
 ### PlayerAPI Multi-Client Strategy
 
@@ -118,7 +124,9 @@ All client configs are defined in `internal/constants/constants.go`:
 | TV_DOWNGRADED | `TVHTML5` | `7` | `5.20260114` | TV Cobalt | Best format coverage. Primary client for both auth and public paths. |
 | WEB | `WEB` | `1` | `2.20260120.01.00` | Chrome desktop | DASH manifest URLs. Always tried alongside TV to get manifest. |
 | WEB_CREATOR | `WEB_CREATOR` | `62` | `1.20260120.01.00` | Chrome desktop | Member-only content. Fallback when TV returns `members_only` or `login_required`. |
-| ANDROID_VR | `ANDROID_VR` | `28` | `1.71.26` | Oculus Quest VR | Last resort. Provides direct URLs without cipher for public content. Does not use cookies. |
+| WEB_EMBEDDED | `WEB_EMBEDDED_PLAYER` | `56` | `2.20260708.00.00` | Chrome desktop | Age-gate bypass, and first call of the authed cascade (yt-dlp's `_DEFAULT_AUTHED_CLIENTS` lead since 2026.08.19). Needs no PO token. |
+| VISIONOS | `VISIONOS` | `101` | `1.02` | Safari / visionOS | Cookieless last resort, yt-dlp's lead default since 2026.08.19. Direct URLs without cipher. HLS-only for live (no `dashManifestUrl`). "Made for kids" videos unavailable. |
+| ANDROID_VR | `ANDROID_VR` | `28` | `1.65.10` | Oculus Quest VR | Cookieless last resort behind VISIONOS, and the only cookieless source of a live `dashManifestUrl`. Pinned at 1.65.10 (>1.65 may return SABR-only streams). |
 
 #### Authenticated Fallback Flow
 
@@ -127,13 +135,14 @@ All client configs are defined in `internal/constants/constants.go`:
 1. **Fetch watch page** -- GET `https://www.youtube.com/watch?v={videoID}` with cookies. Extracts `YtcfgData` (playerURL, visitorData, sessionIndex, delegatedSessionID) and `ytInitialPlayerResponse`.
 2. **Parse watch page response** -- If `ytInitialPlayerResponse` was found (tried against 3 regex patterns), parse it as a player response. Collect formats with `AuthLevelWatchPage`.
 3. **Extract STS** -- If a playerURL was found and a cipher solver is available, extract the `signatureTimestamp` from the player JavaScript.
-4. **Try TV_DOWNGRADED** -- POST to Innertube with TV client, STS, and auth headers. Collect formats with `AuthLevelTVAuth`. If HTTP error occurs, log warning and continue (do not return).
-5. **Try WEB** -- POST to Innertube with WEB client. Collect formats with `AuthLevelWeb`. If WEB returns a DASH manifest URL and TV did not, adopt it.
-6. **Evaluate TV result** -- If TV returned `members_only`, `login_required`, or zero formats:
+4. **Try WEB_EMBEDDED** -- POST with the embedded client (no embed-page fetch; `thirdParty.embedUrl` only). Collect formats with `AuthLevelWebEmbedded`. Purely a format-pool and DASH contributor: WEB_EMBEDDED reports "unavailable" for any embedding-disabled channel, so it must **never** drive playability classification — TV below stays the authority. Failure is logged at Debug and ignored.
+5. **Try TV_DOWNGRADED** -- POST to Innertube with TV client, STS, and auth headers. Collect formats with `AuthLevelTVAuth`. If HTTP error occurs, log warning and continue (do not return).
+6. **Try WEB** -- POST to Innertube with WEB client. Collect formats with `AuthLevelWeb`. If WEB returns a DASH manifest URL and TV did not, adopt it; failing that, adopt WEB_EMBEDDED's if it has one.
+7. **Evaluate TV result** -- If TV returned `members_only`, `login_required`, or zero formats:
    a. **Try WEB_CREATOR** -- POST with WEB_CREATOR client. Collect formats with `AuthLevelWebCreator`.
-   b. **If WEB_CREATOR also fails** (and the error is not `members_only`): **Try ANDROID_VR** -- POST without cookies but with visitorData. Collect formats with `AuthLevelAndroidVR`.
+   b. **If WEB_CREATOR also fails** (and the error is not `members_only`): **run the cookieless chain** (`tryCookielessFallbacks`) -- VISIONOS then ANDROID_VR, POSTed without cookies but with visitorData, collected at their respective auth levels.
    c. **If all API clients fail**: Fall back to the watch page player response if available.
-7. **ANDROID_VR DASH-only enrichment** -- If, after TV+WEB, no client returned a `DashManifestURL` and the stream is live or upcoming AND not members-only / age-restricted / login-required, fetch ANDROID_VR (cookieless). On success, adopt its `DashManifestURL` and merge its formats into the pool with auth-level dedup. This is a workaround for the YouTube account-based experiment that strips `dashManifestUrl` from cookied clients (yt-dlp issue #15274).
+8. **ANDROID_VR DASH-only enrichment** -- If, after WEB_EMBEDDED+TV+WEB, no client returned a `DashManifestURL` and the stream is live or upcoming AND not members-only / age-restricted / login-required, fetch ANDROID_VR (cookieless). On success, adopt its `DashManifestURL` and merge its formats into the pool with auth-level dedup. This is a workaround for the YouTube account-based experiment that strips `dashManifestUrl` from cookied clients (yt-dlp issue #15274). ANDROID_VR remains the client here because VISIONOS returns no live `dashManifestUrl` and anonymous TV / WEB / WEB_EMBEDDED refuse live streams outright. Note this step only matters for pools without split adaptive URLs — anything with them takes the manifest-free path and never reads the manifest.
 8. **Stream classification override** -- If TV says `not_a_stream` but the watch page disagrees, override the stream status while keeping TV's formats if they are adequate (have both video and audio).
 9. **Merge metadata** -- Fill in missing fields (title, channel, description, thumbnails, timestamps) from the watch page response.
 10. **Deduplicate formats** -- Across all collected format pools, deduplicate by itag. When the same itag appears from multiple clients, keep the one with the lowest auth level.
@@ -144,13 +153,23 @@ All client configs are defined in `internal/constants/constants.go`:
 
 1. Fetch watch page (no cookies) and extract ytcfg + player response.
 2. Try TV_DOWNGRADED (public, with STS).
-3. If TV fails or returns inadequate formats, try ANDROID_VR.
+3. If TV fails or returns inadequate formats, run the cookieless chain (VISIONOS then ANDROID_VR).
 4. Apply the same DASH-only ANDROID_VR enrichment as the authenticated path when TV returned no `DashManifestURL` for a live/upcoming stream.
 5. Fall back to watch page response.
 
+#### The Cookieless Chain (`tryCookielessFallbacks`)
+
+Shared by both paths. Tries VISIONOS, then ANDROID_VR, pooling every fetched format at its own auth level, and returns the first result with OK playability and adequate formats (video **and** audio present).
+
+**VISIONOS serves live streams over HLS only and never returns a `dashManifestUrl`** (verified 2026-08-24), while ANDROID_VR does — so the chain will consult the next client for a manifest to adopt into the already-chosen result, but **only when that result cannot already be segment-addressed without one**.
+
+That qualifier is the whole point. A live response carrying split video+audio adaptive URLs routes to the manifest-free `&sq=N` path (`HasSplitAdaptiveFormats`, which `worker.HasManifestlessDashFormats` delegates to), and the strategy switch selects that **ahead of** the `dashManifestUrl` case — it is the primary live path since yt-dlp 8c1f07d81, which skips live DASH manifests entirely. VISIONOS supplies exactly those formats, so a VISIONOS-only live result already has full `--live-from-start` addressability and needs no manifest. The DASH manifest survives only as the fallback for pools **lacking** usable split adaptive URLs, and that is the one case worth another request.
+
+Getting this wrong in both directions is instructive and is why the rule is spelled out here. The first implementation stopped at the first adequate result, and `TestLivePublicExtraction` flagged the missing manifest. The fix then over-corrected — always continuing — on the false premise that a missing manifest meant lost addressability, which cost a needless ANDROID_VR round trip on every anonymous live extraction. The live test now asserts the **capability** (addressable via either source) rather than the mechanism, so it cannot pin ANDROID_VR — the client upstream declared 403-dead — as though it were an invariant. `TestCookielessFallbackDashOnlyWhenNeeded` is the offline gate.
+
 #### Retry Policy
 
-Both `fetchWithClient` and `fetchWithAndroidVR` implement identical retry logic:
+Both `fetchWithClient` and `fetchWithCookielessClient` (used by VISIONOS and ANDROID_VR) implement identical retry logic:
 
 - **Max attempts**: 4 (1 initial + 3 retries)
 - **Retryable errors**: HTTP 5xx, HTTP 429 (rate limited), or network errors
@@ -158,9 +177,9 @@ Both `fetchWithClient` and `fetchWithAndroidVR` implement identical retry logic:
 - **Backoff**: Exponential, factor 2, starting at 1 second: 1s, 2s, 4s
 - **Context-aware**: Checks `ctx.Err()` before each retry. Uses `utils.Sleep` which respects cancellation.
 
-#### ANDROID_VR Specifics
+#### Cookieless Client Specifics
 
-The ANDROID_VR client has its own dedicated method (`fetchWithAndroidVR`) because it:
+VISIONOS and ANDROID_VR share a dedicated method (`fetchWithCookielessClient`, with `fetchWithAndroidVR` as a thin named wrapper) because they:
 - Never sends cookies or auth headers
 - Always sends `X-Goog-Visitor-Id` if visitorData is available
 - Uses the Oculus Quest VR user agent
@@ -801,18 +820,37 @@ Expired entries are cleaned up in two ways:
 
 Moombox mints two populations of PO token, and they follow different rules because upstream treats them differently.
 
-**Player-API tokens** (used by `fetchWithClient` / `fetchWithEmbedded`) bind to the **video ID** — yt-dlp binds `PoTokenContext.PLAYER` to the video ID unconditionally (`pot/utils.py`) — and are minted via the cached /att/get minter (`GeneratePoTokenString`) with normal session caching. Caching is deliberate: player calls fire on every probe and refresh (several per live job per hour, plus monitor polls), so fresh-minting each one would cost a multi-second BotGuard pass on the hot path. The mint still gates on visitor data being present — not as the binding (it no longer derives from it) but as the "session established" precondition it always was. The challenge-sourced variant (`GeneratePlayerPoToken`, watch-page ytAtN attestation) exists but is dormant: it exceeds what yt-dlp does, and stays parked unless premieres 403 despite the yt-dlp-parity bindings.
+**Player-API tokens** (used by `fetchWithClient` / `fetchWithEmbedded`) bind to the **video ID** — yt-dlp binds `PoTokenContext.PLAYER` to the video ID unconditionally (`pot/utils.py`) — and are minted via the sidecar's cached minter (`GeneratePoTokenString`) with normal session caching — that minter is now built from the homepage (ytcfg, ytAtN) pair, with `/att/get` only as its fallback. Caching is deliberate: player calls fire on every probe and refresh (several per live job per hour, plus monitor polls), so fresh-minting each one would cost a multi-second BotGuard pass on the hot path. The mint still gates on visitor data being present — not as the binding (it no longer derives from it) but as the "session established" precondition it always was. The challenge-sourced variant (`GeneratePlayerPoToken`, watch-page ytAtN attestation) exists but is dormant: it exceeds what yt-dlp does, and stays parked unless premieres 403 despite the yt-dlp-parity bindings.
 
 **GVS (segment-URL) tokens** are minted under a deliberately cache-hostile policy — moonarchive parity, added 2026-08-14 (attestation POT coherence) after a premiere broadcast 403'd every segment for its full runtime because the minting session had no tie to the watch-page session that resolved the stream.
 
 `PotProvider.GenerateGvsPoToken(ctx, binding, challenge) (GvsMint, error)` is called once per download start by each segment-download strategy (`internal/worker/strategy_youtube_dash.go`, `strategy_youtube_manifestless_dash.go`, `strategy_youtube_hls.go`):
 
 - **Binding**: resolved by `youtube.GvsContentBinding` (`internal/youtube/pot_binding.go`), a port of yt-dlp's `get_webpo_content_binding`, and carried on `VideoInfo.GvsBinding`/`GvsBindingKind` so every strategy asks once and cannot drift. The rule, in order: the **video ID** when the page's player configs carry `html5_generate_content_po_token=true` (the experiment under which YouTube switches GVS binding to the video ID — active as of 2026-08-15, verified against a live watch page); otherwise the **datasync ID** for an authenticated session; otherwise **visitor data**. A last-resort video-ID/channel-ID fallback covers a session where none of those survived extraction, so a mint is never bound to an empty string. Moombox hardcoded the video ID until 2026-08-15; that was correct only while the experiment stays on, and a session with it off needs datasync binding or earns silent 403s.
-- **Challenge**: `videoInfo.AttestationChallenge`, extracted from the watch page's own `window.ytAtN(...)` blob (see below). Empty when the page carried none, in which case the sidecar falls back to its own `/att/get` fetch — today's prior behavior, preserved exactly as the degraded case.
+- **Challenge**: the sidecar's own **homepage (ytcfg, ytAtN) pair** when it can build one (see below), else `videoInfo.AttestationChallenge` extracted from the watch page's `window.ytAtN(...)` blob, else the sidecar's `/att/get` fetch. Each step down is logged with a distinct reason and is never worse than the step it replaced.
 - **Cache policy**: bypasses the session cache entirely (no read, no write) — every call mints fresh, and the sidecar is told `freshMinter: true` so it regenerates its BotGuard minter for this call rather than reuse an already-cached one. The fresh minter **replaces** the sidecar's cached minter, so subsequent player-API mints passively pick up the more session-coherent one. Concurrent GVS mints share the sidecar's single in-flight regeneration (`minterPromise`); no provider-side inflight entry is added — per-binding minting off a shared minter is cheap, and adding provider-level dedup here would hand a stale (non-fresh) result to whichever caller lost the race.
 - **Fallback**: sidecar unavailable → runs the existing goja mint-and-cache flow with the challenge ignored, reported as `minterSource=goja-fallback`.
-- **Result**: `GvsMint{PoToken, MinterSource, MinterFresh, ViaSidecar}` — the fields the provenance log line below reports. `MinterSource` is `"challenge"` (built from the page's own challenge), `"att_get"` (sidecar fetched its own), or `"goja-fallback"`.
+- **Result**: `GvsMint{PoToken, MinterSource, MinterFresh, ViaSidecar}` — the fields the provenance log line below reports. `MinterSource` is `"homepage"` (the sidecar's own ytcfg+ytAtN pair — the expected value), `"challenge"` (built from the page's own challenge), `"att_get"` (sidecar fetched its own), or `"goja-fallback"`.
 - **Counters**: `PotStats.GvsMints` (every attempt) and `GvsMintsChallenge` (the subset that carried a non-empty page challenge).
+
+#### Homepage (ytcfg + ytAtN) pair minting (`bgutil-sidecar/src/homepage.js`)
+
+**Why it exists.** YouTube binds the initial attestation challenge to the webpage session via `yt.config_.EVENT_ID` and **rejects WebPO tokens minted from `/att/get` challenges** when the session is enrolled in the experiment. The symptom is precise and was Moombox's 2026-08-14 premiere failure exactly: player requests pass, googlevideo 403s every segment. Upstream `bgutil-ytdlp-pot-provider` 495a47f (2026-08-21) and LuanRT/BgUtils#44 diagnose and fix it; Moombox's cached `/att/get` minter was the rejected configuration.
+
+**What it does.** `fetchHomepageChallenge` (server.js) fetches `https://www.youtube.com/` once and extracts a **self-consistent pair from that single page**: the `ytcfg` blob and the page's own `window.ytAtN(...)` challenge. It installs `globalThis.yt = { config_: ytcfg }` (and `window.yt`) so the BotGuard snapshot reads the session's real `EVENT_ID`, then mints from that page's challenge. Pairing is the whole point — a challenge from one page and a ytcfg from another is exactly the incoherence YouTube rejects, which is why an RPC-supplied watch-page challenge (which arrives without its originating page's ytcfg) now ranks *below* the homepage pair.
+
+**Extraction hardening.** `homepage.js` deliberately does not use upstream's regexes; it mirrors the rules `watch_page.go` already learned:
+
+- **String-aware balanced-brace scanning**, not non-greedy regexes. Upstream's `/ytcfg\.set\(({.+?})\);/s` truncates on a `});` inside any string value, and its `/window\.ytAtN\(\s*({[\s\S]*?})\s*\)/` truncates on a `})` inside the opaque program — both yielding an unparseable fragment indistinguishable from "no challenge".
+- **A tolerant recursive-descent parser** (`parseLooseJSON`) for the outer JS object literal — never `eval` or `new Function`. It accepts unquoted keys, single quotes, trailing commas, and `\xNN`/`\uNNNN` escapes, and **throws** on anything else (identifiers, calls, stray backslashes). That last property is load-bearing: attacker text smuggled through a video title arrives backslash-escaped inside a JSON string, and a backslash outside a string is a parse error rather than a challenge.
+- **Canonicalization** to exactly the three fields the minter consumes (`program`, `globalName`, `interpreterUrl`), matching Go's `canonicalizeChallenge`. Extra keys — including an inline `interpreterJavascript` riding alongside a valid URL — are dropped, which also closes the parser-differential class described under the interpreter gate below.
+- **Origin gating before any fetch**: the extracted `interpreterUrl` runs through `assertGoogleHost` inside `fetchHomepageChallenge`, so a disallowed host degrades to the next challenge source instead of failing the mint.
+
+Two shapes the live homepage actually emits broke the first implementation and are now pinned by regression tests: the `R` payload is `\xNN` hex-escaped (`\x7b` = `{`), and the outer object carries a trailing comma.
+
+**Security boundary.** The interpreter-origin gate (`assertGoogleHost`) is the control, **not** the parser. `parseLooseJSON` throws on identifiers, calls and stray backslashes, which keeps page text from being *executed* — but it does not keep page text from *producing a challenge*: JSON string escaping touches none of `'`, `{`, `}`, `:` or bare identifiers, so a single-quoted payload smuggled through a video title parses cleanly (verified 2026-08-24; an earlier comment and test claimed otherwise and both were wrong). What contains this is that the genuine `window.ytAtN(` call precedes `ytInitialData` on the live page, plus the host gate — which an adversarial probe could not defeat across ~30 host-confusion payloads (userinfo, backslash authorities, IDNA homoglyphs, control characters, percent-encoding). Residual risk if YouTube's emission order ever flipped is bounded to **denial of POT minting**, not code execution. Both extractors also try **every** candidate rather than the first: taking only the first match meant one crafted title containing `ytcfg.set({` silently reverted an install to `/att/get`, the exact condition this module prevents.
+
+**Failure handling.** Every miss returns `null` with a distinct reason (the `REASONS` table, mirroring the `atn*` constants) logged as a `homepage-challenge:` warning, and falls through to the next source. Behavior is never worse than the pre-homepage flow. Verified live 2026-08-24: `minterSource=homepage`, no fallback warnings.
 
 #### Watch-page challenge extraction (`internal/youtube/watch_page.go`)
 
@@ -831,7 +869,7 @@ Two independent checks now enforce the same rule — `validateChallengeOrigin` i
 - The interpreter URL must be `https:` on one of **eight exact hosts**: `www.google.com`, `google.com`, `www.gstatic.com`, `ssl.gstatic.com`, `gstatic.com`, `s.ytimg.com`, `www.youtube.com`, `youtube.com`. No suffix matching and no patterns — an adversarial review defeated both weaker forms. Suffix-matching `.googleapis.com` re-admitted `storage.googleapis.com` and `firebasestorage.googleapis.com`, which serve anyone's uploaded bucket objects (and `sites`/`script`/`drive.google.com`, which host third-party content); a `^google\.[a-z]{2,3}(\.[a-z]{2})?$` "regional Google" pattern matched *shape rather than ownership*, admitting live third-party domains such as `google.com.se` and `google.co.nl`. Both reached code execution end-to-end. Regional Google domains are consequently unsupported; the interpreter is served from a global host.
 - The URL must be a **static script**: no query, no fragment, and an encoded path matching `^/[A-Za-z0-9._~/-]+\.[Jj][Ss]$`. An allowlisted host is *not* the same as Google-authored bytes — `www.google.com` serves JSONP endpoints (`/complete/search?client=firefox&jsonp=…`) that reflect an attacker-supplied callback at HTTP 200, which reached RCE through a genuinely allowlisted host with no redirect involved. Reflection requires a query to reflect, so demanding the static shape removes the class. Percent-encoding is excluded from the alphabet because Go decodes `%3F` into `url.Path` while JS's `URL` keeps it encoded: the two gates would otherwise disagree about what the path is, with safety resting on Google returning 404 for the crafted form.
 - Redirects are refused outright (`redirect: "manual"`, any 3xx is an error) on all three sidecar fetches. undici follows redirects by default and only the pre-redirect host was gated, so an allowlisted host answering `302` delivered the body we execute. `/att/get` and `GenerateIT` get the same treatment: the `/att/get` response is the one trusted enough to execute inline.
-- A page-sourced challenge carrying inline `interpreterJavascript` instead of a URL is **refused**, even though bgutils-js treats the two as interchangeable: inline script scraped from HTML has no origin to check at all. Those fall back to `/att/get`, whose response is a genuine YouTube API result; the sidecar honors inline script only for challenges it fetched itself (`trusted = minterSource === "att_get"`). Live YouTube ships `interpreterUrl` and never inline (verified 2026-08-15), so this costs nothing today.
+- A page-sourced challenge carrying inline `interpreterJavascript` instead of a URL is **refused**, even though bgutils-js treats the two as interchangeable: inline script scraped from HTML has no origin to check at all. Those fall back to `/att/get`, whose response is a genuine YouTube API result; the sidecar honors inline script only for challenges it fetched itself (`trusted = minterSource === "att_get"`). Live YouTube ships `interpreterUrl` and never inline (verified 2026-08-15), so this costs nothing today. Homepage-sourced challenges cannot reach that branch at all — `extractHomepageChallenge` rebuilds them from exactly `program`/`globalName`/`interpreterUrl`, so inline script cannot survive extraction.
 
 A rejected host is reported by name in the reason string, so a genuinely-Google host missing from the list surfaces as "add this name" rather than an unexplained loss of session coherence.
 
@@ -839,7 +877,7 @@ A rejected host is reported by name in the reason string, so a genuinely-Google 
 
 `generatePoToken` gained two optional params and three result fields (also reflected in the IPC protocol table above):
 
-- `challenge` (param, string) — a `bgChallenge` JSON string. When present and well-formed (has `program` and `interpreterUrl`, and its host passes `assertGoogleHost`), `generateMinter` builds the BotGuard minter from it instead of fetching its own via `/att/get`. Malformed, disallowed, or absent challenges fall back to `/att/get` with a Warn-level log. Sent by both the GVS and player mints.
+- `challenge` (param, string) — a `bgChallenge` JSON string. Since the homepage-pair change this is the **second** preference, not the first: `generateMinter` builds from its own homepage (ytcfg, ytAtN) pair when it can, uses this challenge when the homepage pair is unavailable and this one is well-formed (has `program` and `interpreterUrl`, and its host passes `assertGoogleHost`), and falls back to `/att/get` otherwise — each step logged with a distinct reason. Sent by both the GVS and player mints.
 - `freshMinter` (param, bool) — forces `getOrCreateMinter` to regenerate even when the cached minter is still valid. Set by GVS mints; player mints omit it and take the cached minter.
 - In-flight regenerations are **keyed by challenge**: a caller joins an in-flight BotGuard pass only when it supplied the same challenge. A caller with a different challenge waits and then regenerates its own rather than silently inheriting another session's minter — the earlier shared-promise behavior reported `minterSource=challenge` for a minter built from a *different* video's page, which is worse than no provenance at all. The cost is that two jobs starting within the same BotGuard window serialize.
 - `minterSource` (result, string) — `"challenge"` or `"att_get"`, whichever input built the minter that served this specific mint.

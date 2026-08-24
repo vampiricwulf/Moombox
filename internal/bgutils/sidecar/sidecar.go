@@ -415,14 +415,16 @@ func (s *Sidecar) GeneratePlayerPoToken(ctx context.Context, binding, challenge 
 // source built the minter and whether it was regenerated for this mint.
 type GvsMintResult struct {
 	PoToken      string `json:"poToken"`
-	MinterSource string `json:"minterSource"` // "challenge" | "att_get"
+	MinterSource string `json:"minterSource"` // "homepage" | "challenge" | "att_get"
 	MinterFresh  bool   `json:"minterFresh"`
 }
 
 // GenerateGvsPoToken mints a GVS (segment-URL) PO token with the
 // fresh-minter-per-mint policy: the sidecar regenerates its BotGuard minter
-// for this call, building it from the supplied watch-page challenge when
-// non-empty (session-coherent) or its own /att/get fetch otherwise.
+// for this call. Challenge sourcing follows upstream 495a47f's preference
+// order: the sidecar's own homepage (ytcfg, ytAtN) pair first — the
+// EVENT_ID-coherent source the binding experiment demands — then the
+// supplied watch-page challenge when non-empty, then its /att/get fetch.
 func (s *Sidecar) GenerateGvsPoToken(ctx context.Context, binding, challenge string) (GvsMintResult, error) {
 	params := map[string]any{"binding": binding, "freshMinter": true}
 	if challenge != "" {

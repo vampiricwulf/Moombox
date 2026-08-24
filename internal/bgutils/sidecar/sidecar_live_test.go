@@ -97,7 +97,10 @@ func TestSidecarLivePoToken(t *testing.T) {
 
 // TestSidecarLiveGvsMint exercises the freshMinter + provenance path against
 // real YouTube endpoints. No page challenge is supplied (none is available in
-// a test), so provenance must report the /att/get source and a fresh minter.
+// a test), so provenance must report a fresh minter built from the sidecar's
+// own sources: "homepage" (the ytcfg+ytAtN pair, the expected primary) or
+// "att_get" (the legacy fallback when the homepage fetch/extraction fails —
+// e.g. a consent-walled region or a page-layout change).
 func TestSidecarLiveGvsMint(t *testing.T) {
 	if os.Getenv("MOOMBOX_LIVE_BG_TEST") != "1" {
 		t.Skip("set MOOMBOX_LIVE_BG_TEST=1 to run live BotGuard tests")
@@ -109,8 +112,16 @@ func TestSidecarLiveGvsMint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateGvsPoToken: %v", err)
 	}
-	if res.PoToken == "" || res.MinterSource != "att_get" || !res.MinterFresh {
+	t.Logf("minterSource=%s (homepage = pair extraction worked; att_get = fell back)", res.MinterSource)
+	if res.PoToken == "" || !res.MinterFresh ||
+		(res.MinterSource != "homepage" && res.MinterSource != "att_get") {
 		t.Errorf("unexpected result: %+v", res)
+	}
+	if res.MinterSource != "homepage" {
+		// Not fatal (att_get is a legitimate fallback) but worth surfacing:
+		// the whole point of the homepage pair is EVENT_ID coherence, so a
+		// persistent fallback here means the extraction needs a look.
+		t.Logf("WARNING: homepage pair extraction did not produce the minter; check sidecar stderr for homepage-challenge warnings")
 	}
 	// Second fresh mint must regenerate again (freshMinter honored).
 	res2, err := s.GenerateGvsPoToken(ctx, "dQw4w9WgXcQ", "")
