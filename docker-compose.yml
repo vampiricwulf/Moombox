@@ -1,0 +1,40 @@
+services:
+  moombox:
+    image: ghcr.io/vampiricwulf/moombox:latest
+    # To build from source instead of pulling the published image,
+    # comment out `image:` above and uncomment:
+    # build: .
+    container_name: moombox
+    restart: unless-stopped
+    # tini as PID 1: reaps any orphaned ffmpeg/sidecar processes.
+    init: true
+    # Give in-flight muxing/finalization time to complete on shutdown.
+    stop_grace_period: 1m
+    ports:
+      # In the container, network_access defaults to "lan", so anything
+      # that can reach this published port can use the dashboard.
+      # Use "127.0.0.1:774:774" to restrict it to the Docker host only.
+      - "774:774"
+    volumes:
+      # Everything lives under /data: config.toml, database, logs,
+      # staging, finished downloads, sidecar cache.
+      - ./data:/data
+      # Optional: put finished downloads on a separate (bigger) disk:
+      # - /mnt/media/vods:/data/output
+      # Optional: Netscape cookie file for members-only content — then
+      # set cookies.cookie_file = "/data/cookies.txt" in data/config.toml:
+      # - ./cookies.txt:/data/cookies.txt:ro
+    # environment:
+    #   # Timezone for timestamps in filenames and logs:
+    #   - TZ=America/Los_Angeles
+    # Run as a specific user instead of root (make sure ./data is
+    # writable by that uid first):
+    # user: "1000:1000"
+    healthcheck:
+      # TCP connect to the dashboard port. If you change network.port in
+      # config.toml, update (or remove) this too.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/774"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

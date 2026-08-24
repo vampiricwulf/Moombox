@@ -73,6 +73,9 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - Windows x64, **or** Linux x64, **or** Linux arm64
 - [FFmpeg](https://ffmpeg.org/download.html) in your PATH (for muxing video + audio)
 
+**Running with Docker:**
+- Docker (x64 or arm64 host) — FFmpeg is included in the image
+
 **Building from source:**
 - [Go](https://go.dev/dl/) 1.25 or later
 - [FFmpeg](https://ffmpeg.org/download.html) in your PATH
@@ -102,6 +105,37 @@ chmod +x moombox-linux-arm64
 ```
 
 A built-in setup wizard walks you through first-time configuration on launch. The TUI opens by default — press **W** to open the web dashboard in your browser.
+
+### Docker (x64 / arm64)
+
+```bash
+mkdir moombox && cd moombox
+wget https://raw.githubusercontent.com/vampiricwulf/Moombox/main/docker-compose.yml
+docker compose up -d
+```
+
+The dashboard is available at `http://<host>:774`. Everything (config,
+database, logs, staging, finished downloads) lives under `./data`; edit
+`./data/config.toml` or use the dashboard's Settings page to configure.
+
+Docker-specific behavior:
+- **Network access defaults to `"lan"`** (instead of `"localhost"`) — the
+  container is only reachable through the published port, and requests
+  arriving over Docker's bridge network are never loopback, so a
+  `"localhost"` default would make the dashboard unreachable. Use
+  `"127.0.0.1:774:774"` as the port mapping to restrict access to the
+  Docker host only.
+- The first-run setup wizard is skipped (the entrypoint seeds a config
+  on first start); all of its settings are available in Settings.
+- For members-only content, mount a Netscape cookie file (see the
+  comments in `docker-compose.yml`) — browser-based automatic cookie
+  acquisition is not available inside a container.
+- Update by pulling a new image (`docker compose pull && docker compose
+  up -d`), not via the in-app updater — an in-app update is lost when
+  the container is recreated.
+
+To build the image from source instead of pulling:
+`docker build -t moombox .` from a checkout of this repository.
 
 To add a video manually:
 ```bash

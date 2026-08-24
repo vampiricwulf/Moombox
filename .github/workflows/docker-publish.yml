@@ -1,0 +1,75 @@
+name: Build and Publish Docker Image
+
+# Publishes ghcr.io/vampiricwulf/moombox on every release tag, alongside
+# the binary release workflow (release.yml). Multi-arch: linux/amd64 +
+# linux/arm64. The Dockerfile compiles both on the native runner
+# (CGO_ENABLED=0 cross-compile); QEMU is only used for the small Debian
+# runtime stage of the arm64 image.
+#
+# workflow_dispatch builds and pushes an `edge` tag from the selected
+# branch — useful for testing image changes without cutting a release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/vampiricwulf/moombox
+          # Release tag vX.Y.Z → X.Y.Z, X.Y, and latest (latest=auto skips
+          # pre-release tags like v2.9.0-test.1, matching release.yml's
+          # prerelease handling). workflow_dispatch on a branch → edge.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=edge,branch=main
+
+      - name: Compute version build args
+        # Mirrors release.yml: main.version gets the tag without the v
+        # prefix; main.commit gets the short SHA. On non-tag builds the
+        # version arg is left empty so the binary keeps the version
+        # hardcoded in cmd/moombox/main.go.
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "MOOMBOX_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "MOOMBOX_VERSION=" >> "$GITHUB_ENV"
+          fi
+          echo "MOOMBOX_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ env.MOOMBOX_VERSION }}
+            COMMIT=${{ env.MOOMBOX_COMMIT }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
