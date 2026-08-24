@@ -1,6 +1,12 @@
 package youtube
 
-import "testing"
+import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+)
 
 // TestCaptureVisitorData pins the watch-page → service visitor-data hand-off
 // shared by the authenticated AND public extraction paths. The public path
@@ -36,7 +42,132 @@ func TestCaptureVisitorData(t *testing.T) {
 		p := &PlayerAPI{OnVisitorData: func(string) {}}
 		p.captureVisitorData(nil) // must not panic
 
-		p = &PlayerAPI{} // nil callback
+		p = &PlayerAPI{}                                   // nil callback
 		p.captureVisitorData(&YtcfgData{VisitorData: "x"}) // must not panic
+	})
+}
+
+// clientKeyedTransport answers /youtubei player requests with a canned body
+// per X-YouTube-Client-Name header and records the call order.
+type clientKeyedTransport struct {
+	responses map[string]struct {
+		status int
+		body   string
+	}
+	calls []string
+}
+
+func (tr *clientKeyedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	client := req.Header.Get("X-YouTube-Client-Name")
+	tr.calls = append(tr.calls, client)
+	r, ok := tr.responses[client]
+	if !ok {
+		r.status, r.body = http.StatusNotFound, "{}"
+	}
+	return &http.Response{
+		StatusCode: r.status,
+		Body:       io.NopCloser(strings.NewReader(r.body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+const adequateOKBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"},
+	"streamingData": {"adaptiveFormats": [
+		{"itag": 299, "url": "https://example.com/v", "mimeType": "video/mp4; codecs=\"avc1.64002a\"", "width": 1920, "height": 1080},
+		{"itag": 140, "url": "https://example.com/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+	]}
+}`
+
+const audioOnlyOKBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"},
+	"streamingData": {"adaptiveFormats": [
+		{"itag": 140, "url": "https://example.com/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+	]}
+}`
+
+// TestTryCookielessFallbacks pins the cookieless fallback chain introduced
+// for yt-dlp 2026.08.19 parity: VISIONOS (client 101) is tried first, an
+// adequate result short-circuits before ANDROID_VR (client 28), and when
+// neither is adequate the pool still collects every fetched format at the
+// last-resort tiers (VisionOS ahead of AndroidVR).
+func TestTryCookielessFallbacks(t *testing.T) {
+	swap := func(t *testing.T, tr *clientKeyedTransport) {
+		t.Helper()
+		orig := apiClient
+		apiClient = &http.Client{Transport: tr}
+		t.Cleanup(func() { apiClient = orig })
+	}
+	newAPI := func() *PlayerAPI { return NewPlayerAPI(nil, noopLogger{}) }
+
+	t.Run("visionos adequate short-circuits android_vr", func(t *testing.T) {
+		tr := &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{
+			"101": {http.StatusOK, adequateOKBody},
+		}}
+		swap(t, tr)
+
+		var pool []Format
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+		if res == nil {
+			t.Fatal("expected a result from visionos")
+		}
+		if len(tr.calls) != 1 || tr.calls[0] != "101" {
+			t.Errorf("calls = %v, want [101] only", tr.calls)
+		}
+		if len(pool) != 2 || pool[0].Source != "visionos" || *pool[0].AuthLevel != AuthLevelVisionOS {
+			t.Errorf("pool = %+v, want 2 visionos formats at AuthLevelVisionOS", pool)
+		}
+	})
+
+	t.Run("visionos failure falls through to android_vr", func(t *testing.T) {
+		tr := &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{
+			"28": {http.StatusOK, adequateOKBody},
+		}}
+		swap(t, tr)
+
+		var pool []Format
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+		if res == nil {
+			t.Fatal("expected a result from android_vr")
+		}
+		if len(tr.calls) != 2 || tr.calls[0] != "101" || tr.calls[1] != "28" {
+			t.Errorf("calls = %v, want [101 28]", tr.calls)
+		}
+		if len(pool) != 2 || pool[0].Source != "android_vr" || *pool[0].AuthLevel != AuthLevelAndroidVR {
+			t.Errorf("pool = %+v, want 2 android_vr formats at AuthLevelAndroidVR", pool)
+		}
+	})
+
+	t.Run("neither adequate returns nil but pools formats", func(t *testing.T) {
+		tr := &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{
+			"101": {http.StatusOK, audioOnlyOKBody},
+			"28":  {http.StatusOK, audioOnlyOKBody},
+		}}
+		swap(t, tr)
+
+		var pool []Format
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+		if res != nil {
+			t.Fatalf("expected nil result, got %+v", res)
+		}
+		if len(pool) != 2 {
+			t.Fatalf("pool has %d formats, want 2 (one per client)", len(pool))
+		}
+		if *pool[0].AuthLevel != AuthLevelVisionOS || *pool[1].AuthLevel != AuthLevelAndroidVR {
+			t.Errorf("pool auth levels = %d, %d; want %d then %d",
+				*pool[0].AuthLevel, *pool[1].AuthLevel, AuthLevelVisionOS, AuthLevelAndroidVR)
+		}
 	})
 }

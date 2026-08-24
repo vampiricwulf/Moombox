@@ -46,6 +46,7 @@ var UserAgents = struct {
 	AndroidVR string
 	TV        string
 	IOS       string
+	VisionOS  string
 }{
 	// Randomized per process start (see randomizedWebUA). This is the single
 	// source of truth for the desktop Web UA — every other site references
@@ -59,6 +60,7 @@ var UserAgents = struct {
 	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 	TV:        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
 	IOS:       "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+	VisionOS:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
 }
 
 // =============================================================================
@@ -168,13 +170,42 @@ var WebEmbeddedClient = YouTubeClientConfig{
 	},
 }
 
-// AndroidVRClient is for VOD downloads without cookies.
+// VisionOSClient is yt-dlp's lead default client since 2026.08.19 (dae52d838
+// removed android_vr from every default list; visionos leads _DEFAULT_CLIENTS
+// and _DEFAULT_JSLESS_CLIENTS). Cookieless, no JS player required, no PO-token
+// policy. Serves direct-URL adaptive formats for VODs and HLS for live —
+// verified 2026-08-24 that it does NOT return dashManifestUrl for live
+// streams, so it cannot replace ANDROID_VR as the live-DASH enrichment
+// source. Caveat per upstream: "Made for kids" videos aren't available.
+var VisionOSClient = YouTubeClientConfig{
+	ClientName:    "VISIONOS",
+	ClientVersion: "1.02",
+	ClientID:      "101",
+	UserAgent:     UserAgents.VisionOS,
+	Context: map[string]any{
+		"clientName":    "VISIONOS",
+		"clientVersion": "1.02",
+		"deviceMake":    "Apple",
+		"deviceModel":   "RealityDevice17,1",
+		"osName":        "visionOS",
+		"osVersion":     "26.5.23O471",
+	},
+}
+
+// AndroidVRClient is for status probes and as a live-DASH / VOD-format
+// fallback without cookies.
 // clientVersion is deliberately held at 1.65.10 — versions >1.65 may return
-// SABR-only streams (yt-dlp keeps the same pin). Since 2026-07 yt-dlp
-// reports intermittent/selective PO-token enforcement on android_vr's
-// non-HLS formats (69ea20006 added a GVS PO-token policy for it); if VOD
-// fetches through this client start failing with 403s, attaching a PO token
-// is the fix to reach for.
+// SABR-only streams (yt-dlp keeps the same pin). yt-dlp reports escalating
+// enforcement: intermittent/selective PO-token enforcement on non-HLS formats
+// since 2026-07 (69ea20006), and "ALL formats (including live HLS and itag
+// 18) are 403'd" since 2026-08-17 (dae52d838 removed it from every default
+// client list). Verified 2026-08-24 from this vantage that the player API,
+// live DASH manifests+segments, and VOD format URLs all still work — the
+// enforcement is selective, not universal. The probe keeps using it (the
+// player response itself is unaffected), VISIONOS now leads the VOD-format
+// fallbacks, and this client remains the only cookieless source of live
+// dashManifestUrl (VISIONOS is HLS-only for live), so the DASH enrichment
+// fallback stays here until enforcement or a replacement forces a change.
 var AndroidVRClient = YouTubeClientConfig{
 	ClientName:    "ANDROID_VR",
 	ClientVersion: "1.65.10",

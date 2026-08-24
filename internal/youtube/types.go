@@ -203,6 +203,16 @@ type YtcfgData struct {
 // source of formats at all for some restricted videos — it simply must not
 // displace a WEB/TV format that carries the same itag.
 //
+// VISIONOS (added 2026-08-24, yt-dlp 2026.08.19 parity) computes to upstream
+// priority -10 — its base client is not in BASE_CLIENTS at all, so
+// qualities() returns -1 — placing it below even android/ios. Moombox ranks
+// it one notch ABOVE android_vr instead: upstream deleted android_vr from
+// its defaults entirely (all-formats 403 enforcement since 2026-08-17), so
+// its relative ranking there is vestigial, while Moombox retains android_vr
+// as an extra fallback tier behind visionos. Under selective enforcement a
+// 403-dead android_vr URL must never win a same-itag tie against a working
+// visionos one.
+//
 // Within a tier the previous relative order is preserved: public watch-page
 // formats still rank ahead of authenticated ones (audit I5).
 const (
@@ -217,8 +227,10 @@ const (
 	AuthLevelWeb             = 5
 	AuthLevelWebEmbedded     = 6
 	AuthLevelWebCreator      = 7
-	// ANDROID tier — upstream priority 10. Last resort: not a WebPO client.
-	AuthLevelAndroidVR = 8
+	// Last-resort tier: cookieless non-WebPO clients. VISIONOS ahead of
+	// ANDROID_VR — see the block comment above.
+	AuthLevelVisionOS  = 8
+	AuthLevelAndroidVR = 9
 )
 
 // Sentinel values written by parsePlayerResponse when metadata is missing.
