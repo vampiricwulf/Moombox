@@ -798,6 +798,18 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	}
 }
 
+// cookiesStatusError reports whether err's chain warrants StatusCookies
+// rather than StatusError — i.e. the user acting on cookie auth is the fix:
+// worker.ErrCookiesRequired (player-API member/login flags),
+// twitch.ErrTwitchAuthExpired (GQL 401/403 after token rotation), and
+// twitch.ErrSubscriberOnly (usher entitlement restriction — logging into an
+// account that has access is the fix). Audit reports/twitch.md #8.
+func cookiesStatusError(err error) bool {
+	return errors.Is(err, ErrCookiesRequired) ||
+		errors.Is(err, twitch.ErrTwitchAuthExpired) ||
+		errors.Is(err, twitch.ErrSubscriberOnly)
+}
+
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Free the queue slot BEFORE committing the error to DB so a concurrent
 	// monitor-driven AutoReinitializeJob can re-enqueue without hitting the
@@ -809,13 +821,8 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	errMsg := err.Error()
 	w.logger.Error("job error", "jobID", job.ID, "err", errMsg)
 
-	// Both worker.ErrCookiesRequired (player-API member/login flags) and
-	// twitch.ErrTwitchAuthExpired (GQL 401/403 after token rotation) mean
-	// the user needs to refresh their cookie session — route both to
-	// StatusCookies so the UI can prompt for re-auth instead of
-	// presenting them as generic failures. Audit reports/twitch.md #8.
 	status := database.StatusError
-	if errors.Is(err, ErrCookiesRequired) || errors.Is(err, twitch.ErrTwitchAuthExpired) {
+	if cookiesStatusError(err) {
 		status = database.StatusCookies
 	}
 

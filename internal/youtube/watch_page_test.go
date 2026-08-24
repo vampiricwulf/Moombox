@@ -2,10 +2,40 @@ package youtube
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
 )
+
+// TestIsConsentRedirect pins the EU consent-wall detection FetchWatchPage
+// applies to the fetch's FINAL URL (after redirects). The consent
+// interstitial answers 200 with no ytcfg/playerResponse, so without this
+// check a cookie-less EU user silently loses visitorData, PlayerURL, STS,
+// and PO tokens with nothing in the log. Mirrors the detection the chat
+// API has had since audit chat.md C14.
+func TestIsConsentRedirect(t *testing.T) {
+	mk := func(host string) *http.Response {
+		return &http.Response{Request: &http.Request{URL: &url.URL{Scheme: "https", Host: host}}}
+	}
+
+	if !isConsentRedirect(mk("consent.youtube.com")) {
+		t.Error("consent.youtube.com must be detected as a consent redirect")
+	}
+	if !isConsentRedirect(mk("consent.google.com")) {
+		t.Error("consent.google.com must be detected as a consent redirect")
+	}
+	if isConsentRedirect(mk("www.youtube.com")) {
+		t.Error("www.youtube.com must NOT be detected as a consent redirect")
+	}
+	if isConsentRedirect(&http.Response{Request: &http.Request{}}) {
+		t.Error("nil URL must be a safe non-match")
+	}
+	if isConsentRedirect(&http.Response{}) {
+		t.Error("nil Request must be a safe non-match")
+	}
+}
 
 func TestJSURLRegex_AcceptsScriptSrc(t *testing.T) {
 	// Modern YouTube watch pages have sometimes shipped a "scriptSrc" key

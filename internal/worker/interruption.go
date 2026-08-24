@@ -420,6 +420,18 @@ func observeYouTubeStatusProbe(job *JobContext, info *youtube.VideoInfo, err err
 	if info == nil {
 		return false, errNilStatusProbe
 	}
+	// An auth-walled probe that ALSO carries no broadcast details at all
+	// (classifyStream had no videoDetails/liveBroadcastDetails to work with,
+	// so it fell through to not_a_stream) is a statement about the PROBE
+	// being blind — YouTube's "Sign in to confirm you're not a bot" wall on
+	// this cookieless ANDROID_VR client returns exactly this shape for a
+	// perfectly healthy public live stream — never a statement about the
+	// broadcast. Reported as an error so the engine treats the check as
+	// inconclusive (defers the verdict) instead of latching streamEnded and
+	// finalizing a still-live recording early.
+	if info.StreamStatus == youtube.StreamNotAStream && isAuthWalledPlayability(info.PlayabilityError) {
+		return false, errAuthWalledStatusProbe
+	}
 	job.Interruption.observe(info)
 	return info.StreamStatus != youtube.StreamLive, nil
 }
@@ -427,3 +439,8 @@ func observeYouTubeStatusProbe(job *JobContext, info *youtube.VideoInfo, err err
 // errNilStatusProbe is returned by observeYouTubeStatusProbe when
 // ProbeVideoStatus returns (nil, nil) — see its doc comment.
 var errNilStatusProbe = errors.New("status probe returned nil info without error")
+
+// errAuthWalledStatusProbe is returned by observeYouTubeStatusProbe when a
+// probe is auth-walled (bot check / login wall) with no broadcast details —
+// see its doc comment.
+var errAuthWalledStatusProbe = errors.New("status probe auth-walled with no broadcast details (bot check or login wall); verdict deferred")

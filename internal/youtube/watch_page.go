@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
@@ -164,6 +166,17 @@ type WatchPageResult struct {
 	AttestationReason string
 }
 
+// isConsentRedirect reports whether a watch-page fetch's FINAL URL (after
+// redirects) landed on the EU consent interstitial (consent.youtube.com /
+// consent.google.com). The interstitial answers 200 with none of the
+// watch-page payloads, so extraction would silently yield an empty ytcfg —
+// no visitorData, PlayerURL, STS, or PO token — with nothing in the log.
+// Mirrors the chat API's detection (audit chat.md C14).
+func isConsentRedirect(resp *http.Response) bool {
+	return resp != nil && resp.Request != nil && resp.Request.URL != nil &&
+		strings.HasPrefix(resp.Request.URL.Host, "consent.")
+}
+
 // FetchWatchPage fetches and parses a YouTube watch page.
 func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*WatchPageResult, error) {
 	url := fmt.Sprintf("%s?v=%s", constants.YouTubeURLs.Watch, videoID)
@@ -177,7 +190,26 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		headers["Cookie"] = cookieHeader
 	}
 
-	body, err := utils.FetchBody(ctx, url, 30*time.Second, headers)
+	// FetchWithTimeout (not FetchBody) so the FINAL post-redirect URL is
+	// inspectable — the consent interstitial answers 200, so status-code
+	// checks alone can never see it.
+	resp, cancel, err := utils.FetchWithTimeout(ctx, url, 30*time.Second, headers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
+	}
+	defer cancel()
+	defer resp.Body.Close()
+
+	if isConsentRedirect(resp) {
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("watch page redirected to consent wall (%s); supply CONSENT cookies via a cookie file", resp.Request.URL.Host)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("failed to fetch watch page: HTTP %d from %s", resp.StatusCode, url)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, utils.MaxFetchBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
 	}

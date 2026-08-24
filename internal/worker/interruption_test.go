@@ -779,6 +779,55 @@ func TestObserveYouTubeStatusProbe(t *testing.T) {
 		}
 	})
 
+	// Bot-check false-end: an anonymous probe hit by YouTube's "Sign in to
+	// confirm you're not a bot" wall returns LOGIN_REQUIRED with NO
+	// videoDetails at all, which classifyStream can only file as
+	// StreamNotAStream. That is a statement about the PROBE being blind,
+	// not about the broadcast -- treating it as "ended" finalizes a
+	// still-live recording early. It must surface as an inconclusive check
+	// (non-nil err defers the verdict) exactly like the nil-info guard.
+	for _, tc := range []struct {
+		name string
+		err  youtube.PlayabilityError
+	}{
+		{"login-required", youtube.PlayabilityLoginRequired},
+		{"members-only", youtube.PlayabilityMembersOnly},
+		{"age-restricted", youtube.PlayabilityAgeRestricted},
+	} {
+		t.Run("auth-walled not-a-stream ("+tc.name+") is inconclusive, not ended", func(t *testing.T) {
+			job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
+			info := &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityError: tc.err}
+
+			ended, err := observeYouTubeStatusProbe(job, info, nil)
+
+			if err == nil {
+				t.Fatal("err = nil; an auth-walled probe with no videoDetails must be inconclusive (non-nil err), never a stream-end verdict")
+			}
+			if ended {
+				t.Error("ended = true; a bot-checked/auth-walled probe must never finalize a live recording")
+			}
+			if job.Interruption.fresh() {
+				t.Error("an inconclusive probe must not arm the interruption signal")
+			}
+		})
+	}
+
+	// A clean not-a-stream verdict (no auth wall) is still a real "ended"
+	// answer -- the guard above must not swallow it.
+	t.Run("non-auth-walled not-a-stream still reports ended", func(t *testing.T) {
+		job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
+		info := &youtube.VideoInfo{StreamStatus: youtube.StreamNotAStream, PlayabilityError: youtube.PlayabilityOK}
+
+		ended, err := observeYouTubeStatusProbe(job, info, nil)
+
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if !ended {
+			t.Error("ended = false for a clean StreamNotAStream, want true")
+		}
+	})
+
 	t.Run("nil info without error is a safe no-op, not a panic", func(t *testing.T) {
 		job := &JobContext{Job: &database.Job{ID: "j1"}, Interruption: &interruptionSignal{}}
 

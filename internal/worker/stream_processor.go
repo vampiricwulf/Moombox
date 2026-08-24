@@ -318,7 +318,10 @@ func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, er
 	case youtube.PlayabilityLoginRequired:
 		return fmt.Sprintf("Login required: %s", reason), ErrCookiesRequired
 	case youtube.PlayabilityAgeRestricted:
-		return fmt.Sprintf("Age restricted: %s", reason), ErrNonActionable
+		// ErrNonActionable suppresses the notification, so the display
+		// string is the user's only breadcrumb — say that cookies are the
+		// fix or a cookie-less user gets a dead-end Error.
+		return fmt.Sprintf("Age restricted: %s (cookies from an age-verified account would allow this)", reason), ErrNonActionable
 	default:
 		return reason, nil
 	}

@@ -27,6 +27,14 @@ import (
 // browser produced indistinguishable errors from transient network trouble.
 var ErrTwitchAuthExpired = errors.New("twitch auth token expired or invalid")
 
+// ErrSubscriberOnly signals an usher 403 whose body carries error_code
+// vod_manifest_restricted or unauthorized_entitlements — subscriber-only
+// content (yt-dlp twitch.py parity). Distinct from ErrTwitchAuthExpired:
+// the token is fine, the account (or the anonymous session) simply lacks
+// access. The worker routes it to StatusCookies since logging into an
+// account that has access is the fix.
+var ErrSubscriberOnly = errors.New("subscriber-only content: you must be logged into an account that has access")
+
 // ErrChannelNotFound signals a login that doesn't resolve to a Twitch user
 // (renamed, banned, deleted, or a typo) — GQL returns user:null, which is
 // indistinguishable from "offline" without this. Surfaced ONLY by
