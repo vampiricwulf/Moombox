@@ -284,6 +284,224 @@ func TestHlsVod_FMP4InitWrittenFirst(t *testing.T) {
 	}
 }
 
+// TestHlsLive_FMP4StuckSegmentSkipsNotSplitCycle pins the empty-file gap
+// rule on fMP4: a successor part whose FIRST segment is permanently failing
+// must not have an init written before any media lands — the file must stay
+// genuinely empty so stuck-segment exhaustion takes the skip-and-record-gap
+// branch (one OnGap, recording continues) instead of returning ErrGapDetected
+// and split-cycling init-only junk parts.
+func TestHlsLive_FMP4StuckSegmentSkipsNotSplitCycle(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		var b strings.Builder
+		b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n")
+		b.WriteString(`#EXT-X-MAP:URI="init0.mp4"` + "\n")
+		b.WriteString("#EXTINF:1.000,live\ndead0.mp4\n")
+		b.WriteString("#EXTINF:1.000,live\nseg1.mp4\n")
+		b.WriteString("#EXTINF:1.000,live\nseg2.mp4\n")
+		b.WriteString("#EXT-X-ENDLIST\n")
+		fmt.Fprint(w, b.String())
+	})
+	var initFetches atomic.Int32
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		switch {
+		case path == "init0.mp4":
+			initFetches.Add(1)
+			fmt.Fprint(w, "(I)")
+		case strings.HasPrefix(path, "dead"):
+			http.Error(w, "gone", http.StatusNotFound)
+		default:
+			fmt.Fprintf(w, "[%s]", strings.TrimSuffix(path, ".mp4"))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	outFile := filepath.Join(tmp, "video_stream")
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/playlist.m3u8",
+		OutputFile: outFile,
+		StartSeq:   -1,
+		IsHls:      true,
+		StopOnGap:  true,
+	})
+	var gaps []DownloadGap
+	d.OnGap = func(g DownloadGap) { gaps = append(gaps, g) }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start = %v (ErrGapDetected here means the init write defeated the empty-file skip rule)", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "(I)[seg1][seg2]"; got != want {
+		t.Errorf("output = %q, want %q (init once, then post-gap media)", got, want)
+	}
+	if len(gaps) != 1 || gaps[0].From != 0 || gaps[0].To != 0 {
+		t.Errorf("gaps = %+v, want exactly one {From:0, To:0}", gaps)
+	}
+	if n := initFetches.Load(); n != 1 {
+		t.Errorf("init fetched %d times, want 1", n)
+	}
+}
+
+// TestHlsLive_FMP4RevertsToTSSplitsPart pins the reversion guard: a playlist
+// that stops carrying EXT-X-MAP while the file already starts with an init
+// segment (Twitch rolling its fMP4 experiment back mid-broadcast) must
+// part-split under StopOnGap — appending raw TS after ISOBMFF fragments
+// silently corrupts the part tail.
+func TestHlsLive_FMP4RevertsToTSSplitsPart(t *testing.T) {
+	srv, _, _ := fmp4TestServer(t, func(refresh int32) string {
+		var b strings.Builder
+		b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:1\n")
+		if refresh == 1 {
+			b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
+			b.WriteString(`#EXT-X-MAP:URI="init-a.mp4"` + "\n")
+			b.WriteString("#EXTINF:1.000,live\nseg0.mp4\n")
+			b.WriteString("#EXTINF:1.000,live\nseg1.mp4\n")
+		} else {
+			// Reverted to TS: no EXT-X-MAP at all.
+			b.WriteString("#EXT-X-MEDIA-SEQUENCE:2\n")
+			b.WriteString("#EXTINF:1.000,live\nseg2.mp4\n")
+			b.WriteString("#EXT-X-ENDLIST\n")
+		}
+		return b.String()
+	}, map[string]string{"init-a.mp4": "(A)"})
+
+	tmp := t.TempDir()
+	outFile := filepath.Join(tmp, "video_stream")
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/playlist.m3u8",
+		OutputFile: outFile,
+		StartSeq:   -1,
+		IsHls:      true,
+		StopOnGap:  true,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := d.Start(ctx)
+	if !errors.Is(err, ErrInitSegmentChanged) {
+		t.Fatalf("Start = %v, want ErrInitSegmentChanged (TS after fMP4 must split, not append)", err)
+	}
+	data, readErr := os.ReadFile(outFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got, want := string(data), "(A)[seg0][seg1]"; got != want {
+		t.Errorf("output = %q, want %q (no TS bytes may follow the fMP4 part)", got, want)
+	}
+	if got := d.CurrentSeq(); got != 2 {
+		t.Errorf("CurrentSeq() = %d, want 2", got)
+	}
+}
+
+// TestHls_FMP4LegacySidecarSplitsInsteadOfAppending is the update-path
+// compliance pin: a staged file recorded by a PRE-fMP4 binary (sidecar has no
+// init fields, file content is whatever the old binary wrote) resumed by this
+// binary against an fMP4 playlist must split — the file's init state is
+// unknown, so appending fragments blind is never safe.
+func TestHls_FMP4LegacySidecarSplitsInsteadOfAppending(t *testing.T) {
+	srv, _, _ := fmp4TestServer(t, func(int32) string {
+		var b strings.Builder
+		b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:2\n")
+		b.WriteString(`#EXT-X-MAP:URI="init0.mp4"` + "\n")
+		b.WriteString("#EXTINF:1.000,live\nseg2.mp4\n")
+		b.WriteString("#EXT-X-ENDLIST\n")
+		return b.String()
+	}, map[string]string{"init0.mp4": "(I)"})
+
+	tmp := t.TempDir()
+	outFile := filepath.Join(tmp, "video_stream")
+	legacy := []byte("OLDBINARYDATA")
+	if err := os.WriteFile(outFile, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy sidecar shape: no init fields.
+	sidecar := fmt.Sprintf(`{"lastSeq":1,"bytesWritten":%d,"timestamp":%d,"baseUrl":%q,"streamId":"12345"}`,
+		len(legacy), time.Now().Unix(), srv.URL+"/playlist.m3u8")
+	if err := os.WriteFile(outFile+".resume.json", []byte(sidecar), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/playlist.m3u8",
+		OutputFile: outFile,
+		StartSeq:   -1,
+		IsHls:      true,
+		StopOnGap:  true,
+		StreamID:   "12345",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := d.Start(ctx)
+	if !errors.Is(err, ErrInitSegmentChanged) {
+		t.Fatalf("Start = %v, want ErrInitSegmentChanged (unknown init state must split)", err)
+	}
+	data, readErr := os.ReadFile(outFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != string(legacy) {
+		t.Errorf("staged file was modified: %q (nothing may be appended to a legacy part)", data)
+	}
+}
+
+// TestHlsLive_FMP4AdBreakOwnInitNoSplit pins the ordering that keeps a
+// stitched-ad break's OWN EXT-X-MAP inert: ad segments are skipped before the
+// init logic runs, so the ad's init is never fetched, never written, and never
+// read as an init change when content resumes.
+func TestHlsLive_FMP4AdBreakOwnInitNoSplit(t *testing.T) {
+	srv, _, initCount := fmp4TestServer(t, func(int32) string {
+		var b strings.Builder
+		b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n")
+		b.WriteString(`#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-07-01T00:00:02.000Z",DURATION=4.000` + "\n")
+		b.WriteString(`#EXT-X-MAP:URI="content-init.mp4"` + "\n")
+		b.WriteString("#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:00.000Z\n#EXTINF:2.000,live\nseg0.mp4\n")
+		b.WriteString(`#EXT-X-MAP:URI="ad-init.mp4"` + "\n")
+		b.WriteString("#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:02.000Z\n#EXTINF:2.000,Amazon\nad1.mp4\n")
+		b.WriteString("#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:04.000Z\n#EXTINF:2.000,Amazon\nad2.mp4\n")
+		b.WriteString(`#EXT-X-MAP:URI="content-init.mp4"` + "\n")
+		b.WriteString("#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:06.000Z\n#EXTINF:2.000,live\nseg3.mp4\n")
+		b.WriteString("#EXT-X-ENDLIST\n")
+		return b.String()
+	}, map[string]string{"content-init.mp4": "(C)", "ad-init.mp4": "(AD)"})
+
+	tmp := t.TempDir()
+	outFile := filepath.Join(tmp, "video_stream")
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/playlist.m3u8",
+		OutputFile: outFile,
+		StartSeq:   -1,
+		IsHls:      true,
+		StopOnGap:  true,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start = %v (an ad break's own init must not read as an init change)", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "(C)[seg0][seg3]"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+	if n := initCount("ad-init.mp4"); n != 0 {
+		t.Errorf("ad init fetched %d times, want 0", n)
+	}
+	if n := initCount("content-init.mp4"); n != 1 {
+		t.Errorf("content init fetched %d times, want 1", n)
+	}
+}
+
 // TestHls_FMP4ResumeDoesNotRewriteInit pins the resume contract: a fresh
 // downloader continuing the same staged file (same-quality recovery / daemon
 // restart, resume sidecar present) must know the init is already at the head

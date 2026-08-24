@@ -806,6 +806,16 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 				resuming = false
 				flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 				state = nil
+				// The restore above already installed the sidecar's byte count
+				// and fMP4 init state; the file is about to be O_TRUNC'd
+				// empty, so none of that is true anymore. Stale init fields
+				// are the dangerous half: hlsInitWritten=true on an empty
+				// file makes the per-segment fast path skip ever writing an
+				// init — a headerless, unmuxable file reported as success.
+				d.bytesWritten.Store(0)
+				d.hlsInitWritten = false
+				d.hlsInitURI = ""
+				d.hlsInitHash = ""
 			}
 		}
 	} else {

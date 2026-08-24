@@ -546,6 +546,13 @@ sessionLoop:
 					// and re-requests the segment the engine refused to write.
 					o.logger.Info("Twitch init segment changed — starting new part",
 						"closedPart", segmentIndex+1, "quality", newQuality.Label, "jobID", jobCtx.Job.ID)
+					// A transcode restart often changes quality too; adopting
+					// it silently would hide the change from the operator, so
+					// fire the same notification the quality path sends. The
+					// closed part always muxes here (continuous data).
+					if newQuality.Changed(currentQuality) {
+						o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex, true)
+					}
 
 					nextSeq := videoDl.CurrentSeq()
 					if !advanceToNewPart(true, segmentEndTime) {

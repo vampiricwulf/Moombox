@@ -608,9 +608,11 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 			}
 
 		case strings.HasPrefix(line, "#EXT-X-MAP:"):
-			// fMP4/CMAF init segment. BYTERANGE is deliberately not parsed:
-			// Twitch serves the init as a standalone resource, and fetching
-			// the full URI is correct for that shape.
+			// fMP4/CMAF init segment. BYTERANGE is not parsed — a
+			// byte-ranged map (init = a slice of a larger resource) would be
+			// mis-fetched whole. No platform Moombox targets serves that
+			// shape (media-segment EXT-X-BYTERANGE is equally unsupported
+			// here); Twitch serves standalone init resources.
 			for _, attr := range parseAttributes(line[len("#EXT-X-MAP:"):]) {
 				if attr.key == "URI" && attr.value != "" {
 					curMapURI = resolveURL(baseURL, attr.value)
