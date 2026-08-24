@@ -17,6 +17,10 @@
 *.md text eol=lf
 *.sh text eol=lf
 
+# Docker files are consumed on Linux — keep LF on Windows checkouts too.
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+
 # Windows-only batch and PowerShell scripts: keep CRLF.
 *.bat text eol=crlf
 *.cmd text eol=crlf
