@@ -21,8 +21,8 @@ services:
       - ./data:/data
       # Optional: put finished downloads on a separate (bigger) disk:
       # - /mnt/media/vods:/data/output
-      # Optional: Netscape cookie file for members-only content — then
-      # set cookies.cookie_file = "/data/cookies.txt" in data/config.toml:
+      # Optional: Netscape cookie file for members-only content — the
+      # seeded config already points at /data/cookies.txt:
       # - ./cookies.txt:/data/cookies.txt:ro
     # environment:
     #   # Timezone for timestamps in filenames and logs:

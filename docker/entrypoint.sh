@@ -35,12 +35,31 @@ if [ ! -f "$CONFIG_PATH" ]; then
 # "127.0.0.1:774:774") or set "external" + a dashboard password to allow
 # non-private clients.
 network_access = "lan"
+# Must match the container's EXPOSEd port and the docker-compose
+# healthcheck — change all three together.
+port = 774
+# Behind a TLS-terminating reverse proxy (nginx, Caddy, Traefik)?
+# See trust_forwarded_proto in config.example.toml.
 
 [paths]
 database_path = "/data/moombox.db"
 log_file_path = "/data/moombox.log"
 output_directory = "/data/output"
 staging_directory = "/data/staging"
+
+[cookies]
+# Mount a Netscape cookie file at this path for members-only content
+# (see the volumes section of docker-compose.yml).
+cookie_file = "/data/cookies.txt"
+
+[updates]
+# The in-app updater would swap the binary INSIDE the container, and
+# that is silently reverted whenever the container is recreated from
+# its image. Update by pulling a new image instead:
+#   docker compose pull && docker compose up -d
+# Set to true if you still want new-release notifications in the
+# dashboard (the manual "Check for updates" button works either way).
+auto_check_updates = false
 EOF
 fi
 

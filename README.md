@@ -127,12 +127,15 @@ Docker-specific behavior:
   Docker host only.
 - The first-run setup wizard is skipped (the entrypoint seeds a config
   on first start); all of its settings are available in Settings.
-- For members-only content, mount a Netscape cookie file (see the
-  comments in `docker-compose.yml`) — browser-based automatic cookie
+- For members-only content, mount a Netscape cookie file at
+  `/data/cookies.txt` (see the comments in `docker-compose.yml`) — the
+  seeded config already points there. Browser-based automatic cookie
   acquisition is not available inside a container.
 - Update by pulling a new image (`docker compose pull && docker compose
-  up -d`), not via the in-app updater — an in-app update is lost when
-  the container is recreated.
+  up -d`) — an in-app update would be lost when the container is
+  recreated, so the seeded config disables automatic update checks
+  (`auto_check_updates = false`; the manual "Check for updates" button
+  still works).
 
 To build the image from source instead of pulling:
 `docker build -t moombox .` from a checkout of this repository.
