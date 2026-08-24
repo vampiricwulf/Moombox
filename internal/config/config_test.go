@@ -994,3 +994,19 @@ func TestInterruptionTimeoutValidation(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateAcceptsPublicNetworkAccess: "public" is a documented synonym
+// for "external" (reverse-proxy deployments, docs/spec/security.md) and every
+// runtime consumer treats it as such — validation must not reset it to the
+// "localhost" default.
+func TestValidateAcceptsPublicNetworkAccess(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.NetworkAccess = "public"
+	if errs := Validate(cfg); len(errs) != 0 {
+		t.Errorf("Validate(network_access=public): got errors %v, want none", errs)
+	}
+	Normalize(cfg)
+	if cfg.Network.NetworkAccess != "public" {
+		t.Errorf("Normalize replaced network_access %q, want \"public\" preserved", cfg.Network.NetworkAccess)
+	}
+}
