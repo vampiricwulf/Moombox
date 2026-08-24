@@ -636,7 +636,7 @@ func (pp *PotProvider) gojaGenerateEphemeralMint(ctx context.Context, contentBin
 // the worker's "[POT] GVS mint" log line reports.
 type GvsMint struct {
 	PoToken      string
-	MinterSource string // "challenge" | "att_get" | "goja-fallback"
+	MinterSource string // "homepage" | "challenge" | "att_get" | "goja-fallback"
 	MinterFresh  bool
 	ViaSidecar   bool
 }
@@ -646,8 +646,10 @@ type GvsMint struct {
 // bypassed (no read, no write), and the minter itself is ephemeral — built
 // fresh, minted once, and torn down immediately after, never entering the
 // shared process-wide minterCache. On the sidecar path the sidecar builds
-// its fresh minter from the supplied watch-page challenge ("" → its
-// /att/get fallback); the expensive BotGuard regeneration is deduplicated
+// its fresh minter from its own homepage (ytcfg, ytAtN) pair when it can,
+// else the supplied watch-page challenge, else its /att/get fetch
+// (upstream 495a47f's preference order); the expensive BotGuard
+// regeneration is deduplicated
 // inside the sidecar (minterPromise), so no provider-side inflight entry is
 // needed. On the goja fallback (sidecar unavailable), gojaGenerateAndMint's
 // bypassCache=true routes to gojaGenerateEphemeralMint, which builds its

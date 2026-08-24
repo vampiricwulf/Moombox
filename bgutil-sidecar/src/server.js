@@ -18,6 +18,7 @@ import { WebPoMinter } from "bgutils-js/webpo";
 import { USER_AGENT, buildURL, getHeaders } from "bgutils-js/utils";
 import { createInterface } from "node:readline";
 import { solveCipher } from "./cipher.js";
+import { extractYtcfg, extractHomepageChallenge } from "./homepage.js";
 
 // ---------------------------------------------------------------------------
 // One-time DOM bootstrap. Must run before any module that inspects globalThis
@@ -53,6 +54,7 @@ const REQUEST_KEY = "O43z0dpjhgX20SCx4KAo";
 const CLIENT_VERSION = "2.20260708.00.00";
 const ATT_GET_URL =
     "https://www.youtube.com/youtubei/v1/att/get?prettyPrint=false";
+const HOMEPAGE_URL = "https://www.youtube.com/";
 // Per-fetch ceiling for the BotGuard network round-trips. Node's fetch (undici)
 // has no overall request timeout — a hung YouTube endpoint would otherwise wedge
 // minterPromise for ~300s (undici's headers timeout), and since every mint awaits
@@ -189,14 +191,99 @@ async function fetchInterpreterScript(interpUrl) {
 }
 
 // ---------------------------------------------------------------------------
+// Homepage-pair challenge sourcing (upstream bgutil-ytdlp-pot-provider
+// 495a47f parity). Fetch the YouTube homepage, extract a self-consistent
+// (ytcfg, ytAtN challenge) pair from that single page, and inject
+// globalThis.yt = { config_: ytcfg } so the BotGuard snapshot sees the
+// session's EVENT_ID — YouTube rejects WebPO tokens minted from /att/get
+// challenges when the session is enrolled in the binding experiment
+// (symptom: player requests pass, googlevideo 403s the download).
+//
+// Returns a canonicalized challenge or null; every null path logs its
+// reason and degrades to the caller's next source, so behavior is never
+// worse than the pre-homepage flow. The ytcfg injection happens even when
+// the challenge extraction fails (mirroring upstream): a stale or unpaired
+// EVENT_ID is no worse than the absent one the /att/get path always had.
+// ---------------------------------------------------------------------------
+async function fetchHomepageChallenge() {
+    let pageHtml;
+    try {
+        const resp = await fetch(HOMEPAGE_URL, {
+            // No redirects: a challenge is only trusted off the constant URL
+            // above. A consent-wall or region redirect lands here and falls
+            // back — consistent with the other fetches in this file.
+            redirect: "manual",
+            headers: {
+                accept: "*/*",
+                "accept-language": "en-US,en;q=0.7",
+                "user-agent": USER_AGENT,
+            },
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (resp.status >= 300 && resp.status < 400) {
+            logWarn(
+                `homepage-challenge: redirected (${resp.status} → ${resp.headers.get("location") ?? "?"}); falling back`,
+            );
+            return null;
+        }
+        if (!resp.ok) {
+            logWarn(`homepage-challenge: HTTP ${resp.status}; falling back`);
+            return null;
+        }
+        pageHtml = await resp.text();
+    } catch (e) {
+        logWarn(`homepage-challenge: fetch failed (${e?.message ?? e}); falling back`);
+        return null;
+    }
+
+    const ytcfg = extractYtcfg(pageHtml);
+    if (ytcfg) {
+        // BotGuard reads yt.config_.EVENT_ID off its globalObject
+        // (globalThis). Overwritten on every regeneration so the snapshot
+        // always sees the pair-mate of the challenge minted below.
+        const ytObj = { config_: ytcfg };
+        globalThis.yt = ytObj;
+        if (globalThis.window) globalThis.window.yt = ytObj;
+    } else {
+        logWarn("homepage-challenge: no parseable ytcfg on page (EVENT_ID missing)");
+    }
+
+    const { challenge, reason } = extractHomepageChallenge(pageHtml);
+    if (!challenge) {
+        logWarn(`homepage-challenge: ${reason}; falling back`);
+        return null;
+    }
+    // Gate the interpreter origin HERE, not just in generateMinter's fetch
+    // path: a disallowed host must degrade to the next challenge source
+    // instead of failing the whole mint.
+    try {
+        assertGoogleHost(
+            `https:${challenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue}`,
+        );
+    } catch (e) {
+        logWarn(`homepage-challenge: interpreter refused (${e?.message ?? e}); falling back`);
+        return null;
+    }
+    return challenge;
+}
+
+// ---------------------------------------------------------------------------
 // Core: full BotGuard fetch + interpreter + minter mint flow. Mirrors the
 // upstream session_manager.generateTokenMinter pattern, but stripped of
 // proxy / axios / Innertube fallbacks (Moombox always supplies a binding).
 // ---------------------------------------------------------------------------
 // challenge: a parsed bgChallenge object from the caller's watch page, or
-// null → fetch our own from /att/get (the legacy, session-incoherent path).
+// null. Challenge preference order mirrors upstream 495a47f: the homepage
+// (ytcfg, ytAtN) pair beats BOTH the RPC-supplied watch-page challenge
+// (which cannot be paired with its originating page's ytcfg here) and the
+// /att/get fallback (whose tokens the experiment rejects outright).
 async function generateMinter(challenge) {
     let minterSource = "challenge";
+    const homepageChallenge = await fetchHomepageChallenge();
+    if (homepageChallenge) {
+        challenge = homepageChallenge;
+        minterSource = "homepage";
+    }
     if (!challenge) {
         minterSource = "att_get";
         // 1. Fetch the BotGuard challenge from YouTube's /att/get endpoint.
@@ -245,11 +332,14 @@ async function generateMinter(challenge) {
     // `minterSource === "att_get"` is exactly that condition. A challenge
     // supplied over the RPC (page-scraped, attacker-adjacent) carrying
     // inline JS has no origin we can check, so it is refused outright and we
-    // regenerate from /att/get instead -- the Go side already refuses to
-    // forward such challenges; this is defense in depth, not the primary
-    // control. (generatePoToken's shape check independently requires
+    // regenerate from the fallback chain instead -- the Go side already
+    // refuses to forward such challenges; this is defense in depth, not the
+    // primary control. (generatePoToken's shape check independently requires
     // interpreterUrl on RPC-supplied challenges, so in practice this branch
-    // only fires if that gate is ever bypassed or weakened.)
+    // only fires if that gate is ever bypassed or weakened. A homepage
+    // challenge can never land here either: extractHomepageChallenge rebuilds
+    // it from exactly program/globalName/interpreterUrl, so inline JS cannot
+    // ride along — which is also why the recursion below cannot loop.)
     const trusted = minterSource === "att_get";
     const inline = challenge.interpreterJavascript;
     const inlineJS =
@@ -260,7 +350,7 @@ async function generateMinter(challenge) {
     let interpJS;
     if (inlineJS !== null && !trusted) {
         logWarn(
-            "RPC-supplied challenge carried inline interpreterJavascript; refusing and regenerating from /att/get",
+            "RPC-supplied challenge carried inline interpreterJavascript; refusing and regenerating from homepage//att/get",
         );
         return generateMinter(null);
     } else if (inlineJS !== null) {
@@ -475,7 +565,7 @@ async function generatePoToken(binding, challengeJSON, freshMinter) {
                 challenge = parsed;
                 challengeKey = challengeJSON;
             } else {
-                logWarn("challenge missing program/interpreterUrl; using /att/get");
+                logWarn("challenge missing program/interpreterUrl; using homepage//att/get fallback");
             }
         } catch (e) {
             logWarn(`invalid challenge JSON ignored: ${e?.message ?? e}`);

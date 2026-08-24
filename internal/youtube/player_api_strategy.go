@@ -502,9 +502,11 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 	// the golden standard here. Re-activated 2026-08-16 — the 10c2efd revert's
 	// suspicion of this binding was exonerated when the stall reproduced on
 	// baseline (root cause: ANDROID_VR client ranking, fixed in e9d1388).
-	// Minted via the cached /att/get minter (upstream provider parity); the
-	// visitorData gate stays as the "session established" precondition it
-	// always was, not as the binding.
+	// Minted via the sidecar's cached minter, which since 2026-08-24 the
+	// sidecar builds from its homepage (ytcfg, ytAtN) pair with /att/get as
+	// fallback (upstream provider parity, 495a47f); the visitorData gate
+	// stays as the "session established" precondition it always was, not as
+	// the binding.
 	//
 	// Failure is non-fatal: the request still runs without a token.
 	if p.potProvider != nil && clientAcceptsPlayerPoToken(client) && ytcfg != nil && ytcfg.VisitorData != "" {
@@ -657,7 +659,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 
 	// Inject PO token for WEB_EMBEDDED (same rationale as fetchWithClient):
 	// bound to the video ID per upstream's PLAYER-context rule, minted via
-	// the cached /att/get minter.
+	// the sidecar's cached minter (homepage pair, /att/get fallback).
 	if p.potProvider != nil && ytcfg != nil && ytcfg.VisitorData != "" {
 		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, videoID, false); err == nil && poToken != "" {
 			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}

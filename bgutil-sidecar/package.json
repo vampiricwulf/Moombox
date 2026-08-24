@@ -11,7 +11,7 @@
     "scripts": {
         "build": "node build.mjs",
         "smoke": "node src/server.js",
-        "test": "node --test --test-force-exit test/minter-keying.test.mjs"
+        "test": "node --test --test-force-exit test/minter-keying.test.mjs test/homepage-extract.test.mjs"
     },
     "dependencies": {
         "bgutils-js": "^4.0.3",
