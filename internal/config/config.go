@@ -446,6 +446,30 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Network.NetworkAccess = defaults.Network.NetworkAccess
 		}
 	}
+	if len(cfg.Network.TrustedProxies) > 0 {
+		valid := cfg.Network.TrustedProxies[:0:0]
+		for _, entry := range cfg.Network.TrustedProxies {
+			e := strings.TrimSpace(entry)
+			if e == "" {
+				continue
+			}
+			ok := false
+			if strings.Contains(e, "/") {
+				_, _, err := net.ParseCIDR(e)
+				ok = err == nil
+			} else {
+				ok = net.ParseIP(e) != nil
+			}
+			if !ok {
+				fail("network.trusted_proxies entry %q is not a valid IP or CIDR", entry)
+				continue
+			}
+			valid = append(valid, e)
+		}
+		if !reportOnly {
+			cfg.Network.TrustedProxies = valid
+		}
+	}
 	// ClientTokenTTLDays: 1 day to 10 years. Default to 365d (1y) if unset or out of range.
 	if cfg.Network.ClientTokenTTLDays <= 0 || cfg.Network.ClientTokenTTLDays > 3650 {
 		fail("network.client_token_ttl_days %d out of range 1..3650", cfg.Network.ClientTokenTTLDays)

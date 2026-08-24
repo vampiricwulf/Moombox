@@ -1010,3 +1010,23 @@ func TestValidateAcceptsPublicNetworkAccess(t *testing.T) {
 		t.Errorf("Normalize replaced network_access %q, want \"public\" preserved", cfg.Network.NetworkAccess)
 	}
 }
+
+// TestValidateTrustedProxies: entries must parse as an IP or CIDR; invalid
+// entries are reported by Validate and dropped by Normalize, valid ones kept.
+func TestValidateTrustedProxies(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.TrustedProxies = []string{"172.18.0.2", "10.0.0.0/8", "fd00::/8", "not-an-ip", "300.1.1.1"}
+	if errs := Validate(cfg); len(errs) != 2 {
+		t.Errorf("Validate: got %d errors (%v), want 2 (one per invalid entry)", len(errs), errs)
+	}
+	Normalize(cfg)
+	want := []string{"172.18.0.2", "10.0.0.0/8", "fd00::/8"}
+	if len(cfg.Network.TrustedProxies) != len(want) {
+		t.Fatalf("Normalize kept %v, want %v", cfg.Network.TrustedProxies, want)
+	}
+	for i, w := range want {
+		if cfg.Network.TrustedProxies[i] != w {
+			t.Errorf("entry %d = %q, want %q", i, cfg.Network.TrustedProxies[i], w)
+		}
+	}
+}
