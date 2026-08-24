@@ -449,7 +449,8 @@ func refreshGvsCredentials(
 		formats := videoInfo.Formats
 		playerURL := videoInfo.PlayerURL
 		if job.YT != nil {
-			if fresh, err := job.YT.GetVideoInfo(refreshCtx, job.Job.VideoID); err != nil {
+			fresh, err := job.YT.GetVideoInfo(refreshCtx, job.Job.VideoID)
+			if err != nil {
 				job.Logger.Warn("[POT] credential refresh: player response re-fetch failed; resolving against cached formats",
 					"jobID", job.Job.ID, "tag", tag, "err", err)
 			} else if fresh != nil {
@@ -458,6 +459,15 @@ func refreshGvsCredentials(
 					playerURL = fresh.PlayerURL
 				}
 			}
+			// Interruption spec Tier 1 evidence: this re-fetch runs on every
+			// 403 recovery attempt (OnCredentialRefresh), a ~20-30s cadence
+			// under a stall — success or formats-empty, either way the
+			// signal should observe it so a fresh signature stays trusted
+			// across the whole interruption, not just the moment it started.
+			// AUTHENTICATED fetch — dead cookies mid-stream can produce the
+			// same shape as a healthy auth-walled stream; observe() itself
+			// guards against arming on that (I4 fix).
+			job.Interruption.observe(fresh)
 		}
 		if formatBecameWholeFile(formats, itag) {
 			// The itag that was segmented (OTF/live, no contentLength) at

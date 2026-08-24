@@ -47,18 +47,19 @@ type ChatDownloaderOptions struct {
 
 // ChatDownloader downloads YouTube live chat messages.
 type ChatDownloader struct {
-	opts          ChatDownloaderOptions
-	api           *ChatAPI
-	mu            sync.Mutex
-	running       bool
-	cancelFlag    bool
-	streamEnded   bool
-	messages      []ChatMessage // Unwritten messages in memory
-	messageCount  int
-	dedup         *utils.OrderedDedup[string]
-	continuation  string
-	streamStartMs int64
-	flushedToDisk bool
+	opts                 ChatDownloaderOptions
+	api                  *ChatAPI
+	mu                   sync.Mutex
+	running              bool
+	cancelFlag           bool
+	streamEnded          bool
+	liveContinuationOpen bool
+	messages             []ChatMessage // Unwritten messages in memory
+	messageCount         int
+	dedup                *utils.OrderedDedup[string]
+	continuation         string
+	streamStartMs        int64
+	flushedToDisk        bool
 	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
 	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
 	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
@@ -72,6 +73,15 @@ type ChatDownloader struct {
 	ioErrorOccurred bool
 	cancelCtx       context.CancelFunc // for aborting sleep on stop/markStreamEnded
 	done            chan struct{}      // closed when Start() completes; nil if never started
+
+	// testRecoveryOverride allows tests to inject a recovery function instead of
+	// calling recoverStaleContinuation. Only set in tests; nil in production.
+	testRecoveryOverride func(ctx context.Context) bool
+
+	// testBackoffOverride, when > 0, replaces the computed exponential-backoff
+	// duration in handleFetchError so tests don't have to sleep for real
+	// (5s-60s) intervals. Only set in tests; zero (disabled) in production.
+	testBackoffOverride time.Duration
 
 	OnStart  func(messageCount int, resuming bool)
 	OnFinish func()
@@ -189,6 +199,13 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.running = true
 	cd.cancelFlag = false
 	cd.streamEnded = false
+	// A fresh run starts with no resume signal, not whatever a PRIOR run on
+	// this same instance last left behind (e.g. a completed run that ended
+	// with the signal open, then this same *ChatDownloader gets Start()
+	// called again). Closed = no information by design (see
+	// LiveContinuationOpen's doc comment) — a run that hasn't polled yet
+	// has none, same as a run that just died.
+	cd.liveContinuationOpen = false
 	cd.done = make(chan struct{})
 	// Propagate Logger to the API so parse-level drift diagnostics are captured.
 	if cd.api != nil {
@@ -308,10 +325,20 @@ func (cd *ChatDownloader) MarkStreamEnded() {
 }
 
 // Stop cancels the chat download (for shutdown/cancellation).
+//
+// This is a PERMANENT exit (I5 fix): closes the resume signal directly,
+// rather than relying on the loop to notice the cancellation and close it
+// on its way out — Stop() can be called while the loop is sleeping between
+// polls, not just mid-fetch, and setting it here covers every case
+// uniformly. Not an "ended" inference (we don't know whether the broadcast
+// is still live) — a stopped downloader carries no information any more,
+// and closed is what "no information" means by design (see
+// LiveContinuationOpen's doc comment).
 func (cd *ChatDownloader) Stop() {
 	cd.mu.Lock()
 	cd.running = false
 	cd.cancelFlag = true
+	cd.liveContinuationOpen = false
 	if cd.cancelCtx != nil {
 		cd.cancelCtx() // Wake up any sleeping poll
 	}
@@ -343,6 +370,53 @@ func (cd *ChatDownloader) shouldStop() bool {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
 	return !cd.running || cd.cancelFlag || cd.streamEnded
+}
+
+// LiveContinuationOpen reports whether the LIVE chat endpoint is still
+// issuing continuations — the "chat is open" resume signal (interruption
+// spec). Directional by design: true means the broadcast may resume; false
+// means NOTHING (streamers disable chat independently, and a downloader
+// that never started, or has permanently stopped, has no information).
+// A TRANSIENT fetch error does not change it — only a definitive
+// end-of-stream (handleEndOfStream) or a PERMANENT loop exit closes it:
+// ErrAuthRequired, the consecutive-error budget exhausting (both I5 fix,
+// handleFetchError), or Stop() (I5 fix) — a downloader that has stopped
+// polling for good carries no information any more, and closed is what
+// "no information" means here, by design, not an inference that the
+// broadcast ended.
+func (cd *ChatDownloader) LiveContinuationOpen() bool {
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	return cd.liveContinuationOpen
+}
+
+// setLiveContinuationOpen records the definitive open/closed state.
+func (cd *ChatDownloader) setLiveContinuationOpen(open bool) {
+	cd.mu.Lock()
+	cd.liveContinuationOpen = open
+	cd.mu.Unlock()
+}
+
+// SetLiveContinuationOpenForTesting force-sets the live-continuation signal
+// without driving a real poll loop. Exported ONLY so cross-package tests
+// (internal/worker's MayResume truth table, which consults the real
+// LiveContinuationOpen() accessor against a real *ChatDownloader) can put
+// one in a known open/closed state — liveContinuationOpen has no other
+// exported setter, and production code must never call this; the real
+// signal path is noteLivePollResult via the live poll loop.
+func (cd *ChatDownloader) SetLiveContinuationOpenForTesting(open bool) {
+	cd.setLiveContinuationOpen(open)
+}
+
+// noteLivePollResult is the runChatLoop hook: a successful LIVE poll with a
+// continuation opens the signal; replay polls never do.
+func (cd *ChatDownloader) noteLivePollResult(hasContinuation bool) {
+	if cd.opts.IsReplay {
+		return
+	}
+	if hasContinuation {
+		cd.setLiveContinuationOpen(true)
+	}
 }
 
 // wasCancelledOrShutdown returns true if the download was stopped by user
@@ -413,7 +487,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			if !cd.isStreamActive() {
 				break // VOD/replay complete
 			}
-			if !cd.recoverStaleContinuation(ctx) {
+			if !cd.handleEndOfStream(ctx) {
 				break
 			}
 			switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
@@ -421,6 +495,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		}
 
 		cd.continuation = resp.NextContinuation
+		cd.noteLivePollResult(true)
 		if delay := cd.computePollDelay(resp); delay > 0 {
 			cd.sleep(ctx, delay)
 		}
@@ -455,7 +530,17 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 	// Auth failure — cookies are expired / never worked. Abort immediately
 	// rather than burning the consecutive-error budget on a credential state
 	// that will not recover without a refresh (audit chat.md T5).
+	//
+	// This is a PERMANENT loop exit (I5 fix): the downloader stops polling
+	// for good here, so it must close the resume signal. This is NOT an
+	// "ended" inference — we have no idea whether the broadcast is still
+	// live — it's the opposite: a downloader that stopped polling carries
+	// NO information any more, and closed is what "no information" means
+	// by design (LiveContinuationOpen's doc comment). Leaving it latched
+	// true would hand the engine permanent (wrong) MayResume evidence from
+	// a downloader that will never observe anything again.
 	if errors.Is(err, ErrAuthRequired) {
+		cd.setLiveContinuationOpen(false)
 		if cd.OnError != nil {
 			cd.OnError(err)
 		}
@@ -473,6 +558,10 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 		maxErrors = maxConsecErrorsLive
 	}
 	if *consecutiveErrors > maxErrors {
+		// Same permanent-exit reasoning as the ErrAuthRequired branch above
+		// — the consecutive-error budget is exhausted, this downloader is
+		// done for good, and its resume signal must close with it.
+		cd.setLiveContinuationOpen(false)
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("too many consecutive chat API errors"))
 		}
@@ -485,7 +574,11 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 		maxBackoff = 60000
 	}
 	backoffMs := min(5000*(*consecutiveErrors), maxBackoff)
-	cd.sleep(ctx, time.Duration(backoffMs)*time.Millisecond)
+	backoff := time.Duration(backoffMs) * time.Millisecond
+	if cd.testBackoffOverride > 0 {
+		backoff = cd.testBackoffOverride
+	}
+	cd.sleep(ctx, backoff)
 	return false
 }
 
@@ -584,6 +677,23 @@ func (cd *ChatDownloader) recoverStaleContinuation(ctx context.Context) bool {
 		contRetryDelay = min(contRetryDelay*2, 5*time.Minute)
 	}
 	return false
+}
+
+// handleEndOfStream processes the end-of-stream / stale continuation case.
+// CRITICAL: the signal must be closed (setLiveContinuationOpen(false)) BEFORE
+// attempting recovery. This ordering guarantees that the signal state is
+// observable even if recovery fails.
+// Returns true if recovery succeeded and polling should resume, false if the
+// loop should break.
+func (cd *ChatDownloader) handleEndOfStream(ctx context.Context) bool {
+	cd.setLiveContinuationOpen(false)
+	recovered := false
+	if cd.testRecoveryOverride != nil {
+		recovered = cd.testRecoveryOverride(ctx)
+	} else {
+		recovered = cd.recoverStaleContinuation(ctx)
+	}
+	return recovered
 }
 
 // computePollDelay returns how long to wait before the next chat fetch,

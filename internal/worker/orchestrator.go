@@ -242,6 +242,17 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Select download strategy (A1: pass cipher/pot to strategies)
 	var result *DownloadResult
+	// waitedForResume is worker-level Tier 2 evidence, finalize-scoped: true
+	// when the live loop's noteRefreshFailure evidence-latch is CURRENTLY
+	// armed (or gave up directly out of an unresolved one) — this fires
+	// whenever resume evidence held on a failed refresh, whether or not
+	// shouldWaitForResume itself actually permitted a wait for it (I1 fix:
+	// interruption_timeout=0 disables the WAIT, not this latch) — cleared
+	// again by runLiveStreamDownload at every later successful refresh, so
+	// a broadcast that actually resumed doesn't permanently taint a clean
+	// finish. Set by runLiveStreamDownload below; always false on the VOD
+	// branch.
+	var waitedForResume bool
 
 	strategy, err := selectDownloadStrategy(isVod, videoInfo)
 	if err != nil {
@@ -352,6 +363,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}()
 	}
 
+	// Interruption spec Tier 1 evidence (built once chatDl is resolved so it
+	// closes over the final chatDl, not a pre-resolution nil/stale value).
+	// Only consulted by the live branch below — VOD downloads never set
+	// engine.SegmentDownloader.MayResume, so building this unconditionally
+	// here is harmless for the VOD branch (simply unused).
+	mayResume := buildMayResume(jobCtx.Interruption, chatDl)
+
 	// Run download loop
 	if isVod {
 		// VOD: run downloaders, refreshing URLs across the ~6h googlevideo
@@ -373,7 +391,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		var incomplete bool
 		var vSeq, vHead, aSeq, aHead int
 		if err == nil {
-			incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result)
+			// false: the VOD refresh loop never takes the live loop's
+			// wait-for-resume branch — that evidence only applies to
+			// runLiveStreamDownload's own call site below.
+			incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result, false)
 		}
 
 		// Set 100% progress after VOD download completes (finishVodWithChat equivalent)
@@ -407,7 +428,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// reassigns result locally on every quality refresh/split, so the
 		// pre-call `result` variable would otherwise go stale the moment a
 		// single refresh happens.
-		result, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker)
+		result, waitedForResume, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker, mayResume)
 
 		if err == nil {
 			// Same eviction guard as the VOD branch (see its call site
@@ -432,7 +453,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// diagnoseEvictedStart) so an eviction error still takes precedence
 		// and is never overwritten by a flag write.
 		if err == nil {
-			o.finalizeIncompleteTail(jobCtx.Job.ID, result)
+			o.finalizeIncompleteTail(jobCtx.Job.ID, result, waitedForResume)
 		}
 	}
 
@@ -694,10 +715,26 @@ func downloaderHead(d *engine.SegmentDownloader) int {
 	return d.HeadSeq()
 }
 
+// downloaderInterrupted reports whether d finalized after latching a Tier-2
+// interruption finalize (engine.SegmentDownloader.FinalizedDuringInterruption:
+// stallForPossibleResume deferred at least once believing the broadcast
+// could resume, then gave up when MayResume flipped false or the
+// InterruptionTimeout ceiling expired) — false (not true) for a nil
+// downloader.
+func downloaderInterrupted(d *engine.SegmentDownloader) bool {
+	return d != nil && d.FinalizedDuringInterruption()
+}
+
 // computeIncompleteTail: the job is incomplete if EITHER stream finalized
 // behind head — video and audio are independent downloaders with
-// independent head tracking, and a missing tail on one truncates the mux.
-func computeIncompleteTail(videoBehind, audioBehind bool) bool { return videoBehind || audioBehind }
+// independent head tracking, and a missing tail on one truncates the mux —
+// OR either stream finalized during an interruption (Tier 2): the resume
+// sidecar was deliberately preserved for that case, and treating the job as
+// complete would let ordinary cleanup discard it before the broadcast gets
+// a chance to resume.
+func computeIncompleteTail(videoBehind, audioBehind, interrupted bool) bool {
+	return videoBehind || audioBehind || interrupted
+}
 
 // finalizeIncompleteTail computes and unconditionally persists the
 // incomplete_tail flag once a download (VOD or live) has returned with
@@ -714,14 +751,38 @@ func computeIncompleteTail(videoBehind, audioBehind bool) bool { return videoBeh
 // also needs to render an honest (non-100%) progress string for an
 // incomplete finish (see incompleteProgressString) can reuse them without
 // re-deriving.
-func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *DownloadResult) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
+//
+// workerWaitedForResume is worker-level Tier 2 evidence (only ever true
+// from the live branch), FINALIZE-scoped: true when the live loop's
+// noteRefreshFailure evidence-latch is still unresolved at the moment the
+// loop gives up — NOT "fired at some point during this call"
+// (runLiveStreamDownload clears it again at every later successful
+// refresh, so a broadcast that actually resumed doesn't taint a clean
+// finish). Latches whenever resume evidence held on a failed refresh, even
+// when shouldWaitForResume itself never permitted an actual wait
+// (interruption_timeout=0 disables the WAIT, not Tier-2 preservation — I1
+// fix). This is deliberately SEPARATE from downloaderInterrupted's
+// engine-latched evidence (FinalizedDuringInterruption) — a live loop that
+// repeatedly hit ErrQualityLost/refresh-failure and waited (or, config
+// permitting, evidenced) via noteRefreshFailure, then eventually gave up
+// when maxConsecutiveLiveChecks exhausted without an intervening
+// successful refresh, never once reaches the engine's own
+// stallForPossibleResume on any downloader (the loop dies from the
+// OUTSIDE, not from an engine-side budget expiry), so
+// FinalizedDuringInterruption stays false on every downloader even though
+// the job genuinely waited for a resume that never came. Without ORing
+// this in, that case would self-clear incomplete_tail and let ordinary
+// cleanup discard staging + the resume sidecar right after deliberately
+// waiting for exactly the resume that data was preserved for.
+func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *DownloadResult, workerWaitedForResume bool) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
 	vSeq = downloaderSeq(result.VideoDownloader)
 	vHead = downloaderHead(result.VideoDownloader)
 	aSeq = downloaderSeq(result.AudioDownloader)
 	aHead = downloaderHead(result.AudioDownloader)
-	incomplete = computeIncompleteTail(
-		downloaderBehindHead(result.VideoDownloader),
-		downloaderBehindHead(result.AudioDownloader))
+	videoBehind := downloaderBehindHead(result.VideoDownloader)
+	audioBehind := downloaderBehindHead(result.AudioDownloader)
+	interrupted := downloaderInterrupted(result.VideoDownloader) || downloaderInterrupted(result.AudioDownloader) || workerWaitedForResume
+	incomplete = computeIncompleteTail(videoBehind, audioBehind, interrupted)
 	// Unconditional write: a retry that completes cleanly clears the flag by
 	// writing false through the same path.
 	o.db.UpdateJobFields(jobID, map[string]any{"incomplete_tail": incomplete})
@@ -729,7 +790,9 @@ func (o *DownloadOrchestrator) finalizeIncompleteTail(jobID string, result *Down
 		o.logger.Warn("recording finished with an unfetched tail — staging preserved; Resume will append the missing segments",
 			"jobID", jobID,
 			"videoSeq", vSeq, "videoHead", vHead,
-			"audioSeq", aSeq, "audioHead", aHead)
+			"audioSeq", aSeq, "audioHead", aHead,
+			"videoBehindHead", videoBehind, "audioBehindHead", audioBehind,
+			"interrupted", interrupted, "workerWaitedForResume", workerWaitedForResume)
 	}
 	return incomplete, vSeq, vHead, aSeq, aHead
 }

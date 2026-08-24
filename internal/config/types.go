@@ -143,6 +143,23 @@ type DownloaderConfig struct {
 	// force-finalizing the recording, even if YouTube still reports the stream
 	// live. Resets whenever a segment arrives.
 	MaximumTimeout int `toml:"maximum_timeout" json:"maximum_timeout"`
+	// InterruptionTimeout (minutes) is how long finalize may stall waiting
+	// for an interrupted broadcast to resume before giving up and finalizing
+	// with what was captured so far. 0 disables the stall — finalize never
+	// waits (Tier 2 preservation of the interrupted-but-not-yet-resumed
+	// recording still applies regardless of this setting).
+	InterruptionTimeout FlexDuration `toml:"interruption_timeout" json:"interruption_timeout"`
+	// IncompleteStagingExpiryDays (days) is how long a Finished job flagged
+	// incomplete_tail keeps its staging directory shielded from orphan
+	// cleanup. The FLAG (the honest "may be missing its tail" badge) never
+	// expires — only the disk-heavy staging preservation does: YouTube
+	// cannot resume a broadcast days later, so week-old interruption staging
+	// has zero resume value and would otherwise park gigabytes forever
+	// (owner ruling 2026-08-21). After expiry the staging becomes an
+	// ordinary orphan-scanner candidate; auto-resume's staging-existence
+	// gate then falls back to the silent drop and manual Reinitialize
+	// remains the recovery. 0 = never expire (preserve indefinitely).
+	IncompleteStagingExpiryDays FlexDuration `toml:"incomplete_staging_expiry_days" json:"incomplete_staging_expiry_days"`
 	// PoToken and VisitorData are session-scoped secrets. Like PasswordHash,
 	// they must never be returned by GET /api/config — use json:"-" to hide
 	// them from any encoder walking the Config struct. Operators who need to

@@ -654,6 +654,8 @@ func activityMessage(a engine.DownloadActivity, elapsed time.Duration) string {
 		return fmt.Sprintf("Waiting for next segment... (%s)", e)
 	case engine.ActivityRetrying:
 		return fmt.Sprintf("Segment fetch failing - retrying... (%s)", e)
+	case engine.ActivityWaitingResume:
+		return fmt.Sprintf("Stream interrupted - waiting for resume... (%s)", e)
 	default:
 		return ""
 	}

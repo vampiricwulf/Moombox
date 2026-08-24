@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -137,12 +138,36 @@ func TestBuildConcatList(t *testing.T) {
 	}
 }
 
+// TestBuildConcatList_EscapesQuotes pins the CORRECT ffconcat escaping for
+// an apostrophe: close the quote, an escaped literal quote OUTSIDE any
+// quoting, then reopen the quote (close-backslash-quote-quote) — NOT a
+// backslash directly before the quote (`\'`), which is not a valid
+// ffconcat escape sequence and breaks parsing (a pre-existing bug fixed
+// here).
 func TestBuildConcatList_EscapesQuotes(t *testing.T) {
 	paths := []string{`C:\temp\it's a file.mp4`}
 	got := buildConcatList(paths)
-	want := "file 'C:/temp/it\\'s a file.mp4'\n"
+	want := "file 'C:/temp/it'\\''s a file.mp4'\n"
 	if got != want {
 		t.Errorf("buildConcatList with quote:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// TestBuildConcatList_ApostropheProducesValidFFConcatSyntax is the I8
+// regression test with an explicit apostrophe path, asserting the exact
+// close-escape-reopen shape ffconcat requires rather than just diffing
+// against a hardcoded want string — a mutation back to the old `\'`
+// escaping must fail this.
+func TestBuildConcatList_ApostropheProducesValidFFConcatSyntax(t *testing.T) {
+	paths := []string{`/tmp/Wendy's Stream - part1.mp4`}
+	got := buildConcatList(paths)
+
+	if !strings.Contains(got, `'\''`) {
+		t.Fatalf("output does not contain the valid ffconcat escape sequence `'\\''`: %q", got)
+	}
+	want := "file '/tmp/Wendy'\\''s Stream - part1.mp4'\n"
+	if got != want {
+		t.Errorf("buildConcatList with apostrophe:\ngot:  %q\nwant: %q", got, want)
 	}
 }
 

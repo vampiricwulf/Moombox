@@ -114,6 +114,8 @@ var sections = []settingsSection{
 			{"download_chat", "Download chat", fieldToggle, nil, "save live chat as JSON alongside video", nil},
 			{"prefer_60fps", "Prefer 60fps", fieldToggle, nil, "prefer 60fps when same resolution available", nil},
 			{"maximum_timeout", "YouTube max timeout", fieldNumber, nil, "seconds to keep retrying a stalled YouTube livestream (30s live-checks) before finalizing even if YouTube still reports it live (default: 600, min 30, no max; very large values risk account consequences)", nil},
+			{"interruption_timeout", "Interruption resume timeout", fieldNumber, nil, "minutes finalize may stall waiting for an interrupted broadcast to resume; 0 = disabled, finalize never stalls (default: 120, no max)", nil},
+			{"incomplete_staging_expiry_days", "Incomplete staging expiry", fieldNumber, nil, "days an incomplete-tail recording keeps staging preserved for Resume; badge never expires, 0 = preserve forever (default: 7, no max)", nil},
 		},
 	},
 	{
@@ -461,6 +463,8 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
 	m.values["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
 	m.values["maximum_timeout"] = strconv.Itoa(cfg.Downloader.MaximumTimeout)
+	m.values["interruption_timeout"] = fmt.Sprintf("%.0f", cfg.Downloader.InterruptionTimeout.Minutes())
+	m.values["incomplete_staging_expiry_days"] = fmt.Sprintf("%.0f", cfg.Downloader.IncompleteStagingExpiryDays.Days())
 
 	// Cookies
 	m.values["cookie_file"] = cfg.Cookies.CookieFile
@@ -553,6 +557,8 @@ func (m *SettingsModel) applyValues() {
 		{"num_parallel_downloads", "Parallel downloads must be at least 1", 1, math.MaxInt},
 		{"segment_workers", "Segment workers must be at least 1", 1, math.MaxInt},
 		{"maximum_timeout", "YouTube max timeout must be at least 30 seconds", 30, math.MaxInt},
+		{"interruption_timeout", "Interruption resume timeout must be >= 0 minutes (0 disables)", 0, math.MaxInt},
+		{"incomplete_staging_expiry_days", "Incomplete staging expiry must be >= 0 days (0 preserves forever)", 0, math.MaxInt},
 		{"refresh_interval", "Cookie refresh interval must be 10-10080 minutes", 10, 10080},
 		{"disk_warn_percent", "Disk warning threshold must be 1-99", 1, 99},
 		{"disk_critical_percent", "Disk critical threshold must be 1-99", 1, 99},
@@ -663,6 +669,10 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Downloader.DownloadChat = m.values["download_chat"] == "Yes"
 	m.cfg.Downloader.Prefer60fps = m.values["prefer_60fps"] == "Yes"
 	m.cfg.Downloader.MaximumTimeout, _ = strconv.Atoi(m.values["maximum_timeout"])
+	interruptionMin, _ := strconv.Atoi(m.values["interruption_timeout"])
+	m.cfg.Downloader.InterruptionTimeout = config.FlexDuration{Value: float64(interruptionMin)}
+	expiryDays, _ := strconv.Atoi(m.values["incomplete_staging_expiry_days"])
+	m.cfg.Downloader.IncompleteStagingExpiryDays = config.FlexDuration{Value: float64(expiryDays)}
 
 	// Cookies
 	m.cfg.Cookies.CookieFile = m.values["cookie_file"]

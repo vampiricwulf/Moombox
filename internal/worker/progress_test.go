@@ -40,6 +40,7 @@ func TestActivityMessage(t *testing.T) {
 		{engine.ActivityFindingFirstSegment, "Waiting for first segment... (1m 20s)"},
 		{engine.ActivityWaitingForSegment, "Waiting for next segment... (1m 20s)"},
 		{engine.ActivityRetrying, "Segment fetch failing - retrying... (1m 20s)"},
+		{engine.ActivityWaitingResume, "Stream interrupted - waiting for resume... (1m 20s)"},
 		{engine.ActivityNone, ""},
 	}
 	for _, c := range cases {
@@ -60,6 +61,7 @@ func TestActivityMessagesCarryWaitMarker(t *testing.T) {
 		engine.ActivityRateLimited,
 		engine.ActivityFindingFirstSegment,
 		engine.ActivityRetrying,
+		engine.ActivityWaitingResume,
 	} {
 		if msg := activityMessage(a, time.Second); !strings.Contains(msg, "... (") {
 			t.Errorf("activityMessage(%v) = %q lacks the %q wait marker", a, msg, "... (")

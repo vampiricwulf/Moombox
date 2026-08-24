@@ -13,6 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // crossMonitorVouchWindow bounds how recently a sibling monitor must have
@@ -52,6 +53,29 @@ func siblingReachable(siblings []channelHealthReporter, channelID string, now ti
 		}
 	}
 	return false
+}
+
+// resumeOnRedetect decides what a live re-detection of an EXISTING job does.
+// Only a Finished job with preserved resume data (incomplete_tail) AND
+// staging files still on disk resumes; Cancelled is a human decision;
+// everything else keeps today's silent drop. stagingExists mirrors the
+// human-initiated /resume route's own gate (internal/web/routes/jobs.go,
+// worker.HasStagingFiles against config.Paths.EffectiveStagingDir()) —
+// staging can vanish between the Finished write and this re-detection
+// (manual deletion, a reconfigured staging_dir), and resuming into an
+// empty/missing staging dir would silently masquerade a fresh restart as
+// an actual resume.
+func resumeOnRedetect(existing *database.Job, disposition monitor.JobDisposition, stagingExists bool, lastAutoResume time.Time, now time.Time) bool {
+	if existing == nil || disposition != monitor.DispositionBroadcast {
+		return false
+	}
+	if existing.Status != database.StatusFinished || !existing.IncompleteTail {
+		return false
+	}
+	if !stagingExists {
+		return false
+	}
+	return now.Sub(lastAutoResume) >= 5*time.Minute
 }
 
 // jobCreationForDisposition maps a monitor.JobDisposition to the created
@@ -107,6 +131,16 @@ func (s *runState) wireMonitorCallbacks() {
 			notifications.SendOptions{Event: "auth"},
 		)
 	}
+
+	// Cooldown for auto-resume on broadcast re-detection: a restarted
+	// broadcast can be re-detected on every monitor cycle (as often as
+	// every 15s per the field case that motivated this) while a previous
+	// resume is still spinning up — coalesce to at most one auto-resume
+	// attempt per window per job. Guarded by a mutex — createYouTubeJob
+	// runs on the feed/DECAPI monitor goroutines. Same pattern as
+	// lastAuthFailNotify above.
+	var resumeMu sync.Mutex
+	lastAutoResume := make(map[string]time.Time)
 
 	s.cookieRefresh.OnRecoveryNeeded = func(platform string) {
 		var autoEnabled bool
@@ -312,7 +346,65 @@ func (s *runState) wireMonitorCallbacks() {
 			return
 		}
 		if !added {
-			return // Duplicate job
+			// Duplicate job — but a broadcast that dropped and came back
+			// under the SAME video ID (interrupted stream, re-detected
+			// live) may be sitting Finished with preserved staging
+			// (incomplete_tail). Re-arm exactly that case; everything
+			// else (still active, Cancelled, no preserved tail, VOD
+			// re-detection, or within the cooldown of a prior auto-resume)
+			// stays a silent drop, unchanged from today.
+			existing, _ := s.db.GetJob(videoID)
+
+			// The cheap in-memory half of resumeOnRedetect's guard,
+			// duplicated only to decide whether the staging-existence
+			// disk check below is worth paying for. This branch runs on
+			// EVERY re-detection of an already-known job — including a
+			// still-live job re-polled every monitor cycle — so gating
+			// the stat avoids hitting disk on that hot path. This can't
+			// loosen the real decision: resumeOnRedetect independently
+			// re-checks every one of these conditions itself.
+			eligible := existing != nil && d == monitor.DispositionBroadcast &&
+				existing.Status == database.StatusFinished && existing.IncompleteTail
+
+			var stagingExists bool
+			if eligible {
+				// Same gate + same stagingBase resolution as the human
+				// /resume route (internal/web/routes/jobs.go) — a job
+				// whose preserved staging vanished (manual deletion, a
+				// reconfigured staging_dir) must not masquerade a fresh
+				// empty-staging restart as a resume.
+				var stagingBase string
+				s.configStore.Read(func(c *config.MoomboxConfig) {
+					stagingBase = c.Paths.EffectiveStagingDir()
+				})
+				stagingExists = worker.HasStagingFiles(stagingBase, videoID)
+			}
+
+			resumeMu.Lock()
+			shouldResume := resumeOnRedetect(existing, d, stagingExists, lastAutoResume[videoID], time.Now())
+			if shouldResume {
+				lastAutoResume[videoID] = time.Now()
+			}
+			resumeMu.Unlock()
+			if !shouldResume {
+				if eligible && !stagingExists {
+					s.log.Debug("broadcast re-detected live but preserved staging is gone — skipping auto-resume, use Reinitialize",
+						slog.String("videoID", videoID))
+				}
+				return
+			}
+			if title != "" && title != existing.Title {
+				s.db.UpdateJobFields(videoID, map[string]any{"title": title})
+			}
+			s.dlWorker.ResumeJob(videoID)
+			// No notification here: orchestrator.go sends "YouTube Download
+			// Starting" unconditionally on every ExecuteWithChat entry —
+			// including this resume — so a second send here would just be
+			// a duplicate back-to-back message for the same event. This
+			// INFO log is the auto-resume-specific record for the operator.
+			s.log.Info("broadcast re-detected live — auto-resuming preserved job",
+				slog.String("source", source), slog.String("videoID", videoID), slog.String("title", title))
+			return
 		}
 		// History fires for EVERY disposition — it is what makes
 		// HasProcessed mean "a job was created" (spec §10/§15).

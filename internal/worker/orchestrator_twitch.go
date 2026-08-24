@@ -226,6 +226,15 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			IsHls:          true,
 			StreamID:       variant.StreamID,
 			SegmentWorkers: jobCtx.Config.SegmentWorkers,
+			// Deliberately NOT routed through engineInterruptionTimeout
+			// (unlike the YouTube live strategies): Twitch downloaders never
+			// get MayResume attached (attachMayResume is only ever called
+			// from runLiveStreamDownload's attachProgress, a YouTube-only
+			// live path), so stallForPossibleResume's nil-MayResume branch
+			// makes this value inert either way — 0 and
+			// engine.InterruptionNoStall behave identically (return false,
+			// never latch) when MayResume is nil.
+			InterruptionTimeout: jobCtx.Config.InterruptionTimeout,
 			// Twitch live has no DVR: segments that left the playlist window
 			// are gone. Stop at real gaps so every part file stays internally
 			// gapless — the loop below muxes the part and starts the next.

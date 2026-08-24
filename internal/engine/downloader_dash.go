@@ -45,6 +45,14 @@ const (
 	// transientFailureRetryDelay is used when behind head but not stuck on
 	// a single segment — treated as a quick transient.
 	transientFailureRetryDelay = 1 * time.Second
+	// interruptionStallRetryDelay paces the retry loop while
+	// stallForPossibleResume is deferring a budget-expired finalize. A
+	// resume-detection latency of 5s is negligible against the multi-minute
+	// (or multi-hour) outages this stall exists for; singleGoneRetryDelay's
+	// 500ms would instead poll GVS ~2x/sec per track (~4x/sec across
+	// video+audio) for as long as InterruptionTimeout allows — up to ~14k
+	// no-op requests per track at the default 2h ceiling.
+	interruptionStallRetryDelay = 5 * time.Second
 
 	// credentialRefreshCooldown is the minimum gap between two
 	// OnCredentialRefresh invocations. Each refresh costs a player-response
@@ -172,6 +180,13 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				if nextSeq > preCatchupSeq {
 					consecutiveGoneErrors = 0
 					d.streamEndVerified = false
+					// Per-episode reset: this progress proves any interruption
+					// stall in progress has resolved. Without this, a SECOND,
+					// unrelated interruption hours later would measure its
+					// InterruptionTimeout ceiling from the FIRST episode's start
+					// (a stale, already-expired clock) and could spuriously latch
+					// finalizedDuringInterruption on a burst that never stalled.
+					d.interruptionStallStart.Clear()
 				}
 				// No dedicated head probe here: catch-up's workers harvest
 				// X-Head-Seqnum from every segment response
@@ -238,6 +253,9 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		// Re-arm end verification: a landed segment proves the burst that
 		// latched the verdict (if any) was transient.
 		d.streamEndVerified = false
+		// Per-episode reset — see the identical comment in the catch-up
+		// progress branch above.
+		d.interruptionStallStart.Clear()
 
 		// Emit progress + aggregate health snapshot. The health update
 		// piggy-backs on the same cadence so the UI sees throughput /
@@ -415,6 +433,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			// otherwise finalize a behind-head recording on the first
 			// post-reconnect gone instead of granting a fresh budget.
 			d.lastSegTime.StoreNow()
+			d.noteOfflineRecovery()
 			*consecutiveGoneErrors = 0
 			return nil // Continue loop
 		}
@@ -464,6 +483,14 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			utils.Sleep(ctx, singleGoneRetryDelay)
 			return nil // Continue loop
 		}
+		// Interruption spec Tier 1/2: a confirmed-ended verdict (streamEndVerified)
+		// must finalize immediately regardless of MayResume — only an
+		// UNCONFIRMED budget expiry defers for possible resume.
+		if !d.streamEndVerified && d.stallForPossibleResume() {
+			d.emitActivity(ActivityWaitingResume)
+			utils.Sleep(ctx, interruptionStallRetryDelay)
+			return nil // Continue loop — the refresh path revives in place on resume
+		}
 		if d.finalizeBehindHead() {
 			// Known-incomplete finalize: leave streamEnded unset so the
 			// runDashLoop defer keeps the resume sidecar — a later retry
@@ -471,6 +498,17 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			// and starting over. (handleHTTPError's errStreamDone exits
 			// never set streamEnded either; only a confirmed-complete end
 			// clears resume.)
+			return errStreamDone
+		}
+		if d.finalizedDuringInterruption.Load() {
+			// Tier 2: this finalize was reached after stallForPossibleResume
+			// deferred at least once above (MayResume was true, then either
+			// flipped false or the InterruptionTimeout ceiling expired). The
+			// worker needs the resume sidecar intact to give the broadcast a
+			// chance to resume, so — mirroring finalizeBehindHead's
+			// keep-sidecar contract just above — leave streamEnded unset
+			// rather than letting the runDashLoop defer's ClearResume()
+			// destroy the exact evidence this latch exists to preserve.
 			return errStreamDone
 		}
 		d.streamEnded.Store(true)
@@ -633,6 +671,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 			// outage detected here first would leave lastSegTime aged and could
 			// force-finalize a still-live stream on the next non-gone HTTP error.
 			d.lastSegTime.StoreNow()
+			d.noteOfflineRecovery()
 			d.lastStreamStatusCheck.StoreNow()
 			*sameHeadRetryDelay = 0
 			return nil
@@ -690,11 +729,25 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 				return err
 			}
 			d.lastSegTime.StoreNow() // reset the timeout clock on recovery
+			d.noteOfflineRecovery()
 			*sameHeadRetryDelay = 0
 			return nil
 		}
+		// Interruption spec Tier 1/2: same deferral as handleGoneError's
+		// backstop — only an unconfirmed budget expiry stalls; a confirmed
+		// end (streamEndVerified) above already routed to errStreamDone
+		// before reaching here.
+		if !d.streamEndVerified && d.stallForPossibleResume() {
+			d.emitActivity(ActivityWaitingResume)
+			utils.Sleep(ctx, interruptionStallRetryDelay)
+			return nil // Continue loop — the refresh path revives in place on resume
+		}
 		d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 			"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
+		// Note: unlike handleGoneError's confirmed-end fallthrough, this path
+		// never sets streamEnded, so the resume sidecar always survives here
+		// (including a Tier 2 / finalizedDuringInterruption exit) without
+		// needing an equivalent guard.
 		d.finalizeBehindHead()
 		return errStreamDone
 	}

@@ -274,23 +274,21 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.HasVideo = true
 		result.VideoPath = filepath.Join(job.StagingDir, "video_stream")
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:        videoStream.BaseURL,
-			OutputFile:     result.VideoPath,
-			StartSeq:       videoStartSeq,
-			ForceStartSeq:  forceVideoSeq,
-			InitURL:        videoStream.Initialization,
-			PoToken:        dashPoToken,
-			CookieHeader:   dashCookieHeader,
-			MaxTimeout:     time.Duration(job.Config.MaximumTimeout) * time.Second,
-			SegmentWorkers: job.Config.SegmentWorkers,
-			IsOnline:       isOnline,
-			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
+			BaseURL:             videoStream.BaseURL,
+			OutputFile:          result.VideoPath,
+			StartSeq:            videoStartSeq,
+			ForceStartSeq:       forceVideoSeq,
+			InitURL:             videoStream.Initialization,
+			PoToken:             dashPoToken,
+			CookieHeader:        dashCookieHeader,
+			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
+			IsOnline:            isOnline,
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
-				if err != nil {
-					return false, err
-				}
-				return info.StreamStatus != youtube.StreamLive, nil
+				return observeYouTubeStatusProbe(job, info, err)
 			},
 		})
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
@@ -306,23 +304,21 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.HasAudio = true
 		result.AudioPath = filepath.Join(job.StagingDir, "audio_stream")
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:        audioStream.BaseURL,
-			OutputFile:     result.AudioPath,
-			StartSeq:       audioStartSeq,
-			ForceStartSeq:  forceAudioSeq,
-			InitURL:        audioStream.Initialization,
-			PoToken:        dashPoToken,
-			CookieHeader:   dashCookieHeader,
-			MaxTimeout:     time.Duration(job.Config.MaximumTimeout) * time.Second,
-			SegmentWorkers: job.Config.SegmentWorkers,
-			IsOnline:       isOnline,
-			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
+			BaseURL:             audioStream.BaseURL,
+			OutputFile:          result.AudioPath,
+			StartSeq:            audioStartSeq,
+			ForceStartSeq:       forceAudioSeq,
+			InitURL:             audioStream.Initialization,
+			PoToken:             dashPoToken,
+			CookieHeader:        dashCookieHeader,
+			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
+			IsOnline:            isOnline,
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
-				if err != nil {
-					return false, err
-				}
-				return info.StreamStatus != youtube.StreamLive, nil
+				return observeYouTubeStatusProbe(job, info, err)
 			},
 		})
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {

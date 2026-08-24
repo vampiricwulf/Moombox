@@ -613,6 +613,55 @@ func (db *Database) ClearJobSegmentsAndGaps(jobID string) error {
 	return nil
 }
 
+// ReplaceJobSegments atomically replaces all segment rows for a job with segs:
+// existing rows are deleted, then segs are re-inserted using the same column
+// list as AddSegment, all inside one transaction. Used by the part-merge row
+// collapse (quality-split part rows folded together on resume/finalize).
+// Unlike ClearJobSegmentsAndGaps, gap rows are left untouched — this replaces
+// segments only. Fires no job-update notification (AddSegment fires none).
+//
+// The jobID parameter — not each row's own JobID field — is the single
+// source of truth for both the DELETE scope and the inserted job_id: a
+// mismatched or stale seg.JobID is corrected to jobID (and written back onto
+// the caller's row) rather than trusted, so a row that happens to name a
+// different existing job can never delete one job's rows while silently
+// inserting them under another. On a non-nil error the transaction is rolled
+// back, but seg.ID values already written onto rows preceding the failure
+// are stale — output state (including seg.ID/seg.JobID) is unspecified on
+// error.
+func (db *Database) ReplaceJobSegments(jobID string, segs []Segment) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM segments WHERE job_id = ?", jobID); err != nil {
+		return err
+	}
+
+	for i := range segs {
+		seg := &segs[i]
+		result, err := tx.ExecContext(ctx, `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			jobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
+			seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds,
+			seg.ChatFile)
+		if err != nil {
+			return err
+		}
+		id, _ := result.LastInsertId()
+		seg.ID = int(id)
+		seg.JobID = jobID
+	}
+
+	return tx.Commit()
+}
+
 // GetSegments returns all segments for a given job, ordered by segment_index.
 func (db *Database) GetSegments(jobID string) ([]Segment, error) {
 	db.mu.RLock()

@@ -270,6 +270,32 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		"status": database.StatusMuxing,
 	})
 
+	// Tier 4: opportunistically collapse contiguous same-format parts into
+	// one file BEFORE anything below decides the finalize shape, so a
+	// fully-merged job takes the plain output name (the len==1 check just
+	// below) exactly like a never-split job. Runs under the Muxing status
+	// set just above rather than the stale pre-finalize status, since a
+	// multi-run concat can take a while.
+	//
+	// YouTube-only gate. Twitch gap-split parts are NOT eligible, for three
+	// reasons: (1) when chat is off, Twitch's gap-split parts are
+	// deliberately gapless-part semantics -- each part is a distinct
+	// continuous span with a real gap between them, and collapsing them
+	// back into one file destroys that meaning; (2) when every part's chat
+	// happens to be empty, mergeChatFiles has nothing to schema-mismatch
+	// on, so the merge "succeeds" and deletes the per-part
+	// twitch.TwitchChatData files, replacing them with a YouTube-shaped
+	// chat.ChatData husk that doesn't match Twitch's chat schema; (3) when
+	// chat IS present and non-empty, the run still pays the full video
+	// concat-copy (I/O, disk, time) before mergeChatFiles's schema
+	// mismatch (TwitchChatData.message is a string, chat.ChatData.message
+	// is []MessagePart) aborts the run -- a throwaway concat on every
+	// chat-on Twitch multi-part finalize. Gating here at the call site
+	// avoids all three: Twitch simply never attempts a Tier 4 merge.
+	if jobCtx.Job.Platform == "youtube" {
+		segments = o.mergeSameFormatParts(ctx, jobCtx, segments)
+	}
+
 	filenameBase := jobCtx.Filename
 	outputDir := filepath.Join(jobCtx.OutputDir, filepath.Dir(filenameBase))
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
@@ -863,13 +889,40 @@ type stagedSeg struct {
 	dir string
 }
 
+// mergeTombstoneFile marks a superseded part's pre-mux staging dir as
+// already consumed by a Tier 4 same-format merge (part_merge.go's merge
+// method writes it, BEFORE attempting RemoveAll on that dir, once
+// db.ReplaceJobSegments has committed the merged row). A crash before the
+// RemoveAll completes, or a locked-dir failure (Windows antivirus/indexer
+// holding a handle), then leaves the raw pre-mux media behind — without
+// this marker, stagedSegDirs would report that dir as a normal unmuxed
+// part, and a later finalize re-entry could resurrect + re-persist +
+// re-merge content that's already inside the merged output (duplication),
+// or discoverResumeSegment could capture a live resume INTO a dir whose
+// content the merge has already superseded. The marker file's own content
+// is diagnostic only (a timestamp) — its mere presence is what matters.
+const mergeTombstoneFile = ".merged-tombstone"
+
+// isMergeTombstoned reports whether dir carries mergeTombstoneFile.
+func isMergeTombstoned(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, mergeTombstoneFile))
+	return err == nil
+}
+
 // stagedSegDirs scans stagingDir for seg_N part dirs and returns them sorted
 // by index. This is THE mapping between the staging layout and part indices
 // — startup resume (discoverResumeSegment) and finalize recovery
-// (muxUnrecordedSegments) both build on it; if the two ever disagreed, a
-// resumed job could append into a dir that recovery attributes to an
-// already-muxed part. The staging ROOT is part index 0 unless seg_0 exists
-// (a short-skipped root span); that rule lives at the call sites.
+// (muxUnrecordedSegments, hasUnmuxedPartsForJob) all build on it; if they
+// ever disagreed, a resumed job could append into a dir that recovery
+// attributes to an already-muxed part. The staging ROOT is part index 0
+// unless seg_0 exists (a short-skipped root span); that rule lives at the
+// call sites.
+//
+// A tombstoned dir (isMergeTombstoned) is skipped entirely — it never
+// appears in the returned slice at all, for any of the three consumers
+// (I7 fix): its content has already been folded into a Tier 4 merge and
+// the dir is pending (or has already failed) removal, so treating it as
+// live staging would resurrect superseded content.
 func stagedSegDirs(stagingDir string) []stagedSeg {
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil {
@@ -884,7 +937,11 @@ func stagedSegDirs(stagingDir string) []stagedSeg {
 		if convErr != nil || n < 0 {
 			continue
 		}
-		segDirs = append(segDirs, stagedSeg{idx: n, dir: filepath.Join(stagingDir, e.Name())})
+		dir := filepath.Join(stagingDir, e.Name())
+		if isMergeTombstoned(dir) {
+			continue
+		}
+		segDirs = append(segDirs, stagedSeg{idx: n, dir: dir})
 	}
 	sort.Slice(segDirs, func(i, j int) bool { return segDirs[i].idx < segDirs[j].idx })
 	return segDirs
