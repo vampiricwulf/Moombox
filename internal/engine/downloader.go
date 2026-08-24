@@ -40,6 +40,18 @@ var ErrSegmentRetriesExhausted = errors.New("segment retries exhausted")
 // (YouTube-style behavior, where the file knowingly contains a jump).
 var ErrGapDetected = errors.New("unrecoverable gap in live stream")
 
+// ErrInitSegmentChanged signals that the HLS playlist's #EXT-X-MAP init
+// segment changed CONTENT mid-part (e.g. a Twitch transcode restart on the
+// fMP4/CMAF delivery path). Appending fragments that reference a different
+// moov onto the current file would corrupt it, so — like ErrGapDetected —
+// the caller muxes the current file as a finished part and starts a fresh
+// downloader, whose empty file begins with the new init segment. Only
+// returned when StopOnGap is set; other configurations (VODs, YouTube HLS)
+// write the new init inline instead. A changed map URI whose content is
+// byte-identical to the written init (Twitch token rotation) never
+// triggers this — see ensureHlsInit.
+var ErrInitSegmentChanged = errors.New("HLS init segment changed")
+
 const (
 	CatchupThreshold     = 10
 	MaxSegmentRetries    = 5
@@ -315,6 +327,20 @@ type SegmentDownloader struct {
 	lastStreamStatusCheck atomicTime
 	logger                DownloaderLogger
 	cipherFailureFired    atomic.Bool
+
+	// hlsInitWritten / hlsInitURI / hlsInitHash track the #EXT-X-MAP init
+	// segment at the head of the output file (fMP4/CMAF HLS — see
+	// ensureHlsInit). URI is the map URI the init was adopted under (updated
+	// in place on a token-rotation rename whose content matched), hash the
+	// SHA-256 of the written bytes — the identity that decides "same init"
+	// when the URI rotates. Persisted in the resume sidecar so a successor
+	// downloader appending to this file neither re-writes the init nor
+	// mistakes the rotated URI for a transcode restart. Only touched from
+	// the download-loop goroutine (Start restores them before the loop), so
+	// plain fields suffice.
+	hlsInitWritten bool
+	hlsInitURI     string
+	hlsInitHash    string
 
 	// streamEndVerified latches an "ended" verdict from CheckStreamStatus
 	// within one continuous gone-burst so the behind-head retry loop in
@@ -703,6 +729,9 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		if state != nil {
 			d.currentSeq.Store(int64(state.LastSeq + 1))
 			d.bytesWritten.Store(state.BytesWritten)
+			d.hlsInitWritten = state.InitWritten
+			d.hlsInitURI = state.InitURI
+			d.hlsInitHash = state.InitHash
 			resuming = true
 		}
 	}
@@ -777,6 +806,16 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 				resuming = false
 				flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 				state = nil
+				// The restore above already installed the sidecar's byte count
+				// and fMP4 init state; the file is about to be O_TRUNC'd
+				// empty, so none of that is true anymore. Stale init fields
+				// are the dangerous half: hlsInitWritten=true on an empty
+				// file makes the per-segment fast path skip ever writing an
+				// init — a headerless, unmuxable file reported as success.
+				d.bytesWritten.Store(0)
+				d.hlsInitWritten = false
+				d.hlsInitURI = ""
+				d.hlsInitHash = ""
 			}
 		}
 	} else {

@@ -100,6 +100,15 @@ type ResumeState struct {
 	// StreamID mirrors DownloaderOptions.StreamID at save time; empty in
 	// legacy state files and for platforms that rely on URL identity.
 	StreamID string `json:"streamId,omitempty"`
+	// InitWritten/InitURI/InitHash mirror the downloader's fMP4 #EXT-X-MAP
+	// init-segment state (see SegmentDownloader.hlsInitWritten): whether the
+	// file starts with an init segment, the map URI it was adopted under, and
+	// the SHA-256 of its bytes. All empty/false in legacy sidecars and for TS
+	// recordings — a resume then treats staged fMP4 data as init-less and the
+	// StopOnGap path splits rather than appending blind.
+	InitWritten bool   `json:"initWritten,omitempty"`
+	InitURI     string `json:"initUri,omitempty"`
+	InitHash    string `json:"initHash,omitempty"`
 }
 
 func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
@@ -147,6 +156,9 @@ func (d *SegmentDownloader) saveResume() {
 		Timestamp:    time.Now().Unix(),
 		BaseURL:      d.getBaseURL(),
 		StreamID:     d.opts.StreamID,
+		InitWritten:  d.hlsInitWritten,
+		InitURI:      d.hlsInitURI,
+		InitHash:     d.hlsInitHash,
 	}
 	data, err := json.Marshal(state)
 	if err != nil {

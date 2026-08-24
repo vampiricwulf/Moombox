@@ -68,6 +68,13 @@ type HlsSegment struct {
 	// token at all, so nothing recordable is lost. Always false for playlists
 	// without ad markers (ad-free tokens, YouTube HLS).
 	IsAd bool
+	// MapURI is the resolved #EXT-X-MAP init-segment URI governing this
+	// segment (fMP4/CMAF delivery — Twitch's TS→fMP4 migration). Empty for
+	// classic self-contained TS segments. Per-segment rather than per-playlist
+	// because the tag is positional: a stitched-ad break can switch the map to
+	// the ad's init and back within one window, and attributing the ad's init
+	// to content segments would corrupt the recording.
+	MapURI string
 }
 
 // HlsPlaylist represents a parsed HLS media playlist.
@@ -580,6 +587,10 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 	// if only the first segment in the window carries the tag. Zero when the
 	// playlist has no PDT tags — ad classification is then skipped entirely.
 	var curDate time.Time
+	// curMapURI tracks the #EXT-X-MAP init segment governing subsequent
+	// segments (RFC 8216 §4.3.2.5: the tag applies until the next EXT-X-MAP).
+	// Empty for TS playlists, which never carry the tag.
+	var curMapURI string
 
 	for _, rawLine := range lines {
 		line := strings.TrimSpace(rawLine)
@@ -594,6 +605,18 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 		case strings.HasPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:"):
 			if t, err := time.Parse(time.RFC3339Nano, line[len("#EXT-X-PROGRAM-DATE-TIME:"):]); err == nil {
 				curDate = t
+			}
+
+		case strings.HasPrefix(line, "#EXT-X-MAP:"):
+			// fMP4/CMAF init segment. BYTERANGE is not parsed — a
+			// byte-ranged map (init = a slice of a larger resource) would be
+			// mis-fetched whole. No platform Moombox targets serves that
+			// shape (media-segment EXT-X-BYTERANGE is equally unsupported
+			// here); Twitch serves standalone init resources.
+			for _, attr := range parseAttributes(line[len("#EXT-X-MAP:"):]) {
+				if attr.key == "URI" && attr.value != "" {
+					curMapURI = resolveURL(baseURL, attr.value)
+				}
 			}
 
 		case strings.HasPrefix(line, "#EXTINF:"):
@@ -621,6 +644,7 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 				Duration: segDur,
 				URL:      resolveURL(baseURL, line),
 				IsAd:     inAdRange(adRanges, curDate),
+				MapURI:   curMapURI,
 			}
 			playlist.Segments = append(playlist.Segments, segment)
 			if !curDate.IsZero() {

@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +12,102 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
+
+// errHlsInitWrite marks an ensureHlsInit failure as a local WRITE error (disk
+// full, handle revoked) rather than a network fetch failure. The distinction
+// is load-bearing: fetch failures are retried across playlist rounds, but
+// retrying a write re-issues the full init after whatever partial bytes the
+// failed write left behind — a corrupt file head — so callers treat these as
+// fatal, exactly like a failed media-segment write. (The partial bytes are
+// harmless on the next resume: bytesWritten is not advanced on the failed
+// write, so the sidecar's truncate-to-known-good drops them.)
+var errHlsInitWrite = errors.New("write HLS init segment")
+
+// ensureHlsInit makes the output file valid for the media segment about to be
+// written under mapURI, the segment's governing #EXT-X-MAP init URI (fMP4/CMAF
+// HLS — Twitch's TS→fMP4 migration). Raw fMP4 fragments are headerless
+// (styp+moof+mdat, no ftyp/moov), so the init segment MUST be at the head of
+// the file or ffmpeg cannot demux it at mux time. Callers invoke it only when
+// the media segment's own data is already in hand, so the file never holds an
+// init without media behind it — the StopOnGap escalations' "file is empty"
+// discriminator keeps meaning "no media captured".
+//
+// A changed URI is compared by CONTENT hash, because Twitch URLs rotate
+// tokens — URI equality alone would misread every rotation as a transcode
+// restart. (An UNCHANGED URI is trusted without a re-fetch: init resources
+// are immutable per RFC 8216 §6.3.4 — that assumption is what makes the
+// per-segment fast path free.) Outcomes:
+//   - TS segment, TS file → no-op
+//   - nothing written yet → write the init at the head of the fresh file
+//   - already written, identical bytes → adopt the new URI, write nothing
+//   - content actually differs, the file predates fMP4 support (init state
+//     unknown), or the playlist REVERTED to TS while the file starts with an
+//     init: StopOnGap returns ErrInitSegmentChanged so the caller
+//     part-splits; other configurations continue in-file with a loud Error
+//     log — the tail may not survive a -c copy mux, but erroring out would
+//     lose the rest of a VOD outright.
+func (d *SegmentDownloader) ensureHlsInit(ctx context.Context, mapURI string) error {
+	if mapURI == "" {
+		if !d.hlsInitWritten {
+			return nil // TS segment into a TS file
+		}
+		// fMP4 → TS reversion: the playlist stopped carrying EXT-X-MAP while
+		// the file already starts with an init segment (e.g. Twitch rolling
+		// its fMP4 experiment back mid-broadcast, or a post-outage variant
+		// swap landing on a TS edge). Raw TS after ISOBMFF fragments makes
+		// the tail undemuxable.
+		if d.opts.StopOnGap {
+			d.logger.Warn("[Downloader] HLS playlist reverted to TS mid-part, stopping for part split")
+			return ErrInitSegmentChanged
+		}
+		d.logger.Error("[Downloader] HLS playlist reverted to TS mid-file; appending TS after fMP4 — mux may fail from this point")
+		d.hlsInitWritten = false
+		d.hlsInitURI = ""
+		d.hlsInitHash = ""
+		return nil
+	}
+	if mapURI == d.hlsInitURI {
+		return nil // unchanged URI ⇒ unchanged init (immutability assumption above)
+	}
+	data, err := d.fetchSegmentWithRetry(ctx, mapURI, nil)
+	if err != nil {
+		return fmt.Errorf("fetch HLS init segment: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+
+	if d.hlsInitWritten && hash == d.hlsInitHash {
+		// Token-rotated URI, same init — adopt the name, nothing to write.
+		d.hlsInitURI = mapURI
+		return nil
+	}
+	if d.hlsInitWritten || d.bytesWritten.Load() > 0 {
+		// The file holds data under a DIFFERENT (or unknown) init.
+		if d.opts.StopOnGap {
+			d.logger.Warn("[Downloader] HLS init segment changed, stopping for part split",
+				"newInit", truncateURL(mapURI, 120))
+			return ErrInitSegmentChanged
+		}
+		// ffmpeg's mov demuxer skips a second moov, so fragments after this
+		// point demux under the FIRST init's sample descriptions — the mux
+		// may fail or misdecode from here. Writing the bytes anyway is the
+		// least-loss fallback for a VOD; the Error level is what makes a
+		// field failure diagnosable.
+		d.logger.Error("[Downloader] HLS init segment changed mid-file, writing new init inline — mux may fail from this point",
+			"newInit", truncateURL(mapURI, 120))
+	}
+	n, werr := d.outputFile.Write(data)
+	if werr != nil {
+		return fmt.Errorf("%w: %v", errHlsInitWrite, werr)
+	}
+	d.bytesWritten.Add(int64(n))
+	d.hlsInitWritten = true
+	d.hlsInitURI = mapURI
+	d.hlsInitHash = hash
+	d.logger.Info("[Downloader] HLS init segment written", "bytes", n,
+		"uri", truncateURL(mapURI, 120))
+	return nil
+}
 
 // waitOnline blocks until connectivity returns, then resets the no-segment
 // clock so the offline stretch doesn't count toward the MaxTimeout backstop
@@ -94,6 +192,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// ended stream with a long listed backlog would otherwise grind through
 	// it skip by skip before EXT-X-ENDLIST/stale handling could fire.
 	consecutiveStuckSkips := 0
+	// initFetchFailures bounds retries of a transiently-unfetchable #EXT-X-MAP
+	// init segment (fMP4 playlists only). Each failure already burned
+	// fetchSegmentWithRetry's internal budget, so this counts playlist-refresh
+	// ROUNDS; without an init the file is unwritable, so exhaustion escalates
+	// through the stream-status check (ended → clean finalize; live →
+	// ErrQualityLost for a variant refresh with a fresh init URI) instead of
+	// spinning.
+	initFetchFailures := 0
 	// inAdBreak/adSegmentsSkipped track a Twitch stitched-ad run across
 	// playlist refreshes so the break logs once at entry (Info) and once with
 	// the total at exit, not per 2s segment.
@@ -436,6 +542,57 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				segFailed = true
 				break
 			}
+			// fMP4: the init segment governing this media segment must be at
+			// the head of the file BEFORE the segment is written. Runs after
+			// the media fetch SUCCEEDED so the file stays genuinely empty
+			// until real media lands — the StopOnGap escalations' empty-file
+			// rule (window gap above, stuck exhaustion below) keys on
+			// bytesWritten, and an eagerly-written init used to flip it and
+			// split-cycle init-only junk parts on a stuck first segment.
+			// currentSeq has still not advanced, so a part split here leaves
+			// the successor at this exact segment (its data is simply
+			// re-fetched). Ad segments never reach this point (skipped
+			// above), so an ad break's own init never counts as a change.
+			if initErr := d.ensureHlsInit(ctx, seg.MapURI); initErr != nil {
+				if errors.Is(initErr, ErrInitSegmentChanged) {
+					return initErr
+				}
+				if errors.Is(initErr, errHlsInitWrite) {
+					// Local write failure — fatal, like a failed media write
+					// below; retrying would re-issue the init after partial
+					// bytes and corrupt the file head.
+					return initErr
+				}
+				if ctx.Err() != nil || d.isCancelled() {
+					return d.cancelErr(ctx)
+				}
+				initFetchFailures++
+				d.logger.Warn("[Downloader] HLS init segment fetch failed, will retry after playlist refresh",
+					"error", initErr, "attempt", initFetchFailures)
+				if initFetchFailures >= MaxSegmentRetries {
+					// Escalate like the sibling playlist/segment paths: an
+					// ended stream finalizes cleanly, a live one hands the
+					// orchestrator an ErrQualityLost so the variant refresh
+					// mints a fresh init URI — a terminal error here would
+					// end a live recording over what is usually a rotten
+					// token.
+					if d.opts.CheckStreamStatus != nil {
+						ended, checkErr := d.opts.CheckStreamStatus(ctx)
+						if checkErr == nil && ended {
+							d.streamEnded.Store(true)
+							return nil
+						}
+						return ErrQualityLost
+					}
+					return fmt.Errorf("HLS init segment fetch failed after %d rounds: %w", initFetchFailures, initErr)
+				}
+				d.emitActivity(ActivityRetrying)
+				utils.Sleep(ctx, 2*time.Second)
+				segFailed = true
+				break
+			}
+			initFetchFailures = 0
+
 			// Success — reset stuck tracking. Record the arrival for the
 			// fetched-bytes signal (the playlist fetch above deliberately
 			// does not — it is not stream payload).
@@ -731,6 +888,15 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				continue
 			}
 			closeGap(nextIdx - 1) // a real segment ends any open gap
+
+			// fMP4: write this segment's governing init ahead of it (first
+			// write, or an inline re-init at a mid-VOD map change — this path
+			// never runs under StopOnGap, so ensureHlsInit never asks for a
+			// part split here). Synchronous in the consumer: it fires once per
+			// distinct init, not per segment.
+			if initErr := d.ensureHlsInit(ctx, pl.Segments[nextIdx].MapURI); initErr != nil {
+				return fmt.Errorf("HLS VOD init segment for %d: %w", nextIdx, initErr)
+			}
 
 			n, err := d.outputFile.Write(data)
 			if err != nil {

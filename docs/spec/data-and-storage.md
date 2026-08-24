@@ -807,8 +807,19 @@ type ResumeState struct {
     BytesWritten int64  `json:"bytesWritten"`  // Bytes written to output file
     Timestamp    int64  `json:"timestamp"`     // Unix timestamp of last save
     BaseURL      string `json:"baseUrl"`       // Base URL for segment downloads
+    StreamID     string `json:"streamId,omitempty"`    // Broadcast identity (Twitch)
+    InitWritten  bool   `json:"initWritten,omitempty"` // fMP4 HLS: init segment at file head
+    InitURI      string `json:"initUri,omitempty"`     // fMP4 HLS: #EXT-X-MAP URI the init was adopted under
+    InitHash     string `json:"initHash,omitempty"`    // fMP4 HLS: SHA-256 of the written init bytes
 }
 ```
+
+The `Init*` fields let a successor downloader appending to the same staged
+file know the file already begins with an fMP4 init segment: an unchanged
+`#EXT-X-MAP` URI needs no re-fetch, a rotated URI is re-fetched and compared
+by content hash (Twitch token rotation is not a transcode restart), and a
+genuinely different init part-splits under `StopOnGap` instead of corrupting
+the file with fragments that reference a different `moov`.
 
 **Save frequency:**
 

@@ -1,19 +1,22 @@
-## Improvements
+### Features
 
-- **The TUI status bar now adapts to the window instead of hiding your keybinds.** Previously a single width threshold flipped the bar between two fixed renderings, and any remaining overflow blanked the entire chord-hint half — so an ordinary narrow terminal showed no keybinds at all. Both halves now carry a density ladder and the bar picks the richest pair that fits the measured width, so it reacts to real content (a long backfill channel name, "12 selected", OFFLINE) rather than a guessed column count. The right half yields first, since losing "Backfill Foo: videos p3" costs a detail the log panel already carries while losing "Tab Focus" costs a keybind you may not know. All eight chords now survive down to roughly 20 columns, and the hints shed labels, then separators, then all but `M` and `?` — which reach everything else — before ever going blank. On the right, the informational items (backfill scan, selection count, active tally) drop before the alerts (OFFLINE, disk warning, re-login), and a healthy `YT`/`TW` yields early since it is only reassurance.
-- **The task list header keeps your scroll position when space is tight.** It used to drop its entire right side on overflow, taking the `[1-20/57]` range along with the monitor countdowns. The countdowns now go first, then the range abbreviates to `[20/57]`.
-- **Release notes render correctly on light terminals.** The markdown renderer now follows the detected terminal background, which the app already applied to its forms and wizards — this was the one themed surface still forcing the dark palette, which renders low-contrast body text on a light background.
+- **Twitch fMP4/CMAF support** — Twitch is migrating live delivery from MPEG-TS to fMP4; recordings of fMP4 streams previously failed at mux with unusable output. The HLS engine now writes the `#EXT-X-MAP` init segment at the head of every part file, tolerates Twitch's token-rotated init URLs (content-hash identity), and part-splits cleanly on a genuine mid-broadcast init change or an fMP4→TS reversion. TS streams are unaffected.
+- **Broadcast interruption resume** — a new `downloader.interruption_timeout` setting (default 2h, 0 disables): a live download cut off mid-broadcast (stream crash, network death) can stall-and-resume instead of finalizing immediately, with interruption classification, chat-open resume signaling, and Tier-2 staging preservation.
+- **Lossless part merging** — contiguous same-format parts are merged at finalize via lossless concat (stream-params probe gated), collapsing multi-part recordings back into fewer files, with per-part chat and segment rows collapsed to match.
+- **Auto-resume on live re-detection** — a preserved Finished job whose broadcast turns out to still be live is automatically resumed by the monitor.
 
-## Bug Fixes
+### Improvements
 
-- **The release-notes overlay no longer spills off narrow terminals.** Its footer was a fixed 44 columns, so a 30-column window rendered a 46-column box that ran past the right edge. The footer now shortens (always keeping `Esc`) and the title truncates; verified fitting at every width from 10 to 140.
-- **The release-notes overlay reflows when you resize the terminal.** It sized itself only when opened, so resizing while reading left the text wrapped for the old width. Scroll position is preserved across the reflow.
-- **A wrapped header can no longer shift the task panel.** Both the status bar and the task list header are now clamped to the terminal width; previously a long filter or search indicator could wrap and push an extra line into the layout.
-- **Text truncated to zero available columns no longer emits a stray ellipsis** into space that has no room for it — visible on very narrow terminals.
+- Quality-split notifications now also fire when a Twitch transcode restart changes quality across an init-segment part split.
+- Staging expiry and offline stall-clock pause rulings applied (staged data of finalized jobs expires; the interruption stall clock pauses while offline).
 
-## Internal
+### Bug Fixes
 
-- Direct dependency updates: lipgloss v2.0.6, goja, x/crypto v0.55, x/text v0.41, and SQLite v1.56.0 (superseding the open Dependabot PR), plus the transitive bumps they pull. Because goja and regexp2 underpin cipher solving and BotGuard, both live-gated paths were exercised beyond the offline suite: live cipher tests and the sidecar BotGuard mint both pass.
-- Text truncation now delegates to Charm's `x/ansi` rather than a hand-rolled width walk, verified equivalent across ASCII, CJK and every width before adoption.
-- Removed a dead `colorProfile` field that Bubble Tea's renderer already owns.
-- New tests pin the status bar's degradation schedule, the overlay's fit at every width, and that every chord in the action system reaches the help overlay.
+- Twitch/YouTube cookie auth recovery now fires on startup-dead auth (not only witnessed transitions) and recovers per-platform instead of service-wide.
+- Stuck-segment recovery on fMP4 streams records the gap exactly once instead of split-cycling junk parts; legacy staged data from pre-fMP4 versions splits safely instead of mixing containers.
+- Interruption-resume audit wave: chat-merge run-abort, `interruption_timeout=0` latch-without-stall, per-episode interruption clock, auth-walled probe mis-arm guard, finalize-scoped resume waits, part-merge cleanup safety, and duplicate resume-notification suppression.
+- `ReplaceJobSegments` binds the job ID parameter correctly during part-row collapse.
+
+### Internal
+
+- Hermetic integration tests for chat `LiveContinuationOpen` signal wiring and ordering; expanded fMP4 engine test coverage (init ordering, rotation, reversion, ad-break inits, update-path resume pins).

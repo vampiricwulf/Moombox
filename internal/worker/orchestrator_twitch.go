@@ -491,13 +491,18 @@ sessionLoop:
 
 			isQualityLost := errors.Is(dlErr, engine.ErrQualityLost)
 			isGap := errors.Is(dlErr, engine.ErrGapDetected)
+			// Init-segment change (fMP4/CMAF): the transcode restarted and new
+			// fragments reference a different moov — handled like a gap split
+			// (mux the current part, seed the successor at CurrentSeq) except
+			// nothing was lost, so no gap notification is sent.
+			isInitChange := errors.Is(dlErr, engine.ErrInitSegmentChanged)
 
 			// FetchVariantsFn guard: only live jobs have it wired. A VOD can
 			// still surface ErrQualityLost (playlist 404 with the VOD-shaped
 			// CheckStreamStatus reporting "not ended") — without the guard
 			// the refresh below would nil-deref; with it, the error falls
 			// through to the normal-stop path and captured data still muxes.
-			if (qualityChanged || isQualityLost || isGap) && variant.FetchVariantsFn != nil {
+			if (qualityChanged || isQualityLost || isGap || isInitChange) && variant.FetchVariantsFn != nil {
 				segmentEndTime := time.Now().Unix()
 				// A resumed part is never "short": the timer only measures
 				// this session's slice of it (see partResumed above).
@@ -506,17 +511,19 @@ sessionLoop:
 				// Re-fetch master playlist FIRST to determine if quality actually changed.
 				newVariant, fetchErr := refreshBestVariant(ctx)
 				if fetchErr != nil {
-					if isGap {
-						// Refresh failing right after a gap usually means the
-						// broadcast just ended — but the final playlist window
-						// keeps serving the post-gap tail for a while. Split
-						// and let the successor continue on the CURRENT
-						// variant URL: a dead URL ends the successor cleanly
-						// (empty part, nothing lost), a live one captures the
-						// rest of the tail.
-						o.logger.Warn("Twitch variant refresh failed after gap; continuing tail on current variant",
+					if isGap || isInitChange {
+						// Refresh failing right after a gap (or an init-segment
+						// change) usually means the broadcast just ended — but
+						// the final playlist window keeps serving the tail for
+						// a while. Split and let the successor continue on the
+						// CURRENT variant URL: a dead URL ends the successor
+						// cleanly (empty part, nothing lost), a live one
+						// captures the rest of the tail.
+						o.logger.Warn("Twitch variant refresh failed after gap/init change; continuing tail on current variant",
 							"err", fetchErr, "jobID", jobCtx.Job.ID)
-						o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
+						if isGap {
+							o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
+						}
 						nextSeq := videoDl.CurrentSeq()
 						if !advanceToNewPart(true, segmentEndTime) {
 							break
@@ -530,6 +537,34 @@ sessionLoop:
 					break
 				}
 				newQuality := qualityInfoFromVariant(newVariant)
+
+				if isInitChange {
+					// Same mechanics as the gap split below — close the part,
+					// seed the successor at the exact segment that triggered
+					// the change — but the data stream is continuous: the
+					// successor's fresh file starts with the NEW init segment
+					// and re-requests the segment the engine refused to write.
+					o.logger.Info("Twitch init segment changed — starting new part",
+						"closedPart", segmentIndex+1, "quality", newQuality.Label, "jobID", jobCtx.Job.ID)
+					// A transcode restart often changes quality too; adopting
+					// it silently would hide the change from the operator, so
+					// fire the same notification the quality path sends. The
+					// closed part always muxes here (continuous data).
+					if newQuality.Changed(currentQuality) {
+						o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex, true)
+					}
+
+					nextSeq := videoDl.CurrentSeq()
+					if !advanceToNewPart(true, segmentEndTime) {
+						break
+					}
+					currentQuality = newQuality
+					currentVariantURL = newVariant.URL
+					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
+					tracker.AttachVideoDownloader(videoDl)
+					drainQualityCh()
+					continue
+				}
 
 				if isGap {
 					// Unrecoverable gap: segments expired from the CDN before
