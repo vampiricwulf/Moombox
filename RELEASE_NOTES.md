@@ -1,25 +1,25 @@
 ### Features
 
-- **Twitch fMP4/CMAF support** — Twitch is migrating live delivery from MPEG-TS to fMP4; recordings of fMP4 streams previously failed at mux with unusable output. The HLS engine now writes the `#EXT-X-MAP` init segment at the head of every part file, tolerates Twitch's token-rotated init URLs (content-hash identity), and part-splits cleanly on a genuine mid-broadcast init change or an fMP4→TS reversion. TS streams are unaffected.
-- **Broadcast interruption resume** — a new `downloader.interruption_timeout` setting (default 2h, 0 disables): a live download cut off mid-broadcast (stream crash, network death) can stall-and-resume instead of finalizing immediately, with interruption classification, chat-open resume signaling, and Tier-2 staging preservation.
-- **Lossless part merging** — contiguous same-format parts are merged at finalize via lossless concat (stream-params probe gated), collapsing multi-part recordings back into fewer files, with per-part chat and segment rows collapsed to match.
-- **Auto-resume on live re-detection** — a preserved Finished job whose broadcast turns out to still be live is automatically resumed by the monitor.
-- **Docker support** — containerized deployment (`Dockerfile` + `ghcr.io` publish workflow) with a LAN-accessible seeded configuration by default.
+- **Session-coherent PO token minting** — YouTube now binds its attestation challenge to the page session (`yt.config_.EVENT_ID`) and rejects WebPO tokens minted from the old `/att/get` flow when an account is enrolled in that experiment. The symptom is distinctive: player requests succeed while every segment fetch from googlevideo returns 403, which is exactly how the 2026-08-14 premiere capture failed. The BotGuard sidecar now mints from a self-consistent `(ytcfg, window.ytAtN)` pair taken from a single youtube.com fetch, so the token matches the session it was issued for. `/att/get` remains as a fallback, and every degradation step is logged with a distinct reason.
+- **YouTube client roster refresh (yt-dlp 2026.08.19 parity)** — adds the `VISIONOS` client, now upstream's lead default, and puts `web_embedded` at the head of the authenticated cascade. YouTube began 403'ing `android_vr` format URLs on 2026-08-17; that enforcement is selective rather than universal, so `android_vr` is retained behind `VISIONOS` as a last-resort tier and as the only cookieless source of a live DASH manifest.
 
 ### Improvements
 
-- Quality-split notifications now also fire when a Twitch transcode restart changes quality across an init-segment part split.
-- Staging expiry and offline stall-clock pause rulings applied (staged data of finalized jobs expires; the interruption stall clock pauses while offline).
+- Anonymous live extractions make one fewer request: a live response that already ships split video+audio adaptive formats is segment-addressable through the manifest-free path and no longer triggers a second client call chasing a DASH manifest it would never read.
+- Age-restricted content no longer fetches the embedded player twice (plus an embed page) on every quality-monitor poll — the cascade result is reused when it is already usable. That path polls every 30 seconds, so it was two redundant requests per poll.
+- The sidecar now enforces a whole-generation time budget rather than three independent per-fetch timeouts, which together could exceed the parent's RPC deadline. The homepage fetch carries its own tight cap so it can never consume a mid-download credential-refresh budget.
+- Format deduplication ranks `VISIONOS` above `android_vr`, so a 403-dead URL cannot displace a working one when both clients return the same itag.
 
 ### Bug Fixes
 
-- Twitch/YouTube cookie auth recovery now fires on startup-dead auth (not only witnessed transitions) and recovers per-platform instead of service-wide.
-- Stuck-segment recovery on fMP4 streams records the gap exactly once instead of split-cycling junk parts; legacy staged data from pre-fMP4 versions splits safely instead of mixing containers.
-- Interruption-resume audit wave: chat-merge run-abort, `interruption_timeout=0` latch-without-stall, per-episode interruption clock, auth-walled probe mis-arm guard, finalize-scoped resume waits, part-merge cleanup safety, and duplicate resume-notification suppression.
-- `ReplaceJobSegments` binds the job ID parameter correctly during part-row collapse.
-- Cookie-less (anonymous) hardening: the visitor-data cache now refills from the public extraction path after 403 recovery (previously one 403 left an anonymous process visitor-less for its lifetime); a bot-checked status probe ("Sign in to confirm you're not a bot") can no longer finalize a still-live recording early; EU consent-wall redirects on watch-page fetches are detected and reported instead of silently degrading extraction; age-restricted errors now say that cookies are the fix.
-- Twitch subscriber-only content (usher `unauthorized_entitlements` / `vod_manifest_restricted`) is classified with an actionable "log into an account that has access" message and routed to the COOKIES? status instead of a generic error with a raw JSON body.
+- **Non-English locales misclassified every probed stream.** Stream classification matches English text in YouTube's playability reasons ("members", "age", "private"), but the two cookieless clients — including the one serving the status probe — never requested English. Both now send `hl=en`, as every other client already did.
+- A crafted video title containing the literal text `ytcfg.set({` could silently disable session-coherent minting for an entire install, quietly reverting it to the very `/att/get` path that produces the 403s above. Both page extractors now evaluate every candidate instead of stopping at the first match.
+- A failed homepage fetch could leave an hours-stale `EVENT_ID` paired with an unrelated challenge — the exact incoherence the feature exists to prevent. Pairing is now all-or-nothing, cleared before each attempt, and reasserted immediately before the BotGuard snapshot.
+- Failed token-minter generation no longer emits a spurious warning-level unhandled-rejection line alongside the real error.
 
 ### Internal
 
-- Hermetic integration tests for chat `LiveContinuationOpen` signal wiring and ordering; expanded fMP4 engine test coverage (init ordering, rotation, reversion, ad-break inits, update-path resume pins).
+- New live-extraction test (`MOOMBOX_LIVE_YT_TEST=1`) exercising the real anonymous cascade against YouTube for both a VOD and a live stream. It asserts capabilities — playable video plus audio, and segment addressability from either source — rather than which client or mechanism supplied them, so a healthy client reordering cannot fail it.
+- New sidecar extraction test suite covering the homepage parser against hostile and live-shaped inputs, including two shapes only the real page exhibits (`\xNN`-escaped payloads and a trailing comma).
+- `HasSplitAdaptiveFormats` consolidated into a single implementation shared by the extraction cascade and the download strategy switch.
+- Deep-dive documentation updated for the client roster, the cookieless fallback chain, and the homepage pair's trust boundary.
