@@ -193,7 +193,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// web_embedded as one more DASH source before the ANDROID_VR round trip
 	// below. Under the account experiment this is likely stripped too (the
 	// embedded call is cookied), but when present it saves the extra call.
-	if result.DashManifestURL == "" && authEmbErr == nil && authEmb.DashManifestURL != "" {
+	// PlayabilityOK is required here for the same reason every sibling
+	// enrichment requires it (the ANDROID_VR blocks below, and the cookieless
+	// chain): a manifest attached to an unplayable response is not a manifest
+	// worth adopting — and web_embedded specifically reports "unavailable"
+	// for embedding-disabled channels.
+	if result.DashManifestURL == "" && authEmbErr == nil &&
+		authEmb.PlayabilityError == PlayabilityOK && authEmb.DashManifestURL != "" {
 		p.logger.Info("[PlayerApi] Got DASH manifest URL from web_embedded", "videoID", videoID)
 		result.DashManifestURL = authEmb.DashManifestURL
 	}
@@ -252,19 +258,39 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		}
 	}
 
-	// Try web_embedded for age-restricted content
+	// Try web_embedded for age-restricted content.
+	//
+	// The cascade call above already fetched this client, so reuse its result
+	// when it came back usable instead of re-fetching. That matters here more
+	// than anywhere: age-restricted is one of the playability states the
+	// quality monitor re-probes every 30s through the authenticated path, and
+	// re-fetching cost TWO extra requests per probe (the player call plus the
+	// embed page). encryptedHostFlags — the only thing the heavier variant
+	// adds — is needed exactly when the plain shape FAILS, so a result that
+	// already succeeded demonstrably did not need it.
 	if result.PlayabilityError == PlayabilityAgeRestricted {
-		p.logger.Info("[PlayerApi] Age-restricted content detected, trying web_embedded", "videoID", videoID)
-		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, wp.AttestationChallenge, true)
+		embResult, embErr := authEmb, authEmbErr
+		if embErr == nil && embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
+			p.logger.Info("[PlayerApi] Age-restricted content detected, reusing cascade web_embedded result", "videoID", videoID)
+		} else {
+			p.logger.Info("[PlayerApi] Age-restricted content detected, retrying web_embedded with encryptedHostFlags", "videoID", videoID)
+			embResult, embErr = p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, wp.AttestationChallenge, true)
+		}
+
 		if embErr != nil {
 			p.logger.Warn("[PlayerApi] web_embedded failed", slog.String("error", embErr.Error()))
 		} else if embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
 			p.logger.Info("[PlayerApi] web_embedded succeeded for age-restricted content", "videoID", videoID)
-			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
+			// Formats from the cascade call are already pooled; re-collecting
+			// the same slice would double every entry (dedup keeps one, but
+			// the pool should not carry known duplicates either way).
+			if embResult != authEmb {
+				collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
+			}
 			mergeWatchPageMetadata(embResult, wpParsed)
 			embResult.Formats = deduplicateFormats(formatPool)
 			return withAttestation(embResult, wp, videoID), nil
-		} else {
+		} else if embResult != authEmb {
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 		}
 	}
@@ -287,8 +313,12 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		// inadequate formats. VISIONOS first (yt-dlp's lead default since
 		// 2026.08.19), then ANDROID_VR — retained behind it because upstream's
 		// all-formats-403 enforcement on android_vr is selective (verified
-		// still fully working from here 2026-08-24) and it covers videos
-		// visionos cannot ("Made for kids" is unavailable on visionos).
+		// still fully working from here 2026-08-24), and because it is the
+		// only cookieless source of a live dashManifestUrl. NOT because it
+		// covers "Made for kids": upstream marks BOTH clients as unable to
+		// serve those (_base.py repeats the same note above each), so
+		// android_vr adds nothing there. Upstream's made-for-kids fallback is
+		// web_embedded then tv_downgraded, which this chain does not attempt.
 		if wcResult.PlayabilityError == PlayabilityLoginRequired ||
 			wcResult.StreamStatus == StreamNotAStream ||
 			len(wcResult.Formats) == 0 ||
@@ -580,15 +610,23 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 // when neither client produced one (the pool still holds whatever partial
 // formats were fetched). Shared by the authenticated and public paths.
 //
-// One wrinkle keeps the chain from silently costing a capability: VISIONOS
-// serves HLS but NEVER a dashManifestUrl for live streams (verified
-// 2026-08-24), while ANDROID_VR does. Returning the first adequate result
-// would therefore hand back an HLS-only live stream and skip the callers'
-// DASH-enrichment step, losing --live-from-start segment addressability for
-// every anonymous live capture — caught by TestLivePublicExtraction the day
-// this chain landed. So for live/upcoming content missing a DASH manifest,
-// the chain keeps going and adopts a later client's manifest into the
-// already-chosen result rather than stopping early.
+// One wrinkle concerns live streams. VISIONOS never returns a
+// dashManifestUrl for live (verified 2026-08-24) while ANDROID_VR does, so
+// the chain will consult the next client for a manifest to adopt into the
+// already-chosen result — but ONLY when the result cannot already be
+// segment-addressed without one.
+//
+// That qualifier is the whole point, and getting it wrong cost a needless
+// round trip on every anonymous live extraction. A live response carrying
+// split video+audio adaptive URLs routes to the manifest-free path
+// (worker.HasManifestlessDashFormats → HasSplitAdaptiveFormats), which the
+// strategy switch selects AHEAD of the dashManifestUrl case and which is the
+// primary live path since yt-dlp 8c1f07d81 — upstream now skips the live
+// DASH manifest entirely. VISIONOS supplies exactly those formats, so a
+// VISIONOS-only live result already has full --live-from-start
+// addressability and needs no manifest. The DASH manifest survives only as
+// the fallback for pools WITHOUT usable split adaptive URLs, and that is the
+// single case worth another request.
 func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitorData string, formatPool *[]Format) *VideoInfo {
 	var chosen *VideoInfo
 	for _, fb := range []struct {
@@ -609,19 +647,29 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 
 		if chosen != nil {
 			// Already have a usable result; this client is only still being
-			// consulted for a DASH manifest it might carry.
+			// consulted for a DASH manifest it might carry. Keep going until
+			// one actually supplies it — an unconditional break here would
+			// silently make a third entry in the list unreachable and falsify
+			// the "chain keeps going" contract documented above.
 			if fbResult.PlayabilityError == PlayabilityOK && fbResult.DashManifestURL != "" {
 				p.logger.Info("[PlayerApi] DASH manifest sourced from cookieless fallback",
 					"videoID", videoID, "client", fb.label)
 				chosen.DashManifestURL = fbResult.DashManifestURL
+				break
 			}
-			break
+			continue
 		}
 
 		if fbResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(fbResult) {
 			chosen = fbResult
+			// Consult the next client for a manifest only when this live
+			// result has neither a DASH manifest NOR the split adaptive
+			// formats that make one unnecessary. Checked against the whole
+			// pool, since the strategy switch sees the deduplicated pool
+			// rather than this one client's slice.
 			needsDash := (fbResult.StreamStatus == StreamLive || fbResult.StreamStatus == StreamUpcoming) &&
-				fbResult.DashManifestURL == ""
+				fbResult.DashManifestURL == "" &&
+				!HasSplitAdaptiveFormats(*formatPool)
 			if !needsDash {
 				break
 			}
@@ -631,9 +679,26 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 }
 
 // fetchWithEmbedded performs a WEB_EMBEDDED_PLAYER request. fetchEmbedPage
-// controls the extra embed-page round trip for encryptedHostFlags: the
-// age-restriction bypass wants it, while the plain authed-cascade call
-// matches yt-dlp's shape (thirdParty.embedUrl only, no embed-page fetch).
+// controls the extra embed-page round trip that sources encryptedHostFlags.
+//
+// This is a DELIBERATE DIVERGENCE from yt-dlp, not parity with it. Upstream
+// attaches encryptedHostFlags to every web_embedded player request
+// (_video.py: "there is no harm in including encryptedHostFlags with all
+// web_embedded player requests"), sourcing it from the embed-page ytcfg it
+// fetches anyway, and names the enforcement experiment
+// embeds_enable_encrypted_host_flags_enforcement. Moombox skips that fetch
+// on the authed-cascade call because the call is already a second round trip
+// on a path that includes mid-download 403 credential recovery, and a third
+// would be worse: that recovery runs under min(45s, MaxTimeout/3), as little
+// as 10s at the configured floor.
+//
+// Known failure mode of the trade-off: for an account enrolled in the
+// enforcement experiment, the cascade call returns nothing usable, so its
+// round trip buys nothing. It is still not harmful — web_embedded only
+// contributes to the format pool and never drives classification — but if
+// authenticated extractions ever come back short a client, pass true here
+// first. The age-restriction bypass already passes true, so that path (where
+// web_embedded is load-bearing rather than supplementary) is unaffected.
 func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int, challenge string, fetchEmbedPage bool) (*VideoInfo, error) {
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 

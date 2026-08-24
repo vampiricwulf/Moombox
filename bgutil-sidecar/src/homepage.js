@@ -22,7 +22,9 @@
 //     the same way.
 //   - The outer ytAtN blob is parsed by a tolerant recursive-descent parser
 //     (parseLooseJSON below), never eval'd or Function()'d — page HTML embeds
-//     third-party-authored strings.
+//     third-party-authored strings. Note this keeps page text from being
+//     EXECUTED; it does not keep page text from producing a challenge (see
+//     the trust note on parseLooseJSON).
 //   - The returned challenge is REBUILT from exactly the three fields the
 //     minter consumes (program, globalName, interpreterUrl), matching Go's
 //     canonicalizeChallenge: no extra keys, no inline interpreterJavascript
@@ -71,11 +73,40 @@ export function scanBalancedObject(s) {
 // parseLooseJSON parses a JS-object-literal-ish value (unquoted keys,
 // single-quoted strings) into plain data without ever executing it. Throws
 // on anything outside that grammar — a backslash outside a string, an
-// identifier value, a function call — so attacker text that merely LOOKS
-// like a ytAtN blob (e.g. one smuggled inside a JSON string elsewhere on
-// the page, where every quote arrives backslash-escaped) fails to parse
-// instead of yielding a challenge. Named after the bgutils-js v4 helper it
-// substitutes for (Moombox pins bgutils-js 3.x, which does not export it).
+// identifier value, a function call. Named after bgutils-js's own helper,
+// which IS available at our pin (^4.0.3 exports parseLooseJSON from
+// bgutils-js/utils) — this is a deliberate replacement, not a shim for a
+// missing export. The vendored one rewrites single-quoted strings with a
+// global regex, which mangles any apostrophe inside a double-quoted string;
+// on a page built from arbitrary video titles that is a real hazard.
+//
+// NOT a security boundary. An earlier version of this comment claimed the
+// throw-on-anything-else behavior stopped attacker text smuggled through
+// page metadata; that was WRONG and the test asserting it only proved the
+// double-quoted case. JSON string escaping touches none of ' { } : or bare
+// identifiers, so a payload written entirely in single quotes survives
+// verbatim inside a JSON string value and parses cleanly here — verified
+// 2026-08-24 against this exact function. Assume any object on the page can
+// reach this parser and come out intact. What actually contains the damage
+// is assertGoogleHost in server.js (the interpreter-origin gate) plus the
+// canonicalization below, and those are what must never be relaxed.
+//
+// Residual risk, stated plainly so nobody has to rediscover it: on the live
+// homepage the genuine window.ytAtN( call sits at ~byte 714k and
+// ytInitialData — the only third-party-authored surface — begins at ~757k,
+// so the genuine call is always the first VALID candidate and wins. That is
+// YouTube's emission ordering, not something enforced here. If it ever
+// flipped (a populated feed rendered before the attestation bootstrap, or
+// this fetch made session-aware), a crafted video title could supply the
+// challenge. The impact even then is bounded to denial of POT minting, NOT
+// code execution: the interpreter origin is still gated to Google hosts, and
+// an attacker program paired with a genuine Google interpreter fails inside
+// BotGuardClient.create. Verified by adversarial probe 2026-08-24, which
+// could not defeat the host gate across ~30 host-confusion payloads. A
+// structural anchor (requiring the call to sit outside any JSON string) was
+// considered and rejected: every cheap version of that test risks rejecting
+// the GENUINE challenge, and falling back to /att/get is the exact
+// degradation this module exists to prevent.
 export function parseLooseJSON(text) {
     let i = 0;
     const fail = (msg) => {
@@ -163,7 +194,18 @@ export function parseLooseJSON(text) {
             ws();
             if (text[i] !== ":") fail("expected ':' after key");
             i++;
-            obj[key] = parseValue();
+            // defineProperty, not obj[key] = …: keys come from
+            // attacker-reachable page text, and a plain assignment of
+            // `__proto__` reaches the prototype SETTER rather than creating
+            // an own property. This keeps the result an ordinary object
+            // (so callers and tests see normal prototypes) while making
+            // every key an inert own data property.
+            Object.defineProperty(obj, key, {
+                value: parseValue(),
+                writable: true,
+                enumerable: true,
+                configurable: true,
+            });
             ws();
             if (text[i] === ",") {
                 i++;
@@ -233,23 +275,30 @@ export function parseLooseJSON(text) {
 // strict JSON, so JSON.parse is authoritative (matching upstream); only the
 // object's EXTENT comes from balanced scanning. Call sites where the
 // argument is not an object literal (ytcfg.set("KEY", v)) are skipped.
+//
+// EVERY candidate is tried, and a failure advances to the next one rather
+// than abandoning the scan. First-match-then-hard-fail was a denial of
+// service: the literal text `ytcfg.set({` inside any string on the page —
+// a recommended video's title, say — made this return null, silently
+// reverting the whole install to the /att/get path this module exists to
+// avoid, with only a Debug-level warning to show for it.
 export function extractYtcfg(html) {
     const marker = "ytcfg.set(";
     for (let from = 0; ; ) {
         const at = html.indexOf(marker, from);
         if (at === -1) return null;
+        from = at + marker.length;
+
         let j = at + marker.length;
         while (j < html.length && " \t\r\n".includes(html[j])) j++;
-        if (html[j] !== "{") {
-            from = at + marker.length;
-            continue;
-        }
+        if (html[j] !== "{") continue;
+
         const obj = scanBalancedObject(html.slice(j));
-        if (obj === null) return null;
+        if (obj === null) continue;
         try {
             return JSON.parse(obj);
         } catch {
-            return null;
+            continue;
         }
     }
 }
@@ -271,18 +320,39 @@ export const REASONS = Object.freeze({
         "bgChallenge has no interpreterUrl (inline interpreterJavascript is refused from page-sourced challenges)",
 });
 
-const ytAtNOpenRe = /window\.ytAtN\(\s*\{/;
+const ytAtNOpenRe = /window\.ytAtN\(\s*\{/g;
+
+// Identifier shape for globalName. Excludes __proto__ explicitly: it matches
+// the identifier pattern but a write to globalThis["__proto__"] is not an
+// ordinary property write.
+const safeGlobalNameRe = /^(?!__proto__$)[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
 
 // extractHomepageChallenge pulls the bgChallenge out of the page's
 // window.ytAtN(...) blob and canonicalizes it down to the three fields the
 // minter consumes. Returns { challenge, reason } — challenge is null on any
-// miss, with reason naming the failure mode. The interpreter URL's origin is
-// NOT validated here; the caller must run it through assertGoogleHost before
-// anything is fetched.
+// miss, with reason naming the failure mode (the LAST candidate's reason,
+// when several were tried). The interpreter URL's origin is NOT validated
+// here; the caller MUST run it through assertGoogleHost before anything is
+// fetched — see the trust note below for why that gate, not this parser, is
+// the actual security boundary.
+//
+// EVERY `window.ytAtN(` candidate is tried and a failure advances to the
+// next, because taking only the first match let one decoy — the literal
+// text in any string on the page — mask the genuine call behind it.
 export function extractHomepageChallenge(html) {
-    const loc = ytAtNOpenRe.exec(html);
-    if (!loc) return { challenge: null, reason: REASONS.noCall };
-    const open = loc.index + loc[0].length - 1; // the '{'
+    ytAtNOpenRe.lastIndex = 0;
+    let lastReason = REASONS.noCall;
+    for (let loc; (loc = ytAtNOpenRe.exec(html)) !== null; ) {
+        const result = parseAtNCandidate(html, loc.index + loc[0].length - 1);
+        if (result.challenge) return result;
+        lastReason = result.reason;
+    }
+    return { challenge: null, reason: lastReason };
+}
+
+// parseAtNCandidate parses one `window.ytAtN({` occurrence, given the index
+// of its opening brace.
+function parseAtNCandidate(html, open) {
     const blob = scanBalancedObject(html.slice(open));
     if (blob === null) return { challenge: null, reason: REASONS.unbalanced };
 
@@ -322,7 +392,13 @@ export function extractHomepageChallenge(html) {
     if (typeof program !== "string" || program === "") {
         return { challenge: null, reason: REASONS.noProgram };
     }
-    const globalName = typeof bg.globalName === "string" ? bg.globalName : "";
+    // globalName becomes a globalThis property key (server.js installs the
+    // interpreter under it and later deletes the stale one), and this value
+    // is attacker-reachable — see the trust note on parseLooseJSON. Restrict
+    // it to an identifier shape so it can never be __proto__, a numeric
+    // index, or anything else with meaning to a property write.
+    const rawGlobalName = typeof bg.globalName === "string" ? bg.globalName : "";
+    const globalName = safeGlobalNameRe.test(rawGlobalName) ? rawGlobalName : "";
     const wrapped =
         bg.interpreterUrl && typeof bg.interpreterUrl === "object"
             ? bg.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue

@@ -160,6 +160,80 @@ test("inline-only challenge (no interpreterUrl) is refused", () => {
     assert.equal(reason, REASONS.noInterpURL);
 });
 
+test("SINGLE-QUOTED attacker payload DOES parse — parser is not the boundary", () => {
+    // Regression for a false security claim: the header comment and the
+    // double-quoted test below once implied parseLooseJSON stopped attacker
+    // text. It does not. JSON escaping touches none of ' { } : or bare
+    // identifiers, so this survives verbatim inside a JSON string value.
+    // Pinning the TRUE behaviour keeps anyone from re-deriving the wrong
+    // guarantee — containment is assertGoogleHost + canonicalization.
+    const attack =
+        "window.ytAtN({R:{bgChallenge:{program:'ATTACKER',globalName:'pwn'," +
+        "interpreterUrl:{privateDoNotAccessOrElseTrustedResourceUrlWrappedValue:" +
+        "'//www.gstatic.com/attacker/path.js'}}}})";
+    const page =
+        '<script>var ytInitialData = {"t":' + JSON.stringify(attack) + "};</script>";
+    const { challenge } = extractHomepageChallenge(page);
+    assert.notEqual(challenge, null, "parser does NOT stop this — do not assert otherwise");
+    assert.equal(challenge.program, "ATTACKER");
+    // What must hold: canonicalization still strips everything else, so the
+    // only attacker levers are the three fields the host gate then judges.
+    assert.deepEqual(Object.keys(challenge).sort(), [
+        "globalName",
+        "interpreterUrl",
+        "program",
+    ]);
+});
+
+test("a decoy ytAtN does not mask the genuine call behind it", () => {
+    const real =
+        "<script>window.ytAtN({'R': " +
+        JSON.stringify(JSON.stringify({ bgChallenge: GOOD_CHALLENGE })) +
+        "});</script>";
+    for (const decoy of [
+        '<script>var d="window.ytAtN({Q:1})";</script>',
+        '<script>var d="window.ytAtN({";</script>',
+        "<script>window.ytAtN({R: window});</script>",
+    ]) {
+        const { challenge, reason } = extractHomepageChallenge(decoy + real);
+        assert.equal(reason, REASONS.ok, decoy);
+        assert.deepEqual(challenge, GOOD_CHALLENGE, decoy);
+    }
+});
+
+test("a decoy ytcfg.set does not mask the genuine config behind it", () => {
+    const real = '<script>ytcfg.set({"EVENT_ID":"real"});</script>';
+    for (const decoy of [
+        '<script>var d={"t":"ytcfg.set({not:json}) haha"};</script>',
+        '<script>var d="ytcfg.set({";</script>',
+        '<script>ytcfg.set("KEY", 1);</script>',
+    ]) {
+        assert.deepEqual(extractYtcfg(decoy + real), { EVENT_ID: "real" }, decoy);
+    }
+});
+
+test("globalName is restricted to an identifier shape", () => {
+    const mk = (name) => {
+        const c = { ...GOOD_CHALLENGE, globalName: name };
+        return extractHomepageChallenge(
+            "<script>window.ytAtN({R: " + JSON.stringify({ bgChallenge: c }) + "});</script>",
+        ).challenge;
+    };
+    assert.equal(mk("trayride").globalName, "trayride");
+    // Rejected shapes fall back to "" rather than becoming a globalThis key.
+    for (const bad of ["__proto__", "a-b", "0abc", "with space", "x".repeat(70)]) {
+        assert.equal(mk(bad).globalName, "", bad);
+    }
+});
+
+test("a __proto__ key cannot pollute Object.prototype", () => {
+    const v = parseLooseJSON('{"__proto__": {"polluted": true}}');
+    assert.equal({}.polluted, undefined, "Object.prototype was polluted");
+    // __proto__ became an inert own property, not a prototype swap.
+    assert.equal(Object.getPrototypeOf(v), Object.prototype);
+    assert.deepEqual(Object.getOwnPropertyNames(v), ["__proto__"]);
+});
+
 test("hostile ytAtN-lookalike smuggled in a JSON string fails to parse", () => {
     // A video title rendered into a JSON string can contain the literal text
     // window.ytAtN({R: ...}) — but its quotes arrive backslash-escaped, and a

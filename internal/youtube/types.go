@@ -203,15 +203,29 @@ type YtcfgData struct {
 // source of formats at all for some restricted videos — it simply must not
 // displace a WEB/TV format that carries the same itag.
 //
-// VISIONOS (added 2026-08-24, yt-dlp 2026.08.19 parity) computes to upstream
-// priority -10 — its base client is not in BASE_CLIENTS at all, so
-// qualities() returns -1 — placing it below even android/ios. Moombox ranks
-// it one notch ABOVE android_vr instead: upstream deleted android_vr from
-// its defaults entirely (all-formats 403 enforcement since 2026-08-17), so
-// its relative ranking there is vestigial, while Moombox retains android_vr
-// as an extra fallback tier behind visionos. Under selective enforcement a
-// 403-dead android_vr URL must never win a same-itag tie against a working
-// visionos one.
+// A correction on what "upstream priority" means here, since the wrong
+// reading is easy and was recorded once already: yt-dlp's numeric `priority`
+// field is NOT its format-preference ranking. It is read in exactly one
+// place — sorting `allowed_clients` for the `player_client=all` expansion.
+// Actual preference comes from the ORDER of the requested-client tuple,
+// because player responses are appended in that order and the first-seen
+// stream_id wins. By that measure upstream's leads are visionos
+// (_DEFAULT_CLIENTS), web_embedded (_DEFAULT_AUTHED_CLIENTS) and web_creator
+// (_DEFAULT_PREMIUM_CLIENTS) — each of which Moombox ranks near the BOTTOM.
+//
+// That inversion is deliberate, and the reason is Moombox's architecture,
+// not upstream's ordering: yt-dlp PICKS one client's response, while Moombox
+// POOLS every client's formats and dedups by itag. Since Moombox attaches
+// WebPO tokens, and WEB/TV are the WEBPO clients whose URLs those tokens
+// match, a WEB/TV format must win a same-itag tie over a cookieless one that
+// carries no PO-token policy at all. Ranking by upstream's tuple order would
+// hand live segment downloads to exactly the clients whose URLs our tokens
+// do not apply to — the 2026-08-15 incident this comment block opens with.
+//
+// Within the last-resort tier, VISIONOS sits above ANDROID_VR. That much IS
+// monotone with upstream, which deleted android_vr outright (all-formats 403
+// since 2026-08-17) while promoting visionos: under selective enforcement a
+// 403-dead android_vr URL must never displace a working visionos one.
 //
 // Within a tier the previous relative order is preserved: public watch-page
 // formats still rank ahead of authenticated ones (audit I5).
@@ -232,6 +246,39 @@ const (
 	AuthLevelVisionOS  = 8
 	AuthLevelAndroidVR = 9
 )
+
+// HasSplitAdaptiveFormats reports whether formats contains the split
+// video + audio adaptive entries that make a manifest-free, &sq=N-segmented
+// download viable: at least one audio-only AND one video-only entry, both
+// with a non-empty URL and NO contentLength.
+//
+// This is the canonical implementation of the predicate the worker exposes
+// as HasManifestlessDashFormats, which delegates here — see that function
+// for why the contentLength exclusion is load-bearing (feeding a whole-file
+// URL to the &sq loop re-downloads the file forever).
+//
+// It lives in this package because the extraction cascade needs it too: a
+// live response carrying these formats is already segment-addressable, so
+// the cascade must not spend an extra round trip chasing a DASH manifest it
+// will never read.
+func HasSplitAdaptiveFormats(formats []Format) bool {
+	hasAudio, hasVideo := false, false
+	for i := range formats {
+		f := &formats[i]
+		if f.URL == "" || f.ContentLength != "" {
+			continue
+		}
+		if f.IsAudio() {
+			hasAudio = true
+		} else if f.Width != nil && *f.Width > 0 {
+			hasVideo = true
+		}
+		if hasAudio && hasVideo {
+			return true
+		}
+	}
+	return false
+}
 
 // Sentinel values written by parsePlayerResponse when metadata is missing.
 // mergeWatchPageMetadata inspects these to decide whether to overwrite with

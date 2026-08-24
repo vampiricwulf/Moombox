@@ -37,23 +37,12 @@ import (
 // manifest-free path regardless of whether dashManifestUrl is present
 // (yt-dlp 8c1f07d81). Originally built to detect the narrower yt-dlp#15274
 // experiment where YouTube withheld dashManifestUrl from cookied clients.
+// The predicate itself lives in internal/youtube (HasSplitAdaptiveFormats)
+// so the extraction cascade can consult it without importing this package;
+// the rules above are the authoritative explanation of why it is shaped the
+// way it is.
 func HasManifestlessDashFormats(formats []youtube.Format) bool {
-	hasAudio, hasVideo := false, false
-	for i := range formats {
-		f := &formats[i]
-		if f.URL == "" || f.ContentLength != "" {
-			continue
-		}
-		if f.IsAudio() {
-			hasAudio = true
-		} else if f.Width != nil && *f.Width > 0 {
-			hasVideo = true
-		}
-		if hasAudio && hasVideo {
-			return true
-		}
-	}
-	return false
+	return youtube.HasSplitAdaptiveFormats(formats)
 }
 
 // formatToDashStreamInfo converts a youtube.Format into the DashStreamInfo

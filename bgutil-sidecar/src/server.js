@@ -63,6 +63,61 @@ const HOMEPAGE_URL = "https://www.youtube.com/";
 // and well under the parent's 90s budget, so a genuine hang aborts fast and the
 // next mint retries from scratch instead of piggybacking a doomed attempt.
 const FETCH_TIMEOUT_MS = 30_000;
+// Whole-generation ceiling. The three fetches above each carry
+// FETCH_TIMEOUT_MS, and 3 × 30s meets or exceeds the parent's 90s RPC
+// timeout (sidecar.Config.RequestTimeout) all by itself — so a slow-but-not
+// hung YouTube could burn the parent's entire budget and still be running,
+// holding serializeChain, when the parent gives up. Worse, a Go-side RPC
+// timeout does NOT cancel this generation, so the next mint would queue
+// behind a request already known dead. Every fetch's abort signal is derived
+// from whatever remains of this budget instead of a flat 30s. 75s leaves
+// headroom under 90s for the BotGuard pass itself, which is CPU work with no
+// fetch of its own.
+const GENERATION_BUDGET_MS = 75_000;
+// The homepage fetch is an OPTIMIZATION — every failure path falls back — so
+// it gets a tight ceiling rather than a share of the full budget. It must
+// never be the reason a mint misses its deadline: the mid-download 403
+// credential refresh calls this path with freshMinter (guaranteeing a full
+// regeneration) under a budget of min(45s, MaxTimeout/3), which is as low as
+// 10s at the configured floor. Measured homepage RTT is ~340ms, so 8s is
+// ~20x headroom on the happy path and still cheap to abandon.
+const HOMEPAGE_FETCH_TIMEOUT_MS = 8_000;
+
+// Ceiling on the homepage body we will buffer. The real page measured
+// ~875 KB decompressed on 2026-08-24, so 4 MB is ~4x headroom. Every body
+// read on the Go side is capped (10 MB player, 50 MB watch page, 20 MB
+// BotGuard, 1 MB challenge); this keeps the sidecar to the same rule so a
+// misbehaving or hostile edge response cannot balloon the heap of a process
+// that runs for weeks.
+const HOMEPAGE_MAX_BYTES = 4 << 20;
+
+// readCapped buffers a response body, aborting past `limit` bytes rather
+// than growing without bound.
+async function readCapped(resp, limit, label) {
+    if (!resp.body) return "";
+    const decoder = new TextDecoder();
+    let out = "";
+    let total = 0;
+    for await (const chunk of resp.body) {
+        total += chunk.length;
+        if (total > limit) {
+            throw new Error(`${label} response exceeded ${limit} bytes`);
+        }
+        out += decoder.decode(chunk, { stream: true });
+    }
+    return out + decoder.decode();
+}
+
+// budgetSignal returns an AbortSignal bounded by BOTH the per-fetch cap and
+// the remaining generation budget, or throws when the budget is already
+// spent so the caller fails fast instead of starting a doomed request.
+function budgetSignal(deadline, capMs) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+        throw new Error("generation budget exhausted");
+    }
+    return AbortSignal.timeout(Math.min(capMs, remaining));
+}
 
 // ---------------------------------------------------------------------------
 // State. Single-minter design (matches Moombox's PotProvider CRIT-2 fix): the
@@ -173,11 +228,11 @@ function assertGoogleHost(rawUrl) {
 // executed (proven against live local servers, 2026-08-15). Refusing 3xx
 // outright is safer than re-gating response.url: YouTube serves the
 // interpreter directly, so a redirect here is already anomalous.
-async function fetchInterpreterScript(interpUrl) {
+async function fetchInterpreterScript(interpUrl, deadline) {
     const resp = await fetch(interpUrl, {
         headers: { "User-Agent": USER_AGENT },
         redirect: "manual",
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: budgetSignal(deadline, FETCH_TIMEOUT_MS),
     });
     if (resp.status >= 300 && resp.status < 400) {
         throw new Error(
@@ -201,11 +256,33 @@ async function fetchInterpreterScript(interpUrl) {
 //
 // Returns a canonicalized challenge or null; every null path logs its
 // reason and degrades to the caller's next source, so behavior is never
-// worse than the pre-homepage flow. The ytcfg injection happens even when
-// the challenge extraction fails (mirroring upstream): a stale or unpaired
-// EVENT_ID is no worse than the absent one the /att/get path always had.
+// worse than the pre-homepage flow.
+//
+// PAIRING IS ALL-OR-NOTHING. Upstream installs the ytcfg as soon as it
+// parses, before the challenge is validated, and shrugs that an unpaired
+// EVENT_ID is "no worse than absent". It is worse: a homepage EVENT_ID
+// married to an /att/get challenge is a deliberately INCOHERENT pair, which
+// is the exact condition this whole module exists to eliminate, and once
+// installed it persisted across later failed fetches (a stale EVENT_ID from
+// hours ago). So the injection happens only on the success path, together
+// with the challenge it belongs to, and any failure clears whatever a
+// previous run left behind.
 // ---------------------------------------------------------------------------
-async function fetchHomepageChallenge() {
+
+// clearYtConfig removes an injected yt.config_ so a failed or fallback mint
+// never runs against a previous run's EVENT_ID.
+function clearYtConfig() {
+    delete globalThis.yt;
+    if (globalThis.window) delete globalThis.window.yt;
+}
+
+async function fetchHomepageChallenge(deadline) {
+    // Drop any previous run's injection FIRST. Every early return below then
+    // means "no ytcfg is installed", never "the last successful load's one is
+    // still installed" — the two are indistinguishable to the snapshot but
+    // very different to YouTube.
+    clearYtConfig();
+
     let pageHtml;
     try {
         const resp = await fetch(HOMEPAGE_URL, {
@@ -218,7 +295,7 @@ async function fetchHomepageChallenge() {
                 "accept-language": "en-US,en;q=0.7",
                 "user-agent": USER_AGENT,
             },
-            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+            signal: budgetSignal(deadline, HOMEPAGE_FETCH_TIMEOUT_MS),
         });
         if (resp.status >= 300 && resp.status < 400) {
             logWarn(
@@ -230,24 +307,15 @@ async function fetchHomepageChallenge() {
             logWarn(`homepage-challenge: HTTP ${resp.status}; falling back`);
             return null;
         }
-        pageHtml = await resp.text();
+        pageHtml = await readCapped(resp, HOMEPAGE_MAX_BYTES, "homepage");
     } catch (e) {
         logWarn(`homepage-challenge: fetch failed (${e?.message ?? e}); falling back`);
         return null;
     }
 
-    const ytcfg = extractYtcfg(pageHtml);
-    if (ytcfg) {
-        // BotGuard reads yt.config_.EVENT_ID off its globalObject
-        // (globalThis). Overwritten on every regeneration so the snapshot
-        // always sees the pair-mate of the challenge minted below.
-        const ytObj = { config_: ytcfg };
-        globalThis.yt = ytObj;
-        if (globalThis.window) globalThis.window.yt = ytObj;
-    } else {
-        logWarn("homepage-challenge: no parseable ytcfg on page (EVENT_ID missing)");
-    }
-
+    // Extract and validate the challenge BEFORE installing anything. The
+    // ytcfg is only useful as the challenge's pair-mate, so a challenge we
+    // end up rejecting must leave no ytcfg behind.
     const { challenge, reason } = extractHomepageChallenge(pageHtml);
     if (!challenge) {
         logWarn(`homepage-challenge: ${reason}; falling back`);
@@ -264,7 +332,24 @@ async function fetchHomepageChallenge() {
         logWarn(`homepage-challenge: interpreter refused (${e?.message ?? e}); falling back`);
         return null;
     }
-    return challenge;
+
+    const ytcfg = extractYtcfg(pageHtml);
+    if (!ytcfg) {
+        // The challenge alone, without its page's EVENT_ID, is not the
+        // coherent pair this path exists to produce. Fall back rather than
+        // mint from half of it.
+        logWarn("homepage-challenge: no parseable ytcfg on page (EVENT_ID missing); falling back");
+        return null;
+    }
+    // BotGuard reads yt.config_.EVENT_ID off its globalObject (globalThis).
+    // Returned to the caller so it can re-assert the binding immediately
+    // before the snapshot — the interpreter runs `new Function(js)()` with
+    // full globalThis access in between, and a clobbered `yt` would fail
+    // silently as a wrong EVENT_ID rather than an exception.
+    const ytObj = { config_: ytcfg };
+    globalThis.yt = ytObj;
+    if (globalThis.window) globalThis.window.yt = ytObj;
+    return { challenge, ytObj };
 }
 
 // ---------------------------------------------------------------------------
@@ -277,12 +362,22 @@ async function fetchHomepageChallenge() {
 // (ytcfg, ytAtN) pair beats BOTH the RPC-supplied watch-page challenge
 // (which cannot be paired with its originating page's ytcfg here) and the
 // /att/get fallback (whose tokens the experiment rejects outright).
-async function generateMinter(challenge) {
+// deadline/ytObj are internal recursion state — callers pass neither.
+// `attempted` guards the homepage fetch so the inline-JS refusal recursion
+// below cannot pay for it twice (a second round trip AND a second
+// globalThis.yt overwrite) inside one RPC.
+async function generateMinter(challenge, deadline, homepageAttempted = false) {
+    deadline ??= Date.now() + GENERATION_BUDGET_MS;
     let minterSource = "challenge";
-    const homepageChallenge = await fetchHomepageChallenge();
-    if (homepageChallenge) {
-        challenge = homepageChallenge;
-        minterSource = "homepage";
+    let ytObj = null;
+    if (!homepageAttempted) {
+        const pair = await fetchHomepageChallenge(deadline);
+        if (pair) {
+            challenge = pair.challenge;
+            ytObj = pair.ytObj;
+            minterSource = "homepage";
+        }
+        homepageAttempted = true;
     }
     if (!challenge) {
         minterSource = "att_get";
@@ -312,7 +407,7 @@ async function generateMinter(challenge) {
                 context: { client: { clientName: "WEB", clientVersion: CLIENT_VERSION } },
                 engagementType: "ENGAGEMENT_TYPE_UNBOUND",
             }),
-            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+            signal: budgetSignal(deadline, FETCH_TIMEOUT_MS),
         });
         if (!attResp.ok) {
             throw new Error(`att/get HTTP ${attResp.status}`);
@@ -352,7 +447,7 @@ async function generateMinter(challenge) {
         logWarn(
             "RPC-supplied challenge carried inline interpreterJavascript; refusing and regenerating from homepage//att/get",
         );
-        return generateMinter(null);
+        return generateMinter(null, deadline, homepageAttempted);
     } else if (inlineJS !== null) {
         interpJS = inlineJS;
     } else {
@@ -370,7 +465,7 @@ async function generateMinter(challenge) {
         // Gate the host, then fetch WITHOUT following redirects — an
         // allowlisted host answering 302 → attacker would otherwise deliver
         // the body we execute. See fetchInterpreterScript.
-        interpJS = await fetchInterpreterScript(assertGoogleHost(interpUrl));
+        interpJS = await fetchInterpreterScript(assertGoogleHost(interpUrl), deadline);
     }
 
     // 3. Install the interpreter into globalThis. `new Function(...)()` runs
@@ -380,6 +475,14 @@ async function generateMinter(challenge) {
     new Function(interpJS)();
 
     // 4. Spin up the BotGuard client, take its snapshot.
+    // Re-assert the ytcfg binding: `new Function(interpJS)()` above just ran
+    // Google-authored code with full globalThis access, and if it defined or
+    // reset `yt` the snapshot would silently read the wrong EVENT_ID.
+    if (ytObj) {
+        globalThis.yt = ytObj;
+        if (globalThis.window) globalThis.window.yt = ytObj;
+    }
+
     const bgClient = await BotGuardClient.create({
         program: challenge.program,
         globalName: challenge.globalName,
@@ -397,7 +500,7 @@ async function generateMinter(challenge) {
         redirect: "manual",
         headers: getHeaders(),
         body: JSON.stringify([REQUEST_KEY, botguardResponse]),
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: budgetSignal(deadline, FETCH_TIMEOUT_MS),
     });
     if (!itResp.ok) {
         throw new Error(`GenerateIT HTTP ${itResp.status}`);
@@ -427,6 +530,11 @@ async function generateMinter(challenge) {
         // YouTube rotates globalName between regenerations (see below).
         globalName: challenge.globalName,
         minterSource,
+        // Whether a homepage ytcfg (EVENT_ID) was paired into this minter.
+        // minterSource alone no longer says: a non-homepage source can still
+        // have had one injected in principle, and the whole point of the
+        // provenance line is diagnosing a 403 months from now.
+        ytcfgPaired: ytObj !== null,
     };
 }
 
@@ -531,7 +639,13 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
     // rejected generation must not wedge the serialization queue.
     serializeChain = generation.catch(() => {});
     minterInflight.set(key, generation);
-    generation.finally(() => {
+    // .catch before .finally: a bare `generation.finally(...)` creates a
+    // DERIVED promise with no rejection handler, so every failed generation
+    // also emitted a process-level unhandledRejection — surfacing as a
+    // duplicate Warn line alongside the real RPC error, in exactly the
+    // diagnostic channel this design cares about. The caller below still
+    // awaits `generation` itself and sees the rejection.
+    generation.catch(() => {}).finally(() => {
         if (minterInflight.get(key) === generation) {
             minterInflight.delete(key);
         }

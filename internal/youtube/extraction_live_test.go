@@ -74,18 +74,30 @@ func TestLivePublicExtraction(t *testing.T) {
 		if info.StreamStatus != StreamLive {
 			t.Skipf("resolved video %s is not live (status=%s); skipping", videoID, info.StreamStatus)
 		}
-		// A live archive needs a manifest to walk.
-		if info.DashManifestURL == "" && info.HlsManifestURL == "" {
-			t.Error("live extraction produced neither a DASH nor an HLS manifest URL")
-		}
-		// DASH specifically is what makes a live stream segment-addressable
-		// (--live-from-start). A cookieless client still serves one — verified
-		// 2026-08-24 — so its absence means the fallback chain stopped at an
-		// HLS-only client, not that YouTube withheld it. That exact regression
-		// shipped and was caught here, so this is an assertion, not a note.
-		if info.DashManifestURL == "" {
-			t.Error("live extraction produced no DASH manifest URL; " +
-				"the cookieless DASH fallback regressed (live-from-start addressability lost)")
+		// Assert the CAPABILITY the archiver needs — segment addressability
+		// for --live-from-start — not the mechanism that happens to provide
+		// it today. Either source qualifies: split adaptive formats route to
+		// the manifest-free &sq=N path (the primary live path since yt-dlp
+		// 8c1f07d81, which skips live DASH manifests entirely), and a DASH
+		// manifest covers pools that lack them.
+		//
+		// An earlier version asserted DashManifestURL specifically. That was
+		// wrong twice over: it pinned ANDROID_VR — the one client upstream
+		// declared 403-dead — as if it were an invariant, and it reported a
+		// VISIONOS-only live result as a lost capability when the
+		// manifest-free path handles it perfectly.
+		addressable := HasSplitAdaptiveFormats(info.Formats)
+		t.Logf("segment-addressable=%t (splitAdaptive=%t dash=%t hls=%t)",
+			addressable || info.DashManifestURL != "",
+			addressable, info.DashManifestURL != "", info.HlsManifestURL != "")
+		if !addressable && info.DashManifestURL == "" {
+			if info.HlsManifestURL == "" {
+				t.Error("live extraction produced no usable source at all: " +
+					"no split adaptive formats, no DASH manifest, no HLS manifest")
+			} else {
+				t.Error("live extraction is HLS-only: no split adaptive formats and no DASH " +
+					"manifest, so --live-from-start segment addressability is unavailable")
+			}
 		}
 	})
 }

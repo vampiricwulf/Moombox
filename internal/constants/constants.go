@@ -189,6 +189,12 @@ var VisionOSClient = YouTubeClientConfig{
 		"deviceModel":   "RealityDevice17,1",
 		"osName":        "visionOS",
 		"osVersion":     "26.5.23O471",
+		// hl is not in yt-dlp's visionos entry because build_innertube_clients
+		// applies `setdefault('hl', 'en')` to EVERY client. It is not optional
+		// here: classifyStream matches English substrings in playability
+		// reasons ("member", "age", "private", "live event will begin", …), so
+		// a localized response misclassifies the stream.
+		"hl": "en",
 	},
 }
 
@@ -215,9 +221,15 @@ var AndroidVRClient = YouTubeClientConfig{
 		"clientName":        "ANDROID_VR",
 		"clientVersion":     "1.65.10",
 		"androidSdkVersion": 32,
+		"osName":            "Android",
 		"osVersion":         "12L",
 		"deviceMake":        "Oculus",
 		"deviceModel":       "Quest 3",
+		// See VisionOSClient for why hl is mandatory rather than cosmetic.
+		// It matters most on THIS client: ANDROID_VR serves ProbeVideoStatus,
+		// whose playability reason is what classifyStream reads, so without
+		// it a non-English locale misclassifies every probed stream.
+		"hl": "en",
 	},
 }
 
