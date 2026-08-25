@@ -223,6 +223,37 @@ func TestSetupCompleteRequiresPasswordForExternal(t *testing.T) {
 	}
 }
 
+// TestSetupCompleteRejectsPublicAsInput mirrors the config-routes lock:
+// /api/setup/complete runs the same validateConfigUpdates, so "public"
+// never reaches its "password required for external access" guard — which
+// checks == "external" alone. The rejection is what keeps that guard safe
+// to leave narrow; see the config-routes twin for the full reasoning.
+func TestSetupCompleteRejectsPublicAsInput(t *testing.T) {
+	f := newSetupFixture(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"network": map[string]any{"network_access": "public"},
+		// no password
+	})
+	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("network_access=public: want 400, got %d (body: %s)\n"+
+			"If you are intentionally accepting \"public\" here, widen the "+
+			"password-required-for-external guard to cover it too.",
+			rec.Code, rec.Body.String())
+	}
+
+	var na string
+	f.store.Read(func(c *config.MoomboxConfig) { na = c.Network.NetworkAccess })
+	if na == "public" {
+		t.Errorf("config should not have been written; network_access = %q", na)
+	}
+}
+
 func TestSetupCompleteHashesAndPersistsPassword(t *testing.T) {
 	f := newSetupFixture(t)
 

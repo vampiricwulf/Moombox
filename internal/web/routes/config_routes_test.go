@@ -236,6 +236,44 @@ func TestConfigPutRejectsExternalWithoutPassword(t *testing.T) {
 	}
 }
 
+// TestConfigPutRejectsPublicAsInput locks the coupling that lets the
+// password guard above stay narrow. "public" is a documented config-FILE
+// alias for "external" (a deployment behind an authenticating reverse
+// proxy); the API deliberately does not accept it, and the UIs only offer
+// localhost/lan/external.
+//
+// That rejection is load-bearing, not cosmetic. applyConfigUpdates assigns
+// network_access straight through, so validateConfigUpdates is the ONLY
+// thing keeping "public" out of this handler — and the "must set a password
+// before enabling external access" guard 670 lines below checks == "external"
+// alone. Widening the accepted enum without widening that guard reopens
+// passwordless-external through the API.
+func TestConfigPutRejectsPublicAsInput(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"network": map[string]any{
+			"network_access": "public",
+		},
+	})
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("network_access=public: want 400, got %d (body: %s)\n"+
+			"If you are intentionally accepting \"public\" as an API value, widen the "+
+			"passwordless-external guard in the PUT handler to cover it too.",
+			rec.Code, rec.Body.String())
+	}
+
+	var na string
+	f.store.Read(func(c *config.MoomboxConfig) { na = c.Network.NetworkAccess })
+	if na == "public" {
+		t.Errorf("config should not have been written, but network_access = %q", na)
+	}
+}
+
 func TestConfigPutAcceptsExternalWithPassword(t *testing.T) {
 	f := newConfigRoutesFixture(t)
 	if err := f.store.Update(func(c *config.MoomboxConfig) {

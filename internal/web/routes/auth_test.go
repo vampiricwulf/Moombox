@@ -531,6 +531,43 @@ func TestAuthRemovePasswordResetsExternalAccess(t *testing.T) {
 	}
 }
 
+// TestAuthRemovePasswordResetsPublicAccess: the handler's reset is
+// unconditional, so the "public" alias is already covered — this locks that
+// it stays that way. If the reset is ever narrowed to fire only for
+// specific modes, "public" must remain in the set: removing the password
+// while public would otherwise leave an unauthenticated dashboard live.
+func TestAuthRemovePasswordResetsPublicAccess(t *testing.T) {
+	f := newAuthFixture(t)
+	f.setPasswordHash(t, "the-secret")
+	if err := f.store.Update(func(c *config.MoomboxConfig) {
+		c.Network.NetworkAccess = "public"
+	}); err != nil {
+		t.Fatalf("seed public access: %v", err)
+	}
+
+	req := loopbackRequest("POST", "/api/auth/remove-password", map[string]string{
+		"currentPassword": "the-secret",
+	})
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remove-password: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	var hash, netAccess string
+	f.store.Read(func(c *config.MoomboxConfig) {
+		hash = c.Network.PasswordHash
+		netAccess = c.Network.NetworkAccess
+	})
+	if hash != "" {
+		t.Errorf("password hash should be empty, got %q", hash)
+	}
+	if netAccess != "localhost" {
+		t.Errorf("network_access should reset to localhost, got %q", netAccess)
+	}
+}
+
 func TestAuthRemovePasswordNoPasswordSet(t *testing.T) {
 	f := newAuthFixture(t)
 

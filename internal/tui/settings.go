@@ -515,7 +515,7 @@ func (m *SettingsModel) applyValues() {
 	m.configStore.Read(func(c *config.MoomboxConfig) {
 		passwordHash = c.Network.PasswordHash
 	})
-	if m.values["network_access"] == "external" && passwordHash == "" {
+	if isExternalAccess(m.values["network_access"]) && passwordHash == "" {
 		m.errorMsg = "Password required for external access. Set password in Network section."
 		m.status = saveError
 		return

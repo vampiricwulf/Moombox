@@ -4,6 +4,18 @@ import "github.com/vampiricwulf/Moombox/internal/config"
 
 // --- Security sub-editor ---
 
+// isExternalAccess reports whether a network_access value exposes the
+// dashboard beyond the local network. "external" and "public" are documented
+// synonyms — "public" marks a deployment sitting behind an authenticating
+// reverse proxy — and every runtime consumer treats them identically. Config
+// validation used to normalise a hand-edited "public" back to "localhost" at
+// load, which hid the alias from guards that only checked "external"; it is a
+// persistable value now, so every passwordless-external guard goes through
+// here rather than re-spelling the pair.
+func isExternalAccess(access string) bool {
+	return access == "external" || access == "public"
+}
+
 func (m *SettingsModel) handleSecurityKey(key string) string {
 	switch m.secMode {
 	case securitySet:
@@ -163,7 +175,10 @@ func (m *SettingsModel) handleRemovePassword() {
 	// Remove password
 	mu := m.configStore.RWMutex()
 	mu.Lock()
-	networkReset := m.cfg.Network.NetworkAccess == "external"
+	// Removing the password while external/public would leave the dashboard
+	// open to every reachable IP — the exact state block-set exists to
+	// prevent — so drop back to localhost in the same write.
+	networkReset := isExternalAccess(m.cfg.Network.NetworkAccess)
 	m.cfg.Network.PasswordHash = ""
 	if networkReset {
 		m.cfg.Network.NetworkAccess = "localhost"
