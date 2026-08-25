@@ -278,11 +278,15 @@ func firefoxSchemaVersion(db *sql.DB) int64 {
 //     final attempt read the live database instead, because SQLite resolves
 //     WAL consistency itself — a profile under constant write must not fail
 //     where the pre-snapshot implementation succeeded.
-//   - UNREADABLE SIDECAR: propagate. Falling back to the live database would
-//     hit the same unreadable -wal and could return a stale checkpointed set
-//     as if it were current.
-//   - ANYTHING ELSE (no temp space, an AV holding the file): fall back to the
-//     live database, which is exactly what this code did before snapshots.
+//   - UNREADABLE SIDECAR (the SOURCE -wal cannot be stat'd or read):
+//     propagate. Falling back to the live database would hit the same
+//     unreadable -wal and could return a stale checkpointed set as if it
+//     were current.
+//   - ANYTHING ELSE (no temp space or an I/O error on OUR side of the copy,
+//     an AV holding the file): fall back to the live database, which is
+//     exactly what this code did before snapshots. Note that this covers a
+//     temp-side failure on EITHER file — the profile is fine in that case,
+//     so there is nothing to refuse.
 func querySnapshotOrLive(profileDir, livePath string, finalAttempt bool) ([]string, error) {
 	snapDir, cleanup, err := snapshotFirefoxCookieDB(profileDir)
 	switch {
