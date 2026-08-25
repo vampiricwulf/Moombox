@@ -627,6 +627,10 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 
 	var netscapeCookies string
 	var err error
+	// emptyBrowserProfile records that a browser refresh read a profile with
+	// no relevant cookies in it. Not fatal on its own (see below), but it is
+	// the explanation the operator needs if auth then fails to verify.
+	emptyBrowserProfile := false
 
 	if importedFromProfile {
 		// No refreshPlatforms() gate here. That gate asks "does the jar
@@ -650,6 +654,26 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 
 		if isFirefoxBased(browser.Type) {
 			netscapeCookies, err = s.refreshFirefox(ctx, browser)
+			// An empty profile is a hard error for the IMPORT path, where it
+			// means the read is broken. On the browser path it has a mundane
+			// explanation — Firefox set to clear cookies on close leaves the
+			// profile empty every time — and before this package that
+			// produced a no-op merge and a refresh that succeeded off the
+			// still-good cookies.txt. Failing here instead would fire
+			// "Cookie Auto-Refresh Failed — recordings will fail" at a user
+			// whose recordings are fine.
+			//
+			// So: contribute nothing, let verification below decide, and
+			// remember the fact so it is named if the existing cookies turn
+			// out to be dead too. That keeps the desktop behaviour while
+			// refusing to let a browser that silently stopped saving cookies
+			// masquerade as an ordinary expiry.
+			if errors.Is(err, ErrNoCookiesInProfile) {
+				s.logger.Warn("browser refresh produced no cookies — falling back to the existing cookies.txt",
+					"profile_dir", s.profileDir, "err", err)
+				emptyBrowserProfile = true
+				netscapeCookies, err = "", nil
+			}
 		} else {
 			netscapeCookies, err = s.refreshChromium(ctx, browser)
 		}
@@ -680,16 +704,32 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	}
 
 	// Merge with existing cookies using temp file + rename for atomicity.
-	// previousCookies is kept verbatim so an import that turns out not to
-	// authenticate anything can put the old file back byte-for-byte (see the
-	// rollback below).
+	// previousCookies is kept verbatim so an import that turns out to have
+	// damaged a platform can hand that platform's rows back untouched.
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
 		return false, err
 	}
-	var previousCookies []byte
+	var previousCookies string
 	if existingData, readErr := os.ReadFile(s.cookiePath); readErr == nil && len(existingData) > 0 {
-		previousCookies = existingData
-		netscapeCookies = mergeCookieFiles(string(existingData), netscapeCookies)
+		previousCookies = string(existingData)
+	}
+
+	// Verify BEFORE overwriting, on the import path only. Rolling back a
+	// regression is impossible without knowing what worked beforehand, and
+	// "the file had cookies" is not the same as "those cookies worked".
+	// Skipped when there is nothing to protect, so the common container case
+	// (no cookies.txt yet) costs no extra round trips.
+	pre := map[string]platformAuth{}
+	if importedFromProfile && previousCookies != "" {
+		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
+			s.logger.Warn("could not load existing cookies before import — rollback protection is off", "err", loadErr)
+		}
+		preYT, preTW := s.checkPlatformAuth(ctx)
+		pre["youtube"], pre["twitch"] = preYT, preTW
+	}
+
+	if previousCookies != "" {
+		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
 	}
 	if err := writeFileAtomic(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
 		return false, err
@@ -701,68 +741,60 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	}
 
 	// Verify auth via API callbacks (matches TypeScript refreshCookies behavior)
-	verifyCtx, verifyCancel := context.WithTimeout(ctx, authVerifyTimeout)
-	defer verifyCancel()
+	postYT, postTW := s.checkPlatformAuth(ctx)
 
-	ytAuth := false
-	twAuth := false
-
-	// Mirror FinishSetup's contract for unwired verify callbacks: presence is
-	// the only signal we have, so report it with a warning instead of counting
-	// the platform as verification-failed and flagging a re-login purely
-	// because no verifier was plumbed in (test wiring / alternate constructors).
-	if s.jar.HasYouTubeAuthCookies() {
-		if s.VerifyYouTubeAuth != nil {
-			if verified, err := s.VerifyYouTubeAuth(verifyCtx); err == nil {
-				ytAuth = verified
-			}
-		} else {
-			s.logger.Warn("YouTube auth verification callback not wired — reporting based on cookie presence alone")
-			ytAuth = true
-		}
-	}
-	if s.jar.HasTwitchAuthCookies() {
-		if s.VerifyTwitchAuth != nil {
-			if verified, err := s.VerifyTwitchAuth(verifyCtx); err == nil {
-				twAuth = verified
-			}
-		} else {
-			s.logger.Warn("Twitch auth verification callback not wired — reporting based on cookie presence alone")
-			twAuth = true
-		}
-	}
-
-	// Roll back an import that made things worse. A mounted profile can be
-	// STALE — older rotating tokens than the ones cookies.txt already held —
-	// and the merge lets the imported values win by construction. Whether
-	// the result is actually worse is only knowable from verification, so
-	// that is what gates the restore: if the import authenticated nothing
-	// and there was a previous file, put the previous file back untouched.
-	// When there was no previous file (a fresh container) there is nothing
-	// to protect and the imported set is kept so the failure is visible.
+	// Roll back, per platform, an import that made that platform worse.
 	//
-	// Only the import path does this. The browser path writes cookies it
-	// just re-fetched from the live site, which cannot be staler than what
-	// was on disk.
-	if importedFromProfile && !ytAuth && !twAuth && len(previousCookies) > 0 {
-		s.logger.Warn("imported profile cookies authenticated nothing — restoring the previous cookies.txt",
-			"profile_dir", s.profileDir)
-		if restoreErr := writeFileAtomic(s.cookiePath, previousCookies, 0o600); restoreErr != nil {
+	// A mounted profile can be STALE, and mergeCookieFiles lets the imported
+	// value win by name+domain — so a dead Twitch token in the profile
+	// overwrites a working one on disk. Judging the import as a WHOLE hides
+	// exactly that: a healthy YouTube result masks the Twitch loss, the
+	// refresh reports success, and the working credential is gone. The
+	// startup one-shot would then repeat it on every restart.
+	//
+	// Only the import path does this. The browser path writes cookies it just
+	// re-fetched from the live site, which cannot be staler than what was on
+	// disk.
+	var restoredPlatforms []string
+	if restore := platformsToRestore(pre, map[string]platformAuth{"youtube": postYT, "twitch": postTW}); len(restore) > 0 {
+		for _, platform := range []string{"youtube", "twitch"} {
+			if restore[platform] {
+				restoredPlatforms = append(restoredPlatforms, platform)
+			}
+		}
+		s.logger.Warn("imported profile cookies did not hold up — restoring the previous credentials for those platforms",
+			"platforms", strings.Join(restoredPlatforms, ","), "profile_dir", s.profileDir)
+
+		restored := restorePlatformRows(netscapeCookies, previousCookies, restore)
+		if restoreErr := writeFileAtomic(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
 			s.logger.Error("could not restore pre-import cookies.txt", "err", restoreErr)
 		} else if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
 			s.logger.Error("could not reload cookie jar after restoring pre-import cookies.txt", "err", loadErr)
+		} else {
+			// Re-verify the file we actually kept. Without this, the status
+			// below would describe the DISCARDED merged jar and flag a
+			// re-login for credentials that were restored and never
+			// re-checked — an instruction a container operator cannot even
+			// act on.
+			postYT, postTW = s.checkPlatformAuth(ctx)
 		}
 	}
 
-	// Update re-login flags based on verification results
+	ytAuth := postYT.ok()
+	twAuth := postTW.ok()
+
+	// Update re-login flags based on verification results. Only a CONCLUSIVE
+	// failure flags a re-login: an unreachable network told us nothing about
+	// the credentials, and sending the user to sign in again over a blip is
+	// both wrong and, in a container, impossible to act on.
 	ytHasCookies := s.jar.HasYouTubeAuthCookies()
 	twHasCookies := s.jar.HasTwitchAuthCookies()
 
 	s.mu.Lock()
-	if !ytAuth && ytHasCookies {
+	if postYT.state == verifyFailed && ytHasCookies {
 		s.needsRelogin["youtube"] = true
 	}
-	if !twAuth && twHasCookies {
+	if postTW.state == verifyFailed && twHasCookies {
 		s.needsRelogin["twitch"] = true
 	}
 	if ytAuth {
@@ -773,10 +805,10 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	}
 	s.mu.Unlock()
 
-	if !ytAuth && ytHasCookies {
+	if postYT.state == verifyFailed && ytHasCookies {
 		s.logger.Warn("YouTube auth verification failed after refresh — manual re-login required")
 	}
-	if !twAuth && twHasCookies {
+	if postTW.state == verifyFailed && twHasCookies {
 		s.logger.Warn("Twitch auth verification failed after refresh — manual re-login required")
 	}
 
@@ -834,9 +866,26 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		s.mu.Unlock()
 		return false, nil
 	}
-	errMsg := strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
+	// Say what actually happened. "Manual re-login required" is the right
+	// advice only when the credentials were conclusively rejected; when the
+	// checks could not reach the network, or when we kept the previous
+	// credentials rather than the import, that message sends the operator
+	// after the wrong problem.
+	var errMsg string
+	switch {
+	case len(restoredPlatforms) > 0:
+		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
+			" — the mounted browser profile did not verify"
+	case postYT.state == verifyUnknown || postTW.state == verifyUnknown:
+		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the check did not complete (network?)"
+	case emptyBrowserProfile:
+		errMsg = strings.Join(failed, " + ") + " auth verification failed, and the browser profile contained " +
+			"no cookies to refresh from — check whether the browser is clearing cookies on exit"
+	default:
+		errMsg = strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
+	}
 	s.setError(errMsg)
-	s.logger.Warn("refresh completed but auth verification failed", "platforms", strings.Join(failed, ","))
+	s.logger.Warn("refresh completed but auth verification failed", "platforms", strings.Join(failed, ","), "detail", errMsg)
 	return false, nil
 }
 
