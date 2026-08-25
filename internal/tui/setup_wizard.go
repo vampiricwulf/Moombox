@@ -1088,6 +1088,22 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		m.errorMsg = "Downloader: YouTube max timeout must be at least 30 seconds"
 		return ""
 	}
+	// Path fields: reject ".." segments, matching validateConfigUpdates on
+	// the web wizard's /api/setup/complete. Absolute paths are accepted on
+	// both — see internal/config/pathcheck.go.
+	for _, c := range []struct{ key, label string }{
+		{"logFilePath", "Paths: Log file path"},
+		{"databasePath", "Paths: Database path"},
+		{"outputDir", "Paths: Output directory"},
+		{"stagingDir", "Paths: Staging directory"},
+		{"ffmpegPath", "Paths: FFmpeg path"},
+		{"cookieFile", "Cookies: Cookie file"},
+	} {
+		if config.PathHasTraversal(v(c.key)) {
+			m.errorMsg = c.label + " cannot contain a .. segment"
+			return ""
+		}
+	}
 
 	cfg := config.Defaults()
 

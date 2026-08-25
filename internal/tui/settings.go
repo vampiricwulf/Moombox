@@ -640,6 +640,27 @@ func (m *SettingsModel) applyValues() {
 			return
 		}
 	}
+	// Path fields: reject ".." segments. Absolute paths are accepted here and
+	// in the Web UI alike — config.PathHasTraversal is the single rule both
+	// call, because a value one UI saves and the other refuses is exactly the
+	// defect this replaced (see internal/config/pathcheck.go).
+	for _, c := range []struct{ key, label string }{
+		{"database_path", "Database path"},
+		{"log_file_path", "Log file path"},
+		{"output_directory", "Output directory"},
+		{"staging_directory", "Staging directory"},
+		{"ffmpeg_path", "FFmpeg path"},
+		{"tls_cert_path", "TLS certificate path"},
+		{"tls_key_path", "TLS key path"},
+		{"cookie_file", "Cookie file"},
+		{"browser_profile_dir", "Browser profile directory"},
+	} {
+		if config.PathHasTraversal(m.values[c.key]) {
+			m.errorMsg = c.label + " cannot contain a .. segment"
+			m.status = saveError
+			return
+		}
+	}
 
 	// Lock for all config writes
 	mu := m.configStore.RWMutex()

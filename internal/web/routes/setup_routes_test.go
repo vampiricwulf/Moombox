@@ -181,6 +181,51 @@ func TestSetupCompleteRejectsValidationFailure(t *testing.T) {
 	}
 }
 
+// TestSetupCompleteAcceptsAbsolutePaths confirms the absolute-path fix
+// reaches the setup wizard too: /api/setup/complete shares
+// validateConfigUpdates with PUT /api/config, so a first run that points
+// the wizard at absolute locations (the normal case for a Linux install
+// writing to /var/lib/moombox, or a Windows install outside the binary's
+// directory) must succeed. Traversal stays rejected on this path as well.
+func TestSetupCompleteAcceptsAbsolutePaths(t *testing.T) {
+	f := newSetupFixture(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"paths": map[string]any{
+			"database_path":     "/var/lib/moombox/moombox.db",
+			"log_file_path":     "/var/log/moombox.log",
+			"output_directory":  "/srv/media/moombox",
+			"staging_directory": `C:\Moombox\staging`,
+		},
+		"cookies": map[string]any{"cookie_file": "/etc/moombox/cookies.txt"},
+	})
+	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("absolute paths in setup: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var got string
+	f.store.Read(func(c *config.MoomboxConfig) { got = c.Paths.OutputDirectory })
+	if got != "/srv/media/moombox" {
+		t.Errorf("output_directory = %q, want /srv/media/moombox", got)
+	}
+
+	f2 := newSetupFixture(t)
+	body2, _ := json.Marshal(map[string]any{
+		"paths": map[string]any{"output_directory": "../../escape"},
+	})
+	req2 := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body2))
+	req2.RemoteAddr = "127.0.0.1:0"
+	rec2 := httptest.NewRecorder()
+	f2.router.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("traversal in setup: want 400, got %d (body: %s)", rec2.Code, rec2.Body.String())
+	}
+}
+
 func TestSetupCompleteRejectsShortPassword(t *testing.T) {
 	f := newSetupFixture(t)
 

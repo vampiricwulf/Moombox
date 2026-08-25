@@ -63,23 +63,41 @@ type ConfigRoutesCallbacks struct {
 	OnNotificationsChange func()
 }
 
-// isSafePath validates that a path doesn't contain traversal or absolute paths.
-// Matches TypeScript safePathSchema.
-func isSafePath(p string) bool {
-	if p == "" {
-		return true
+// pathFieldError returns the per-field error for a user-supplied path value,
+// or "" when the value is acceptable.
+//
+// It rejects ".." segments and nothing else. Absolute paths are deliberately
+// allowed: the Docker entrypoint seeds every path field as "/data/...", the
+// TUI has always accepted absolute values, and config.toml has always taken
+// them by hand — so the old "no absolute paths" rule (inherited verbatim from
+// the pre-Go TypeScript safePathSchema, not a considered Go boundary) made
+// EVERY settings save from a containerized dashboard 400 with no UI
+// workaround. PUT /api/config is admin-only, so the rule bought no
+// containment it did not already concede.
+//
+// config.PathHasTraversal is shared with the TUI so the two UIs cannot
+// disagree about what a valid path is — that disagreement was the bug.
+//
+// required mirrors config.Validate's non-empty path fields. Without it an
+// empty (or whitespace-only) value for one of those passed validation, was
+// applied, and then failed inside config.Save as an opaque 500 "failed to
+// save config" naming no field — the same unsavable-settings-page symptom
+// from the opposite direction. The TUI settings panel already blocked these.
+func pathFieldError(p string, required bool) string {
+	if required && strings.TrimSpace(p) == "" {
+		return "must not be empty"
 	}
-	if strings.Contains(p, "..") {
-		return false
+	if config.PathHasTraversal(p) {
+		return "Path cannot contain a .. segment"
 	}
-	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\") {
-		return false
-	}
-	// Check Windows drive letter (e.g., C:)
-	if len(p) >= 2 && p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) {
-		return false
-	}
-	return true
+	return ""
+}
+
+// pathField names one path-shaped config field and whether config.Validate
+// refuses to persist it empty.
+type pathField struct {
+	key      string
+	required bool
 }
 
 // validateConfigUpdates validates the config update map against TypeScript Zod
@@ -126,43 +144,30 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				}
 			}
 		}
-		if v, ok := net["tls_cert_path"].(string); ok {
-			if v != "" && !isSafePath(v) {
-				errs["network.tls_cert_path"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := net["tls_key_path"].(string); ok {
-			if v != "" && !isSafePath(v) {
-				errs["network.tls_key_path"] = "Path cannot contain .. or be absolute"
+		// Empty means "no TLS material configured" — legitimate.
+		for _, f := range []pathField{{"tls_cert_path", false}, {"tls_key_path", false}} {
+			if v, ok := net[f.key].(string); ok {
+				if msg := pathFieldError(v, f.required); msg != "" {
+					errs["network."+f.key] = msg
+				}
 			}
 		}
 	}
 
-	// Paths sub-fields
+	// Paths sub-fields. ffmpeg_path may be empty ("use ffmpeg from PATH");
+	// the other four are required by config.Validate.
 	if paths, ok := updates["paths"].(map[string]any); ok {
-		if v, ok := paths["log_file_path"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.log_file_path"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := paths["database_path"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.database_path"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := paths["output_directory"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.output_directory"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := paths["staging_directory"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.staging_directory"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := paths["ffmpeg_path"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.ffmpeg_path"] = "Path cannot contain .. or be absolute"
+		for _, f := range []pathField{
+			{"log_file_path", true},
+			{"database_path", true},
+			{"output_directory", true},
+			{"staging_directory", true},
+			{"ffmpeg_path", false},
+		} {
+			if v, ok := paths[f.key].(string); ok {
+				if msg := pathFieldError(v, f.required); msg != "" {
+					errs["paths."+f.key] = msg
+				}
 			}
 		}
 	}
@@ -322,14 +327,13 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 
 	// Cookies sub-fields
 	if ck, ok := updates["cookies"].(map[string]any); ok {
-		if v, ok := ck["cookie_file"].(string); ok {
-			if !isSafePath(v) {
-				errs["cookies.cookie_file"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := ck["browser_profile_dir"].(string); ok {
-			if !isSafePath(v) {
-				errs["cookies.browser_profile_dir"] = "Path cannot contain .. or be absolute"
+		// browser_profile_dir may be empty ("auto-cookies not configured");
+		// cookie_file is required by config.Validate.
+		for _, f := range []pathField{{"cookie_file", true}, {"browser_profile_dir", false}} {
+			if v, ok := ck[f.key].(string); ok {
+				if msg := pathFieldError(v, f.required); msg != "" {
+					errs["cookies."+f.key] = msg
+				}
 			}
 		}
 		// browser_path: must be empty (auto-detect) or pass the static
