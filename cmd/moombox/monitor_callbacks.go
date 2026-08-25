@@ -300,10 +300,11 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 	}
 
-	// When the cookie file starts holding a DIFFERENT, working account, sweep
-	// the membership-parked jobs too — this is the one event that can fix
-	// them, and it is invisible to OnAuthRecovered above because those jobs
-	// parked while auth was perfectly healthy.
+	// Whenever the signed-in account is (re-)observed, re-evaluate the parked
+	// jobs against it. For a membership park this is the only thing that can
+	// help — such a job parked while auth was perfectly healthy, so it is
+	// invisible to OnAuthRecovered above — and it resumes only if the account
+	// is genuinely a different one from the one that refused it.
 	//
 	// Dead-cookie parks are eligible here as well. In the common case
 	// OnAuthRecovered already took them (a swap that also restores auth fires
@@ -313,11 +314,21 @@ func (s *runState) wireMonitorCallbacks() {
 	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
 		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
 		if resumed > 0 {
-			s.log.Info("credentials changed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// States no cause, for the same reason the "Cookie Auto-Refresh
+			// Ineffective" notification above states none. This fires on the
+			// first authenticated observation of EVERY process, not only on a
+			// real account change: an operator who fixed their cookies while
+			// Moombox was stopped gets their jobs resumed here, and telling
+			// them "a different account was supplied" would be flatly false.
+			// A notification is more visible than a log line, so it should
+			// assert less than the log line, not more — report what happened
+			// (jobs resumed) and leave the cause to the log.
+			//
 			// Same "auth" event as the recovery notification above, for the
 			// same reason: an empty Event bypasses every target's allowlist.
-			s.notifyMgr.Send("Credentials Changed",
-				fmt.Sprintf("A different %s account was supplied — resumed %d parked job(s), including any waiting on a channel membership", platform, resumed),
+			s.notifyMgr.Send("Parked Jobs Re-evaluated",
+				fmt.Sprintf("Resumed %d job(s) parked on %s credentials after re-checking the signed-in account", resumed, platform),
 				notifications.TypeInfo,
 				[]notifications.Field{
 					{Name: "Platform", Value: platform, Inline: true},

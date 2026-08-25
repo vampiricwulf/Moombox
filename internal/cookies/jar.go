@@ -286,9 +286,20 @@ func (j *CookieJar) YouTubeIdentity() string {
 	if j == nil {
 		return ""
 	}
-	sapisid := j.GetSapisid()
-
+	// ONE RLock covering both reads. Load swaps the whole cookie map under
+	// Lock, so taking the lock twice (once inside GetSapisid, once for
+	// LOGIN_INFO) could pair a SAPISID from the pre-Reload jar with a
+	// LOGIN_INFO from the post-Reload one and fingerprint a state that never
+	// existed. The interleaving is reachable: the worker's park path and the
+	// refresh loop's Reload run on different goroutines.
+	//
+	// The SAPISID fallback is inlined rather than delegated for that reason —
+	// KEEP IN SYNC with GetSapisid.
 	j.mu.RLock()
+	sapisid := j.cookies["SAPISID"]
+	if sapisid == "" {
+		sapisid = j.cookies["__Secure-3PAPISID"]
+	}
 	loginInfo := j.cookies["LOGIN_INFO"]
 	j.mu.RUnlock()
 

@@ -2,7 +2,10 @@ package cookies
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -254,4 +257,84 @@ func TestBaselineSurvivesUnauthenticatedCheck(t *testing.T) {
 	if got := advanceIdentityBaseline(baseline, "identity-C", true, errors.New("timeout")); got != "identity-B" {
 		t.Errorf("baseline = %q after a network error, want identity-B", got)
 	}
+}
+
+// TestYouTubeIdentityIsAtomicAcrossReload: the fingerprint must never mix
+// halves from two different jar states.
+//
+// Load builds new maps and swaps them under one Lock, so a reader that takes
+// RLock twice — once for SAPISID, once for LOGIN_INFO — can straddle the swap
+// and produce a fingerprint of a pairing that never existed on disk. That is
+// reachable in production: the worker records a park identity on one goroutine
+// while the refresh loop calls Reload on another.
+//
+// Every observation must therefore equal one of the two real account
+// fingerprints, never a third value. Run under -race for the full effect.
+func TestYouTubeIdentityIsAtomicAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.txt")
+	pathB := filepath.Join(dir, "b.txt")
+
+	write := func(path, sapisid, loginInfo string) {
+		t.Helper()
+		content := "# Netscape HTTP Cookie File\n" +
+			".youtube.com\tTRUE\t/\tTRUE\t9999999999\tSAPISID\t" + sapisid + "\n" +
+			".youtube.com\tTRUE\t/\tTRUE\t9999999999\tLOGIN_INFO\t" + loginInfo + "\n"
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Both halves differ between the two accounts, so any mixed read produces
+	// a fingerprint matching neither.
+	write(pathA, "sapisid-A", "login-A")
+	write(pathB, "sapisid-B", "login-B")
+
+	jar := NewCookieJar()
+	if err := jar.Load(pathA); err != nil {
+		t.Fatal(err)
+	}
+	wantA := jar.YouTubeIdentity()
+	if err := jar.Load(pathB); err != nil {
+		t.Fatal(err)
+	}
+	wantB := jar.YouTubeIdentity()
+	if wantA == "" || wantB == "" || wantA == wantB {
+		t.Fatalf("test setup: need two distinct non-empty identities, got %q / %q", wantA, wantB)
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			p := pathA
+			if i%2 == 1 {
+				p = pathB
+			}
+			_ = jar.Load(p)
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20000; i++ {
+			got := jar.YouTubeIdentity()
+			if got != wantA && got != wantB {
+				t.Errorf("observed identity %q, which is neither account — "+
+					"the two cookie halves were read from different jar states", got)
+				break
+			}
+		}
+		close(stop)
+	}()
+
+	wg.Wait()
 }
