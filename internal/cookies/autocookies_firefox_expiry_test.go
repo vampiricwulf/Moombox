@@ -123,7 +123,7 @@ func TestQueryFirefoxCookieDB_ExpiryUnitsBySchemaVersion(t *testing.T) {
 				{name: "SID", value: "abc123", host: ".youtube.com", path: "/", expiry: ptrInt64(tt.storedExpiry)},
 			})
 
-			lines, err := queryFirefoxCookieDB(dbPath)
+			lines, _, err := queryFirefoxCookieDB(dbPath)
 			if err != nil {
 				t.Fatalf("queryFirefoxCookieDB: %v", err)
 			}
@@ -146,7 +146,7 @@ func TestQueryFirefoxCookieDB_NullExpiry(t *testing.T) {
 				{name: "SID", value: "abc123", host: ".youtube.com", path: "/", expiry: nil},
 			})
 
-			lines, err := queryFirefoxCookieDB(dbPath)
+			lines, _, err := queryFirefoxCookieDB(dbPath)
 			if err != nil {
 				t.Fatalf("queryFirefoxCookieDB: %v", err)
 			}
@@ -169,7 +169,7 @@ func TestQueryFirefoxCookieDB_ExpiredCookieStillExpiredAfterConversion(t *testin
 		{name: "SID", value: "stale", host: ".youtube.com", path: "/", expiry: ptrInt64(pastSeconds * 1000)},
 	})
 
-	lines, err := queryFirefoxCookieDB(dbPath)
+	lines, _, err := queryFirefoxCookieDB(dbPath)
 	if err != nil {
 		t.Fatalf("queryFirefoxCookieDB: %v", err)
 	}

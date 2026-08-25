@@ -21,14 +21,19 @@ import (
 // Returns "" + error when no profiles are found, when none of the
 // found profiles contain relevant cookies, or when every profile
 // hits a fatal decode error (master-key load failure, SQLite open
-// failure). Per-row decryption errors are silently skipped — the
-// underlying ReadChromeCookies fails-soft on legacy / mismatched
-// rows.
+// failure). Per-row decryption failures do not fail the pass — the
+// underlying read is fail-soft on legacy / mismatched / App-Bound
+// rows — but they are COUNTED BY REASON and reported, because
+// "nothing came out" has several causes that need different
+// responses and used to be indistinguishable.
 //
 // On non-Windows hosts, dpapi.FindBrowserProfiles returns an empty
-// slice and dpapi.ReadChromeCookies returns ErrNotSupported, so this
-// function returns the "no profiles found" error without crashing.
-func dpapiExtractAsNetscape() (string, error) {
+// slice and dpapi.ReadChromeCookiesStats returns ErrNotSupported, so
+// this function returns the "no profiles found" error without crashing.
+func dpapiExtractAsNetscape(logger interface {
+	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
+}) (string, error) {
 	profiles := dpapi.FindBrowserProfiles()
 	if len(profiles) == 0 {
 		return "", fmt.Errorf("DPAPI fallback: no Chromium-family profiles found under LOCALAPPDATA")
@@ -36,6 +41,7 @@ func dpapiExtractAsNetscape() (string, error) {
 
 	var collected []extractedCookie
 	var lastErr error
+	var stats dpapi.ChromeReadStats
 	profilesRead := 0
 	for _, p := range profiles {
 		// Read with empty origin filter: deduplicateAndFormat does the
@@ -43,7 +49,12 @@ func dpapiExtractAsNetscape() (string, error) {
 		// per-profile read costs ~50 ms even for a thousand-row Chrome
 		// profile. Keeping the filter empty here avoids the multi-call
 		// pattern that would re-open the SQLite DB once per host.
-		cookies, err := dpapi.ReadChromeCookies(p.Path, "")
+		cookies, profileStats, err := dpapi.ReadChromeCookiesStats(p.Path, "")
+		stats.Add(profileStats)
+		if summary := profileStats.Summary(); summary != "" && logger != nil {
+			logger.Warn("DPAPI fallback skipped undecryptable cookies",
+				"browser", p.Browser, "profile", p.Name, "detail", summary)
+		}
 		if err != nil {
 			lastErr = fmt.Errorf("read %s/%s: %w", p.Browser, p.Name, err)
 			continue
@@ -73,6 +84,14 @@ func dpapiExtractAsNetscape() (string, error) {
 
 	filtered := deduplicateAndFormat(collected)
 	if len(filtered) == 0 {
+		// This is where the whole pass reports as "nothing came out", and
+		// it is the one message the operator gets. Naming WHY the rows were
+		// skipped is the difference between "DPAPI cannot work on your
+		// browser at all" (App-Bound), "this profile is not yours"
+		// (master-key mismatch) and "you are simply not signed in".
+		if summary := stats.Summary(); summary != "" {
+			return "", fmt.Errorf("DPAPI fallback: no relevant cookies in any profile (read %d profile(s); %s)", profilesRead, summary)
+		}
 		return "", fmt.Errorf("DPAPI fallback: no relevant cookies in any profile (read %d profile(s))", profilesRead)
 	}
 

@@ -119,7 +119,7 @@ func snapshotFirefoxCookieDB(profileDir string) (string, func(), error) {
 	}
 	cleanup := func() { os.RemoveAll(tmpDir) }
 
-	if err := copyFile(srcDB, filepath.Join(tmpDir, firefoxCookieDBName)); err != nil {
+	if err := copySnapshotFile(srcDB, filepath.Join(tmpDir, firefoxCookieDBName)); err != nil {
 		cleanup()
 		return "", func() {}, fmt.Errorf("copy %s: %w", firefoxCookieDBName, err)
 	}
@@ -132,6 +132,11 @@ func snapshotFirefoxCookieDB(profileDir string) (string, func(), error) {
 	// or AppArmor label, a restrictive mode left by docker cp / rsync) is a
 	// hard failure. Falling back to reading the live database would not help
 	// either — SQLite hits the same unreadable -wal.
+	//
+	// That reasoning covers the SOURCE only. A failure on the destination
+	// side of the copy is our own temp directory misbehaving and is reported
+	// as such, so the caller degrades to the live database instead of
+	// blaming a profile that is perfectly readable.
 	for _, suffix := range firefoxCookieDBSidecars {
 		src := srcDB + suffix
 		if _, err := os.Stat(src); err != nil {
@@ -142,9 +147,23 @@ func snapshotFirefoxCookieDB(profileDir string) (string, func(), error) {
 			return "", func() {}, fmt.Errorf("%w: %s%s exists but cannot be read (%v) — its contents would be silently missing from the import",
 				ErrCookieDBUnreadable, firefoxCookieDBName, suffix, err)
 		}
-		if err := copyFile(src, filepath.Join(tmpDir, firefoxCookieDBName+suffix)); err != nil {
+		if err := copySnapshotFile(src, filepath.Join(tmpDir, firefoxCookieDBName+suffix)); err != nil {
 			cleanup()
-			return "", func() {}, fmt.Errorf("%w: copy %s%s: %v", ErrCookieDBUnreadable, firefoxCookieDBName, suffix, err)
+			// Which END failed decides the whole response. A failure writing
+			// OUR copy into OUR temp dir (no space, a transient error on the
+			// temp filesystem) says nothing about the profile: the live
+			// fallback is safe, it is what the same failure on the main file
+			// already did, and it is what this function's doc comment
+			// promises. Only a failure READING the sidecar means the profile
+			// itself is unreadable, and that one must keep refusing the
+			// fallback — SQLite would hit the same -wal and could hand back a
+			// stale checkpointed set as if it were current.
+			if isDestinationCopyFault(err) {
+				return "", func() {}, fmt.Errorf("could not write %s%s into the snapshot dir %q: %v",
+					firefoxCookieDBName, suffix, tmpDir, err)
+			}
+			return "", func() {}, fmt.Errorf("%w: %s%s exists but could not be read (%v) — its contents would be silently missing from the import",
+				ErrCookieDBUnreadable, firefoxCookieDBName, suffix, err)
 		}
 	}
 
@@ -185,12 +204,23 @@ func stampFile(path string) fileStamp {
 	return fileStamp{exists: true, size: info.Size(), mod: info.ModTime()}
 }
 
+// equal compares two stamps of the same file. The mtime goes through
+// time.Equal rather than `==`: struct equality on a time.Time compares the
+// wall clock, the monotonic reading AND the Location pointer, so two stamps
+// of the same instant can compare unequal. Both stamps happen to come from
+// os.Stat today (no monotonic reading, same Location), which is exactly what
+// makes the trap easy to spring later — a false "torn" verdict costs a retry
+// and, on the last attempt, a fall back to the live database.
+func (a fileStamp) equal(b fileStamp) bool {
+	return a.exists == b.exists && a.size == b.size && a.mod.Equal(b.mod)
+}
+
 func fingerprintCookieDB(dbPath string) cookieDBFingerprint {
 	return cookieDBFingerprint{main: stampFile(dbPath), wal: stampFile(dbPath + "-wal")}
 }
 
 func fingerprintsDiffer(a, b cookieDBFingerprint) bool {
-	return a.main != b.main || a.wal != b.wal
+	return !a.main.equal(b.main) || !a.wal.equal(b.wal)
 }
 
 // sweepStaleCookieSnapshots removes snapshot directories left behind by a
@@ -216,24 +246,83 @@ func sweepStaleCookieSnapshots(root string, maxAge time.Duration) {
 	}
 }
 
-// copyFile copies src to dst with 0o600 permissions.
+// copyFault says which END of a file copy failed.
+//
+// The distinction is load-bearing for the cookie snapshot: a failure on the
+// SOURCE means the user's profile cannot be read, which must never be
+// papered over; a failure on the DESTINATION means our own temp directory is
+// full or flaky, which says nothing at all about the profile and must not be
+// reported as one.
+type copyFault struct {
+	dest bool // true: the failure happened writing our copy, not reading theirs
+	err  error
+}
+
+func (c *copyFault) Error() string {
+	if c.dest {
+		return "write copy: " + c.err.Error()
+	}
+	return "read source: " + c.err.Error()
+}
+
+func (c *copyFault) Unwrap() error { return c.err }
+
+// isDestinationCopyFault reports whether a copy failed on the destination
+// (our temp dir) rather than on the source file.
+func isDestinationCopyFault(err error) bool {
+	var fault *copyFault
+	return errors.As(err, &fault) && fault.dest
+}
+
+// writeFaultRecorder notes whether io.Copy's error came out of the WRITE
+// half. io.Copy collapses both directions into one error value, and the
+// caller has to be able to tell them apart. Wrapping the destination in a
+// plain io.Writer also keeps io.Copy off the fd-to-fd fast paths, which is
+// what makes the attribution reliable.
+type writeFaultRecorder struct {
+	w   io.Writer
+	err error
+}
+
+func (r *writeFaultRecorder) Write(p []byte) (int, error) {
+	n, err := r.w.Write(p)
+	if err != nil {
+		r.err = err
+	}
+	return n, err
+}
+
+// copySnapshotFile is the copy the cookie-database snapshot goes through.
+// A package variable so tests can inject the failure modes that matter here
+// (a full temp filesystem, an unreadable sidecar) without needing a
+// filesystem that can actually produce them on every supported platform.
+var copySnapshotFile = copyFile
+
+// copyFile copies src to dst with 0o600 permissions. Every error it returns
+// is a *copyFault, so callers can tell a source-side failure from a
+// destination-side one.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return &copyFault{err: err}
 	}
 	defer in.Close()
 
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return err
+		return &copyFault{dest: true, err: err}
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	recorder := &writeFaultRecorder{w: out}
+	if _, err := io.Copy(recorder, in); err != nil {
 		out.Close()
 		os.Remove(dst)
-		return err
+		return &copyFault{dest: recorder.err != nil, err: err}
 	}
-	return out.Close()
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return &copyFault{dest: true, err: err}
+	}
+	return nil
 }
 
 // firefoxCookieDBExists reports whether profileDir looks like it holds an
@@ -417,7 +506,8 @@ func (s *AutoCookieService) importProfileCookies() (string, error) {
 		return "", classifyCookieDBError(fmt.Errorf("open %s in %q: %w", firefoxCookieDBName, s.profileDir, statErr))
 	}
 
-	netscape, err := readFirefoxCookies(s.profileDir)
+	netscape, stats, err := readFirefoxCookies(s.profileDir)
+	s.logFirefoxReadStats(stats)
 	if err != nil {
 		return "", err
 	}

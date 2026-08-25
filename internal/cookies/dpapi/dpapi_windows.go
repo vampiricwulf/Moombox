@@ -119,7 +119,7 @@ func loadChromeMasterKey(profilePath string) ([]byte, error) {
 	return cryptUnprotectData(raw[len(dpapiPrefix):])
 }
 
-// ReadChromeCookies opens the SQLite Cookies file under profilePath,
+// ReadChromeCookiesStats opens the SQLite Cookies file under profilePath,
 // decrypts each row's encrypted_value with the master key from Local
 // State, and returns the result. originFilter (if non-empty) restricts
 // the result to cookies whose host_key contains the substring
@@ -128,8 +128,10 @@ func loadChromeMasterKey(profilePath string) ([]byte, error) {
 // The function fails-soft per row: a row whose encrypted_value can't
 // be decrypted (legacy pre-v10 format, corrupted blob, master-key
 // mismatch from a different profile) is skipped rather than failing
-// the whole pass. Callers that need byte-exact accounting should
-// inspect logs after the call.
+// the whole pass. The returned ChromeReadStats accounts for every skip
+// BY REASON, which is the difference between "nothing came out" and a
+// diagnosis — App-Bound encryption, a foreign master key and a failed
+// meta.version probe all look identical without it.
 //
 // Concurrency: Chrome holds an exclusive write lock on Cookies while
 // running. The SQLite open uses ?mode=ro and a 2 s busy_timeout so a
@@ -137,10 +139,12 @@ func loadChromeMasterKey(profilePath string) ([]byte, error) {
 // that hit "database is locked" should retry after the user closes
 // Chrome, or copy Cookies to a tempdir first (Chrome doesn't lock the
 // copy).
-func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error) {
+func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, ChromeReadStats, error) {
+	var stats ChromeReadStats
+
 	masterKey, err := loadChromeMasterKey(profilePath)
 	if err != nil {
-		return nil, fmt.Errorf("load master key: %w", err)
+		return nil, stats, fmt.Errorf("load master key: %w", err)
 	}
 
 	cookiesPath := filepath.Join(profilePath, "Cookies")
@@ -150,14 +154,14 @@ func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error)
 		if _, altErr := os.Stat(alt); altErr == nil {
 			cookiesPath = alt
 		} else {
-			return nil, fmt.Errorf("cookies file not found at %q (and not at Network/Cookies)", cookiesPath)
+			return nil, stats, fmt.Errorf("cookies file not found at %q (and not at Network/Cookies)", cookiesPath)
 		}
 	}
 
 	dsn := "file:" + cookiesPath + "?mode=ro&_pragma=busy_timeout(2000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open SQLite at %q: %w", cookiesPath, err)
+		return nil, stats, fmt.Errorf("open SQLite at %q: %w", cookiesPath, err)
 	}
 	defer db.Close()
 
@@ -165,7 +169,12 @@ func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error)
 	// the cookie's domain to the plaintext inside every encrypted value.
 	// Probe the schema before decrypting anything so the strip is gated on
 	// this profile's actual version rather than assumed either way.
-	hashPrefix := chromeUsesHashPrefix(readChromeMetaVersion(db))
+	metaVersion, metaKnown := readChromeMetaVersion(db)
+	stats.MetaVersion = metaVersion
+	if !metaKnown {
+		stats.MetaProbeFailed = 1
+	}
+	hashPrefix := chromeUsesHashPrefix(metaVersion)
 
 	rows, err := db.Query(`
 		SELECT host_key, name, encrypted_value, path,
@@ -173,7 +182,7 @@ func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error)
 		FROM cookies
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("query cookies: %w", err)
+		return nil, stats, fmt.Errorf("query cookies: %w", err)
 	}
 	defer rows.Close()
 
@@ -191,18 +200,31 @@ func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error)
 			samesite int
 		)
 		if err := rows.Scan(&host, &name, &encVal, &path, &expUTC, &secure, &httpOnly, &samesite); err != nil {
+			// In scope by definition: without a host there is no way to
+			// know whether the filter would have excluded it.
+			stats.Rows++
+			stats.ScanFailed++
 			continue
 		}
 		if filter != "" && !strings.Contains(strings.ToLower(host), filter) {
 			continue
 		}
+		// Counted AFTER the filter so Rows means "rows this pass actually
+		// considered". Counting the whole table instead would make
+		// Summary()'s "N of M could not be decrypted" ratio understate
+		// itself for any caller that passes an origin filter.
+		stats.Rows++
 		value, decryptErr := decryptV10Cookie(masterKey, encVal, hashPrefix)
 		if decryptErr != nil {
 			// Skip the row but don't kill the whole extraction —
 			// legacy pre-v10 rows (rare today), master-key
-			// mismatches, and non-UTF-8 plaintexts show up here.
+			// mismatches, App-Bound v20 values and non-UTF-8
+			// plaintexts all show up here, and they are counted by
+			// reason so the caller can say WHICH one happened.
+			stats.recordDecryptFailure(decryptErr)
 			continue
 		}
+		stats.Decrypted++
 		result = append(result, ChromeCookie{
 			Host:     host,
 			Name:     name,
@@ -215,7 +237,7 @@ func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error)
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return result, fmt.Errorf("rows iteration: %w", err)
+		return result, stats, fmt.Errorf("rows iteration: %w", err)
 	}
-	return result, nil
+	return result, stats, nil
 }

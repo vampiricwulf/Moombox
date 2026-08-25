@@ -168,7 +168,38 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		}
 	}
 
-	return readFirefoxCookies(s.profileDir)
+	netscape, stats, err := readFirefoxCookies(s.profileDir)
+	s.logFirefoxReadStats(stats)
+	return netscape, err
+}
+
+// logFirefoxReadStats reports what a moz_cookies read had to work around.
+// The read itself has no logger by design (see firefoxReadStats), so this is
+// where a degraded schema probe or a dropped row stops being invisible.
+func (s *AutoCookieService) logFirefoxReadStats(stats firefoxReadStats) {
+	if s.logger == nil || stats.rows == 0 {
+		// Nothing was read; whatever error came back says why, and a
+		// zero-value stats line would only add noise.
+		return
+	}
+	switch {
+	case !stats.schemaKnown:
+		s.logger.Warn("firefox cookie database has no readable schema version — assuming pre-142 (seconds) expiry units",
+			"rows", stats.rows)
+	case stats.schemaVersion > firefoxMaxKnownSchema:
+		s.logger.Warn("firefox cookie database is newer than this build has been checked against — expiry handling may be wrong",
+			"schema_version", stats.schemaVersion, "max_known", firefoxMaxKnownSchema, "rows", stats.rows)
+	default:
+		s.logger.Debug("read firefox cookie database",
+			"schema_version", stats.schemaVersion, "rows", stats.rows)
+	}
+	if stats.unusable() > 0 {
+		s.logger.Warn("skipped unusable moz_cookies rows",
+			"no_name", stats.droppedNoName, "no_host", stats.droppedNoHost, "scan_errors", stats.scanErrors, "rows", stats.rows)
+	}
+	if stats.defaulted > 0 {
+		s.logger.Debug("filled in NULL moz_cookies columns", "rows_defaulted", stats.defaulted)
+	}
 }
 
 // readFirefoxCookies extracts the relevant cookies from a Firefox profile
@@ -185,10 +216,16 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 // Retrying the snapshot as well as the query is deliberate: a copy taken
 // while Firefox is mid-flush can pair a main file and a -wal that disagree,
 // and the fix for that is another copy, not another query of the same one.
-func readFirefoxCookies(profileDir string) (string, error) {
+// The read stats of the attempt that produced the result are returned
+// alongside it so the caller — which owns a logger, unlike anything down
+// this chain — can report what the read had to work around: a schema
+// version it does not recognise, rows it could not use.
+func readFirefoxCookies(profileDir string) (string, firefoxReadStats, error) {
+	var stats firefoxReadStats
+
 	dbPath := filepath.Join(profileDir, "cookies.sqlite")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("firefox %s not found in %q: %w", firefoxCookieDBName, profileDir, ErrCookieDBNotFound)
+		return "", stats, fmt.Errorf("firefox %s not found in %q: %w", firefoxCookieDBName, profileDir, ErrCookieDBNotFound)
 	}
 
 	// Retry loop for SQLite WAL lock contention (Firefox may not have fully
@@ -207,14 +244,14 @@ func readFirefoxCookies(profileDir string) (string, error) {
 			time.Sleep(retryBackoff)
 		}
 
-		lines, lastErr = querySnapshotOrLive(profileDir, dbPath, attempt == maxRetries-1)
+		lines, stats, lastErr = querySnapshotOrLive(profileDir, dbPath, attempt == maxRetries-1)
 		if lastErr == nil || !isRetryableDBError(lastErr) {
 			break
 		}
 	}
 
 	if lastErr != nil {
-		return "", classifyCookieDBError(fmt.Errorf("after %d attempts: %w", maxRetries, lastErr))
+		return "", stats, classifyCookieDBError(fmt.Errorf("after %d attempts: %w", maxRetries, lastErr))
 	}
 
 	// Zero relevant cookies is NEVER a success. It is what a dropped -wal
@@ -224,7 +261,7 @@ func readFirefoxCookies(profileDir string) (string, error) {
 	// an empty jar here would merge as a no-op and let a broken read hide
 	// behind whatever cookies.txt already held.
 	if len(lines) == 0 {
-		return "", fmt.Errorf("%s in %q yielded no YouTube/Google/Twitch cookies — if the profile is in use, close the browser and try again: %w",
+		return "", stats, fmt.Errorf("%s in %q yielded no YouTube/Google/Twitch cookies — if the profile is in use, close the browser and try again: %w",
 			firefoxCookieDBName, profileDir, ErrNoCookiesInProfile)
 	}
 
@@ -235,7 +272,7 @@ func readFirefoxCookies(profileDir string) (string, error) {
 	}
 	result = append(result, lines...)
 
-	return strings.Join(result, "\n") + "\n", nil
+	return strings.Join(result, "\n") + "\n", stats, nil
 }
 
 // firefoxMillisecondExpirySchema is the moz_cookies schema version
@@ -246,9 +283,38 @@ func readFirefoxCookies(profileDir string) (string, error) {
 // Ref: https://github.com/mozilla-firefox/firefox/commit/5869af852cd20425165837f6c2d9971f3efba83d
 const firefoxMillisecondExpirySchema = 16
 
+// firefoxMaxKnownSchema is the highest moz_cookies schema generation this
+// build has been checked against. Anything above it may have moved a column
+// or changed a unit the way Firefox 142 changed expiry, so it is worth
+// saying out loud. yt-dlp warns at the same boundary
+// (MAX_SUPPORTED_DB_SCHEMA_VERSION in _extract_firefox_cookies).
+const firefoxMaxKnownSchema = 17
+
+// firefoxReadStats is what one read of moz_cookies had to work around.
+//
+// It is returned rather than logged because nothing down this call chain
+// owns a logger, and threading one into four pure functions to say
+// "user_version came back empty" buys less than handing the facts back to
+// the layer that already has a logger — which is also the only form a test
+// can assert on.
+type firefoxReadStats struct {
+	schemaVersion int64 // PRAGMA user_version, or 0 when the probe failed
+	schemaKnown   bool  // the probe actually read a version
+	rows          int   // rows moz_cookies handed back
+	scanErrors    int   // rows whose Scan failed for a reason other than a NULL we handle
+	droppedNoName int   // NULL/empty name — nothing to send, nothing to match
+	droppedNoHost int   // NULL/empty host — no domain to attach the cookie to
+	defaulted     int   // rows where a NULL non-identity column was filled in
+}
+
+// unusable is the count of rows this read could not turn into a cookie.
+func (s firefoxReadStats) unusable() int {
+	return s.scanErrors + s.droppedNoName + s.droppedNoHost
+}
+
 // firefoxSchemaVersion reads `PRAGMA user_version` from an open Firefox
 // cookie database, which is how Firefox stamps the moz_cookies schema
-// generation.
+// generation. The second return says whether a version was actually read.
 //
 // A missing, unreadable, non-integer, or negative pragma degrades to 0 —
 // i.e. "the pre-Firefox-142 seconds interpretation". The asymmetry is
@@ -258,15 +324,19 @@ const firefoxMillisecondExpirySchema = 16
 // every real expiry by 1000, throwing every cookie back to the 1970s so the
 // merge pruner deletes the entire authenticated set. Only a positively-read
 // version >= 16 may enable the conversion.
-func firefoxSchemaVersion(db *sql.DB) int64 {
+//
+// The degrade stays silent HERE and is reported by the caller: this
+// function has no logger and should not grow one just to say that a
+// one-line pragma came back empty.
+func firefoxSchemaVersion(db *sql.DB) (int64, bool) {
 	var version sql.NullInt64
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		return 0
+		return 0, false
 	}
 	if !version.Valid || version.Int64 < 0 {
-		return 0
+		return 0, false
 	}
-	return version.Int64
+	return version.Int64, true
 }
 
 // querySnapshotOrLive runs one read attempt against a private copy of the
@@ -278,21 +348,25 @@ func firefoxSchemaVersion(db *sql.DB) int64 {
 //     final attempt read the live database instead, because SQLite resolves
 //     WAL consistency itself — a profile under constant write must not fail
 //     where the pre-snapshot implementation succeeded.
-//   - UNREADABLE SIDECAR: propagate. Falling back to the live database would
-//     hit the same unreadable -wal and could return a stale checkpointed set
-//     as if it were current.
-//   - ANYTHING ELSE (no temp space, an AV holding the file): fall back to the
-//     live database, which is exactly what this code did before snapshots.
-func querySnapshotOrLive(profileDir, livePath string, finalAttempt bool) ([]string, error) {
+//   - UNREADABLE SIDECAR (the SOURCE -wal cannot be stat'd or read):
+//     propagate. Falling back to the live database would hit the same
+//     unreadable -wal and could return a stale checkpointed set as if it
+//     were current.
+//   - ANYTHING ELSE (no temp space or an I/O error on OUR side of the copy,
+//     an AV holding the file): fall back to the live database, which is
+//     exactly what this code did before snapshots. Note that this covers a
+//     temp-side failure on EITHER file — the profile is fine in that case,
+//     so there is nothing to refuse.
+func querySnapshotOrLive(profileDir, livePath string, finalAttempt bool) ([]string, firefoxReadStats, error) {
 	snapDir, cleanup, err := snapshotFirefoxCookieDB(profileDir)
 	switch {
 	case err == nil:
 		defer cleanup()
 		return queryFirefoxCookieDB(filepath.Join(snapDir, firefoxCookieDBName))
 	case errors.Is(err, errSnapshotTorn) && !finalAttempt:
-		return nil, err
+		return nil, firefoxReadStats{}, err
 	case errors.Is(err, ErrCookieDBUnreadable):
-		return nil, err
+		return nil, firefoxReadStats{}, err
 	default:
 		return queryFirefoxCookieDB(livePath)
 	}
@@ -316,36 +390,90 @@ func isRetryableDBError(err error) bool {
 // locked" almost immediately under the default 0ms busy timeout, and the
 // caller's 5×500ms retry loop doesn't help if each open errors before even
 // waiting.
-func queryFirefoxCookieDB(dbPath string) ([]string, error) {
+func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
+	var stats firefoxReadStats
+
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
 	if err != nil {
-		return nil, fmt.Errorf("open cookies.sqlite: %w", err)
+		return nil, stats, fmt.Errorf("open cookies.sqlite: %w", err)
 	}
 	defer db.Close()
 
 	// Read the schema generation BEFORE the rows: it decides whether the
 	// expiry column is seconds or milliseconds (Firefox 142 / schema 16).
-	schemaVersion := firefoxSchemaVersion(db)
+	schemaVersion, schemaKnown := firefoxSchemaVersion(db)
+	stats.schemaVersion, stats.schemaKnown = schemaVersion, schemaKnown
 
 	rows, err := db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure FROM moz_cookies")
 	if err != nil {
-		return nil, fmt.Errorf("query cookies: %w", err)
+		return nil, stats, fmt.Errorf("query cookies: %w", err)
 	}
 	defer rows.Close()
 
 	var collected []extractedCookie
 	for rows.Next() {
-		var name, value, host, cookiePath string
-		var isHttpOnly, isSecure int64
-		// expiry is nullable: Firefox leaves it NULL for some rows, and a
-		// plain int64 destination turns that into a scan error, which the
-		// `continue` below would silently swallow — dropping the cookie
-		// entirely. Upstream keeps such rows with no expiry at all
-		// (`expiry is not None`), so 0 (the Netscape session-cookie
-		// sentinel, which rowExpired never prunes) is the faithful mapping.
-		var expiry sql.NullInt64
+		// EVERY column here is nullable — moz_cookies declares none of them
+		// NOT NULL — and a bare Go destination turns any NULL into a scan
+		// error, which the `continue` below swallows: the whole cookie
+		// disappears with nothing said. That is how a NULL expiry used to
+		// drop rows, and name/value/host/path/isHttpOnly/isSecure had the
+		// identical hole. Scanning through the Null* types means a NULL is
+		// a value we decide about, per column, instead of a row we lose.
+		//
+		// Upstream (yt-dlp _extract_firefox_cookies) passes the raw values
+		// straight into http.cookiejar.Cookie, so it does not guard these
+		// either; parity is not the argument here, not silently losing
+		// credentials is.
+		var name, value, host, cookiePath sql.NullString
+		var expiry, isHttpOnly, isSecure sql.NullInt64
+		stats.rows++
 		if err := rows.Scan(&name, &value, &host, &cookiePath, &expiry, &isHttpOnly, &isSecure); err != nil {
+			stats.scanErrors++
 			continue
+		}
+
+		// A cookie with no NAME cannot be sent and cannot be matched; one
+		// with no HOST has no domain to attach to and would be written as a
+		// row with an empty domain field. Both are genuinely unusable, so
+		// they are dropped — but counted, which is the whole difference from
+		// before.
+		if !name.Valid || name.String == "" {
+			stats.droppedNoName++
+			continue
+		}
+		if !host.Valid || host.String == "" {
+			stats.droppedNoHost++
+			continue
+		}
+
+		// The rest have a faithful default and must NOT cost the row:
+		//   value      NULL -> "" (an empty cookie value is legal)
+		//   path       NULL -> "/" (upstream's path_specified=False, i.e. no
+		//                           path restriction; "/" is how that is
+		//                           spelled in a Netscape file)
+		//   expiry     NULL -> 0, the Netscape session-cookie sentinel that
+		//                      rowExpired never prunes (upstream's
+		//                      `expiry is not None`)
+		//   isHttpOnly NULL -> false; it only decides the #HttpOnly_ prefix
+		//   isSecure   NULL -> TRUE, deliberately not false. The field is
+		//                      unknown, and the two guesses are not
+		//                      symmetric: marking a cookie secure withholds
+		//                      it from a plaintext request, marking it
+		//                      insecure would send a session credential over
+		//                      one. Our own jar ignores the field and all
+		//                      our traffic is HTTPS, so the safe guess is
+		//                      free here and only ever helps another
+		//                      consumer of the file.
+		if !value.Valid || !cookiePath.Valid || !expiry.Valid || !isHttpOnly.Valid || !isSecure.Valid {
+			stats.defaulted++
+		}
+		rowPath := cookiePath.String
+		if !cookiePath.Valid || rowPath == "" {
+			rowPath = "/"
+		}
+		secure := true
+		if isSecure.Valid {
+			secure = isSecure.Int64 != 0
 		}
 
 		expirySeconds := int64(0)
@@ -357,13 +485,13 @@ func queryFirefoxCookieDB(dbPath string) ([]string, error) {
 		}
 
 		collected = append(collected, extractedCookie{
-			domain:   host,
-			httpOnly: isHttpOnly != 0,
-			path:     cookiePath,
-			secure:   isSecure != 0,
+			domain:   host.String,
+			httpOnly: isHttpOnly.Int64 != 0,
+			path:     rowPath,
+			secure:   secure,
 			expiry:   expirySeconds,
-			name:     name,
-			value:    value,
+			name:     name.String,
+			value:    value.String,
 		})
 	}
 	// A mid-iteration failure (lock contention while Firefox flushes — the
@@ -371,10 +499,10 @@ func queryFirefoxCookieDB(dbPath string) ([]string, error) {
 	// Next()==false; without this check a PARTIAL cookie set would be
 	// returned as success and merged over the full file.
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate cookies: %w", err)
+		return nil, stats, fmt.Errorf("iterate cookies: %w", err)
 	}
 
-	return deduplicateAndFormat(collected), nil
+	return deduplicateAndFormat(collected), stats, nil
 }
 
 func cleanFirefoxLockFiles(profileDir string) {

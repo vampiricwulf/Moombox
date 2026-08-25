@@ -450,7 +450,7 @@ func TestCorruptDBFailsFastWithoutRetrying(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	_, err := readFirefoxCookies(dir)
+	_, _, err := readFirefoxCookies(dir)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, ErrCookieDBUnreadable) {
