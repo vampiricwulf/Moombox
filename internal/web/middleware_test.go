@@ -557,31 +557,49 @@ func TestEffectiveClientIP(t *testing.T) {
 		remoteAddr string
 		xff        string
 		expected   string
+		// untrusted additionally asserts the result is classified as neither
+		// loopback nor private — the fail-CLOSED property. It is the
+		// load-bearing assertion for the neutralized cases below; their
+		// `expected` string only documents the current diagnostic form.
+		untrusted bool
 	}{
 		// No proxies configured: identical to ExtractIP, XFF ignored.
-		{"no proxies, forged xff ignored", nil, "203.0.113.9:5000", "127.0.0.1", "203.0.113.9"},
+		{"no proxies, forged xff ignored", nil, "203.0.113.9:5000", "127.0.0.1", "203.0.113.9", false},
 		// Direct peer is NOT a trusted proxy: XFF ignored even when configured.
-		{"untrusted peer, xff ignored", []string{"172.18.0.2"}, "203.0.113.9:5000", "10.0.0.1", "203.0.113.9"},
+		{"untrusted peer, xff ignored", []string{"172.18.0.2"}, "203.0.113.9:5000", "10.0.0.1", "203.0.113.9", false},
 		// Trusted proxy, single-hop XFF: real client returned.
-		{"proxy forwards wan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "203.0.113.9", "203.0.113.9"},
-		{"proxy forwards lan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "192.168.1.50", "192.168.1.50"},
+		{"proxy forwards wan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "203.0.113.9", "203.0.113.9", false},
+		{"proxy forwards lan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "192.168.1.50", "192.168.1.50", false},
 		// Client-forged private prefix through the proxy: proxy appends the
 		// real address to the RIGHT, and the rightmost-untrusted walk finds it.
-		{"forged private prefix defeated", []string{"172.18.0.2"}, "172.18.0.2:41000", "10.0.0.1, 203.0.113.9", "203.0.113.9"},
+		{"forged private prefix defeated", []string{"172.18.0.2"}, "172.18.0.2:41000", "10.0.0.1, 203.0.113.9", "203.0.113.9", false},
 		// Two chained trusted proxies (CIDR), then the client.
-		{"cidr proxy chain", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "203.0.113.9, 172.18.0.3", "203.0.113.9"},
+		{"cidr proxy chain", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "203.0.113.9, 172.18.0.3", "203.0.113.9", false},
 		// Trusted proxy but no XFF at all: fall back to the proxy address.
-		{"proxy without xff", []string{"172.18.0.2"}, "172.18.0.2:41000", "", "172.18.0.2"},
+		{"proxy without xff", []string{"172.18.0.2"}, "172.18.0.2:41000", "", "172.18.0.2", false},
 		// Every hop trusted (proxy self-call / health check): direct peer.
-		{"all hops trusted", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "172.18.0.3", "172.18.0.2"},
+		{"all hops trusted", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "172.18.0.3", "172.18.0.2", false},
 		// Malformed rightmost entry fails CLOSED (returned verbatim → treated
 		// as neither loopback nor private downstream), not open.
-		{"malformed entry fails closed", []string{"172.18.0.2"}, "172.18.0.2:41000", "garbage-value", "garbage-value"},
+		{"malformed entry fails closed", []string{"172.18.0.2"}, "172.18.0.2:41000", "garbage-value", "garbage-value", true},
+		// A forged entry that SPELLS a trusted class must not inherit it.
+		// isLoopback resolves the bare hostname "localhost" to loopback, so an
+		// un-neutralized verbatim return here would fail OPEN and, once this
+		// feeds the auth predicate, skip authentication outright. Reachable in
+		// the headline Docker setup: a sender on the bridge emits
+		// "X-Forwarded-For: localhost" and the proxy appends its real bridge
+		// address to the right, so the walk skips the trusted hop and lands on
+		// the forgery.
+		{"forged localhost fails closed", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "localhost, 172.18.0.99", "invalid-localhost", true},
+		{"bare forged localhost fails closed", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "localhost", "invalid-localhost", true},
 		// IPv6: bracketed with port, plus zone stripping.
-		{"ipv6 bracketed with port", []string{"172.18.0.2"}, "172.18.0.2:41000", "[2001:db8::1]:443", "2001:db8::1"},
-		{"ipv6 zone stripped", []string{"172.18.0.2"}, "172.18.0.2:41000", "fe80::1%eth0", "fe80::1"},
+		{"ipv6 bracketed with port", []string{"172.18.0.2"}, "172.18.0.2:41000", "[2001:db8::1]:443", "2001:db8::1", false},
+		{"ipv6 zone stripped", []string{"172.18.0.2"}, "172.18.0.2:41000", "fe80::1%eth0", "fe80::1", false},
 		// IPv6 trusted proxy.
-		{"ipv6 proxy", []string{"fd77:4d42::/64"}, "[fd77:4d42::2]:41000", "203.0.113.9", "203.0.113.9"},
+		{"ipv6 proxy", []string{"fd77:4d42::/64"}, "[fd77:4d42::2]:41000", "203.0.113.9", "203.0.113.9", false},
+		// Bare (non-CIDR) IPv6 proxy entry: exercises the /128 widening in
+		// loadTrustedProxies that every CIDR-shaped case above skips.
+		{"bare ipv6 proxy widened to /128", []string{"fd77:4d42::2"}, "[fd77:4d42::2]:41000", "203.0.113.9", "203.0.113.9", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -593,6 +611,14 @@ func TestEffectiveClientIP(t *testing.T) {
 			got := EffectiveClientIP(storeWithProxies(tt.proxies...), r)
 			if got != tt.expected {
 				t.Errorf("EffectiveClientIP() = %q, want %q", got, tt.expected)
+			}
+			if tt.untrusted {
+				if isLoopback(got) {
+					t.Errorf("EffectiveClientIP() = %q classifies as LOOPBACK; must fail closed", got)
+				}
+				if isPrivateIP(got) {
+					t.Errorf("EffectiveClientIP() = %q classifies as PRIVATE; must fail closed", got)
+				}
 			}
 		})
 	}

@@ -351,11 +351,12 @@ func EffectiveClientIP(store *config.Store, r *http.Request) string {
 	for i := len(parts) - 1; i >= 0; i-- {
 		hop := canonicalizeForwardedIP(parts[i])
 		if !proxies.contains(hop) {
-			// First hop the chain didn't vouch for. An unparseable value
-			// is returned verbatim on purpose: isLoopback/isPrivateIP both
-			// reject garbage, so downstream fails CLOSED (treated as a
-			// non-local client) instead of falling back to the proxy's own
-			// private address.
+			// First hop the chain didn't vouch for. An unparseable value is
+			// returned as-is on purpose rather than falling back to the
+			// proxy's own private address: canonicalizeForwardedIP guarantees
+			// its result never names a trusted class unless it is a genuine
+			// IP in that class, so isLoopback/isPrivateIP both reject it and
+			// downstream fails CLOSED (treated as a non-local client).
 			return hop
 		}
 	}
@@ -366,8 +367,15 @@ func EffectiveClientIP(store *config.Store, r *http.Request) string {
 
 // canonicalizeForwardedIP normalizes one X-Forwarded-For entry: surrounding
 // whitespace, an optional port, IPv6 brackets, and zone suffixes are
-// stripped. Unparseable entries come back trimmed-but-verbatim so callers
-// fail closed on them.
+// stripped, and the address is re-rendered in its canonical form.
+//
+// Guarantee relied on by EffectiveClientIP: the result NEVER names a trusted
+// class (loopback or private) unless it is a genuine, parseable IP in that
+// class. An X-Forwarded-For entry is an address by definition, so anything
+// that parses as neither IPv4 nor IPv6 is untrusted garbage; such entries
+// come back trimmed-but-verbatim — preserving their diagnostic value in log
+// lines — except when the verbatim text would itself be resolved to a
+// trusted class downstream, in which case it is neutralized first.
 func canonicalizeForwardedIP(entry string) string {
 	e := strings.TrimSpace(entry)
 	if e == "" {
@@ -383,7 +391,26 @@ func canonicalizeForwardedIP(entry string) string {
 	if ip := net.ParseIP(e); ip != nil {
 		return ip.String()
 	}
-	return strings.TrimSpace(entry)
+	verbatim := strings.TrimSpace(entry)
+	if namesTrustedClass(verbatim) {
+		// Not an address, but a name a classifier resolves to a trusted
+		// class. Prefixing keeps the operator-facing diagnostic ("who sent
+		// this?") while guaranteeing the result parses as no IP and spells
+		// no trusted class, so it fails CLOSED like any other garbage.
+		return "invalid-" + verbatim
+	}
+	return verbatim
+}
+
+// namesTrustedClass reports whether a non-IP string would be resolved to a
+// trusted class by a downstream classifier. isLoopback deliberately treats
+// the bare hostname "localhost" as loopback — that special case is correct
+// and load-bearing for the Origin checks in isAllowedOrigin — which makes
+// "localhost" the one value a forwarded entry must never be allowed to
+// spell. Compared case-insensitively so the guard does not hinge on a
+// classifier's choice of case folding.
+func namesTrustedClass(s string) bool {
+	return strings.EqualFold(s, "localhost")
 }
 
 func isLoopback(ipStr string) bool {
