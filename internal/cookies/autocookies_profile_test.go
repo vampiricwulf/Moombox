@@ -163,6 +163,37 @@ func TestSnapshotCopiesWALSidecars(t *testing.T) {
 		}
 	})
 
+	// The measurement behind dropping -shm from the copy list. -shm is pure
+	// derived state (the WAL index) that SQLite rebuilds from the -wal, and
+	// copying it AFTER the -wal means the copied index can describe more
+	// frames than the copied log actually contains — the one stale-WAL vector
+	// a snapshot could introduce. This asserts the copy is complete without
+	// it, which is what makes dropping it safe.
+	t.Run("main plus wal without shm returns every row", func(t *testing.T) {
+		bare := t.TempDir()
+		src := filepath.Join(profileDir, "cookies.sqlite")
+		for _, suffix := range []string{"", "-wal"} {
+			data, err := os.ReadFile(src + suffix)
+			if err != nil {
+				t.Fatalf("read %s: %v", src+suffix, err)
+			}
+			if err := os.WriteFile(filepath.Join(bare, "cookies.sqlite"+suffix), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(bare, "cookies.sqlite-shm")); err == nil {
+			t.Fatal("fixture error: -shm should not have been copied")
+		}
+		lines, err := queryFirefoxCookieDB(filepath.Join(bare, "cookies.sqlite"))
+		if err != nil {
+			t.Fatalf("query main+wal copy: %v", err)
+		}
+		if len(lines) != len(youtubeAuthRows()) {
+			t.Fatalf("main+wal returned %d rows, want %d — -shm would have to be copied after all",
+				len(lines), len(youtubeAuthRows()))
+		}
+	})
+
 	t.Run("cleanup removes the snapshot", func(t *testing.T) {
 		snapDir, cleanup, err := snapshotFirefoxCookieDB(profileDir)
 		if err != nil {
@@ -348,9 +379,10 @@ func TestRefreshCookiesNoBrowserNoProfileStillReportsNoBrowser(t *testing.T) {
 }
 
 // TestRefreshCookiesRestoresCookiesWhenImportFailsVerification pins the
-// "never clobber a good cookies.txt with a worse one" rule: a stale mounted
-// profile that verifies as unauthenticated must leave the previous file
-// byte-identical.
+// "never clobber a good cookies.txt with a worse one" rule on a single
+// -platform install: the only platform present verified before the import and
+// does not after, so its previous credentials must come back — and, because
+// they do, the refresh ends up healthy rather than failed.
 func TestRefreshCookiesRestoresCookiesWhenImportFailsVerification(t *testing.T) {
 	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
 	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
@@ -364,22 +396,30 @@ func TestRefreshCookiesRestoresCookiesWhenImportFailsVerification(t *testing.T) 
 
 	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
 	s.detectBrowser = func() *DetectedBrowser { return nil }
-	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return false, nil }
+	// Only the credential already on disk works; anything the profile brings
+	// does not. That is a regression, not a flat failure.
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
+		return s.jar.GetSapisid() == "good-sapisid", nil
+	}
 	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
 
 	ok, err := s.RefreshCookies(context.Background())
 	if err != nil {
 		t.Fatalf("RefreshCookies: %v", err)
 	}
-	if ok {
-		t.Fatal("RefreshCookies = true although no platform verified")
+	if !ok {
+		t.Fatal("RefreshCookies = false; the working credentials were restored, so the end state is healthy")
 	}
-	got, err := os.ReadFile(cookiePath)
+	data, err := os.ReadFile(cookiePath)
 	if err != nil {
 		t.Fatalf("read cookies.txt: %v", err)
 	}
-	if string(got) != original {
-		t.Fatalf("unverified import clobbered the previous cookies.txt.\n got: %q\nwant: %q", got, original)
+	got := string(data)
+	if !strings.Contains(got, "good-sapisid") || !strings.Contains(got, "good-login-info") {
+		t.Errorf("the working credentials were not restored:\n%s", got)
+	}
+	if strings.Contains(got, "sapisid-from-profile") {
+		t.Errorf("the failing imported credentials survived the rollback:\n%s", got)
 	}
 }
 

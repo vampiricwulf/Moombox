@@ -1,6 +1,7 @@
 package cookies
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Browser-free cookie import from a mounted Firefox profile.
@@ -37,26 +40,50 @@ const (
 //
 // This is the whole reason a "just copy the db" implementation is wrong, and
 // it was measured rather than assumed. Against a WAL-mode cookies.sqlite
-// holding 25 uncheckpointed rows:
+// whose schema is checkpointed but whose rows are not (the shape of any
+// long-lived profile):
 //
-//	copy cookies.sqlite only          -> opens fine, 0 rows, NO error
-//	copy cookies.sqlite + -wal + -shm -> all 25 rows
+//	copy cookies.sqlite only   -> opens fine, 0 rows, NO error
+//	copy cookies.sqlite + -wal -> every row
 //
 // A silently-empty cookie jar is the single worst outcome for this feature,
-// so the sidecars are non-negotiable. yt-dlp gets this wrong today
+// so the -wal is non-negotiable. yt-dlp gets this wrong today
 // (yt_dlp/cookies.py copies the main file alone); do not mirror it.
 //
-// Note also that `immutable=1` is the WRONG DSN for a live WAL database — it
-// tells SQLite the file cannot change, so the -wal is ignored and stale (or
-// empty) data comes back. queryFirefoxCookieDB's
-// `mode=ro&_pragma=busy_timeout(2000)` is correct against the writable temp
-// copy this file produces.
-var firefoxCookieDBSidecars = []string{"-wal", "-shm"}
+// -shm is deliberately NOT copied. It is pure derived state — the WAL index —
+// which SQLite rebuilds from the -wal, and copying it could only hurt: taken
+// after the -wal it can describe more frames than the copied log contains,
+// which is the one way a snapshot could serve stale data. The
+// "main plus wal without shm" case in TestSnapshotCopiesWALSidecars is the
+// measurement that says leaving it behind loses nothing.
+//
+// Rebuilding that index is also why the copy goes into a WRITABLE temp dir.
+// `mode=ro` stops SQLite writing to the DATABASE, not to the directory, so it
+// can still create the -shm it needs. `immutable=1` would be the wrong DSN
+// here for the same reason the main file alone is wrong: it tells SQLite the
+// file cannot change, so the -wal is ignored and stale or empty data comes
+// back.
+var firefoxCookieDBSidecars = []string{"-wal"}
 
-// snapshotFirefoxCookieDB copies cookies.sqlite and its -wal/-shm sidecars
-// into a private temp directory and returns that directory plus a cleanup
-// func the caller MUST defer (the copy contains the user's live session
-// cookies).
+// errSnapshotTorn reports that the profile's cookie database changed while it
+// was being copied, so the copy may pair a main file and a -wal that
+// disagree. Retryable: the fix is another copy, not another query of this one.
+var errSnapshotTorn = errors.New("cookie database changed during snapshot")
+
+// snapshotMaxAge bounds how long an abandoned snapshot directory may survive
+// before the sweep reclaims it. Comfortably longer than any read, so a
+// concurrent snapshot is never yanked out from under its own reader.
+const snapshotMaxAge = time.Hour
+
+// snapshotDirPrefix is both the os.MkdirTemp pattern and what the sweep
+// matches on, so the two can never drift apart.
+const snapshotDirPrefix = "moombox-cookiedb-"
+
+var snapshotSweepOnce sync.Once
+
+// snapshotFirefoxCookieDB copies cookies.sqlite and its -wal sidecar into a
+// private temp directory and returns that directory plus a cleanup func the
+// caller MUST defer (the copy contains the user's live session cookies).
 //
 // Copying rather than opening in place buys two things:
 //
@@ -67,15 +94,26 @@ var firefoxCookieDBSidecars = []string{"-wal", "-shm"}
 //     file, so a plain byte copy succeeds where a second SQLite connection is
 //     refused outright.
 //
+// The copy is not atomic against a live Firefox, so the database is
+// fingerprinted before and after; a change means the pair may be inconsistent
+// and errSnapshotTorn asks the caller to try again. Without that check a torn
+// pair yields a PARTIAL cookie set with no error at all, which no retry loop
+// would ever retry.
+//
 // The temp dir is created 0o700 by os.MkdirTemp; on Windows %TEMP% is already
 // per-user, so no extra ACL shell-out is worth the 30-80ms it costs here.
 func snapshotFirefoxCookieDB(profileDir string) (string, func(), error) {
+	// Reclaim snapshots abandoned by a previous run that was SIGKILLed
+	// mid-read. Each one holds live session cookies at 0600.
+	snapshotSweepOnce.Do(func() { sweepStaleCookieSnapshots(os.TempDir(), snapshotMaxAge) })
+
 	srcDB := filepath.Join(profileDir, firefoxCookieDBName)
 	if _, err := os.Stat(srcDB); err != nil {
 		return "", func() {}, fmt.Errorf("stat %s: %w", firefoxCookieDBName, err)
 	}
+	before := fingerprintCookieDB(srcDB)
 
-	tmpDir, err := os.MkdirTemp("", "moombox-cookiedb-")
+	tmpDir, err := os.MkdirTemp("", snapshotDirPrefix)
 	if err != nil {
 		return "", func() {}, fmt.Errorf("create cookie snapshot dir: %w", err)
 	}
@@ -85,20 +123,97 @@ func snapshotFirefoxCookieDB(profileDir string) (string, func(), error) {
 		cleanup()
 		return "", func() {}, fmt.Errorf("copy %s: %w", firefoxCookieDBName, err)
 	}
-	// Sidecars are optional: a cleanly-checkpointed profile has no -wal at
-	// all. Their ABSENCE is fine; failing to copy one that exists is not,
-	// because that is precisely the silently-empty case.
+	// A sidecar's ABSENCE is fine — a cleanly-checkpointed profile has no
+	// -wal at all. A sidecar that exists and cannot be read is NOT fine, and
+	// must never be quietly skipped: the main file may still hold a stale
+	// checkpointed set, which would then come back as a perfectly valid
+	// looking cookie jar full of dead credentials. Only fs.ErrNotExist means
+	// absence; a permission error (uid mismatch on a bind mount, an SELinux
+	// or AppArmor label, a restrictive mode left by docker cp / rsync) is a
+	// hard failure. Falling back to reading the live database would not help
+	// either — SQLite hits the same unreadable -wal.
 	for _, suffix := range firefoxCookieDBSidecars {
 		src := srcDB + suffix
 		if _, err := os.Stat(src); err != nil {
-			continue
+			if isMissingSidecar(err) {
+				continue
+			}
+			cleanup()
+			return "", func() {}, fmt.Errorf("%w: %s%s exists but cannot be read (%v) — its contents would be silently missing from the import",
+				ErrCookieDBUnreadable, firefoxCookieDBName, suffix, err)
 		}
 		if err := copyFile(src, filepath.Join(tmpDir, firefoxCookieDBName+suffix)); err != nil {
 			cleanup()
-			return "", func() {}, fmt.Errorf("copy %s%s: %w", firefoxCookieDBName, suffix, err)
+			return "", func() {}, fmt.Errorf("%w: copy %s%s: %v", ErrCookieDBUnreadable, firefoxCookieDBName, suffix, err)
 		}
 	}
+
+	if fingerprintsDiffer(before, fingerprintCookieDB(srcDB)) {
+		cleanup()
+		return "", func() {}, errSnapshotTorn
+	}
 	return tmpDir, cleanup, nil
+}
+
+// isMissingSidecar reports whether a sidecar stat error means "there is no
+// such file" as opposed to "there is one and I could not look at it". Only the
+// former is safe to skip.
+func isMissingSidecar(err error) bool {
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// fileStamp is the cheap change-detector for one file: presence, size and
+// mtime. Enough to notice a Firefox flush landing mid-copy.
+type fileStamp struct {
+	exists bool
+	size   int64
+	mod    time.Time
+}
+
+// cookieDBFingerprint stamps the database and its -wal together, since a torn
+// snapshot is precisely a disagreement between the two.
+type cookieDBFingerprint struct {
+	main fileStamp
+	wal  fileStamp
+}
+
+func stampFile(path string) fileStamp {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileStamp{}
+	}
+	return fileStamp{exists: true, size: info.Size(), mod: info.ModTime()}
+}
+
+func fingerprintCookieDB(dbPath string) cookieDBFingerprint {
+	return cookieDBFingerprint{main: stampFile(dbPath), wal: stampFile(dbPath + "-wal")}
+}
+
+func fingerprintsDiffer(a, b cookieDBFingerprint) bool {
+	return a.main != b.main || a.wal != b.wal
+}
+
+// sweepStaleCookieSnapshots removes snapshot directories left behind by a
+// process that died mid-read. Only directories carrying our own prefix and
+// older than maxAge are touched, so a snapshot a concurrent read is still
+// using is never removed. Best-effort: every error is ignored, because this
+// is housekeeping and must never fail a cookie read.
+func sweepStaleCookieSnapshots(root string, maxAge time.Duration) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), snapshotDirPrefix) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		os.RemoveAll(filepath.Join(root, entry.Name()))
+	}
 }
 
 // copyFile copies src to dst with 0o600 permissions.
@@ -147,6 +262,73 @@ func countNetscapeCookieRows(content string) int {
 		n++
 	}
 	return n
+}
+
+// cookieRowPlatform returns which platform a Netscape row belongs to
+// ("youtube", "twitch") or "" for anything else. Google rows count as YouTube
+// because that is where the shared auth cookies (SID/HSID/SAPISID) live and
+// they must always be restored or replaced as one set with youtube.com's.
+func cookieRowPlatform(row string) string {
+	trimmed := strings.TrimPrefix(row, "#HttpOnly_")
+	fields := strings.Split(trimmed, "\t")
+	if len(fields) < 7 {
+		return ""
+	}
+	domain := fields[0]
+	switch {
+	case isYouTubeDomain(domain) || isGoogleDomain(domain):
+		return "youtube"
+	case isTwitchDomain(domain):
+		return "twitch"
+	default:
+		return ""
+	}
+}
+
+// netscapeDataRows returns the data rows of a Netscape cookie file.
+// `#HttpOnly_` lines are data despite the leading '#'.
+func netscapeDataRows(content string) []string {
+	var rows []string
+	for line := range strings.SplitSeq(content, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "#HttpOnly_") {
+			continue
+		}
+		rows = append(rows, line)
+	}
+	return rows
+}
+
+// restorePlatformRows rebuilds a cookie file from `merged`, swapping every row
+// belonging to a platform in `restore` back to the rows `previous` held.
+//
+// Per-platform rather than whole-file, because the platforms are entirely
+// independent domains: an import that fixes YouTube and breaks Twitch should
+// keep the YouTube fix. The unit of restore is the platform's whole row set,
+// never individual cookies, so a platform's credentials stay internally
+// coherent instead of mixing generations.
+func restorePlatformRows(merged, previous string, restore map[string]bool) string {
+	out := []string{
+		"# Netscape HTTP Cookie File",
+		"# Extracted by Moombox auto-cookie service",
+		"",
+	}
+	for _, row := range netscapeDataRows(merged) {
+		if !restore[cookieRowPlatform(row)] {
+			out = append(out, row)
+		}
+	}
+	now := time.Now().Unix()
+	for _, row := range netscapeDataRows(previous) {
+		// Same expiry prune mergeCookieFiles applies, so a restore cannot
+		// resurrect rows the merge had already dropped as expired.
+		if restore[cookieRowPlatform(row)] && !rowExpired(row, now) {
+			out = append(out, row)
+		}
+	}
+	return strings.Join(out, "\n") + "\n"
 }
 
 // lockedDBErrorMarkers are the substrings that identify "someone else holds
@@ -243,6 +425,93 @@ func (s *AutoCookieService) importProfileCookies() (string, error) {
 	s.logger.Info("imported cookies from browser profile without launching a browser",
 		"profile_dir", s.profileDir, "cookies", countNetscapeCookieRows(netscape))
 	return netscape, nil
+}
+
+// verificationState is the outcome of one platform auth check. The third
+// state is the point: "the check errored" is NOT the same as "the credentials
+// are dead", and conflating them is how a network blip ends up telling the
+// user to sign in again — or, worse, how an unevaluated cookie set gets
+// committed over a working one.
+type verificationState int
+
+const (
+	verifyUnknown verificationState = iota // callback errored — we learned nothing
+	verifyFailed                           // conclusively not authenticated
+	verifyOK                               // conclusively authenticated
+)
+
+// platformAuth pairs "are there credentials on disk for this platform" with
+// what verifying them concluded.
+type platformAuth struct {
+	hasCookies bool
+	state      verificationState
+}
+
+func (p platformAuth) ok() bool { return p.state == verifyOK }
+
+// checkPlatformAuth verifies both platforms against the CURRENT jar contents.
+//
+// The bool projection (`state == verifyOK`) is exactly what RefreshCookies
+// computed inline before, including the "no verify callback wired" contract:
+// presence is then the only signal available, so it is reported as success
+// with a warning rather than counted as a verification failure.
+func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platformAuth) {
+	vctx, cancel := context.WithTimeout(ctx, authVerifyTimeout)
+	defer cancel()
+
+	check := func(hasCookies bool, verify func(context.Context) (bool, error), platform string) platformAuth {
+		if !hasCookies {
+			return platformAuth{hasCookies: false, state: verifyFailed}
+		}
+		if verify == nil {
+			s.logger.Warn(platform + " auth verification callback not wired — reporting based on cookie presence alone")
+			return platformAuth{hasCookies: true, state: verifyOK}
+		}
+		verified, err := verify(vctx)
+		switch {
+		case err != nil:
+			return platformAuth{hasCookies: true, state: verifyUnknown}
+		case verified:
+			return platformAuth{hasCookies: true, state: verifyOK}
+		default:
+			return platformAuth{hasCookies: true, state: verifyFailed}
+		}
+	}
+
+	yt = check(s.jar.HasYouTubeAuthCookies(), s.VerifyYouTubeAuth, "YouTube")
+	tw = check(s.jar.HasTwitchAuthCookies(), s.VerifyTwitchAuth, "Twitch")
+	return yt, tw
+}
+
+// platformsToRestore decides which platforms an import must give back.
+//
+// Two independent reasons, both scoped to a single platform so an import that
+// helps one and harms the other is not judged as a whole:
+//
+//   - REGRESSION: it verified before the import and does not after. This is
+//     the case that silently destroys a working credential, because
+//     mergeCookieFiles lets the imported value win by name+domain and a
+//     sibling platform verifying can mask the loss entirely.
+//   - INCONCLUSIVE: the post-import check could not reach the network for a
+//     platform that had credentials. We have learned nothing, so committing a
+//     set we could not evaluate over one that may be fine is a bet with no
+//     upside.
+//
+// A platform that was already dead is deliberately NOT restored: replacing
+// dead cookies with other dead cookies costs nothing, and the fresher set is
+// the better guess for the next attempt.
+func platformsToRestore(pre, post map[string]platformAuth) map[string]bool {
+	restore := map[string]bool{}
+	for platform, before := range pre {
+		after := post[platform]
+		switch {
+		case before.ok() && after.state == verifyFailed:
+			restore[platform] = true
+		case before.hasCookies && after.state == verifyUnknown:
+			restore[platform] = true
+		}
+	}
+	return restore
 }
 
 // shouldSeedFromProfileAtStartup reports whether the service should run one
