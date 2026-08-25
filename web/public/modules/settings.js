@@ -563,6 +563,7 @@ export class SettingsController {
     if (trustForwardedProtoSwitch) {
       trustForwardedProtoSwitch.checked = !!config.network?.trust_forwarded_proto;
     }
+    this.app.setInputValue("cfg-trusted-proxies", (config.network?.trusted_proxies || []).join(", "));
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     if (dpapiFallbackSwitch) {
       dpapiFallbackSwitch.checked = !!config.cookies?.dpapi_fallback;
@@ -712,6 +713,12 @@ export class SettingsController {
     const trustForwardedProtoSwitch = document.getElementById("cfg-trust-forwarded-proto");
     const trustForwardedProto = trustForwardedProtoSwitch ? trustForwardedProtoSwitch.checked : false;
 
+    const trustedProxiesEl = document.getElementById("cfg-trusted-proxies");
+    const trustedProxies = (trustedProxiesEl?.value || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     const dpapiFallback = dpapiFallbackSwitch ? dpapiFallbackSwitch.checked : false;
 
@@ -725,6 +732,7 @@ export class SettingsController {
         tls_cert_path: tlsCertPath,
         tls_key_path: tlsKeyPath,
         trust_forwarded_proto: trustForwardedProto,
+        trusted_proxies: trustedProxies,
       },
       paths: {
         database_path: database,

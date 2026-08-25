@@ -532,3 +532,32 @@ func TestIsSafePath(t *testing.T) {
 		}
 	}
 }
+
+// --- network.trusted_proxies (validate + apply) ---
+
+func TestConfigUpdatesTrustedProxies(t *testing.T) {
+	// validateConfigUpdates: entries must be IPs or CIDRs.
+	bad := map[string]any{"network": map[string]any{
+		"trusted_proxies": []any{"172.18.0.2", "not-an-ip"},
+	}}
+	if errs := validateConfigUpdates(bad); errs["network.trusted_proxies"] == "" {
+		t.Errorf("expected a network.trusted_proxies validation error, got %v", errs)
+	}
+	good := map[string]any{"network": map[string]any{
+		"trusted_proxies": []any{"172.18.0.2", "10.0.0.0/8"},
+	}}
+	if errs := validateConfigUpdates(good); len(errs) != 0 {
+		t.Errorf("valid entries rejected: %v", errs)
+	}
+
+	// applyConfigUpdates: array applied; empty array clears.
+	cfg := config.Defaults()
+	applyConfigUpdates(cfg, good)
+	if len(cfg.Network.TrustedProxies) != 2 || cfg.Network.TrustedProxies[0] != "172.18.0.2" {
+		t.Errorf("apply: got %v, want [172.18.0.2 10.0.0.0/8]", cfg.Network.TrustedProxies)
+	}
+	applyConfigUpdates(cfg, map[string]any{"network": map[string]any{"trusted_proxies": []any{}}})
+	if len(cfg.Network.TrustedProxies) != 0 {
+		t.Errorf("apply empty: got %v, want cleared", cfg.Network.TrustedProxies)
+	}
+}

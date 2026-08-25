@@ -647,6 +647,7 @@ func TestIPGateHonorsTrustedProxy(t *testing.T) {
 		{"proxy itself (no xff) allowed", "172.18.0.2:41000", "", http.StatusOK},
 		{"direct wan client still blocked", "203.0.113.9:5000", "", http.StatusForbidden},
 		{"direct wan client, forged xff, still blocked", "203.0.113.9:5000", "192.168.1.50", http.StatusForbidden},
+		{"trusted proxy, forged private prefix, still blocked", "172.18.0.2:41000", "192.168.1.50, 203.0.113.9", http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

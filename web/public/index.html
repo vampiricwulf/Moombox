@@ -634,6 +634,12 @@
                                     this header).
                                 </span>
                             </sl-switch>
+                            <sl-input
+                                id="cfg-trusted-proxies"
+                                label="Trusted Proxies"
+                                placeholder="172.18.0.0/16, 10.0.0.5"
+                                help-text="Comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is used for access control. Leave empty unless Moombox sits behind a reverse proxy you control. Applies immediately."
+                            ></sl-input>
 
                             <sl-divider></sl-divider>
                             <h4>Password</h4>

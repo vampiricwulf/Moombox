@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -283,5 +284,43 @@ func TestDisplayColumnsCoverage(t *testing.T) {
 		if _, ok := displayColumns[col]; !ok {
 			t.Errorf("displayColumns missing %q", col)
 		}
+	}
+}
+
+// --- settings: trusted_proxies ---
+
+// TestApplyValuesRejectsBadTrustedProxy: config.Save runs config.Validate and
+// REFUSES to write a config whose trusted_proxies carries an unparseable
+// entry. The TUI must therefore reject it before OnSave — otherwise the panel
+// reports "Saved" while that save (and every other field changed alongside it)
+// is silently dropped. Mirrors the web UI's validateConfigUpdates field error.
+func TestApplyValuesRejectsBadTrustedProxy(t *testing.T) {
+	cfg := config.Defaults()
+	m := NewSettingsModel()
+	m.configStore = config.NewStore(cfg, "")
+	m.Open(cfg)
+
+	m.values["trusted_proxies"] = "172.18.0.2, not-an-ip"
+	m.applyValues()
+	if m.status != saveError {
+		t.Fatalf("status = %v, want saveError for an unparseable trusted_proxies entry", m.status)
+	}
+
+	m.status = saveIdle
+	m.errorMsg = ""
+	m.values["trusted_proxies"] = "172.18.0.2, 10.0.0.0/8"
+	m.applyValues()
+	if m.status == saveError {
+		t.Fatalf("valid entries rejected: %s", m.errorMsg)
+	}
+	if got := cfg.Network.TrustedProxies; len(got) != 2 || got[0] != "172.18.0.2" || got[1] != "10.0.0.0/8" {
+		t.Errorf("TrustedProxies = %v, want [172.18.0.2 10.0.0.0/8]", got)
+	}
+
+	// Empty clears the list rather than persisting a one-entry "" list.
+	m.values["trusted_proxies"] = "  "
+	m.applyValues()
+	if len(cfg.Network.TrustedProxies) != 0 {
+		t.Errorf("TrustedProxies = %v, want cleared", cfg.Network.TrustedProxies)
 	}
 }
