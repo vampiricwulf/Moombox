@@ -4,6 +4,8 @@ package cookies
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"sort"
@@ -245,6 +247,34 @@ func (j *CookieJar) GetSapisid() string {
 		return v
 	}
 	return j.cookies["__Secure-3PAPISID"]
+}
+
+// YouTubeIdentity returns a stable, non-reversible fingerprint of WHICH
+// Google account the jar currently holds — "" when it holds none.
+//
+// SAPISID (with __Secure-3PAPISID as the documented fallback, mirroring
+// GetSapisid) is the discriminator: it is per-account and long-lived, so it
+// stays put across the session-cookie rotation processYouTubeSetCookies
+// performs every refresh, and it changes when the operator swaps to a
+// different account. That makes "the value changed" a usable stand-in for
+// "different credentials were supplied", which is the only event that can fix
+// a job parked because the account lacks a channel membership.
+//
+// Hashed rather than returned raw because this value is held for the life of
+// the process and compared in code paths near logging, while the cookie it
+// derives from is the highest-value secret the app holds. Callers must treat
+// it as an opaque equality token — never as a credential, and never as
+// something to display.
+func (j *CookieJar) YouTubeIdentity() string {
+	if j == nil {
+		return ""
+	}
+	v := j.GetSapisid()
+	if v == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:])
 }
 
 // GetSapisidCookies returns all SAPISID variants.

@@ -281,6 +281,34 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 	}
 
+	// When the cookie file starts holding a DIFFERENT, working account, sweep
+	// the membership-parked jobs too — this is the one event that can fix
+	// them, and it is invisible to OnAuthRecovered above because those jobs
+	// parked while auth was perfectly healthy.
+	//
+	// Dead-cookie parks are eligible here as well. In the common case
+	// OnAuthRecovered already took them (a swap that also restores auth fires
+	// both), and resumeCookieParkedJobs is idempotent, so whichever runs
+	// second simply finds nothing left. Being permissive costs nothing and
+	// covers the swap-while-healthy case for them too.
+	s.cookieRefresh.OnCredentialsChanged = func(platform string) {
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, true)
+		if resumed > 0 {
+			s.log.Info("credentials changed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// Same "auth" event as the recovery notification above, for the
+			// same reason: an empty Event bypasses every target's allowlist.
+			s.notifyMgr.Send("Credentials Changed",
+				fmt.Sprintf("A different %s account was supplied — resumed %d parked job(s), including any waiting on a channel membership", platform, resumed),
+				notifications.TypeInfo,
+				[]notifications.Field{
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+				},
+				notifications.SendOptions{Event: "auth"},
+			)
+		}
+	}
+
 	// ProbeVideo callback for monitors (metadata check before job creation).
 	// Uses the caller-supplied ctx so monitor shutdown cancels in-flight
 	// probes (per audit reports/cross-cutting.md C4).

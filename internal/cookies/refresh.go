@@ -94,6 +94,18 @@ type RefreshService struct {
 	ytEverConcluded bool
 	twEverConcluded bool
 
+	// prevYouTubeIdentity is the jar's YouTubeIdentity() as of the last
+	// CONCLUSIVE check — the baseline OnCredentialsChanged compares against.
+	// Process-local by design: it is not persisted, so the first conclusive
+	// check after a restart only establishes the baseline and never fires.
+	// That is what keeps a restart from reading as an account swap.
+	//
+	// YouTube only. Twitch's auth-token rotates on Twitch's schedule (see
+	// twitch.ErrTwitchAuthExpired), so it is not a stable account
+	// discriminator — and no Twitch failure produces a membership park, so
+	// there is nothing on that side for the signal to unlock.
+	prevYouTubeIdentity string
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -114,6 +126,21 @@ type RefreshService struct {
 	// not-authenticated to authenticated (the inverse of OnRecoveryNeeded).
 	// Useful for waking jobs that were parked in the COOKIES? status.
 	OnAuthRecovered func(platform string)
+
+	// OnCredentialsChanged is called when a platform's stored account
+	// IDENTITY changes to a different, working one — the operator replaced
+	// the cookies with a different account's.
+	//
+	// This is not a weaker OnAuthRecovered; it catches a case that one
+	// structurally cannot. A job parked because the signed-in account lacks a
+	// channel membership parked while auth was HEALTHY, so swapping to the
+	// account that holds the membership produces no
+	// not-authenticated → authenticated transition to ride. Without this
+	// signal such a job has no automatic resume trigger at all.
+	//
+	// Fires for "youtube" only — see prevYouTubeIdentity for why Twitch has
+	// no usable identity signal and nothing that would need one.
+	OnCredentialsChanged func(platform string)
 }
 
 // NewRefreshService creates a new cookie refresh service.
@@ -270,6 +297,12 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	hasYTCookies := rs.jar.HasYouTubeAuthCookies()
 	hasTWCookies := rs.jar.HasTwitchAuthCookies()
 
+	// Sampled under the same lock as the rest of this check's snapshots, and
+	// AFTER the jar.Reload() at the top of doRefresh, so it reflects whatever
+	// account is on disk right now.
+	ytIdentity := rs.jar.YouTubeIdentity()
+	prevYTIdentity := rs.prevYouTubeIdentity
+
 	rs.status = AuthStatus{
 		YouTubeAuthenticated: ytAuth,
 		TwitchAuthenticated:  twAuth,
@@ -288,6 +321,12 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	if ytErr == nil {
 		rs.prevYouTubeAuth = ytAuth
 		rs.ytEverConcluded = true
+		// Advance the identity baseline on every CONCLUSIVE check, including
+		// the ones that do not fire (same account, or a swap to credentials
+		// that don't authenticate). A swap only ever fires once: the next
+		// check compares against the new value, so a persistently broken new
+		// account cannot re-fire on every cycle.
+		rs.prevYouTubeIdentity = ytIdentity
 	}
 	if twErr == nil {
 		rs.prevTwitchAuth = twAuth
@@ -352,6 +391,19 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 		}
 	}
 
+	// Detect account swaps: the cookie file now holds a DIFFERENT, working
+	// Google account than it did on the last conclusive check. Deliberately
+	// independent of the auth-recovered transition above — the case this
+	// exists for (a job blocked because the signed-in account lacks a channel
+	// membership) parks while auth is healthy, so the operator's fix produces
+	// no auth transition at all. Both can fire on the same check when dead
+	// cookies are replaced by a different account's; the sweeps they drive
+	// are idempotent, so the second finds nothing left to resume.
+	if rs.OnCredentialsChanged != nil && shouldFireIdentityChange(prevYTIdentity, ytIdentity, ytAuth, ytErr) {
+		rs.logger.Info("youtube credentials changed to a different account")
+		rs.OnCredentialsChanged("youtube")
+	}
+
 	rs.logger.Debug("cookie refresh done",
 		"youtube", ytAuth,
 		"twitch", twAuth)
@@ -405,6 +457,42 @@ func shouldFireRecovery(everConcluded, prevAuth, nowAuth bool, checkErr error, c
 		return prevAuth // witnessed transition
 	}
 	return cookiesPresent // first conclusive check — only for a configured platform
+}
+
+// shouldFireIdentityChange reports whether OnCredentialsChanged should fire
+// for a just-completed YouTube check. Pulled out of doRefresh as a pure
+// function for the same reason shouldFireRecovery was: the network calls above
+// it have no stub seam, so this is the only way to table-test the decision.
+//
+// prevIdentity is the jar fingerprint from the last CONCLUSIVE check (see
+// RefreshService.prevYouTubeIdentity), nowIdentity is this check's. nowAuth
+// and checkErr are this check's result. Four things must all hold:
+//
+//   - checkErr == nil. A network error means we learned nothing; the identity
+//     may be fine and the auth answer is meaningless.
+//   - nowAuth. Different credentials that don't authenticate are not a fix —
+//     resuming into them burns an extraction attempt and re-parks the job.
+//     If they later start working, OnAuthRecovered picks the jobs up.
+//   - prevIdentity != "". No baseline means this is the first conclusive
+//     check in this process. The baseline is not persisted across restarts on
+//     purpose, so a restart establishes it silently instead of reading as a
+//     swap and re-firing every sweep on every boot.
+//   - the two differ. The steady state is silence; anything else would put
+//     membership-parked jobs straight back into the retry loop this whole
+//     mechanism exists to end.
+//
+// nowIdentity != "" falls out of nowAuth in practice (YouTube cannot
+// authenticate a jar with no SAPISID) but is not asserted separately —
+// prevIdentity != "" plus inequality already excludes the cookies-vanished
+// direction, which is auth LOSS and belongs to OnRecoveryNeeded.
+func shouldFireIdentityChange(prevIdentity, nowIdentity string, nowAuth bool, checkErr error) bool {
+	if checkErr != nil || !nowAuth {
+		return false
+	}
+	if prevIdentity == "" {
+		return false
+	}
+	return prevIdentity != nowIdentity
 }
 
 // setYouTubeHeaders applies the standard YouTube API headers for cookie-authenticated requests.

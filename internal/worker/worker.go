@@ -1038,8 +1038,9 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		// Live was wrong when the stream had transitioned to post-live
 		// or had not yet started (per audit reports/worker.md Finding 21).
 		w.db.UpdateJobFields(job.ID, map[string]any{
-			"status": database.StatusUpcoming,
-			"error":  "",
+			"status":      database.StatusUpcoming,
+			"error":       "",
+			"park_reason": database.ParkReasonNone,
 		})
 		w.queue.Enqueue(job.ID, database.StatusUpcoming)
 		return
