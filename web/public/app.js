@@ -126,6 +126,7 @@ class MoomboxApp {
     this.connectWebSocket();
     this.loadConfig();
     this.loadStatus();
+    this.checkSecurityBanner();
     // 1 Hz UI tick. Skipped entirely while the tab is hidden — the
     // visibilitychange handler at the bottom of this file re-fires both
     // updates on return so stale strings never show. This is the app's only
@@ -1363,6 +1364,23 @@ class MoomboxApp {
       banner.classList.remove("show");
     } else {
       banner.classList.add("show");
+    }
+  }
+
+  async checkSecurityBanner() {
+    // Passwordless external access — mirrors the server's startup warning.
+    // Every interactive surface refuses to SET this combination, so it can
+    // only come from a hand-edited config file; warn persistently, don't
+    // block (update-path compatibility).
+    try {
+      const resp = await fetch("/api/auth/status");
+      if (!resp.ok) return;
+      const status = await resp.json();
+      document
+        .getElementById("security-banner")
+        ?.classList.toggle("show", !!status.passwordlessExternal);
+    } catch {
+      // Offline/restarting — the connectivity banner tells that story.
     }
   }
 

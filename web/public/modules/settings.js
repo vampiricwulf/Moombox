@@ -1881,6 +1881,12 @@ export class SettingsController {
       if (!response.ok) return;
       const status = await response.json();
 
+      // Keep the global banner in sync when the user fixes (or creates)
+      // the passwordless-external state from the Security section.
+      document
+        .getElementById("security-banner")
+        ?.classList.toggle("show", !!status.passwordlessExternal);
+
       if (status.hasPassword) {
         badge.variant = "success";
         badge.textContent = "Password set";

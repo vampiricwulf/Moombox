@@ -413,11 +413,20 @@ func (s *Server) Start(ctx context.Context) error {
 	s.ActualPort = actualPort
 	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
-	if s.cfg.Network.NetworkAccess == "lan" || s.cfg.Network.NetworkAccess == "external" {
+	// Mirrors the host switch above: all three of these bind 0.0.0.0.
+	if s.cfg.Network.NetworkAccess == "lan" || s.cfg.Network.NetworkAccess == "external" || s.cfg.Network.NetworkAccess == "public" {
 		s.logger.Info(fmt.Sprintf("[WebServer] LAN access enabled (listening on %s)", host))
 	}
 	if (s.cfg.Network.NetworkAccess == "external" || s.cfg.Network.NetworkAccess == "public") && s.cfg.Network.PasswordHash != "" && !s.cfg.Network.HTTPSEnabled {
 		s.logger.Warn("[WebServer] External access with authentication over plain HTTP — session cookies are not encrypted. Consider setting https_enabled = true or using a reverse proxy with HTTPS.")
+	}
+	// Warn-boot half of the passwordless-external policy. Every interactive
+	// surface (TUI settings, config API, setup wizard) refuses to SET this
+	// combination, so reaching it means a hand-edited config file. Deliberately
+	// a warning and not a hard failure: an existing deployment fronted by an
+	// authenticating reverse proxy must keep booting.
+	if (s.cfg.Network.NetworkAccess == "external" || s.cfg.Network.NetworkAccess == "public") && s.cfg.Network.PasswordHash == "" {
+		s.logger.Warn("[WebServer] SECURITY: network_access is \"" + s.cfg.Network.NetworkAccess + "\" with NO dashboard password — the dashboard accepts every IP that can reach this port, unauthenticated. Set a dashboard password or lower network_access; only leave this if an authenticating reverse proxy is the ONLY route to the port.")
 	}
 
 	// Open browser to dashboard URL (matches TS openBrowser behavior)

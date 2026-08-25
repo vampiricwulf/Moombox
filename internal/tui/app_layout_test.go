@@ -2,6 +2,8 @@ package tui
 
 import (
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // TestFeedbackColorChordMessages exercises the chord-prefix branch of
@@ -110,5 +112,40 @@ func TestFeedbackColorPriorityOrder(t *testing.T) {
 	// "Cancelled:" prefix wins over the warning prefix later.
 	if got := feedbackColor("Cancelled: user aborted"); got != ColorRed {
 		t.Errorf("Cancelled prefix should be red: got %v", got)
+	}
+}
+
+// TestSecurityBannerText locks the single warned state: external/public
+// network access with no dashboard password. Every interactive surface
+// refuses to SET that combination, so the banner exists only for a
+// hand-edited config file (block-set / warn-boot policy).
+func TestSecurityBannerText(t *testing.T) {
+	tests := []struct {
+		name     string
+		access   string
+		hash     string
+		wantWarn bool
+	}{
+		{"external no password warns", "external", "", true},
+		{"public no password warns", "public", "", true},
+		{"external with password silent", "external", "scrypt:salt:hash", false},
+		{"lan no password silent", "lan", "", false},
+		{"localhost silent", "localhost", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Network.NetworkAccess = tt.access
+			cfg.Network.PasswordHash = tt.hash
+			a := &App{configStore: config.NewStore(cfg, "")}
+			got := a.securityBannerText()
+			if (got != "") != tt.wantWarn {
+				t.Errorf("securityBannerText() = %q, wantWarn=%v", got, tt.wantWarn)
+			}
+		})
+	}
+	// Nil store (tests / early init) must not panic.
+	if got := (&App{}).securityBannerText(); got != "" {
+		t.Errorf("nil store: got %q, want empty", got)
 	}
 }

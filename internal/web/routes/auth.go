@@ -55,6 +55,11 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 			"authRequired":  web.IsAuthRequired(networkAccess, passwordHash),
 			"authenticated": authenticated,
 			"hasPassword":   passwordHash != "",
+			// External/public access with no password: open to any IP that
+			// can reach the port. Drives the web UI's persistent security
+			// banner (block-set/warn-boot policy — the state can only come
+			// from a hand-edited config file).
+			"passwordlessExternal": (networkAccess == "external" || networkAccess == "public") && passwordHash == "",
 		})
 	})
 
