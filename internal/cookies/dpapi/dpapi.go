@@ -20,8 +20,14 @@ package dpapi
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	_ "modernc.org/sqlite"
 )
 
 // ChromeCookie is one decrypted cookie row from a Chrome / Chromium
@@ -60,6 +66,56 @@ const chromeV11Prefix = "v11"
 // on current Chrome/Edge profiles (Brave kept v10 and still works).
 const chromeV20Prefix = "v20"
 
+// chromeHashPrefixMetaVersion is the Cookies-database `meta.version` at
+// which Chrome started prepending a 32-byte SHA-256 of the cookie's domain
+// to the plaintext INSIDE the encrypted value. Landed around Chrome 130
+// (Edge followed); everything below 24 stores the bare value.
+//
+// Ref: https://chromium.googlesource.com/chromium/src/+/b02dcebd7cafab92770734dc2bc317bd07f1d891/net/extras/sqlite/sqlite_persistent_cookie_store.cc#223
+// Mirrors yt-dlp's `meta_version >= 24` gate (yt_dlp/cookies.py:328, :559).
+const chromeHashPrefixMetaVersion = 24
+
+// chromeDomainHashLen is the length of that prefix (SHA-256 digest).
+const chromeDomainHashLen = 32
+
+// chromeUsesHashPrefix reports whether a Cookies database at the given
+// meta.version prefixes decrypted values with the domain hash.
+func chromeUsesHashPrefix(metaVersion int64) bool {
+	return metaVersion >= chromeHashPrefixMetaVersion
+}
+
+// readChromeMetaVersion reads `meta.version` from an open Chrome Cookies
+// database — the schema stamp that says whether decrypted cookie values
+// carry the 32-byte domain-hash prefix.
+//
+// Chrome declares the column LONGVARCHAR but writes an integer, so SQLite
+// may hand it back as either storage class; the value is read as text and
+// parsed, which covers both.
+//
+// Every failure mode — no meta table (a Cookies file from a pre-meta
+// Chrome, or a corrupt/truncated copy), no `version` row, NULL, a
+// non-numeric value, a negative value — degrades to 0, i.e. "no hash
+// prefix". The asymmetry is deliberate. Stripping 32 bytes that were never
+// there silently amputates the front of every cookie value and there is no
+// way to detect it downstream; NOT stripping a prefix that IS there leaves
+// binary SHA-256 bytes at the head of the plaintext, which the UTF-8 check
+// in decryptV10Cookie rejects — so that direction fails loudly, per row,
+// and the operator sees an empty extraction rather than a poisoned one.
+func readChromeMetaVersion(db *sql.DB) int64 {
+	var raw sql.NullString
+	if err := db.QueryRow("SELECT value FROM meta WHERE key = 'version'").Scan(&raw); err != nil {
+		return 0
+	}
+	if !raw.Valid {
+		return 0
+	}
+	version, err := strconv.ParseInt(strings.TrimSpace(raw.String), 10, 64)
+	if err != nil || version < 0 {
+		return 0
+	}
+	return version
+}
+
 // decryptV10Cookie decrypts a Chrome v10+ encrypted cookie value:
 //
 //	"v10" || nonce(12) || ciphertext || tag(16)
@@ -68,7 +124,12 @@ const chromeV20Prefix = "v20"
 // both use the same AES-GCM-with-12-byte-nonce-and-16-byte-tag layout.
 // Chrome on Windows produces v10; Chrome on Linux / desktop-keystore
 // configurations produces v11; Edge has been seen producing both.
-func decryptV10Cookie(masterKey, encrypted []byte) (string, error) {
+//
+// hashPrefix must come from chromeUsesHashPrefix(readChromeMetaVersion(db))
+// for the profile the row was read from: at meta.version >= 24 the
+// decrypted plaintext is `sha256(domain) || value` and the digest has to be
+// dropped before the value is usable.
+func decryptV10Cookie(masterKey, encrypted []byte, hashPrefix bool) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
@@ -104,6 +165,27 @@ func decryptV10Cookie(masterKey, encrypted []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("AES-GCM open: %w", err)
 	}
+
+	if hashPrefix {
+		// A plaintext shorter than the digest cannot be carrying one. Slicing
+		// anyway would report an empty value as a successful decrypt; erroring
+		// makes ReadChromeCookies skip the row instead.
+		if len(plaintext) < chromeDomainHashLen {
+			return "", fmt.Errorf("decrypted cookie is %d bytes, shorter than the %d-byte domain hash prefix Chrome writes at meta.version >= %d",
+				len(plaintext), chromeDomainHashLen, chromeHashPrefixMetaVersion)
+		}
+		plaintext = plaintext[chromeDomainHashLen:]
+	}
+
+	// AES-GCM already authenticated the plaintext, so invalid UTF-8 here does
+	// not mean a wrong key — it means the bytes aren't a cookie value: most
+	// likely an un-stripped domain hash from a profile whose meta.version
+	// probe came back empty. Refusing the row (upstream drops it on
+	// UnicodeDecodeError) keeps binary garbage out of cookies.txt.
+	if !utf8.Valid(plaintext) {
+		return "", fmt.Errorf("decrypted cookie value is not valid UTF-8 (%d bytes) — profile may use the Chrome 130+ domain hash prefix", len(plaintext))
+	}
+
 	return string(plaintext), nil
 }
 
