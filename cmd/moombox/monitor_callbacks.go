@@ -23,6 +23,66 @@ import (
 // success) stops vouching so a genuine outage still surfaces.
 const crossMonitorVouchWindow = 20 * time.Minute
 
+// sweepShouldResume reports whether one job should be bounced out of
+// StatusCookies back to Upcoming by a credential-recovery sweep for
+// `platform`. credentialsChanged distinguishes the two sweeps: false is the
+// auth-recovered sweep (a not-authenticated → authenticated transition —
+// dead cookies came back to life), true is the credentials-changed sweep (the
+// platform's stored account IDENTITY is different from the one we last saw).
+//
+// The status+platform gate is the pre-existing behavior. What the park reason
+// adds is the membership case: a job parks at ParkReasonMembership only when
+// the platform answered a session it had already confirmed was SIGNED IN, so
+// the auth transition the first sweep fires on cannot be the event that fixes
+// it — that session was authenticated when it failed. Resuming there bought a
+// guaranteed-identical failure and a full extraction attempt every auth cycle,
+// forever. A different account is the only thing that can help, so only the
+// credentials-changed sweep wakes those.
+//
+// ParkReasonNone (every COOKIES? row that predates the park_reason column, and
+// any park recorded by a path that does not classify) deliberately falls into
+// the resumable class: nothing on such a row can say retroactively whether it
+// was a membership problem, and stranding a genuinely dead-cookie job is worse
+// than one wasted retry on a membership one.
+func sweepShouldResume(job *database.Job, platform string, credentialsChanged bool) bool {
+	if job == nil || job.Status != database.StatusCookies || job.Platform != platform {
+		return false
+	}
+	if job.ParkReason == database.ParkReasonMembership {
+		return credentialsChanged
+	}
+	return true
+}
+
+// resumeCookieParkedJobs applies sweepShouldResume to every job and returns
+// how many were resumed. Split out of the callback closures so the decision
+// and the database loop it actually drives can both be tested directly.
+func resumeCookieParkedJobs(db *database.Database, log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, platform string, credentialsChanged bool) int {
+	jobs, err := db.GetAllJobs()
+	if err != nil {
+		log.Warn("cookie-parked sweep: GetAllJobs failed", "platform", platform, "err", err)
+		return 0
+	}
+	resumed := 0
+	for _, job := range jobs {
+		if !sweepShouldResume(job, platform, credentialsChanged) {
+			continue
+		}
+		db.UpdateJobFields(job.ID, map[string]any{
+			"status":      database.StatusUpcoming,
+			"error":       "",
+			"park_reason": database.ParkReasonNone,
+		})
+		resumed++
+	}
+	return resumed
+}
+
 // channelHealthReporter is the slice of a monitor's surface needed to
 // cross-confirm a channel's reachability across sibling monitors.
 type channelHealthReporter interface {
@@ -195,29 +255,15 @@ func (s *runState) wireMonitorCallbacks() {
 	}
 
 	// When a platform transitions from not-authenticated to authenticated,
-	// sweep any jobs parked in StatusCookies on that platform back to
-	// Upcoming so they get re-probed without manual intervention. Closes
-	// audit decision #23 (worker.md Q3).
+	// sweep the jobs parked in StatusCookies on that platform back to Upcoming
+	// so they get re-probed without manual intervention. Closes audit
+	// decision #23 (worker.md Q3).
+	//
+	// "the jobs", not "every job": sweepShouldResume holds back the
+	// membership-parked ones, whose session was already authenticated when
+	// they failed and which this transition therefore cannot fix.
 	s.cookieRefresh.OnAuthRecovered = func(platform string) {
-		jobs, err := s.db.GetAllJobs()
-		if err != nil {
-			s.log.Warn("auth-recovered sweep: GetAllJobs failed", "platform", platform, "err", err)
-			return
-		}
-		resumed := 0
-		for _, job := range jobs {
-			if job.Status != database.StatusCookies {
-				continue
-			}
-			if job.Platform != platform {
-				continue
-			}
-			s.db.UpdateJobFields(job.ID, map[string]any{
-				"status": database.StatusUpcoming,
-				"error":  "",
-			})
-			resumed++
-		}
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, false)
 		if resumed > 0 {
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 			// Event "auth" pairs with the worker's "Authentication Required"
