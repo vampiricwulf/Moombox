@@ -562,26 +562,38 @@ func TestEffectiveClientIP(t *testing.T) {
 		// load-bearing assertion for the neutralized cases below; their
 		// `expected` string only documents the current diagnostic form.
 		untrusted bool
+		// xffLines sets X-Forwarded-For as SEPARATE header field lines (one
+		// Header.Add per entry) instead of the single line `xff` produces.
+		// Mutually exclusive with xff.
+		xffLines []string
 	}{
 		// No proxies configured: identical to ExtractIP, XFF ignored.
-		{"no proxies, forged xff ignored", nil, "203.0.113.9:5000", "127.0.0.1", "203.0.113.9", false},
+		{"no proxies, forged xff ignored", nil, "203.0.113.9:5000", "127.0.0.1", "203.0.113.9", false, nil},
 		// Direct peer is NOT a trusted proxy: XFF ignored even when configured.
-		{"untrusted peer, xff ignored", []string{"172.18.0.2"}, "203.0.113.9:5000", "10.0.0.1", "203.0.113.9", false},
+		{"untrusted peer, xff ignored", []string{"172.18.0.2"}, "203.0.113.9:5000", "10.0.0.1", "203.0.113.9", false, nil},
 		// Trusted proxy, single-hop XFF: real client returned.
-		{"proxy forwards wan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "203.0.113.9", "203.0.113.9", false},
-		{"proxy forwards lan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "192.168.1.50", "192.168.1.50", false},
+		{"proxy forwards wan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "203.0.113.9", "203.0.113.9", false, nil},
+		{"proxy forwards lan client", []string{"172.18.0.2"}, "172.18.0.2:41000", "192.168.1.50", "192.168.1.50", false, nil},
 		// Client-forged private prefix through the proxy: proxy appends the
 		// real address to the RIGHT, and the rightmost-untrusted walk finds it.
-		{"forged private prefix defeated", []string{"172.18.0.2"}, "172.18.0.2:41000", "10.0.0.1, 203.0.113.9", "203.0.113.9", false},
+		{"forged private prefix defeated", []string{"172.18.0.2"}, "172.18.0.2:41000", "10.0.0.1, 203.0.113.9", "203.0.113.9", false, nil},
+		// Same forgery, but the proxy appends by adding a SECOND header field
+		// line instead of extending the first (HAProxy's `option forwardfor`
+		// does exactly this). Header.Get would return only the client's line
+		// and the walk would hand back the forged private address, failing
+		// OPEN through the lan gate and the auth skip. Every field line must
+		// be concatenated in wire order before the walk.
+		{"multi-line xff: rightmost line wins", []string{"172.18.0.2"}, "172.18.0.2:41000", "", "203.0.113.9", true,
+			[]string{"192.168.1.50", "203.0.113.9"}},
 		// Two chained trusted proxies (CIDR), then the client.
-		{"cidr proxy chain", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "203.0.113.9, 172.18.0.3", "203.0.113.9", false},
+		{"cidr proxy chain", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "203.0.113.9, 172.18.0.3", "203.0.113.9", false, nil},
 		// Trusted proxy but no XFF at all: fall back to the proxy address.
-		{"proxy without xff", []string{"172.18.0.2"}, "172.18.0.2:41000", "", "172.18.0.2", false},
+		{"proxy without xff", []string{"172.18.0.2"}, "172.18.0.2:41000", "", "172.18.0.2", false, nil},
 		// Every hop trusted (proxy self-call / health check): direct peer.
-		{"all hops trusted", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "172.18.0.3", "172.18.0.2", false},
+		{"all hops trusted", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "172.18.0.3", "172.18.0.2", false, nil},
 		// Malformed rightmost entry fails CLOSED (returned verbatim → treated
 		// as neither loopback nor private downstream), not open.
-		{"malformed entry fails closed", []string{"172.18.0.2"}, "172.18.0.2:41000", "garbage-value", "garbage-value", true},
+		{"malformed entry fails closed", []string{"172.18.0.2"}, "172.18.0.2:41000", "garbage-value", "garbage-value", true, nil},
 		// A forged entry that SPELLS a trusted class must not inherit it.
 		// isLoopback resolves the bare hostname "localhost" to loopback, so an
 		// un-neutralized verbatim return here would fail OPEN and, once this
@@ -590,16 +602,16 @@ func TestEffectiveClientIP(t *testing.T) {
 		// "X-Forwarded-For: localhost" and the proxy appends its real bridge
 		// address to the right, so the walk skips the trusted hop and lands on
 		// the forgery.
-		{"forged localhost fails closed", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "localhost, 172.18.0.99", "invalid-localhost", true},
-		{"bare forged localhost fails closed", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "localhost", "invalid-localhost", true},
+		{"forged localhost fails closed", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "localhost, 172.18.0.99", "invalid-localhost", true, nil},
+		{"bare forged localhost fails closed", []string{"172.18.0.0/16"}, "172.18.0.2:41000", "localhost", "invalid-localhost", true, nil},
 		// IPv6: bracketed with port, plus zone stripping.
-		{"ipv6 bracketed with port", []string{"172.18.0.2"}, "172.18.0.2:41000", "[2001:db8::1]:443", "2001:db8::1", false},
-		{"ipv6 zone stripped", []string{"172.18.0.2"}, "172.18.0.2:41000", "fe80::1%eth0", "fe80::1", false},
+		{"ipv6 bracketed with port", []string{"172.18.0.2"}, "172.18.0.2:41000", "[2001:db8::1]:443", "2001:db8::1", false, nil},
+		{"ipv6 zone stripped", []string{"172.18.0.2"}, "172.18.0.2:41000", "fe80::1%eth0", "fe80::1", false, nil},
 		// IPv6 trusted proxy.
-		{"ipv6 proxy", []string{"fd77:4d42::/64"}, "[fd77:4d42::2]:41000", "203.0.113.9", "203.0.113.9", false},
+		{"ipv6 proxy", []string{"fd77:4d42::/64"}, "[fd77:4d42::2]:41000", "203.0.113.9", "203.0.113.9", false, nil},
 		// Bare (non-CIDR) IPv6 proxy entry: exercises the /128 widening in
 		// loadTrustedProxies that every CIDR-shaped case above skips.
-		{"bare ipv6 proxy widened to /128", []string{"fd77:4d42::2"}, "[fd77:4d42::2]:41000", "203.0.113.9", "203.0.113.9", false},
+		{"bare ipv6 proxy widened to /128", []string{"fd77:4d42::2"}, "[fd77:4d42::2]:41000", "203.0.113.9", "203.0.113.9", false, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -607,6 +619,9 @@ func TestEffectiveClientIP(t *testing.T) {
 			r.RemoteAddr = tt.remoteAddr
 			if tt.xff != "" {
 				r.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			for _, line := range tt.xffLines {
+				r.Header.Add("X-Forwarded-For", line)
 			}
 			got := EffectiveClientIP(storeWithProxies(tt.proxies...), r)
 			if got != tt.expected {
@@ -641,13 +656,21 @@ func TestIPGateHonorsTrustedProxy(t *testing.T) {
 		remoteAddr string
 		xff        string
 		wantStatus int
+		// xffLines sets X-Forwarded-For as separate header field lines
+		// (Header.Add per entry) rather than one comma-joined line.
+		xffLines []string
 	}{
-		{"wan client via proxy blocked", "172.18.0.2:41000", "203.0.113.9", http.StatusForbidden},
-		{"lan client via proxy allowed", "172.18.0.2:41000", "192.168.1.50", http.StatusOK},
-		{"proxy itself (no xff) allowed", "172.18.0.2:41000", "", http.StatusOK},
-		{"direct wan client still blocked", "203.0.113.9:5000", "", http.StatusForbidden},
-		{"direct wan client, forged xff, still blocked", "203.0.113.9:5000", "192.168.1.50", http.StatusForbidden},
-		{"trusted proxy, forged private prefix, still blocked", "172.18.0.2:41000", "192.168.1.50, 203.0.113.9", http.StatusForbidden},
+		{"wan client via proxy blocked", "172.18.0.2:41000", "203.0.113.9", http.StatusForbidden, nil},
+		{"lan client via proxy allowed", "172.18.0.2:41000", "192.168.1.50", http.StatusOK, nil},
+		{"proxy itself (no xff) allowed", "172.18.0.2:41000", "", http.StatusOK, nil},
+		{"direct wan client still blocked", "203.0.113.9:5000", "", http.StatusForbidden, nil},
+		{"direct wan client, forged xff, still blocked", "203.0.113.9:5000", "192.168.1.50", http.StatusForbidden, nil},
+		{"trusted proxy, forged private prefix, still blocked", "172.18.0.2:41000", "192.168.1.50, 203.0.113.9", http.StatusForbidden, nil},
+		// The forgery arrives on its own header field line and the proxy adds
+		// a second one (HAProxy-style append). Reading only the first line
+		// would let the forged 192.168.1.50 pass the lan gate.
+		{"trusted proxy, forged private line, still blocked", "172.18.0.2:41000", "", http.StatusForbidden,
+			[]string{"192.168.1.50", "203.0.113.9"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -655,6 +678,9 @@ func TestIPGateHonorsTrustedProxy(t *testing.T) {
 			r.RemoteAddr = tt.remoteAddr
 			if tt.xff != "" {
 				r.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			for _, line := range tt.xffLines {
+				r.Header.Add("X-Forwarded-For", line)
 			}
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, r)

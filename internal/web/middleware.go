@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -275,9 +276,14 @@ type trustedProxySet struct {
 var trustedProxyCache atomic.Pointer[trustedProxySet]
 
 func loadTrustedProxies(store *config.Store) *trustedProxySet {
+	// Clone inside the callback: copying only the slice header would leave the
+	// join and the parse loop below reading ELEMENTS with no lock held. Every
+	// writer today replaces the backing array rather than editing in place, so
+	// that is safe by accident; cloning makes it safe by construction. Strings
+	// are immutable, so a shallow clone is enough.
 	var entries []string
 	store.Read(func(c *config.MoomboxConfig) {
-		entries = c.Network.TrustedProxies
+		entries = slices.Clone(c.Network.TrustedProxies)
 	})
 	raw := strings.Join(entries, ",")
 	if cached := trustedProxyCache.Load(); cached != nil && cached.raw == raw {
@@ -343,7 +349,17 @@ func EffectiveClientIP(store *config.Store, r *http.Request) string {
 	if !proxies.contains(direct) {
 		return direct
 	}
-	xff := r.Header.Get("X-Forwarded-For")
+	// Values+join, never Get: Header.Get returns only the FIRST field line and
+	// Go never joins repeated headers. Proxies are free to append by adding a
+	// second "X-Forwarded-For:" line instead of extending the first — HAProxy's
+	// `option forwardfor` does exactly that by default, which is why its own
+	// docs tell operators to read the LAST occurrence. Reading only the first
+	// line there would hand the walk the client's forged entry and never show
+	// it the address the proxy actually observed: a forged private address
+	// would pass the lan gate and skip auth, failing OPEN. Concatenating every
+	// field line in wire order (RFC 7230 §3.2.2) makes both append styles
+	// equivalent; a single-line header joins to itself unchanged.
+	xff := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
 	if xff == "" {
 		return direct
 	}
