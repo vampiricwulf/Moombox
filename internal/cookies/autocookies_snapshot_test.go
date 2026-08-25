@@ -52,7 +52,7 @@ func TestSnapshotFallsBackWhenTheTempSideOfTheSidecarCopyFails(t *testing.T) {
 
 	// The payoff: the read still completes off the live database, which is
 	// what the function's own doc comment promises for "no temp space".
-	lines, err := querySnapshotOrLive(profileDir, filepath.Join(profileDir, firefoxCookieDBName), false)
+	lines, _, err := querySnapshotOrLive(profileDir, filepath.Join(profileDir, firefoxCookieDBName), false)
 	if err != nil {
 		t.Fatalf("a temp-side failure must degrade to the live database, got %v", err)
 	}
@@ -77,7 +77,7 @@ func TestSnapshotStillRefusesFallbackOnUnreadableSidecarSource(t *testing.T) {
 		t.Fatalf("an unreadable sidecar must stay ErrCookieDBUnreadable, got %v", err)
 	}
 
-	if _, err := querySnapshotOrLive(profileDir, filepath.Join(profileDir, firefoxCookieDBName), false); !errors.Is(err, ErrCookieDBUnreadable) {
+	if _, _, err := querySnapshotOrLive(profileDir, filepath.Join(profileDir, firefoxCookieDBName), false); !errors.Is(err, ErrCookieDBUnreadable) {
 		t.Fatalf("an unreadable sidecar must not degrade to the live database, got %v", err)
 	}
 }

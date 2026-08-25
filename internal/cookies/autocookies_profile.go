@@ -506,7 +506,8 @@ func (s *AutoCookieService) importProfileCookies() (string, error) {
 		return "", classifyCookieDBError(fmt.Errorf("open %s in %q: %w", firefoxCookieDBName, s.profileDir, statErr))
 	}
 
-	netscape, err := readFirefoxCookies(s.profileDir)
+	netscape, stats, err := readFirefoxCookies(s.profileDir)
+	s.logFirefoxReadStats(stats)
 	if err != nil {
 		return "", err
 	}

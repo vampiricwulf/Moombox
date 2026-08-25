@@ -135,7 +135,7 @@ func TestSnapshotCopiesWALSidecars(t *testing.T) {
 		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			t.Fatalf("write decoy db: %v", err)
 		}
-		lines, err := queryFirefoxCookieDB(dst)
+		lines, _, err := queryFirefoxCookieDB(dst)
 		if err != nil {
 			t.Fatalf("main-file-only copy: unexpected error %v (the trap is that it SUCCEEDS with no rows)", err)
 		}
@@ -154,7 +154,7 @@ func TestSnapshotCopiesWALSidecars(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(snapDir, "cookies.sqlite-wal")); err != nil {
 			t.Fatalf("snapshot is missing the -wal sidecar: %v", err)
 		}
-		lines, err := queryFirefoxCookieDB(filepath.Join(snapDir, "cookies.sqlite"))
+		lines, _, err := queryFirefoxCookieDB(filepath.Join(snapDir, "cookies.sqlite"))
 		if err != nil {
 			t.Fatalf("query snapshot: %v", err)
 		}
@@ -184,7 +184,7 @@ func TestSnapshotCopiesWALSidecars(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(bare, "cookies.sqlite-shm")); err == nil {
 			t.Fatal("fixture error: -shm should not have been copied")
 		}
-		lines, err := queryFirefoxCookieDB(filepath.Join(bare, "cookies.sqlite"))
+		lines, _, err := queryFirefoxCookieDB(filepath.Join(bare, "cookies.sqlite"))
 		if err != nil {
 			t.Fatalf("query main+wal copy: %v", err)
 		}

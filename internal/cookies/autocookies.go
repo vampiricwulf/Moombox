@@ -438,7 +438,9 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 
 	if isFirefoxBased(browser.Type) {
 		s.closeFirefoxGracefully()
-		netscapeCookies, err = readFirefoxCookies(s.profileDir)
+		var stats firefoxReadStats
+		netscapeCookies, stats, err = readFirefoxCookies(s.profileDir)
+		s.logFirefoxReadStats(stats)
 		// Interactive setup has a legitimate empty state the refresh and
 		// profile-import paths do not: the user opened the browser and
 		// closed it without signing in. readFirefoxCookies now reports an
