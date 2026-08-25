@@ -131,10 +131,20 @@ Docker-specific behavior:
   `docker-compose.yml`).
 - The first-run setup wizard is skipped (the entrypoint seeds a config
   on first start); all of its settings are available in Settings.
-- For members-only content, mount a Netscape cookie file at
-  `/data/cookies.txt` (see the comments in `docker-compose.yml`) — the
-  seeded config already points there. Browser-based automatic cookie
-  acquisition is not available inside a container.
+- For members-only content, put a Netscape cookie file at
+  `./data/cookies.txt` on the host — the `./data` volume already exposes
+  it and the seeded config points at `/data/cookies.txt`, so there is no
+  extra volume line to add. **Do not bind-mount the file individually**
+  (`- ./cookies.txt:/data/cookies.txt`): Moombox keeps the YouTube
+  session alive by rewriting `cookies.txt` about every 30 minutes with
+  the values YouTube rotates back, and it does so with a temp file plus a
+  rename. A rename cannot replace a single-file bind mount, so the
+  write-back fails with only a warning in the log and the session quietly
+  ages out. Browser-based automatic cookie acquisition is not available
+  inside a container either, so when the session does die the fix is to
+  overwrite `./data/cookies.txt` with a fresh export. Export it from a
+  private window and close that window afterwards — continuing to browse
+  in the source profile rotates the session and invalidates the export.
 - Update by pulling a new image (`docker compose pull && docker compose
   up -d`) — an in-app update would be lost when the container is
   recreated, so the seeded config disables automatic update checks
