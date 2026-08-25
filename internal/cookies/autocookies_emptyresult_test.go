@@ -168,6 +168,87 @@ func TestRefreshLeavingNoAuthCookiesIsStatedNotCleared(t *testing.T) {
 	}
 }
 
+// partiallyExpiredPreviousCookieFile is a cookies.txt where the YouTube
+// credentials have lapsed but the Twitch one is a live session cookie.
+const partiallyExpiredPreviousCookieFile = "# Netscape HTTP Cookie File\n" +
+	".youtube.com\tTRUE\t/\tTRUE\t1000000000\tSAPISID\tprevious-sapisid\n" +
+	"#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1000000000\tLOGIN_INFO\tprevious-login-info\n" +
+	"#HttpOnly_.twitch.tv\tTRUE\t/\tTRUE\t0\tauth-token\t" + goodTwitchToken + "\n"
+
+// TestRefreshLosingOnePlatformIsNotReportedAsSuccess is the per-platform
+// half of the same mechanism.
+//
+// The jar ignores expiry and mergeCookieFiles prunes on it, so a refresh can
+// drop one platform's rows while the other survives. Then ytHasCookies is
+// false, twHasCookies is true, Twitch verifies — and control reaches the
+// "any platform verified" branch, which affirmatively CLEARS lastError,
+// records success and logs "verified=Twitch". The YouTube credential is gone
+// from cookies.txt and nothing anywhere says so.
+//
+// Reachable on the first pass off a mounted profile that holds a fresh
+// Twitch token next to expired YouTube rows.
+func TestRefreshLosingOnePlatformIsNotReportedAsSuccess(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, []profileTestCookie{
+		{name: "auth-token", value: goodTwitchToken, host: ".twitch.tv", path: "/", httpOnly: true, secure: true},
+		{name: "login", value: "someuser", host: ".twitch.tv", path: "/"},
+	})
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(partiallyExpiredPreviousCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	// YouTube is dead before AND after, so nothing is rolled back — this is
+	// the loss on its own, not a rollback in disguise.
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return false, nil }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) {
+		return s.jar.GetTwitchAuthToken() == goodTwitchToken, nil
+	}
+	if err := s.jar.Load(cookiePath); err != nil {
+		t.Fatal(err)
+	}
+	if !s.jar.HasYouTubeAuthCookies() {
+		t.Fatal("fixture is broken — the jar must believe it holds YouTube auth before the refresh")
+	}
+
+	ok, err := s.RefreshCookies(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+	// Twitch genuinely verified, so `true` is the right answer here. The
+	// complaint is the silence about YouTube, not the return value.
+	if !ok {
+		t.Fatal("Twitch verified, so the refresh did succeed for that platform")
+	}
+
+	// Establish that the loss really happened.
+	data, readErr := os.ReadFile(cookiePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), "previous-login-info") {
+		t.Fatalf("fixture is broken — the YouTube rows were supposed to be pruned as expired:\n%s", data)
+	}
+	if !strings.Contains(string(data), goodTwitchToken) {
+		t.Fatalf("fixture is broken — the Twitch credential was supposed to survive:\n%s", data)
+	}
+	if s.jar.HasYouTubeAuthCookies() {
+		t.Fatal("fixture is broken — the reloaded jar was supposed to have lost YouTube")
+	}
+
+	status := s.GetStatus()
+	if status.LastError == nil {
+		t.Fatal("the refresh dropped the YouTube credential and cleared the status — a lost platform must be stated")
+	}
+	if !strings.Contains(*status.LastError, "YouTube") {
+		t.Errorf("status must name the platform whose credentials are gone, got %q", *status.LastError)
+	}
+	if strings.Contains(*status.LastError, "Twitch") {
+		t.Errorf("Twitch verified and must not be named as lost: %q", *status.LastError)
+	}
+}
+
 // TestRefreshWithNothingToDoStaysQuiet is the guard on the other side. The
 // branch above must not turn a legitimate no-op into a false alarm: when
 // there were no credentials to begin with and nothing was written, there is

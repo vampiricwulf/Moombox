@@ -199,14 +199,21 @@ func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, C
 			httpOnly int
 			samesite int
 		)
-		stats.Rows++
 		if err := rows.Scan(&host, &name, &encVal, &path, &expUTC, &secure, &httpOnly, &samesite); err != nil {
+			// In scope by definition: without a host there is no way to
+			// know whether the filter would have excluded it.
+			stats.Rows++
 			stats.ScanFailed++
 			continue
 		}
 		if filter != "" && !strings.Contains(strings.ToLower(host), filter) {
 			continue
 		}
+		// Counted AFTER the filter so Rows means "rows this pass actually
+		// considered". Counting the whole table instead would make
+		// Summary()'s "N of M could not be decrypted" ratio understate
+		// itself for any caller that passes an origin filter.
+		stats.Rows++
 		value, decryptErr := decryptV10Cookie(masterKey, encVal, hashPrefix)
 		if decryptErr != nil {
 			// Skip the row but don't kill the whole extraction —

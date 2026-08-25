@@ -833,6 +833,23 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	ytHasCookies := s.jar.HasYouTubeAuthCookies()
 	twHasCookies := s.jar.HasTwitchAuthCookies()
 
+	// Platforms that HAD auth cookies going into this refresh and do not
+	// have them coming out. This is per platform on purpose: the jar ignores
+	// expiry while mergeCookieFiles prunes on it, so one platform's rows can
+	// vanish while the other's survive — and a sibling that verifies would
+	// otherwise carry the whole call to "refresh succeeded" over a
+	// credential that just disappeared. A platform the import legitimately
+	// REPLACED still has auth in the reloaded jar, and the rollback above
+	// puts previous rows back before this point, so neither of those reads
+	// as a loss.
+	var lost []string
+	if hadYTAuth && !ytHasCookies {
+		lost = append(lost, "YouTube")
+	}
+	if hadTWAuth && !twHasCookies {
+		lost = append(lost, "Twitch")
+	}
+
 	s.mu.Lock()
 	if postYT.state == verifyFailed && ytHasCookies {
 		s.needsRelogin["youtube"] = true
@@ -858,9 +875,21 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	// Consider refresh successful if any platform verified
 	if ytAuth || twAuth {
 		now := time.Now()
+		// One platform verifying does not license clearing the status over
+		// another platform's credentials disappearing. Success here is
+		// partial, and the part that was lost is the part nobody would
+		// otherwise find out about.
+		lostMsg := ""
+		if len(lost) > 0 {
+			lostMsg = cookiesLostMessage(lost)
+		}
 		s.mu.Lock()
 		s.lastRefresh = &now
-		s.lastError = nil
+		if lostMsg != "" {
+			s.lastError = &lostMsg
+		} else {
+			s.lastError = nil
+		}
 		s.mu.Unlock()
 
 		// Persist LastRefresh to the sidecar (audit cookies.md #48).
@@ -885,7 +914,12 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		if twAuth {
 			verified = append(verified, "Twitch")
 		}
-		s.logger.Info("cookie refresh succeeded", "verified", strings.Join(verified, " + "))
+		if lostMsg != "" {
+			s.logger.Warn("cookie refresh verified one platform and lost another",
+				"verified", strings.Join(verified, " + "), "lost", strings.Join(lost, ","), "detail", lostMsg)
+		} else {
+			s.logger.Info("cookie refresh succeeded", "verified", strings.Join(verified, " + "))
+		}
 		return true, nil
 	}
 
@@ -905,13 +939,6 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		// platform. That is three different situations wearing one face, and
 		// clearing lastError for all of them (the old behaviour) is only
 		// right for the third.
-		var lost []string
-		if hadYTAuth {
-			lost = append(lost, "YouTube")
-		}
-		if hadTWAuth {
-			lost = append(lost, "Twitch")
-		}
 		switch {
 		case len(lost) > 0:
 			// We HAD credentials and now the file has none. The usual cause
@@ -920,19 +947,18 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			// refresh that thought it had something to refresh. Whatever the
 			// cause, an empty credential file must never be reported as a
 			// clean no-op.
-			errMsg := strings.Join(lost, " + ") + " cookies are gone from cookies.txt after this refresh — " +
-				"every stored credential had expired or was dropped, so nothing is left to authenticate with; sign in again"
+			errMsg := cookiesLostMessage(lost)
 			s.setError(errMsg)
 			s.logger.Warn("cookie refresh left no auth cookies on disk",
 				"platforms", strings.Join(lost, ","), "detail", errMsg)
 		case fetchedRows > 0:
 			// Nothing was lost — there was nothing to lose — but this pass
 			// did write cookies, and none of them authenticate anything. The
-			// container case: a mounted profile that is simply not signed in.
-			// Saying nothing here makes a useless mount look like a working
-			// one.
+			// container case: a mounted profile that is not signed in, or
+			// one whose saved logins have since lapsed. Saying nothing here
+			// makes a useless mount look like a working one.
 			errMsg := "cookies were read but none of them authenticate YouTube or Twitch — " +
-				"the browser profile is not signed in to either platform"
+				"the browser profile is not signed in to either platform, or its saved logins have expired"
 			s.setError(errMsg)
 			s.logger.Warn("cookie refresh produced no auth cookies", "rows", fetchedRows, "detail", errMsg)
 		default:
@@ -976,9 +1002,26 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	default:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
 	}
+	// A platform can be LOST while another is merely rejected, and the
+	// rejection message would otherwise be the only thing said — naming the
+	// surviving platform's problem while the other one's credentials
+	// silently left the file.
+	if len(lost) > 0 {
+		errMsg = cookiesLostMessage(lost) + ". " + errMsg
+	}
 	s.setError(errMsg)
-	s.logger.Warn("refresh completed but auth verification failed", "platforms", strings.Join(failed, ","), "detail", errMsg)
+	s.logger.Warn("refresh completed but auth verification failed",
+		"platforms", strings.Join(failed, ","), "lost", strings.Join(lost, ","), "detail", errMsg)
 	return false, nil
+}
+
+// cookiesLostMessage names the platforms whose credentials were on disk
+// before a refresh and are not on disk after it. One wording for every exit
+// that can observe the loss, so the operator sees the same sentence whether
+// the sibling platform verified, was rejected, or was never there.
+func cookiesLostMessage(lost []string) string {
+	return strings.Join(lost, " + ") + " cookies are gone from cookies.txt after this refresh — " +
+		"every stored credential had expired or was dropped, so nothing is left to authenticate with; sign in again"
 }
 
 // Stop stops the auto-cookie service.
@@ -1177,6 +1220,12 @@ func isWindows() bool {
 	return runtimeGOOS() == "windows"
 }
 
+// writeCookieFile is the cookie-file write RefreshCookies goes through, as a
+// package variable so tests can exercise the branches that only exist for a
+// FAILED write — notably a rollback that cannot put the previous credentials
+// back, which decides what the operator is told is on disk.
+var writeCookieFile = writeFileAtomic
+
 // writeFileAtomic writes data to a temp file then renames it to the target path,
 // preventing corruption on partial failure. Applies
 // utils.ApplyUserOnlyDACL ONCE per parent directory across the process
@@ -1189,12 +1238,6 @@ func isWindows() bool {
 // ACL ends up over-restrictive, and (b) propagating from the dir
 // covers any future writes (rotated cookies, side-files) without
 // per-write icacls latency. No-op on non-Windows; idempotent.
-// writeCookieFile is the cookie-file write RefreshCookies goes through, as a
-// package variable so tests can exercise the branches that only exist for a
-// FAILED write — notably a rollback that cannot put the previous credentials
-// back, which decides what the operator is told is on disk.
-var writeCookieFile = writeFileAtomic
-
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Unique temp name (os.CreateTemp): the RefreshService rewrites the same
 	// cookies.txt through its own temp file, and a shared fixed ".tmp" name

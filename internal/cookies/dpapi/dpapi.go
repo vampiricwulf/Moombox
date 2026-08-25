@@ -87,7 +87,7 @@ var (
 // counts the same thing and reports "({failed_cookies} could not be
 // decrypted)".
 type ChromeReadStats struct {
-	Rows            int   // rows read from the cookies table
+	Rows            int   // rows considered (past the origin filter, if any)
 	Decrypted       int   // rows whose value came out usable
 	ScanFailed      int   // rows whose Scan failed
 	Failed          int   // rows whose value could not be decrypted

@@ -447,19 +447,33 @@ func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 		}
 
 		// The rest have a faithful default and must NOT cost the row:
-		//   value NULL -> "" (an empty cookie value is legal)
-		//   path  NULL -> "/" (upstream's path_specified=False, i.e. no
-		//                      path restriction; "/" is how that is spelled
-		//                      in a Netscape file)
-		//   flags NULL -> not set
-		// expiry NULL -> 0, the Netscape session-cookie sentinel that
-		// rowExpired never prunes (upstream's `expiry is not None`).
-		if !value.Valid || !cookiePath.Valid || !isHttpOnly.Valid || !isSecure.Valid {
+		//   value      NULL -> "" (an empty cookie value is legal)
+		//   path       NULL -> "/" (upstream's path_specified=False, i.e. no
+		//                           path restriction; "/" is how that is
+		//                           spelled in a Netscape file)
+		//   expiry     NULL -> 0, the Netscape session-cookie sentinel that
+		//                      rowExpired never prunes (upstream's
+		//                      `expiry is not None`)
+		//   isHttpOnly NULL -> false; it only decides the #HttpOnly_ prefix
+		//   isSecure   NULL -> TRUE, deliberately not false. The field is
+		//                      unknown, and the two guesses are not
+		//                      symmetric: marking a cookie secure withholds
+		//                      it from a plaintext request, marking it
+		//                      insecure would send a session credential over
+		//                      one. Our own jar ignores the field and all
+		//                      our traffic is HTTPS, so the safe guess is
+		//                      free here and only ever helps another
+		//                      consumer of the file.
+		if !value.Valid || !cookiePath.Valid || !expiry.Valid || !isHttpOnly.Valid || !isSecure.Valid {
 			stats.defaulted++
 		}
 		rowPath := cookiePath.String
 		if !cookiePath.Valid || rowPath == "" {
 			rowPath = "/"
+		}
+		secure := true
+		if isSecure.Valid {
+			secure = isSecure.Int64 != 0
 		}
 
 		expirySeconds := int64(0)
@@ -474,7 +488,7 @@ func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 			domain:   host.String,
 			httpOnly: isHttpOnly.Int64 != 0,
 			path:     rowPath,
-			secure:   isSecure.Int64 != 0,
+			secure:   secure,
 			expiry:   expirySeconds,
 			name:     name.String,
 			value:    value.String,

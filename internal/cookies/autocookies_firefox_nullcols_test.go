@@ -77,6 +77,7 @@ func TestQueryFirefoxCookieDB_NullColumnsAreNotSilentlyDropped(t *testing.T) {
 		{name: "LOGIN_INFO", value: nil, host: ".youtube.com", path: "/", expiry: int64(0), httpOnly: int64(1), secure: int64(1)},
 		{name: "HSID", value: "hsid-value", host: ".google.com", path: nil, expiry: int64(0), httpOnly: int64(1), secure: int64(0)},
 		{name: "YSC", value: "ysc-value", host: ".youtube.com", path: "/", expiry: int64(0), httpOnly: nil, secure: nil},
+		{name: "SID", value: "sid-value", host: ".google.com", path: "/", expiry: nil, httpOnly: int64(1), secure: int64(1)},
 		// Rows that cannot be used at all: no name to send, no host to match.
 		{name: nil, value: "orphan-value", host: ".youtube.com", path: "/", expiry: int64(0), httpOnly: int64(0), secure: int64(1)},
 		{name: "APISID", value: "apisid-value", host: nil, path: "/", expiry: int64(0), httpOnly: int64(0), secure: int64(1)},
@@ -107,7 +108,10 @@ func TestQueryFirefoxCookieDB_NullColumnsAreNotSilentlyDropped(t *testing.T) {
 		t.Errorf("NULL path became %q, want \"/\"", fields[2])
 	}
 
-	// NULL flags mean "not set", not "drop the cookie".
+	// NULL flags mean "not set", not "drop the cookie". isSecure defaults
+	// the conservative way: the two guesses are not symmetric, since
+	// "insecure" would send a session credential over plaintext while
+	// "secure" merely withholds it.
 	row = netscapeRowFor(lines, "YSC")
 	if row == "" {
 		t.Errorf("NULL isHttpOnly/isSecure dropped the whole cookie:\n%v", lines)
@@ -115,8 +119,8 @@ func TestQueryFirefoxCookieDB_NullColumnsAreNotSilentlyDropped(t *testing.T) {
 		if strings.HasPrefix(row, "#HttpOnly_") {
 			t.Errorf("NULL isHttpOnly became httpOnly=true: %q", row)
 		}
-		if fields := strings.Split(row, "\t"); fields[3] != "FALSE" {
-			t.Errorf("NULL isSecure became %q, want FALSE", fields[3])
+		if fields := strings.Split(row, "\t"); fields[3] != "TRUE" {
+			t.Errorf("NULL isSecure became %q, want TRUE — an unknown secure flag must not downgrade the cookie", fields[3])
 		}
 	}
 
@@ -134,11 +138,21 @@ func TestQueryFirefoxCookieDB_NullColumnsAreNotSilentlyDropped(t *testing.T) {
 	if stats.scanErrors != 0 {
 		t.Errorf("scanErrors = %d, want 0 — NULLs are expected, not scan failures", stats.scanErrors)
 	}
-	if stats.rows != 6 {
-		t.Errorf("rows = %d, want 6", stats.rows)
+	// A NULL expiry maps to the session-cookie sentinel, and that mapping is
+	// counted like every other one — it is the column whose NULL handling
+	// landed first, and it must not be the one that stays invisible.
+	row = netscapeRowFor(lines, "SID")
+	if row == "" {
+		t.Errorf("a NULL expiry dropped the whole cookie:\n%v", lines)
+	} else if fields := strings.Split(strings.TrimPrefix(row, "#HttpOnly_"), "\t"); fields[4] != "0" {
+		t.Errorf("NULL expiry became %q, want the session sentinel 0", fields[4])
 	}
-	if stats.defaulted != 3 {
-		t.Errorf("defaulted = %d, want 3 (NULL value, NULL path, NULL flags)", stats.defaulted)
+
+	if stats.rows != 7 {
+		t.Errorf("rows = %d, want 7", stats.rows)
+	}
+	if stats.defaulted != 4 {
+		t.Errorf("defaulted = %d, want 4 (NULL value, path, flags, expiry)", stats.defaulted)
 	}
 }
 
