@@ -44,6 +44,7 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 ### Security
 - **HTTPS support** — Auto-generated self-signed certificates with dual-protocol (TLS + plain HTTP) on a single port
 - **Password authentication** — Optional password protection for external access (scrypt-hashed, session-based)
+- **Reverse-proxy aware** — `trusted_proxies` makes IP-based access control judge the real client behind nginx/Caddy/Traefik instead of the proxy (see [Remote Access](#remote-access))
 
 ### Authentication
 - **Member-only support** — Cookie-based authentication for members-only streams (YouTube + Twitch)
@@ -124,7 +125,10 @@ Docker-specific behavior:
   arriving over Docker's bridge network are never loopback, so a
   `"localhost"` default would make the dashboard unreachable. Use
   `"127.0.0.1:774:774"` as the port mapping to restrict access to the
-  Docker host only.
+  Docker host only. The compose file also declares an IPv6-enabled
+  network — reach the dashboard over the host's **IPv4** address (see
+  [Remote Access](#remote-access) and the comments in
+  `docker-compose.yml`).
 - The first-run setup wizard is skipped (the entrypoint seeds a config
   on first start); all of its settings are available in Settings.
 - For members-only content, mount a Netscape cookie file at
@@ -157,6 +161,148 @@ Moombox.exe --config path.toml # Use a specific config file
 Moombox.exe --log-level DEBUG  # Override log level
 ```
 
+## Remote Access
+
+Out of the box Moombox is reachable only from the machine it runs on
+(`network_access = "localhost"`). The Docker image seeds `"lan"` instead,
+because requests arriving through a published port come over Docker's
+bridge network and never look like loopback. In both cases the dashboard
+has no password and needs none — the IP filter is the boundary, and
+loopback/private clients always skip authentication.
+
+To reach the dashboard from outside that boundary, pick one of these —
+strongest first.
+
+### 1. VPN / Tailscale (recommended)
+
+Put the host on a tailnet or WireGuard network and change nothing in
+Moombox. VPN clients arrive with private addresses, so they pass the
+`lan` filter as if they were on the LAN. No open ports, no password to
+manage, and network membership is the authentication.
+
+### 2. Reverse proxy with HTTPS
+
+Terminate TLS at nginx/Caddy/Traefik and forward to Moombox. In
+`[network]`:
+
+```toml
+network_access = "external"
+trusted_proxies = ["172.18.0.2"]  # the proxy's address — as narrow as possible
+trust_forwarded_proto = true      # proxy terminates TLS; Moombox sees plain HTTP
+```
+
+`trusted_proxies` is what makes this safe. Without it every forwarded
+request is judged by the *proxy's* address — private or loopback, and
+trusted either way — so internet traffic passes the `lan` filter and
+skips authentication. With it, Moombox reads `X-Forwarded-For` (and only
+from that peer) and applies the IP gate, the auth skip, and rate limiting
+to the real client. Changes take effect immediately; no restart.
+
+Declare the narrowest thing that works — the single proxy address, not a
+`/16`. Anything inside a declared range is trusted to state who the
+client is, including claiming a loopback address. That is inherent to
+trusting a range, so keep the range small.
+
+The address to declare is the one **Moombox actually sees**, which is not
+always the proxy's own IP:
+
+- Proxy on the Docker host, connecting to `127.0.0.1:774` — the
+  connection is relayed by `docker-proxy`, so the peer address is the
+  bridge gateway (`docker network inspect <network>` reports it, commonly
+  `172.17.0.1`).
+- Proxy as a container on a shared Docker network — the peer address is
+  that container's address on the network.
+- Moombox running directly on the host — the peer address is the proxy's
+  own IP, or `127.0.0.1` if both are on the same machine.
+
+When unsure, configure `trusted_proxies` last: while it is empty, any
+Moombox log line that records a client address (the `[Auth]` login lines,
+for example) shows the direct peer — exactly the value to declare.
+
+Note that `network_access` must be `external`/`public` here, not `lan`.
+Once `trusted_proxies` resolves the real client, that client is an
+internet address — the `lan` filter would 403 it, which is the whole
+point of resolving it.
+
+Then choose where authentication happens:
+
+- **Moombox authenticates** — set a dashboard password and keep
+  `network_access = "external"`. Remote clients get the login page;
+  loopback and private clients still skip it. Set the password *before*
+  switching Network Access — see "Direct exposure" below for why, and for
+  how to set the first password inside a container.
+- **The proxy authenticates** — set `network_access = "public"` in
+  `config.toml`. It behaves identically to `"external"` and exists to
+  label this deployment; it is deliberately absent from the Settings
+  dropdowns and rejected by the config API, because it is only meaningful
+  behind an authenticating proxy. With no dashboard password, Moombox
+  logs a startup warning and shows a red banner in the dashboard and the
+  TUI — on purpose, because it cannot verify that your proxy really does
+  authenticate. Setting a Moombox password as well clears the warning and
+  gives you a second lock.
+
+Either way, make the proxy the **only** route to Moombox's port: publish
+it as `127.0.0.1:774:774`, or put the proxy and Moombox on a shared
+Docker network and don't publish the port at all. A directly reachable
+port defeats both the proxy's authentication and `trusted_proxies`.
+
+### 3. Direct exposure
+
+Set a dashboard password first, then `network_access = "external"` and
+`https_enabled = true`.
+
+That order is enforced: the web dashboard, the TUI, the config API, and
+the setup wizard all refuse to enable external access while no password
+is set, and removing the password drops `network_access` back to
+`"localhost"` in the same write.
+
+Setting the *first* password inside a container needs a workaround —
+first-time password setup requires a loopback connection, and requests
+through Docker's bridge are never loopback. Put the plaintext password in
+`/data/config.toml` and restart the container:
+
+```toml
+[network]
+password_hash = "your-password-here"
+```
+
+Moombox detects that this is not a scrypt hash, converts it, and writes
+the hash back on the next start — the plaintext only sits in the file
+until then.
+
+If a hand-edited config ends up on `external`/`public` with no password,
+Moombox still boots — it logs a warning, reports `passwordlessExternal`
+on `/api/auth/status`, and shows a persistent red banner in both UIs. It
+never refuses to start, so an existing deployment fronted by an
+authenticating proxy keeps working.
+
+### Docker caveats
+
+- **Docker Desktop (Windows/macOS)** proxies every inbound connection
+  through its VM, so Moombox sees all clients as the private gateway
+  address and the `lan` filter cannot tell them apart. There, the port
+  publish is the only exposure control — keep it host-only or
+  LAN-firewalled.
+- **Published ports bypass `ufw`/`firewalld`** on Linux: Docker inserts
+  its own DNAT rules, so a host firewall rule does not cover a published
+  port. Restrict the publish itself (`127.0.0.1:774:774`) rather than
+  relying on the firewall.
+- **IPv6.** Moombox binds IPv4 only. `docker-compose.yml` declares an
+  IPv6-enabled network so that inbound IPv6 to the published port is
+  handled by ip6tables instead of Docker's userland proxy — which would
+  otherwise re-originate those connections from the bridge gateway's
+  *private IPv4* address, making an internet IPv6 client look like a LAN
+  client to the `lan` filter. The practical effect is that IPv6
+  connections are refused at the container rather than misclassified:
+  **reach the dashboard over the host's IPv4 address.** A hostname with
+  an AAAA record generally still works, since browsers fall back to IPv4
+  after the refusal. This relies on Docker Engine 27+, where ip6tables is
+  enabled by default; on older engines the misclassification remains and
+  nothing in Moombox can detect it. Publishing as `0.0.0.0:774:774` stops
+  the port accepting IPv6 in the first place. See the comments in
+  `docker-compose.yml`, including what to do if your host cannot create
+  an IPv6-enabled network at all.
+
 ## Configuration
 
 Moombox includes a built-in first-time setup wizard — no manual configuration is necessary. All settings can be changed at any time from the **Settings** page in the web dashboard or TUI.
@@ -169,6 +315,7 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 |---------|---------|-------------|
 | `port` | `774` | Web dashboard port |
 | `network_access` | `"localhost"` | `"localhost"`, `"lan"`, or `"external"` |
+| `network.trusted_proxies` | `[]` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored ([Remote Access](#remote-access)) |
 | `log_level` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"` |
 | `downloader.max_video_resolution` | `1080` | Max resolution (based on max of width/height, handles portrait) |
 | `downloader.cookie_file` | `"./cookies.txt"` | Netscape-format cookie file |
