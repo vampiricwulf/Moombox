@@ -208,6 +208,37 @@ func readFirefoxCookies(profileDir string) (string, error) {
 	return strings.Join(result, "\n") + "\n", nil
 }
 
+// firefoxMillisecondExpirySchema is the moz_cookies schema version
+// (`PRAGMA user_version`) at which Firefox switched the expiry column from
+// SECONDS to MILLISECONDS. Firefox 142 shipped the change; yt-dlp mirrors it
+// in _extract_firefox_cookies.
+//
+// Ref: https://github.com/mozilla-firefox/firefox/commit/5869af852cd20425165837f6c2d9971f3efba83d
+const firefoxMillisecondExpirySchema = 16
+
+// firefoxSchemaVersion reads `PRAGMA user_version` from an open Firefox
+// cookie database, which is how Firefox stamps the moz_cookies schema
+// generation.
+//
+// A missing, unreadable, non-integer, or negative pragma degrades to 0 —
+// i.e. "the pre-Firefox-142 seconds interpretation". The asymmetry is
+// deliberate: guessing SECONDS on a milliseconds database inflates expiries
+// by 1000x, which is exactly today's (pre-fix) behavior and merely keeps
+// stale rows around; guessing MILLISECONDS on a seconds database divides
+// every real expiry by 1000, throwing every cookie back to the 1970s so the
+// merge pruner deletes the entire authenticated set. Only a positively-read
+// version >= 16 may enable the conversion.
+func firefoxSchemaVersion(db *sql.DB) int64 {
+	var version sql.NullInt64
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return 0
+	}
+	if !version.Valid || version.Int64 < 0 {
+		return 0
+	}
+	return version.Int64
+}
+
 // queryFirefoxCookieDB opens the Firefox cookie database and reads all cookies.
 //
 // The DSN needs the `file:` prefix — without it modernc/sqlite strips the
@@ -226,6 +257,10 @@ func queryFirefoxCookieDB(dbPath string) ([]string, error) {
 	}
 	defer db.Close()
 
+	// Read the schema generation BEFORE the rows: it decides whether the
+	// expiry column is seconds or milliseconds (Firefox 142 / schema 16).
+	schemaVersion := firefoxSchemaVersion(db)
+
 	rows, err := db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure FROM moz_cookies")
 	if err != nil {
 		return nil, fmt.Errorf("query cookies: %w", err)
@@ -235,9 +270,24 @@ func queryFirefoxCookieDB(dbPath string) ([]string, error) {
 	var collected []extractedCookie
 	for rows.Next() {
 		var name, value, host, cookiePath string
-		var expiry, isHttpOnly, isSecure int64
+		var isHttpOnly, isSecure int64
+		// expiry is nullable: Firefox leaves it NULL for some rows, and a
+		// plain int64 destination turns that into a scan error, which the
+		// `continue` below would silently swallow — dropping the cookie
+		// entirely. Upstream keeps such rows with no expiry at all
+		// (`expiry is not None`), so 0 (the Netscape session-cookie
+		// sentinel, which rowExpired never prunes) is the faithful mapping.
+		var expiry sql.NullInt64
 		if err := rows.Scan(&name, &value, &host, &cookiePath, &expiry, &isHttpOnly, &isSecure); err != nil {
 			continue
+		}
+
+		expirySeconds := int64(0)
+		if expiry.Valid {
+			expirySeconds = expiry.Int64
+			if schemaVersion >= firefoxMillisecondExpirySchema {
+				expirySeconds /= 1000
+			}
 		}
 
 		collected = append(collected, extractedCookie{
@@ -245,7 +295,7 @@ func queryFirefoxCookieDB(dbPath string) ([]string, error) {
 			httpOnly: isHttpOnly != 0,
 			path:     cookiePath,
 			secure:   isSecure != 0,
-			expiry:   expiry,
+			expiry:   expirySeconds,
 			name:     name,
 			value:    value,
 		})
