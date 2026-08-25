@@ -172,7 +172,7 @@ func (s *runState) wireMonitorCallbacks() {
 				// only when a recording actually failed. 30-min per-platform
 				// cooldown via notifyAuthFailure.
 				notifyAuthFailure(platform, "Cookie Auto-Refresh Failed",
-					fmt.Sprintf("Automatic cookie refresh for %s failed — recordings will fail until the cookies are replaced. Export a fresh Netscape cookies.txt from a browser signed in to the account and overwrite the file at %s. (Export from a private window and close it: browsing on in the source profile rotates the session and invalidates the export.) The browser-driven setup in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
+					fmt.Sprintf("Automatic cookie refresh for %s failed — recordings will fail until the cookies are replaced. Export a fresh Netscape cookies.txt from a browser signed in to the account and overwrite the file at %s. (Export from a private window and close it: browsing on in the source profile rotates the session and invalidates the export.) The interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
 					notifications.TypeError)
 			} else if ok {
 				s.log.Info("auto-cookie recovery succeeded", "platform", platform)

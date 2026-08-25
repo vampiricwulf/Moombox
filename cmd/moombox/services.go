@@ -610,7 +610,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 			// followed by "auto cookie refresh failed" — nothing had in fact
 			// been attempted, and no line said so. auto_enabled defaults to
 			// false, so this is the COMMON path, not an edge case.
-			log.Warn("browser-driven cookie refresh is disabled — nothing was attempted",
+			log.Warn("automatic cookie refresh is disabled — nothing was attempted",
 				slog.String("setting", "cookies.auto_enabled = false"),
 				slog.String("note", "the background YouTube session refresh keeps running, but it only rotates a session that is still alive — it cannot revive dead cookies"))
 			return false
@@ -623,10 +623,17 @@ func (s *runState) initServices(logLevelOverride string) error {
 			return false
 		}
 		if !ok {
-			// Also previously silent: RefreshCookies can decline (no browser
-			// detected, extraction produced nothing usable) without an error.
-			log.Warn("browser-driven cookie refresh completed without producing usable cookies",
-				slog.String("note", "a headless browser login is required for this path; it cannot run inside a container"))
+			// Also previously silent. Deliberately states no cause:
+			// RefreshCookies returns (false, nil) from four distinct places —
+			// a setup already in progress, a refresh already running, no
+			// platforms configured, and genuine extraction failure. Each of
+			// the first three logs its own reason at Debug, which is off by
+			// default, so at the default level this line is the only thing
+			// the operator sees. Asserting a cause here would be wrong three
+			// times out of four and would send them hunting for a missing
+			// browser while a refresh is already in flight.
+			log.Warn("automatic cookie refresh produced no usable cookies",
+				slog.String("note", "the refresh either declined to run or found nothing usable — run at debug level to see which"))
 		}
 		return ok
 	}

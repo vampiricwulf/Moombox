@@ -272,12 +272,12 @@ func jobArchivedAt(j *database.Job, cutoff time.Time) bool {
 // operator-facing messages, or a short prose stand-in when none is set.
 //
 // Auth-failure guidance used to say only "re-run cookie setup from Settings",
-// which is a dead end wherever the browser-driven wizard cannot run — inside
-// a container there is no browser, and the setup endpoints are loopback-gated
-// so a remote dashboard cannot reach them either. Naming the actual path
-// makes the advice concrete in every deployment without having to guess at
-// the environment: a Docker operator reads "/data/cookies.txt" and knows
-// which host file to replace.
+// which is a dead end wherever the interactive browser login cannot run — it
+// needs a headed browser and a person at it, and the setup endpoints are
+// loopback-gated so a remote dashboard cannot reach them either. Naming the
+// actual path makes the advice concrete in every deployment without having to
+// guess at the environment: a Docker operator reads "/data/cookies.txt" and
+// knows which host file to replace.
 func (s *runState) cookieFilePath() string {
 	var path string
 	if s.configStore != nil {

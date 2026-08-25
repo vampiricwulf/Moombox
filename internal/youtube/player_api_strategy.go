@@ -327,6 +327,11 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		}
 
 		collectFormats(&formatPool, wcResult.Formats, "web_creator", AuthLevelWebCreator)
+		p.logger.Debug("[PlayerApi] WEB_CREATOR result",
+			"client", constants.WebCreatorClient.ClientName,
+			"formats", len(wcResult.Formats),
+			"streamStatus", wcResult.StreamStatus,
+			"playability", string(wcResult.PlayabilityError))
 
 		// Try the cookieless fallback clients if WEB_CREATOR also fails or has
 		// inadequate formats. VISIONOS first (yt-dlp's lead default since
@@ -351,9 +356,23 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 				}
 			}
 
-			// Fall back to watch page if all clients failed
+			// Fall back to watch page if all clients failed.
+			//
+			// This is the return that supplies the verdict on the
+			// authenticated members-only path — TV says members_only,
+			// WEB_CREATOR agrees with zero formats, the cookieless chain is
+			// skipped because members-only content cannot come from an
+			// anonymous client — so the error string the operator reads is
+			// built from THIS result. Name its source or that string has no
+			// traceable origin in the log.
 			if wpParsed != nil {
 				wpParsed.Formats = deduplicateFormats(formatPool)
+				p.logger.Debug("[PlayerApi] returning watch-page parse (all clients exhausted)",
+					"client", "watch_page",
+					"videoID", videoID,
+					"formats", len(wpParsed.Formats),
+					"streamStatus", wpParsed.StreamStatus,
+					"playability", string(wpParsed.PlayabilityError))
 				return withAttestation(wpParsed, wp, videoID), nil
 			}
 		}

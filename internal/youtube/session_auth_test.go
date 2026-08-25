@@ -2,11 +2,19 @@ package youtube
 
 import "testing"
 
-// TestWatchPageSessionAuth pins the watch-page login detector. The markers
-// are the ytcfg booleans YouTube stamps into every watch page; absence means
-// the response came back logged out, NOT "we don't know" — the page was
-// fetched and answered, so the third state (unknown) belongs to the caller
-// that never got a page at all.
+// TestWatchPageSessionAuth pins the contract of the watch-page login
+// detector, which is deliberately NOT "anything that isn't logged in is
+// logged out".
+//
+// A 200 that lacks the marker is not proof of an anonymous session: consent
+// interstitials, edge error pages and A/B shells all answer 200 with no
+// ytcfg. Before this state was surfaced to the user that mistake was
+// invisible; now it would print "your cookies are dead" at an operator whose
+// cookies are fine — the exact failure mode this package exists to remove.
+// So logged-out is claimed only from a recognisable watch-page shell (the
+// explicit negative marker, or the ytcfg bootstrap every real watch page
+// carries), and everything else falls back to unknown, which already has a
+// safe generic message behind it.
 func TestWatchPageSessionAuth(t *testing.T) {
 	tests := []struct {
 		name string
@@ -29,9 +37,24 @@ func TestWatchPageSessionAuth(t *testing.T) {
 			want: SessionAuthLoggedOut,
 		},
 		{
-			name: "no marker at all",
-			html: `<html><body>nothing here</body></html>`,
+			name: "camelCase negative marker",
+			html: `<script>window.x = {"isLoggedIn":false};</script>`,
 			want: SessionAuthLoggedOut,
+		},
+		{
+			name: "real watch-page shell with no LOGGED_IN key at all",
+			html: `<script nonce="x">ytcfg.set({"VISITOR_DATA":"x","INNERTUBE_API_KEY":"k"});</script>`,
+			want: SessionAuthLoggedOut,
+		},
+		{
+			name: "consent interstitial / edge error page is NOT evidence of a dead session",
+			html: `<html><body>Before you continue to YouTube</body></html>`,
+			want: SessionAuthUnknown,
+		},
+		{
+			name: "empty body",
+			html: ``,
+			want: SessionAuthUnknown,
 		},
 	}
 

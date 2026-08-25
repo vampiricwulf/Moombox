@@ -2,10 +2,12 @@ package worker
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -30,10 +32,16 @@ func TestMembersOnlyDistinguishesSessionAuth(t *testing.T) {
 		notFrags     []string
 	}{
 		{
+			// "cookies are alive" is the load-bearing half: it tells the
+			// operator to stop looking at credentials. The remedy must name a
+			// browser-side account switch, because a Netscape export carries
+			// whatever account the profile is on — there is no account choice
+			// at export time.
 			name:         "signed in → not a member, do not blame cookies",
 			sessionAuth:  youtube.SessionAuthLoggedIn,
 			wantSentinel: ErrNotAMember,
-			wantFrags:    []string{"Member-only", reason, "signed in", "not a member"},
+			wantFrags:    []string{"Member-only", reason, "cookies are alive", "not a member", "switch the browser to the account"},
+			notFrags:     []string{"not signed in", "session is dead"},
 		},
 		{
 			name:         "signed out → cookies are dead",
@@ -151,6 +159,26 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 			wantCalled:  false,
 			wantStatus:  database.StatusError,
 			jobIDSuffix: "generic",
+		},
+		{
+			// A multi-%w error can satisfy cookiesStatusError AND
+			// ErrNonActionable at once: stream_processor_twitch.go's probe
+			// give-up wraps the underlying error alongside ErrNonActionable,
+			// and that underlying error can carry twitch.ErrTwitchAuthExpired.
+			// ErrNonActionable means "terminal, stop working this job", so the
+			// refresh must not fire — it would set the job back to Upcoming,
+			// re-enqueue it, and restart the probe budget from zero.
+			//
+			// Unreachable today only because classifyProbeErr's default routes
+			// "gql auth failure (401)" to the network class, which is a string
+			// heuristic over a Twitch response body, not an invariant.
+			name: "terminal non-actionable error never resurrects the job",
+			err: fmt.Errorf("max probe errors: %w (%w)",
+				fmt.Errorf("gql auth failure (401): %w", twitch.ErrTwitchAuthExpired),
+				ErrNonActionable),
+			wantCalled:  false,
+			wantStatus:  database.StatusCookies,
+			jobIDSuffix: "terminalauth",
 		},
 	}
 

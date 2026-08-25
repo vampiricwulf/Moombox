@@ -930,7 +930,19 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// above: an attempt to fix the session is not a notification, and gating
 	// it on w.notifier != nil meant a deployment with no webhook configured
 	// silently got neither the recovery nor any log line explaining why.
-	if status == database.StatusCookies {
+	//
+	// ErrNonActionable is excluded because it means "terminal, stop working
+	// this job", and the recovery path does not merely log — on success it
+	// sets the job back to Upcoming and re-enqueues it, restarting the probe
+	// budget from zero. The two categories can co-occur: a multi-%w error
+	// (stream_processor_twitch.go's probe give-up wraps ErrNonActionable
+	// alongside an underlying error that may carry twitch.ErrTwitchAuthExpired)
+	// satisfies cookiesStatusError and ErrNonActionable at the same time.
+	// That is unreachable today only because classifyProbeErr's default
+	// routes "gql auth failure (401)" to the network class — a string
+	// heuristic over a Twitch response body, not an invariant worth relying
+	// on for a resurrection hazard.
+	if status == database.StatusCookies && !errors.Is(err, ErrNonActionable) {
 		w.attemptCookieRefresh(job, err)
 	}
 }
@@ -941,13 +953,18 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 //
 // The advice is deliberately environment-neutral and leads with the cookie
 // file. "Re-run setup from Settings" used to be the only thing printed here,
-// and it is a dead end wherever the browser-driven wizard cannot run: in a
-// container there is no browser, and the setup endpoints are loopback-gated
-// so a remote dashboard cannot reach them either. Naming the configured
-// cookie file path instead makes the message concrete in every deployment —
-// a Docker operator reads "/data/cookies.txt" and knows exactly which host
-// file to replace — without probing for an environment we cannot reliably
-// detect.
+// and it is a dead end wherever the interactive browser login cannot run: it
+// needs a headed browser and a person at it, and the setup endpoints are
+// loopback-gated so a remote dashboard cannot reach them either. Naming the
+// configured cookie file path instead makes the message concrete in every
+// deployment — a Docker operator reads "/data/cookies.txt" and knows exactly
+// which host file to replace — without probing for an environment we cannot
+// reliably detect.
+//
+// The distinction that holds over time is between LOGGING IN (interactive,
+// needs a browser and a human) and SUPPLYING COOKIES (a file Moombox reads).
+// Only the first is bounded by the environment; phrase guidance against that
+// line rather than against "container", which is a moving target.
 func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 	if !cookieRefreshWorthAttempting(err) {
 		w.logger.Warn("skipping automatic cookie refresh — YouTube answered this request as a SIGNED-IN session, so the credentials are alive and the account simply lacks access",
@@ -986,7 +1003,7 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		"cookieFile", cookieFile,
 		"fix", "export a fresh Netscape cookies.txt from a browser signed in to the account and overwrite that file",
 		"why", "browsing on in the source browser profile rotates the session and invalidates an earlier export — export from a private window, then close it",
-		"wizard", "the browser-driven setup in Settings runs only on the machine hosting Moombox, so it is unavailable in a container")
+		"wizard", "the interactive browser login in Settings needs a headed browser and a person at it, so it runs only on the machine hosting Moombox")
 }
 
 // fetchURL is a helper to download a URL's body.

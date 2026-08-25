@@ -240,16 +240,42 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 // watchPageSessionAuth reads YouTube's own login verdict off a watch page.
 // Two ytcfg spellings have been observed for the same flag; either counts.
 //
-// Only ever returns logged-in/logged-out: a page that was fetched and parsed
-// IS an observation. SessionAuthUnknown belongs to callers that never got a
-// page (see WatchPageResult.SessionAuth). Two strings.Contains over the
-// already-materialized HTML — no allocation, no regex — because this runs on
-// every watch-page fetch including quality-monitor polling.
+// A 200 is NOT by itself an observation of the session. Consent
+// interstitials, edge error pages and A/B shells all answer 200 carrying no
+// ytcfg at all, and treating "marker absent" as "logged out" would assert a
+// dead session at an operator whose cookies are fine — the precise failure
+// this whole change exists to remove, and one that only became user-visible
+// once the state started being printed. So logged-out is claimed only from a
+// recognisable watch-page shell: the explicit negative marker, or the ytcfg
+// bootstrap that every genuine watch page carries. Anything else is unknown,
+// which callers already render as the safe generic wording.
+//
+// Cost is one Index for the primary key plus, on pages that lack it, one
+// scan each for the camelCase spelling and the ytcfg bootstrap — no
+// allocation and no regex, because this runs on every watch-page fetch
+// including quality-monitor polling.
 func watchPageSessionAuth(html string) SessionAuthState {
-	if strings.Contains(html, `"LOGGED_IN":true`) || strings.Contains(html, `"isLoggedIn":true`) {
-		return SessionAuthLoggedIn
+	const key = `"LOGGED_IN":`
+	if i := strings.Index(html, key); i >= 0 {
+		if strings.HasPrefix(html[i+len(key):], "true") {
+			return SessionAuthLoggedIn
+		}
+		return SessionAuthLoggedOut
 	}
-	return SessionAuthLoggedOut
+	const camelKey = `"isLoggedIn":`
+	if i := strings.Index(html, camelKey); i >= 0 {
+		if strings.HasPrefix(html[i+len(camelKey):], "true") {
+			return SessionAuthLoggedIn
+		}
+		return SessionAuthLoggedOut
+	}
+	// No login key, but a real watch-page shell: YouTube answered as a page
+	// it would have stamped the key onto, so an anonymous session is the
+	// sound reading.
+	if strings.Contains(html, "ytcfg.set") {
+		return SessionAuthLoggedOut
+	}
+	return SessionAuthUnknown
 }
 
 // extractChatContinuation pulls the live-chat continuation token (and its

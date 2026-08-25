@@ -334,7 +334,14 @@ func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, er
 	case youtube.PlayabilityMembersOnly:
 		switch info.SessionAuth {
 		case youtube.SessionAuthLoggedIn:
-			return fmt.Sprintf("Member-only: %s — signed in, but this account is not a member of this channel (if the browser you exported from holds several accounts, export the one with the membership)", reason), ErrNotAMember
+			// Phrased as an inference, not a fact: SessionAuth comes from the
+			// watch-page fetch (plain Cookie header) while the members_only
+			// verdict comes from a separate SAPISIDHASH-signed Innertube call,
+			// so the two can in principle disagree. And the remedy is a
+			// browser-side account switch — a Netscape export carries whatever
+			// account the profile is currently on; there is no account choice
+			// at export time to get right.
+			return fmt.Sprintf("Member-only: %s — YouTube served this session a signed-in watch page, so the cookies are alive; most likely this account is not a member of this channel (switch the browser to the account that holds the membership, then export again)", reason), ErrNotAMember
 		case youtube.SessionAuthLoggedOut:
 			return fmt.Sprintf("Member-only: %s — the request was not signed in: the cookie file is missing, or its session is dead (export a fresh Netscape cookies.txt from a signed-in browser)", reason), ErrCookiesRequired
 		default:

@@ -140,11 +140,12 @@ Docker-specific behavior:
   the values YouTube rotates back, and it does so with a temp file plus a
   rename. A rename cannot replace a single-file bind mount, so the
   write-back fails with only a warning in the log and the session quietly
-  ages out. Browser-based automatic cookie acquisition is not available
-  inside a container either, so when the session does die the fix is to
-  overwrite `./data/cookies.txt` with a fresh export. Export it from a
-  private window and close that window afterwards — continuing to browse
-  in the source profile rotates the session and invalidates the export.
+  ages out. When the session does die, the fix is to overwrite
+  `./data/cookies.txt` with a fresh export — the interactive browser login
+  in Settings needs a headed browser and a person at it, so it is not an
+  option here. Export from a private window and close that window
+  afterwards: continuing to browse in the source profile rotates the
+  session and invalidates the export.
 - Update by pulling a new image (`docker compose pull && docker compose
   up -d`) — an in-app update would be lost when the container is
   recreated, so the seeded config disables automatic update checks
