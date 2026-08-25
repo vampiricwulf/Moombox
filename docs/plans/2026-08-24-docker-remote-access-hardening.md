@@ -1117,9 +1117,10 @@ git commit -m "fix(docker): IPv6-enabled compose network — real v6 source IPs 
 ### Remote access
 
 Out of the box the container is LAN-only: the `lan` filter rejects any
-non-private client IP, and Docker preserves real source addresses (the
-compose network is IPv6-enabled so this holds for IPv6 too). To use the
-dashboard away from home, pick one of these, strongest first:
+non-private client IP, and Docker's bridge DNAT preserves the real IPv4
+source address, so the filter judges the actual client. IPv6 works
+differently — see the caveats below. To use the dashboard away from
+home, pick one of these, strongest first:
 
 1. **VPN / Tailscale (recommended).** Put the Docker host on a tailnet or
    WireGuard network and change nothing in Moombox — VPN clients arrive
@@ -1145,19 +1146,29 @@ Caveats: on Docker Desktop (Windows/macOS) every client appears as the
 private VM gateway address, so the `lan` filter cannot tell clients
 apart — treat the port publish as the only exposure control. Published
 ports also bypass ufw/firewalld on Linux (Docker inserts its own DNAT
-rules); don't rely on a host firewall to cover a published port. LAN
-IPv6 clients with global (GUA) addresses count as non-private and are
-rejected in `lan` mode — they can use IPv4, or one of the options above.
+rules); don't rely on a host firewall to cover a published port.
+
+**IPv6:** Moombox listens on IPv4 only, and the compose network is
+IPv6-enabled so that inbound IPv6 is handled by ip6tables rather than
+by Docker's userland proxy — which would otherwise re-originate those
+connections from the bridge gateway's *private IPv4* address, making an
+internet IPv6 client look like a LAN client to the `lan` filter. The
+practical effect is that IPv6 connections are refused at the container
+rather than misclassified: **reach the dashboard over the host's IPv4
+address.** A hostname with an AAAA record generally still works, since
+browsers fall back to IPv4 after the refusal.
 ```
+
+**Accuracy requirements for this Step 1 text (do not paraphrase these away):** Moombox binds `0.0.0.0`, which in Go is an IPv4-only (AF_INET) socket — verify at `internal/web/server.go` (`host` assignment, `net.Listen`, and the port-probe fallback, which reuses the same host). Therefore: (a) never write that the compose network makes an IPv6 client's real source address reach the `lan` filter — it cannot, because nothing is listening on the container's IPv6 address; (b) never write that a GUA IPv6 LAN client is "rejected by the `lan` filter" — it is refused at TCP and never reaches the filter, even though `internal/web/middleware.go`'s private-range list (only `fc00::/7` plus link-local for v6) would indeed classify it non-private if it did; (c) do not claim any IPv6 behavior as observed — no Docker daemon has run this. An earlier draft of this plan asserted (a) and (b) and both were falsified during Task 7; the compose file's own comments were corrected accordingly and are the reference wording.
 
 - [ ] **Step 2: `docs/spec/security.md`** — make these edits, verifying each against the code:
   - The client-IP policy statement (line 16, "never trusts X-Forwarded-For") becomes: X-Forwarded-For is ignored **unless** the direct peer is listed in `network.trusted_proxies`, in which case `EffectiveClientIP` walks the header right-to-left past trusted hops (rightmost-untrusted algorithm); loopback-gated endpoints always use the direct peer address. Document the fail-closed handling of unparseable entries.
   - Add `trusted_proxies` to the network-settings table with its default (empty = off) and hot-reload note.
   - Note that `public` is now accepted by config validation as an `external` synonym (previously it was silently normalized to `localhost` — record the fix).
   - Document the block-set/warn-boot policy for passwordless external: the three interactive blocks (TUI, config API, setup wizard) with file references, plus the warn surfaces (startup log, `passwordlessExternal` on `/api/auth/status`, web banner, TUI banner).
-  - Add a "Docker source-IP caveats" note: bridge DNAT preserves IPv4 source; the compose network enables IPv6 for the same reason; Docker Desktop always shows the gateway IP; published ports bypass host firewalls.
+  - Add a "Docker source-IP caveats" note: bridge DNAT preserves the IPv4 source address; Docker Desktop always shows the gateway IP; published ports bypass host firewalls. For IPv6, state the mechanism accurately (see the Step 1 accuracy requirements): the compose network is IPv6-enabled so ip6tables handles inbound v6 instead of the userland proxy, which would re-originate it from the gateway's private IPv4 and defeat the `lan` filter; because Moombox binds IPv4 only, the result is that v6 connections are refused at the container, NOT that the filter sees the v6 client.
   - Update the middleware-order line only if it changed (it should NOT — the IP gate stays in the same position, it just resolves a different IP).
-- [ ] **Step 3: `docs/spec/operations.md`** — in the Docker subsection, add one paragraph: the compose network is IPv6-enabled (Docker 27+ for default ip6tables) and why; remote access is documented in the README's "Remote access" subsection.
+- [ ] **Step 3: `docs/spec/operations.md`** — in the Docker subsection, add one paragraph: the compose network is IPv6-enabled (Docker 27+ for default ip6tables) and why — stated per the Step 1 accuracy requirements, i.e. it routes inbound v6 through ip6tables instead of the userland proxy so internet v6 clients are refused rather than misclassified as private, not that v6 source addresses reach the filter. Note that a host with IPv6 disabled in-kernel fails to CREATE the network (recovery: delete the `networks:` block or set `enable_ipv6: false` and drop the `ipam:` subnet with it), and that on Engine <27 the misclassification hole persists silently. Point at the README's "Remote access" subsection for the rest.
 - [ ] **Step 4: `SPEC.md`** — in the Security section, add one or two sentences: trusted-proxy client-IP resolution exists (`trusted_proxies`), and passwordless external is block-set/warn-boot. Keep SPEC.md standalone but brief; details live in `docs/spec/security.md`.
 - [ ] **Step 5: Re-read the diff for doc/code drift** — every file:line referenced in the docs must exist post-implementation; adjust line references that moved.
 - [ ] **Step 6: Commit**
