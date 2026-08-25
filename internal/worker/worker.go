@@ -32,6 +32,19 @@ import (
 // to any explicit cookies-needed signal.
 var ErrCookiesRequired = errors.New("cookies required (auth needed)")
 
+// ErrNotAMember marks a members-only failure that YouTube returned to a
+// session it confirmed was SIGNED IN. That is a membership problem, not a
+// credential problem: the cookies are demonstrably alive, they just belong
+// to an account that does not hold the channel's membership (commonly the
+// wrong one of several Google accounts in the exporting browser).
+//
+// It still routes to StatusCookies — supplying credentials for an account
+// that DOES hold the membership is the fix, and the auth-recovered sweep
+// should retry the job — but it suppresses the automatic cookie refresh:
+// rotating a live session cannot add a membership to it, and doing so
+// printed "re-run setup" advice at an operator whose cookies were fine.
+var ErrNotAMember = errors.New("not a channel member")
+
 // ErrNonActionable marks errors where there's nothing the user can do
 // (age-restricted content, exhausted retry budgets). Notification
 // dispatch is suppressed for these to avoid noisy "your stream failed"
@@ -804,10 +817,23 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 // twitch.ErrTwitchAuthExpired (GQL 401/403 after token rotation), and
 // twitch.ErrSubscriberOnly (usher entitlement restriction — logging into an
 // account that has access is the fix). Audit reports/twitch.md #8.
+// ErrNotAMember belongs here too: the session is alive but lacks the
+// membership, and credentials for an account that has it are still the fix.
 func cookiesStatusError(err error) bool {
 	return errors.Is(err, ErrCookiesRequired) ||
+		errors.Is(err, ErrNotAMember) ||
 		errors.Is(err, twitch.ErrTwitchAuthExpired) ||
 		errors.Is(err, twitch.ErrSubscriberOnly)
+}
+
+// cookieRefreshWorthAttempting reports whether firing the automatic cookie
+// refresh could plausibly fix err. Everything that lands on StatusCookies
+// qualifies EXCEPT ErrNotAMember: YouTube already answered that request as a
+// signed-in session, so refreshing (rotating) that same session changes
+// nothing and its failure message would send the operator after credentials
+// that are not the problem.
+func cookieRefreshWorthAttempting(err error) bool {
+	return !errors.Is(err, ErrNotAMember)
 }
 
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
@@ -872,25 +898,6 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 					Event:     "auth",
 				},
 			)
-
-			// Attempt automatic cookie refresh if configured
-			if w.OnCookieRefreshNeeded != nil {
-				w.logger.Info("attempting automatic cookie refresh...")
-				if w.OnCookieRefreshNeeded() {
-					w.logger.Info("cookie refresh succeeded, retrying job")
-					// Set to Upcoming so StreamProcessor.Process re-probes and
-					// correctly classifies the stream (live/VOD/upcoming). Using
-					// Live was wrong when the stream had transitioned to post-live
-					// or had not yet started (per audit reports/worker.md Finding 21).
-					w.db.UpdateJobFields(job.ID, map[string]any{
-						"status": database.StatusUpcoming,
-						"error":  "",
-					})
-					w.queue.Enqueue(job.ID, database.StatusUpcoming)
-					return
-				}
-				w.logger.Warn("auto cookie refresh failed — re-run setup from Settings")
-			}
 		} else {
 			// URL fallback: use stored URL, or construct YouTube URL (matches TS)
 			notifURL := job.URL
@@ -918,6 +925,95 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			)
 		}
 	}
+
+	// Automatic cookie recovery. Deliberately OUTSIDE the notifier branch
+	// above: an attempt to fix the session is not a notification, and gating
+	// it on w.notifier != nil meant a deployment with no webhook configured
+	// silently got neither the recovery nor any log line explaining why.
+	// attemptCookieRefresh owns the "should we, and if not why not" decision
+	// so that every reason for declining is stated in one place.
+	if status == database.StatusCookies {
+		w.attemptCookieRefresh(job, err)
+	}
+}
+
+// attemptCookieRefresh runs (or deliberately declines to run) the automatic
+// cookie refresh for a job that just parked at StatusCookies, and — when it
+// cannot fix things — says what WILL, in terms the operator can act on.
+//
+// The advice is deliberately environment-neutral and leads with the cookie
+// file. "Re-run setup from Settings" used to be the only thing printed here,
+// and it is a dead end wherever the interactive browser login cannot run: it
+// needs a headed browser and a person at it, and the setup endpoints are
+// loopback-gated so a remote dashboard cannot reach them either. Naming the
+// configured cookie file path instead makes the message concrete in every
+// deployment — a Docker operator reads "/data/cookies.txt" and knows exactly
+// which host file to replace — without probing for an environment we cannot
+// reliably detect.
+//
+// The distinction that holds over time is between LOGGING IN (interactive,
+// needs a browser and a human) and SUPPLYING COOKIES (a file Moombox reads).
+// Only the first is bounded by the environment; phrase guidance against that
+// line rather than against "container", which is a moving target.
+func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
+	// ErrNonActionable means "terminal, stop working this job", and the
+	// recovery path does not merely log — on success it sets the job back to
+	// Upcoming and re-enqueues it, restarting the probe budget from zero. The
+	// two categories can co-occur: a multi-%w error (stream_processor_twitch's
+	// probe give-up wraps ErrNonActionable alongside an underlying error that
+	// may carry twitch.ErrTwitchAuthExpired) satisfies cookiesStatusError and
+	// ErrNonActionable at the same time. That is unreachable today only
+	// because classifyProbeErr's default routes "gql auth failure (401)" to
+	// the network class — a string heuristic over a Twitch response body, not
+	// an invariant worth relying on for a resurrection hazard.
+	if errors.Is(err, ErrNonActionable) {
+		w.logger.Warn("skipping automatic cookie refresh — this failure was already classified terminal, and recovery would re-queue the job and reset its retry budget",
+			"jobID", job.ID,
+			"videoID", job.VideoID)
+		return
+	}
+	if !cookieRefreshWorthAttempting(err) {
+		w.logger.Warn("skipping automatic cookie refresh — YouTube answered this request as a SIGNED-IN session, so the credentials are alive and the account simply lacks access",
+			"jobID", job.ID,
+			"videoID", job.VideoID,
+			"fix", "supply cookies from the account that holds the channel membership")
+		return
+	}
+	if w.OnCookieRefreshNeeded == nil {
+		// Not wired (no auto-cookie service constructed). Debug rather than
+		// Warn: this is a build/wiring fact, not something the operator did.
+		w.logger.Debug("no automatic cookie refresh is wired; leaving the job parked",
+			"jobID", job.ID, "videoID", job.VideoID)
+		return
+	}
+
+	w.logger.Info("attempting automatic cookie refresh...")
+	if w.OnCookieRefreshNeeded() {
+		w.logger.Info("cookie refresh succeeded, retrying job")
+		// Set to Upcoming so StreamProcessor.Process re-probes and
+		// correctly classifies the stream (live/VOD/upcoming). Using
+		// Live was wrong when the stream had transitioned to post-live
+		// or had not yet started (per audit reports/worker.md Finding 21).
+		w.db.UpdateJobFields(job.ID, map[string]any{
+			"status": database.StatusUpcoming,
+			"error":  "",
+		})
+		w.queue.Enqueue(job.ID, database.StatusUpcoming)
+		return
+	}
+
+	var cookieFile string
+	w.readConfig(func(c *config.MoomboxConfig) { cookieFile = c.Cookies.CookieFile })
+	if cookieFile == "" {
+		w.logger.Warn("auto cookie refresh failed — no cookie file is configured",
+			"fix", "set cookies.cookie_file to a Netscape cookies.txt exported from a browser signed in to the account")
+		return
+	}
+	w.logger.Warn("auto cookie refresh failed — the cookie file has to be replaced by hand",
+		"cookieFile", cookieFile,
+		"fix", "export a fresh Netscape cookies.txt from a browser signed in to the account and overwrite that file",
+		"why", "browsing on in the source browser profile rotates the session and invalidates an earlier export — export from a private window, then close it",
+		"wizard", "the interactive browser login in Settings needs a headed browser and a person at it, so it runs only on the machine hosting Moombox")
 }
 
 // fetchURL is a helper to download a URL's body.

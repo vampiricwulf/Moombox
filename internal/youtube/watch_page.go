@@ -143,8 +143,15 @@ const (
 // extracted at parse time so the body string can be GC'd as soon as
 // FetchWatchPage returns.
 type WatchPageResult struct {
-	Ytcfg            *YtcfgData
-	IsLoggedIn       bool
+	Ytcfg *YtcfgData
+	// SessionAuth is YouTube's own verdict on whether this fetch was a
+	// signed-in session. The zero value is SessionAuthUnknown, which is what
+	// callers that synthesize a WatchPageResult after a failed fetch get for
+	// free — and what watchPageSessionAuth returns for a 200 that is not a
+	// recognisable watch-page shell. Neither "we never saw a page" nor "we
+	// saw something we can't read" may be reported as "logged out": that
+	// verdict is now printed to the user as "your cookies are dead".
+	SessionAuth      SessionAuthState
 	PlayerResponse   map[string]any
 	ChatContinuation string
 	ChatIsReplay     bool
@@ -215,7 +222,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	}
 
 	html := string(body)
-	isLoggedIn := strings.Contains(html, `"LOGGED_IN":true`) || strings.Contains(html, `"isLoggedIn":true`)
+	sessionAuth := watchPageSessionAuth(html)
 
 	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(html)
 	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(html)
@@ -223,7 +230,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 
 	return &WatchPageResult{
 		Ytcfg:                ytcfg,
-		IsLoggedIn:           isLoggedIn,
+		SessionAuth:          sessionAuth,
 		PlayerResponse:       playerResponse,
 		ChatContinuation:     chatContinuation,
 		ChatIsReplay:         chatIsReplay,
@@ -231,6 +238,47 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		AttestationChallenge: attestationChallenge,
 		AttestationReason:    attestationReason,
 	}, nil
+}
+
+// watchPageSessionAuth reads YouTube's own login verdict off a watch page.
+// Two ytcfg spellings have been observed for the same flag; either counts.
+//
+// A 200 is NOT by itself an observation of the session. Consent
+// interstitials, edge error pages and A/B shells all answer 200 carrying no
+// ytcfg at all, and treating "marker absent" as "logged out" would assert a
+// dead session at an operator whose cookies are fine — the precise failure
+// this whole change exists to remove, and one that only became user-visible
+// once the state started being printed. So logged-out is claimed only from a
+// recognisable watch-page shell: the explicit negative marker, or the ytcfg
+// bootstrap that every genuine watch page carries. Anything else is unknown,
+// which callers already render as the safe generic wording.
+//
+// Cost is one Index for the primary key plus, on pages that lack it, one
+// scan each for the camelCase spelling and the ytcfg bootstrap — no
+// allocation and no regex, because this runs on every watch-page fetch
+// including quality-monitor polling.
+func watchPageSessionAuth(html string) SessionAuthState {
+	const key = `"LOGGED_IN":`
+	if i := strings.Index(html, key); i >= 0 {
+		if strings.HasPrefix(html[i+len(key):], "true") {
+			return SessionAuthLoggedIn
+		}
+		return SessionAuthLoggedOut
+	}
+	const camelKey = `"isLoggedIn":`
+	if i := strings.Index(html, camelKey); i >= 0 {
+		if strings.HasPrefix(html[i+len(camelKey):], "true") {
+			return SessionAuthLoggedIn
+		}
+		return SessionAuthLoggedOut
+	}
+	// No login key, but a real watch-page shell: YouTube answered as a page
+	// it would have stamped the key onto, so an anonymous session is the
+	// sound reading.
+	if strings.Contains(html, "ytcfg.set") {
+		return SessionAuthLoggedOut
+	}
+	return SessionAuthUnknown
 }
 
 // extractChatContinuation pulls the live-chat continuation token (and its

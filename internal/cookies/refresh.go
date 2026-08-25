@@ -690,8 +690,16 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 
 	rs.logger.Debug("youtube session refresh: updating cookies", "count", len(updates))
 
+	// A failure here is not cosmetic: the rotated values are discarded and
+	// the on-disk session ages out, so downloads eventually start failing
+	// for a reason that has nothing to do with the download. Name the
+	// deployment mistake that actually causes it — updateCookieFile ends in
+	// writeFileAtomic (temp file + rename), and a rename cannot replace a
+	// single-file bind mount.
 	if err := rs.updateCookieFile(updates); err != nil {
-		rs.logger.Warn("youtube session refresh: failed to update cookie file", "err", err)
+		rs.logger.Warn("youtube session refresh: failed to update cookie file — rotated session cookies were discarded and the file will go stale",
+			"err", err,
+			"hint", "if this is Docker, do not bind-mount cookies.txt as an individual file; put it inside the mounted /data directory so the atomic rename can replace it")
 		return
 	}
 

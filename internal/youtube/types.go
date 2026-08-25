@@ -28,6 +28,36 @@ const (
 	PlayabilityUnknown       PlayabilityError = "unknown"
 )
 
+// SessionAuthState is what YouTube itself said about the login state of the
+// session that performed an extraction — not what our config claims. It is
+// read straight off the watch page's ytcfg, which is the cheapest available
+// proof that a cookie file is (or is not) still a live session.
+//
+// The third state is load-bearing. "YouTube told us this session is signed
+// out" and "we have no answer" are different facts, and collapsing them into
+// one boolean is what let a members-only failure be blamed on cookies
+// unconditionally: an operator whose cookies were fine got told to refresh
+// them, and an operator whose cookies were dead got the same line and no way
+// to tell which case they were in.
+type SessionAuthState string
+
+const (
+	// SessionAuthUnknown means no usable answer was obtained. Three
+	// producers reach it: the watch-page fetch failed, the code path never
+	// fetches one, or a response came back that is not a recognisable
+	// watch-page shell (a consent interstitial or edge error page answers
+	// 200 carrying no ytcfg — see watchPageSessionAuth). The zero value
+	// deliberately lands here so neither a synthesized WatchPageResult nor
+	// an unrecognisable page can masquerade as a logged-out observation.
+	SessionAuthUnknown SessionAuthState = ""
+	// SessionAuthLoggedIn means YouTube answered the watch-page request as
+	// a signed-in session.
+	SessionAuthLoggedIn SessionAuthState = "logged_in"
+	// SessionAuthLoggedOut means YouTube answered the watch-page request as
+	// anonymous — either no cookies were sent, or the ones sent are dead.
+	SessionAuthLoggedOut SessionAuthState = "logged_out"
+)
+
 // VideoInfo contains complete video information from YouTube.
 type VideoInfo struct {
 	Title              string           `json:"title"`
@@ -48,6 +78,13 @@ type VideoInfo struct {
 	HlsManifestURL     string           `json:"hlsManifestUrl,omitempty"`
 	PlayabilityError   PlayabilityError `json:"playabilityError,omitempty"`
 	PlayabilityReason  string           `json:"playabilityReason,omitempty"`
+
+	// SessionAuth is the login state YouTube reported for the session that
+	// produced this info (see SessionAuthState). Diagnostic only — nothing
+	// downloads differently because of it — but it is what lets a
+	// members-only or login-required verdict be attributed to the right
+	// cause instead of always to "your cookies expired".
+	SessionAuth SessionAuthState `json:"-"`
 
 	// AttestationChallenge is the session's watch-page BotGuard challenge
 	// (see WatchPageResult.AttestationChallenge). Rides on VideoInfo so

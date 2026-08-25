@@ -49,8 +49,11 @@ output_directory = "/data/output"
 staging_directory = "/data/staging"
 
 [cookies]
-# Mount a Netscape cookie file at this path for members-only content
-# (see the volumes section of docker-compose.yml).
+# Netscape cookie file for members-only content. Put it at
+# ./data/cookies.txt on the host — the /data volume already exposes it.
+# Do NOT bind-mount the file on its own: Moombox rewrites it (temp file +
+# rename) to keep the rotated YouTube session alive, and a rename cannot
+# replace a single-file bind mount. See docker-compose.yml.
 cookie_file = "/data/cookies.txt"
 
 [updates]

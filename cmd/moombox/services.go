@@ -605,6 +605,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 			autoEnabled = c.Cookies.AutoEnabled
 		})
 		if !autoEnabled {
+			// Previously a silent `return false`. That silence is why a field
+			// log read "attempting automatic cookie refresh..." immediately
+			// followed by "auto cookie refresh failed" — nothing had in fact
+			// been attempted, and no line said so. auto_enabled defaults to
+			// false, so this is the COMMON path, not an edge case.
+			log.Warn("automatic cookie refresh is disabled — nothing was attempted",
+				slog.String("setting", "cookies.auto_enabled = false"),
+				slog.String("note", "the background YouTube session refresh keeps running, but it only rotates a session that is still alive — it cannot revive dead cookies"))
 			return false
 		}
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -613,6 +621,24 @@ func (s *runState) initServices(logLevelOverride string) error {
 		if err != nil {
 			log.Warn("auto cookie refresh error", slog.String("error", err.Error()))
 			return false
+		}
+		if !ok {
+			// Also previously silent. Deliberately states no cause:
+			// RefreshCookies returns (false, nil) from FIVE distinct places —
+			// a setup already in progress, a refresh already running, no
+			// platforms configured, a refresh that found no cookies to
+			// verify, and a refresh whose auth verification failed. Only the
+			// last of those means anything is actually wrong with the
+			// session; the rest mean it declined to run. (Genuine extraction
+			// failure is NOT among them — it returns (false, err) and takes
+			// the branch above.) Four of the five log their own reason at
+			// Debug, which is off by default, so at the default level this
+			// line is usually the only thing the operator sees. Asserting a
+			// cause here would be wrong four times in five and would send
+			// them hunting for a missing browser while a refresh is already
+			// in flight.
+			log.Warn("automatic cookie refresh produced no usable cookies",
+				slog.String("note", "the refresh either declined to run or found nothing usable — run at debug level to see which"))
 		}
 		return ok
 	}

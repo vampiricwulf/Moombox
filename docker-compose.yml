@@ -36,9 +36,21 @@ services:
       - ./data:/data
       # Optional: put finished downloads on a separate (bigger) disk:
       # - /mnt/media/vods:/data/output
-      # Optional: Netscape cookie file for members-only content — the
-      # seeded config already points at /data/cookies.txt:
-      # - ./cookies.txt:/data/cookies.txt:ro
+      #
+      # Netscape cookie file for members-only content: put it at
+      # ./data/cookies.txt on the host. The ./data mount above already
+      # exposes it, and the seeded config points at /data/cookies.txt — so
+      # there is NO extra volume line to add.
+      #
+      # Do not bind-mount the file on its own (e.g.
+      # "- ./cookies.txt:/data/cookies.txt"). Moombox keeps the YouTube
+      # session alive by rewriting cookies.txt roughly every 30 minutes with
+      # the values YouTube rotates back, and it writes a temp file and
+      # renames it over the original. A rename cannot replace a single-file
+      # bind mount, so the write-back fails, only a warning is logged, and
+      # the session quietly ages out until downloads start failing for a
+      # reason that looks nothing like a mount problem. Adding ":ro" breaks
+      # it the same way.
     # environment:
     #   # Timezone for timestamps in filenames and logs:
     #   - TZ=America/Los_Angeles
