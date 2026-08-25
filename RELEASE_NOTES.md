@@ -1,25 +1,29 @@
-### Features
+## Features
 
-- **Session-coherent PO token minting** — YouTube now binds its attestation challenge to the page session (`yt.config_.EVENT_ID`) and rejects WebPO tokens minted from the old `/att/get` flow when an account is enrolled in that experiment. The symptom is distinctive: player requests succeed while every segment fetch from googlevideo returns 403, which is exactly how the 2026-08-14 premiere capture failed. The BotGuard sidecar now mints from a self-consistent `(ytcfg, window.ytAtN)` pair taken from a single youtube.com fetch, so the token matches the session it was issued for. `/att/get` remains as a fallback, and every degradation step is logged with a distinct reason.
-- **YouTube client roster refresh (yt-dlp 2026.08.19 parity)** — adds the `VISIONOS` client, now upstream's lead default, and puts `web_embedded` at the head of the authenticated cascade. YouTube began 403'ing `android_vr` format URLs on 2026-08-17; that enforcement is selective rather than universal, so `android_vr` is retained behind `VISIONOS` as a last-resort tier and as the only cookieless source of a live DASH manifest.
+- **Browser-free cookie import from a mounted Firefox profile.** Point `browser_profile_dir` at a profile directory (it already defaults to `/data/browser-profile` in Docker) and Moombox reads `cookies.sqlite` directly — no browser process, so it works in a container. The profile is copied with its `-wal` sidecar before reading; copying `cookies.sqlite` alone opens fine and silently returns zero cookies, which is the trap behind most "my profile has the cookies but nothing works" reports.
+- **`network.trusted_proxies`** — a list of reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored when resolving the client IP. Empty by default, hot-reloadable, exposed in config, API, Web UI and TUI.
+- Members-only failures now name the actual problem, and both UIs distinguish "not a member of this channel" from "cookies are dead".
 
-### Improvements
+## Bug Fixes
 
-- Anonymous live extractions make one fewer request: a live response that already ships split video+audio adaptive formats is segment-addressable through the manifest-free path and no longer triggers a second client call chasing a DASH manifest it would never read.
-- Age-restricted content no longer fetches the embedded player twice (plus an embed page) on every quality-monitor poll — the cascade result is reused when it is already usable. That path polls every 30 seconds, so it was two redundant requests per poll.
-- The sidecar now enforces a whole-generation time budget rather than three independent per-fetch timeouts, which together could exceed the parent's RPC deadline. The homepage fetch carries its own tight cap so it can never consume a mid-download credential-refresh budget.
-- Format deduplication ranks `VISIONOS` above `android_vr`, so a 403-dead URL cannot displace a working one when both clients return the same itag.
+- **Reverse proxies bypassed the IP gate and authentication entirely.** Any proxy in front of Moombox made every forwarded request — including internet traffic — appear to come from the proxy's private address, which passed the `lan` filter and skipped auth. Trust decisions now resolve through `EffectiveClientIP`, which honors `X-Forwarded-For` only from a declared trusted proxy and reads **every** header line (HAProxy appends a separate one by default, which a single-line read would have let through).
+- **Members-only content was reported as a cookie failure even when the session was fine**, and pointed at a browser login that cannot run in a container. Moombox now distinguishes a signed-in-but-not-a-member account from dead cookies, names the client that produced the verdict, and stops asserting causes it cannot know.
+- **Not-a-member jobs were retried forever.** The recovery sweep resumed every `COOKIES?` job on any auth transition, so a job that could never succeed re-ran on every cycle. The park reason is now persisted, and such a job resumes only when the signed-in account actually changes.
+- **Firefox 142+ cookie expiry was read 1000× too large.** Firefox moved `moz_cookies.expiry` to milliseconds at schema 16; expiries are now converted, so genuinely-expired cookies stop being merged forward indefinitely.
+- **Six nullable `moz_cookies` columns silently dropped rows.** A NULL in any of them failed the scan and the row vanished without a word.
+- **Chrome/Edge 130+ cookie values carried 32 bytes of binary garbage** — a domain hash is now stripped when the profile's `meta.version` calls for it, and non-decryptable rows are counted and named instead of discarded.
+- **Every settings save from a Docker dashboard returned 400.** Path validation rejected absolute paths while the entrypoint seeds `/data/...`, with no way to fix it from the UI. Absolute paths are accepted; `..` traversal still is not, and the rule is now shared by both UIs.
+- **A cookie refresh could write an empty or partial `cookies.txt`, clear the error state and report success.** Losing one platform's credentials while another survived is now stated rather than silently swallowed.
+- `network_access = "public"` was silently reset to `"localhost"` at load, and the Web UI settings panel could not save anything at all while it was set.
+- Passwordless external access now warns loudly at startup and in both UIs instead of booting silently.
+- `docker-compose.yml` no longer suggests bind-mounting `cookies.txt` as a single file — that breaks the atomic-rename write-back and silently disables the 30-minute YouTube session refresh.
 
-### Bug Fixes
+## Improvements
 
-- **Non-English locales misclassified every probed stream.** Stream classification matches English text in YouTube's playability reasons ("members", "age", "private"), but the two cookieless clients — including the one serving the status probe — never requested English. Both now send `hl=en`, as every other client already did.
-- A crafted video title containing the literal text `ytcfg.set({` could silently disable session-coherent minting for an entire install, quietly reverting it to the very `/att/get` path that produces the 403s above. Both page extractors now evaluate every candidate instead of stopping at the first match.
-- A failed homepage fetch could leave an hours-stale `EVENT_ID` paired with an unrelated challenge — the exact incoherence the feature exists to prevent. Pairing is now all-or-nothing, cleared before each attempt, and reasserted immediately before the BotGuard snapshot.
-- Failed token-minter generation no longer emits a spurious warning-level unhandled-rejection line alongside the real error.
+- The Docker compose network is IPv6-enabled, so inbound IPv6 is handled by ip6tables rather than being re-originated from the bridge gateway's private IPv4 address and misclassified as LAN.
+- Documentation: a Remote Access guide covering VPN, reverse proxy and direct exposure; Docker source-IP caveats; and corrections to several security-spec claims that did not match the code.
 
-### Internal
+## Internal
 
-- New live-extraction test (`MOOMBOX_LIVE_YT_TEST=1`) exercising the real anonymous cascade against YouTube for both a VOD and a live stream. It asserts capabilities — playable video plus audio, and segment addressability from either source — rather than which client or mechanism supplied them, so a healthy client reordering cannot fail it.
-- New sidecar extraction test suite covering the homepage parser against hostile and live-shaped inputs, including two shapes only the real page exhibits (`\xNN`-escaped payloads and a trailing comma).
-- `HasSplitAdaptiveFormats` consolidated into a single implementation shared by the extraction cascade and the download strategy switch.
-- Deep-dive documentation updated for the client roster, the cookieless fallback chain, and the homepage pair's trust boundary.
+- Database schema v19: `park_reason` and `park_identity` on jobs.
+- Cookie-failure diagnostics throughout — decrypt failures, schema probes and dropped rows are now counted and reported rather than silently absorbed.
