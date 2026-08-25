@@ -91,6 +91,11 @@ func NewServer(store *config.Store, logger interface {
 		logger:        logger,
 	}
 
+	// The WebSocket upgrade path makes its own auth-skip decision — it must
+	// resolve the same effective client IP as the middleware chain, or a
+	// trusted reverse proxy would re-open the auth bypass there.
+	s.ws.ClientIP = func(r *http.Request) string { return EffectiveClientIP(store, r) }
+
 	// Apply middleware (order matters).
 	// RequestID first so RecoveryMiddleware (and any future logger
 	// middleware) can correlate log lines back to the originating request
@@ -133,7 +138,7 @@ func (s *Server) SetAuth(auth *AuthService) {
 // when a password is configured.
 func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := ExtractIP(r)
+		ip := EffectiveClientIP(s.configStore, r)
 
 		// Loopback and private IPs skip auth
 		if isLoopback(ip) || isPrivateIP(ip) {

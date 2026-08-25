@@ -89,7 +89,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 
 		if !deps.Auth.VerifyPassword(body.Password, passwordHash) {
 			if deps.Logger != nil {
-				deps.Logger.Warn("[Auth] Failed login attempt from " + web.ExtractIP(req))
+				deps.Logger.Warn("[Auth] Failed login attempt from " + web.EffectiveClientIP(store, req))
 			}
 			jsonError(rw, "Invalid password", http.StatusUnauthorized)
 			return
@@ -107,7 +107,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		}
 
 		if deps.Logger != nil {
-			deps.Logger.Info("[Auth] Successful login from " + web.ExtractIP(req))
+			deps.Logger.Info("[Auth] Successful login from " + web.EffectiveClientIP(store, req))
 		}
 
 		web.SetSessionCookie(rw, req, token)
@@ -128,10 +128,10 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 						ID:          generateShortID(),
 						TokenPrefix: web.TokenPrefix(rawToken),
 						TokenHash:   tokenHash,
-						Label:       buildTokenLabel(req),
+						Label:       buildTokenLabel(store, req),
 						CreatedAt:   now,
 						LastUsedAt:  now,
-						LastIP:      web.ExtractIP(req),
+						LastIP:      web.EffectiveClientIP(store, req),
 					}
 					if err := deps.DB.AddClientToken(ct); err == nil {
 						var ttlDays int
@@ -178,7 +178,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		// Must be authenticated via session OR from loopback/private IP
 		token := getSessionToken(req)
 		isAuthenticated := deps.Auth.ValidateSession(token)
-		isLocal := web.IsLocalOrPrivateRequest(req)
+		isLocal := web.IsLocalOrPrivateRequest(store, req)
 
 		if !isAuthenticated && !isLocal {
 			jsonError(rw, "authentication required", http.StatusUnauthorized)
@@ -257,7 +257,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		clearClientCookie(rw, req)
 
 		if deps.Logger != nil {
-			deps.Logger.Info("[Auth] Password set/changed from " + web.ExtractIP(req))
+			deps.Logger.Info("[Auth] Password set/changed from " + web.EffectiveClientIP(store, req))
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
@@ -267,7 +267,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 	r.With(deps.PasswordRL.Middleware).Post("/api/auth/remove-password", func(rw http.ResponseWriter, req *http.Request) {
 		token := getSessionToken(req)
 		isAuthenticated := deps.Auth.ValidateSession(token)
-		isLocal := web.IsLocalOrPrivateRequest(req)
+		isLocal := web.IsLocalOrPrivateRequest(store, req)
 
 		if !isAuthenticated && !isLocal {
 			jsonError(rw, "authentication required", http.StatusUnauthorized)
@@ -327,7 +327,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		clearClientCookie(rw, req)
 
 		if deps.Logger != nil {
-			deps.Logger.Info("[Auth] Password removed, network_access reset to localhost from " + web.ExtractIP(req))
+			deps.Logger.Info("[Auth] Password removed, network_access reset to localhost from " + web.EffectiveClientIP(store, req))
 		}
 
 		jsonResponse(rw, map[string]any{
@@ -453,9 +453,9 @@ func clearClientCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildTokenLabel creates a human-readable label from the User-Agent and IP.
-func buildTokenLabel(r *http.Request) string {
+func buildTokenLabel(store *config.Store, r *http.Request) string {
 	ua := r.UserAgent()
-	ip := web.ExtractIP(r)
+	ip := web.EffectiveClientIP(store, r)
 
 	// Truncate UA to something useful
 	label := ua

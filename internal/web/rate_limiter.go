@@ -47,6 +47,13 @@ type RateLimiter struct {
 	done      chan struct{}
 	closeOnce sync.Once         // guards close(done) so double-Close doesn't panic
 	logger    rateLimiterLogger // optional; may be nil
+
+	// ClientIP resolves the effective client IP used as the bucket key
+	// (trusted_proxies / X-Forwarded-For aware). Nil falls back to the raw
+	// peer address. Without it, a reverse proxy collapses every remote
+	// client into one bucket — one attacker could exhaust the login budget
+	// for everyone behind the proxy.
+	ClientIP func(*http.Request) string
 }
 
 // NewRateLimiter creates a new rate limiter and starts its background
@@ -167,6 +174,9 @@ func (rl *RateLimiter) Allow(ip string) bool {
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := ExtractIP(r)
+		if rl.ClientIP != nil {
+			ip = rl.ClientIP(r)
+		}
 		if allowed, retryAfter := rl.AllowWithRetry(ip); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			w.Header().Set("Content-Type", "application/json")

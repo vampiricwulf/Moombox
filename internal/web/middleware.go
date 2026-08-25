@@ -183,7 +183,7 @@ func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler
 // WebSocket upgrade interception in Server.Start, which bypasses the
 // middleware chain entirely.
 func ipAllowedByNetworkAccess(store *config.Store, r *http.Request) bool {
-	ip := ExtractIP(r)
+	ip := EffectiveClientIP(store, r)
 
 	var networkAccess string
 	store.Read(func(c *config.MoomboxConfig) {
@@ -472,11 +472,12 @@ func IsLoopbackRequest(r *http.Request) bool {
 	return isLoopback(ExtractIP(r))
 }
 
-// IsLocalOrPrivateRequest returns true if the request is from a loopback or
-// private (LAN) address. Used by auth endpoints to match the server's
-// AuthMiddleware trust policy which allows both loopback and private IPs.
-func IsLocalOrPrivateRequest(r *http.Request) bool {
-	return isLocalIP(ExtractIP(r))
+// IsLocalOrPrivateRequest returns true if the request's effective client IP
+// (X-Forwarded-For-aware when the direct peer is a trusted proxy) is loopback
+// or private. Used by auth endpoints to match the server's AuthMiddleware
+// trust policy, which allows both loopback and private clients.
+func IsLocalOrPrivateRequest(store *config.Store, r *http.Request) bool {
+	return isLocalIP(EffectiveClientIP(store, r))
 }
 
 // shouldSkipCompression returns true for paths where compression should be

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -283,26 +282,6 @@ func TestShouldSkipPendingVersion(t *testing.T) {
 					tc.pendingTag, tc.version, tc.markerPresent, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestExtractWSIPHostOnly covers the happy path — a host:port
-// RemoteAddr returns just the host.
-func TestExtractWSIPHostOnly(t *testing.T) {
-	r := httptest.NewRequest("GET", "/", nil)
-	r.RemoteAddr = "192.168.1.10:54321"
-	if got := extractWSIP(r); got != "192.168.1.10" {
-		t.Errorf("extractWSIP host:port: want 192.168.1.10, got %q", got)
-	}
-}
-
-// TestExtractWSIPMalformedReturnsRaw covers the SplitHostPort error
-// branch — a malformed RemoteAddr falls through to the raw string.
-func TestExtractWSIPMalformedReturnsRaw(t *testing.T) {
-	r := httptest.NewRequest("GET", "/", nil)
-	r.RemoteAddr = "no-port-here"
-	if got := extractWSIP(r); got != "no-port-here" {
-		t.Errorf("extractWSIP malformed: want %q, got %q", "no-port-here", got)
 	}
 }
 

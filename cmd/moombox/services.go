@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -645,6 +646,15 @@ func (s *runState) initServices(logLevelOverride string) error {
 	authSvc.Start()
 	loginRL := web.NewRateLimiter(rateLimitLoginPerMinute, time.Minute)
 	passwordRL := web.NewRateLimiter(rateLimitPasswordPerMinute, time.Minute)
+
+	// Key rate-limit buckets by the effective client IP so a trusted reverse
+	// proxy doesn't collapse all remote clients into a single bucket.
+	limiterClientIP := func(r *http.Request) string { return web.EffectiveClientIP(s.configStore, r) }
+	apiRL.ClientIP = limiterClientIP
+	potRL.ClientIP = limiterClientIP
+	loginRL.ClientIP = limiterClientIP
+	passwordRL.ClientIP = limiterClientIP
+
 	s.apiRL = apiRL
 	s.potRL = potRL
 	s.authSvc = authSvc

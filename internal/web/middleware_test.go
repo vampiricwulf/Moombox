@@ -623,3 +623,43 @@ func TestEffectiveClientIP(t *testing.T) {
 		})
 	}
 }
+
+// TestIPGateHonorsTrustedProxy: with a trusted proxy declared, the lan gate
+// judges the FORWARDED client address, not the proxy's private address.
+func TestIPGateHonorsTrustedProxy(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Network.NetworkAccess = "lan"
+	cfg.Network.TrustedProxies = []string{"172.18.0.2"}
+	store := config.NewStore(cfg, "")
+
+	handler := IPGateMiddleware(store)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		xff        string
+		wantStatus int
+	}{
+		{"wan client via proxy blocked", "172.18.0.2:41000", "203.0.113.9", http.StatusForbidden},
+		{"lan client via proxy allowed", "172.18.0.2:41000", "192.168.1.50", http.StatusOK},
+		{"proxy itself (no xff) allowed", "172.18.0.2:41000", "", http.StatusOK},
+		{"direct wan client still blocked", "203.0.113.9:5000", "", http.StatusForbidden},
+		{"direct wan client, forged xff, still blocked", "203.0.113.9:5000", "192.168.1.50", http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/api/jobs", nil)
+			r.RemoteAddr = tt.remoteAddr
+			if tt.xff != "" {
+				r.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+		})
+	}
+}
