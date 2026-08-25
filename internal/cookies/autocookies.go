@@ -730,6 +730,19 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		pre["youtube"], pre["twitch"] = preYT, preTW
 	}
 
+	// What we believed we held going in, and what this pass actually brought
+	// back. Both are read BEFORE the write, because afterwards the only thing
+	// left to look at is the merged result — and the whole point below is to
+	// tell "we lost what we had" apart from "there was never anything here".
+	//
+	// The jar is the right source for the first pair: it is what
+	// refreshPlatforms() gated on, and the disagreement between the jar
+	// (which ignores expiry) and mergeCookieFiles (which prunes on it) is
+	// precisely how a refresh can end up writing an empty file.
+	hadYTAuth := s.jar.HasYouTubeAuthCookies()
+	hadTWAuth := s.jar.HasTwitchAuthCookies()
+	fetchedRows := countNetscapeCookieRows(netscapeCookies)
+
 	if previousCookies != "" {
 		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
 	}
@@ -851,9 +864,6 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	// Neither platform verified. Build a targeted message naming only the
 	// platforms that actually had cookies worth verifying — if a user only
 	// signed in to YouTube, they should not see "Twitch needs re-login".
-	// If neither platform even has cookies (e.g. first run before setup),
-	// emit no error at all: the refresh completed cleanly, there was just
-	// nothing to refresh yet.
 	var failed []string
 	if ytHasCookies {
 		failed = append(failed, "YouTube")
@@ -862,10 +872,50 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		failed = append(failed, "Twitch")
 	}
 	if len(failed) == 0 {
-		s.logger.Debug("cookie refresh completed with no cookies to verify")
-		s.mu.Lock()
-		s.lastError = nil
-		s.mu.Unlock()
+		// Execution is PAST writeFileAtomic, so whatever sits in cookies.txt
+		// now is what this pass produced — and it authenticates neither
+		// platform. That is three different situations wearing one face, and
+		// clearing lastError for all of them (the old behaviour) is only
+		// right for the third.
+		var lost []string
+		if hadYTAuth {
+			lost = append(lost, "YouTube")
+		}
+		if hadTWAuth {
+			lost = append(lost, "Twitch")
+		}
+		switch {
+		case len(lost) > 0:
+			// We HAD credentials and now the file has none. The usual cause
+			// is the disagreement noted above: the jar ignores expiry, the
+			// merge prunes on it, so every stored row can be dropped by a
+			// refresh that thought it had something to refresh. Whatever the
+			// cause, an empty credential file must never be reported as a
+			// clean no-op.
+			errMsg := strings.Join(lost, " + ") + " cookies are gone from cookies.txt after this refresh — " +
+				"every stored credential had expired or was dropped, so nothing is left to authenticate with; sign in again"
+			s.setError(errMsg)
+			s.logger.Warn("cookie refresh left no auth cookies on disk",
+				"platforms", strings.Join(lost, ","), "detail", errMsg)
+		case fetchedRows > 0:
+			// Nothing was lost — there was nothing to lose — but this pass
+			// did write cookies, and none of them authenticate anything. The
+			// container case: a mounted profile that is simply not signed in.
+			// Saying nothing here makes a useless mount look like a working
+			// one.
+			errMsg := "cookies were read but none of them authenticate YouTube or Twitch — " +
+				"the browser profile is not signed in to either platform"
+			s.setError(errMsg)
+			s.logger.Warn("cookie refresh produced no auth cookies", "rows", fetchedRows, "detail", errMsg)
+		default:
+			// Genuinely nothing to do and nothing lost (e.g. first run before
+			// setup). The refresh completed cleanly; there was just nothing
+			// to refresh yet.
+			s.logger.Debug("cookie refresh completed with no cookies to verify")
+			s.mu.Lock()
+			s.lastError = nil
+			s.mu.Unlock()
+		}
 		return false, nil
 	}
 	// Say what actually happened. "Manual re-login required" is the right
