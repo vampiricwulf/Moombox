@@ -250,30 +250,54 @@ func (j *CookieJar) GetSapisid() string {
 }
 
 // YouTubeIdentity returns a stable, non-reversible fingerprint of WHICH
-// Google account the jar currently holds — "" when it holds none.
+// Google account the jar currently holds — "" when it cannot tell.
 //
-// SAPISID (with __Secure-3PAPISID as the documented fallback, mirroring
-// GetSapisid) is the discriminator: it is per-account and long-lived, so it
-// stays put across the session-cookie rotation processYouTubeSetCookies
-// performs every refresh, and it changes when the operator swaps to a
-// different account. That makes "the value changed" a usable stand-in for
-// "different credentials were supplied", which is the only event that can fix
-// a job parked because the account lacks a channel membership.
+// Both halves are required, and LOGIN_INFO is the load-bearing one.
 //
-// Hashed rather than returned raw because this value is held for the life of
-// the process and compared in code paths near logging, while the cookie it
-// derives from is the highest-value secret the app holds. Callers must treat
-// it as an opaque equality token — never as a credential, and never as
+// SAPISID identifies a Google SESSION, not an account: a multi-login browser
+// holds several accounts under one cookie session sharing one SAPISID. That
+// is precisely why internal/youtube/auth.go cannot rely on cookies alone to
+// pick an account and has to send X-Goog-AuthUser (ytcfg SESSION_INDEX) and
+// X-Goog-PageId (DELEGATED_SESSION_ID) alongside them. A fingerprint over
+// SAPISID alone would therefore be blind to the exact remedy Moombox prints
+// for a not-a-member failure — "switch the browser to the account that holds
+// the membership, then export again" — because switching the active account
+// rewrites LOGIN_INFO and leaves SAPISID untouched.
+//
+// LOGIN_INFO is the jar-local equivalent of the DataSyncID that
+// internal/youtube already uses for this same "which account is this"
+// question (see types.go / pot_binding.go). SAPISID stays in the mix so a
+// full re-login also registers. Deliberately excluded: __Secure-1PSIDTS and
+// SIDCC, which rotate constantly and would fire on every refresh cycle.
+//
+// A changed fingerprint is a hint, not proof — a same-account cookie rotation
+// that touched either value reads as a change. That direction is cheap: the
+// sweep it wakes retries a parked job once and re-parks it under the new
+// value. The opposite error (missing a real account switch) is the bug this
+// exists to prevent, so the fingerprint is deliberately biased toward
+// sensitivity.
+//
+// Hashed rather than returned raw because this value is compared in code
+// paths near logging and is persisted on job rows, while the cookies it
+// derives from are the highest-value secrets the app holds. Callers must
+// treat it as an opaque equality token — never as a credential, and never as
 // something to display.
 func (j *CookieJar) YouTubeIdentity() string {
 	if j == nil {
 		return ""
 	}
-	v := j.GetSapisid()
-	if v == "" {
+	sapisid := j.GetSapisid()
+
+	j.mu.RLock()
+	loginInfo := j.cookies["LOGIN_INFO"]
+	j.mu.RUnlock()
+
+	if sapisid == "" || loginInfo == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(v))
+	// NUL separator: neither cookie may contain one, so no pair of distinct
+	// (sapisid, loginInfo) inputs can concatenate to the same string.
+	sum := sha256.Sum256([]byte(sapisid + "\x00" + loginInfo))
 	return hex.EncodeToString(sum[:])
 }
 

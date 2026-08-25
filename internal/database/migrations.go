@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 18
+const schemaVersion = 19
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -99,7 +99,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     channel_id TEXT,
     queue_priority INTEGER NOT NULL DEFAULT 1,
     incomplete_tail INTEGER NOT NULL DEFAULT 0,
-    park_reason TEXT NOT NULL DEFAULT ''
+    park_reason TEXT NOT NULL DEFAULT '',
+    park_identity TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -640,6 +641,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 19 {
+		if err := db.migrateV19(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(19); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -734,6 +744,24 @@ func (db *Database) migrateV18() error {
 	// written last), so a duplicate-column error is expected and benign.
 	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN park_reason TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v18 alter: %w", err)
+	}
+	return nil
+}
+
+// migrateV19 adds park_identity to jobs: WHICH account a membership-parked job
+// was refused under. See the Job.ParkIdentity doc comment in types.go.
+//
+// No backfill, for the same reason v18 had none and one more besides: the
+// value is an opaque fingerprint of credentials as they were at park time, and
+// nothing in the database can reconstruct it after the fact. Existing rows keep
+// '' and are treated as "parked under an unknown account", which resolves
+// permissively — one retry rather than a permanent strand.
+func (db *Database) migrateV19() error {
+	ctx := db.getCtx()
+	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is
+	// written last), so a duplicate-column error is expected and benign.
+	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN park_identity TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v19 alter: %w", err)
 	}
 	return nil
 }

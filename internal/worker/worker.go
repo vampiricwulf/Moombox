@@ -52,8 +52,18 @@ var ErrCookiesRequired = errors.New("cookies required (auth needed)")
 //     cannot be the event that fixes a membership problem (the session was
 //     already authenticated when it failed). Resuming on it bought a
 //     guaranteed-identical failure and a full extraction attempt per auth
-//     cycle, forever. A genuine change of account identity resumes these
-//     instead — see cmd/moombox's credentials-changed sweep.
+//     cycle, forever. What resumes these instead is a different ACCOUNT: the
+//     job records the identity it was refused under (database.ParkIdentity)
+//     and cmd/moombox's credential sweep compares against it.
+//
+// Note the cost of a misclassification. The signed-in determination comes
+// from the watch page's session state, and checkPlayability already notes
+// that signal can in principle disagree with the player response. A failure
+// wrongly classified here is excluded from the auth-recovered sweep for the
+// rest of that job's life — it will only ever resume on an account change or
+// a manual retry. That asymmetry is deliberate (the alternative is the
+// forever-retry loop), but it is why the classification is driven off an
+// explicit SessionAuthLoggedIn verdict and never off a guess.
 var ErrNotAMember = errors.New("not a channel member")
 
 // ErrNonActionable marks errors where there's nothing the user can do
@@ -166,6 +176,14 @@ type DownloadWorker struct {
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should be attempted.
 	// Returns true if cookies were refreshed successfully.
 	OnCookieRefreshNeeded func() bool
+
+	// CurrentCredentialIdentity returns an opaque fingerprint of the account
+	// the platform's cookies currently belong to (cookies.CookieJar's
+	// YouTubeIdentity), or "" when it cannot be determined. Recorded on a
+	// membership park so the credential sweep can tell later whether the
+	// account has actually changed. Optional: a nil slot simply records "",
+	// which the sweep resolves permissively.
+	CurrentCredentialIdentity func(platform string) string
 }
 
 // readConfig runs fn under configStore's read lock when the store has been
@@ -856,10 +874,15 @@ func cookieRefreshWorthAttempting(err error) bool {
 //
 // ErrNotAMember is the only membership case: YouTube answered a demonstrably
 // signed-in request with "members only", so no amount of restoring or
-// rotating THESE credentials can help. twitch.ErrSubscriberOnly looks similar
-// but is not: usher's 403 does not distinguish an anonymous session from an
-// un-entitled one, so working credentials genuinely may be the fix and it
-// stays in the auth class.
+// rotating THESE credentials can help.
+//
+// twitch.ErrSubscriberOnly looks similar but is not, for two reasons. Usher's
+// 403 does not distinguish an anonymous session from an un-entitled one, so
+// working credentials genuinely may be the fix. And the retry loop this
+// classification exists to break is structurally absent on that side anyway:
+// the auth-recovered sweep only fires on a not-auth → auth TRANSITION, and an
+// un-entitled account with healthy Twitch auth produces no transitions, so
+// nothing re-runs the job in the first place. It stays in the auth class.
 //
 // Returns ParkReasonNone for anything that does not park at StatusCookies, so
 // callers can write the field unconditionally and never leave a stale
@@ -890,14 +913,25 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 		status = database.StatusCookies
 	}
 
-	// park_reason is written on EVERY error transition, including the
-	// ParkReasonNone case, so a job that once parked as "membership" and later
-	// failed for something else does not carry the old classification — a
-	// stale one would suppress a legitimate auth-recovery resume forever.
+	// park_reason and park_identity are written on EVERY error transition,
+	// including the cleared case, so a job that once parked as "membership"
+	// and later failed for something else does not carry the old
+	// classification — a stale one would suppress a legitimate auth-recovery
+	// resume forever, and a stale identity would fake an account change.
+	//
+	// The identity is captured only for a membership park: it is the account
+	// the platform refused this job under, and it is meaningless for any other
+	// failure.
+	reason := parkReasonForError(err)
+	identity := ""
+	if reason == database.ParkReasonMembership && w.CurrentCredentialIdentity != nil {
+		identity = w.CurrentCredentialIdentity(job.Platform)
+	}
 	w.db.UpdateJobFields(job.ID, map[string]any{
-		"status":      status,
-		"error":       errMsg,
-		"park_reason": parkReasonForError(err),
+		"status":        status,
+		"error":         errMsg,
+		"park_reason":   reason,
+		"park_identity": identity,
 	})
 
 	// Suppress notifications for non-actionable errors (matches TS behavior):
@@ -1038,9 +1072,10 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		// Live was wrong when the stream had transitioned to post-live
 		// or had not yet started (per audit reports/worker.md Finding 21).
 		w.db.UpdateJobFields(job.ID, map[string]any{
-			"status":      database.StatusUpcoming,
-			"error":       "",
-			"park_reason": database.ParkReasonNone,
+			"status":        database.StatusUpcoming,
+			"error":         "",
+			"park_reason":   database.ParkReasonNone,
+			"park_identity": "",
 		})
 		w.queue.Enqueue(job.ID, database.StatusUpcoming)
 		return
@@ -1128,6 +1163,7 @@ func (w *DownloadWorker) ResumeJob(jobID string) {
 		"status":           database.StatusDownloading,
 		"error":            "",
 		"park_reason":      database.ParkReasonNone,
+		"park_identity":    "",
 		"auto_retry_count": 0,
 	})
 	w.EnqueueJob(jobID)
@@ -1187,6 +1223,7 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 		"status":              database.StatusUpcoming,
 		"error":               "",
 		"park_reason":         database.ParkReasonNone,
+		"park_identity":       "",
 		"progress":            "",
 		"percent":             0,
 		"speed":               "",
@@ -1260,6 +1297,7 @@ func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
 		"status":              database.StatusUpcoming,
 		"error":               "",
 		"park_reason":         database.ParkReasonNone,
+		"park_identity":       "",
 		"progress":            "",
 		"percent":             0,
 		"speed":               "",

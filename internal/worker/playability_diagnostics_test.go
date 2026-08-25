@@ -385,3 +385,110 @@ func TestNotAMemberDistinctFromOtherSentinels(t *testing.T) {
 		t.Error("ErrNotAMember should not match ErrNonActionable")
 	}
 }
+
+// TestSetJobErrorRecordsParkIdentity: a membership park must record WHICH
+// account refused it. That value is what lets the credential sweep decide,
+// durably and after any number of restarts, whether the account has actually
+// changed — without it the sweep can only guess.
+//
+// It is captured for membership parks ONLY. On any other failure the account
+// is not what blocked the job, and a recorded identity there would later read
+// as a meaningless "account changed" signal.
+func TestSetJobErrorRecordsParkIdentity(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		id       string
+		wantID   string
+		wantCall bool
+	}{
+		{
+			name:     "membership park records the current account",
+			err:      (&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError(),
+			id:       "pidmember",
+			wantID:   "account-A",
+			wantCall: true,
+		},
+		{
+			name:     "dead-cookie park records nothing",
+			err:      (&StreamProcessResult{Error: "m", ErrSentinel: ErrCookiesRequired}).AsError(),
+			id:       "pidauth",
+			wantID:   "",
+			wantCall: false,
+		},
+		{
+			name:     "generic failure records nothing",
+			err:      errors.New("ffmpeg exploded"),
+			id:       "pidgeneric",
+			wantID:   "",
+			wantCall: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			jobID := "yt_" + tc.id
+			if _, err := db.AddJob(&database.Job{
+				ID: jobID, VideoID: tc.id, URL: "u", Platform: "youtube",
+				Status: database.StatusDownloading,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			w.OnCookieRefreshNeeded = func() bool { return false }
+
+			called := false
+			w.CurrentCredentialIdentity = func(platform string) string {
+				called = true
+				if platform != "youtube" {
+					t.Errorf("identity requested for platform %q, want youtube", platform)
+				}
+				return "account-A"
+			}
+
+			w.setJobError(&database.Job{ID: jobID, Platform: "youtube"}, tc.err)
+
+			if called != tc.wantCall {
+				t.Errorf("CurrentCredentialIdentity called = %v, want %v", called, tc.wantCall)
+			}
+			got, err := db.GetJob(jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ParkIdentity != tc.wantID {
+				t.Errorf("park_identity = %q, want %q", got.ParkIdentity, tc.wantID)
+			}
+		})
+	}
+}
+
+// TestSetJobErrorParkIdentityNilSlotIsSafe: the callback is optional (tests,
+// and any wiring that has no jar). A nil slot must record "" rather than
+// panic — "" resolves permissively at the sweep, which is the right default
+// for "we could not tell".
+func TestSetJobErrorParkIdentityNilSlotIsSafe(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	const jobID = "yt_pidnil"
+	if _, err := db.AddJob(&database.Job{
+		ID: jobID, VideoID: "pidnil", URL: "u", Platform: "youtube",
+		Status: database.StatusDownloading,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w.OnCookieRefreshNeeded = func() bool { return false }
+	w.CurrentCredentialIdentity = nil
+
+	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
+		(&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError())
+
+	got, err := db.GetJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParkReason != database.ParkReasonMembership {
+		t.Errorf("park_reason = %q, want membership", got.ParkReason)
+	}
+	if got.ParkIdentity != "" {
+		t.Errorf("park_identity = %q, want empty", got.ParkIdentity)
+	}
+}

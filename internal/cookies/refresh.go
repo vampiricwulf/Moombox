@@ -95,10 +95,15 @@ type RefreshService struct {
 	twEverConcluded bool
 
 	// prevYouTubeIdentity is the jar's YouTubeIdentity() as of the last
-	// CONCLUSIVE check — the baseline OnCredentialsChanged compares against.
-	// Process-local by design: it is not persisted, so the first conclusive
-	// check after a restart only establishes the baseline and never fires.
-	// That is what keeps a restart from reading as an account swap.
+	// conclusive AND authenticated check — the baseline shouldObserveCredentials
+	// compares against. See advanceIdentityBaseline for why an unauthenticated
+	// check must not move it.
+	//
+	// Process-local, and that is not where correctness lives: the durable
+	// record is each parked job's own park_identity, so this baseline only
+	// decides WHEN to look, never WHAT moves. Its zero value therefore fires
+	// once per process rather than staying silent — which is how an offline
+	// cookie swap (stop, replace, start) gets noticed at all.
 	//
 	// YouTube only. Twitch's auth-token rotates on Twitch's schedule (see
 	// twitch.ErrTwitchAuthExpired), so it is not a stable account
@@ -127,9 +132,10 @@ type RefreshService struct {
 	// Useful for waking jobs that were parked in the COOKIES? status.
 	OnAuthRecovered func(platform string)
 
-	// OnCredentialsChanged is called when a platform's stored account
-	// IDENTITY changes to a different, working one — the operator replaced
-	// the cookies with a different account's.
+	// OnCredentialsChanged reports the platform's current working account
+	// identity when it may have changed, so parked jobs can be re-evaluated
+	// against it. The identity is an opaque equality token (see
+	// CookieJar.YouTubeIdentity) — never log or display it.
 	//
 	// This is not a weaker OnAuthRecovered; it catches a case that one
 	// structurally cannot. A job parked because the signed-in account lacks a
@@ -140,7 +146,7 @@ type RefreshService struct {
 	//
 	// Fires for "youtube" only — see prevYouTubeIdentity for why Twitch has
 	// no usable identity signal and nothing that would need one.
-	OnCredentialsChanged func(platform string)
+	OnCredentialsChanged func(platform, identity string)
 }
 
 // NewRefreshService creates a new cookie refresh service.
@@ -321,13 +327,11 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	if ytErr == nil {
 		rs.prevYouTubeAuth = ytAuth
 		rs.ytEverConcluded = true
-		// Advance the identity baseline on every CONCLUSIVE check, including
-		// the ones that do not fire (same account, or a swap to credentials
-		// that don't authenticate). A swap only ever fires once: the next
-		// check compares against the new value, so a persistently broken new
-		// account cannot re-fire on every cycle.
-		rs.prevYouTubeIdentity = ytIdentity
 	}
+	// Deliberately outside the ytErr == nil block above: the baseline advances
+	// only on a check that also AUTHENTICATED, so a stale intermediate export
+	// cannot consume the edge. See advanceIdentityBaseline.
+	rs.prevYouTubeIdentity = advanceIdentityBaseline(rs.prevYouTubeIdentity, ytIdentity, ytAuth, ytErr)
 	if twErr == nil {
 		rs.prevTwitchAuth = twAuth
 		rs.twEverConcluded = true
@@ -391,17 +395,16 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 		}
 	}
 
-	// Detect account swaps: the cookie file now holds a DIFFERENT, working
-	// Google account than it did on the last conclusive check. Deliberately
-	// independent of the auth-recovered transition above — the case this
-	// exists for (a job blocked because the signed-in account lacks a channel
-	// membership) parks while auth is healthy, so the operator's fix produces
-	// no auth transition at all. Both can fire on the same check when dead
-	// cookies are replaced by a different account's; the sweeps they drive
-	// are idempotent, so the second finds nothing left to resume.
-	if rs.OnCredentialsChanged != nil && shouldFireIdentityChange(prevYTIdentity, ytIdentity, ytAuth, ytErr) {
-		rs.logger.Info("youtube credentials changed to a different account")
-		rs.OnCredentialsChanged("youtube")
+	// Hand the current account identity to the sweep whenever it may have
+	// changed. Deliberately independent of the auth-recovered transition above
+	// — the case this exists for (a job blocked because the signed-in account
+	// lacks a channel membership) parks while auth is healthy, so the
+	// operator's fix produces no auth transition at all. Both can fire on the
+	// same check when dead cookies are replaced by a different account's; the
+	// sweeps they drive are idempotent, so the second finds nothing left.
+	if rs.OnCredentialsChanged != nil && shouldObserveCredentials(prevYTIdentity, ytIdentity, ytAuth, ytErr) {
+		rs.logger.Info("youtube account identity observed — re-evaluating parked jobs")
+		rs.OnCredentialsChanged("youtube", ytIdentity)
 	}
 
 	rs.logger.Debug("cookie refresh done",
@@ -459,40 +462,73 @@ func shouldFireRecovery(everConcluded, prevAuth, nowAuth bool, checkErr error, c
 	return cookiesPresent // first conclusive check — only for a configured platform
 }
 
-// shouldFireIdentityChange reports whether OnCredentialsChanged should fire
+// shouldObserveCredentials reports whether OnCredentialsChanged should fire
 // for a just-completed YouTube check. Pulled out of doRefresh as a pure
 // function for the same reason shouldFireRecovery was: the network calls above
 // it have no stub seam, so this is the only way to table-test the decision.
 //
-// prevIdentity is the jar fingerprint from the last CONCLUSIVE check (see
-// RefreshService.prevYouTubeIdentity), nowIdentity is this check's. nowAuth
-// and checkErr are this check's result. Four things must all hold:
+// This is a WAKE-UP, not the resume decision. What actually moves a job is the
+// comparison between the identity it recorded when it parked and the current
+// one (see cmd/moombox's sweepShouldResume), which is durable and level-based.
+// That is what lets this predicate stay a cheap edge filter: a missed edge
+// costs a delay until the next account change or restart, never a permanent
+// strand.
+//
+// baseline is the fingerprint from the last conclusive AND authenticated
+// check (see RefreshService.prevYouTubeIdentity); nowIdentity, nowAuth and
+// checkErr are this check's results. Three things must hold:
 //
 //   - checkErr == nil. A network error means we learned nothing; the identity
 //     may be fine and the auth answer is meaningless.
-//   - nowAuth. Different credentials that don't authenticate are not a fix —
-//     resuming into them burns an extraction attempt and re-parks the job.
-//     If they later start working, OnAuthRecovered picks the jobs up.
-//   - prevIdentity != "". No baseline means this is the first conclusive
-//     check in this process. The baseline is not persisted across restarts on
-//     purpose, so a restart establishes it silently instead of reading as a
-//     swap and re-firing every sweep on every boot.
-//   - the two differ. The steady state is silence; anything else would put
-//     membership-parked jobs straight back into the retry loop this whole
-//     mechanism exists to end.
+//   - nowAuth && nowIdentity != "". Credentials that don't authenticate are
+//     not a fix, and an empty fingerprint compares unequal to every real one,
+//     so firing on it would wake the sweep on every cookie-less cycle. This is
+//     NOT deferring to OnAuthRecovered: that sweep skips membership parks by
+//     design, so nothing else would pick them up. The reason it is safe is
+//     that advanceIdentityBaseline holds the baseline here, leaving the edge
+//     intact for the moment those same credentials start working.
+//   - baseline == "" (the first authenticated observation of this process —
+//     see below) or the two differ.
 //
-// nowIdentity != "" falls out of nowAuth in practice (YouTube cannot
-// authenticate a jar with no SAPISID) but is not asserted separately —
-// prevIdentity != "" plus inequality already excludes the cookies-vanished
-// direction, which is auth LOSS and belongs to OnRecoveryNeeded.
-func shouldFireIdentityChange(prevIdentity, nowIdentity string, nowAuth bool, checkErr error) bool {
+// The baseline == "" case fires ON PURPOSE. An operator who stops Moombox,
+// replaces the cookies and starts it again produces no in-process transition
+// at all, so a start-up that stayed silent could never see an offline swap.
+// Firing here is safe precisely because the per-job comparison decides what
+// moves: on an unchanged cookie file every parked job matches the current
+// identity and nothing happens.
+func shouldObserveCredentials(baseline, nowIdentity string, nowAuth bool, checkErr error) bool {
+	if checkErr != nil || !nowAuth || nowIdentity == "" {
+		return false
+	}
+	return baseline == "" || baseline != nowIdentity
+}
+
+// advanceIdentityBaseline returns the baseline to carry into the next check.
+//
+// It advances ONLY on a check that was both conclusive and authenticated —
+// never on one that merely concluded. Advancing on a conclusive-but-dead check
+// consumes the edge and strands exactly the job class this mechanism serves:
+//
+//  1. a membership park sits under account A, auth healthy;
+//  2. the operator drops in account B's export, which is already stale
+//     (routine — Moombox's own advice warns that browsing on in the source
+//     profile invalidates an earlier export). Conclusive check, not
+//     authenticated;
+//  3. the operator re-exports B properly and it works.
+//
+// Had step 2 moved the baseline to B, step 3 would compare B against B and
+// never fire — and OnAuthRecovered deliberately skips membership parks, so
+// nothing else would pick the job up. Holding the baseline at A makes step 3
+// the account change it actually is.
+//
+// This also cannot loop: firing requires nowAuth, so an account that stays
+// broken never fires however many times it is observed, and one that starts
+// working fires exactly once before becoming the new baseline.
+func advanceIdentityBaseline(baseline, nowIdentity string, nowAuth bool, checkErr error) string {
 	if checkErr != nil || !nowAuth {
-		return false
+		return baseline
 	}
-	if prevIdentity == "" {
-		return false
-	}
-	return prevIdentity != nowIdentity
+	return nowIdentity
 }
 
 // setYouTubeHeaders applies the standard YouTube API headers for cookie-authenticated requests.

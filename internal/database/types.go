@@ -133,6 +133,20 @@ type Job struct {
 	// doc comment). Meaningful only while Status == StatusCookies; every path
 	// that parks a job rewrites it, and every path that un-parks one clears it.
 	ParkReason ParkReason `json:"parkReason,omitempty"`
+	// ParkIdentity is an opaque fingerprint of WHICH platform account the job
+	// was refused under, recorded when ParkReason is ParkReasonMembership (see
+	// cookies.CookieJar.YouTubeIdentity). A membership park resumes when the
+	// current account differs from this one — the durable comparison that
+	// makes the resume decision independent of any in-process edge, so it
+	// survives restarts and cannot be consumed by a missed transition.
+	//
+	// "" means "parked under an unknown account" (a pre-v19 row, or a park
+	// where the identity could not be computed) and resolves permissively:
+	// one retry on the next observation rather than a permanent strand.
+	//
+	// json:"-" on purpose. It is credential-derived and of no use to any UI;
+	// the user-facing signal is ParkReason plus the job's error text.
+	ParkIdentity string `json:"-"`
 	// IncompleteTail marks a Finished job whose recording is known to be missing
 	// tail segments (finalized behind head after refresh attempts). Staging +
 	// resume sidecar are preserved; Retry/Resume are allowed and clear the flag

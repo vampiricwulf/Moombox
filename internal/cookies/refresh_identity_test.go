@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -23,25 +24,25 @@ func TestYouTubeIdentity(t *testing.T) {
 		t.Errorf("empty jar identity = %q, want empty", got)
 	}
 
-	a := jarWith(map[string]string{"SAPISID": "account-A-secret"}).YouTubeIdentity()
-	b := jarWith(map[string]string{"SAPISID": "account-B-secret"}).YouTubeIdentity()
+	a := jarWith(map[string]string{"SAPISID": "session-1", "LOGIN_INFO": "account-A"}).YouTubeIdentity()
+	b := jarWith(map[string]string{"SAPISID": "session-2", "LOGIN_INFO": "account-B"}).YouTubeIdentity()
 	if a == "" || b == "" {
-		t.Fatal("a jar holding SAPISID must produce an identity")
+		t.Fatal("a jar holding SAPISID + LOGIN_INFO must produce an identity")
 	}
 	if a == b {
 		t.Error("two different accounts produced the same identity — the sweep could never tell them apart")
 	}
 	// Stable: the same account re-read must fingerprint the same, or every
 	// refresh cycle would look like an account change.
-	if again := jarWith(map[string]string{"SAPISID": "account-A-secret"}).YouTubeIdentity(); again != a {
-		t.Error("identity is not stable for the same SAPISID")
+	if again := jarWith(map[string]string{"SAPISID": "session-1", "LOGIN_INFO": "account-A"}).YouTubeIdentity(); again != a {
+		t.Error("identity is not stable for the same cookies")
 	}
-	// Never the raw secret. This value is compared, logged around, and held
-	// for the life of the process; the cookie it derives from is the highest
-	// value credential the app holds.
+	// Never the raw secret. This value is compared, logged around, and stored
+	// on job rows; the cookies it derives from are the highest-value
+	// credentials the app holds.
 	for _, id := range []string{a, b} {
-		if id == "account-A-secret" || id == "account-B-secret" {
-			t.Error("identity leaks the raw SAPISID")
+		if strings.Contains(id, "session-") || strings.Contains(id, "account-") {
+			t.Error("identity leaks a raw cookie value")
 		}
 	}
 
@@ -49,89 +50,208 @@ func TestYouTubeIdentity(t *testing.T) {
 	// a jar that has both must not fingerprint differently from one that
 	// resolves to the same value — otherwise adding the mirror cookie to an
 	// export would read as an account change.
-	fallback := jarWith(map[string]string{"__Secure-3PAPISID": "account-A-secret"}).YouTubeIdentity()
+	fallback := jarWith(map[string]string{"__Secure-3PAPISID": "session-1", "LOGIN_INFO": "account-A"}).YouTubeIdentity()
 	if fallback != a {
 		t.Error("__Secure-3PAPISID fallback must fingerprint identically to SAPISID")
 	}
 }
 
-// TestShouldFireIdentityChange pins when a YouTube account swap counts as
-// "the operator supplied different credentials".
+// TestYouTubeIdentitySeparatesAccountsInOneSession is the case the whole
+// membership-resume feature exists to serve, and the one SAPISID alone cannot
+// see.
 //
-// This is the resume trigger for membership-parked jobs, and it exists
-// because OnAuthRecovered cannot be: a not-a-member job parks while the
-// session is HEALTHY, so there is no not-authenticated → authenticated
-// transition to ride when the operator later swaps to the member account.
-func TestShouldFireIdentityChange(t *testing.T) {
+// SAPISID identifies a Google *session*, not an account: a multi-login browser
+// holds N accounts under one cookie session sharing one SAPISID, which is
+// exactly why internal/youtube/auth.go has to select the account separately
+// with X-Goog-AuthUser (ytcfg SESSION_INDEX) and X-Goog-PageId
+// (DELEGATED_SESSION_ID). If SAPISID identified the account those headers
+// would be redundant.
+//
+// The remedy Moombox prints for a not-a-member failure is "switch the browser
+// to the account that holds the membership, then export again"
+// (stream_processor.go). Doing precisely that changes LOGIN_INFO and leaves
+// SAPISID untouched. Fingerprinting SAPISID alone would therefore go blind to
+// the single action the error message asks the user to take.
+func TestYouTubeIdentitySeparatesAccountsInOneSession(t *testing.T) {
+	jarWith := func(kv map[string]string) *CookieJar {
+		j := NewCookieJar()
+		for k, v := range kv {
+			j.cookies[k] = v
+		}
+		return j
+	}
+
+	const sharedSession = "one-browser-session-sapisid"
+	accountA := jarWith(map[string]string{"SAPISID": sharedSession, "LOGIN_INFO": "channel-A-binding"}).YouTubeIdentity()
+	accountB := jarWith(map[string]string{"SAPISID": sharedSession, "LOGIN_INFO": "channel-B-binding"}).YouTubeIdentity()
+
+	if accountA == accountB {
+		t.Error("switching the browser's active YouTube account left the identity unchanged — " +
+			"the resume trigger is blind to the exact remedy the error message tells the user to perform")
+	}
+}
+
+// TestYouTubeIdentityNeedsBothCookies: a jar missing either half cannot
+// identify an account, and must report "unknown" rather than a fingerprint
+// that would compare unequal to every real one and fire spurious sweeps.
+func TestYouTubeIdentityNeedsBothCookies(t *testing.T) {
+	jarWith := func(kv map[string]string) *CookieJar {
+		j := NewCookieJar()
+		for k, v := range kv {
+			j.cookies[k] = v
+		}
+		return j
+	}
+	if got := jarWith(map[string]string{"SAPISID": "s"}).YouTubeIdentity(); got != "" {
+		t.Errorf("SAPISID without LOGIN_INFO = %q, want empty", got)
+	}
+	if got := jarWith(map[string]string{"LOGIN_INFO": "l"}).YouTubeIdentity(); got != "" {
+		t.Errorf("LOGIN_INFO without SAPISID = %q, want empty", got)
+	}
+}
+
+// TestShouldObserveCredentials pins when a check should hand the current
+// account identity to the sweep for re-evaluation.
+//
+// This trigger exists because OnAuthRecovered structurally cannot serve
+// membership parks: such a job parks while the session is HEALTHY, so the
+// operator swapping to the member account produces no
+// not-authenticated → authenticated transition to ride.
+//
+// The trigger is only a WAKE-UP. The actual resume decision compares each
+// job's recorded park identity against the current one, so a missed trigger
+// costs a delay, never a permanent strand — which is what lets this predicate
+// stay simple.
+func TestShouldObserveCredentials(t *testing.T) {
 	cases := []struct {
 		name     string
-		prev     string
+		baseline string
 		now      string
 		nowAuth  bool
 		checkErr error
 		want     bool
 	}{
 		{
-			name:    "different account with working auth fires",
-			prev:    "aaa",
-			now:     "bbb",
-			nowAuth: true,
-			want:    true,
+			name:     "different account with working auth fires",
+			baseline: "aaa",
+			now:      "bbb",
+			nowAuth:  true,
+			want:     true,
 		},
 		{
 			// The steady state. Every 30-minute check must be silent, or the
-			// membership job goes right back to being retried forever.
-			name:    "same account does not fire",
-			prev:    "aaa",
-			now:     "aaa",
-			nowAuth: true,
-			want:    false,
+			// sweep runs a full job scan on every cycle for nothing.
+			name:     "same account does not fire",
+			baseline: "aaa",
+			now:      "aaa",
+			nowAuth:  true,
+			want:     false,
 		},
 		{
-			// First conclusive observation in this process: there is no
-			// baseline, so a restart must not read as an account swap.
-			name:    "no previous identity does not fire",
-			prev:    "",
-			now:     "bbb",
-			nowAuth: true,
-			want:    false,
+			// First conclusive authenticated check of the process. It MUST
+			// fire: an operator who stopped Moombox, replaced the cookies and
+			// started it again produces no in-process transition at all, and
+			// the per-job comparison is what decides whether anything
+			// actually moves. Firing here is how an offline swap is seen.
+			name:     "first observation of the process fires",
+			baseline: "",
+			now:      "bbb",
+			nowAuth:  true,
+			want:     true,
 		},
 		{
 			// Cookies removed. Nothing to resume INTO — and this is the auth
 			// LOSS path, which OnRecoveryNeeded owns.
-			name:    "identity disappearing does not fire",
-			prev:    "aaa",
-			now:     "",
-			nowAuth: false,
-			want:    false,
+			name:     "identity disappearing does not fire",
+			baseline: "aaa",
+			now:      "",
+			nowAuth:  false,
+			want:     false,
 		},
 		{
-			// A different account whose cookies do not actually authenticate
-			// is not a fix. Resuming into it burns an extraction attempt and
-			// re-parks; OnAuthRecovered picks the jobs up if it later works.
-			name:    "different account that does not authenticate does not fire",
-			prev:    "aaa",
-			now:     "bbb",
-			nowAuth: false,
-			want:    false,
+			// Different credentials that do not authenticate are not a fix.
+			// Critically, the caller must ALSO not advance its baseline here
+			// — see TestBaselineSurvivesUnauthenticatedCheck.
+			name:     "different account that does not authenticate does not fire",
+			baseline: "aaa",
+			now:      "bbb",
+			nowAuth:  false,
+			want:     false,
 		},
 		{
 			// A network error means we learned nothing this cycle.
 			name:     "inconclusive check never fires",
-			prev:     "aaa",
+			baseline: "aaa",
 			now:      "bbb",
 			nowAuth:  true,
 			checkErr: errors.New("dial tcp: timeout"),
+			want:     false,
+		},
+		{
+			name:     "authenticated with no identity at all does not fire",
+			baseline: "aaa",
+			now:      "",
+			nowAuth:  true,
 			want:     false,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldFireIdentityChange(tc.prev, tc.now, tc.nowAuth, tc.checkErr)
+			got := shouldObserveCredentials(tc.baseline, tc.now, tc.nowAuth, tc.checkErr)
 			if got != tc.want {
-				t.Errorf("shouldFireIdentityChange = %v, want %v", got, tc.want)
+				t.Errorf("shouldObserveCredentials = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBaselineSurvivesUnauthenticatedCheck pins the rule that keeps a stale
+// intermediate export from eating the only edge.
+//
+// The flow is the one Moombox's own advice steers users into — browsing on in
+// the source profile invalidates an earlier export (worker.go), so a
+// first-attempt export arriving dead is routine:
+//
+//  1. membership park under account A, auth healthy
+//  2. operator drops in account B's export, already stale:
+//     conclusive check, ytAuth=false
+//  3. operator re-exports B properly: ytAuth=true
+//
+// If step 2 advanced the baseline to B, step 3 compares B against B, never
+// fires, and the job is stranded — OnAuthRecovered skips membership parks by
+// design, so nothing else would pick it up. The baseline therefore advances
+// only on checks that were BOTH conclusive and authenticated.
+func TestBaselineSurvivesUnauthenticatedCheck(t *testing.T) {
+	baseline := "identity-A"
+
+	// Step 2: a conclusive check that found the new cookies dead.
+	if shouldObserveCredentials(baseline, "identity-B", false, nil) {
+		t.Fatal("an unauthenticated check must not fire")
+	}
+	baseline = advanceIdentityBaseline(baseline, "identity-B", false, nil)
+	if baseline != "identity-A" {
+		t.Fatalf("baseline = %q after an unauthenticated check, want it held at identity-A — "+
+			"advancing here consumes the edge and strands the job at step 3", baseline)
+	}
+
+	// Step 3: the same account, now working. This is the fix arriving.
+	if !shouldObserveCredentials(baseline, "identity-B", true, nil) {
+		t.Error("the working re-export must fire — nothing else can resume a membership park")
+	}
+	baseline = advanceIdentityBaseline(baseline, "identity-B", true, nil)
+	if baseline != "identity-B" {
+		t.Errorf("baseline = %q, want identity-B once the account is confirmed working", baseline)
+	}
+
+	// And it settles: a permanently broken swap never fires repeatedly, and a
+	// working one fires exactly once.
+	if shouldObserveCredentials(baseline, "identity-B", true, nil) {
+		t.Error("steady state must be silent")
+	}
+
+	// An inconclusive check must not move the baseline either.
+	if got := advanceIdentityBaseline(baseline, "identity-C", true, errors.New("timeout")); got != "identity-B" {
+		t.Errorf("baseline = %q after a network error, want identity-B", got)
 	}
 }
