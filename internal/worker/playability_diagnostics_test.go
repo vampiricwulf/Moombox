@@ -219,6 +219,161 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 	}
 }
 
+// TestParkReasonForError pins the sentinel → database.ParkReason mapping that
+// setJobError persists. This is the durable record of WHY a job stopped at
+// COOKIES?, and the auth-recovery sweep in cmd/moombox keys on it. The whole
+// point is to keep that decision off the job's error TEXT, which is prose the
+// user reads and which has already been reworded once.
+func TestParkReasonForError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want database.ParkReason
+	}{
+		{
+			// The session was alive and YouTube still said no. Rotating or
+			// restoring THESE credentials cannot help; only a different
+			// account can.
+			name: "not-a-member",
+			err:  ErrNotAMember,
+			want: database.ParkReasonMembership,
+		},
+		{
+			name: "not-a-member wrapped by AsError",
+			err:  (&StreamProcessResult{Error: "Member-only: x", ErrSentinel: ErrNotAMember}).AsError(),
+			want: database.ParkReasonMembership,
+		},
+		{
+			name: "cookies required",
+			err:  ErrCookiesRequired,
+			want: database.ParkReasonAuth,
+		},
+		{
+			name: "twitch auth expired",
+			err:  fmt.Errorf("gql: %w", twitch.ErrTwitchAuthExpired),
+			want: database.ParkReasonAuth,
+		},
+		{
+			// Ambiguous by construction: usher's 403 does not say whether the
+			// session was anonymous or simply un-entitled, so supplying
+			// working credentials may well be the fix. It must keep being
+			// swept — classifying it as "membership" would strand the
+			// anonymous case.
+			name: "twitch subscriber-only",
+			err:  fmt.Errorf("usher: %w", twitch.ErrSubscriberOnly),
+			want: database.ParkReasonAuth,
+		},
+		{
+			// Not a cookie park at all — the job goes to Error, and the reason
+			// must be cleared rather than left carrying a stale value.
+			name: "unrelated failure",
+			err:  errors.New("ffmpeg exploded"),
+			want: database.ParkReasonNone,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parkReasonForError(tc.err); got != tc.want {
+				t.Errorf("parkReasonForError = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetJobErrorPersistsParkReason drives the mapping through the real call
+// site: the reason must reach the database, because the sweep reads it from
+// there long after this process may have restarted.
+func TestSetJobErrorPersistsParkReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantStatus database.JobStatus
+		wantReason database.ParkReason
+		id         string
+	}{
+		{
+			name:       "members-only on a live session records membership",
+			err:        (&StreamProcessResult{Error: "Member-only: x", ErrSentinel: ErrNotAMember}).AsError(),
+			wantStatus: database.StatusCookies,
+			wantReason: database.ParkReasonMembership,
+			id:         "prnotmember",
+		},
+		{
+			name:       "dead cookies record auth",
+			err:        (&StreamProcessResult{Error: "Member-only: x", ErrSentinel: ErrCookiesRequired}).AsError(),
+			wantStatus: database.StatusCookies,
+			wantReason: database.ParkReasonAuth,
+			id:         "prdeadcookies",
+		},
+		{
+			name:       "generic failure records no reason",
+			err:        errors.New("ffmpeg exploded"),
+			wantStatus: database.StatusError,
+			wantReason: database.ParkReasonNone,
+			id:         "prgeneric",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			jobID := "yt_" + tc.id
+			job := &database.Job{
+				ID:       jobID,
+				VideoID:  tc.id,
+				URL:      "https://youtube.com/watch?v=" + tc.id,
+				Platform: "youtube",
+				Status:   database.StatusDownloading,
+			}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			w.OnCookieRefreshNeeded = func() bool { return false }
+
+			w.setJobError(job, tc.err)
+
+			got, err := db.GetJob(jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if got.ParkReason != tc.wantReason {
+				t.Errorf("park_reason = %q, want %q", got.ParkReason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestSetJobErrorOverwritesStaleParkReason: a job that parked as "membership",
+// was retried, and then failed for a different reason must not keep carrying
+// the old classification — a stale "membership" would suppress a legitimate
+// auth-recovery resume for the rest of that job's life.
+func TestSetJobErrorOverwritesStaleParkReason(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	const jobID = "yt_prstale"
+	if _, err := db.AddJob(&database.Job{
+		ID: jobID, VideoID: "prstale", URL: "u", Platform: "youtube",
+		Status: database.StatusDownloading,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w.OnCookieRefreshNeeded = func() bool { return false }
+
+	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
+		(&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError())
+	if got, _ := db.GetJob(jobID); got.ParkReason != database.ParkReasonMembership {
+		t.Fatalf("setup: park_reason = %q, want membership", got.ParkReason)
+	}
+
+	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
+		(&StreamProcessResult{Error: "m", ErrSentinel: ErrCookiesRequired}).AsError())
+	if got, _ := db.GetJob(jobID); got.ParkReason != database.ParkReasonAuth {
+		t.Errorf("park_reason = %q, want auth — a stale membership reason would suppress the sweep forever", got.ParkReason)
+	}
+}
+
 // TestNotAMemberDistinctFromOtherSentinels: ErrNotAMember must be its own
 // identity, or the suppression above would silently disable the refresh for
 // every cookie failure.
@@ -228,5 +383,112 @@ func TestNotAMemberDistinctFromOtherSentinels(t *testing.T) {
 	}
 	if errors.Is(ErrNotAMember, ErrNonActionable) {
 		t.Error("ErrNotAMember should not match ErrNonActionable")
+	}
+}
+
+// TestSetJobErrorRecordsParkIdentity: a membership park must record WHICH
+// account refused it. That value is what lets the credential sweep decide,
+// durably and after any number of restarts, whether the account has actually
+// changed — without it the sweep can only guess.
+//
+// It is captured for membership parks ONLY. On any other failure the account
+// is not what blocked the job, and a recorded identity there would later read
+// as a meaningless "account changed" signal.
+func TestSetJobErrorRecordsParkIdentity(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		id       string
+		wantID   string
+		wantCall bool
+	}{
+		{
+			name:     "membership park records the current account",
+			err:      (&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError(),
+			id:       "pidmember",
+			wantID:   "account-A",
+			wantCall: true,
+		},
+		{
+			name:     "dead-cookie park records nothing",
+			err:      (&StreamProcessResult{Error: "m", ErrSentinel: ErrCookiesRequired}).AsError(),
+			id:       "pidauth",
+			wantID:   "",
+			wantCall: false,
+		},
+		{
+			name:     "generic failure records nothing",
+			err:      errors.New("ffmpeg exploded"),
+			id:       "pidgeneric",
+			wantID:   "",
+			wantCall: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			jobID := "yt_" + tc.id
+			if _, err := db.AddJob(&database.Job{
+				ID: jobID, VideoID: tc.id, URL: "u", Platform: "youtube",
+				Status: database.StatusDownloading,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			w.OnCookieRefreshNeeded = func() bool { return false }
+
+			called := false
+			w.CurrentCredentialIdentity = func(platform string) string {
+				called = true
+				if platform != "youtube" {
+					t.Errorf("identity requested for platform %q, want youtube", platform)
+				}
+				return "account-A"
+			}
+
+			w.setJobError(&database.Job{ID: jobID, Platform: "youtube"}, tc.err)
+
+			if called != tc.wantCall {
+				t.Errorf("CurrentCredentialIdentity called = %v, want %v", called, tc.wantCall)
+			}
+			got, err := db.GetJob(jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ParkIdentity != tc.wantID {
+				t.Errorf("park_identity = %q, want %q", got.ParkIdentity, tc.wantID)
+			}
+		})
+	}
+}
+
+// TestSetJobErrorParkIdentityNilSlotIsSafe: the callback is optional (tests,
+// and any wiring that has no jar). A nil slot must record "" rather than
+// panic — "" resolves permissively at the sweep, which is the right default
+// for "we could not tell".
+func TestSetJobErrorParkIdentityNilSlotIsSafe(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	const jobID = "yt_pidnil"
+	if _, err := db.AddJob(&database.Job{
+		ID: jobID, VideoID: "pidnil", URL: "u", Platform: "youtube",
+		Status: database.StatusDownloading,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w.OnCookieRefreshNeeded = func() bool { return false }
+	w.CurrentCredentialIdentity = nil
+
+	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
+		(&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError())
+
+	got, err := db.GetJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParkReason != database.ParkReasonMembership {
+		t.Errorf("park_reason = %q, want membership", got.ParkReason)
+	}
+	if got.ParkIdentity != "" {
+		t.Errorf("park_identity = %q, want empty", got.ParkIdentity)
 	}
 }

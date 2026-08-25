@@ -23,6 +23,85 @@ import (
 // success) stops vouching so a genuine outage still surfaces.
 const crossMonitorVouchWindow = 20 * time.Minute
 
+// sweepShouldResume reports whether one job should be bounced out of
+// StatusCookies back to Upcoming by a credential sweep for `platform`.
+//
+// currentIdentity is the opaque fingerprint of the account the platform's
+// cookies belong to right now, or "" when the caller has none to offer. It is
+// what separates the two sweeps:
+//
+//   - The auth-recovered sweep passes "". Dead cookies came back to life,
+//     which fixes an auth park and cannot fix a membership one.
+//   - The credential sweep passes the observed identity, letting a membership
+//     park move if — and only if — the account is not the one that refused it.
+//
+// The status+platform gate is the pre-existing behavior. What the park reason
+// adds is the membership case: a job parks at ParkReasonMembership only when
+// the platform answered a session it had already confirmed was SIGNED IN, so
+// the auth transition cannot be the event that fixes it — that session was
+// authenticated when it failed. Resuming there bought a guaranteed-identical
+// failure and a full extraction attempt every auth cycle, forever.
+//
+// The membership comparison is deliberately against the job's OWN recorded
+// identity rather than any process-level "did it change since last time" edge.
+// A durable per-job comparison cannot be missed: it survives restarts, it
+// cannot be consumed by an intermediate observation, and re-evaluating it is
+// free and idempotent. A resumed job that fails again re-parks under the
+// current identity, so it settles at exactly one retry per real account
+// change.
+//
+// Two permissive defaults, both chosen so an unknown resolves to one wasted
+// retry rather than a permanent strand:
+//
+//   - ParkReasonNone (every COOKIES? row predating the park_reason column, and
+//     any park recorded by a path that does not classify) is resumable —
+//     nothing on such a row says retroactively whether it was a membership
+//     problem, and stranding a genuinely dead-cookie job is the worse error.
+//   - A membership park with no recorded identity ("" — a pre-v19 row, or a
+//     park where the fingerprint could not be computed) is treated as parked
+//     under an unknown account and resumes on the next observation.
+func sweepShouldResume(job *database.Job, platform, currentIdentity string) bool {
+	if job == nil || job.Status != database.StatusCookies || job.Platform != platform {
+		return false
+	}
+	if job.ParkReason != database.ParkReasonMembership {
+		return true
+	}
+	// No identity on offer means this caller cannot speak to the membership
+	// question at all (the auth-recovered sweep), so it must not move these.
+	return currentIdentity != "" && currentIdentity != job.ParkIdentity
+}
+
+// resumeCookieParkedJobs applies sweepShouldResume to every job and returns
+// how many were resumed. Split out of the callback closures so the decision
+// and the database loop it actually drives can both be tested directly.
+func resumeCookieParkedJobs(db *database.Database, log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, platform, currentIdentity string) int {
+	jobs, err := db.GetAllJobs()
+	if err != nil {
+		log.Warn("cookie-parked sweep: GetAllJobs failed", "platform", platform, "err", err)
+		return 0
+	}
+	resumed := 0
+	for _, job := range jobs {
+		if !sweepShouldResume(job, platform, currentIdentity) {
+			continue
+		}
+		db.UpdateJobFields(job.ID, map[string]any{
+			"status":        database.StatusUpcoming,
+			"error":         "",
+			"park_reason":   database.ParkReasonNone,
+			"park_identity": "",
+		})
+		resumed++
+	}
+	return resumed
+}
+
 // channelHealthReporter is the slice of a monitor's surface needed to
 // cross-confirm a channel's reachability across sibling monitors.
 type channelHealthReporter interface {
@@ -195,29 +274,15 @@ func (s *runState) wireMonitorCallbacks() {
 	}
 
 	// When a platform transitions from not-authenticated to authenticated,
-	// sweep any jobs parked in StatusCookies on that platform back to
-	// Upcoming so they get re-probed without manual intervention. Closes
-	// audit decision #23 (worker.md Q3).
+	// sweep the jobs parked in StatusCookies on that platform back to Upcoming
+	// so they get re-probed without manual intervention. Closes audit
+	// decision #23 (worker.md Q3).
+	//
+	// "the jobs", not "every job": sweepShouldResume holds back the
+	// membership-parked ones, whose session was already authenticated when
+	// they failed and which this transition therefore cannot fix.
 	s.cookieRefresh.OnAuthRecovered = func(platform string) {
-		jobs, err := s.db.GetAllJobs()
-		if err != nil {
-			s.log.Warn("auth-recovered sweep: GetAllJobs failed", "platform", platform, "err", err)
-			return
-		}
-		resumed := 0
-		for _, job := range jobs {
-			if job.Status != database.StatusCookies {
-				continue
-			}
-			if job.Platform != platform {
-				continue
-			}
-			s.db.UpdateJobFields(job.ID, map[string]any{
-				"status": database.StatusUpcoming,
-				"error":  "",
-			})
-			resumed++
-		}
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
 		if resumed > 0 {
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 			// Event "auth" pairs with the worker's "Authentication Required"
@@ -225,6 +290,45 @@ func (s *runState) wireMonitorCallbacks() {
 			// (unfilterable) since the filter only applies when Event != "".
 			s.notifyMgr.Send("Authentication Recovered",
 				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
+				notifications.TypeInfo,
+				[]notifications.Field{
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+				},
+				notifications.SendOptions{Event: "auth"},
+			)
+		}
+	}
+
+	// Whenever the signed-in account is (re-)observed, re-evaluate the parked
+	// jobs against it. For a membership park this is the only thing that can
+	// help — such a job parked while auth was perfectly healthy, so it is
+	// invisible to OnAuthRecovered above — and it resumes only if the account
+	// is genuinely a different one from the one that refused it.
+	//
+	// Dead-cookie parks are eligible here as well. In the common case
+	// OnAuthRecovered already took them (a swap that also restores auth fires
+	// both), and resumeCookieParkedJobs is idempotent, so whichever runs
+	// second simply finds nothing left. Being permissive costs nothing and
+	// covers the swap-while-healthy case for them too.
+	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
+		if resumed > 0 {
+			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// States no cause, for the same reason the "Cookie Auto-Refresh
+			// Ineffective" notification above states none. This fires on the
+			// first authenticated observation of EVERY process, not only on a
+			// real account change: an operator who fixed their cookies while
+			// Moombox was stopped gets their jobs resumed here, and telling
+			// them "a different account was supplied" would be flatly false.
+			// A notification is more visible than a log line, so it should
+			// assert less than the log line, not more — report what happened
+			// (jobs resumed) and leave the cause to the log.
+			//
+			// Same "auth" event as the recovery notification above, for the
+			// same reason: an empty Event bypasses every target's allowlist.
+			s.notifyMgr.Send("Parked Jobs Re-evaluated",
+				fmt.Sprintf("Resumed %d job(s) parked on %s credentials after re-checking the signed-in account", resumed, platform),
 				notifications.TypeInfo,
 				[]notifications.Field{
 					{Name: "Platform", Value: platform, Inline: true},

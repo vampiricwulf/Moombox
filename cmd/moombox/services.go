@@ -598,6 +598,20 @@ func (s *runState) initServices(logLevelOverride string) error {
 		autoCookieSvc.DpapiFallback = c.Cookies.DpapiFallback
 	})
 
+	// Wire the account fingerprint the worker records on a membership park, so
+	// the credential sweep can later tell whether the account actually changed.
+	// Reads the live jar, so it reflects whatever cookies are on disk at the
+	// moment the job was refused.
+	dlWorker.CurrentCredentialIdentity = func(platform string) string {
+		if platform != "youtube" {
+			// Only YouTube produces a membership park, and only YouTube has a
+			// stable account fingerprint — see cookies.RefreshService's
+			// prevYouTubeIdentity.
+			return ""
+		}
+		return s.jar.YouTubeIdentity()
+	}
+
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func() bool {
 		var autoEnabled bool

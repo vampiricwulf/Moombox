@@ -39,10 +39,31 @@ var ErrCookiesRequired = errors.New("cookies required (auth needed)")
 // wrong one of several Google accounts in the exporting browser).
 //
 // It still routes to StatusCookies — supplying credentials for an account
-// that DOES hold the membership is the fix, and the auth-recovered sweep
-// should retry the job — but it suppresses the automatic cookie refresh:
-// rotating a live session cannot add a membership to it, and doing so
-// printed "re-run setup" advice at an operator whose cookies were fine.
+// that DOES hold the membership is the fix, and the user must be able to see
+// and act on that — but it suppresses both automatic paths that assume the
+// SAME credentials can be made to work:
+//
+//   - the automatic cookie refresh (cookieRefreshWorthAttempting), because
+//     rotating a live session cannot add a membership to it, and doing so
+//     printed "re-run setup" advice at an operator whose cookies were fine;
+//   - the auth-recovered sweep, via the persisted database.ParkReasonMembership
+//     that parkReasonForError records. That sweep fires on a
+//     not-authenticated → authenticated transition, which by definition
+//     cannot be the event that fixes a membership problem (the session was
+//     already authenticated when it failed). Resuming on it bought a
+//     guaranteed-identical failure and a full extraction attempt per auth
+//     cycle, forever. What resumes these instead is a different ACCOUNT: the
+//     job records the identity it was refused under (database.ParkIdentity)
+//     and cmd/moombox's credential sweep compares against it.
+//
+// Note the cost of a misclassification. The signed-in determination comes
+// from the watch page's session state, and checkPlayability already notes
+// that signal can in principle disagree with the player response. A failure
+// wrongly classified here is excluded from the auth-recovered sweep for the
+// rest of that job's life — it will only ever resume on an account change or
+// a manual retry. That asymmetry is deliberate (the alternative is the
+// forever-retry loop), but it is why the classification is driven off an
+// explicit SessionAuthLoggedIn verdict and never off a guess.
 var ErrNotAMember = errors.New("not a channel member")
 
 // ErrNonActionable marks errors where there's nothing the user can do
@@ -155,6 +176,14 @@ type DownloadWorker struct {
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should be attempted.
 	// Returns true if cookies were refreshed successfully.
 	OnCookieRefreshNeeded func() bool
+
+	// CurrentCredentialIdentity returns an opaque fingerprint of the account
+	// the platform's cookies currently belong to (cookies.CookieJar's
+	// YouTubeIdentity), or "" when it cannot be determined. Recorded on a
+	// membership park so the credential sweep can tell later whether the
+	// account has actually changed. Optional: a nil slot simply records "",
+	// which the sweep resolves permissively.
+	CurrentCredentialIdentity func(platform string) string
 }
 
 // readConfig runs fn under configStore's read lock when the store has been
@@ -836,6 +865,38 @@ func cookieRefreshWorthAttempting(err error) bool {
 	return !errors.Is(err, ErrNotAMember)
 }
 
+// parkReasonForError classifies err into the database.ParkReason persisted
+// alongside StatusCookies. This is the durable half of the same distinction
+// cookieRefreshWorthAttempting makes in-process: the automatic refresh decides
+// once, here and now, but the auth-recovery sweep in cmd/moombox decides
+// again — minutes, days, or a restart later — and needs the answer written
+// down rather than re-derived from the job's error prose.
+//
+// ErrNotAMember is the only membership case: YouTube answered a demonstrably
+// signed-in request with "members only", so no amount of restoring or
+// rotating THESE credentials can help.
+//
+// twitch.ErrSubscriberOnly looks similar but is not, for two reasons. Usher's
+// 403 does not distinguish an anonymous session from an un-entitled one, so
+// working credentials genuinely may be the fix. And the retry loop this
+// classification exists to break is structurally absent on that side anyway:
+// the auth-recovered sweep only fires on a not-auth → auth TRANSITION, and an
+// un-entitled account with healthy Twitch auth produces no transitions, so
+// nothing re-runs the job in the first place. It stays in the auth class.
+//
+// Returns ParkReasonNone for anything that does not park at StatusCookies, so
+// callers can write the field unconditionally and never leave a stale
+// classification behind on a job that failed for an unrelated reason.
+func parkReasonForError(err error) database.ParkReason {
+	if !cookiesStatusError(err) {
+		return database.ParkReasonNone
+	}
+	if errors.Is(err, ErrNotAMember) {
+		return database.ParkReasonMembership
+	}
+	return database.ParkReasonAuth
+}
+
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Free the queue slot BEFORE committing the error to DB so a concurrent
 	// monitor-driven AutoReinitializeJob can re-enqueue without hitting the
@@ -852,9 +913,25 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 		status = database.StatusCookies
 	}
 
+	// park_reason and park_identity are written on EVERY error transition,
+	// including the cleared case, so a job that once parked as "membership"
+	// and later failed for something else does not carry the old
+	// classification — a stale one would suppress a legitimate auth-recovery
+	// resume forever, and a stale identity would fake an account change.
+	//
+	// The identity is captured only for a membership park: it is the account
+	// the platform refused this job under, and it is meaningless for any other
+	// failure.
+	reason := parkReasonForError(err)
+	identity := ""
+	if reason == database.ParkReasonMembership && w.CurrentCredentialIdentity != nil {
+		identity = w.CurrentCredentialIdentity(job.Platform)
+	}
 	w.db.UpdateJobFields(job.ID, map[string]any{
-		"status": status,
-		"error":  errMsg,
+		"status":        status,
+		"error":         errMsg,
+		"park_reason":   reason,
+		"park_identity": identity,
 	})
 
 	// Suppress notifications for non-actionable errors (matches TS behavior):
@@ -995,8 +1072,10 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		// Live was wrong when the stream had transitioned to post-live
 		// or had not yet started (per audit reports/worker.md Finding 21).
 		w.db.UpdateJobFields(job.ID, map[string]any{
-			"status": database.StatusUpcoming,
-			"error":  "",
+			"status":        database.StatusUpcoming,
+			"error":         "",
+			"park_reason":   database.ParkReasonNone,
+			"park_identity": "",
 		})
 		w.queue.Enqueue(job.ID, database.StatusUpcoming)
 		return
@@ -1083,6 +1162,8 @@ func (w *DownloadWorker) ResumeJob(jobID string) {
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status":           database.StatusDownloading,
 		"error":            "",
+		"park_reason":      database.ParkReasonNone,
+		"park_identity":    "",
 		"auto_retry_count": 0,
 	})
 	w.EnqueueJob(jobID)
@@ -1141,6 +1222,8 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status":              database.StatusUpcoming,
 		"error":               "",
+		"park_reason":         database.ParkReasonNone,
+		"park_identity":       "",
 		"progress":            "",
 		"percent":             0,
 		"speed":               "",
@@ -1213,6 +1296,8 @@ func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status":              database.StatusUpcoming,
 		"error":               "",
+		"park_reason":         database.ParkReasonNone,
+		"park_identity":       "",
 		"progress":            "",
 		"percent":             0,
 		"speed":               "",

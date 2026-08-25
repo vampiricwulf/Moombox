@@ -2132,6 +2132,14 @@ class MoomboxApp {
     }
 
     if (job.status === "COOKIES?") {
+      // A membership park is a DIFFERENT remedy from a dead-cookie park:
+      // refreshing the current account cannot add a channel membership to it,
+      // and these jobs deliberately never resume on their own until a
+      // different account is supplied. Saying "needs cookie refresh" sent an
+      // operator round a loop that could never have helped.
+      if (job.parkReason === "membership") {
+        return "Not a member — needs member account";
+      }
       return "Needs cookie refresh";
     }
 
@@ -3977,6 +3985,11 @@ class MoomboxApp {
   formatProgressTooltip(job) {
     // Show full error in tooltip (card truncates to 50 chars)
     if (job.status === "Error" && job.error) return job.error;
+    // COOKIES? carries the actionable remedy in its error text too — for a
+    // membership park that text names the fix ("switch the browser to the
+    // account that holds the membership"), and the flat list label has no
+    // room for it.
+    if (job.status === "COOKIES?" && job.error) return job.error;
 
     const p = job.progress || "";
     // DASH: (V: 789/1000 A: 123/456 C: 50) — video first since v2.7.8;

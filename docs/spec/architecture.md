@@ -672,7 +672,7 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 | `Finished` | `"Finished"` | Terminal. Output file is ready. |
 | `Error` | `"Error"` | Terminal. Something went wrong. Error message in `error` field. |
 | `Cancelled` | `"Cancelled"` | Terminal. User explicitly cancelled. |
-| `COOKIES?` | `"COOKIES?"` | Terminal (but retriable). Authentication required -- cookies expired or members-only. |
+| `COOKIES?` | `"COOKIES?"` | Terminal (but retriable). Authentication required -- cookies expired or members-only. The `park_reason` column records which, and gates automatic resume (see below). |
 
 ### Transition Rules
 
@@ -685,6 +685,12 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 - Any -> `Error`: Unrecoverable error at any stage
 - Any -> `Cancelled`: User-initiated cancellation
 - `Downloading` -> `COOKIES?`: Auth failure detected (login required, members-only, cookies expired)
+- `COOKIES?` -> `Upcoming`: A credential-recovery sweep resumed the job. Two sweeps exist and they are not interchangeable:
+  - **Auth recovered** (`RefreshService.OnAuthRecovered`) fires when a platform goes from not-authenticated to authenticated, and offers the sweep no account identity. It resumes every park EXCEPT `park_reason = 'membership'`.
+  - **Credential observation** (`RefreshService.OnCredentialsChanged`, YouTube only) hands the sweep the account identity currently in the cookie file. A membership park then resumes if and only if that identity differs from the `park_identity` it recorded when it was refused.
+  A membership park is excluded from the first sweep because it happened while the session was ALREADY authenticated, so that transition cannot be the event that fixes it -- resuming there bought a guaranteed-identical failure once per auth cycle. Only a different account can help.
+- **Account identity** is `SHA-256(SAPISID || NUL || LOGIN_INFO)` (`cookies.CookieJar.YouTubeIdentity`). `LOGIN_INFO` is the load-bearing half: SAPISID identifies a Google *session*, not an account, which is why `internal/youtube/auth.go` must select the account separately via `X-Goog-AuthUser`/`X-Goog-PageId`. Switching the browser's active account -- the exact remedy Moombox prints for a not-a-member failure -- rewrites `LOGIN_INFO` and leaves SAPISID untouched, so a SAPISID-only fingerprint would be blind to it.
+- **The resume decision is durable, not edge-triggered.** The per-job `park_identity` comparison is what moves a job; the observation callback only decides *when* to look. A missed observation therefore costs a delay until the next account change or restart, never a permanent strand. Its process-local baseline advances only on a check that both concluded AND authenticated -- otherwise a stale intermediate export (dead on arrival, then re-exported working) would consume the edge -- and its zero value fires once per process, which is how an offline swap (stop, replace cookies, start) is noticed at all.
 
 ### Cancellation Semantics
 

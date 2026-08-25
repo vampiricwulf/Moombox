@@ -545,15 +545,24 @@ func (m *JobDetailsModel) buildRows() {
 
 	// === Error (J6 - word wrapping) ===
 	if j.Error != "" {
+		// A membership park is not a broken video and not a dead session: the
+		// cookies are alive, the account simply lacks the membership, and this
+		// job deliberately will not resume on its own until a DIFFERENT account
+		// is supplied. Heading it "Error" in red buried that distinction — the
+		// text below already names the remedy, so let the heading agree with it.
+		header, color := "Error", ColorError
+		if j.Status == database.StatusCookies && j.ParkReason == database.ParkReasonMembership {
+			header, color = "Not a Member", ColorCookies
+		}
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
-		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Error"})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: header})
 		contentW := max(m.width-2, 20)
 		valueW := contentW - labelWidth
 		if valueW < 10 {
 			valueW = contentW
 		}
 		for _, line := range wrapText(j.Error, valueW) {
-			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: ColorError})
+			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: color})
 		}
 	}
 

@@ -4,6 +4,8 @@ package cookies
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"sort"
@@ -245,6 +247,69 @@ func (j *CookieJar) GetSapisid() string {
 		return v
 	}
 	return j.cookies["__Secure-3PAPISID"]
+}
+
+// YouTubeIdentity returns a stable, non-reversible fingerprint of WHICH
+// Google account the jar currently holds — "" when it cannot tell.
+//
+// Both halves are required, and LOGIN_INFO is the load-bearing one.
+//
+// SAPISID identifies a Google SESSION, not an account: a multi-login browser
+// holds several accounts under one cookie session sharing one SAPISID. That
+// is precisely why internal/youtube/auth.go cannot rely on cookies alone to
+// pick an account and has to send X-Goog-AuthUser (ytcfg SESSION_INDEX) and
+// X-Goog-PageId (DELEGATED_SESSION_ID) alongside them. A fingerprint over
+// SAPISID alone would therefore be blind to the exact remedy Moombox prints
+// for a not-a-member failure — "switch the browser to the account that holds
+// the membership, then export again" — because switching the active account
+// rewrites LOGIN_INFO and leaves SAPISID untouched.
+//
+// LOGIN_INFO is the jar-local equivalent of the DataSyncID that
+// internal/youtube already uses for this same "which account is this"
+// question (see types.go / pot_binding.go). SAPISID stays in the mix so a
+// full re-login also registers. Deliberately excluded: __Secure-1PSIDTS and
+// SIDCC, which rotate constantly and would fire on every refresh cycle.
+//
+// A changed fingerprint is a hint, not proof — a same-account cookie rotation
+// that touched either value reads as a change. That direction is cheap: the
+// sweep it wakes retries a parked job once and re-parks it under the new
+// value. The opposite error (missing a real account switch) is the bug this
+// exists to prevent, so the fingerprint is deliberately biased toward
+// sensitivity.
+//
+// Hashed rather than returned raw because this value is compared in code
+// paths near logging and is persisted on job rows, while the cookies it
+// derives from are the highest-value secrets the app holds. Callers must
+// treat it as an opaque equality token — never as a credential, and never as
+// something to display.
+func (j *CookieJar) YouTubeIdentity() string {
+	if j == nil {
+		return ""
+	}
+	// ONE RLock covering both reads. Load swaps the whole cookie map under
+	// Lock, so taking the lock twice (once inside GetSapisid, once for
+	// LOGIN_INFO) could pair a SAPISID from the pre-Reload jar with a
+	// LOGIN_INFO from the post-Reload one and fingerprint a state that never
+	// existed. The interleaving is reachable: the worker's park path and the
+	// refresh loop's Reload run on different goroutines.
+	//
+	// The SAPISID fallback is inlined rather than delegated for that reason —
+	// KEEP IN SYNC with GetSapisid.
+	j.mu.RLock()
+	sapisid := j.cookies["SAPISID"]
+	if sapisid == "" {
+		sapisid = j.cookies["__Secure-3PAPISID"]
+	}
+	loginInfo := j.cookies["LOGIN_INFO"]
+	j.mu.RUnlock()
+
+	if sapisid == "" || loginInfo == "" {
+		return ""
+	}
+	// NUL separator: neither cookie may contain one, so no pair of distinct
+	// (sapisid, loginInfo) inputs can concatenate to the same string.
+	sum := sha256.Sum256([]byte(sapisid + "\x00" + loginInfo))
+	return hex.EncodeToString(sum[:])
 }
 
 // GetSapisidCookies returns all SAPISID variants.
