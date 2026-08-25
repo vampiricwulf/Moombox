@@ -100,10 +100,20 @@ func TestApplyValuesRequiresPasswordForExternalAndPublic(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, _ := newSecuritySettingsModel(t, tt.access, tt.hash)
+			m, cfg := newSecuritySettingsModel(t, tt.access, tt.hash)
 			if got := m.values["network_access"]; got != tt.access {
 				t.Fatalf("loadValues dropped the access mode: values[network_access] = %q, want %q", got, tt.access)
 			}
+
+			// Clobber cfg (NOT m.values) with a different mode, so the
+			// post-save assertion below proves applyValues actually wrote the
+			// panel's value through rather than passing because cfg happened
+			// to already hold it.
+			sentinel := "lan"
+			if tt.access == "lan" {
+				sentinel = "localhost"
+			}
+			cfg.Network.NetworkAccess = sentinel
 
 			m.applyValues()
 
@@ -118,6 +128,15 @@ func TestApplyValuesRequiresPasswordForExternalAndPublic(t *testing.T) {
 			}
 			if m.status == saveError {
 				t.Fatalf("save refused for %q/%q: %s", tt.access, tt.hash, m.errorMsg)
+			}
+			// The allowed path must write the mode back UNMANGLED. This is the
+			// other half of the guard's reachability argument: loadValues copies
+			// network_access verbatim into m.values and applyValues writes it
+			// straight back to cfg, so a hand-edited "public" round-trips
+			// through the settings panel — which is exactly why the guard above
+			// has to recognise it.
+			if cfg.Network.NetworkAccess != tt.access {
+				t.Errorf("NetworkAccess = %q after applyValues, want %q preserved", cfg.Network.NetworkAccess, tt.access)
 			}
 		})
 	}
