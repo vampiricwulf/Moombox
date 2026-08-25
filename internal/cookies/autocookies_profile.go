@@ -185,12 +185,23 @@ func stampFile(path string) fileStamp {
 	return fileStamp{exists: true, size: info.Size(), mod: info.ModTime()}
 }
 
+// equal compares two stamps of the same file. The mtime goes through
+// time.Equal rather than `==`: struct equality on a time.Time compares the
+// wall clock, the monotonic reading AND the Location pointer, so two stamps
+// of the same instant can compare unequal. Both stamps happen to come from
+// os.Stat today (no monotonic reading, same Location), which is exactly what
+// makes the trap easy to spring later — a false "torn" verdict costs a retry
+// and, on the last attempt, a fall back to the live database.
+func (a fileStamp) equal(b fileStamp) bool {
+	return a.exists == b.exists && a.size == b.size && a.mod.Equal(b.mod)
+}
+
 func fingerprintCookieDB(dbPath string) cookieDBFingerprint {
 	return cookieDBFingerprint{main: stampFile(dbPath), wal: stampFile(dbPath + "-wal")}
 }
 
 func fingerprintsDiffer(a, b cookieDBFingerprint) bool {
-	return a.main != b.main || a.wal != b.wal
+	return !a.main.equal(b.main) || !a.wal.equal(b.wal)
 }
 
 // sweepStaleCookieSnapshots removes snapshot directories left behind by a
