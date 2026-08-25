@@ -14,6 +14,12 @@ services:
       # In the container, network_access defaults to "lan", so anything
       # that can reach this published port can use the dashboard.
       # Use "127.0.0.1:774:774" to restrict it to the Docker host only.
+      #
+      # Docker Desktop (Windows/macOS) NOTE: all inbound connections are
+      # proxied through the Desktop VM, so Moombox sees every client as the
+      # private gateway IP and the "lan" filter cannot tell clients apart.
+      # There, the port publish is the ONLY exposure control — keep it
+      # host-only or LAN-firewalled.
       - "774:774"
     volumes:
       # Everything lives under /data: config.toml, database, logs,
@@ -38,3 +44,18 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+networks:
+  # IPv6-enabled so a real IPv6 client's source address reaches Moombox's
+  # network_access filter. Without this, Docker's userland proxy accepts
+  # IPv6 connections and re-originates them from the bridge gateway's
+  # PRIVATE IPv4 address — an internet IPv6 client would pass the "lan"
+  # filter. Requires Docker Engine 27+ (ip6tables is on by default for
+  # IPv6-enabled networks there); on older engines, either upgrade or
+  # change the publish to "0.0.0.0:774:774" to disable IPv6 entirely.
+  # The subnet is an arbitrary ULA — change it if it collides with yours.
+  default:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: "fd77:4d42::/64"
