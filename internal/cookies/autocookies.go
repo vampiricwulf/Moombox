@@ -746,7 +746,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	if previousCookies != "" {
 		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
 	}
-	if err := writeFileAtomic(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
+	if err := writeCookieFile(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
 		return false, err
 	}
 
@@ -781,18 +781,46 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			"platforms", strings.Join(restoredPlatforms, ","), "profile_dir", s.profileDir)
 
 		restored := restorePlatformRows(netscapeCookies, previousCookies, restore)
-		if restoreErr := writeFileAtomic(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
-			s.logger.Error("could not restore pre-import cookies.txt", "err", restoreErr)
-		} else if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
-			s.logger.Error("could not reload cookie jar after restoring pre-import cookies.txt", "err", loadErr)
-		} else {
-			// Re-verify the file we actually kept. Without this, the status
-			// below would describe the DISCARDED merged jar and flag a
-			// re-login for credentials that were restored and never
-			// re-checked — an instruction a container operator cannot even
-			// act on.
-			postYT, postTW = s.checkPlatformAuth(ctx)
+
+		// A rollback that does not land must not be reported as one. Both
+		// failures below leave the process describing a jar that is not what
+		// is on disk, and the status built at the bottom of this function
+		// would go on to say "kept the previous cookies for X" — while the
+		// rejected import is the file the next download actually uses. Worse,
+		// a sibling platform that verified would carry the whole call to
+		// "refresh succeeded".
+		//
+		// So they end the refresh instead, with a message describing the
+		// state that really exists. Failing the call matches how every other
+		// write failure in this function is handled.
+		if restoreErr := writeCookieFile(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
+			errMsg := "the browser profile did not verify for " + strings.Join(restoredPlatforms, " + ") +
+				", and Moombox could not restore the previous cookies (" + restoreErr.Error() +
+				") — cookies.txt still holds the rejected imported credentials"
+			s.setError(errMsg)
+			s.logger.Error("could not restore pre-import cookies.txt",
+				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
+			return false, fmt.Errorf("restore pre-import cookies: %w", restoreErr)
 		}
+		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
+			// The FILE is correct here; the running process is not. Saying
+			// "kept the previous cookies" would be true of the disk and false
+			// of everything using the jar until the next successful load.
+			errMsg := "restored the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
+				" after the browser profile did not verify, but reloading them failed (" + loadErr.Error() +
+				") — this process is still using the rejected credentials until the next refresh"
+			s.setError(errMsg)
+			s.logger.Error("could not reload cookie jar after restoring pre-import cookies.txt",
+				"err", loadErr, "platforms", strings.Join(restoredPlatforms, ","))
+			return false, fmt.Errorf("reload cookie jar after restore: %w", loadErr)
+		}
+
+		// Re-verify the file we actually kept. Without this, the status
+		// below would describe the DISCARDED merged jar and flag a
+		// re-login for credentials that were restored and never
+		// re-checked — an instruction a container operator cannot even
+		// act on.
+		postYT, postTW = s.checkPlatformAuth(ctx)
 	}
 
 	ytAuth := postYT.ok()
@@ -1161,6 +1189,12 @@ func isWindows() bool {
 // ACL ends up over-restrictive, and (b) propagating from the dir
 // covers any future writes (rotated cookies, side-files) without
 // per-write icacls latency. No-op on non-Windows; idempotent.
+// writeCookieFile is the cookie-file write RefreshCookies goes through, as a
+// package variable so tests can exercise the branches that only exist for a
+// FAILED write — notably a rollback that cannot put the previous credentials
+// back, which decides what the operator is told is on disk.
+var writeCookieFile = writeFileAtomic
+
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Unique temp name (os.CreateTemp): the RefreshService rewrites the same
 	// cookies.txt through its own temp file, and a shared fixed ".tmp" name

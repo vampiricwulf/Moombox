@@ -2,11 +2,87 @@ package cookies
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// failCookieWriteAfter makes the nth (1-based) cookie-file write and every
+// write after it fail. Restores the real write at test end.
+func failCookieWriteAfter(t *testing.T, n int, err error) {
+	t.Helper()
+	real := writeCookieFile
+	t.Cleanup(func() { writeCookieFile = real })
+	calls := 0
+	writeCookieFile = func(path string, data []byte, perm os.FileMode) error {
+		calls++
+		if calls >= n {
+			return err
+		}
+		return real(path, data, perm)
+	}
+}
+
+// TestRollbackWriteFailureIsNotReportedAsKept covers the status lying about
+// what is on disk.
+//
+// When an import regresses a platform, the previous rows are written back
+// and the result re-verified. That re-verify sits in the `else` of the
+// write/reload error branches, but restoredPlatforms is already populated —
+// so if the restore WRITE fails, postYT/postTW still describe the DISCARDED
+// merged jar, and the operator is told "kept the previous cookies for X"
+// while the merged, damaged file is what is actually on disk. Worse, when
+// the other platform verified, the whole call reports success.
+func TestRollbackWriteFailureIsNotReportedAsKept(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAndTwitchRows(staleTwitchToken))
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(previousCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) {
+		return s.jar.GetTwitchAuthToken() == goodTwitchToken, nil
+	}
+
+	// Write 1 is the merged import; write 2 is the rollback putting the
+	// previous Twitch credential back. Only the second one fails.
+	diskFull := errors.New("no space left on device")
+	failCookieWriteAfter(t, 2, diskFull)
+
+	ok, err := s.RefreshCookies(context.Background())
+
+	if ok {
+		t.Error("the rollback never landed, so this refresh did not succeed")
+	}
+	if err == nil {
+		t.Error("a rollback that could not be written must surface as an error — cookies.txt is not what we intended it to be")
+	}
+
+	// The merged (rejected) import is what is actually on disk.
+	data, readErr := os.ReadFile(cookiePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(data), staleTwitchToken) {
+		t.Fatalf("fixture is broken — the failed restore was supposed to leave the merged import on disk:\n%s", data)
+	}
+
+	status := s.GetStatus()
+	if status.LastError == nil {
+		t.Fatal("a failed rollback must be stated")
+	}
+	if strings.Contains(*status.LastError, "kept the previous cookies") {
+		t.Errorf("status claims credentials were kept that were never written: %q", *status.LastError)
+	}
+	if !strings.Contains(strings.ToLower(*status.LastError), "restore") {
+		t.Errorf("status must say the restore failed, got %q", *status.LastError)
+	}
+}
 
 // pastExpiry is a unix timestamp comfortably in the past (2001-09-09), so
 // mergeCookieFiles prunes any row carrying it.
