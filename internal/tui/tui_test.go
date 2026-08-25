@@ -287,6 +287,79 @@ func TestDisplayColumnsCoverage(t *testing.T) {
 	}
 }
 
+// --- settings: path fields ---
+
+// TestApplyValuesPathTraversalParity keeps the TUI and the Web UI agreeing
+// about what a valid path is. They disagreed before: the Web UI rejected
+// absolute paths, so a value the TUI happily saved (or the Docker entrypoint
+// seeded) then blocked every subsequent Web UI save with a 400. Now both
+// accept absolute paths and both reject ".." segments, via the same
+// config.PathHasTraversal.
+func TestApplyValuesPathTraversalParity(t *testing.T) {
+	pathKeys := []string{
+		"database_path", "log_file_path", "output_directory",
+		"staging_directory", "ffmpeg_path", "tls_cert_path", "tls_key_path",
+		"cookie_file", "browser_profile_dir",
+	}
+
+	for _, key := range pathKeys {
+		t.Run(key+"/traversal rejected", func(t *testing.T) {
+			cfg := config.Defaults()
+			m := NewSettingsModel()
+			m.configStore = config.NewStore(cfg, "")
+			m.Open(cfg)
+
+			m.values[key] = "output/../../escape"
+			m.applyValues()
+			if m.status != saveError {
+				t.Fatalf("%s=%q: status = %v, want saveError", key, m.values[key], m.status)
+			}
+		})
+
+		t.Run(key+"/absolute accepted", func(t *testing.T) {
+			cfg := config.Defaults()
+			m := NewSettingsModel()
+			m.configStore = config.NewStore(cfg, "")
+			m.Open(cfg)
+
+			m.values[key] = "/data/moombox-thing"
+			m.applyValues()
+			if m.status == saveError {
+				t.Fatalf("%s=/data/moombox-thing rejected: %s", key, m.errorMsg)
+			}
+		})
+	}
+}
+
+// TestSetupWizardRejectsPathTraversal mirrors the /api/setup/complete side:
+// the web wizard runs validateConfigUpdates, so the TUI wizard has to reject
+// the same values or the two first-run flows accept different configs.
+func TestSetupWizardRejectsPathTraversal(t *testing.T) {
+	for _, key := range []string{
+		"logFilePath", "databasePath", "outputDir", "stagingDir",
+		"ffmpegPath", "cookieFile",
+	} {
+		m := NewSetupWizardModel()
+		m.values[key] = "data/../../escape"
+		if got := m.finishAdvancedSetup(); got != "" {
+			t.Errorf("%s traversal: finishAdvancedSetup returned %q, want \"\" (rejected)", key, got)
+		}
+		if m.errorMsg == "" {
+			t.Errorf("%s traversal: expected an errorMsg", key)
+		}
+
+		// Positive control: the same field with an absolute value must pass,
+		// both to prove the rejection above is the traversal check (and not
+		// some unrelated wizard failure) and to lock absolute-path
+		// acceptance on the wizard path.
+		ok := NewSetupWizardModel()
+		ok.values[key] = "/data/moombox-thing"
+		if got := ok.finishAdvancedSetup(); got == "" {
+			t.Errorf("%s absolute: finishAdvancedSetup rejected it: %s", key, ok.errorMsg)
+		}
+	}
+}
+
 // --- settings: trusted_proxies ---
 
 // TestApplyValuesRejectsBadTrustedProxy: config.Save runs config.Validate and
