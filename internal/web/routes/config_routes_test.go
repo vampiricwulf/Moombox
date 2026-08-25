@@ -652,6 +652,62 @@ func TestDockerSeededAbsoluteConfigRoundTrips(t *testing.T) {
 	}
 }
 
+// TestConfigRequiredPathFieldsRejectEmpty closes the other half of the
+// API-vs-config.Validate divergence around path fields. config.Validate
+// refuses to save an empty database_path / log_file_path / output_directory
+// / staging_directory / cookie_file, and the TUI settings panel already
+// blocks them — but the API accepted them, applied them, and only failed
+// inside config.Save, surfacing as an opaque 500 "failed to save config"
+// with no field named. Same unsavable-settings-page experience as the
+// absolute-path bug, from the opposite direction.
+//
+// ffmpeg_path and browser_profile_dir are deliberately absent: empty is
+// meaningful for both ("use ffmpeg from PATH", "auto-cookies unconfigured")
+// and config.Validate permits it.
+func TestConfigRequiredPathFieldsRejectEmpty(t *testing.T) {
+	cases := []struct{ section, key string }{
+		{"paths", "database_path"},
+		{"paths", "log_file_path"},
+		{"paths", "output_directory"},
+		{"paths", "staging_directory"},
+		{"cookies", "cookie_file"},
+	}
+	for _, c := range cases {
+		for _, empty := range []string{"", "   "} {
+			f := newConfigRoutesFixture(t)
+			body, _ := json.Marshal(map[string]any{c.section: map[string]any{c.key: empty}})
+			req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, req)
+
+			field := c.section + "." + c.key
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("%s=%q: want 400, got %d (body: %s)", field, empty, rec.Code, rec.Body.String())
+				continue
+			}
+			var resp map[string]any
+			json.NewDecoder(rec.Body).Decode(&resp)
+			details, _ := resp["details"].(map[string]any)
+			if _, ok := details[field]; !ok {
+				t.Errorf("%s=%q: expected details key %q, got %v", field, empty, field, resp["details"])
+			}
+		}
+	}
+
+	// The optional siblings must still accept empty.
+	for _, c := range []struct{ section, key string }{
+		{"paths", "ffmpeg_path"},
+		{"cookies", "browser_profile_dir"},
+		{"network", "tls_cert_path"},
+		{"network", "tls_key_path"},
+	} {
+		errs := validateConfigUpdates(map[string]any{c.section: map[string]any{c.key: ""}})
+		if msg, bad := errs[c.section+"."+c.key]; bad {
+			t.Errorf("%s.%s=\"\" rejected: %s", c.section, c.key, msg)
+		}
+	}
+}
+
 // TestConfigPathFieldsAcceptAbsoluteRejectTraversal locks the post-fix
 // contract for every path-shaped field the API validates. Absolute paths
 // (POSIX and Windows drive-letter) are legitimate: PUT /api/config is

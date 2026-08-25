@@ -77,11 +77,27 @@ type ConfigRoutesCallbacks struct {
 //
 // config.PathHasTraversal is shared with the TUI so the two UIs cannot
 // disagree about what a valid path is — that disagreement was the bug.
-func pathFieldError(p string) string {
+//
+// required mirrors config.Validate's non-empty path fields. Without it an
+// empty (or whitespace-only) value for one of those passed validation, was
+// applied, and then failed inside config.Save as an opaque 500 "failed to
+// save config" naming no field — the same unsavable-settings-page symptom
+// from the opposite direction. The TUI settings panel already blocked these.
+func pathFieldError(p string, required bool) string {
+	if required && strings.TrimSpace(p) == "" {
+		return "must not be empty"
+	}
 	if config.PathHasTraversal(p) {
 		return "Path cannot contain a .. segment"
 	}
 	return ""
+}
+
+// pathField names one path-shaped config field and whether config.Validate
+// refuses to persist it empty.
+type pathField struct {
+	key      string
+	required bool
 }
 
 // validateConfigUpdates validates the config update map against TypeScript Zod
@@ -128,24 +144,29 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				}
 			}
 		}
-		for _, key := range []string{"tls_cert_path", "tls_key_path"} {
-			if v, ok := net[key].(string); ok {
-				if msg := pathFieldError(v); msg != "" {
-					errs["network."+key] = msg
+		// Empty means "no TLS material configured" — legitimate.
+		for _, f := range []pathField{{"tls_cert_path", false}, {"tls_key_path", false}} {
+			if v, ok := net[f.key].(string); ok {
+				if msg := pathFieldError(v, f.required); msg != "" {
+					errs["network."+f.key] = msg
 				}
 			}
 		}
 	}
 
-	// Paths sub-fields
+	// Paths sub-fields. ffmpeg_path may be empty ("use ffmpeg from PATH");
+	// the other four are required by config.Validate.
 	if paths, ok := updates["paths"].(map[string]any); ok {
-		for _, key := range []string{
-			"log_file_path", "database_path", "output_directory",
-			"staging_directory", "ffmpeg_path",
+		for _, f := range []pathField{
+			{"log_file_path", true},
+			{"database_path", true},
+			{"output_directory", true},
+			{"staging_directory", true},
+			{"ffmpeg_path", false},
 		} {
-			if v, ok := paths[key].(string); ok {
-				if msg := pathFieldError(v); msg != "" {
-					errs["paths."+key] = msg
+			if v, ok := paths[f.key].(string); ok {
+				if msg := pathFieldError(v, f.required); msg != "" {
+					errs["paths."+f.key] = msg
 				}
 			}
 		}
@@ -306,10 +327,12 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 
 	// Cookies sub-fields
 	if ck, ok := updates["cookies"].(map[string]any); ok {
-		for _, key := range []string{"cookie_file", "browser_profile_dir"} {
-			if v, ok := ck[key].(string); ok {
-				if msg := pathFieldError(v); msg != "" {
-					errs["cookies."+key] = msg
+		// browser_profile_dir may be empty ("auto-cookies not configured");
+		// cookie_file is required by config.Validate.
+		for _, f := range []pathField{{"cookie_file", true}, {"browser_profile_dir", false}} {
+			if v, ok := ck[f.key].(string); ok {
+				if msg := pathFieldError(v, f.required); msg != "" {
+					errs["cookies."+f.key] = msg
 				}
 			}
 		}
