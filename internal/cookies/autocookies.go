@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -181,6 +182,13 @@ type AutoCookieService struct {
 	// re-running the check. Audit reports/cookies.md #26.
 	profileDirErr error
 
+	// detectBrowser is the browser-detection seam used by resolvedBrowser.
+	// Defaults to DetectBrowser; tests override it to exercise the
+	// browserless (mounted-profile import) path on a host that does have a
+	// browser installed. nil is treated as DetectBrowser so services built
+	// via struct literal keep working.
+	detectBrowser func() *DetectedBrowser
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -219,6 +227,7 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 		cookiePath:    cookiePath,
 		jar:           jar,
 		profileDirErr: profileDirErr,
+		detectBrowser: DetectBrowser,
 		// Always populated with both supported platforms so the JSON wire
 		// shape stays {"youtube": false, "twitch": false} even for
 		// fresh-install state. Audit reports/cookies.md #44.
@@ -314,6 +323,9 @@ func (s *AutoCookieService) resolvedBrowser() *DetectedBrowser {
 			}
 			return &DetectedBrowser{Type: btype, Path: path, Name: path}
 		}
+	}
+	if s.detectBrowser != nil {
+		return s.detectBrowser()
 	}
 	return DetectBrowser()
 }
@@ -427,6 +439,18 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	if isFirefoxBased(browser.Type) {
 		s.closeFirefoxGracefully()
 		netscapeCookies, err = readFirefoxCookies(s.profileDir)
+		// Interactive setup has a legitimate empty state the refresh and
+		// profile-import paths do not: the user opened the browser and
+		// closed it without signing in. readFirefoxCookies now reports an
+		// empty profile as a hard error (a silently empty jar is the bug
+		// that error exists to catch), so translate it back here — the setup
+		// dialog should say "no login detected", not fail.
+		if errors.Is(err, ErrNoCookiesInProfile) {
+			s.logger.Info("cookie setup finished with an empty profile — no login detected")
+			s.setError("no login detected — sign in before finishing setup")
+			s.cleanup()
+			return false, false, nil
+		}
 	} else {
 		netscapeCookies, err = s.extractChromiumCookies()
 		s.killSetupProcess()
@@ -579,30 +603,80 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	}()
 
 	browser := s.resolvedBrowser()
-	if browser == nil {
-		s.setError("no browser found for refresh")
-		return false, ErrNoBrowserFound
-	}
 
 	if _, err := os.Stat(s.profileDir); os.IsNotExist(err) {
+		// Neither a browser to drive nor a profile to import from: the
+		// install genuinely has no cookie source, so keep the historical
+		// answer and the "install a supported browser" UI copy that hangs
+		// off it.
+		if browser == nil {
+			s.setError("no browser found for refresh, and no browser profile to import from")
+			return false, ErrNoBrowserFound
+		}
 		s.setError("browser profile not found — run setup first")
 		return false, fmt.Errorf("run setup first: %w", ErrProfileNotFound)
 	}
 
-	if len(s.refreshPlatforms()) == 0 {
-		s.logger.Debug("skipping cookie refresh — no platforms have cookies")
-		return false, nil
-	}
-
-	s.logger.Info("refreshing cookies via " + browser.Type)
+	// importedFromProfile selects the browser-free path: no browser is
+	// installed (a container, or a headless host), but the configured
+	// profile directory is present and may hold a readable cookies.sqlite.
+	// Before this branch existed, RefreshCookies bailed on `browser == nil`
+	// BEFORE it ever looked at the profile — so a perfectly readable
+	// mounted profile was refused on a technicality.
+	importedFromProfile := browser == nil
 
 	var netscapeCookies string
 	var err error
+	// emptyBrowserProfile records that a browser refresh read a profile with
+	// no relevant cookies in it. Not fatal on its own (see below), but it is
+	// the explanation the operator needs if auth then fails to verify.
+	emptyBrowserProfile := false
 
-	if isFirefoxBased(browser.Type) {
-		netscapeCookies, err = s.refreshFirefox(ctx, browser)
+	if importedFromProfile {
+		// No refreshPlatforms() gate here. That gate asks "does the jar
+		// already hold cookies worth re-fetching?", which is the right
+		// question for a browser refresh and the wrong one for an import:
+		// seeding a container that has no cookies.txt yet is the primary
+		// use case.
+		netscapeCookies, err = s.importProfileCookies()
+		if err != nil {
+			s.setError(err.Error())
+			s.logger.Warn("browser-profile cookie import failed", "profile_dir", s.profileDir, "err", err)
+			return false, err
+		}
 	} else {
-		netscapeCookies, err = s.refreshChromium(ctx, browser)
+		if len(s.refreshPlatforms()) == 0 {
+			s.logger.Debug("skipping cookie refresh — no platforms have cookies")
+			return false, nil
+		}
+
+		s.logger.Info("refreshing cookies via " + browser.Type)
+
+		if isFirefoxBased(browser.Type) {
+			netscapeCookies, err = s.refreshFirefox(ctx, browser)
+			// An empty profile is a hard error for the IMPORT path, where it
+			// means the read is broken. On the browser path it has a mundane
+			// explanation — Firefox set to clear cookies on close leaves the
+			// profile empty every time — and before this package that
+			// produced a no-op merge and a refresh that succeeded off the
+			// still-good cookies.txt. Failing here instead would fire
+			// "Cookie Auto-Refresh Failed — recordings will fail" at a user
+			// whose recordings are fine.
+			//
+			// So: contribute nothing, let verification below decide, and
+			// remember the fact so it is named if the existing cookies turn
+			// out to be dead too. That keeps the desktop behaviour while
+			// refusing to let a browser that silently stopped saving cookies
+			// masquerade as an ordinary expiry.
+			if errors.Is(err, ErrNoCookiesInProfile) {
+				s.logger.Warn("browser refresh produced no cookies — falling back to the existing cookies.txt",
+					"profile_dir", s.profileDir, "err", err)
+				emptyBrowserProfile = true
+				netscapeCookies, err = "", nil
+			}
+		} else {
+			netscapeCookies, err = s.refreshChromium(ctx, browser)
+		}
 	}
 
 	// DPAPI fallback: if the CDP path failed and the user has opted
@@ -610,7 +684,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	// profile via CryptUnprotectData. Skipped for Firefox-based
 	// browsers — Firefox uses cookies.sqlite (no DPAPI involved) and
 	// already has its own SQLite-direct path. DECISIONS #6.
-	if err != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
+	if err != nil && browser != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
 		s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
 		fallbackCookies, fallbackErr := dpapiExtractAsNetscape()
 		if fallbackErr != nil {
@@ -629,12 +703,33 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	// Merge with existing cookies using temp file + rename for atomicity
+	// Merge with existing cookies using temp file + rename for atomicity.
+	// previousCookies is kept verbatim so an import that turns out to have
+	// damaged a platform can hand that platform's rows back untouched.
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
 		return false, err
 	}
+	var previousCookies string
 	if existingData, readErr := os.ReadFile(s.cookiePath); readErr == nil && len(existingData) > 0 {
-		netscapeCookies = mergeCookieFiles(string(existingData), netscapeCookies)
+		previousCookies = string(existingData)
+	}
+
+	// Verify BEFORE overwriting, on the import path only. Rolling back a
+	// regression is impossible without knowing what worked beforehand, and
+	// "the file had cookies" is not the same as "those cookies worked".
+	// Skipped when there is nothing to protect, so the common container case
+	// (no cookies.txt yet) costs no extra round trips.
+	pre := map[string]platformAuth{}
+	if importedFromProfile && previousCookies != "" {
+		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
+			s.logger.Warn("could not load existing cookies before import — rollback protection is off", "err", loadErr)
+		}
+		preYT, preTW := s.checkPlatformAuth(ctx)
+		pre["youtube"], pre["twitch"] = preYT, preTW
+	}
+
+	if previousCookies != "" {
+		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
 	}
 	if err := writeFileAtomic(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
 		return false, err
@@ -646,46 +741,60 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	}
 
 	// Verify auth via API callbacks (matches TypeScript refreshCookies behavior)
-	verifyCtx, verifyCancel := context.WithTimeout(ctx, authVerifyTimeout)
-	defer verifyCancel()
+	postYT, postTW := s.checkPlatformAuth(ctx)
 
-	ytAuth := false
-	twAuth := false
-
-	// Mirror FinishSetup's contract for unwired verify callbacks: presence is
-	// the only signal we have, so report it with a warning instead of counting
-	// the platform as verification-failed and flagging a re-login purely
-	// because no verifier was plumbed in (test wiring / alternate constructors).
-	if s.jar.HasYouTubeAuthCookies() {
-		if s.VerifyYouTubeAuth != nil {
-			if verified, err := s.VerifyYouTubeAuth(verifyCtx); err == nil {
-				ytAuth = verified
+	// Roll back, per platform, an import that made that platform worse.
+	//
+	// A mounted profile can be STALE, and mergeCookieFiles lets the imported
+	// value win by name+domain — so a dead Twitch token in the profile
+	// overwrites a working one on disk. Judging the import as a WHOLE hides
+	// exactly that: a healthy YouTube result masks the Twitch loss, the
+	// refresh reports success, and the working credential is gone. The
+	// startup one-shot would then repeat it on every restart.
+	//
+	// Only the import path does this. The browser path writes cookies it just
+	// re-fetched from the live site, which cannot be staler than what was on
+	// disk.
+	var restoredPlatforms []string
+	if restore := platformsToRestore(pre, map[string]platformAuth{"youtube": postYT, "twitch": postTW}); len(restore) > 0 {
+		for _, platform := range []string{"youtube", "twitch"} {
+			if restore[platform] {
+				restoredPlatforms = append(restoredPlatforms, platform)
 			}
+		}
+		s.logger.Warn("imported profile cookies did not hold up — restoring the previous credentials for those platforms",
+			"platforms", strings.Join(restoredPlatforms, ","), "profile_dir", s.profileDir)
+
+		restored := restorePlatformRows(netscapeCookies, previousCookies, restore)
+		if restoreErr := writeFileAtomic(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
+			s.logger.Error("could not restore pre-import cookies.txt", "err", restoreErr)
+		} else if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
+			s.logger.Error("could not reload cookie jar after restoring pre-import cookies.txt", "err", loadErr)
 		} else {
-			s.logger.Warn("YouTube auth verification callback not wired — reporting based on cookie presence alone")
-			ytAuth = true
+			// Re-verify the file we actually kept. Without this, the status
+			// below would describe the DISCARDED merged jar and flag a
+			// re-login for credentials that were restored and never
+			// re-checked — an instruction a container operator cannot even
+			// act on.
+			postYT, postTW = s.checkPlatformAuth(ctx)
 		}
 	}
-	if s.jar.HasTwitchAuthCookies() {
-		if s.VerifyTwitchAuth != nil {
-			if verified, err := s.VerifyTwitchAuth(verifyCtx); err == nil {
-				twAuth = verified
-			}
-		} else {
-			s.logger.Warn("Twitch auth verification callback not wired — reporting based on cookie presence alone")
-			twAuth = true
-		}
-	}
 
-	// Update re-login flags based on verification results
+	ytAuth := postYT.ok()
+	twAuth := postTW.ok()
+
+	// Update re-login flags based on verification results. Only a CONCLUSIVE
+	// failure flags a re-login: an unreachable network told us nothing about
+	// the credentials, and sending the user to sign in again over a blip is
+	// both wrong and, in a container, impossible to act on.
 	ytHasCookies := s.jar.HasYouTubeAuthCookies()
 	twHasCookies := s.jar.HasTwitchAuthCookies()
 
 	s.mu.Lock()
-	if !ytAuth && ytHasCookies {
+	if postYT.state == verifyFailed && ytHasCookies {
 		s.needsRelogin["youtube"] = true
 	}
-	if !twAuth && twHasCookies {
+	if postTW.state == verifyFailed && twHasCookies {
 		s.needsRelogin["twitch"] = true
 	}
 	if ytAuth {
@@ -696,10 +805,10 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	}
 	s.mu.Unlock()
 
-	if !ytAuth && ytHasCookies {
+	if postYT.state == verifyFailed && ytHasCookies {
 		s.logger.Warn("YouTube auth verification failed after refresh — manual re-login required")
 	}
-	if !twAuth && twHasCookies {
+	if postTW.state == verifyFailed && twHasCookies {
 		s.logger.Warn("Twitch auth verification failed after refresh — manual re-login required")
 	}
 
@@ -757,9 +866,38 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		s.mu.Unlock()
 		return false, nil
 	}
-	errMsg := strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
+	// Say what actually happened. "Manual re-login required" is the right
+	// advice only when the credentials were conclusively rejected; when the
+	// checks could not reach the network, or when we kept the previous
+	// credentials rather than the import, that message sends the operator
+	// after the wrong problem.
+	//
+	// A rollback and an inconclusive check can be true at once — in fact the
+	// pure-network case is exactly that, since a check that cannot complete
+	// is itself a reason to keep the previous credentials. Blaming the
+	// profile there would send a container operator off to re-export one
+	// that is perfectly fine, which is the misattribution verifyUnknown
+	// exists to prevent. So that combination gets its own message carrying
+	// both facts: what we kept, and why.
+	inconclusive := postYT.state == verifyUnknown || postTW.state == verifyUnknown
+	var errMsg string
+	switch {
+	case len(restoredPlatforms) > 0 && inconclusive:
+		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
+			" — the auth check did not complete (network?), so the imported profile was not accepted"
+	case len(restoredPlatforms) > 0:
+		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
+			" — the mounted browser profile did not verify"
+	case inconclusive:
+		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the check did not complete (network?)"
+	case emptyBrowserProfile:
+		errMsg = strings.Join(failed, " + ") + " auth verification failed, and the browser profile contained " +
+			"no cookies to refresh from — check whether the browser is clearing cookies on exit"
+	default:
+		errMsg = strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
+	}
 	s.setError(errMsg)
-	s.logger.Warn("refresh completed but auth verification failed", "platforms", strings.Join(failed, ","))
+	s.logger.Warn("refresh completed but auth verification failed", "platforms", strings.Join(failed, ","), "detail", errMsg)
 	return false, nil
 }
 
@@ -802,10 +940,22 @@ func (s *AutoCookieService) shouldSkipPeriodicRefresh(interval time.Duration) bo
 	return false
 }
 
+// profileImportStartupDelay is how long the browserless startup import waits
+// before running. RefreshCookies verifies the imported cookies over the
+// network, and firing that the instant the process comes up — before DNS,
+// the network stack, or a VPN sidecar is ready — would report a false
+// "auth verification failed" and flag a re-login the user does not need.
+const profileImportStartupDelay = 15 * time.Second
+
 // StartPeriodicRefresh starts a background goroutine that periodically
 // refreshes cookies via headless browser visit. When HasActiveJobs is set,
 // ticks where it returns false are skipped to avoid spawning a headless
 // browser when nothing needs authenticated YouTube/Twitch access.
+//
+// On a browserless host with an importable profile (the Docker case) the
+// goroutine also runs ONE import shortly after start, instead of leaving a
+// freshly-mounted profile unread until the first tick — which with the
+// default six-hour interval would be most of a day.
 func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval time.Duration) {
 	s.logger.Info("auto-cookie periodic refresh enabled", "interval", interval.String())
 	go func() {
@@ -814,6 +964,29 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 				s.logger.Error("panic in periodic cookie refresh goroutine", "panic", fmt.Sprintf("%v", r))
 			}
 		}()
+
+		if s.shouldSeedFromProfileAtStartup() {
+			s.logger.Info("no browser detected — seeding cookies from the configured browser profile",
+				"profile_dir", s.profileDir, "delay", profileImportStartupDelay.String())
+			if err := utils.Sleep(ctx, profileImportStartupDelay); err == nil {
+				// Deliberately bypasses shouldSkipPeriodicRefresh: the
+				// profile may have been swapped while we were down, so
+				// "nothing is downloading" and "we refreshed recently" are
+				// both the wrong reasons to skip the first read of it.
+				seedCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
+				ok, err := s.RefreshCookies(seedCtx)
+				cancel()
+				switch {
+				case err != nil:
+					s.logger.Warn("startup browser-profile cookie import failed", "err", err)
+				case ok:
+					s.logger.Info("startup browser-profile cookie import succeeded")
+				default:
+					s.logger.Warn("startup browser-profile cookie import did not authenticate any platform")
+				}
+			}
+		}
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 

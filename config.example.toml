@@ -165,6 +165,21 @@
 #
 # Setup: enable below, then use the web dashboard Settings page or TUI
 # setup wizard to launch the browser and complete login.
+#
+# HEADLESS HOSTS AND DOCKER: when no supported browser is installed,
+# Moombox falls back to importing cookies straight out of the profile
+# directory below — no browser launch, and nothing is written into the
+# profile. Point browser_profile_dir at a SINGLE Firefox profile (the
+# directory holding prefs.js and cookies.sqlite), not its parent. In the
+# Docker image the default resolves to /data/browser-profile, so a bind
+# mount there needs no config change beyond auto_enabled.
+#
+# Copy the profile with Firefox closed, and keep cookies.sqlite-wal
+# alongside cookies.sqlite — recent cookies live in that sidecar and a
+# copy without it reads as empty (cookies.sqlite-shm is rebuilt and does
+# not need copying). Importing refreshes what the profile holds; it
+# cannot renew SAPISID/LOGIN_INFO, so an exported profile still ages out
+# eventually.
 # auto_enabled = false
 # browser_profile_dir = "./browser-profile"
 

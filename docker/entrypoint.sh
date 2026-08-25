@@ -55,6 +55,17 @@ staging_directory = "/data/staging"
 # rename) to keep the rotated YouTube session alive, and a rename cannot
 # replace a single-file bind mount. See docker-compose.yml.
 cookie_file = "/data/cookies.txt"
+# Alternative to exporting cookies.txt by hand: bind-mount a Firefox
+# profile directory (the one holding prefs.js and cookies.sqlite, not its
+# parent) at /data/browser-profile and uncomment the line below.
+# browser_profile_dir needs no entry — it defaults to ./browser-profile,
+# which resolves to /data/browser-profile here.
+# This image ships no browser, so Moombox reads the profile directly
+# instead of launching one — and never writes into it. Copy the profile
+# with Firefox closed, and keep cookies.sqlite-wal next to
+# cookies.sqlite; recent cookies live in that sidecar and a copy without
+# it reads as empty.
+# auto_enabled = true
 
 [updates]
 # The in-app updater would swap the binary INSIDE the container, and

@@ -3,6 +3,7 @@ package cookies
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -170,13 +171,31 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 	return readFirefoxCookies(s.profileDir)
 }
 
+// readFirefoxCookies extracts the relevant cookies from a Firefox profile
+// directory and returns them in Netscape format.
+//
+// Each attempt SNAPSHOTS cookies.sqlite together with its -wal sidecar into a
+// temp dir and queries the copy (see snapshotFirefoxCookieDB for why the
+// sidecar is mandatory, why -shm is not, and why copying beats opening in
+// place). If the snapshot itself fails — no temp space, an AV holding the
+// file — the attempt falls back to querying the profile's database directly,
+// which is exactly what this function did before, so a snapshot problem can
+// never make this path worse than it was.
+//
+// Retrying the snapshot as well as the query is deliberate: a copy taken
+// while Firefox is mid-flush can pair a main file and a -wal that disagree,
+// and the fix for that is another copy, not another query of the same one.
 func readFirefoxCookies(profileDir string) (string, error) {
 	dbPath := filepath.Join(profileDir, "cookies.sqlite")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("firefox cookies.sqlite not found")
+		return "", fmt.Errorf("firefox %s not found in %q: %w", firefoxCookieDBName, profileDir, ErrCookieDBNotFound)
 	}
 
-	// Retry loop for SQLite WAL lock contention (Firefox may not have fully released the lock)
+	// Retry loop for SQLite WAL lock contention (Firefox may not have fully
+	// released the lock) and for torn snapshots. Both are transient. A corrupt
+	// or non-database file is permanent, and retrying it five times at 500ms
+	// only delays the error the operator needs — so the loop breaks on
+	// anything that is not retryable.
 	const maxRetries = 5
 	const retryBackoff = 500 * time.Millisecond
 
@@ -188,14 +207,25 @@ func readFirefoxCookies(profileDir string) (string, error) {
 			time.Sleep(retryBackoff)
 		}
 
-		lines, lastErr = queryFirefoxCookieDB(dbPath)
-		if lastErr == nil {
+		lines, lastErr = querySnapshotOrLive(profileDir, dbPath, attempt == maxRetries-1)
+		if lastErr == nil || !isRetryableDBError(lastErr) {
 			break
 		}
 	}
 
 	if lastErr != nil {
-		return "", fmt.Errorf("query cookies after %d attempts: %w", maxRetries, lastErr)
+		return "", classifyCookieDBError(fmt.Errorf("after %d attempts: %w", maxRetries, lastErr))
+	}
+
+	// Zero relevant cookies is NEVER a success. It is what a dropped -wal
+	// looks like (the database opens cleanly and simply has nothing in it),
+	// what a profile snapshotted out from under a live Firefox looks like,
+	// and what pointing at the wrong profile directory looks like. Returning
+	// an empty jar here would merge as a no-op and let a broken read hide
+	// behind whatever cookies.txt already held.
+	if len(lines) == 0 {
+		return "", fmt.Errorf("%s in %q yielded no YouTube/Google/Twitch cookies — if the profile is in use, close the browser and try again: %w",
+			firefoxCookieDBName, profileDir, ErrNoCookiesInProfile)
 	}
 
 	result := []string{
@@ -237,6 +267,42 @@ func firefoxSchemaVersion(db *sql.DB) int64 {
 		return 0
 	}
 	return version.Int64
+}
+
+// querySnapshotOrLive runs one read attempt against a private copy of the
+// cookie database.
+//
+// The three snapshot outcomes are handled differently on purpose:
+//
+//   - TORN (a live Firefox wrote mid-copy): retry for a clean copy. On the
+//     final attempt read the live database instead, because SQLite resolves
+//     WAL consistency itself — a profile under constant write must not fail
+//     where the pre-snapshot implementation succeeded.
+//   - UNREADABLE SIDECAR: propagate. Falling back to the live database would
+//     hit the same unreadable -wal and could return a stale checkpointed set
+//     as if it were current.
+//   - ANYTHING ELSE (no temp space, an AV holding the file): fall back to the
+//     live database, which is exactly what this code did before snapshots.
+func querySnapshotOrLive(profileDir, livePath string, finalAttempt bool) ([]string, error) {
+	snapDir, cleanup, err := snapshotFirefoxCookieDB(profileDir)
+	switch {
+	case err == nil:
+		defer cleanup()
+		return queryFirefoxCookieDB(filepath.Join(snapDir, firefoxCookieDBName))
+	case errors.Is(err, errSnapshotTorn) && !finalAttempt:
+		return nil, err
+	case errors.Is(err, ErrCookieDBUnreadable):
+		return nil, err
+	default:
+		return queryFirefoxCookieDB(livePath)
+	}
+}
+
+// isRetryableDBError reports whether another attempt could plausibly succeed.
+// Lock contention clears and torn copies are a race; a corrupt file is not
+// going to fix itself.
+func isRetryableDBError(err error) bool {
+	return isLockedDBError(err) || errors.Is(err, errSnapshotTorn)
 }
 
 // queryFirefoxCookieDB opens the Firefox cookie database and reads all cookies.

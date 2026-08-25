@@ -75,8 +75,20 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			switch {
 			case errors.Is(err, cookies.ErrNoBrowserFound):
 				jsonError(rw, "no supported browser installed", http.StatusFailedDependency)
-			case errors.Is(err, cookies.ErrProfileNotFound):
+			case errors.Is(err, cookies.ErrProfileNotFound),
+				errors.Is(err, cookies.ErrProfileNotADirectory):
 				jsonError(rw, "browser profile not found — run setup first", http.StatusNotFound)
+			// Browser-free profile import failures. These carry the only
+			// actionable detail the operator has (there is no browser UI in a
+			// container), so pass the message through verbatim instead of
+			// flattening it to "cookie refresh failed".
+			case errors.Is(err, cookies.ErrCookieDBNotFound),
+				errors.Is(err, cookies.ErrNoCookiesInProfile):
+				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+			case errors.Is(err, cookies.ErrCookieDBLocked):
+				jsonError(rw, err.Error(), http.StatusConflict)
+			case errors.Is(err, cookies.ErrCookieDBUnreadable):
+				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			default:
 				jsonError(rw, "cookie refresh failed", http.StatusInternalServerError)
 			}
@@ -150,6 +162,16 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			case errors.Is(err, cookies.ErrNoSetupInProgress):
 				jsonError(rw, err.Error(), http.StatusNotFound)
 			case errors.Is(err, cookies.ErrSetupCancelled):
+				jsonError(rw, err.Error(), http.StatusConflict)
+			// readFirefoxCookies now reports an unreadable profile loudly
+			// instead of returning an empty jar, so a broken profile reaches
+			// the user as that rather than a bare 500. (An EMPTY profile is
+			// not here: FinishSetup translates it to "no login detected",
+			// which the setup dialog renders inline.)
+			case errors.Is(err, cookies.ErrCookieDBNotFound),
+				errors.Is(err, cookies.ErrCookieDBUnreadable):
+				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+			case errors.Is(err, cookies.ErrCookieDBLocked):
 				jsonError(rw, err.Error(), http.StatusConflict)
 			default:
 				jsonError(rw, "failed to finish setup", http.StatusInternalServerError)
