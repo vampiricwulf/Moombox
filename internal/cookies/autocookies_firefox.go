@@ -170,10 +170,24 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 	return readFirefoxCookies(s.profileDir)
 }
 
+// readFirefoxCookies extracts the relevant cookies from a Firefox profile
+// directory and returns them in Netscape format.
+//
+// Each attempt SNAPSHOTS cookies.sqlite together with its -wal/-shm sidecars
+// into a temp dir and queries the copy (see snapshotFirefoxCookieDB for why
+// the sidecars are mandatory and why copying beats opening in place). If the
+// snapshot itself fails — no temp space, an AV holding the file — the attempt
+// falls back to querying the profile's database directly, which is exactly
+// what this function did before, so a snapshot problem can never make this
+// path worse than it was.
+//
+// Retrying the snapshot as well as the query is deliberate: a copy taken
+// while Firefox is mid-flush can pair a main file and a -wal that disagree,
+// and the fix for that is another copy, not another query of the same one.
 func readFirefoxCookies(profileDir string) (string, error) {
 	dbPath := filepath.Join(profileDir, "cookies.sqlite")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("firefox cookies.sqlite not found")
+		return "", fmt.Errorf("firefox %s not found in %q: %w", firefoxCookieDBName, profileDir, ErrCookieDBNotFound)
 	}
 
 	// Retry loop for SQLite WAL lock contention (Firefox may not have fully released the lock)
@@ -188,14 +202,25 @@ func readFirefoxCookies(profileDir string) (string, error) {
 			time.Sleep(retryBackoff)
 		}
 
-		lines, lastErr = queryFirefoxCookieDB(dbPath)
+		lines, lastErr = querySnapshotOrLive(profileDir, dbPath)
 		if lastErr == nil {
 			break
 		}
 	}
 
 	if lastErr != nil {
-		return "", fmt.Errorf("query cookies after %d attempts: %w", maxRetries, lastErr)
+		return "", classifyCookieDBError(fmt.Errorf("after %d attempts: %w", maxRetries, lastErr))
+	}
+
+	// Zero relevant cookies is NEVER a success. It is what a dropped -wal
+	// looks like (the database opens cleanly and simply has nothing in it),
+	// what a profile snapshotted out from under a live Firefox looks like,
+	// and what pointing at the wrong profile directory looks like. Returning
+	// an empty jar here would merge as a no-op and let a broken read hide
+	// behind whatever cookies.txt already held.
+	if len(lines) == 0 {
+		return "", fmt.Errorf("%s in %q yielded no YouTube/Google/Twitch cookies — if the profile is in use, close the browser and try again: %w",
+			firefoxCookieDBName, profileDir, ErrNoCookiesInProfile)
 	}
 
 	result := []string{
@@ -206,6 +231,20 @@ func readFirefoxCookies(profileDir string) (string, error) {
 	result = append(result, lines...)
 
 	return strings.Join(result, "\n") + "\n", nil
+}
+
+// querySnapshotOrLive runs one read attempt against a private copy of the
+// cookie database, falling back to the live file when the copy cannot be
+// made.
+func querySnapshotOrLive(profileDir, livePath string) ([]string, error) {
+	snapDir, cleanup, err := snapshotFirefoxCookieDB(profileDir)
+	if err != nil {
+		// No snapshot: behave exactly like the pre-snapshot implementation
+		// rather than failing outright.
+		return queryFirefoxCookieDB(livePath)
+	}
+	defer cleanup()
+	return queryFirefoxCookieDB(filepath.Join(snapDir, firefoxCookieDBName))
 }
 
 // queryFirefoxCookieDB opens the Firefox cookie database and reads all cookies.

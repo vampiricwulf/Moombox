@@ -97,6 +97,11 @@ func TestSentinelsAreDistinct(t *testing.T) {
 		ErrSetupCancelled,
 		ErrRefreshInProgress,
 		ErrProfileNotFound,
+		ErrProfileNotADirectory,
+		ErrCookieDBNotFound,
+		ErrCookieDBLocked,
+		ErrCookieDBUnreadable,
+		ErrNoCookiesInProfile,
 	}
 	for i, a := range all {
 		for j, b := range all {
