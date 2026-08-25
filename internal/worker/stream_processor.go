@@ -199,11 +199,21 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 	sp.logger.Debug("fetch result",
 		"status", info.StreamStatus,
 		"playability", info.PlayabilityError,
+		"sessionAuth", string(info.SessionAuth),
 		"videoID", job.VideoID)
 
 	sp.updateJobMetadata(job, info, false)
 
 	if errMsg, sentinel := sp.checkPlayability(info); errMsg != "" {
+		// The one log line that answers "were we even signed in?" at the
+		// moment the answer decides what the operator should do. Warn, not
+		// Debug: this is the failure the user is reading the log to explain,
+		// and it fires once per failed job — not on any hot path.
+		sp.logger.Warn("playability check failed",
+			"videoID", job.VideoID,
+			"playability", string(info.PlayabilityError),
+			"sessionAuth", string(info.SessionAuth),
+			"reason", errMsg)
 		return &StreamProcessResult{
 			VideoInfo:      info,
 			ShouldDownload: false,
@@ -301,9 +311,17 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 // checkPlayability returns an error string and an optional sentinel for
 // classification when the video is not playable. The display string is
 // the user-facing error; the sentinel (ErrCookiesRequired for member /
-// login, ErrNonActionable for age-restricted) lets the downstream
-// worker route the job to StatusCookies or suppress notifications via
-// errors.Is rather than substring matching. Both empty/nil → playable.
+// login, ErrNotAMember for a members-only wall hit by a live session,
+// ErrNonActionable for age-restricted) lets the downstream worker route
+// the job to StatusCookies or suppress notifications via errors.Is rather
+// than substring matching. Both empty/nil → playable.
+//
+// The members-only branch consults info.SessionAuth — YouTube's own verdict
+// on whether the failing request was signed in — because the two causes need
+// opposite actions and used to be indistinguishable. "Cookies expired" and
+// "this account is signed in but is not a member of that channel" both
+// produced the identical string and both parked the job in COOKIES?, so an
+// operator whose credentials were perfectly healthy was told to refresh them.
 func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, error) {
 	if info.PlayabilityError == "" || info.PlayabilityError == youtube.PlayabilityOK {
 		return "", nil
@@ -314,7 +332,16 @@ func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, er
 	}
 	switch info.PlayabilityError {
 	case youtube.PlayabilityMembersOnly:
-		return fmt.Sprintf("Member-only: %s", reason), ErrCookiesRequired
+		switch info.SessionAuth {
+		case youtube.SessionAuthLoggedIn:
+			return fmt.Sprintf("Member-only: %s — signed in, but this account is not a member of this channel (if the browser you exported from holds several accounts, export the one with the membership)", reason), ErrNotAMember
+		case youtube.SessionAuthLoggedOut:
+			return fmt.Sprintf("Member-only: %s — the request was not signed in: the cookie file is missing, or its session is dead (export a fresh Netscape cookies.txt from a signed-in browser)", reason), ErrCookiesRequired
+		default:
+			// Login state unobserved (no watch page this round). Keep the
+			// original wording rather than guessing at a cause.
+			return fmt.Sprintf("Member-only: %s", reason), ErrCookiesRequired
+		}
 	case youtube.PlayabilityLoginRequired:
 		return fmt.Sprintf("Login required: %s", reason), ErrCookiesRequired
 	case youtube.PlayabilityAgeRestricted:
