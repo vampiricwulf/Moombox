@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"maps"
 	"math"
+	"net"
 	"strconv"
 	"strings"
 
@@ -64,6 +65,7 @@ var sections = []settingsSection{
 			{"tls_cert_path", "TLS cert path", fieldText, nil, "PEM format certificate file (requires restart)", nil},
 			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)", nil},
 			{"trust_forwarded_proto", "Trust forwarded proto", fieldToggle, nil, "ONLY enable behind a TLS-terminating reverse proxy that strips client X-Forwarded-Proto", nil},
+			{"trusted_proxies", "Trusted proxies", fieldText, nil, "comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is honored — leave empty unless behind a proxy you control", nil},
 		},
 	},
 	{
@@ -282,6 +284,14 @@ type SettingsModel struct {
 	// doesn't leave a config/runtime mismatch with no visual reminder.
 	// Audit reports/tui.md #26.
 	OnRestartRequired func()
+	// OnSecurityChanged fires after the Security sub-editor commits a change
+	// to the dashboard password (set or remove). Both can flip the persistent
+	// security banner — setting a password on a passwordless external config
+	// clears it — and the banner occupies rows above the panels, so the App
+	// re-derives panel heights + mouse regions the same way OnRestartRequired
+	// does. The general settings save needs no equivalent: network_access is
+	// a restartRequiredKey, so that path already recalcs via OnRestartRequired.
+	OnSecurityChanged func()
 	OnHashPassword    func(password string) string
 	OnVerifyPassword  func(password, hash string) bool
 
@@ -421,6 +431,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["tls_cert_path"] = cfg.Network.TLSCertPath
 	m.values["tls_key_path"] = cfg.Network.TLSKeyPath
 	m.values["trust_forwarded_proto"] = boolToDisplay(cfg.Network.TrustForwardedProto)
+	m.values["trusted_proxies"] = strings.Join(cfg.Network.TrustedProxies, ", ")
 
 	// Paths
 	m.values["database_path"] = cfg.Paths.DatabasePath
@@ -512,10 +523,34 @@ func (m *SettingsModel) applyValues() {
 	m.configStore.Read(func(c *config.MoomboxConfig) {
 		passwordHash = c.Network.PasswordHash
 	})
-	if m.values["network_access"] == "external" && passwordHash == "" {
+	if isExternalAccess(m.values["network_access"]) && passwordHash == "" {
 		m.errorMsg = "Password required for external access. Set password in Network section."
 		m.status = saveError
 		return
+	}
+
+	// Validate trusted_proxies entries. config.Validate — and therefore the
+	// config.Save behind OnSave — REFUSES a config carrying an unparseable
+	// entry, so without this gate one typo makes the whole save fail while
+	// saveAndClose still reports "Saved" and every other change in that save
+	// is lost. Mirrors validateConfigUpdates' web-side field error.
+	for _, p := range strings.Split(m.values["trusted_proxies"], ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		ok := false
+		if strings.Contains(p, "/") {
+			_, _, err := net.ParseCIDR(p)
+			ok = err == nil
+		} else {
+			ok = net.ParseIP(p) != nil
+		}
+		if !ok {
+			m.errorMsg = fmt.Sprintf("Trusted proxies: %q is not a valid IP or CIDR", p)
+			m.status = saveError
+			return
+		}
 	}
 
 	// Validate browser_path if set.
@@ -617,6 +652,13 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Network.TLSCertPath = m.values["tls_cert_path"]
 	m.cfg.Network.TLSKeyPath = m.values["tls_key_path"]
 	m.cfg.Network.TrustForwardedProto = m.values["trust_forwarded_proto"] == "Yes"
+	proxies := []string(nil)
+	for _, p := range strings.Split(m.values["trusted_proxies"], ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			proxies = append(proxies, p)
+		}
+	}
+	m.cfg.Network.TrustedProxies = proxies
 
 	// Paths
 	m.cfg.Paths.DatabasePath = m.values["database_path"]

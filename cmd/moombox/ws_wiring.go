@@ -74,7 +74,7 @@ func (s *runState) wireWebSocket() {
 								s.log.Error("client token usage update panic", "panic", r)
 							}
 						}()
-						s.db.UpdateClientTokenUsage(ct.ID, extractWSIP(r))
+						s.db.UpdateClientTokenUsage(ct.ID, web.EffectiveClientIP(s.configStore, r))
 					}()
 					return true
 				}

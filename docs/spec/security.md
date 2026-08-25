@@ -2,18 +2,19 @@
 
 ## Scope
 
-This document defines the security architecture of Moombox's HTTP server, authentication system, authorization model, and binary update verification. It covers the middleware stack, CSRF protection, session management, IP-based access control, rate limiting, Content Security Policy, TLS configuration, Ed25519 update signing, and panic recovery requirements. Every security-relevant decision and its rationale is documented here so that an AI or developer can understand and maintain the security posture without guessing.
+This document defines the security architecture of Moombox's HTTP server, authentication system, authorization model, and binary update verification. It covers the middleware stack, CSRF protection, session management, IP-based access control, client-IP resolution behind trusted reverse proxies, the passwordless-external-access policy, rate limiting, Content Security Policy, TLS configuration, Ed25519 update signing, and panic recovery requirements. Every security-relevant decision and its rationale is documented here so that an AI or developer can understand and maintain the security posture without guessing.
 
 ## Rules and Constraints
 
 These are hard rules. They are not guidelines, suggestions, or aspirations. An AI assisting with Moombox development must follow these without exception:
 
-- **Middleware order is critical and MUST be maintained.** The middleware chain is applied in this exact order: Recovery, CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, Compression, Auth. Reordering can create security vulnerabilities (e.g., moving Auth before IPGate would break local-network trust; moving CSRF after Auth would leave authenticated routes unprotected against cross-site request forgery).
+- **Middleware order is critical and MUST be maintained.** The middleware chain is applied in this exact order: RequestID, Drain, Recovery, CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, Compression, Auth. (`chimiddleware.RequestID` runs first so recovery/log lines can be correlated to a request; `DrainMiddleware` sits ahead of `RecoveryMiddleware` so its shutdown 503 cannot be disturbed by a panic in a later middleware. The eight security-relevant middlewares from Recovery onward are documented individually below.) Reordering can create security vulnerabilities (e.g., moving Auth before IPGate would break local-network trust; moving CSRF after Auth would leave authenticated routes unprotected against cross-site request forgery).
 - **CSRF uses Origin/Referer validation, NOT CSRF tokens.** Moombox does not generate or validate CSRF tokens. It validates the Origin or Referer header on mutating requests (POST, PUT, DELETE) against the configured network_access level. This is sufficient because the server controls CORS preflight responses and does not grant cross-origin access to untrusted origins.
 - **TUI bypasses CSRF via the X-Internal-Token header.** The TUI is a same-process client that cannot send Origin/Referer headers. It sends a 16-byte random hex token (generated at server startup) in the `X-Internal-Token` header. The comparison uses `crypto/subtle.ConstantTimeCompare` to prevent timing side-channels.
 - **Loopback and private IPs skip authentication.** Requests from 127.0.0.1, ::1, and private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local addresses) bypass the AuthMiddleware entirely. Authentication is only enforced for external (non-local, non-LAN) clients when a password is configured.
 - **Ed25519 signature verification before binary swap.** Self-updates download a new binary and a `.sig` file. The binary is verified against the embedded Ed25519 public key before any file rename operations occur. An invalid signature aborts the update.
-- **NEVER trust X-Forwarded-For.** IP extraction uses `net.SplitHostPort(r.RemoteAddr)` directly. The `ExtractIP` function explicitly ignores `X-Forwarded-For`, `X-Real-IP`, and all other proxy headers to prevent IP spoofing attacks that would bypass IP-based access control and authentication.
+- **X-Forwarded-For is ignored unless the direct peer is a declared trusted proxy.** `ExtractIP` never reads proxy headers — it is `net.SplitHostPort(r.RemoteAddr)` and nothing else. Every trust decision instead calls `EffectiveClientIP(store, r)`, which returns `ExtractIP(r)` unless the *direct peer* matches an entry in `network.trusted_proxies`; only then does it walk `X-Forwarded-For` right-to-left past trusted hops (rightmost-untrusted). `trusted_proxies` is empty by default, so the default posture is identical to never trusting the header. A client-forged `X-Forwarded-For` never matters: either the peer is untrusted and the header is ignored, or a trusted proxy appended the real address to the right of the forgery. See "Client IP Resolution and Trusted Proxies" below.
+- **Loopback-gated endpoints always use the direct peer address.** `LoopbackOnly`, `IsLoopbackRequest`, first-time password setup, and the setup wizard call `ExtractIP` directly and MUST continue to. "Arrived over this machine's loopback interface" is a physical-access signal, and no forwarded header may ever confer it.
 - **All goroutines must have panic recovery.** Every goroutine in the application — HTTP handlers, background workers, database callbacks, monitor callbacks — must include a `defer func() { if r := recover(); r != nil { ... } }()` block. A panic in one subsystem must never crash the application. This is enforced at multiple layers: RecoveryMiddleware for HTTP, `safeCallJobUpdate`/`safeCallJobsChange` for database subscribers, and inline defers for all other goroutines.
 
 ---
@@ -21,6 +22,8 @@ These are hard rules. They are not guidelines, suggestions, or aspirations. An A
 ## Middleware Stack
 
 The middleware chain is applied in `NewServer()` in `internal/web/server.go`. The order is load-bearing — each middleware depends on the ones before it having already executed, and moving any middleware out of position can create security gaps.
+
+Two non-security middlewares run ahead of everything numbered below: `chimiddleware.RequestID`, then `s.DrainMiddleware` (which short-circuits with 503 once `StartDrain` is called, and is placed before `RecoveryMiddleware` so a later panic cannot disturb that path). The numbering below starts at `RecoveryMiddleware` and covers the security-relevant chain.
 
 ### 1. RecoveryMiddleware
 
@@ -32,7 +35,7 @@ The middleware chain is applied in `NewServer()` in `internal/web/server.go`. Th
 - If headers have already been sent (partial response written), it cannot write a new status code — the connection is effectively broken, but the server survives.
 - Logs the panic value and the request path at Error level.
 
-**Why it is first:** If any subsequent middleware or handler panics, this middleware catches it. If it were placed later in the chain, panics in earlier middleware would crash the process.
+**Why it is first of these:** it catches panics raised anywhere downstream — every numbered middleware below it, plus the handler. Placed later, a panic in a middleware it had skipped past would escape it: `net/http` recovers such a panic per-connection, so the process survives either way, but the client sees an aborted connection instead of the 500 JSON response and the stack is logged by the standard library rather than by Moombox. `RequestID` and `Drain` run ahead of it and sit outside that cover by design (see the note above).
 
 **Source:** `RecoveryMiddleware` in `internal/web/server.go`.
 
@@ -93,13 +96,13 @@ The middleware chain is applied in `NewServer()` in `internal/web/server.go`. Th
 - `lan`: Only loopback (127.0.0.1, ::1) and private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local unicast). External IPs receive `403 Forbidden`.
 - `localhost` (or unset default): Only loopback IPs. Everything else receives `403 Forbidden`.
 
-**IP extraction:** Uses `ExtractIP(r)` which calls `net.SplitHostPort(r.RemoteAddr)`. Never trusts proxy headers.
+**IP extraction:** Uses `EffectiveClientIP(store, r)` — the direct peer address unless that peer is listed in `network.trusted_proxies`, in which case the rightmost-untrusted `X-Forwarded-For` hop. With the default empty `trusted_proxies` this is exactly `ExtractIP(r)`. The shared helper `ipAllowedByNetworkAccess` applies the policy for every branch, so the routed chain and the WebSocket upgrade path (which bypasses the router entirely — see `Server.Start` in `internal/web/server.go`) cannot drift apart.
 
 **Private IP detection:** The `isPrivateIP` function checks against pre-parsed CIDR blocks (parsed once at package init to avoid per-request overhead) and also treats `IsLinkLocalUnicast()` addresses (fe80::/10 IPv6, 169.254.0.0/16 IPv4) as private, since phones on LAN often connect via IPv6 link-local.
 
 **Additional route-level gating:** The `LoopbackOnly` middleware is applied to specific routes (`/get_pot`, `/invalidate_caches`, `/invalidate_it`) that must only be accessible from the local machine regardless of `network_access` config.
 
-**Source:** `IPGateMiddleware`, `LoopbackOnly`, `ExtractIP`, `isPrivateIP`, `isLoopback` in `internal/web/middleware.go`.
+**Source:** `IPGateMiddleware`, `ipAllowedByNetworkAccess`, `LoopbackOnly`, `ExtractIP`, `EffectiveClientIP`, `isPrivateIP`, `isLoopback` in `internal/web/middleware.go`.
 
 ### 6. MaxBodySize
 
@@ -133,9 +136,9 @@ The middleware chain is applied in `NewServer()` in `internal/web/server.go`. Th
 **Note on registration:** AuthMiddleware is registered separately from the other middleware — it is added via `r.Use(webServer.AuthMiddleware)` in `main.go` after the server is constructed, because it requires the AuthService to be wired up first. Despite this, it is the last middleware in the chain.
 
 **Behavior — step by step:**
-1. Extract the client IP via `ExtractIP(r)`.
+1. Resolve the client IP via `EffectiveClientIP(s.configStore, r)`.
 2. If the IP is loopback or private: skip auth, serve the request.
-3. If `IsAuthRequired` returns false (network_access is not `external`, or no password hash is configured): skip auth.
+3. If `IsAuthRequired` returns false (network_access is neither `external` nor `public`, or no password hash is configured): skip auth.
 4. If the request path is a public endpoint (`/api/auth/login`, `/api/auth/status`, `/ping`, `/minter_cache`, `/favicon.svg`, `/login.html`): skip auth.
 5. Check the `moombox_session` cookie. If valid (exists in the in-memory session map and not expired): serve the request.
 6. Fallback: check the `moombox_client` cookie. If the `ClientTokenCheck` callback validates the persistent client token: issue a fresh session cookie and serve the request.
@@ -167,9 +170,11 @@ Three categories of requests are exempt from CSRF validation:
 
 ### Missing Origin Handling
 
-When a mutating request arrives without an Origin or Referer header and without an internal token:
-- If `network_access` is `external` or `public` AND a password hash is configured: the request is rejected. This prevents blind form-submission CSRF attacks where the browser does not send an Origin header (some older browser/form combinations).
-- For `localhost` or `lan` access: the request is allowed. The IP gate and auth middleware already restrict access to trusted networks.
+A mutating request that reaches the Origin check with neither an `Origin` nor a `Referer` header is rejected with `403 {"error":"Forbidden: missing origin"}` — **unconditionally**, regardless of `network_access`. The middleware does read the `network_access` value beforehand, but only the later `isAllowedOrigin` comparison consults it; the missing-header branch never does. This matches step 4 of CSRFMiddleware above.
+
+There is no localhost/LAN exemption. An earlier version allowed missing-Origin requests from local and LAN clients, which let any local process or same-origin browser tab call `/api/restart`, `/api/auth/set-password`, or `/api/jobs/{id}/open-folder` with no proof of browser context. That bypass was removed (audit `reports/web.md` C-1/C-5/C-8) and **must not be reintroduced.**
+
+The only ways a mutating request reaches a handler without an Origin/Referer header are the two exemptions listed above, both of which short-circuit before the check: a matching `X-Internal-Token` (same-process TUI), or one of the three path-exempt POT endpoints (`/get_pot`, `/invalidate_caches`, `/invalidate_it`, each `LoopbackOnly` at the route level). Non-browser local CLIs must therefore send `Origin: http://localhost:<port>` or the internal token.
 
 ---
 
@@ -233,9 +238,9 @@ Client tokens provide a "remember this browser" mechanism for remote clients, su
 
 For every incoming request:
 
-1. Extract client IP from `RemoteAddr` (never from proxy headers).
+1. Resolve the client IP with `EffectiveClientIP` — `RemoteAddr` unless the peer is a declared trusted proxy.
 2. If IP is loopback (127.0.0.1, ::1) or private (LAN ranges): **skip auth entirely**.
-3. If `network_access` is not `external` or no password hash is configured: **skip auth**.
+3. If `network_access` is neither `external` nor `public`, or no password hash is configured: **skip auth**.
 4. If the path is a public endpoint (login, status, ping, favicon): **skip auth**.
 5. Check `moombox_session` cookie → validate against in-memory session map → if valid: **authenticated**.
 6. Check `moombox_client` cookie → validate via `ClientTokenCheck` callback → if valid: issue fresh session, **authenticated**.
@@ -245,20 +250,33 @@ For every incoming request:
 
 ## Authorization (IP-Based Access Control)
 
-Moombox does not have role-based access control or user accounts. Authorization is binary: you either have full access or no access. The access decision is based entirely on the client's IP address and the `network_access` configuration.
+Moombox does not have role-based access control or user accounts. Authorization is binary: you either have full access or no access. The access decision is based entirely on the client's effective IP address and the `network_access` configuration.
 
 ### network_access Levels
 
-| Level | Who can connect | Auth required? |
-|-------|----------------|----------------|
-| `localhost` (default) | Loopback only (127.0.0.1, ::1) | Never |
-| `lan` | Loopback + private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local) | Never |
-| `external` / `public` | Any IP | Yes, if password configured |
+| Level | Who can connect | Auth required? | Settable from a UI? |
+|-------|----------------|----------------|---------------------|
+| `localhost` (default) | Loopback only (127.0.0.1, ::1) | Never | Yes |
+| `lan` | Loopback + private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local) | Never | Yes |
+| `external` | Any IP | Yes, if password configured | Yes (password required first) |
+| `public` | Any IP — identical to `external` | Yes, if password configured | **No — config file only** |
 
 **Key behaviors:**
 - Loopback and private IPs are always trusted regardless of the `network_access` setting. Even at `external` level, a request from 192.168.1.100 skips authentication.
-- Authentication is only enforced when `network_access == "external"` AND a `password_hash` is configured. The `public` level allows any IP but does not enforce auth (it is intended for scenarios where the server is behind a reverse proxy that handles authentication).
+- Authentication is enforced when `network_access` is `external` **or** `public` AND a `password_hash` is configured — `IsAuthRequired` in `internal/web/auth.go` treats the two identically, as does every other runtime consumer (the IP gate, the bind-address switch, the plain-HTTP warning). `public` is a label for "this deployment sits behind an authenticating reverse proxy", not a distinct policy.
 - The IP gate (middleware layer 5) rejects connections from disallowed IP ranges before they reach the auth layer. This means that at `localhost` level, a request from an external IP never reaches the auth check — it is rejected at the network level.
+
+### The `public` alias
+
+`public` is a config-file-level synonym for `external`. It has always been honored at runtime, but `validateOrNormalize` in `internal/config/config.go` did not list it among the valid values, so a hand-edited `network_access = "public"` was silently reset to the `localhost` default on load. That reset is fixed: `public` now passes validation and persists.
+
+The value is deliberately **not** offered as an input anywhere:
+- The web UI's Network Access dropdown and the TUI's cycle field list only `localhost`/`lan`/`external`.
+- `validateConfigUpdates` in `internal/web/routes/config_routes.go` rejects `"public"` with a 400, which also covers `POST /api/setup/complete` (it runs the same validator).
+
+That rejection is load-bearing rather than cosmetic. The `PUT /api/config` password guard checks `v == "external"` alone, so widening the accepted enum without widening that guard would reopen passwordless external access through the API. `TestConfigPutRejectsPublicAsInput` and `TestSetupCompleteRejectsPublicAsInput` lock the coupling.
+
+Because a `public` value has no matching `<sl-option>`, Shoelace resolves the dropdown's `.value` to `""`. The Settings page detects that, explains it in the field's help text, and omits `network_access` from the save payload entirely — both `validateConfigUpdates` and `applyConfigUpdates` skip absent network keys, so the stored `public` survives and every *other* setting on the page stays savable (`web/public/modules/settings.js`).
 
 ### Private IP Detection
 
@@ -274,11 +292,138 @@ Loopback detection uses Go's `net.IP.IsLoopback()`, which covers both 127.0.0.0/
 
 ---
 
+## Client IP Resolution and Trusted Proxies
+
+### The problem
+
+Every trust decision in Moombox — the `network_access` IP gate, the auth skip for loopback/private clients, rate-limit bucket keys — is a function of the client's IP. Put any reverse proxy in front of the process and that IP becomes the *proxy's* address, which is private or loopback and therefore trusted by every one of those decisions. Without a way to look past it, an internet client forwarded by nginx passes the `lan` gate and skips authentication entirely. `trusted_proxies` is the mechanism that resolves the real client instead.
+
+### Configuration
+
+| Setting | Type | Default | Restart? |
+|---------|------|---------|----------|
+| `network.trusted_proxies` | list of bare IPs or CIDRs (`"172.18.0.2"`, `"10.0.0.0/8"`) | `[]` — empty, feature off | **No** — applies immediately |
+
+Empty is off, and off is exactly the behavior that existed before the setting: `X-Forwarded-For` is never read.
+
+The setting is hot-reloadable and deliberately absent from both restart-required lists (`restartRequiredKeys` in `internal/tui/settings.go`, `RESTART_REQUIRED_FIELDS` in `web/public/modules/settings.js`). `loadTrustedProxies` re-reads the config store on every request and rebuilds its parsed `[]*net.IPNet` only when the joined raw value changes, so a save takes effect on the next request with no restart hook and no per-request CIDR parsing.
+
+Exposed in `config.example.toml`, `PUT /api/config` (`network.trusted_proxies`), the web UI's Network settings (`cfg-trusted-proxies`), and the TUI's Network section (comma-separated text field). Entries must parse as an IP or a CIDR: `validateOrNormalize` reports invalid entries and `Normalize` drops them; `validateConfigUpdates` returns a 400 field error; the TUI validates before saving, because `config.Save` refuses a config carrying an unparseable entry and the save would otherwise be silently lost behind a "Saved" message.
+
+### Algorithm — `EffectiveClientIP`
+
+`EffectiveClientIP(store, r)` in `internal/web/middleware.go`:
+
+1. `direct := ExtractIP(r)` — the peer address from `RemoteAddr`.
+2. If `direct` is not inside any `trusted_proxies` entry: **return `direct`**. The header is not read.
+3. Read `X-Forwarded-For` with `Header.Values` and concatenate **all** of its field lines in wire order — RFC 7230 §3.2.2 makes repeated field lines exactly equivalent to one comma-joined line. If the header is absent: return `direct`.
+4. Otherwise walk the joined value **right to left**, canonicalizing each entry, and return the first hop that is not itself a trusted proxy (rightmost-untrusted).
+5. If every listed hop is a trusted proxy, the connection originated inside the trusted set (health checks, proxy self-calls) — return `direct`.
+
+Right-to-left is what makes a forged header harmless. A client can prepend anything it likes to `X-Forwarded-For`; the trusted proxy appends the address it actually saw to the right of that forgery, and the walk stops there.
+
+Concatenating rather than calling `Header.Get` is load-bearing, not tidiness: `Get` returns only the **first** field line and Go never joins repeated headers, while a proxy is free to append by adding a second `X-Forwarded-For` line instead of extending the first — HAProxy's `option forwardfor` does, which is why its own documentation tells operators to use the last occurrence of the header. Reading only the first line there would hand the walk the client's forged entry, never show it the address the proxy actually observed, and fail **open** through the IP gate and the auth skip. `TestEffectiveClientIP`/`TestIPGateHonorsTrustedProxy` both pin the multi-line case.
+
+### Fail-closed handling of non-IP entries
+
+`canonicalizeForwardedIP` strips whitespace, an optional port, IPv6 brackets, and zone suffixes, then re-renders a parseable address in canonical form. Entries that parse as neither IPv4 nor IPv6 are returned trimmed-but-verbatim, which preserves their diagnostic value in log lines while guaranteeing that `isLoopback`/`isPrivateIP` both reject them — an unparseable value therefore fails **closed**, treated as a non-local client, rather than falling back to the proxy's own private address.
+
+One string breaks that guarantee on its own: `isLoopback` deliberately resolves the bare hostname `"localhost"` to loopback (load-bearing for the `isAllowedOrigin` checks). A forwarded entry spelling `localhost` would therefore be classified as loopback despite parsing as no IP. `namesTrustedClass` catches exactly that case and the value is returned prefixed as `invalid-localhost`, which spells no trusted class and parses as no IP. The invariant to preserve when touching this code: **`canonicalizeForwardedIP`'s result must never name a trusted class unless it is a genuine, parseable IP in that class.**
+
+### Where it is used
+
+Every trust decision routes through `EffectiveClientIP`:
+
+| Decision point | Source |
+|----------------|--------|
+| `network_access` IP gate (all branches) | `ipAllowedByNetworkAccess`, `internal/web/middleware.go` |
+| WebSocket upgrade gate (bypasses the router chain) | `Server.Start`, `internal/web/server.go` |
+| WebSocket auth-skip check | `WebSocketHub.HandleUpgrade` via `hub.ClientIP`, `internal/web/websocket.go` |
+| Auth skip for loopback/private clients | `Server.AuthMiddleware`, `internal/web/server.go` |
+| Auth-endpoint local check | `IsLocalOrPrivateRequest`, `internal/web/middleware.go` |
+| Rate limiters — API, POT, login, password | `RateLimiter.ClientIP` wired in `initServices`, `cmd/moombox/services.go` |
+| Rate limiter — import | `ImportRoutes`, `internal/web/routes/import_routes.go` |
+| Login/password audit log lines, client-token labels and `LastIP` | `internal/web/routes/auth.go`, `cmd/moombox/ws_wiring.go` |
+
+Keying rate limiters by the effective IP matters as much as the gate: without it, a reverse proxy collapses every remote client into one bucket, and a single attacker could exhaust the 5/min login budget for everyone behind the proxy.
+
+### What stays on the direct peer address
+
+`LoopbackOnly`, `IsLoopbackRequest`, the first-time branch of `POST /api/auth/set-password` (no existing hash and no session), and the setup wizard (`POST /api/setup/complete`) all call `ExtractIP` and ignore `trusted_proxies` entirely. "Arrived over this machine's loopback interface" is a proof-of-physical-access signal; a forwarded header must never be able to confer it.
+
+Note the distinction inside `/api/auth/set-password`: the outer "session or local client" gate uses `IsLocalOrPrivateRequest` (trusted-proxy aware, matching AuthMiddleware's trust policy), while the stricter first-time branch drops to `IsLoopbackRequest`. Only the branch with no proof-of-access signal is loopback-gated.
+
+### Operational guidance
+
+- **Declare the narrowest range that works** — ideally the single proxy IP, not a `/16`. Anything inside a declared range is trusted to state who the client is, *including claiming a loopback address* (`X-Forwarded-For: 127.0.0.1` from a trusted peer resolves to loopback and skips auth). That is inherent to trusting a subnet, not a defect in the walk.
+- **The proxy must append to (or replace) `X-Forwarded-For` — never forward the client's header unchanged.** The rightmost-untrusted walk is safe *because* the trusted proxy writes the address it actually saw to the right of anything the client sent. A proxy that passes the client's header through verbatim makes the client's forgery the rightmost entry, and the walk returns it — silently reopening the exact bypass this feature closes. Use nginx's `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` (append) or `$remote_addr` (replace); Caddy and Traefik append by default. *How* the proxy appends does not matter — extending the existing field line (nginx, Caddy, Traefik, `httputil.ReverseProxy`) and emitting a second one (HAProxy's `option forwardfor`) are equivalent, because step 3 joins every line first. A bare pass-through is the only broken configuration.
+- **The proxy must be the only route to the port.** If the port is also directly reachable, a client that can connect from inside the trusted range sets its own effective IP, and a `public` deployment loses the proxy's authentication altogether. Bind the publish to `127.0.0.1`, or keep the port unpublished and share a Docker network with the proxy.
+- Pair it with `trust_forwarded_proto = true` when the proxy terminates TLS, so session cookies get the `Secure` flag even though Moombox itself sees plain HTTP.
+
+---
+
+## Passwordless External Access (block set, warn boot)
+
+`network_access = external`/`public` with an empty `password_hash` means the dashboard accepts every IP that can reach the port, unauthenticated. The policy is **block set, warn boot**: interactive surfaces refuse to create the state, but a config file that already has it still boots.
+
+### The three interactive blocks
+
+| Surface | Behavior | Source |
+|---------|----------|--------|
+| TUI Settings | `applyValues` refuses the save with "Password required for external access. Set password in Network section." | `SettingsModel.applyValues`, `internal/tui/settings.go` |
+| Config API (`PUT /api/config`) — the path the web dashboard's Settings page saves through | 400 "A password must be set before enabling external access." | `internal/web/routes/config_routes.go` |
+| Setup wizard (`POST /api/setup/complete`) | 400 "A password (min 8 characters) is required for external access." | `internal/web/routes/setup_routes.go` |
+
+The reverse direction is closed too: removing the dashboard password resets `network_access` in the same write. `POST /api/auth/remove-password` sets it to `localhost` unconditionally; the TUI's `handleRemovePassword` resets when `isExternalAccess` (which covers the `public` alias — see `internal/tui/settings_security.go`).
+
+Note also that the config API has no `password_hash` key at all (`applyConfigUpdates` does not read one, and `NetworkConfig.PasswordHash` is tagged `json:"-"`), so the hash can only be changed through the dedicated auth endpoints.
+
+### Why it is not a hard failure
+
+Reaching the state therefore takes a config file that already carries the combination — normally a hand-edited `config.toml`, or a legacy config with `allow_lan = true` + `allow_external = true` and no password, which `migrateOldFormat` converts to `network_access = "external"` on load. Refusing to boot on it would break a live deployment that is legitimately fronted by an authenticating reverse proxy, and Moombox cannot verify from the inside whether such a proxy exists. So it warns, loudly and persistently, and starts.
+
+### The four warn surfaces
+
+| Surface | Behavior | Source |
+|---------|----------|--------|
+| Startup log | `Warn`: `[WebServer] SECURITY: network_access is "…" with NO dashboard password …` | `Server.Start`, `internal/web/server.go` |
+| API | `passwordlessExternal: true` on `GET /api/auth/status` — one of AuthMiddleware's public, unauthenticated paths, so it is readable even before login | `AuthRoutes`, `internal/web/routes/auth.go` |
+| Web UI | Persistent red banner above the tab strip; set on load by `checkSecurityBanner` (`web/public/app.js`) and re-synced by `loadSecurityStatus` whenever the Settings Security section refreshes | `#security-banner` in `web/public/index.html`, `.security-banner` in `web/public/moombox.css` |
+| TUI | Persistent red banner above the panels, alongside the restart banner; `recalcLayout` subtracts its rendered height so the frame never overflows | `securityBannerText` / `securityBanner`, `internal/tui/app_layout.go` |
+
+Both banners read the live config, so fixing the config clears them without a restart. Note that the `passwordlessExternal` flag reports state; it is not a gate, and nothing in the request path consults it.
+
+---
+
+## Docker Source-IP Caveats
+
+Moombox's IP-based access control is only as good as the source address the container observes. Containerized deployments change that address in ways worth stating explicitly. None of the items below are in-app behavior — they are properties of the Docker network stack that the `lan` filter inherits.
+
+**Linux bridge, IPv4.** Docker's iptables DNAT rules preserve the original IPv4 source address for traffic arriving from other hosts, so the `lan` filter judges the actual client. Connections that originate on the Docker host itself go through `docker-proxy` and arrive as the bridge gateway address — private, but never loopback. This is why the seeded container config uses `network_access = "lan"` rather than the `localhost` default: with `localhost`, the server would bind `127.0.0.1` and nothing through a published port could reach it.
+
+**Docker Desktop (Windows/macOS)** proxies all inbound connections through its VM, so Moombox sees *every* client as the private gateway address. The `lan` filter cannot distinguish clients at all there, and the port publish is the only effective exposure control.
+
+**Published ports bypass host firewalls.** Docker inserts its own DNAT rules on Linux, so `ufw`/`firewalld` rules do not cover a published port. Restrict the publish itself (`127.0.0.1:774:774`) rather than relying on a host firewall.
+
+**IPv6.** Moombox binds IPv4 only — `Server.Start` picks `127.0.0.1` or `0.0.0.0` (`internal/web/server.go`), and `0.0.0.0` in Go is an AF_INET socket; the in-use-port probe reuses the same host. Docker's userland proxy, however, does accept IPv6 connections to a published port and re-originates them from the bridge gateway's **private IPv4** address — which would make an internet IPv6 client indistinguishable from a LAN client to the `lan` filter. `docker-compose.yml` therefore declares an IPv6-enabled network so that, on Docker Engine 27+ (where ip6tables is on by default for such networks), inbound IPv6 is DNATed to the container instead of being re-originated by the proxy.
+
+The result is that IPv6 connections are **refused at the container**, not that the filter judges the real IPv6 client — nothing is listening on the container's IPv6 address. Reach the dashboard over the host's IPv4 address; a hostname with an AAAA record generally still works because browsers fall back to IPv4 after the refusal. Publishing as `0.0.0.0:774:774` stops the port accepting IPv6 in the first place.
+
+Two limits worth recording. On Docker Engine < 27, ip6tables is off by default, the userland proxy still handles IPv6, and the misclassification above persists silently — nothing in Moombox can detect it. And on a host with IPv6 disabled in-kernel, `docker compose up` fails to *create* the network rather than degrading; the recovery is to delete the `networks:` block, or set `enable_ipv6: false` and drop the `ipam:` subnet with it, accepting that the hole reopens on that host. The compose file's own comments carry both, and are the reference wording.
+
+For completeness: `internal/web/middleware.go`'s private-range list covers only `fc00::/7` plus link-local for IPv6, so an IPv6 global-unicast client *would* be classified non-private if it ever reached the filter. It does not reach it — the connection is refused at TCP first.
+
+**Status:** the IPv6 behavior above is derived from the binding code and Docker's documented networking model. No Docker daemon has exercised it; the verification gate is `docker compose up -d` on a daemon-equipped host.
+
+---
+
 ## Rate Limiting
 
 ### Algorithm
 
 Sliding window per-IP rate limiting, implemented entirely in-memory. Each IP address has an array of request timestamps. When a new request arrives, expired timestamps (outside the window) are filtered out. If the remaining count meets or exceeds the limit, the request is rejected.
+
+The bucket key is the **effective** client IP. Each limiter carries a `ClientIP func(*http.Request) string` hook wired to `EffectiveClientIP`; when it is nil the limiter falls back to the raw peer address. Without the hook, a reverse proxy would collapse every remote client into a single bucket and one attacker could exhaust the login budget for everyone behind it.
 
 ### Memory Bounds
 
@@ -295,7 +440,7 @@ When a request is rate-limited:
 
 ### Per-Route Limits
 
-All rate limiters use a 60-second sliding window. The limits are configured in `cmd/moombox/main.go`:
+All rate limiters use a 60-second sliding window. The limit constants live in `cmd/moombox/main.go`; the limiters are constructed and given their `ClientIP` hook in `initServices` (`cmd/moombox/services.go`), except the import limiter, which is created inside `ImportRoutes`:
 
 | Route | Limit | Window | Purpose |
 |-------|-------|--------|---------|
@@ -305,7 +450,7 @@ All rate limiters use a 60-second sliding window. The limits are configured in `
 | Import (`/api/import`) | 5 | 60s | Limits resource-intensive archive imports |
 | API general | 20 | 60s | Broad rate limit on API endpoints |
 
-**Source:** `internal/web/rate_limiter.go`, rate limiter instantiation in `cmd/moombox/main.go`.
+**Source:** `internal/web/rate_limiter.go`, limit constants in `cmd/moombox/main.go`, instantiation and `ClientIP` wiring in `cmd/moombox/services.go` and `internal/web/routes/import_routes.go`.
 
 ---
 
@@ -374,9 +519,11 @@ The server binds to different addresses based on `network_access`:
 - `localhost` (or unset): binds to `127.0.0.1`.
 - `lan`, `external`, or `public`: binds to `0.0.0.0`.
 
+Both are IPv4 literals, and in Go `net.Listen("tcp", "0.0.0.0:774")` creates an AF_INET socket — **Moombox listens on IPv4 only.** Nothing binds `::`. This is load-bearing for the Docker IPv6 discussion above and should not be changed casually.
+
 ### Port
 
-Default port is 774. If the port is in use, the server probes ports 775 through 784 sequentially. The first available port is used, and the actual port is logged.
+Default port is 774. If the port is in use, the server probes ports 775 through 784 sequentially, reusing the same host, so the fallback is IPv4-only too. The first available port is used, and the actual port is logged.
 
 ### Security Warning
 
@@ -384,7 +531,7 @@ If `network_access` is `external` or `public` with a password configured but HTT
 
 > External access with authentication over plain HTTP — session cookies are not encrypted. Consider setting https_enabled = true or using a reverse proxy with HTTPS.
 
-This warns that session cookies are transmitted in cleartext, making them vulnerable to network sniffing.
+This warns that session cookies are transmitted in cleartext, making them vulnerable to network sniffing. The complementary case — `external`/`public` with *no* password — is the separate, louder warning documented in "Passwordless External Access" above. The two conditions are mutually exclusive by construction (one requires a password hash, the other requires its absence), so only one can fire per boot.
 
 **Source:** `LoadOrGenerateTLSConfig` in `internal/web/tls.go`, TLS setup in `internal/web/server.go`.
 
@@ -515,7 +662,11 @@ Beyond the middleware stack, the HTTP server itself is configured with security-
 - **[user-interfaces.md](user-interfaces.md)** — Internal token usage by the TUI, WebSocket authentication, how the TUI's custom RoundTripper works.
 - **[operations.md](operations.md)** — Ed25519 signing in the release process, binary swap mechanism during updates, CI signing workflow.
 - **[data-and-storage.md](data-and-storage.md)** — Client token storage in the database (`client_tokens` table, schema v6), password hash storage in the TOML config file.
-- **Source: [`internal/web/middleware.go`](../../internal/web/middleware.go)** — CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, LoopbackOnly, ExtractIP, isPrivateIP, isLoopback.
+- **[operations.md](operations.md#docker-image)** — Docker image build, entrypoint config seeding, and the compose network.
+- **[`README.md`](../../README.md#remote-access)** — Operator-facing "Remote Access" guide: VPN/Tailscale, reverse proxy, direct exposure, and the Docker caveats in practical form.
+- **Source: [`internal/web/middleware.go`](../../internal/web/middleware.go)** — CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, LoopbackOnly, ExtractIP, EffectiveClientIP, canonicalizeForwardedIP, loadTrustedProxies, isPrivateIP, isLoopback.
+- **Source: [`internal/config/types.go`](../../internal/config/types.go)** — `NetworkConfig`, including `TrustedProxies` and `TrustForwardedProto`.
+- **Source: [`docker-compose.yml`](../../docker-compose.yml)** — IPv6-enabled network, port-publish guidance, Docker Desktop caveat. Its comments are the reference wording for the IPv6 behavior.
 - **Source: [`internal/web/auth.go`](../../internal/web/auth.go)** — AuthService, password hashing, session management, client token helpers, SetSessionCookie.
 - **Source: [`internal/web/server.go`](../../internal/web/server.go)** — Server struct, NewServer (middleware registration + internal token generation), AuthMiddleware, RecoveryMiddleware, CompressionMiddleware, HTTP server config.
 - **Source: [`internal/web/rate_limiter.go`](../../internal/web/rate_limiter.go)** — RateLimiter struct, sliding window algorithm, cleanup goroutine.

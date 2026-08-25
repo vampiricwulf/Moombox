@@ -59,6 +59,9 @@ func decodeImportHeader(v string) string {
 // Returns a cleanup function that stops the rate limiter's background goroutine.
 func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func() {
 	importRL := web.NewRateLimiter(5, time.Minute)
+	// Key the buckets by the effective client IP so a trusted reverse proxy
+	// doesn't collapse every remote client into a single 5/min bucket.
+	importRL.ClientIP = func(r *http.Request) string { return web.EffectiveClientIP(store, r) }
 	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
 		// Max 500MB upload
 		req.Body = http.MaxBytesReader(rw, req.Body, 500*1024*1024)

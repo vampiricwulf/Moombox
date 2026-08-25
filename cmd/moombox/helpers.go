@@ -5,8 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"time"
 
@@ -168,14 +166,6 @@ func checkAndBroadcastUpdate(
 		)
 	}
 	*lastNotifiedTag = release.TagName
-}
-
-func extractWSIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // filterJobsByAge removes finished jobs older than hide_finished_age_days from

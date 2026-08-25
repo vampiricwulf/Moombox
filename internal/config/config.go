@@ -439,10 +439,35 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Network.Port = defaults.Network.Port
 		}
 	}
-	if cfg.Network.NetworkAccess != "localhost" && cfg.Network.NetworkAccess != "lan" && cfg.Network.NetworkAccess != "external" {
-		fail("network.network_access %q must be one of localhost|lan|external", cfg.Network.NetworkAccess)
+	if cfg.Network.NetworkAccess != "localhost" && cfg.Network.NetworkAccess != "lan" &&
+		cfg.Network.NetworkAccess != "external" && cfg.Network.NetworkAccess != "public" {
+		fail("network.network_access %q must be one of localhost|lan|external|public", cfg.Network.NetworkAccess)
 		if !reportOnly {
 			cfg.Network.NetworkAccess = defaults.Network.NetworkAccess
+		}
+	}
+	if len(cfg.Network.TrustedProxies) > 0 {
+		valid := cfg.Network.TrustedProxies[:0:0]
+		for _, entry := range cfg.Network.TrustedProxies {
+			e := strings.TrimSpace(entry)
+			if e == "" {
+				continue
+			}
+			ok := false
+			if strings.Contains(e, "/") {
+				_, _, err := net.ParseCIDR(e)
+				ok = err == nil
+			} else {
+				ok = net.ParseIP(e) != nil
+			}
+			if !ok {
+				fail("network.trusted_proxies entry %q is not a valid IP or CIDR", entry)
+				continue
+			}
+			valid = append(valid, e)
+		}
+		if !reportOnly {
+			cfg.Network.TrustedProxies = valid
 		}
 	}
 	// ClientTokenTTLDays: 1 day to 10 years. Default to 365d (1y) if unset or out of range.

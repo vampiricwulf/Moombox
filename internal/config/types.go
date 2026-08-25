@@ -52,6 +52,22 @@ type NetworkConfig struct {
 	// session cookies because Moombox sees plaintext HTTP from the
 	// proxy.
 	TrustForwardedProto bool `toml:"trust_forwarded_proto,omitempty" json:"trust_forwarded_proto,omitempty"`
+
+	// TrustedProxies lists reverse-proxy source addresses (bare IPs or
+	// CIDRs, e.g. "172.18.0.2" or "10.0.0.0/8") whose X-Forwarded-For
+	// header is honored when resolving the client IP for trust decisions
+	// (network_access gate, auth skip, rate limiting).
+	//
+	// Default empty: X-Forwarded-For is NEVER trusted, exactly as before
+	// this setting existed. Without it, ANY reverse proxy in front of
+	// Moombox makes all forwarded traffic — including internet traffic —
+	// appear to come from the proxy's private address, which passes the
+	// "lan" gate and skips authentication entirely.
+	//
+	// Loopback-gated endpoints (setup wizard, open-folder, POT provider,
+	// first-time password setup) intentionally ignore this setting and
+	// keep requiring a direct loopback connection.
+	TrustedProxies []string `toml:"trusted_proxies,omitempty" json:"trusted_proxies,omitempty"`
 }
 
 // PathsConfig holds file and directory path settings.

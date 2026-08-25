@@ -651,13 +651,13 @@ Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 48-entry 
 
 TOML format parsed by `BurntSushi/toml`. Search order: custom path (CLI flag), `./config.toml`, `./config/config.toml`, `~/.config/moombox/config.toml`. Falls back to defaults if no file found.
 
-**Sections:** `[network]` (port, access level, TLS, password), `[paths]` (database, log, output, staging, ffmpeg), `[logs]` (level, rotation), `[monitors]` (intervals, archive window/slots, hide threshold, probe cooldown, membership discovery), `[downloader]` (template, resolution, parallelism, chat, retry), `[cookies]` (file, auto, browser profile, platforms, refresh interval), `[disk]` (warn/critical percent), `[updates]` (auto-check), `[[channels]]` (array of monitored channels), `[[notifications]]` (array of webhook configs).
+**Sections:** `[network]` (port, access level, TLS, password, trusted proxies), `[paths]` (database, log, output, staging, ffmpeg), `[logs]` (level, rotation), `[monitors]` (intervals, archive window/slots, hide threshold, probe cooldown, membership discovery), `[downloader]` (template, resolution, parallelism, chat, retry), `[cookies]` (file, auto, browser profile, platforms, refresh interval), `[disk]` (warn/critical percent), `[updates]` (auto-check), `[[channels]]` (array of monitored channels), `[[notifications]]` (array of webhook configs).
 
 **FlexDuration:** Custom type that accepts either a bare number (interpreted in the field's documented unit — minutes for `feed_check_interval`, seconds for `probe_cooldown`) or a structured duration in TOML. Used for `feed_check_interval`, `hide_finished_age_days`, `probe_cooldown`, `refresh_interval`.
 
 **Non-destructive migrations:** `migrateOldFormat()` handles backward compatibility — migrates flat fields into current sections, converts legacy flags (e.g., `allow_lan`/`allow_external` to `network_access`). Only applies when the new section does not already exist.
 
-**Runtime hot-reload:** Log level and parallel download count can be changed at runtime via the API or TUI without restart. Channel changes trigger monitor re-evaluation via `kickMonitors()`, which calls `CheckNow()` on all three monitors to wake them from idle sleep.
+**Runtime hot-reload:** Log level, parallel download count, and `network.trusted_proxies` can be changed at runtime via the API or TUI without restart (the client-IP middleware re-reads the store per request, so `trusted_proxies` is deliberately absent from both restart-required lists). Channel changes trigger monitor re-evaluation via `kickMonitors()`, which calls `CheckNow()` on all three monitors to wake them from idle sleep.
 
 **Channel configuration:** Each `[[channels]]` entry has: `id` (YouTube channel ID or Twitch login), `name` (display name), `platform` ("youtube" or "twitch", defaults to "youtube"), `enabled` (optional, defaults to true), `terms` (title/description match terms for filtering), `output_directory` (per-channel override), `include_non_live_content` (archive regular videos too), `archive_window_days`/`archive_slots` (per-channel overrides), `quality_preference` (Twitch quality string).
 
@@ -693,7 +693,7 @@ slog-based wrapper with dual output (file + stdout). File rotation by size (defa
 
 ### Middleware Stack
 
-Applied in `NewServer()` in this exact order (order matters):
+Applied in `NewServer()` in this exact order (order matters). `chimiddleware.RequestID` and `DrainMiddleware` run first — non-security, so unnumbered here; Drain sits ahead of Recovery so its shutdown 503 cannot be disturbed by a later panic:
 
 1. **RecoveryMiddleware** — Catches panics, logs stack trace, returns 500
 2. **CORSMiddleware** — Validates Origin based on `network_access` config
@@ -723,13 +723,18 @@ Uses Origin and Referer header validation (not CSRF tokens). Mutating requests (
 The `network_access` config field controls who can connect:
 - `localhost` — Only loopback (127.0.0.1, ::1)
 - `lan` — Loopback + private IP ranges (10.x, 172.16-31.x, 192.168.x)
-- `external` / `public` — All IPs
+- `external` — All IPs
+- `public` — All IPs; a config-file-only synonym for `external` marking a deployment behind an authenticating reverse proxy. Not offered in any dropdown and rejected as an API input value.
 
-Loopback and private IP connections skip authentication entirely — this means local access always works without a password, which is the expected use case for a personal archiving appliance. Authentication (session + client token) is only required for external connections when a password is configured. The `isLoopback()` and `isPrivateIP()` functions parse the request's remote address, handling both IPv4 and IPv6 addresses and X-Forwarded-For headers.
+Loopback and private IP connections skip authentication entirely — this means local access always works without a password, which is the expected use case for a personal archiving appliance. Authentication (session + client token) is only required for external connections when a password is configured.
+
+**Client IP resolution.** `isLoopback()` and `isPrivateIP()` classify whatever address `EffectiveClientIP()` returns — the direct peer from `RemoteAddr` unless that peer is listed in `network.trusted_proxies` (empty by default), in which case `X-Forwarded-For` is walked right-to-left past trusted hops. Without a declared trusted proxy the header is never read. Every trust decision — IP gate, auth skip, WebSocket upgrade, all five rate limiters — routes through it; loopback-gated endpoints deliberately keep using the direct peer address. The setting is hot-reloadable (no restart).
+
+**Passwordless external access is block set, warn boot.** The TUI, the config API, and the setup wizard all refuse to enable `external`/`public` with no password, and removing the password resets `network_access` to `localhost`. A config file that already carries the combination still boots — it warns at startup, sets `passwordlessExternal` on `/api/auth/status`, and shows a persistent red banner in both the web UI and the TUI. It never hard-fails, because a deployment behind an authenticating proxy must keep working.
 
 ### Rate Limiting
 
-Sliding window per-IP rate limiter. Per-route limits:
+Sliding window rate limiter keyed on the effective client IP (trusted-proxy aware). Per-route limits:
 - Login: 5 attempts per 60 seconds
 - Password change: 3 attempts per 60 seconds
 - General API: 20 requests per 60 seconds

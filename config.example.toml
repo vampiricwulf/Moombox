@@ -15,6 +15,12 @@
 #   "localhost" — only this machine (default, most secure)
 #   "lan"      — any device on your local network
 #   "external" — any device (use with caution)
+#   "public"   — a config-file-only synonym for "external" (rejected as an API
+#                input, absent from both UIs); identical runtime behavior,
+#                including that authentication is still enforced once a
+#                password is set
+# Before exposing the dashboard beyond this machine, read the "Remote Access"
+# section of the README.
 # network_access = "localhost"
 
 # Enable built-in HTTPS with a self-signed certificate.
@@ -31,6 +37,17 @@
 # reduce blast radius of a leaked cookie; longer values reduce re-login
 # friction for personal-use setups.
 # client_token_ttl_days = 365
+
+# Reverse-proxy addresses (bare IPs or CIDRs) whose X-Forwarded-For header
+# is trusted when working out the real client IP for access control
+# (network_access gate, auth, rate limiting). Leave EMPTY unless Moombox
+# sits behind a reverse proxy you control: without it a proxy makes every
+# request — including internet traffic — look like it comes from the
+# proxy's private address, which passes the "lan" filter and skips auth.
+# With it, the proxy must be the only route to Moombox's port (bind the
+# port to localhost / keep it unpublished in Docker).
+# Applies immediately — no restart needed. Example:
+# trusted_proxies = ["172.18.0.0/16"]
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 [paths]

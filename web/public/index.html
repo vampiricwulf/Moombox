@@ -75,6 +75,10 @@
             <sl-icon name="wifi-off"></sl-icon>
             Internet connection lost
         </div>
+        <div id="security-banner" class="security-banner">
+            <sl-icon name="shield-exclamation"></sl-icon>
+            External access is enabled without a dashboard password — anyone who can reach this port has full control. Set a password in Settings &rarr; Security, or lower Network Access.
+        </div>
         <h1 class="visually-hidden">Moombox Dashboard</h1>
         <main class="app-main">
         <sl-tab-group>
@@ -634,6 +638,12 @@
                                     this header).
                                 </span>
                             </sl-switch>
+                            <sl-input
+                                id="cfg-trusted-proxies"
+                                label="Trusted Proxies"
+                                placeholder="172.18.0.0/16, 10.0.0.5"
+                                help-text="Comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is used for access control. Leave empty unless Moombox sits behind a reverse proxy you control. Applies immediately."
+                            ></sl-input>
 
                             <sl-divider></sl-divider>
                             <h4>Password</h4>

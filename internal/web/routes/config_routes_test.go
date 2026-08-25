@@ -236,6 +236,97 @@ func TestConfigPutRejectsExternalWithoutPassword(t *testing.T) {
 	}
 }
 
+// TestConfigPutRejectsPublicAsInput locks the coupling that lets the
+// password guard above stay narrow. "public" is a documented config-FILE
+// alias for "external" (a deployment behind an authenticating reverse
+// proxy); the API deliberately does not accept it, and the UIs only offer
+// localhost/lan/external.
+//
+// That rejection is load-bearing, not cosmetic. applyConfigUpdates assigns
+// network_access straight through, so validateConfigUpdates is the ONLY
+// thing keeping "public" out of this handler — and the "must set a password
+// before enabling external access" guard 670 lines below checks == "external"
+// alone. Widening the accepted enum without widening that guard reopens
+// passwordless-external through the API.
+func TestConfigPutRejectsPublicAsInput(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"network": map[string]any{
+			"network_access": "public",
+		},
+	})
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("network_access=public: want 400, got %d (body: %s)\n"+
+			"If you are intentionally accepting \"public\" as an API value, widen the "+
+			"passwordless-external guard in the PUT handler to cover it too.",
+			rec.Code, rec.Body.String())
+	}
+
+	var na string
+	f.store.Read(func(c *config.MoomboxConfig) { na = c.Network.NetworkAccess })
+	if na == "public" {
+		t.Errorf("config should not have been written, but network_access = %q", na)
+	}
+}
+
+// TestConfigPutOmittedNetworkAccessPreservesPublic is the server-side half of
+// the web settings panel's fix for a "public" config.
+//
+// The Network Access dropdown deliberately has no "public" option (it is a
+// config-file-level alias for "external", used behind an authenticating
+// reverse proxy), so Shoelace resolves the select's value to "" for such a
+// config. settings.js therefore OMITS network_access from the PUT payload
+// rather than sending "" — which would fail validation and 400 the whole
+// request, making every other setting on the page unsavable.
+//
+// This locks the behaviour that makes omission the right fix: an absent
+// network_access is skipped by both validateConfigUpdates and
+// applyConfigUpdates, so the stored value survives and the co-submitted
+// fields still apply.
+func TestConfigPutOmittedNetworkAccessPreservesPublic(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+	if err := f.store.Update(func(c *config.MoomboxConfig) {
+		c.Network.NetworkAccess = "public"
+		c.Network.PasswordHash = "hash-present"
+	}); err != nil {
+		t.Fatalf("seed public access: %v", err)
+	}
+
+	// Exactly what settings.js now sends for a "public" config: the rest of
+	// the network section, with network_access absent.
+	body, _ := json.Marshal(map[string]any{
+		"network": map[string]any{
+			"port":          8080,
+			"https_enabled": false,
+		},
+	})
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("omitted network_access: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	var na string
+	var port int
+	f.store.Read(func(c *config.MoomboxConfig) {
+		na = c.Network.NetworkAccess
+		port = c.Network.Port
+	})
+	if na != "public" {
+		t.Errorf("network_access = %q, want %q preserved across a save that omitted it", na, "public")
+	}
+	if port != 8080 {
+		t.Errorf("port = %d, want 8080 — the co-submitted field must still apply", port)
+	}
+}
+
 func TestConfigPutAcceptsExternalWithPassword(t *testing.T) {
 	f := newConfigRoutesFixture(t)
 	if err := f.store.Update(func(c *config.MoomboxConfig) {
@@ -530,5 +621,34 @@ func TestIsSafePath(t *testing.T) {
 		if got := isSafePath(tt.in); got != tt.want {
 			t.Errorf("isSafePath(%q) = %v, want %v", tt.in, got, tt.want)
 		}
+	}
+}
+
+// --- network.trusted_proxies (validate + apply) ---
+
+func TestConfigUpdatesTrustedProxies(t *testing.T) {
+	// validateConfigUpdates: entries must be IPs or CIDRs.
+	bad := map[string]any{"network": map[string]any{
+		"trusted_proxies": []any{"172.18.0.2", "not-an-ip"},
+	}}
+	if errs := validateConfigUpdates(bad); errs["network.trusted_proxies"] == "" {
+		t.Errorf("expected a network.trusted_proxies validation error, got %v", errs)
+	}
+	good := map[string]any{"network": map[string]any{
+		"trusted_proxies": []any{"172.18.0.2", "10.0.0.0/8"},
+	}}
+	if errs := validateConfigUpdates(good); len(errs) != 0 {
+		t.Errorf("valid entries rejected: %v", errs)
+	}
+
+	// applyConfigUpdates: array applied; empty array clears.
+	cfg := config.Defaults()
+	applyConfigUpdates(cfg, good)
+	if len(cfg.Network.TrustedProxies) != 2 || cfg.Network.TrustedProxies[0] != "172.18.0.2" {
+		t.Errorf("apply: got %v, want [172.18.0.2 10.0.0.0/8]", cfg.Network.TrustedProxies)
+	}
+	applyConfigUpdates(cfg, map[string]any{"network": map[string]any{"trusted_proxies": []any{}}})
+	if len(cfg.Network.TrustedProxies) != 0 {
+		t.Errorf("apply empty: got %v, want cleared", cfg.Network.TrustedProxies)
 	}
 }

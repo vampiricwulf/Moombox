@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	net2 "net" // aliased: "net" is shadowed by the network update map in this file
 	"net/http"
 	"strings"
 
@@ -99,6 +100,30 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 			case "localhost", "lan", "external":
 			default:
 				errs["network.network_access"] = "network_access must be localhost, lan, or external"
+			}
+		}
+		if v, ok := net["trusted_proxies"].([]any); ok {
+			for _, item := range v {
+				s, ok := item.(string)
+				if !ok {
+					errs["network.trusted_proxies"] = "trusted_proxies must be an array of strings"
+					break
+				}
+				s = strings.TrimSpace(s)
+				if s == "" {
+					continue
+				}
+				valid := false
+				if strings.Contains(s, "/") {
+					_, _, err := net2.ParseCIDR(s)
+					valid = err == nil
+				} else {
+					valid = net2.ParseIP(s) != nil
+				}
+				if !valid {
+					errs["network.trusted_proxies"] = fmt.Sprintf("%q is not a valid IP or CIDR", s)
+					break
+				}
 			}
 		}
 		if v, ok := net["tls_cert_path"].(string); ok {
@@ -390,6 +415,17 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 		if v, ok := net["trust_forwarded_proto"].(bool); ok {
 			cfg.Network.TrustForwardedProto = v
+		}
+		if v, ok := net["trusted_proxies"].([]any); ok {
+			proxies := make([]string, 0, len(v))
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					if s = strings.TrimSpace(s); s != "" {
+						proxies = append(proxies, s)
+					}
+				}
+			}
+			cfg.Network.TrustedProxies = proxies
 		}
 	}
 

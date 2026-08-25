@@ -14,6 +14,21 @@ services:
       # In the container, network_access defaults to "lan", so anything
       # that can reach this published port can use the dashboard.
       # Use "127.0.0.1:774:774" to restrict it to the Docker host only.
+      #
+      # Moombox binds IPv4 only inside the container, so reach the
+      # dashboard over the host's IPv4 address — an AAAA-only hostname is
+      # refused (see the networks: block at the bottom of this file); a
+      # dual-stack hostname usually still works, because browsers fall
+      # back to IPv4 after the refusal.
+      # Publishing as "0.0.0.0:774:774" instead stops this port
+      # from accepting IPv6 at all; the network below keeps its IPv6
+      # address and outbound IPv6 either way.
+      #
+      # Docker Desktop (Windows/macOS) NOTE: all inbound connections are
+      # proxied through the Desktop VM, so Moombox sees every client as the
+      # private gateway IP and the "lan" filter cannot tell clients apart.
+      # There, the port publish is the ONLY exposure control — keep it
+      # host-only or LAN-firewalled.
       - "774:774"
     volumes:
       # Everything lives under /data: config.toml, database, logs,
@@ -38,3 +53,40 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+networks:
+  # Why this block exists: without it, Docker's userland proxy accepts
+  # IPv6 connections to the published port and re-originates them from the
+  # bridge gateway's PRIVATE IPv4 address — so an internet IPv6 client is
+  # misclassified as private and passes Moombox's "lan" network_access
+  # filter. That is the hole this closes.
+  #
+  # What actually happens with this block on Docker Engine 27+ (where
+  # ip6tables is on by default for IPv6-enabled networks): inbound IPv6 is
+  # DNATed to the container instead of being re-originated by the userland
+  # proxy, and since Moombox binds IPv4 only, those connections are
+  # REFUSED at the container. The hole is closed by refusal — not by the
+  # filter judging the real client address.
+  #
+  # So: IPv6 clients must reach the dashboard over the host's IPv4
+  # address. A connection to an AAAA address gets "connection refused" —
+  # an AAAA-only hostname therefore fails outright, while a dual-stack
+  # hostname usually still works because browsers fall back to IPv4.
+  # Use the IPv4 address, or publish as "0.0.0.0:774:774" (see the ports:
+  # comment above) so the port stops accepting IPv6 in the first place.
+  #
+  # On Docker Engine < 27, ip6tables is off, the userland proxy still
+  # handles IPv6, and the misclassification above — the hole — persists.
+  # Upgrade the engine, or publish as "0.0.0.0:774:774".
+  #
+  # The subnet is an arbitrary ULA — change it if it collides with yours.
+  default:
+    # If "docker compose up" fails to CREATE this network, the host cannot
+    # do IPv6 (e.g. booted with ipv6.disable=1) and an IPv6-enabled
+    # network cannot exist there. Recovery: delete this whole networks:
+    # block, or set enable_ipv6 to false and drop the ipam: subnet with
+    # it — accepting that the misclassification hole reopens on that host.
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: "fd77:4d42::/64"

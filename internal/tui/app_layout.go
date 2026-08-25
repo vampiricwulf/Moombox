@@ -6,18 +6,27 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 func (a *App) recalcLayout() {
 	// Status bar is 1 row at the bottom
 	contentH := a.height - 1
 
-	// Restart banner sits above the panels when pending — subtract its
-	// rendered height (it can wrap on narrow terminals) and shift the
-	// mouse regions down by the same amount.
+	// Persistent banners sit above the panels — subtract their rendered
+	// height (they can wrap on narrow terminals) and shift the mouse
+	// regions down by the same amount. Must stay in step with the banner
+	// block in View(); a banner that isn't accounted for here renders the
+	// frame taller than the terminal.
 	bannerH := 0
-	if a.restartPending && a.width > 0 {
-		bannerH = lipgloss.Height(restartBanner(a.width))
+	if a.width > 0 {
+		if a.restartPending {
+			bannerH += lipgloss.Height(restartBanner(a.width))
+		}
+		if warn := a.securityBannerText(); warn != "" {
+			bannerH += lipgloss.Height(securityBanner(a.width, warn))
+		}
 		contentH -= bannerH
 	}
 
@@ -132,6 +141,9 @@ func (a *App) View() tea.View {
 	if a.restartPending {
 		mainParts = append(mainParts, restartBanner(a.width))
 	}
+	if warn := a.securityBannerText(); warn != "" {
+		mainParts = append(mainParts, securityBanner(a.width, warn))
+	}
 	mainParts = append(mainParts, topRow, a.logs.View(), a.statusBar.View())
 	content := lipgloss.JoinVertical(lipgloss.Left, mainParts...)
 
@@ -162,6 +174,45 @@ func restartBanner(width int) string {
 		Padding(0, 1).
 		Width(width)
 	return style.Render("⚠ Restart required — saved config differs from running process. Press ` then Save & Restart, or restart Moombox.")
+}
+
+// securityBannerText returns the persistent security warning shown above the
+// main content, or "" when the running config is not in a warned state.
+// Single condition today: external/public network access with no dashboard
+// password. Every interactive surface refuses to SET that combination
+// (settings.go, config API, setup wizard), so it can only come from a
+// hand-edited config file — policy is block-set / warn-boot, and this banner
+// plus the twin startup log warning in web.Server.Start is the warn-boot
+// half. Reads the store per render; a single uncontended RLock is noise next
+// to the render cost.
+func (a *App) securityBannerText() string {
+	if a.configStore == nil {
+		return ""
+	}
+	var access, hash string
+	a.configStore.Read(func(c *config.MoomboxConfig) {
+		access = c.Network.NetworkAccess
+		hash = c.Network.PasswordHash
+	})
+	if (access == "external" || access == "public") && hash == "" {
+		return "⚠ SECURITY: network_access is \"" + access + "\" with no dashboard password — every reachable IP has full control. Set a password (` → Network) or lower network_access."
+	}
+	return ""
+}
+
+// securityBanner renders the passwordless-external warning with the same
+// persistent-banner treatment as restartBanner, in red.
+func securityBanner(width int, msg string) string {
+	if width <= 0 {
+		return ""
+	}
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(ColorRed).
+		Bold(true).
+		Padding(0, 1).
+		Width(width)
+	return style.Render(msg)
 }
 
 func addOverlayMessage(content string, width int, msg string) string {

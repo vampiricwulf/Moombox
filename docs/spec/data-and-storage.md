@@ -456,11 +456,14 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | Field | Type | Default | TOML Key | Notes |
 |-------|------|---------|----------|-------|
 | Port | int | 774 | `port` | Valid range: 1-65535 |
-| NetworkAccess | string | "localhost" | `network_access` | "localhost", "lan", or "external" |
+| NetworkAccess | string | "localhost" | `network_access` | "localhost", "lan", "external", or "public" — "public" is a config-file-only synonym for "external" (rejected as an API input, absent from both UIs) |
 | HTTPSEnabled | bool | false | `https_enabled` | |
 | TLSCertPath | string | "" | `tls_cert_path` | |
 | TLSKeyPath | string | "" | `tls_key_path` | |
-| PasswordHash | string | "" | `password_hash` | scrypt hash, omitted from JSON |
+| PasswordHash | string | "" | `password_hash` | scrypt hash, omitted from JSON; a plaintext value is auto-converted on the next start |
+| ClientTokenTTLDays | int | 365 | `client_token_ttl_days` | Valid range: 1-3650 |
+| TrustForwardedProto | bool | false | `trust_forwarded_proto` | Only behind a TLS-terminating proxy that strips the client's own header |
+| TrustedProxies | []string | `[]` | `trusted_proxies` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored. Entries must parse as an IP or CIDR (invalid ones are reported and dropped). Hot-reloadable — no restart. See [security.md](security.md) |
 
 #### [paths]
 

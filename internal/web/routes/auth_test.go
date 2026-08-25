@@ -165,6 +165,53 @@ func TestAuthStatusWithPasswordAndSession(t *testing.T) {
 	}
 }
 
+// TestAuthStatusPasswordlessExternal covers the flag that drives the web
+// UI's persistent security banner. Every interactive surface refuses to
+// SET external/public without a password, so this state only arrives from
+// a hand-edited config file — the flag is the warn-boot signal, not a gate.
+func TestAuthStatusPasswordlessExternal(t *testing.T) {
+	tests := []struct {
+		access      string
+		setPassword bool
+		want        bool
+	}{
+		{access: "external", want: true},
+		{access: "public", want: true},
+		{access: "external", setPassword: true, want: false},
+		{access: "lan", want: false},
+		{access: "localhost", want: false},
+	}
+	for _, tt := range tests {
+		name := tt.access
+		if tt.setPassword {
+			name += "+password"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newAuthFixture(t)
+			if tt.setPassword {
+				f.setPasswordHash(t, "correct-horse-battery-staple")
+			}
+			if err := f.store.Update(func(c *config.MoomboxConfig) {
+				c.Network.NetworkAccess = tt.access
+			}); err != nil {
+				t.Fatalf("store.Update: %v", err)
+			}
+
+			req := loopbackRequest("GET", "/api/auth/status", nil)
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+			}
+			resp := decodeJSONResponse(t, rec.Body.Bytes())
+			if resp["passwordlessExternal"] != tt.want {
+				t.Errorf("passwordlessExternal for %q: want %v, got %v", name, tt.want, resp["passwordlessExternal"])
+			}
+		})
+	}
+}
+
 // --- /api/auth/login ---
 
 func TestAuthLoginNoPasswordConfigured(t *testing.T) {
@@ -481,6 +528,43 @@ func TestAuthRemovePasswordResetsExternalAccess(t *testing.T) {
 	resp := decodeJSONResponse(t, rec.Body.Bytes())
 	if resp["networkAccessChanged"] != true {
 		t.Errorf("response should set networkAccessChanged=true, got %v", resp["networkAccessChanged"])
+	}
+}
+
+// TestAuthRemovePasswordResetsPublicAccess: the handler's reset is
+// unconditional, so the "public" alias is already covered — this locks that
+// it stays that way. If the reset is ever narrowed to fire only for
+// specific modes, "public" must remain in the set: removing the password
+// while public would otherwise leave an unauthenticated dashboard live.
+func TestAuthRemovePasswordResetsPublicAccess(t *testing.T) {
+	f := newAuthFixture(t)
+	f.setPasswordHash(t, "the-secret")
+	if err := f.store.Update(func(c *config.MoomboxConfig) {
+		c.Network.NetworkAccess = "public"
+	}); err != nil {
+		t.Fatalf("seed public access: %v", err)
+	}
+
+	req := loopbackRequest("POST", "/api/auth/remove-password", map[string]string{
+		"currentPassword": "the-secret",
+	})
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remove-password: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	var hash, netAccess string
+	f.store.Read(func(c *config.MoomboxConfig) {
+		hash = c.Network.PasswordHash
+		netAccess = c.Network.NetworkAccess
+	})
+	if hash != "" {
+		t.Errorf("password hash should be empty, got %q", hash)
+	}
+	if netAccess != "localhost" {
+		t.Errorf("network_access should reset to localhost, got %q", netAccess)
 	}
 }
 

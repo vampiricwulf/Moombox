@@ -64,6 +64,11 @@ type WebSocketHub struct {
 	// If nil, all connections are accepted (no auth configured).
 	AuthCheck func(r *http.Request) bool
 
+	// ClientIP resolves the effective client IP for the upgrade-path trust
+	// decision (trusted_proxies / X-Forwarded-For aware). Set by NewServer;
+	// nil falls back to the raw peer address.
+	ClientIP func(*http.Request) string
+
 	// Log buffer for initial state (ring buffer)
 	logBufMu sync.RWMutex
 	logBuf   []string
@@ -105,6 +110,9 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Verify authentication for external connections (matching TypeScript verifyWsClient)
 	if hub.AuthCheck != nil {
 		ip := ExtractIP(r)
+		if hub.ClientIP != nil {
+			ip = hub.ClientIP(r)
+		}
 		if !isLoopback(ip) && !isPrivateIP(ip) {
 			if !hub.AuthCheck(r) {
 				hub.logger.Debug("websocket upgrade rejected: auth required", "ip", ip)

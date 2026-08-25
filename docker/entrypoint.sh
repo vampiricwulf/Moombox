@@ -33,7 +33,8 @@ if [ ! -f "$CONFIG_PATH" ]; then
 # published ports, and those arrive over the bridge network (not
 # loopback). Restrict exposure via the port publish (e.g.
 # "127.0.0.1:774:774") or set "external" + a dashboard password to allow
-# non-private clients.
+# non-private clients. For internet exposure, read "Remote access" in the
+# README first (trusted_proxies, TLS, and the Tailscale/VPN option).
 network_access = "lan"
 # Must match the container's EXPOSEd port and the docker-compose
 # healthcheck — change all three together.

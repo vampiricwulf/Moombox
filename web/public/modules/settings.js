@@ -439,6 +439,24 @@ export class SettingsController {
     if (netAccessSelect) {
       const level = config.network?.network_access || "localhost";
       netAccessSelect.value = level;
+      // A config value with no matching <sl-option> (today: the "public"
+      // alias, config-file-only by design) leaves the select blank, because
+      // Shoelace drops a .value that matches no option. Say so in the field's
+      // own help text rather than leaving an unexplained empty dropdown —
+      // saveConfig omits the key in that state, so the stored value is kept.
+      if (this._netAccessHelpText === undefined) {
+        this._netAccessHelpText = netAccessSelect.getAttribute("help-text") || "";
+      }
+      const representable = Array.from(netAccessSelect.querySelectorAll("sl-option")).some(
+        (opt) => opt.getAttribute("value") === level,
+      );
+      netAccessSelect.setAttribute(
+        "help-text",
+        representable
+          ? this._netAccessHelpText
+          : `Currently "${level}", which is set in config.toml and not offered here. ` +
+              `Leave blank to keep it; picking an option replaces it. Requires restart.`,
+      );
       if (cfgExtWarning) {
         cfgExtWarning.style.display = level === "external" ? "" : "none";
         if (!this._netAccessListenerAdded) {
@@ -563,6 +581,7 @@ export class SettingsController {
     if (trustForwardedProtoSwitch) {
       trustForwardedProtoSwitch.checked = !!config.network?.trust_forwarded_proto;
     }
+    this.app.setInputValue("cfg-trusted-proxies", (config.network?.trusted_proxies || []).join(", "));
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     if (dpapiFallbackSwitch) {
       dpapiFallbackSwitch.checked = !!config.cookies?.dpapi_fallback;
@@ -712,20 +731,45 @@ export class SettingsController {
     const trustForwardedProtoSwitch = document.getElementById("cfg-trust-forwarded-proto");
     const trustForwardedProto = trustForwardedProtoSwitch ? trustForwardedProtoSwitch.checked : false;
 
+    const trustedProxiesEl = document.getElementById("cfg-trusted-proxies");
+    const trustedProxies = (trustedProxiesEl?.value || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     const dpapiFallback = dpapiFallbackSwitch ? dpapiFallbackSwitch.checked : false;
 
     // Build payload with only form-managed sections (don't include channels
     // to avoid overwriting concurrent changes from TUI).
+    const network = {
+      port,
+      https_enabled: httpsEnabled,
+      tls_cert_path: tlsCertPath,
+      tls_key_path: tlsKeyPath,
+      trust_forwarded_proto: trustForwardedProto,
+      trusted_proxies: trustedProxies,
+    };
+    // network_access is sent only when the select actually holds a value.
+    //
+    // It can be empty for exactly one reason: the select is populated from the
+    // loaded config (populateConfigForm), and when that config carries a value
+    // this dropdown has no <sl-option> for, Shoelace resolves .value to "".
+    // The live case is network_access = "public" — a config-file-level alias
+    // for "external" used behind an authenticating reverse proxy, deliberately
+    // absent from this dropdown so the UI never offers it as a choice.
+    //
+    // Sending "" would fail validateConfigUpdates and 400 the entire request,
+    // making every OTHER setting on this page unsavable for those deployments.
+    // Omitting the key instead preserves the stored value: both
+    // validateConfigUpdates and applyConfigUpdates skip absent network keys
+    // (type-assertion guarded), so "public" survives the save untouched.
+    if (networkAccess !== "") {
+      network.network_access = networkAccess;
+    }
+
     const payload = {
-      network: {
-        port,
-        network_access: networkAccess,
-        https_enabled: httpsEnabled,
-        tls_cert_path: tlsCertPath,
-        tls_key_path: tlsKeyPath,
-        trust_forwarded_proto: trustForwardedProto,
-      },
+      network,
       paths: {
         database_path: database,
         log_file_path: logFile,
@@ -1872,6 +1916,12 @@ export class SettingsController {
       const response = await fetch("/api/auth/status");
       if (!response.ok) return;
       const status = await response.json();
+
+      // Keep the global banner in sync when the user fixes (or creates)
+      // the passwordless-external state from the Security section.
+      document
+        .getElementById("security-banner")
+        ?.classList.toggle("show", !!status.passwordlessExternal);
 
       if (status.hasPassword) {
         badge.variant = "success";

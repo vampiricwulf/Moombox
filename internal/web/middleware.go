@@ -2,10 +2,13 @@ package web
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -181,7 +184,7 @@ func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler
 // WebSocket upgrade interception in Server.Start, which bypasses the
 // middleware chain entirely.
 func ipAllowedByNetworkAccess(store *config.Store, r *http.Request) bool {
-	ip := ExtractIP(r)
+	ip := EffectiveClientIP(store, r)
 
 	var networkAccess string
 	store.Read(func(c *config.MoomboxConfig) {
@@ -261,6 +264,171 @@ func ExtractIP(r *http.Request) string {
 	return host
 }
 
+// trustedProxySet is the parsed form of network.trusted_proxies, cached so
+// the per-request path doesn't re-parse CIDR strings. Rebuilt lazily whenever
+// the raw config value changes, which makes the setting hot-reloadable with
+// no restart hook.
+type trustedProxySet struct {
+	raw  string       // joined source entries — the cache key
+	nets []*net.IPNet // parsed entries; bare IPs become /32 or /128
+}
+
+var trustedProxyCache atomic.Pointer[trustedProxySet]
+
+func loadTrustedProxies(store *config.Store) *trustedProxySet {
+	// Clone inside the callback: copying only the slice header would leave the
+	// join and the parse loop below reading ELEMENTS with no lock held. Every
+	// writer today replaces the backing array rather than editing in place, so
+	// that is safe by accident; cloning makes it safe by construction. Strings
+	// are immutable, so a shallow clone is enough.
+	var entries []string
+	store.Read(func(c *config.MoomboxConfig) {
+		entries = slices.Clone(c.Network.TrustedProxies)
+	})
+	raw := strings.Join(entries, ",")
+	if cached := trustedProxyCache.Load(); cached != nil && cached.raw == raw {
+		return cached
+	}
+	set := &trustedProxySet{raw: raw}
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if !strings.Contains(e, "/") {
+			if ip := net.ParseIP(e); ip != nil {
+				bits := 32
+				if ip.To4() == nil {
+					bits = 128
+				}
+				e = fmt.Sprintf("%s/%d", e, bits)
+			}
+		}
+		// Invalid entries were dropped by config validation; skip any
+		// stragglers rather than trusting garbage.
+		if _, n, err := net.ParseCIDR(e); err == nil {
+			set.nets = append(set.nets, n)
+		}
+	}
+	trustedProxyCache.Store(set)
+	return set
+}
+
+func (s *trustedProxySet) contains(ipStr string) bool {
+	if s == nil || len(s.nets) == 0 {
+		return false
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	for _, n := range s.nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectiveClientIP returns the address every trust decision (network_access
+// gate, auth skip, rate-limit keying) treats as the client. Identical to
+// ExtractIP unless the DIRECT peer is listed in network.trusted_proxies —
+// only then is X-Forwarded-For consulted, walking right-to-left past trusted
+// hops to the first address the proxy chain did not vouch for. A client-
+// forged XFF header never matters: either the direct peer is untrusted (the
+// header is ignored) or the trusted proxy appended the client's real address
+// to the right of the forgery.
+//
+// Loopback-gated surfaces (LoopbackOnly, IsLoopbackRequest, first-time
+// password setup, the setup wizard) intentionally keep using the direct peer
+// address: "arrived over this machine's loopback interface" is a physical-
+// access signal that a forwarded header must never confer.
+func EffectiveClientIP(store *config.Store, r *http.Request) string {
+	direct := ExtractIP(r)
+	proxies := loadTrustedProxies(store)
+	if !proxies.contains(direct) {
+		return direct
+	}
+	// Values+join, never Get: Header.Get returns only the FIRST field line and
+	// Go never joins repeated headers. Proxies are free to append by adding a
+	// second "X-Forwarded-For:" line instead of extending the first — HAProxy's
+	// `option forwardfor` does exactly that by default, which is why its own
+	// docs tell operators to read the LAST occurrence. Reading only the first
+	// line there would hand the walk the client's forged entry and never show
+	// it the address the proxy actually observed: a forged private address
+	// would pass the lan gate and skip auth, failing OPEN. Concatenating every
+	// field line in wire order (RFC 7230 §3.2.2) makes both append styles
+	// equivalent; a single-line header joins to itself unchanged.
+	xff := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
+	if xff == "" {
+		return direct
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		hop := canonicalizeForwardedIP(parts[i])
+		if !proxies.contains(hop) {
+			// First hop the chain didn't vouch for. An unparseable value is
+			// returned as-is on purpose rather than falling back to the
+			// proxy's own private address: canonicalizeForwardedIP guarantees
+			// its result never names a trusted class unless it is a genuine
+			// IP in that class, so isLoopback/isPrivateIP both reject it and
+			// downstream fails CLOSED (treated as a non-local client).
+			return hop
+		}
+	}
+	// Every listed hop is itself a trusted proxy — the connection originated
+	// inside the trusted set (health checks, proxy self-calls).
+	return direct
+}
+
+// canonicalizeForwardedIP normalizes one X-Forwarded-For entry: surrounding
+// whitespace, an optional port, IPv6 brackets, and zone suffixes are
+// stripped, and the address is re-rendered in its canonical form.
+//
+// Guarantee relied on by EffectiveClientIP: the result NEVER names a trusted
+// class (loopback or private) unless it is a genuine, parseable IP in that
+// class. An X-Forwarded-For entry is an address by definition, so anything
+// that parses as neither IPv4 nor IPv6 is untrusted garbage; such entries
+// come back trimmed-but-verbatim — preserving their diagnostic value in log
+// lines — except when the verbatim text would itself be resolved to a
+// trusted class downstream, in which case it is neutralized first.
+func canonicalizeForwardedIP(entry string) string {
+	e := strings.TrimSpace(entry)
+	if e == "" {
+		return e
+	}
+	if host, _, err := net.SplitHostPort(e); err == nil {
+		e = host
+	}
+	e = strings.Trim(e, "[]")
+	if i := strings.IndexByte(e, '%'); i >= 0 {
+		e = e[:i]
+	}
+	if ip := net.ParseIP(e); ip != nil {
+		return ip.String()
+	}
+	verbatim := strings.TrimSpace(entry)
+	if namesTrustedClass(verbatim) {
+		// Not an address, but a name a classifier resolves to a trusted
+		// class. Prefixing keeps the operator-facing diagnostic ("who sent
+		// this?") while guaranteeing the result parses as no IP and spells
+		// no trusted class, so it fails CLOSED like any other garbage.
+		return "invalid-" + verbatim
+	}
+	return verbatim
+}
+
+// namesTrustedClass reports whether a non-IP string would be resolved to a
+// trusted class by a downstream classifier. isLoopback deliberately treats
+// the bare hostname "localhost" as loopback — that special case is correct
+// and load-bearing for the Origin checks in isAllowedOrigin — which makes
+// "localhost" the one value a forwarded entry must never be allowed to
+// spell. Compared case-insensitively so the guard does not hinge on a
+// classifier's choice of case folding.
+func namesTrustedClass(s string) bool {
+	return strings.EqualFold(s, "localhost")
+}
+
 func isLoopback(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
@@ -320,11 +488,12 @@ func IsLoopbackRequest(r *http.Request) bool {
 	return isLoopback(ExtractIP(r))
 }
 
-// IsLocalOrPrivateRequest returns true if the request is from a loopback or
-// private (LAN) address. Used by auth endpoints to match the server's
-// AuthMiddleware trust policy which allows both loopback and private IPs.
-func IsLocalOrPrivateRequest(r *http.Request) bool {
-	return isLocalIP(ExtractIP(r))
+// IsLocalOrPrivateRequest returns true if the request's effective client IP
+// (X-Forwarded-For-aware when the direct peer is a trusted proxy) is loopback
+// or private. Used by auth endpoints to match the server's AuthMiddleware
+// trust policy, which allows both loopback and private clients.
+func IsLocalOrPrivateRequest(store *config.Store, r *http.Request) bool {
+	return isLocalIP(EffectiveClientIP(store, r))
 }
 
 // shouldSkipCompression returns true for paths where compression should be
