@@ -8,7 +8,7 @@ This document defines the security architecture of Moombox's HTTP server, authen
 
 These are hard rules. They are not guidelines, suggestions, or aspirations. An AI assisting with Moombox development must follow these without exception:
 
-- **Middleware order is critical and MUST be maintained.** The middleware chain is applied in this exact order: Recovery, CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, Compression, Auth. Reordering can create security vulnerabilities (e.g., moving Auth before IPGate would break local-network trust; moving CSRF after Auth would leave authenticated routes unprotected against cross-site request forgery).
+- **Middleware order is critical and MUST be maintained.** The middleware chain is applied in this exact order: RequestID, Drain, Recovery, CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, Compression, Auth. (`chimiddleware.RequestID` runs first so recovery/log lines can be correlated to a request; `DrainMiddleware` sits ahead of `RecoveryMiddleware` so its shutdown 503 cannot be disturbed by a panic in a later middleware. The eight security-relevant middlewares from Recovery onward are documented individually below.) Reordering can create security vulnerabilities (e.g., moving Auth before IPGate would break local-network trust; moving CSRF after Auth would leave authenticated routes unprotected against cross-site request forgery).
 - **CSRF uses Origin/Referer validation, NOT CSRF tokens.** Moombox does not generate or validate CSRF tokens. It validates the Origin or Referer header on mutating requests (POST, PUT, DELETE) against the configured network_access level. This is sufficient because the server controls CORS preflight responses and does not grant cross-origin access to untrusted origins.
 - **TUI bypasses CSRF via the X-Internal-Token header.** The TUI is a same-process client that cannot send Origin/Referer headers. It sends a 16-byte random hex token (generated at server startup) in the `X-Internal-Token` header. The comparison uses `crypto/subtle.ConstantTimeCompare` to prevent timing side-channels.
 - **Loopback and private IPs skip authentication.** Requests from 127.0.0.1, ::1, and private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local addresses) bypass the AuthMiddleware entirely. Authentication is only enforced for external (non-local, non-LAN) clients when a password is configured.
@@ -22,6 +22,8 @@ These are hard rules. They are not guidelines, suggestions, or aspirations. An A
 ## Middleware Stack
 
 The middleware chain is applied in `NewServer()` in `internal/web/server.go`. The order is load-bearing — each middleware depends on the ones before it having already executed, and moving any middleware out of position can create security gaps.
+
+Two non-security middlewares run ahead of everything numbered below: `chimiddleware.RequestID`, then `s.DrainMiddleware` (which short-circuits with 503 once `StartDrain` is called, and is placed before `RecoveryMiddleware` so a later panic cannot disturb that path). The numbering below starts at `RecoveryMiddleware` and covers the security-relevant chain.
 
 ### 1. RecoveryMiddleware
 
@@ -168,9 +170,11 @@ Three categories of requests are exempt from CSRF validation:
 
 ### Missing Origin Handling
 
-When a mutating request arrives without an Origin or Referer header and without an internal token:
-- If `network_access` is `external` or `public` AND a password hash is configured: the request is rejected. This prevents blind form-submission CSRF attacks where the browser does not send an Origin header (some older browser/form combinations).
-- For `localhost` or `lan` access: the request is allowed. The IP gate and auth middleware already restrict access to trusted networks.
+A mutating request that reaches the Origin check with neither an `Origin` nor a `Referer` header is rejected with `403 {"error":"Forbidden: missing origin"}` — **unconditionally**, regardless of `network_access`. The middleware does read the `network_access` value beforehand, but only the later `isAllowedOrigin` comparison consults it; the missing-header branch never does. This matches step 4 of CSRFMiddleware above.
+
+There is no localhost/LAN exemption. An earlier version allowed missing-Origin requests from local and LAN clients, which let any local process or same-origin browser tab call `/api/restart`, `/api/auth/set-password`, or `/api/jobs/{id}/open-folder` with no proof of browser context. That bypass was removed (audit `reports/web.md` C-1/C-5/C-8) and **must not be reintroduced.**
+
+The only ways a mutating request reaches a handler without an Origin/Referer header are the two exemptions listed above, both of which short-circuit before the check: a matching `X-Internal-Token` (same-process TUI), or one of the three path-exempt POT endpoints (`/get_pot`, `/invalidate_caches`, `/invalidate_it`, each `LoopbackOnly` at the route level). Non-browser local CLIs must therefore send `Origin: http://localhost:<port>` or the internal token.
 
 ---
 
@@ -350,6 +354,7 @@ Note the distinction inside `/api/auth/set-password`: the outer "session or loca
 ### Operational guidance
 
 - **Declare the narrowest range that works** — ideally the single proxy IP, not a `/16`. Anything inside a declared range is trusted to state who the client is, *including claiming a loopback address* (`X-Forwarded-For: 127.0.0.1` from a trusted peer resolves to loopback and skips auth). That is inherent to trusting a subnet, not a defect in the walk.
+- **The proxy must append to (or replace) `X-Forwarded-For` — never forward the client's header unchanged.** The rightmost-untrusted walk is safe *because* the trusted proxy writes the address it actually saw to the right of anything the client sent. A proxy that passes the client's header through verbatim makes the client's forgery the rightmost entry, and the walk returns it — silently reopening the exact bypass this feature closes. Use nginx's `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` (append) or `$remote_addr` (replace); Caddy and Traefik append by default. Do not configure a bare pass-through.
 - **The proxy must be the only route to the port.** If the port is also directly reachable, a client that can connect from inside the trusted range sets its own effective IP, and a `public` deployment loses the proxy's authentication altogether. Bind the publish to `127.0.0.1`, or keep the port unpublished and share a Docker network with the proxy.
 - Pair it with `trust_forwarded_proto = true` when the proxy terminates TLS, so session cookies get the `Secure` flag even though Moombox itself sees plain HTTP.
 
@@ -363,7 +368,7 @@ Note the distinction inside `/api/auth/set-password`: the outer "session or loca
 
 | Surface | Behavior | Source |
 |---------|----------|--------|
-| TUI Settings | `applyValues` refuses the save with "Password required for external access." | `SettingsModel.applyValues`, `internal/tui/settings.go` |
+| TUI Settings | `applyValues` refuses the save with "Password required for external access. Set password in Network section." | `SettingsModel.applyValues`, `internal/tui/settings.go` |
 | Config API (`PUT /api/config`) — the path the web dashboard's Settings page saves through | 400 "A password must be set before enabling external access." | `internal/web/routes/config_routes.go` |
 | Setup wizard (`POST /api/setup/complete`) | 400 "A password (min 8 characters) is required for external access." | `internal/web/routes/setup_routes.go` |
 

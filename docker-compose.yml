@@ -16,9 +16,11 @@ services:
       # Use "127.0.0.1:774:774" to restrict it to the Docker host only.
       #
       # Moombox binds IPv4 only inside the container, so reach the
-      # dashboard over the host's IPv4 address — a hostname that resolves
-      # to AAAA is refused (see the networks: block at the bottom of this
-      # file). Publishing as "0.0.0.0:774:774" instead stops this port
+      # dashboard over the host's IPv4 address — an AAAA-only hostname is
+      # refused (see the networks: block at the bottom of this file); a
+      # dual-stack hostname usually still works, because browsers fall
+      # back to IPv4 after the refusal.
+      # Publishing as "0.0.0.0:774:774" instead stops this port
       # from accepting IPv6 at all; the network below keeps its IPv6
       # address and outbound IPv6 either way.
       #
@@ -67,8 +69,10 @@ networks:
   # filter judging the real client address.
   #
   # So: IPv6 clients must reach the dashboard over the host's IPv4
-  # address. A connection to an AAAA record gets "connection refused";
-  # use the IPv4 address, or publish as "0.0.0.0:774:774" (see the ports:
+  # address. A connection to an AAAA address gets "connection refused" —
+  # an AAAA-only hostname therefore fails outright, while a dual-stack
+  # hostname usually still works because browsers fall back to IPv4.
+  # Use the IPv4 address, or publish as "0.0.0.0:774:774" (see the ports:
   # comment above) so the port stops accepting IPv6 in the first place.
   #
   # On Docker Engine < 27, ip6tables is off, the userland proxy still

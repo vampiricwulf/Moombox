@@ -693,7 +693,7 @@ slog-based wrapper with dual output (file + stdout). File rotation by size (defa
 
 ### Middleware Stack
 
-Applied in `NewServer()` in this exact order (order matters):
+Applied in `NewServer()` in this exact order (order matters). `chimiddleware.RequestID` and `DrainMiddleware` run first — non-security, so unnumbered here; Drain sits ahead of Recovery so its shutdown 503 cannot be disturbed by a later panic:
 
 1. **RecoveryMiddleware** — Catches panics, logs stack trace, returns 500
 2. **CORSMiddleware** — Validates Origin based on `network_access` config

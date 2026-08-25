@@ -203,6 +203,15 @@ Declare the narrowest thing that works — the single proxy address, not a
 client is, including claiming a loopback address. That is inherent to
 trusting a range, so keep the range small.
 
+Configure the proxy to **append to** (or replace) `X-Forwarded-For` —
+never to forward the client's header unchanged. Moombox trusts the
+rightmost entry the proxy did not vouch for, which is safe only because
+the proxy writes the address it actually saw to the right of whatever the
+client sent. A bare pass-through makes the client's own value the
+rightmost entry and reopens exactly the bypass this setting closes. In
+nginx use `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+(or `$remote_addr` to replace); Caddy and Traefik append by default.
+
 The address to declare is the one **Moombox actually sees**, which is not
 always the proxy's own IP:
 
@@ -314,8 +323,8 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `port` | `774` | Web dashboard port |
-| `network_access` | `"localhost"` | `"localhost"`, `"lan"`, or `"external"` |
-| `network.trusted_proxies` | `[]` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored ([Remote Access](#remote-access)) |
+| `network_access` | `"localhost"` | `"localhost"`, `"lan"`, `"external"`, or `"public"` — `"public"` behaves like `"external"` and is only settable in `config.toml` ([Remote Access](#remote-access)) |
+| `trusted_proxies` | `[]` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored ([Remote Access](#remote-access)) |
 | `log_level` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"` |
 | `downloader.max_video_resolution` | `1080` | Max resolution (based on max of width/height, handles portrait) |
 | `downloader.cookie_file` | `"./cookies.txt"` | Netscape-format cookie file |
