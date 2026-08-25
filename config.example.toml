@@ -15,6 +15,12 @@
 #   "localhost" — only this machine (default, most secure)
 #   "lan"      — any device on your local network
 #   "external" — any device (use with caution)
+#   "public"   — a config-file-only synonym for "external" (rejected as an API
+#                input, absent from both UIs); identical runtime behavior,
+#                including that authentication is still enforced once a
+#                password is set
+# Before exposing the dashboard beyond this machine, read the "Remote Access"
+# section of the README.
 # network_access = "localhost"
 
 # Enable built-in HTTPS with a self-signed certificate.

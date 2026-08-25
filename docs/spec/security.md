@@ -35,7 +35,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 - If headers have already been sent (partial response written), it cannot write a new status code — the connection is effectively broken, but the server survives.
 - Logs the panic value and the request path at Error level.
 
-**Why it is first:** If any subsequent middleware or handler panics, this middleware catches it. If it were placed later in the chain, panics in earlier middleware would crash the process.
+**Why it is first of these:** it catches panics raised anywhere downstream — every numbered middleware below it, plus the handler. Placed later, a panic in a middleware it had skipped past would escape it: `net/http` recovers such a panic per-connection, so the process survives either way, but the client sees an aborted connection instead of the 500 JSON response and the stack is logged by the standard library rather than by Moombox. `RequestID` and `Drain` run ahead of it and sit outside that cover by design (see the note above).
 
 **Source:** `RecoveryMiddleware` in `internal/web/server.go`.
 
@@ -316,11 +316,13 @@ Exposed in `config.example.toml`, `PUT /api/config` (`network.trusted_proxies`),
 
 1. `direct := ExtractIP(r)` — the peer address from `RemoteAddr`.
 2. If `direct` is not inside any `trusted_proxies` entry: **return `direct`**. The header is not read.
-3. If `X-Forwarded-For` is absent: return `direct`.
-4. Otherwise walk the header **right to left**, canonicalizing each entry, and return the first hop that is not itself a trusted proxy (rightmost-untrusted).
+3. Read `X-Forwarded-For` with `Header.Values` and concatenate **all** of its field lines in wire order — RFC 7230 §3.2.2 makes repeated field lines exactly equivalent to one comma-joined line. If the header is absent: return `direct`.
+4. Otherwise walk the joined value **right to left**, canonicalizing each entry, and return the first hop that is not itself a trusted proxy (rightmost-untrusted).
 5. If every listed hop is a trusted proxy, the connection originated inside the trusted set (health checks, proxy self-calls) — return `direct`.
 
 Right-to-left is what makes a forged header harmless. A client can prepend anything it likes to `X-Forwarded-For`; the trusted proxy appends the address it actually saw to the right of that forgery, and the walk stops there.
+
+Concatenating rather than calling `Header.Get` is load-bearing, not tidiness: `Get` returns only the **first** field line and Go never joins repeated headers, while a proxy is free to append by adding a second `X-Forwarded-For` line instead of extending the first — HAProxy's `option forwardfor` does, which is why its own documentation tells operators to use the last occurrence of the header. Reading only the first line there would hand the walk the client's forged entry, never show it the address the proxy actually observed, and fail **open** through the IP gate and the auth skip. `TestEffectiveClientIP`/`TestIPGateHonorsTrustedProxy` both pin the multi-line case.
 
 ### Fail-closed handling of non-IP entries
 
@@ -354,7 +356,7 @@ Note the distinction inside `/api/auth/set-password`: the outer "session or loca
 ### Operational guidance
 
 - **Declare the narrowest range that works** — ideally the single proxy IP, not a `/16`. Anything inside a declared range is trusted to state who the client is, *including claiming a loopback address* (`X-Forwarded-For: 127.0.0.1` from a trusted peer resolves to loopback and skips auth). That is inherent to trusting a subnet, not a defect in the walk.
-- **The proxy must append to (or replace) `X-Forwarded-For` — never forward the client's header unchanged.** The rightmost-untrusted walk is safe *because* the trusted proxy writes the address it actually saw to the right of anything the client sent. A proxy that passes the client's header through verbatim makes the client's forgery the rightmost entry, and the walk returns it — silently reopening the exact bypass this feature closes. Use nginx's `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` (append) or `$remote_addr` (replace); Caddy and Traefik append by default. Do not configure a bare pass-through.
+- **The proxy must append to (or replace) `X-Forwarded-For` — never forward the client's header unchanged.** The rightmost-untrusted walk is safe *because* the trusted proxy writes the address it actually saw to the right of anything the client sent. A proxy that passes the client's header through verbatim makes the client's forgery the rightmost entry, and the walk returns it — silently reopening the exact bypass this feature closes. Use nginx's `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` (append) or `$remote_addr` (replace); Caddy and Traefik append by default. *How* the proxy appends does not matter — extending the existing field line (nginx, Caddy, Traefik, `httputil.ReverseProxy`) and emitting a second one (HAProxy's `option forwardfor`) are equivalent, because step 3 joins every line first. A bare pass-through is the only broken configuration.
 - **The proxy must be the only route to the port.** If the port is also directly reachable, a client that can connect from inside the trusted range sets its own effective IP, and a `public` deployment loses the proxy's authentication altogether. Bind the publish to `127.0.0.1`, or keep the port unpublished and share a Docker network with the proxy.
 - Pair it with `trust_forwarded_proto = true` when the proxy terminates TLS, so session cookies get the `Secure` flag even though Moombox itself sees plain HTTP.
 

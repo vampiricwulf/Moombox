@@ -211,6 +211,9 @@ client sent. A bare pass-through makes the client's own value the
 rightmost entry and reopens exactly the bypass this setting closes. In
 nginx use `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
 (or `$remote_addr` to replace); Caddy and Traefik append by default.
+Either append style works — extending the existing header line or adding
+a second `X-Forwarded-For` line (HAProxy's `option forwardfor`) — since
+Moombox reads every line of the header, not just the first.
 
 The address to declare is the one **Moombox actually sees**, which is not
 always the proxy's own IP:
