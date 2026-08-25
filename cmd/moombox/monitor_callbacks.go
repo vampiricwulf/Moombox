@@ -151,6 +151,11 @@ func (s *runState) wireMonitorCallbacks() {
 			s.log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
 			return
 		}
+		// See notifyAuthFailure bodies below: the guidance leads with the
+		// cookie FILE rather than the Settings wizard, because the wizard
+		// drives a local browser and its endpoints are loopback-gated — it
+		// is unreachable from a container and from a remote dashboard, which
+		// is exactly where this notification is most likely to be read.
 		s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
 		go func() {
 			defer func() {
@@ -167,7 +172,7 @@ func (s *runState) wireMonitorCallbacks() {
 				// only when a recording actually failed. 30-min per-platform
 				// cooldown via notifyAuthFailure.
 				notifyAuthFailure(platform, "Cookie Auto-Refresh Failed",
-					fmt.Sprintf("Automatic cookie refresh for %s failed — recordings will fail until cookies are refreshed. Re-run cookie setup from Settings.", platform),
+					fmt.Sprintf("Automatic cookie refresh for %s failed — recordings will fail until the cookies are replaced. Export a fresh Netscape cookies.txt from a browser signed in to the account and overwrite the file at %s. (Export from a private window and close it: browsing on in the source profile rotates the session and invalidates the export.) The browser-driven setup in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
 					notifications.TypeError)
 			} else if ok {
 				s.log.Info("auto-cookie recovery succeeded", "platform", platform)
@@ -176,7 +181,7 @@ func (s *runState) wireMonitorCallbacks() {
 			} else {
 				s.log.Warn("auto-cookie recovery did not restore auth", "platform", platform)
 				notifyAuthFailure(platform, "Cookie Auto-Refresh Ineffective",
-					fmt.Sprintf("Automatic cookie refresh completed but did not restore %s authentication — sign in again via cookie setup in Settings.", platform),
+					fmt.Sprintf("Automatic cookie refresh completed but did not restore %s authentication — the session behind those cookies is gone. Replace %s with a fresh Netscape export from a browser signed in to the account, or re-run cookie setup from Settings on the machine hosting Moombox.", platform, s.cookieFilePath()),
 					notifications.TypeWarning)
 			}
 		}()

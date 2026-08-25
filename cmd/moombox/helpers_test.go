@@ -303,3 +303,27 @@ func TestNopLoggerImplementsInterface(t *testing.T) {
 	// Drop a tiny invariant in the test name so test grep finds intent.
 	_ = strings.Contains("ok", "k")
 }
+
+// TestCookieFilePath: the auth-failure notifications name the cookie file so
+// the operator knows which file to replace — a Docker user reads
+// "/data/cookies.txt" and can act, where "re-run setup from Settings" is a
+// dead end (the wizard drives a local browser and is loopback-gated). An
+// unconfigured path must degrade to prose, never to an empty string dropped
+// mid-sentence.
+func TestCookieFilePath(t *testing.T) {
+	cfg := &config.MoomboxConfig{}
+	cfg.Cookies.CookieFile = "/data/cookies.txt"
+	s := &runState{configStore: config.NewStore(cfg, "")}
+	if got := s.cookieFilePath(); got != "/data/cookies.txt" {
+		t.Errorf("cookieFilePath = %q, want %q", got, "/data/cookies.txt")
+	}
+
+	empty := &runState{configStore: config.NewStore(&config.MoomboxConfig{}, "")}
+	got := empty.cookieFilePath()
+	if got == "" {
+		t.Error("cookieFilePath with no configured file returned an empty string")
+	}
+	if !strings.Contains(got, "cookie") {
+		t.Errorf("cookieFilePath fallback %q should mention the missing cookie file setting", got)
+	}
+}

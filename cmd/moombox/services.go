@@ -605,6 +605,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 			autoEnabled = c.Cookies.AutoEnabled
 		})
 		if !autoEnabled {
+			// Previously a silent `return false`. That silence is why a field
+			// log read "attempting automatic cookie refresh..." immediately
+			// followed by "auto cookie refresh failed" — nothing had in fact
+			// been attempted, and no line said so. auto_enabled defaults to
+			// false, so this is the COMMON path, not an edge case.
+			log.Warn("browser-driven cookie refresh is disabled — nothing was attempted",
+				slog.String("setting", "cookies.auto_enabled = false"),
+				slog.String("note", "the background YouTube session refresh keeps running, but it only rotates a session that is still alive — it cannot revive dead cookies"))
 			return false
 		}
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -613,6 +621,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		if err != nil {
 			log.Warn("auto cookie refresh error", slog.String("error", err.Error()))
 			return false
+		}
+		if !ok {
+			// Also previously silent: RefreshCookies can decline (no browser
+			// detected, extraction produced nothing usable) without an error.
+			log.Warn("browser-driven cookie refresh completed without producing usable cookies",
+				slog.String("note", "a headless browser login is required for this path; it cannot run inside a container"))
 		}
 		return ok
 	}
