@@ -24,34 +24,52 @@ import (
 const crossMonitorVouchWindow = 20 * time.Minute
 
 // sweepShouldResume reports whether one job should be bounced out of
-// StatusCookies back to Upcoming by a credential-recovery sweep for
-// `platform`. credentialsChanged distinguishes the two sweeps: false is the
-// auth-recovered sweep (a not-authenticated → authenticated transition —
-// dead cookies came back to life), true is the credentials-changed sweep (the
-// platform's stored account IDENTITY is different from the one we last saw).
+// StatusCookies back to Upcoming by a credential sweep for `platform`.
+//
+// currentIdentity is the opaque fingerprint of the account the platform's
+// cookies belong to right now, or "" when the caller has none to offer. It is
+// what separates the two sweeps:
+//
+//   - The auth-recovered sweep passes "". Dead cookies came back to life,
+//     which fixes an auth park and cannot fix a membership one.
+//   - The credential sweep passes the observed identity, letting a membership
+//     park move if — and only if — the account is not the one that refused it.
 //
 // The status+platform gate is the pre-existing behavior. What the park reason
 // adds is the membership case: a job parks at ParkReasonMembership only when
 // the platform answered a session it had already confirmed was SIGNED IN, so
-// the auth transition the first sweep fires on cannot be the event that fixes
-// it — that session was authenticated when it failed. Resuming there bought a
-// guaranteed-identical failure and a full extraction attempt every auth cycle,
-// forever. A different account is the only thing that can help, so only the
-// credentials-changed sweep wakes those.
+// the auth transition cannot be the event that fixes it — that session was
+// authenticated when it failed. Resuming there bought a guaranteed-identical
+// failure and a full extraction attempt every auth cycle, forever.
 //
-// ParkReasonNone (every COOKIES? row that predates the park_reason column, and
-// any park recorded by a path that does not classify) deliberately falls into
-// the resumable class: nothing on such a row can say retroactively whether it
-// was a membership problem, and stranding a genuinely dead-cookie job is worse
-// than one wasted retry on a membership one.
-func sweepShouldResume(job *database.Job, platform string, credentialsChanged bool) bool {
+// The membership comparison is deliberately against the job's OWN recorded
+// identity rather than any process-level "did it change since last time" edge.
+// A durable per-job comparison cannot be missed: it survives restarts, it
+// cannot be consumed by an intermediate observation, and re-evaluating it is
+// free and idempotent. A resumed job that fails again re-parks under the
+// current identity, so it settles at exactly one retry per real account
+// change.
+//
+// Two permissive defaults, both chosen so an unknown resolves to one wasted
+// retry rather than a permanent strand:
+//
+//   - ParkReasonNone (every COOKIES? row predating the park_reason column, and
+//     any park recorded by a path that does not classify) is resumable —
+//     nothing on such a row says retroactively whether it was a membership
+//     problem, and stranding a genuinely dead-cookie job is the worse error.
+//   - A membership park with no recorded identity ("" — a pre-v19 row, or a
+//     park where the fingerprint could not be computed) is treated as parked
+//     under an unknown account and resumes on the next observation.
+func sweepShouldResume(job *database.Job, platform, currentIdentity string) bool {
 	if job == nil || job.Status != database.StatusCookies || job.Platform != platform {
 		return false
 	}
-	if job.ParkReason == database.ParkReasonMembership {
-		return credentialsChanged
+	if job.ParkReason != database.ParkReasonMembership {
+		return true
 	}
-	return true
+	// No identity on offer means this caller cannot speak to the membership
+	// question at all (the auth-recovered sweep), so it must not move these.
+	return currentIdentity != "" && currentIdentity != job.ParkIdentity
 }
 
 // resumeCookieParkedJobs applies sweepShouldResume to every job and returns
@@ -62,7 +80,7 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
-}, platform string, credentialsChanged bool) int {
+}, platform, currentIdentity string) int {
 	jobs, err := db.GetAllJobs()
 	if err != nil {
 		log.Warn("cookie-parked sweep: GetAllJobs failed", "platform", platform, "err", err)
@@ -70,13 +88,14 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 	}
 	resumed := 0
 	for _, job := range jobs {
-		if !sweepShouldResume(job, platform, credentialsChanged) {
+		if !sweepShouldResume(job, platform, currentIdentity) {
 			continue
 		}
 		db.UpdateJobFields(job.ID, map[string]any{
-			"status":      database.StatusUpcoming,
-			"error":       "",
-			"park_reason": database.ParkReasonNone,
+			"status":        database.StatusUpcoming,
+			"error":         "",
+			"park_reason":   database.ParkReasonNone,
+			"park_identity": "",
 		})
 		resumed++
 	}
@@ -263,7 +282,7 @@ func (s *runState) wireMonitorCallbacks() {
 	// membership-parked ones, whose session was already authenticated when
 	// they failed and which this transition therefore cannot fix.
 	s.cookieRefresh.OnAuthRecovered = func(platform string) {
-		resumed := resumeCookieParkedJobs(s.db, s.log, platform, false)
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
 		if resumed > 0 {
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 			// Event "auth" pairs with the worker's "Authentication Required"
@@ -291,8 +310,8 @@ func (s *runState) wireMonitorCallbacks() {
 	// both), and resumeCookieParkedJobs is idempotent, so whichever runs
 	// second simply finds nothing left. Being permissive costs nothing and
 	// covers the swap-while-healthy case for them too.
-	s.cookieRefresh.OnCredentialsChanged = func(platform string) {
-		resumed := resumeCookieParkedJobs(s.db, s.log, platform, true)
+	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
 		if resumed > 0 {
 			s.log.Info("credentials changed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 			// Same "auth" event as the recovery notification above, for the
