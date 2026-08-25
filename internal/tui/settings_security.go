@@ -133,6 +133,9 @@ func (m *SettingsModel) handleSetPassword() {
 		if m.OnSave != nil {
 			m.OnSave(m.cfg)
 		}
+		if m.OnSecurityChanged != nil {
+			m.OnSecurityChanged()
+		}
 		m.secMessage = "Password set successfully"
 		m.secMessageColor = ColorGreen
 		m.secMode = securityStatus
@@ -191,6 +194,9 @@ func (m *SettingsModel) handleRemovePassword() {
 	}
 	if m.OnSave != nil {
 		m.OnSave(m.cfg)
+	}
+	if m.OnSecurityChanged != nil {
+		m.OnSecurityChanged()
 	}
 	if networkReset {
 		m.secMessage = "Password removed, network access reset to localhost"

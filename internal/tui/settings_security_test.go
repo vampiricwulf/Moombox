@@ -142,6 +142,62 @@ func TestApplyValuesRequiresPasswordForExternalAndPublic(t *testing.T) {
 	}
 }
 
+// TestSecurityCommitNotifiesApp: recalcLayout subtracts the security banner's
+// rendered height from the panel area, so a commit that can flip the banner
+// must tell the App to re-derive the layout — the same contract
+// OnRestartRequired has. Setting a password on a passwordless external config
+// is the reachable non-empty → empty transition; without the callback View()
+// drops the banner while contentH is still short by its height, leaving a dead
+// row until the next resize.
+func TestSecurityCommitNotifiesApp(t *testing.T) {
+	t.Run("set password notifies", func(t *testing.T) {
+		m, cfg := newSecuritySettingsModel(t, "external", "")
+		m.OnHashPassword = func(string) string { return "scrypt:salt:hash" }
+		notified := 0
+		m.OnSecurityChanged = func() { notified++ }
+		m.secNewPw = "correct-horse"
+		m.secConfirmPw = "correct-horse"
+
+		m.handleSetPassword()
+
+		if cfg.Network.PasswordHash == "" {
+			t.Fatalf("password was not committed: %s", m.secMessage)
+		}
+		if notified != 1 {
+			t.Errorf("OnSecurityChanged called %d times, want 1", notified)
+		}
+	})
+
+	t.Run("rejected set does not notify", func(t *testing.T) {
+		m, _ := newSecuritySettingsModel(t, "external", "")
+		m.OnHashPassword = func(string) string { return "scrypt:salt:hash" }
+		notified := 0
+		m.OnSecurityChanged = func() { notified++ }
+		m.secNewPw = "correct-horse"
+		m.secConfirmPw = "typo"
+
+		m.handleSetPassword()
+
+		if notified != 0 {
+			t.Errorf("OnSecurityChanged called %d times for a rejected commit, want 0", notified)
+		}
+	})
+
+	t.Run("remove password notifies", func(t *testing.T) {
+		m, _ := newSecuritySettingsModel(t, "external", "scrypt:salt:hash")
+		m.OnVerifyPassword = func(string, string) bool { return true }
+		notified := 0
+		m.OnSecurityChanged = func() { notified++ }
+		m.secRemovePw = "correct-horse"
+
+		m.handleRemovePassword()
+
+		if notified != 1 {
+			t.Errorf("OnSecurityChanged called %d times, want 1", notified)
+		}
+	})
+}
+
 // TestRenderSecurityRemoveWarnsForExternalAndPublic: the remove-password
 // confirmation warns that network access will be reset. The warning must
 // appear exactly when handleRemovePassword actually resets, or the panel

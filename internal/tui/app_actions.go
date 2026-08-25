@@ -295,6 +295,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				// panel heights + mouse regions now that it's visible.
 				a.recalcLayout()
 			}
+			a.settings.OnSecurityChanged = func() {
+				// Setting a password can clear the security banner — the
+				// rows it occupied must go back to the panels, or View()
+				// renders a dead row until the next resize.
+				a.recalcLayout()
+			}
 			a.settings.OnHashPassword = a.OnHashPassword
 			a.settings.OnVerifyPassword = a.OnVerifyPassword
 			a.settings.Open(a.cfg)

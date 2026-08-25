@@ -284,6 +284,14 @@ type SettingsModel struct {
 	// doesn't leave a config/runtime mismatch with no visual reminder.
 	// Audit reports/tui.md #26.
 	OnRestartRequired func()
+	// OnSecurityChanged fires after the Security sub-editor commits a change
+	// to the dashboard password (set or remove). Both can flip the persistent
+	// security banner — setting a password on a passwordless external config
+	// clears it — and the banner occupies rows above the panels, so the App
+	// re-derives panel heights + mouse regions the same way OnRestartRequired
+	// does. The general settings save needs no equivalent: network_access is
+	// a restartRequiredKey, so that path already recalcs via OnRestartRequired.
+	OnSecurityChanged func()
 	OnHashPassword    func(password string) string
 	OnVerifyPassword  func(password, hash string) bool
 
