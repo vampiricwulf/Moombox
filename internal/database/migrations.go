@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 17
+const schemaVersion = 18
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     auto_retry_count INTEGER NOT NULL DEFAULT 0,
     channel_id TEXT,
     queue_priority INTEGER NOT NULL DEFAULT 1,
-    incomplete_tail INTEGER NOT NULL DEFAULT 0
+    incomplete_tail INTEGER NOT NULL DEFAULT 0,
+    park_reason TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -630,6 +631,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 18 {
+		if err := db.migrateV18(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(18); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -703,6 +713,27 @@ func (db *Database) migrateV17() error {
 	// written last), so a duplicate-column error is expected and benign.
 	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN incomplete_tail INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v17 alter: %w", err)
+	}
+	return nil
+}
+
+// migrateV18 adds park_reason to jobs: WHY a job stopped at COOKIES?. See the
+// database.ParkReason doc comment in types.go for the full semantics.
+//
+// There is deliberately NO backfill. Existing COOKIES? rows parked before the
+// distinction existed, and nothing on the row can tell retroactively whether
+// the session was signed in at the time — the error text of that era says
+// "Member-only" for both cases. They keep the '' default, which every sweep
+// treats as ParkReasonAuth, so their behavior is byte-identical to what it was
+// before this column existed. Guessing "membership" for them would silently
+// strand genuinely dead-cookie jobs, which is the one regression this change
+// must not cause.
+func (db *Database) migrateV18() error {
+	ctx := db.getCtx()
+	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is
+	// written last), so a duplicate-column error is expected and benign.
+	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN park_reason TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v18 alter: %w", err)
 	}
 	return nil
 }

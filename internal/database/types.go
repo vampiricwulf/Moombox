@@ -19,6 +19,41 @@ const (
 	StatusCookies     JobStatus = "COOKIES?"
 )
 
+// ParkReason records WHY a job was parked at StatusCookies. The status alone
+// says "credentials are the fix", which is true for every value here — but it
+// does not say WHICH credentials, and the automatic recovery sweeps need that
+// distinction to avoid retrying a job that cannot possibly succeed against the
+// credentials currently on disk.
+//
+// It is deliberately a persisted column rather than a re-derivation from the
+// job's error text: the sweep runs minutes, days, or restarts after the park,
+// and the error string is user-facing prose that gets reworded (it already has
+// been). Routing control flow through UI copy is the failure mode this codebase
+// has been bitten by before — see classifyProbeErr's "gql auth failure (401)"
+// substring in internal/worker/probe_classify.go.
+type ParkReason string
+
+const (
+	// ParkReasonNone is the zero value: the job is not parked at
+	// StatusCookies, or it parked before this column existed (pre-v18 rows).
+	// Sweeps treat it exactly like ParkReasonAuth, which preserves the
+	// behavior every legacy COOKIES? row already had.
+	ParkReasonNone ParkReason = ""
+
+	// ParkReasonAuth means the request was NOT signed in — the cookies are
+	// missing, expired, or dead. Restoring authentication is the whole fix,
+	// so the auth-recovered sweep resumes these.
+	ParkReasonAuth ParkReason = "auth"
+
+	// ParkReasonMembership means the request WAS signed in and YouTube still
+	// refused: the account simply does not hold the channel's membership.
+	// Credentials are still the fix, but only DIFFERENT credentials — an
+	// account that holds the membership. Restoring or rotating the same
+	// session cannot help, so the auth-recovered sweep skips these; only a
+	// genuine change of account identity resumes them.
+	ParkReasonMembership ParkReason = "membership"
+)
+
 // Job is the primary data model for a download job.
 type Job struct {
 	ID          string    `json:"id"`
@@ -94,6 +129,10 @@ type Job struct {
 	// pre-v16 legacy rows and must never be relied on.
 	ChannelID     *string `json:"channelId,omitempty"`
 	QueuePriority int     `json:"queuePriority,omitempty"`
+	// ParkReason is why the job stopped at StatusCookies (see the ParkReason
+	// doc comment). Meaningful only while Status == StatusCookies; every path
+	// that parks a job rewrites it, and every path that un-parks one clears it.
+	ParkReason ParkReason `json:"parkReason,omitempty"`
 	// IncompleteTail marks a Finished job whose recording is known to be missing
 	// tail segments (finalized behind head after refresh attempts). Staging +
 	// resume sidecar are preserved; Retry/Resume are allowed and clear the flag
