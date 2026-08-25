@@ -42,9 +42,15 @@ func PathHasTraversal(p string) bool {
 	// Linux file literally named `a\..\b` is a far cheaper mistake than
 	// letting `..\` through on Windows.
 	for _, seg := range strings.FieldsFunc(p, isPathSeparator) {
-		// Windows drops trailing spaces from a path component, so ".. "
-		// resolves to "..". Trim before comparing or the segment form would
-		// be weaker than the substring check it replaces.
+		// Windows strips trailing dots and spaces from a path component, so
+		// ".. " is not stored verbatim. Measured: it resolves to the CURRENT
+		// directory, not the parent — as do "...", "....", and ".. ." — so
+		// none of them traverse and none of them has to be caught here.
+		// Trimming trailing spaces is a deliberate over-rejection that keeps
+		// ".. " on the conservative side; it is not required for correctness.
+		// Do NOT extend this to trailing dots on the assumption that they
+		// traverse: they don't, and trimming them would start rejecting
+		// legitimate names like "..." for no gain.
 		if strings.TrimRight(seg, " ") == ".." {
 			return true
 		}
