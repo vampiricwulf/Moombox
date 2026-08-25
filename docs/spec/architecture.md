@@ -672,7 +672,7 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 | `Finished` | `"Finished"` | Terminal. Output file is ready. |
 | `Error` | `"Error"` | Terminal. Something went wrong. Error message in `error` field. |
 | `Cancelled` | `"Cancelled"` | Terminal. User explicitly cancelled. |
-| `COOKIES?` | `"COOKIES?"` | Terminal (but retriable). Authentication required -- cookies expired or members-only. |
+| `COOKIES?` | `"COOKIES?"` | Terminal (but retriable). Authentication required -- cookies expired or members-only. The `park_reason` column records which, and gates automatic resume (see below). |
 
 ### Transition Rules
 
@@ -685,6 +685,10 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 - Any -> `Error`: Unrecoverable error at any stage
 - Any -> `Cancelled`: User-initiated cancellation
 - `Downloading` -> `COOKIES?`: Auth failure detected (login required, members-only, cookies expired)
+- `COOKIES?` -> `Upcoming`: A credential-recovery sweep resumed the job. Two sweeps exist and they are not interchangeable:
+  - **Auth recovered** (`RefreshService.OnAuthRecovered`) fires when a platform goes from not-authenticated to authenticated. It resumes every park EXCEPT `park_reason = 'membership'`.
+  - **Credentials changed** (`RefreshService.OnCredentialsChanged`, YouTube only) fires when the cookie file starts holding a different, working Google account (SHA-256 of `SAPISID` changed between conclusive checks). It resumes every park, membership included.
+  A membership park is excluded from the first sweep because it happened while the session was ALREADY authenticated, so that transition cannot be the event that fixes it -- resuming there bought a guaranteed-identical failure once per auth cycle. Only a different account can help, which is exactly what the second sweep detects. The identity baseline is process-local and never persisted, so a restart establishes it silently rather than reading as an account swap.
 
 ### Cancellation Semantics
 
