@@ -63,23 +63,25 @@ type ConfigRoutesCallbacks struct {
 	OnNotificationsChange func()
 }
 
-// isSafePath validates that a path doesn't contain traversal or absolute paths.
-// Matches TypeScript safePathSchema.
-func isSafePath(p string) bool {
-	if p == "" {
-		return true
+// pathFieldError returns the per-field error for a user-supplied path value,
+// or "" when the value is acceptable.
+//
+// It rejects ".." segments and nothing else. Absolute paths are deliberately
+// allowed: the Docker entrypoint seeds every path field as "/data/...", the
+// TUI has always accepted absolute values, and config.toml has always taken
+// them by hand — so the old "no absolute paths" rule (inherited verbatim from
+// the pre-Go TypeScript safePathSchema, not a considered Go boundary) made
+// EVERY settings save from a containerized dashboard 400 with no UI
+// workaround. PUT /api/config is admin-only, so the rule bought no
+// containment it did not already concede.
+//
+// config.PathHasTraversal is shared with the TUI so the two UIs cannot
+// disagree about what a valid path is — that disagreement was the bug.
+func pathFieldError(p string) string {
+	if config.PathHasTraversal(p) {
+		return "Path cannot contain a .. segment"
 	}
-	if strings.Contains(p, "..") {
-		return false
-	}
-	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\") {
-		return false
-	}
-	// Check Windows drive letter (e.g., C:)
-	if len(p) >= 2 && p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) {
-		return false
-	}
-	return true
+	return ""
 }
 
 // validateConfigUpdates validates the config update map against TypeScript Zod
@@ -126,43 +128,25 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				}
 			}
 		}
-		if v, ok := net["tls_cert_path"].(string); ok {
-			if v != "" && !isSafePath(v) {
-				errs["network.tls_cert_path"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := net["tls_key_path"].(string); ok {
-			if v != "" && !isSafePath(v) {
-				errs["network.tls_key_path"] = "Path cannot contain .. or be absolute"
+		for _, key := range []string{"tls_cert_path", "tls_key_path"} {
+			if v, ok := net[key].(string); ok {
+				if msg := pathFieldError(v); msg != "" {
+					errs["network."+key] = msg
+				}
 			}
 		}
 	}
 
 	// Paths sub-fields
 	if paths, ok := updates["paths"].(map[string]any); ok {
-		if v, ok := paths["log_file_path"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.log_file_path"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := paths["database_path"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.database_path"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := paths["output_directory"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.output_directory"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := paths["staging_directory"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.staging_directory"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := paths["ffmpeg_path"].(string); ok {
-			if !isSafePath(v) {
-				errs["paths.ffmpeg_path"] = "Path cannot contain .. or be absolute"
+		for _, key := range []string{
+			"log_file_path", "database_path", "output_directory",
+			"staging_directory", "ffmpeg_path",
+		} {
+			if v, ok := paths[key].(string); ok {
+				if msg := pathFieldError(v); msg != "" {
+					errs["paths."+key] = msg
+				}
 			}
 		}
 	}
@@ -322,14 +306,11 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 
 	// Cookies sub-fields
 	if ck, ok := updates["cookies"].(map[string]any); ok {
-		if v, ok := ck["cookie_file"].(string); ok {
-			if !isSafePath(v) {
-				errs["cookies.cookie_file"] = "Path cannot contain .. or be absolute"
-			}
-		}
-		if v, ok := ck["browser_profile_dir"].(string); ok {
-			if !isSafePath(v) {
-				errs["cookies.browser_profile_dir"] = "Path cannot contain .. or be absolute"
+		for _, key := range []string{"cookie_file", "browser_profile_dir"} {
+			if v, ok := ck[key].(string); ok {
+				if msg := pathFieldError(v); msg != "" {
+					errs["cookies."+key] = msg
+				}
 			}
 		}
 		// browser_path: must be empty (auto-detect) or pass the static

@@ -598,28 +598,106 @@ func TestConfigPutBrowserPathPersistsViaHTTP(t *testing.T) {
 	}
 }
 
-// --- isSafePath unit (used by validateConfigUpdates path fields) ---
+// --- path-field validation (traversal only; absolute paths are allowed) ---
 
-func TestIsSafePath(t *testing.T) {
-	tests := []struct {
-		in   string
-		want bool
-	}{
-		{"", true},
-		{"output", true},
-		{"output/sub", true},
-		{"output/sub/file.txt", true},
-		{"../escape", false},
-		{"output/../escape", false},
-		{"/abs/path", false},
-		{"\\abs\\path", false},
-		{"C:\\Windows", false},
-		{"D:\\path", false},
-		{"a:lower", false},
+// TestDockerSeededAbsoluteConfigRoundTrips is the regression test for the
+// shipped bug: docker/entrypoint.sh seeds every path field as an absolute
+// /data/... path, and web/public/modules/settings.js resubmits the whole
+// paths + cookies block on every save. While the API rejected absolute
+// paths, a containerized dashboard 400'd on EVERY settings save — including
+// saves that changed nothing in those sections — with no UI workaround.
+func TestDockerSeededAbsoluteConfigRoundTrips(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+
+	// Byte-for-byte the values docker/entrypoint.sh writes, plus the
+	// mounted-Firefox-profile dir the browser-free import feature needs.
+	body, _ := json.Marshal(map[string]any{
+		"paths": map[string]any{
+			"database_path":     "/data/moombox.db",
+			"log_file_path":     "/data/moombox.log",
+			"output_directory":  "/data/output",
+			"staging_directory": "/data/staging",
+		},
+		"cookies": map[string]any{
+			"cookie_file":         "/data/cookies.txt",
+			"browser_profile_dir": "/data/browser-profile",
+		},
+	})
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Docker-seeded absolute config: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
-	for _, tt := range tests {
-		if got := isSafePath(tt.in); got != tt.want {
-			t.Errorf("isSafePath(%q) = %v, want %v", tt.in, got, tt.want)
+
+	var got config.PathsConfig
+	var cookieFile, profileDir string
+	f.store.Read(func(c *config.MoomboxConfig) {
+		got = c.Paths
+		cookieFile = c.Cookies.CookieFile
+		profileDir = c.Cookies.BrowserProfileDir
+	})
+	for _, c := range []struct{ name, got, want string }{
+		{"database_path", got.DatabasePath, "/data/moombox.db"},
+		{"log_file_path", got.LogFilePath, "/data/moombox.log"},
+		{"output_directory", got.OutputDirectory, "/data/output"},
+		{"staging_directory", got.StagingDirectory, "/data/staging"},
+		{"cookie_file", cookieFile, "/data/cookies.txt"},
+		{"browser_profile_dir", profileDir, "/data/browser-profile"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+// TestConfigPathFieldsAcceptAbsoluteRejectTraversal locks the post-fix
+// contract for every path-shaped field the API validates. Absolute paths
+// (POSIX and Windows drive-letter) are legitimate: PUT /api/config is
+// admin-only, config.toml has always accepted them by hand, and the TUI
+// accepts them — the Web UI was the sole outlier. ".." segments stay
+// rejected as a typo/sanity guard.
+func TestConfigPathFieldsAcceptAbsoluteRejectTraversal(t *testing.T) {
+	fields := []struct{ section, key string }{
+		{"network", "tls_cert_path"},
+		{"network", "tls_key_path"},
+		{"paths", "log_file_path"},
+		{"paths", "database_path"},
+		{"paths", "output_directory"},
+		{"paths", "staging_directory"},
+		{"paths", "ffmpeg_path"},
+		{"cookies", "cookie_file"},
+		{"cookies", "browser_profile_dir"},
+	}
+	accepted := []string{
+		"/data/moombox",
+		`C:\Moombox\data`,
+		`\\server\share\moombox`, // UNC
+		"./relative/still/fine",
+		"my..file.txt",  // two dots inside a NAME, not a ".." segment
+		"..hidden/file", // segment starts with .. but is not ".."
+	}
+	rejected := []string{
+		"../escape",
+		"output/../escape",
+		`C:\data\..\escape`,
+		"..",
+		`C:..\escape`, // drive-relative traversal
+	}
+
+	for _, fl := range fields {
+		for _, v := range accepted {
+			errs := validateConfigUpdates(map[string]any{fl.section: map[string]any{fl.key: v}})
+			if msg, bad := errs[fl.section+"."+fl.key]; bad {
+				t.Errorf("%s.%s=%q rejected: %s", fl.section, fl.key, v, msg)
+			}
+		}
+		for _, v := range rejected {
+			errs := validateConfigUpdates(map[string]any{fl.section: map[string]any{fl.key: v}})
+			if _, bad := errs[fl.section+"."+fl.key]; !bad {
+				t.Errorf("%s.%s=%q accepted, want traversal rejection", fl.section, fl.key, v)
+			}
 		}
 	}
 }
