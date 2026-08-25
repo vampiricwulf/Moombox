@@ -2,10 +2,10 @@
 
 package dpapi
 
-// ReadChromeCookies is unsupported on non-Windows platforms. Moombox
-// is Windows-only at runtime; the stub exists so cross-platform builds
-// (used by devs running `go build` on macOS / Linux for sanity) succeed
-// without compiler errors. Returns ErrNotSupported.
-func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error) {
-	return nil, ErrNotSupported
+// ReadChromeCookiesStats is unsupported on non-Windows platforms. Moombox
+// is Windows-only for this path; the stub exists so cross-platform builds
+// (the Linux/arm64 release binaries, and devs running `go build` on macOS)
+// succeed without compiler errors. Returns ErrNotSupported.
+func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, ChromeReadStats, error) {
+	return nil, ChromeReadStats{}, ErrNotSupported
 }

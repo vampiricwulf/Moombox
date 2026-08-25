@@ -688,7 +688,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	// already has its own SQLite-direct path. DECISIONS #6.
 	if err != nil && browser != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
 		s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
-		fallbackCookies, fallbackErr := dpapiExtractAsNetscape()
+		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger)
 		if fallbackErr != nil {
 			s.logger.Warn("DPAPI fallback also failed; surfacing original CDP error",
 				"dpapi_err", fallbackErr)

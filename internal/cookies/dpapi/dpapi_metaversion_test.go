@@ -36,24 +36,28 @@ const chromeMetaTable = `CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIM
 // loudly.
 func TestReadChromeMetaVersion(t *testing.T) {
 	tests := []struct {
-		name  string
-		stmts []string
-		want  int64
+		name      string
+		stmts     []string
+		want      int64
+		wantKnown bool
 	}{
 		{
-			name:  "integer-typed version",
-			stmts: []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', 24)`},
-			want:  24,
+			name:      "integer-typed version",
+			stmts:     []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', 24)`},
+			want:      24,
+			wantKnown: true,
 		},
 		{
-			name:  "text-typed version",
-			stmts: []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', '24')`},
-			want:  24,
+			name:      "text-typed version",
+			stmts:     []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', '24')`},
+			want:      24,
+			wantKnown: true,
 		},
 		{
-			name:  "pre-hash-prefix version",
-			stmts: []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', '23')`},
-			want:  23,
+			name:      "pre-hash-prefix version",
+			stmts:     []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', '23')`},
+			want:      23,
+			wantKnown: true,
 		},
 		{
 			name:  "no meta table at all",
@@ -81,17 +85,33 @@ func TestReadChromeMetaVersion(t *testing.T) {
 			want:  0,
 		},
 		{
-			name:  "version with surrounding whitespace",
-			stmts: []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', ' 24 ')`},
-			want:  24,
+			// A database that genuinely says 0 is not a failed probe, and
+			// the two must not read the same.
+			name:      "genuine version 0",
+			stmts:     []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', '0')`},
+			want:      0,
+			wantKnown: true,
+		},
+		{
+			name:      "version with surrounding whitespace",
+			stmts:     []string{chromeMetaTable, `INSERT INTO meta VALUES ('version', ' 24 ')`},
+			want:      24,
+			wantKnown: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			db := openMetaFixture(t, tt.stmts...)
-			if got := readChromeMetaVersion(db); got != tt.want {
+			got, known := readChromeMetaVersion(db)
+			if got != tt.want {
 				t.Errorf("readChromeMetaVersion = %d, want %d", got, tt.want)
+			}
+			// A degraded probe must be distinguishable from a genuine
+			// version 0: both read 0, and only the second return says
+			// which one happened.
+			if known != tt.wantKnown {
+				t.Errorf("readChromeMetaVersion known = %v, want %v", known, tt.wantKnown)
 			}
 		})
 	}
