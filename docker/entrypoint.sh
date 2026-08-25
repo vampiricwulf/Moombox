@@ -52,6 +52,16 @@ staging_directory = "/data/staging"
 # Mount a Netscape cookie file at this path for members-only content
 # (see the volumes section of docker-compose.yml).
 cookie_file = "/data/cookies.txt"
+# Alternative to exporting cookies.txt by hand: bind-mount a Firefox
+# profile directory (the one holding prefs.js and cookies.sqlite, not its
+# parent) at /data/browser-profile and uncomment the two lines below.
+# This image ships no browser, so Moombox reads the profile directly
+# instead of launching one — and never writes into it. Copy the profile
+# with Firefox closed, and keep cookies.sqlite-wal / cookies.sqlite-shm
+# next to cookies.sqlite; recent cookies live in those sidecars and a
+# copy without them reads as empty.
+# auto_enabled = true
+# browser_profile_dir = "/data/browser-profile"
 
 [updates]
 # The in-app updater would swap the binary INSIDE the container, and
