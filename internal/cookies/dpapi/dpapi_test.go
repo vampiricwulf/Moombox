@@ -19,7 +19,7 @@ func TestDecryptV10Cookie_RoundTrip(t *testing.T) {
 	plaintext := []byte("MyCookieValue=hello%20world")
 	encrypted := buildV10(t, masterKey, "v10", plaintext)
 
-	got, err := decryptV10Cookie(masterKey, encrypted)
+	got, err := decryptV10Cookie(masterKey, encrypted, false)
 	if err != nil {
 		t.Fatalf("decryptV10Cookie: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestDecryptV10Cookie_V11Variant(t *testing.T) {
 	plaintext := []byte("session=abc")
 	encrypted := buildV10(t, masterKey, "v11", plaintext)
 
-	got, err := decryptV10Cookie(masterKey, encrypted)
+	got, err := decryptV10Cookie(masterKey, encrypted, false)
 	if err != nil {
 		t.Fatalf("decryptV10Cookie v11: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestDecryptV10Cookie_V11Variant(t *testing.T) {
 // TestDecryptV10Cookie_Empty returns empty string + nil for an empty
 // input — matches Chrome's session-cookie sentinel for "no value yet".
 func TestDecryptV10Cookie_Empty(t *testing.T) {
-	got, err := decryptV10Cookie(make([]byte, 32), nil)
+	got, err := decryptV10Cookie(make([]byte, 32), nil, false)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestDecryptV10Cookie_LegacyPrefix(t *testing.T) {
 	masterKey := make([]byte, 32)
 	// 16 bytes that happen not to start with "v10" or "v11"
 	encrypted := []byte("\x00\x01legacy_dpapi_blob_data_here")
-	_, err := decryptV10Cookie(masterKey, encrypted)
+	_, err := decryptV10Cookie(masterKey, encrypted, false)
 	if err == nil {
 		t.Fatal("expected error for legacy DPAPI prefix")
 	}
@@ -80,7 +80,7 @@ func TestDecryptV10Cookie_TooShort(t *testing.T) {
 	masterKey := make([]byte, 32)
 	// "v10" + only 5 bytes — too short to even contain a nonce.
 	encrypted := []byte("v10short")
-	_, err := decryptV10Cookie(masterKey, encrypted)
+	_, err := decryptV10Cookie(masterKey, encrypted, false)
 	if err == nil {
 		t.Fatal("expected error for too-short ciphertext")
 	}
@@ -102,7 +102,7 @@ func TestDecryptV10Cookie_BadMasterKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	encrypted := buildV10(t, rightKey, "v10", []byte("secret"))
-	if _, err := decryptV10Cookie(wrongKey, encrypted); err == nil {
+	if _, err := decryptV10Cookie(wrongKey, encrypted, false); err == nil {
 		t.Fatal("expected error for wrong master key")
 	}
 }

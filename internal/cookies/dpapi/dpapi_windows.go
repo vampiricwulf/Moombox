@@ -12,8 +12,6 @@ import (
 	"strings"
 	"syscall"
 	"unsafe"
-
-	_ "modernc.org/sqlite"
 )
 
 var (
@@ -163,6 +161,12 @@ func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error)
 	}
 	defer db.Close()
 
+	// Chrome ~130 (Cookies meta.version >= 24) prepends a 32-byte SHA-256 of
+	// the cookie's domain to the plaintext inside every encrypted value.
+	// Probe the schema before decrypting anything so the strip is gated on
+	// this profile's actual version rather than assumed either way.
+	hashPrefix := chromeUsesHashPrefix(readChromeMetaVersion(db))
+
 	rows, err := db.Query(`
 		SELECT host_key, name, encrypted_value, path,
 		       expires_utc, is_secure, is_httponly, samesite
@@ -192,11 +196,11 @@ func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error)
 		if filter != "" && !strings.Contains(strings.ToLower(host), filter) {
 			continue
 		}
-		value, decryptErr := decryptV10Cookie(masterKey, encVal)
+		value, decryptErr := decryptV10Cookie(masterKey, encVal, hashPrefix)
 		if decryptErr != nil {
 			// Skip the row but don't kill the whole extraction —
-			// legacy pre-v10 rows (rare today) and master-key
-			// mismatches show up here.
+			// legacy pre-v10 rows (rare today), master-key
+			// mismatches, and non-UTF-8 plaintexts show up here.
 			continue
 		}
 		result = append(result, ChromeCookie{
