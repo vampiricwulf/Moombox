@@ -532,16 +532,23 @@ browser launch and no writes into the profile:
 ```toml
 [cookies]
 auto_enabled = true
-browser_profile_dir = "/data/browser-profile"   # the default resolves here in Docker
 ```
 
-Mount or copy in the **single** Firefox profile directory (the one containing
-`prefs.js` and `cookies.sqlite`), not its parent. Moombox imports shortly after
-startup, on every refresh tick, and whenever it detects that authentication has
-died. Copy the profile with Firefox **closed**, and bring
-`cookies.sqlite-wal` / `cookies.sqlite-shm` along with `cookies.sqlite` if you
-copy the files individually — recent cookies live in those sidecars, and a copy
-without them looks valid while containing nothing.
+`browser_profile_dir` needs no entry: it defaults to `./browser-profile`,
+which resolves to `/data/browser-profile` inside the container. Mount or copy
+in the **single** Firefox profile directory there (the one containing
+`prefs.js` and `cookies.sqlite`), not its parent.
+
+Moombox imports shortly after startup, whenever it detects that authentication
+has died, and on refresh ticks where there is active work — the periodic tick
+is skipped while nothing is downloading or live, so an idle instance will not
+re-read the profile on a timer. The "Refresh cookies now" button in Settings
+(and `R F` in the TUI) forces an import at any time.
+
+Copy the profile with Firefox **closed**, and bring `cookies.sqlite-wal` along
+with `cookies.sqlite` if you copy the files individually — recent cookies live
+in that sidecar, and a copy without it looks valid while containing nothing.
+(`cookies.sqlite-shm` is rebuilt automatically and does not need copying.)
 
 Two honest limits, so you know what this does and does not buy you:
 

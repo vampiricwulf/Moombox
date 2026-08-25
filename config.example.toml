@@ -174,11 +174,12 @@
 # Docker image the default resolves to /data/browser-profile, so a bind
 # mount there needs no config change beyond auto_enabled.
 #
-# Copy the profile with Firefox closed, and keep cookies.sqlite-wal /
-# cookies.sqlite-shm alongside cookies.sqlite — recent cookies live in
-# those sidecars and a copy without them reads as empty. Importing
-# refreshes what the profile holds; it cannot renew SAPISID/LOGIN_INFO,
-# so an exported profile still ages out eventually.
+# Copy the profile with Firefox closed, and keep cookies.sqlite-wal
+# alongside cookies.sqlite — recent cookies live in that sidecar and a
+# copy without it reads as empty (cookies.sqlite-shm is rebuilt and does
+# not need copying). Importing refreshes what the profile holds; it
+# cannot renew SAPISID/LOGIN_INFO, so an exported profile still ages out
+# eventually.
 # auto_enabled = false
 # browser_profile_dir = "./browser-profile"
 
