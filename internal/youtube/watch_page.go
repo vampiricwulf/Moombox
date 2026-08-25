@@ -143,8 +143,12 @@ const (
 // extracted at parse time so the body string can be GC'd as soon as
 // FetchWatchPage returns.
 type WatchPageResult struct {
-	Ytcfg            *YtcfgData
-	IsLoggedIn       bool
+	Ytcfg *YtcfgData
+	// SessionAuth is YouTube's own verdict on whether this fetch was a
+	// signed-in session. The zero value is SessionAuthUnknown, which is what
+	// callers that synthesize a WatchPageResult after a failed fetch get for
+	// free — "we never saw a page" must not be reported as "logged out".
+	SessionAuth      SessionAuthState
 	PlayerResponse   map[string]any
 	ChatContinuation string
 	ChatIsReplay     bool
@@ -215,7 +219,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	}
 
 	html := string(body)
-	isLoggedIn := strings.Contains(html, `"LOGGED_IN":true`) || strings.Contains(html, `"isLoggedIn":true`)
+	sessionAuth := watchPageSessionAuth(html)
 
 	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(html)
 	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(html)
@@ -223,7 +227,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 
 	return &WatchPageResult{
 		Ytcfg:                ytcfg,
-		IsLoggedIn:           isLoggedIn,
+		SessionAuth:          sessionAuth,
 		PlayerResponse:       playerResponse,
 		ChatContinuation:     chatContinuation,
 		ChatIsReplay:         chatIsReplay,
@@ -231,6 +235,21 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		AttestationChallenge: attestationChallenge,
 		AttestationReason:    attestationReason,
 	}, nil
+}
+
+// watchPageSessionAuth reads YouTube's own login verdict off a watch page.
+// Two ytcfg spellings have been observed for the same flag; either counts.
+//
+// Only ever returns logged-in/logged-out: a page that was fetched and parsed
+// IS an observation. SessionAuthUnknown belongs to callers that never got a
+// page (see WatchPageResult.SessionAuth). Two strings.Contains over the
+// already-materialized HTML — no allocation, no regex — because this runs on
+// every watch-page fetch including quality-monitor polling.
+func watchPageSessionAuth(html string) SessionAuthState {
+	if strings.Contains(html, `"LOGGED_IN":true`) || strings.Contains(html, `"isLoggedIn":true`) {
+		return SessionAuthLoggedIn
+	}
+	return SessionAuthLoggedOut
 }
 
 // extractChatContinuation pulls the live-chat continuation token (and its

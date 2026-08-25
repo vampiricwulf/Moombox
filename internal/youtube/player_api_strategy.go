@@ -31,11 +31,16 @@ func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *Vide
 	}
 	if wp != nil {
 		info.AttestationChallenge = wp.AttestationChallenge
-		info.GvsBinding, info.GvsBindingKind = GvsContentBinding(videoID, wp.Ytcfg, wp.IsLoggedIn, info.ChannelID)
+		// Carry YouTube's own login verdict onto the result. It costs a
+		// string copy and it is the only thing that can tell a dead cookie
+		// file apart from a live session that simply lacks a membership.
+		info.SessionAuth = wp.SessionAuth
+		info.GvsBinding, info.GvsBindingKind = GvsContentBinding(videoID, wp.Ytcfg, wp.SessionAuth == SessionAuthLoggedIn, info.ChannelID)
 		return info
 	}
 	// No watch page at all (fetch failed): still produce a usable binding
-	// rather than leaving the strategies to invent one.
+	// rather than leaving the strategies to invent one. SessionAuth stays
+	// unknown — absence of evidence, not evidence of a logged-out session.
 	info.GvsBinding, info.GvsBindingKind = GvsContentBinding(videoID, nil, false, info.ChannelID)
 	return info
 }
@@ -109,6 +114,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 
 	ytcfg := wp.Ytcfg
 
+	// Log what YouTube thought of our session BEFORE any playability verdict
+	// exists to argue about. "hasAuth=true" upstream only means a cookie file
+	// was parsed; this line is the first place the answer to "are those
+	// cookies still a session?" appears in the log.
+	p.logger.Debug("[PlayerApi] watch page session state",
+		"videoID", videoID, "sessionAuth", string(wp.SessionAuth))
+
 	if wp.AttestationChallenge == "" {
 		p.logger.Debug("[PlayerApi] no attestation challenge from watch page", "videoID", videoID, "reason", wp.AttestationReason)
 	}
@@ -155,11 +167,17 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		result = &VideoInfo{}
 	} else {
 		collectFormats(&formatPool, result.Formats, "tv_auth", AuthLevelTVAuth)
+		// The TV client is the playability/status AUTHORITY on this path, so
+		// its verdict is the one every downstream error string is derived
+		// from — name the client AND the verdict together, or a log reader
+		// cannot tell which of five clients produced "members_only".
 		p.logger.Debug("[PlayerApi] TV client result",
+			"client", constants.TVDowngradedClient.ClientName,
 			"formats", len(result.Formats),
 			"dashManifestUrl", result.DashManifestURL != "",
 			"hlsManifestUrl", result.HlsManifestURL != "",
-			"streamStatus", result.StreamStatus)
+			"streamStatus", result.StreamStatus,
+			"playability", string(result.PlayabilityError))
 	}
 
 	// Try web_safari client for DASH manifest (preferred over web)
@@ -182,7 +200,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			"formats", len(webResult.Formats),
 			"dashManifestUrl", webResult.DashManifestURL != "",
 			"hlsManifestUrl", webResult.HlsManifestURL != "",
-			"streamStatus", webResult.StreamStatus)
+			"streamStatus", webResult.StreamStatus,
+			"playability", string(webResult.PlayabilityError))
 		collectFormats(&formatPool, webResult.Formats, webLabel, webAuthLevel)
 		if webResult.DashManifestURL != "" && result.DashManifestURL == "" {
 			p.logger.Info("[PlayerApi] Got DASH manifest URL from web client", "videoID", videoID)
@@ -392,6 +411,11 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		return nil, err
 	}
 	collectFormats(&formatPool, result.Formats, "tv_public", AuthLevelTVPublic)
+	p.logger.Debug("[PlayerApi] TV client result (public)",
+		"client", constants.TVDowngradedClient.ClientName,
+		"formats", len(result.Formats),
+		"streamStatus", result.StreamStatus,
+		"playability", string(result.PlayabilityError))
 
 	// Try web_embedded for age-restricted content (public path)
 	if result.PlayabilityError == PlayabilityAgeRestricted {
@@ -644,6 +668,11 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 			continue
 		}
 		collectFormats(formatPool, fbResult.Formats, fb.label, fb.level)
+		p.logger.Debug("[PlayerApi] cookieless fallback result",
+			"client", fb.label,
+			"formats", len(fbResult.Formats),
+			"streamStatus", fbResult.StreamStatus,
+			"playability", string(fbResult.PlayabilityError))
 
 		if chosen != nil {
 			// Already have a usable result; this client is only still being
