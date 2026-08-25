@@ -930,19 +930,9 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// above: an attempt to fix the session is not a notification, and gating
 	// it on w.notifier != nil meant a deployment with no webhook configured
 	// silently got neither the recovery nor any log line explaining why.
-	//
-	// ErrNonActionable is excluded because it means "terminal, stop working
-	// this job", and the recovery path does not merely log — on success it
-	// sets the job back to Upcoming and re-enqueues it, restarting the probe
-	// budget from zero. The two categories can co-occur: a multi-%w error
-	// (stream_processor_twitch.go's probe give-up wraps ErrNonActionable
-	// alongside an underlying error that may carry twitch.ErrTwitchAuthExpired)
-	// satisfies cookiesStatusError and ErrNonActionable at the same time.
-	// That is unreachable today only because classifyProbeErr's default
-	// routes "gql auth failure (401)" to the network class — a string
-	// heuristic over a Twitch response body, not an invariant worth relying
-	// on for a resurrection hazard.
-	if status == database.StatusCookies && !errors.Is(err, ErrNonActionable) {
+	// attemptCookieRefresh owns the "should we, and if not why not" decision
+	// so that every reason for declining is stated in one place.
+	if status == database.StatusCookies {
 		w.attemptCookieRefresh(job, err)
 	}
 }
@@ -966,6 +956,22 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 // Only the first is bounded by the environment; phrase guidance against that
 // line rather than against "container", which is a moving target.
 func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
+	// ErrNonActionable means "terminal, stop working this job", and the
+	// recovery path does not merely log — on success it sets the job back to
+	// Upcoming and re-enqueues it, restarting the probe budget from zero. The
+	// two categories can co-occur: a multi-%w error (stream_processor_twitch's
+	// probe give-up wraps ErrNonActionable alongside an underlying error that
+	// may carry twitch.ErrTwitchAuthExpired) satisfies cookiesStatusError and
+	// ErrNonActionable at the same time. That is unreachable today only
+	// because classifyProbeErr's default routes "gql auth failure (401)" to
+	// the network class — a string heuristic over a Twitch response body, not
+	// an invariant worth relying on for a resurrection hazard.
+	if errors.Is(err, ErrNonActionable) {
+		w.logger.Warn("skipping automatic cookie refresh — this failure was already classified terminal, and recovery would re-queue the job and reset its retry budget",
+			"jobID", job.ID,
+			"videoID", job.VideoID)
+		return
+	}
 	if !cookieRefreshWorthAttempting(err) {
 		w.logger.Warn("skipping automatic cookie refresh — YouTube answered this request as a SIGNED-IN session, so the credentials are alive and the account simply lacks access",
 			"jobID", job.ID,
@@ -974,6 +980,10 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		return
 	}
 	if w.OnCookieRefreshNeeded == nil {
+		// Not wired (no auto-cookie service constructed). Debug rather than
+		// Warn: this is a build/wiring fact, not something the operator did.
+		w.logger.Debug("no automatic cookie refresh is wired; leaving the job parked",
+			"jobID", job.ID, "videoID", job.VideoID)
 		return
 	}
 

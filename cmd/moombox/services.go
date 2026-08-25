@@ -624,14 +624,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 		}
 		if !ok {
 			// Also previously silent. Deliberately states no cause:
-			// RefreshCookies returns (false, nil) from four distinct places —
+			// RefreshCookies returns (false, nil) from FIVE distinct places —
 			// a setup already in progress, a refresh already running, no
-			// platforms configured, and genuine extraction failure. Each of
-			// the first three logs its own reason at Debug, which is off by
-			// default, so at the default level this line is the only thing
-			// the operator sees. Asserting a cause here would be wrong three
-			// times out of four and would send them hunting for a missing
-			// browser while a refresh is already in flight.
+			// platforms configured, a refresh that found no cookies to
+			// verify, and a refresh whose auth verification failed. Only the
+			// last of those means anything is actually wrong with the
+			// session; the rest mean it declined to run. (Genuine extraction
+			// failure is NOT among them — it returns (false, err) and takes
+			// the branch above.) Four of the five log their own reason at
+			// Debug, which is off by default, so at the default level this
+			// line is usually the only thing the operator sees. Asserting a
+			// cause here would be wrong four times in five and would send
+			// them hunting for a missing browser while a refresh is already
+			// in flight.
 			log.Warn("automatic cookie refresh produced no usable cookies",
 				slog.String("note", "the refresh either declined to run or found nothing usable — run at debug level to see which"))
 		}

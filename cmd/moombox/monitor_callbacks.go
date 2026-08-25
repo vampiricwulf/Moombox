@@ -180,8 +180,15 @@ func (s *runState) wireMonitorCallbacks() {
 				s.cookieRefresh.CheckNow(context.Background())
 			} else {
 				s.log.Warn("auto-cookie recovery did not restore auth", "platform", platform)
+				// States no cause, for the same reason the equivalent log line
+				// in services.go states none: this fires from every
+				// (false, nil) return of RefreshCookies, and most of those
+				// mean it DECLINED to run (setup in progress, a refresh
+				// already running, no platforms configured) with the session
+				// possibly perfectly healthy. A notification is more visible
+				// than a log line, so an assertion here is worse, not better.
 				notifyAuthFailure(platform, "Cookie Auto-Refresh Ineffective",
-					fmt.Sprintf("Automatic cookie refresh completed but did not restore %s authentication — the session behind those cookies is gone. Replace %s with a fresh Netscape export from a browser signed in to the account, or re-run cookie setup from Settings on the machine hosting Moombox.", platform, s.cookieFilePath()),
+					fmt.Sprintf("Automatic cookie refresh did not restore %s authentication — it either declined to run or found nothing usable (the log at debug level says which). If the cookies have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
 					notifications.TypeWarning)
 			}
 		}()

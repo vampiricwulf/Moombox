@@ -147,7 +147,10 @@ type WatchPageResult struct {
 	// SessionAuth is YouTube's own verdict on whether this fetch was a
 	// signed-in session. The zero value is SessionAuthUnknown, which is what
 	// callers that synthesize a WatchPageResult after a failed fetch get for
-	// free — "we never saw a page" must not be reported as "logged out".
+	// free — and what watchPageSessionAuth returns for a 200 that is not a
+	// recognisable watch-page shell. Neither "we never saw a page" nor "we
+	// saw something we can't read" may be reported as "logged out": that
+	// verdict is now printed to the user as "your cookies are dead".
 	SessionAuth      SessionAuthState
 	PlayerResponse   map[string]any
 	ChatContinuation string

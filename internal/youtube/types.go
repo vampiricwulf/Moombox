@@ -33,19 +33,22 @@ const (
 // read straight off the watch page's ytcfg, which is the cheapest available
 // proof that a cookie file is (or is not) still a live session.
 //
-// The third state is load-bearing. "We fetched a page and it came back
-// signed out" and "we never got a page" are different facts, and collapsing
-// them into one boolean is what let a members-only failure be blamed on
-// cookies unconditionally: an operator whose cookies were fine got told to
-// refresh them, and an operator whose cookies were dead got the same line
-// and no way to tell which case they were in.
+// The third state is load-bearing. "YouTube told us this session is signed
+// out" and "we have no answer" are different facts, and collapsing them into
+// one boolean is what let a members-only failure be blamed on cookies
+// unconditionally: an operator whose cookies were fine got told to refresh
+// them, and an operator whose cookies were dead got the same line and no way
+// to tell which case they were in.
 type SessionAuthState string
 
 const (
-	// SessionAuthUnknown means no watch page was obtained for this
-	// extraction (fetch failed, or the code path never fetches one). The
-	// zero value deliberately lands here so a synthesized WatchPageResult
-	// cannot masquerade as a logged-out observation.
+	// SessionAuthUnknown means no usable answer was obtained. Three
+	// producers reach it: the watch-page fetch failed, the code path never
+	// fetches one, or a response came back that is not a recognisable
+	// watch-page shell (a consent interstitial or edge error page answers
+	// 200 carrying no ytcfg — see watchPageSessionAuth). The zero value
+	// deliberately lands here so neither a synthesized WatchPageResult nor
+	// an unrecognisable page can masquerade as a logged-out observation.
 	SessionAuthUnknown SessionAuthState = ""
 	// SessionAuthLoggedIn means YouTube answered the watch-page request as
 	// a signed-in session.
