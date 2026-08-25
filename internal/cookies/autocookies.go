@@ -871,12 +871,24 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	// checks could not reach the network, or when we kept the previous
 	// credentials rather than the import, that message sends the operator
 	// after the wrong problem.
+	//
+	// A rollback and an inconclusive check can be true at once — in fact the
+	// pure-network case is exactly that, since a check that cannot complete
+	// is itself a reason to keep the previous credentials. Blaming the
+	// profile there would send a container operator off to re-export one
+	// that is perfectly fine, which is the misattribution verifyUnknown
+	// exists to prevent. So that combination gets its own message carrying
+	// both facts: what we kept, and why.
+	inconclusive := postYT.state == verifyUnknown || postTW.state == verifyUnknown
 	var errMsg string
 	switch {
+	case len(restoredPlatforms) > 0 && inconclusive:
+		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
+			" — the auth check did not complete (network?), so the imported profile was not accepted"
 	case len(restoredPlatforms) > 0:
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
 			" — the mounted browser profile did not verify"
-	case postYT.state == verifyUnknown || postTW.state == verifyUnknown:
+	case inconclusive:
 		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the check did not complete (network?)"
 	case emptyBrowserProfile:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed, and the browser profile contained " +

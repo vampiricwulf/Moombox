@@ -203,6 +203,20 @@ func TestRefreshCookiesDoesNotCommitOnInconclusiveVerification(t *testing.T) {
 	if status.NeedsManualRelogin["youtube"] || status.NeedsManualRelogin["twitch"] {
 		t.Error("a network failure must not tell the user to re-login")
 	}
+	// A rollback and an inconclusive check are BOTH true here — a check that
+	// cannot complete is itself why the previous credentials were kept. The
+	// status must not blame the profile for that: sending an operator off to
+	// re-export a mount that is perfectly fine is the exact misattribution
+	// verifyUnknown was added to prevent.
+	if status.LastError == nil {
+		t.Fatal("an import that was not committed must leave an explanation")
+	}
+	if !strings.Contains(*status.LastError, "did not complete") {
+		t.Errorf("status must name the incomplete check as the cause, got %q", *status.LastError)
+	}
+	if strings.Contains(*status.LastError, "did not verify") {
+		t.Errorf("status blames the profile for a network failure: %q", *status.LastError)
+	}
 }
 
 // TestRestorePlatformRows unit-tests the row surgery the rollback depends on.
