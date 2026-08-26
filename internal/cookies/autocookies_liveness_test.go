@@ -277,6 +277,80 @@ func TestHalfClearedDeadSessionStillLetsTheImportThrough(t *testing.T) {
 	}
 }
 
+// TestInconclusiveImportOverADeadPartialSetKeepsItAndSaysWhy covers the one
+// behavioural shape this arc genuinely made newly reachable, and the
+// attribution bug that shape exposes. Both facts belong to one event, so they
+// are asserted together — the same pairing TestRefreshCookiesDoesNotCommitOn-
+// InconclusiveVerification uses.
+//
+// The shape: cookies.txt holds a KNOWN-DEAD partial set and the mounted profile
+// holds a complete fresh one, but the post-import check cannot complete. pre is
+// now {hasCookies:true, state:verifyFailed} where it used to be
+// {false, verifyFailed}, so arm 2 (before.hasCookies && after == verifyUnknown)
+// fires and the fresh import is DISCARDED. That is the documented policy —
+// identical to what already happens for a full-but-dead set, and bounded,
+// because the next pass re-imports once the network is back — but until now
+// nothing exercised it.
+//
+// The bug: the restored dead set then verifies conclusively-false, so the
+// post-rollback `inconclusive` is false and the operator was told "the mounted
+// browser profile did not verify" about a profile that was never evaluated.
+// That message sends a container operator off to re-export a mount that is
+// perfectly fine.
+func TestInconclusiveImportOverADeadPartialSetKeepsItAndSaysWhy(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(
+		"# Netscape HTTP Cookie File\n"+
+			".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tdead-sapisid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	offline := errors.New("dial tcp: no such host")
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	// Conclusively dead for what is already on disk; unreachable for anything
+	// the profile brings. Keyed off the jar's live value so the pre-import
+	// check, the post-import check and the post-rollback re-check all answer
+	// differently — which is the only way to separate the three.
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
+		if s.jar.GetSapisid() == "dead-sapisid" {
+			return false, nil
+		}
+		return false, offline
+	}
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+
+	data, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "dead-sapisid") || strings.Contains(got, "sapisid-from-profile") {
+		t.Errorf("an unevaluated import was committed over the previous credentials:\n%s", got)
+	}
+
+	status := s.GetStatus()
+	if status.LastError == nil {
+		t.Fatal("an import that was not committed must leave an explanation")
+	}
+	if !strings.Contains(*status.LastError, "did not complete") {
+		t.Errorf("the rollback must name the incomplete check that caused it, got %q", *status.LastError)
+	}
+	if strings.Contains(*status.LastError, "did not verify") {
+		t.Errorf("the rollback blames a profile that was never evaluated: %q", *status.LastError)
+	}
+	// The credentials actually in force ARE conclusively dead, so this half of
+	// the advice is earned and must survive the attribution fix.
+	if !status.NeedsManualRelogin["youtube"] {
+		t.Error("the restored credentials were conclusively rejected; the user does need to sign in again")
+	}
+}
+
 // finishSetupService wires the FinishSetup preconditions the way
 // TestFinishSetupTreatsEmptyProfileAsNoLogin does: a registered (fake) setup
 // process on the Firefox path, already exited so the graceful-close wait is
@@ -371,20 +445,75 @@ func TestFinishSetupSaysWhenItCouldNotVerify(t *testing.T) {
 		return false, errors.New("youtube auth check: unexpected status 429")
 	}
 
-	if _, _, err := s.FinishSetup(context.Background()); err != nil {
+	ytAuth, _, err := s.FinishSetup(context.Background())
+	if err != nil {
 		t.Fatalf("FinishSetup: %v", err)
 	}
 
 	if !log.contains("did not complete") {
 		t.Errorf("an inconclusive setup check said nothing at all: %v", log.msgs)
 	}
-	// It must not read as a failure either — the credentials were never
-	// evaluated, so neither verdict has been earned.
-	if log.contains("verification failed") {
-		t.Errorf("an incomplete check was reported as a verification failure: %v", log.msgs)
+	// It must not read as a failure either — a check that could not reach the
+	// site has earned neither verdict. Asserting on the value AND on the
+	// "neither platform is authenticated" line, because both are live: an
+	// over-correction that rejected the login would flip the first and emit the
+	// second, and a string that can never appear guards nothing.
+	if !ytAuth {
+		t.Error("a 429 is not evidence against a login the user just completed")
+	}
+	if log.contains("neither platform is authenticated") {
+		t.Errorf("an incomplete check was reported as a failure to authenticate: %v", log.msgs)
 	}
 	if status := s.GetStatus(); status.LastError != nil {
 		t.Errorf("an inconclusive check must not raise the Settings error, which reads as \"recordings will fail\": %q", *status.LastError)
+	}
+}
+
+// TestFinishSetupDoesNotReportASignInThatWasNeverChecked is I1.
+//
+// checkYouTubeAuth's gates at refresh.go:596-604 return an error BY DESIGN when
+// the jar holds something but cannot build a request out of it — a structural
+// failure must not read to shouldFireRecovery as dead credentials. Routing
+// FinishSetup through checkPlatformAuth newly exposed that path here, and
+// "inconclusive" alone could not tell it apart from a rate limit, so a leftover
+// Google remnant with no SAPISID was reported as a completed YouTube sign-in.
+//
+// The web setup wizard turns that value into a green "YouTube cookies
+// configured" badge and an entry in active_platforms, so the user who signed in
+// to Twitch only would be told YouTube was configured too.
+func TestFinishSetupDoesNotReportASignInThatWasNeverChecked(t *testing.T) {
+	// A Google session remnant with no SAPISID and no __Secure-3PAPISID:
+	// HasAnyYouTubeAuthCookie accepts it, GenerateAuthorizationHeader cannot
+	// build a SAPISIDHASH from it, so the real check errors before any request.
+	remnant := []profileTestCookie{
+		{name: "__Secure-1PSID", value: "1psid-remnant", host: ".youtube.com", path: "/", httpOnly: true, secure: true},
+		{name: "SID", value: "sid-remnant", host: ".youtube.com", path: "/", secure: true},
+		{name: "auth-token", value: goodTwitchToken, host: ".twitch.tv", path: "/", httpOnly: true, secure: true},
+	}
+	s := finishSetupService(t, remnant, nopAutoCookieLogger{})
+	// The REAL check over the service's own jar — the shape
+	// cmd/moombox/services.go:601 builds. A stub could not reproduce this:
+	// the gate lives inside the production callback.
+	s.VerifyYouTubeAuth = NewRefreshService(s.jar, 0, nopLogger{}).CheckYouTubeAuth
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return true, nil }
+
+	ytAuth, twAuth, err := s.FinishSetup(context.Background())
+	if err != nil {
+		t.Fatalf("FinishSetup: %v", err)
+	}
+
+	if s.jar.GenerateAuthorizationHeader("https://www.youtube.com") != "" {
+		t.Fatal("fixture is broken — this test needs a jar that cannot build a SAPISIDHASH")
+	}
+	if !s.jar.HasAnyYouTubeAuthCookie() {
+		t.Fatal("fixture is broken — the remnant must still read as a configured platform")
+	}
+
+	if ytAuth {
+		t.Error("YouTube was reported as a completed sign-in although no request was ever made — the setup wizard lights a green badge off this")
+	}
+	if !twAuth {
+		t.Error("the Twitch login the user actually completed must still be accepted")
 	}
 }
 

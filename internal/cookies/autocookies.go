@@ -531,13 +531,25 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	ytCheck, twCheck := s.checkPlatformAuth(ctx)
 
 	// What the CALLER is told, and it is deliberately not the verification
-	// result. A sign-in the user just completed is accepted unless the site
-	// conclusively rejected it: an inconclusive check — a 429, a captive
-	// portal, a DNS blip — is not evidence against a login that happened
-	// thirty seconds ago, and refusing it would send the user back through a
-	// wizard that was working. False failure is the worse direction here.
-	ytAuth = ytCheck.hasCookies && ytCheck.state != verifyFailed
-	twAuth = twCheck.hasCookies && twCheck.state != verifyFailed
+	// result. A sign-in the user just completed is accepted when the site could
+	// not answer: a 429, a captive portal or a DNS blip is not evidence against
+	// a login that happened thirty seconds ago, and refusing it would send the
+	// user back through a wizard that was working. False failure is the worse
+	// direction there.
+	//
+	// It is NOT accepted when nothing was ever asked. A jar that cannot produce
+	// a cookie header or a SAPISIDHASH made no request, so there is no answer
+	// to extend the benefit of the doubt to — and the caller-facing value is
+	// what setup.js turns into a green "YouTube cookies configured" badge and
+	// an entry in active_platforms. Because FinishSetup merges the pre-existing
+	// cookies.txt before checking, a leftover Google remnant with no SAPISID
+	// would otherwise light that badge up for a user who only signed in to
+	// Twitch. attempted is what separates the two; see platformAuth.
+	accepted := func(p platformAuth) bool {
+		return p.hasCookies && (p.state == verifyOK || (p.state == verifyUnknown && p.attempted))
+	}
+	ytAuth = accepted(ytCheck)
+	twAuth = accepted(twCheck)
 
 	// What gets WRITTEN DOWN, which is a different claim and must be the
 	// stricter one. PersistPlatforms unions into cfg.Cookies.Platforms, a set
@@ -554,18 +566,26 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	// 429 during setup was indistinguishable from a clean pass. No cause is
 	// named and no error is recorded: the check did not complete, which is not
 	// a finding about the credentials, and s.lastError renders in Settings as
-	// "your recordings will fail".
-	if ytCheck.hasCookies && ytCheck.state == verifyUnknown {
-		s.logger.Warn("YouTube auth check did not complete during setup — accepting the sign-in without verifying it")
+	// "your recordings will fail". The two halves get different wording because
+	// they carry different advice — one is "try again", the other is "this
+	// login is not usable as it stands".
+	warnInconclusive := func(platform string, p platformAuth) {
+		if s.logger == nil || !p.hasCookies || p.state != verifyUnknown {
+			return
+		}
+		if p.attempted {
+			s.logger.Warn(platform + " auth check did not complete during setup — accepting the sign-in without verifying it")
+			return
+		}
+		s.logger.Warn(platform + " auth check was never attempted during setup — the extracted cookies cannot form an authenticated request")
 	}
-	if twCheck.hasCookies && twCheck.state == verifyUnknown {
-		s.logger.Warn("Twitch auth check did not complete during setup — accepting the sign-in without verifying it")
-	}
+	warnInconclusive("YouTube", ytCheck)
+	warnInconclusive("Twitch", twCheck)
 
-	if !ytAuth && !twAuth {
-		// Not "verification failed": for a platform with no auth cookie at all
-		// no verification ran, and there are always two of those in a
-		// single-platform setup.
+	if !ytAuth && !twAuth && s.logger != nil {
+		// Not "verification failed": a platform with no auth cookie at all was
+		// never verified, and in a single-platform setup one of the two never
+		// is.
 		s.logger.Warn("cookies extracted, but neither platform is authenticated")
 	}
 
@@ -1040,8 +1060,15 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// Only the import path does this. The browser path writes cookies it just
 	// re-fetched from the live site, which cannot be staler than what was on
 	// disk.
+	//
+	// importCheck is kept under its own name because the rollback branch below
+	// REPLACES postYT/postTW with a re-verification of what was restored. The
+	// question "why did we reject the import" can only be answered by the check
+	// that rejected it, and after the re-verify that check is no longer in
+	// scope. See rollbackWasInconclusive.
+	importCheck := map[string]platformAuth{"youtube": postYT, "twitch": postTW}
 	var restoredPlatforms []string
-	if restore := platformsToRestore(pre, map[string]platformAuth{"youtube": postYT, "twitch": postTW}); len(restore) > 0 {
+	if restore := platformsToRestore(pre, importCheck); len(restore) > 0 {
 		for _, platform := range []string{"youtube", "twitch"} {
 			if restore[platform] {
 				restoredPlatforms = append(restoredPlatforms, platform)
@@ -1349,10 +1376,28 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// that is perfectly fine, which is the misattribution verifyUnknown
 	// exists to prevent. So that combination gets its own message carrying
 	// both facts: what we kept, and why.
+	//
+	// Two different questions, so two different sources. `inconclusive`
+	// describes the credentials in force NOW, which after a rollback are the
+	// restored ones — that is the right input for the no-rollback branches
+	// below. rollbackWasInconclusive describes why the IMPORT was rejected, and
+	// only the check that rejected it can answer that: the re-verification
+	// overwrote postYT/postTW, so reading them would attribute the rollback to
+	// a check performed afterwards on different cookies. When the restored
+	// credentials then verify conclusively-false — the ordinary outcome once a
+	// dead-but-configured platform can reach arm 2 at all — that misattribution
+	// prints "the mounted browser profile did not verify" about a profile that
+	// was never evaluated.
 	inconclusive := postYT.state == verifyUnknown || postTW.state == verifyUnknown
+	rollbackWasInconclusive := false
+	for _, platform := range restoredPlatforms {
+		if importCheck[platform].state == verifyUnknown {
+			rollbackWasInconclusive = true
+		}
+	}
 	var errMsg string
 	switch {
-	case len(restoredPlatforms) > 0 && inconclusive:
+	case len(restoredPlatforms) > 0 && rollbackWasInconclusive:
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
 			" — the auth check did not complete (network?), so the imported profile was not accepted"
 	case len(restoredPlatforms) > 0:

@@ -77,4 +77,19 @@ var (
 	// copied without its -wal sidecar (the copy opens fine and returns
 	// nothing) and of a profile snapshotted out from under a live Firefox.
 	ErrNoCookiesInProfile = errors.New("no YouTube/Twitch cookies found in browser profile")
+
+	// ErrAuthCheckNotAttempted marks an auth check that failed BEFORE any
+	// request left the process — the jar holds something, but not enough to
+	// build a request out of (no cookie header, no SAPISIDHASH). It is still
+	// an error rather than (false, nil), for the reason spelled out above
+	// checkYouTubeAuth: a structural failure is not a verdict on the
+	// credentials, and shouldFireRecovery must not read it as one.
+	//
+	// The sentinel exists because "we could not reach the site" and "we could
+	// not form the question" are both inconclusive and are NOT
+	// interchangeable. A caller may reasonably accept a sign-in over the
+	// first — a rate limit says nothing about a login the user completed
+	// thirty seconds ago — while the second means nothing was ever asked, so
+	// there is no answer to accept.
+	ErrAuthCheckNotAttempted = errors.New("auth check could not be attempted")
 )

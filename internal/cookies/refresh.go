@@ -594,13 +594,13 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 
 	cookieHeader := rs.jar.GetCookieHeader()
 	if cookieHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no cookie header could be built")
+		return false, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
 	}
 
 	origin := "https://www.youtube.com"
 	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
 	if authHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated")
+		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
 	}
 
 	// POST to YouTube guide endpoint to check auth
@@ -687,13 +687,13 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 
 	cookieHeader := rs.jar.GetCookieHeader()
 	if cookieHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no cookie header could be built")
+		return false, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
 	}
 
 	origin := "https://www.youtube.com"
 	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
 	if authHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated")
+		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)

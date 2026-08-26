@@ -532,9 +532,18 @@ const (
 
 // platformAuth pairs "are there credentials on disk for this platform" with
 // what verifying them concluded.
+//
+// attempted splits verifyUnknown in two, because the two halves license
+// different things. "The site could not answer" (a 429, a dropped connection)
+// says nothing about a credential and a caller may reasonably accept a login
+// over it; "we could not form the question" — a jar with no cookie header or
+// no SAPISIDHASH to build, ErrAuthCheckNotAttempted — means no request was ever
+// made, so there is no answer to accept. Both stay verifyUnknown: neither is a
+// finding about the credentials, which is what the state records.
 type platformAuth struct {
 	hasCookies bool
 	state      verificationState
+	attempted  bool
 }
 
 func (p platformAuth) ok() bool { return p.state == verifyOK }
@@ -578,11 +587,20 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 		verified, err := verify(vctx)
 		switch {
 		case err != nil:
-			return platformAuth{hasCookies: true, state: verifyUnknown}
+			// ErrAuthCheckNotAttempted means the callback gave up before any
+			// request left the process. Still unknown — nothing was learned
+			// about the credentials either way — but not the same unknown as a
+			// site that would not answer, and FinishSetup has to tell them
+			// apart before it reports a completed sign-in.
+			return platformAuth{
+				hasCookies: true,
+				state:      verifyUnknown,
+				attempted:  !errors.Is(err, ErrAuthCheckNotAttempted),
+			}
 		case verified:
-			return platformAuth{hasCookies: true, state: verifyOK}
+			return platformAuth{hasCookies: true, state: verifyOK, attempted: true}
 		default:
-			return platformAuth{hasCookies: true, state: verifyFailed}
+			return platformAuth{hasCookies: true, state: verifyFailed, attempted: true}
 		}
 	}
 
