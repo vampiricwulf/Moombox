@@ -355,6 +355,10 @@ func refreshLooksImplausiblyFast(elapsed time.Duration, acted bool) bool {
 // Windows may already have recycled onto something else. Before the
 // drain-wait that window was ~200ms; the drain stretches it to the whole
 // launch budget.
+//
+// Called on every runWithTimeout exit that OBSERVES a reap, which is not quite
+// every exit — see the note on runWithTimeout for the one that deliberately
+// leaves the PID published.
 func (s *AutoCookieService) restoreRefreshSlot() {
 	s.mu.Lock()
 	s.refreshCmd = &exec.Cmd{}
@@ -741,6 +745,34 @@ func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
 //   - the query fails → nil, degrading to the pre-drain behaviour. That is
 //     bad but known; spinning on a failing syscall for the whole budget is
 //     worse.
+//
+// VERIFICATION STATUS — one browser, one platform. The measurements above come
+// from Waterfox on Windows, run against copies of a real profile: the killed
+// launch returned in 170ms with no screenshot and an untouched profile; the
+// drained launch took 3.082s over 59 polls and wrote both. Every other
+// Firefox-family browser is UNVERIFIED.
+//
+// The risk if one behaves differently: this waits for the job to become EMPTY,
+// which is a stronger condition than "the page finished loading". A browser
+// that leaves any process alive in the job — a background updater, a crash
+// reporter, a lingering content process — would burn the full processTimeout
+// budget on every refresh and return errBrowserDrainTimeout, turning working
+// refreshes into reported failures. Not observed on Waterfox.
+//
+// Accepted rather than defended against, on three grounds: it is bounded by the
+// budget, it degrades rather than aborts, and the poll count and elapsed time
+// are logged below, so the symptom is legible rather than silent. Guessing at a
+// weaker stop condition without a browser that actually needs one would trade a
+// proven fix for a speculative one.
+//
+// To close this out, run the live gate against a second Firefox-family browser
+// (Firefox, LibreWolf, or Zen):
+//
+//	$env:MOOMBOX_LIVE_BROWSER_REFRESH="1"
+//	go test -count=1 -run TestLiveFirefoxRefreshWritesTheProfile ./internal/cookies/...
+//
+// A drain completing in a second or two with a screenshot on disk confirms the
+// condition generalises.
 func drainJob(ctx context.Context, job *processJob, startedAt time.Time, budget time.Duration, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -761,6 +793,23 @@ func drainJob(ctx context.Context, job *processJob, startedAt time.Time, budget 
 				logger.Warn("browser still running when the launch budget expired; killing it",
 					"active", active, "budget", budget, "polls", polls)
 				return errBrowserDrainTimeout
+			}
+			if polls == 0 {
+				// Nothing was ever seen alive in the job, so nothing was
+				// waited on — which is a different statement from "the
+				// browser finished", and the only one this observation
+				// supports.
+				//
+				// It is also the norm on two platforms rather than an edge:
+				// the Linux and darwin processJob stubs return 0 from
+				// activeProcesses unconditionally, so every launch there
+				// lands here on lap zero having drained nothing. Claiming a
+				// finish would assert something the platform cannot observe,
+				// the same distinction the !rendered branch in refreshFirefox
+				// holds.
+				logger.Debug("no tracked processes to wait for; the browser was not waited on",
+					"elapsed", elapsed.Round(time.Millisecond), "polls", polls)
+				return nil
 			}
 			logger.Debug("browser finished; job drained",
 				"elapsed", elapsed.Round(time.Millisecond), "polls", polls)
@@ -785,6 +834,11 @@ func drainJob(ctx context.Context, job *processJob, startedAt time.Time, budget 
 // onLauncherReaped, when non-nil, is called the instant cmd.Wait() returns —
 // before the drain, which can run for the rest of the budget. The caller uses
 // it to stop advertising a PID that no longer exists (see refreshFirefox).
+//
+// It fires on both exits that actually observe a reap: the normal one, and the
+// timeout path once the post-kill wait sees cmd.Wait() return. It does NOT
+// fire when that wait times out in turn, because then the process may still be
+// alive and the published PID is the only handle on it.
 func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, onLauncherReaped func(), logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -860,6 +914,22 @@ func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, o
 		select {
 		case <-done:
 			logger.Debug("process reaped after kill", "pid", cmd.Process.Pid)
+			// Same reason as the <-done branch above, and previously missing
+			// here: cmd.Wait() has returned, so this PID is reaped and
+			// Windows may recycle it onto something unrelated at any moment.
+			// The caller then carries a dead PID through the launch spacing
+			// and the rest of the refresh with killRefreshProcess still
+			// willing to taskkill /F /T it.
+			//
+			// Only in this arm. The 5s fallback below reaches its deadline
+			// WITHOUT a reap, so the process may still be alive and the
+			// caller's ability to kill it is the last line of defence —
+			// clearing the slot there would trade a recycled-PID risk for an
+			// orphaned-browser one, which is the worse of the two because it
+			// holds the profile lock and breaks every later refresh.
+			if onLauncherReaped != nil {
+				onLauncherReaped()
+			}
 		case <-time.After(5 * time.Second):
 			logger.Warn("process did not exit after kill, forcing", "pid", cmd.Process.Pid)
 			if cmd.Process != nil {

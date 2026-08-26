@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,5 +67,43 @@ func TestDrainJobReturnsImmediatelyWithoutAJob(t *testing.T) {
 				t.Errorf("drainJob took %s; it should not have waited at all", elapsed)
 			}
 		})
+	}
+}
+
+// capturingDrainLogger records every message drainJob emits.
+type capturingDrainLogger struct{ msgs []string }
+
+func (l *capturingDrainLogger) Debug(msg string, args ...any) { l.msgs = append(l.msgs, msg) }
+func (l *capturingDrainLogger) Info(msg string, args ...any)  { l.msgs = append(l.msgs, msg) }
+func (l *capturingDrainLogger) Warn(msg string, args ...any)  { l.msgs = append(l.msgs, msg) }
+
+// TestDrainJobWithNothingToWaitOnDoesNotClaimTheBrowserFinished is a wording
+// fix with a platform behind it.
+//
+// The drain exits as soon as the job reports zero active processes, and used
+// to log "browser finished; job drained" when it did. On Linux and darwin the
+// processJob stubs return zero unconditionally — there is no Job Object — so
+// that line fired on lap ZERO of every single launch, announcing a completion
+// nobody had observed and nothing had waited for. It is the one place in the
+// drain that broke the "could not confirm is not confirmed" line the rest of
+// the refresh path holds.
+//
+// A zero-handle job reports zero on Windows too, so this reproduces the exact
+// shape on every platform.
+func TestDrainJobWithNothingToWaitOnDoesNotClaimTheBrowserFinished(t *testing.T) {
+	log := &capturingDrainLogger{}
+	if err := drainJob(context.Background(), &processJob{}, time.Now(), 30*time.Second, log); err != nil {
+		t.Fatalf("drainJob = %v, want nil", err)
+	}
+
+	if len(log.msgs) != 1 {
+		t.Fatalf("expected exactly one log line, got %v", log.msgs)
+	}
+	got := log.msgs[0]
+	if strings.Contains(got, "browser finished") {
+		t.Errorf("nothing was ever seen alive in the job, so nothing finished as far as this can tell: %q", got)
+	}
+	if !strings.Contains(got, "not waited on") {
+		t.Errorf("the line must say what actually happened — that there was nothing to wait for: %q", got)
 	}
 }
