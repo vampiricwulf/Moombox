@@ -493,10 +493,17 @@ func (s *runState) wireMonitorCallbacks() {
 	// live each cycle, so toggling the setting or acquiring cookies takes effect
 	// on the next cycle with no restart.
 	s.feedMon.FetchMembership = func(ctx context.Context, channelID string) ([]monitor.MembershipVideo, error) {
-		vids, err := s.ytService.FetchMembershipVideos(ctx, channelID)
+		vids, verdict, err := s.ytService.FetchMembershipVideos(ctx, channelID)
 		if err != nil {
 			return nil, err
 		}
+		// The probe's login verdict is a credential-health signal, not a
+		// discovery result, so MembershipFetchFunc keeps its two-value shape
+		// and the adapter absorbs the third. Routing it to the health
+		// reporter is a later step in this arc — and it has to arrive there
+		// deduped, because this closure runs once per configured channel per
+		// cycle and one dead session must not raise N alarms.
+		_ = verdict
 		out := make([]monitor.MembershipVideo, len(vids))
 		for i, v := range vids {
 			out[i] = monitor.MembershipVideo{VideoID: v.VideoID, Title: v.Title, Age: v.Age}
@@ -508,7 +515,20 @@ func (s *runState) wireMonitorCallbacks() {
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			enabled = c.Monitors.MembershipDiscoveryEnabled()
 		})
-		return enabled && s.ytService.HasAuthCookies()
+		// HasAnyAuthCookie, not HasAuthCookies: this gate asks "should we
+		// even look", and the complete-set predicate answers no for exactly
+		// the half-cleared session the probe exists to detect — SAPISID
+		// present with LOGIN_INFO gone reads as never-configured. Left
+		// strict, FetchMembershipVideos is never called in that state and
+		// the verdict it now returns is unreachable.
+		//
+		// Widening is safe HERE specifically: the feed cycle's membership arm
+		// only upserts the videos it finds, so a dead session yields a
+		// non-member page, zero videos and zero writes — indistinguishable
+		// from an account that holds no membership. It records no completion
+		// flag, unlike the backfill sweep's own gate (services.go), which
+		// persists backfilled_with_membership and must stay strict.
+		return enabled && s.ytService.HasAnyAuthCookie()
 	}
 
 	// createYouTubeJob creates a YouTube job per the disposition's creation

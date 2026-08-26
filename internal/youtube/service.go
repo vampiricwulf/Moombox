@@ -284,6 +284,17 @@ func (s *Service) HasAuthCookies() bool {
 	return s.Auth.HasAuthCookies()
 }
 
+// HasAnyAuthCookie reports whether YouTube auth was ever configured, as
+// opposed to whether a complete working set is present right now. A gate that
+// decides "should we even try" belongs on this predicate: HasAuthCookies
+// skips exactly the half-cleared session worth detecting.
+//
+// Do NOT swap a caller that asks "do we have a usable credential set" onto
+// this — that question is still HasAuthCookies'.
+func (s *Service) HasAnyAuthCookie() bool {
+	return s.Auth.HasAnyAuthCookie()
+}
+
 // GetVisitorData returns the cached visitor data extracted from a watch page.
 func (s *Service) GetVisitorData() string {
 	s.vdMu.RLock()

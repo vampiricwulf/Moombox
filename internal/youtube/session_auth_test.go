@@ -199,12 +199,40 @@ func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 }
 
 // TestSessionAuthFromBytesDoesNotAllocate guards the reason this function
-// exists. If a marker ever grows past 32 bytes the compiler stops using a
-// stack tmpBuf for the []byte conversion and this starts allocating per
-// call, on a ~1MB page, on every monitor cycle.
+// exists: the membership probe holds a ~1MB page as []byte and reads the
+// login flag off it once per channel per monitor cycle, so the marker
+// conversions must stay off the heap.
+//
+// What actually keeps them off it is escape analysis, NOT the marker size.
+// Measured 2026-08-26: lengthening a marker to 300 bytes, and making one a
+// var instead of a const, both still allocate zero — bytes.Index and
+// bytes.Contains do not retain their argument, so the conversion stays local.
+// What DOES make this fire is the converted slice escaping (verified by
+// assigning it to a package var). So read a failure here as "something now
+// keeps a reference to the converted marker", not as "a marker got too long".
 func TestSessionAuthFromBytesDoesNotAllocate(t *testing.T) {
 	page := append(bytes.Repeat([]byte("x"), 900<<10), []byte(`ytcfg.set({"LOGGED_IN":true});`)...)
 	if n := testing.AllocsPerRun(200, func() { _ = sessionAuthFromBytes(page) }); n != 0 {
-		t.Errorf("allocs/op = %v, want 0 — is a marker now longer than 32 bytes?", n)
+		t.Errorf("allocs/op = %v, want 0 — does the converted marker now escape?", n)
+	}
+}
+
+// TestLivenessVerdictDoesNotAllocate is the same guard one layer up, and the
+// hotter path: livenessVerdict is what the membership probe calls, and it
+// pays TWO []byte conversions of its own in the guard before delegating to
+// sessionAuthFromBytes' three. The guard's MISS path is the worst case — both
+// bytes.Contains scans run the full page before it returns Unknown.
+//
+// It is a separate pin because it covers separate conversions: making only
+// livenessVerdict's escape leaves TestSessionAuthFromBytesDoesNotAllocate
+// green and fails here.
+func TestLivenessVerdictDoesNotAllocate(t *testing.T) {
+	hit := append(bytes.Repeat([]byte("x"), 900<<10), []byte(`ytcfg.set({"LOGGED_IN":true});`)...)
+	if n := testing.AllocsPerRun(200, func() { _ = livenessVerdict(hit) }); n != 0 {
+		t.Errorf("allocs/op (marker present) = %v, want 0 — does a converted marker now escape?", n)
+	}
+	miss := bytes.Repeat([]byte("x"), 900<<10)
+	if n := testing.AllocsPerRun(200, func() { _ = livenessVerdict(miss) }); n != 0 {
+		t.Errorf("allocs/op (no marker) = %v, want 0 — does a converted marker now escape?", n)
 	}
 }

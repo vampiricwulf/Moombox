@@ -550,6 +550,20 @@ func (s *runState) initServices(logLevelOverride string) error {
 				refs = append(refs, monitor.ChannelRef{Ch: &ch, ChID: ch.ID, WindowDays: days})
 			}
 		})
+		// HasAuthCookies — the COMPLETE-set predicate — and it stays that way.
+		// The feed monitor's membership gate (monitor_callbacks.go) was
+		// widened to HasAnyAuthCookie so a half-cleared session still gets
+		// probed; do NOT mirror that here for symmetry. This gate is
+		// load-bearing on durable state, and widening it loses data:
+		// flipping WithMembership on satisfies needsBackfill's membership arm
+		// (backfill.go — a RECORDED false plus current eligibility), which
+		// queues a full catalog re-scan; completeScan then persists
+		// backfilled_with_membership = true even though the dead session made
+		// the membership tab come back empty. Since that arm only re-fires on
+		// a recorded false, the channel is permanently marked
+		// membership-complete and its members-only backlog is never
+		// re-scanned once the cookies are fixed. Widening this needs
+		// backfilled_with_membership handling to go with it.
 		if membershipOn && ytService.HasAuthCookies() {
 			for i := range refs {
 				refs[i].WithMembership = true
