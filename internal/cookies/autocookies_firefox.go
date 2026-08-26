@@ -746,18 +746,26 @@ func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
 //     bad but known; spinning on a failing syscall for the whole budget is
 //     worse.
 //
-// VERIFICATION STATUS — one browser, one platform. The measurements above come
-// from Waterfox on Windows, run against copies of a real profile: the killed
-// launch returned in 170ms with no screenshot and an untouched profile; the
-// drained launch took 3.082s over 59 polls and wrote both. Every other
-// Firefox-family browser is UNVERIFIED.
+// VERIFICATION STATUS — two browsers, one platform, both on Windows.
+//
+//	Waterfox  2026-08-25  drained in 2.848s over 53 polls, 6 YouTube cookies
+//	Firefox   2026-08-25  drained in 1.734s over 32 polls, 6 YouTube cookies
+//
+// Both ran against a throwaway profile via the live gate below; the killed
+// control (job closed the instant cmd.Wait() returned) came back in 146-167ms
+// having written a cookies.sqlite with ZERO rows, on both. The earlier
+// Waterfox figure — 3.082s over 59 polls against a copy of a real profile —
+// still holds. LibreWolf and Zen remain UNVERIFIED, as does every non-Windows
+// platform (where there is no job to drain at all).
 //
 // The risk if one behaves differently: this waits for the job to become EMPTY,
 // which is a stronger condition than "the page finished loading". A browser
 // that leaves any process alive in the job — a background updater, a crash
 // reporter, a lingering content process — would burn the full processTimeout
 // budget on every refresh and return errBrowserDrainTimeout, turning working
-// refreshes into reported failures. Not observed on Waterfox.
+// refreshes into reported failures. Observed on neither Waterfox nor Firefox,
+// which is the point of having run two: the empty-job condition is not a
+// Waterfox quirk.
 //
 // Accepted rather than defended against, on three grounds: it is bounded by the
 // budget, it degrades rather than aborts, and the poll count and elapsed time
@@ -765,14 +773,18 @@ func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
 // weaker stop condition without a browser that actually needs one would trade a
 // proven fix for a speculative one.
 //
-// To close this out, run the live gate against a second Firefox-family browser
-// (Firefox, LibreWolf, or Zen):
+// To extend this to LibreWolf or Zen, run the live gate against one.
+// DetectBrowser cannot be steered, so name the executable directly —
+// MOOMBOX_LIVE_BROWSER_PATH exists for exactly this:
 //
 //	$env:MOOMBOX_LIVE_BROWSER_REFRESH="1"
-//	go test -count=1 -run TestLiveFirefoxRefreshWritesTheProfile ./internal/cookies/...
+//	$env:MOOMBOX_LIVE_BROWSER_PATH="$env:LOCALAPPDATA\Mozilla Firefox\firefox.exe"
+//	go test -count=1 -v -run TestLiveFirefoxRefreshWritesTheProfile ./internal/cookies/
 //
-// A drain completing in a second or two with a screenshot on disk confirms the
-// condition generalises.
+// A drain that empties the job in a few seconds and leaves YouTube cookies in
+// the throwaway profile confirms the condition generalises. Do NOT look for a
+// screenshot there: --screenshot is unreliable against freshly-created
+// profiles, which is why the gate only logs it — see the test's doc comment.
 func drainJob(ctx context.Context, job *processJob, startedAt time.Time, budget time.Duration, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
