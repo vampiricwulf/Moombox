@@ -270,14 +270,34 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	return s
 }
 
-// refreshPlatforms returns the platforms that have cookies in the jar and need refreshing.
-// Order is stable: YouTube first, then Twitch.
+// refreshPlatforms returns the platforms that have cookies in the jar and need
+// refreshing. Order is stable: YouTube first, then Twitch. It gates the whole
+// browser refresh (RefreshCookiesDetailed), the Firefox launch loop and the
+// Chromium navigation loop, so a platform missing from this list is never
+// visited at all.
+//
+// The question is "does the jar already hold cookies worth re-fetching" — was
+// this platform ever configured — not "is the credential set complete right
+// now". Hence the permissive predicates.
+//
+// Read strictly, this list makes the remedy unreachable exactly when it is
+// needed. A jar holding SAPISID with LOGIN_INFO cleared is what YouTube's
+// rotation-invalidation leaves behind; doRefresh now fires OnRecoveryNeeded on
+// it, recovery calls RefreshCookiesDetailed, the strict predicate returns an
+// empty list, the refresh declines — and the operator reads "Cookie
+// Auto-Refresh Ineffective … it either declined to run or found nothing
+// usable" about the one platform it was called to fix. Same for a Twitch
+// session left holding only twilight-user.
+//
+// A platform with no auth cookie at all is still excluded, and that is not the
+// same omission: there is no session to re-fetch, so a browser launched at it
+// costs a process and can bring nothing back.
 func (s *AutoCookieService) refreshPlatforms() []string {
 	var platforms []string
-	if s.jar.HasYouTubeAuthCookies() {
+	if s.jar.HasAnyYouTubeAuthCookie() {
 		platforms = append(platforms, "youtube")
 	}
-	if s.jar.HasTwitchAuthCookies() {
+	if s.jar.HasAnyTwitchAuthCookie() {
 		platforms = append(platforms, "twitch")
 	}
 	return platforms
@@ -958,8 +978,16 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// refreshPlatforms() gated on, and the disagreement between the jar
 	// (which ignores expiry) and mergeCookieFiles (which prunes on it) is
 	// precisely how a refresh can end up writing an empty file.
-	hadYTAuth := s.jar.HasYouTubeAuthCookies()
-	hadTWAuth := s.jar.HasTwitchAuthCookies()
+	//
+	// Same predicate as refreshPlatforms() and checkPlatformAuth, so `lost`
+	// below compares like with like. It also makes the sentence
+	// cookiesLostMessage prints true: "nothing is left to authenticate with"
+	// describes a platform that went from some credential to none, which is
+	// what these now measure. Under the complete-set predicate a full set
+	// degrading to a partial one was reported as a total loss (false), and a
+	// partial set vanishing entirely was not reported at all (silent).
+	hadYTAuth := s.jar.HasAnyYouTubeAuthCookie()
+	hadTWAuth := s.jar.HasAnyTwitchAuthCookie()
 	fetchedRows := countNetscapeCookieRows(netscapeCookies)
 
 	if previousCookies != "" {
@@ -1081,8 +1109,15 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// failure flags a re-login: an unreachable network told us nothing about
 	// the credentials, and sending the user to sign in again over a blip is
 	// both wrong and, in a container, impossible to act on.
-	ytHasCookies := s.jar.HasYouTubeAuthCookies()
-	twHasCookies := s.jar.HasTwitchAuthCookies()
+	//
+	// Taken from the verdicts rather than re-read from the jar, as the comment
+	// above result says: the presence bit has to describe the same moment and
+	// the same question as the state it is paired with. Re-reading it strictly
+	// here silently dropped the half-cleared platform out of both `failed` and
+	// the re-login flag, so a session YouTube had conclusively rejected
+	// produced no prompt and no targeted message.
+	ytHasCookies := postYT.hasCookies
+	twHasCookies := postTW.hasCookies
 
 	// Platforms that HAD auth cookies going into this refresh and do not
 	// have them coming out. This is per platform on purpose: the jar ignores
