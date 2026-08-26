@@ -29,12 +29,12 @@ var cookiesHTTPClient = httpx.Client(30 * time.Second)
 var (
 	youtubeGuideURL        = "https://www.youtube.com/youtubei/v1/guide"
 	youtubeGuideRefreshURL = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
+	twitchValidateURL      = "https://id.twitch.tv/oauth2/validate"
 )
 
 const (
 	defaultRefreshInterval = 30 * time.Minute
 	authCheckTimeout       = 15 * time.Second
-	twitchValidateURL      = "https://id.twitch.tv/oauth2/validate"
 
 	// youtubeClientVersion is the WEB client version sent in Innertube API requests.
 	// Update this when YouTube bumps the client version — it's used in auth check
@@ -993,5 +993,26 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 		resp.Body.Close()
 	}()
 
-	return resp.StatusCode == http.StatusOK, nil
+	// Twitch documents exactly two answers for oauth2/validate: 200 for a
+	// valid token, 401 for an invalid one. So 401 stays CONCLUSIVE — it is
+	// the one status that genuinely means "sign in again", and folding it
+	// into the error branch below would suppress recovery and the re-login
+	// prompt for every expired token. Everything else is infrastructure (a
+	// rate limiter, an outage, an edge block) and says nothing about the
+	// token, so it must not be reported as dead credentials — the same
+	// mistake the YouTube guide check made, reachable here through the same
+	// checkPlatformAuth mapping.
+	//
+	// The error names the status and nothing else. It reaches
+	// AutoCookieService.setError and is rendered in the Web UI and TUI, so a
+	// response body echoed back by an intermediary must never be
+	// interpolated into it.
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusUnauthorized:
+		return false, nil
+	default:
+		return false, fmt.Errorf("twitch auth check: unexpected status %d", resp.StatusCode)
+	}
 }
