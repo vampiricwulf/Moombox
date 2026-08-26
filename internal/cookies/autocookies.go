@@ -1069,10 +1069,30 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 			// tell the user their credentials are fresher than they are.
 			s.lastRefresh = &now
 		}
-		if lostMsg != "" {
+		switch {
+		case lostMsg != "":
+			// A loss is something THIS pass observed, so it is recorded
+			// whether or not the pass renewed anything.
 			s.lastError = &lostMsg
-		} else {
+		case renewed:
 			s.lastError = nil
+		default:
+			// Withheld for the same reason lastRefresh is. Clearing lastError
+			// is an assertion — "whatever was wrong is not wrong any more" —
+			// and this pass has no basis for it. What it established is that
+			// the credentials ON DISK verify; what it could not establish is
+			// that the refresh mechanism works, which is exactly what a
+			// previously recorded error may have been about ("the browser
+			// profile contained no cookies to refresh from — check whether the
+			// browser is clearing cookies on exit"). Retracting that report
+			// off a pass whose browser did nothing is how a twice-broken
+			// refresh presents a clean bill of health.
+			//
+			// Nothing is set here either: the credentials verify, so the
+			// Settings error field — which reads as "your recordings will
+			// fail" — would be alarming a user whose recordings are fine.
+			// The honest signals for this case are a lastRefresh that stays
+			// stale and the Warn logged below.
 		}
 		s.mu.Unlock()
 

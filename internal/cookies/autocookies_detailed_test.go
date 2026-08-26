@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -183,5 +184,99 @@ func TestAnyVerifiedPinsTheLegacyBool(t *testing.T) {
 				t.Errorf("anyVerified(%v, %v) = %v, want %v", yt, tw, got, want)
 			}
 		}
+	}
+}
+
+// TestRefreshThatRenewedNothingKeepsThePriorError is the second carried
+// ledger item from A0.4, verified reachable and then closed.
+//
+// The clearing of lastError sat OUTSIDE the `renewed` gate that A0.4 added
+// for lastRefresh and the meta sidecar. So a pass whose browser did nothing
+// at all — the credentials on disk verify only because the independent
+// 30-minute RefreshService keeps them alive — would still retract a
+// previously recorded problem. Since the recorded problem is typically ABOUT
+// the refresh mechanism ("the browser profile contained no cookies to refresh
+// from"), a twice-broken refresh cleared its own report and presented a clean
+// bill of health.
+func TestRefreshThatRenewedNothingKeepsThePriorError(t *testing.T) {
+	// Nothing relevant in the profile, so the read contributes nothing and
+	// the existing cookies.txt is what verifies.
+	profileDir := writeWALCookieProfile(t, []profileTestCookie{
+		{name: "sessionid", value: "x", host: ".example.com", path: "/"},
+	})
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(youtubeOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	// A browser that cannot launch is the simplest not-acted case: no
+	// screenshot, and refreshFirefox degrades rather than failing the refresh.
+	s.detectBrowser = func() *DetectedBrowser {
+		return &DetectedBrowser{Type: "firefox", Path: "moombox-no-such-browser", Name: "Firefox"}
+	}
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+	if err := s.jar.Load(cookiePath); err != nil {
+		t.Fatal(err)
+	}
+
+	const prior = "the browser profile contained no cookies to refresh from"
+	s.setError(prior)
+
+	result, err := s.RefreshCookiesDetailed(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshCookiesDetailed: %v", err)
+	}
+	if result.Verdict("youtube") != RefreshOK {
+		t.Fatalf("fixture is broken — the cookies on disk were supposed to still verify, got %v",
+			result.Verdict("youtube"))
+	}
+	if lr := s.GetStatus().LastRefresh; lr != nil {
+		t.Fatalf("fixture is broken — this pass was supposed to renew nothing, got lastRefresh %q", *lr)
+	}
+
+	status := s.GetStatus()
+	if status.LastError == nil {
+		t.Fatal("a pass whose browser did nothing retracted a previously recorded problem — " +
+			"it established that the CREDENTIALS work, not that the REFRESH does")
+	}
+	if *status.LastError != prior {
+		t.Errorf("LastError = %q, want the untouched prior error %q", *status.LastError, prior)
+	}
+}
+
+// TestRefreshThatRenewedClearsThePriorError is the control for the test
+// above: gating the clear must not make a stale error permanent. A pass that
+// really did fetch credentials — here the browserless profile import, the
+// container path — has the standing to retract an earlier report.
+func TestRefreshThatRenewedClearsThePriorError(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(youtubeOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+	if err := s.jar.Load(cookiePath); err != nil {
+		t.Fatal(err)
+	}
+	s.setError("something that used to be wrong")
+
+	result, err := s.RefreshCookiesDetailed(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshCookiesDetailed: %v", err)
+	}
+	if result.Verdict("youtube") != RefreshOK {
+		t.Fatalf("fixture is broken — the import was supposed to verify, got %v", result.Verdict("youtube"))
+	}
+	if s.GetStatus().LastRefresh == nil {
+		t.Fatal("fixture is broken — an import renews, so this pass should have stamped lastRefresh")
+	}
+	if le := s.GetStatus().LastError; le != nil {
+		t.Errorf("LastError = %q, want cleared — this pass fetched the credentials it verified", *le)
 	}
 }
