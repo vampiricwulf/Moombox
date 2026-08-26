@@ -522,12 +522,28 @@ func (s *runState) wireMonitorCallbacks() {
 		// strict, FetchMembershipVideos is never called in that state and
 		// the verdict it now returns is unreachable.
 		//
-		// Widening is safe HERE specifically: the feed cycle's membership arm
-		// only upserts the videos it finds, so a dead session yields a
-		// non-member page, zero videos and zero writes — indistinguishable
-		// from an account that holds no membership. It records no completion
-		// flag, unlike the backfill sweep's own gate (services.go), which
-		// persists backfilled_with_membership and must stay strict.
+		// This value reaches FOUR consumers via membershipActive()
+		// (internal/monitor/feed.go:645). Widening was checked against all
+		// four, not just the first:
+		//
+		//	feed.go:513     the discovery arm — upserts only videos it finds
+		//	walk.go:90      skips membership-source rows when inactive
+		//	walk.go:247     same-cycle escalation to the authed probe
+		//	archive.go:131  skips membership-source rows when inactive
+		//
+		// None writes durable state for a dead session: a refusal is
+		// OutcomeDenied, applyProbe runs only on OutcomeProbed, and archive's
+		// denied arm just counts a retry. No job, no classification, no
+		// completion flag — unlike the backfill sweep's own gate
+		// (services.go), which persists backfilled_with_membership and must
+		// stay strict.
+		//
+		// There IS a real cost: with a half-cleared session those membership
+		// rows are no longer parked at walk.go:90 / archive.go:131, so each
+		// burns one refused authenticated probe per cycle, and walk.go:247's
+		// same-cycle escalation fires too. That is the price of observing the
+		// session at all, and it stops the moment the cookies are fixed or
+		// the operator clears them.
 		return enabled && s.ytService.HasAnyAuthCookie()
 	}
 

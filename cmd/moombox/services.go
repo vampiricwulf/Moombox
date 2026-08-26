@@ -557,13 +557,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// load-bearing on durable state, and widening it loses data:
 		// flipping WithMembership on satisfies needsBackfill's membership arm
 		// (backfill.go — a RECORDED false plus current eligibility), which
-		// queues a full catalog re-scan; completeScan then persists
-		// backfilled_with_membership = true even though the dead session made
-		// the membership tab come back empty. Since that arm only re-fires on
-		// a recorded false, the channel is permanently marked
-		// membership-complete and its members-only backlog is never
-		// re-scanned once the cookies are fixed. Widening this needs
-		// backfilled_with_membership handling to go with it.
+		// queues a full catalog re-scan; a missing membership tab is "clean
+		// empty exhaustion" to scanTab (browse.go), so the scan COMPLETES and
+		// completeScan persists backfilled_with_membership = true even though
+		// the dead session made that tab come back empty. Since that arm only
+		// re-fires on a recorded false, the AUTOMATIC path never revisits the
+		// channel's members-only backlog once the cookies are fixed — it now
+		// reads as membership-complete forever.
+		//
+		// Recovery exists but is not automatic: Sweep(force=true) skips
+		// needsBackfill entirely (the R B chord, POST /api/backfill/rescan),
+		// and widening archive_window_days re-fires the window arm. An
+		// operator who never does either never gets that backlog. Widening
+		// this gate needs backfilled_with_membership handling to go with it.
 		if membershipOn && ytService.HasAuthCookies() {
 			for i := range refs {
 				refs[i].WithMembership = true

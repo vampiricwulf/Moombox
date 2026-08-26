@@ -203,17 +203,28 @@ func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 // login flag off it once per channel per monitor cycle, so the marker
 // conversions must stay off the heap.
 //
-// What actually keeps them off it is escape analysis, NOT the marker size.
-// Measured 2026-08-26: lengthening a marker to 300 bytes, and making one a
-// var instead of a const, both still allocate zero — bytes.Index and
-// bytes.Contains do not retain their argument, so the conversion stays local.
-// What DOES make this fire is the converted slice escaping (verified by
-// assigning it to a package var). So read a failure here as "something now
-// keeps a reference to the converted marker", not as "a marker got too long".
+// TWO independent things keep the conversions off the heap, and a failure
+// here means one of them stopped holding:
+//
+//   - The markers are compile-time CONSTANTS. For a constant the compiler
+//     emits an exact-size stack array, so no size ceiling applies at all.
+//   - bytes.Index and bytes.Contains do not retain their argument, so escape
+//     analysis keeps the conversion local.
+//
+// The 32-byte ceiling is real but applies only to the NON-constant case:
+// runtime.stringtoslicebyte (runtime/string.go:224) uses its caller's stack
+// tmpBuf when len(s) <= tmpStringBufSize (32) and calls rawbyteslice
+// otherwise. Measured on go1.26.1, 2026-08-26: const at 31/32/33/66/310 bytes
+// all allocate 0; a package var allocates 0 at 31 and 32 bytes and 1 at 33 and
+// above; a conversion made to escape allocates 1 at any length.
+//
+// So read a failure here as either "a converted marker now escapes" or "a
+// marker stopped being a constant AND is longer than 32 bytes" — not as
+// marker length alone, and not as escape alone.
 func TestSessionAuthFromBytesDoesNotAllocate(t *testing.T) {
 	page := append(bytes.Repeat([]byte("x"), 900<<10), []byte(`ytcfg.set({"LOGGED_IN":true});`)...)
 	if n := testing.AllocsPerRun(200, func() { _ = sessionAuthFromBytes(page) }); n != 0 {
-		t.Errorf("allocs/op = %v, want 0 — does the converted marker now escape?", n)
+		t.Errorf("allocs/op = %v, want 0 — did a converted marker escape, or stop being a const while exceeding 32 bytes?", n)
 	}
 }
 
@@ -226,13 +237,16 @@ func TestSessionAuthFromBytesDoesNotAllocate(t *testing.T) {
 // It is a separate pin because it covers separate conversions: making only
 // livenessVerdict's escape leaves TestSessionAuthFromBytesDoesNotAllocate
 // green and fails here.
+//
+// Same two failure causes as that test — see its comment for the measured
+// const/var × length matrix and the runtime source behind it.
 func TestLivenessVerdictDoesNotAllocate(t *testing.T) {
 	hit := append(bytes.Repeat([]byte("x"), 900<<10), []byte(`ytcfg.set({"LOGGED_IN":true});`)...)
 	if n := testing.AllocsPerRun(200, func() { _ = livenessVerdict(hit) }); n != 0 {
-		t.Errorf("allocs/op (marker present) = %v, want 0 — does a converted marker now escape?", n)
+		t.Errorf("allocs/op (marker present) = %v, want 0 — did a converted marker escape, or stop being a const while exceeding 32 bytes?", n)
 	}
 	miss := bytes.Repeat([]byte("x"), 900<<10)
 	if n := testing.AllocsPerRun(200, func() { _ = livenessVerdict(miss) }); n != 0 {
-		t.Errorf("allocs/op (no marker) = %v, want 0 — does a converted marker now escape?", n)
+		t.Errorf("allocs/op (no marker) = %v, want 0 — did a converted marker escape, or stop being a const while exceeding 32 bytes?", n)
 	}
 }
