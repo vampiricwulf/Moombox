@@ -158,6 +158,15 @@ func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 	return cdpGetCookiesAsNetscape(ctx, port)
 }
 
+// No minPlausibleBrowserRefresh-style floor here, deliberately. That
+// threshold was measured against the Firefox launcher-handoff path — a
+// stamped startTime, a drain wait, a screenshot artifact — none of which
+// exist here: this function drives the browser directly over CDP with no
+// intermediate launcher process. A floor calibrated on a different
+// mechanism, with no timing data of its own, would be a new heuristic
+// guessing at a failure mode this path hasn't been shown to have; see
+// cdpNavigate's discarded error return below for where this path's actual
+// gap lives.
 func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *DetectedBrowser) (string, error) {
 	if s.profileDirErr != nil {
 		return "", s.profileDirErr

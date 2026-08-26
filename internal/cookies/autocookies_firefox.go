@@ -196,7 +196,8 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		elapsed := time.Since(startTime).Round(time.Millisecond)
 
 		rendered := browserRendered(tempScreenshot)
-		if !browserLaunchActed(err, rendered) {
+		acted := browserLaunchActed(err, rendered)
+		if !acted {
 			allActed = false
 		}
 		profileWritten := fingerprintsDiffer(beforeDB, fingerprintCookieDB(cookieDB))
@@ -240,6 +241,12 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 				"elapsed", elapsed, "profile_written", profileWritten)
 		default:
 			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", elapsed, "profile_written", profileWritten)
+			// Observability only: does not touch acted, allActed, or any
+			// return value. See refreshLooksImplausiblyFast.
+			if refreshLooksImplausiblyFast(elapsed, acted) {
+				s.logger.Debug("firefox "+platform+" refresh rendered unusually fast; the page may not have fully loaded",
+					"elapsed", elapsed, "floor", minPlausibleBrowserRefresh)
+			}
 		}
 	}
 
@@ -296,6 +303,41 @@ func browserRendered(path string) bool {
 //     the paths that logged "refresh completed" while doing nothing.
 func browserLaunchActed(launchErr error, rendered bool) bool {
 	return launchErr == nil && rendered
+}
+
+// minPlausibleBrowserRefresh is a Debug-level sanity threshold, not a second
+// success gate. browserLaunchActed's screenshot check is the decisive verdict
+// on whether a launch acted, and this constant plays no part in it — see
+// refreshLooksImplausiblyFast, which never changes browserActed, a return
+// value, or control flow. It only decides whether a launch that already
+// reported "acted" is worth a Debug note.
+//
+// Measured against the owner's Waterfox, run against a copy of the real
+// profile, with A0.3's drain-wait in place: a no-op launch (the browser
+// killed before it could paint anything) completed in 160-211 ms; a working
+// launch that actually rendered the page completed in 3.08 s (the drain
+// finishing in 59 polls). 1 s sits ~5x above the no-op and ~3x below the
+// working case — margin on both sides, so do not retune it toward either
+// observed number without new measurements of your own.
+const minPlausibleBrowserRefresh = 1 * time.Second
+
+// refreshLooksImplausiblyFast is a pure, table-testable predicate behind the
+// Debug note logged when a launch that already reported ACTED (a screenshot
+// exists, no launch error) finished suspiciously quickly.
+//
+// acted is a parameter rather than re-derived here on purpose: a launch that
+// was already reported not-acted gets no second complaint — that failure is
+// already loud through browserLaunchActed, and layering a heuristic warning
+// on top of a fact would just be noise. This function only has something to
+// say about the launches the fact already credited.
+//
+// On Linux there is no Job Object, so drainJob returns on lap zero (see its
+// doc comment) and a launch that genuinely worked can still read as fast
+// here. The Debug message at the call site is worded as an observation, not
+// a conclusion, so that routine case does not read as an assertion of
+// failure.
+func refreshLooksImplausiblyFast(elapsed time.Duration, acted bool) bool {
+	return acted && elapsed < minPlausibleBrowserRefresh
 }
 
 // restoreRefreshSlot puts the claim SENTINEL back once the launched browser
