@@ -18,4 +18,9 @@ func newProcessJob() (*processJob, error)        { return &processJob{}, nil }
 func (j *processJob) assign(p *os.Process) error { return nil }
 func (j *processJob) close()                     {}
 
+// activeProcesses always reports zero — there is no job to count, so
+// runWithTimeout's drain loop exits on its first lap and this platform keeps
+// exactly today's behaviour.
+func (j *processJob) activeProcesses() (int, error) { return 0, nil }
+
 func configureCmdSysProcAttr(*exec.Cmd) {}

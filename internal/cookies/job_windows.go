@@ -13,11 +13,15 @@ var (
 	procCreateJobObjectW      = kernel32.NewProc("CreateJobObjectW")
 	procSetInformationJobObj  = kernel32.NewProc("SetInformationJobObject")
 	procAssignProcessToJobObj = kernel32.NewProc("AssignProcessToJobObject")
+	procQueryInformationJobOb = kernel32.NewProc("QueryInformationJobObject")
 )
 
 const (
 	jobObjectExtendedLimitInformation = 9
 	jobObjectLimitKillOnJobClose      = 0x2000
+	// jobObjectBasicAccountingInformation is the JOBOBJECTINFOCLASS value
+	// that makes QueryInformationJobObject return live process counts.
+	jobObjectBasicAccountingInformation = 1
 )
 
 // jobobjectExtendedLimitInformation matches the Windows
@@ -107,6 +111,56 @@ func (j *processJob) assign(p *os.Process) error {
 		return fmt.Errorf("AssignProcessToJobObject: %w", callErr)
 	}
 	return nil
+}
+
+// jobobjectBasicAccountingInformation matches the Windows
+// JOBOBJECT_BASIC_ACCOUNTING_INFORMATION struct layout — 4x LARGE_INTEGER
+// then 4x DWORD. No padding on amd64: 32 bytes of int64 followed by 16 bytes
+// of uint32.
+type jobobjectBasicAccountingInformation struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
+
+// activeProcesses reports how many processes are still alive in the job.
+//
+// This is what makes the Firefox-family refresh work at all. Firefox uses a
+// launcher-process model: the exe we start hands off to the real browser and
+// exits in ~170ms, so cmd.Wait() returning tells us nothing about whether the
+// page loaded. Closing the job at that moment kills the browser mid-load —
+// measured, and the reason every refresh silently did nothing.
+//
+// A nil job (newProcessJob failed; runWithTimeout carries on without one) or
+// an already-closed handle reports zero, which reads as "nothing left to wait
+// for" and degrades the caller to the pre-drain behaviour rather than erroring.
+func (j *processJob) activeProcesses() (int, error) {
+	if j == nil || j.handle == 0 {
+		return 0, nil
+	}
+	var info jobobjectBasicAccountingInformation
+	var retLen uint32
+	// Check r == 0, NOT callErr != nil. syscall.LazyProc.Call always returns
+	// a non-nil syscall.Errno, and Errno(0) formats as "The operation
+	// completed successfully." — so an err-based check reports every success
+	// as a failure with a cheerful message. The other calls in this file get
+	// this right too (newProcessJob, assign); do not "fix" it.
+	r, _, callErr := procQueryInformationJobOb.Call(
+		uintptr(j.handle),
+		uintptr(jobObjectBasicAccountingInformation),
+		uintptr(unsafe.Pointer(&info)),
+		uintptr(unsafe.Sizeof(info)),
+		uintptr(unsafe.Pointer(&retLen)),
+	)
+	if r == 0 {
+		return 0, fmt.Errorf("QueryInformationJobObject: %w", callErr)
+	}
+	return int(info.ActiveProcesses), nil
 }
 
 // close terminates all processes in the job and releases the handle.

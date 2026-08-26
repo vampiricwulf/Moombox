@@ -161,16 +161,48 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		s.refreshCmd = cmd
 		s.mu.Unlock()
 		startTime := time.Now()
-		if err := runWithTimeout(cmd, processTimeout, s.logger); err != nil {
-			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", time.Since(startTime).Round(time.Millisecond))
-		} else {
-			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", time.Since(startTime).Round(time.Millisecond))
+		err := runWithTimeout(ctx, cmd, processTimeout, s.restoreRefreshSlot, s.logger)
+		elapsed := time.Since(startTime).Round(time.Millisecond)
+		switch {
+		case errors.Is(err, errBrowserDrainTimeout):
+			// Degrade, do not abort. The browser was alive and has just been
+			// killed, so the profile may be half-written — but the existing
+			// cookies.txt is untouched and readFirefoxCookies below may still
+			// find a usable set. Same shape as the ErrNoCookiesInProfile
+			// handling in RefreshCookies: say what happened, keep going.
+			s.logger.Warn("firefox "+platform+" refresh did not finish in time; the browser was killed mid-load",
+				"elapsed", elapsed, "budget", processTimeout)
+		case err != nil:
+			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", elapsed)
+		default:
+			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", elapsed)
 		}
 	}
 
 	netscape, stats, err := readFirefoxCookies(s.profileDir)
 	s.logFirefoxReadStats(stats)
 	return netscape, err
+}
+
+// restoreRefreshSlot puts the claim SENTINEL back once the launched browser
+// process has been reaped.
+//
+// Not nil: RefreshCookies still has its critical tail to run (merge → atomic
+// write → jar reload → auth verify → meta save), and clearing the slot here
+// would let a concurrent RefreshCookies or StartSetup launch a second browser
+// against the same profile mid-write. The outer defer in RefreshCookies
+// releases the slot for real. Identical reasoning, and identical three lines,
+// to refreshChromium's restore (autocookies_chromium.go).
+//
+// The restore matters MORE than it looks: while the real cmd sits in the slot
+// with a reaped Process, killRefreshProcess would taskkill /F /T a PID
+// Windows may already have recycled onto something else. Before the
+// drain-wait that window was ~200ms; the drain stretches it to the whole
+// launch budget.
+func (s *AutoCookieService) restoreRefreshSlot() {
+	s.mu.Lock()
+	s.refreshCmd = &exec.Cmd{}
+	s.mu.Unlock()
 }
 
 // logFirefoxReadStats reports what a moz_cookies read had to work around.
@@ -513,7 +545,91 @@ func cleanFirefoxLockFiles(profileDir string) {
 	}
 }
 
-func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
+// errBrowserDrainTimeout is returned by runWithTimeout when the launcher
+// process was reaped but the Job Object still held live processes once the
+// launch budget ran out — the browser was still working, or hung, and the
+// deferred job.close() is about to kill it.
+//
+// It is deliberately DISTINCT from a nil return. Returning nil would report a
+// hung browser as a refresh that merely took the whole budget: the exact
+// silent failure the drain-wait exists to fix, only slower and harder to see.
+var errBrowserDrainTimeout = errors.New("browser did not finish within the launch budget")
+
+// shouldKeepWaiting decides whether the job-drain loop takes another lap:
+// processes are still alive in the job AND the launch budget has not run out.
+//
+// Extracted so the decision is testable without a Job Object — the syscall
+// that produces `active` is the part this package cannot exercise in a unit
+// test, and the part that was actually wrong.
+func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
+	return active > 0 && elapsed < budget
+}
+
+// drainJob waits for every process in the job to exit.
+//
+// This is the whole point of the Firefox fix. cmd.Wait() returning tells us
+// only that the LAUNCHER exited: Firefox (and Waterfox / LibreWolf / Zen)
+// hand off to a separate browser process and the launcher exits in ~170ms.
+// Returning at that moment runs the caller's deferred job.close(), whose
+// KILL_ON_JOB_CLOSE kills the real browser mid-page-load — measured, and the
+// reason every Firefox-family cookie refresh silently did nothing.
+//
+// The budget is shared with the launch (startedAt is stamped before
+// cmd.Start), not restarted here, so a slow start eats into the drain rather
+// than granting a second full timeout.
+//
+// Three ways out:
+//   - the job empties → nil, the browser finished on its own;
+//   - the budget expires with processes alive → errBrowserDrainTimeout, and
+//     the caller's job.close() kills them;
+//   - the query fails → nil, degrading to the pre-drain behaviour. That is
+//     bad but known; spinning on a failing syscall for the whole budget is
+//     worse.
+func drainJob(ctx context.Context, job *processJob, startedAt time.Time, budget time.Duration, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+}) error {
+	if job == nil {
+		return nil
+	}
+	for polls := 0; ; polls++ {
+		active, qErr := job.activeProcesses()
+		if qErr != nil {
+			logger.Warn("could not query job process count; not waiting for the browser to finish", "err", qErr, "polls", polls)
+			return nil
+		}
+		elapsed := time.Since(startedAt)
+		if !shouldKeepWaiting(active, elapsed, budget) {
+			if active > 0 {
+				logger.Warn("browser still running when the launch budget expired; killing it",
+					"active", active, "budget", budget, "polls", polls)
+				return errBrowserDrainTimeout
+			}
+			logger.Debug("browser finished; job drained",
+				"elapsed", elapsed.Round(time.Millisecond), "polls", polls)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			// The caller (refreshOverallBudget, or shutdown) gave up. Without
+			// this the drain is up to a full budget of un-cancellable wait
+			// per launch.
+			logger.Warn("cancelled while waiting for the browser to finish",
+				"err", ctx.Err(), "active", active, "polls", polls)
+			return ctx.Err()
+		case <-time.After(killProcessTreePollDelay):
+		}
+	}
+}
+
+// runWithTimeout starts cmd inside a Job Object, waits for the launched
+// process AND for the job to empty, and kills the tree on the way out.
+//
+// onLauncherReaped, when non-nil, is called the instant cmd.Wait() returns —
+// before the drain, which can run for the rest of the budget. The caller uses
+// it to stop advertising a PID that no longer exists (see refreshFirefox).
+func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, onLauncherReaped func(), logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -533,6 +649,9 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
 		}
 	}()
 
+	// Stamped before Start so the launch and the drain share ONE budget
+	// rather than the drain quietly starting a second one.
+	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -559,8 +678,23 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
 
 	select {
 	case err := <-done:
-		logger.Debug("process exited normally", "pid", cmd.Process.Pid, "err", err)
-		return err
+		logger.Debug("launcher process exited", "pid", cmd.Process.Pid, "err", err)
+		// The PID is reaped as of now, so stop advertising it as something to
+		// kill: killProcessTree on a reaped PID can land on whatever Windows
+		// recycled it onto, and the drain below holds that window open for up
+		// to the whole budget instead of ~200ms.
+		if onLauncherReaped != nil {
+			onLauncherReaped()
+		}
+		// Do NOT return here. cmd.Wait() only says the LAUNCHER exited;
+		// returning closes the job and kills the browser it handed off to.
+		drainErr := drainJob(ctx, job, startedAt, timeout, logger)
+		if err != nil {
+			// A launcher that itself failed is the more direct diagnosis;
+			// the drain outcome after it is noise.
+			return err
+		}
+		return drainErr
 	case <-time.After(timeout):
 		logger.Warn("process timed out, killing", "pid", cmd.Process.Pid, "timeout", timeout)
 		// Closing the job handle kills all processes in the job.
