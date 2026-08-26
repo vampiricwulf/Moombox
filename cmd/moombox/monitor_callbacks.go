@@ -15,6 +15,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/worker"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // crossMonitorVouchWindow bounds how recently a sibling monitor must have
@@ -304,6 +305,29 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	}
 }
 
+// routeLivenessVerdict hands one YouTube login verdict to the cookie health
+// signal, and drops the one that is not a verdict.
+//
+// Split out of the FetchMembership closure it is called from because the
+// mapping is the whole of the decision and the closure around it needs a
+// monitor, the service graph and the network to exist. `observe` is
+// (*cookies.RefreshService).ObserveLiveness in production.
+//
+// SessionAuthUnknown is absent from the switch deliberately, not by omission.
+// A consent wall, a rate limit, an off-host redirect and a jar that was never
+// configured all arrive as Unknown; none of them is evidence about the
+// session, and reporting any of them as a dead one would send an operator off
+// to re-export credentials that were never wrong — a remedy that, in a
+// container, they may not even be able to reach.
+func routeLivenessVerdict(observe func(platform string, loggedIn bool), verdict youtube.SessionAuthState) {
+	switch verdict {
+	case youtube.SessionAuthLoggedIn:
+		observe("youtube", true)
+	case youtube.SessionAuthLoggedOut:
+		observe("youtube", false)
+	}
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -494,16 +518,26 @@ func (s *runState) wireMonitorCallbacks() {
 	// on the next cycle with no restart.
 	s.feedMon.FetchMembership = func(ctx context.Context, channelID string) ([]monitor.MembershipVideo, error) {
 		vids, verdict, err := s.ytService.FetchMembershipVideos(ctx, channelID)
+		// The login verdict is a credential-health signal, not a discovery
+		// result, so MembershipFetchFunc keeps its two-value shape and the
+		// adapter absorbs the third here.
+		//
+		// Routed BEFORE the error return on purpose. Whether the tab scan
+		// produced videos is a different question from whether YouTube
+		// recognised the session, and this placement does not depend on the
+		// two answers being packaged together. It costs nothing today —
+		// FetchMembershipVideos returns SessionAuthUnknown on every failure
+		// path — and it means a conclusive verdict reported alongside a failed
+		// fetch would still reach the health signal rather than being dropped
+		// by an early return nobody re-read.
+		//
+		// This closure runs once per configured channel per feed cycle, so a
+		// dead session arrives as N identical verdicts. ObserveLiveness owns
+		// the de-duplication — see livenessRefireWindow in internal/cookies.
+		routeLivenessVerdict(s.cookieRefresh.ObserveLiveness, verdict)
 		if err != nil {
 			return nil, err
 		}
-		// The probe's login verdict is a credential-health signal, not a
-		// discovery result, so MembershipFetchFunc keeps its two-value shape
-		// and the adapter absorbs the third. Routing it to the health
-		// reporter is a later step in this arc — and it has to arrive there
-		// deduped, because this closure runs once per configured channel per
-		// cycle and one dead session must not raise N alarms.
-		_ = verdict
 		out := make([]monitor.MembershipVideo, len(vids))
 		for i, v := range vids {
 			out[i] = monitor.MembershipVideo{VideoID: v.VideoID, Title: v.Title, Age: v.Age}

@@ -36,6 +36,46 @@ const (
 	defaultRefreshInterval = 30 * time.Minute
 	authCheckTimeout       = 15 * time.Second
 
+	// livenessRefireWindow bounds how often ONE platform's logged-out
+	// liveness verdict may clear the dedupe and reach OnRecoveryNeeded.
+	//
+	// The membership probe runs once per configured channel per feed cycle,
+	// so a dead session produces N verdicts within seconds of each other.
+	// Each OnRecoveryNeeded call spawns its own two-minute headless-browser
+	// recovery attempt, so without this an install with N channels would pay
+	// N of them — and, once one of those attempts fails, the operator's
+	// notification cooldown is the only thing standing between them and N
+	// alerts for one problem.
+	//
+	// Its own constant on purpose. It is NOT the notification cooldown in
+	// cmd/moombox's wireMonitorCallbacks, and it is NOT defaultRefreshInterval
+	// above, however the three numbers happen to line up today. It is set to
+	// match that cooldown so the two coalescing windows do not drift apart —
+	// not because either implies the other. The cooldown only starts when a
+	// notification is actually sent, which happens only when a recovery
+	// attempt fails, so what this window bounds is recovery ATTEMPTS. That is
+	// the expensive half anyway: each one is a headless browser.
+	livenessRefireWindow = 30 * time.Minute
+
+	// livenessFreshWindow bounds how old the last conclusive liveness
+	// observation may be before a periodic refresh pays for the
+	// FallbackLiveness probe. That probe is a full first-party page fetch;
+	// an install whose membership probe is already reporting gets the same
+	// answer for free every feed cycle and must not buy a second one.
+	//
+	// Both bounds are load-bearing:
+	//
+	//   - It must be comfortably longer than a feed-monitor cycle, or an
+	//     install with a working membership probe would still pay for the
+	//     fallback whenever the two cadences drifted apart.
+	//   - It must be strictly SHORTER than defaultRefreshInterval, because
+	//     the fallback records its own answer through the same method. At one
+	//     full cadence the fallback's own stamp would still read as fresh on
+	//     the next tick and the probe would quietly suppress itself on
+	//     alternate cycles — halving a coverage nobody decided to halve.
+	//     TestFallbackObservationAgesOutWithinOneCadence pins that.
+	livenessFreshWindow = 25 * time.Minute
+
 	// youtubeClientVersion is the WEB client version sent in Innertube API requests.
 	// Update this when YouTube bumps the client version — it's used in auth check
 	// and session refresh requests. Format: "2.YYYYMMDD.00.00".
@@ -117,6 +157,29 @@ type RefreshService struct {
 	// there is nothing on that side for the signal to unlock.
 	prevYouTubeIdentity string
 
+	// lastLivenessObserved records the last CONCLUSIVE external liveness
+	// observation per platform, in BOTH directions. Consulted by exactly one
+	// thing — the FallbackLiveness skip — which asks "has anything told us
+	// about this session recently?", a question a healthy answer settles just
+	// as well as a dead one.
+	//
+	// Deliberately a different map from lastRecoveryDecided below. One map
+	// serving both questions cannot answer either: a healthy observation has
+	// to make the fallback stand down, and it must not be able to swallow a
+	// dead verdict that lands a moment later.
+	lastLivenessObserved map[string]time.Time
+
+	// lastRecoveryDecided records when a platform's recovery last cleared the
+	// dedupe — from a logged-out liveness verdict in ObserveLiveness, or from
+	// the tier-1 auth check in doRefresh, which stamps it so a dead session
+	// cannot buy two headless-browser attempts in one pass.
+	//
+	// "Decided", not "fired": while livenessRecoveryArmed is false a cleared
+	// liveness verdict is logged rather than acted on, so the stamp records
+	// the decision this map exists to de-duplicate and not, in that case, a
+	// call that happened. A LoggedIn observation must never write here.
+	lastRecoveryDecided map[string]time.Time
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -153,7 +216,39 @@ type RefreshService struct {
 	// Fires for "youtube" only — see prevYouTubeIdentity for why Twitch has
 	// no usable identity signal and nothing that would need one.
 	OnCredentialsChanged func(platform, identity string)
+
+	// FallbackLiveness is a channel-independent YouTube liveness probe,
+	// injected by cmd/moombox rather than called directly, because this
+	// package cannot import internal/youtube — internal/youtube/auth.go
+	// imports this one, so the direct call would be an import cycle. The
+	// injection matches what VerifyYouTubeAuth, HasActiveJobs and
+	// ConfiguredBrowserOverride already do for the same reason.
+	//
+	// Called at the tail of a PERIODIC refresh, and only when no liveness
+	// observation has arrived within livenessFreshWindow: the membership
+	// probe already answers this for a normally-configured install, for free,
+	// every feed cycle. The CheckNow path never calls it — that path runs
+	// synchronously on an HTTP handler.
+	//
+	// conclusive == false means the probe learned nothing (a consent wall, a
+	// rate limit, a transport failure) and MUST NOT move any state. Only a
+	// conclusive answer is passed on to ObserveLiveness.
+	FallbackLiveness func(ctx context.Context) (loggedIn, conclusive bool)
 }
+
+// livenessRecoveryArmed gates whether an external liveness verdict may
+// actually invoke OnRecoveryNeeded.
+//
+// It is false, and that is the entire point of this landing. OnRecoveryNeeded
+// returns early only when auto-cookies are disabled; on an auto_enabled
+// install — which is every install that went through the setup wizard —
+// letting a brand-new signal reach it would launch a headless browser and can
+// send an operator-visible "Cookie Auto-Refresh Failed" notification. These
+// verdicts have never been in the health path before, so they run log-only
+// first: the observation, the dedupe and the freshness accounting all happen
+// and are logged, and only the last step is withheld. Flipping this to true is
+// a deliberate, separate change — not a side effect of wiring something else.
+const livenessRecoveryArmed = false
 
 // NewRefreshService creates a new cookie refresh service.
 // If refreshInterval is zero, the default of 30 minutes is used.
@@ -168,9 +263,11 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 		interval = defaultRefreshInterval
 	}
 	return &RefreshService{
-		jar:             jar,
-		refreshInterval: interval,
-		logger:          logger,
+		jar:                  jar,
+		refreshInterval:      interval,
+		logger:               logger,
+		lastLivenessObserved: make(map[string]time.Time),
+		lastRecoveryDecided:  make(map[string]time.Time),
 	}
 }
 
@@ -251,8 +348,114 @@ func (rs *RefreshService) GetStatus() AuthStatus {
 }
 
 // CheckNow triggers an immediate cookie refresh and auth check.
+//
+// allowFallback is false: POST /api/cookies/recheck runs this synchronously on
+// the HTTP handler goroutine, and the fallback probe is a full page fetch on
+// top of the auth check that is already there. The periodic path owns that
+// probe; a button press does not need to buy one.
 func (rs *RefreshService) CheckNow(ctx context.Context) {
-	rs.doRefresh(ctx)
+	rs.refresh(ctx, false)
+}
+
+// ObserveLiveness records an external verdict about whether `platform`'s
+// stored session is still signed in, and — once livenessRecoveryArmed is true
+// — fires OnRecoveryNeeded for a signed-out one.
+//
+// Callers must filter their own inconclusive results out: reaching this method
+// means "YouTube told us", not "we asked". A consent wall, a rate limit, an
+// off-host redirect and a never-configured jar are all silence, and passing
+// any of them in as loggedIn=false would report working credentials as dead.
+//
+// Two producers exist today, both YouTube: the per-channel membership probe
+// (which runs once per configured channel per feed cycle) and the
+// channel-independent FallbackLiveness probe. The first is why the dedupe is
+// not optional — one dead session must raise one alarm, not one per channel.
+func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
+	due := rs.recordLiveness(platform, loggedIn, time.Now())
+
+	// Info, not Debug: while the pilot is disarmed this line is the ONLY
+	// evidence of what the new signal would have done, and it is what the
+	// decision to arm it will be made on. It carries the verdict and the two
+	// decisions — never anything read off the page the verdict came from.
+	rs.logger.Info("liveness observation",
+		"platform", platform,
+		"loggedIn", loggedIn,
+		"wouldFireRecovery", due,
+		"armed", livenessRecoveryArmed)
+
+	if !livenessRecoveryArmed || !due {
+		return
+	}
+	if fn := rs.OnRecoveryNeeded; fn != nil {
+		rs.logger.Warn("liveness probe reports this platform is signed out, triggering recovery", "platform", platform)
+		fn(platform)
+	}
+}
+
+// recordLiveness folds one conclusive observation into both liveness maps and
+// reports whether it warrants firing OnRecoveryNeeded. Split out of
+// ObserveLiveness so the decision — dedupe window, direction, and the
+// two-map separation — is testable on its own, upstream of the pilot gate
+// that currently suppresses the call.
+//
+// `now` is a parameter so a test can drive the windows without sleeping
+// through them.
+//
+// The lock is released before ObserveLiveness invokes the callback, following
+// doRefresh's convention: OnRecoveryNeeded reaches out into cmd/moombox and
+// must not run under this service's mutex.
+func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now time.Time) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	if rs.lastLivenessObserved == nil {
+		rs.lastLivenessObserved = make(map[string]time.Time)
+	}
+	// Both directions. This map answers "did anything tell us recently", and
+	// a healthy answer settles that question exactly as well as a dead one.
+	rs.lastLivenessObserved[platform] = now
+
+	if loggedIn {
+		// Positive evidence is silent, and must not touch lastRecoveryDecided:
+		// stamping it here would let a healthy verdict swallow a dead one
+		// arriving a moment later from another channel in the same cycle.
+		return false
+	}
+	if last, ok := rs.lastRecoveryDecided[platform]; ok && now.Sub(last) < livenessRefireWindow {
+		return false
+	}
+	if rs.lastRecoveryDecided == nil {
+		rs.lastRecoveryDecided = make(map[string]time.Time)
+	}
+	rs.lastRecoveryDecided[platform] = now
+	return true
+}
+
+// noteRecoveryDecided stamps the dedupe map for a recovery that the tier-1
+// auth check is about to fire.
+//
+// One-directional on purpose: the refresh stamps the map so a liveness verdict
+// arriving in the same window cannot buy a second headless-browser attempt for
+// a problem recovery is already working on, but it does not CONSULT the map.
+// Suppressing the tier-1 fire would change behaviour that predates this signal
+// entirely, and that check is the one with the longest field record.
+func (rs *RefreshService) noteRecoveryDecided(platform string, now time.Time) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.lastRecoveryDecided == nil {
+		rs.lastRecoveryDecided = make(map[string]time.Time)
+	}
+	rs.lastRecoveryDecided[platform] = now
+}
+
+// livenessObservedRecently reports whether any conclusive liveness observation
+// for `platform` landed within livenessFreshWindow — the sole gate on paying
+// for the FallbackLiveness probe.
+func (rs *RefreshService) livenessObservedRecently(platform string, now time.Time) bool {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	last, ok := rs.lastLivenessObserved[platform]
+	return ok && now.Sub(last) < livenessFreshWindow
 }
 
 // CheckYouTubeAuth checks whether the current YouTube cookies are authenticated
@@ -268,7 +471,17 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 	return rs.checkTwitchAuth(ctx)
 }
 
+// doRefresh is the PERIODIC refresh — the startup check and every ticker tick.
+// It is the only path allowed to pay for the FallbackLiveness probe; see
+// CheckNow for the path that is not.
 func (rs *RefreshService) doRefresh(ctx context.Context) {
+	rs.refresh(ctx, true)
+}
+
+// refresh is the shared body of both entry points; allowFallback is the only
+// thing that separates them. Commentary elsewhere in this file that names
+// doRefresh is describing this body — the split is newer than the comments.
+func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	rs.logger.Debug("refreshing cookies")
 
 	// Reload cookies from file
@@ -388,12 +601,20 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	// same silent-forever bug for whichever platform is absent from the
 	// list (e.g. Platforms=["youtube"] with unverified Twitch cookies on
 	// disk).
+	//
+	// Each fire stamps the shared dedupe map (noteRecoveryDecided) so a
+	// liveness verdict landing in the same window — including the one the
+	// fallback probe at the tail of this very pass may produce — does not
+	// launch a second headless-browser recovery for a problem this one is
+	// already working on.
 	if rs.OnRecoveryNeeded != nil {
 		if shouldFireRecovery(ytConcluded, prevYT, ytAuth, ytErr, hasYTCookies) {
+			rs.noteRecoveryDecided("youtube", time.Now())
 			rs.logger.Warn("youtube auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("youtube")
 		}
 		if shouldFireRecovery(twConcluded, prevTW, twAuth, twErr, hasTWCookies) {
+			rs.noteRecoveryDecided("twitch", time.Now())
 			rs.logger.Warn("twitch auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("twitch")
 		}
@@ -422,6 +643,26 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	if rs.OnCredentialsChanged != nil && shouldObserveCredentials(prevYTIdentity, ytIdentity, ytAuth, ytErr) {
 		rs.logger.Info("youtube account identity observed — re-evaluating parked jobs")
 		rs.OnCredentialsChanged("youtube", ytIdentity)
+	}
+
+	// Tier 2: the channel-independent liveness probe, for the installs the
+	// per-channel one cannot reach — no YouTube channels configured, or
+	// membership discovery off everywhere. Skipped whenever something already
+	// reported inside livenessFreshWindow, which is the normal case and is
+	// what keeps a configured install from paying for a second full page
+	// fetch every cycle.
+	//
+	// Runs inline on the periodic refresh's own goroutine — Start's ticker
+	// loop, which carries the inline recover, or Start's initial synchronous
+	// call. Nothing is spawned, so there is no new recover obligation and no
+	// overlap to guard against: the ticker coalesces missed ticks, and the
+	// CheckNow path never reaches this branch.
+	if allowFallback && rs.FallbackLiveness != nil && !rs.livenessObservedRecently("youtube", time.Now()) {
+		// Only a conclusive answer moves anything. `false, false` is a consent
+		// wall or a rate limit, not a dead session.
+		if loggedIn, conclusive := rs.FallbackLiveness(ctx); conclusive {
+			rs.ObserveLiveness("youtube", loggedIn)
+		}
 	}
 
 	rs.logger.Debug("cookie refresh done",

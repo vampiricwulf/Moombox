@@ -119,6 +119,24 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 	}
 }
 
+// livenessFromProbe collapses ProbeAccountLiveness's (verdict, error) pair
+// into the (loggedIn, conclusive) pair RefreshService.FallbackLiveness
+// expects. Written as a function taking the probe's two results so it can be
+// table-tested; the wiring passes the call straight through.
+//
+// The collapse is where the caution lives. An error and SessionAuthUnknown are
+// both "we learned nothing" — a transport failure, a non-2xx, a redirect off
+// the probe host, a cookie-stripped chain, an unrecognisable body — and all of
+// them must report conclusive=false so the refresh service moves no state. A
+// false alarm is worse than a missed one: it sends an operator to replace
+// credentials that were working.
+func livenessFromProbe(verdict youtube.SessionAuthState, err error) (loggedIn, conclusive bool) {
+	if err != nil || verdict == youtube.SessionAuthUnknown {
+		return false, false
+	}
+	return verdict == youtube.SessionAuthLoggedIn, true
+}
+
 // initServices runs the 16 numbered construction sections from the original
 // run() — config load, logger, updater, database, connectivity, cookies,
 // platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
@@ -602,6 +620,21 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	cookieRefresh := cookies.NewRefreshService(jar, 0, log)
 	s.cookieRefresh = cookieRefresh
+
+	// Tier-2 liveness, injected rather than called: internal/cookies cannot
+	// import internal/youtube (internal/youtube/auth.go imports internal/
+	// cookies, so the direct call would be an import cycle), and this file can
+	// import both. Same inversion as VerifyYouTubeAuth just below.
+	//
+	// The probe is only reached when nothing else has reported liveness
+	// recently, which is why it can afford to be a full page fetch. Its three
+	// answers collapse to two here, and the collapse is the important part: an
+	// error and SessionAuthUnknown are both "we learned nothing", and they
+	// must report conclusive=false so the refresh service moves no state. Only
+	// a verdict YouTube actually gave us may.
+	cookieRefresh.FallbackLiveness = func(ctx context.Context) (bool, bool) {
+		return livenessFromProbe(ytService.ProbeAccountLiveness(ctx))
+	}
 
 	// =========================================================================
 	// 15b. Auto-cookie service
