@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,6 +218,68 @@ func TestRefreshCookiesDoesNotCommitOnInconclusiveVerification(t *testing.T) {
 	}
 	if strings.Contains(*status.LastError, "did not verify") {
 		t.Errorf("status blames the profile for a network failure: %q", *status.LastError)
+	}
+}
+
+// TestImportIsNotCommittedWhenTheRealCheckIsRateLimited wires the REAL
+// verification callback instead of a stub, because the stubs above cannot see
+// the cross-subsystem consequence of making a non-200 guide response
+// inconclusive.
+//
+// Production wires cmd/moombox's AutoCookieService.VerifyYouTubeAuth to
+// RefreshService.CheckYouTubeAuth. While a non-200 returned (false, nil) that
+// callback reported a YouTube 429 as a CONCLUSIVE failure, so
+// checkPlatformAuth recorded verifyFailed on both sides of the import,
+// platformsToRestore found no reason to roll back, and an unevaluated profile
+// was committed over credentials that may well have been fine — then the
+// operator was told "manual re-login required" on the strength of a rate
+// limit. With the non-200 inconclusive, both checks land on verifyUnknown, the
+// previous rows are restored, and the status names the incomplete check.
+func TestImportIsNotCommittedWhenTheRealCheckIsRateLimited(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	origPlain := youtubeGuideURL
+	youtubeGuideURL = srv.URL
+	t.Cleanup(func() { youtubeGuideURL = origPlain })
+
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(youtubeOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	// The real check, over the same jar the service reloads — exactly the
+	// shape cmd/moombox/services.go builds.
+	s.VerifyYouTubeAuth = NewRefreshService(s.jar, 0, nopLogger{}).CheckYouTubeAuth
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+
+	got, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "previous-login-info") {
+		t.Errorf("a rate-limited check let an unevaluated import overwrite the previous credentials:\n%s", got)
+	}
+	if strings.Contains(string(got), "login-info-from-profile") {
+		t.Errorf("imported credentials were committed on the strength of a 429:\n%s", got)
+	}
+
+	status := s.GetStatus()
+	if status.NeedsManualRelogin["youtube"] {
+		t.Error("a 429 must not tell the user their YouTube login is dead")
+	}
+	if status.LastError == nil {
+		t.Fatal("an import that was not committed must leave an explanation")
+	}
+	if !strings.Contains(*status.LastError, "did not complete") {
+		t.Errorf("status must name the incomplete check as the cause, got %q", *status.LastError)
 	}
 }
 

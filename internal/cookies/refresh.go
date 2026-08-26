@@ -23,11 +23,17 @@ import (
 // + refresh round trip amortises the TLS handshake.
 var cookiesHTTPClient = httpx.Client(30 * time.Second)
 
+// Package vars, not consts, solely so tests can point them at an httptest
+// server — these functions have no other seam (see refresh.go's note that
+// the pure predicates were extracted for exactly this reason).
+var (
+	youtubeGuideURL        = "https://www.youtube.com/youtubei/v1/guide"
+	youtubeGuideRefreshURL = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
+)
+
 const (
 	defaultRefreshInterval = 30 * time.Minute
 	authCheckTimeout       = 15 * time.Second
-	youtubeGuideURL        = "https://www.youtube.com/youtubei/v1/guide"
-	youtubeGuideRefreshURL = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
 	twitchValidateURL      = "https://id.twitch.tv/oauth2/validate"
 
 	// youtubeClientVersion is the WEB client version sent in Innertube API requests.
@@ -585,7 +591,10 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, nil
+		// NOT (false, nil). That means "conclusively not authenticated" to
+		// shouldFireRecovery, so a 429/503/edge block would be reported as
+		// dead credentials. We learned nothing about the session here.
+		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
 	}
 
 	// YouTube always returns 200 even with invalid cookies — parse body
@@ -672,7 +681,10 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, nil
+		// NOT (false, nil). That means "conclusively not authenticated" to
+		// shouldFireRecovery, so a 429/503/edge block would be reported as
+		// dead credentials. We learned nothing about the session here.
+		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
 	}
 
 	// Read body for auth check
