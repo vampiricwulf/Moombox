@@ -600,18 +600,133 @@ func (s *AutoCookieService) CancelSetup() {
 	s.logger.Info("auto-cookie setup cancelled")
 }
 
-// RefreshCookies performs a headless browser visit to refresh cookies.
+// RefreshVerdict is what a refresh pass concluded about ONE platform.
+//
+// The three states exist for the same reason verificationState's do: "we did
+// not find out" is not "it is dead", and a notification built on the second
+// when only the first is true tells an operator to re-export cookies that are
+// perfectly fine.
+type RefreshVerdict int
+
+const (
+	// RefreshUnknown means this pass learned nothing about the platform: the
+	// refresh declined to run, aborted before it could verify, or the
+	// verification itself could not reach the service. It is the ZERO VALUE
+	// on purpose — a caller that forgets to populate a field must not
+	// accidentally assert health or failure.
+	RefreshUnknown RefreshVerdict = iota
+	// RefreshFailed means the platform is conclusively not authenticated
+	// after this pass. It covers "the credentials were rejected" and "there
+	// are no credentials at all" alike: the question this answers is whether
+	// authenticated requests will work, and in both cases they will not.
+	RefreshFailed
+	// RefreshOK means the platform is conclusively authenticated.
+	RefreshOK
+)
+
+func (v RefreshVerdict) String() string {
+	switch v {
+	case RefreshFailed:
+		return "failed"
+	case RefreshOK:
+		return "ok"
+	default:
+		return "unknown"
+	}
+}
+
+// RefreshResult reports a refresh pass PER PLATFORM.
+//
+// The whole-service bool that RefreshCookies still returns cannot answer the
+// question its callers actually ask. A recovery attempt is triggered FOR a
+// platform, and a healthy sibling made a dead YouTube look recovered: the
+// field log for 2026-08-20 03:40:01 reads "YouTube auth verification failed
+// after refresh" and "auto-cookie recovery succeeded platform=youtube" three
+// lines apart. Both platforms were already computed at that point; only the
+// signature threw them away.
+type RefreshResult struct {
+	// Ran is false when the pass declined before doing any work at all —
+	// setup in progress, a refresh already in flight, nothing to refresh.
+	// Both verdicts are RefreshUnknown whenever this is false.
+	Ran     bool
+	YouTube RefreshVerdict
+	Twitch  RefreshVerdict
+}
+
+// Verdict returns the verdict for a platform key ("youtube" / "twitch"),
+// matched case-insensitively.
+//
+// An unrecognised key — including the empty string — returns RefreshUnknown,
+// never RefreshFailed. Callers turn RefreshFailed into "your cookies are
+// dead, recordings will fail"; firing that off a typo'd or absent platform
+// string would be an unearned assertion sourced from a programming error.
+func (r RefreshResult) Verdict(platform string) RefreshVerdict {
+	switch strings.ToLower(platform) {
+	case "youtube":
+		return r.YouTube
+	case "twitch":
+		return r.Twitch
+	default:
+		return RefreshUnknown
+	}
+}
+
+// anyVerified is the whole-service bool RefreshCookies has always returned:
+// at least one platform is conclusively authenticated.
+func (r RefreshResult) anyVerified() bool {
+	return r.YouTube == RefreshOK || r.Twitch == RefreshOK
+}
+
+// refreshDeclined is the result of a pass that did no work: it says nothing
+// about either platform, because it never looked.
+func refreshDeclined() RefreshResult { return RefreshResult{} }
+
+// refreshAborted is the result of a pass that started work and stopped before
+// verification. It ran, but it still learned nothing about either platform —
+// an extraction or write failure says nothing about whether the credentials
+// on disk are alive.
+func refreshAborted() RefreshResult { return RefreshResult{Ran: true} }
+
+// verdictOf projects one platform's internal verification state onto the
+// exported enum. The mapping is one-to-one by construction; there is no state
+// that "sort of" verified.
+func verdictOf(p platformAuth) RefreshVerdict {
+	switch p.state {
+	case verifyOK:
+		return RefreshOK
+	case verifyFailed:
+		return RefreshFailed
+	default:
+		return RefreshUnknown
+	}
+}
+
+// RefreshCookies performs a headless browser visit to refresh cookies and
+// reports whether ANY platform ended up authenticated.
+//
+// Kept as a thin wrapper over RefreshCookiesDetailed for the callers whose
+// question really is whole-service ("can we do authenticated work at all?"):
+// the startup seed, the periodic tick, the Settings "refresh now" button and
+// the TUI's equivalent. Callers acting ON BEHALF of one platform must use
+// RefreshCookiesDetailed instead — see RefreshResult.
 func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
+	result, err := s.RefreshCookiesDetailed(ctx)
+	return result.anyVerified(), err
+}
+
+// RefreshCookiesDetailed performs a headless browser visit to refresh cookies
+// and reports the outcome per platform.
+func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (RefreshResult, error) {
 	s.mu.Lock()
 	if s.setupProcess != nil || s.setupClaimed {
 		s.mu.Unlock()
 		s.logger.Debug("skipping cookie refresh — setup in progress")
-		return false, nil
+		return refreshDeclined(), nil
 	}
 	if s.refreshCmd != nil {
 		s.mu.Unlock()
 		s.logger.Debug("skipping cookie refresh — already refreshing")
-		return false, nil
+		return refreshDeclined(), nil
 	}
 	s.refreshCmd = &exec.Cmd{} // sentinel to claim slot
 	s.mu.Unlock()
@@ -630,10 +745,10 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		// off it.
 		if browser == nil {
 			s.setError("no browser found for refresh, and no browser profile to import from")
-			return false, ErrNoBrowserFound
+			return refreshDeclined(), ErrNoBrowserFound
 		}
 		s.setError("browser profile not found — run setup first")
-		return false, fmt.Errorf("run setup first: %w", ErrProfileNotFound)
+		return refreshDeclined(), fmt.Errorf("run setup first: %w", ErrProfileNotFound)
 	}
 
 	// importedFromProfile selects the browser-free path: no browser is
@@ -676,12 +791,12 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		if err != nil {
 			s.setError(err.Error())
 			s.logger.Warn("browser-profile cookie import failed", "profile_dir", s.profileDir, "err", err)
-			return false, err
+			return refreshAborted(), err
 		}
 	} else {
 		if len(s.refreshPlatforms()) == 0 {
 			s.logger.Debug("skipping cookie refresh — no platforms have cookies")
-			return false, nil
+			return refreshDeclined(), nil
 		}
 
 		s.logger.Info("refreshing cookies via " + browser.Type)
@@ -746,14 +861,14 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 
 	if err != nil {
 		s.setError(err.Error())
-		return false, err
+		return refreshAborted(), err
 	}
 
 	// Merge with existing cookies using temp file + rename for atomicity.
 	// previousCookies is kept verbatim so an import that turns out to have
 	// damaged a platform can hand that platform's rows back untouched.
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
-		return false, err
+		return refreshAborted(), err
 	}
 	var previousCookies string
 	if existingData, readErr := os.ReadFile(s.cookiePath); readErr == nil && len(existingData) > 0 {
@@ -791,12 +906,12 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
 	}
 	if err := writeCookieFile(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
-		return false, err
+		return refreshAborted(), err
 	}
 
 	// Reload jar
 	if err := s.jar.Load(s.cookiePath); err != nil {
-		return false, err
+		return refreshAborted(), err
 	}
 
 	// Verify auth via API callbacks (matches TypeScript refreshCookies behavior)
@@ -844,7 +959,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			s.setError(errMsg)
 			s.logger.Error("could not restore pre-import cookies.txt",
 				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return false, fmt.Errorf("restore pre-import cookies: %w", restoreErr)
+			return refreshAborted(), fmt.Errorf("restore pre-import cookies: %w", restoreErr)
 		}
 		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
 			// The FILE is correct here; the running process is not. Saying
@@ -856,7 +971,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			s.setError(errMsg)
 			s.logger.Error("could not reload cookie jar after restoring pre-import cookies.txt",
 				"err", loadErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return false, fmt.Errorf("reload cookie jar after restore: %w", loadErr)
+			return refreshAborted(), fmt.Errorf("reload cookie jar after restore: %w", loadErr)
 		}
 
 		// Re-verify the file we actually kept. Without this, the status
@@ -869,6 +984,12 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 
 	ytAuth := postYT.ok()
 	twAuth := postTW.ok()
+
+	// The per-platform answer, fixed here because postYT/postTW are final from
+	// this point on (the rollback branch above is the last thing that can
+	// re-verify). Every remaining exit reports THIS — the three of them differ
+	// in what they log and record, not in what they concluded.
+	result := RefreshResult{Ran: true, YouTube: verdictOf(postYT), Twitch: verdictOf(postTW)}
 
 	// Update re-login flags based on verification results. Only a CONCLUSIVE
 	// failure flags a re-login: an unreachable network told us nothing about
@@ -1011,7 +1132,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		default:
 			s.logger.Info("cookie refresh succeeded", "verified", strings.Join(verified, " + "))
 		}
-		return true, nil
+		return result, nil
 	}
 
 	// Neither platform verified. Build a targeted message naming only the
@@ -1061,7 +1182,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			s.lastError = nil
 			s.mu.Unlock()
 		}
-		return false, nil
+		return result, nil
 	}
 	// Say what actually happened. "Manual re-login required" is the right
 	// advice only when the credentials were conclusively rejected; when the
@@ -1103,7 +1224,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	s.setError(errMsg)
 	s.logger.Warn("refresh completed but auth verification failed",
 		"platforms", strings.Join(failed, ","), "lost", strings.Join(lost, ","), "detail", errMsg)
-	return false, nil
+	return result, nil
 }
 
 // cookiesLostMessage names the platforms whose credentials were on disk
