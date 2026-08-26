@@ -39,7 +39,7 @@ const livenessFetchTimeout = 20 * time.Second
 // That last rule is the load-bearing one and it does not follow from the host
 // check. Go's http.Client drops a manually-set Cookie header once a redirect
 // leaves the initial host, and the decision is STICKY: client.go declares
-// stripSensitiveHeaders once before the redirect loop (:618) and only ever
+// stripSensitiveHeaders once before the redirect loop (:620) and only ever
 // sets it inside (:688, itself guarded by !stripSensitiveHeaders) — nothing
 // clears it on a later hop. So origin → wall → origin lands back on the host
 // we asked for, passes any terminal-host test, and delivers a body fetched
@@ -50,8 +50,25 @@ const livenessFetchTimeout = 20 * time.Second
 //
 // Verified against go1.26.1, C:\Program Files\Go\src\net\http\client.go.
 //
+// COUPLING, and it fails silently if broken: the third rule only means
+// anything because the client behind utils.FetchWithTimeout has no
+// http.CookieJar. With one installed, the stdlib re-adds a Cookie header on
+// the final hop from the jar's own scope rules, the check passes on a request
+// that never carried OUR session, and nothing here would fail. That property
+// is pinned by TestUtilsHTTPClientCarriesNoCookieJar in internal/utils —
+// deleting this rule breaks tests loudly, but weakening its premise from
+// another package would not, which is why the pin lives at the other end too.
+//
 // Errors name a status code, a URL, or a host — never response bytes and
 // never a cookie value.
+//
+// SCOPE NOTE — this gates DISCOVERY as well as liveness. FetchMembershipVideos
+// parses its video list out of the same body, so a page refused here yields no
+// members-only videos, not merely no verdict. A legitimate off-origin or
+// subdomain redirect on /channel/<id>/membership would therefore silently
+// disable membership discovery for that channel. That is the right trade for
+// the verdict (an anonymous page must never produce one), but anyone
+// tightening these rules is trading against discovery too and should say so.
 func (s *Service) fetchLivenessPage(ctx context.Context, pageURL string) ([]byte, error) {
 	want, err := url.Parse(pageURL)
 	if err != nil {

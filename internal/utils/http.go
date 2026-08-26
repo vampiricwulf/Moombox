@@ -22,6 +22,16 @@ const MaxFetchBodySize = 50 << 20
 // per-call timeouts come from FetchWithTimeout's ctx.WithTimeout.
 // httpx's transport already carries the keep-alive tuning the audit
 // recommended (MaxIdleConnsPerHost=8, IdleConnTimeout=90s, HTTP/2).
+//
+// DO NOT give this client an http.CookieJar. internal/youtube's liveness
+// probes decide whether a fetched page may be read as evidence about the
+// user's session by checking that the request which finally answered still
+// carried the Cookie header they set — the stdlib strips it, permanently, once
+// a redirect leaves the origin. A jar would re-add a Cookie header on that
+// final hop from its own scope rules, so the check would pass on a request
+// that never carried the caller's session and the probe would report healthy
+// credentials as dead. Nothing in that package can observe this from here,
+// which is why TestUtilsHTTPClientCarriesNoCookieJar pins it.
 var utilsHTTPClient = httpx.Client(5 * time.Minute)
 
 // ConnectivityReporter is a type alias to connectivity.Reporter so the HTTP

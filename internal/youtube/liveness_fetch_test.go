@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -110,12 +111,29 @@ func TestLivenessResponseIsOursRejectsAnUnplaceableResponse(t *testing.T) {
 // TestFetchLivenessPageRefusesAnAnonymousFetch: with no cookies to send there
 // is nothing to observe, and any LoggedOut read off the result would be a
 // false alarm. It must not even make the request.
+//
+// The zero-hit assertion is the load-bearing one and it has to be counted, not
+// inferred. Rule 3 rejects this same case AFTER fetching, so an error alone is
+// consistent with rule 1 having been deleted; only the hit count distinguishes
+// "refused up front" from "fetched, then refused". Pointing this at an
+// unreachable address instead would have made the error assertion pass on the
+// dial failure alone, testing nothing.
 func TestFetchLivenessPageRefusesAnAnonymousFetch(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte(`ytcfg.set({"LOGGED_IN":false});`))
+	}))
+	defer srv.Close()
+
 	s := jarServiceFromCookieFile(t, "# Netscape HTTP Cookie File\n")
 	if got := s.Auth.GetCookieHeader(); got != "" {
-		t.Fatalf("precondition: expected an empty cookie header, got a non-empty one")
+		t.Fatal("precondition: expected an empty cookie header, got a non-empty one")
 	}
-	if _, err := s.fetchLivenessPage(t.Context(), "http://127.0.0.1:0/never-dialed"); err == nil {
+	if _, err := s.fetchLivenessPage(t.Context(), srv.URL); err == nil {
 		t.Error("expected an error when there are no session cookies to send")
+	}
+	if hits != 0 {
+		t.Errorf("made %d request(s), want 0 — an anonymous fetch must not be attempted at all", hits)
 	}
 }
