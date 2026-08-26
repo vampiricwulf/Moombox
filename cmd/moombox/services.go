@@ -613,7 +613,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	}
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
-	dlWorker.OnCookieRefreshNeeded = func() bool {
+	dlWorker.OnCookieRefreshNeeded = func(platform string) bool {
 		var autoEnabled bool
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			autoEnabled = c.Cookies.AutoEnabled
@@ -631,30 +631,44 @@ func (s *runState) initServices(logLevelOverride string) error {
 		}
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		ok, err := autoCookieSvc.RefreshCookies(refreshCtx)
+		// Detailed, not the bool: the worker is asking on behalf of ONE job on
+		// ONE platform. The whole-service bool let a Twitch success answer a
+		// YouTube job's question, so the job went back to Upcoming and
+		// re-probed into a guaranteed-identical failure, spending its retry
+		// budget on a request that could not succeed.
+		result, err := autoCookieSvc.RefreshCookiesDetailed(refreshCtx)
 		if err != nil {
-			log.Warn("auto cookie refresh error", slog.String("error", err.Error()))
+			log.Warn("auto cookie refresh error",
+				slog.String("platform", platform), slog.String("error", err.Error()))
 			return false
 		}
-		if !ok {
-			// Also previously silent. Deliberately states no cause:
-			// RefreshCookies returns (false, nil) from FIVE distinct places —
-			// a setup already in progress, a refresh already running, no
-			// platforms configured, a refresh that found no cookies to
-			// verify, and a refresh whose auth verification failed. Only the
-			// last of those means anything is actually wrong with the
-			// session; the rest mean it declined to run. (Genuine extraction
-			// failure is NOT among them — it returns (false, err) and takes
-			// the branch above.) Four of the five log their own reason at
-			// Debug, which is off by default, so at the default level this
-			// line is usually the only thing the operator sees. Asserting a
-			// cause here would be wrong four times in five and would send
-			// them hunting for a missing browser while a refresh is already
-			// in flight.
+		switch result.Verdict(platform) {
+		case cookies.RefreshOK:
+			return true
+		case cookies.RefreshFailed:
+			// Conclusive, so this one MAY name a cause: the refresh ran, it
+			// verified, and the answer was no.
+			log.Warn("automatic cookie refresh ran and the credentials are still rejected",
+				slog.String("platform", platform),
+				slog.String("note", "the stored cookies for this platform are dead — replace cookies.cookie_file with a fresh Netscape export from a browser signed in to the account"))
+			return false
+		default:
+			// RefreshUnknown. Previously silent, and then for a while this
+			// line covered the failed case too. It deliberately states no
+			// cause: Unknown is returned when the refresh DECLINED to run (a
+			// setup already in progress, a refresh already in flight, no
+			// platforms configured), when it aborted before verifying, and
+			// when the verification itself could not reach the service. Most
+			// of those leave the session perfectly healthy, and the ones that
+			// log their own reason do it at Debug, which is off by default —
+			// so asserting a cause here would usually be wrong and would send
+			// the operator hunting for a missing browser while a refresh is
+			// already in flight.
 			log.Warn("automatic cookie refresh produced no usable cookies",
-				slog.String("note", "the refresh either declined to run or found nothing usable — run at debug level to see which"))
+				slog.String("platform", platform),
+				slog.String("note", "the refresh either declined to run or could not find out whether the cookies work — run at debug level to see which"))
+			return false
 		}
-		return ok
 	}
 
 	// =========================================================================

@@ -131,10 +131,16 @@ func TestNotAMemberSuppressesAutoRefresh(t *testing.T) {
 //     The attempt used to sit inside the `w.notifier != nil` branch, so a
 //     deployment without webhooks silently got neither the recovery nor any
 //     log line explaining its absence.
+//  3. The job's PLATFORM reaches the callback. The callback used to take no
+//     arguments, so it could only report whether any platform ended up
+//     authenticated — and a healthy Twitch sent a YouTube job back to
+//     Upcoming to re-probe into a guaranteed-identical failure. The twitch
+//     row below is what stops a future edit from hardcoding "youtube".
 func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 	cases := []struct {
 		name        string
 		err         error
+		platform    string
 		wantCalled  bool
 		wantStatus  database.JobStatus
 		jobIDSuffix string
@@ -142,6 +148,7 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 		{
 			name:        "members-only on a live session skips the refresh",
 			err:         (&StreamProcessResult{Error: "Member-only: x", ErrSentinel: ErrNotAMember}).AsError(),
+			platform:    "youtube",
 			wantCalled:  false,
 			wantStatus:  database.StatusCookies,
 			jobIDSuffix: "notmember",
@@ -149,9 +156,18 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 		{
 			name:        "dead cookies fire the refresh with no notifier wired",
 			err:         (&StreamProcessResult{Error: "Member-only: x", ErrSentinel: ErrCookiesRequired}).AsError(),
+			platform:    "youtube",
 			wantCalled:  true,
 			wantStatus:  database.StatusCookies,
 			jobIDSuffix: "deadcookies",
+		},
+		{
+			name:        "a twitch job asks about twitch, not about youtube",
+			err:         (&StreamProcessResult{Error: "auth expired", ErrSentinel: ErrCookiesRequired}).AsError(),
+			platform:    "twitch",
+			wantCalled:  true,
+			wantStatus:  database.StatusCookies,
+			jobIDSuffix: "twitchcookies",
 		},
 		{
 			name:        "non-cookie failure never consults the refresh",
@@ -176,6 +192,7 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 			err: fmt.Errorf("max probe errors: %w (%w)",
 				fmt.Errorf("gql auth failure (401): %w", twitch.ErrTwitchAuthExpired),
 				ErrNonActionable),
+			platform:    "youtube",
 			wantCalled:  false,
 			wantStatus:  database.StatusCookies,
 			jobIDSuffix: "terminalauth",
@@ -190,7 +207,7 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 				ID:       jobID,
 				VideoID:  tc.jobIDSuffix,
 				URL:      "https://youtube.com/watch?v=" + tc.jobIDSuffix,
-				Platform: "youtube",
+				Platform: tc.platform,
 				Status:   database.StatusDownloading,
 			}
 			if _, err := db.AddJob(job); err != nil {
@@ -198,8 +215,10 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 			}
 
 			called := false
-			w.OnCookieRefreshNeeded = func() bool {
+			gotPlatform := ""
+			w.OnCookieRefreshNeeded = func(platform string) bool {
 				called = true
+				gotPlatform = platform
 				return false
 			}
 
@@ -207,6 +226,10 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 
 			if called != tc.wantCalled {
 				t.Errorf("OnCookieRefreshNeeded called = %v, want %v", called, tc.wantCalled)
+			}
+			if called && gotPlatform != tc.platform {
+				t.Errorf("OnCookieRefreshNeeded got platform %q, want %q — a refresh answered for "+
+					"the wrong platform sends the job back to re-probe into the same failure", gotPlatform, tc.platform)
 			}
 			got, err := db.GetJob(jobID)
 			if err != nil {
@@ -328,7 +351,7 @@ func TestSetJobErrorPersistsParkReason(t *testing.T) {
 			if _, err := db.AddJob(job); err != nil {
 				t.Fatal(err)
 			}
-			w.OnCookieRefreshNeeded = func() bool { return false }
+			w.OnCookieRefreshNeeded = func(string) bool { return false }
 
 			w.setJobError(job, tc.err)
 
@@ -359,7 +382,7 @@ func TestSetJobErrorOverwritesStaleParkReason(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	w.OnCookieRefreshNeeded = func() bool { return false }
+	w.OnCookieRefreshNeeded = func(string) bool { return false }
 
 	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
 		(&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError())
@@ -435,7 +458,7 @@ func TestSetJobErrorRecordsParkIdentity(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			w.OnCookieRefreshNeeded = func() bool { return false }
+			w.OnCookieRefreshNeeded = func(string) bool { return false }
 
 			called := false
 			w.CurrentCredentialIdentity = func(platform string) string {
@@ -475,7 +498,7 @@ func TestSetJobErrorParkIdentityNilSlotIsSafe(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	w.OnCookieRefreshNeeded = func() bool { return false }
+	w.OnCookieRefreshNeeded = func(string) bool { return false }
 	w.CurrentCredentialIdentity = nil
 
 	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
