@@ -1069,9 +1069,14 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		return
 	}
 
-	// job.Platform, not a locally-derived one: the database layer already
-	// defaults an empty Platform to "youtube" on insert, and a second
-	// defaulting rule here would be a second place to keep in sync.
+	// job.Platform verbatim, with no defaulting applied here.
+	//
+	// Every production creator sets Platform explicitly, and this reads the
+	// in-memory struct rather than a row, so the schema default never enters
+	// into it. If one ever arrives empty, RefreshResult.Verdict("") is
+	// RefreshUnknown — no health claim either way — and the job stays parked
+	// for a human. Guessing "youtube" here would trade that safe outcome for
+	// a second defaulting rule to keep in sync with the creators.
 	w.logger.Info("attempting automatic cookie refresh...", "platform", job.Platform)
 	if w.OnCookieRefreshNeeded(job.Platform) {
 		w.logger.Info("cookie refresh succeeded, retrying job", "platform", job.Platform)

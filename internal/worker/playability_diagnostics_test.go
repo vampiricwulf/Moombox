@@ -172,6 +172,7 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 		{
 			name:        "non-cookie failure never consults the refresh",
 			err:         errors.New("ffmpeg exploded"),
+			platform:    "youtube",
 			wantCalled:  false,
 			wantStatus:  database.StatusError,
 			jobIDSuffix: "generic",
