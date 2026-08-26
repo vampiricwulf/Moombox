@@ -43,17 +43,27 @@ func recoveryTestState(t *testing.T) (*runState, *[]sentNotification) {
 	return s, &sent
 }
 
-func (s *runState) recoveryNotifier(sent *[]sentNotification) authFailureNotifier {
+// recoveryNotifier records everything the pass tried to send.
+func recoveryNotifier(sent *[]sentNotification) authFailureNotifier {
 	return func(platform, title, desc string, ntype notifications.NotificationType) {
 		*sent = append(*sent, sentNotification{platform, title, desc, ntype})
 	}
 }
 
-// stubRefresh returns a cookieRefresher that hands back a fixed verdict pair.
+// stubRefreshResult returns a cookieRefresher that hands back a fixed result.
+func stubRefreshResult(r cookies.RefreshResult) cookieRefresher {
+	return func(context.Context) (cookies.RefreshResult, error) { return r, nil }
+}
+
+// stubRefresh is the same for an install that HOLDS credentials for both
+// platforms — the shape the 2026-08-20 field case had, and the one where a
+// conclusive failure really does mean "these cookies are dead".
 func stubRefresh(yt, tw cookies.RefreshVerdict) cookieRefresher {
-	return func(context.Context) (cookies.RefreshResult, error) {
-		return cookies.RefreshResult{Ran: true, YouTube: yt, Twitch: tw}, nil
-	}
+	return stubRefreshResult(cookies.RefreshResult{
+		Ran:     true,
+		YouTube: yt, YouTubeStored: true,
+		Twitch: tw, TwitchStored: true,
+	})
 }
 
 // TestRecoveryNotifiesThePlatformItWasInvokedFor is the 2026-08-20 03:40:01
@@ -98,7 +108,7 @@ func TestRecoveryNotifiesThePlatformItWasInvokedFor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, sent := recoveryTestState(t)
 			s.runCookieRecovery(context.Background(), tc.platform,
-				stubRefresh(tc.yt, tc.tw), s.recoveryNotifier(sent))
+				stubRefresh(tc.yt, tc.tw), recoveryNotifier(sent))
 
 			if len(*sent) != 1 {
 				t.Fatalf("sent %d notifications, want exactly 1 — the sibling platform verifying "+
@@ -136,7 +146,7 @@ func TestRecoveryNotifiesThePlatformItWasInvokedFor(t *testing.T) {
 func TestRecoverySilentWhenTheTriggeringPlatformIsHealthy(t *testing.T) {
 	s, sent := recoveryTestState(t)
 	s.runCookieRecovery(context.Background(), "youtube",
-		stubRefresh(cookies.RefreshOK, cookies.RefreshFailed), s.recoveryNotifier(sent))
+		stubRefresh(cookies.RefreshOK, cookies.RefreshFailed), recoveryNotifier(sent))
 
 	if len(*sent) != 0 {
 		t.Fatalf("YouTube verified and still got notified: %+v", *sent)
@@ -160,7 +170,7 @@ func TestRecoveryDeclineIsNotAFailureNotification(t *testing.T) {
 	for _, platform := range []string{"youtube", "twitch"} {
 		t.Run(platform, func(t *testing.T) {
 			s, sent := recoveryTestState(t)
-			s.runCookieRecovery(context.Background(), platform, declined, s.recoveryNotifier(sent))
+			s.runCookieRecovery(context.Background(), platform, declined, recoveryNotifier(sent))
 
 			if len(*sent) != 1 {
 				t.Fatalf("sent %d notifications, want exactly 1: %+v", len(*sent), *sent)
@@ -189,7 +199,7 @@ func TestRecoveryErrorStillNotifies(t *testing.T) {
 	boom := func(context.Context) (cookies.RefreshResult, error) {
 		return cookies.RefreshResult{}, errors.New("browser exploded")
 	}
-	s.runCookieRecovery(context.Background(), "youtube", boom, s.recoveryNotifier(sent))
+	s.runCookieRecovery(context.Background(), "youtube", boom, recoveryNotifier(sent))
 
 	if len(*sent) != 1 {
 		t.Fatalf("sent %d notifications, want exactly 1: %+v", len(*sent), *sent)
@@ -197,6 +207,46 @@ func TestRecoveryErrorStillNotifies(t *testing.T) {
 	got := (*sent)[0]
 	if got.title != "Cookie Auto-Refresh Failed" || got.ntype != notifications.TypeError {
 		t.Errorf("error branch = %q/%v, want the failure title at error severity", got.title, got.ntype)
+	}
+}
+
+// TestRecoveryFailureOnAnUnconfiguredPlatformDoesNotBlameCookies pins the
+// defence-in-depth split inside the RefreshFailed branch.
+//
+// A conclusive failure with no stored credentials is still a failure — under
+// liveness-over-presence, "nothing there" and "rejected" both mean requests
+// will not work — but only one of them was caused by a cookie going bad.
+// Saying "the stored cookies are dead, replace them" about cookies that were
+// never there names a cause that did not happen.
+//
+// shouldFireRecovery cannot currently deliver this shape (its startup arm is
+// gated on cookiesPresent, its transition arm on prevAuth), so this guards an
+// invariant that lives in another package rather than a live path.
+func TestRecoveryFailureOnAnUnconfiguredPlatformDoesNotBlameCookies(t *testing.T) {
+	s, sent := recoveryTestState(t)
+	s.runCookieRecovery(context.Background(), "twitch",
+		stubRefreshResult(cookies.RefreshResult{
+			Ran:     true,
+			YouTube: cookies.RefreshOK, YouTubeStored: true,
+			Twitch: cookies.RefreshFailed, TwitchStored: false,
+		}),
+		recoveryNotifier(sent))
+
+	if len(*sent) != 1 {
+		t.Fatalf("sent %d notifications, want exactly 1: %+v", len(*sent), *sent)
+	}
+	got := (*sent)[0]
+	if got.title != "Cookie Auto-Refresh Failed" {
+		t.Errorf("title = %q — this is still a conclusive failure", got.title)
+	}
+	for _, forbidden := range []string{"are dead", "replaced"} {
+		if strings.Contains(got.desc, forbidden) {
+			t.Errorf("nothing was stored and nothing was rejected, so %q is an unearned cause: %q",
+				forbidden, got.desc)
+		}
+	}
+	if !strings.Contains(got.desc, "no twitch cookies") {
+		t.Errorf("the description must say what is actually true — that there are none: %q", got.desc)
 	}
 }
 
@@ -209,7 +259,7 @@ func TestRecoveryUnrecognisedPlatformDoesNotAssertFailure(t *testing.T) {
 	for _, platform := range []string{"", "kick"} {
 		s, sent := recoveryTestState(t)
 		s.runCookieRecovery(context.Background(), platform,
-			stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed), s.recoveryNotifier(sent))
+			stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed), recoveryNotifier(sent))
 
 		if len(*sent) != 1 {
 			t.Fatalf("platform %q: sent %d notifications, want exactly 1: %+v", platform, len(*sent), *sent)

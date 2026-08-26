@@ -257,6 +257,21 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 		// verified, and the answer was no — so unlike the branch below it may
 		// name the cause.
 		s.log.Warn("auto-cookie recovery ran and this platform is still not authenticated", "platform", platform)
+		if !result.HasCredentials(platform) {
+			// Defence in depth, not a live case: shouldFireRecovery gates its
+			// startup arm on cookiesPresent and its witnessed-transition arm
+			// on prevAuth, so this path cannot currently be entered for a
+			// platform nobody configured. That invariant lives in another
+			// package, though, and the claim it protects — "your cookies are
+			// dead, replace them" — is the most visible one this file makes.
+			// Costing one branch to stop a future edit to shouldFireRecovery
+			// turning it into a lie is the right trade.
+			notify(platform, "Cookie Auto-Refresh Failed",
+				fmt.Sprintf("Automatic cookie refresh ran, and Moombox holds no %s cookies at all — recordings that "+
+					"need an account will fail until some are supplied. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
+				notifications.TypeError)
+			return
+		}
 		notify(platform, "Cookie Auto-Refresh Failed",
 			fmt.Sprintf("Automatic cookie refresh ran, and %s is still not authenticated — the stored cookies are dead "+
 				"and recordings will fail until they are replaced. "+cookieReplacementGuidance, platform, s.cookieFilePath()),

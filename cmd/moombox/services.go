@@ -33,6 +33,79 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
+// cookieRefreshReport is what the worker-facing cookie refresh concluded
+// about one job's platform, and the line that says it honestly.
+//
+// An empty msg means say nothing: the refresh worked and the job is about to
+// be retried, which the worker logs for itself.
+type cookieRefreshReport struct {
+	ok   bool
+	msg  string
+	note string
+}
+
+// cookieRefreshReportFor turns one platform's verdict into the worker's log
+// line. Extracted from the OnCookieRefreshNeeded closure — which lives inside
+// initServices and needs the whole construction graph — so the wording choice
+// can be table-tested on its own.
+//
+// Three verdicts, four lines: RefreshFailed splits on whether Moombox holds
+// any credentials for the platform at all.
+func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cookieRefreshReport {
+	switch result.Verdict(platform) {
+	case cookies.RefreshOK:
+		return cookieRefreshReport{ok: true}
+
+	case cookies.RefreshFailed:
+		if !result.HasCredentials(platform) {
+			// Reachable on a YouTube-only install that meets a
+			// subscriber-only Twitch VOD: Usher's 403 cannot tell an
+			// anonymous session from an un-entitled one (see
+			// parkReasonForError), so the job asks for a Twitch refresh, the
+			// sibling's cookies keep the refresh from declining, and Twitch
+			// comes back conclusively unauthenticated — because there is
+			// nothing there.
+			//
+			// The verdict is right; "the stored cookies are dead" would not
+			// be. Nothing was stored and nothing was rejected, and the remedy
+			// is to ADD credentials, not to replace them.
+			return cookieRefreshReport{
+				ok:  false,
+				msg: "automatic cookie refresh ran and Moombox holds no cookies for this platform",
+				note: "nothing was rejected — there are no stored credentials for this platform to refresh; " +
+					"to archive content that needs an account here, point cookies.cookie_file at a Netscape " +
+					"export from a browser signed in to one",
+			}
+		}
+		// Conclusive AND about credentials we actually hold, so this one may
+		// name a cause: the refresh ran, it verified, and the answer was no.
+		return cookieRefreshReport{
+			ok:  false,
+			msg: "automatic cookie refresh ran and the credentials are still rejected",
+			note: "the stored cookies for this platform are dead — replace cookies.cookie_file with a fresh " +
+				"Netscape export from a browser signed in to the account",
+		}
+
+	default:
+		// RefreshUnknown. Previously silent, and then for a while this line
+		// covered the failed case too. It deliberately states no cause:
+		// Unknown is returned when the refresh DECLINED to run (a setup
+		// already in progress, a refresh already in flight, no platforms
+		// configured), when it aborted before verifying, and when the
+		// verification itself could not reach the service. Most of those
+		// leave the session perfectly healthy, and the ones that log their
+		// own reason do it at Debug, which is off by default — so asserting a
+		// cause here would usually be wrong and would send the operator
+		// hunting for a missing browser while a refresh is already in flight.
+		return cookieRefreshReport{
+			ok:  false,
+			msg: "automatic cookie refresh produced no usable cookies",
+			note: "the refresh either declined to run or could not find out whether the cookies work — " +
+				"run at debug level to see which",
+		}
+	}
+}
+
 // initServices runs the 16 numbered construction sections from the original
 // run() — config load, logger, updater, database, connectivity, cookies,
 // platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
@@ -642,33 +715,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 				slog.String("platform", platform), slog.String("error", err.Error()))
 			return false
 		}
-		switch result.Verdict(platform) {
-		case cookies.RefreshOK:
-			return true
-		case cookies.RefreshFailed:
-			// Conclusive, so this one MAY name a cause: the refresh ran, it
-			// verified, and the answer was no.
-			log.Warn("automatic cookie refresh ran and the credentials are still rejected",
+		report := cookieRefreshReportFor(platform, result)
+		if report.msg != "" {
+			log.Warn(report.msg,
 				slog.String("platform", platform),
-				slog.String("note", "the stored cookies for this platform are dead — replace cookies.cookie_file with a fresh Netscape export from a browser signed in to the account"))
-			return false
-		default:
-			// RefreshUnknown. Previously silent, and then for a while this
-			// line covered the failed case too. It deliberately states no
-			// cause: Unknown is returned when the refresh DECLINED to run (a
-			// setup already in progress, a refresh already in flight, no
-			// platforms configured), when it aborted before verifying, and
-			// when the verification itself could not reach the service. Most
-			// of those leave the session perfectly healthy, and the ones that
-			// log their own reason do it at Debug, which is off by default —
-			// so asserting a cause here would usually be wrong and would send
-			// the operator hunting for a missing browser while a refresh is
-			// already in flight.
-			log.Warn("automatic cookie refresh produced no usable cookies",
-				slog.String("platform", platform),
-				slog.String("note", "the refresh either declined to run or could not find out whether the cookies work — run at debug level to see which"))
-			return false
+				slog.String("note", report.note))
 		}
+		return report.ok
 	}
 
 	// =========================================================================
