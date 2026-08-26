@@ -37,6 +37,9 @@ func TestCookieRefreshReportFor(t *testing.T) {
 		Twitch: cookies.RefreshFailed, TwitchStored: true,
 	}
 	declined := cookies.RefreshResult{}
+	// Ran, but stopped before it could verify — an I/O failure, or a check
+	// that could not reach the service. Differs from `declined` in one bit.
+	aborted := cookies.RefreshResult{Ran: true}
 
 	cases := []struct {
 		name     string
@@ -55,12 +58,15 @@ func TestCookieRefreshReportFor(t *testing.T) {
 		},
 		{
 			// THE FIX.
-			name:       "twitch job on a youtube-only install is not told its cookies died",
-			platform:   "twitch",
-			result:     youTubeOnly,
-			wantOK:     false,
-			wantSaid:   []string{"holds no cookies", "nothing was rejected"},
-			wantUnsaid: []string{"are dead", "still rejected", "replace"},
+			name:     "twitch job on a youtube-only install is not told its cookies died",
+			platform: "twitch",
+			result:   youTubeOnly,
+			wantOK:   false,
+			// The same line also has to serve a total expiry, where every
+			// stored row was pruned by this very refresh — so it names both
+			// possibilities and asserts neither.
+			wantSaid:   []string{"no credentials for this platform", "nothing was rejected", "or none were ever supplied"},
+			wantUnsaid: []string{"are dead", "still rejected"},
 		},
 		{
 			name:       "stored credentials that were rejected may be called dead",
@@ -68,23 +74,35 @@ func TestCookieRefreshReportFor(t *testing.T) {
 			result:     bothStoredBothDead,
 			wantOK:     false,
 			wantSaid:   []string{"still rejected", "are dead", "replace"},
-			wantUnsaid: []string{"holds no cookies"},
+			wantUnsaid: []string{"no credentials for this platform", "declined"},
 		},
 		{
-			name:       "a declined pass asserts nothing at all",
+			// Ran == false. The line may now say WHICH kind of nothing
+			// happened, because that is exactly the distinction Ran draws.
+			name:       "a declined pass says it declined and nothing more",
 			platform:   "youtube",
 			result:     declined,
 			wantOK:     false,
-			wantSaid:   []string{"no usable cookies", "declined to run"},
-			wantUnsaid: []string{"are dead", "rejected", "holds no cookies"},
+			wantSaid:   []string{"declined to run", "nothing was learned"},
+			wantUnsaid: []string{"are dead", "rejected", "no credentials for this platform"},
+		},
+		{
+			// Ran == true, verdicts Unknown. Must NOT claim it declined — it
+			// did run, it just could not conclude.
+			name:       "an aborted pass says it ran and concluded nothing",
+			platform:   "youtube",
+			result:     aborted,
+			wantOK:     false,
+			wantSaid:   []string{"ran but could not establish", "may", "be perfectly fine"},
+			wantUnsaid: []string{"declined", "are dead", "rejected"},
 		},
 		{
 			name:       "an unrecognised platform asserts nothing at all",
 			platform:   "kick",
 			result:     bothStoredBothDead,
 			wantOK:     false,
-			wantSaid:   []string{"no usable cookies"},
-			wantUnsaid: []string{"are dead", "rejected", "holds no cookies"},
+			wantSaid:   []string{"could not establish"},
+			wantUnsaid: []string{"are dead", "rejected", "no credentials for this platform"},
 		},
 	}
 

@@ -58,23 +58,29 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 
 	case cookies.RefreshFailed:
 		if !result.HasCredentials(platform) {
-			// Reachable on a YouTube-only install that meets a
-			// subscriber-only Twitch VOD: Usher's 403 cannot tell an
-			// anonymous session from an un-entitled one (see
-			// parkReasonForError), so the job asks for a Twitch refresh, the
-			// sibling's cookies keep the refresh from declining, and Twitch
-			// comes back conclusively unauthenticated — because there is
-			// nothing there.
+			// Two ways in, and the line has to be true of both.
 			//
-			// The verdict is right; "the stored cookies are dead" would not
-			// be. Nothing was stored and nothing was rejected, and the remedy
-			// is to ADD credentials, not to replace them.
+			// A YouTube-only install meeting a subscriber-only Twitch VOD:
+			// Usher's 403 cannot tell an anonymous session from an
+			// un-entitled one (see parkReasonForError), so the job asks for a
+			// Twitch refresh, the sibling's cookies keep the refresh from
+			// declining, and Twitch comes back conclusively unauthenticated
+			// because there is nothing there.
+			//
+			// Or a total expiry: the jar ignores expiry and mergeCookieFiles
+			// prunes on it, so every stored row for a platform can be dropped
+			// by the very refresh that was meant to renew them.
+			//
+			// The verdict is right for both; "the stored cookies are dead —
+			// replace them" is right for neither. Nothing was rejected, and
+			// the remedy is to SUPPLY credentials rather than replace ones
+			// that were examined and refused.
 			return cookieRefreshReport{
 				ok:  false,
-				msg: "automatic cookie refresh ran and Moombox holds no cookies for this platform",
-				note: "nothing was rejected — there are no stored credentials for this platform to refresh; " +
-					"to archive content that needs an account here, point cookies.cookie_file at a Netscape " +
-					"export from a browser signed in to one",
+				msg: "automatic cookie refresh ran and cookies.txt now holds no credentials for this platform",
+				note: "nothing was rejected — either every stored credential for it had expired and was dropped, " +
+					"or none were ever supplied; point cookies.cookie_file at a Netscape export from a browser " +
+					"signed in to an account with access",
 			}
 		}
 		// Conclusive AND about credentials we actually hold, so this one may
@@ -88,20 +94,27 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 
 	default:
 		// RefreshUnknown. Previously silent, and then for a while this line
-		// covered the failed case too. It deliberately states no cause:
-		// Unknown is returned when the refresh DECLINED to run (a setup
-		// already in progress, a refresh already in flight, no platforms
-		// configured), when it aborted before verifying, and when the
-		// verification itself could not reach the service. Most of those
-		// leave the session perfectly healthy, and the ones that log their
-		// own reason do it at Debug, which is off by default — so asserting a
-		// cause here would usually be wrong and would send the operator
-		// hunting for a missing browser while a refresh is already in flight.
+		// covered the failed case too. It still asserts nothing about the
+		// CREDENTIALS — Unknown means we did not find out, and most of the
+		// ways to get here leave the session perfectly healthy.
+		//
+		// What it can now say is which KIND of nothing happened, because Ran
+		// draws exactly that line. This used to hedge "either declined to run
+		// or found nothing usable" and send the operator to debug level to
+		// find out which; the result already knew.
+		if !result.Ran {
+			return cookieRefreshReport{
+				ok:  false,
+				msg: "automatic cookie refresh declined to run, so nothing was learned about these cookies",
+				note: "a setup or another refresh is already in flight, or no platform has cookies worth " +
+					"refreshing — run at debug level for the specific reason",
+			}
+		}
 		return cookieRefreshReport{
 			ok:  false,
-			msg: "automatic cookie refresh produced no usable cookies",
-			note: "the refresh either declined to run or could not find out whether the cookies work — " +
-				"run at debug level to see which",
+			msg: "automatic cookie refresh ran but could not establish whether these cookies work",
+			note: "it stopped before verifying, or the check could not reach the service — the credentials may " +
+				"be perfectly fine, so nothing has been concluded about them",
 		}
 	}
 }

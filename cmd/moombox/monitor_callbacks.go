@@ -258,17 +258,28 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 		// name the cause.
 		s.log.Warn("auto-cookie recovery ran and this platform is still not authenticated", "platform", platform)
 		if !result.HasCredentials(platform) {
-			// Defence in depth, not a live case: shouldFireRecovery gates its
-			// startup arm on cookiesPresent and its witnessed-transition arm
-			// on prevAuth, so this path cannot currently be entered for a
-			// platform nobody configured. That invariant lives in another
-			// package, though, and the claim it protects — "your cookies are
-			// dead, replace them" — is the most visible one this file makes.
-			// Costing one branch to stop a future edit to shouldFireRecovery
-			// turning it into a lie is the right trade.
+			// Reachable, and the trigger is a total credential EXPIRY.
+			//
+			// The two conditions are sampled at different moments and read
+			// different things. shouldFireRecovery's cookiesPresent comes from
+			// the jar, which ignores expiry; HasCredentials comes from the
+			// post-merge jar, and mergeCookieFiles prunes ON expiry — the
+			// disagreement RefreshCookiesDetailed documents where it computes
+			// `lost`. So a platform whose every stored row has lapsed fires
+			// recovery (the jar still sees rows), merges to nothing, and
+			// arrives here with a conclusive failure and no credentials left.
+			//
+			// The wording therefore has to hold for BOTH shapes — a platform
+			// that just lost everything and one that never had anything —
+			// because nothing here can tell them apart. It names the two
+			// possibilities and asserts neither. Deliberately NOT
+			// cookiesLostMessage, which is the same information but asserts
+			// the loss outright, and would be simply false on an install that
+			// never held credentials for this platform.
 			notify(platform, "Cookie Auto-Refresh Failed",
-				fmt.Sprintf("Automatic cookie refresh ran, and Moombox holds no %s cookies at all — recordings that "+
-					"need an account will fail until some are supplied. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
+				fmt.Sprintf("Automatic cookie refresh ran, and Moombox now holds no %s cookies at all — either every "+
+					"stored credential had expired and was dropped, or none were ever supplied. Recordings that need "+
+					"an account will fail until some are. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
 				notifications.TypeError)
 			return
 		}
