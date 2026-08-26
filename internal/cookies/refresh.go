@@ -306,8 +306,15 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	// Captured once here (not re-read at the shouldFireRecovery call sites
 	// below) so the "cookies present" snapshot lines up with the rest of
 	// this check's other snapshots, all taken under the same lock.
-	hasYTCookies := rs.jar.HasYouTubeAuthCookies()
-	hasTWCookies := rs.jar.HasTwitchAuthCookies()
+	//
+	// "Was this platform ever configured", NOT "is the set complete right
+	// now". shouldFireRecovery's first-check branch returns this value, and
+	// the complete-set predicates cannot tell a never-configured platform
+	// from one whose LOGIN_INFO YouTube has cleared, or from a Twitch session
+	// whose HttpOnly auth-token an exporter dropped — the exact states that
+	// must be reported, and that were silent forever.
+	hasYTCookies := rs.jar.HasAnyYouTubeAuthCookie()
+	hasTWCookies := rs.jar.HasAnyTwitchAuthCookie()
 
 	// Sampled under the same lock as the rest of this check's snapshots, and
 	// AFTER the jar.Reload() at the top of doRefresh, so it reflects whatever
@@ -318,10 +325,14 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	rs.status = AuthStatus{
 		YouTubeAuthenticated: ytAuth,
 		TwitchAuthenticated:  twAuth,
-		HasYouTubeCookies:    hasYTCookies,
-		LastCheck:            time.Now().UTC().Format(time.RFC3339),
-		YouTubeError:         ytErrStr,
-		TwitchError:          twErrStr,
+		// Now "YouTube auth is configured" rather than "the cookie set is
+		// complete", which is what the label this drives has always claimed.
+		// A half-cleared jar consequently renders as configured-but-unverified
+		// instead of as no-cookies-at-all — see AuthStatus.HasYouTubeCookies.
+		HasYouTubeCookies: hasYTCookies,
+		LastCheck:         time.Now().UTC().Format(time.RFC3339),
+		YouTubeError:      ytErrStr,
+		TwitchError:       twErrStr,
 	}
 
 	// Update previous auth state tracking.
@@ -431,8 +442,11 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 // presence in the persisted list masks a sibling platform that was never
 // actually checked (see the ytEverConcluded/twEverConcluded field comment
 // on RefreshService). nowAuth/checkErr are this check's result.
-// cookiesPresent is whether THIS PLATFORM currently has any auth cookies in
-// the jar at all (jar.HasYouTubeAuthCookies / jar.HasTwitchAuthCookies).
+// cookiesPresent is whether THIS PLATFORM was ever configured — any auth
+// cookie in the jar at all (jar.HasAnyYouTubeAuthCookie /
+// jar.HasAnyTwitchAuthCookie), NOT whether the set is currently complete.
+// The complete-set predicates read a half-cleared session as never
+// configured, which is precisely how a dead platform stayed silent.
 // Two cases fire:
 //
 //   - Witnessed transition: everConcluded is true and prevAuth was true —
@@ -454,7 +468,9 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 //     credential-recovery attempt (and possibly a user-facing warning) for
 //     a platform nobody set up. Dead-but-PRESENT cookies still fire —
 //     that's the whole point of this case; only the never-configured
-//     (absent) case is newly excluded.
+//     (absent) case is excluded. "Present" is deliberately the loose
+//     any-auth-cookie test: a half-cleared session is a configured platform
+//     with broken credentials, and reporting it is the point.
 //
 // In both cases checkErr must be nil (a network error is not auth loss) and
 // nowAuth must be false (the platform must actually be unauthenticated).
@@ -555,20 +571,36 @@ func youtubeGuideRequestBody() string {
 	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
 }
 
+// checkYouTubeAuth asks YouTube whether the jar's session is still signed in.
+//
+// Its three entry gates appear identically in checkAndRefreshYouTube and
+// encode one rule — the rule this subsystem kept getting wrong. Only the
+// FIRST of them may answer (false, nil).
+//
+//   - Nothing configured at all — no session to have an opinion about, so a
+//     silent "not authenticated" is the truth and shouldFireRecovery's
+//     cookiesPresent gate (fed by the same predicate) keeps it silent.
+//   - Configured but no request could be built — a check that did NOT happen.
+//     (false, nil) would report it as dead credentials, so it errors instead.
+//
+// Everything in between now reaches the network. In particular a jar with
+// SAPISID and a cleared LOGIN_INFO — YouTube's own rotation-invalidation
+// state — is CONFIGURED with BROKEN credentials, and its verdict has to come
+// from YouTube rather than from a missing name in a map.
 func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
-	if !rs.jar.HasYouTubeAuthCookies() {
-		return false, nil // No auth cookies
+	if !rs.jar.HasAnyYouTubeAuthCookie() {
+		return false, nil // Nothing configured at all.
 	}
 
 	cookieHeader := rs.jar.GetCookieHeader()
 	if cookieHeader == "" {
-		return false, nil
+		return false, fmt.Errorf("youtube auth check: no cookie header could be built")
 	}
 
 	origin := "https://www.youtube.com"
 	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
 	if authHeader == "" {
-		return false, nil
+		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated")
 	}
 
 	// POST to YouTube guide endpoint to check auth
@@ -647,19 +679,21 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 // YouTube auth status and refresh session cookies from Set-Cookie headers.
 // This avoids the redundancy of separate check + refresh requests.
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
-	if !rs.jar.HasYouTubeAuthCookies() {
-		return false, nil
+	// See the gate commentary above checkYouTubeAuth — same three gates, same
+	// rule about which one may answer (false, nil).
+	if !rs.jar.HasAnyYouTubeAuthCookie() {
+		return false, nil // Nothing configured at all.
 	}
 
 	cookieHeader := rs.jar.GetCookieHeader()
 	if cookieHeader == "" {
-		return false, nil
+		return false, fmt.Errorf("youtube auth check: no cookie header could be built")
 	}
 
 	origin := "https://www.youtube.com"
 	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
 	if authHeader == "" {
-		return false, nil
+		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
@@ -970,10 +1004,31 @@ func isGoogleOnlyAuthName(name string) bool {
 }
 
 func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
-	if !rs.jar.HasTwitchAuthCookies() {
-		return false, nil // No auth token
+	// Read the token once. It is both the gate and the credential, so asking
+	// HasTwitchAuthCookies first and re-reading the value after would leave a
+	// window in which a concurrent jar.Reload swaps the map between the two.
+	token := rs.jar.GetTwitchAuthToken()
+	if token == "" {
+		// Deliberately NOT broadened the way the YouTube gate above was.
+		// Twitch auth is a single bearer token, so its absence is not an
+		// inference about liveness the way a cleared LOGIN_INFO is — there is
+		// no credential to test and no request that could learn anything, so
+		// "not authenticated" is true rather than assumed.
+		//
+		// Nor does it probe with an empty OAuth header just to reach the
+		// network. That would only guess at what Twitch does with a malformed
+		// token, and under the 200/401-only rule below a 400 would come back
+		// INCONCLUSIVE — suppressing the alarm for the very state that most
+		// needs one.
+		//
+		// The "was Twitch ever configured" question, which decides whether
+		// that alarm fires, is answered by jar.HasAnyTwitchAuthCookie at the
+		// doRefresh gate instead: a jar holding twilight-user and no
+		// auth-token is a signed-in session whose HttpOnly credential an
+		// exporter dropped, and it now reports as configured-and-broken
+		// rather than as never-configured.
+		return false, nil
 	}
-	token := rs.jar.GetCookie("auth-token")
 
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()

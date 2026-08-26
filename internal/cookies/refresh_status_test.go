@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -242,5 +243,200 @@ func TestTwitchValidateErrorNamesOnlyTheStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("the error should name the status it could not interpret, got %q", err)
+	}
+}
+
+// --- Presence is not liveness: the checks that never reached the network ---
+
+// countingGuide serves one fixed body and counts requests. The counter is
+// atomic because the handler runs on the server's own goroutine and the test
+// reads it after the client call returns, which is not an ordering the race
+// detector can see.
+func countingGuide(t *testing.T, body string) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+const loggedOutGuideBody = `{"responseContext":{"mainAppWebResponseContext":{"loggedIn":false}}}`
+
+// TestHalfClearedJarStillProbes: with LOGIN_INFO gone but SAPISID intact, the
+// check must make a REQUEST and read what YouTube says — not infer death from
+// the missing cookie. Presence is not liveness.
+//
+// This is the state yt-dlp documents as rotation-invalidation: YouTube clears
+// LOGIN_INFO and leaves SAPISID behind. Before this change the strict
+// HasYouTubeAuthCookies gate returned (false, nil) without a request — a
+// verdict of "conclusively logged out" that was really only "a cookie is
+// missing", and one shouldFireRecovery could not tell apart from a platform
+// nobody ever set up.
+func TestHalfClearedJarStillProbes(t *testing.T) {
+	srv, hits := countingGuide(t, loggedOutGuideBody)
+	pointYouTubeGuideAt(t, srv)
+
+	jar := jarWithAuth(t)
+	jar.cookies["LOGIN_INFO"] = "" // the rotation-invalidation state
+
+	rs := NewRefreshService(jar, 0, nopLogger{})
+	auth, err := rs.checkAndRefreshYouTube(context.Background())
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("server hits = %d, want 1 — the check short-circuited instead of probing", got)
+	}
+	if auth || err != nil {
+		t.Errorf("auth=%v err=%v, want false/nil — a real logged-out verdict", auth, err)
+	}
+}
+
+// TestCheckYouTubeAuthHalfClearedJarStillProbes is the same rule on the other
+// entry point. checkYouTubeAuth is what AutoCookieService.VerifyYouTubeAuth
+// calls, so its answer decides whether a freshly imported profile is committed
+// — that answer has to come from YouTube, not from a name lookup. Here the
+// server says logged_in=1, so the half-cleared jar is reported WORKING.
+func TestCheckYouTubeAuthHalfClearedJarStillProbes(t *testing.T) {
+	srv, hits := countingGuide(t, `{"responseContext":{"serviceTrackingParams":[{"params":[{"key":"logged_in","value":"1"}]}]}}`)
+	pointYouTubeGuideAt(t, srv)
+
+	jar := jarWithAuth(t)
+	jar.cookies["LOGIN_INFO"] = ""
+
+	rs := NewRefreshService(jar, 0, nopLogger{})
+	auth, err := rs.CheckYouTubeAuth(context.Background())
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("server hits = %d, want 1 — the check short-circuited instead of probing", got)
+	}
+	if !auth || err != nil {
+		t.Errorf("auth=%v err=%v, want true/nil — YouTube said logged_in=1", auth, err)
+	}
+}
+
+// TestNeverConfiguredYouTubeDoesNotProbe is the other side of that gate, and
+// what keeps the change from becoming noise: an install holding no Google auth
+// cookie at all has no session to have an opinion about. It stays a silent
+// (false, nil) — not an error, which would put a scary string on a fresh
+// install, and not a request to youtube.com on behalf of a user who never
+// configured the platform.
+func TestNeverConfiguredYouTubeDoesNotProbe(t *testing.T) {
+	srv, hits := countingGuide(t, loggedOutGuideBody)
+	pointYouTubeGuideAt(t, srv)
+
+	rs := NewRefreshService(NewCookieJar(), 0, nopLogger{})
+	auth, err := rs.checkAndRefreshYouTube(context.Background())
+	if got := hits.Load(); got != 0 {
+		t.Errorf("server hits = %d, want 0 — an unconfigured platform must not be probed", got)
+	}
+	if auth || err != nil {
+		t.Errorf("auth=%v err=%v, want false/nil", auth, err)
+	}
+}
+
+// TestNoSAPISIDIsInconclusiveNotDead covers the remaining short-circuit: a jar
+// that was configured (LOGIN_INFO is present) but has lost every SAPISID
+// variant cannot produce a SAPISIDHASH, so no request can be made at all. That
+// is a check that did not happen — it must read as inconclusive (err != nil),
+// never as the conclusive "not authenticated" shouldFireRecovery acts on.
+func TestNoSAPISIDIsInconclusiveNotDead(t *testing.T) {
+	srv, hits := countingGuide(t, loggedOutGuideBody)
+	pointYouTubeGuideAt(t, srv)
+
+	jar := jarWithAuth(t)
+	jar.cookies["SAPISID"] = ""
+
+	rs := NewRefreshService(jar, 0, nopLogger{})
+	auth, err := rs.checkAndRefreshYouTube(context.Background())
+	if got := hits.Load(); got != 0 {
+		t.Errorf("server hits = %d, want 0 — no Authorization header could be built", got)
+	}
+	if auth {
+		t.Error("authenticated = true, want false")
+	}
+	if err == nil {
+		t.Fatal("err = nil, want non-nil — a check that could not be made is not a verdict")
+	}
+	// Same rule as TestTwitchValidateErrorNamesOnlyTheStatus: this string is
+	// rendered in the Web UI and TUI, so it may never carry cookie material.
+	if strings.Contains(err.Error(), "sapisid-value") || strings.Contains(err.Error(), "login-info-value") {
+		t.Errorf("the error carries cookie material: %q", err)
+	}
+}
+
+// --- Twitch: the fifth short-circuit ---
+
+// TestTwitchSessionWithoutItsTokenFiresRecovery is the Twitch half of the same
+// defect. auth-token is HttpOnly; twilight-user, which Twitch sets alongside
+// it, is not. Any exporter that skips HttpOnly cookies therefore yields a jar
+// that plainly WAS a signed-in Twitch session with no credential left in it —
+// and because doRefresh asked HasTwitchAuthCookies ("is the token here"), that
+// state read as "Twitch was never configured" and the auth-loss gate stayed
+// silent forever. Exactly the failure this arc exists to close.
+//
+// The check itself still must not fire a request: with no bearer token there
+// is nothing to validate, and probing with an empty OAuth header would only
+// guess at what Twitch does with a malformed token — a 400 reads as
+// inconclusive, which would suppress the very alarm this test demands.
+func TestTwitchSessionWithoutItsTokenFiresRecovery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	content := "# Netscape HTTP Cookie File\n" +
+		".twitch.tv\tTRUE\t/\tTRUE\t0\ttwilight-user\t%7B%22id%22%3A%221%22%7D\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+
+	var validateHits atomic.Int64
+	tw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		validateHits.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(tw.Close)
+	pointTwitchValidateAt(t, tw)
+	// The jar holds no YouTube cookies so the guide seam is never reached,
+	// but pin it anyway — an unpinned seam is one refactor from youtube.com.
+	ytSrv, ytHits := countingGuide(t, loggedOutGuideBody)
+	pointYouTubeGuideAt(t, ytSrv)
+
+	rs := NewRefreshService(jar, 0, nopLogger{})
+	var fired []string
+	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+
+	rs.doRefresh(context.Background())
+
+	if got := validateHits.Load(); got != 0 {
+		t.Errorf("oauth2/validate hits = %d, want 0 — there is no bearer token to validate", got)
+	}
+	if got := ytHits.Load(); got != 0 {
+		t.Errorf("guide hits = %d, want 0 — no YouTube cookies were configured", got)
+	}
+	if len(fired) != 1 || fired[0] != "twitch" {
+		t.Errorf("OnRecoveryNeeded fired %v, want [twitch] — a Twitch session with no credential must be reported", fired)
+	}
+}
+
+// TestNeverConfiguredPlatformsStaySilent is the false-alarm guard that keeps
+// the broadened predicates honest. An empty jar configures neither platform,
+// so neither may fire recovery: a spurious alarm sends an operator off to
+// re-export credentials that were never wrong, and in a container the remedy
+// it names may not even be reachable.
+func TestNeverConfiguredPlatformsStaySilent(t *testing.T) {
+	ytSrv, _ := countingGuide(t, loggedOutGuideBody)
+	pointYouTubeGuideAt(t, ytSrv)
+	pointTwitchValidateAt(t, statusServer(t, http.StatusUnauthorized))
+
+	rs := NewRefreshService(NewCookieJar(), 0, nopLogger{})
+	var fired []string
+	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+
+	rs.doRefresh(context.Background())
+
+	if len(fired) != 0 {
+		t.Errorf("OnRecoveryNeeded fired %v on an empty jar, want none", fired)
 	}
 }
