@@ -198,6 +198,64 @@ func TestRefreshAbortPathsReportRanButUnknown(t *testing.T) {
 	}
 }
 
+// TestTotalExpiryReportsFailedWithNothingStored is the OTHER way a platform
+// reaches "conclusively unauthenticated with no credentials behind it", and
+// the one that proves that combination is not hypothetical.
+//
+// The jar ignores expiry; mergeCookieFiles prunes on it. So a platform whose
+// every stored row has lapsed passes the "there are cookies worth refreshing"
+// gate, gets merged down to nothing, and comes out the far side with a
+// conclusive failure and an empty jar — while a live sibling carries the pass
+// far enough to reach verification at all.
+//
+// This is also the trigger that makes the recovery notification's
+// no-credentials branch reachable: shouldFireRecovery's cookiesPresent is
+// sampled from the pre-merge jar, so recovery fires for exactly this platform.
+// The branch is not dead code, and the copy there has to be true both here and
+// on an install that never held credentials at all.
+func TestTotalExpiryReportsFailedWithNothingStored(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, []profileTestCookie{
+		{name: "auth-token", value: goodTwitchToken, host: ".twitch.tv", path: "/", httpOnly: true, secure: true},
+		{name: "login", value: "someuser", host: ".twitch.tv", path: "/"},
+	})
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(partiallyExpiredPreviousCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return false, nil }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) {
+		return s.jar.GetTwitchAuthToken() == goodTwitchToken, nil
+	}
+	if err := s.jar.Load(cookiePath); err != nil {
+		t.Fatal(err)
+	}
+	// The pre-merge jar still believes YouTube is present — which is exactly
+	// what shouldFireRecovery reads before deciding to fire.
+	if !s.jar.HasYouTubeAuthCookies() {
+		t.Fatal("fixture is broken — the jar must believe it holds YouTube auth before the refresh")
+	}
+
+	result, err := s.RefreshCookiesDetailed(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshCookiesDetailed: %v", err)
+	}
+
+	if result.Verdict("twitch") != RefreshOK {
+		t.Fatalf("fixture is broken — the live Twitch sibling was supposed to verify, got %v",
+			result.Verdict("twitch"))
+	}
+	if got := result.Verdict("youtube"); got != RefreshFailed {
+		t.Errorf("YouTube verdict = %v, want failed — every row it had was pruned as expired", got)
+	}
+	if result.HasCredentials("youtube") {
+		t.Error("YouTube reports stored credentials after every one of its rows was pruned — " +
+			"this is the pair that decides whether the operator is told to REPLACE cookies or SUPPLY them")
+	}
+}
+
 // TestRefreshVerdictUnknownIsTheZeroValue is the property every other
 // guarantee here rests on: a RefreshResult nobody populated asserts nothing.
 func TestRefreshVerdictUnknownIsTheZeroValue(t *testing.T) {
@@ -398,6 +456,12 @@ func TestRefreshThatRenewedNothingKeepsThePriorError(t *testing.T) {
 	if lr := s.GetStatus().LastRefresh; lr != nil {
 		t.Fatalf("fixture is broken — this pass was supposed to renew nothing, got lastRefresh %q", *lr)
 	}
+	// The same fact the gates below consume, now visible to a caller. Without
+	// it the manual-refresh button in Settings and the TUI's R F chord report
+	// this pass as an unqualified success.
+	if result.Renewed {
+		t.Error("Renewed = true although the browser never ran — this is the bit the UI branches on")
+	}
 
 	status := s.GetStatus()
 	if status.LastError == nil {
@@ -438,6 +502,10 @@ func TestRefreshThatRenewedClearsThePriorError(t *testing.T) {
 	}
 	if s.GetStatus().LastRefresh == nil {
 		t.Fatal("fixture is broken — an import renews, so this pass should have stamped lastRefresh")
+	}
+	if !result.Renewed {
+		t.Error("Renewed = false although this pass read the profile it verified — the UI would " +
+			"downgrade a genuine success to 'could not confirm'")
 	}
 	if le := s.GetStatus().LastError; le != nil {
 		t.Errorf("LastError = %q, want cleared — this pass fetched the credentials it verified", *le)

@@ -652,6 +652,27 @@ type RefreshResult struct {
 	YouTube RefreshVerdict
 	Twitch  RefreshVerdict
 
+	// Renewed reports whether THIS pass produced the credentials it verified,
+	// as opposed to finding the previous ones still alive — the independent
+	// 30-minute RefreshService keeps a working session alive whether or not
+	// the browser refresh does anything at all.
+	//
+	// It is a fact about the MECHANISM, and the verdicts are facts about the
+	// credentials; the two are independent and must stay that way. A pass can
+	// verify both platforms while renewing nothing (a browser that never ran),
+	// which is why RefreshCookies still returns true there: authenticated
+	// requests will work. What must not happen is a UI reporting that as an
+	// unqualified success — the operator pressed a button that runs the
+	// browser refresh, and asking whether it worked is the whole reason they
+	// pressed it.
+	//
+	// False on every declined and aborted pass, which renewed nothing by
+	// definition. On Linux it is false nearly always: there is no Job Object
+	// to drain, so a launch cannot be confirmed to have acted. It therefore
+	// means "not confirmed", never "the browser failed" — see the wording
+	// note on browserLaunchActed.
+	Renewed bool
+
 	// YouTubeStored / TwitchStored report whether Moombox held ANY auth
 	// cookies for that platform when the verdict was reached. This is
 	// PRESENCE, not liveness, and it must never be used to decide whether
@@ -1032,9 +1053,24 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// hasCookies travels WITH the verdict rather than being re-read from the
 	// jar, so the two can never describe different moments: a rollback
 	// re-verifies, and a presence bit sampled before it would belong to the
-	// discarded import.
+	// discarded import. renewed rides along for the same reason — the gates
+	// further down consume it, and a UI caller that has to re-derive it would
+	// be re-deriving it from information it does not have.
+	//
+	// renewed says whether this pass actually produced the credentials it is
+	// about to be judged on, as opposed to finding the previous ones still
+	// alive. The import and empty-profile paths always did (they read a
+	// profile); the browser path only did if the browser ran.
+	//
+	// Written as an explicit `importedFromProfile ||` rather than leaning on
+	// browserActed's initialiser so the scoping is visible at the point of
+	// use: an earlier draft of this change gated success on the profile
+	// database's mtime and would have made every containerised import report
+	// failure forever.
+	renewed := importedFromProfile || browserActed
 	result := RefreshResult{
 		Ran:           true,
+		Renewed:       renewed,
 		YouTube:       verdictOf(postYT),
 		YouTubeStored: postYT.hasCookies,
 		Twitch:        verdictOf(postTW),
@@ -1086,18 +1122,6 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	if postTW.state == verifyFailed && twHasCookies {
 		s.logger.Warn("Twitch auth verification failed after refresh — manual re-login required")
 	}
-
-	// renewed says whether this pass actually produced the credentials it is
-	// about to be judged on, as opposed to finding the previous ones still
-	// alive. The import and empty-profile paths always did (they read a
-	// profile); the browser path only did if the browser ran.
-	//
-	// Written as an explicit `importedFromProfile ||` rather than leaning on
-	// browserActed's initialiser so the scoping is visible at the point of
-	// use: an earlier draft of this change gated success on the profile
-	// database's mtime and would have made every containerised import report
-	// failure forever.
-	renewed := importedFromProfile || browserActed
 
 	// Consider refresh successful if any platform verified
 	if ytAuth || twAuth {

@@ -363,12 +363,27 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case cookieForceRefreshResultMsg:
-		if msg.Err != nil {
+		// Three outcomes, not two. Success says the cookies work; Renewed says
+		// THIS pass produced them. A browser that never ran leaves a working
+		// cookies.txt behind — the background session refresh keeps it alive —
+		// so success alone reported "successful" for a refresh that did
+		// nothing, one line after the log said it could not confirm it had,
+		// and while the Last refresh time refused to move.
+		//
+		// The middle message stops at "could not confirm" on purpose: with no
+		// Job Object to drain (Linux, or a job we failed to create) a browser
+		// that finished after we looked is indistinguishable from one that
+		// never started. Asserting it failed would swap one wrong claim for
+		// its mirror image.
+		switch {
+		case msg.Err != nil:
 			a.setFeedback("Browser cookie refresh failed: " + msg.Err.Error())
-		} else if msg.Success {
-			a.setFeedback("Browser cookie refresh successful")
-		} else {
+		case !msg.Success:
 			a.setFeedback("Browser cookie refresh: no cookies acquired")
+		case !msg.Renewed:
+			a.setFeedback("Cookies still work, but this pass could not confirm the browser refreshed them")
+		default:
+			a.setFeedback("Browser cookie refresh successful")
 		}
 		return a, nil
 

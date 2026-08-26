@@ -801,12 +801,30 @@ class MoomboxApp {
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
         if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
-        this.showToast(
-          data.success
-            ? "Browser cookie refresh successful"
-            : "Browser cookie refresh completed — auth verification failed",
-          data.success ? "success" : "warning",
-        );
+        // Three outcomes, not two. `success` says the cookies work; `renewed`
+        // says THIS pass produced them. A browser that never ran still leaves
+        // a working cookies.txt behind (the background session refresh keeps
+        // it alive), so success alone would toast "successful" while the
+        // Last refresh line below refuses to advance — and on Linux, where a
+        // launch can never be confirmed to have acted, that is every time.
+        //
+        // The middle message stops at "could not confirm" deliberately: we
+        // cannot tell a browser that did nothing from one that finished after
+        // we looked, so asserting it failed would swap one wrong claim for
+        // another.
+        let refreshMsg, refreshVariant;
+        if (!data.success) {
+          refreshMsg = "Browser cookie refresh completed — auth verification failed";
+          refreshVariant = "warning";
+        } else if (data.renewed === false) {
+          refreshMsg =
+            "Cookies still work — but this pass could not confirm the browser refreshed them, so the last-refresh time is unchanged";
+          refreshVariant = "warning";
+        } else {
+          refreshMsg = "Browser cookie refresh successful";
+          refreshVariant = "success";
+        }
+        this.showToast(refreshMsg, refreshVariant);
       } else {
         this.showToast(data.error || "Browser cookie refresh failed", "danger");
       }
