@@ -70,12 +70,25 @@ func TestDrainJobReturnsImmediatelyWithoutAJob(t *testing.T) {
 	}
 }
 
-// capturingDrainLogger records every message drainJob emits.
-type capturingDrainLogger struct{ msgs []string }
+// capturingLogger records every message written through it. Carries all four
+// methods so it satisfies the AutoCookieService logger field as well as the
+// narrower one drainJob takes — one capturing logger for the package.
+type capturingLogger struct{ msgs []string }
 
-func (l *capturingDrainLogger) Debug(msg string, args ...any) { l.msgs = append(l.msgs, msg) }
-func (l *capturingDrainLogger) Info(msg string, args ...any)  { l.msgs = append(l.msgs, msg) }
-func (l *capturingDrainLogger) Warn(msg string, args ...any)  { l.msgs = append(l.msgs, msg) }
+func (l *capturingLogger) Debug(msg string, args ...any) { l.msgs = append(l.msgs, msg) }
+func (l *capturingLogger) Info(msg string, args ...any)  { l.msgs = append(l.msgs, msg) }
+func (l *capturingLogger) Warn(msg string, args ...any)  { l.msgs = append(l.msgs, msg) }
+func (l *capturingLogger) Error(msg string, args ...any) { l.msgs = append(l.msgs, msg) }
+
+// contains reports whether any recorded message contains sub.
+func (l *capturingLogger) contains(sub string) bool {
+	for _, m := range l.msgs {
+		if strings.Contains(m, sub) {
+			return true
+		}
+	}
+	return false
+}
 
 // TestDrainJobWithNothingToWaitOnDoesNotClaimTheBrowserFinished is a wording
 // fix with a platform behind it.
@@ -91,7 +104,7 @@ func (l *capturingDrainLogger) Warn(msg string, args ...any)  { l.msgs = append(
 // A zero-handle job reports zero on Windows too, so this reproduces the exact
 // shape on every platform.
 func TestDrainJobWithNothingToWaitOnDoesNotClaimTheBrowserFinished(t *testing.T) {
-	log := &capturingDrainLogger{}
+	log := &capturingLogger{}
 	if err := drainJob(context.Background(), &processJob{}, time.Now(), 30*time.Second, log); err != nil {
 		t.Fatalf("drainJob = %v, want nil", err)
 	}

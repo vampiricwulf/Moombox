@@ -523,41 +523,58 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		return false, false, err
 	}
 
-	// Validate: first check cookie presence, then verify via API if callbacks available
-	ytAuth = s.jar.HasYouTubeAuthCookies()
-	twAuth = s.jar.HasTwitchAuthCookies()
+	// Presence + real API verification, through the same pairing the refresh
+	// path uses. This was the last inline copy of it; the nil-callback contract
+	// (presence is then the only signal, reported as success with a warning so
+	// callers cannot quietly succeed on cookies that are present-but-invalid —
+	// audit reports/cookies.md #21) lives in checkPlatformAuth now.
+	ytCheck, twCheck := s.checkPlatformAuth(ctx)
 
-	// Real API verification (more reliable than just checking cookie presence).
-	// When the corresponding Verify callback is nil (test wiring or alternate
-	// constructors), the presence check above is the only signal we have —
-	// surface that explicitly so callers can't quietly succeed on cookies that
-	// are present-but-invalid (audit reports/cookies.md #21).
-	ctx, cancel := context.WithTimeout(ctx, authVerifyTimeout)
-	defer cancel()
-	if ytAuth {
-		if s.VerifyYouTubeAuth != nil {
-			if verified, err := s.VerifyYouTubeAuth(ctx); err == nil {
-				ytAuth = verified
-			}
-		} else {
-			s.logger.Warn("YouTube auth verification callback not wired — reporting based on cookie presence alone")
-		}
+	// What the CALLER is told, and it is deliberately not the verification
+	// result. A sign-in the user just completed is accepted unless the site
+	// conclusively rejected it: an inconclusive check — a 429, a captive
+	// portal, a DNS blip — is not evidence against a login that happened
+	// thirty seconds ago, and refusing it would send the user back through a
+	// wizard that was working. False failure is the worse direction here.
+	ytAuth = ytCheck.hasCookies && ytCheck.state != verifyFailed
+	twAuth = twCheck.hasCookies && twCheck.state != verifyFailed
+
+	// What gets WRITTEN DOWN, which is a different claim and must be the
+	// stricter one. PersistPlatforms unions into cfg.Cookies.Platforms, a set
+	// that only ever grows and is never retracted, so accepting a login on an
+	// inconclusive check and then recording it as verified turns one rate limit
+	// during setup into a durable, permanent assertion that YouTube was
+	// verified. Accepting is right; recording the acceptance as a verification
+	// is not.
+	ytVerified := ytCheck.ok()
+	twVerified := twCheck.ok()
+
+	// Inconclusive has to read as inconclusive. The nil-callback branch inside
+	// checkPlatformAuth says so; the errored branch said nothing at all, so a
+	// 429 during setup was indistinguishable from a clean pass. No cause is
+	// named and no error is recorded: the check did not complete, which is not
+	// a finding about the credentials, and s.lastError renders in Settings as
+	// "your recordings will fail".
+	if ytCheck.hasCookies && ytCheck.state == verifyUnknown {
+		s.logger.Warn("YouTube auth check did not complete during setup — accepting the sign-in without verifying it")
 	}
-	if twAuth {
-		if s.VerifyTwitchAuth != nil {
-			if verified, err := s.VerifyTwitchAuth(ctx); err == nil {
-				twAuth = verified
-			}
-		} else {
-			s.logger.Warn("Twitch auth verification callback not wired — reporting based on cookie presence alone")
-		}
+	if twCheck.hasCookies && twCheck.state == verifyUnknown {
+		s.logger.Warn("Twitch auth check did not complete during setup — accepting the sign-in without verifying it")
 	}
 
 	if !ytAuth && !twAuth {
-		s.logger.Warn("cookies extracted but authentication verification failed")
+		// Not "verification failed": for a platform with no auth cookie at all
+		// no verification ran, and there are always two of those in a
+		// single-platform setup.
+		s.logger.Warn("cookies extracted, but neither platform is authenticated")
 	}
 
-	// Clear re-login flags for verified platforms
+	// Clear the re-login flag for every platform this setup ACCEPTED, not just
+	// the ones it verified. The flag means "go and sign in again", the user
+	// just did exactly that, and leaving it raised because the confirming
+	// request hit a rate limit would nag them about work they have already
+	// done. Unlike the persisted set below, this is process-local and the next
+	// conclusive check re-raises it.
 	s.mu.Lock()
 	if ytAuth {
 		s.needsRelogin["youtube"] = false
@@ -567,10 +584,15 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	}
 	s.mu.Unlock()
 
-	// Persist verified platforms to config so we can detect auth loss after restart
-	// (matches TS autoCookies.ts persistPlatforms)
+	// Persist verified platforms to config so we can detect auth loss after
+	// restart (matches TS autoCookies.ts persistPlatforms). VERIFIED, not
+	// accepted — see above. Withholding an unverified platform costs no
+	// recovery: shouldFireRecovery's first-conclusive-check branch fires for a
+	// platform absent from the persisted list, which is precisely the case
+	// SetExpectedPlatforms's per-platform everConcluded flags exist to keep
+	// working.
 	if s.PersistPlatforms != nil {
-		s.PersistPlatforms(ytAuth, twAuth)
+		s.PersistPlatforms(ytVerified, twVerified)
 	}
 
 	now := time.Now()
@@ -582,10 +604,10 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	// Persist LastRefresh to the sidecar so the next launch doesn't
 	// re-run the refresh immediately. Audit reports/cookies.md #48.
 	persistedPlatforms := []string{}
-	if ytAuth {
+	if ytVerified {
 		persistedPlatforms = append(persistedPlatforms, "youtube")
 	}
-	if twAuth {
+	if twVerified {
 		persistedPlatforms = append(persistedPlatforms, "twitch")
 	}
 	if metaErr := SaveMeta(s.cookiePath, CookieMeta{
@@ -595,11 +617,12 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		s.logger.Warn("could not persist cookies.meta.json", "err", metaErr)
 	}
 
+	// "verified" is the word this line uses, so only what verified goes in it.
 	var verified []string
-	if ytAuth {
+	if ytVerified {
 		verified = append(verified, "YouTube")
 	}
-	if twAuth {
+	if twVerified {
 		verified = append(verified, "Twitch")
 	}
 	if len(verified) > 0 {

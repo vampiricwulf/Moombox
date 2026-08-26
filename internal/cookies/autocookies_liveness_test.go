@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -273,5 +274,138 @@ func TestHalfClearedDeadSessionStillLetsTheImportThrough(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "sapisid-from-profile") {
 		t.Errorf("a working import was rolled back over a dead partial set:\n%s", data)
+	}
+}
+
+// finishSetupService wires the FinishSetup preconditions the way
+// TestFinishSetupTreatsEmptyProfileAsNoLogin does: a registered (fake) setup
+// process on the Firefox path, already exited so the graceful-close wait is
+// skipped.
+func finishSetupService(t *testing.T, rows []profileTestCookie, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) *AutoCookieService {
+	t.Helper()
+	profileDir := writeWALCookieProfile(t, rows)
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), logger)
+	s.setupProcess = &os.Process{Pid: -1}
+	s.setupBrowser = &DetectedBrowser{Type: "firefox", Path: "firefox", Name: "Firefox"}
+	s.browserExited = true
+	return s
+}
+
+// TestFinishSetupDoesNotRecordAnUnverifiedLoginAsVerified is site 3a.
+//
+// When the verify callback errored, FinishSetup fell back to cookie presence
+// and handed that value to PersistPlatforms, which unions into
+// cfg.Cookies.Platforms — a set that only ever grows and is never retracted. A
+// single 429 during interactive setup therefore recorded "YouTube verified" in
+// config, durably, on the strength of two cookie names being present.
+//
+// Accepting the login is still right (see the return-value assertion below);
+// recording the acceptance as a verification is not.
+func TestFinishSetupDoesNotRecordAnUnverifiedLoginAsVerified(t *testing.T) {
+	s := finishSetupService(t, youtubeAuthRows(), nopAutoCookieLogger{})
+	// The shape production produces: refresh.go returns a status code and
+	// nothing else, precisely so no credential material can reach a log or the
+	// UI through it.
+	rateLimited := errors.New("youtube auth check: unexpected status 429")
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return false, rateLimited }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, rateLimited }
+
+	var persistedYT, persistedTW bool
+	var persistCalls int
+	s.PersistPlatforms = func(yt, tw bool) {
+		persistCalls++
+		persistedYT, persistedTW = yt, tw
+	}
+
+	ytAuth, twAuth, err := s.FinishSetup(context.Background())
+	if err != nil {
+		t.Fatalf("FinishSetup: %v", err)
+	}
+
+	// A sign-in the user just completed is accepted: refusing it over a rate
+	// limit is the false-failure direction, and in a container the remedy it
+	// would send them to may not even be reachable.
+	if !ytAuth {
+		t.Error("FinishSetup rejected a login the user just completed because the check could not reach YouTube")
+	}
+	if twAuth {
+		t.Error("no Twitch credential was extracted, so nothing about Twitch may be accepted")
+	}
+
+	if persistCalls != 1 {
+		t.Fatalf("PersistPlatforms called %d times, want 1", persistCalls)
+	}
+	if persistedYT {
+		t.Error("an unverified acceptance was written into the durable verified-platforms set on the strength of a 429")
+	}
+	if persistedTW {
+		t.Error("Twitch was recorded as verified with no Twitch credential at all")
+	}
+
+	meta, err := LoadMeta(s.cookiePath)
+	if err != nil {
+		t.Fatalf("LoadMeta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("FinishSetup should still have written the sidecar")
+	}
+	if len(meta.Platforms) != 0 {
+		t.Errorf("cookies.meta.json records %v as verified after a check that did not complete", meta.Platforms)
+	}
+}
+
+// TestFinishSetupSaysWhenItCouldNotVerify is site 3b. The nil-callback branch
+// has always warned that it is reporting on presence alone; the errored branch
+// emitted nothing — no log, no status — so once a non-200 became inconclusive
+// a 429, a 503 and a captive portal all read as a clean verified pass.
+func TestFinishSetupSaysWhenItCouldNotVerify(t *testing.T) {
+	log := &capturingLogger{}
+	s := finishSetupService(t, youtubeAuthRows(), log)
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
+		return false, errors.New("youtube auth check: unexpected status 429")
+	}
+
+	if _, _, err := s.FinishSetup(context.Background()); err != nil {
+		t.Fatalf("FinishSetup: %v", err)
+	}
+
+	if !log.contains("did not complete") {
+		t.Errorf("an inconclusive setup check said nothing at all: %v", log.msgs)
+	}
+	// It must not read as a failure either — the credentials were never
+	// evaluated, so neither verdict has been earned.
+	if log.contains("verification failed") {
+		t.Errorf("an incomplete check was reported as a verification failure: %v", log.msgs)
+	}
+	if status := s.GetStatus(); status.LastError != nil {
+		t.Errorf("an inconclusive check must not raise the Settings error, which reads as \"recordings will fail\": %q", *status.LastError)
+	}
+}
+
+// TestFinishSetupStillRecordsAVerifiedLogin is the control for both site-3
+// tests: the ordinary success path must keep writing the platform down, or
+// SetExpectedPlatforms loses its startup baseline entirely.
+func TestFinishSetupStillRecordsAVerifiedLogin(t *testing.T) {
+	s := finishSetupService(t, youtubeAuthRows(), nopAutoCookieLogger{})
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+
+	var persistedYT bool
+	s.PersistPlatforms = func(yt, tw bool) { persistedYT = yt }
+
+	ytAuth, _, err := s.FinishSetup(context.Background())
+	if err != nil {
+		t.Fatalf("FinishSetup: %v", err)
+	}
+	if !ytAuth {
+		t.Error("FinishSetup = false for a login YouTube confirmed")
+	}
+	if !persistedYT {
+		t.Error("a verified login was not persisted")
 	}
 }
