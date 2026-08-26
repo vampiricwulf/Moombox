@@ -128,14 +128,33 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 	time.Sleep(cdpCloseFlushDelay)
 }
 
-func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, error) {
+// refreshFirefox drives one browser launch per platform and reads the profile
+// afterwards.
+//
+// The middle return is the ACTED verdict: did the browser this function
+// launched actually run? It exists because the caller's notion of success is
+// "cookies.txt authenticates something", and cookies.txt is kept alive by the
+// independent 30-minute RefreshService whether or not a browser ever ran — so
+// a refresh that did nothing at all still verified, and still logged "cookie
+// refresh succeeded". See browserLaunchActed for what the verdict is made of.
+//
+// It is an AND across every launch this pass makes: one platform whose browser
+// never rendered means that platform's cookies were not renewed, and the merge
+// downstream cannot tell the difference afterwards.
+func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, bool, error) {
 	if s.profileDirErr != nil {
-		return "", s.profileDirErr
+		return "", false, s.profileDirErr
 	}
 	tempScreenshot := filepath.Join(s.profileDir, "refresh-screenshot.png")
 	defer os.Remove(tempScreenshot)
+	cookieDB := filepath.Join(s.profileDir, firefoxCookieDBName)
 
 	platforms := s.refreshPlatforms()
+	// Vacuous truth is the wrong default here: no launches means nothing was
+	// refreshed, not "every launch succeeded". RefreshCookies gates this call
+	// on there being at least one platform, so this only guards a future
+	// caller that does not.
+	allActed := len(platforms) > 0
 	for i, platform := range platforms {
 		url := platformRefreshURLs[platform]
 
@@ -148,11 +167,22 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		}
 
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", false, ctx.Err()
 		}
 
 		// Clean lock files right before launch — Firefox leaves parent.lock on exit
 		cleanFirefoxLockFiles(s.profileDir)
+
+		// Clear the PREVIOUS launch's proof before this one starts. The defer
+		// above is function-scoped, so without this the YouTube screenshot
+		// survives into the Twitch launch and every platform after the first
+		// reads as "acted" no matter what its browser did.
+		clearBrowserRenderProof(tempScreenshot)
+		// Corroboration only — deliberately NOT a second gate. A browser set
+		// to clear cookies on close renders the page and writes nothing, so
+		// gating on the profile moving would report a working refresh as a
+		// failure. It is worth SAYING alongside the verdict, nothing more.
+		beforeDB := fingerprintCookieDB(cookieDB)
 
 		s.logger.Info("launching Firefox for cookie refresh", "platform", platform, "url", url)
 		cmd := exec.Command(browser.Path, "--new-instance", "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
@@ -163,6 +193,13 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		startTime := time.Now()
 		err := runWithTimeout(ctx, cmd, processTimeout, s.restoreRefreshSlot, s.logger)
 		elapsed := time.Since(startTime).Round(time.Millisecond)
+
+		rendered := browserRendered(tempScreenshot)
+		if !browserLaunchActed(err, rendered) {
+			allActed = false
+		}
+		profileWritten := fingerprintsDiffer(beforeDB, fingerprintCookieDB(cookieDB))
+
 		switch {
 		case errors.Is(err, errBrowserDrainTimeout):
 			// Degrade, do not abort. The browser was alive and has just been
@@ -171,17 +208,84 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 			// find a usable set. Same shape as the ErrNoCookiesInProfile
 			// handling in RefreshCookies: say what happened, keep going.
 			s.logger.Warn("firefox "+platform+" refresh did not finish in time; the browser was killed mid-load",
-				"elapsed", elapsed, "budget", processTimeout)
+				"elapsed", elapsed, "budget", processTimeout, "profile_written", profileWritten)
 		case err != nil:
 			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", elapsed)
+		case !rendered:
+			// Nothing reported an error and the launcher was reaped, but the
+			// browser left no screenshot: it never rendered the page.
+			//
+			// This arm is where the two NIL-returning failures land, and both
+			// used to log "refresh completed" at Info:
+			//   - the job-count query failed, so drainJob stopped waiting
+			//     (autocookies_firefox.go, drainJob) and the deferred
+			//     job.close() killed the browser mid-load — one line after a
+			//     Warn saying the query failed;
+			//   - job.assign failed, so the browser is outside the job, the
+			//     drain sees an empty job on its first lap, and we read the
+			//     profile while the page is still loading.
+			// Keying the verdict off errBrowserDrainTimeout alone would have
+			// reopened the silent-success hole through both of these.
+			s.logger.Warn("firefox "+platform+" refresh did not render the page; the profile was not refreshed",
+				"elapsed", elapsed, "profile_written", profileWritten)
 		default:
-			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", elapsed)
+			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", elapsed, "profile_written", profileWritten)
 		}
 	}
 
 	netscape, stats, err := readFirefoxCookies(s.profileDir)
 	s.logFirefoxReadStats(stats)
-	return netscape, err
+	return netscape, allActed, err
+}
+
+// clearBrowserRenderProof deletes the screenshot from the previous launch.
+//
+// MUST run before every launch, not once per refresh: the artifact lives at a
+// fixed path inside the profile, so a surviving file from the YouTube launch is
+// indistinguishable from one the Twitch launch just wrote.
+//
+// Errors are ignored on purpose. "Not there" is the normal case, and a removal
+// that genuinely fails leaves a stale file that browserRendered will read as
+// proof — which is the pre-existing behaviour, not a new failure, and refusing
+// the refresh over it would be worse.
+func clearBrowserRenderProof(path string) {
+	os.Remove(path)
+}
+
+// browserRendered reports whether the launch that just finished wrote a
+// screenshot.
+//
+// This is the decisive signal, and it is the one the isolation experiment used:
+// under a Job Object the identical argv produced no screenshot and no profile
+// write, while a plain exec produced both. It is per-launch, needs no WAL
+// reasoning, and — unlike anything derived from cookies.txt — cannot be
+// satisfied by the independent 30-minute RefreshService.
+//
+// A zero-length file does not count: that is what a browser killed part-way
+// through writing leaves behind, and it is not evidence that anything rendered.
+//
+// Only meaningful directly after clearBrowserRenderProof; see its comment.
+func browserRendered(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+// browserLaunchActed folds one launch's outcome into the single verdict the
+// refresh tail needs: did this browser do the work the refresh is about to take
+// credit for?
+//
+// Both halves are required, and each covers failures the other cannot see:
+//
+//   - launchErr != nil is the browser that could not start, that the launch
+//     budget killed mid-load (errBrowserDrainTimeout), or that the caller
+//     cancelled. A screenshot from earlier in the same launch does not redeem
+//     any of those — the profile is half-written at best.
+//   - rendered == false is every failure that returns NO error: a job query
+//     that failed, a job assign that failed, and on platforms with no Job
+//     Object at all a launcher handoff we never waited for. These are exactly
+//     the paths that logged "refresh completed" while doing nothing.
+func browserLaunchActed(launchErr error, rendered bool) bool {
+	return launchErr == nil && rendered
 }
 
 // restoreRefreshSlot puts the claim SENTINEL back once the launched browser

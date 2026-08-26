@@ -27,9 +27,22 @@ const (
 // pass is one place rather than scattered across autocookies*.go (audit
 // reports/cookies.md #38).
 const (
-	processTimeout       = 30 * time.Second // overall browser-launch budget for refresh
+	// processTimeout is the budget for ONE browser launch — and it is now
+	// spent for real. runWithTimeout waits for the launched BROWSER to finish
+	// rather than for the launcher stub that spawned it, so a Firefox refresh
+	// that used to return in ~200ms legitimately takes seconds and may take
+	// the whole 30s.
+	//
+	// It is COUPLED to refreshOverallBudget below, which caps the same work
+	// end to end. Worst case for a two-platform Firefox refresh:
+	//   2×processTimeout (60s) + firefoxLaunchSpacing (5s)
+	//   + the cookie-DB read retries (~2.5s) + 2×authVerifyTimeout (30s) ≈ 97s
+	// against a 120s cap. RAISING processTimeout WITHOUT RAISING
+	// refreshOverallBudget makes the outer ctx cancel the second platform's
+	// launch mid-flight instead of granting it the budget it was just given.
+	processTimeout       = 30 * time.Second
 	authVerifyTimeout    = 15 * time.Second // single VerifyYouTubeAuth / VerifyTwitchAuth call
-	refreshOverallBudget = 2 * time.Minute  // periodic refresh: ctx cap end-to-end
+	refreshOverallBudget = 2 * time.Minute  // periodic refresh: ctx cap end-to-end (see processTimeout)
 	// taskkillDrainDelay is the post-taskkill pause that lets Windows release
 	// the process handle before the next cleanup step inspects state. Replaces
 	// a bare 300ms literal in killSetupProcess (audit reports/cookies.md #45).
@@ -629,6 +642,21 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 
 	var netscapeCookies string
 	var err error
+	// browserActed answers the question this function used to get wrong: did
+	// the browser we launched actually DO anything?
+	//
+	// Success here is measured against cookies.txt, which the independent
+	// 30-minute RefreshService keeps alive regardless — so a refresh whose
+	// browser was killed mid-load, or never started, still verified and still
+	// logged "cookie refresh succeeded".
+	//
+	// It starts TRUE and only the browser branch below can clear it. That is
+	// the scoping, not an oversight: the import path and the empty-profile
+	// fallback never launch a browser, so there is no browser whose inaction
+	// could be detected, and gating them on this would make every
+	// containerised profile import report a refresh that never renews —
+	// permanently, on every restart.
+	browserActed := true
 	// emptyBrowserProfile records that a browser refresh read a profile with
 	// no relevant cookies in it. Not fatal on its own (see below), but it is
 	// the explanation the operator needs if auth then fails to verify.
@@ -655,7 +683,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		s.logger.Info("refreshing cookies via " + browser.Type)
 
 		if isFirefoxBased(browser.Type) {
-			netscapeCookies, err = s.refreshFirefox(ctx, browser)
+			netscapeCookies, browserActed, err = s.refreshFirefox(ctx, browser)
 			// An empty profile is a hard error for the IMPORT path, where it
 			// means the read is broken. On the browser path it has a mundane
 			// explanation — Firefox set to clear cookies on close leaves the
@@ -678,6 +706,12 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			}
 		} else {
 			netscapeCookies, err = s.refreshChromium(ctx, browser)
+			// Chromium needs no screenshot to prove it ran. refreshChromium
+			// waits for the CDP endpoint, navigates, and RETURNS what it read
+			// back over that connection — a nil error means the browser was
+			// alive and answering, which is proof of the same order as the
+			// Firefox screenshot and already in hand.
+			browserActed = err == nil
 		}
 	}
 
@@ -697,6 +731,12 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			s.logger.Info("DPAPI fallback succeeded; using user's signed-in browser cookies")
 			netscapeCookies = fallbackCookies
 			err = nil
+			// The headless launch failed, but this pass did bring fresh
+			// credential material in — read out of the user's real,
+			// signed-in browser profile rather than recycled from
+			// cookies.txt. That is what browserActed asks about, so the
+			// failed launch does not veto it.
+			browserActed = true
 		}
 	}
 
@@ -872,6 +912,18 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		s.logger.Warn("Twitch auth verification failed after refresh — manual re-login required")
 	}
 
+	// renewed says whether this pass actually produced the credentials it is
+	// about to be judged on, as opposed to finding the previous ones still
+	// alive. The import and empty-profile paths always did (they read a
+	// profile); the browser path only did if the browser ran.
+	//
+	// Written as an explicit `importedFromProfile ||` rather than leaning on
+	// browserActed's initialiser so the scoping is visible at the point of
+	// use: an earlier draft of this change gated success on the profile
+	// database's mtime and would have made every containerised import report
+	// failure forever.
+	renewed := importedFromProfile || browserActed
+
 	// Consider refresh successful if any platform verified
 	if ytAuth || twAuth {
 		now := time.Now()
@@ -884,7 +936,14 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			lostMsg = cookiesLostMessage(lost)
 		}
 		s.mu.Lock()
-		s.lastRefresh = &now
+		if renewed {
+			// Withheld when the browser did nothing. lastRefresh is what
+			// shouldSkipPeriodicRefresh consults and what the settings page
+			// prints as "Last refresh"; stamping it for a pass that renewed
+			// nothing would both suppress the NEXT attempt (interval/2) and
+			// tell the user their credentials are fresher than they are.
+			s.lastRefresh = &now
+		}
 		if lostMsg != "" {
 			s.lastError = &lostMsg
 		} else {
@@ -900,11 +959,16 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		if twAuth {
 			persistedPlatforms = append(persistedPlatforms, "twitch")
 		}
-		if metaErr := SaveMeta(s.cookiePath, CookieMeta{
-			LastRefresh: now,
-			Platforms:   persistedPlatforms,
-		}); metaErr != nil && s.logger != nil {
-			s.logger.Warn("could not persist cookies.meta.json", "err", metaErr)
+		// Same reason as lastRefresh above: the sidecar is the copy that
+		// survives a restart, so writing a timestamp for a refresh that never
+		// ran makes the lie durable.
+		if renewed {
+			if metaErr := SaveMeta(s.cookiePath, CookieMeta{
+				LastRefresh: now,
+				Platforms:   persistedPlatforms,
+			}); metaErr != nil && s.logger != nil {
+				s.logger.Warn("could not persist cookies.meta.json", "err", metaErr)
+			}
 		}
 
 		var verified []string
@@ -914,10 +978,24 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		if twAuth {
 			verified = append(verified, "Twitch")
 		}
-		if lostMsg != "" {
+		switch {
+		case lostMsg != "":
 			s.logger.Warn("cookie refresh verified one platform and lost another",
 				"verified", strings.Join(verified, " + "), "lost", strings.Join(lost, ","), "detail", lostMsg)
-		} else {
+		case !renewed:
+			// The credentials on disk verify — but they are the SAME ones that
+			// were already there, kept alive by the independent 30-minute
+			// RefreshService, not by this pass. Calling that "cookie refresh
+			// succeeded" is the claim this branch exists to stop making: it is
+			// how a Firefox-family refresh that did literally nothing reported
+			// success on every run for the life of the feature.
+			//
+			// Still `return true`: the caller asked whether authenticated
+			// requests will work, and they will. What changes is that nothing
+			// here credits this pass for it.
+			s.logger.Warn("cookies still verify, but this refresh did not renew them — the browser never completed a page load",
+				"verified", strings.Join(verified, " + "))
+		default:
 			s.logger.Info("cookie refresh succeeded", "verified", strings.Join(verified, " + "))
 		}
 		return true, nil
@@ -1129,7 +1207,13 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 				if err != nil {
 					s.logger.Warn("periodic auto-cookie refresh failed", "err", err)
 				} else if ok {
-					s.logger.Info("periodic auto-cookie refresh succeeded")
+					// Debug, and deliberately not "succeeded": RefreshCookies
+					// has just logged the one line that knows whether this pass
+					// RENEWED the credentials or merely found the previous ones
+					// still alive — at Info when it did, at Warn when it did
+					// not. Repeating "succeeded" here would contradict the
+					// second case and put the false claim back a line later.
+					s.logger.Debug("periodic auto-cookie refresh tick finished with authenticated cookies on disk")
 				}
 			}
 		}
