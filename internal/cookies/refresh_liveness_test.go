@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -35,10 +36,10 @@ func TestRecordLivenessOnlyLoggedOutWarrantsRecovery(t *testing.T) {
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	now := time.Now()
 
-	if rs.recordLiveness("youtube", true, now) {
+	if due, _ := rs.recordLiveness("youtube", true, now); due {
 		t.Error("a logged-in observation warranted recovery — positive evidence must be silent")
 	}
-	if !rs.recordLiveness("youtube", false, now.Add(time.Second)) {
+	if due, _ := rs.recordLiveness("youtube", false, now.Add(time.Second)); !due {
 		t.Error("a logged-out observation one second after a logged-in one did not warrant recovery — the healthy verdict swallowed the dead one")
 	}
 }
@@ -50,15 +51,16 @@ func TestRecordLivenessOnlyLoggedOutWarrantsRecovery(t *testing.T) {
 // checkChannel walks the channel list serially on the feed monitor's own
 // goroutine (internal/monitor/feed.go), so a dead session arrives here as a
 // short serial burst of identical logged-out verdicts. Exactly one of them may
-// warrant recovery: each one that does spawns its own two-minute
-// headless-browser attempt.
+// warrant recovery — see livenessRefireWindow for what the extra ones cost:
+// the auto-cookie single-flight declines them, a decline reports as
+// "Ineffective", and that notification suppresses the real verdict's.
 func TestRecordLivenessDedupesAcrossChannels(t *testing.T) {
 	base := time.Now()
 
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	warranted := 0
 	for i := range 5 {
-		if rs.recordLiveness("youtube", false, base.Add(time.Duration(i)*time.Second)) {
+		if due, _ := rs.recordLiveness("youtube", false, base.Add(time.Duration(i)*time.Second)); due {
 			warranted++
 		}
 	}
@@ -73,7 +75,7 @@ func TestRecordLivenessDedupesAcrossChannels(t *testing.T) {
 	for range 5 {
 		viaObserve.ObserveLiveness("youtube", false)
 	}
-	if viaObserve.recordLiveness("youtube", false, time.Now()) {
+	if due, _ := viaObserve.recordLiveness("youtube", false, time.Now()); due {
 		t.Error("ObserveLiveness left the dedupe window unconsumed — it is not routing through recordLiveness")
 	}
 }
@@ -86,13 +88,13 @@ func TestRecordLivenessRefiresAfterTheWindow(t *testing.T) {
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	t0 := time.Now()
 
-	if !rs.recordLiveness("youtube", false, t0) {
+	if due, _ := rs.recordLiveness("youtube", false, t0); !due {
 		t.Fatal("premise broken: the first logged-out verdict must warrant recovery")
 	}
-	if rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow-time.Second)) {
+	if due, _ := rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow-time.Second)); due {
 		t.Error("a verdict inside livenessRefireWindow warranted recovery")
 	}
-	if !rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow)) {
+	if due, _ := rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow)); !due {
 		t.Error("a verdict a full livenessRefireWindow later did not warrant recovery — the dedupe latched")
 	}
 }
@@ -104,10 +106,10 @@ func TestRecordLivenessSeparatesPlatforms(t *testing.T) {
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	now := time.Now()
 
-	if !rs.recordLiveness("youtube", false, now) {
+	if due, _ := rs.recordLiveness("youtube", false, now); !due {
 		t.Fatal("premise broken: the first logged-out verdict must warrant recovery")
 	}
-	if !rs.recordLiveness("twitch", false, now) {
+	if due, _ := rs.recordLiveness("twitch", false, now); !due {
 		t.Error("a YouTube verdict deduped a Twitch one")
 	}
 }
@@ -131,7 +133,7 @@ func TestLivenessRecoveryPilotIsDisarmed(t *testing.T) {
 	}
 
 	premise := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
-	if !premise.recordLiveness("youtube", false, time.Now()) {
+	if due, _ := premise.recordLiveness("youtube", false, time.Now()); !due {
 		t.Fatal("premise broken: a first logged-out observation must warrant recovery")
 	}
 
@@ -178,6 +180,12 @@ func TestObserveLivenessIsSafeUnderConcurrentProducers(t *testing.T) {
 // gets a liveness verdict for free from the membership probe every feed cycle.
 // Buying a second full page fetch on top of it, every cycle, forever, is the
 // cost this skip exists to avoid.
+//
+// The second half is what makes the first half mean anything. `called == 0`
+// alone is satisfied just as well by the fallback block not existing at all,
+// so the observation is then aged past the window on the SAME service and the
+// SAME call must now pay for the probe. That pins the zero to the freshness
+// gate specifically.
 func TestFallbackSkippedWhenMembershipIsFresh(t *testing.T) {
 	healthyRefreshSeams(t)
 
@@ -190,6 +198,15 @@ func TestFallbackSkippedWhenMembershipIsFresh(t *testing.T) {
 
 	if called != 0 {
 		t.Errorf("fallback fired %d times despite a fresh observation, want 0", called)
+	}
+
+	rs.mu.Lock()
+	rs.lastLivenessObserved["youtube"] = time.Now().Add(-livenessFreshWindow - time.Minute)
+	rs.mu.Unlock()
+
+	rs.doRefresh(context.Background())
+	if called != 1 {
+		t.Errorf("fallback fired %d times once the observation aged out, want 1 — the zero above proves nothing if the probe never runs at all", called)
 	}
 }
 
@@ -217,18 +234,26 @@ func TestFallbackRunsWhenNothingHasObserved(t *testing.T) {
 // neither record an observation (which would suppress the next cycle's probe)
 // nor consume the dedupe (which would swallow the next real logged-out
 // verdict).
+//
+// `called` is asserted alongside the two negatives on purpose: both of them
+// also hold if the probe never ran, so without it this test passes with the
+// entire fallback block deleted.
 func TestFallbackInconclusiveMovesNothing(t *testing.T) {
 	healthyRefreshSeams(t)
 
+	called := 0
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
-	rs.FallbackLiveness = func(context.Context) (bool, bool) { return false, false }
+	rs.FallbackLiveness = func(context.Context) (bool, bool) { called++; return false, false }
 
 	rs.doRefresh(context.Background())
 
+	if called != 1 {
+		t.Fatalf("fallback fired %d times, want 1 — the assertions below say nothing about a probe that never ran", called)
+	}
 	if rs.livenessObservedRecently("youtube", time.Now()) {
 		t.Error("an inconclusive fallback recorded an observation — it would suppress the next cycle's probe")
 	}
-	if !rs.recordLiveness("youtube", false, time.Now()) {
+	if due, _ := rs.recordLiveness("youtube", false, time.Now()); !due {
 		t.Error("an inconclusive fallback consumed the dedupe — a real logged-out verdict would be swallowed")
 	}
 }
@@ -262,22 +287,113 @@ func TestCheckNowSkipsFallbackProbe(t *testing.T) {
 	}
 }
 
-// TestFallbackObservationAgesOutWithinOneCadence pins livenessFreshWindow
-// against the cadence it has to interlock with.
+// TestStartupRefreshSkipsFallbackProbe: Start runs its initial check
+// SYNCHRONOUSLY on the caller's goroutine, and cmd/moombox's run() blocks on it
+// before the web server binds. Nothing has observed liveness at that point, so
+// the freshness skip cannot help — every install holding a YouTube auth cookie
+// would put a full page fetch, up to a 20s timeout, in front of the dashboard
+// coming up, on every start. Config changes restart the process, so that is one
+// delayed startup per settings tweak.
+//
+// Same reasoning that excludes CheckNow, and it was missed there first.
+func TestStartupRefreshSkipsFallbackProbe(t *testing.T) {
+	healthyRefreshSeams(t)
+
+	// Atomic because Start spawns the ticker goroutine. It cannot fire inside
+	// this test at a 30-minute interval, but the counter must not depend on
+	// that to be race-free.
+	var called atomic.Int64
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	rs.FallbackLiveness = func(context.Context) (bool, bool) { called.Add(1); return true, true }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rs.Start(ctx)
+	rs.Stop()
+
+	if got := called.Load(); got != 0 {
+		t.Errorf("fallback fired %d times on the synchronous startup check, want 0", got)
+	}
+
+	// Same service, still nothing observed: the ticker path does pay for it,
+	// so the zero above is attributable to the startup path and not to the
+	// probe being unreachable.
+	rs.doRefresh(context.Background())
+	if got := called.Load(); got != 1 {
+		t.Errorf("fallback fired %d times on the ticker path, want 1 — the startup zero proves nothing if the probe never runs at all", got)
+	}
+}
+
+// TestFallbackSkipCoversTheDefaultFeedCadence pins livenessFreshWindow's LOWER
+// bound at the configuration it was chosen for. monitors.feed_check_interval
+// defaults to 10 minutes, so a membership observation is at most that old when
+// the next refresh looks at it; if that read as stale, a perfectly healthy
+// install would pay for the fallback on every cycle — the exact cost the skip
+// exists to remove.
+//
+// This is an assumption about configuration, not an invariant, and the test
+// can only pin the default. feed_check_interval validates to 1..1440 minutes,
+// so anything above ~25 breaks the assumption and costs one extra page fetch
+// on roughly every other cycle. See livenessFreshWindow.
+func TestFallbackSkipCoversTheDefaultFeedCadence(t *testing.T) {
+	// internal/config: Monitors.FeedCheckInterval default, in minutes.
+	const defaultFeedCadence = 10 * time.Minute
+
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	t0 := time.Now()
+	rs.recordLiveness("youtube", true, t0)
+
+	if !rs.livenessObservedRecently("youtube", t0.Add(defaultFeedCadence)) {
+		t.Errorf("an observation %v old — one default feed cycle — reads as stale, so a healthy install would pay for the fallback on every cycle", defaultFeedCadence)
+	}
+}
+
+// TestLivenessLogLevelIsNotableOnlyOnChangeOrSignedOut pins the log-level rule.
+//
+// ObserveLiveness is called once per configured channel per feed cycle, so
+// logging every verdict at Info puts 144*N lines a day into the log AND over
+// the WebSocket stream to the Web UI and TUI — all of them identical on a
+// healthy install. Notable means: signed out (never demoted, because losing
+// evidence of a dead session is the one direction this must not fail in), a
+// change of verdict, or the first observation of the process.
+func TestLivenessLogLevelIsNotableOnlyOnChangeOrSignedOut(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	t0 := time.Now()
+
+	steps := []struct {
+		loggedIn bool
+		want     bool
+		why      string
+	}{
+		{true, true, "the first observation of the process is the record that the signal started producing"},
+		{true, false, "a repeat of a healthy verdict already on record is the volume problem"},
+		{false, true, "a signed-out verdict is always notable"},
+		{false, true, "a repeated signed-out verdict must not be demoted even though the dedupe refused it"},
+		{true, true, "recovery back to healthy is a change and must be visible"},
+		{true, false, "and the repeats after it are not"},
+	}
+	for i, s := range steps {
+		_, notable := rs.recordLiveness("youtube", s.loggedIn, t0.Add(time.Duration(i)*time.Second))
+		if notable != s.want {
+			t.Errorf("step %d (loggedIn=%v): notable = %v, want %v — %s", i, s.loggedIn, notable, s.want, s.why)
+		}
+	}
+}
+
+// TestFallbackObservationAgesOutWithinOneCadence pins livenessFreshWindow's
+// UPPER bound against the cadence it has to interlock with.
 //
 // The fallback records its own answer through the same method the membership
 // probe uses, so if its own stamp still read as fresh on the next tick the
 // probe would suppress itself on alternate cycles — quietly halving a coverage
-// nobody decided to halve. The lower bound matters too: a window so short that
-// a minutes-old membership observation reads as stale would make the skip
-// useless and put a second page fetch on every cycle.
+// nobody decided to halve.
 //
 // The staleness assertion deliberately sits SHORT of a full cadence. The
 // ticker measures tick-to-tick, while the stamp is written at the tail of a
 // pass, so consecutive fallback stamps are one cadence apart MINUS however
 // long the pass took — up to ~50s of auth checks and page fetch. A window that
 // only just cleared defaultRefreshInterval would therefore still self-suppress
-// in the field; passingSlack covers that gap.
+// in the field; passSlack covers that gap.
 func TestFallbackObservationAgesOutWithinOneCadence(t *testing.T) {
 	const passSlack = 2 * time.Minute
 
@@ -285,9 +401,6 @@ func TestFallbackObservationAgesOutWithinOneCadence(t *testing.T) {
 	t0 := time.Now()
 	rs.recordLiveness("youtube", true, t0)
 
-	if !rs.livenessObservedRecently("youtube", t0.Add(time.Minute)) {
-		t.Error("a one-minute-old observation is stale — the fallback would fire on every cycle despite a working membership probe")
-	}
 	if rs.livenessObservedRecently("youtube", t0.Add(defaultRefreshInterval-passSlack)) {
 		t.Errorf("an observation %v old still reads as fresh — the fallback's own stamp would suppress the next cycle's probe", defaultRefreshInterval-passSlack)
 	}
@@ -295,9 +408,11 @@ func TestFallbackObservationAgesOutWithinOneCadence(t *testing.T) {
 
 // TestTierOneRecoveryStampsTheLivenessDedupe: a dead session makes the tier-1
 // auth check fire recovery AND makes the fallback probe at the tail of the
-// same pass report logged-out. The operator-facing notification coalesces on
-// its own cooldown, but each OnRecoveryNeeded call spawns its own two-minute
-// headless-browser attempt, so the second one has to be suppressed here.
+// same pass report logged-out. The second fire is the harmful one: the
+// auto-cookie single-flight declines it while the first attempt is still
+// running, a decline reports as RefreshUnknown, and the "Ineffective" warning
+// that produces stamps the notification cooldown — so the real verdict's
+// actionable message, two minutes later, is never sent.
 func TestTierOneRecoveryStampsTheLivenessDedupe(t *testing.T) {
 	srv, _ := countingGuide(t, loggedOutGuideBody)
 	pointYouTubeGuideAt(t, srv)
@@ -312,7 +427,7 @@ func TestTierOneRecoveryStampsTheLivenessDedupe(t *testing.T) {
 	if len(fired) != 1 || fired[0] != "youtube" {
 		t.Fatalf("premise broken: tier-1 recovery fired %v, want [youtube]", fired)
 	}
-	if rs.recordLiveness("youtube", false, time.Now()) {
-		t.Error("a logged-out liveness verdict cleared the dedupe in the same window tier-1 recovery fired in — that is a second headless-browser attempt for one problem")
+	if due, _ := rs.recordLiveness("youtube", false, time.Now()); due {
+		t.Error("a logged-out liveness verdict cleared the dedupe in the same window tier-1 recovery fired in — the declined second attempt would report Ineffective and suppress the real verdict's notification")
 	}
 }
