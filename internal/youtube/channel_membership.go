@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
-	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // membershipTabIdentifier is the tabRenderer.tabIdentifier for a channel's
@@ -94,18 +93,19 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 	// malformed value from altering the request path (the fixed https host
 	// prefix already precludes SSRF; this is defense-in-depth).
 	pageURL := fmt.Sprintf("%s/channel/%s/membership", membershipPageBase, url.PathEscape(channelID))
-	headers := map[string]string{
-		"User-Agent":      constants.UserAgents.Web,
-		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-		"Accept-Language": "en-US,en;q=0.5",
-	}
-	if ch := s.Auth.GetCookieHeader(); ch != "" {
-		headers["Cookie"] = ch
-	}
 
-	body, err := utils.FetchBody(ctx, pageURL, 20*time.Second, headers)
+	// fetchLivenessPage, not utils.FetchBody. FetchBody returns bytes with no
+	// way to ask where they came from, and this is the arc's PREFERRED liveness
+	// signal — it runs every monitor cycle for every channel, so a false
+	// LoggedOut here is the loudest false alarm in the system. Task 3's strict
+	// livenessVerdict only removes the ytcfg fallback; it does nothing about a
+	// login or consent page that explicitly stamps "LOGGED_IN":false, which is
+	// what an off-origin redirect delivers. The shared helper is what refuses
+	// those pages; see its doc comment.
+	body, err := s.fetchLivenessPage(ctx, pageURL)
 	if err != nil {
-		// A page we never received is not an observation of the session.
+		// A page we never received — or one that did not come from our own
+		// credentialed request — is not an observation of the session.
 		return nil, SessionAuthUnknown, fmt.Errorf("fetch membership tab: %w", err)
 	}
 

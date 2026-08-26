@@ -4,14 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // wrapPage embeds a ytInitialData JSON literal in a minimal HTML page the way
@@ -267,18 +263,10 @@ const homeFallbackJSON = `{"contents": {"twoColumnBrowseResultsRenderer": {"tabs
 // cleanup.
 func newMembershipProbeService(t *testing.T, base, cookieFile string) *Service {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "cookies.txt")
-	if err := os.WriteFile(path, []byte(cookieFile), 0o600); err != nil {
-		t.Fatalf("write cookie file: %v", err)
-	}
-	jar := cookies.NewCookieJar()
-	if err := jar.Load(path); err != nil {
-		t.Fatalf("load cookie file: %v", err)
-	}
 	orig := membershipPageBase
 	membershipPageBase = base
 	t.Cleanup(func() { membershipPageBase = orig })
-	return NewService(jar, noopLogger{})
+	return jarServiceFromCookieFile(t, cookieFile)
 }
 
 // TestFetchMembershipVideosReturnsVerdict pins the contract this probe now
@@ -436,6 +424,85 @@ func TestFetchMembershipVideosTransportFailureIsNotAVerdict(t *testing.T) {
 	}
 	if videos != nil {
 		t.Errorf("videos = %+v, want nil", videos)
+	}
+}
+
+// TestFetchMembershipVideosRejectsAnOffOriginAnswer: the membership probe is
+// the arc's PREFERRED liveness signal and runs every monitor cycle for every
+// channel, so a false LoggedOut here is the loudest false alarm in the system.
+// It used to fetch via utils.FetchBody, which returns bytes with no way to ask
+// where they came from.
+//
+// Task 3's strict livenessVerdict does NOT cover this. It removes only the
+// ytcfg fallback — "a shell with a bootstrap and no login key". A login or
+// consent page that explicitly stamps "LOGGED_IN":false sails straight through
+// it, which is exactly what an off-origin redirect delivers.
+func TestFetchMembershipVideosRejectsAnOffOriginAnswer(t *testing.T) {
+	wall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(membershipHTML(false, homeFallbackJSON))
+	}))
+	defer wall.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, wall.URL+"/ServiceLogin", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	s := newMembershipProbeService(t, origin.URL, halfClearedCookieFile)
+	videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	if err == nil {
+		t.Fatal("expected an error for an answer from another host")
+	}
+	if verdict != SessionAuthUnknown {
+		t.Errorf("verdict = %q, want %q — another host's page is not a verdict on this session", verdict, SessionAuthUnknown)
+	}
+	if videos != nil {
+		t.Errorf("videos = %+v, want nil", videos)
+	}
+}
+
+// TestFetchMembershipVideosSurvivesACookieStrippingBounce is the membership
+// twin of TestProbeAccountLivenessSurvivesACookieStrippingBounce: origin →
+// off-host wall → origin ends on the requested host with Go's sticky
+// Cookie-strip already applied, so a terminal-host check alone still hands the
+// verdict an anonymous page. See that test and fetchLivenessPage for the
+// mechanism.
+func TestFetchMembershipVideosSurvivesACookieStrippingBounce(t *testing.T) {
+	var origin, wall *httptest.Server
+	var finalHopCookie string
+	var sawFinalHop bool
+
+	origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("back") == "" {
+			http.Redirect(w, r, wallURL(wall)+"/consent", http.StatusFound)
+			return
+		}
+		sawFinalHop = true
+		finalHopCookie = r.Header.Get("Cookie")
+		w.Write(membershipHTML(false, homeFallbackJSON))
+	}))
+	defer origin.Close()
+
+	wall = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, origin.URL+"/channel/UCabc/membership?back=1", http.StatusFound)
+	}))
+	defer wall.Close()
+
+	s := newMembershipProbeService(t, origin.URL, halfClearedCookieFile)
+	_, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+
+	if !sawFinalHop {
+		t.Fatal("the chain never bounced back to the origin; this test is not set up as intended")
+	}
+	// Presence only — never the value.
+	if finalHopCookie != "" {
+		t.Fatal("the final hop still carried a Cookie header; this test has stopped reproducing the hazard")
+	}
+	if verdict != SessionAuthUnknown {
+		t.Errorf("verdict = %q, want %q — the page was fetched with no credentials", verdict, SessionAuthUnknown)
+	}
+	if err == nil {
+		t.Error("expected an error; got nil")
 	}
 }
 

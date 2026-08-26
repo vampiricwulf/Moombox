@@ -1,8 +1,12 @@
 package youtube
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // noopLogger is a logger implementation that discards everything; used by
@@ -22,6 +26,27 @@ func newTestService(t *testing.T) *Service {
 	return &Service{
 		logger: noopLogger{},
 	}
+}
+
+// jarServiceFromCookieFile builds a FULLY WIRED Service around a jar loaded
+// from a Netscape cookie file written into the test's temp dir.
+//
+// Use this, not newTestService, for anything that touches auth: newTestService
+// leaves Auth nil, and both liveness probes open with s.Auth.HasAnyAuthCookie()
+// — so the &Service{} shortcut nil-panics before the code under test runs.
+// Shared by the membership and account-probe suites; the cookie-file constants
+// live in channel_membership_test.go.
+func jarServiceFromCookieFile(t *testing.T, cookieFile string) *Service {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(path, []byte(cookieFile), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+	jar := cookies.NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatalf("load cookie file: %v", err)
+	}
+	return NewService(jar, noopLogger{})
 }
 
 func TestSetVisitorData_StickyOnFirstWrite(t *testing.T) {

@@ -4,34 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
-	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
-
-// newTestServiceWithCookieFile builds a real Service around a jar loaded from a
-// Netscape cookie file written into the test's temp dir.
-//
-// It goes through NewService rather than composing a &Service{} literal:
-// ProbeAccountLiveness's first act is s.Auth.HasAnyAuthCookie(), and
-// newTestService (service_test.go) leaves Auth nil, so the literal shortcut
-// nil-panics before the probe does anything.
-func newTestServiceWithCookieFile(t *testing.T, cookieFile string) *Service {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "cookies.txt")
-	if err := os.WriteFile(path, []byte(cookieFile), 0o600); err != nil {
-		t.Fatalf("write cookie file: %v", err)
-	}
-	jar := cookies.NewCookieJar()
-	if err := jar.Load(path); err != nil {
-		t.Fatalf("load cookie file: %v", err)
-	}
-	return NewService(jar, noopLogger{})
-}
 
 // newTestServiceWithAuthCookies builds a Service whose jar holds a CONFIGURED
 // YouTube session.
@@ -43,7 +20,7 @@ func newTestServiceWithCookieFile(t *testing.T, cookieFile string) *Service {
 // turns all of them into zero-fetch runs.
 func newTestServiceWithAuthCookies(t *testing.T) *Service {
 	t.Helper()
-	return newTestServiceWithCookieFile(t, halfClearedCookieFile)
+	return jarServiceFromCookieFile(t, halfClearedCookieFile)
 }
 
 // aimProbeAt points accountProbeURL at u for the duration of the test and
@@ -117,7 +94,7 @@ func TestProbeAccountLivenessSkipsWhenNeverConfigured(t *testing.T) {
 	defer srv.Close()
 	aimProbeAt(t, srv.URL)
 
-	s := newTestServiceWithCookieFile(t, unconfiguredCookieFile)
+	s := jarServiceFromCookieFile(t, unconfiguredCookieFile)
 	got, err := s.ProbeAccountLiveness(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -166,16 +143,20 @@ func TestProbeAccountLivenessProbesAHalfClearedSession(t *testing.T) {
 // Unknown for unrelated reasons.
 const deadSessionPage = `<html><head><script>ytcfg.set({"LOGGED_IN":false});</script></head><body>Sign in</body></html>`
 
-// TestProbeAccountLivenessRedirectGuard is H4: a probe that is answered by
-// some OTHER host learned nothing about this session, and must say so.
+// TestProbeAccountLivenessRedirectGuard is half of H4: a probe answered by
+// some OTHER host learned nothing about this session and must say so.
 //
 // Task 3 removed the ytcfg fallback so an IN-PLACE consent interstitial cannot
 // read as a dead session. This covers the other shape — YouTube 302-ing to
-// consent.youtube.com or accounts.google.com instead of interstitialing. Go's
-// http.Client drops a manually-set Cookie header when a redirect leaves the
-// initial host (net/http/client.go shouldCopyHeaderOnRedirect), so the page
-// that answers such a redirect is by construction an anonymous fetch: parsing
-// it would report every EU/datacenter deployment's healthy cookies as dead.
+// consent.youtube.com or accounts.google.com instead of interstitialing.
+//
+// SCOPE, precisely: this exercises the HOST comparison and nothing else. Both
+// servers here are 127.0.0.1 on different ports, and Go's cookie-strip rule is
+// hostname-based (shouldCopyHeaderOnRedirect → idnaASCIIFromURL → URL.Hostname(),
+// port-stripped), so the Cookie header is NOT stripped in this test and the
+// landing page below is fetched WITH credentials. The stripping — and the
+// bounce-back case where the terminal host alone is not enough — is
+// TestProbeAccountLivenessSurvivesACookieStrippingBounce.
 func TestProbeAccountLivenessRedirectGuard(t *testing.T) {
 	// Self-check: without the guard, this landing page yields LoggedOut, so
 	// the assertions below genuinely exercise the guard rather than passing
@@ -211,6 +192,96 @@ func TestProbeAccountLivenessRedirectGuard(t *testing.T) {
 	landingHost := strings.TrimPrefix(landing.URL, "http://")
 	if !strings.Contains(err.Error(), landingHost) {
 		t.Errorf("error = %v, want it to name the host it landed on (%s)", err, landingHost)
+	}
+}
+
+// bounceChain wires an origin server that redirects off-host to a wall server,
+// which redirects straight back to the origin. It returns the probe URL to
+// aim at and a func reporting whether the final on-origin hop still carried a
+// Cookie header. The landing body is deadSessionPage, so a probe that reads it
+// answers LoggedOut.
+//
+// The two hops must differ by HOSTNAME, not merely by port: Go compares
+// URL.Hostname(), so two ports on 127.0.0.1 are the same host to it and no
+// strip occurs. "localhost" and "127.0.0.1" both reach the loopback listeners
+// while being distinct hostnames, which is what makes the strip reproducible
+// with no DNS setup.
+func bounceChain(t *testing.T) (probeURL string, cookieSurvived func() bool) {
+	t.Helper()
+	var origin *httptest.Server
+	var wall *httptest.Server
+	var finalHopCookie string
+	var sawFinalHop bool
+
+	origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("back") == "" {
+			http.Redirect(w, r, wallURL(wall)+"/consent", http.StatusFound)
+			return
+		}
+		sawFinalHop = true
+		finalHopCookie = r.Header.Get("Cookie")
+		w.Write([]byte(deadSessionPage))
+	}))
+	t.Cleanup(origin.Close)
+
+	wall = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, origin.URL+"/feed/subscriptions?back=1", http.StatusFound)
+	}))
+	t.Cleanup(wall.Close)
+
+	return origin.URL + "/feed/subscriptions", func() bool {
+		if !sawFinalHop {
+			t.Fatal("the chain never bounced back to the origin; this test is not set up as intended")
+		}
+		return finalHopCookie != ""
+	}
+}
+
+// wallURL re-addresses an httptest server (which listens on 127.0.0.1) as
+// "localhost" so the redirect to it is a genuine cross-hostname hop.
+func wallURL(s *httptest.Server) string {
+	return strings.Replace(s.URL, "127.0.0.1", "localhost", 1)
+}
+
+// TestProbeAccountLivenessSurvivesACookieStrippingBounce is the other half of
+// H4, and the case a terminal-host check alone does NOT cover.
+//
+// Go's decision to strip a manually-set Cookie header is STICKY: client.go
+// declares stripSensitiveHeaders once before the redirect loop and only ever
+// sets it inside, guarded by !stripSensitiveHeaders — nothing clears it on a
+// later hop. So origin → wall → origin ends on the host we asked for, with the
+// credentials permanently gone. The host comparison passes; the body is an
+// anonymous fetch; livenessVerdict reads LoggedOut off it and an operator whose
+// cookies are fine is told they are dead.
+//
+// The assertion on cookieSurvived() is the load-bearing part: it observes the
+// strip directly, so if a future Go release stops stripping (or starts
+// restoring on return to the origin) this test says so out loud instead of
+// silently ceasing to cover anything.
+func TestProbeAccountLivenessSurvivesACookieStrippingBounce(t *testing.T) {
+	if v := livenessVerdict([]byte(deadSessionPage)); v != SessionAuthLoggedOut {
+		t.Fatalf("landing page reads as %q, want %q — the test would not exercise the guard", v, SessionAuthLoggedOut)
+	}
+
+	probeURL, cookieSurvived := bounceChain(t)
+	aimProbeAt(t, probeURL)
+
+	s := newTestServiceWithAuthCookies(t)
+	got, err := s.ProbeAccountLiveness(context.Background())
+
+	// Never print the header's value — only whether one was present.
+	if cookieSurvived() {
+		t.Fatal("the final hop still carried a Cookie header; Go no longer strips on this chain, " +
+			"so this test has stopped reproducing the hazard it was written for")
+	}
+	if got != SessionAuthUnknown {
+		t.Errorf("verdict = %q, want %q — the body was fetched with no credentials", got, SessionAuthUnknown)
+	}
+	if err == nil {
+		t.Fatal("expected an error; got nil")
+	}
+	if strings.Contains(err.Error(), "LOGGED_IN") || strings.Contains(err.Error(), "working-sapisid") {
+		t.Errorf("error echoed page content or a cookie value: %v", err)
 	}
 }
 
