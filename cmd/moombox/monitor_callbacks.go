@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
@@ -182,6 +183,127 @@ func jobCreationForDisposition(d monitor.JobDisposition) (status database.JobSta
 	}
 }
 
+// authFailureNotifier is wireMonitorCallbacks' cooldown-guarded notification
+// sender. Threaded into runCookieRecovery as a parameter rather than reached
+// through runState, both because the cooldown map is a local of the wiring
+// function and so a test can observe exactly what would have been sent.
+type authFailureNotifier func(platform, title, desc string, ntype notifications.NotificationType)
+
+// cookieRefresher is the single outward call runCookieRecovery makes on the
+// auto-cookie service.
+//
+// It is a parameter rather than a reach through runState because the branch
+// it feeds is the entire subject of this code, and driving a real
+// AutoCookieService to a chosen pair of per-platform verdicts needs a browser
+// profile, a browser, and the network. Passing the refresh in lets each
+// verdict be exercised directly; the mapping from a real refresh onto those
+// verdicts is pinned inside the cookies package, where the profile fixtures
+// live.
+type cookieRefresher func(context.Context) (cookies.RefreshResult, error)
+
+// cookieReplacementGuidance is the tail shared by both failure notifications.
+//
+// It leads with the cookie FILE rather than the Settings wizard on purpose:
+// the wizard drives a local headed browser and its endpoints are
+// loopback-gated, so it is unreachable from a container and from a remote
+// dashboard — which is exactly where this notification is most likely to be
+// read. %s is the path to the configured cookie file.
+const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a browser signed in to the account " +
+	"and overwrite the file at %s. (Export from a private window and close it: browsing on in the source profile " +
+	"rotates the session and invalidates the export.) The interactive browser login in Settings is an alternative " +
+	"only on the machine hosting Moombox."
+
+// runCookieRecovery performs one auto-cookie recovery pass on behalf of
+// `platform` and reports what it concluded ABOUT THAT PLATFORM.
+//
+// The per-platform verdict is the entire point. This used to branch on
+// RefreshCookies' whole-service bool, which answers "did ANY platform end up
+// authenticated" — so a healthy Twitch made a conclusively dead YouTube take
+// the success branch. The field log for 2026-08-20 03:40:01 has all three
+// lines within a second of each other:
+//
+//	YouTube auth verification failed after refresh — manual re-login required
+//	cookie refresh succeeded                       verified=Twitch
+//	auto-cookie recovery succeeded                 platform=youtube
+//
+// No notification was sent, and the operator found out days later when a
+// recording failed.
+//
+// The three verdicts map onto the three branches that were already here; only
+// the question being asked changed.
+func (s *runState) runCookieRecovery(ctx context.Context, platform string, refresh cookieRefresher, notify authFailureNotifier) {
+	result, err := refresh(ctx)
+	if err != nil {
+		s.log.Error("auto-cookie recovery failed", "platform", platform, "err", err)
+		// Previously log-only: the operator learned cookies were dead
+		// only when a recording actually failed. 30-min per-platform
+		// cooldown via notifyAuthFailure.
+		notify(platform, "Cookie Auto-Refresh Failed",
+			fmt.Sprintf("Automatic cookie refresh for %s failed — recordings will fail until the cookies are replaced. "+
+				cookieReplacementGuidance, platform, s.cookieFilePath()),
+			notifications.TypeError)
+		return
+	}
+
+	switch result.Verdict(platform) {
+	case cookies.RefreshOK:
+		s.log.Info("auto-cookie recovery succeeded", "platform", platform)
+		// Re-check auth status immediately so the UI updates
+		s.cookieRefresh.CheckNow(context.Background())
+
+	case cookies.RefreshFailed:
+		// The case that was silently swallowed whenever the sibling platform
+		// verified. It is conclusive — the refresh ran, the credentials were
+		// verified, and the answer was no — so unlike the branch below it may
+		// name the cause.
+		s.log.Warn("auto-cookie recovery ran and this platform is still not authenticated", "platform", platform)
+		if !result.HasCredentials(platform) {
+			// Reachable, and the trigger is a total credential EXPIRY.
+			//
+			// The two conditions are sampled at different moments and read
+			// different things. shouldFireRecovery's cookiesPresent comes from
+			// the jar, which ignores expiry; HasCredentials comes from the
+			// post-merge jar, and mergeCookieFiles prunes ON expiry — the
+			// disagreement RefreshCookiesDetailed documents where it computes
+			// `lost`. So a platform whose every stored row has lapsed fires
+			// recovery (the jar still sees rows), merges to nothing, and
+			// arrives here with a conclusive failure and no credentials left.
+			//
+			// The wording therefore has to hold for BOTH shapes — a platform
+			// that just lost everything and one that never had anything —
+			// because nothing here can tell them apart. It names the two
+			// possibilities and asserts neither. Deliberately NOT
+			// cookiesLostMessage, which is the same information but asserts
+			// the loss outright, and would be simply false on an install that
+			// never held credentials for this platform.
+			notify(platform, "Cookie Auto-Refresh Failed",
+				fmt.Sprintf("Automatic cookie refresh ran, and Moombox now holds no %s cookies at all — either every "+
+					"stored credential had expired and was dropped, or none were ever supplied. Recordings that need "+
+					"an account will fail until some are. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
+				notifications.TypeError)
+			return
+		}
+		notify(platform, "Cookie Auto-Refresh Failed",
+			fmt.Sprintf("Automatic cookie refresh ran, and %s is still not authenticated — the stored cookies are dead "+
+				"and recordings will fail until they are replaced. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
+			notifications.TypeError)
+
+	default: // cookies.RefreshUnknown
+		s.log.Warn("auto-cookie recovery did not establish whether this platform is authenticated", "platform", platform)
+		// States no cause, for the same reason the equivalent log line in
+		// services.go states none: Unknown is what comes back when the
+		// refresh DECLINED to run (setup in progress, a refresh already
+		// running, no platforms configured), when it aborted before
+		// verifying, and when the verification could not reach the service —
+		// with the session possibly perfectly healthy throughout. A
+		// notification is more visible than a log line, so an unearned
+		// assertion here is worse, not better.
+		notify(platform, "Cookie Auto-Refresh Ineffective",
+			fmt.Sprintf("Automatic cookie refresh did not restore %s authentication — it either declined to run or found nothing usable (the log at debug level says which). If the cookies have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
+			notifications.TypeWarning)
+	}
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -230,11 +352,10 @@ func (s *runState) wireMonitorCallbacks() {
 			s.log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
 			return
 		}
-		// See notifyAuthFailure bodies below: the guidance leads with the
-		// cookie FILE rather than the Settings wizard, because the wizard
-		// drives a local browser and its endpoints are loopback-gated — it
-		// is unreachable from a container and from a remote dashboard, which
-		// is exactly where this notification is most likely to be read.
+		// The pass itself, and the per-platform branch it takes, live in
+		// runCookieRecovery — see cookieReplacementGuidance there for why the
+		// notification copy leads with the cookie FILE rather than the
+		// Settings wizard.
 		s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
 		go func() {
 			defer func() {
@@ -244,32 +365,7 @@ func (s *runState) wireMonitorCallbacks() {
 			}()
 			refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer refreshCancel()
-			ok, err := s.autoCookieSvc.RefreshCookies(refreshCtx)
-			if err != nil {
-				s.log.Error("auto-cookie recovery failed", "platform", platform, "err", err)
-				// Previously log-only: the operator learned cookies were dead
-				// only when a recording actually failed. 30-min per-platform
-				// cooldown via notifyAuthFailure.
-				notifyAuthFailure(platform, "Cookie Auto-Refresh Failed",
-					fmt.Sprintf("Automatic cookie refresh for %s failed — recordings will fail until the cookies are replaced. Export a fresh Netscape cookies.txt from a browser signed in to the account and overwrite the file at %s. (Export from a private window and close it: browsing on in the source profile rotates the session and invalidates the export.) The interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
-					notifications.TypeError)
-			} else if ok {
-				s.log.Info("auto-cookie recovery succeeded", "platform", platform)
-				// Re-check auth status immediately so the UI updates
-				s.cookieRefresh.CheckNow(context.Background())
-			} else {
-				s.log.Warn("auto-cookie recovery did not restore auth", "platform", platform)
-				// States no cause, for the same reason the equivalent log line
-				// in services.go states none: this fires from every
-				// (false, nil) return of RefreshCookies, and most of those
-				// mean it DECLINED to run (setup in progress, a refresh
-				// already running, no platforms configured) with the session
-				// possibly perfectly healthy. A notification is more visible
-				// than a log line, so an assertion here is worse, not better.
-				notifyAuthFailure(platform, "Cookie Auto-Refresh Ineffective",
-					fmt.Sprintf("Automatic cookie refresh did not restore %s authentication — it either declined to run or found nothing usable (the log at debug level says which). If the cookies have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
-					notifications.TypeWarning)
-			}
+			s.runCookieRecovery(refreshCtx, platform, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
 		}()
 	}
 

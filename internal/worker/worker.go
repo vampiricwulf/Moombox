@@ -173,9 +173,14 @@ type DownloadWorker struct {
 	wg           sync.WaitGroup // tracks in-flight processJob goroutines
 	notifyJob    chan struct{}  // signal to re-check for new jobs (non-blocking send)
 
-	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should be attempted.
-	// Returns true if cookies were refreshed successfully.
-	OnCookieRefreshNeeded func() bool
+	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
+	// be attempted. Returns true if THE NAMED PLATFORM ended up authenticated.
+	//
+	// The platform argument is not decoration. Without it the callback could
+	// only answer "did any platform end up authenticated", so a healthy Twitch
+	// told a YouTube job to retry — spending a probe attempt and a slot on a
+	// request that had just conclusively failed, on every cycle.
+	OnCookieRefreshNeeded func(platform string) bool
 
 	// CurrentCredentialIdentity returns an opaque fingerprint of the account
 	// the platform's cookies currently belong to (cookies.CookieJar's
@@ -1064,9 +1069,17 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		return
 	}
 
-	w.logger.Info("attempting automatic cookie refresh...")
-	if w.OnCookieRefreshNeeded() {
-		w.logger.Info("cookie refresh succeeded, retrying job")
+	// job.Platform verbatim, with no defaulting applied here.
+	//
+	// Every production creator sets Platform explicitly, and this reads the
+	// in-memory struct rather than a row, so the schema default never enters
+	// into it. If one ever arrives empty, RefreshResult.Verdict("") is
+	// RefreshUnknown — no health claim either way — and the job stays parked
+	// for a human. Guessing "youtube" here would trade that safe outcome for
+	// a second defaulting rule to keep in sync with the creators.
+	w.logger.Info("attempting automatic cookie refresh...", "platform", job.Platform)
+	if w.OnCookieRefreshNeeded(job.Platform) {
+		w.logger.Info("cookie refresh succeeded, retrying job", "platform", job.Platform)
 		// Set to Upcoming so StreamProcessor.Process re-probes and
 		// correctly classifies the stream (live/VOD/upcoming). Using
 		// Live was wrong when the stream had transitioned to post-live

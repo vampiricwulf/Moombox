@@ -119,7 +119,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 
 Dependencies injected via `DownloadWorkerDeps` struct: cipher solver, PO token provider, Twitch service, notification manager.
 
-The `OnCookieRefreshNeeded` callback is wired to `autoCookieSvc.RefreshCookies()` for automatic cookie recovery on auth failures.
+The `OnCookieRefreshNeeded(platform string) bool` callback is wired to `autoCookieSvc.RefreshCookiesDetailed()` for automatic cookie recovery on auth failures. It answers per platform (`RefreshResult.Verdict`), not per service: a healthy Twitch must not tell a YouTube job to retry into the same failure.
 
 ### 12. Trim Service
 `worker.NewTrimService()` creates the FFmpeg-based clip creation service. Prevents concurrent trim operations on the same job via `activeOps` mutex map.
@@ -168,7 +168,7 @@ After all services are created, `main.go` wires the event callbacks:
 - `db.OnJobUpdate` -> `wsHub.BroadcastJobUpdate()` (per-job WebSocket messages)
 - `db.OnJobsChange` -> `wsHub.BroadcastJobsUpdate()` (full job list), prune job logs
 - `log.Subscribe()` -> `wsHub.BroadcastLog()` + `db.RouteLogToJobs()` (per-job log buffers)
-- `cookieRefresh.OnRecoveryNeeded` -> triggers `autoCookieSvc.RefreshCookies()` in background goroutine
+- `cookieRefresh.OnRecoveryNeeded` -> `runCookieRecovery()` in a background goroutine: `autoCookieSvc.RefreshCookiesDetailed()`, then notifies on the triggering platform's own verdict (OK / Failed / Unknown)
 
 All monitor `OnVideoFound`/`OnStreamFound` callbacks are wrapped with `defer func() { if r := recover() }()` for panic isolation.
 

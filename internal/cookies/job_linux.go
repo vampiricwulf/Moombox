@@ -20,6 +20,14 @@ func newProcessJob() (*processJob, error)        { return &processJob{}, nil }
 func (j *processJob) assign(p *os.Process) error { return nil }
 func (j *processJob) close()                     {}
 
+// activeProcesses always reports zero because there is no job to count.
+// runWithTimeout's drain loop treats that as "nothing left to wait for" and
+// exits immediately, so this platform keeps exactly today's behaviour — the
+// Firefox launcher handoff is unfixed here, but nothing is killed either
+// (pdeathsig fires on Moombox's death, not the launcher's), so the browser
+// runs on detached.
+func (j *processJob) activeProcesses() (int, error) { return 0, nil }
+
 // configureCmdSysProcAttr arranges for the kernel to SIGKILL the launched
 // browser when Moombox dies — the Linux counterpart of the Windows Job
 // Object's KILL_ON_JOB_CLOSE. Without it, a crashed Moombox orphans a

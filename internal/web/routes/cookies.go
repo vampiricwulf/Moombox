@@ -66,7 +66,14 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			return
 		}
 
-		ok, err := autoCookieSvc.RefreshCookies(req.Context())
+		// Detailed, for `renewed` alone. This is the manual refresh button —
+		// the single most direct place an operator asks "did the browser
+		// refresh actually do anything", and the one place that answered
+		// unconditionally "successful" while the Last refresh line beside it
+		// silently refused to advance. On Linux, where a launch can never be
+		// confirmed to have acted, that pairing is the permanent steady state.
+		result, err := autoCookieSvc.RefreshCookiesDetailed(req.Context())
+		ok := result.YouTube == cookies.RefreshOK || result.Twitch == cookies.RefreshOK
 		if err != nil {
 			// Discriminate sentinel errors so the frontend can surface a
 			// useful message (and so XHR callers with `if (!response.ok)`
@@ -101,6 +108,16 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		response := map[string]any{
 			"success": ok,
+			// renewed splits `success` into the two things it was conflating:
+			// "the credentials work" (success) and "this pass produced them"
+			// (renewed). Additive — success keeps its exact old meaning, so an
+			// older frontend against a newer binary behaves as before.
+			//
+			// False here does NOT mean the browser failed. With no Job Object
+			// to drain we cannot tell a browser that did nothing from one that
+			// finished after we looked, so the copy must stop at "could not
+			// confirm".
+			"renewed": result.Renewed,
 			"cookieStatus": map[string]any{
 				"found":         status.HasYouTubeCookies,
 				"authenticated": status.YouTubeAuthenticated,

@@ -194,6 +194,12 @@ type (
 	}
 	cookieForceRefreshResultMsg struct {
 		Success bool
+		// Renewed says whether the pass produced the credentials it verified.
+		// Only meaningful when Success is true: a working cookies.txt outlives
+		// a browser refresh that did nothing, so "the cookies work" and "the
+		// refresh worked" are separate answers and the operator pressed a key
+		// asking the second one.
+		Renewed bool
 		Err     error
 	}
 
@@ -432,8 +438,11 @@ type App struct {
 	OnFetchReleaseNotes func(version string) (tag, notes string, err error)
 
 	// Cookie refresh callbacks
-	OnRecheckCookies      func() (ytAuth bool, twAuth bool)
-	OnForceRefreshCookies func() (ok bool, err error) // nil if auto-cookies not configured
+	OnRecheckCookies func() (ytAuth bool, twAuth bool)
+	// OnForceRefreshCookies runs the browser cookie refresh. nil if
+	// auto-cookies are not configured. renewed is meaningful only when ok:
+	// see cookieForceRefreshResultMsg.
+	OnForceRefreshCookies func() (ok, renewed bool, err error)
 
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)

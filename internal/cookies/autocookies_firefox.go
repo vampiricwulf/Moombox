@@ -128,14 +128,34 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 	time.Sleep(cdpCloseFlushDelay)
 }
 
-func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, error) {
+// refreshFirefox drives one browser launch per platform and reads the profile
+// afterwards.
+//
+// The middle return is the ACTED verdict: did the browser this function
+// launched actually run? It exists because the caller's notion of success is
+// "cookies.txt authenticates something", and cookies.txt is kept alive by the
+// independent 30-minute RefreshService whether or not a browser ever ran — so
+// a refresh that did nothing at all still verified, and still logged "cookie
+// refresh succeeded". See browserLaunchActed for what the verdict is made of.
+//
+// It is an AND across every launch this pass makes: one launch that could not
+// be confirmed leaves the pass unable to claim it renewed that platform, and
+// the merge downstream cannot tell the difference afterwards. Note the shape of
+// that — it says the pass has no proof, not that the browser did nothing.
+func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, bool, error) {
 	if s.profileDirErr != nil {
-		return "", s.profileDirErr
+		return "", false, s.profileDirErr
 	}
 	tempScreenshot := filepath.Join(s.profileDir, "refresh-screenshot.png")
 	defer os.Remove(tempScreenshot)
+	cookieDB := filepath.Join(s.profileDir, firefoxCookieDBName)
 
 	platforms := s.refreshPlatforms()
+	// Vacuous truth is the wrong default here: no launches means nothing was
+	// refreshed, not "every launch succeeded". RefreshCookies gates this call
+	// on there being at least one platform, so this only guards a future
+	// caller that does not.
+	allActed := len(platforms) > 0
 	for i, platform := range platforms {
 		url := platformRefreshURLs[platform]
 
@@ -148,11 +168,22 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		}
 
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", false, ctx.Err()
 		}
 
 		// Clean lock files right before launch — Firefox leaves parent.lock on exit
 		cleanFirefoxLockFiles(s.profileDir)
+
+		// Clear the PREVIOUS launch's proof before this one starts. The defer
+		// above is function-scoped, so without this the YouTube screenshot
+		// survives into the Twitch launch and every platform after the first
+		// reads as "acted" no matter what its browser did.
+		clearBrowserRenderProof(tempScreenshot)
+		// Corroboration only — deliberately NOT a second gate. A browser set
+		// to clear cookies on close renders the page and writes nothing, so
+		// gating on the profile moving would report a working refresh as a
+		// failure. It is worth SAYING alongside the verdict, nothing more.
+		beforeDB := fingerprintCookieDB(cookieDB)
 
 		s.logger.Info("launching Firefox for cookie refresh", "platform", platform, "url", url)
 		cmd := exec.Command(browser.Path, "--new-instance", "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
@@ -161,16 +192,177 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		s.refreshCmd = cmd
 		s.mu.Unlock()
 		startTime := time.Now()
-		if err := runWithTimeout(cmd, processTimeout, s.logger); err != nil {
-			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", time.Since(startTime).Round(time.Millisecond))
-		} else {
-			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", time.Since(startTime).Round(time.Millisecond))
+		err := runWithTimeout(ctx, cmd, processTimeout, s.restoreRefreshSlot, s.logger)
+		elapsed := time.Since(startTime).Round(time.Millisecond)
+
+		rendered := browserRendered(tempScreenshot)
+		acted := browserLaunchActed(err, rendered)
+		if !acted {
+			allActed = false
+		}
+		profileWritten := fingerprintsDiffer(beforeDB, fingerprintCookieDB(cookieDB))
+
+		switch {
+		case errors.Is(err, errBrowserDrainTimeout):
+			// Degrade, do not abort. The browser was alive and has just been
+			// killed, so the profile may be half-written — but the existing
+			// cookies.txt is untouched and readFirefoxCookies below may still
+			// find a usable set. Same shape as the ErrNoCookiesInProfile
+			// handling in RefreshCookies: say what happened, keep going.
+			s.logger.Warn("firefox "+platform+" refresh did not finish in time; the browser was killed mid-load",
+				"elapsed", elapsed, "budget", processTimeout, "profile_written", profileWritten)
+		case err != nil:
+			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", elapsed, "profile_written", profileWritten)
+		case !rendered:
+			// Nothing reported an error and the launcher was reaped, but no
+			// screenshot had appeared by the time the launch returned.
+			//
+			// The message says exactly that and no more. What the browser
+			// actually did is not observable from here: with no Job Object to
+			// drain (Linux, or a job we failed to create) a detached browser
+			// may render moments after this stat, and profile_written can come
+			// back true off a flush that landed in between. Asserting "it never
+			// rendered" or "the profile was not refreshed" would be the same
+			// kind of unearned claim this whole change exists to remove — one
+			// that happens to point the other way.
+			//
+			// This arm is where the two NIL-returning failures land, and both
+			// used to log "refresh completed" at Info:
+			//   - the job-count query failed, so drainJob stopped waiting
+			//     (autocookies_firefox.go, drainJob) and the deferred
+			//     job.close() killed the browser mid-load — one line after a
+			//     Warn saying the query failed;
+			//   - job.assign failed, so the browser is outside the job, the
+			//     drain sees an empty job on its first lap, and we read the
+			//     profile while the page is still loading.
+			// Keying the verdict off errBrowserDrainTimeout alone would have
+			// reopened the silent-success hole through both of these.
+			s.logger.Warn("firefox "+platform+" refresh could not be confirmed — no screenshot was written by the time the launch returned",
+				"elapsed", elapsed, "profile_written", profileWritten)
+		default:
+			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", elapsed, "profile_written", profileWritten)
+			// Observability only: does not touch acted, allActed, or any
+			// return value. See refreshLooksImplausiblyFast.
+			if refreshLooksImplausiblyFast(elapsed, acted) {
+				s.logger.Debug("firefox "+platform+" refresh rendered unusually fast; the page may not have fully loaded",
+					"elapsed", elapsed, "floor", minPlausibleBrowserRefresh)
+			}
 		}
 	}
 
 	netscape, stats, err := readFirefoxCookies(s.profileDir)
 	s.logFirefoxReadStats(stats)
-	return netscape, err
+	return netscape, allActed, err
+}
+
+// clearBrowserRenderProof deletes the screenshot from the previous launch.
+//
+// MUST run before every launch, not once per refresh: the artifact lives at a
+// fixed path inside the profile, so a surviving file from the YouTube launch is
+// indistinguishable from one the Twitch launch just wrote.
+//
+// Errors are ignored on purpose. "Not there" is the normal case, and a removal
+// that genuinely fails leaves a stale file that browserRendered will read as
+// proof — which is the pre-existing behaviour, not a new failure, and refusing
+// the refresh over it would be worse.
+func clearBrowserRenderProof(path string) {
+	os.Remove(path)
+}
+
+// browserRendered reports whether the launch that just finished wrote a
+// screenshot.
+//
+// This is the decisive signal, and it is the one the isolation experiment used:
+// under a Job Object the identical argv produced no screenshot and no profile
+// write, while a plain exec produced both. It is per-launch, needs no WAL
+// reasoning, and — unlike anything derived from cookies.txt — cannot be
+// satisfied by the independent 30-minute RefreshService.
+//
+// A zero-length file does not count: that is what a browser killed part-way
+// through writing leaves behind, and it is not evidence that anything rendered.
+//
+// Only meaningful directly after clearBrowserRenderProof; see its comment.
+func browserRendered(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+// browserLaunchActed folds one launch's outcome into the single verdict the
+// refresh tail needs: did this browser do the work the refresh is about to take
+// credit for?
+//
+// Both halves are required, and each covers failures the other cannot see:
+//
+//   - launchErr != nil is the browser that could not start, that the launch
+//     budget killed mid-load (errBrowserDrainTimeout), or that the caller
+//     cancelled. A screenshot from earlier in the same launch does not redeem
+//     any of those — the profile is half-written at best.
+//   - rendered == false is every failure that returns NO error: a job query
+//     that failed, a job assign that failed, and on platforms with no Job
+//     Object at all a launcher handoff we never waited for. These are exactly
+//     the paths that logged "refresh completed" while doing nothing.
+func browserLaunchActed(launchErr error, rendered bool) bool {
+	return launchErr == nil && rendered
+}
+
+// minPlausibleBrowserRefresh is a Debug-level sanity threshold, not a second
+// success gate. browserLaunchActed's screenshot check is the decisive verdict
+// on whether a launch acted, and this constant plays no part in it — see
+// refreshLooksImplausiblyFast, which never changes browserActed, a return
+// value, or control flow. It only decides whether a launch that already
+// reported "acted" is worth a Debug note.
+//
+// Measured against the owner's Waterfox, run against a copy of the real
+// profile, with A0.3's drain-wait in place: a no-op launch (the browser
+// killed before it could paint anything) completed in 160-211 ms; a working
+// launch that actually rendered the page completed in 3.08 s (the drain
+// finishing in 59 polls). 1 s sits ~5x above the no-op and ~3x below the
+// working case — margin on both sides, so do not retune it toward either
+// observed number without new measurements of your own.
+const minPlausibleBrowserRefresh = 1 * time.Second
+
+// refreshLooksImplausiblyFast is a pure, table-testable predicate behind the
+// Debug note logged when a launch that already reported ACTED (a screenshot
+// exists, no launch error) finished suspiciously quickly.
+//
+// acted is a parameter rather than re-derived here on purpose: a launch that
+// was already reported not-acted gets no second complaint — that failure is
+// already loud through browserLaunchActed, and layering a heuristic warning
+// on top of a fact would just be noise. This function only has something to
+// say about the launches the fact already credited.
+//
+// On Linux there is no Job Object, so drainJob returns on lap zero (see its
+// doc comment) and a launch that genuinely worked can still read as fast
+// here. The Debug message at the call site is worded as an observation, not
+// a conclusion, so that routine case does not read as an assertion of
+// failure.
+func refreshLooksImplausiblyFast(elapsed time.Duration, acted bool) bool {
+	return acted && elapsed < minPlausibleBrowserRefresh
+}
+
+// restoreRefreshSlot puts the claim SENTINEL back once the launched browser
+// process has been reaped.
+//
+// Not nil: RefreshCookies still has its critical tail to run (merge → atomic
+// write → jar reload → auth verify → meta save), and clearing the slot here
+// would let a concurrent RefreshCookies or StartSetup launch a second browser
+// against the same profile mid-write. The outer defer in RefreshCookies
+// releases the slot for real. Identical reasoning, and identical three lines,
+// to refreshChromium's restore (autocookies_chromium.go).
+//
+// The restore matters MORE than it looks: while the real cmd sits in the slot
+// with a reaped Process, killRefreshProcess would taskkill /F /T a PID
+// Windows may already have recycled onto something else. Before the
+// drain-wait that window was ~200ms; the drain stretches it to the whole
+// launch budget.
+//
+// Called on every runWithTimeout exit that OBSERVES a reap, which is not quite
+// every exit — see the note on runWithTimeout for the one that deliberately
+// leaves the PID published.
+func (s *AutoCookieService) restoreRefreshSlot() {
+	s.mu.Lock()
+	s.refreshCmd = &exec.Cmd{}
+	s.mu.Unlock()
 }
 
 // logFirefoxReadStats reports what a moz_cookies read had to work around.
@@ -513,7 +705,153 @@ func cleanFirefoxLockFiles(profileDir string) {
 	}
 }
 
-func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
+// errBrowserDrainTimeout is returned by runWithTimeout when the launcher
+// process was reaped but the Job Object still held live processes once the
+// launch budget ran out — the browser was still working, or hung, and the
+// deferred job.close() is about to kill it.
+//
+// It is deliberately DISTINCT from a nil return. Returning nil would report a
+// hung browser as a refresh that merely took the whole budget: the exact
+// silent failure the drain-wait exists to fix, only slower and harder to see.
+var errBrowserDrainTimeout = errors.New("browser did not finish within the launch budget")
+
+// shouldKeepWaiting decides whether the job-drain loop takes another lap:
+// processes are still alive in the job AND the launch budget has not run out.
+//
+// Extracted so the decision is testable without a Job Object — the syscall
+// that produces `active` is the part this package cannot exercise in a unit
+// test, and the part that was actually wrong.
+func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
+	return active > 0 && elapsed < budget
+}
+
+// drainJob waits for every process in the job to exit.
+//
+// This is the whole point of the Firefox fix. cmd.Wait() returning tells us
+// only that the LAUNCHER exited: Firefox (and Waterfox / LibreWolf / Zen)
+// hand off to a separate browser process and the launcher exits in ~170ms.
+// Returning at that moment runs the caller's deferred job.close(), whose
+// KILL_ON_JOB_CLOSE kills the real browser mid-page-load — measured, and the
+// reason every Firefox-family cookie refresh silently did nothing.
+//
+// The budget is shared with the launch (startedAt is stamped before
+// cmd.Start), not restarted here, so a slow start eats into the drain rather
+// than granting a second full timeout.
+//
+// Three ways out:
+//   - the job empties → nil, the browser finished on its own;
+//   - the budget expires with processes alive → errBrowserDrainTimeout, and
+//     the caller's job.close() kills them;
+//   - the query fails → nil, degrading to the pre-drain behaviour. That is
+//     bad but known; spinning on a failing syscall for the whole budget is
+//     worse.
+//
+// VERIFICATION STATUS — two browsers, one platform, both on Windows.
+//
+//	Waterfox  2026-08-25  drained in 2.848s over 53 polls, 6 YouTube cookies
+//	Firefox   2026-08-25  drained in 1.734s over 32 polls, 6 YouTube cookies
+//
+// Both ran against a throwaway profile via the live gate below; the killed
+// control (job closed the instant cmd.Wait() returned) came back in 146-167ms
+// having written a cookies.sqlite with ZERO rows, on both. The earlier
+// Waterfox figure — 3.082s over 59 polls against a copy of a real profile —
+// still holds. LibreWolf and Zen remain UNVERIFIED, as does every non-Windows
+// platform (where there is no job to drain at all).
+//
+// The risk if one behaves differently: this waits for the job to become EMPTY,
+// which is a stronger condition than "the page finished loading". A browser
+// that leaves any process alive in the job — a background updater, a crash
+// reporter, a lingering content process — would burn the full processTimeout
+// budget on every refresh and return errBrowserDrainTimeout, turning working
+// refreshes into reported failures. Observed on neither Waterfox nor Firefox,
+// which is the point of having run two: the empty-job condition is not a
+// Waterfox quirk.
+//
+// Accepted rather than defended against, on three grounds: it is bounded by the
+// budget, it degrades rather than aborts, and the poll count and elapsed time
+// are logged below, so the symptom is legible rather than silent. Guessing at a
+// weaker stop condition without a browser that actually needs one would trade a
+// proven fix for a speculative one.
+//
+// To extend this to LibreWolf or Zen, run the live gate against one.
+// DetectBrowser cannot be steered, so name the executable directly —
+// MOOMBOX_LIVE_BROWSER_PATH exists for exactly this:
+//
+//	$env:MOOMBOX_LIVE_BROWSER_REFRESH="1"
+//	$env:MOOMBOX_LIVE_BROWSER_PATH="$env:LOCALAPPDATA\Mozilla Firefox\firefox.exe"
+//	go test -count=1 -v -run TestLiveFirefoxRefreshWritesTheProfile ./internal/cookies/
+//
+// A drain that empties the job in a few seconds and leaves YouTube cookies in
+// the throwaway profile confirms the condition generalises. Do NOT look for a
+// screenshot there: --screenshot is unreliable against freshly-created
+// profiles, which is why the gate only logs it — see the test's doc comment.
+func drainJob(ctx context.Context, job *processJob, startedAt time.Time, budget time.Duration, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+}) error {
+	if job == nil {
+		return nil
+	}
+	for polls := 0; ; polls++ {
+		active, qErr := job.activeProcesses()
+		if qErr != nil {
+			logger.Warn("could not query job process count; not waiting for the browser to finish", "err", qErr, "polls", polls)
+			return nil
+		}
+		elapsed := time.Since(startedAt)
+		if !shouldKeepWaiting(active, elapsed, budget) {
+			if active > 0 {
+				logger.Warn("browser still running when the launch budget expired; killing it",
+					"active", active, "budget", budget, "polls", polls)
+				return errBrowserDrainTimeout
+			}
+			if polls == 0 {
+				// Nothing was ever seen alive in the job, so nothing was
+				// waited on — which is a different statement from "the
+				// browser finished", and the only one this observation
+				// supports.
+				//
+				// It is also the norm on two platforms rather than an edge:
+				// the Linux and darwin processJob stubs return 0 from
+				// activeProcesses unconditionally, so every launch there
+				// lands here on lap zero having drained nothing. Claiming a
+				// finish would assert something the platform cannot observe,
+				// the same distinction the !rendered branch in refreshFirefox
+				// holds.
+				logger.Debug("no tracked processes to wait for; the browser was not waited on",
+					"elapsed", elapsed.Round(time.Millisecond), "polls", polls)
+				return nil
+			}
+			logger.Debug("browser finished; job drained",
+				"elapsed", elapsed.Round(time.Millisecond), "polls", polls)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			// The caller (refreshOverallBudget, or shutdown) gave up. Without
+			// this the drain is up to a full budget of un-cancellable wait
+			// per launch.
+			logger.Warn("cancelled while waiting for the browser to finish",
+				"err", ctx.Err(), "active", active, "polls", polls)
+			return ctx.Err()
+		case <-time.After(killProcessTreePollDelay):
+		}
+	}
+}
+
+// runWithTimeout starts cmd inside a Job Object, waits for the launched
+// process AND for the job to empty, and kills the tree on the way out.
+//
+// onLauncherReaped, when non-nil, is called the instant cmd.Wait() returns —
+// before the drain, which can run for the rest of the budget. The caller uses
+// it to stop advertising a PID that no longer exists (see refreshFirefox).
+//
+// It fires on both exits that actually observe a reap: the normal one, and the
+// timeout path once the post-kill wait sees cmd.Wait() return. It does NOT
+// fire when that wait times out in turn, because then the process may still be
+// alive and the published PID is the only handle on it.
+func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, onLauncherReaped func(), logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -533,6 +871,9 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
 		}
 	}()
 
+	// Stamped before Start so the launch and the drain share ONE budget
+	// rather than the drain quietly starting a second one.
+	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -559,8 +900,23 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
 
 	select {
 	case err := <-done:
-		logger.Debug("process exited normally", "pid", cmd.Process.Pid, "err", err)
-		return err
+		logger.Debug("launcher process exited", "pid", cmd.Process.Pid, "err", err)
+		// The PID is reaped as of now, so stop advertising it as something to
+		// kill: killProcessTree on a reaped PID can land on whatever Windows
+		// recycled it onto, and the drain below holds that window open for up
+		// to the whole budget instead of ~200ms.
+		if onLauncherReaped != nil {
+			onLauncherReaped()
+		}
+		// Do NOT return here. cmd.Wait() only says the LAUNCHER exited;
+		// returning closes the job and kills the browser it handed off to.
+		drainErr := drainJob(ctx, job, startedAt, timeout, logger)
+		if err != nil {
+			// A launcher that itself failed is the more direct diagnosis;
+			// the drain outcome after it is noise.
+			return err
+		}
+		return drainErr
 	case <-time.After(timeout):
 		logger.Warn("process timed out, killing", "pid", cmd.Process.Pid, "timeout", timeout)
 		// Closing the job handle kills all processes in the job.
@@ -570,6 +926,22 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
 		select {
 		case <-done:
 			logger.Debug("process reaped after kill", "pid", cmd.Process.Pid)
+			// Same reason as the <-done branch above, and previously missing
+			// here: cmd.Wait() has returned, so this PID is reaped and
+			// Windows may recycle it onto something unrelated at any moment.
+			// The caller then carries a dead PID through the launch spacing
+			// and the rest of the refresh with killRefreshProcess still
+			// willing to taskkill /F /T it.
+			//
+			// Only in this arm. The 5s fallback below reaches its deadline
+			// WITHOUT a reap, so the process may still be alive and the
+			// caller's ability to kill it is the last line of defence —
+			// clearing the slot there would trade a recycled-PID risk for an
+			// orphaned-browser one, which is the worse of the two because it
+			// holds the profile lock and breaks every later refresh.
+			if onLauncherReaped != nil {
+				onLauncherReaped()
+			}
 		case <-time.After(5 * time.Second):
 			logger.Warn("process did not exit after kill, forcing", "pid", cmd.Process.Pid)
 			if cmd.Process != nil {

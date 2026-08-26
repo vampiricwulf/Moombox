@@ -283,16 +283,20 @@ func (s *runState) runTUI() {
 		return status.YouTubeAuthenticated, status.TwitchAuthenticated
 	}
 	if s.cfg.Cookies.AutoEnabled {
-		app.OnForceRefreshCookies = func() (bool, error) {
+		app.OnForceRefreshCookies = func() (ok, renewed bool, err error) {
 			s.log.Info("Browser cookie refresh requested from TUI")
 			refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer refreshCancel()
-			ok, err := s.autoCookieSvc.RefreshCookies(refreshCtx)
+			// Detailed, for `Renewed` alone. R F is a key the operator presses
+			// to ask whether the browser refresh works; answering with a bool
+			// that only says "the cookies on disk still authenticate" reports
+			// success for a refresh that did nothing.
+			result, err := s.autoCookieSvc.RefreshCookiesDetailed(refreshCtx)
 			if err != nil {
-				return false, err
+				return false, false, err
 			}
 			s.cookieRefresh.CheckNow(context.Background())
-			return ok, nil
+			return result.YouTube == cookies.RefreshOK || result.Twitch == cookies.RefreshOK, result.Renewed, nil
 		}
 	}
 
