@@ -11,11 +11,21 @@ import (
 )
 
 // TestLiveLoginMarkersPresent checks the premise the liveness arc is built
-// on: that these two pages carry a marker watchPageSessionAuth can read.
+// on: that these two pages carry a marker livenessVerdict can read.
 //
 // The anonymous half is the gate. LoggedOut is the ONLY verdict the arc
 // acts on, so a page that answers Unknown to a signed-out request is
 // useless for this purpose no matter what it does when authenticated.
+//
+// livenessVerdict, not watchPageSessionAuth, is what production actually
+// calls on this path (Tasks 4-6). Pinning the string version alone would
+// miss a precise and severe failure: if YouTube ever drops the explicit
+// "LOGGED_IN": key but keeps the ytcfg bootstrap, watchPageSessionAuth's
+// fallback still returns LoggedOut and this test would keep passing, while
+// livenessVerdict — which deliberately has no such fallback, see its
+// doc comment — returns Unknown in production and the whole arc goes
+// silent. So livenessVerdict is asserted directly; watchPageSessionAuth is
+// asserted alongside it only to keep its own coverage of these two pages.
 //
 // Enable with MOOMBOX_LIVE_YT_TEST=1 (matches extraction_live_test.go).
 func TestLiveLoginMarkersPresent(t *testing.T) {
@@ -42,11 +52,13 @@ func TestLiveLoginMarkersPresent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: anonymous fetch failed: %v", name, err)
 		}
-		got := watchPageSessionAuth(string(body))
-		if got != SessionAuthLoggedOut {
-			t.Errorf("%s: anonymous verdict = %q, want LoggedOut.\n"+
+		if got := livenessVerdict(body); got != SessionAuthLoggedOut {
+			t.Errorf("%s: anonymous livenessVerdict = %q, want LoggedOut.\n"+
 				"The arc acts ONLY on LoggedOut. If this page cannot produce it, "+
 				"pick a different page before building Tasks 3-6.", name, got)
+		}
+		if got := watchPageSessionAuth(string(body)); got != SessionAuthLoggedOut {
+			t.Errorf("%s: anonymous watchPageSessionAuth = %q, want LoggedOut.", name, got)
 		}
 	}
 }

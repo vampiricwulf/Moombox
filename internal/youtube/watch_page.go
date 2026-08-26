@@ -1,6 +1,7 @@
 package youtube
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -240,6 +241,16 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	}, nil
 }
 
+// Login-verdict markers, shared by the string and []byte detectors so the
+// two can never drift. Two ytcfg spellings have been observed for the same
+// flag; either counts.
+const (
+	sessionAuthKey       = `"LOGGED_IN":`
+	sessionAuthCamelKey  = `"isLoggedIn":`
+	sessionAuthTrue      = "true"
+	sessionAuthYtcfgMark = "ytcfg.set"
+)
+
 // watchPageSessionAuth reads YouTube's own login verdict off a watch page.
 // Two ytcfg spellings have been observed for the same flag; either counts.
 //
@@ -258,16 +269,14 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 // allocation and no regex, because this runs on every watch-page fetch
 // including quality-monitor polling.
 func watchPageSessionAuth(html string) SessionAuthState {
-	const key = `"LOGGED_IN":`
-	if i := strings.Index(html, key); i >= 0 {
-		if strings.HasPrefix(html[i+len(key):], "true") {
+	if i := strings.Index(html, sessionAuthKey); i >= 0 {
+		if strings.HasPrefix(html[i+len(sessionAuthKey):], sessionAuthTrue) {
 			return SessionAuthLoggedIn
 		}
 		return SessionAuthLoggedOut
 	}
-	const camelKey = `"isLoggedIn":`
-	if i := strings.Index(html, camelKey); i >= 0 {
-		if strings.HasPrefix(html[i+len(camelKey):], "true") {
+	if i := strings.Index(html, sessionAuthCamelKey); i >= 0 {
+		if strings.HasPrefix(html[i+len(sessionAuthCamelKey):], sessionAuthTrue) {
 			return SessionAuthLoggedIn
 		}
 		return SessionAuthLoggedOut
@@ -275,10 +284,59 @@ func watchPageSessionAuth(html string) SessionAuthState {
 	// No login key, but a real watch-page shell: YouTube answered as a page
 	// it would have stamped the key onto, so an anonymous session is the
 	// sound reading.
-	if strings.Contains(html, "ytcfg.set") {
+	if strings.Contains(html, sessionAuthYtcfgMark) {
 		return SessionAuthLoggedOut
 	}
 	return SessionAuthUnknown
+}
+
+// sessionAuthFromBytes is watchPageSessionAuth over raw response bytes.
+//
+// It exists because callers holding a ~1MB page as []byte must not pay a
+// string copy just to read one flag — internal/youtube/channel_membership.go
+// is explicit about that cost (98k → 32 allocs from lazy decoding). Three
+// bytes.Index/Contains calls, no allocation.
+//
+// KEEP IN SYNC with watchPageSessionAuth. TestSessionAuthFromBytesMatchesStringVersion
+// enforces it.
+func sessionAuthFromBytes(b []byte) SessionAuthState {
+	if i := bytes.Index(b, []byte(sessionAuthKey)); i >= 0 {
+		if bytes.HasPrefix(b[i+len(sessionAuthKey):], []byte(sessionAuthTrue)) {
+			return SessionAuthLoggedIn
+		}
+		return SessionAuthLoggedOut
+	}
+	if i := bytes.Index(b, []byte(sessionAuthCamelKey)); i >= 0 {
+		if bytes.HasPrefix(b[i+len(sessionAuthCamelKey):], []byte(sessionAuthTrue)) {
+			return SessionAuthLoggedIn
+		}
+		return SessionAuthLoggedOut
+	}
+	if bytes.Contains(b, []byte(sessionAuthYtcfgMark)) {
+		return SessionAuthLoggedOut
+	}
+	return SessionAuthUnknown
+}
+
+// livenessVerdict is sessionAuthFromBytes with the ytcfg fallback removed.
+//
+// That fallback ("a shell carrying ytcfg.set but no login key is anonymous")
+// is sound for watch pages, which may legitimately omit the key. It is NOT
+// safe for the liveness probe: a consent interstitial carrying ytcfg would
+// read as a dead session and alarm an operator whose cookies are fine —
+// from an EU or datacenter IP, i.e. the Docker deployment this targets.
+//
+// The probe does not need it. Measured 2026-08-25, both probe pages stamp
+// the explicit key in both directions (anonymous false / authenticated
+// true), on /feed/subscriptions and /channel/<id>/membership alike. So
+// requiring the explicit marker costs nothing real and makes the consent
+// question moot: an unrecognised page is Unknown, which is the truthful
+// answer for a page we cannot read.
+func livenessVerdict(b []byte) SessionAuthState {
+	if !bytes.Contains(b, []byte(sessionAuthKey)) && !bytes.Contains(b, []byte(sessionAuthCamelKey)) {
+		return SessionAuthUnknown
+	}
+	return sessionAuthFromBytes(b)
 }
 
 // extractChatContinuation pulls the live-chat continuation token (and its

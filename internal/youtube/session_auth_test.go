@@ -1,6 +1,9 @@
 package youtube
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 // TestWatchPageSessionAuth pins the contract of the watch-page login
 // detector, which is deliberately NOT "anything that isn't logged in is
@@ -132,5 +135,76 @@ func TestWithAttestationSessionAuthDrivesBinding(t *testing.T) {
 		if out.GvsBindingKind != BindingVisitorData {
 			t.Errorf("%q: binding kind = %q, want %q", state, out.GvsBindingKind, BindingVisitorData)
 		}
+	}
+}
+
+// TestSessionAuthFromBytesMatchesStringVersion pins the two detectors to
+// identical behaviour. They exist separately only because the membership
+// path holds []byte and must not pay a ~1MB string copy — the SEMANTICS
+// must never diverge, or a page read as logged-in on one path is read as
+// dead on the other.
+func TestSessionAuthFromBytesMatchesStringVersion(t *testing.T) {
+	cases := []string{
+		`<html>ytcfg.set({"LOGGED_IN":true});</html>`,
+		`<html>ytcfg.set({"LOGGED_IN":false});</html>`,
+		`<html>{"isLoggedIn":true}</html>`,
+		`<html>{"isLoggedIn":false}</html>`,
+		`<html>ytcfg.set({"OTHER":1});</html>`,
+		`<html>consent interstitial, no ytcfg at all</html>`,
+		``,
+	}
+	for _, html := range cases {
+		want := watchPageSessionAuth(html)
+		got := sessionAuthFromBytes([]byte(html))
+		if got != want {
+			t.Errorf("sessionAuthFromBytes(%q) = %q, watchPageSessionAuth = %q", html, got, want)
+		}
+	}
+}
+
+// TestSessionAuthFromBytesDoesNotOverClaim is the property the membership
+// probe depends on: an unrecognisable page must be Unknown, never
+// LoggedOut. Asserting death on a consent wall would alarm an operator
+// whose cookies are fine.
+func TestSessionAuthFromBytesDoesNotOverClaim(t *testing.T) {
+	for _, html := range []string{
+		"",
+		"<html>502 Bad Gateway</html>",
+		"<html>Before you continue to YouTube</html>",
+	} {
+		if got := sessionAuthFromBytes([]byte(html)); got != SessionAuthUnknown {
+			t.Errorf("sessionAuthFromBytes(%q) = %q, want Unknown", html, got)
+		}
+	}
+}
+
+// TestLivenessVerdictRefusesTheYtcfgFallback: the whole point. A page with a
+// ytcfg bootstrap and no login key is Unknown to the probe, even though
+// sessionAuthFromBytes calls it LoggedOut for watch-page purposes.
+func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
+	shell := []byte(`<html>ytcfg.set({"OTHER":1});</html>`)
+	if got := sessionAuthFromBytes(shell); got != SessionAuthLoggedOut {
+		t.Fatalf("precondition: sessionAuthFromBytes = %q, want LoggedOut", got)
+	}
+	if got := livenessVerdict(shell); got != SessionAuthUnknown {
+		t.Errorf("livenessVerdict = %q, want Unknown — a consent shell must not read as a dead session", got)
+	}
+	// Explicit markers still pass through unchanged.
+	if got := livenessVerdict([]byte(`{"LOGGED_IN":true}`)); got != SessionAuthLoggedIn {
+		t.Errorf("livenessVerdict(logged-in) = %q, want LoggedIn", got)
+	}
+	if got := livenessVerdict([]byte(`{"LOGGED_IN":false}`)); got != SessionAuthLoggedOut {
+		t.Errorf("livenessVerdict(logged-out) = %q, want LoggedOut", got)
+	}
+}
+
+// TestSessionAuthFromBytesDoesNotAllocate guards the reason this function
+// exists. If a marker ever grows past 32 bytes the compiler stops using a
+// stack tmpBuf for the []byte conversion and this starts allocating per
+// call, on a ~1MB page, on every monitor cycle.
+func TestSessionAuthFromBytesDoesNotAllocate(t *testing.T) {
+	page := append(bytes.Repeat([]byte("x"), 900<<10), []byte(`ytcfg.set({"LOGGED_IN":true});`)...)
+	if n := testing.AllocsPerRun(200, func() { _ = sessionAuthFromBytes(page) }); n != 0 {
+		t.Errorf("allocs/op = %v, want 0 — is a marker now longer than 32 bytes?", n)
 	}
 }
