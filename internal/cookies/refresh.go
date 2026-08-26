@@ -1009,24 +1009,28 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 	// window in which a concurrent jar.Reload swaps the map between the two.
 	token := rs.jar.GetTwitchAuthToken()
 	if token == "" {
-		// Deliberately NOT broadened the way the YouTube gate above was.
-		// Twitch auth is a single bearer token, so its absence is not an
-		// inference about liveness the way a cleared LOGIN_INFO is — there is
-		// no credential to test and no request that could learn anything, so
-		// "not authenticated" is true rather than assumed.
+		// Deliberately NOT broadened the way the YouTube gate above was, and
+		// the reason has nothing to do with what Twitch would answer.
 		//
-		// Nor does it probe with an empty OAuth header just to reach the
-		// network. That would only guess at what Twitch does with a malformed
-		// token, and under the 200/401-only rule below a 400 would come back
-		// INCONCLUSIVE — suppressing the alarm for the very state that most
-		// needs one.
+		// Twitch auth is a single bearer token. With no auth-token there is
+		// no credential to validate, so a request could not learn anything
+		// about THIS install's session whatever came back — which makes "not
+		// authenticated" true here rather than inferred. That is the whole
+		// difference from a cleared LOGIN_INFO, which says nothing at all
+		// about whether the Google session still works.
 		//
-		// The "was Twitch ever configured" question, which decides whether
-		// that alarm fires, is answered by jar.HasAnyTwitchAuthCookie at the
-		// doRefresh gate instead: a jar holding twilight-user and no
-		// auth-token is a signed-in session whose HttpOnly credential an
-		// exporter dropped, and it now reports as configured-and-broken
-		// rather than as never-configured.
+		// Sending an empty OAuth header just to reach the network therefore
+		// buys nothing, and would force the 200/401-only rule below to read
+		// the reply as if it were a verdict on a token this install does not
+		// have.
+		//
+		// The "was Twitch ever configured" question, which is what decides
+		// whether an alarm fires, is answered by jar.HasAnyTwitchAuthCookie
+		// at the doRefresh gate instead: a jar holding twilight-user and no
+		// auth-token is a session that plainly was configured and now has no
+		// credential, and it reports as configured-and-broken rather than as
+		// never-configured. See twitchAuthCookieNames for how that state
+		// arises.
 		return false, nil
 	}
 

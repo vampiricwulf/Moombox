@@ -277,18 +277,25 @@ func (j *CookieJar) HasAnyYouTubeAuthCookie() bool {
 
 // twitchAuthCookieNames is the Twitch counterpart to youtubeAuthCookieNames.
 //
-// Only two names, and the reason for the second one is specific: auth-token
-// is the bearer credential AND is HttpOnly, while twilight-user is the
-// non-HttpOnly companion Twitch's own web app reads. A cookie exporter that
-// skips HttpOnly entries therefore produces a file with twilight-user and no
-// auth-token — a Twitch session that WAS configured and whose credential is
-// missing, which the auth-loss gate must be able to see.
+// twilight-user earns its place because auth-token can disappear while it
+// survives, by a path documented in-tree: the jar ignores cookie expiry but
+// mergeCookieFiles prunes on it (see the comment above hadTWAuth in
+// autocookies.go), so a lapsed auth-token can be pruned out of the file while
+// the rest of the session's cookies are written back. What remains is a Twitch
+// session that WAS configured and now holds no credential — the state the
+// auth-loss gate has to be able to see. twilight-user is the signed-in user's
+// own record, so it is evidence of configuration on its own merits.
 //
-// essentialTwitchCookies also keeps "login" and "name"; those are
-// deliberately excluded here. The jar is keyed by cookie NAME with no domain
-// scoping on lookup, so a "login" cookie belonging to any other site in the
-// same file would read as evidence that Twitch was configured and fire a
-// recovery pass nobody can act on. twilight-user collides with nothing.
+// essentialTwitchCookies also keeps "login" and "name"; those are left out,
+// and NOT for a cross-site reason — Load admits twitch.tv rows only (they
+// reach the jar solely via isTwitchEssential), so another site's "login"
+// cookie never gets in. They are out because nothing in-tree or in
+// references/ establishes that Twitch sets them only for signed-in visitors,
+// and this predicate drives a recovery pass plus an operator-facing alarm.
+// auth-token and twilight-user are unambiguously artifacts of a signed-in
+// session; those two are not, and an alarm raised on a guess is worse than
+// one missed. Adding them is safe mechanically and would close the last
+// silent Twitch state — do it if that assumption is ever confirmed.
 var twitchAuthCookieNames = []string{"auth-token", "twilight-user"}
 
 // HasAnyTwitchAuthCookie reports whether this install was ever configured for

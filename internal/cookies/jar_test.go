@@ -509,10 +509,10 @@ func TestHasAnyYouTubeAuthCookie(t *testing.T) {
 }
 
 // TestHasAnyTwitchAuthCookie: the same "was this ever configured" question on
-// the Twitch side. auth-token is the credential itself AND is HttpOnly, while
-// twilight-user is Twitch's non-HttpOnly companion — so an exporter that
-// drops HttpOnly cookies yields the configured-but-broken jar, and the
-// narrow predicate reads it as never-configured.
+// the Twitch side. auth-token is the credential itself, and it can be pruned
+// out of the file on expiry while twilight-user survives — so a jar that is
+// plainly a configured session reads as never-configured under the narrow
+// predicate. See twitchAuthCookieNames.
 func TestHasAnyTwitchAuthCookie(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -522,12 +522,13 @@ func TestHasAnyTwitchAuthCookie(t *testing.T) {
 	}{
 		{"empty jar", map[string]string{}, false, false},
 		{"auth-token present", map[string]string{"auth-token": "t"}, true, true},
-		{"HttpOnly auth-token dropped by the exporter", map[string]string{"twilight-user": `{"id":"1"}`}, true, false},
+		{"expired auth-token pruned away", map[string]string{"twilight-user": `{"id":"1"}`}, true, false},
 		{"both", map[string]string{"auth-token": "t", "twilight-user": `{"id":"1"}`}, true, true},
-		// login/name are deliberately NOT markers: the jar is keyed by cookie
-		// NAME across every domain in the file, so any other site's "login"
-		// cookie would manufacture a Twitch alarm nobody can act on.
-		{"generic names are not Twitch markers", map[string]string{"login": "x", "name": "y"}, false, false},
+		// login/name are deliberately NOT markers — see twitchAuthCookieNames.
+		// Not a cross-site concern (Load admits twitch.tv rows only); they are
+		// out because nothing establishes Twitch sets them only for signed-in
+		// visitors, and this predicate raises an operator-facing alarm.
+		{"unconfirmed markers stay out", map[string]string{"login": "x", "name": "y"}, false, false},
 		{"empty values do not count", map[string]string{"auth-token": "", "twilight-user": ""}, false, false},
 	}
 	for _, tt := range tests {

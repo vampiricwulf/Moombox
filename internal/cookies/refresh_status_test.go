@@ -367,17 +367,16 @@ func TestNoSAPISIDIsInconclusiveNotDead(t *testing.T) {
 // --- Twitch: the fifth short-circuit ---
 
 // TestTwitchSessionWithoutItsTokenFiresRecovery is the Twitch half of the same
-// defect. auth-token is HttpOnly; twilight-user, which Twitch sets alongside
-// it, is not. Any exporter that skips HttpOnly cookies therefore yields a jar
-// that plainly WAS a signed-in Twitch session with no credential left in it —
-// and because doRefresh asked HasTwitchAuthCookies ("is the token here"), that
-// state read as "Twitch was never configured" and the auth-loss gate stayed
-// silent forever. Exactly the failure this arc exists to close.
+// defect. The jar ignores cookie expiry while mergeCookieFiles prunes on it,
+// so a lapsed auth-token can be pruned out while twilight-user is written
+// back — leaving a jar that plainly WAS a signed-in Twitch session with no
+// credential left in it. Because doRefresh asked HasTwitchAuthCookies ("is the
+// token here"), that state read as "Twitch was never configured" and the
+// auth-loss gate stayed silent forever. Exactly the failure this arc closes.
 //
 // The check itself still must not fire a request: with no bearer token there
-// is nothing to validate, and probing with an empty OAuth header would only
-// guess at what Twitch does with a malformed token — a 400 reads as
-// inconclusive, which would suppress the very alarm this test demands.
+// is no credential to validate, so a probe could not learn anything about this
+// install's session whatever Twitch answered.
 func TestTwitchSessionWithoutItsTokenFiresRecovery(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cookies.txt")
