@@ -138,9 +138,10 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 // a refresh that did nothing at all still verified, and still logged "cookie
 // refresh succeeded". See browserLaunchActed for what the verdict is made of.
 //
-// It is an AND across every launch this pass makes: one platform whose browser
-// never rendered means that platform's cookies were not renewed, and the merge
-// downstream cannot tell the difference afterwards.
+// It is an AND across every launch this pass makes: one launch that could not
+// be confirmed leaves the pass unable to claim it renewed that platform, and
+// the merge downstream cannot tell the difference afterwards. Note the shape of
+// that — it says the pass has no proof, not that the browser did nothing.
 func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, bool, error) {
 	if s.profileDirErr != nil {
 		return "", false, s.profileDirErr
@@ -210,10 +211,19 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 			s.logger.Warn("firefox "+platform+" refresh did not finish in time; the browser was killed mid-load",
 				"elapsed", elapsed, "budget", processTimeout, "profile_written", profileWritten)
 		case err != nil:
-			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", elapsed)
+			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", elapsed, "profile_written", profileWritten)
 		case !rendered:
-			// Nothing reported an error and the launcher was reaped, but the
-			// browser left no screenshot: it never rendered the page.
+			// Nothing reported an error and the launcher was reaped, but no
+			// screenshot had appeared by the time the launch returned.
+			//
+			// The message says exactly that and no more. What the browser
+			// actually did is not observable from here: with no Job Object to
+			// drain (Linux, or a job we failed to create) a detached browser
+			// may render moments after this stat, and profile_written can come
+			// back true off a flush that landed in between. Asserting "it never
+			// rendered" or "the profile was not refreshed" would be the same
+			// kind of unearned claim this whole change exists to remove — one
+			// that happens to point the other way.
 			//
 			// This arm is where the two NIL-returning failures land, and both
 			// used to log "refresh completed" at Info:
@@ -226,7 +236,7 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 			//     profile while the page is still loading.
 			// Keying the verdict off errBrowserDrainTimeout alone would have
 			// reopened the silent-success hole through both of these.
-			s.logger.Warn("firefox "+platform+" refresh did not render the page; the profile was not refreshed",
+			s.logger.Warn("firefox "+platform+" refresh could not be confirmed — no screenshot was written by the time the launch returned",
 				"elapsed", elapsed, "profile_written", profileWritten)
 		default:
 			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", elapsed, "profile_written", profileWritten)

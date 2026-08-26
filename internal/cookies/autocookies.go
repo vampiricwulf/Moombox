@@ -35,8 +35,12 @@ const (
 	//
 	// It is COUPLED to refreshOverallBudget below, which caps the same work
 	// end to end. Worst case for a two-platform Firefox refresh:
-	//   2×processTimeout (60s) + firefoxLaunchSpacing (5s)
-	//   + the cookie-DB read retries (~2.5s) + 2×authVerifyTimeout (30s) ≈ 97s
+	//   2 × (processTimeout + the 5s post-kill reap in runWithTimeout) = 70s
+	//   + firefoxLaunchSpacing                                          =  5s
+	//   + the cookie-DB read retries (5 × 500ms)                        ≈  2.5s
+	//   + authVerifyTimeout — ONE window covering BOTH platforms, not
+	//     one each; see checkPlatformAuth                               = 15s
+	//                                                                   ≈ 92s
 	// against a 120s cap. RAISING processTimeout WITHOUT RAISING
 	// refreshOverallBudget makes the outer ctx cancel the second platform's
 	// launch mid-flight instead of granting it the budget it was just given.
@@ -983,17 +987,26 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 			s.logger.Warn("cookie refresh verified one platform and lost another",
 				"verified", strings.Join(verified, " + "), "lost", strings.Join(lost, ","), "detail", lostMsg)
 		case !renewed:
-			// The credentials on disk verify — but they are the SAME ones that
-			// were already there, kept alive by the independent 30-minute
-			// RefreshService, not by this pass. Calling that "cookie refresh
-			// succeeded" is the claim this branch exists to stop making: it is
-			// how a Firefox-family refresh that did literally nothing reported
-			// success on every run for the life of the feature.
+			// The credentials on disk verify, but nothing here established that
+			// THIS pass produced them: they may be the same ones that were
+			// already there, kept alive by the independent 30-minute
+			// RefreshService. Calling that "cookie refresh succeeded" is the
+			// claim this branch exists to stop making — it is how a
+			// Firefox-family refresh that did nothing at all reported success
+			// on every run for the life of the feature.
+			//
+			// The wording stops at "could not confirm" on purpose. Naming a
+			// mechanism ("the browser never completed a page load") would be
+			// wrong in the partial case — with two platforms, one browser can
+			// genuinely have rendered while the other did not, and the verdict
+			// is an AND — and unprovable wherever there is no Job Object to
+			// drain. Replacing one unearned claim with its mirror image is not
+			// the fix.
 			//
 			// Still `return true`: the caller asked whether authenticated
 			// requests will work, and they will. What changes is that nothing
 			// here credits this pass for it.
-			s.logger.Warn("cookies still verify, but this refresh did not renew them — the browser never completed a page load",
+			s.logger.Warn("cookies still verify, but this pass could not confirm the browser refreshed the profile",
 				"verified", strings.Join(verified, " + "))
 		default:
 			s.logger.Info("cookie refresh succeeded", "verified", strings.Join(verified, " + "))
