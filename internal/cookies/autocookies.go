@@ -651,6 +651,28 @@ type RefreshResult struct {
 	Ran     bool
 	YouTube RefreshVerdict
 	Twitch  RefreshVerdict
+
+	// YouTubeStored / TwitchStored report whether Moombox held ANY auth
+	// cookies for that platform when the verdict was reached. This is
+	// PRESENCE, not liveness, and it must never be used to decide whether
+	// requests will work — that is what the verdict is for, and a stored
+	// cookie that does not work is worth nothing.
+	//
+	// Its one legitimate use is choosing WORDING. RefreshFailed covers "the
+	// credentials were rejected" and "there are no credentials at all"
+	// alike, correctly, because neither will authenticate a request; but
+	// telling an operator to replace dead cookies for a platform they never
+	// configured names a cause that did not happen. The same AND-with-
+	// presence guards three claims elsewhere in this file (needsRelogin, the
+	// "manual re-login required" Warn, and the `failed` list, whose comment
+	// reads "if a user only signed in to YouTube, they should not see
+	// 'Twitch needs re-login'").
+	//
+	// False for both platforms on any pass that did not reach verification —
+	// a declined or aborted pass never looked at the jar. That pairs with a
+	// RefreshUnknown verdict, which asserts nothing either way.
+	YouTubeStored bool
+	TwitchStored  bool
 }
 
 // Verdict returns the verdict for a platform key ("youtube" / "twitch"),
@@ -668,6 +690,23 @@ func (r RefreshResult) Verdict(platform string) RefreshVerdict {
 		return r.Twitch
 	default:
 		return RefreshUnknown
+	}
+}
+
+// HasCredentials reports whether Moombox held any auth cookies for the named
+// platform when this pass reached its verdict. Unrecognised keys — including
+// the empty string — report false.
+//
+// Presence, not liveness: see the field comment on RefreshResult. Use it only
+// to choose how a Verdict is WORDED, never in place of one.
+func (r RefreshResult) HasCredentials(platform string) bool {
+	switch strings.ToLower(platform) {
+	case "youtube":
+		return r.YouTubeStored
+	case "twitch":
+		return r.TwitchStored
+	default:
+		return false
 	}
 }
 
@@ -989,7 +1028,18 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// this point on (the rollback branch above is the last thing that can
 	// re-verify). Every remaining exit reports THIS — the three of them differ
 	// in what they log and record, not in what they concluded.
-	result := RefreshResult{Ran: true, YouTube: verdictOf(postYT), Twitch: verdictOf(postTW)}
+	//
+	// hasCookies travels WITH the verdict rather than being re-read from the
+	// jar, so the two can never describe different moments: a rollback
+	// re-verifies, and a presence bit sampled before it would belong to the
+	// discarded import.
+	result := RefreshResult{
+		Ran:           true,
+		YouTube:       verdictOf(postYT),
+		YouTubeStored: postYT.hasCookies,
+		Twitch:        verdictOf(postTW),
+		TwitchStored:  postTW.hasCookies,
+	}
 
 	// Update re-login flags based on verification results. Only a CONCLUSIVE
 	// failure flags a re-login: an unreachable network told us nothing about

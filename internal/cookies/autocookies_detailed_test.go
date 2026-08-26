@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,6 +125,79 @@ func TestRefreshDeclinePathsReportUnknown(t *testing.T) {
 	}
 }
 
+// TestRefreshAbortPathsReportRanButUnknown is the subtler half of the
+// contract: a pass that started work and then failed before it could verify.
+//
+// It differs from a decline in exactly one bit — Ran — and in nothing else.
+// The temptation is to read a returned error as "so the credentials must be
+// bad"; it is not. A profile that cannot be read and a cookie file that
+// cannot be written both say precisely nothing about whether what is on disk
+// still authenticates, and the verdicts must stay Unknown so no caller
+// converts an I/O failure into "your cookies are dead".
+func TestRefreshAbortPathsReportRanButUnknown(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func(t *testing.T) *AutoCookieService
+	}{
+		{
+			// The import path with an unreadable profile: the directory
+			// exists (so this is not the missing-profile decline) but holds
+			// no cookie database.
+			name: "profile import fails",
+			build: func(t *testing.T) *AutoCookieService {
+				t.Helper()
+				s := NewAutoCookieService(t.TempDir(), filepath.Join(t.TempDir(), "cookies.txt"),
+					NewCookieJar(), nopAutoCookieLogger{})
+				s.detectBrowser = func() *DetectedBrowser { return nil }
+				return s
+			},
+		},
+		{
+			// Past the read, into the write. The import succeeded and
+			// produced real cookies; the file they were going to land in
+			// cannot be written.
+			name: "the cookie file cannot be written",
+			build: func(t *testing.T) *AutoCookieService {
+				t.Helper()
+				failCookieWriteAfter(t, 1, errors.New("disk on fire"))
+				s := NewAutoCookieService(writeWALCookieProfile(t, youtubeAuthRows()),
+					filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), nopAutoCookieLogger{})
+				s.detectBrowser = func() *DetectedBrowser { return nil }
+				return s
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.build(t)
+			s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
+				t.Error("a pass that aborted before verification must not verify anything")
+				return false, nil
+			}
+			s.VerifyTwitchAuth = s.VerifyYouTubeAuth
+
+			result, err := s.RefreshCookiesDetailed(context.Background())
+			if err == nil {
+				t.Fatal("fixture is broken — this path was supposed to fail")
+			}
+			if !result.Ran {
+				t.Error("Ran = false although the pass did real work before failing")
+			}
+			if result.YouTube != RefreshUnknown || result.Twitch != RefreshUnknown {
+				t.Errorf("verdicts = %v/%v, want unknown/unknown — an I/O failure says nothing "+
+					"about whether the credentials on disk are alive", result.YouTube, result.Twitch)
+			}
+			if result.HasCredentials("youtube") || result.HasCredentials("twitch") {
+				t.Error("a pass that never reached the jar must not report stored credentials")
+			}
+			if result.anyVerified() {
+				t.Error("an aborted pass must not report the legacy bool as true")
+			}
+		})
+	}
+}
+
 // TestRefreshVerdictUnknownIsTheZeroValue is the property every other
 // guarantee here rests on: a RefreshResult nobody populated asserts nothing.
 func TestRefreshVerdictUnknownIsTheZeroValue(t *testing.T) {
@@ -162,11 +236,100 @@ func TestRefreshResultVerdictLookup(t *testing.T) {
 		{"", RefreshUnknown},
 		{"kick", RefreshUnknown},
 		{"you tube", RefreshUnknown},
+		// Surrounding whitespace is NOT trimmed, deliberately. Nothing in the
+		// codebase normalises a platform string, so inventing a trim contract
+		// here would be a guess; Unknown is the safe answer to a key we
+		// cannot parse, and this row pins that it stays the answer.
+		{"youtube ", RefreshUnknown},
+		{" twitch", RefreshUnknown},
 	}
 	for _, tc := range cases {
 		if got := r.Verdict(tc.platform); got != tc.want {
 			t.Errorf("Verdict(%q) = %v, want %v", tc.platform, got, tc.want)
 		}
+	}
+}
+
+// TestRefreshResultHasCredentials pins the presence predicate that decides
+// how a RefreshFailed is WORDED.
+//
+// It is not a health signal and must never be used as one — a stored cookie
+// that does not work is worth nothing. Its whole job is to stop "the stored
+// cookies for this platform are dead" being said about a platform that has
+// none: on a YouTube-only install, a subscriber-only Twitch VOD produces a
+// conclusive Twitch failure with nothing stored behind it.
+func TestRefreshResultHasCredentials(t *testing.T) {
+	r := RefreshResult{
+		Ran:     true,
+		YouTube: RefreshOK, YouTubeStored: true,
+		Twitch: RefreshFailed, TwitchStored: false,
+	}
+
+	cases := []struct {
+		platform string
+		want     bool
+	}{
+		{"youtube", true},
+		{"YouTube", true},
+		{"twitch", false},
+		{"TWITCH", false},
+		// Same contract as Verdict: an unparseable key claims nothing, and
+		// false is the answer that cannot license a cause.
+		{"", false},
+		{"kick", false},
+		{"youtube ", false},
+	}
+	for _, tc := range cases {
+		if got := r.HasCredentials(tc.platform); got != tc.want {
+			t.Errorf("HasCredentials(%q) = %v, want %v", tc.platform, got, tc.want)
+		}
+	}
+
+	var zero RefreshResult
+	if zero.HasCredentials("youtube") || zero.HasCredentials("twitch") {
+		t.Error("the zero RefreshResult claims to hold credentials")
+	}
+}
+
+// TestYouTubeOnlyInstallReportsTwitchAsUnconfigured is the data half of the
+// worker-side wording fix, end to end through a real refresh.
+//
+// The install holds working YouTube cookies and nothing for Twitch. A
+// subscriber-only Twitch VOD asks attemptCookieRefresh for a Twitch refresh —
+// there is no cookies-present gate there, and Usher's 403 cannot tell an
+// anonymous session from an un-entitled one. YouTube's cookies keep the
+// refresh from declining, so it really runs and really concludes: Twitch is
+// conclusively unauthenticated, and it holds nothing.
+//
+// Both facts have to survive the trip, because only the pair distinguishes
+// "your cookies died" from "you never had any".
+func TestYouTubeOnlyInstallReportsTwitchAsUnconfigured(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) {
+		t.Error("Twitch has no cookies — verification must not be attempted")
+		return false, nil
+	}
+
+	result, err := s.RefreshCookiesDetailed(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshCookiesDetailed: %v", err)
+	}
+
+	if result.Verdict("youtube") != RefreshOK || !result.HasCredentials("youtube") {
+		t.Fatalf("fixture is broken — YouTube was supposed to verify off a stored credential, got %v/%v",
+			result.Verdict("youtube"), result.HasCredentials("youtube"))
+	}
+	if got := result.Verdict("twitch"); got != RefreshFailed {
+		t.Errorf("Twitch verdict = %v, want failed — nothing there will authenticate a request", got)
+	}
+	if result.HasCredentials("twitch") {
+		t.Error("Twitch reports stored credentials on an install that has none — this is what licenses " +
+			"telling the operator their Twitch cookies died")
 	}
 }
 
