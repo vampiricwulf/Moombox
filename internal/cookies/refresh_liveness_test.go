@@ -116,11 +116,18 @@ func TestRecordLivenessSeparatesPlatforms(t *testing.T) {
 
 // TestLivenessRecoveryPilotIsDisarmed is the guard on the staged rollout.
 //
-// OnRecoveryNeeded returns early only when auto-cookies are disabled, so on an
-// auto_enabled install — every install that used the setup wizard — one
-// logged-out verdict reaching it launches a headless browser and can send a
-// "Cookie Auto-Refresh Failed" notification. This signal has never been in the
-// health path before, so it lands log-only.
+// One logged-out verdict reaching OnRecoveryNeeded notifies the operator on
+// EITHER install shape — there is no quiet arm. cmd/moombox's
+// handleRecoveryNeeded either runs a headless refresh and reports "Cookie
+// Auto-Refresh Failed"/"Ineffective" (auto_enabled = true), or sends "Cookie
+// Re-Authentication Required" synchronously (auto_enabled = false, since Task 7
+// replaced that arm's silence). The second shape is the one least able to act
+// on the remedy the notification names: a container or a remote dashboard
+// cannot reach the loopback-gated Settings wizard.
+//
+// That is why this signal lands log-only, and why the gate is not a statement
+// about browsers: a false LoggedOut costs an operator a re-export of
+// credentials that were never wrong, whatever auto_enabled says.
 //
 // The premise runs on its own service ON PURPOSE. "OnRecoveryNeeded was not
 // called" sits downstream of a junction: a logged-in verdict, a consumed
@@ -144,7 +151,7 @@ func TestLivenessRecoveryPilotIsDisarmed(t *testing.T) {
 	rs.ObserveLiveness("youtube", false)
 
 	if len(fired) != 0 {
-		t.Errorf("OnRecoveryNeeded fired %v — the pilot gate must suppress it, or an auto_enabled install starts launching browsers and sending alerts off a signal nobody has field-checked", fired)
+		t.Errorf("OnRecoveryNeeded fired %v — the pilot gate must suppress it, or every install shape starts notifying its operator off a signal nobody has field-checked", fired)
 	}
 }
 

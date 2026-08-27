@@ -267,15 +267,36 @@ type RefreshService struct {
 // livenessRecoveryArmed gates whether an external liveness verdict may
 // actually invoke OnRecoveryNeeded.
 //
-// It is false, and that is the entire point of this landing. OnRecoveryNeeded
-// returns early only when auto-cookies are disabled; on an auto_enabled
-// install — which is every install that went through the setup wizard —
-// letting a brand-new signal reach it would launch a headless browser and can
-// send an operator-visible "Cookie Auto-Refresh Failed" notification. These
-// verdicts have never been in the health path before, so they run log-only
-// first: the observation, the dedupe and the freshness accounting all happen
-// and are logged, and only the last step is withheld. Flipping this to true is
-// a deliberate, separate change — not a side effect of wiring something else.
+// It is false, and that is the entire point of this landing. What arming would
+// actually do, on BOTH install shapes — cmd/moombox's handleRecoveryNeeded
+// splits on cookies.auto_enabled and neither arm is silent about a session it
+// cannot restore:
+//
+//   - auto_enabled = true: a goroutine runs RefreshCookiesDetailed under a
+//     2-minute timeout, which drives a headless browser. Only a successful
+//     refresh is quiet; the other two verdicts notify — "Cookie Auto-Refresh
+//     Failed" (TypeError) or "Cookie Auto-Refresh Ineffective" (TypeWarning) —
+//     and a spurious verdict is by definition one no refresh can fix.
+//   - auto_enabled = false: no browser, and no quiet case at all. A SYNCHRONOUS
+//     "Cookie Re-Authentication Required" (TypeError) naming the cookie file,
+//     every time. This arm used to Debug-log and send nothing; Task 7 replaced
+//     that silence, so arming now alarms the population this arc elsewhere
+//     identifies as LEAST able to reach the remedy it names — containers,
+//     remote dashboards, a loopback-gated setup wizard.
+//
+// A per-platform 30-minute cooldown in wireMonitorCallbacks bounds how often
+// that repeats; it does not withhold the first one.
+//
+// So the risk of arming is NOT scoped to auto_enabled installs, and the reason
+// to stage it is not the browser — the disabled shape is if anything the worse
+// of the two, because the operator it pages has no automated attempt that might
+// have quietly fixed things first. It is that a false LoggedOut sends an
+// operator to re-export credentials that were never wrong, on every install
+// shape, and these verdicts have never been in the health path before. They
+// therefore run log-only first: the observation, the dedupe and the freshness
+// accounting all happen and are logged, and only the last step is withheld.
+// Flipping this to true is a deliberate, separate change — not a side effect of
+// wiring something else.
 const livenessRecoveryArmed = false
 
 // NewRefreshService creates a new cookie refresh service.

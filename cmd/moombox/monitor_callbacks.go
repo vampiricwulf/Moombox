@@ -341,12 +341,23 @@ func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refre
 			"platform", platform)
 		// Claims nothing about a refresh, because none ran: no attempt, no
 		// finding, no failure. What IS known is exactly two things — this
-		// platform answered a conclusive "not authenticated" (shouldFireRecovery
-		// fires only on checkErr == nil && !nowAuth, and livenessRecoveryArmed
-		// is false so nothing else reaches here), and the config flag this
-		// branch just read is off. Note it does NOT say cookies are present:
+		// platform answered a conclusive "not authenticated", and the config
+		// flag this branch just read is off. Note it does NOT say cookies are
+		// present:
 		// the witnessed-transition arm of shouldFireRecovery never consults
 		// cookiesPresent, so the file may have been deleted outright.
+		//
+		// WHY "conclusive" holds, and what to re-check before it stops. Today
+		// there is exactly one producer: shouldFireRecovery, which fires only on
+		// checkErr == nil && !nowAuth. cookies.livenessRecoveryArmed is false, so
+		// the liveness probes cannot reach here at all. ARMING IT ADDS A SECOND
+		// PRODUCER — and this copy survives it, because ObserveLiveness is
+		// documented to take only conclusive verdicts (SessionAuthUnknown is
+		// dropped upstream in routeLivenessVerdict), so a liveness LoggedOut is
+		// conclusive in the same sense. Nothing here fails loudly if that stops
+		// being true, so any THIRD producer has to be checked against this
+		// sentence by hand: a caller that could pass an inconclusive result would
+		// make this notification assert a dead session it does not have.
 		//
 		// "on its own" scopes the claim to AUTOMATIC attempts, which is all
 		// this branch knows about. POST /api/cookies/auto-refresh
@@ -635,12 +646,25 @@ func (s *runState) wireMonitorCallbacks() {
 		// (services.go), which persists backfilled_with_membership and must
 		// stay strict.
 		//
-		// There IS a real cost: with a half-cleared session those membership
-		// rows are no longer parked at walk.go:90 / archive.go:131, so each
-		// burns one refused authenticated probe per cycle, and walk.go:247's
-		// same-cycle escalation fires too. That is the price of observing the
-		// session at all, and it stops the moment the cookies are fixed or
-		// the operator clears them.
+		// There IS a real cost, in two parts, and the second is the larger.
+		//
+		// Per membership ROW: with a half-cleared session those rows are no
+		// longer parked at walk.go:90 / archive.go:131, so each burns one
+		// refused authenticated probe per cycle, and walk.go:247's same-cycle
+		// escalation fires too.
+		//
+		// Per membership CHANNEL: the discovery arm at feed.go:513 now also runs,
+		// so every feed cycle pays a full authenticated /channel/<id>/membership
+		// page fetch and parse — the ~1MB payload FetchMembershipVideos
+		// describes, capped by utils.MaxFetchBodySize at 5MB — where the strict
+		// gate skipped it outright. Indefinitely, for as long as the session
+		// stays half-cleared.
+		//
+		// Both are bounded and neither is a regression: this is the same work a
+		// HEALTHY install already does every cycle, and it is exactly the fetch
+		// the liveness verdict is read off — refusing to pay it is refusing to
+		// observe the session at all. It stops the moment the cookies are fixed
+		// or the operator clears them.
 		return enabled && s.ytService.HasAnyAuthCookie()
 	}
 
