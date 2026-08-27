@@ -314,16 +314,30 @@ func livenessRecordOf(loggedIn bool) livenessRecord {
 // cannot restore:
 //
 //   - auto_enabled = true: a goroutine runs RefreshCookiesDetailed under a
-//     2-minute timeout, which drives a headless browser. Only a successful
-//     refresh is quiet; the other two verdicts notify — "Cookie Auto-Refresh
-//     Failed" (TypeError) or "Cookie Auto-Refresh Ineffective" (TypeWarning) —
-//     and a spurious verdict is by definition one no refresh can fix.
-//   - auto_enabled = false: no browser, and no quiet case at all. A SYNCHRONOUS
-//     "Cookie Re-Authentication Required" (TypeError) naming the cookie file,
-//     every time. This arm used to Debug-log and send nothing; Task 7 replaced
-//     that silence, so arming now alarms the population this arc elsewhere
-//     identifies as LEAST able to reach the remedy it names — containers,
-//     remote dashboards, a loopback-gated setup wizard.
+//     2-minute timeout, which drives a headless browser. TWO outcomes are
+//     quiet — a successful refresh, and a pass that DECLINED to run at all
+//     (the Ran == false half of runCookieRecovery's Unknown branch, which
+//     logs and returns). The rest notify: "Cookie Auto-Refresh Failed"
+//     (TypeError) for a transport error or a conclusive failure, "Cookie
+//     Auto-Refresh Ineffective" (TypeWarning) for a pass that ran without
+//     reaching an answer. A spurious verdict is by definition one no refresh
+//     can fix, so it lands in a notifying outcome unless it is declined.
+//
+//     Do not read the decline as a safety net. It is a RACE: the pass is
+//     declined only while another one holds the auto-cookie single-flight,
+//     which is likely for a verdict produced in the same pass as a tier-1
+//     fire (that is what noteRecoveryDecided is for) and not otherwise. A
+//     spurious LoggedOut arriving with the slot free runs the browser and
+//     notifies exactly as before.
+//
+//   - auto_enabled = false: no browser, and no quiet case at all — the decline
+//     above cannot help here, because handleRecoveryNeeded returns on this arm
+//     without calling the refresher, so there is no single-flight to lose. A
+//     SYNCHRONOUS "Cookie Re-Authentication Required" (TypeError) naming the
+//     cookie file, every time. This arm used to Debug-log and send nothing;
+//     Task 7 replaced that silence, so arming now alarms the population this
+//     arc elsewhere identifies as LEAST able to reach the remedy it names —
+//     containers, remote dashboards, a loopback-gated setup wizard.
 //
 // A per-platform 30-minute cooldown in wireMonitorCallbacks bounds how often
 // that repeats; it does not withhold the first one.
@@ -852,7 +866,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 		// wall or a rate limit, not a dead session.
 		if loggedIn, conclusive := rs.FallbackLiveness(ctx); conclusive {
 			rs.ObserveLiveness("youtube", loggedIn)
-		} else {
+		} else if hasYTCookies {
 			// Not a verdict, but not nothing either. This branch used to be
 			// absent entirely, which made a probe that has NEVER been able to
 			// answer look identical in the log to a healthy install with
@@ -860,6 +874,23 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 			// read as evidence about the signal. Deduped through the same
 			// record a verdict uses, so a permanently-refused probe says so
 			// once per process instead of once per cycle.
+			//
+			// Gated on the platform being CONFIGURED, and the gate covers the
+			// record as well as the line. An install with no YouTube auth
+			// cookie at all makes ProbeAccountLiveness return (Unknown, nil)
+			// from its own first gate — there is no session for it to report
+			// on — so "the probe learned nothing about this session" would be
+			// describing a session that does not exist, and the one
+			// distinction this line exists to draw would be diluted by installs
+			// that were never in scope. Recording without logging would be
+			// worse than either: the entry would sit at livenessInconclusive,
+			// and the FIRST genuine failure after cookies arrive would read as
+			// a repeat and land at Debug.
+			//
+			// hasYTCookies is this pass's own snapshot, taken under the lock
+			// with every other one, and it is the permissive
+			// HasAnyYouTubeAuthCookie — so a half-cleared session, the state
+			// the probe exists to detect, still reports.
 			//
 			// The reason is not here because the (loggedIn, conclusive) pair
 			// cannot carry one; cmd/moombox's FallbackLiveness closure logs the

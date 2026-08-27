@@ -109,10 +109,10 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 		return nil, SessionAuthUnknown, fmt.Errorf("fetch membership tab: %w", err)
 	}
 
-	// Read the verdict off the raw bytes — livenessVerdict, not
-	// sessionAuthFromBytes: the strict variant refuses the ytcfg fallback, so
-	// a consent shell that carries a bootstrap but no login key reads as
-	// unknown instead of as a dead session.
+	// Read the verdict off the raw bytes — livenessVerdict, not the permissive
+	// watch-page detector: the strict variant refuses the ytcfg fallback, so a
+	// consent shell that carries a bootstrap but no login key reads as unknown
+	// instead of as a dead session.
 	verdict := livenessVerdict(body)
 
 	// Parse straight off the response bytes — no string(body)/[]byte(raw) copies

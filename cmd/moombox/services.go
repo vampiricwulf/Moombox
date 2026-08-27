@@ -110,11 +110,20 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 					"refreshing — run at debug level for the specific reason",
 			}
 		}
+		// Same two possibilities as runCookieRecovery's Ineffective copy, for
+		// the same reason and traced the same way — see the long note there.
+		// This sibling had the identical defect and is corrected with it
+		// rather than left behind: "it stopped before verifying" cannot happen
+		// on either path, because every refreshAborted() carries a non-nil
+		// error and BOTH callers return before this line on one
+		// (services.go's OnCookieRefreshNeeded above, runCookieRecovery's
+		// err != nil branch).
 		return cookieRefreshReport{
 			ok:  false,
 			msg: "automatic cookie refresh ran but could not establish whether these cookies work",
-			note: "it stopped before verifying, or the check could not reach the service — the credentials may " +
-				"be perfectly fine, so nothing has been concluded about them",
+			note: "the check could not reach the service, or could not be made at all (no cookie header or no " +
+				"SAPISIDHASH to sign with) — the credentials may be perfectly fine, so nothing has been " +
+				"concluded about them",
 		}
 	}
 }

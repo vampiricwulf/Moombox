@@ -380,19 +380,39 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 			return
 		}
 		s.log.Warn("auto-cookie recovery ran and did not establish whether this platform is authenticated", "platform", platform)
-		// States no cause, for the same reason the equivalent log line in
-		// services.go states none: with Ran true, Unknown is still what comes
-		// back when the pass aborted before verifying, when the verification
-		// could not reach the service, and when the platform key is one the
-		// result does not recognise — with the session possibly perfectly
-		// healthy throughout. A notification is more visible than a log line,
-		// so an unearned assertion here is worse, not better.
+		// States no cause about the CREDENTIALS, because with Ran true and no
+		// error the session may be perfectly healthy throughout. A notification
+		// is more visible than a log line, so an unearned assertion here is
+		// worse, not better.
 		//
-		// The copy no longer offers "it declined to run" as one of the two
-		// possibilities: the branch above now takes every declined pass, so
-		// naming it here would describe a case that cannot reach this line.
+		// Two possibilities are named and neither is asserted, and the list is
+		// exhaustive rather than illustrative — traced from verdictOf back
+		// through checkPlatformAuth (internal/cookies/autocookies_profile.go):
+		// a completed pass reports RefreshUnknown for a platform only when its
+		// verify callback returned an error, which splits in two.
+		//
+		//   - The site could not answer: a 429, a dropped connection, a
+		//     response that failed the provenance check.
+		//   - The question could not be formed at all: ErrAuthCheckNotAttempted,
+		//     raised when no cookie header can be built or no SAPISIDHASH can
+		//     be generated. Reachable — HasAnyYouTubeAuthCookie counts
+		//     LOGIN_INFO, so a jar holding it with the whole SAPISID family
+		//     gone is "configured" and still cannot sign a request.
+		//
+		// Deliberately NOT offered: "it stopped before verifying". Every
+		// refreshAborted() in autocookies.go (:918, :988, :995, :1041, :1046,
+		// :1101, :1113) is returned with a non-nil error, so an aborted pass
+		// takes the err != nil branch above and cannot reach this line. Nor
+		// "it declined to run" — the branch above takes every declined pass.
+		// Both would be causes this code cannot have.
+		//
+		// One case is not in the copy because it is not a production cause: an
+		// unrecognised platform key resolves to Unknown through Verdict's
+		// default. That is defence in depth against a wiring mistake or a
+		// future third platform (TestRecoveryUnrecognisedPlatformDoesNotAssertFailure),
+		// and the wording holds for it because it asserts nothing.
 		notify(platform, "Cookie Auto-Refresh Ineffective",
-			fmt.Sprintf("Automatic cookie refresh ran and did not restore %s authentication, but could not establish why — it may have stopped before verifying, or the check could not reach the service, so nothing has been concluded about the cookies (the log at debug level says how far it got). If they have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
+			fmt.Sprintf("Automatic cookie refresh ran and did not restore %s authentication, but could not establish why — the check either could not reach the service or could not be made at all, so nothing has been concluded about the cookies (the log at debug level says which). If they have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
 			notifications.TypeWarning)
 	}
 }

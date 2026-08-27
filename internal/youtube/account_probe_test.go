@@ -49,12 +49,12 @@ func TestProbeAccountLivenessVerdicts(t *testing.T) {
 		{"server error", 503, ``, SessionAuthUnknown, true},
 		// The camelCase spelling YouTube has also been observed using.
 		{"camel-case marker", 200, `{"isLoggedIn":true}`, SessionAuthLoggedIn, false},
-		// The case that separates livenessVerdict from sessionAuthFromBytes at
-		// THIS call site: a shell carrying the ytcfg bootstrap but no login key
-		// at all. The permissive detector calls that logged-out; the probe must
-		// not, or a consent wall that ships a bootstrap reads as dead cookies.
-		// Swapping this call site to sessionAuthFromBytes fails here and
-		// nowhere else in this file.
+		// The case that separates livenessVerdict from the permissive
+		// watch-page detector at THIS call site: a shell carrying the ytcfg
+		// bootstrap but no login key at all. watchPageSessionAuth calls that
+		// logged-out; the probe must not, or a consent wall that ships a
+		// bootstrap reads as dead cookies. Giving livenessVerdict the ytcfg
+		// fallback back fails here and nowhere else in this file.
 		{"ytcfg shell with no login key", 200, `<script>ytcfg.set({"VISITOR_DATA":"x"});</script>`, SessionAuthUnknown, false},
 		// A 200 with nothing in it is not an observation of anything.
 		{"empty body", 200, ``, SessionAuthUnknown, false},

@@ -70,8 +70,9 @@ func TestWatchPageSessionAuth(t *testing.T) {
 	}
 }
 
-// TestSessionAuthValueForms pins how the marker VALUE is read, across all
-// three detectors at once.
+// TestSessionAuthValueForms pins how the marker KEY and VALUE are read, across
+// both surviving detectors at once — watchPageSessionAuth on the watch-page
+// path and livenessVerdict on the liveness path.
 //
 // The detector used to test the value with HasPrefix against the literal
 // `true`, so every value that was not exactly that byte sequence — one space,
@@ -88,9 +89,9 @@ func TestWatchPageSessionAuth(t *testing.T) {
 //
 // NONE of these fixtures contain `ytcfg.set`. That is deliberate and is what
 // makes the assertion meaningful: LoggedOut has two possible producers in
-// the string/bytes detectors (the value read, and the ytcfg shell fallback),
-// so a fixture carrying the bootstrap could not tell which one answered.
-// With the bootstrap absent, the value read is the only thing under test.
+// watchPageSessionAuth (the value read, and the ytcfg shell fallback), so a
+// fixture carrying the bootstrap could not tell which one answered. With the
+// bootstrap absent, the marker read is the only thing under test.
 func TestSessionAuthValueForms(t *testing.T) {
 	tests := []struct {
 		name string
@@ -146,9 +147,6 @@ func TestSessionAuthValueForms(t *testing.T) {
 			if got := watchPageSessionAuth(tt.body); got != tt.want {
 				t.Errorf("watchPageSessionAuth(%q) = %q, want %q", tt.body, got, tt.want)
 			}
-			if got := sessionAuthFromBytes([]byte(tt.body)); got != tt.want {
-				t.Errorf("sessionAuthFromBytes(%q) = %q, want %q", tt.body, got, tt.want)
-			}
 			if got := livenessVerdict([]byte(tt.body)); got != tt.want {
 				t.Errorf("livenessVerdict(%q) = %q, want %q", tt.body, got, tt.want)
 			}
@@ -193,9 +191,6 @@ func TestUnreadableValueDoesNotFallThrough(t *testing.T) {
 			if got := watchPageSessionAuth(tt.body); got != SessionAuthUnknown {
 				t.Errorf("watchPageSessionAuth = %q, want Unknown — an unreadable marker fell through to a weaker signal", got)
 			}
-			if got := sessionAuthFromBytes([]byte(tt.body)); got != SessionAuthUnknown {
-				t.Errorf("sessionAuthFromBytes = %q, want Unknown — an unreadable marker fell through to a weaker signal", got)
-			}
 			if got := livenessVerdict([]byte(tt.body)); got != SessionAuthUnknown {
 				t.Errorf("livenessVerdict = %q, want Unknown — an unreadable marker fell through to a weaker signal", got)
 			}
@@ -226,9 +221,6 @@ func TestSpacedKeyOnAWatchPageIsNotReadAsAnonymous(t *testing.T) {
 		t.Errorf("watchPageSessionAuth = %q, want LoggedIn — a space before the colon made an "+
 			"authenticated watch page read off the ytcfg bootstrap instead of its own marker", got)
 	}
-	if got := sessionAuthFromBytes([]byte(page)); got != SessionAuthLoggedIn {
-		t.Errorf("sessionAuthFromBytes = %q, want LoggedIn", got)
-	}
 	if got := livenessVerdict([]byte(page)); got != SessionAuthLoggedIn {
 		t.Errorf("livenessVerdict = %q, want LoggedIn", got)
 	}
@@ -258,9 +250,6 @@ func TestABareKeyOccurrenceDoesNotHideTheRealMarker(t *testing.T) {
 
 	if got := watchPageSessionAuth(body); got != SessionAuthLoggedIn {
 		t.Errorf("watchPageSessionAuth = %q, want LoggedIn — the scan stopped at a non-marker occurrence of the key", got)
-	}
-	if got := sessionAuthFromBytes([]byte(body)); got != SessionAuthLoggedIn {
-		t.Errorf("sessionAuthFromBytes = %q, want LoggedIn", got)
 	}
 	if got := livenessVerdict([]byte(body)); got != SessionAuthLoggedIn {
 		t.Errorf("livenessVerdict = %q, want LoggedIn", got)
@@ -346,12 +335,23 @@ func TestWithAttestationSessionAuthDrivesBinding(t *testing.T) {
 	}
 }
 
-// TestSessionAuthFromBytesMatchesStringVersion pins the two detectors to
-// identical behaviour. They exist separately only because the membership
-// path holds []byte and must not pay a ~1MB string copy — the SEMANTICS
-// must never diverge, or a page read as logged-in on one path is read as
-// dead on the other.
-func TestSessionAuthFromBytesMatchesStringVersion(t *testing.T) {
+// TestMarkerLookupTwinsAgree pins the string and []byte marker scans to
+// identical behaviour.
+//
+// They exist separately only because one calls strings.Index and the other
+// bytes.Index — the watch-page path holds a string, the liveness path holds a
+// ~1MB page it must not copy to read one flag. Everything that decides a
+// verdict is shared through sessionAuthMarkerAt, but the SCAN is written
+// twice, and that is the half that can silently drift: a page read as
+// logged-in on one path and dead on the other is the failure this whole file
+// is about.
+//
+// This replaces TestSessionAuthFromBytesMatchesStringVersion, which compared
+// watchPageSessionAuth against a sessionAuthFromBytes that no longer exists.
+// That test inferred the twins agreed from two callers agreeing; this asserts
+// it of the twins themselves, which is both tighter and one layer closer to
+// the duplication.
+func TestMarkerLookupTwinsAgree(t *testing.T) {
 	cases := []string{
 		`<html>ytcfg.set({"LOGGED_IN":true});</html>`,
 		`<html>ytcfg.set({"LOGGED_IN":false});</html>`,
@@ -369,39 +369,57 @@ func TestSessionAuthFromBytesMatchesStringVersion(t *testing.T) {
 		`<html>ytcfg.set({"LOGGED_IN":'true'});</html>`,
 		`<html>ytcfg.set({"LOGGED_IN":1});</html>`,
 		`<html>ytcfg.set({"LOGGED_IN":`,
+		// Key-read forms. The colon is no longer part of the key literal, so
+		// the scans do more than one Index each and have more room to diverge
+		// than they did.
+		`<html>ytcfg.set({"LOGGED_IN" : true});</html>`,
+		`<html>{"fields":["LOGGED_IN"],"cfg":{"LOGGED_IN":true}}</html>`,
+		`<html>{"LOGGED_IN"}</html>`,
 	}
-	for _, html := range cases {
-		want := watchPageSessionAuth(html)
-		got := sessionAuthFromBytes([]byte(html))
-		if got != want {
-			t.Errorf("sessionAuthFromBytes(%q) = %q, watchPageSessionAuth = %q", html, got, want)
+	for _, key := range []string{sessionAuthKey, sessionAuthCamelKey} {
+		for _, html := range cases {
+			wantState, wantOK := sessionAuthMarkerInString(html, key)
+			gotState, gotOK := sessionAuthMarkerInBytes([]byte(html), key)
+			if gotState != wantState || gotOK != wantOK {
+				t.Errorf("key %s, body %q: bytes = (%q, %v), string = (%q, %v)",
+					key, html, gotState, gotOK, wantState, wantOK)
+			}
 		}
 	}
 }
 
-// TestSessionAuthFromBytesDoesNotOverClaim is the property the membership
-// probe depends on: an unrecognisable page must be Unknown, never
-// LoggedOut. Asserting death on a consent wall would alarm an operator
-// whose cookies are fine.
-func TestSessionAuthFromBytesDoesNotOverClaim(t *testing.T) {
+// TestLivenessVerdictDoesNotOverClaim is the property the membership probe
+// depends on: an unrecognisable page must be Unknown, never LoggedOut.
+// Asserting death on a consent wall would alarm an operator whose cookies are
+// fine.
+//
+// Retargeted from sessionAuthFromBytes when that function was deleted —
+// livenessVerdict is what the membership probe actually calls, so this now
+// pins the property on the path that has it.
+func TestLivenessVerdictDoesNotOverClaim(t *testing.T) {
 	for _, html := range []string{
 		"",
 		"<html>502 Bad Gateway</html>",
 		"<html>Before you continue to YouTube</html>",
 	} {
-		if got := sessionAuthFromBytes([]byte(html)); got != SessionAuthUnknown {
-			t.Errorf("sessionAuthFromBytes(%q) = %q, want Unknown", html, got)
+		if got := livenessVerdict([]byte(html)); got != SessionAuthUnknown {
+			t.Errorf("livenessVerdict(%q) = %q, want Unknown", html, got)
 		}
 	}
 }
 
 // TestLivenessVerdictRefusesTheYtcfgFallback: the whole point. A page with a
 // ytcfg bootstrap and no login key is Unknown to the probe, even though
-// sessionAuthFromBytes calls it LoggedOut for watch-page purposes.
+// watchPageSessionAuth calls it LoggedOut for watch-page purposes.
+//
+// The precondition is what makes the assertion mean anything: without it,
+// "livenessVerdict says Unknown" is satisfied just as well by a fixture that
+// nothing would have called LoggedOut. It reads through watchPageSessionAuth
+// because that is now the only detector carrying the ytcfg branch.
 func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 	shell := []byte(`<html>ytcfg.set({"OTHER":1});</html>`)
-	if got := sessionAuthFromBytes(shell); got != SessionAuthLoggedOut {
-		t.Fatalf("precondition: sessionAuthFromBytes = %q, want LoggedOut", got)
+	if got := watchPageSessionAuth(string(shell)); got != SessionAuthLoggedOut {
+		t.Fatalf("precondition: watchPageSessionAuth = %q, want LoggedOut", got)
 	}
 	if got := livenessVerdict(shell); got != SessionAuthUnknown {
 		t.Errorf("livenessVerdict = %q, want Unknown — a consent shell must not read as a dead session", got)
@@ -415,22 +433,29 @@ func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 	}
 }
 
-// TestSessionAuthFromBytesDoesNotAllocate guards the reason this function
-// exists: the membership probe holds a ~1MB page as []byte and reads the
-// login flag off it once per channel per monitor cycle, so the marker
-// conversions must stay off the heap.
+// TestLivenessVerdictDoesNotAllocate guards the reason the byte-side detector
+// exists: the membership probe holds a ~1MB page as []byte and reads the login
+// flag off it once per channel per monitor cycle, so the marker conversions
+// must stay off the heap. The MISS path is the worst case — both scans run the
+// full page before it returns Unknown, so both are measured.
+//
+// This is now the ONLY byte-side allocation pin. It used to be the second of
+// two, alongside TestSessionAuthFromBytesDoesNotAllocate; that function lost
+// its last production caller and was deleted, and this one always covered the
+// path the probe actually takes. The explanation below is the merged one.
 //
 // TWO independent things keep the conversions off the heap, and a failure
 // here means one of them stopped holding:
 //
-//   - Every converted marker is short. The ytcfg mark is still converted from
-//     a compile-time CONSTANT at the call site, which gets an exact-size stack
-//     array with no size ceiling at all; the two login keys now reach
-//     bytes.Index through sessionAuthMarkerInBytes' `key string` PARAMETER, so
-//     their conversion is the non-constant case and does have a ceiling — see
-//     below. `"LOGGED_IN"` and `"isLoggedIn"` are 11 and 12 bytes.
-//   - bytes.Index and bytes.Contains do not retain their argument, so escape
-//     analysis keeps the conversion local.
+//   - Every converted marker is short. The two login keys reach bytes.Index
+//     through sessionAuthMarkerInBytes' `key string` PARAMETER, so their
+//     conversion is the NON-constant case and has a real size ceiling — see
+//     below. `"LOGGED_IN"` and `"isLoggedIn"` are 11 and 12 bytes. (A
+//     conversion made directly from a compile-time constant, as
+//     watchPageSessionAuth's ytcfg mark still is, gets an exact-size stack
+//     array instead and has no ceiling at all.)
+//   - bytes.Index does not retain its argument, so escape analysis keeps the
+//     conversion local.
 //
 // The 32-byte ceiling on the non-constant case:
 // runtime.stringtoslicebyte (runtime/string.go:224) uses its caller's stack
@@ -441,32 +466,13 @@ func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 //
 // So read a failure here as either "a converted marker now escapes" or "a
 // marker exceeded 32 bytes while not being converted from a constant" — not as
-// marker length alone, and not as escape alone.
+// marker length alone, and not as escape alone. A longer login key added later
+// fails here first.
 //
 // A third cause was added when the value read moved into sessionAuthValue:
 // that reader compares byte-by-byte via sessionAuthWordAt precisely so it
 // converts nothing. Rewriting it around string(b[i:j]) == "true" would be
 // the natural-looking change that breaks this pin.
-func TestSessionAuthFromBytesDoesNotAllocate(t *testing.T) {
-	page := append(bytes.Repeat([]byte("x"), 900<<10), []byte(`ytcfg.set({"LOGGED_IN":true});`)...)
-	if n := testing.AllocsPerRun(200, func() { _ = sessionAuthFromBytes(page) }); n != 0 {
-		t.Errorf("allocs/op = %v, want 0 — did a converted marker escape, or stop being a const while exceeding 32 bytes?", n)
-	}
-}
-
-// TestLivenessVerdictDoesNotAllocate is the same guard one layer up, and the
-// hotter path: livenessVerdict is what the membership probe calls, and it runs
-// its own two marker scans over the page rather than delegating. The MISS path
-// is the worst case — both scans run the full page before it returns Unknown.
-//
-// It is a separate pin because it covers separate conversions: the []byte(key)
-// each scan makes is a conversion of a PARAMETER, not of a constant, so it
-// leans on the 32-byte tmpBuf case described below rather than on the
-// exact-size stack array the constant form gets. Both marker keys are well
-// under that; a longer one added later fails here first.
-//
-// Same two failure causes as that test — see its comment for the measured
-// const/var × length matrix and the runtime source behind it.
 func TestLivenessVerdictDoesNotAllocate(t *testing.T) {
 	hit := append(bytes.Repeat([]byte("x"), 900<<10), []byte(`ytcfg.set({"LOGGED_IN":true});`)...)
 	if n := testing.AllocsPerRun(200, func() { _ = livenessVerdict(hit) }); n != 0 {

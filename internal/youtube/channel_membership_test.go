@@ -308,13 +308,13 @@ func TestFetchMembershipVideosReturnsVerdict(t *testing.T) {
 			wantVideos:  0,
 		},
 		{
-			// The case that separates livenessVerdict from
-			// sessionAuthFromBytes: a shell carrying a ytcfg bootstrap but no
-			// login key at all. The permissive detector calls that logged-out
+			// The case that separates livenessVerdict from the permissive
+			// watch-page detector: a shell carrying a ytcfg bootstrap but no
+			// login key at all. watchPageSessionAuth calls that logged-out
 			// (sound for a watch page, which always stamps the key on a real
 			// one); the probe must not, because a consent wall serving a
-			// bootstrap would then read as dead cookies. Swapping this call
-			// site back to sessionAuthFromBytes fails HERE and nowhere else.
+			// bootstrap would then read as dead cookies. Giving livenessVerdict
+			// the ytcfg fallback back fails HERE and nowhere else.
 			name:        "ytcfg shell with no login key is not a dead session",
 			body:        []byte(`<html><head><script>ytcfg.set({"VISITOR_DATA":"x"});</script></head></html>`),
 			wantVerdict: SessionAuthUnknown,

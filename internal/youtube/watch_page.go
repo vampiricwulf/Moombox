@@ -518,32 +518,24 @@ func watchPageSessionAuth(html string) SessionAuthState {
 	return SessionAuthUnknown
 }
 
-// sessionAuthFromBytes is watchPageSessionAuth over raw response bytes.
+// There used to be a sessionAuthFromBytes here: watchPageSessionAuth over raw
+// response bytes, ytcfg fallback and all. It existed because callers holding a
+// ~1MB page as []byte must not pay a string copy to read one flag, and its
+// only production caller was livenessVerdict below, which delegated to it
+// behind a Contains guard.
 //
-// It exists because callers holding a ~1MB page as []byte must not pay a
-// string copy just to read one flag — internal/youtube/channel_membership.go
-// is explicit about that cost (98k → 32 allocs from lazy decoding). Two
-// marker scans and one bytes.Contains, no allocation.
-//
-// KEEP IN SYNC with watchPageSessionAuth. TestSessionAuthFromBytesMatchesStringVersion
-// enforces it. The two remain separate functions because the Index calls
-// differ and that difference IS the reason this one exists; the part most
-// likely to drift — reading the value — is shared through the generic
-// sessionAuthValue rather than written twice.
-func sessionAuthFromBytes(b []byte) SessionAuthState {
-	if st, ok := sessionAuthMarkerInBytes(b, sessionAuthKey); ok {
-		return st
-	}
-	if st, ok := sessionAuthMarkerInBytes(b, sessionAuthCamelKey); ok {
-		return st
-	}
-	if bytes.Contains(b, []byte(sessionAuthYtcfgMark)) {
-		return SessionAuthLoggedOut
-	}
-	return SessionAuthUnknown
-}
+// That guard had to go when the marker keys dropped their colon (see
+// livenessVerdict), and with the delegation went the last caller. It was
+// deleted rather than kept as a tested twin: the byte-side path is still
+// exercised — livenessVerdict IS the byte-side reader the membership probe
+// calls — and the duplication that genuinely needs pinning is now
+// sessionAuthMarkerInString against sessionAuthMarkerInBytes, which
+// TestMarkerLookupTwinsAgree pins directly instead of inferring it two layers
+// up. Nothing needs a byte-side ytcfg fallback; watchPageSessionAuth is the
+// only consumer of that branch and it holds a string.
 
-// livenessVerdict is sessionAuthFromBytes with the ytcfg fallback removed.
+// livenessVerdict is watchPageSessionAuth over raw bytes with the ytcfg
+// fallback removed.
 //
 // That fallback ("a shell carrying ytcfg.set but no login key is anonymous")
 // is sound for watch pages, which may legitimately omit the key. It is NOT

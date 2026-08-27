@@ -310,6 +310,46 @@ func TestInconclusiveFallbackIsReportedOncePerRun(t *testing.T) {
 	}
 }
 
+// TestInconclusiveFallbackIsSilentWhenNothingIsConfigured: the line exists to
+// separate "the signal is dead" from "healthy, nothing to say", and an install
+// that holds no YouTube cookies at all is neither.
+//
+// ProbeAccountLiveness returns (Unknown, nil) from its own first gate for that
+// install — there is no session to report on — so an ungated line would say
+// "the probe learned nothing about this session" once per process on every
+// cookie-less deployment, diluting exactly the distinction it was added to
+// sharpen.
+//
+// The second half is the part that would have been easy to get wrong: the gate
+// has to cover the RECORD too. Recording silently would leave the entry at
+// livenessInconclusive, so the first genuine failure after cookies arrive
+// would read as a repeat and be demoted to Debug — the pilot would miss the
+// one line it most needs.
+func TestInconclusiveFallbackIsSilentWhenNothingIsConfigured(t *testing.T) {
+	const line = "liveness fallback probe learned nothing"
+
+	log := &capturingLogger{}
+	called := 0
+	// A bare jar: no YouTube auth cookie of any kind.
+	rs := NewRefreshService(NewCookieJar(), 0, log)
+	rs.FallbackLiveness = func(context.Context) (bool, bool) { called++; return false, false }
+
+	rs.doRefresh(context.Background())
+
+	if called != 1 {
+		t.Fatalf("fallback ran %d times, want 1 — the silence below says nothing about a probe that never ran", called)
+	}
+	if got := countContaining(log.msgs, line); got != 0 {
+		t.Errorf("an install with no YouTube cookies was told the probe learned nothing about its session: %q", log.msgs)
+	}
+
+	// The record must be untouched, or the first real failure after cookies
+	// arrive is demoted to a repeat.
+	if !rs.recordInconclusiveLiveness("youtube") {
+		t.Error("the silent pass recorded livenessInconclusive anyway — the first genuine failure would land at Debug")
+	}
+}
+
 // TestInconclusiveFallbackIsNotableAgainAfterAVerdict: the dedupe is keyed on
 // what is KNOWN about the platform, not on a latch. A probe that starts
 // answering and then stops answering has changed state twice, and each change
