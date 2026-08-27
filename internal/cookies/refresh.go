@@ -901,6 +901,90 @@ func youtubeGuideRequestBody() string {
 	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
 }
 
+// authResponseIsOurs returns nil only when resp can be read as an answer about
+// THIS install's credential, and otherwise an error saying which way it failed
+// to qualify. `sent` is the request we dispatched; credentialHeader is the
+// header carrying the credential ("Cookie" for YouTube, "Authorization" for
+// Twitch).
+//
+// This is internal/youtube's livenessResponseIsOurs rule, ported rather than
+// shared: that function is unexported, and this package must not import
+// internal/youtube — internal/youtube/auth.go already imports this one, so the
+// dependency only runs the other way. Any change to either should be made to
+// both.
+//
+// Why the tier-1 checks need it at all. cookiesHTTPClient installs no
+// CheckRedirect, so Go follows redirects; on the first hop to a different
+// HOSTNAME it drops the manually-set credential header, and the decision is
+// STICKY (client.go:620 declares stripSensitiveHeaders once before the redirect
+// loop and only ever sets it inside at :688; nothing clears it on a later hop).
+// So origin → wall → origin lands back on the host we asked for and delivers a
+// body fetched with no credentials. Neither guide check nor the Twitch validate
+// check looked at where the answer came from: any 200 whose body lacked both
+// `"logged_in":"1"` and `"loggedIn":true` fell through to a CONCLUSIVE "not
+// authenticated", and any 401 was Twitch's documented dead-token verdict. Both
+// are what shouldFireRecovery acts on, and after Task 7 a fire notifies the
+// operator on BOTH install shapes. Task 1 closed the non-200 half of this; a
+// followed redirect never presents as non-200, so it could not catch this one.
+//
+// The trigger is an intercepting intermediary — captive portal, transparent or
+// corporate proxy (http.ProxyFromEnvironment is on the shared transport at
+// internal/httpx/client.go:40, and this package consults no connectivity gate).
+//
+// A provenance failure is INCONCLUSIVE — an error, matching what Task 1 and
+// Task 1b established for a non-200 — never a verdict. It deliberately does NOT
+// wrap ErrAuthCheckNotAttempted: a request did leave the process, so this is
+// the "the site could not answer for us" unknown, not the "we could not form
+// the question" one, and checkPlatformAuth tells those apart.
+//
+// The check is non-vacuous only because both callers refuse the empty-credential
+// case BEFORE fetching (checkYouTubeAuth/checkAndRefreshYouTube on an empty
+// cookie header, checkTwitchAuth on an empty token). Past that point the header
+// was definitely set, so finding none on the answering request can only mean it
+// was taken away.
+//
+// COUPLING, and it fails silently if broken: the header rule only means
+// anything because cookiesHTTPClient has no http.CookieJar. With one installed
+// the stdlib would re-add a Cookie header on the final hop from the jar's own
+// scope rules, the check would pass on a request that never carried OUR
+// session, and nothing here would fail. httpx.Client documents that property;
+// TestCookiesHTTPClientCarriesNoCookieJar pins it for THIS client, as
+// internal/utils' TestUtilsHTTPClientCarriesNoCookieJar does for the one the
+// tier-2 probes use.
+//
+// Positive confirmation throughout, and deliberately STRICTER than the stdlib
+// rule it defends against, so every disagreement resolves toward inconclusive:
+//
+//   - Host is compared as host:port, raw. Go compares URL.Hostname() —
+//     port-stripped and permitting subdomains (isDomainOrSubdomain,
+//     client.go:1028) — so a port change or a subdomain hop fails here while Go
+//     would still forward the credential.
+//   - Scheme is compared at all. Go's strip decision looks only at Host, so an
+//     https→http downgrade on the same host keeps the credential; we refuse it
+//     rather than read a verdict off an exchange made in clear.
+//
+// Errors name a host and a header NAME — never a header value, never response
+// bytes. They reach AutoCookieService.setError and are rendered in the Web UI
+// and TUI.
+func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeader string) error {
+	if sent == nil || sent.URL == nil {
+		return fmt.Errorf("could not determine what was asked")
+	}
+	if resp == nil || resp.Request == nil || resp.Request.URL == nil {
+		return fmt.Errorf("could not determine what answered %s", sent.URL.Host)
+	}
+	final := resp.Request.URL
+	if !strings.EqualFold(final.Scheme, sent.URL.Scheme) || !strings.EqualFold(final.Host, sent.URL.Host) {
+		return fmt.Errorf("%s was answered by %s://%s; not an observation of this session",
+			sent.URL.Host, final.Scheme, final.Host)
+	}
+	if resp.Request.Header.Get(credentialHeader) == "" {
+		return fmt.Errorf("%s was answered by a request that no longer carried the %s header; not an observation of this session",
+			sent.URL.Host, credentialHeader)
+	}
+	return nil
+}
+
 // checkYouTubeAuth asks YouTube whether the jar's session is still signed in.
 //
 // Its three entry gates appear identically in checkAndRefreshYouTube and
@@ -950,6 +1034,14 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("youtube auth check: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Before the status, for the same reason internal/youtube checks it first:
+	// a redirected answer is not this session's answer whatever status it
+	// carries, and naming the route is more accurate than naming the code.
+	if err := authResponseIsOurs(resp, req, "Cookie"); err != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return false, fmt.Errorf("youtube auth check: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -1042,6 +1134,15 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 		return false, fmt.Errorf("youtube auth check: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Before the status AND before the body, which matters more here than in
+	// checkYouTubeAuth: this function also merges Set-Cookie headers back into
+	// the jar on the authenticated path, and a redirected exchange must not be
+	// allowed to write to it at all.
+	if err := authResponseIsOurs(resp, req, "Cookie"); err != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return false, fmt.Errorf("youtube auth check: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -1381,6 +1482,15 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
+
+	// The 401 rule below is only a statement about OUR token if our token is
+	// what reached the endpoint. Go strips Authorization on a cross-hostname
+	// redirect exactly as it strips Cookie, and the strip is sticky, so an
+	// intermediary that bounces this call and answers 401 would otherwise
+	// produce a conclusive dead-token verdict about a token it never saw.
+	if err := authResponseIsOurs(resp, req, "Authorization"); err != nil {
+		return false, fmt.Errorf("twitch auth check: %w", err)
+	}
 
 	// Twitch documents exactly two answers for oauth2/validate: 200 for a
 	// valid token, 401 for an invalid one. So 401 stays CONCLUSIVE — it is
