@@ -125,6 +125,79 @@ func TestPerPlatformEverConcludedNotMaskedBySibling(t *testing.T) {
 	}
 }
 
+// TestSeedingIsUnnecessaryForStartupDeadAuthAndFiresFalselyWithoutCookies is
+// the acceptance check for leaving main.go's seeding gate
+// (`cfg.Cookies.AutoEnabled && len(cfg.Cookies.Platforms) > 0`) alone.
+//
+// The proposal under review was to drop the AutoEnabled half so that a
+// manual-cookie install also gets SetExpectedPlatforms, on the reasoning that
+// without it a manual user whose cookies died while the process was down
+// learns nothing on the next start. Both halves of that reasoning are tested
+// here, and the first one is false.
+//
+//   - Row 1 (the case the seeding exists for): a platform that was NEVER
+//     seeded, holding cookies that no longer authenticate, already fires on
+//     its first conclusive check — shouldFireRecovery's everConcluded == false
+//     arm returns cookiesPresent. Seeding adds nothing to it.
+//
+//   - Row 2 (the cost): Cookies.Platforms is a monotonic union that only ever
+//     grows (cmd/moombox/services.go PersistPlatforms unions into it; the
+//     cookie-file auto-detect seeds it), so it routinely names a platform the
+//     install no longer has cookies for. SetExpectedPlatforms sets BOTH
+//     prevAuth and everConcluded for such an entry, which sends the check down
+//     the witnessed-transition arm — where cookiesPresent is never consulted —
+//     and fires "auth lost" for a platform that simply is not configured. On
+//     the first check after every restart, forever.
+//
+// That asymmetry is why the gate stays: the seeding asserts everConcluded for
+// a platform this process has not actually checked, which is a conclusion it
+// did not reach, and the only behaviour it buys over not seeding at all is a
+// recurring false alarm. Since Arc 1 makes OnRecoveryNeeded operator-visible
+// on exactly the auto_enabled = false installs this change would have covered,
+// the false alarm would land as a notification telling someone to re-export
+// credentials that were never wrong.
+//
+// The proposed middle ground — seed prevAuth but not everConcluded — is a
+// no-op rather than a fix: with everConcluded false, shouldFireRecovery
+// returns cookiesPresent without ever reading prevAuth, so it is row 1 by
+// another name. Row 3 pins that.
+func TestSeedingIsUnnecessaryForStartupDeadAuthAndFiresFalselyWithoutCookies(t *testing.T) {
+	// Row 1: unseeded (what a manual install gets today), cookies present on
+	// disk, conclusive check says not authenticated.
+	if !shouldFireRecovery(false, false, false, nil, true) {
+		t.Error("unseeded platform with present-but-dead cookies did not fire — the startup-dead-auth " +
+			"case the seeding was proposed for is already covered without it")
+	}
+
+	// Row 2: seeded from a stale Cookies.Platforms entry, no cookies for that
+	// platform at all. checkTwitchAuth / checkYouTubeAuth both return
+	// (false, nil) when nothing is configured, so this is the exact shape the
+	// first check after a restart produces.
+	rs := newTransitionService([]string{"twitch"})
+	rs.mu.RLock()
+	twConcluded := rs.twEverConcluded
+	prevTW := rs.prevTwitchAuth
+	rs.mu.RUnlock()
+	if shouldFireRecovery(twConcluded, prevTW, false, nil, false) != true {
+		t.Fatal("premise check failed: seeding a stale platform was expected to fire; if it no longer " +
+			"does, SetExpectedPlatforms changed and this rationale needs re-deriving")
+	}
+	// Same inputs, unseeded: the correct answer, and the one the AutoEnabled
+	// gate preserves for manual installs.
+	if shouldFireRecovery(false, false, false, nil, false) {
+		t.Error("unseeded platform with no cookies fired — a platform nobody configured is not dead auth")
+	}
+
+	// Row 3: prevAuth without everConcluded is indistinguishable from row 1 in
+	// both directions, so it cannot be the compromise it looks like.
+	if got, want := shouldFireRecovery(false, true, false, nil, true), shouldFireRecovery(false, false, false, nil, true); got != want {
+		t.Errorf("prevAuth changed the first-check answer with cookies present: %v vs %v", got, want)
+	}
+	if got, want := shouldFireRecovery(false, true, false, nil, false), shouldFireRecovery(false, false, false, nil, false); got != want {
+		t.Errorf("prevAuth changed the first-check answer with no cookies: %v vs %v", got, want)
+	}
+}
+
 // TestGetStatusReturnsSnapshot verifies the AuthStatus returned by
 // GetStatus is a value copy — mutations to the returned struct must
 // not bleed back into the service.

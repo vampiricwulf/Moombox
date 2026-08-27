@@ -250,7 +250,28 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 
 	// Start cookie refresh (only if a cookie file is configured, like TS)
 	if cfg.Cookies.CookieFile != "" {
-		// Seed expected auth from persisted platforms so auth loss is detected on restart
+		// Seed expected auth from persisted platforms so auth loss is detected
+		// on restart.
+		//
+		// The AutoEnabled half looks like it needlessly denies manual-cookie
+		// installs the cross-restart detection, and dropping it was proposed
+		// for exactly that reason. It stays, because both halves of that
+		// reasoning are wrong — measured, not assumed; see
+		// TestSeedingIsUnnecessaryForStartupDeadAuthAndFiresFalselyWithoutCookies
+		// in internal/cookies for the mutation-checked derivation.
+		//
+		// A manual install already gets the detection without seeding:
+		// shouldFireRecovery's everConcluded == false arm returns
+		// cookiesPresent, so present-but-dead cookies fire on the first
+		// conclusive check of every start. And Cookies.Platforms is a
+		// monotonic union that only grows, so seeding here would set
+		// everConcluded for platforms this process never checked and no longer
+		// has cookies for — sending them down the witnessed-transition arm,
+		// which never consults cookiesPresent, and firing "auth lost" after
+		// every restart for a platform nobody configured. Since Arc 1 makes
+		// OnRecoveryNeeded operator-visible on precisely the auto_enabled =
+		// false installs this would have covered, that lands as a notification
+		// telling someone to re-export credentials that were never wrong.
 		if cfg.Cookies.AutoEnabled && len(cfg.Cookies.Platforms) > 0 {
 			cookieRefresh.SetExpectedPlatforms(cfg.Cookies.Platforms)
 		}
