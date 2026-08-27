@@ -51,9 +51,10 @@ func TestRecordLivenessOnlyLoggedOutWarrantsRecovery(t *testing.T) {
 // checkChannel walks the channel list serially on the feed monitor's own
 // goroutine (internal/monitor/feed.go), so a dead session arrives here as a
 // short serial burst of identical logged-out verdicts. Exactly one of them may
-// warrant recovery — see livenessRefireWindow for what the extra ones cost:
-// the auto-cookie single-flight declines them, a decline reports as
-// "Ineffective", and that notification suppresses the real verdict's.
+// warrant recovery — see livenessRefireWindow for what the extra ones cost.
+// (They no longer cost the operator a wrong message: a declined pass reports
+// nothing since runCookieRecovery's Unknown branch started splitting on
+// RefreshResult.Ran. What is left is the work.)
 func TestRecordLivenessDedupesAcrossChannels(t *testing.T) {
 	base := time.Now()
 
@@ -265,6 +266,97 @@ func TestFallbackInconclusiveMovesNothing(t *testing.T) {
 	}
 }
 
+// TestInconclusiveFallbackIsReportedOncePerRun is the other half of
+// TestFallbackInconclusiveMovesNothing: moving no state must not mean saying
+// nothing.
+//
+// The pilot is log-only, so the log IS its evidence — and with the
+// inconclusive outcome unlogged, "the probe is healthy and has nothing new to
+// report" and "the probe has never once been able to answer" produced the
+// identical (empty) record. Whether the tier-2 signal is alive is precisely
+// the judgement the pilot exists to inform, so it has to be visible.
+//
+// Deduped, and that is the harder half. An install permanently behind a
+// redirecting captive portal or a proxy answering on another host is
+// inconclusive on EVERY cycle, forever; a line per cycle would be noise fanned
+// out over the WebSocket stream to the Web UI and TUI as well as the log. Same
+// granularity rule ObserveLiveness follows: notable on a change of what is
+// known about the platform, Debug on a repeat.
+func TestInconclusiveFallbackIsReportedOncePerRun(t *testing.T) {
+	healthyRefreshSeams(t)
+
+	const line = "liveness fallback probe learned nothing"
+
+	log := &capturingLogger{}
+	called := 0
+	rs := NewRefreshService(jarWithAuth(t), 0, log)
+	rs.FallbackLiveness = func(context.Context) (bool, bool) { called++; return false, false }
+
+	for range 3 {
+		rs.doRefresh(context.Background())
+	}
+
+	// The probe really did run every cycle: an inconclusive outcome records no
+	// observation, so nothing suppresses the next one. Without this, one Info
+	// line is equally well explained by the probe having run exactly once.
+	if called != 3 {
+		t.Fatalf("fallback ran %d times over 3 refreshes, want 3 — the log counts below say nothing otherwise", called)
+	}
+	if got := countContaining(log.infos, line); got != 1 {
+		t.Errorf("%d operator-visible lines about an inconclusive probe over 3 cycles, want exactly 1: %q", got, log.infos)
+	}
+	if got := countContaining(log.debugs, line); got != 2 {
+		t.Errorf("%d debug-level repeats, want 2 — the repeats must still be recorded, just not at Info: %q", got, log.debugs)
+	}
+}
+
+// TestInconclusiveFallbackIsNotableAgainAfterAVerdict: the dedupe is keyed on
+// what is KNOWN about the platform, not on a latch. A probe that starts
+// answering and then stops answering has changed state twice, and each change
+// is the operator-visible event.
+//
+// This is what makes sharing one record with the verdicts worth doing rather
+// than bolting on a second boolean: "has this changed since last time" has one
+// answer covering all three states.
+func TestInconclusiveFallbackIsNotableAgainAfterAVerdict(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+
+	if !rs.recordInconclusiveLiveness("youtube") {
+		t.Fatal("premise broken: the first inconclusive outcome of the process must be notable")
+	}
+	if rs.recordInconclusiveLiveness("youtube") {
+		t.Error("a repeated inconclusive outcome was notable — an install behind a redirecting intermediary would say so every cycle forever")
+	}
+	if _, notable := rs.recordLiveness("youtube", true, time.Now()); !notable {
+		t.Error("the probe recovering to a real verdict was not notable — that is the event that says the signal came back")
+	}
+	if !rs.recordInconclusiveLiveness("youtube") {
+		t.Error("losing the signal again after a verdict was not notable — the dedupe latched instead of tracking the change")
+	}
+}
+
+// TestInconclusiveFallbackDoesNotSuppressTheNextProbe guards the one way this
+// logging could have done damage: recordInconclusiveLiveness shares a map with
+// the verdict path, and writing the WRONG map would make an inconclusive
+// outcome look like an observation — silencing the probe for a full
+// livenessFreshWindow precisely while it is failing.
+//
+// TestFallbackInconclusiveMovesNothing asserts the same property through
+// doRefresh; this asserts it against the recording method directly, so a
+// future caller of that method inherits the pin.
+func TestInconclusiveFallbackDoesNotSuppressTheNextProbe(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+
+	rs.recordInconclusiveLiveness("youtube")
+
+	if rs.livenessObservedRecently("youtube", time.Now()) {
+		t.Error("an inconclusive outcome recorded an observation — the next cycle's probe would be skipped for being 'fresh'")
+	}
+	if due, _ := rs.recordLiveness("youtube", false, time.Now()); !due {
+		t.Error("an inconclusive outcome consumed the recovery dedupe — a real logged-out verdict would be swallowed")
+	}
+}
+
 // TestCheckNowSkipsFallbackProbe: POST /api/cookies/recheck runs the refresh
 // synchronously on the HTTP handler goroutine, already paying for a 15s auth
 // check. Adding a 20s page fetch to a button press is a bad trade, and the
@@ -415,11 +507,16 @@ func TestFallbackObservationAgesOutWithinOneCadence(t *testing.T) {
 
 // TestTierOneRecoveryStampsTheLivenessDedupe: a dead session makes the tier-1
 // auth check fire recovery AND makes the fallback probe at the tail of the
-// same pass report logged-out. The second fire is the harmful one: the
-// auto-cookie single-flight declines it while the first attempt is still
-// running, a decline reports as RefreshUnknown, and the "Ineffective" warning
-// that produces stamps the notification cooldown — so the real verdict's
-// actionable message, two minutes later, is never sent.
+// same pass report logged-out. The second fire is pure waste: the auto-cookie
+// single-flight declines it while the first attempt is still running, so it
+// buys a goroutine and a 2-minute timeout context to be told no.
+//
+// It used to be worse than waste — a decline notified "Ineffective" and burned
+// the platform's 30-minute cooldown, so the real verdict's actionable message
+// was dropped. That is fixed at the source now (runCookieRecovery splits the
+// Unknown branch on RefreshResult.Ran), and this stamp is no longer the only
+// thing standing between the operator and the wrong message. It stays because
+// firing twice for one problem was never right on its own terms.
 func TestTierOneRecoveryStampsTheLivenessDedupe(t *testing.T) {
 	srv, _ := countingGuide(t, loggedOutGuideBody)
 	pointYouTubeGuideAt(t, srv)
@@ -435,6 +532,6 @@ func TestTierOneRecoveryStampsTheLivenessDedupe(t *testing.T) {
 		t.Fatalf("premise broken: tier-1 recovery fired %v, want [youtube]", fired)
 	}
 	if due, _ := rs.recordLiveness("youtube", false, time.Now()); due {
-		t.Error("a logged-out liveness verdict cleared the dedupe in the same window tier-1 recovery fired in — the declined second attempt would report Ineffective and suppress the real verdict's notification")
+		t.Error("a logged-out liveness verdict cleared the dedupe in the same window tier-1 recovery fired in — the second attempt would be declined by the auto-cookie single-flight, having spent a goroutine and a two-minute timeout on a problem the first one is already working")
 	}
 }

@@ -284,10 +284,11 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 // needed. A jar holding SAPISID with LOGIN_INFO cleared is what YouTube's
 // rotation-invalidation leaves behind; doRefresh now fires OnRecoveryNeeded on
 // it, recovery calls RefreshCookiesDetailed, the strict predicate returns an
-// empty list, the refresh declines — and the operator reads "Cookie
-// Auto-Refresh Ineffective … it either declined to run or found nothing
-// usable" about the one platform it was called to fix. Same for a Twitch
-// session left holding only twilight-user.
+// empty list, and the refresh declines — so the one platform the pass existed
+// to fix gets no attempt at all. The operator is not even told: since
+// runCookieRecovery's Unknown branch started splitting on RefreshResult.Ran, a
+// declined pass is a log line and nothing more, which is right for a decline
+// and useless here. Same for a Twitch session left holding only twilight-user.
 //
 // A platform with no auth cookie at all is still excluded, and that is not the
 // same omission: there is no session to re-fetch, so a browser launched at it

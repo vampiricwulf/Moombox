@@ -644,8 +644,22 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// error and SessionAuthUnknown are both "we learned nothing", and they
 	// must report conclusive=false so the refresh service moves no state. Only
 	// a verdict YouTube actually gave us may.
+	//
+	// The collapse throws the REASON away — the pair has nowhere to put it —
+	// so it is logged here, at the one place that still holds it. Debug
+	// because it recurs every cycle for as long as the obstruction lasts; the
+	// once-per-change Info line that says the probe is learning nothing at all
+	// is emitted by the refresh service, which owns the liveness dedupe. The
+	// error names a status code, a URL or a host and never page content (see
+	// ProbeAccountLiveness), so it is safe to write to a log that fans out
+	// over the WebSocket stream.
 	cookieRefresh.FallbackLiveness = func(ctx context.Context) (bool, bool) {
-		return livenessFromProbe(ytService.ProbeAccountLiveness(ctx))
+		verdict, err := ytService.ProbeAccountLiveness(ctx)
+		loggedIn, conclusive := livenessFromProbe(verdict, err)
+		if !conclusive {
+			log.Debug("tier-2 liveness probe did not answer", "verdict", verdict, "err", err)
+		}
+		return loggedIn, conclusive
 	}
 
 	// =========================================================================

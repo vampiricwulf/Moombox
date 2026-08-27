@@ -119,6 +119,16 @@ func (s *Service) fetchLivenessPage(ctx context.Context, pageURL string) ([]byte
 // which way it failed to qualify. Callers must have set a Cookie header on the
 // request (fetchLivenessPage enforces that before fetching).
 //
+// THIS RULE EXISTS TWICE. internal/cookies/authResponseIsOurs is the same
+// check, applied to the tier-1 guide and Twitch-validate requests, and it is a
+// PORT rather than a shared helper: this function is unexported, and
+// internal/cookies must not import internal/youtube because
+// internal/youtube/auth.go already imports internal/cookies, so the dependency
+// only runs the other way. Any change here — the host comparison, the scheme
+// comparison, the credential-header check, or the reasoning below — has to be
+// made to that twin as well, and vice versa. Neither copy fails loudly when
+// only the other one moves.
+//
 // Positive confirmation throughout: an answer we cannot place is not an
 // answer. Both checks are deliberately STRICTER than the stdlib rule they
 // defend against, so the direction of any mismatch is toward Unknown:

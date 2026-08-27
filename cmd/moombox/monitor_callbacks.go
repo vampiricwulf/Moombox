@@ -190,6 +190,61 @@ func jobCreationForDisposition(d monitor.JobDisposition) (status database.JobSta
 // function and so a test can observe exactly what would have been sent.
 type authFailureNotifier func(platform, title, desc string, ntype notifications.NotificationType)
 
+// withAuthFailureCooldown wraps `send` in a per-platform 30-minute cooldown.
+// wireMonitorCallbacks hands the wrapped notifier to every path that can
+// report an auth problem, so this is the single place a repeat is dropped.
+//
+// A package-level function rather than a closure inside wireMonitorCallbacks
+// because the cooldown is the thing that decides whether the operator hears
+// the ACCURATE message or a vague one that arrived first, and that decision
+// needs a test — see TestDeclinedRecoveryDoesNotSpendTheCooldown. The `send`
+// parameter is the seam: production passes notifyMgr.Send, a test passes a
+// recorder.
+//
+// HOW OFTEN THE WRAPPED NOTIFIER CAN BE REACHED, read off the producers rather
+// than assumed. This comment previously said OnRecoveryNeeded "can re-fire on
+// every periodic auth check while cookies stay dead". Tier-1 cannot do that:
+//
+//   - Today there is exactly one producer, shouldFireRecovery
+//     (internal/cookies/refresh.go), and for a platform whose cookies stay
+//     dead it fires ONCE PER PROCESS. Its first-conclusive-check arm answers
+//     the first check; every later check falls to the witnessed-transition
+//     arm, which returns prevAuth — and prevAuth was just set to that same
+//     dead answer, so it stays false until the platform genuinely
+//     re-authenticates. A platform that flaps dead → alive → dead fires again
+//     on each real transition, which is the case this window still coalesces.
+//   - Arming cookies.livenessRecoveryArmed adds a SECOND producer that is
+//     periodic by design: a signed-out liveness verdict may clear its own
+//     dedupe once per livenessRefireWindow (30 minutes), on every cycle a dead
+//     session persists.
+//
+// So the per-poll alarm this was written to bound does not exist yet; what the
+// window really covers is the armed case and the flap.
+//
+// What must NOT reach here is a recovery pass that DECLINED to run. Stamping
+// this map for a pass that learned nothing suppresses the accurate verdict
+// that follows it inside the window — the failure runCookieRecovery's Unknown
+// branch splits on RefreshResult.Ran to prevent.
+//
+// Guarded by a mutex: recovery attempts run on their own goroutines, so two
+// platforms can arrive here concurrently. The lock covers the read-and-stamp
+// only and is released before `send`, so one target's dispatch cannot hold up
+// the other platform's decision.
+func withAuthFailureCooldown(send authFailureNotifier) authFailureNotifier {
+	var mu sync.Mutex
+	last := make(map[string]time.Time)
+	return func(platform, title, desc string, ntype notifications.NotificationType) {
+		mu.Lock()
+		if time.Since(last[platform]) < 30*time.Minute {
+			mu.Unlock()
+			return
+		}
+		last[platform] = time.Now()
+		mu.Unlock()
+		send(platform, title, desc, ntype)
+	}
+}
+
 // cookieRefresher is the single outward call runCookieRecovery makes on the
 // auto-cookie service.
 //
@@ -231,7 +286,10 @@ const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a br
 // recording failed.
 //
 // The three verdicts map onto the three branches that were already here; only
-// the question being asked changed.
+// the question being asked changed. The Unknown branch then splits once more,
+// on RefreshResult.Ran, because a pass that DECLINED to run and a pass that
+// ran without reaching an answer are the same verdict and not the same event —
+// see that branch.
 func (s *runState) runCookieRecovery(ctx context.Context, platform string, refresh cookieRefresher, notify authFailureNotifier) {
 	result, err := refresh(ctx)
 	if err != nil {
@@ -290,17 +348,51 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 			notifications.TypeError)
 
 	default: // cookies.RefreshUnknown
-		s.log.Warn("auto-cookie recovery did not establish whether this platform is authenticated", "platform", platform)
+		// Two different nothings arrive here, and only one of them is the
+		// operator's problem. RefreshResult.Ran draws exactly that line, and
+		// this is its first production consumer; services.go's
+		// cookieRefreshReport already splits the operator-facing wording on it
+		// for the same reason.
+		if !result.Ran {
+			// The pass DECLINED before doing any work — setup in progress, a
+			// refresh already in flight, or nothing configured to refresh
+			// (refreshDeclined() is RefreshResult{}, so Ran is false and both
+			// verdicts are the zero value). No browser ran, nothing was
+			// checked, and nothing about these cookies changed.
+			//
+			// Notifying here is worse than useless, because it is REACHABLE BY
+			// RACING OURSELVES and it costs the accurate message. Both
+			// platforms losing auth in one pass makes refresh.go fire
+			// OnRecoveryNeeded twice; AutoCookieService.RefreshCookiesDetailed
+			// single-flights, so the second call is declined immediately, and
+			// an "Ineffective" sent for that decline stamps the platform's
+			// 30-minute cooldown (withAuthFailureCooldown). When the one real
+			// attempt finishes ~2 minutes later and genuinely fails, its
+			// actionable "Cookie Auto-Refresh Failed" is inside that window and
+			// is never sent — the operator is left with a vague warning about a
+			// condition Moombox created for itself.
+			//
+			// So: a log line, no notification, and — the load-bearing half —
+			// no cooldown stamp. TestDeclinedRecoveryDoesNotSpendTheCooldown
+			// drives that exact two-platform sequence.
+			s.log.Info("auto-cookie recovery declined to run — no verdict for this platform, and nothing reported",
+				"platform", platform)
+			return
+		}
+		s.log.Warn("auto-cookie recovery ran and did not establish whether this platform is authenticated", "platform", platform)
 		// States no cause, for the same reason the equivalent log line in
-		// services.go states none: Unknown is what comes back when the
-		// refresh DECLINED to run (setup in progress, a refresh already
-		// running, no platforms configured), when it aborted before
-		// verifying, and when the verification could not reach the service —
-		// with the session possibly perfectly healthy throughout. A
-		// notification is more visible than a log line, so an unearned
-		// assertion here is worse, not better.
+		// services.go states none: with Ran true, Unknown is still what comes
+		// back when the pass aborted before verifying, when the verification
+		// could not reach the service, and when the platform key is one the
+		// result does not recognise — with the session possibly perfectly
+		// healthy throughout. A notification is more visible than a log line,
+		// so an unearned assertion here is worse, not better.
+		//
+		// The copy no longer offers "it declined to run" as one of the two
+		// possibilities: the branch above now takes every declined pass, so
+		// naming it here would describe a case that cannot reach this line.
 		notify(platform, "Cookie Auto-Refresh Ineffective",
-			fmt.Sprintf("Automatic cookie refresh did not restore %s authentication — it either declined to run or found nothing usable (the log at debug level says which). If the cookies have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
+			fmt.Sprintf("Automatic cookie refresh ran and did not restore %s authentication, but could not establish why — it may have stopped before verifying, or the check could not reach the service, so nothing has been concluded about the cookies (the log at debug level says how far it got). If they have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
 			notifications.TypeWarning)
 	}
 }
@@ -426,24 +518,12 @@ func routeLivenessVerdict(observe func(platform string, loggedIn bool), verdict 
 //
 // Called once between wireRoutes() and the "start services" phase in run().
 func (s *runState) wireMonitorCallbacks() {
-	// Cooldown for auth-recovery failure notifications: OnRecoveryNeeded can
-	// re-fire on every periodic auth check while cookies stay dead, and a
-	// broken refresh should page the operator once per window, not per poll.
-	// Guarded by a mutex — the recovery attempt runs on its own goroutine.
-	var authNotifyMu sync.Mutex
-	lastAuthFailNotify := make(map[string]time.Time)
-	notifyAuthFailure := func(platform, title, desc string, ntype notifications.NotificationType) {
-		authNotifyMu.Lock()
-		defer authNotifyMu.Unlock()
-		if time.Since(lastAuthFailNotify[platform]) < 30*time.Minute {
-			return
-		}
-		lastAuthFailNotify[platform] = time.Now()
+	notifyAuthFailure := withAuthFailureCooldown(func(platform, title, desc string, ntype notifications.NotificationType) {
 		s.notifyMgr.Send(title, desc, ntype,
 			[]notifications.Field{{Name: "Platform", Value: platform, Inline: true}},
 			notifications.SendOptions{Event: "auth"},
 		)
-	}
+	})
 
 	// Cooldown for auto-resume on broadcast re-detection: a restarted
 	// broadcast can be re-detected on every monitor cycle (as often as
@@ -656,9 +736,10 @@ func (s *runState) wireMonitorCallbacks() {
 		// Per membership CHANNEL: the discovery arm at feed.go:513 now also runs,
 		// so every feed cycle pays a full authenticated /channel/<id>/membership
 		// page fetch and parse — the ~1MB payload FetchMembershipVideos
-		// describes, capped by utils.MaxFetchBodySize at 5MB — where the strict
-		// gate skipped it outright. Indefinitely, for as long as the session
-		// stays half-cleared.
+		// describes, capped by utils.MaxFetchBodySize at 50MB
+		// (internal/utils/http.go: 50 << 20) — where the strict gate skipped it
+		// outright. Indefinitely, for as long as the session stays
+		// half-cleared.
 		//
 		// Both are bounded and neither is a regression: this is the same work a
 		// HEALTHY install already does every cycle, and it is exactly the fetch

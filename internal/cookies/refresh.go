@@ -43,21 +43,24 @@ const (
 	// with a 500ms stagger between channels, so a dead session produces N
 	// verdicts inside a couple of seconds.
 	//
-	// What N un-deduped verdicts cost is NOT N headless browsers.
-	// AutoCookieService.RefreshCookiesDetailed single-flights on its
+	// What N un-deduped verdicts cost within ONE cycle is not N headless
+	// browsers. AutoCookieService.RefreshCookiesDetailed single-flights on its
 	// refreshCmd sentinel, so the first call claims the slot and every call
-	// that arrives while it runs returns refreshDeclined() immediately. The
-	// damage is that a decline is RefreshResult{}, whose zero-value verdict is
-	// RefreshUnknown, which lands in runCookieRecovery's default branch and
-	// sends "Cookie Auto-Refresh Ineffective" — a warning about a condition
-	// Moombox created by racing itself. That notification stamps
-	// lastAuthFailNotify, so when the one real attempt finishes ~2 minutes
-	// later and genuinely fails, its accurate and actionable "Cookie
-	// Auto-Refresh Failed" is inside the 30-minute cooldown and never sent.
-	// The operator is left with the vague message instead of the useful one.
+	// that arrives while it runs returns refreshDeclined() immediately.
 	//
-	// So this window protects the QUALITY of what the operator is told, not
-	// the machine's workload. That is the more valuable thing of the two.
+	// This comment used to say the damage was that each of those declines sent
+	// "Cookie Auto-Refresh Ineffective" and stamped the notification cooldown,
+	// suppressing the real verdict two minutes later. That was true when it was
+	// written and is no longer: runCookieRecovery's Unknown branch now splits on
+	// RefreshResult.Ran and a declined pass reports nothing at all. The hazard
+	// was fixed where it lived rather than being held off by this window.
+	//
+	// What is left is workload, and it is per CYCLE rather than per verdict.
+	// Without this window a dead session fires again on every feed cycle — 10
+	// minutes by default — so the one call that does claim the slot drives a
+	// real headless-browser refresh, under a 2-minute timeout, three times as
+	// often as this window allows, with the rest of each burst spending a
+	// goroutine apiece to be told no.
 	//
 	// Its own constant on purpose. It is NOT the notification cooldown in
 	// cmd/moombox's wireMonitorCallbacks, and it is NOT defaultRefreshInterval
@@ -147,16 +150,17 @@ type RefreshService struct {
 	// ytEverConcluded / twEverConcluded track, per platform, whether THAT
 	// platform has ever completed a conclusive (checkErr == nil) check.
 	// This is deliberately NOT the same thing as hasCheckedOnce, which is
-	// service-wide: Cookies.Platforms is a monotonic per-platform union
-	// that only grows on successful verification, so SetExpectedPlatforms
-	// can seed hasCheckedOnce=true from YouTube's presence alone while
-	// Twitch cookies exist on disk but were never verified. Using the
-	// shared hasCheckedOnce for the "first conclusive check" decision in
-	// shouldFireRecovery would then treat Twitch's actual first check as a
-	// "subsequent" one (prevTwitchAuth is the false zero value, so the
-	// witnessed-transition condition never fires either) — silently
-	// swallowing recovery for any platform absent from the persisted list
-	// while a sibling platform is present. See shouldFireRecovery.
+	// service-wide: nothing AUTOMATIC ever prunes Cookies.Platforms — both
+	// automatic writers only add, and the sole removal path is an operator
+	// replacing the list wholesale through PATCH /api/config — so
+	// SetExpectedPlatforms can seed hasCheckedOnce=true from YouTube's
+	// presence alone while Twitch cookies exist on disk but were never
+	// verified. Using the shared hasCheckedOnce for the "first conclusive
+	// check" decision in shouldFireRecovery would then treat Twitch's actual
+	// first check as a "subsequent" one (prevTwitchAuth is the false zero
+	// value, so the witnessed-transition condition never fires either) —
+	// silently swallowing recovery for any platform absent from the persisted
+	// list while a sibling platform is present. See shouldFireRecovery.
 	ytEverConcluded bool
 	twEverConcluded bool
 
@@ -193,8 +197,9 @@ type RefreshService struct {
 	// dedupe — from a logged-out liveness verdict in ObserveLiveness, or from
 	// the tier-1 auth check in doRefresh, which stamps it so a dead session
 	// cannot fire recovery twice in one pass. See livenessRefireWindow for
-	// what a redundant fire actually costs: not a second browser, but a
-	// spurious "Ineffective" notification that suppresses the real one.
+	// what a redundant fire actually costs: not a second browser — the
+	// auto-cookie service single-flights — but a goroutine and its two-minute
+	// timeout spent being told no.
 	//
 	// "Decided", not "fired": while livenessRecoveryArmed is false a cleared
 	// liveness verdict is logged rather than acted on, so the stamp records
@@ -202,11 +207,22 @@ type RefreshService struct {
 	// call that happened. A LoggedIn observation must never write here.
 	lastRecoveryDecided map[string]time.Time
 
-	// lastLivenessVerdict is the previous verdict per platform, kept solely to
-	// decide the LOG LEVEL of the next one (see ObserveLiveness). It steers no
-	// behaviour: absence means "never observed in this process", which reads
-	// as notable, so the worst a missing entry can do is emit one extra line.
-	lastLivenessVerdict map[string]bool
+	// lastLivenessKnown is the last thing this process learned about a
+	// platform's session, kept solely to decide the LOG LEVEL of the next
+	// line (see ObserveLiveness). It steers no behaviour: the zero value is
+	// livenessNever — "nothing learned in this process" — which differs from
+	// every real state and therefore reads as notable, so the worst a missing
+	// entry can do is emit one extra line.
+	//
+	// THREE states, not two, because the fallback probe has a third outcome.
+	// An inconclusive probe is not a verdict and must move no other state, but
+	// it is the outcome the log-only pilot most needs to be able to see: with
+	// only conclusive outcomes recorded, a signal that has gone permanently
+	// dead behind a redirecting intermediary is indistinguishable from a
+	// healthy install with nothing to report. It shares this map rather than
+	// getting its own so there is ONE answer to "has this changed since last
+	// time", whatever the change is between.
+	lastLivenessKnown map[string]livenessRecord
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -264,6 +280,31 @@ type RefreshService struct {
 	FallbackLiveness func(ctx context.Context) (loggedIn, conclusive bool)
 }
 
+// livenessRecord is what the liveness signal last told this process about one
+// platform. The zero value is livenessNever so an unwritten map entry means
+// "nothing yet" without a second lookup, and so the first thing learned about
+// a platform always compares as a change.
+//
+// livenessInconclusive is not a verdict and never reaches ObserveLiveness — it
+// is recorded only so a repeated "the probe learned nothing" stops being
+// notable after the first one. See recordInconclusiveLiveness.
+type livenessRecord uint8
+
+const (
+	livenessNever livenessRecord = iota
+	livenessSignedIn
+	livenessSignedOut
+	livenessInconclusive
+)
+
+// livenessRecordOf maps a conclusive verdict onto its record.
+func livenessRecordOf(loggedIn bool) livenessRecord {
+	if loggedIn {
+		return livenessSignedIn
+	}
+	return livenessSignedOut
+}
+
 // livenessRecoveryArmed gates whether an external liveness verdict may
 // actually invoke OnRecoveryNeeded.
 //
@@ -317,7 +358,7 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 		logger:               logger,
 		lastLivenessObserved: make(map[string]time.Time),
 		lastRecoveryDecided:  make(map[string]time.Time),
-		lastLivenessVerdict:  make(map[string]bool),
+		lastLivenessKnown:    make(map[string]livenessRecord),
 	}
 }
 
@@ -501,20 +542,21 @@ func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now tim
 	if rs.lastLivenessObserved == nil {
 		rs.lastLivenessObserved = make(map[string]time.Time)
 	}
-	if rs.lastLivenessVerdict == nil {
-		rs.lastLivenessVerdict = make(map[string]bool)
+	if rs.lastLivenessKnown == nil {
+		rs.lastLivenessKnown = make(map[string]livenessRecord)
 	}
 
-	// Read the previous verdict BEFORE this one overwrites it. No entry means
-	// this platform has never been observed in this process, which is itself
-	// worth a line: it is the record that the signal started producing.
-	prev, seen := rs.lastLivenessVerdict[platform]
-	notable = !loggedIn || !seen || prev != loggedIn
+	// Read what was last known BEFORE this observation overwrites it. The
+	// missing entry reads as livenessNever, which differs from both verdicts,
+	// so a platform's first observation is notable on its own: it is the
+	// record that the signal started producing.
+	record := livenessRecordOf(loggedIn)
+	notable = !loggedIn || rs.lastLivenessKnown[platform] != record
 
 	// Both directions. This map answers "did anything tell us recently", and
 	// a healthy answer settles that question exactly as well as a dead one.
 	rs.lastLivenessObserved[platform] = now
-	rs.lastLivenessVerdict[platform] = loggedIn
+	rs.lastLivenessKnown[platform] = record
 
 	if loggedIn {
 		// Positive evidence is silent, and must not touch lastRecoveryDecided:
@@ -532,6 +574,42 @@ func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now tim
 	return true, notable
 }
 
+// recordInconclusiveLiveness folds a fallback probe that learned NOTHING into
+// the same per-platform record a real verdict goes into, and reports whether
+// that is worth an operator-visible line.
+//
+// It exists because the log-only pilot is being read as evidence, and silence
+// was ambiguous: an install whose probe is permanently refused — a redirecting
+// captive portal, a proxy answering on another host, a rate limit that never
+// clears — produced exactly the same log as a perfectly healthy install with
+// nothing new to say. That is the one distinction the pilot has to be able to
+// make about its own signal.
+//
+// Deliberately touches NEITHER of the other two maps:
+//
+//   - not lastLivenessObserved, because recording an observation would make
+//     the next cycle's freshness check skip the probe — silencing the signal
+//     for as long as it keeps failing, which is backwards.
+//   - not lastRecoveryDecided, because that window belongs to real signed-out
+//     verdicts and consuming it here would swallow the next one.
+//
+// TestFallbackInconclusiveMovesNothing pins both.
+//
+// `notable` follows the same rule ObserveLiveness uses: notable on a change of
+// what is known, or on the first thing known about the platform in this
+// process; a repeat is Debug. An install stuck behind an intermediary
+// therefore says so once and then goes quiet, rather than every cycle forever.
+func (rs *RefreshService) recordInconclusiveLiveness(platform string) (notable bool) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.lastLivenessKnown == nil {
+		rs.lastLivenessKnown = make(map[string]livenessRecord)
+	}
+	notable = rs.lastLivenessKnown[platform] != livenessInconclusive
+	rs.lastLivenessKnown[platform] = livenessInconclusive
+	return notable
+}
+
 // noteRecoveryDecided stamps the dedupe map for a recovery that the tier-1
 // auth check is about to fire.
 //
@@ -542,9 +620,10 @@ func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now tim
 // and that check is the one with the longest field record.
 //
 // The second fire would not launch a second browser — RefreshCookiesDetailed
-// single-flights — it would be DECLINED, and a decline is what produces the
-// spurious "Ineffective" notification that then suppresses the real verdict.
-// livenessRefireWindow carries the full chain.
+// single-flights — it would be DECLINED, and since runCookieRecovery's Unknown
+// branch started splitting on RefreshResult.Ran a decline reports nothing. So
+// what this stamp saves is the redundant goroutine and its 2-minute timeout,
+// not an operator-visible mistake; livenessRefireWindow has the accounting.
 func (rs *RefreshService) noteRecoveryDecided(platform string, now time.Time) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -714,9 +793,10 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	// liveness verdict landing in the same window — including the one the
 	// fallback probe at the tail of this very pass may produce — does not
 	// fire recovery again for a problem this one is already working on. A
-	// redundant fire is declined by the auto-cookie single-flight and reports
-	// back as "Ineffective", which then suppresses the real verdict's
-	// notification; see livenessRefireWindow.
+	// redundant fire is declined by the auto-cookie single-flight and, since
+	// that branch started splitting on RefreshResult.Ran, reports nothing at
+	// all; what it still costs is the goroutine and its timeout. See
+	// livenessRefireWindow.
 	if rs.OnRecoveryNeeded != nil {
 		if shouldFireRecovery(ytConcluded, prevYT, ytAuth, ytErr, hasYTCookies) {
 			rs.noteRecoveryDecided("youtube", time.Now())
@@ -772,6 +852,23 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 		// wall or a rate limit, not a dead session.
 		if loggedIn, conclusive := rs.FallbackLiveness(ctx); conclusive {
 			rs.ObserveLiveness("youtube", loggedIn)
+		} else {
+			// Not a verdict, but not nothing either. This branch used to be
+			// absent entirely, which made a probe that has NEVER been able to
+			// answer look identical in the log to a healthy install with
+			// nothing to report — while the pilot's whole purpose is to be
+			// read as evidence about the signal. Deduped through the same
+			// record a verdict uses, so a permanently-refused probe says so
+			// once per process instead of once per cycle.
+			//
+			// The reason is not here because the (loggedIn, conclusive) pair
+			// cannot carry one; cmd/moombox's FallbackLiveness closure logs the
+			// probe's own error at Debug, where it has it.
+			logAt := rs.logger.Debug
+			if rs.recordInconclusiveLiveness("youtube") {
+				logAt = rs.logger.Info
+			}
+			logAt("liveness fallback probe learned nothing about this session", "platform", "youtube")
 		}
 	}
 

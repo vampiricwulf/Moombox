@@ -153,24 +153,44 @@ func TestRecoverySilentWhenTheTriggeringPlatformIsHealthy(t *testing.T) {
 	}
 }
 
-// TestRecoveryDeclineIsNotAFailureNotification pins the branch that must NOT
-// move when a conclusive failure starts notifying.
+// TestRecoveryDeclineSaysNothingAndRanUnknownStaysNonCommittal pins both
+// halves of the Unknown branch, which are two different events wearing one
+// verdict.
 //
-// A declined pass — setup in progress, a refresh already in flight, nothing
-// configured to refresh — learned nothing, and RefreshResult reports that as
-// the zero value. Turning that into "your cookies are dead, recordings will
-// fail" would be the same over-claiming this task exists to remove, one
-// branch over. Once Arc 1 Task 1 lands, every non-200 verification becomes
-// Unknown too, so this branch gets busier, not quieter.
-func TestRecoveryDeclineIsNotAFailureNotification(t *testing.T) {
+// A DECLINED pass — setup in progress, a refresh already in flight, nothing
+// configured to refresh — did no work at all: refreshDeclined() is
+// RefreshResult{}, so Ran is false. It has nothing to report, and reporting
+// anyway is not merely noise; the notification stamps the platform's 30-minute
+// cooldown, which is what TestDeclinedRecoveryDoesNotSpendTheCooldown below is
+// about. This row used to require exactly one "Ineffective" notification.
+//
+// A pass that RAN and still could not establish an answer — it aborted before
+// verifying, the verification could not reach the service, or the platform key
+// is one the result does not recognise — is the real Unknown, and it keeps the
+// non-committal warning it always had. Turning either into "your cookies are
+// dead, recordings will fail" would be the over-claiming this arc exists to
+// remove.
+func TestRecoveryDeclineSaysNothingAndRanUnknownStaysNonCommittal(t *testing.T) {
 	declined := func(context.Context) (cookies.RefreshResult, error) {
-		return cookies.RefreshResult{}, nil
+		return cookies.RefreshResult{}, nil // refreshDeclined(): Ran == false
 	}
+	// refreshAborted()'s shape: it ran, and learned nothing either way.
+	ranUnknown := stubRefreshResult(cookies.RefreshResult{Ran: true})
 
 	for _, platform := range []string{"youtube", "twitch"} {
-		t.Run(platform, func(t *testing.T) {
+		t.Run(platform+"/declined", func(t *testing.T) {
 			s, sent := recoveryTestState(t)
 			s.runCookieRecovery(context.Background(), platform, declined, recoveryNotifier(sent))
+
+			if len(*sent) != 0 {
+				t.Fatalf("a pass that declined to run notified the operator anyway — it did no work, "+
+					"and the notification burns the platform's cooldown: %+v", *sent)
+			}
+		})
+
+		t.Run(platform+"/ran without an answer", func(t *testing.T) {
+			s, sent := recoveryTestState(t)
+			s.runCookieRecovery(context.Background(), platform, ranUnknown, recoveryNotifier(sent))
 
 			if len(*sent) != 1 {
 				t.Fatalf("sent %d notifications, want exactly 1: %+v", len(*sent), *sent)
@@ -187,7 +207,101 @@ func TestRecoveryDeclineIsNotAFailureNotification(t *testing.T) {
 					t.Errorf("an Unknown verdict must not assert a cause (%q): %q", forbidden, got.desc)
 				}
 			}
+			// And it must not offer "it declined to run" as one of the
+			// possibilities either: the branch above takes every declined pass,
+			// so naming it here would describe a case that cannot reach this
+			// copy. Same rule, pointed the other way.
+			if strings.Contains(strings.ToLower(got.desc), "declined") {
+				t.Errorf("this pass RAN, so offering a decline as an explanation is a cause it cannot have: %q", got.desc)
+			}
 		})
+	}
+}
+
+// TestDeclinedRecoveryDoesNotSpendTheCooldown is the reachable-today failure
+// this split exists for, driven end to end through the REAL cooldown.
+//
+// Both platforms losing auth in one pass is all it takes. refresh.go fires
+// OnRecoveryNeeded twice; handleRecoveryNeeded puts each on its own goroutine;
+// AutoCookieService.RefreshCookiesDetailed single-flights on its refreshCmd
+// sentinel, so whichever arrives second is handed refreshDeclined() —
+// RefreshResult{} — immediately. Its verdict is the zero value, RefreshUnknown.
+//
+// Sending "Cookie Auto-Refresh Ineffective" for that decline stamps the
+// platform's entry in withAuthFailureCooldown, and the next 30 minutes of
+// accurate, actionable verdicts for that platform are then dropped. The
+// operator is left with a vague warning about a condition Moombox created by
+// racing itself, and never sees the one that names the remedy.
+//
+// The third step is deliberately not tied to a particular producer — a flap
+// back to dead, the operator's own POST /api/cookies/auto-refresh, or a
+// signed-out liveness verdict once cookies.livenessRecoveryArmed flips. What
+// is being pinned is that a pass which did no work leaves the window unspent
+// for whatever arrives next.
+func TestDeclinedRecoveryDoesNotSpendTheCooldown(t *testing.T) {
+	s, sent := recoveryTestState(t)
+	notify := withAuthFailureCooldown(recoveryNotifier(sent))
+
+	bothDead := stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed)
+	declined := func(context.Context) (cookies.RefreshResult, error) {
+		return cookies.RefreshResult{}, nil
+	}
+
+	// 1. YouTube's pass claims the single-flight slot and reports the truth.
+	s.runCookieRecovery(context.Background(), "youtube", bothDead, notify)
+	// 2. Twitch's pass arrives while that one is still running: declined.
+	s.runCookieRecovery(context.Background(), "twitch", declined, notify)
+	// 3. The next real attempt for Twitch completes and conclusively fails.
+	s.runCookieRecovery(context.Background(), "twitch", bothDead, notify)
+
+	if len(*sent) != 2 {
+		t.Fatalf("sent %d notifications, want exactly 2 (one accurate one per platform): %+v", len(*sent), *sent)
+	}
+	byPlatform := map[string]sentNotification{}
+	for _, n := range *sent {
+		if _, dup := byPlatform[n.platform]; dup {
+			t.Fatalf("two notifications for %q — the decline was reported as an event of its own: %+v", n.platform, *sent)
+		}
+		byPlatform[n.platform] = n
+	}
+	for _, platform := range []string{"youtube", "twitch"} {
+		got, ok := byPlatform[platform]
+		if !ok {
+			t.Fatalf("%s was never notified at all: %+v", platform, *sent)
+		}
+		if got.title != "Cookie Auto-Refresh Failed" {
+			t.Errorf("%s got %q, want the conclusive-failure title — a declined pass spent the cooldown "+
+				"and suppressed the accurate verdict", platform, got.title)
+		}
+		if got.ntype != notifications.TypeError {
+			t.Errorf("%s got severity %v, want TypeError", platform, got.ntype)
+		}
+	}
+}
+
+// TestAuthFailureCooldownStillSuppressesARepeat is the premise the test above
+// needs and cannot supply itself. "Both platforms got their accurate message"
+// is satisfied just as well by a cooldown that suppresses nothing at all, in
+// which case that test would pass with the Ran split deleted and the window
+// removed. This shows the same wrapper does drop a second notification for a
+// platform inside the window — so the survival above is attributable to the
+// decline not spending it.
+func TestAuthFailureCooldownStillSuppressesARepeat(t *testing.T) {
+	s, sent := recoveryTestState(t)
+	notify := withAuthFailureCooldown(recoveryNotifier(sent))
+	bothDead := stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed)
+
+	s.runCookieRecovery(context.Background(), "youtube", bothDead, notify)
+	s.runCookieRecovery(context.Background(), "youtube", bothDead, notify)
+
+	if len(*sent) != 1 {
+		t.Fatalf("two conclusive failures for one platform sent %d notifications, want 1 — the cooldown "+
+			"is not suppressing anything, so nothing else about it can be concluded: %+v", len(*sent), *sent)
+	}
+	// And it is per platform, not global: the sibling must still get through.
+	s.runCookieRecovery(context.Background(), "twitch", bothDead, notify)
+	if len(*sent) != 2 {
+		t.Fatalf("the cooldown suppressed a different platform's first notification: %+v", *sent)
 	}
 }
 
@@ -318,15 +432,18 @@ func TestRecoveryNeededNotifiesWhenAutoRefreshIsDisabled(t *testing.T) {
 	collect("twitch", stubRefreshResult(cookies.RefreshResult{                // conclusive, nothing left
 		Ran: true, Twitch: cookies.RefreshFailed, TwitchStored: false,
 	}))
-	collect("youtube", stubRefreshResult(cookies.RefreshResult{})) // declined / Unknown
+	// Ran, verdict Unknown. NOT RefreshResult{}: a declined pass now notifies
+	// nothing at all (TestRecoveryDeclineSaysNothingAndRanUnknownStaysNonCommittal),
+	// so collecting one would contribute no copy and silently retire every
+	// phrase below that only the Unknown branch produces.
+	collect("youtube", stubRefreshResult(cookies.RefreshResult{Ran: true}))
 
 	gotLower := strings.ToLower(got.desc)
 	for _, forbidden := range []string{
 		"automatic cookie refresh ran",
 		"automatic cookie refresh for",
 		"did not restore",
-		"declined to run",
-		"found nothing usable",
+		"could not establish why",
 	} {
 		established := false
 		for _, c := range refreshCopy {

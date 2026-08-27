@@ -85,9 +85,11 @@ func TestRefreshPlatformsCountsAConfiguredPlatformWithAnIncompleteSet(t *testing
 // end, and it is the chain the review reconstructed: doRefresh fires
 // OnRecoveryNeeded("youtube") for a half-cleared jar, monitor_callbacks runs
 // runCookieRecovery, and RefreshCookiesDetailed found refreshPlatforms() empty
-// and returned refreshDeclined() — a RefreshUnknown verdict, which the
-// operator reads as "Cookie Auto-Refresh Ineffective … it either declined to
-// run or found nothing usable" about the one platform the pass existed to fix.
+// and returned refreshDeclined() — so the one platform the pass existed to fix
+// got no attempt at all. At the time that also produced a misleading "Cookie
+// Auto-Refresh Ineffective" notification; a decline now reports nothing
+// (runCookieRecovery splits the Unknown branch on RefreshResult.Ran), which
+// makes a regression here silent rather than merely confusing.
 func TestRefreshDoesNotDeclineTheRecoveryItWasCalledToPerform(t *testing.T) {
 	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
 	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")

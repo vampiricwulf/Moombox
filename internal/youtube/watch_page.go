@@ -244,23 +244,35 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 // Login-verdict markers, shared by the string and []byte detectors so the
 // two can never drift. Two ytcfg spellings have been observed for the same
 // flag; either counts.
+//
+// The keys are the quoted NAME only — the colon is deliberately not part of
+// them. It used to be, and that made the key match strict in exactly the way
+// the value match had already been fixed not to be: `"LOGGED_IN" : true`, with
+// a space BEFORE the colon, matched nothing. On the liveness path that is
+// merely silence, but watchPageSessionAuth would then fall through to the
+// ytcfg-bootstrap branch and answer LoggedOut — reading a genuinely
+// authenticated watch page as anonymous and dropping its authenticated GVS
+// binding. Both sides of the colon are now walked by the same bounded
+// whitespace skip; see sessionAuthMarkerAt.
 const (
-	sessionAuthKey       = `"LOGGED_IN":`
-	sessionAuthCamelKey  = `"isLoggedIn":`
+	sessionAuthKey       = `"LOGGED_IN"`
+	sessionAuthCamelKey  = `"isLoggedIn"`
 	sessionAuthTrue      = "true"
 	sessionAuthFalse     = "false"
 	sessionAuthYtcfgMark = "ytcfg.set"
 )
 
-// sessionAuthMaxSpaceSkip bounds how far past the colon the value reader will
-// walk through whitespace before giving up.
+// sessionAuthMaxSpaceSkip bounds how far the marker reader will walk through
+// whitespace before giving up — applied on EACH side of the colon
+// independently, once between the key name and the colon and once between the
+// colon and the value.
 //
 // A bound rather than an unbounded loop because these functions run over a
-// ~1MB page on a monitor cadence and must stay O(1) past the key. Eight is
-// far more than any serialiser puts between a colon and its value (one space
-// is the realistic maximum) while still being a run no plausible emitter
-// produces by accident — past it we are no longer looking at a marker we
-// recognise, and Unknown is the honest answer.
+// ~1MB page on a monitor cadence and must stay O(1) per candidate. Eight is
+// far more than any serialiser puts around a colon (one space is the realistic
+// maximum) while still being a run no plausible emitter produces by accident —
+// past it we are no longer looking at a marker we recognise, and Unknown is
+// the honest answer.
 const sessionAuthMaxSpaceSkip = 8
 
 // sessionAuthBody is the two shapes a fetched page arrives in. The value
@@ -295,14 +307,97 @@ func isSessionAuthWordByte(c byte) bool {
 		(c >= 'A' && c <= 'Z')
 }
 
-// isSessionAuthSpace is the whitespace a serialiser may put between the colon
-// and the value.
+// isSessionAuthSpace is the whitespace a serialiser may put around the colon.
 func isSessionAuthSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
-// sessionAuthValue reads the login-marker value that begins at rest[0] — rest
-// being whatever follows the marker key's colon.
+// sessionAuthSkipSpace returns the first index at or after i that is not
+// whitespace, walking at most sessionAuthMaxSpaceSkip bytes. Both sides of the
+// colon go through this one function so the two can never acquire different
+// tolerances.
+func sessionAuthSkipSpace[T sessionAuthBody](b T, i int) int {
+	for end := i + sessionAuthMaxSpaceSkip; i < len(b) && i < end && isSessionAuthSpace(b[i]); i++ {
+	}
+	return i
+}
+
+// sessionAuthMarkerAt reads the login marker whose key NAME ends at index i —
+// that is, i is the offset just past the key's closing quote.
+//
+// It reports ok=false only when b[i:] is not a marker AT ALL: no colon within
+// the whitespace bound, so the key name we matched was some other occurrence
+// of that string and not this flag. The caller keeps looking for a later one.
+// Everything else is ok=true with a verdict, INCLUDING SessionAuthUnknown for
+// a colon whose value cannot be read — that is a marker we found and failed to
+// understand, and the established rule is that it stops the search rather than
+// licensing a weaker signal (see watchPageSessionAuth).
+func sessionAuthMarkerAt[T sessionAuthBody](b T, i int) (SessionAuthState, bool) {
+	j := sessionAuthSkipSpace(b, i)
+	if j >= len(b) || b[j] != ':' {
+		return SessionAuthUnknown, false
+	}
+	return sessionAuthValue(b, j+1), true
+}
+
+// sessionAuthMarkerInString finds the first occurrence of `key` in html that is
+// actually a marker and returns its verdict. ok=false means the page carries no
+// such marker, whatever else it carries.
+//
+// The scan continues past an occurrence that is not a marker — a bare
+// `"LOGGED_IN"` in some unrelated list, say — rather than giving up on it,
+// because the previous colon-bearing key would have skipped it silently and
+// found the real marker further on. Answering Unknown there instead would be a
+// new way to lose a LoggedIn read, and a lost LoggedIn costs an authenticated
+// download its datasyncID binding.
+//
+// Total work stays linear in the page: each iteration resumes past the
+// previous match, so the Index scans partition the body.
+//
+// Twinned with sessionAuthMarkerInBytes below. The two differ ONLY in
+// strings.Index vs bytes.Index, which is the same reason watchPageSessionAuth
+// and sessionAuthFromBytes are separate functions; everything that decides a
+// verdict is shared through sessionAuthMarkerAt.
+func sessionAuthMarkerInString(html, key string) (SessionAuthState, bool) {
+	for from := 0; from <= len(html)-len(key); {
+		i := strings.Index(html[from:], key)
+		if i < 0 {
+			return SessionAuthUnknown, false
+		}
+		past := from + i + len(key)
+		if st, ok := sessionAuthMarkerAt(html, past); ok {
+			return st, true
+		}
+		from = past
+	}
+	return SessionAuthUnknown, false
+}
+
+// sessionAuthMarkerInBytes is sessionAuthMarkerInString over raw bytes. Keep
+// the two in step; TestSessionAuthFromBytesMatchesStringVersion enforces it
+// through their callers.
+//
+// The []byte(key) conversion is hoisted out of the loop and never escapes
+// (bytes.Index does not retain it), which is what keeps the zero-allocation
+// pins in session_auth_test.go holding.
+func sessionAuthMarkerInBytes(b []byte, key string) (SessionAuthState, bool) {
+	needle := []byte(key)
+	for from := 0; from <= len(b)-len(needle); {
+		i := bytes.Index(b[from:], needle)
+		if i < 0 {
+			return SessionAuthUnknown, false
+		}
+		past := from + i + len(needle)
+		if st, ok := sessionAuthMarkerAt(b, past); ok {
+			return st, true
+		}
+		from = past
+	}
+	return SessionAuthUnknown, false
+}
+
+// sessionAuthValue reads the login-marker value that begins at b[start] —
+// start being the index just past the marker's colon.
 //
 // This function is the fix for the failure mode that shaped it. The value
 // used to be tested with a single HasPrefix against the literal `true`, and
@@ -347,30 +442,27 @@ func isSessionAuthSpace(c byte) bool {
 // true forms only grew), so no authenticated download loses its datasyncID
 // binding. And a marker that drifts into an unrecognised shape now goes
 // quiet rather than alarming — a missed failure, the acceptable direction.
-func sessionAuthValue[T sessionAuthBody](rest T) SessionAuthState {
-	i := 0
-	for i < len(rest) && i < sessionAuthMaxSpaceSkip && isSessionAuthSpace(rest[i]) {
-		i++
-	}
-	if i >= len(rest) {
+func sessionAuthValue[T sessionAuthBody](b T, start int) SessionAuthState {
+	i := sessionAuthSkipSpace(b, start)
+	if i >= len(b) {
 		return SessionAuthUnknown
 	}
 
-	if q := rest[i]; q == '"' || q == '\'' {
+	if q := b[i]; q == '"' || q == '\'' {
 		v := i + 1
 		switch {
-		case sessionAuthWordAt(rest, v, sessionAuthTrue) && sessionAuthClosedBy(rest, v+len(sessionAuthTrue), q):
+		case sessionAuthWordAt(b, v, sessionAuthTrue) && sessionAuthClosedBy(b, v+len(sessionAuthTrue), q):
 			return SessionAuthLoggedIn
-		case sessionAuthWordAt(rest, v, sessionAuthFalse) && sessionAuthClosedBy(rest, v+len(sessionAuthFalse), q):
+		case sessionAuthWordAt(b, v, sessionAuthFalse) && sessionAuthClosedBy(b, v+len(sessionAuthFalse), q):
 			return SessionAuthLoggedOut
 		}
 		return SessionAuthUnknown
 	}
 
 	switch {
-	case sessionAuthWordAt(rest, i, sessionAuthTrue):
+	case sessionAuthWordAt(b, i, sessionAuthTrue):
 		return SessionAuthLoggedIn
-	case sessionAuthWordAt(rest, i, sessionAuthFalse):
+	case sessionAuthWordAt(b, i, sessionAuthFalse):
 		return SessionAuthLoggedOut
 	}
 	return SessionAuthUnknown
@@ -404,16 +496,18 @@ func sessionAuthClosedBy[T sessionAuthBody](b T, i int, q byte) bool {
 // alarm sessionAuthValue exists to prevent. The fallbacks stay reachable for
 // their real case: no key at all.
 //
-// Cost is one Index for the primary key plus, on pages that lack it, one
-// scan each for the camelCase spelling and the ytcfg bootstrap, then a
-// bounded read of a few bytes — no allocation and no regex, because this runs
-// on every watch-page fetch including quality-monitor polling.
+// Cost is one pass over the page for the primary key plus, on pages that lack
+// it, one each for the camelCase spelling and the ytcfg bootstrap, and a
+// bounded read of a few bytes per candidate — no allocation and no regex,
+// because this runs on every watch-page fetch including quality-monitor
+// polling. A key that occurs several times without being a marker resumes the
+// scan past each hit, so the total stays linear in the page either way.
 func watchPageSessionAuth(html string) SessionAuthState {
-	if i := strings.Index(html, sessionAuthKey); i >= 0 {
-		return sessionAuthValue(html[i+len(sessionAuthKey):])
+	if st, ok := sessionAuthMarkerInString(html, sessionAuthKey); ok {
+		return st
 	}
-	if i := strings.Index(html, sessionAuthCamelKey); i >= 0 {
-		return sessionAuthValue(html[i+len(sessionAuthCamelKey):])
+	if st, ok := sessionAuthMarkerInString(html, sessionAuthCamelKey); ok {
+		return st
 	}
 	// No login key, but a real watch-page shell: YouTube answered as a page
 	// it would have stamped the key onto, so an anonymous session is the
@@ -428,8 +522,8 @@ func watchPageSessionAuth(html string) SessionAuthState {
 //
 // It exists because callers holding a ~1MB page as []byte must not pay a
 // string copy just to read one flag — internal/youtube/channel_membership.go
-// is explicit about that cost (98k → 32 allocs from lazy decoding). Three
-// bytes.Index/Contains calls, no allocation.
+// is explicit about that cost (98k → 32 allocs from lazy decoding). Two
+// marker scans and one bytes.Contains, no allocation.
 //
 // KEEP IN SYNC with watchPageSessionAuth. TestSessionAuthFromBytesMatchesStringVersion
 // enforces it. The two remain separate functions because the Index calls
@@ -437,11 +531,11 @@ func watchPageSessionAuth(html string) SessionAuthState {
 // likely to drift — reading the value — is shared through the generic
 // sessionAuthValue rather than written twice.
 func sessionAuthFromBytes(b []byte) SessionAuthState {
-	if i := bytes.Index(b, []byte(sessionAuthKey)); i >= 0 {
-		return sessionAuthValue(b[i+len(sessionAuthKey):])
+	if st, ok := sessionAuthMarkerInBytes(b, sessionAuthKey); ok {
+		return st
 	}
-	if i := bytes.Index(b, []byte(sessionAuthCamelKey)); i >= 0 {
-		return sessionAuthValue(b[i+len(sessionAuthCamelKey):])
+	if st, ok := sessionAuthMarkerInBytes(b, sessionAuthCamelKey); ok {
+		return st
 	}
 	if bytes.Contains(b, []byte(sessionAuthYtcfgMark)) {
 		return SessionAuthLoggedOut
@@ -464,21 +558,31 @@ func sessionAuthFromBytes(b []byte) SessionAuthState {
 // question moot: an unrecognised page is Unknown, which is the truthful
 // answer for a page we cannot read.
 //
-// Both routes to the ytcfg branch are now closed, and by two independent
-// mechanisms — so neither one alone is load-bearing. Key absent: the guard
-// below returns Unknown before delegating at all. Key present but its value
-// unreadable: sessionAuthFromBytes returns sessionAuthValue's Unknown from
-// the key branch and never reaches the bootstrap. That second case is the
-// one worth stating, because "unreadable" is a verdict this function must
-// pass through unchanged — routing it into the bootstrap would answer
+// Both routes to the ytcfg branch are closed, and structurally: this function
+// asks the marker lookups directly and has nowhere else to go. No marker at
+// all falls off the end as Unknown; a marker whose value is unreadable comes
+// back as ok=true carrying Unknown and returns immediately. That second case
+// is the one worth stating, because "unreadable" is a verdict this function
+// must pass through unchanged — routing it into the bootstrap would answer
 // LoggedOut off a shell, which is the alarm the value reader exists to
 // prevent. TestUnreadableValueDoesNotFallThrough pins it here, not just one
 // layer down.
+//
+// This used to be a Contains-guard in front of sessionAuthFromBytes. That
+// shape stopped being safe once the marker keys dropped their colon: a page
+// carrying the bare string `"LOGGED_IN"` and a ytcfg bootstrap would pass the
+// guard, find no actual marker, and reach the bootstrap branch — exactly the
+// LoggedOut-off-a-consent-shell this function exists to refuse. Asking for the
+// marker itself cannot make that mistake, and it also drops a whole redundant
+// scan of the page.
 func livenessVerdict(b []byte) SessionAuthState {
-	if !bytes.Contains(b, []byte(sessionAuthKey)) && !bytes.Contains(b, []byte(sessionAuthCamelKey)) {
-		return SessionAuthUnknown
+	if st, ok := sessionAuthMarkerInBytes(b, sessionAuthKey); ok {
+		return st
 	}
-	return sessionAuthFromBytes(b)
+	if st, ok := sessionAuthMarkerInBytes(b, sessionAuthCamelKey); ok {
+		return st
+	}
+	return SessionAuthUnknown
 }
 
 // extractChatContinuation pulls the live-chat continuation token (and its

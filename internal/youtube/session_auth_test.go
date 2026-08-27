@@ -107,6 +107,13 @@ func TestSessionAuthValueForms(t *testing.T) {
 		{"single-quoted true", `{"LOGGED_IN":'true'}`, SessionAuthLoggedIn},
 		{"camelCase spaced true", `{"isLoggedIn": true}`, SessionAuthLoggedIn},
 		{"camelCase quoted true", `{"isLoggedIn":"true"}`, SessionAuthLoggedIn},
+		// Whitespace BEFORE the colon. The key used to carry the colon as part
+		// of its literal, so these matched no key at all — see
+		// TestSpacedKeyOnAWatchPageIsNotReadAsAnonymous for what that cost.
+		{"space before the colon", `{"LOGGED_IN" : true}`, SessionAuthLoggedIn},
+		{"space before the colon, no space after", `{"LOGGED_IN" :true}`, SessionAuthLoggedIn},
+		{"newline before the colon", "{\"LOGGED_IN\"\n\t: true}", SessionAuthLoggedIn},
+		{"camelCase space before the colon", `{"isLoggedIn" : true}`, SessionAuthLoggedIn},
 
 		// Recognised false. These are the cases the arc acts on, so they
 		// must keep working in every form the true side accepts.
@@ -116,6 +123,7 @@ func TestSessionAuthValueForms(t *testing.T) {
 		{"spaced double-quoted false", `{"LOGGED_IN": "false"}`, SessionAuthLoggedOut},
 		{"single-quoted false", `{"LOGGED_IN":'false'}`, SessionAuthLoggedOut},
 		{"camelCase spaced false", `{"isLoggedIn": false}`, SessionAuthLoggedOut},
+		{"space before the colon, false", `{"LOGGED_IN" : false}`, SessionAuthLoggedOut},
 
 		// Unreadable. Every one of these used to answer LoggedOut.
 		{"numeric one", `{"LOGGED_IN":1}`, SessionAuthUnknown},
@@ -128,6 +136,8 @@ func TestSessionAuthValueForms(t *testing.T) {
 		{"unterminated quoted value", `{"LOGGED_IN":"true`, SessionAuthUnknown},
 		{"quote closed by the wrong quote", `{"LOGGED_IN":"true'}`, SessionAuthUnknown},
 		{"whitespace run past the bound", `{"LOGGED_IN":` + "         " + `true}`, SessionAuthUnknown},
+		{"whitespace run past the bound BEFORE the colon", `{"LOGGED_IN"` + "         " + `:true}`, SessionAuthUnknown},
+		{"key name with no colon after it at all", `{"LOGGED_IN"}`, SessionAuthUnknown},
 		{"camelCase unreadable", `{"isLoggedIn":1}`, SessionAuthUnknown},
 	}
 
@@ -190,6 +200,81 @@ func TestUnreadableValueDoesNotFallThrough(t *testing.T) {
 				t.Errorf("livenessVerdict = %q, want Unknown — an unreadable marker fell through to a weaker signal", got)
 			}
 		})
+	}
+}
+
+// TestSpacedKeyOnAWatchPageIsNotReadAsAnonymous is the failure that made the
+// key read matter as much as the value read.
+//
+// The value reader was made whitespace-tolerant, but the KEY was still the
+// literal `"LOGGED_IN":` — colon included — so `"LOGGED_IN" : true`, with the
+// space on the LEFT of the colon, matched nothing. On the liveness path that
+// is safe (no key, no verdict, Unknown). On the watch-page path it is not:
+// watchPageSessionAuth falls through to the ytcfg-bootstrap branch, and every
+// real watch page carries that bootstrap, so a genuinely SIGNED-IN page reads
+// as LoggedOut. That is the false-failure direction — and it costs the
+// download its authenticated GVS binding, because withAttestation gives the
+// datasyncID branch only to SessionAuthLoggedIn.
+//
+// The fixture carries the bootstrap ON PURPOSE. Without it the page would
+// answer Unknown before and LoggedIn after, which is an improvement but not
+// this bug; with it, the pre-fix answer is the confident wrong one.
+func TestSpacedKeyOnAWatchPageIsNotReadAsAnonymous(t *testing.T) {
+	page := `<script nonce="x">ytcfg.set({"LOGGED_IN" : true,"VISITOR_DATA":"x"});</script>`
+
+	if got := watchPageSessionAuth(page); got != SessionAuthLoggedIn {
+		t.Errorf("watchPageSessionAuth = %q, want LoggedIn — a space before the colon made an "+
+			"authenticated watch page read off the ytcfg bootstrap instead of its own marker", got)
+	}
+	if got := sessionAuthFromBytes([]byte(page)); got != SessionAuthLoggedIn {
+		t.Errorf("sessionAuthFromBytes = %q, want LoggedIn", got)
+	}
+	if got := livenessVerdict([]byte(page)); got != SessionAuthLoggedIn {
+		t.Errorf("livenessVerdict = %q, want LoggedIn", got)
+	}
+
+	// The same page signed OUT still reads as signed out: tolerating the space
+	// must not have cost the negative verdict, which is the only one the
+	// liveness arc acts on.
+	out := `<script nonce="x">ytcfg.set({"LOGGED_IN" : false,"VISITOR_DATA":"x"});</script>`
+	if got := livenessVerdict([]byte(out)); got != SessionAuthLoggedOut {
+		t.Errorf("livenessVerdict(signed out) = %q, want LoggedOut", got)
+	}
+}
+
+// TestABareKeyOccurrenceDoesNotHideTheRealMarker is a preservation pin, not a
+// bug fix: it passed before this change too, and the point is that it still
+// does.
+//
+// Dropping the colon from the key literal means the key scan can now land on
+// an occurrence of `"LOGGED_IN"` that is not a marker — a string in some
+// unrelated list. Stopping at the first such hit and answering Unknown would
+// be a NEW way to lose a LoggedIn read, and a lost LoggedIn costs the
+// authenticated GVS binding just as a false LoggedOut does. So the scan
+// continues past a non-marker occurrence, exactly as the colon-bearing literal
+// used to skip it.
+func TestABareKeyOccurrenceDoesNotHideTheRealMarker(t *testing.T) {
+	body := `{"fields":["LOGGED_IN","VISITOR_DATA"],"cfg":{"LOGGED_IN":true}}`
+
+	if got := watchPageSessionAuth(body); got != SessionAuthLoggedIn {
+		t.Errorf("watchPageSessionAuth = %q, want LoggedIn — the scan stopped at a non-marker occurrence of the key", got)
+	}
+	if got := sessionAuthFromBytes([]byte(body)); got != SessionAuthLoggedIn {
+		t.Errorf("sessionAuthFromBytes = %q, want LoggedIn", got)
+	}
+	if got := livenessVerdict([]byte(body)); got != SessionAuthLoggedIn {
+		t.Errorf("livenessVerdict = %q, want LoggedIn", got)
+	}
+
+	// And the consent-shell refusal survives it: a page whose only mention of
+	// the key is a non-marker one, plus a ytcfg bootstrap, must still be
+	// Unknown to the probe rather than LoggedOut. The old Contains-guard in
+	// livenessVerdict would have waved this through to the bootstrap branch
+	// once the key literal lost its colon.
+	shell := []byte(`<html>ytcfg.set({"schema":["LOGGED_IN"]});</html>`)
+	if got := livenessVerdict(shell); got != SessionAuthUnknown {
+		t.Errorf("livenessVerdict(shell) = %q, want Unknown — a page with no actual marker must not "+
+			"read as a dead session off the bootstrap", got)
 	}
 }
 
@@ -338,12 +423,16 @@ func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 // TWO independent things keep the conversions off the heap, and a failure
 // here means one of them stopped holding:
 //
-//   - The markers are compile-time CONSTANTS. For a constant the compiler
-//     emits an exact-size stack array, so no size ceiling applies at all.
+//   - Every converted marker is short. The ytcfg mark is still converted from
+//     a compile-time CONSTANT at the call site, which gets an exact-size stack
+//     array with no size ceiling at all; the two login keys now reach
+//     bytes.Index through sessionAuthMarkerInBytes' `key string` PARAMETER, so
+//     their conversion is the non-constant case and does have a ceiling — see
+//     below. `"LOGGED_IN"` and `"isLoggedIn"` are 11 and 12 bytes.
 //   - bytes.Index and bytes.Contains do not retain their argument, so escape
 //     analysis keeps the conversion local.
 //
-// The 32-byte ceiling is real but applies only to the NON-constant case:
+// The 32-byte ceiling on the non-constant case:
 // runtime.stringtoslicebyte (runtime/string.go:224) uses its caller's stack
 // tmpBuf when len(s) <= tmpStringBufSize (32) and calls rawbyteslice
 // otherwise. Measured on go1.26.1, 2026-08-26: const at 31/32/33/66/310 bytes
@@ -351,7 +440,7 @@ func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 // above; a conversion made to escape allocates 1 at any length.
 //
 // So read a failure here as either "a converted marker now escapes" or "a
-// marker stopped being a constant AND is longer than 32 bytes" — not as
+// marker exceeded 32 bytes while not being converted from a constant" — not as
 // marker length alone, and not as escape alone.
 //
 // A third cause was added when the value read moved into sessionAuthValue:
@@ -366,14 +455,15 @@ func TestSessionAuthFromBytesDoesNotAllocate(t *testing.T) {
 }
 
 // TestLivenessVerdictDoesNotAllocate is the same guard one layer up, and the
-// hotter path: livenessVerdict is what the membership probe calls, and it
-// pays TWO []byte conversions of its own in the guard before delegating to
-// sessionAuthFromBytes' three. The guard's MISS path is the worst case — both
-// bytes.Contains scans run the full page before it returns Unknown.
+// hotter path: livenessVerdict is what the membership probe calls, and it runs
+// its own two marker scans over the page rather than delegating. The MISS path
+// is the worst case — both scans run the full page before it returns Unknown.
 //
-// It is a separate pin because it covers separate conversions: making only
-// livenessVerdict's escape leaves TestSessionAuthFromBytesDoesNotAllocate
-// green and fails here.
+// It is a separate pin because it covers separate conversions: the []byte(key)
+// each scan makes is a conversion of a PARAMETER, not of a constant, so it
+// leans on the 32-byte tmpBuf case described below rather than on the
+// exact-size stack array the constant form gets. Both marker keys are well
+// under that; a longer one added later fails here first.
 //
 // Same two failure causes as that test — see its comment for the measured
 // const/var × length matrix and the runtime source behind it.
