@@ -263,10 +263,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// A manual install already gets the detection without seeding:
 		// shouldFireRecovery's everConcluded == false arm returns
 		// cookiesPresent, so present-but-dead cookies fire on the first
-		// conclusive check of every start. And Cookies.Platforms is a
-		// monotonic union that only grows, so seeding here would set
-		// everConcluded for platforms this process never checked and no longer
-		// has cookies for — sending them down the witnessed-transition arm,
+		// conclusive check of every start. And nothing AUTOMATIC ever prunes
+		// Cookies.Platforms — both automatic writers only add, and the sole
+		// removal path is an operator replacing the list wholesale through
+		// PATCH /api/config — so seeding here would set everConcluded for
+		// platforms this process never checked and no longer has cookies for,
+		// sending them down the witnessed-transition arm,
 		// which never consults cookiesPresent, and firing "auth lost" after
 		// every restart for a platform nobody configured. Since Arc 1 makes
 		// OnRecoveryNeeded operator-visible on precisely the auto_enabled =

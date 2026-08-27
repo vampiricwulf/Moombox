@@ -348,14 +348,20 @@ func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refre
 		// the witnessed-transition arm of shouldFireRecovery never consults
 		// cookiesPresent, so the file may have been deleted outright.
 		//
+		// "on its own" scopes the claim to AUTOMATIC attempts, which is all
+		// this branch knows about. POST /api/cookies/auto-refresh
+		// (internal/web/routes/cookies.go) is not gated on AutoEnabled, so an
+		// operator can still trigger a refresh by hand — a flat "nothing will
+		// attempt to restore it" would be a shade stronger than the code.
+		//
 		// Guidance leads with the cookie FILE for the reason spelled out at
 		// cookieReplacementGuidance: this is the notification most likely to
 		// be read somewhere the loopback-gated Settings wizard cannot be
 		// reached at all.
 		notify(platform, "Cookie Re-Authentication Required",
 			fmt.Sprintf("Moombox is not authenticated to %s, and automatic cookie refresh is turned off — nothing will "+
-				"attempt to restore it, so recordings that need an account will fail until the cookies are replaced by "+
-				"hand. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
+				"attempt to restore it on its own, so recordings that need an account will fail until the cookies are "+
+				"replaced by hand. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
 			notifications.TypeError)
 		return
 	}

@@ -284,21 +284,6 @@ func TestRecoveryNeededNotifiesWhenAutoRefreshIsDisabled(t *testing.T) {
 	if !strings.Contains(got.desc, "youtube") {
 		t.Errorf("description does not name the platform it is about: %q", got.desc)
 	}
-	// Nothing ran, so nothing may be claimed about a run. Every phrase below is
-	// live copy from one of runCookieRecovery's branches; the premise check at
-	// the end of this test shows they really are reachable, so their absence
-	// here is a property of this path rather than of the assertion.
-	for _, forbidden := range []string{
-		"Automatic cookie refresh ran",
-		"Automatic cookie refresh for",
-		"did not restore",
-		"declined to run",
-		"found nothing usable",
-	} {
-		if strings.Contains(got.desc, forbidden) {
-			t.Errorf("no refresh ran, so %q is an unearned claim: %q", forbidden, got.desc)
-		}
-	}
 	// Same rule the conclusive-failure copy follows: the Settings wizard is
 	// loopback-gated, so a container or remote dashboard — the deployments
 	// most likely to be reading this — cannot reach it.
@@ -308,16 +293,55 @@ func TestRecoveryNeededNotifiesWhenAutoRefreshIsDisabled(t *testing.T) {
 		t.Errorf("guidance must lead with the cookie file, not the Settings wizard: %q", got.desc)
 	}
 
-	// Premise for the forbidden-phrase block: a refresh that DID run reaches
-	// this same notifier with copy that says so. Without this, "the disabled
-	// path does not claim a refresh ran" is equally satisfied by copy that
-	// could never have said it, and the assertion pins nothing.
-	sRan, sentRan := recoveryTestState(t)
-	sRan.runCookieRecovery(context.Background(), "youtube",
-		stubRefresh(cookies.RefreshFailed, cookies.RefreshOK), recoveryNotifier(sentRan))
-	if len(*sentRan) != 1 || !strings.Contains((*sentRan)[0].desc, "Automatic cookie refresh ran") {
-		t.Fatalf("a real refresh no longer produces the phrase this test forbids, so forbidding it "+
-			"proves nothing: %+v", *sentRan)
+	// Nothing ran, so nothing may be claimed about a run.
+	//
+	// Every phrase below is established before it is forbidden. Drive all four
+	// of runCookieRecovery's branches and collect what they actually say; a
+	// phrase that no longer appears in any of them is a dead assertion, and
+	// forbidding it in the disabled path would prove nothing — the exact
+	// junction this test exists to stay upstream of. Comparison is
+	// case-insensitive in both directions so a future capitalisation change
+	// cannot quietly retire either half.
+	var refreshCopy []string
+	collect := func(platform string, refresh cookieRefresher) {
+		t.Helper()
+		sc, sentC := recoveryTestState(t)
+		sc.runCookieRecovery(context.Background(), platform, refresh, recoveryNotifier(sentC))
+		for _, n := range *sentC {
+			refreshCopy = append(refreshCopy, strings.ToLower(n.desc))
+		}
+	}
+	collect("youtube", func(context.Context) (cookies.RefreshResult, error) {
+		return cookies.RefreshResult{}, errors.New("browser exploded") // error branch
+	})
+	collect("youtube", stubRefresh(cookies.RefreshFailed, cookies.RefreshOK)) // conclusive, credentials held
+	collect("twitch", stubRefreshResult(cookies.RefreshResult{                // conclusive, nothing left
+		Ran: true, Twitch: cookies.RefreshFailed, TwitchStored: false,
+	}))
+	collect("youtube", stubRefreshResult(cookies.RefreshResult{})) // declined / Unknown
+
+	gotLower := strings.ToLower(got.desc)
+	for _, forbidden := range []string{
+		"automatic cookie refresh ran",
+		"automatic cookie refresh for",
+		"did not restore",
+		"declined to run",
+		"found nothing usable",
+	} {
+		established := false
+		for _, c := range refreshCopy {
+			if strings.Contains(c, forbidden) {
+				established = true
+				break
+			}
+		}
+		if !established {
+			t.Fatalf("premise failed: %q no longer appears in ANY runCookieRecovery branch, so "+
+				"forbidding it on the disabled path pins nothing. Live copy: %q", forbidden, refreshCopy)
+		}
+		if strings.Contains(gotLower, forbidden) {
+			t.Errorf("no refresh ran, so %q is an unearned claim: %q", forbidden, got.desc)
+		}
 	}
 }
 
@@ -354,19 +378,26 @@ func TestRecoveryNeededDoesNotRefreshWhenDisabledButDoesWhenEnabled(t *testing.T
 		}
 	})
 
-	t.Run("enabled does refresh", func(t *testing.T) {
+	t.Run("enabled refreshes and routes the result through runCookieRecovery", func(t *testing.T) {
 		s, _ := recoveryTestState(t)
 		called := make(chan struct{})
 		finished := make(chan struct{})
+		var gotTitle, gotDesc string
+		var gotType notifications.NotificationType
 		s.handleRecoveryNeeded("youtube", true,
 			func(context.Context) (cookies.RefreshResult, error) {
 				close(called)
 				return cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed, YouTubeStored: true}, nil
 			},
-			// Signals completion rather than recording: this row exists to
-			// prove the refresher seam is live, and joining the goroutine
-			// before the test's logger is closed is what makes that safe.
-			func(string, string, string, notifications.NotificationType) { close(finished) })
+			// Records, then signals. The write happens before close(finished)
+			// and every read below happens after <-finished, so the channel
+			// supplies the happens-before edge and there is no race — and
+			// joining the goroutine before the test's logger is closed is what
+			// makes the whole subtest safe.
+			func(_, title, desc string, ntype notifications.NotificationType) {
+				gotTitle, gotDesc, gotType = title, desc, ntype
+				close(finished)
+			})
 		select {
 		case <-called:
 		case <-time.After(10 * time.Second):
@@ -377,6 +408,23 @@ func TestRecoveryNeededDoesNotRefreshWhenDisabledButDoesWhenEnabled(t *testing.T
 		case <-finished:
 		case <-time.After(10 * time.Second):
 			t.Fatal("the enabled path refreshed but never notified")
+		}
+
+		// "Refreshed, then notified" is NOT enough: an enabled arm that called
+		// the refresher, threw the result away and sent its own message would
+		// satisfy it while bypassing runCookieRecovery entirely. What pins the
+		// wiring is that the notification carries the copy only the
+		// RefreshFailed + credentials-held branch produces for the verdict
+		// this refresher returned. runCookieRecovery's own tests own the
+		// contents of that branch; this owns the fact that the gate reaches it.
+		if gotTitle != "Cookie Auto-Refresh Failed" || gotType != notifications.TypeError {
+			t.Errorf("enabled path notified %q/%v — the RefreshFailed verdict did not reach "+
+				"runCookieRecovery's conclusive-failure branch", gotTitle, gotType)
+		}
+		if !strings.Contains(gotDesc, "Automatic cookie refresh ran") ||
+			!strings.Contains(gotDesc, "still not authenticated") {
+			t.Errorf("enabled path's copy is not the conclusive-failure branch's, so the gate is no "+
+				"longer wired to the three-verdict pass: %q", gotDesc)
 		}
 	})
 }

@@ -140,10 +140,15 @@ func TestPerPlatformEverConcludedNotMaskedBySibling(t *testing.T) {
 //     its first conclusive check — shouldFireRecovery's everConcluded == false
 //     arm returns cookiesPresent. Seeding adds nothing to it.
 //
-//   - Row 2 (the cost): Cookies.Platforms is a monotonic union that only ever
-//     grows (cmd/moombox/services.go PersistPlatforms unions into it; the
-//     cookie-file auto-detect seeds it), so it routinely names a platform the
-//     install no longer has cookies for. SetExpectedPlatforms sets BOTH
+//   - Row 2 (the cost): nothing AUTOMATIC ever prunes Cookies.Platforms. Both
+//     automatic writers only add — cmd/moombox/services.go PersistPlatforms
+//     unions into it, and the cookie-file auto-detect seeds it — so a stale
+//     entry survives indefinitely once written. (An operator can replace the
+//     list wholesale through PATCH /api/config, which
+//     internal/web/routes/config_routes.go assigns verbatim; that is the only
+//     way an entry ever leaves, and it requires someone to go and do it.) So
+//     the list routinely names a platform the install no longer has cookies
+//     for. SetExpectedPlatforms sets BOTH
 //     prevAuth and everConcluded for such an entry, which sends the check down
 //     the witnessed-transition arm — where cookiesPresent is never consulted —
 //     and fires "auth lost" for a platform that simply is not configured. On
