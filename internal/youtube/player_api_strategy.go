@@ -115,8 +115,9 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	ytcfg := wp.Ytcfg
 
 	// Log what YouTube thought of our session BEFORE any playability verdict
-	// exists to argue about. "hasAuth=true" upstream only means a cookie file
-	// was parsed; this line is the first place the answer to "are those
+	// exists to argue about. The startup "Cookies loaded" line upstream
+	// (completeAuthSet / anyAuthCookie) reports only what a parsed cookie
+	// file CONTAINS; this line is the first place the answer to "are those
 	// cookies still a session?" appears in the log.
 	p.logger.Debug("[PlayerApi] watch page session state",
 		"videoID", videoID, "sessionAuth", string(wp.SessionAuth))

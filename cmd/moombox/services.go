@@ -283,7 +283,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 		if err := jar.Load(cfg.Cookies.CookieFile); err != nil {
 			log.Warn("Failed to load cookies", slog.String("error", err.Error()))
 		} else {
-			log.Info("Cookies loaded", slog.Bool("hasAuth", jar.HasYouTubeAuthCookies()))
+			// Two predicates, two fields, because they answer different
+			// questions and the old single "hasAuth" field reported the
+			// wrong one. It carried HasYouTubeAuthCookies — SAPISID (or
+			// __Secure-3PAPISID) AND LOGIN_INFO, i.e. "is the set complete
+			// right now" — while the auth-loss gate and the liveness check
+			// downstream both run off HasAnyYouTubeAuthCookie, "was this
+			// install ever configured for YouTube auth". A real acceptance
+			// run printed `hasAuth=false` and then correctly went on to
+			// probe and fire, so the line contradicted what the subsystem
+			// did on the very next step. Named for what each measures.
+			log.Info("Cookies loaded",
+				slog.Bool("completeAuthSet", jar.HasYouTubeAuthCookies()),
+				slog.Bool("anyAuthCookie", jar.HasAnyYouTubeAuthCookie()))
 			// Auto-detect platforms from cookie file when not already set
 			if len(cfg.Cookies.Platforms) == 0 && len(cfg.Cookies.ActivePlatforms) == 0 {
 				var detected []string
