@@ -67,13 +67,22 @@ func TestLiveLoginMarkersPresent(t *testing.T) {
 // TestLiveAuthenticatedAccountProbe is the other half of the premise, and it
 // closes a gate the anonymous arm above structurally cannot.
 //
-// The detector requires the exact byte sequence `"LOGGED_IN":true` — no
-// whitespace tolerance at all (sessionAuthFromBytes uses bytes.HasPrefix on the
-// literal). If YouTube ever emitted `"LOGGED_IN": true` with one space, an
-// AUTHENTICATED page would read as SessionAuthLoggedOut and every healthy
-// install would be told its cookies are dead. TestLiveLoginMarkersPresent
-// cannot catch that: it fetches anonymously, where LoggedOut is the answer it
-// wants, so it would keep passing throughout.
+// The detector reads a bounded set of value forms — bare or quoted
+// true/false, whitespace-tolerant after the colon — and answers Unknown for
+// anything else (see sessionAuthValue). It used to require the exact byte
+// sequence `"LOGGED_IN":true`, so a single added space made an AUTHENTICATED
+// page read as SessionAuthLoggedOut and every healthy install would have been
+// told its cookies were dead. That specific hole is closed in the detector
+// itself, which is a better remedy than detecting the drift after it lands.
+//
+// This test still earns its place, because the remaining drift is the shape
+// the detector CANNOT be made immune to: a marker renamed, dropped, or moved
+// somewhere the key scan does not match. That now reads as Unknown rather
+// than LoggedOut — the arc goes quiet instead of raising a false alarm, which
+// is the right direction but is still a failure, and a silent one.
+// TestLiveLoginMarkersPresent structurally cannot see it: it fetches
+// anonymously, where LoggedOut is the answer it wants, so it would keep
+// passing throughout.
 //
 // This runs the real production path — ProbeAccountLiveness against
 // accountProbeURL, both admissibility guards included — so it also covers a
@@ -110,7 +119,8 @@ func TestLiveAuthenticatedAccountProbe(t *testing.T) {
 	if got != SessionAuthLoggedIn {
 		t.Errorf("authenticated ProbeAccountLiveness = %q, want %q.\n"+
 			"If the cookies really are live, the marker YouTube stamps has changed shape "+
-			"(spacing, spelling, or it is gone) and livenessVerdict can no longer read it — "+
-			"which means every healthy install is about to be told its cookies are dead.", got, SessionAuthLoggedIn)
+			"(spelling, or it is gone) and livenessVerdict can no longer read it. Unknown "+
+			"here means every install's liveness check has gone silent; LoggedOut here "+
+			"means it is actively alarming on healthy credentials, which is worse.", got, SessionAuthLoggedIn)
 	}
 }
