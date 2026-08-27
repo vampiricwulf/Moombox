@@ -202,7 +202,7 @@ type authFailureNotifier func(platform, title, desc string, ntype notifications.
 // live.
 type cookieRefresher func(context.Context) (cookies.RefreshResult, error)
 
-// cookieReplacementGuidance is the tail shared by both failure notifications.
+// cookieReplacementGuidance is the tail shared by the failure notifications.
 //
 // It leads with the cookie FILE rather than the Settings wizard on purpose:
 // the wizard drives a local headed browser and its endpoints are
@@ -305,6 +305,77 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	}
 }
 
+// handleRecoveryNeeded is the whole body of the OnRecoveryNeeded callback,
+// with the two things a test cannot supply passed in: the config answer
+// (autoEnabled) and the auto-cookie service's refresh entry point.
+//
+// autoEnabled splits two genuinely different situations, not one situation
+// and a silence:
+//
+//   - Automatic refresh is ON: there is something to attempt, so attempt it
+//     on its own goroutine (RefreshCookiesDetailed drives a headless browser
+//     and is bounded here by a 2-minute timeout; the refresh service's loop
+//     must not block on it) and report whatever it concluded.
+//   - Automatic refresh is OFF: there is nothing to attempt. This used to
+//     Debug-log and send nothing, on the implicit reasoning that no
+//     configured recovery means nothing worth saying. That is inverted. A
+//     user with auto-recovery on has an automated attempt that may quietly
+//     fix the problem before they ever see it; a user with it off has none,
+//     so this notification is not redundant for them — it is the only thing
+//     that will tell them their credentials need replacing by hand. The
+//     whole point of this work is that Moombox could hold dead cookies and
+//     never say so, and this gate was the last place it still stayed silent.
+//
+// The disabled path runs SYNCHRONOUSLY and deliberately does not call
+// `refresh`: launching a headless browser the operator explicitly turned off,
+// and paying its timeout, is precisely what "disabled" forbids.
+// notifyMgr.Send hands every target off to its own bounded goroutine
+// (internal/notifications.Manager.Send), so sending inline cannot stall the
+// refresh loop — the same reason OnAuthRecovered and OnCredentialsChanged
+// below send inline.
+func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refresh cookieRefresher, notify authFailureNotifier) {
+	if !autoEnabled {
+		// Warn, not Debug. Debug was right for "we did nothing"; it is not
+		// right for "we are telling the operator their recordings will fail".
+		s.log.Warn("auth lost and automatic cookie refresh is disabled — manual re-authentication required",
+			"platform", platform)
+		// Claims nothing about a refresh, because none ran: no attempt, no
+		// finding, no failure. What IS known is exactly two things — this
+		// platform answered a conclusive "not authenticated" (shouldFireRecovery
+		// fires only on checkErr == nil && !nowAuth, and livenessRecoveryArmed
+		// is false so nothing else reaches here), and the config flag this
+		// branch just read is off. Note it does NOT say cookies are present:
+		// the witnessed-transition arm of shouldFireRecovery never consults
+		// cookiesPresent, so the file may have been deleted outright.
+		//
+		// Guidance leads with the cookie FILE for the reason spelled out at
+		// cookieReplacementGuidance: this is the notification most likely to
+		// be read somewhere the loopback-gated Settings wizard cannot be
+		// reached at all.
+		notify(platform, "Cookie Re-Authentication Required",
+			fmt.Sprintf("Moombox is not authenticated to %s, and automatic cookie refresh is turned off — nothing will "+
+				"attempt to restore it, so recordings that need an account will fail until the cookies are replaced by "+
+				"hand. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
+			notifications.TypeError)
+		return
+	}
+	// The pass itself, and the per-platform branch it takes, live in
+	// runCookieRecovery — see cookieReplacementGuidance there for why the
+	// notification copy leads with the cookie FILE rather than the Settings
+	// wizard.
+	s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("auto-cookie recovery panic", "panic", r)
+			}
+		}()
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer refreshCancel()
+		s.runCookieRecovery(refreshCtx, platform, refresh, notify)
+	}()
+}
+
 // routeLivenessVerdict hands one YouTube login verdict to the cookie health
 // signal, and drops the one that is not a verdict.
 //
@@ -372,25 +443,11 @@ func (s *runState) wireMonitorCallbacks() {
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			autoEnabled = c.Cookies.AutoEnabled
 		})
-		if !autoEnabled {
-			s.log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
-			return
-		}
-		// The pass itself, and the per-platform branch it takes, live in
-		// runCookieRecovery — see cookieReplacementGuidance there for why the
-		// notification copy leads with the cookie FILE rather than the
-		// Settings wizard.
-		s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					s.log.Error("auto-cookie recovery panic", "panic", r)
-				}
-			}()
-			refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer refreshCancel()
-			s.runCookieRecovery(refreshCtx, platform, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
-		}()
+		// Both branches — attempt a recovery, or report that no attempt will
+		// be made — live in handleRecoveryNeeded so each can be driven
+		// directly by a test. The method value is taken unconditionally and
+		// is not called on the disabled path.
+		s.handleRecoveryNeeded(platform, autoEnabled, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
 	}
 
 	// When a platform transitions from not-authenticated to authenticated,

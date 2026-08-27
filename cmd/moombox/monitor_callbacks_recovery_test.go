@@ -250,6 +250,137 @@ func TestRecoveryFailureOnAnUnconfiguredPlatformDoesNotBlameCookies(t *testing.T
 	}
 }
 
+// TestRecoveryNeededNotifiesWhenAutoRefreshIsDisabled pins the fourth path.
+//
+// The callback used to return early on cookies.auto_enabled = false with a
+// Debug line and no notification at all, on the implicit reasoning that an
+// install with no configured recovery has nothing worth being told. That is
+// backwards: an install WITH auto-recovery has an attempt that may quietly
+// fix the problem before anyone notices, and an install without one has
+// nothing — so this is the only thing that will ever tell that operator their
+// credentials are dead.
+//
+// The forbidden-phrase block at the bottom is downstream of a junction — copy
+// that could never have contained the phrase satisfies it just as well as copy
+// that deliberately omits it — so the test establishes the premise separately
+// by driving a real refresh through the same notifier helper and requiring the
+// phrase to appear there. Whether the refresher is called at all is a different
+// question with its own junction, pinned in the test below.
+func TestRecoveryNeededNotifiesWhenAutoRefreshIsDisabled(t *testing.T) {
+	s, sent := recoveryTestState(t)
+	s.handleRecoveryNeeded("youtube", false,
+		stubRefreshResult(cookies.RefreshResult{}), recoveryNotifier(sent))
+
+	if len(*sent) != 1 {
+		t.Fatalf("sent %d notifications, want exactly 1 — this path used to send none: %+v", len(*sent), *sent)
+	}
+	got := (*sent)[0]
+	if got.platform != "youtube" {
+		t.Errorf("notified about platform %q, want %q", got.platform, "youtube")
+	}
+	if got.ntype != notifications.TypeError {
+		t.Errorf("type = %v, want TypeError — recordings will fail and nothing will fix it", got.ntype)
+	}
+	if !strings.Contains(got.desc, "youtube") {
+		t.Errorf("description does not name the platform it is about: %q", got.desc)
+	}
+	// Nothing ran, so nothing may be claimed about a run. Every phrase below is
+	// live copy from one of runCookieRecovery's branches; the premise check at
+	// the end of this test shows they really are reachable, so their absence
+	// here is a property of this path rather than of the assertion.
+	for _, forbidden := range []string{
+		"Automatic cookie refresh ran",
+		"Automatic cookie refresh for",
+		"did not restore",
+		"declined to run",
+		"found nothing usable",
+	} {
+		if strings.Contains(got.desc, forbidden) {
+			t.Errorf("no refresh ran, so %q is an unearned claim: %q", forbidden, got.desc)
+		}
+	}
+	// Same rule the conclusive-failure copy follows: the Settings wizard is
+	// loopback-gated, so a container or remote dashboard — the deployments
+	// most likely to be reading this — cannot reach it.
+	file := strings.Index(got.desc, "cookies.txt")
+	wizard := strings.Index(got.desc, "Settings")
+	if file < 0 || wizard < 0 || file > wizard {
+		t.Errorf("guidance must lead with the cookie file, not the Settings wizard: %q", got.desc)
+	}
+
+	// Premise for the forbidden-phrase block: a refresh that DID run reaches
+	// this same notifier with copy that says so. Without this, "the disabled
+	// path does not claim a refresh ran" is equally satisfied by copy that
+	// could never have said it, and the assertion pins nothing.
+	sRan, sentRan := recoveryTestState(t)
+	sRan.runCookieRecovery(context.Background(), "youtube",
+		stubRefresh(cookies.RefreshFailed, cookies.RefreshOK), recoveryNotifier(sentRan))
+	if len(*sentRan) != 1 || !strings.Contains((*sentRan)[0].desc, "Automatic cookie refresh ran") {
+		t.Fatalf("a real refresh no longer produces the phrase this test forbids, so forbidding it "+
+			"proves nothing: %+v", *sentRan)
+	}
+}
+
+// TestRecoveryNeededDoesNotRefreshWhenDisabledButDoesWhenEnabled is the other
+// half, and the reason the fix could not simply delete the early return.
+//
+// With cookies.auto_enabled off there is no recovery to attempt: falling
+// through to RefreshCookiesDetailed would launch a headless browser the
+// operator explicitly disabled and pay its two-minute timeout for it. The
+// disabled row asserts the refresher is untouched.
+//
+// The enabled row is the junction guard and is not optional. "The refresher
+// was not called" is downstream of everything — a broken seam, a wrongly-typed
+// parameter or a method value that is never wired reads identically. Only by
+// showing the SAME injected refresher is reached on the enabled path does the
+// disabled row's silence mean the gate.
+func TestRecoveryNeededDoesNotRefreshWhenDisabledButDoesWhenEnabled(t *testing.T) {
+	t.Run("disabled does not refresh", func(t *testing.T) {
+		s, sent := recoveryTestState(t)
+		s.handleRecoveryNeeded("youtube", false,
+			func(context.Context) (cookies.RefreshResult, error) {
+				t.Error("RefreshCookiesDetailed was called with auto-cookies disabled — " +
+					"that launches the headless browser the operator turned off")
+				return cookies.RefreshResult{}, nil
+			},
+			recoveryNotifier(sent))
+		// handleRecoveryNeeded's disabled arm is synchronous by contract
+		// (notifyMgr.Send hands off to its own goroutines), so by the time it
+		// returns the whole path has run — nothing is still in flight that
+		// could call the refresher after this check.
+		if len(*sent) != 1 {
+			t.Fatalf("the disabled path did not run to completion, so \"refresher untouched\" is "+
+				"vacuous: sent %d notifications: %+v", len(*sent), *sent)
+		}
+	})
+
+	t.Run("enabled does refresh", func(t *testing.T) {
+		s, _ := recoveryTestState(t)
+		called := make(chan struct{})
+		finished := make(chan struct{})
+		s.handleRecoveryNeeded("youtube", true,
+			func(context.Context) (cookies.RefreshResult, error) {
+				close(called)
+				return cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed, YouTubeStored: true}, nil
+			},
+			// Signals completion rather than recording: this row exists to
+			// prove the refresher seam is live, and joining the goroutine
+			// before the test's logger is closed is what makes that safe.
+			func(string, string, string, notifications.NotificationType) { close(finished) })
+		select {
+		case <-called:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the enabled path never reached the injected refresher — the seam the disabled " +
+				"row relies on is not wired")
+		}
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the enabled path refreshed but never notified")
+		}
+	})
+}
+
 // TestRecoveryUnrecognisedPlatformDoesNotAssertFailure guards the seam
 // between the recovery pass and RefreshResult.Verdict. A platform string the
 // result does not know about resolves to Unknown, so a wiring mistake or a
