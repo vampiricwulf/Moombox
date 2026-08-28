@@ -111,10 +111,16 @@ func TestGuide200WithNoLoginMarkerIsInconclusive(t *testing.T) {
 	}
 }
 
-// TestUnreadableGuideErrorCarriesNoBody: this string is rendered in the Web UI
-// and TUI. The unreadable body is the SUBJECT of the report and must never
-// become its content — a portal page can echo back a request, and the request
-// carries the session.
+// TestUnreadableGuideErrorCarriesNoBody: the unreadable body is the SUBJECT of
+// this error and must never become its content — a portal page can echo back a
+// request, and the request carries the session.
+//
+// NOT because the string reaches the Web UI and TUI status surfaces. It does
+// not; AuthStatus.YouTubeError has no reader. An earlier version of this comment
+// said otherwise, and the same false claim stood in the sentinel's own doc
+// comment — see errGuideLoginMarkerUnreadable in refresh.go for where the string
+// actually goes and for the five log surfaces it fans out to once the operator
+// raises the level to DEBUG. Those are the reason this test exists.
 //
 // Same rule as TestTwitchValidateErrorNamesOnlyTheStatus and the provenance
 // errors, which name a status, a host or a header NAME and nothing else.

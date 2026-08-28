@@ -758,8 +758,11 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	}
 
 	// Update previous auth state tracking.
-	// Only update previous state when the check was conclusive (no network error).
-	// A network-error check deliberately does NOT mark the platform
+	// Only update previous state when the check was CONCLUSIVE. That is not
+	// the same as "no network error": a non-200, an answer from the wrong
+	// host, and a 200 whose body carries no marker we recognise are all
+	// inconclusive too, and none of them may move this baseline.
+	// An inconclusive check deliberately does NOT mark the platform
 	// "concluded" — the next conclusive check still counts as that
 	// platform's first, so shouldFireRecovery's startup-dead-auth case
 	// still applies to it.
@@ -791,7 +794,9 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	}
 
 	// Detect auth loss transitions: previously authenticated -> not authenticated,
-	// and the failure is genuine auth loss (err == nil), not a network error.
+	// and the failure is genuine auth loss (err == nil) rather than any of the
+	// inconclusive outcomes — a network fault, a non-200, a redirected answer,
+	// or a 200 we could not read a marker out of.
 	//
 	// Startup case: auth already dead when the process began never produces
 	// a witnessed transition, so it previously stayed silent forever
@@ -1081,12 +1086,26 @@ func youtubeGuideRequestBody() string {
 // test and discards the value, so the rollback messaging composes from the
 // verification STATE and never interpolates this text.
 //
-// The one sink is rs.logger.Debug in doRefresh — which the TUI log panel
-// renders. So the no-body-bytes rule below is load-bearing on a log surface,
-// not a UI one, and TestUnreadableGuideErrorCarriesNoBody still earns its
-// place: it names no host, no header and — most importantly here — no body
-// bytes. The unreadable body is the subject of the report and must never
-// become its content.
+// The one sink is rs.logger.Debug in doRefresh, and what that means depends on
+// the operator's log level — which makes the no-body-bytes rule below MORE
+// load-bearing than "it goes to a log", not less:
+//
+//   - At the default INFO (config.go's LogLevel) the line has NO sink at all.
+//     Logger.log returns at its slog.Enabled gate before formatting, the ring
+//     buffer, or any subscriber.
+//   - At DEBUG the same line fans out to FIVE places: the rotating log file;
+//     the in-memory ring buffer, which GET /api/logs serves to any authenticated
+//     client; the Web UI's live log stream (cmd/moombox's log-forwarder
+//     subscriber → wsHub.BroadcastLog → the frontend's "log" case); the per-job
+//     log buffers that same forwarder writes to the DATABASE; and the TUI log
+//     panel via its own subscriber.
+//
+// So the surface is conditional, persistent (file + DB), and remotely readable
+// — and DEBUG is exactly the level an operator raises to when their cookies
+// look broken, i.e. precisely when this error fires. TestUnreadableGuideError-
+// CarriesNoBody earns its place on that basis: this error names no host, no
+// header and no body bytes. The unreadable body is the subject of the report
+// and must never become its content.
 //
 // The wording says "learned nothing", not "failed", for when that changes.
 // Follow-up 1 of the remediation plan is to surface the inconclusive state in
@@ -1213,12 +1232,25 @@ func youtubeGuideAuthVerdict(respBody []byte) (bool, error) {
 					// decode confines that failure to the one param it actually
 					// happened on.
 					//
-					// Key stays a plain string on purpose. A non-string `key`
-					// would mean serviceTrackingParams is no longer a key/value
-					// list at all — a schema change this reader could not
-					// survive in any typing — and making it lazy too would cost
-					// a decode on every param in a 15KB body to guard against
-					// that.
+					// Key stays a plain string, and the residual is real: a
+					// non-string `key` on ANY param collapses the whole body
+					// exactly the same way, through the field this does not
+					// confine. (An earlier version of this comment claimed such
+					// a key would be unsurvivable in any typing. That is wrong —
+					// a lazy Key would survive it fine, for the same reason a
+					// lazy Value survives a mistyped Value.)
+					//
+					// It stays strict on COST, not on impossibility. Key is
+					// compared on every param in the reply, so deferring it
+					// means a decode per param on a ~15KB body on every refresh
+					// cycle, where Value is decoded at most a handful of times —
+					// only for params whose key already matched. Paying that to
+					// guard a param NAME, the half of a key/value list least
+					// likely to change type, is the wrong trade.
+					//
+					// If it ever happens the failure direction is the safe one:
+					// the body falls to the literal-needle fallback and tier-1
+					// degrades toward inconclusive, never toward a false alarm.
 					Value json.RawMessage `json:"value"`
 				} `json:"params"`
 			} `json:"serviceTrackingParams"`
