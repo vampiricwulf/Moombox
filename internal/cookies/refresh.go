@@ -1672,7 +1672,13 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 				}
 			case strings.HasPrefix(trimmed, "domain="):
 				_, dom, _ := strings.Cut(part, "=")
-				domainAttr = strings.TrimSpace(dom)
+				// Lowercased here, not just at comparison time. Domains are
+				// case-insensitive and this string becomes a MAP KEY: without
+				// this, "Domain=.YouTube.com" and "Domain=.youtube.com" are two
+				// distinct keys that both scope-match the same row, and which
+				// one wins is map-iteration order. CPython normalizes the same
+				// way (_normalized_cookie_tuples: `if k == "domain": v = v.lower()`).
+				domainAttr = strings.ToLower(strings.TrimSpace(dom))
 			case trimmed == "httponly":
 				httpOnly = true
 			}
@@ -1821,6 +1827,39 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 						}
 						continue
 					}
+					// An empty value with NO expiry attribute is refused, not
+					// applied. Scoped to this path only — the global version of
+					// this guard was rejected in review, and this function is
+					// reachable from processYouTubeSetCookies alone.
+					//
+					// Two reasons it is a refusal rather than a third deletion form:
+					//
+					//  1. This package cannot represent an empty-valued row at
+					//     all. CookieJar.Load TrimSpaces the line first, so the
+					//     trailing tab disappears, the row reads as 6 fields and
+					//     is skipped as malformed — the credential vanishes from
+					//     the jar while the row sits in the file. Writing one is
+					//     never the right answer.
+					//  2. The server has two unambiguous ways to say "delete"
+					//     (a past Expires, Max-Age<=0) and both are honoured
+					//     above. A bare "NAME=" states no intent — and this
+					//     function only ever runs on a response YouTube just
+					//     told us was AUTHENTICATED (refresh.go's `if
+					//     authenticated` gate), so a blanked essential cookie
+					//     here is likelier a truncated or value-stripping
+					//     proxy than a real logout. Keeping a stale value is
+					//     recoverable; destroying a live one is not.
+					if cu.Value == "" {
+						if essentialYouTubeCookies[cookieName] && strings.Join(parts[6:], "\t") != "" {
+							rs.logger.Warn("youtube session refresh: refused to blank an essential cookie — the Set-Cookie carried an empty value but no expiry, so it is not a deletion and the existing value was kept",
+								"name", cookieName, "domain", rowDomain)
+						} else {
+							rs.logger.Debug("youtube session refresh: ignoring empty-valued Set-Cookie with no expiry", "name", cookieName, "domain", rowDomain)
+						}
+						result.WriteString(line)
+						result.WriteString("\n")
+						continue
+					}
 					// Rebuild the row as EXACTLY seven tab-separated fields.
 					// CookieJar.Load reads fields 6.. as one value that may
 					// itself contain tabs, so a live row can split into 8+
@@ -1846,9 +1885,15 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	}
 
 	// Add new cookies that weren't found in the existing file. A deletion for
-	// a row that is not there is simply done — it must never be inserted.
+	// a row that is not there is simply done — it must never be inserted. Nor
+	// may an empty value: same refusal as the rewrite path above, and an
+	// inserted empty row would be one this package's own reader cannot read.
 	for key, cu := range updates {
 		if handled[key] || cu.Delete {
+			continue
+		}
+		if cu.Value == "" {
+			rs.logger.Debug("youtube session refresh: not inserting an empty-valued cookie", "name", key.Name, "domain", key.Domain)
 			continue
 		}
 		name := key.Name
@@ -1908,17 +1953,28 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 //
 // The rule is asymmetric on purpose: grow broadly, destroy narrowly.
 //
-//   - A value refresh may cross domain variants. The same session value is
-//     valid on .youtube.com and .google.com alike, and leaving one variant
-//     stale while the other moves on is the drift that finding #4 was about.
-//     Worst case a row gets a fresher value than the server strictly scoped.
-//   - A deletion may not. It is unrecoverable, so it only ever removes rows
-//     inside the scope the server actually named.
+//   - A value refresh may cross domain variants, but only within one platform.
+//     The same session value is valid on .youtube.com and .google.com alike,
+//     and leaving one variant stale while the other moves on is the drift that
+//     finding #4 was about. Crossing to .twitch.tv is a different matter:
+//     growing onto another platform's occupied slot IS destruction, so the
+//     platforms are kept apart even though no name collides between them today.
+//   - A deletion may not cross at all. It is unrecoverable, so it only ever
+//     removes rows inside the scope the server actually named.
+//
+// The narrow half is deliberately under-applied rather than over-applied: a
+// deletion scoped to ".youtube.com" does NOT remove a host-only
+// "www.youtube.com" row, even though RFC 6265 domain-matching says it covers
+// it. Browser extraction really does write host-only rows, so this is
+// reachable — and the chosen failure is a stale row that keeps being sent
+// (recoverable) over a deleted credential (not). Do not "fix" it into a
+// suffix match without re-deciding that trade.
 //
 // At most one candidate can scope-match a given row: Domain= is normalized to
-// a single leading-dot form before it becomes a key, so two distinct keys for
-// one name always name different hosts. The result is therefore deterministic
-// despite the caller's map.
+// one lowercased leading-dot form before it becomes a key, so two distinct keys
+// for one name always name different hosts. Both halves of that normalization
+// are load-bearing — without the lowercasing, ".YouTube.com" and ".youtube.com"
+// are separate keys that both match, and which one wins is map-iteration order.
 func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []cookieUpdateKey, rowDomain string) (cookieUpdateKey, cookieUpdate, bool) {
 	if len(candidates) == 0 {
 		return cookieUpdateKey{}, cookieUpdate{}, false
@@ -1940,12 +1996,13 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 			}
 		}
 	}
-	// 3. Otherwise only a value refresh may cross domains, and only when a
-	//    single non-deleting update is in play so the choice is unambiguous.
+	// 3. Otherwise only a value refresh may cross domains — within one platform,
+	//    and only when a single non-deleting update is in play so the choice is
+	//    unambiguous.
 	var only cookieUpdateKey
 	refreshes := 0
 	for _, k := range candidates {
-		if !updates[k].Delete {
+		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain) {
 			only, refreshes = k, refreshes+1
 		}
 	}
@@ -1953,6 +2010,31 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 		return only, updates[only], true
 	}
 	return cookieUpdateKey{}, cookieUpdate{}, false
+}
+
+// sameCookiePlatform reports whether an update's domain and a file row's domain
+// belong to the same credential platform. YouTube and Google are one platform:
+// a Google session covers both, which is exactly why a refresh is allowed to
+// fan out across them. Twitch is another, and a row on neither matches nothing.
+//
+// An update with no Domain= counts as the YouTube/Google platform — like rule 2
+// above, that is a property of the single call site (processYouTubeSetCookies
+// is only ever fed a youtube.com API response), not of this function.
+func sameCookiePlatform(updateDomain, rowDomain string) bool {
+	platform := func(d string) string {
+		switch {
+		case isTwitchDomain(d):
+			return "twitch"
+		case isYouTubeDomain(d) || isGoogleDomain(d):
+			return "google"
+		}
+		return ""
+	}
+	up := "google"
+	if updateDomain != "" {
+		up = platform(updateDomain)
+	}
+	return up != "" && up == platform(rowDomain)
 }
 
 // sameCookieScope reports whether two domain strings name the same host. The

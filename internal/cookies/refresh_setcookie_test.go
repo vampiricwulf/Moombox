@@ -380,6 +380,167 @@ func TestProcessSetCookiesFutureExpiryStillUpdates(t *testing.T) {
 	}
 }
 
+// TestProcessSetCookiesRefusesEmptyValueWithoutExpiry covers the deletion form
+// neither S7 branch reaches: an empty value with no Expires and no Max-Age.
+// The server stated no deletion intent, and this function only ever runs on a
+// response YouTube just called authenticated, so the empty value is refused —
+// the existing credential is kept rather than blanked.
+//
+// A blanked row is not merely wrong, it is unreadable: CookieJar.Load
+// TrimSpaces the line, the trailing tab disappears, and the 6-field row is
+// skipped as malformed. Hence the round-trip assertion.
+//
+// Discriminates: pre-fix the row was rewritten with value "" and a one-year
+// expiry, and a fresh jar reported the cookie absent. The third subtest is a
+// regression guard on the guard itself and passes either way.
+func TestProcessSetCookiesRefusesEmptyValueWithoutExpiry(t *testing.T) {
+	t.Run("existing row is kept", func(t *testing.T) {
+		initial := "# Netscape HTTP Cookie File\n" +
+			".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tfixture-login\n"
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
+
+		rs.processYouTubeSetCookies(setCookieResponse("LOGIN_INFO=; Domain=.youtube.com; Path=/"))
+
+		row := rowFor(t, readCookieRows(t, path), "LOGIN_INFO", ".youtube.com")
+		if row.value != "fixture-login" {
+			t.Errorf("LOGIN_INFO value = %q, want the existing value kept", row.value)
+		}
+		if row.expiry != "2000000000" {
+			t.Errorf("LOGIN_INFO expiry = %q, want unchanged", row.expiry)
+		}
+		// The row must survive a real load, not just a read of the file.
+		fresh := NewCookieJar()
+		if err := fresh.Load(path); err != nil {
+			t.Fatal(err)
+		}
+		if got := fresh.GetCookie("LOGIN_INFO"); got != "fixture-login" {
+			t.Errorf("a freshly loaded jar reads LOGIN_INFO as %q — the row is unreadable", got)
+		}
+	})
+
+	t.Run("no empty row is inserted", func(t *testing.T) {
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
+
+		rs.processYouTubeSetCookies(setCookieResponse("YSC=; Domain=.youtube.com; Path=/"))
+
+		if got := rowsNamed(readCookieRows(t, path), "YSC"); len(got) != 0 {
+			t.Errorf("an empty-valued Set-Cookie inserted a row: %q", got[0].raw)
+		}
+	})
+
+	t.Run("an explicit deletion is still a deletion", func(t *testing.T) {
+		// The guard must sit behind the Delete check: every deletion form also
+		// carries an empty value, so testing emptiness first would neuter S7.
+		initial := "# Netscape HTTP Cookie File\n" +
+			".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tfixture-login\n"
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
+
+		rs.processYouTubeSetCookies(setCookieResponse(
+			"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"))
+
+		if got := rowsNamed(readCookieRows(t, path), "LOGIN_INFO"); len(got) != 0 {
+			t.Errorf("the empty-value guard swallowed a real deletion: %q", got[0].raw)
+		}
+	})
+}
+
+// TestProcessSetCookiesDomainCaseNormalized covers the map-key nondeterminism:
+// Domain= was dot-normalized but never lowercased, while sameCookieScope
+// compares with EqualFold. ".YouTube.com" and ".youtube.com" therefore became
+// two distinct keys that both scope-matched the same row, and which one won was
+// map-iteration order.
+//
+// Discriminates: pre-fix the inserted row carried the domain verbatim, and the
+// two-key case produced two different outcomes across repeated runs — one of
+// which rebuilt the row through the insertion path and downgraded secure to
+// FALSE.
+func TestProcessSetCookiesDomainCaseNormalized(t *testing.T) {
+	t.Run("row domain is lowercased", func(t *testing.T) {
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
+
+		rs.processYouTubeSetCookies(setCookieResponse("LOGIN_INFO=fixture-login; Domain=.YouTube.com; Path=/"))
+
+		rowFor(t, readCookieRows(t, path), "LOGIN_INFO", ".youtube.com")
+	})
+
+	t.Run("outcome is stable across runs", func(t *testing.T) {
+		// A deletion and a refresh for one name, differing only in the case of
+		// Domain=. Once both normalize to one key the second header simply wins,
+		// every time.
+		//
+		// The signature deliberately omits the expiry field: it is derived from
+		// time.Now(), so a run straddling a second boundary would look like a
+		// second outcome for a reason that has nothing to do with the bug.
+		signature := func() string {
+			initial := "# Netscape HTTP Cookie File\n" +
+				".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSAPISID\tfixture-sapisid\n"
+			rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
+			rs.processYouTubeSetCookies(setCookieResponse(
+				"SAPISID=; Domain=.YouTube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/",
+				"SAPISID=survivor; Domain=.youtube.com; Path=/",
+			))
+			var sb strings.Builder
+			for _, r := range readCookieRows(t, path) {
+				sb.WriteString(strings.Join([]string{
+					r.domain, r.fields[1], r.fields[2], r.fields[3], r.name, r.value,
+				}, "|"))
+				sb.WriteString("\n")
+			}
+			return sb.String()
+		}
+
+		seen := make(map[string]int)
+		for range 100 {
+			seen[signature()]++
+		}
+		if len(seen) != 1 {
+			t.Errorf("100 identical runs produced %d distinct outcomes — the write path is nondeterministic:", len(seen))
+			for s, n := range seen {
+				t.Errorf("  %d run(s): %s", n, strings.ReplaceAll(strings.TrimSpace(s), "\n", " ;; "))
+			}
+		}
+		for s := range seen {
+			// domain|subdomains|path|secure|name|value — secure must still be TRUE.
+			if !strings.Contains(s, "|TRUE|SAPISID|survivor") {
+				t.Errorf("the surviving row lost its secure flag or its value: %q", strings.TrimSpace(s))
+			}
+		}
+	})
+}
+
+// TestProcessSetCookiesRefreshDoesNotCrossPlatforms pins the platform half of
+// the matching rule. "Grow broadly" must not include growing onto another
+// platform's credential: a YouTube refresh reaching a .twitch.tv row of the
+// same name would destroy a working Twitch login. Deletions already could not
+// cross; refreshes could.
+//
+// No name collides between the two platforms today, so this is a doctrine pin
+// rather than a live bug — but the whole point of the rule is that no path
+// silently destroys a working credential.
+//
+// Discriminates: pre-fix the .twitch.tv row was rewritten with the YouTube
+// value and the YouTube expiry.
+func TestProcessSetCookiesRefreshDoesNotCrossPlatforms(t *testing.T) {
+	initial := "# Netscape HTTP Cookie File\n" +
+		".twitch.tv\tTRUE\t/\tTRUE\t2000000000\tlogin\tfixture-twitch-login\n"
+	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
+
+	rs.processYouTubeSetCookies(setCookieResponse("login=youtube-value; Domain=.youtube.com; Path=/"))
+
+	rows := readCookieRows(t, path)
+	twitch := rowFor(t, rows, "login", ".twitch.tv")
+	if twitch.value != "fixture-twitch-login" {
+		t.Errorf("a YouTube refresh overwrote the Twitch credential: value = %q", twitch.value)
+	}
+	if twitch.expiry != "2000000000" {
+		t.Errorf("a YouTube refresh rewrote the Twitch row's expiry to %q", twitch.expiry)
+	}
+	// Having declined the Twitch row, the update must land on its own row.
+	if got := rowFor(t, rows, "login", ".youtube.com").value; got != "youtube-value" {
+		t.Errorf(".youtube.com login row = %q, want youtube-value", got)
+	}
+}
+
 // TestProcessSetCookiesUnparseableExpiresKeepsDefault is a regression guard.
 // An Expires the parser cannot read must fall back to the one-year default,
 // NOT to a zero value that the new past-expiry rule would read as a deletion.
