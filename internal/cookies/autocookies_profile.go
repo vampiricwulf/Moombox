@@ -479,9 +479,28 @@ func (s *AutoCookieService) importProfileCookies() (string, error) {
 		return "", fmt.Errorf("no browser_profile_dir configured: %w", ErrProfileNotFound)
 	}
 
-	info, err := os.Stat(s.profileDir)
-	if err != nil {
-		return "", fmt.Errorf("browser profile dir %q is not readable: %w", s.profileDir, ErrProfileNotFound)
+	info, err := statProfileDir(s.profileDir)
+	switch {
+	case err == nil:
+	case os.IsNotExist(err):
+		// Genuinely absent. This IS the manual ladder's bottom rung, and it
+		// keeps ErrProfileNotFound. Normally unreachable from a refresh —
+		// RefreshCookiesDetailed's own gate catches it first — but the two
+		// stats are not atomic, and a profile deleted between them must not be
+		// reported as a permissions problem.
+		return "", fmt.Errorf("browser profile dir %q does not exist: %w", s.profileDir, ErrProfileNotFound)
+	default:
+		// Everything else: EACCES, ENOTDIR, an over-long path. The profile IS
+		// there and this process cannot look at it, which is a different state
+		// with a different remedy — so NOT ErrProfileNotFound, which is what
+		// this returned for every stat failure before. That put the compose
+		// uid-mismatch case on the ladder's bottom rung: R F and the
+		// dashboard's shift+click both reported "No browser profile found",
+		// ran a plain recheck instead, and threw away the one sentence that
+		// would have fixed it — on the exact path a container operator uses.
+		return "", fmt.Errorf("browser profile dir %q is not readable by this process (%v) — check "+
+			"ownership and permissions on the mounted profile, and that every parent directory is "+
+			"traversable: %w", s.profileDir, err, ErrProfileDirUnreadable)
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("browser profile dir %q is a file: %w", s.profileDir, ErrProfileNotADirectory)

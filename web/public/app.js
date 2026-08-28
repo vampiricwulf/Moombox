@@ -424,11 +424,24 @@ class MoomboxApp {
       }, true); // capture phase — intercept before Shoelace switches the tab
     });
 
-    // Refresh cookies button (shift+click triggers auto-cookie browser refresh)
+    // Refresh cookies button. Plain click runs the in-process Go refresh;
+    // shift+click runs the auto-cookie pass — headless browser when
+    // cookies.auto_enabled permits it, an immediate import from the browser
+    // profile when it does not.
+    //
+    // DELIBERATELY NOT GATED ON auto_enabled, and do not put the gate back.
+    // It used to read `e.shiftKey && this.config?.cookies?.auto_enabled`, so on
+    // a disabled install shift+click silently fell through to the plain
+    // recheck: the gesture existed, did something else, and said nothing about
+    // it. This is the Web twin of the TUI's R F chord (cmd/moombox/
+    // tui_wiring.go), which was hidden by the same flag one surface over, and
+    // it is the gesture an operator who has hand-updated their browser profile
+    // uses to have it read. The server decides which mechanism runs — see
+    // AutoCookieService.BrowserLaunchAllowed — and reports which it was.
     const refreshBtn = document.getElementById("btn-refresh-cookies");
     if (refreshBtn) {
       refreshBtn.addEventListener("click", (e) => {
-        if (e.shiftKey && this.config?.cookies?.auto_enabled) {
+        if (e.shiftKey) {
           this.autoCookieRefresh();
         } else {
           this.recheckCookies();
@@ -855,6 +868,39 @@ class MoomboxApp {
           refreshVariant = "success";
         }
         this.showToast(refreshMsg, refreshVariant);
+      } else if (response.status === 404 || response.status === 424) {
+        // THE BOTTOM RUNG, and the Web twin of the TUI's R F fallback.
+        //
+        // Shift+click asks for the strongest refresh available: the headless
+        // browser when cookies.auto_enabled permits one and a browser is there,
+        // otherwise an immediate import from the browser profile. These two
+        // statuses are the server saying there is no profile to work from at
+        // all — 404 for ErrProfileNotFound, 424 for ErrNoBrowserFound, both
+        // raised from the same missing-directory check in
+        // RefreshCookiesDetailed. The operator still has the in-process Go
+        // refresh, which is what a plain click runs, so fall through to it
+        // rather than dead-ending on "failed".
+        //
+        // Branched on the STATUS, not the message: those sentences are the
+        // route's prose and matching them would break the moment either is
+        // reworded. No other failure on this endpoint uses either code.
+        //
+        // Same event as the TUI's, and deliberately NOT the same sentence.
+        // Each surface names ITS OWN affordance for the in-process refresh:
+        // the TUI says "running R C instead..." because the TUI has chords,
+        // and this says "a normal cookie refresh" because a plain click on
+        // this button IS the dashboard's R C. Parallel structure, and every
+        // reader is pointed at something they can actually do. Do not
+        // "unify" these into one string, and do not describe the mechanism
+        // instead of the affordance. Both are pinned exactly, and their
+        // divergence asserted, by TestRungThreeSentencesDivergeByDesign.
+        this.showToast(
+          "No browser profile found, running a normal cookie refresh instead...",
+          "primary",
+        );
+        if (btn) btn.classList.remove("checking");
+        await this.recheckCookies();
+        return;
       } else {
         this.showToast(data.error || "Browser cookie refresh failed", "danger");
       }

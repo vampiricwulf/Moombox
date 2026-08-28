@@ -292,6 +292,37 @@ type AutoCookieService struct {
 	// once the primary CDP launch returns an error. DECISIONS #6.
 	DpapiFallback bool
 
+	// BrowserLaunchAllowed reports whether a REFRESH PASS may execute a
+	// headless browser. It is the injected form of cookies.auto_enabled, which
+	// this package deliberately cannot read: internal/cookies has no dependency
+	// on internal/config and keeping it that way is why this is a predicate
+	// rather than a bool copied in at construction — the flag is read live
+	// everywhere else, so a snapshot would go stale the moment it is edited.
+	//
+	// Moombox keeps cookies alive with two independent mechanisms on two
+	// independent timers: the in-process Go refresh (RefreshService, gated on
+	// cookies.cookie_file alone) and, only when the operator turns this flag on,
+	// a much slower headless-browser pass. The flag decides whether the second
+	// mechanism runs on a timer at all — that decision lives in main.go and does
+	// not come through here.
+	//
+	// What comes through here is the MANUAL trigger for that mechanism: the
+	// TUI's R F chord and the Web dashboard's shift+click. Those are wired
+	// unconditionally, because an operator who has hand-updated their browser
+	// profile wants them to import from it immediately, and a disabled install
+	// is exactly the install that does so. So a false answer does not refuse
+	// the pass — it drops the browser, and every branch below takes the
+	// browser-free import path that already exists for containers.
+	//
+	// Consulted at ONE call site, in RefreshCookiesDetailed, and deliberately
+	// NOT inside resolvedBrowser itself: StartSetup resolves a browser too, and
+	// setup is acquisition — an explicit gesture in a visible window, and the
+	// thing that turns this flag on. Gating it there would make the setting
+	// unreachable on a fresh install, where it is false by definition.
+	//
+	// nil = allowed, so every existing caller and test keeps today's behaviour.
+	BrowserLaunchAllowed func() bool
+
 	// ConfiguredBrowserOverride, when set, returns the user's configured
 	// browser_path and browser_type from the active config. Empty values
 	// mean "no override; use auto-detect". Used by GetStatus to surface
@@ -668,6 +699,25 @@ func (s *AutoCookieService) resolvedBrowser() *DetectedBrowser {
 		return s.detectBrowser()
 	}
 	return DetectBrowser()
+}
+
+// refreshBrowser is resolvedBrowser as a REFRESH PASS sees it: the configured
+// or detected browser, or nil when cookies.auto_enabled has switched headless
+// browser runs off.
+//
+// The wrapper exists so the gate applies to refreshes only. resolvedBrowser has
+// two other callers — StartSetup, which is acquisition and must never be gated
+// (see BrowserLaunchAllowed), and shouldSeedFromProfileAtStartup, which uses it
+// to ask "is this a browserless host?", a question about the machine rather
+// than about a setting.
+//
+// nil from the predicate is treated as allowed, so a service built without it
+// behaves exactly as before.
+func (s *AutoCookieService) refreshBrowser() *DetectedBrowser {
+	if s.BrowserLaunchAllowed != nil && !s.BrowserLaunchAllowed() {
+		return nil
+	}
+	return s.resolvedBrowser()
 }
 
 // FlagManualRelogin marks a platform as needing manual re-login.
@@ -1537,27 +1587,58 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 		s.mu.Unlock()
 	}()
 
-	browser := s.resolvedBrowser()
+	// refreshBrowser, not resolvedBrowser: this is the one site where
+	// cookies.auto_enabled reaches a refresh, and it reaches it by answering
+	// nil rather than by refusing the pass. See BrowserLaunchAllowed.
+	browser := s.refreshBrowser()
 
-	if _, err := os.Stat(s.profileDir); os.IsNotExist(err) {
+	if _, err := statProfileDir(s.profileDir); os.IsNotExist(err) {
 		// Neither a browser to drive nor a profile to import from: the
 		// install genuinely has no cookie source, so keep the historical
 		// answer and the "install a supported browser" UI copy that hangs
 		// off it.
 		if browser == nil {
+			// Two ways to arrive with no browser, and they do not share a
+			// remedy. The gate above can drop a browser that is installed and
+			// working, and "no browser found" would send that operator to
+			// install a second copy of one they already have — the unearned
+			// cause this arc exists to stop. Same sentinel either way, because
+			// every consumer's branch is genuinely the same (there is no
+			// browser to use); different sentence, because the reader's next
+			// action is not.
+			if s.BrowserLaunchAllowed != nil && !s.BrowserLaunchAllowed() {
+				disabled := fmt.Errorf(
+					"cookies.auto_enabled is false so no headless browser was launched, and there is no "+
+						"browser profile at %s to import from (%w for this pass)",
+					s.profileDir, ErrNoBrowserFound)
+				s.setError(disabled.Error())
+				return refreshDeclined(), disabled
+			}
+			// Wrapped rather than bare, and symmetrically with the arm above,
+			// because the Web route renders this message verbatim now — the
+			// static sentence it used to substitute ("no supported browser
+			// installed") is a claim only ONE of these two arms can support.
+			// Both now say which of the two cookie sources was missing and why.
+			missing := fmt.Errorf("%w, and there is no browser profile at %s to import from",
+				ErrNoBrowserFound, s.profileDir)
 			s.setError("no browser found for refresh, and no browser profile to import from")
-			return refreshDeclined(), ErrNoBrowserFound
+			return refreshDeclined(), missing
 		}
 		s.setError("browser profile not found — run setup first")
 		return refreshDeclined(), fmt.Errorf("run setup first: %w", ErrProfileNotFound)
 	}
 
 	// importedFromProfile selects the browser-free path: no browser is
-	// installed (a container, or a headless host), but the configured
-	// profile directory is present and may hold a readable cookies.sqlite.
+	// installed (a container, or a headless host) or none may be launched
+	// (cookies.auto_enabled is off), but the configured profile directory is
+	// present and may hold a readable cookies.sqlite.
 	// Before this branch existed, RefreshCookies bailed on `browser == nil`
 	// BEFORE it ever looked at the profile — so a perfectly readable
 	// mounted profile was refused on a technicality.
+	//
+	// The disabled case is the same shape and lands here for the same reason:
+	// an operator who hand-updates their browser profile presses R F to have it
+	// read, and launching nothing is precisely what they want.
 	importedFromProfile := browser == nil
 
 	var netscapeCookies string
@@ -2590,6 +2671,20 @@ var writeCookieFile = writeFileAtomic
 // other error must abort rather than silently proceed as if there were
 // nothing to merge.
 var readCookieFile = os.ReadFile
+
+// statProfileDir is os.Stat, behind a seam, for the two places that ask whether
+// the configured browser profile directory can be looked at: the
+// missing-profile gate in RefreshCookiesDetailed and the import in
+// importProfileCookies. Both, so a test drives the real sequence — the gate
+// sees a non-ENOENT error and proceeds, and the import classifies it.
+//
+// A seam rather than a fixture because the states that matter are not portably
+// constructible: EACCES needs a chmod that means nothing on Windows, and the
+// ENOTDIR shape (a file in the middle of the path) surfaces as ERROR_PATH_NOT_
+// FOUND there, which os.IsNotExist reports as true. Building the failure by
+// hand would pin the case on one platform and skip it on the other, and the one
+// it would skip is the one this seam exists to test.
+var statProfileDir = os.Stat
 
 // writeFileAtomic writes data to a temp file then renames it to the target path,
 // preventing corruption on partial failure. Applies

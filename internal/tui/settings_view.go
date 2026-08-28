@@ -812,7 +812,12 @@ func (m *SettingsModel) renderRestartOverlay() string {
 	var content strings.Builder
 	content.WriteString(YellowBoldStyle.Render("Restart Required") + "\n\n")
 	content.WriteString("Some settings require a restart to take effect:\n")
-	content.WriteString(DimStyle.Render("port, network access, database path, log settings") + "\n\n")
+	// Enumerates the CATEGORIES restartRequiredKeys covers. It has to keep pace
+	// with that map: an operator who changed only a cookie setting and is shown
+	// a list naming four things they did not touch reads this as a prompt about
+	// something else and dismisses it — which is the failure the whole entry
+	// exists to prevent.
+	content.WriteString(DimStyle.Render("port, network access, database path, log settings, cookie settings") + "\n\n")
 
 	content.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Render("Enter: Restart now"))
 	content.WriteString("  ")

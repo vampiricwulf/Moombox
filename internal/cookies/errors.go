@@ -78,12 +78,35 @@ var (
 
 	// --- browser-free profile import (Docker / headless hosts) ---
 	//
-	// These four describe the realistic ways reading a MOUNTED browser
+	// These five describe the realistic ways reading a MOUNTED browser
 	// profile fails. They are deliberately distinct: the operator action
-	// differs for each (fix the mount, point at the right dir, stop
-	// Firefox, re-export the profile), so collapsing them into one
-	// "profile import failed" would strip the only useful part of the
-	// message.
+	// differs for each (fix the permissions, fix the mount, point at the
+	// right dir, stop Firefox, re-export the profile), so collapsing them
+	// into one "profile import failed" would strip the only useful part of
+	// the message.
+	//
+	// None of them is the manual-refresh ladder's bottom rung, and that is the
+	// property to preserve when adding a sixth. Rung 3 means there is NO
+	// profile, so R F and the dashboard's shift+click fall through to the
+	// in-process refresh and say so (see IsNoBrowserProfile). Every error here
+	// means the profile IS there and is wrong in a specific way, from a pass
+	// that RAN — so falling back would replace the one actionable sentence the
+	// operator has with a recheck that cannot fix any of them.
+
+	// ErrProfileDirUnreadable is returned when the configured profile
+	// directory exists but could not be examined at all: EACCES from a uid
+	// mismatch on a bind mount (compose's `user:` against a host-owned
+	// directory), ENOTDIR from a path component that is itself a file, or an
+	// over-long path on Windows. Anything, in short, that makes stat fail with
+	// something other than "it is not there".
+	//
+	// It used to wrap ErrProfileNotFound, which put it on rung 3: a container
+	// operator whose mounted profile was present but unreadable — the compose
+	// uid-mismatch shape, and the single likeliest failure on the path the
+	// owner has designated as THE Docker workflow — was told "No browser
+	// profile found", watched a plain recheck run instead, and never saw the
+	// permissions sentence that would have fixed it.
+	ErrProfileDirUnreadable = errors.New("browser profile directory could not be read")
 
 	// ErrProfileNotADirectory is returned when the configured profile path
 	// exists but is a regular file — the classic "bind-mounted cookies.txt
@@ -146,3 +169,38 @@ var (
 	// there is no answer to accept.
 	ErrAuthCheckNotAttempted = errors.New("auth check could not be attempted")
 )
+
+// IsNoBrowserProfile reports whether a refresh pass failed because there was no
+// browser profile to work from at all.
+//
+// This is the bottom rung of the manual refresh ladder, and it exists as ONE
+// exported predicate because two surfaces have to agree on it. R F and the
+// dashboard's shift+click are the same gesture — refresh by the strongest means
+// available — so a state that falls back to the in-process refresh on one must
+// fall back on the other. They were written independently and had already
+// diverged on ErrProfileNotADirectory before anything held them together.
+//
+// Both members come from the SAME `os.IsNotExist(profileDir)` block in
+// RefreshCookiesDetailed, before any work is done; which one is returned
+// depends only on whether a browser could have been launched, and that is not a
+// distinction the operator can act on when the profile is absent either way.
+//
+// That sentence is now true, and was not when this predicate was written.
+// importProfileCookies wrapped ErrProfileNotFound a second time, for a stat
+// that failed with anything other than ENOENT — from a pass that had already
+// RUN — which put the compose uid-mismatch case on rung 3. It has its own
+// sentinel now (ErrProfileDirUnreadable). Before adding a producer of either
+// member, check it really is "there is no profile", from before any work.
+//
+// Deliberately EXCLUDES every profile-import failure — ErrProfileDirUnreadable,
+// ErrProfileNotADirectory, ErrCookieDBNotFound, ErrCookieDBLocked,
+// ErrCookieDBUnreadable, ErrNoCookiesInProfile. Those mean the profile IS there
+// and is wrong in a specific, diagnosable way; each is returned from a pass that
+// RAN, and each carries the only guidance the operator has (fix the
+// permissions, fix the mount, point at the right directory, stop Firefox,
+// re-export). Folding them into a fallback would replace real diagnosis with a
+// recheck that cannot fix any of them — the exact collapse the block comment
+// above those six forbids.
+func IsNoBrowserProfile(err error) bool {
+	return errors.Is(err, ErrProfileNotFound) || errors.Is(err, ErrNoBrowserFound)
+}

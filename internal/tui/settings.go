@@ -43,16 +43,30 @@ type settingsSection struct {
 }
 
 // Keys that require a restart when changed.
+//
+// The three cookie keys are not cosmetic entries. AutoCookieService is built
+// once, at startup, from cookie_file and browser_profile_dir, and run() decides
+// there and then whether the periodic refresh loop starts at all — it reads
+// auto_enabled and os.Stat's the profile directory before any of this UI
+// exists. So an operator acting on a "your cookies are dead" notification can
+// turn the setting on, watch it save, and have nothing whatever happen until
+// they restart. Keep them here until those three reads are genuinely live.
+//
+// Kept in step with RESTART_REQUIRED_FIELDS in web/public/modules/settings.js;
+// the two lists are pinned against each other by TestRestartRequiredListsAgree.
 var restartRequiredKeys = map[string]bool{
-	"port":              true,
-	"network_access":    true,
-	"https_enabled":     true,
-	"tls_cert_path":     true,
-	"tls_key_path":      true,
-	"database_path":     true,
-	"log_file_path":     true,
-	"log_max_file_size": true,
-	"log_max_files":     true,
+	"port":                true,
+	"network_access":      true,
+	"https_enabled":       true,
+	"tls_cert_path":       true,
+	"tls_key_path":        true,
+	"database_path":       true,
+	"log_file_path":       true,
+	"log_max_file_size":   true,
+	"log_max_files":       true,
+	"cookie_file":         true,
+	"auto_enabled":        true,
+	"browser_profile_dir": true,
 }
 
 var sections = []settingsSection{

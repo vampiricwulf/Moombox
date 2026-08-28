@@ -64,6 +64,20 @@ const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 
 // Settings that require a process restart to take effect
 // Each entry is [nestedPath, formElementId] for change detection
+//
+// `path` is resolved against the config the server returns, and `id` must name
+// a real element in index.html — it is what the "Restart" badge is inserted
+// after, so a wrong id costs no error, just a badge that never appears.
+//
+// The three cookie entries are not cosmetic. AutoCookieService is constructed
+// once at startup from cookie_file and browser_profile_dir, and main.go decides
+// there and then whether the periodic refresh runs at all — it reads
+// auto_enabled and os.Stat's the profile directory before this page exists. An
+// operator acting on a "your cookies are dead" notification can otherwise turn
+// the setting on, watch it save, and have nothing whatever happen.
+//
+// Kept in step with restartRequiredKeys in internal/tui/settings.go; the two
+// lists are pinned against each other by TestRestartRequiredListsAgree.
 const RESTART_REQUIRED_FIELDS = [
   { path: "network.port", id: "cfg-port" },
   { path: "network.network_access", id: "cfg-network-access" },
@@ -74,6 +88,9 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "paths.log_file_path", id: "cfg-log-file" },
   { path: "logs.log_max_file_size", id: "cfg-log-max-size" },
   { path: "logs.log_max_files", id: "cfg-log-max-files" },
+  { path: "cookies.cookie_file", id: "cfg-cookie-file" },
+  { path: "cookies.auto_enabled", id: "cfg-auto-cookies-enabled" },
+  { path: "cookies.browser_profile_dir", id: "cfg-auto-cookies-profile-dir" },
 ];
 
 /** Render a template preview string using sample data. */
@@ -1049,7 +1066,12 @@ export class SettingsController {
     const oldHttps = !!this._originalRestartValues["network.https_enabled"];
 
     const shouldRestart = await this.app.showConfirm(
-      "Some settings require a restart to take effect (port, network access, database path, log settings).\n\nRestart Moombox now?",
+      // Enumerates the CATEGORIES RESTART_REQUIRED_FIELDS covers, and has to
+      // keep pace with it: an operator who changed only a cookie setting and is
+      // shown a list naming four things they did not touch reads this as a
+      // prompt about something else and dismisses it — which is the failure the
+      // cookie entries exist to prevent.
+      "Some settings require a restart to take effect (port, network access, database path, log settings, cookie settings).\n\nRestart Moombox now?",
       { okLabel: "Restart", okVariant: "primary", title: "Restart Required" },
     );
     if (!shouldRestart) {

@@ -687,6 +687,26 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// Wire auth verification callbacks so AutoCookieService can verify via real API
 	autoCookieSvc.VerifyYouTubeAuth = cookieRefresh.CheckYouTubeAuth
 	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
+	// The only place cookies.auto_enabled is handed to the cookie service.
+	//
+	// It governs one mechanism — the headless-browser cookie pass — and reaches
+	// a refresh only by deciding whether that pass gets a browser. The manual
+	// triggers (the TUI's R F, the dashboard's shift+click) are wired
+	// unconditionally and fall through to the browser-free profile import when
+	// this answers false, which is what an operator who hand-updates their
+	// profile is asking for. The AUTOMATIC paths never get this far with the
+	// flag off: handleRecoveryNeeded returns before calling the refresh, the
+	// worker's OnCookieRefreshNeeded does the same, and main.go does not start
+	// the periodic timer at all.
+	//
+	// Read LIVE, like every other reader of this flag.
+	autoCookieSvc.BrowserLaunchAllowed = func() bool {
+		var enabled bool
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			enabled = c.Cookies.AutoEnabled
+		})
+		return enabled
+	}
 	// Wire configured-browser-override callback so GetStatus surfaces the
 	// user's chosen browser_path/browser_type (if any) for the dropdown UI.
 	autoCookieSvc.ConfiguredBrowserOverride = func() (string, string) {
