@@ -37,8 +37,8 @@ func TestUpdateCookieFileReplacesDuplicateRows(t *testing.T) {
 	}
 	rs := NewRefreshService(jar, 0, nopLogger{})
 
-	updates := map[string]cookieUpdate{
-		"SAPISID": {Value: "fresh_value", Expiry: 2000, Domain: ".youtube.com"},
+	updates := map[cookieUpdateKey]cookieUpdate{
+		{Name: "SAPISID", Domain: ".youtube.com"}: {Value: "fresh_value", Expiry: 2000},
 	}
 	if err := rs.updateCookieFile(updates); err != nil {
 		t.Fatalf("updateCookieFile: %v", err)
@@ -76,9 +76,9 @@ func TestUpdateCookieFileSubdomainFlag(t *testing.T) {
 	}
 	rs := NewRefreshService(jar, 0, nopLogger{})
 
-	updates := map[string]cookieUpdate{
-		"LOGIN_INFO": {Value: "v1", Expiry: 1000, Domain: ".youtube.com"},
-		"login":      {Value: "v2", Expiry: 1000, Domain: "host.twitch.tv"},
+	updates := map[cookieUpdateKey]cookieUpdate{
+		{Name: "LOGIN_INFO", Domain: ".youtube.com"}: {Value: "v1", Expiry: 1000},
+		{Name: "login", Domain: "host.twitch.tv"}:    {Value: "v2", Expiry: 1000},
 	}
 	if err := rs.updateCookieFile(updates); err != nil {
 		t.Fatalf("updateCookieFile: %v", err)
@@ -133,9 +133,9 @@ func TestUpdateCookieFileFallsBackToDomainHeuristic(t *testing.T) {
 	}
 	rs := NewRefreshService(jar, 0, nopLogger{})
 
-	updates := map[string]cookieUpdate{
-		"SAPISID":    {Value: "s", Expiry: 1, Domain: ""}, // no Domain= -> fallback = google
-		"LOGIN_INFO": {Value: "l", Expiry: 1, Domain: ""}, // no Domain= -> fallback = youtube
+	updates := map[cookieUpdateKey]cookieUpdate{
+		{Name: "SAPISID"}:    {Value: "s", Expiry: 1}, // no Domain= -> fallback = google
+		{Name: "LOGIN_INFO"}: {Value: "l", Expiry: 1}, // no Domain= -> fallback = youtube
 	}
 	if err := rs.updateCookieFile(updates); err != nil {
 		t.Fatalf("updateCookieFile: %v", err)

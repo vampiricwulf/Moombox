@@ -115,14 +115,30 @@ const (
 	authBodyFallbackLimit = 16 << 10
 )
 
-// cookieUpdate holds a parsed Set-Cookie value, expiry, and authoritative
-// domain. Domain is captured from the Set-Cookie Domain= attribute so new
-// rows can be written under the correct host instead of guessing from the
+// cookieUpdateKey identifies one pending Set-Cookie change. Name alone is not
+// enough: a real cookie file carries the same name on both .youtube.com and
+// .google.com, and a name-keyed map both loses one of two same-name headers in
+// a single response and lets a deletion scoped to one domain destroy the other
+// domain's row.
+//
+// Domain is the normalized Set-Cookie Domain= attribute (leading dot, e.g.
+// ".youtube.com"), or "" when the server sent no Domain= at all.
+type cookieUpdateKey struct {
+	Name   string
+	Domain string
+}
+
+// cookieUpdate holds a parsed Set-Cookie value, expiry and flags. The domain
+// lives in the map key (cookieUpdateKey) so there is exactly one copy of it;
+// the write path reads it from there rather than re-deriving it from the
 // cookie name.
 type cookieUpdate struct {
-	Value  string
-	Expiry int64
-	Domain string // e.g. ".youtube.com" — from Set-Cookie Domain= when present
+	Value    string
+	Expiry   int64
+	HTTPOnly bool // Set-Cookie carried the HttpOnly attribute -> "#HttpOnly_" row prefix
+	// Delete marks a deletion request: Max-Age<=0, or an Expires at or before
+	// now. The row is removed, not rewritten empty — see processYouTubeSetCookies.
+	Delete bool
 }
 
 // AuthStatus tracks the authentication state for each platform.
@@ -1598,7 +1614,7 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 		return
 	}
 
-	updates := make(map[string]cookieUpdate)
+	updates := make(map[cookieUpdateKey]cookieUpdate)
 	for _, sc := range setCookies {
 		// Cheap early filter before tokenizing — only cookies that mention
 		// youtube.com or google.com anywhere in the Set-Cookie string are
@@ -1622,37 +1638,72 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 
 		now := time.Now().Unix()
 		expiry := now + 365*24*60*60
-		skipCookie := false
-		domainAttr := ""
+
+		var (
+			expiresAt  int64
+			hasExpires bool
+			maxAge     int64
+			hasMaxAge  bool
+			httpOnly   bool
+			domainAttr string
+		)
+		// Every attribute is read to the end of the header. The old loop broke
+		// out early on Max-Age<=0, which threw away the Domain= that usually
+		// follows it — and Domain= is what scopes the deletion below.
 		for _, part := range parts[1:] {
 			trimmed := strings.TrimSpace(strings.ToLower(part))
-			if strings.HasPrefix(trimmed, "expires=") {
+			switch {
+			case strings.HasPrefix(trimmed, "expires="):
 				_, dateStr, _ := strings.Cut(part, "=")
 				dateStr = strings.TrimSpace(dateStr)
 				if t, err := time.Parse(time.RFC1123, dateStr); err == nil {
-					expiry = t.Unix()
+					expiresAt, hasExpires = t.Unix(), true
 				} else if t, err := time.Parse("Mon, 02-Jan-2006 15:04:05 MST", dateStr); err == nil {
-					expiry = t.Unix()
+					expiresAt, hasExpires = t.Unix(), true
 				} else if t, err := time.Parse(time.RFC1123Z, dateStr); err == nil {
-					expiry = t.Unix()
+					expiresAt, hasExpires = t.Unix(), true
 				}
-				// If all date formats fail, keep the default expiry
-			} else if strings.HasPrefix(trimmed, "max-age=") {
-				if maxAge, err := strconv.ParseInt(strings.TrimSpace(trimmed[8:]), 10, 64); err == nil {
-					// Negative or zero max-age means the cookie should be deleted — skip it
-					if maxAge <= 0 {
-						skipCookie = true
-						break
-					}
-					expiry = now + maxAge
+				// If all date formats fail, hasExpires stays false and the
+				// default one-year expiry below applies. An unreadable date
+				// must not fall through as "expired" and delete the row.
+			case strings.HasPrefix(trimmed, "max-age="):
+				if v, err := strconv.ParseInt(strings.TrimSpace(trimmed[len("max-age="):]), 10, 64); err == nil {
+					maxAge, hasMaxAge = v, true
 				}
-			} else if strings.HasPrefix(trimmed, "domain=") {
+			case strings.HasPrefix(trimmed, "domain="):
 				_, dom, _ := strings.Cut(part, "=")
 				domainAttr = strings.TrimSpace(dom)
+			case trimmed == "httponly":
+				httpOnly = true
 			}
 		}
-		if skipCookie {
-			continue
+
+		// RFC 6265 §4.1.2.2: Max-Age takes precedence over Expires.
+		//
+		// An expiry at or before now is a DELETION request and is treated
+		// exactly as Max-Age<=0 is. This is the same rule yt-dlp gets from
+		// Python's http.cookiejar: _cookie_from_cookie_tuple converts Max-Age
+		// to an absolute expiry and then, for `expires <= self._now`, calls
+		// self.clear(domain, path, name) and returns None — the cookie is
+		// dropped from the jar entirely, keyed by domain+path+name. It is
+		// never stored with an empty value, which is what this code used to
+		// write: a row with value "" and expiry 0 that rowExpired will not
+		// prune (it ignores exp == 0) and that CookieJar.Load cannot even see
+		// (TrimSpace eats the trailing tab, leaving a 6-field "malformed" row).
+		deleteCookie := false
+		switch {
+		case hasMaxAge:
+			if maxAge <= 0 {
+				deleteCookie = true
+			} else {
+				expiry = now + maxAge
+			}
+		case hasExpires:
+			if expiresAt <= now {
+				deleteCookie = true
+			} else {
+				expiry = expiresAt
+			}
 		}
 
 		// Normalize domain so the Netscape row uses a leading-dot form when
@@ -1670,7 +1721,12 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 			continue
 		}
 
-		updates[name] = cookieUpdate{Value: value, Expiry: expiry, Domain: domainAttr}
+		updates[cookieUpdateKey{Name: name, Domain: domainAttr}] = cookieUpdate{
+			Value:    value,
+			Expiry:   expiry,
+			HTTPOnly: httpOnly,
+			Delete:   deleteCookie,
+		}
 	}
 
 	if len(updates) == 0 {
@@ -1711,7 +1767,9 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 //   - Domain for newly-inserted rows is taken from the Set-Cookie Domain=
 //     attribute when the server provided one (finding #40); falling back to
 //     the legacy .youtube.com / .google.com heuristic only as a last resort.
-func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) error {
+//   - Deletions remove the row. See resolveRowUpdate for why a value refresh
+//     may cross domain variants while a deletion may not.
+func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate) error {
 	filePath := rs.jar.GetFilePath()
 	if filePath == "" {
 		return fmt.Errorf("no cookie file path configured")
@@ -1722,8 +1780,15 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 		return fmt.Errorf("read cookie file: %w", err)
 	}
 
+	// Index by name once so each row costs a map lookup rather than a scan of
+	// every pending update.
+	byName := make(map[string][]cookieUpdateKey, len(updates))
+	for k := range updates {
+		byName[k.Name] = append(byName[k.Name], k)
+	}
+
 	var result strings.Builder
-	updated := make(map[string]bool)
+	handled := make(map[cookieUpdateKey]bool)
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	// Netscape cookie files occasionally contain values that push a single
 	// line past bufio.Scanner's default 64KiB buffer; bump the ceiling to
@@ -1742,13 +1807,31 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 			parts := strings.Split(trimmed, "\t")
 			if len(parts) >= 7 {
 				cookieName := strings.TrimSpace(parts[5])
-				if cu, ok := updates[cookieName]; ok {
-					// Update value (field 6) and expiry (field 4)
-					parts[4] = strconv.FormatInt(cu.Expiry, 10)
-					parts[6] = cu.Value
-					result.WriteString(strings.Join(parts, "\t"))
+				rowDomain := strings.TrimPrefix(strings.TrimSpace(parts[0]), "#HttpOnly_")
+				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain); ok {
+					handled[key] = true
+					if cu.Delete {
+						// Drop the row. Writing it back with an empty value
+						// left a credential-shaped hole nothing could prune.
+						if essentialYouTubeCookies[cookieName] {
+							rs.logger.Info("youtube session refresh: the server deleted an essential cookie — the signed-in session may have ended",
+								"name", cookieName, "domain", rowDomain)
+						} else {
+							rs.logger.Debug("youtube session refresh: server deleted a cookie", "name", cookieName, "domain", rowDomain)
+						}
+						continue
+					}
+					// Rebuild the row as EXACTLY seven tab-separated fields.
+					// CookieJar.Load reads fields 6.. as one value that may
+					// itself contain tabs, so a live row can split into 8+
+					// parts; assigning parts[6] and re-joining left the tail
+					// of the replaced value dangling on the end of the new one.
+					result.WriteString(strings.Join([]string{
+						parts[0], parts[1], parts[2], parts[3],
+						strconv.FormatInt(cu.Expiry, 10),
+						parts[5], cu.Value,
+					}, "\t"))
 					result.WriteString("\n")
-					updated[cookieName] = true
 					continue
 				}
 			}
@@ -1762,12 +1845,14 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 		return fmt.Errorf("scan cookie file: %w", err)
 	}
 
-	// Add new cookies that weren't found in the existing file
-	for name, cu := range updates {
-		if updated[name] {
+	// Add new cookies that weren't found in the existing file. A deletion for
+	// a row that is not there is simply done — it must never be inserted.
+	for key, cu := range updates {
+		if handled[key] || cu.Delete {
 			continue
 		}
-		domain := cu.Domain
+		name := key.Name
+		domain := key.Domain
 		if domain == "" {
 			// Fallback when the Set-Cookie lacked Domain=. Prefer YouTube;
 			// Google-only auth cookies are only emitted by google.com paths.
@@ -1786,13 +1871,21 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 		if strings.HasPrefix(name, "__Secure-") {
 			secure = "TRUE"
 		}
+		// An HttpOnly cookie is written as a "#HttpOnly_"-prefixed row — the
+		// Netscape convention every reader in this package already honours
+		// (CookieJar.Load, rowExpired, mergeCookieFiles). Inserting it without
+		// the prefix silently downgraded the flag.
+		prefix := ""
+		if cu.HTTPOnly {
+			prefix = "#HttpOnly_"
+		}
 		// Netscape format: domain, include_subdomains, path, secure, expiry, name, value
-		if _, werr := fmt.Fprintf(&result, "%s\t%s\t/\t%s\t%d\t%s\t%s\n",
-			domain, subdomains, secure, cu.Expiry, name, cu.Value); werr != nil {
+		if _, werr := fmt.Fprintf(&result, "%s%s\t%s\t/\t%s\t%d\t%s\t%s\n",
+			prefix, domain, subdomains, secure, cu.Expiry, name, cu.Value); werr != nil {
 			return fmt.Errorf("write new cookie row: %w", werr)
 		}
 		rs.logger.Debug("added new cookie to file", "name", name, "domain", domain)
-		updated[name] = true
+		handled[key] = true
 	}
 
 	// Atomic write via the shared same-package helper — it uses a unique
@@ -1803,11 +1896,73 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 		return err
 	}
 
-	if len(updated) > 0 {
-		rs.logger.Debug("updated cookies in file", "updated", len(updated))
+	if len(handled) > 0 {
+		rs.logger.Debug("updated cookies in file", "updated", len(handled))
 	}
 
 	return nil
+}
+
+// resolveRowUpdate picks the pending update that applies to one file row, from
+// the candidate keys that already share the row's cookie name.
+//
+// The rule is asymmetric on purpose: grow broadly, destroy narrowly.
+//
+//   - A value refresh may cross domain variants. The same session value is
+//     valid on .youtube.com and .google.com alike, and leaving one variant
+//     stale while the other moves on is the drift that finding #4 was about.
+//     Worst case a row gets a fresher value than the server strictly scoped.
+//   - A deletion may not. It is unrecoverable, so it only ever removes rows
+//     inside the scope the server actually named.
+//
+// At most one candidate can scope-match a given row: Domain= is normalized to
+// a single leading-dot form before it becomes a key, so two distinct keys for
+// one name always name different hosts. The result is therefore deterministic
+// despite the caller's map.
+func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []cookieUpdateKey, rowDomain string) (cookieUpdateKey, cookieUpdate, bool) {
+	if len(candidates) == 0 {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+	// 1. A Set-Cookie scoped to this row's own host always wins.
+	for _, k := range candidates {
+		if k.Domain != "" && sameCookieScope(k.Domain, rowDomain) {
+			return k, updates[k], true
+		}
+	}
+	// 2. A Set-Cookie with no Domain= is host-scoped to the response that
+	//    carried it, and processYouTubeSetCookies is only ever fed a
+	//    youtube.com API response (single call site). Confining it to YouTube
+	//    rows is what stops an unscoped deletion reaching .google.com auth.
+	if isYouTubeDomain(rowDomain) {
+		for _, k := range candidates {
+			if k.Domain == "" {
+				return k, updates[k], true
+			}
+		}
+	}
+	// 3. Otherwise only a value refresh may cross domains, and only when a
+	//    single non-deleting update is in play so the choice is unambiguous.
+	var only cookieUpdateKey
+	refreshes := 0
+	for _, k := range candidates {
+		if !updates[k].Delete {
+			only, refreshes = k, refreshes+1
+		}
+	}
+	if refreshes == 1 {
+		return only, updates[only], true
+	}
+	return cookieUpdateKey{}, cookieUpdate{}, false
+}
+
+// sameCookieScope reports whether two domain strings name the same host. The
+// leading dot only encodes the Netscape include-subdomains flag, so
+// ".youtube.com" and "youtube.com" are one scope written two ways.
+func sameCookieScope(a, b string) bool {
+	return strings.EqualFold(
+		strings.TrimPrefix(strings.TrimSpace(a), "."),
+		strings.TrimPrefix(strings.TrimSpace(b), "."),
+	)
 }
 
 // isGoogleOnlyAuthName returns true for cookie names that live on the
