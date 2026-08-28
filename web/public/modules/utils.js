@@ -196,11 +196,24 @@ const COOKIE_SETUP_PROBE_TIMEOUT_MS = 5000;
  *                 conclusion, so it is a field rather than a missing value.
  *   inProgress  — is the setup slot still held?
  *   lastError   — the message the finish recorded, or null.
- *   lastRefresh — the server-side RFC3339 stamp that ONLY a successful finish
- *                 writes (FinishSetupDetailed sets it immediately before its
- *                 final cleanup; every failure path returns before it).
+ *   lastRefresh — the server-side RFC3339 stamp a successful finish writes
+ *                 (autocookies.go:1055, immediately before its final cleanup;
+ *                 every FinishSetup failure path returns before that line).
  *
- * Never throws, so a caller may hold the promise unawaited.
+ * lastRefresh is NOT written only by a finish, and it would be wrong to reason
+ * about the comparison as though it were. Three writers exist: the successful
+ * finish; a refresh pass that actually renewed (:1910); and the sidecar restore
+ * at construction (:368). What makes the comparison safe is not exclusivity of
+ * the field but MUTUAL EXCLUSION OF THE WRITERS — StartSetup refuses to start
+ * while `refreshCmd != nil` (:695) and RefreshCookiesDetailed declines while
+ * `setupInProgressLocked()` (:1469) — so no refresh can stamp between the
+ * baseline and the probe for as long as the setup holds the slot. The residual
+ * window is between the finish's own cleanup and this probe, which is the same
+ * window the lastError arm hedges its attribution for.
+ *
+ * Never throws, so a caller may hold the promise unawaited. That licence is
+ * load-bearing (the baseline probe is held unawaited) and is pinned by a
+ * behaviour test, not by the shape of this catch.
  *
  * The last two fields are what make the "already finished" verdict honest.
  * `setupInProgress` alone cannot say WHICH conclusion was reached: cleanup()
@@ -256,17 +269,21 @@ function cookieSetupRefreshAdvanced(baseline, probe) {
  * committed, and telling the user it timed out invites them to redo a sign-in
  * that succeeded.
  *
- * Four arms, because a freed setup slot is not one outcome. In descending
+ * FIVE arms, because a freed setup slot is not one outcome. In descending
  * order of what the server actually told us:
  *
+ *   - the probe could not answer → say only that.
+ *   - the slot is still held → the finish is still running.
  *   - it recorded an error → say what it said. This is the 422 that refused to
  *     overwrite an unreadable cookies.txt, and the empty profile that found no
  *     login, both of which free the slot exactly like a success does.
  *   - it stamped a new lastRefresh → the finish completed and committed.
- *   - neither → the slot is free and nothing was recorded. Three failure paths
- *     look like this (the MkdirAll, atomic-write and jar-reload returns), and
- *     none of them saved anything, so this must not claim a save.
- *   - the probe could not answer → say only that.
+ *   - neither → the slot is free and nothing was recorded. Reached by the
+ *     MkdirAll, atomic-write and jar-reload returns (the three that cleanup
+ *     without a setError), by both early returns — no setup in progress, and
+ *     cancelled — and by the SERVER-SIDE REAP of an abandoned setup, which on
+ *     this path is not exotic: the grace window and the client cap are both
+ *     60 s. None of them saved anything, so none may claim a save.
  *
  * `wizard` adds the one thing the setup wizard cannot do on this path: it
  * cannot mark a platform configured, because nothing here says WHICH platform

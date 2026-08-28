@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -30,13 +31,17 @@ func readEmbeddedModule(t *testing.T, path string) string {
 	return strings.ReplaceAll(string(raw), "\r\n", "\n")
 }
 
-// jsFunctionBody slices one exported function out of a module so an assertion
-// can name the SITE it is about.
+// jsFunctionBody slices one function out of a module so an assertion can name
+// the SITE it is about.
 //
-// A file-wide strings.Contains cannot: the copy helpers each carry the same
-// comparison, so inverting one of them leaves a whole-file check green. That is
-// the junction defect this plan keeps rediscovering, and it is only avoidable
-// by bracketing.
+// A file-wide strings.Contains cannot, and repeatedly did not: the same literal
+// appears in sibling helpers, so changing one of them leaves a whole-file check
+// green. That junction defect was found three rounds running in this file.
+//
+// Bracketing is the mitigation for the source-shape assertions that remain
+// (which URL the probe calls, which module passes the wizard flag). It is not
+// the mitigation for assertions about BEHAVIOUR — those moved to
+// cookies_setup_utilsvm_test.go, which runs the module instead.
 func jsFunctionBody(t *testing.T, js, name string) string {
 	t.Helper()
 	var header string
@@ -59,6 +64,65 @@ func jsFunctionBody(t *testing.T, js, name string) string {
 		body = body[:end]
 	}
 	return body
+}
+
+// jsCallArgs returns the top-level arguments of the first call to fn in src.
+//
+// Written because bracketing was NOT enough. The reviewer's mutation dropped
+// `{ wizard: true }` from the call and left the literal in a trailing comment
+// on the same line — inside the bracketed slice — and a Contains check passed.
+// Narrowing the window does not help when the decoy sits inside the window; the
+// fix is to stop asking whether text appears and start asking what the call
+// actually passes.
+//
+// Scans from the call token to its matching close paren, tracking nesting and
+// string literals, so a comment cannot contribute an argument. Returns nil when
+// there is no such call.
+func jsCallArgs(src, fn string) []string {
+	at := strings.Index(src, fn+"(")
+	if at < 0 {
+		return nil
+	}
+	rest := src[at+len(fn)+1:]
+
+	var args []string
+	var current strings.Builder
+	depth := 0
+	var quote rune
+	for i, r := range rest {
+		if quote != 0 {
+			current.WriteRune(r)
+			if r == quote && (i == 0 || rest[i-1] != '\\') {
+				quote = 0
+			}
+			continue
+		}
+		switch r {
+		case '\'', '"', '`':
+			quote = r
+			current.WriteRune(r)
+		case '(', '{', '[':
+			depth++
+			current.WriteRune(r)
+		case ')', '}', ']':
+			if r == ')' && depth == 0 {
+				args = append(args, strings.TrimSpace(current.String()))
+				return args
+			}
+			depth--
+			current.WriteRune(r)
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(current.String()))
+				current.Reset()
+				continue
+			}
+			current.WriteRune(r)
+		default:
+			current.WriteRune(r)
+		}
+	}
+	return nil
 }
 
 // TestCookieSetupOutcomeCarriesTheVerificationBesideTheAcceptance pins the
@@ -155,22 +219,22 @@ func TestCookieSetupOutcomeCarriesTheVerificationBesideTheAcceptance(t *testing.
 	}
 }
 
-// TestSetupDialogsReadTheVerificationFieldsTheHandlerEmits is the Go↔JS seam
-// nothing else can see: the dialog's branch conditions are JavaScript and no JS
-// harness exists in-tree. Copied from TestAppJSReadsTheFieldsTheHandlerEmits,
-// which pinned the refresh toast's fields the same way.
+// TestSetupDialogsReadTheVerificationFieldsTheHandlerEmits pins the Go↔JS seam,
+// in the shape TestAppJSReadsTheFieldsTheHandlerEmits established for the
+// refresh toast.
 //
 // The realistic drift is a Go-side rename leaving the modules reading
 // `undefined`, which is worse than a crash: `undefined === "unknown"` is false,
 // so a renamed field silently stops the hedged arm from ever firing and every
 // setup goes back to claiming an unqualified success.
 //
-// The direction of the comparison is load-bearing and asserted verbatim. The
-// copy branches on `=== "unknown"`, never on `!== "ok"`, which is what makes
-// the additive claim hold in the other direction too: against an older binary
-// that emits neither field the value is undefined, matches neither arm, and the
-// copy degrades to what that binary's users already see. Inverted, a missing
-// field would hedge about every setup against every older build.
+// SCOPE, since it narrowed: this test now asserts only that the two names line
+// up across the seam — the handler emits them and both dialogs read them. What
+// the copy DOES with the values, including the backward-compat property that
+// the comparison runs positively (`=== "unknown"`, never `!== "ok"`), is
+// executed in cookies_setup_utilsvm_test.go rather than matched here. It was a
+// string prohibition until the review demonstrated that inverting one of the
+// two helpers left it green.
 func TestSetupDialogsReadTheVerificationFieldsTheHandlerEmits(t *testing.T) {
 	payload := cookieSetupOutcome(cookies.SetupResult{})
 	for _, key := range []string{"youtubeVerification", "twitchVerification"} {
@@ -190,37 +254,52 @@ func TestSetupDialogsReadTheVerificationFieldsTheHandlerEmits(t *testing.T) {
 		}
 	}
 
-	// The three-way copy lives in one place so the two dialogs cannot drift
-	// apart, and the comparison direction lives with it.
+	// What the copy helpers DO with those fields — including the whole
+	// backward-compat property, which used to be a prohibition on the string
+	// `verification !==` — is executed in
+	// TestCookieSetupCopySpeaksFromTheVerificationField. A source match could
+	// not distinguish an inverted comparison in one helper from an inverted one
+	// in the other, and did not.
 	//
-	// BRACKETED PER FUNCTION, not file-wide. Both helpers carry the same
-	// literal, so a whole-file Contains stays green when only ONE of them is
-	// inverted — and the one that carries the backward-compat property is
-	// cookieSetupAcceptedToast, the branch an older binary's missing field must
-	// fall past. A file-wide check asserting "verbatim" would have been a claim
-	// the test did not make.
+	// One source assertion remains here because it is about VOCABULARY rather
+	// than behaviour: the three states must be worded in the phrasing
+	// cookies.RefreshVerdict.String() already established across the
+	// manual-refresh surfaces, not in a fourth one. Running the helper cannot
+	// tell a correct fourth phrasing from a correct reuse.
 	utils := readEmbeddedModule(t, "public/modules/utils.js")
-	for _, fn := range []string{"cookieSetupAcceptedToast", "cookieSetupRejectedMessage"} {
-		body := jsFunctionBody(t, utils, fn)
-		if !strings.Contains(body, `verification === "unknown"`) {
-			t.Errorf(`%s does not branch on verification === "unknown"`, fn)
-		}
-		// The exact inversion the doc comment names. Written this way round, a
-		// field an older binary never sends would hedge about every setup.
-		if strings.Contains(body, "verification !==") {
-			t.Errorf("%s branches NEGATIVELY on the verification string. Against an older binary "+
-				"the field is undefined, which fails every positive test and passes every negative "+
-				"one — the hedged copy would fire for users whose check ran perfectly well", fn)
-		}
-	}
-	if !strings.Contains(jsFunctionBody(t, utils, "cookieSetupAcceptedToast"), `verification === "failed"`) {
-		t.Error(`cookieSetupAcceptedToast no longer distinguishes verification === "failed"`)
-	}
-	// Reuse of the refresh vocabulary, not a fourth phrasing for the same three
-	// states. cookies.RefreshVerdict.String() produces these exact words.
 	if !strings.Contains(utils, "could not establish") {
 		t.Error("utils.js words the inconclusive setup outcome in something other than the " +
 			"\"could not establish\" wording the manual-refresh surfaces already use")
+	}
+}
+
+// TestAutoStatusEmitsTheFieldsTheAbortProbeReads is the Go half of the abort
+// probe's contract, and it is the half that was missing.
+//
+// The probe's three discriminators were pinned only on the JavaScript side, so
+// a Go-side JSON tag rename — `lastError` to `last_error`, say — would leave
+// the probe reading undefined and the report silently falling to its hedged
+// arm forever. Safe direction, but a permanent one, and nothing would fail.
+//
+// Marshalled rather than reflected over, because the tag is only half the
+// story: a field that stops being serialised at all (omitempty on a nil
+// pointer, an embedded rename) reaches the browser the same way.
+func TestAutoStatusEmitsTheFieldsTheAbortProbeReads(t *testing.T) {
+	raw, err := json.Marshal(cookies.AutoCookieStatus{})
+	if err != nil {
+		t.Fatalf("marshal AutoCookieStatus: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal AutoCookieStatus: %v", err)
+	}
+
+	for _, field := range []string{"setupInProgress", "lastError", "lastRefresh"} {
+		if _, ok := wire[field]; !ok {
+			t.Errorf("/api/cookies/auto-status no longer emits %q, but cookieSetupProbe reads "+
+				"status.%s — the abort report would fall to its hedged arm for every user, "+
+				"permanently and silently", field, field)
+		}
 	}
 }
 
@@ -329,27 +408,51 @@ func TestSetupAbortReportsRealStatusInsteadOfAssertingATimeout(t *testing.T) {
 		if !strings.Contains(body, "this.app.loadStatus()") {
 			t.Errorf("%s does not refresh the status after an abort that may have completed", path)
 		}
+
+		// Asserted on the CALL, not on the text. Two earlier attempts at this
+		// failed: file-wide, and then bracketed-but-still-Contains, which the
+		// review defeated by leaving the literal in a trailing comment inside
+		// the bracket. jsCallArgs parses to the matching paren, so only a real
+		// argument counts.
+		//
+		// Only the wizard has badges to disclaim, so the option is required in
+		// one module and prohibited in the other. What it DOES to the copy is
+		// executed, not matched — see
+		// TestCookieSetupAbortReportNeverClaimsAnUnknownSave, which renders both.
+		args := jsCallArgs(body, "cookieSetupAbortReport")
+		if len(args) < 2 {
+			t.Errorf("%s's abort arm does not call cookieSetupAbortReport(probe, baseline): %v", path, args)
+			continue
+		}
+		wantsWizard := path == "public/modules/setup.js"
+		hasWizard := len(args) >= 3 && strings.Contains(args[2], "wizard")
+		switch {
+		case wantsWizard && !hasWizard:
+			t.Errorf("%s's abort arm passes no wizard option, so its save arm claims a save "+
+				"without saying it cannot record WHICH platform — cookieYTDone/cookieTWDone are "+
+				"the sole source of the active_platforms the wizard then writes, and this path "+
+				"lights neither. Args: %v", path, args)
+		case !wantsWizard && hasWizard:
+			t.Errorf("%s is not the wizard and has no badges to disclaim. Args: %v", path, args)
+		}
 	}
 
-	// Only the wizard can be left with unlit badges, so only the wizard carries
-	// the sentence that says so — cookieYTDone/cookieTWDone are the sole source
-	// of the active_platforms it is about to write.
-	if !strings.Contains(readEmbeddedModule(t, "public/modules/setup.js"), "{ wizard: true }") {
-		t.Error("the setup wizard's abort alert claims a save without saying it cannot record " +
-			"which platform — the config it then writes would list no active platform")
-	}
-	if strings.Contains(readEmbeddedModule(t, "public/modules/settings.js"), "{ wizard: true }") {
-		t.Error("the Settings panel is not the wizard and has no badges to disclaim")
-	}
-
+	// The endpoint is source shape: which URL the probe calls cannot be
+	// observed from its return value, and it is the whole point of the fix.
+	// Everything else about the probe and the report — the fields it carries,
+	// every arm it renders, and its promise never rejecting — is executed in
+	// cookies_setup_utilsvm_test.go. Those assertions used to live here as
+	// string matches, and three of them were shown not to hold.
 	utils := readEmbeddedModule(t, "public/modules/utils.js")
 	probe := jsFunctionBody(t, utils, "cookieSetupProbe")
 	if !strings.Contains(probe, "/api/cookies/auto-status") {
 		t.Error("the abort probe does not hit the endpoint that knows what became of the setup")
 	}
-	// The probe runs BECAUSE the server did not answer in 60 s. Unbounded, a
-	// wedged server leaves the user with no alert, no buttons and a countdown
-	// still on screen, all behind the await.
+	// Also source shape, and deliberately so: proving the BOUND by execution
+	// would need a host event loop with a real clock, which this harness does
+	// not have (its setTimeout never fires). The bound was measured directly
+	// instead — 5007 ms against a stub that never answers — and this keeps the
+	// mechanism from being deleted afterwards.
 	if !strings.Contains(probe, "controller.abort()") || !strings.Contains(probe, "COOKIE_SETUP_PROBE_TIMEOUT_MS") {
 		t.Error("the abort probe is unbounded — the one situation it exists for is a server that " +
 			"is not answering, and it would strand the user there with nothing rendered")
@@ -357,56 +460,11 @@ func TestSetupAbortReportsRealStatusInsteadOfAssertingATimeout(t *testing.T) {
 	if !strings.Contains(probe, "clearTimeout") {
 		t.Error("the abort probe leaks its timeout timer")
 	}
-	// Asserted as READS OFF THE RESPONSE, not as bare field names. A Contains
-	// on "lastRefresh" alone survives `lastRefresh: null`, which is precisely
-	// what discarding the field looks like.
-	for _, read := range []string{"status.setupInProgress", "status.lastError", "status.lastRefresh"} {
-		if !strings.Contains(probe, read) {
-			t.Errorf("the probe never reads %s. Without it a freed setup slot is one undivided "+
-				"outcome again, and the report goes back to guessing which one", read)
-		}
-	}
 
-	report := jsFunctionBody(t, utils, "cookieSetupAbortReport")
-	// Four answers, and the guards are pinned in their EXACT form rather than
-	// by field name: a Contains on "probe.lastError" stays green against
-	// `if (false && probe.lastError)`, which is what a neutered arm looks like.
-	//
-	// The limit is real and this test does not pretend otherwise — text cannot
-	// prove a branch body still renders anything. It can prove the condition
-	// was not quietly disarmed, which is the drift that actually happens.
-	for _, guard := range []string{
-		"if (!probe.ok) {",
-		"if (probe.inProgress) {",
-		"if (probe.lastError) {",
-		"if (cookieSetupRefreshAdvanced(baseline, probe)) {",
-	} {
-		if !strings.Contains(report, guard) {
-			t.Errorf("the abort report no longer guards on %q — a freed setup slot is not one "+
-				"outcome, and collapsing them reintroduces S17's own unearned claim", guard)
-		}
-	}
-
-	advanced := jsFunctionBody(t, utils, "cookieSetupRefreshAdvanced")
-	if !strings.Contains(advanced, "probe.lastRefresh !== baseline.lastRefresh") {
-		t.Error("the save verdict no longer compares the two stamps, so it cannot tell a stamp " +
-			"this finish wrote from one that was already on disk")
-	}
-	if !strings.Contains(advanced, "!baseline.ok") {
-		t.Error("a baseline that could not be read is being treated as \"there was no stamp " +
-			"before\" — the server may have carried one all along, and the wrong answer here " +
-			"tells the user their cookies were saved when nothing was")
-	}
-	// Asserted as an ORDERING: the recorded-error arm has to be reached before
-	// anything claims a save, because the 422 that refuses to write cookies.txt
-	// frees the slot exactly like a success does.
-	errAt := strings.Index(report, "probe.lastError")
-	savedAt := strings.Index(report, "were saved")
-	switch {
-	case savedAt < 0:
-		t.Error("the abort report no longer has a save arm to order against")
-	case errAt < 0 || errAt > savedAt:
-		t.Error("the abort report claims the cookies were saved before it checks whether the " +
-			"server recorded an error — that is the 422 case, where nothing was written at all")
-	}
+	// The stamp comparison, the unreadable-baseline rule and the precedence of
+	// the recorded-error arm over the save arm are all executed now. The last
+	// of those used to be an index comparison between "probe.lastError" and
+	// "were saved" in this source, which any earlier textual mention of the
+	// field defeated; the behaviour test renders a probe carrying BOTH and
+	// asserts which sentence comes out.
 }
