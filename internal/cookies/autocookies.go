@@ -812,21 +812,29 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		var stats firefoxReadStats
 		netscapeCookies, stats, err = readFirefoxCookies(s.profileDir)
 		s.logFirefoxReadStats(stats)
-		// Interactive setup has a legitimate empty state the refresh and
-		// profile-import paths do not: the user opened the browser and
-		// closed it without signing in. readFirefoxCookies now reports an
-		// empty profile as a hard error (a silently empty jar is the bug
-		// that error exists to catch), so translate it back here — the setup
-		// dialog should say "no login detected", not fail.
-		if errors.Is(err, ErrNoCookiesInProfile) {
-			s.logger.Info("cookie setup finished with an empty profile — no login detected")
-			s.setError("no login detected — sign in before finishing setup")
-			s.cleanup()
-			return false, false, nil
-		}
 	} else {
 		netscapeCookies, err = s.extractChromiumCookies()
 		s.killSetupProcess()
+	}
+
+	// Interactive setup has a legitimate empty state the refresh and
+	// profile-import paths do not: the user opened the browser and closed it
+	// without signing in. Both read paths report an empty profile as a hard
+	// error (a silently empty jar is the bug those errors exist to catch), so
+	// translate it back here — the setup dialog should say "no login detected",
+	// not fail.
+	//
+	// OUTSIDE the if/else, not inside the Firefox arm where it used to live.
+	// Chromium can produce the same sentinel now that cdpGetCookiesAsNetscape
+	// distinguishes "the browser answered and holds nothing" from "the read
+	// failed", and while it could not, a Chromium user who never signed in got
+	// the route's default 500 "failed to finish setup" for a state that is not
+	// a failure at all.
+	if errors.Is(err, ErrNoCookiesInProfile) {
+		s.logger.Info("cookie setup finished with an empty profile — no login detected")
+		s.setError("no login detected — sign in before finishing setup")
+		s.cleanup()
+		return false, false, nil
 	}
 
 	if err != nil {
@@ -1470,26 +1478,6 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 
 		if isFirefoxBased(browser.Type) {
 			netscapeCookies, browserActed, err = s.refreshFirefox(ctx, browser)
-			// An empty profile is a hard error for the IMPORT path, where it
-			// means the read is broken. On the browser path it has a mundane
-			// explanation — Firefox set to clear cookies on close leaves the
-			// profile empty every time — and before this package that
-			// produced a no-op merge and a refresh that succeeded off the
-			// still-good cookies.txt. Failing here instead would fire
-			// "Cookie Auto-Refresh Failed — recordings will fail" at a user
-			// whose recordings are fine.
-			//
-			// So: contribute nothing, let verification below decide, and
-			// remember the fact so it is named if the existing cookies turn
-			// out to be dead too. That keeps the desktop behaviour while
-			// refusing to let a browser that silently stopped saving cookies
-			// masquerade as an ordinary expiry.
-			if errors.Is(err, ErrNoCookiesInProfile) {
-				s.logger.Warn("browser refresh produced no cookies — falling back to the existing cookies.txt",
-					"profile_dir", s.profileDir, "err", err)
-				emptyBrowserProfile = true
-				netscapeCookies, err = "", nil
-			}
 		} else {
 			// Chromium needs no screenshot: the navigations are driven over
 			// CDP, so each one reports its own outcome and refreshChromium
@@ -1505,7 +1493,7 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 			// would still have claimed it renewed the credentials. Both halves
 			// are required.
 			var navigated bool
-			netscapeCookies, navigated, err = s.refreshChromium(ctx, browser)
+			netscapeCookies, navigated, err = refreshChromiumCookies(s, ctx, browser)
 			browserActed = err == nil && navigated
 		}
 	}
@@ -1533,6 +1521,44 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 			// failed launch does not veto it.
 			browserActed = true
 		}
+	}
+
+	// An empty profile is a hard error for the IMPORT path, where it means the
+	// read is broken. That path has already returned above on any error, so the
+	// !importedFromProfile guard is belt-and-braces — it also keeps browser
+	// non-nil for the log line.
+	//
+	// On the BROWSER path it has a mundane explanation — a browser set to clear
+	// cookies on close leaves the profile empty every time — and before this
+	// package that produced a no-op merge and a refresh that succeeded off the
+	// still-good cookies.txt. Failing here instead would fire "Cookie
+	// Auto-Refresh Failed — recordings will fail" at a user whose recordings are
+	// fine.
+	//
+	// So: contribute nothing, let verification below decide, and remember the
+	// fact so it is named if the existing cookies turn out to be dead too. That
+	// keeps the desktop behaviour while refusing to let a browser that silently
+	// stopped saving cookies masquerade as an ordinary expiry.
+	//
+	// BOTH FAMILIES. This used to sit inside the Firefox arm of the if/else
+	// above, so the identical Chromium state — cdpGetCookiesAsNetscape can now
+	// tell an empty profile from a failed read and says ErrNoCookiesInProfile
+	// for it — aborted the refresh instead.
+	//
+	// Placed AFTER the DPAPI fallback rather than immediately after the if/else,
+	// and that ordering is load-bearing on Windows: an empty headless profile is
+	// exactly when reading the user's real signed-in profile is worth trying, so
+	// the downgrade must not consume the error before the fallback sees it.
+	// Firefox is unaffected either way — the fallback skips that family.
+	//
+	// browserActed is deliberately left as the branches set it. This pass
+	// contributed no credentials, so whatever verifies below was already on
+	// disk, and Renewed must not claim otherwise.
+	if !importedFromProfile && errors.Is(err, ErrNoCookiesInProfile) {
+		s.logger.Warn("browser refresh produced no cookies — falling back to the existing cookies.txt",
+			"browser", browser.Type, "profile_dir", s.profileDir, "err", err)
+		emptyBrowserProfile = true
+		netscapeCookies, err = "", nil
 	}
 
 	if err != nil {
@@ -2148,6 +2174,17 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 }
 
 // --- helpers ---
+
+// refreshChromiumCookies is the Chromium browser-refresh step behind a package
+// variable, so a test can exercise what RefreshCookiesDetailed DOES WITH the
+// step's result without launching a browser — notably the ErrNoCookiesInProfile
+// downgrade above, which is unreachable otherwise: the real function has to
+// start a headless Chromium and speak CDP to it before it can report an empty
+// profile, and no test in this package may launch a browser.
+//
+// Same seam convention as detectBrowser, setupBrowserGone, killProcessTree and
+// writeCookieFile. Nothing in production reassigns it.
+var refreshChromiumCookies = (*AutoCookieService).refreshChromium
 
 // killProcessTree kills a process and all its children on Windows (taskkill /T /F),
 // or just the process itself on other platforms.

@@ -229,8 +229,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// readFirefoxCookies now reports an unreadable profile loudly
 			// instead of returning an empty jar, so a broken profile reaches
 			// the user as that rather than a bare 500. (An EMPTY profile is
-			// not here: FinishSetup translates it to "no login detected",
-			// which the setup dialog renders inline.)
+			// not here, for EITHER browser family: FinishSetup translates it
+			// to "no login detected" and returns no error at all, which the
+			// setup dialog renders inline. Chromium reached the default 500
+			// below until cdpGetCookiesAsNetscape learned to tell an empty
+			// profile from a failed read.)
 			case errors.Is(err, cookies.ErrCookieDBNotFound),
 				errors.Is(err, cookies.ErrCookieDBUnreadable):
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)

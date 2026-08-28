@@ -3,6 +3,7 @@ package cookies
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -537,6 +538,45 @@ type cdpCookieResult struct {
 	} `json:"cookies"`
 }
 
+// cdpCookieReadOutcome is the terminal decision of a CDP cookie read: given
+// what the three tiers observed, what does "no cookies" mean?
+//
+// It exists because the answer used to be one sentence for three different
+// situations — the profile is empty, every query failed, or some of each — and
+// a caller given "CDP returned no cookies" cannot tell "nobody signed in" (a
+// normal state with its own remedy) from "Moombox could not read the profile"
+// (a fault). The first of those is what a user who opened the setup browser
+// and closed it without signing in produces, and sending them to debug a
+// browser that is working is the wrong instruction.
+//
+// anyQuerySucceeded MUST mean "at least one query returned WITHOUT ERROR,
+// INCLUDING one that returned zero cookies". Wiring it to "at least one query
+// returned cookies" re-creates the exact conflation this function removes: an
+// empty profile returns zero from every tier, so every empty profile would
+// classify as a failed read.
+//
+// A mix — some tiers errored, at least one answered empty — resolves to the
+// empty verdict. A definitive empty answer is evidence about the PROFILE;
+// a sibling tier's error is only evidence about that TIER (Storage.getCookies
+// is simply absent from some builds, which is why the fallbacks exist at all).
+func cdpCookieReadOutcome(anyQuerySucceeded bool, cookieCount int, lastErr error) error {
+	if cookieCount > 0 {
+		return nil
+	}
+	if anyQuerySucceeded {
+		return fmt.Errorf("%w — CDP read the browser profile and it holds no cookies", ErrNoCookiesInProfile)
+	}
+	if lastErr == nil {
+		// Nothing answered and nothing failed, so nothing was asked. Only
+		// reachable if the bookkeeping below ever drops an error, and it must
+		// not read as "the profile is empty": we never looked.
+		return errors.New("CDP cookie read: no query was attempted " +
+			"(Storage.getCookies, Network.getAllCookies, Network.getCookies)")
+	}
+	return fmt.Errorf("CDP cookie read failed — no query answered "+
+		"(Storage.getCookies, Network.getAllCookies, Network.getCookies): %w", lastErr)
+}
+
 func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 	// Get version info for the browser websocket URL
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json/version", port), nil)
@@ -569,44 +609,79 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 		return cookieResult, nil
 	}
 
+	// The two facts every tier below contributes to, and the whole reason this
+	// function can now tell an empty profile from a failed read. Each tier used
+	// to be an `if …, err := …; err == nil` with a silent else, so every error
+	// was discarded and the function ended on a bare negative statement.
+	//
+	// anyQuerySucceeded records that a query ANSWERED — see cdpCookieReadOutcome
+	// for why an answer of zero cookies counts, and why wiring this to "returned
+	// cookies" would defeat the point. lastErr keeps the most recent failure so a
+	// read where nothing answered can say what went wrong.
+	anyQuerySucceeded := false
+	var lastErr error
+
 	// Primary: browser-level Storage.getCookies. Returns a result even if
 	// empty when the page has no assigned cookies yet, so a zero-length
 	// cookies slice is not definitive success — we still try the fallbacks
 	// before giving up (finding #17).
 	var cookieResult cdpCookieResult
-	if result, err := cdpSendCommandWithResult(version.WebSocketDebuggerURL, "Storage.getCookies", nil); err == nil {
-		cookieResult, _ = parseResult(result)
+	if result, queryErr := cdpSendCommandWithResult(version.WebSocketDebuggerURL, "Storage.getCookies", nil); queryErr != nil {
+		lastErr = fmt.Errorf("Storage.getCookies: %w", queryErr)
+	} else if parsed, parseErr := parseResult(result); parseErr != nil {
+		lastErr = fmt.Errorf("Storage.getCookies: %w", parseErr)
+	} else {
+		anyQuerySucceeded = true
+		cookieResult = parsed
 	}
 
 	// If Storage.getCookies returned nothing, try the page-level fallbacks.
 	if len(cookieResult.Cookies) == 0 {
-		fallbackReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json", port), nil)
-		pagesResp, err2 := cookiesHTTPClient.Do(fallbackReq)
-		if err2 != nil {
-			return "", fmt.Errorf("CDP cookie fallback listing failed: %w", err2)
-		}
-		defer func() {
-			io.Copy(io.Discard, pagesResp.Body)
-			pagesResp.Body.Close()
-		}()
-
 		var targets []struct {
 			WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 			Type                 string `json:"type"`
 		}
-		if err := json.NewDecoder(pagesResp.Body).Decode(&targets); err != nil {
-			return "", fmt.Errorf("CDP fallback decode: %w", err)
+
+		fallbackReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json", port), nil)
+		pagesResp, listErr := cookiesHTTPClient.Do(fallbackReq)
+		if listErr != nil {
+			// Recorded, not returned. Bailing here re-conflated the two states
+			// one level up: a browser that ANSWERED "no cookies" at tier 1 and
+			// then could not produce a target list was reported as a failed
+			// read. Let the terminal decision weigh both facts.
+			lastErr = fmt.Errorf("CDP cookie fallback listing failed: %w", listErr)
+		} else {
+			decodeErr := json.NewDecoder(pagesResp.Body).Decode(&targets)
+			io.Copy(io.Discard, pagesResp.Body)
+			pagesResp.Body.Close()
+			if decodeErr != nil {
+				lastErr = fmt.Errorf("CDP fallback decode: %w", decodeErr)
+				targets = nil
+			}
 		}
 
 		// Fallback 1: page-level Network.getAllCookies.
 		for _, t := range targets {
-			if t.Type == "page" && t.WebSocketDebuggerURL != "" {
-				if raw, err := cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getAllCookies", nil); err == nil {
-					if parsed, perr := parseResult(raw); perr == nil && len(parsed.Cookies) > 0 {
-						cookieResult = parsed
-						break
-					}
-				}
+			if t.Type != "page" || t.WebSocketDebuggerURL == "" {
+				continue
+			}
+			raw, queryErr := cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getAllCookies", nil)
+			if queryErr != nil {
+				lastErr = fmt.Errorf("Network.getAllCookies: %w", queryErr)
+				continue
+			}
+			parsed, parseErr := parseResult(raw)
+			if parseErr != nil {
+				lastErr = fmt.Errorf("Network.getAllCookies: %w", parseErr)
+				continue
+			}
+			// Set BEFORE the length check, deliberately: this tier answered,
+			// and an answer of "the profile holds nothing" is the state we are
+			// here to be able to name.
+			anyQuerySucceeded = true
+			if len(parsed.Cookies) > 0 {
+				cookieResult = parsed
+				break
 			}
 		}
 
@@ -615,33 +690,45 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 		// expose Storage.getCookies or Network.getAllCookies).
 		if len(cookieResult.Cookies) == 0 {
 			for _, t := range targets {
-				if t.Type == "page" && t.WebSocketDebuggerURL != "" {
-					params := map[string]any{
-						"urls": []string{
-							"https://www.youtube.com",
-							"https://youtube.com",
-							"https://accounts.google.com",
-							"https://www.google.com",
-							"https://google.com",
-							"https://www.twitch.tv",
-							"https://twitch.tv",
-						},
-					}
-					if raw, err := cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getCookies", params); err == nil {
-						if parsed, perr := parseResult(raw); perr == nil && len(parsed.Cookies) > 0 {
-							cookieResult = parsed
-							break
-						}
-					}
+				if t.Type != "page" || t.WebSocketDebuggerURL == "" {
+					continue
+				}
+				params := map[string]any{
+					"urls": []string{
+						"https://www.youtube.com",
+						"https://youtube.com",
+						"https://accounts.google.com",
+						"https://www.google.com",
+						"https://google.com",
+						"https://www.twitch.tv",
+						"https://twitch.tv",
+					},
+				}
+				raw, queryErr := cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getCookies", params)
+				if queryErr != nil {
+					lastErr = fmt.Errorf("Network.getCookies: %w", queryErr)
+					continue
+				}
+				parsed, parseErr := parseResult(raw)
+				if parseErr != nil {
+					lastErr = fmt.Errorf("Network.getCookies: %w", parseErr)
+					continue
+				}
+				anyQuerySucceeded = true
+				if len(parsed.Cookies) > 0 {
+					cookieResult = parsed
+					break
 				}
 			}
 		}
+	}
 
-		// Still nothing — surface as an explicit error instead of silently
-		// handing back a Netscape file with just headers.
-		if len(cookieResult.Cookies) == 0 {
-			return "", fmt.Errorf("CDP returned no cookies (Storage.getCookies, Network.getAllCookies, Network.getCookies all empty)")
-		}
+	// Still nothing — say WHICH nothing. ErrNoCookiesInProfile means the
+	// browser answered and holds no cookies (FinishSetup turns that into "no
+	// login detected" and RefreshCookies falls back to the existing
+	// cookies.txt); anything else means the read itself failed.
+	if outcome := cdpCookieReadOutcome(anyQuerySucceeded, len(cookieResult.Cookies), lastErr); outcome != nil {
+		return "", outcome
 	}
 
 	// Convert to extractedCookie for filtering/deduplication (matching TS cdpCookiesToNetscape)
