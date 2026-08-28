@@ -140,6 +140,15 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				jsonError(rw, err.Error(), http.StatusConflict)
 			case errors.Is(err, cookies.ErrCookieDBUnreadable):
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+			// S9's abort: Moombox could not read the existing cookies.txt and
+			// deliberately did not write to it. This carries the only
+			// actionable detail the operator has — same reasoning as the two
+			// cases above — and it is the one message that must NOT be
+			// flattened to "cookie refresh failed", which reads as "replace
+			// your cookies" and would send the operator to overwrite the
+			// exact file this abort just refused to destroy.
+			case errors.Is(err, cookies.ErrCookieFileUnreadable):
+				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			default:
 				jsonError(rw, "cookie refresh failed", http.StatusInternalServerError)
 			}
@@ -222,6 +231,15 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			case errors.Is(err, cookies.ErrCookieDBLocked):
 				jsonError(rw, err.Error(), http.StatusConflict)
+			// S9's abort: Moombox could not read the existing cookies.txt
+			// before merging in the cookies this setup call just extracted,
+			// and deliberately did not write anything. Passed through
+			// verbatim for the same reason as the two cases above — and it
+			// must not fall to "failed to finish setup", which gives no hint
+			// that the fix is a permissions/mount problem rather than
+			// running setup again.
+			case errors.Is(err, cookies.ErrCookieFileUnreadable):
+				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			default:
 				jsonError(rw, "failed to finish setup", http.StatusInternalServerError)
 			}

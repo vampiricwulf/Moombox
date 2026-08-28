@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -321,6 +322,56 @@ func TestRecoveryErrorStillNotifies(t *testing.T) {
 	got := (*sent)[0]
 	if got.title != "Cookie Auto-Refresh Failed" || got.ntype != notifications.TypeError {
 		t.Errorf("error branch = %q/%v, want the failure title at error severity", got.title, got.ntype)
+	}
+}
+
+// TestRecoveryReportsUnreadableCookieFileWithoutSolicitingItsDestruction is
+// F6/F7: autocookies.go's S9 abort refuses to write to cookies.txt BECAUSE it
+// could not read it — the file may hold a working credential for a platform
+// this pass never touched — and the generic branch right above
+// (TestRecoveryErrorStillNotifies) tells the operator "recordings will fail
+// until the cookies are replaced". That is backwards for this one error: the
+// code destroyed nothing, so the notification must not ask a human to.
+//
+// The stub error is wrapped the same shape autocookies.go actually produces
+// — the sentinel AND the underlying read failure, both via %w — so this
+// pins errors.Is resolving ErrCookieFileUnreadable from inside
+// runCookieRecovery, one layer removed from where the cookies package
+// returns it, rather than only at the point the error was constructed.
+func TestRecoveryReportsUnreadableCookieFileWithoutSolicitingItsDestruction(t *testing.T) {
+	s, sent := recoveryTestState(t)
+	unreadable := func(context.Context) (cookies.RefreshResult, error) {
+		return cookies.RefreshResult{Ran: true}, fmt.Errorf(
+			"%w — refusing to merge or overwrite an existing cookies.txt that could not be read (%w)",
+			cookies.ErrCookieFileUnreadable, errors.New("permission denied (simulated)"))
+	}
+	s.runCookieRecovery(context.Background(), "youtube", unreadable, recoveryNotifier(sent))
+
+	if len(*sent) != 1 {
+		t.Fatalf("sent %d notifications, want exactly 1: %+v", len(*sent), *sent)
+	}
+	got := (*sent)[0]
+	if got.title != "Cookie File Unreadable" {
+		t.Errorf("title = %q — took the generic catch-all branch instead of the dedicated one", got.title)
+	}
+	if got.ntype != notifications.TypeError {
+		t.Errorf("type = %v, want TypeError", got.ntype)
+	}
+	lower := strings.ToLower(got.desc)
+	// The generic branch's signature phrase — the one that asks the operator
+	// to overwrite a file this abort exists to protect. Its absence is the
+	// whole point of the dedicated branch.
+	if strings.Contains(lower, "until the cookies are replaced") {
+		t.Errorf("notification carries the generic branch's solicit-the-destruction phrasing: %q", got.desc)
+	}
+	if !strings.Contains(lower, "did not write") {
+		t.Errorf("notification must say what actually happened — nothing was written: %q", got.desc)
+	}
+	if !strings.Contains(lower, "do not replace") {
+		t.Errorf("notification must give the corrected instruction — do not replace the file: %q", got.desc)
+	}
+	if !strings.Contains(got.desc, "cookies.txt") {
+		t.Errorf("notification does not name the file: %q", got.desc)
 	}
 }
 

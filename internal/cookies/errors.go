@@ -78,6 +78,23 @@ var (
 	// nothing) and of a profile snapshotted out from under a live Firefox.
 	ErrNoCookiesInProfile = errors.New("no YouTube/Twitch cookies found in browser profile")
 
+	// ErrCookieFileUnreadable is returned by FinishSetup and
+	// RefreshCookiesDetailed when the EXISTING cookies.txt could not be read
+	// for a reason other than "the file does not exist" — a permission blip,
+	// a locked file, an I/O error, a bind-mount hiccup in Docker. Both
+	// producers abort on this error BEFORE merging or writing anything: the
+	// unreadable file may hold working credentials for a platform this pass
+	// never touched, and proceeding as if it were simply absent would
+	// silently replace it with only whatever this pass just acquired.
+	//
+	// Consumers MUST discriminate this from every other refresh/setup
+	// failure. The correct instruction is "fix the permission or mount
+	// problem and it will retry" — never "replace cookies.txt". Moombox
+	// deliberately left the file untouched, and telling the operator to
+	// overwrite the one file it just went out of its way not to destroy
+	// defeats the entire point of the abort.
+	ErrCookieFileUnreadable = errors.New("existing cookies.txt could not be read")
+
 	// ErrAuthCheckNotAttempted marks an auth check that failed BEFORE any
 	// request left the process — the jar holds something, but not enough to
 	// build a request out of (no cookie header, no SAPISIDHASH). It is still
