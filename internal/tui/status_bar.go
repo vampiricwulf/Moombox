@@ -46,6 +46,19 @@ const (
 	CookieStatusOK
 	CookieStatusCookiesOnly
 	CookieStatusRelogin
+	// CookieStatusUnknown: cookies ARE configured and the last check could
+	// not conclude anything about them — a network fault, a non-200, a
+	// redirect, or a body with no login marker we recognise.
+	//
+	// APPENDED, not inserted: CookieStatusNone is the zero value and both the
+	// TUI wiring and every test rely on an unset status meaning "no cookies".
+	//
+	// Distinct from CookieStatusCookiesOnly, which this state used to be
+	// rendered as, and that conflation is the bug: CookiesOnly is a
+	// CONCLUSION (the credentials were rejected, or there are none) and earns
+	// the red alert that survives every tier, while this one is an absence of
+	// information the operator cannot act on.
+	CookieStatusUnknown
 )
 
 // StatusBarModel renders the bottom status bar.
@@ -376,12 +389,38 @@ func (m *StatusBarModel) renderMetrics(t barTier) string {
 	return strings.Join(parts, " ") + " "
 }
 
+// cookieUnknownLabel words the could-not-check badge for one platform.
+//
+// "Unknown" rather than a fourth invention: it is what RefreshVerdict.String()
+// returns for this state, and the same three-way vocabulary already carries
+// the setup toasts and the R F feedback. A badge cannot hold the full sentence
+// ("could not establish whether they work"), so it borrows the enum's own word
+// instead of coining a synonym that would drift.
+//
+// Abbreviates at tierTight like the re-login prompt does. The bare code is
+// still colour-distinct from the green OK and the yellow no-cookies, and the
+// state is dropped one tier later anyway.
+func cookieUnknownLabel(code string, t barTier) string {
+	if t >= tierTight {
+		return code
+	}
+	return code + ": Unknown"
+}
+
 // renderCookieStatus renders auth indicators and warnings (B2) at tier t.
 //
 // A platform whose auth is HEALTHY is dropped at tierEssential — the green
 // "YT" is reassurance, not information — while a re-login prompt or a
 // rejected-cookie indicator survives to the last tier, abbreviated. That
 // keeps the narrowest useful bar showing only what needs acting on.
+//
+// CookieStatusUnknown joins the dropped group rather than the surviving one,
+// and that placement IS the fix. "The last check could not reach YouTube" is
+// not something the operator can act on — it is the state that used to render
+// as the red always-visible CookiesOnly alert, so a DNS blip shouted at the
+// same volume as a dead session for as long as it lasted. The tier rule
+// already says what to do with un-actionable information; this state simply
+// belongs on that side of it.
 func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 	if t >= tierNone || (!m.ytActive && !m.twActive) {
 		return ""
@@ -412,7 +451,14 @@ func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 				parts = append(parts, statusBarRedStyle.Render("YT: Re-login"))
 			}
 		case cookiesRejected || m.ytCookie == CookieStatusCookiesOnly:
+			// cookiesRejected stays ahead of the unknown arm on purpose: a job
+			// parked in COOKIES? is evidence from a real download attempt, and
+			// it outranks a check that could not reach the site.
 			parts = append(parts, statusBarRedStyle.Render("YT"))
+		case m.ytCookie == CookieStatusUnknown:
+			if healthy {
+				parts = append(parts, statusBarWrnStyle.Render(cookieUnknownLabel("YT", t)))
+			}
 		case m.ytCookie == CookieStatusNone:
 			if healthy {
 				parts = append(parts, statusBarYelStyle.Render("YT"))
@@ -438,7 +484,15 @@ func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 				parts = append(parts, statusBarRedStyle.Render("TW: Re-login"))
 			}
 		case CookieStatusCookiesOnly:
+			// Reachable since AuthStatus gained HasTwitchCookies. It was dead
+			// code for as long as the TUI could only assign CookieStatusOK for
+			// Twitch, which meant a Twitch session whose auth-token had been
+			// pruned on expiry looked exactly like one that was never set up.
 			parts = append(parts, statusBarRedStyle.Render("TW"))
+		case CookieStatusUnknown:
+			if healthy {
+				parts = append(parts, statusBarWrnStyle.Render(cookieUnknownLabel("TW", t)))
+			}
 		case CookieStatusOK:
 			if healthy {
 				parts = append(parts, statusBarGrnStyle.Render("TW"))

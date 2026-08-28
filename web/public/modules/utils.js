@@ -346,3 +346,62 @@ export function cookieSetupAbortReport(probe, baseline, { wizard = false } = {})
     icon: "question-circle",
   };
 }
+
+/**
+ * How each platform words the state "this install was never configured".
+ *
+ * The asymmetry is deliberate and predates this helper: YouTube without cookies
+ * is a warning, because almost everything Moombox does with YouTube wants them;
+ * Twitch without cookies is the ordinary anonymous mode and gets the neutral
+ * "off" dot. Keeping it as data is what lets one function serve both badges.
+ */
+const COOKIE_INDICATOR_PLATFORMS = {
+  youtube: { name: "YouTube", absent: { className: "indicator-warn", title: "YouTube: No cookies" } },
+  twitch: { name: "Twitch", absent: { className: "indicator-off", title: "Twitch: Anonymous" } },
+};
+
+/**
+ * Decide the dashboard indicator for one platform: {className, title}.
+ *
+ * FOUR states where there were three, and the new one is the whole point. The
+ * old chain ended `else -> "Not verified"`, in red, which is what a transient
+ * network fault rendered as: the server reports `authenticated: false` for a
+ * check that could not reach the site, exactly as it does for one the site
+ * rejected, and the badge could not tell them apart. `verification` is the
+ * field that can — "ok", "failed" or "unknown" — and only "failed" is a
+ * conclusion about the credentials.
+ *
+ * TWO PROPERTIES CARRY THE ADDITIVE CONTRACT, and both are about a NEWER
+ * FRONTEND AGAINST AN OLDER BINARY, which emits neither `verification` nor (on
+ * the Twitch side) `found`:
+ *
+ *   - the comparison is POSITIVE (`=== "unknown"`). Written as `!== "ok"` a
+ *     missing field would hedge about every platform on every older build.
+ *   - `authenticated` is tested BEFORE `found`. Twitch's payload carried no
+ *     `found` key at all until this arc, so an older binary leaves it
+ *     undefined; ordering the absence test first would render a working,
+ *     authenticated Twitch session as "Anonymous".
+ *
+ * The relogin arm stays first and stays a caller decision: it is gated on the
+ * auto_enabled config flag at the call site, and that gating is not this
+ * function's to change.
+ */
+export function cookieIndicatorState(platform, status, reloginRequired) {
+  const meta = COOKIE_INDICATOR_PLATFORMS[platform];
+  if (reloginRequired) {
+    return { className: "indicator-error", title: `${meta.name}: Re-login required` };
+  }
+  if (status?.authenticated) {
+    return { className: "indicator-ok", title: `${meta.name}: Authenticated` };
+  }
+  if (!status?.found) {
+    return meta.absent;
+  }
+  if (status?.verification === "unknown") {
+    return {
+      className: "indicator-warn",
+      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work`,
+    };
+  }
+  return { className: "indicator-error", title: `${meta.name}: Not authenticated` };
+}

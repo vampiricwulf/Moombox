@@ -341,20 +341,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case cookieRecheckResultMsg:
+		// Three arms where there were two. "Not authenticated" is a
+		// CONCLUSION, and this line asserted it for every check that failed to
+		// reach the site — the exact claim Arc 1 stopped the internal
+		// machinery from making, still being made to the operator's face.
 		var parts []string
 		if a.statusBar.ytActive {
-			if msg.YouTubeAuth {
-				parts = append(parts, "YouTube OK")
-			} else {
-				parts = append(parts, "YouTube not authenticated")
-			}
+			parts = append(parts, cookieRecheckPart("YouTube", msg.YouTube))
 		}
 		if a.statusBar.twActive {
-			if msg.TwitchAuth {
-				parts = append(parts, "Twitch OK")
-			} else {
-				parts = append(parts, "Twitch not authenticated")
-			}
+			parts = append(parts, cookieRecheckPart("Twitch", msg.Twitch))
 		}
 		if len(parts) == 0 {
 			a.setFeedback("Cookies: no platforms configured")
@@ -1021,6 +1017,24 @@ func (a *App) channelDisplayName(chID string) string {
 		})
 	}
 	return name
+}
+
+// cookieRecheckPart words one platform's half of the R C feedback line.
+//
+// The phrasing is the arc's settled three-way vocabulary — "failed" for a
+// conclusion, "could not establish" for an absence of one — the same split
+// setupCookieAcceptedMessage below and cookieRefreshReportFor in
+// cmd/moombox/services.go already draw. Only RefreshFailed earns a word about
+// the credentials; RefreshUnknown speaks about the CHECK.
+func cookieRecheckPart(platform string, v cookies.RefreshVerdict) string {
+	switch v {
+	case cookies.RefreshOK:
+		return platform + " OK"
+	case cookies.RefreshFailed:
+		return platform + " not authenticated"
+	default:
+		return platform + " — could not establish"
+	}
 }
 
 // setupCookieAcceptedMessage words a platform the setup ACCEPTED.

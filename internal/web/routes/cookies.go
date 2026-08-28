@@ -94,6 +94,56 @@ func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
 	}
 }
 
+// CookieStatusPayload renders AuthStatus's YouTube half onto the wire, and
+// TwitchAuthStatusPayload the Twitch half.
+//
+// ONE copy of each shape, exported, because there were three hand-written
+// copies of the first and two of the second across two packages — GET
+// /api/status (cmd/moombox/routes_wiring.go), POST /api/cookies/recheck and
+// POST /api/cookies/auto-refresh — and a field added to two of three is the
+// junction defect this arc keeps finding: the badge silently keeps its old
+// meaning on whichever endpoint was missed, which for `verification` means the
+// dashboard reverts to "not authenticated" the moment the user reloads.
+//
+//   - found — was this install ever CONFIGURED for the platform? The loose
+//     predicate, not "is the cookie set complete": a Twitch session whose
+//     auth-token was pruned on expiry is a configured session with no
+//     credential, which is a different thing to say than "no cookies".
+//   - authenticated — UNCHANGED in meaning, on purpose. It is the only key a
+//     pre-existing frontend reads, and it stays "can we do authenticated work
+//     right now", false on an inconclusive check.
+//   - verification — what the check CONCLUDED: "ok", "failed" or "unknown".
+//     Only "failed" is a conclusive negative and only it may be worded as one.
+//
+// `verification` (and, for Twitch, `found`) are ADDITIVE, by the precedent
+// `renewed` set and `ran`/`verdict` and the setup's two verification fields
+// followed: an older frontend ignores the extra keys and behaves exactly as it
+// did, and the new frontend branches POSITIVELY on the strings, so against an
+// older binary that omits them it degrades to today's copy rather than to the
+// hedged one. See cookieIndicatorState in web/public/modules/utils.js, whose
+// arm order is what delivers the second half of that.
+//
+// The vocabulary is RefreshVerdict's, deliberately shared rather than
+// re-invented — same reason as cookieSetupOutcome above.
+func CookieStatusPayload(status cookies.AuthStatus) map[string]any {
+	return map[string]any{
+		"found":         status.HasYouTubeCookies,
+		"authenticated": status.YouTubeAuthenticated,
+		"verification":  status.YouTubeVerification.String(),
+	}
+}
+
+// TwitchAuthStatusPayload is CookieStatusPayload's Twitch counterpart. See
+// there for the field contract; `found` is new on this side because
+// AuthStatus had no HasTwitchCookies to project until this arc.
+func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
+	return map[string]any{
+		"found":         status.HasTwitchCookies,
+		"authenticated": status.TwitchAuthenticated,
+		"verification":  status.TwitchVerification.String(),
+	}
+}
+
 // CookieRoutes registers cookie-related API routes. The optional rate
 // limiter wraps the headless-browser endpoints (/auto-refresh and the
 // auto-setup start/finish/cancel trio) so a buggy or hostile client
@@ -105,14 +155,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		refreshSvc.CheckNow(req.Context())
 		status := refreshSvc.GetStatus()
 		response := map[string]any{
-			"success": status.YouTubeAuthenticated || status.TwitchAuthenticated,
-			"cookieStatus": map[string]any{
-				"found":         status.HasYouTubeCookies,
-				"authenticated": status.YouTubeAuthenticated,
-			},
-			"twitchAuthStatus": map[string]any{
-				"authenticated": status.TwitchAuthenticated,
-			},
+			"success":          status.YouTubeAuthenticated || status.TwitchAuthenticated,
+			"cookieStatus":     CookieStatusPayload(status),
+			"twitchAuthStatus": TwitchAuthStatusPayload(status),
 		}
 		if autoCookieSvc != nil {
 			autoStatus := autoCookieSvc.GetStatus()
@@ -199,13 +244,8 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		status := refreshSvc.GetStatus()
 
 		response := cookieRefreshOutcome(result)
-		response["cookieStatus"] = map[string]any{
-			"found":         status.HasYouTubeCookies,
-			"authenticated": status.YouTubeAuthenticated,
-		}
-		response["twitchAuthStatus"] = map[string]any{
-			"authenticated": status.TwitchAuthenticated,
-		}
+		response["cookieStatus"] = CookieStatusPayload(status)
+		response["twitchAuthStatus"] = TwitchAuthStatusPayload(status)
 		autoStatus := autoCookieSvc.GetStatus()
 		response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
 		if getActivePlatforms != nil {

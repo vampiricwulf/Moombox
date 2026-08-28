@@ -189,9 +189,15 @@ type (
 	backfillRescanQueuedMsg struct{}
 
 	// Async results for cookie refresh
+	// cookieRecheckResultMsg carries VERDICTS, not booleans. R C is the key
+	// an operator presses to ask "do my cookies work", and the flattened bool
+	// could not tell "the site rejected them" from "the check never reached
+	// the site" — so a DNS blip answered "YouTube not authenticated", which is
+	// a claim the check did not make and sends the user off to re-export
+	// perfectly good cookies.
 	cookieRecheckResultMsg struct {
-		YouTubeAuth bool
-		TwitchAuth  bool
+		YouTube cookies.RefreshVerdict
+		Twitch  cookies.RefreshVerdict
 	}
 	cookieForceRefreshResultMsg struct {
 		// Result is carried whole rather than pre-flattened to a bool pair.
@@ -453,7 +459,10 @@ type App struct {
 	OnFetchReleaseNotes func(version string) (tag, notes string, err error)
 
 	// Cookie refresh callbacks
-	OnRecheckCookies func() (ytAuth bool, twAuth bool)
+	// OnRecheckCookies runs the auth check and reports what it CONCLUDED per
+	// platform. See cookieRecheckResultMsg for why the bool pair it used to
+	// return could not be worded truthfully.
+	OnRecheckCookies func() (yt, tw cookies.RefreshVerdict)
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if
 	// auto-cookies are not configured. It returns the pass's whole result
 	// rather than a bool: see cookieForceRefreshResultMsg for why the

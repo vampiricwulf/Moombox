@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
@@ -902,36 +902,27 @@ class MoomboxApp {
       }
     }
 
-    // 2. YT indicator (hidden if platform not active)
-    const ytEl = document.getElementById("yt-indicator");
-    if (ytEl) {
-      ytEl.style.display = ytActive ? "" : "none";
-      if (ytActive) {
-        if (this.autoCookieReloginRequired?.youtube && autoCookiesEnabled) {
-          ytEl.className = "indicator-error"; ytEl.title = "YouTube: Re-login required";
-        } else if (!this.cookieStatus?.found) {
-          ytEl.className = "indicator-warn"; ytEl.title = "YouTube: No cookies";
-        } else if (this.cookieStatus?.authenticated) {
-          ytEl.className = "indicator-ok"; ytEl.title = "YouTube: Authenticated";
-        } else {
-          ytEl.className = "indicator-error"; ytEl.title = "YouTube: Not verified";
-        }
-      }
-    }
-
-    // 3. TW indicator (hidden if platform not active)
-    const twEl = document.getElementById("tw-indicator");
-    if (twEl) {
-      twEl.style.display = twActive ? "" : "none";
-      if (twActive) {
-        if (this.autoCookieReloginRequired?.twitch && autoCookiesEnabled) {
-          twEl.className = "indicator-error"; twEl.title = "Twitch: Re-login required";
-        } else if (this.twitchAuthStatus?.authenticated) {
-          twEl.className = "indicator-ok"; twEl.title = "Twitch: Authenticated";
-        } else {
-          twEl.className = "indicator-off"; twEl.title = "Twitch: Anonymous";
-        }
-      }
+    // 2. + 3. Platform indicators (hidden if the platform is not active).
+    //
+    // Both branch chains now live in cookieIndicatorState, in utils.js, for
+    // two reasons. They had already drifted — YouTube had a no-cookies arm and
+    // Twitch did not, because the server sent no `found` for Twitch — and this
+    // decision is the one the whole three-state change exists to fix, so it
+    // has to be testable by EXECUTION rather than by matching source text.
+    // The relogin flag stays computed here: it is gated on auto_enabled, which
+    // is a config question and not the badge's.
+    for (const [platform, id, active, status] of [
+      ["youtube", "yt-indicator", ytActive, this.cookieStatus],
+      ["twitch", "tw-indicator", twActive, this.twitchAuthStatus],
+    ]) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.style.display = active ? "" : "none";
+      if (!active) continue;
+      const relogin = !!(this.autoCookieReloginRequired?.[platform] && autoCookiesEnabled);
+      const { className, title } = cookieIndicatorState(platform, status, relogin);
+      el.className = className;
+      el.title = title;
     }
 
     // 4. Hide refresh button if neither platform is active
