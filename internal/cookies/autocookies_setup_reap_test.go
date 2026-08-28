@@ -42,6 +42,21 @@ func captureKills(t *testing.T) *[]int {
 	return &killed
 }
 
+// jobReports fixes what the setup slot's Job Object says for one test, and
+// restores the real probe afterwards.
+//
+// This is the seam that makes the reap testable at all. The real
+// setupBrowserGone asks a Windows Job Object how many processes it still holds,
+// which needs a launched browser — and no test here may launch one. The two
+// booleans are the two axes that matter: whether the browser is gone, and
+// whether anything is in a position to say.
+func jobReports(t *testing.T, gone, known bool) {
+	t.Helper()
+	prev := setupBrowserGone
+	setupBrowserGone = func(*processJob) (bool, bool) { return gone, known }
+	t.Cleanup(func() { setupBrowserGone = prev })
+}
+
 // abandonedSetup puts the service into the exact state a walked-away-from setup
 // leaves behind: a browser process registered in the slot, the wait goroutine
 // having recorded its exit `exitedAgo` in the past, and nothing at all having
@@ -50,8 +65,15 @@ func captureKills(t *testing.T) *[]int {
 // That last part is the defect. The wait goroutines have always set
 // browserExited; no path ever acted on it, so the slot stayed occupied for the
 // life of the process and SetupInProgress stayed true with it.
+//
+// It also declares the browser genuinely gone, because a stamped exit is NOT
+// on its own enough for the reap to act — see setupBrowserGone. The Firefox
+// browser record with a job that can answer is a state only Task 3 (S5) makes
+// real; today the same slot state arises on the Chromium path, and the two
+// FinishSetup tests need the Firefox read path to have a profile to read.
 func abandonedSetup(t *testing.T, s *AutoCookieService, exitedAgo time.Duration) *os.Process {
 	t.Helper()
+	jobReports(t, true, true)
 	proc := &os.Process{Pid: abandonedSetupPid}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -339,5 +361,154 @@ func TestKillSetupProcessCannotBlockOnALauncherThatNeverPublishes(t *testing.T) 
 
 	if len(*killed) != 0 {
 		t.Fatalf("nothing was ever published, yet a kill was issued for %v", *killed)
+	}
+}
+
+// TestReapWillNotCloseAJobThatStillHasLiveProcesses is the fix for the one way
+// this change could destroy the thing it exists to protect.
+//
+// `browserExited` records that the process MOOMBOX SPAWNED exited. That is not
+// the browser. Firefox and its forks hand off to a separate process and the
+// launcher exits in ~170ms — measured, and written down in drainJob's doc,
+// where closing the Job Object at that moment was found to kill the browser
+// mid-load. A Chromium binary behind a shim, a `.bat`, msedge_proxy.exe, a snap
+// wrapper, or any custom path accepted through Settings does the same.
+//
+// So the slot below is the realistic one: the launcher exited well over an hour
+// ago, and the browser it started is still running with the user's login in it.
+// A reap here closes the Job Object, KILL_ON_JOB_CLOSE fires, and the window
+// they are typing into disappears. That is precisely the outcome the
+// no-sleeping-reaper ruling exists to prevent, arriving through a different
+// door.
+//
+// Asserted on the slot surviving a status poll — the most frequent reap
+// trigger. Against the first cut of this change (346733d) the poll reaps.
+func TestReapWillNotCloseAJobThatStillHasLiveProcesses(t *testing.T) {
+	captureKills(t)
+	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+	abandonedSetup(t, s, time.Hour)
+	// Overrides the helper's default: the launcher is gone, but the job still
+	// holds the real browser.
+	jobReports(t, false, true)
+
+	if !s.GetStatus().SetupInProgress {
+		t.Fatal("the reap released a setup whose Job Object still holds live processes — " +
+			"cleanupLocked closes that handle, and KILL_ON_JOB_CLOSE kills the browser " +
+			"the user is signed into")
+	}
+
+	s.mu.Lock()
+	proc, job := s.setupProcess, s.setupJob
+	s.mu.Unlock()
+	if proc == nil {
+		t.Fatal("the setup slot was cleared out from under a running browser")
+	}
+	_ = job
+}
+
+// TestReapWillNotFireWhenNothingCanSayTheBrowserIsGone is the same rule for the
+// case where there is no evidence at all rather than evidence of life.
+//
+// `known == false` is what the probe returns with no Job Object (every Firefox
+// setup today — S5 has not given that path one — and any Chromium launch where
+// newProcessJob failed) and on the platforms whose processJob cannot count.
+// drainJob draws the identical line on the same syscall: a zero from something
+// that cannot count means "nothing was waited on", not "the browser finished".
+//
+// Refusing to reap there costs the wedge staying put on those paths, which is
+// exactly the pre-existing behaviour. Reaping there would destroy live setups
+// 60 seconds in, on the default path for anyone whose default browser is
+// Firefox. The first is a gap; the second is a regression.
+func TestReapWillNotFireWhenNothingCanSayTheBrowserIsGone(t *testing.T) {
+	captureKills(t)
+	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+	abandonedSetup(t, s, time.Hour)
+	jobReports(t, false, false) // no job, or a job that cannot count
+
+	if !s.GetStatus().SetupInProgress {
+		t.Fatal("the reap released a setup on no evidence at all — a launcher exit is not " +
+			"a browser exit, and where nothing can tell the two apart the reap must not act")
+	}
+}
+
+// TestTheGraceIsMeasuredFromTheLastTimeTheSetupWasSeenAlive covers the reap's
+// one write.
+//
+// For a browser that outlives its launcher, setupRetainedSince is stamped at
+// the launcher's exit — seconds after the setup starts. Left alone, the browser
+// would burn its whole window while still running, and the moment it finally
+// closed the very next poll would reap with no grace left for the finish the
+// user is about to ask for. The reap therefore re-arms the clock every time it
+// finds the setup alive.
+func TestTheGraceIsMeasuredFromTheLastTimeTheSetupWasSeenAlive(t *testing.T) {
+	captureKills(t)
+	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+	abandonedSetup(t, s, time.Hour)
+	jobReports(t, false, true) // still running, an hour after the launcher went
+
+	if !s.GetStatus().SetupInProgress {
+		t.Fatal("fixture: a live setup must survive a poll")
+	}
+
+	// The browser closes. The stamp from an hour ago must not still be the one
+	// the grace is measured from.
+	jobReports(t, true, true)
+	if !s.GetStatus().SetupInProgress {
+		t.Fatal("the setup was reaped the instant its browser closed, with none of the grace " +
+			"window left — an hour-old launcher exit is not when the browser went away")
+	}
+}
+
+// TestSetupBrowserGoneRefusesToAnswerWithoutAJobObject pins the real probe's
+// default, since every other test in this file replaces it.
+//
+// The `known` half is the whole contract: no job, or a job on a platform whose
+// processJob cannot count, must answer "no idea" rather than "empty".
+func TestSetupBrowserGoneRefusesToAnswerWithoutAJobObject(t *testing.T) {
+	gone, known := setupBrowserGone(nil)
+	if known {
+		t.Error("setupBrowserGone claimed to know something with no Job Object to ask")
+	}
+	if gone {
+		t.Error("setupBrowserGone reported a browser gone with no Job Object to ask")
+	}
+}
+
+// TestCancelSucceedsWheneverTheUIIsOfferingIt pins the deliberate divergence
+// F-3 named: CancelSetup's gate is NOT setupInProgressLocked, and it must stay
+// a strict superset of it.
+//
+// The direction is what matters. A cancel may succeed on a slot GetStatus has
+// stopped advertising — that cancel is what tears a dead slot down. It must
+// never do the reverse and answer "nothing to cancel" while the dialog is still
+// showing the Cancel button that produced it.
+//
+// A guard, not a witness: at 6b00559 the two predicates were literally the same
+// expression, so it passed there for a reason that no longer holds.
+func TestCancelSucceedsWheneverTheUIIsOfferingIt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		exitedAgo time.Duration
+		gone      bool
+		known     bool
+	}{
+		{"a browser still running", time.Hour, false, true},
+		{"an exited browser inside its grace window", time.Second, true, true},
+		{"a launcher exit nothing can corroborate", time.Hour, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captureKills(t)
+			s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+			abandonedSetup(t, s, tc.exitedAgo)
+			jobReports(t, tc.gone, tc.known)
+
+			if !s.GetStatus().SetupInProgress {
+				t.Fatal("fixture: this state is supposed to be one the UI advertises")
+			}
+			if err := s.CancelSetup(); err != nil {
+				t.Fatalf("the UI is showing a Cancel button for this state and the cancel "+
+					"behind it reported nothing to cancel: %v", err)
+			}
+		})
 	}
 }

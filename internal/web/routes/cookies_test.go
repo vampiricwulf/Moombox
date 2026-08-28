@@ -311,7 +311,10 @@ func TestAppJSMatchesTheDeclinedCauses(t *testing.T) {
 // The unload beacon is deliberately on pagehide rather than beforeunload: the
 // beforeunload handler beside it can put a "Leave site?" confirm in front of
 // the user, and a beacon fired from there would cancel a setup they chose to
-// stay for.
+// stay for. pagehide's other case — the back/forward cache — is pinned too,
+// because it is the one that turns a fast path into a trap: a bfcache
+// round-trip would cancel a live setup on the server host AND clear the flag on
+// the way out, leaving the restored page with a dialog it can no longer cancel.
 func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 	for _, mod := range []struct {
 		path     string
@@ -331,9 +334,29 @@ func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 				"an abandoned wizard then blocks every setup and every periodic refresh "+
 				"until the grace window expires", mod.path)
 		}
-		if !strings.Contains(js, `window.addEventListener("pagehide"`) {
+		// Matched on the event registration alone, not on the handler's
+		// signature: a missing `e.persisted` must fail as a missing bfcache
+		// guard, not as "this is not pagehide".
+		const pagehide = `window.addEventListener("pagehide"`
+		hideAt := strings.Index(js, pagehide)
+		if hideAt < 0 {
 			t.Errorf("%s fires its cancel beacon from something other than pagehide; "+
 				"beforeunload can be cancelled by the user and would kill a setup they kept", mod.path)
+		} else {
+			// Bracketed to the handler body, not the file: `e.persisted`
+			// appearing anywhere else would prove nothing about this beacon.
+			hideBody := js[hideAt+len(pagehide):]
+			if end := strings.Index(hideBody, "});"); end >= 0 {
+				hideBody = hideBody[:end]
+			}
+			if !strings.Contains(hideBody, "e.persisted") {
+				t.Errorf("%s cancels the setup on a bfcache pagehide. That page is coming back, "+
+					"the setup it just killed is not, and the flag is cleared on the way out so the "+
+					"restored page cannot cancel either:\n%s", mod.path, hideBody)
+			}
+			if !strings.Contains(hideBody, `navigator.sendBeacon("/api/cookies/auto-setup/cancel")`) {
+				t.Errorf("%s's pagehide handler does not send the cancel beacon:\n%s", mod.path, hideBody)
+			}
 		}
 
 		// The Skip button, in the handler the timeout alert wires up. Checked as

@@ -23,4 +23,9 @@ func (j *processJob) close()                     {}
 // exactly today's behaviour.
 func (j *processJob) activeProcesses() (int, error) { return 0, nil }
 
+// queryable is always false — the zero above is "there is no job to count",
+// not "the job is empty", and setupBrowserGone must not confuse the two. See
+// job_windows.go for the version that can actually answer.
+func (j *processJob) queryable() bool { return false }
+
 func configureCmdSysProcAttr(*exec.Cmd) {}

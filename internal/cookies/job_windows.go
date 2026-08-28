@@ -163,6 +163,17 @@ func (j *processJob) activeProcesses() (int, error) {
 	return int(info.ActiveProcesses), nil
 }
 
+// queryable reports whether activeProcesses can return a MEANINGFUL count for
+// this job, as opposed to the zero it returns when there is nothing to ask.
+//
+// The distinction exists because a caller that acts on "the job is empty" must
+// not be handed the same answer for "there is no job". activeProcesses returns
+// (0, nil) for a nil receiver AND for an already-closed handle, both of which
+// are absence of information; only a live handle on a platform with real Job
+// Objects can say anything. See setupBrowserGone, whose whole contract is that
+// distinction, and drainJob, which draws the same line in prose.
+func (j *processJob) queryable() bool { return j != nil && j.handle != 0 }
+
 // close terminates all processes in the job and releases the handle.
 func (j *processJob) close() {
 	if j != nil && j.handle != 0 {

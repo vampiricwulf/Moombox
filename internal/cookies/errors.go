@@ -27,11 +27,10 @@ var (
 	// load-bearing rather than an oversight:
 	//
 	//   - CancelSetup treats a setup as active while `setupProcess != nil ||
-	//     setupClaimed`, the same expression GetStatus publishes as
-	//     SetupInProgress. The claim half counts because a cancel arriving
-	//     during StartSetup's preparation has a real setup to abort even though
-	//     no process exists yet — StartSetup's mid-preparation check is what
-	//     consumes it.
+	//     setupClaimed` — anything in the slot to tear down. The claim half
+	//     counts because a cancel arriving during StartSetup's preparation has a
+	//     real setup to abort even though no process exists yet — StartSetup's
+	//     mid-preparation check is what consumes it.
 	//   - FinishSetup requires `setupProcess != nil && setupBrowser != nil`. It
 	//     has to actually read cookies out of a specific browser, so a claim
 	//     with nothing behind it yet gives it nothing to finish.
@@ -41,6 +40,17 @@ var (
 	// to abort and nothing to harvest — but any caller reasoning about "is a
 	// setup in progress" must pick the producer it means rather than assume one
 	// answer covers both.
+	//
+	// A THIRD predicate now exists and neither producer uses it. Since the setup
+	// slot acquired a lifetime, `setupInProgressLocked()` — what GetStatus
+	// publishes as SetupInProgress, and what StartSetup and RefreshCookies gate
+	// on — excludes a slot whose browser is gone and whose grace has expired.
+	// CancelSetup's gate is a strict superset of it, so a cancel still succeeds
+	// whenever the UI is offering one; it just also succeeds on an expired slot
+	// nothing has reaped yet, which is the cancel that cleans it up. This
+	// paragraph exists because the sentence it replaced ("the same expression
+	// GetStatus publishes as SetupInProgress") went stale the moment that
+	// lifetime landed.
 	ErrNoSetupInProgress = errors.New("no cookie auto-setup in progress")
 
 	// ErrServiceStopped is returned by StartSetup once Stop has been called.

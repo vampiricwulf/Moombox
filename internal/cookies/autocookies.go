@@ -74,13 +74,30 @@ const (
 	// evidence of abandonment; reaping on the exit alone would pull the slot
 	// out from under the call that is about to succeed.
 	//
-	// 60s is not a guess. Both clients cap one FinishSetup at 60 seconds — the
-	// Web dialog's AbortController (settings.js / setup.js) and the TUI's
-	// finishCtx in cmd/moombox/tui_wiring.go — and FinishSetup re-stamps
-	// setupRetainedSince when it takes the slot, so a finish always gets a full
-	// window from the moment it started rather than whatever was left of one.
-	// The server-side worst case inside it is far shorter: the Firefox read
-	// retries (~2.5s) plus authVerifyTimeout (15s).
+	// 60s is not a guess, and the headroom is much thinner than it looks. Both
+	// clients cap one FinishSetup at 60 seconds — the Web dialog's
+	// AbortController (settings.js / setup.js) and the TUI's finishCtx in
+	// cmd/moombox/tui_wiring.go — and FinishSetup re-stamps setupRetainedSince
+	// when it takes the slot, so a finish always gets a full window from the
+	// moment it started rather than whatever was left of one.
+	//
+	// Server-side worst case inside that window, summed rather than sampled:
+	//
+	//   Firefox   firefoxGracefulCloseTimeout   8.0s
+	//             cdpCloseFlushDelay (force-kill) 0.5s
+	//             readFirefoxCookies retries    ~2.0s   (5 × 500ms)
+	//             authVerifyTimeout            15.0s
+	//                                        ≈ 25.5s
+	//   Chromium  cdpExtractTimeout            30.0s
+	//             taskkillDrainDelay            0.3s
+	//             authVerifyTimeout            15.0s
+	//                                        ≈ 45.3s
+	//
+	// plus merge / write / jar-load I/O in both columns. So the real margin is
+	// ~15s, not the ~42s an "authVerifyTimeout plus the read retries" reading
+	// suggests. DO NOT LOWER THIS TO 30s: a slow Chromium finish would be reaped
+	// mid-flight, which is precisely what the re-stamp above exists to prevent.
+	// Raising any of the four constants above eats the margin directly.
 	//
 	// It is also the longest an ABANDONED setup can wedge acquisition, which is
 	// the bug this whole change exists to fix, so it must not grow without a
@@ -368,30 +385,93 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 
 // --- setup slot lifecycle ---
 //
-// Three predicates and one reaper, all requiring s.mu, which together answer
-// "is the setup slot still in use?" without the answer being "yes, forever".
+// One liveness probe, three predicates and one reaper — the predicates and the
+// reaper all requiring s.mu — which together answer "is the setup slot still in
+// use?" without the answer being "yes, forever".
 //
 // It used to be "forever". The wait goroutines set browserExited when the user
 // closed the browser or walked away, and NOTHING ever cleared setupProcess, so
 // SetupInProgress stayed true and StartSetup, RefreshCookies and GetStatus all
 // kept refusing until the process restarted. One abandoned wizard wedged every
 // form of cookie acquisition for the lifetime of the run.
+//
+// The correction that shapes all of it: browserExited is a statement about the
+// PROCESS MOOMBOX SPAWNED, not about the browser. Where the two differ — every
+// Firefox-family launch, and any Chromium behind a shim — only the Job Object
+// knows, and where there is no Job Object nothing knows. See setupBrowserGone.
 
-// setupBrowserLiveLocked reports whether a setup browser is genuinely running:
-// a process was registered and its wait goroutine has not seen it exit.
+// setupBrowserGone reports whether every process the setup's Job Object was
+// tracking is gone, and — separately — whether anything could actually say.
+//
+// PROCESS EXIT IS A HINT; AN EMPTY JOB IS THE FACT. This is Arc 0's finding,
+// applied to the setup slot. `cmd.Wait()` returning tells us the process
+// MOOMBOX SPAWNED exited, which for a launcher is not the browser: Firefox and
+// its forks hand off and exit in ~170ms (measured — see drainJob's doc, where
+// closing the job at that moment was found to kill the browser mid-load), and
+// a Chromium binary behind a shim, a `.bat`, `msedge_proxy.exe`, a snap or any
+// custom path accepted through Settings does the same. Believing the hint
+// there would have the reap close a Job Object with the user's live login
+// inside it 60 seconds after they started typing.
+//
+// `known` false means NO ANSWER, and the caller must read that as "still
+// running" — never as "gone". drainJob draws the identical line on the same
+// syscall: a zero from a platform that cannot count is "nothing was waited on",
+// which is a different statement from "the browser finished".
+//
+// A package variable so tests can supply the answer a real Job Object gives on
+// a machine where no browser may be launched — the same seam convention as
+// detectBrowser, killProcessTree and writeCookieFile. Nothing in production
+// reassigns it.
+var setupBrowserGone = func(job *processJob) (gone, known bool) {
+	// queryable, not `job != nil`. activeProcesses answers 0 for three
+	// different situations and only one of them is "the job is empty": a nil
+	// job (every Firefox setup today — S5 has not given that path a Job Object
+	// yet — and any Chromium launch where newProcessJob failed), an
+	// already-closed handle, and a platform whose processJob cannot count at
+	// all. The type knows which it is; this does not.
+	if !job.queryable() {
+		return false, false
+	}
+	active, err := job.activeProcesses()
+	if err != nil {
+		return false, false
+	}
+	return active == 0, true
+}
+
+// setupBrowserLiveLocked reports whether a setup browser is still running.
+//
+// Three cases, in the order they are cheap:
+//
+//   - no process registered            → not live;
+//   - the spawned process has not exited → live, on the hint alone, which is
+//     sufficient in that direction: a running launcher means a running setup;
+//   - the spawned process HAS exited    → ask the Job Object, and treat "no
+//     answer" as live. See setupBrowserGone for why the hint cannot be trusted
+//     in this direction and what the consequence of trusting it would be.
 //
 // Caller must hold s.mu.
 func (s *AutoCookieService) setupBrowserLiveLocked() bool {
-	return s.setupProcess != nil && !s.browserExited
+	if s.setupProcess == nil {
+		return false
+	}
+	if !s.browserExited {
+		return true
+	}
+	gone, known := setupBrowserGone(s.setupJob)
+	return !(known && gone)
 }
 
-// setupRetainedLocked reports whether a setup whose browser has ALREADY exited
-// is still being held. It is the grace window, and its only purpose is to let a
-// FinishSetup that is in flight finish: see setupAbandonGrace.
+// setupRetainedLocked reports whether a setup whose spawned process has ALREADY
+// exited is still being held. It is the grace window, and its only purpose is
+// to let a FinishSetup that is in flight finish: see setupAbandonGrace.
 //
 // The distinction from setupBrowserLiveLocked matters because the two decay
-// differently — "live" ends when the browser dies, "retained" ends on a clock —
-// and because only the retained state is ever reaped.
+// differently — "live" ends when the browser is observed to be gone, "retained"
+// ends on a clock — and because only the retained state is ever reaped. The two
+// overlap while a launcher has exited but its browser has not; that is
+// deliberate, since both disjuncts of setupInProgressLocked say "hands off" and
+// the reap tests them in order.
 //
 // Caller must hold s.mu.
 func (s *AutoCookieService) setupRetainedLocked() bool {
@@ -399,11 +479,15 @@ func (s *AutoCookieService) setupRetainedLocked() bool {
 		time.Since(s.setupRetainedSince) < setupAbandonGrace
 }
 
-// setupInProgressLocked is the one predicate the consumers share: GetStatus
-// publishes it as SetupInProgress, StartSetup refuses on it and
+// setupInProgressLocked is the predicate the three ACQUISITION consumers share:
+// GetStatus publishes it as SetupInProgress, StartSetup refuses on it and
 // RefreshCookiesDetailed declines on it. Keeping it in one place is the point —
-// the four sites used to spell `setupProcess != nil || setupClaimed` out
-// individually, and a fix applied to three of them would have been silent.
+// all three used to spell `setupProcess != nil || setupClaimed` out
+// individually, and a fix applied to two of them would have been silent.
+//
+// CancelSetup is the fourth reader of that old expression and is DELIBERATELY
+// NOT MIGRATED; see its doc for why the two predicates are now different, and
+// in which direction.
 //
 // The claim is in it for the reason CancelSetup's doc gives: between
 // StartSetup's gate and the browser launch there is no process yet, but there
@@ -414,9 +498,14 @@ func (s *AutoCookieService) setupInProgressLocked() bool {
 	return s.setupClaimed || s.setupBrowserLiveLocked() || s.setupRetainedLocked()
 }
 
-// reapAbandonedSetupLocked releases a setup whose browser exited and whose
+// reapAbandonedSetupLocked releases a setup whose browser is gone and whose
 // grace window has run out. Called INLINE by the three consumers that are about
 // to test setupInProgressLocked, each already holding s.mu.
+//
+// IT NEVER CLOSES A JOB OBJECT THAT STILL HAS PROCESSES IN IT. The liveness
+// test is setupBrowserLiveLocked, which asks the job rather than trusting the
+// spawned process's exit, and which answers "live" whenever nothing can say.
+// Read its doc before changing the order of the tests below.
 //
 // THERE IS DELIBERATELY NO REAPER GOROUTINE, and one must never be added. A
 // reaper that sleeps and then takes the lock decides what to reap at a moment
@@ -434,12 +523,23 @@ func (s *AutoCookieService) reapAbandonedSetupLocked() {
 	if s.setupProcess == nil || s.setupClaimed {
 		return // nothing registered, or a StartSetup owns the slot right now
 	}
-	if s.setupBrowserLiveLocked() || s.setupRetainedLocked() {
+	if s.setupBrowserLiveLocked() {
+		// Re-arm the grace from the last moment the setup was OBSERVED alive,
+		// not from the moment its launcher exited. Without this a browser that
+		// outlives its launcher — the whole reason the job is consulted above —
+		// would burn its entire window while still running, and be reaped the
+		// instant it closed with no grace left for the finish the user is about
+		// to ask for. Best-effort, because it only advances when someone looks;
+		// FinishSetup's own stamp is what guarantees a finish its full window.
+		s.setupRetainedSince = time.Now()
+		return
+	}
+	if s.setupRetainedLocked() {
 		return
 	}
 	if s.logger != nil {
-		s.logger.Info("releasing an abandoned cookie setup — its browser exited and no finish followed",
-			"exited", time.Since(s.setupRetainedSince).Round(time.Second).String()+" ago",
+		s.logger.Info("releasing an abandoned cookie setup — its browser is gone and no finish followed",
+			"last_seen_alive", time.Since(s.setupRetainedSince).Round(time.Second).String()+" ago",
 			"platform", s.targetPlatform)
 	}
 	s.cleanupLocked()
@@ -870,12 +970,26 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 // CancelSetup aborts an in-flight setup: it raises the cancelled flag, kills
 // the setup browser if one is running, and clears the per-setup state.
 //
-// "In flight" is `setupProcess != nil || setupClaimed` — deliberately the same
-// expression GetStatus publishes as SetupInProgress, so a cancel succeeds
-// exactly when the UI is showing the Cancel button that produced it. The claim
-// half is not a technicality: between StartSetup's gate and the browser launch
-// there is no process yet, but there IS a setup to cancel, and StartSetup's
-// mid-preparation check is what consumes the flag this call raises.
+// "In flight" is `setupProcess != nil || setupClaimed`: there is something in
+// the slot to tear down. The claim half is not a technicality — between
+// StartSetup's gate and the browser launch there is no process yet, but there
+// IS a setup to cancel, and StartSetup's mid-preparation check is what consumes
+// the flag this call raises.
+//
+// THAT IS DELIBERATELY NOT setupInProgressLocked, AND IT IS DELIBERATELY WIDER.
+// It used to be the identical expression, and this doc used to say so; the
+// setup slot now expires, so the two have to diverge and the direction of the
+// divergence is the whole point. Every disjunct of setupInProgressLocked
+// implies `setupClaimed || setupProcess != nil`, so this gate is a strict
+// SUPERSET: a cancel can never answer "nothing to cancel" while the UI is still
+// showing the Cancel button that produced it. The converse — a slot that has
+// expired but not yet been reaped reports SetupInProgress false while a cancel
+// still succeeds — is the useful direction: that cancel is what tears the dead
+// slot down, and answering 404 while leaving state behind would be worse.
+//
+// Narrowing this to setupInProgressLocked would therefore need a fourth reap
+// site to stay coherent, and would trade a cancel that cleans up for one that
+// declines. Don't.
 //
 // Returns ErrNoSetupInProgress when there was nothing to cancel — a second
 // cancel, or a cancel with no setup ever started. This used to return nothing
@@ -883,6 +997,8 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 // cancelling twice reported a cancel that never happened.
 func (s *AutoCookieService) CancelSetup() error {
 	s.mu.Lock()
+	// Deliberately a superset of setupInProgressLocked — see above. Not a
+	// missed migration.
 	if s.setupProcess == nil && !s.setupClaimed {
 		s.mu.Unlock()
 		return ErrNoSetupInProgress

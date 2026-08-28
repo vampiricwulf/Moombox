@@ -94,6 +94,12 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	// the only process this job can hold is a setup browser from an attempt the
 	// gate has already declared over. It happens BEFORE cmd.Process is assigned
 	// to the new job, so it cannot touch the browser we just launched.
+	//
+	// DEFENCE-IN-DEPTH WITH NO TEST BEHIND IT, deliberately. Reaching this line
+	// with a non-nil handle is unreachable by construction, and covering it
+	// would need a process that actually launches, which no test in this
+	// package may do — see TestReapClosesTheFirstAttemptsJobObject, which pins
+	// the reap's close and says so rather than claiming this one.
 	if s.setupJob != nil {
 		s.logger.Warn("closing a setup Job Object left behind by an earlier attempt")
 		s.setupJob.close()

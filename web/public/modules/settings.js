@@ -411,7 +411,23 @@ export class SettingsController {
     // stay. pagehide only fires once the page really is going. sendBeacon
     // survives the unload where fetch does not (player.js does the same for the
     // resume position); its POST carries an Origin, so it passes CSRF.
-    window.addEventListener("pagehide", () => {
+    //
+    // e.persisted is the other half of picking pagehide. It also fires when the
+    // page goes into the back/forward cache — a back navigation, or a phone
+    // backgrounding the tab — and that page is coming BACK. Cancelling there
+    // kills a live setup (on the server host, which in a LAN or Docker
+    // deployment is not even the same machine) and, because the flag is cleared
+    // on the way out, leaves the restored page unable to cancel it: the dialog
+    // is still up, "I'm Logged In" 404s, and nothing can clean up. Skipping the
+    // bfcache case needs no pageshow re-arm precisely because the flag is left
+    // alone.
+    //
+    // visibilitychange, the event usually paired with pagehide for unload
+    // reliability, must NOT be added here for the same reason only louder: the
+    // one thing this flow asks of the user is to switch to the browser window
+    // Moombox just opened, which hides this tab.
+    window.addEventListener("pagehide", (e) => {
+      if (e.persisted) return;
       if (!this._cookieSetupActive) return;
       this._cookieSetupActive = false;
       navigator.sendBeacon("/api/cookies/auto-setup/cancel");
