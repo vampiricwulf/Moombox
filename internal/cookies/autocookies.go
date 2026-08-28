@@ -795,14 +795,65 @@ func (r RefreshResult) HasCredentials(platform string) bool {
 	}
 }
 
-// anyVerified is the whole-service bool RefreshCookies has always returned:
-// at least one platform is conclusively authenticated.
-func (r RefreshResult) anyVerified() bool {
-	return r.YouTube == RefreshOK || r.Twitch == RefreshOK
+// Overall folds the per-platform verdicts into the single verdict a
+// whole-service caller can render. It is the one place that fold happens.
+//
+//   - RefreshOK: at least one platform is conclusively authenticated, so
+//     authenticated work is possible.
+//   - RefreshFailed: no platform verified AND at least one was conclusively
+//     found unauthenticated. Conclusive, and the only branch entitled to
+//     report a verification failure.
+//   - RefreshUnknown: nothing conclusive either way. Says nothing about the
+//     credentials — most of the ways to get here leave a perfectly healthy
+//     session.
+//
+// Unknown covers two very different events and callers MUST NOT word them the
+// same: a pass that declined before doing any work, and a pass that ran and
+// could not find out. Ran draws exactly that line — see its field comment, and
+// cookieRefreshReportFor in cmd/moombox/services.go for the vocabulary.
+func (r RefreshResult) Overall() RefreshVerdict {
+	switch {
+	case r.YouTube == RefreshOK || r.Twitch == RefreshOK:
+		return RefreshOK
+	case r.YouTube == RefreshFailed || r.Twitch == RefreshFailed:
+		return RefreshFailed
+	default:
+		return RefreshUnknown
+	}
 }
 
+// AnyVerified is the whole-service bool RefreshCookies has always returned:
+// at least one platform is conclusively authenticated.
+//
+// Exported because the Web and TUI wirings each hand-rolled this same OR over
+// the two verdict fields, which is two copies of a rule that has to agree.
+// Derived from Overall so there is a single fold rather than a second one that
+// can drift from it.
+func (r RefreshResult) AnyVerified() bool {
+	return r.Overall() == RefreshOK
+}
+
+// RefreshDeclinedCauses names every way a refresh pass can decline with a NIL
+// error, for UI copy that has to explain a decline without naming a cause it
+// cannot know.
+//
+// Exactly three, and the list must stay exhaustive: the two slot conflicts at
+// the top of RefreshCookiesDetailed (setup in progress, refresh already in
+// flight) and the empty refreshPlatforms() gate. The other two refreshDeclined()
+// returns — no browser and no profile, profile not found — both carry an error,
+// so every caller has already branched away before it reaches this text.
+//
+// Exported because three surfaces render it (the worker's log via
+// cookieRefreshReportFor, the TUI's R F feedback, and the Web toast) and they
+// had already begun to drift — "cookies to refresh" against "cookies worth
+// refreshing" — with nothing to catch it. The Go callers share this constant;
+// the Web copy is pinned against it by a test, since app.js cannot import it.
+const RefreshDeclinedCauses = "a setup or another refresh is already in flight, " +
+	"or no platform has cookies worth refreshing"
+
 // refreshDeclined is the result of a pass that did no work: it says nothing
-// about either platform, because it never looked.
+// about either platform, because it never looked. See RefreshDeclinedCauses for
+// the ways to get here with a nil error.
 func refreshDeclined() RefreshResult { return RefreshResult{} }
 
 // refreshAborted is the result of a pass that started work and stopped before
@@ -835,7 +886,7 @@ func verdictOf(p platformAuth) RefreshVerdict {
 // RefreshCookiesDetailed instead — see RefreshResult.
 func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	result, err := s.RefreshCookiesDetailed(ctx)
-	return result.anyVerified(), err
+	return result.AnyVerified(), err
 }
 
 // RefreshCookiesDetailed performs a headless browser visit to refresh cookies
@@ -948,13 +999,22 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 				netscapeCookies, err = "", nil
 			}
 		} else {
-			netscapeCookies, err = s.refreshChromium(ctx, browser)
-			// Chromium needs no screenshot to prove it ran. refreshChromium
-			// waits for the CDP endpoint, navigates, and RETURNS what it read
-			// back over that connection — a nil error means the browser was
-			// alive and answering, which is proof of the same order as the
-			// Firefox screenshot and already in hand.
-			browserActed = err == nil
+			// Chromium needs no screenshot: the navigations are driven over
+			// CDP, so each one reports its own outcome and refreshChromium
+			// ANDs them, exactly as refreshFirefox ANDs its per-launch
+			// verdicts. It is a weaker signal than the Firefox screenshot —
+			// "no navigation reported a transport failure", see
+			// refreshChromium — but it is the one this path can produce.
+			//
+			// The READ error alone is not it, which is what this used to take
+			// it for. That error comes from cdpGetCookiesAsNetscape, and the
+			// read is satisfied by a profile the previous session already
+			// populated — so every navigation could have failed and the pass
+			// would still have claimed it renewed the credentials. Both halves
+			// are required.
+			var navigated bool
+			netscapeCookies, navigated, err = s.refreshChromium(ctx, browser)
+			browserActed = err == nil && navigated
 		}
 	}
 

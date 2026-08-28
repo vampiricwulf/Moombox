@@ -284,7 +284,8 @@ type sessionAuthBody interface{ ~string | ~[]byte }
 // sessionAuthWordAt reports whether word sits at b[i:] as a complete token —
 // i.e. not merely as the prefix of a longer identifier, so `truthy` does not
 // read as `true`. Byte-by-byte rather than a slice conversion so no []byte
-// ever becomes a string here; see TestSessionAuthFromBytesDoesNotAllocate.
+// ever becomes a string here; see TestLivenessVerdictDoesNotAllocate, which is
+// now the only byte-side allocation pin.
 func sessionAuthWordAt[T sessionAuthBody](b T, i int, word string) bool {
 	if i < 0 || i+len(word) > len(b) {
 		return false
@@ -355,9 +356,9 @@ func sessionAuthMarkerAt[T sessionAuthBody](b T, i int) (SessionAuthState, bool)
 // previous match, so the Index scans partition the body.
 //
 // Twinned with sessionAuthMarkerInBytes below. The two differ ONLY in
-// strings.Index vs bytes.Index, which is the same reason watchPageSessionAuth
-// and sessionAuthFromBytes are separate functions; everything that decides a
-// verdict is shared through sessionAuthMarkerAt.
+// strings.Index vs bytes.Index — the watch-page path holds a string, the
+// liveness path holds a ~1MB page it must not copy to read one flag — and
+// everything that decides a verdict is shared through sessionAuthMarkerAt.
 func sessionAuthMarkerInString(html, key string) (SessionAuthState, bool) {
 	for from := 0; from <= len(html)-len(key); {
 		i := strings.Index(html[from:], key)
@@ -374,8 +375,8 @@ func sessionAuthMarkerInString(html, key string) (SessionAuthState, bool) {
 }
 
 // sessionAuthMarkerInBytes is sessionAuthMarkerInString over raw bytes. Keep
-// the two in step; TestSessionAuthFromBytesMatchesStringVersion enforces it
-// through their callers.
+// the two in step; TestMarkerLookupTwinsAgree enforces it on the twins
+// themselves.
 //
 // The []byte(key) conversion is hoisted out of the loop and never escapes
 // (bytes.Index does not retain it), which is what keeps the zero-allocation

@@ -725,8 +725,10 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	// now". shouldFireRecovery's first-check branch returns this value, and
 	// the complete-set predicates cannot tell a never-configured platform
 	// from one whose LOGIN_INFO YouTube has cleared, or from a Twitch session
-	// whose HttpOnly auth-token an exporter dropped — the exact states that
-	// must be reported, and that were silent forever.
+	// whose auth-token was pruned out on expiry while twilight-user survived
+	// (the jar ignores expiry, mergeCookieFiles prunes on it — see
+	// twitchAuthCookieNames) — the exact states that must be reported, and
+	// that were silent forever.
 	hasYTCookies := rs.jar.HasAnyYouTubeAuthCookie()
 	hasTWCookies := rs.jar.HasAnyTwitchAuthCookie()
 

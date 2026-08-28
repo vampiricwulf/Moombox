@@ -283,20 +283,23 @@ func (s *runState) runTUI() {
 		return status.YouTubeAuthenticated, status.TwitchAuthenticated
 	}
 	if s.cfg.Cookies.AutoEnabled {
-		app.OnForceRefreshCookies = func() (ok, renewed bool, err error) {
+		app.OnForceRefreshCookies = func() (cookies.RefreshResult, error) {
 			s.log.Info("Browser cookie refresh requested from TUI")
 			refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer refreshCancel()
-			// Detailed, for `Renewed` alone. R F is a key the operator presses
-			// to ask whether the browser refresh works; answering with a bool
-			// that only says "the cookies on disk still authenticate" reports
-			// success for a refresh that did nothing.
+			// The whole result, not a flattened bool. R F is a key the operator
+			// presses to ask whether the browser refresh works, and three of
+			// the four answers it can get are distinct: the cookies on disk
+			// still authenticate (Overall), this pass produced them (Renewed),
+			// and this pass did any work at all (Ran). Flattening lost the
+			// last two — reporting success for a refresh that did nothing, and
+			// reporting a verification failure for a pass that never looked.
 			result, err := s.autoCookieSvc.RefreshCookiesDetailed(refreshCtx)
 			if err != nil {
-				return false, false, err
+				return result, err
 			}
 			s.cookieRefresh.CheckNow(context.Background())
-			return result.YouTube == cookies.RefreshOK || result.Twitch == cookies.RefreshOK, result.Renewed, nil
+			return result, nil
 		}
 	}
 

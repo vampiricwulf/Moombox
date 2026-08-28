@@ -253,7 +253,13 @@ func feedbackColor(msg string) color.Color {
 	if strings.HasPrefix(msg, "Can only") || strings.HasPrefix(msg, "Trim only") ||
 		strings.HasPrefix(msg, "No update") || strings.HasPrefix(msg, "No stream") ||
 		strings.HasPrefix(msg, "A trim is already") ||
-		strings.Contains(lower, "no cookies acquired") ||
+		// The two "we did not find out" cookie-refresh outcomes. They must
+		// NOT reach the error branch above: a pass that declined to run, or
+		// that ran without concluding, has established nothing about the
+		// credentials, and a red line is an alarm the operator then has to
+		// chase. Only a conclusive verdict says "failed" and earns red.
+		strings.Contains(lower, "declined to run") ||
+		strings.Contains(lower, "could not establish") ||
 		strings.Contains(lower, "not authenticated") ||
 		strings.Contains(lower, "no platforms") ||
 		strings.Contains(lower, "already exists") ||

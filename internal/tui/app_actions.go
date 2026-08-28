@@ -175,8 +175,8 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setFeedback("Running browser cookie refresh...")
 			refreshFn := a.OnForceRefreshCookies
 			return a, safeCmd(func() tea.Msg {
-				ok, renewed, err := refreshFn()
-				return cookieForceRefreshResultMsg{Success: ok, Renewed: renewed, Err: err}
+				result, err := refreshFn()
+				return cookieForceRefreshResultMsg{Result: result, Err: err}
 			})
 		}
 	case "R V":

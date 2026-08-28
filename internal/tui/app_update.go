@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -363,24 +364,46 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case cookieForceRefreshResultMsg:
-		// Three outcomes, not two. Success says the cookies work; Renewed says
-		// THIS pass produced them. A browser that never ran leaves a working
-		// cookies.txt behind — the background session refresh keeps it alive —
-		// so success alone reported "successful" for a refresh that did
-		// nothing, one line after the log said it could not confirm it had,
-		// and while the Last refresh time refused to move.
+		// Six arms where there were four, because three independent facts come
+		// back and each can disagree with the others:
 		//
-		// The middle message stops at "could not confirm" on purpose: with no
-		// Job Object to drain (Linux, or a job we failed to create) a browser
-		// that finished after we looked is indistinguishable from one that
-		// never started. Asserting it failed would swap one wrong claim for
-		// its mirror image.
+		//   Ran      did this pass do any work at all?
+		//   Overall  what did it conclude about the credentials, if anything?
+		//   Renewed  did THIS pass produce the credentials it verified?
+		//
+		// A browser that never ran leaves a working cookies.txt behind — the
+		// background session refresh keeps it alive — so the verdict alone
+		// reported "successful" for a refresh that did nothing, one line after
+		// the log said it could not confirm it had, and while the Last refresh
+		// time refused to move. That is the Renewed arm.
+		//
+		// The Ran arm is the mirror image, and the one that was live: the
+		// single refresh slot is held by the 30-minute tick and by interactive
+		// setup, so pressing this key while either is in flight returns a pass
+		// that never looked at anything — and that reported "no cookies
+		// acquired" for cookies the same screen showed as authenticated.
+		//
+		// Both un-concluded arms stop short of asserting failure, deliberately.
+		// A browser that finished after we looked and one that never started
+		// are indistinguishable from here, and an un-run verification says
+		// nothing whatever about the credentials. Only Overall == RefreshFailed
+		// earns the word "failed"; the wording of the other two follows
+		// cookieRefreshReportFor in cmd/moombox/services.go, which draws the
+		// same three-way line for the worker's log.
 		switch {
 		case msg.Err != nil:
 			a.setFeedback("Browser cookie refresh failed: " + msg.Err.Error())
-		case !msg.Success:
-			a.setFeedback("Browser cookie refresh: no cookies acquired")
-		case !msg.Renewed:
+		case !msg.Result.Ran:
+			// Causes from the shared constant, not restated: this line, the
+			// worker's log note and the Web toast are three renderings of one
+			// exhaustive list, and they had already drifted apart once.
+			a.setFeedback("Browser cookie refresh declined to run (" + cookies.RefreshDeclinedCauses +
+				") — nothing was learned about these cookies")
+		case msg.Result.Overall() == cookies.RefreshFailed:
+			a.setFeedback("Browser cookie refresh ran and auth verification failed")
+		case msg.Result.Overall() == cookies.RefreshUnknown:
+			a.setFeedback("Browser cookie refresh ran but could not establish whether these cookies work")
+		case !msg.Result.Renewed:
 			a.setFeedback("Cookies still work, but this pass could not confirm the browser refreshed them")
 		default:
 			a.setFeedback("Browser cookie refresh successful")
