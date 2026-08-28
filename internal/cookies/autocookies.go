@@ -2115,15 +2115,45 @@ var killProcessTree = func(proc *os.Process) {
 // errors before assigning cannot make Stop() hang; past the cap the
 // mid-preparation cancel check is what stops the launch, and what is left is a
 // sub-second window between that check and cmd.Start() returning.
+//
+// IT WILL NOT SHELL A TASKKILL AT A PID THAT HAS ALREADY BEEN REAPED. Once the
+// spawned process has exited AND a live Job Object is holding whatever it
+// handed off to, this PID identifies nothing: Windows recycles PIDs, so the
+// kill can only ever land on an unrelated process, and the thing it was meant
+// to reach is killed by cleanupLocked closing the job a moment later. That
+// last clause is the guard's premise, so it is checked rather than assumed:
+// ALL FOUR callers — CancelSetup, Stop, FinishSetup's Chromium branch, and
+// startChromiumSetup's CDP-timeout bail — call cleanup() immediately after
+// this, so the job always gets its turn. A fifth caller that does not must not
+// rely on this.
+//
+// That state is the NORMAL one on the Firefox family, where the launcher hands
+// off and exits in ~170ms, and it is why this guard arrived with the setup Job
+// Object rather than before it: until the job existed, killing the stale PID
+// was the only thing that even pretended to help. It is the same rule
+// runWithTimeout applies with onLauncherReaped, which stops advertising a
+// reaped PID for exactly this reason.
+//
+// It does NOT make killing-by-PID safe in general, and does not try to. Where
+// no job can vouch for the browser — a failed assign, and every non-Windows
+// target, where queryable() is always false — the kill still runs, because
+// there it is the only thing that can work.
 func (s *AutoCookieService) killSetupProcess() {
 	deadline := time.Now().Add(launchWindowKillBudget)
 	for {
 		s.mu.Lock()
 		proc := s.setupProcess
 		claimed := s.setupClaimed
+		// Read under the same lock as proc: the question is whether THIS
+		// process is still a thing worth killing, and both halves of the answer
+		// have to describe the same instant.
+		reapedPID := s.browserExited && s.setupJob.queryable()
 		s.mu.Unlock()
 
 		if proc != nil {
+			if reapedPID {
+				return // the job will do it; this PID belongs to whoever Windows gave it to next
+			}
 			killProcessTree(proc)
 			time.Sleep(taskkillDrainDelay)
 			return
@@ -2226,6 +2256,52 @@ func (s *AutoCookieService) cleanupLocked() {
 	s.setupRetainedSince = time.Time{}
 	s.cdpPort = 0
 	s.targetPlatform = ""
+}
+
+// assignProcessToJob is processJob.assign behind a package variable, so a test
+// can induce the failure trackedSetupJob exists to handle. That failure needs a
+// hostile process state — a handle that cannot be opened for
+// PROCESS_SET_QUOTA|PROCESS_TERMINATE, or an AssignProcessToJobObject refusal —
+// which no test in this package can arrange without launching something. Same
+// seam convention as setupBrowserGone, killProcessTree and writeCookieFile;
+// nothing in production reassigns it.
+var assignProcessToJob = func(job *processJob, p *os.Process) error { return job.assign(p) }
+
+// trackedSetupJob puts a launched setup browser under its Job Object and
+// returns the job the setup slot should own — nil when nothing is actually
+// being tracked. Both launchers call it, so the decision below is made once.
+//
+// A JOB THAT TRACKS NOTHING IS WORSE THAN NO JOB. Its handle is live, so
+// queryable() is true and activeProcesses() answers 0 — and setupBrowserGone
+// reads that pair as a POSITIVE "the browser is gone". The reap would then
+// release a setup whose browser is still on screen. It cannot kill that
+// browser (nothing is in the job for KILL_ON_JOB_CLOSE to take), so the
+// consequence is a premature release: the user's next "I'm logged in" answers
+// ErrNoSetupInProgress. Dropping the job instead makes the probe say "no idea",
+// which is the honest reading of a failed assign, and leaves the slot alone.
+//
+// Dropping loses nothing. A job with a failed assign provides neither the
+// crash-time cleanup nor the count it was created for, because the launcher's
+// children join the launcher's OWN job, not this one.
+//
+// NOTE THE ASYMMETRY WITH runWithTimeout, which keeps a failed-assign job on
+// purpose. Correct there, and for the same underlying rule: drainJob reads its
+// zero as "nothing was waited on", never as "the browser finished". The two
+// paths differ because their readers differ.
+func (s *AutoCookieService) trackedSetupJob(job *processJob, proc *os.Process, family string) *processJob {
+	if job == nil {
+		return nil
+	}
+	if err := assignProcessToJob(job, proc); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to assign setup process to job object — dropping the job "+
+				"rather than let an empty one look like a closed browser",
+				"family", family, "pid", proc.Pid, "err", err)
+		}
+		job.close()
+		return nil
+	}
+	return job
 }
 
 // adoptSetupJobLocked hands ownership of a freshly created Job Object to the

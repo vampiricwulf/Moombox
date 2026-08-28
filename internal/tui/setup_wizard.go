@@ -16,6 +16,34 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
+// cookieSetupCountdownSeconds is how long the wizard waits for the user to
+// finish signing in before it fires OnCancelAutoCookie. ONE constant, six call
+// sites — it was the bare literal 60 in all six, which is how it stayed at a
+// value its own job had outgrown.
+//
+// IT IS NOT A SAFETY MECHANISM ANY MORE, and that is the whole reason for the
+// number. It used to be the only backstop against an abandoned setup wedging
+// every form of cookie acquisition for the rest of the run, which is why it was
+// aggressive. The server-side reap is that backstop now
+// (cookies.reapAbandonedSetupLocked): it has its own grace window, it is keyed
+// on the browser actually being GONE rather than on a clock, and it runs
+// whether or not any client survived to say anything. So this countdown only
+// bounds a human who walked away, and it should never expire on one who is
+// still typing.
+//
+// Sixty seconds could not cover an email, a password and a 2FA code, and since
+// cookies.cleanupLocked started closing the setup Job Object on the Firefox
+// family too, expiry DESTROYS the window being typed into rather than merely
+// abandoning it. Five minutes is chosen to be longer than any login, not to be
+// a tight bound: a deliberate cancel is always one Esc away, and the reap
+// collects whatever this misses.
+//
+// Raising it further is safe from this side. What it does NOT interact with is
+// the 60-second cap both clients put on one FinishSetup call — the TUI's
+// finishCtx in cmd/moombox/tui_wiring.go and the Web dialog's AbortController —
+// which is priced against cookies.setupAbandonGrace and must stay where it is.
+const cookieSetupCountdownSeconds = 300
+
 // cookieCountdownTickMsg is sent every second to decrement the cookie timeout
 // countdown. gen identifies the tick chain — ticks from a superseded chain are
 // ignored so stacked chains can't drain the countdown N per second.
@@ -625,7 +653,7 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 					return ""
 				}
 				m.cookieActive = true
-				m.cookieCountdown = 60
+				m.cookieCountdown = cookieSetupCountdownSeconds
 				m.spinner = newSpinner()
 			}
 			return ""
@@ -657,7 +685,7 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 				} else {
 					m.cookieActive = true
 					m.cookiePlatform = "youtube"
-					m.cookieCountdown = 60
+					m.cookieCountdown = cookieSetupCountdownSeconds
 					m.cookieTimedOut = false
 					m.spinner = newSpinner()
 				}
@@ -669,7 +697,7 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 				} else {
 					m.cookieActive = true
 					m.cookiePlatform = "twitch"
-					m.cookieCountdown = 60
+					m.cookieCountdown = cookieSetupCountdownSeconds
 					m.cookieTimedOut = false
 					m.spinner = newSpinner()
 				}
@@ -939,7 +967,7 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 					return ""
 				}
 				m.cookieActive = true
-				m.cookieCountdown = 60
+				m.cookieCountdown = cookieSetupCountdownSeconds
 				m.spinner = newSpinner()
 			}
 			return ""
@@ -974,7 +1002,7 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 				} else {
 					m.cookieActive = true
 					m.cookiePlatform = "youtube"
-					m.cookieCountdown = 60
+					m.cookieCountdown = cookieSetupCountdownSeconds
 					m.cookieTimedOut = false
 					m.spinner = newSpinner()
 				}
@@ -986,7 +1014,7 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 				} else {
 					m.cookieActive = true
 					m.cookiePlatform = "twitch"
-					m.cookieCountdown = 60
+					m.cookieCountdown = cookieSetupCountdownSeconds
 					m.cookieTimedOut = false
 					m.spinner = newSpinner()
 				}

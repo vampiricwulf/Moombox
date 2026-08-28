@@ -86,20 +86,9 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 	}
 
 	// Assign immediately, before the launcher can hand off: a child created
-	// before the assign lands is never tracked by the job.
-	if job != nil {
-		if assignErr := job.assign(cmd.Process); assignErr != nil {
-			s.logger.Warn("failed to assign firefox setup process to job object",
-				"pid", cmd.Process.Pid, "err", assignErr)
-			// A job tracking nothing is worse than no job at all here — it
-			// reports an empty job from a live handle, which reads as "the
-			// browser is gone" and licenses the reap to release a setup the
-			// user is still signed into. Drop it and let the probe say "no
-			// idea" instead. Same reasoning as the Chromium path.
-			job.close()
-			job = nil
-		}
-	}
+	// before the assign lands is never tracked by the job. Returns nil if the
+	// assign failed — see trackedSetupJob.
+	job = s.trackedSetupJob(job, cmd.Process, "firefox")
 
 	s.mu.Lock()
 	s.setupProcess = cmd.Process

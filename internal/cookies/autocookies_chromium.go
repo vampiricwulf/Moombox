@@ -78,20 +78,19 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		return fmt.Errorf("start browser: %w", err)
 	}
 
-	if job != nil {
-		if assignErr := job.assign(cmd.Process); assignErr != nil {
-			s.logger.Warn("failed to assign chromium setup process to job object",
-				"pid", cmd.Process.Pid, "err", assignErr)
-			// Do not keep a job that tracks nothing. It would answer
-			// activeProcesses() == 0 from a LIVE handle, which setupBrowserGone
-			// reads as "the browser is gone" — and the reap would then release a
-			// setup whose browser is still on screen. A nil job answers "no
-			// idea", which is the honest reading of a failed assign and leaves
-			// the slot alone. See setupBrowserGone.
-			job.close()
-			job = nil
-		}
-	}
+	// Assign immediately after start so children are tracked from the beginning.
+	// Returns nil if the assign failed — see trackedSetupJob for why a job that
+	// tracks nothing must not be kept.
+	//
+	// COVERAGE, stated rather than implied: trackedSetupJob's own behaviour is
+	// pinned by TestTrackedSetupJobDropsAJobItCouldNotAssignTo, and
+	// TestAFirefoxSetupWithAFailedAssignStoresNoJob proves the Firefox launcher
+	// routes through it. THIS line — that the Chromium launcher does too — is
+	// reviewed by eye and never executed by a test: reaching it needs a process
+	// that launches AND a CDP endpoint to answer afterwards, and the CDP failure
+	// path calls cleanup() before returning, which nils the very field an
+	// assertion would read.
+	job = s.trackedSetupJob(job, cmd.Process, "chromium")
 
 	s.mu.Lock()
 	s.setupProcess = cmd.Process
