@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 )
 
 // --- a browser the tests can drive -----------------------------------------
@@ -30,9 +33,40 @@ const (
 	// fakeBrowserYouTubeOnly renders for YouTube and not for Twitch — a
 	// two-platform refresh whose second launch did nothing.
 	fakeBrowserYouTubeOnly = "youtube-only"
+	// fakeBrowserHandoff is the SETUP path's mode, and it models the one fact
+	// that path turns on: a Firefox launcher starts the real browser and then
+	// exits (~170ms measured), so cmd.Wait() returning is evidence about the
+	// launcher and nothing else. The stub starts a second process that keeps
+	// running and returns immediately, which is the same shape.
+	//
+	// The refresh launches ignore it — they are judged by their screenshot —
+	// so it only ever selects a behaviour on the setup argv.
+	fakeBrowserHandoff = "handoff"
 )
 
-// TestMain lets the test binary stand in for a Firefox-family browser.
+// fakeSetupChildArg marks the process fakeBrowserHandoff leaves behind: the
+// stand-in for the browser window the user is signed into. An argv marker
+// rather than a mode, because it has to be recognised before anything else and
+// no `go test` flag can produce it.
+const fakeSetupChildArg = "--moombox-fake-setup-browser-child"
+
+// fakeSetupChildLifetime bounds that process. Normally the Job Object kills it
+// — that is the whole point of the setup job — so this is the backstop for the
+// case where it never got into one: a failed assign must not be able to leave a
+// sleeping process behind on the machine running the tests. Chosen between two
+// pressures: long enough that a slow host cannot make the stand-in browser
+// "close" mid-test (the tests need it for under a second), short enough that an
+// escapee cannot keep the test binary locked into the next `go test` run.
+const fakeSetupChildLifetime = 15 * time.Second
+
+// fakeSetupHandoffDelay holds the stand-in launcher open long enough for
+// startFirefoxSetup's job.assign to land before the child exists. A child joins
+// its parent's job AT CREATION, so one forked inside that window would never be
+// tracked, and the tests would be measuring that race instead of the fix.
+const fakeSetupHandoffDelay = 150 * time.Millisecond
+
+// TestMain lets the test binary stand in for a Firefox-family browser, on both
+// paths that launch one.
 //
 // refreshFirefox launches `<path> --new-instance --screenshot <file> --profile
 // <dir> <url>` and judges the result by whether that screenshot appears, so a
@@ -40,11 +74,75 @@ const (
 // runWithTimeout, the Job Object, the drain, the verdict — with no browser
 // installed and no toolchain invoked at test time. No `go test` flag produces
 // `--new-instance`, so an ordinary run can never trip the branch.
+//
+// startFirefoxSetup launches the same argv MINUS the `--screenshot` pair, and
+// the setup stub covers that one. It exists because the setup path's Job Object
+// cannot be tested any other way: the probe behind the abandoned-setup reap
+// asks a real handle how many processes it holds, and faking the probe
+// (jobReports) skips the very thing under test.
 func TestMain(m *testing.M) {
+	if isFakeSetupChild(os.Args) {
+		// The stand-in browser: it does nothing but stay alive inside the job
+		// until something closes the handle.
+		time.Sleep(fakeSetupChildLifetime)
+		os.Exit(0)
+	}
 	if screenshot, url, isBrowserLaunch := parseFakeBrowserArgs(os.Args); isBrowserLaunch {
 		os.Exit(runFakeBrowser(os.Getenv(fakeBrowserModeEnv), screenshot, url))
 	}
+	if isFakeSetupLaunch(os.Args) {
+		os.Exit(runFakeSetupBrowser(os.Getenv(fakeBrowserModeEnv)))
+	}
 	os.Exit(m.Run())
+}
+
+// isFakeSetupChild recognises the process fakeBrowserHandoff spawns. Checked
+// first: it carries the inherited mode environment too, and must not be
+// mistaken for another launcher.
+func isFakeSetupChild(args []string) bool {
+	return slices.Contains(args, fakeSetupChildArg)
+}
+
+// isFakeSetupLaunch recognises startFirefoxSetup's argv — the refresh argv
+// without its `--screenshot` pair. The two are disjoint by that flag alone, so
+// this is checked after parseFakeBrowserArgs and neither can claim the other's
+// launch.
+func isFakeSetupLaunch(args []string) bool {
+	sawNewInstance := false
+	for _, a := range args {
+		switch a {
+		case "--screenshot":
+			return false
+		case "--new-instance":
+			sawNewInstance = true
+		}
+	}
+	return sawNewInstance
+}
+
+// runFakeSetupBrowser is the setup stub's whole body.
+//
+// An unset or unknown mode exits at once and hands nothing off, leaving an
+// EMPTY job behind — the abandoned setup. Only fakeBrowserHandoff leaves a live
+// process in the job. That default is the same rule the refresh stub follows
+// and matters more here: an accidental launch cannot manufacture the evidence
+// that a browser is still running, which is the evidence that stops the reap.
+func runFakeSetupBrowser(mode string) int {
+	if mode != fakeBrowserHandoff {
+		return 0
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return 1
+	}
+	time.Sleep(fakeSetupHandoffDelay)
+	// Nil Stdout/Stderr, so the child gets NUL rather than a share of the pipe
+	// `go test` is reading — an inherited pipe would keep the run open until the
+	// child's lifetime expired.
+	if err := exec.Command(exe, fakeSetupChildArg).Start(); err != nil {
+		return 1
+	}
+	return 0
 }
 
 // parseFakeBrowserArgs recognises refreshFirefox's argv and pulls out the two

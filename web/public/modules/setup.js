@@ -11,6 +11,9 @@ export class SetupController {
     this.advStep = 1;
     this.cookieYTDone = false;
     this.cookieTWDone = false;
+    // True while the SERVER is holding a setup slot this controller opened —
+    // not while the dialog is merely visible. The pagehide beacon reads it.
+    this._cookieSetupActive = false;
     this._redirectUrl = null; // Set when port/HTTPS changes require redirect after restart
   }
 
@@ -75,6 +78,21 @@ export class SetupController {
         this.cancelCookieSetup();
       });
     }
+
+    // Tell the server when the tab goes away mid-setup — the wizard half of the
+    // same fix settings.js carries; see the comment there for why this posts
+    // /abandon rather than /cancel (a tab unload is not consent to close the
+    // browser the user is signing into), why this is pagehide rather than
+    // beforeunload, why the e.persisted bail-out is not optional, and why a
+    // beacon rather than a fetch. Only the controller that STARTED a setup has
+    // the flag set, so the two controllers sharing this dialog cannot both fire
+    // one.
+    window.addEventListener("pagehide", (e) => {
+      if (e.persisted) return; // bfcache: this page is coming back
+      if (!this._cookieSetupActive) return;
+      this._cookieSetupActive = false;
+      navigator.sendBeacon("/api/cookies/auto-setup/abandon");
+    });
 
     // Mode selection
     document.getElementById("setup-mode-quick")?.addEventListener("click", () => {
@@ -262,6 +280,8 @@ export class SetupController {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       if (data.success) {
+        // The server is now holding the setup slot; an unload must cancel it.
+        this._cookieSetupActive = true;
         const dialog = document.getElementById("auto-cookie-setup-dialog");
         const instructions = document.getElementById("auto-cookie-instructions");
         if (instructions) {
@@ -327,6 +347,9 @@ export class SetupController {
 
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
+      // Any answer means the slot was released; only the abort path below keeps
+      // the flag raised, because a timed-out finish leaves the setup live.
+      this._cookieSetupActive = false;
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       const ytOk = data.authenticated;
@@ -380,10 +403,11 @@ export class SetupController {
             if (countdownEl) countdownEl.textContent = "";
             this.startCookieSetup(platform);
           });
+          // Skip goes through the cancel path — hide() alone does not fire
+          // sl-request-close, so the server was never told the user gave up.
+          // cancelCookieSetup hides the dialog and clears these elements itself.
           document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {
-            document.getElementById("auto-cookie-setup-dialog")?.hide();
-            if (countdownEl) countdownEl.textContent = "";
-            timeoutResultEl.innerHTML = "";
+            this.cancelCookieSetup();
           });
         }
         return;
@@ -401,6 +425,7 @@ export class SetupController {
   }
 
   async cancelCookieSetup() {
+    this._cookieSetupActive = false;
     try {
       await fetch("/api/cookies/auto-setup/cancel", { method: "POST" });
     } catch { /* ignore */ }

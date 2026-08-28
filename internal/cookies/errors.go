@@ -20,9 +20,45 @@ var (
 	// FinishSetup or CancelSetup). HTTP consumers can map to 409 Conflict.
 	ErrSetupInProgress = errors.New("cookie auto-setup already in progress")
 
-	// ErrNoSetupInProgress is returned by FinishSetup or CancelSetup when
-	// no StartSetup call is active. HTTP consumers can map to 404.
+	// ErrNoSetupInProgress is returned by FinishSetup or CancelSetup when no
+	// StartSetup call is active. HTTP consumers can map to 404.
+	//
+	// The two producers do NOT share a predicate, and the difference is
+	// load-bearing rather than an oversight:
+	//
+	//   - CancelSetup treats a setup as active while `setupProcess != nil ||
+	//     setupClaimed` — anything in the slot to tear down. The claim half
+	//     counts because a cancel arriving during StartSetup's preparation has a
+	//     real setup to abort even though no process exists yet — StartSetup's
+	//     mid-preparation check is what consumes it.
+	//   - FinishSetup requires `setupProcess != nil && setupBrowser != nil`. It
+	//     has to actually read cookies out of a specific browser, so a claim
+	//     with nothing behind it yet gives it nothing to finish.
+	//
+	// So a claim in flight is a state CancelSetup will act on and FinishSetup
+	// reports this sentinel for. That asymmetry is correct — there is something
+	// to abort and nothing to harvest — but any caller reasoning about "is a
+	// setup in progress" must pick the producer it means rather than assume one
+	// answer covers both.
+	//
+	// A THIRD predicate now exists and neither producer uses it. Since the setup
+	// slot acquired a lifetime, `setupInProgressLocked()` — what GetStatus
+	// publishes as SetupInProgress, and what StartSetup and RefreshCookies gate
+	// on — excludes a slot whose browser is gone and whose grace has expired.
+	// CancelSetup's gate is a strict superset of it, so a cancel still succeeds
+	// whenever the UI is offering one; it just also succeeds on an expired slot
+	// nothing has reaped yet, which is the cancel that cleans it up. This
+	// paragraph exists because the sentence it replaced ("the same expression
+	// GetStatus publishes as SetupInProgress") went stale the moment that
+	// lifetime landed.
 	ErrNoSetupInProgress = errors.New("no cookie auto-setup in progress")
+
+	// ErrServiceStopped is returned by StartSetup once Stop has been called.
+	// Distinct from ErrSetupInProgress and ErrRefreshInProgress because those
+	// two clear on their own and this one never does: the service is finished
+	// for the remaining lifetime of the process, so "try again shortly" is the
+	// wrong advice. HTTP consumers can map to 503.
+	ErrServiceStopped = errors.New("cookie service stopped")
 
 	// ErrSetupCancelled is returned by FinishSetup after CancelSetup has
 	// flipped the cancelled flag — the setup state is still partially

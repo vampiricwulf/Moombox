@@ -28,6 +28,13 @@ func (j *processJob) close()                     {}
 // runs on detached.
 func (j *processJob) activeProcesses() (int, error) { return 0, nil }
 
+// queryable is always false here, which is the honest form of the sentence
+// above: this platform's zero means "there is no job to count", not "the job is
+// empty". Callers that would ACT on an empty job — setupBrowserGone, and the
+// reap behind it — must be able to tell those apart, or a Firefox launcher
+// handoff reads as a browser that exited.
+func (j *processJob) queryable() bool { return false }
+
 // configureCmdSysProcAttr arranges for the kernel to SIGKILL the launched
 // browser when Moombox dies — the Linux counterpart of the Windows Job
 // Object's KILL_ON_JOB_CLOSE. Without it, a crashed Moombox orphans a

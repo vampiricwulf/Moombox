@@ -199,6 +199,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				jsonError(rw, err.Error(), http.StatusConflict)
 			case errors.Is(err, cookies.ErrNoBrowserFound):
 				jsonError(rw, "no supported browser installed", http.StatusFailedDependency)
+			// Shutdown, not a fault: the service latched stopped and will not
+			// launch another browser. 503 rather than the 409 the two
+			// in-progress cases get, because this one never clears.
+			case errors.Is(err, cookies.ErrServiceStopped):
+				jsonError(rw, err.Error(), http.StatusServiceUnavailable)
 			default:
 				jsonError(rw, "failed to start setup", http.StatusInternalServerError)
 			}
@@ -259,8 +264,55 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			return
 		}
 
-		autoCookieSvc.CancelSetup()
+		// Same shape as the finish handler's ErrNoSetupInProgress arm above,
+		// deliberately: both endpoints are answering "was there a setup here
+		// to act on?" and there is no reason for the two to disagree about
+		// what a missing one looks like on the wire. Before this, cancel
+		// answered {"success": true} unconditionally — a second cancel, or a
+		// cancel with no setup ever started, reported a cancel that never
+		// happened.
+		if err := autoCookieSvc.CancelSetup(); err != nil {
+			switch {
+			case errors.Is(err, cookies.ErrNoSetupInProgress):
+				jsonError(rw, err.Error(), http.StatusNotFound)
+			default:
+				jsonError(rw, "failed to cancel setup", http.StatusInternalServerError)
+			}
+			return
+		}
 		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// POST /api/cookies/auto-setup/abandon
+	//
+	// The unload beacon's endpoint, and deliberately NOT /cancel. A user
+	// pressing Cancel consents to the setup browser closing; a dashboard tab
+	// unloading does not — and since the Firefox setup gained a Job Object,
+	// every cancel closes that window. The flow tells the user to leave this
+	// tab and go sign in, so closing it had become a remote kill of the window
+	// they were typing into. See AbandonSetup for what this does instead and
+	// why it is a no-op on Windows and load-bearing everywhere else.
+	//
+	// Answers a missing setup exactly as /cancel and /finish do; the beacon
+	// cannot read any of it, but a 404 must not read as a server fault to
+	// anything that can.
+	heavy.Post("/api/cookies/auto-setup/abandon", func(rw http.ResponseWriter, req *http.Request) {
+		if autoCookieSvc == nil {
+			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		released, err := autoCookieSvc.AbandonSetup()
+		if err != nil {
+			switch {
+			case errors.Is(err, cookies.ErrNoSetupInProgress):
+				jsonError(rw, err.Error(), http.StatusNotFound)
+			default:
+				jsonError(rw, "failed to release setup", http.StatusInternalServerError)
+			}
+			return
+		}
+		jsonResponse(rw, map[string]any{"success": true, "released": released})
 	})
 
 	// POST /api/auto-cookies/validate-browser-path validates a user-specified

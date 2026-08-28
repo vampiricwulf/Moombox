@@ -78,16 +78,24 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		return fmt.Errorf("start browser: %w", err)
 	}
 
-	if job != nil {
-		if assignErr := job.assign(cmd.Process); assignErr != nil {
-			s.logger.Warn("failed to assign chromium setup process to job object",
-				"pid", cmd.Process.Pid, "err", assignErr)
-		}
-	}
+	// Assign immediately after start so children are tracked from the beginning.
+	// Returns nil if the assign failed — see trackedSetupJob for why a job that
+	// tracks nothing must not be kept.
+	//
+	// COVERAGE, stated rather than implied: trackedSetupJob's own behaviour is
+	// pinned by TestTrackedSetupJobDropsAJobItCouldNotAssignTo, and
+	// TestAFirefoxSetupWithAFailedAssignStoresNoJob proves the Firefox launcher
+	// routes through it. THIS line — that the Chromium launcher does too — is
+	// reviewed by eye and never executed by a test: reaching it needs a process
+	// that launches AND a CDP endpoint to answer afterwards, and the CDP failure
+	// path calls cleanup() before returning, which nils the very field an
+	// assertion would read.
+	job = s.trackedSetupJob(job, cmd.Process, "chromium")
 
 	s.mu.Lock()
 	s.setupProcess = cmd.Process
-	s.setupJob = job
+	// Closes any handle a previous attempt left behind; see the guard's doc.
+	s.adoptSetupJobLocked(job)
 	s.cdpPort = port
 	s.mu.Unlock()
 
@@ -108,6 +116,10 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		s.mu.Lock()
 		if s.setupProcess == proc {
 			s.browserExited = true
+			// Starts the retention grace — see the Firefox wait goroutine and
+			// setupAbandonGrace. Without it this exit was recorded and then
+			// ignored, and the slot never freed.
+			s.setupRetainedSince = time.Now()
 		}
 		s.mu.Unlock()
 	}()

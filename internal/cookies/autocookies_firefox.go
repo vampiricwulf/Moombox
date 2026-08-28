@@ -57,13 +57,43 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 	}
 
 	cmd := exec.Command(browser.Path, "--new-instance", "--profile", s.profileDir, url)
-	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG; Windows: no-op
+	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG; Windows: no-op (Job Object below)
+
+	// A Job Object, created before the launch, for the two reasons the Chromium
+	// path has one — the browser dies with a crashed Moombox, and cleanupLocked
+	// can finish off one the user left behind — plus a third that is specific to
+	// this family and is why the omission mattered: the Firefox launcher hands
+	// off to the real browser and EXITS IN ~170ms, so cmd.Wait() returning says
+	// nothing about whether a browser is still on screen. The job is the only
+	// thing that can tell an abandoned setup from a live one. Without it
+	// setupBrowserGone answered "no idea" for every Firefox setup, and the
+	// abandoned-setup reap never fired on the default path for anyone whose
+	// browser is Firefox-family.
+	//
+	// WINDOWS ONLY. newProcessJob is a no-op stub on Linux and on the fallback
+	// build, so this changes nothing there and the reap stays dead on those
+	// platforms — see setupBrowserGone's third case.
+	job, jobErr := newProcessJob()
+	if jobErr != nil {
+		s.logger.Warn("failed to create job object for firefox setup", "err", jobErr)
+	}
+
 	if err := cmd.Start(); err != nil {
+		if job != nil {
+			job.close()
+		}
 		return fmt.Errorf("start firefox: %w", err)
 	}
 
+	// Assign immediately, before the launcher can hand off: a child created
+	// before the assign lands is never tracked by the job. Returns nil if the
+	// assign failed — see trackedSetupJob.
+	job = s.trackedSetupJob(job, cmd.Process, "firefox")
+
 	s.mu.Lock()
 	s.setupProcess = cmd.Process
+	// Closes any handle a previous attempt left behind; see the guard's doc.
+	s.adoptSetupJobLocked(job)
 	s.mu.Unlock()
 
 	// Monitor for exit. Compare against s.setupProcess so a stale wait from a
@@ -80,6 +110,10 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 		s.mu.Lock()
 		if s.setupProcess == proc {
 			s.browserExited = true
+			// Starts the retention grace. Until this stamp existed the exit
+			// was recorded and then ignored: setupProcess stayed non-nil
+			// forever and every consumer kept reporting a setup in progress.
+			s.setupRetainedSince = time.Now()
 		}
 		s.mu.Unlock()
 	}()
