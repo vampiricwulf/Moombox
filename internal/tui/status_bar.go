@@ -46,6 +46,19 @@ const (
 	CookieStatusOK
 	CookieStatusCookiesOnly
 	CookieStatusRelogin
+	// CookieStatusUnknown: cookies ARE configured and the last check could
+	// not conclude anything about them — a network fault, a non-200, a
+	// redirect, or a body with no login marker we recognise.
+	//
+	// APPENDED, not inserted: CookieStatusNone is the zero value and both the
+	// TUI wiring and every test rely on an unset status meaning "no cookies".
+	//
+	// Distinct from CookieStatusCookiesOnly, which this state used to be
+	// rendered as, and that conflation is the bug: CookiesOnly is a
+	// CONCLUSION (the credentials were rejected, or there are none) and earns
+	// the red alert that survives every tier, while this one is an absence of
+	// information the operator cannot act on.
+	CookieStatusUnknown
 )
 
 // StatusBarModel renders the bottom status bar.
@@ -376,12 +389,118 @@ func (m *StatusBarModel) renderMetrics(t barTier) string {
 	return strings.Join(parts, " ") + " "
 }
 
+// cookieUnknownLabel words the could-not-check badge for one platform.
+//
+// "Unknown" rather than a fourth invention: it is what RefreshVerdict.String()
+// returns for this state, and the same three-way vocabulary already carries
+// the setup toasts and the R F feedback. A badge cannot hold the full sentence
+// ("could not establish whether they work"), so it borrows the enum's own word
+// instead of coining a synonym that would drift.
+//
+// Abbreviates at tierTight like the re-login prompt does. The bare code is
+// still colour-distinct from the green OK and the yellow no-cookies, and the
+// state is dropped one tier later anyway.
+func cookieUnknownLabel(code string, t barTier) string {
+	if t >= tierTight {
+		return code
+	}
+	return code + ": Unknown"
+}
+
+// parkedCookieJobs reports whether any job is parked in COOKIES? for YouTube
+// and for Twitch, separately.
+//
+// SEPARATELY is the whole point. This used to be one unfiltered bool set by
+// any parked job whatever, and it was consumed only inside the YouTube
+// branch — so a parked TWITCH job reddened the YOUTUBE indicator and left the
+// Twitch one untouched. The badge pointed at the wrong platform and stayed
+// silent about the right one, which is worse than not escalating at all: it
+// sends the operator to re-export credentials that were never the problem.
+//
+// An EMPTY Platform counts as YouTube, deliberately, for three reasons:
+//
+//   - it is what the rest of the TUI already means by the absence of
+//     "twitch" (task_list.go:579, job_details.go:249, app_actions.go:387 all
+//     test for "twitch" and treat everything else as YouTube), and a status
+//     bar that partitioned platforms differently from the rows above it would
+//     be its own defect;
+//   - the rows that actually carry an empty Platform are pre-Twitch ones, and
+//     ImportFromJSON (database_jobs.go:905) already backfills exactly this
+//     value when it meets them;
+//   - of the three candidate rules it is the only one that neither loses the
+//     alert (reddening neither) nor asserts a Twitch failure on no evidence
+//     (reddening both). Reddening "whichever platform is configured" was the
+//     fourth option and it decides nothing when both are.
+//
+// The consequence to be aware of: a job on some future third platform would
+// also land on YouTube here. That is not an oversight this function can fix
+// alone — every platform test named above would have to move together — so it
+// stays binary, matching them, rather than inventing a third answer here.
+//
+// One site deliberately decides the empty case the OTHER way and is not a
+// counter-example to the above: worker.go:1072 is choosing which platform to
+// drive a refresh AGAINST, where guessing wrong does work on the wrong
+// credentials. Attributing a badge and dispatching a refresh carry different
+// costs for the same unknown, so they are allowed to differ — but a survey
+// that listed only the agreeing sites would have read as more settled than it
+// is.
+//
+// This deliberately does NOT filter on ParkReason, and the distinction is
+// worth stating because the badge is coarser than the status it reads. Coarser
+// in two ways, not one — an earlier draft of this comment said "two reasons,
+// dead credentials or membership", and that is a tidier split than the code:
+//
+//   - ParkReasonMembership: the request WAS signed in and YouTube refused
+//     anyway. worker.go:1058 logs "the credentials are alive and the account
+//     simply lacks access". The remedy is cookies from a DIFFERENT account.
+//   - ParkReasonAuth: usually dead credentials — but not only. worker.go:884-890
+//     files twitch.ErrSubscriberOnly here ON PURPOSE, because Usher's 403 cannot
+//     tell an anonymous session from an un-entitled one. So an Auth park can sit
+//     on a perfectly healthy, signed-in Twitch session.
+//   - ParkReasonNone: the zero value every pre-v18 COOKIES? row still carries,
+//     because migrateV18 deliberately backfills nothing. Sweeps treat it as
+//     Auth; so does this, by not looking.
+//
+// All three escalate, because in all three the remedy is credentials of some
+// kind, and filtering any of them out would lose a real alarm. What the red
+// badge means is therefore "a download stopped for want of usable credentials",
+// NOT "your cookies expired" — job_details.go:548-554 is where the operator
+// gets the difference.
+func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
+	for _, j := range m.jobs {
+		if j.Status != database.StatusCookies {
+			continue
+		}
+		if j.Platform == "twitch" {
+			tw = true
+		} else {
+			yt = true
+		}
+		if yt && tw {
+			break
+		}
+	}
+	return yt, tw
+}
+
 // renderCookieStatus renders auth indicators and warnings (B2) at tier t.
 //
 // A platform whose auth is HEALTHY is dropped at tierEssential — the green
 // "YT" is reassurance, not information — while a re-login prompt or a
 // rejected-cookie indicator survives to the last tier, abbreviated. That
 // keeps the narrowest useful bar showing only what needs acting on.
+//
+// A job parked in COOKIES? escalates ITS OWN platform's indicator to that
+// surviving red, and only its own — see parkedCookieJobs. Both branches carry
+// the escalation now; the Twitch one never had it.
+//
+// CookieStatusUnknown joins the dropped group rather than the surviving one,
+// and that placement IS the fix. "The last check could not reach YouTube" is
+// not something the operator can act on — it is the state that used to render
+// as the red always-visible CookiesOnly alert, so a DNS blip shouted at the
+// same volume as a dead session for as long as it lasted. The tier rule
+// already says what to do with un-actionable information; this state simply
+// belongs on that side of it.
 func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 	if t >= tierNone || (!m.ytActive && !m.twActive) {
 		return ""
@@ -389,14 +508,8 @@ func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 
 	var parts []string
 
-	// Check if any job has COOKIES? status (B1)
-	cookiesRejected := false
-	for _, j := range m.jobs {
-		if j.Status == database.StatusCookies {
-			cookiesRejected = true
-			break
-		}
-	}
+	// Jobs parked in COOKIES?, attributed to the platform they belong to (B1).
+	ytRejected, twRejected := m.parkedCookieJobs()
 
 	// healthy reports whether a platform's indicator is pure reassurance —
 	// dropped once space is scarce (tierEssential).
@@ -411,8 +524,15 @@ func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 			} else {
 				parts = append(parts, statusBarRedStyle.Render("YT: Re-login"))
 			}
-		case cookiesRejected || m.ytCookie == CookieStatusCookiesOnly:
+		case ytRejected || m.ytCookie == CookieStatusCookiesOnly:
+			// ytRejected stays ahead of the unknown arm on purpose: a job
+			// parked in COOKIES? is evidence from a real download attempt, and
+			// it outranks a check that could not reach the site.
 			parts = append(parts, statusBarRedStyle.Render("YT"))
+		case m.ytCookie == CookieStatusUnknown:
+			if healthy {
+				parts = append(parts, statusBarWrnStyle.Render(cookieUnknownLabel("YT", t)))
+			}
 		case m.ytCookie == CookieStatusNone:
 			if healthy {
 				parts = append(parts, statusBarYelStyle.Render("YT"))
@@ -428,18 +548,39 @@ func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 		}
 	}
 
-	// Twitch status (only if active)
+	// Twitch status (only if active).
+	//
+	// Switched on no value, like the YouTube ladder above it, so twRejected can
+	// join its arm. The two blocks have drifted apart repeatedly — a state
+	// reachable on one and dead on the other, an escalation present on one and
+	// missing here — and keeping them the same SHAPE is what makes the next
+	// divergence visible. CookieStatusNone is still handled by default and not
+	// by an arm of its own: Twitch without cookies is ordinary anonymous mode
+	// and gets the neutral dim indicator, unlike YouTube's yellow warning.
 	if m.twActive {
-		switch m.twCookie {
-		case CookieStatusRelogin:
+		switch {
+		case m.twCookie == CookieStatusRelogin:
 			if t >= tierTight {
 				parts = append(parts, statusBarRedStyle.Render("TW!"))
 			} else {
 				parts = append(parts, statusBarRedStyle.Render("TW: Re-login"))
 			}
-		case CookieStatusCookiesOnly:
+		case twRejected || m.twCookie == CookieStatusCookiesOnly:
+			// Same precedence as YouTube's, and for the same reason: a parked
+			// job is evidence from a real download attempt and outranks a check
+			// that could not reach the site.
+			//
+			// CookiesOnly here is reachable since AuthStatus gained
+			// HasTwitchCookies. It was dead code for as long as the TUI could
+			// only assign CookieStatusOK for Twitch, which meant a Twitch
+			// session whose auth-token had been pruned on expiry looked exactly
+			// like one that was never set up.
 			parts = append(parts, statusBarRedStyle.Render("TW"))
-		case CookieStatusOK:
+		case m.twCookie == CookieStatusUnknown:
+			if healthy {
+				parts = append(parts, statusBarWrnStyle.Render(cookieUnknownLabel("TW", t)))
+			}
+		case m.twCookie == CookieStatusOK:
 			if healthy {
 				parts = append(parts, statusBarGrnStyle.Render("TW"))
 			}

@@ -19,6 +19,40 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
+// cookieBadgeFor projects one platform's AuthStatus triple onto the status-bar
+// tier. Shared by both platforms rather than written twice: the two arms had
+// already diverged — YouTube could reach CookiesOnly and Twitch could not,
+// because AuthStatus had no HasTwitchCookies to read.
+//
+// The order is the contract:
+//
+//   - authenticated wins outright. It is the only state that lets us do
+//     authenticated work, and it implies RefreshOK.
+//   - no cookies at all reports NONE, whatever the verdict says. A platform
+//     that was never configured is not a platform whose cookies failed, and
+//     the check returns a conclusive "not authenticated" for it.
+//   - RefreshFailed with cookies present is COOKIES ONLY — the red, always-
+//     visible alert. Credentials exist and the site rejected them.
+//   - everything else is UNKNOWN: cookies exist and this check learned nothing
+//     about them. That is the state that used to fall into CookiesOnly and
+//     render a transient network fault as a dead session.
+//
+// `hasCookies` is the LOOSE predicate on both sides (HasAnyYouTubeAuthCookie /
+// HasAnyTwitchAuthCookie), so a half-cleared jar reads as configured rather
+// than as never-set-up — see AuthStatus and twitchAuthCookieNames.
+func cookieBadgeFor(authenticated, hasCookies bool, verdict cookies.RefreshVerdict) tui.CookieStatus {
+	switch {
+	case authenticated:
+		return tui.CookieStatusOK
+	case !hasCookies:
+		return tui.CookieStatusNone
+	case verdict == cookies.RefreshFailed:
+		return tui.CookieStatusCookiesOnly
+	default:
+		return tui.CookieStatusUnknown
+	}
+}
+
 // runTUI starts the BubbleTea TUI, wires every callback (job actions,
 // trim service, orphan scanner, client-token management, setup wizard,
 // FFmpeg check, cookie controls, update check, etc.), runs the TUI
@@ -276,11 +310,14 @@ func (s *runState) runTUI() {
 			return info.TagName, info.ReleaseNotes, nil
 		}
 	}
-	app.OnRecheckCookies = func() (bool, bool) {
+	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict) {
 		s.log.Info("Cookie recheck requested from TUI")
 		s.cookieRefresh.CheckNow(context.Background())
 		status := s.cookieRefresh.GetStatus()
-		return status.YouTubeAuthenticated, status.TwitchAuthenticated
+		// The verdicts, not the booleans. Both booleans are false for a check
+		// that could not reach the site, and the feedback line built on them
+		// reported "not authenticated" — a conclusion the check never drew.
+		return status.YouTubeVerification, status.TwitchVerification
 	}
 	if s.cfg.Cookies.AutoEnabled {
 		app.OnForceRefreshCookies = func() (cookies.RefreshResult, error) {
@@ -337,15 +374,23 @@ func (s *runState) runTUI() {
 			}
 			return nil
 		},
-		func() (bool, bool, error) {
+		// The whole result, not a bool pair. A sign-in the site could not be
+		// reached to confirm is ACCEPTED but not verified, and the pair reports
+		// it identically to a verified one — so the wizard said "configured"
+		// about cookies nothing had checked. See cookies.SetupResult.
+		//
+		// The 60 s cap is load-bearing beyond this call: the server-side setup
+		// grace window is priced against it. Do not raise it to buy a slow
+		// finish more time.
+		func() (cookies.SetupResult, error) {
 			finishCtx, finishCancel := context.WithTimeout(s.ctx, 60*time.Second)
 			defer finishCancel()
-			yt, tw, err := s.autoCookieSvc.FinishSetup(finishCtx)
+			result, err := s.autoCookieSvc.FinishSetupDetailed(finishCtx)
 			if err != nil {
 				s.log.Error("Failed to finish auto-cookie setup", slog.String("error", err.Error()))
-				return yt, tw, err
+				return result, err
 			}
-			return yt, tw, nil
+			return result, nil
 		},
 		func() {
 			s.autoCookieSvc.CancelSetup()
@@ -571,18 +616,15 @@ func (s *runState) runTUI() {
 	// Wire cookie status to TUI. Parameter `auth` is the incoming status —
 	// named differently from `s` (receiver) to avoid the pre-refactor shadow.
 	authStatusToTUI := func(auth cookies.AuthStatus) {
-		var yt, tw tui.CookieStatus
-		switch {
-		case auth.YouTubeAuthenticated:
-			yt = tui.CookieStatusOK
-		case auth.HasYouTubeCookies:
-			yt = tui.CookieStatusCookiesOnly
-		}
-		if auth.TwitchAuthenticated {
-			tw = tui.CookieStatusOK
-		}
+		yt := cookieBadgeFor(auth.YouTubeAuthenticated, auth.HasYouTubeCookies, auth.YouTubeVerification)
+		tw := cookieBadgeFor(auth.TwitchAuthenticated, auth.HasTwitchCookies, auth.TwitchVerification)
 		// Check auto-cookie relogin state. As of test.36 the relogin map
 		// is keyed by lowercase platform name (audit cookies.md #44).
+		//
+		// Applied unconditionally, and NOT gated on cookies.auto_enabled: the
+		// flag means a human has to sign in again, which a manual-cookie
+		// install must do by hand. The Web dashboard used to gate its copy of
+		// this and now does not — see updateStatusBar in web/public/app.js.
 		relogin := s.autoCookieSvc.GetStatus().NeedsManualRelogin
 		if relogin["youtube"] {
 			yt = tui.CookieStatusRelogin

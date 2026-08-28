@@ -299,9 +299,18 @@ func TestOnAuthRecoveredFiresOnRestore(t *testing.T) {
 
 // TestOnAuthChangeOnlyFiresWhenAuthFlagsChange verifies the
 // non-redundant-callback contract: OnAuthChange must fire ONCE per
-// auth-flag transition, not on every refresh tick. The audit's
-// concern is making sure subscribers (TUI / WebSocket broadcaster)
-// don't get spammed with no-op updates.
+// transition, not on every refresh tick. The audit's concern is making sure
+// subscribers (TUI / WebSocket broadcaster) don't get spammed with no-op
+// updates.
+//
+// It now drives the gate through authStatusChanged — the function doRefresh
+// itself calls — instead of restating the predicate inline. The restated
+// version passed with the two-boolean comparison hard-coded in it, so it went
+// on describing the old contract while the real gate changed underneath it:
+// a test that reimplements the thing it tests can only ever agree with itself.
+// What ELSE the gate must react to is tabled in
+// TestAuthStatusChangedGateCoversEverySurfaceInput; this one owns the
+// once-per-transition property.
 func TestOnAuthChangeOnlyFiresWhenAuthFlagsChange(t *testing.T) {
 	rs := newTransitionService(nil)
 	var fires atomic.Int32
@@ -309,23 +318,19 @@ func TestOnAuthChangeOnlyFiresWhenAuthFlagsChange(t *testing.T) {
 		fires.Add(1)
 	}
 
-	// Direct invocation: simulate the doRefresh "changed" path by
-	// computing whether status flags differ pre-vs-post.
+	fire := func(prev, next AuthStatus) {
+		if authStatusChanged(prev, next) {
+			rs.OnAuthChange(next)
+		}
+	}
+
 	prevStatus := AuthStatus{}
-	newStatus := AuthStatus{YouTubeAuthenticated: true}
+	newStatus := AuthStatus{YouTubeAuthenticated: true, YouTubeVerification: RefreshOK}
 
 	// First transition: not-authed → authed → fire.
-	if newStatus.YouTubeAuthenticated != prevStatus.YouTubeAuthenticated ||
-		newStatus.TwitchAuthenticated != prevStatus.TwitchAuthenticated {
-		rs.OnAuthChange(newStatus)
-	}
-
-	// Second tick with same status: no diff → no fire.
-	prevStatus = newStatus
-	if newStatus.YouTubeAuthenticated != prevStatus.YouTubeAuthenticated ||
-		newStatus.TwitchAuthenticated != prevStatus.TwitchAuthenticated {
-		rs.OnAuthChange(newStatus)
-	}
+	fire(prevStatus, newStatus)
+	// Second tick with the same status: no diff → no fire.
+	fire(newStatus, newStatus)
 
 	if got := fires.Load(); got != 1 {
 		t.Errorf("OnAuthChange fires: want exactly 1, got %d", got)

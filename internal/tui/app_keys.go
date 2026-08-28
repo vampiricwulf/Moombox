@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -169,16 +170,16 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			platform := a.setupWiz.cookiePlatform
 			finishFn := a.setupWiz.OnFinishAutoCookie
 			cmds = append(cmds, safeCmd(func() tea.Msg {
-				yt, tw := false, false
+				var result cookies.SetupResult
 				var errStr string
 				if finishFn != nil {
 					var err error
-					yt, tw, err = finishFn()
+					result, err = finishFn()
 					if err != nil {
 						errStr = err.Error()
 					}
 				}
-				return setupCookieFinishMsg{Platform: platform, YTAuth: yt, TWAuth: tw, Err: errStr}
+				return setupCookieFinishMsg{Platform: platform, Result: result, Err: errStr}
 			}))
 		}
 		if a.setupWiz.cookieActive {

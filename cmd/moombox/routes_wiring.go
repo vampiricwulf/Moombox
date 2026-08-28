@@ -34,18 +34,16 @@ func (s *runState) wireRoutes() func() {
 		Version:            version,
 		StartTime:          s.startTime,
 		GetActivePlatforms: s.getActivePlatforms,
+		// Both wire shapes come from routes' own projections rather than
+		// being rebuilt here. Three hand-written copies of the cookieStatus
+		// map existed across two packages and a field added to two of them
+		// leaves this endpoint — the one the dashboard polls — quietly
+		// serving the old meaning.
 		GetCookieStatus: func() map[string]any {
-			status := s.cookieRefresh.GetStatus()
-			return map[string]any{
-				"found":         status.HasYouTubeCookies,
-				"authenticated": status.YouTubeAuthenticated,
-			}
+			return routes.CookieStatusPayload(s.cookieRefresh.GetStatus())
 		},
 		GetTwitchAuthStatus: func() map[string]any {
-			status := s.cookieRefresh.GetStatus()
-			return map[string]any{
-				"authenticated": status.TwitchAuthenticated,
-			}
+			return routes.TwitchAuthStatusPayload(s.cookieRefresh.GetStatus())
 		},
 		GetAutoCookieReloginNeeded: func() any {
 			return s.autoCookieSvc.GetStatus().NeedsManualRelogin

@@ -1157,7 +1157,7 @@ All routes below are under `/api/`. Error responses: `{ "error": "message" }`. V
 | POST | `/cookies/auto-setup/start` | Body: `{ platform?: "youtube"\|"twitch" }`. Launches browser. |
 | POST | `/cookies/auto-setup/finish` | Extracts cookies from browser. Returns `{ success, authenticated, twitchAuthenticated }`. |
 | POST | `/cookies/auto-setup/cancel` | Kills browser. |
-| GET | `/cookies/auto-status` | `{ configured, setupInProgress, browser, lastRefresh, lastError, needsManualRelogin }`. |
+| GET | `/cookies/auto-status` | `{ setupInProgress, browser, availableBrowsers, configuredBrowserPath?, configuredBrowserType?, lastRefresh, lastError, needsManualRelogin }`. The two `configuredBrowser*` keys are `omitempty` — absent when no explicit browser is configured. |
 
 ### yt-dlp Plugin Routes
 

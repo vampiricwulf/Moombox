@@ -155,10 +155,10 @@ var dangerousProfilePathSubstrings = []string{
 
 // validateBrowserProfileDir refuses configured profile directories that
 // sit inside any user-installed browser's real profile tree. Empty
-// input is allowed — that just signals "auto-cookies not configured"
-// and the service's Configured status reports false. Otherwise the
-// path is resolved to absolute, lowercased, and checked against the
-// dangerous-substring list above. Audit reports/cookies.md #26.
+// input is allowed — it just leaves the service inert, since every entry
+// point that needs a profile dir returns ErrProfileNotFound without one.
+// Otherwise the path is resolved to absolute, lowercased, and checked
+// against the dangerous-substring list above. Audit reports/cookies.md #26.
 func validateBrowserProfileDir(profileDir string) error {
 	if profileDir == "" {
 		return nil
@@ -188,8 +188,16 @@ func validateBrowserProfileDir(profileDir string) error {
 type AutoCookieReloginRequired map[string]bool
 
 // AutoCookieStatus holds the current status of the auto-cookie service.
+//
+// There is deliberately no `configured` flag. One existed, computed as
+// `profileDir != ""`, and it could not be false: cmd/moombox seeds the profile
+// dir with a "./browser-profile" default before the service is constructed, so
+// every install reported true from the first run. Nothing read it — not the
+// dashboard, not the settings dialog, not the TUI — and a value that is always
+// true and read by nobody is worse than an absent one, because the next reader
+// believes it. Whether auto-cookies were ever set up is answered honestly by
+// lastRefresh and needsManualRelogin, which describe what actually happened.
 type AutoCookieStatus struct {
-	Configured            bool                      `json:"configured"`
 	SetupInProgress       bool                      `json:"setupInProgress"`
 	Browser               *DetectedBrowser          `json:"browser"`
 	AvailableBrowsers     []DetectedBrowser         `json:"availableBrowsers"`
@@ -331,9 +339,10 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	// Validate ONCE at construction; subprocess-launching entry points
 	// fast-fail with the cached error rather than each running the
 	// scan independently. A malformed dir doesn't return an error from
-	// the constructor — Configured will simply report false (empty
-	// case) or the entry-point fast-fail kicks in (dangerous case)
-	// — to preserve the current "constructor never errors" contract.
+	// the constructor — the empty case simply leaves every profile-
+	// dependent entry point returning ErrProfileNotFound, and the
+	// dangerous case hits the entry-point fast-fail — to preserve the
+	// current "constructor never errors" contract.
 	// Audit reports/cookies.md #26.
 	profileDirErr := validateBrowserProfileDir(profileDir)
 	if profileDirErr != nil && logger != nil {
@@ -619,7 +628,6 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	}
 
 	return AutoCookieStatus{
-		Configured:            s.profileDir != "",
 		SetupInProgress:       s.setupInProgressLocked(),
 		Browser:               browser,
 		AvailableBrowsers:     available,
@@ -774,16 +782,62 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	return s.startChromiumSetup(browser, loginTarget)
 }
 
-// FinishSetup extracts cookies from the running browser and saves them.
+// SetupResult reports what ONE interactive setup concluded, per platform.
+//
+// Two independent facts per platform, and the reason this type exists is that
+// they can disagree:
+//
+//   - the verdict — what the auth check CONCLUDED, in the same three-way
+//     vocabulary a refresh pass uses. RefreshUnknown is the zero value on
+//     purpose, so any path that returns without checking cannot accidentally
+//     assert health or failure.
+//   - Accepted — what the CALLER is told, which is deliberately not the
+//     verdict. A sign-in the user just completed is accepted when the site
+//     could not answer; see the acceptance predicate in FinishSetupDetailed
+//     for why, and why it is not extended to a check that never ran.
+//
+// Accepted with a verdict of RefreshUnknown is the state this type exists to
+// carry: the cookies are saved and in use, and Moombox could not reach the
+// site to confirm them. Collapsing that into either neighbour is what tells a
+// user whose network blipped mid-check that their sign-in failed.
+type SetupResult struct {
+	YouTube RefreshVerdict
+	Twitch  RefreshVerdict
+
+	YouTubeAccepted bool
+	TwitchAccepted  bool
+}
+
+// FinishSetup extracts cookies from the running browser and saves them, and
+// reports only whether each platform was ACCEPTED.
+//
+// A thin wrapper over FinishSetupDetailed, the same split RefreshCookies /
+// RefreshCookiesDetailed already draws — with one honest difference: both of
+// the callers that RENDER a finish (the HTTP route and the TUI wizard) had to
+// move to the detailed form, so nothing but the tests calls this today. It is
+// kept because the projection is the thing worth pinning: the acceptance
+// answer must not drift as the verdicts gain consumers, and a caller whose
+// question really is "did this platform end up usable" should not have to
+// know about verdicts to ask it.
+//
+// A caller that renders the outcome must NOT use this: the bool pair cannot
+// say "saved, but we could not check them", and a UI built on it has to guess.
 func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth bool, err error) {
+	result, err := s.FinishSetupDetailed(ctx)
+	return result.YouTubeAccepted, result.TwitchAccepted, err
+}
+
+// FinishSetupDetailed extracts cookies from the running browser, saves them,
+// and reports both what it accepted and what it concluded.
+func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResult, error) {
 	s.mu.Lock()
 	if s.setupProcess == nil || s.setupBrowser == nil {
 		s.mu.Unlock()
-		return false, false, ErrNoSetupInProgress
+		return SetupResult{}, ErrNoSetupInProgress
 	}
 	if s.cancelled {
 		s.mu.Unlock()
-		return false, false, ErrSetupCancelled
+		return SetupResult{}, ErrSetupCancelled
 	}
 	// Restart the retention clock. The grace window exists FOR this call, and
 	// measuring it from the browser's exit alone would let a finish that
@@ -806,39 +860,65 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	s.mu.Unlock()
 
 	var netscapeCookies string
+	var err error
 
 	if isFirefoxBased(browser.Type) {
 		s.closeFirefoxGracefully()
 		var stats firefoxReadStats
 		netscapeCookies, stats, err = readFirefoxCookies(s.profileDir)
 		s.logFirefoxReadStats(stats)
-		// Interactive setup has a legitimate empty state the refresh and
-		// profile-import paths do not: the user opened the browser and
-		// closed it without signing in. readFirefoxCookies now reports an
-		// empty profile as a hard error (a silently empty jar is the bug
-		// that error exists to catch), so translate it back here — the setup
-		// dialog should say "no login detected", not fail.
-		if errors.Is(err, ErrNoCookiesInProfile) {
-			s.logger.Info("cookie setup finished with an empty profile — no login detected")
-			s.setError("no login detected — sign in before finishing setup")
-			s.cleanup()
-			return false, false, nil
-		}
 	} else {
 		netscapeCookies, err = s.extractChromiumCookies()
 		s.killSetupProcess()
 	}
 
+	// Interactive setup has a legitimate empty state the refresh and
+	// profile-import paths do not: the user opened the browser and closed it
+	// without signing in. Both read paths report an empty profile as a hard
+	// error (a silently empty jar is the bug those errors exist to catch), so
+	// translate it back here — the setup dialog should say "no login detected",
+	// not fail.
+	//
+	// OUTSIDE the if/else, not inside the Firefox arm where it used to live.
+	// Chromium can produce the same sentinel now that cdpGetCookiesAsNetscape
+	// distinguishes "the browser answered and holds nothing" from "the read
+	// failed", and while it could not, a Chromium user who never signed in got
+	// the route's default 500 "failed to finish setup" for a state that is not
+	// a failure at all.
+	if errors.Is(err, ErrNoCookiesInProfile) {
+		// The error rides into the log line. On the Chromium path it can carry
+		// a tier failure that was out-voted by another tier's empty answer, and
+		// cdpGetCookiesAsNetscape has no logger of its own — so dropping it here
+		// would leave the only evidence that this verdict might be wrong with
+		// nowhere to go.
+		s.logger.Info("cookie setup finished with an empty profile — no login detected", "detail", err)
+		s.setError("no login detected — sign in before finishing setup")
+		s.cleanup()
+		// RefreshFailed, not RefreshUnknown, and the difference is what the
+		// dialog says. This attempt produced no credential of any kind, which
+		// is the same conclusion checkPlatformAuth reaches for a platform with
+		// nothing on disk — "there is nothing to send, so no request can be
+		// authenticated". Unknown would route the UI to its "we could not
+		// check" copy, which is the one wrong thing to say about a browser
+		// that plainly held no login.
+		//
+		// It is a statement about THIS setup, not about cookies.txt: this path
+		// deliberately merges nothing and reloads nothing, so a working session
+		// already on disk is untouched and unexamined. The UI branch it selects
+		// says "no login detected" and makes no verification claim.
+		return SetupResult{YouTube: RefreshFailed, Twitch: RefreshFailed}, nil
+	}
+
 	if err != nil {
 		s.setError(err.Error())
 		s.cleanup()
-		return false, false, err
+		return SetupResult{}, err
 	}
 
 	// Merge with existing cookies using temp file + rename for atomicity
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
 		s.cleanup()
-		return false, false, err
+		return SetupResult{}, err
 	}
 
 	existingData, readErr := readCookieFile(s.cookiePath)
@@ -871,19 +951,19 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 			"path", s.cookiePath, "err", readErr)
 		s.setError(mergeErr.Error())
 		s.cleanup()
-		return false, false, mergeErr
+		return SetupResult{}, mergeErr
 	}
 
 	// Write merged cookies via temp file + rename to prevent corruption on partial failure
 	if err := writeFileAtomic(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
 		s.cleanup()
-		return false, false, err
+		return SetupResult{}, err
 	}
 
 	// Reload jar and verify
 	if err := s.jar.Load(s.cookiePath); err != nil {
 		s.cleanup()
-		return false, false, err
+		return SetupResult{}, err
 	}
 
 	// Presence + real API verification, through the same pairing the refresh
@@ -911,8 +991,8 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	accepted := func(p platformAuth) bool {
 		return p.hasCookies && (p.state == verifyOK || (p.state == verifyUnknown && p.attempted))
 	}
-	ytAuth = accepted(ytCheck)
-	twAuth = accepted(twCheck)
+	ytAuth := accepted(ytCheck)
+	twAuth := accepted(twCheck)
 
 	// What gets WRITTEN DOWN, which is a different claim and must be the
 	// stricter one. PersistPlatforms unions into cfg.Cookies.Platforms, a set
@@ -1012,7 +1092,16 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		s.logger.Info("[AutoCookies] Setup complete — verified: " + strings.Join(verified, " + "))
 	}
 
-	return ytAuth, twAuth, nil
+	// The distinction the three log lines above draw used to end at the log.
+	// verdictOf is the same projection the refresh path publishes, so the
+	// dialog can render "saved, but we could not check them" in the wording
+	// the manual-refresh surfaces already use.
+	return SetupResult{
+		YouTube:         verdictOf(ytCheck),
+		Twitch:          verdictOf(twCheck),
+		YouTubeAccepted: ytAuth,
+		TwitchAccepted:  twAuth,
+	}, nil
 }
 
 // CancelSetup aborts an in-flight setup: it raises the cancelled flag, kills
@@ -1156,6 +1245,51 @@ func (v RefreshVerdict) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// RecheckedPlatform pairs one platform's display label with what the manual
+// recheck concluded about it.
+type RecheckedPlatform struct {
+	Label   string
+	Verdict RefreshVerdict
+}
+
+// RecheckReport words the answer to a manual "recheck cookies".
+//
+// TWO SURFACES, ONE SENTENCE, exported for the same reason
+// RefreshDeclinedCauses is: the TUI's R C chord and the Web dashboard's
+// refresh button are THE SAME GESTURE, and they were answering it differently
+// — the TUI with a three-way verdict, the Web with a two-arm
+// "successful"/"completed" keyed on a success bool that is false for a check
+// that never reached the site. The Web copy cannot import Go, so a test pins
+// the rendered string against this function; sharing the sentence is what
+// stops a fourth phrasing appearing the next time one side is edited.
+//
+// Only RefreshFailed says anything about the credentials. RefreshUnknown
+// speaks about the CHECK — "could not establish", the arc's settled wording —
+// because a check that could not reach the site has concluded nothing, and
+// telling an operator their cookies failed is how they get sent off to
+// re-export a session that is perfectly alive.
+//
+// Callers pass only the platforms they actually monitor; an empty list is a
+// real state (nothing configured) and gets its own sentence rather than an
+// empty one.
+func RecheckReport(platforms ...RecheckedPlatform) string {
+	if len(platforms) == 0 {
+		return "Cookies: no platforms configured"
+	}
+	parts := make([]string, 0, len(platforms))
+	for _, p := range platforms {
+		switch p.Verdict {
+		case RefreshOK:
+			parts = append(parts, p.Label+" OK")
+		case RefreshFailed:
+			parts = append(parts, p.Label+" not authenticated")
+		default:
+			parts = append(parts, p.Label+" — could not establish")
+		}
+	}
+	return "Cookies: " + strings.Join(parts, ", ")
 }
 
 // RefreshResult reports a refresh pass PER PLATFORM.
@@ -1470,26 +1604,6 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 
 		if isFirefoxBased(browser.Type) {
 			netscapeCookies, browserActed, err = s.refreshFirefox(ctx, browser)
-			// An empty profile is a hard error for the IMPORT path, where it
-			// means the read is broken. On the browser path it has a mundane
-			// explanation — Firefox set to clear cookies on close leaves the
-			// profile empty every time — and before this package that
-			// produced a no-op merge and a refresh that succeeded off the
-			// still-good cookies.txt. Failing here instead would fire
-			// "Cookie Auto-Refresh Failed — recordings will fail" at a user
-			// whose recordings are fine.
-			//
-			// So: contribute nothing, let verification below decide, and
-			// remember the fact so it is named if the existing cookies turn
-			// out to be dead too. That keeps the desktop behaviour while
-			// refusing to let a browser that silently stopped saving cookies
-			// masquerade as an ordinary expiry.
-			if errors.Is(err, ErrNoCookiesInProfile) {
-				s.logger.Warn("browser refresh produced no cookies — falling back to the existing cookies.txt",
-					"profile_dir", s.profileDir, "err", err)
-				emptyBrowserProfile = true
-				netscapeCookies, err = "", nil
-			}
 		} else {
 			// Chromium needs no screenshot: the navigations are driven over
 			// CDP, so each one reports its own outcome and refreshChromium
@@ -1505,7 +1619,7 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 			// would still have claimed it renewed the credentials. Both halves
 			// are required.
 			var navigated bool
-			netscapeCookies, navigated, err = s.refreshChromium(ctx, browser)
+			netscapeCookies, navigated, err = refreshChromiumCookies(s, ctx, browser)
 			browserActed = err == nil && navigated
 		}
 	}
@@ -1533,6 +1647,44 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 			// failed launch does not veto it.
 			browserActed = true
 		}
+	}
+
+	// An empty profile is a hard error for the IMPORT path, where it means the
+	// read is broken. That path has already returned above on any error, so the
+	// !importedFromProfile guard is belt-and-braces — it also keeps browser
+	// non-nil for the log line.
+	//
+	// On the BROWSER path it has a mundane explanation — a browser set to clear
+	// cookies on close leaves the profile empty every time — and before this
+	// package that produced a no-op merge and a refresh that succeeded off the
+	// still-good cookies.txt. Failing here instead would fire "Cookie
+	// Auto-Refresh Failed — recordings will fail" at a user whose recordings are
+	// fine.
+	//
+	// So: contribute nothing, let verification below decide, and remember the
+	// fact so it is named if the existing cookies turn out to be dead too. That
+	// keeps the desktop behaviour while refusing to let a browser that silently
+	// stopped saving cookies masquerade as an ordinary expiry.
+	//
+	// BOTH FAMILIES. This used to sit inside the Firefox arm of the if/else
+	// above, so the identical Chromium state — cdpGetCookiesAsNetscape can now
+	// tell an empty profile from a failed read and says ErrNoCookiesInProfile
+	// for it — aborted the refresh instead.
+	//
+	// Placed AFTER the DPAPI fallback rather than immediately after the if/else,
+	// and that ordering is load-bearing on Windows: an empty headless profile is
+	// exactly when reading the user's real signed-in profile is worth trying, so
+	// the downgrade must not consume the error before the fallback sees it.
+	// Firefox is unaffected either way — the fallback skips that family.
+	//
+	// browserActed is deliberately left as the branches set it. This pass
+	// contributed no credentials, so whatever verifies below was already on
+	// disk, and Renewed must not claim otherwise.
+	if !importedFromProfile && errors.Is(err, ErrNoCookiesInProfile) {
+		s.logger.Warn("browser refresh produced no cookies — falling back to the existing cookies.txt",
+			"browser", browser.Type, "profile_dir", s.profileDir, "err", err)
+		emptyBrowserProfile = true
+		netscapeCookies, err = "", nil
 	}
 
 	if err != nil {
@@ -2148,6 +2300,17 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 }
 
 // --- helpers ---
+
+// refreshChromiumCookies is the Chromium browser-refresh step behind a package
+// variable, so a test can exercise what RefreshCookiesDetailed DOES WITH the
+// step's result without launching a browser — notably the ErrNoCookiesInProfile
+// downgrade above, which is unreachable otherwise: the real function has to
+// start a headless Chromium and speak CDP to it before it can report an empty
+// profile, and no test in this package may launch a browser.
+//
+// Same seam convention as detectBrowser, setupBrowserGone, killProcessTree and
+// writeCookieFile. Nothing in production reassigns it.
+var refreshChromiumCookies = (*AutoCookieService).refreshChromium
 
 // killProcessTree kills a process and all its children on Windows (taskkill /T /F),
 // or just the process itself on other platforms.

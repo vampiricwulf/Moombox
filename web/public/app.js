@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
@@ -771,12 +771,18 @@ class MoomboxApp {
         this.twitchAuthStatus = data.twitchAuthStatus;
         if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
-        this.showToast(
-          data.success
-            ? "Cookies refreshed successfully"
-            : "Cookie check completed",
-          data.success ? "success" : "primary",
+        // Worded from the verdicts, in cookieRecheckToast, where it can be
+        // executed. The two-arm toast this replaces was keyed on
+        // `data.success` — false for a check that never reached the site —
+        // so the one gesture that asks "what are my credentials doing" was
+        // the last surface in this arc that could not say.
+        const recheck = cookieRecheckToast(
+          this.activePlatforms,
+          data.cookieStatus,
+          data.twitchAuthStatus,
+          data.success,
         );
+        this.showToast(recheck.message, recheck.variant);
       } else {
         this.showToast("Failed to recheck cookies", "danger");
       }
@@ -860,17 +866,29 @@ class MoomboxApp {
   }
 
   updateStatusBar() {
-    const autoCookiesEnabled = this.config?.cookies?.auto_enabled === true;
     const ytActive = this.activePlatforms?.youtube === true;
     const twActive = this.activePlatforms?.twitch === true;
 
     // 1. Warnings — text on desktop, collapsed icon on mobile
+    //
+    // DELIBERATELY NOT GATED ON cookies.auto_enabled, and the gate that used to
+    // be here is the bug. The flag means "the session Moombox holds has been
+    // rejected; a human has to sign in again" — which is true, and actionable,
+    // whether or not a browser will do the signing in. A manual-cookie install
+    // has to do theirs by hand, which makes them the audience LEAST able to
+    // discover this any other way and the one the gate hid it from. The flag is
+    // reachable for them too: POST /api/cookies/auto-refresh is not gated on
+    // AutoEnabled, so an operator-triggered refresh can raise it.
+    //
+    // The same ruling was already made for the auth-loss NOTIFICATION, for the
+    // same reason, and the TUI (cmd/moombox/tui_wiring.go) has never gated it.
+    // Re-adding a gate on either surface puts the two UIs back out of step.
     const warningsEl = document.getElementById("status-warnings");
     const warningsIcon = document.getElementById("status-warnings-icon");
     const warningItems = [];
-    if (ytActive && autoCookiesEnabled && this.autoCookieReloginRequired?.youtube)
+    if (ytActive && this.autoCookieReloginRequired?.youtube)
       warningItems.push({ action: "yt-relogin", label: "YT: Re-login" });
-    if (twActive && autoCookiesEnabled && this.autoCookieReloginRequired?.twitch)
+    if (twActive && this.autoCookieReloginRequired?.twitch)
       warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
 
     if (warningsEl) {
@@ -902,36 +920,29 @@ class MoomboxApp {
       }
     }
 
-    // 2. YT indicator (hidden if platform not active)
-    const ytEl = document.getElementById("yt-indicator");
-    if (ytEl) {
-      ytEl.style.display = ytActive ? "" : "none";
-      if (ytActive) {
-        if (this.autoCookieReloginRequired?.youtube && autoCookiesEnabled) {
-          ytEl.className = "indicator-error"; ytEl.title = "YouTube: Re-login required";
-        } else if (!this.cookieStatus?.found) {
-          ytEl.className = "indicator-warn"; ytEl.title = "YouTube: No cookies";
-        } else if (this.cookieStatus?.authenticated) {
-          ytEl.className = "indicator-ok"; ytEl.title = "YouTube: Authenticated";
-        } else {
-          ytEl.className = "indicator-error"; ytEl.title = "YouTube: Not verified";
-        }
-      }
-    }
-
-    // 3. TW indicator (hidden if platform not active)
-    const twEl = document.getElementById("tw-indicator");
-    if (twEl) {
-      twEl.style.display = twActive ? "" : "none";
-      if (twActive) {
-        if (this.autoCookieReloginRequired?.twitch && autoCookiesEnabled) {
-          twEl.className = "indicator-error"; twEl.title = "Twitch: Re-login required";
-        } else if (this.twitchAuthStatus?.authenticated) {
-          twEl.className = "indicator-ok"; twEl.title = "Twitch: Authenticated";
-        } else {
-          twEl.className = "indicator-off"; twEl.title = "Twitch: Anonymous";
-        }
-      }
+    // 2. + 3. Platform indicators (hidden if the platform is not active).
+    //
+    // Both branch chains now live in cookieIndicatorState, in utils.js, for
+    // two reasons. They had already drifted — YouTube had a no-cookies arm and
+    // Twitch did not, because the server sent no `found` for Twitch — and this
+    // decision is the one the whole three-state change exists to fix, so it
+    // has to be testable by EXECUTION rather than by matching source text.
+    // The relogin flag stays computed here rather than inside the helper: it
+    // arrives on a different key of the status payload than the per-platform
+    // check result the badge reads. It is NOT gated on auto_enabled — see the
+    // warnings block above for why.
+    for (const [platform, id, active, status] of [
+      ["youtube", "yt-indicator", ytActive, this.cookieStatus],
+      ["twitch", "tw-indicator", twActive, this.twitchAuthStatus],
+    ]) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.style.display = active ? "" : "none";
+      if (!active) continue;
+      const relogin = !!this.autoCookieReloginRequired?.[platform];
+      const { className, title } = cookieIndicatorState(platform, status, relogin);
+      el.className = className;
+      el.title = title;
     }
 
     // 4. Hide refresh button if neither platform is active

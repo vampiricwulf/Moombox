@@ -341,26 +341,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case cookieRecheckResultMsg:
-		var parts []string
+		// Three arms where there were two. "Not authenticated" is a
+		// CONCLUSION, and this line asserted it for every check that failed to
+		// reach the site — the exact claim Arc 1 stopped the internal
+		// machinery from making, still being made to the operator's face.
+		//
+		// The wording itself lives in cookies.RecheckReport, not here: the Web
+		// dashboard's refresh button is the same gesture and had drifted to a
+		// different answer entirely. This side decides only WHICH platforms
+		// were checked; the sentence is shared.
+		var checked []cookies.RecheckedPlatform
 		if a.statusBar.ytActive {
-			if msg.YouTubeAuth {
-				parts = append(parts, "YouTube OK")
-			} else {
-				parts = append(parts, "YouTube not authenticated")
-			}
+			checked = append(checked, cookies.RecheckedPlatform{Label: "YouTube", Verdict: msg.YouTube})
 		}
 		if a.statusBar.twActive {
-			if msg.TwitchAuth {
-				parts = append(parts, "Twitch OK")
-			} else {
-				parts = append(parts, "Twitch not authenticated")
-			}
+			checked = append(checked, cookies.RecheckedPlatform{Label: "Twitch", Verdict: msg.Twitch})
 		}
-		if len(parts) == 0 {
-			a.setFeedback("Cookies: no platforms configured")
-		} else {
-			a.setFeedback("Cookies: " + strings.Join(parts, ", "))
-		}
+		a.setFeedback(cookies.RecheckReport(checked...))
 		return a, nil
 
 	case cookieForceRefreshResultMsg:
@@ -667,28 +664,45 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupCookieFinishMsg:
 		// Update both platform flags — extraction may detect cookies for either
 		// platform regardless of which was targeted (matches Web UI behavior).
-		if msg.YTAuth {
+		if msg.Result.YouTubeAccepted {
 			a.setupWiz.cookieYTDone = true
 		}
-		if msg.TWAuth {
+		if msg.Result.TwitchAccepted {
 			a.setupWiz.cookieTWDone = true
 		}
 		a.setupWiz.cookieActive = false
 		a.setupWiz.cookieFinishing = false
 		a.setupWiz.cookiePlatform = ""
 		a.setupWiz.cookieCountdown = 0
-		// Show per-platform success feedback, or error/no-login feedback
-		if msg.Err != "" {
+		// Four arms where there were three, because acceptance and verification
+		// are different facts and the wizard was rendering only the first.
+		//
+		// FinishSetup accepts a sign-in the user just completed even when the
+		// site could not answer — a 429 or a DNS blip is not evidence against a
+		// login that happened thirty seconds ago. That is the right call, but
+		// reporting it as "configured" states a verification that never
+		// happened. Its mirror image is the extraction whose cookies cannot
+		// form an authenticated request at all: not accepted, and NOT "no login
+		// detected" either, because a login plainly was detected — it just did
+		// not yield credentials that can sign a request.
+		//
+		// Wording follows the R F chord's three-way split above: only a
+		// conclusive verdict says "failed", and everything that did not find
+		// out stops at "could not establish".
+		switch {
+		case msg.Err != "":
 			a.setupWiz.errorMsg = msg.Err
-		} else if !msg.YTAuth && !msg.TWAuth {
-			a.setupWiz.errorMsg = "No login detected — try signing in again"
-		} else {
-			if msg.YTAuth {
-				a.setFeedback("YouTube cookies configured")
+		case !msg.Result.YouTubeAccepted && !msg.Result.TwitchAccepted:
+			a.setupWiz.errorMsg = setupCookieRejectedMessage(msg.Platform, msg.Result)
+		default:
+			var parts []string
+			if msg.Result.YouTubeAccepted {
+				parts = append(parts, setupCookieAcceptedMessage("YouTube", msg.Result.YouTube))
 			}
-			if msg.TWAuth {
-				a.setFeedback("Twitch cookies configured")
+			if msg.Result.TwitchAccepted {
+				parts = append(parts, setupCookieAcceptedMessage("Twitch", msg.Result.Twitch))
 			}
+			a.setFeedback(strings.Join(parts, "; "))
 		}
 		return a, nil
 
@@ -1004,4 +1018,51 @@ func (a *App) channelDisplayName(chID string) string {
 		})
 	}
 	return name
+}
+
+// setupCookieAcceptedMessage words a platform the setup ACCEPTED.
+//
+// Accepted is not verified. The acceptance predicate takes a sign-in the user
+// just completed even when the check could not reach the site, so "configured"
+// is only true of the conclusive half; the other half has to say what it
+// actually knows, which is nothing.
+//
+// RefreshFailed is unreachable here by construction — the predicate requires
+// verifyOK or an attempted verifyUnknown — and is spelled out anyway so a
+// future change to that predicate surfaces as wrong copy rather than as a
+// conclusive failure quietly rendered in the "could not establish" arm.
+func setupCookieAcceptedMessage(platform string, v cookies.RefreshVerdict) string {
+	switch v {
+	case cookies.RefreshOK:
+		return platform + " cookies configured"
+	case cookies.RefreshFailed:
+		return platform + " cookies saved, but auth verification failed"
+	default:
+		return platform + " cookies saved, but Moombox could not establish whether they work — " +
+			"nothing has been concluded about them"
+	}
+}
+
+// setupCookieRejectedMessage words a finish that accepted NEITHER platform.
+//
+// It speaks for the platform the wizard was setting up, because that is the
+// one the user just signed in to; the sibling is routinely "failed" for the
+// uninteresting reason that it was never part of this setup.
+//
+// The unknown arm is the one that was missing. Reaching it means credentials
+// were extracted and the check never left the process — the jar could not
+// produce a cookie header or a SAPISIDHASH — so "no login detected" is the
+// wrong advice: a login WAS detected, and it did not yield anything that can
+// sign a request. An empty profile reports RefreshFailed for both platforms
+// and still gets the original line.
+func setupCookieRejectedMessage(platform string, result cookies.SetupResult) string {
+	verdict := result.YouTube
+	if platform == "twitch" {
+		verdict = result.Twitch
+	}
+	if verdict == cookies.RefreshUnknown {
+		return "Cookies were saved, but Moombox could not establish whether they authenticate — " +
+			"they cannot form a signed-in request. Try signing in again."
+	}
+	return "No login detected — try signing in again"
 }

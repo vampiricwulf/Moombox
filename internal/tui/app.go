@@ -189,9 +189,15 @@ type (
 	backfillRescanQueuedMsg struct{}
 
 	// Async results for cookie refresh
+	// cookieRecheckResultMsg carries VERDICTS, not booleans. R C is the key
+	// an operator presses to ask "do my cookies work", and the flattened bool
+	// could not tell "the site rejected them" from "the check never reached
+	// the site" — so a DNS blip answered "YouTube not authenticated", which is
+	// a claim the check did not make and sends the user off to re-export
+	// perfectly good cookies.
 	cookieRecheckResultMsg struct {
-		YouTubeAuth bool
-		TwitchAuth  bool
+		YouTube cookies.RefreshVerdict
+		Twitch  cookies.RefreshVerdict
 	}
 	cookieForceRefreshResultMsg struct {
 		// Result is carried whole rather than pre-flattened to a bool pair.
@@ -229,11 +235,18 @@ type (
 		Err string
 	}
 
-	// Async results for setup wizard cookie extraction
+	// Async results for setup wizard cookie extraction.
+	//
+	// Carries the whole SetupResult rather than the bool pair it used to. Two
+	// of the three outcomes look identical through a bool: cookies verified,
+	// and cookies saved that the check could not reach the site to confirm.
+	// The wizard reported both as "configured", so a network blip during the
+	// check was invisible — and its mirror image, an extraction whose cookies
+	// cannot form an authenticated request at all, was reported as "no login
+	// detected", which is a different problem with different advice.
 	setupCookieFinishMsg struct {
 		Platform string // "youtube" or "twitch"
-		YTAuth   bool
-		TWAuth   bool
+		Result   cookies.SetupResult
 		Err      string // error message from extraction (empty on success)
 	}
 
@@ -446,7 +459,10 @@ type App struct {
 	OnFetchReleaseNotes func(version string) (tag, notes string, err error)
 
 	// Cookie refresh callbacks
-	OnRecheckCookies func() (ytAuth bool, twAuth bool)
+	// OnRecheckCookies runs the auth check and reports what it CONCLUDED per
+	// platform. See cookieRecheckResultMsg for why the bool pair it used to
+	// return could not be worded truthfully.
+	OnRecheckCookies func() (yt, tw cookies.RefreshVerdict)
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if
 	// auto-cookies are not configured. It returns the pass's whole result
 	// rather than a bool: see cookieForceRefreshResultMsg for why the
@@ -537,7 +553,7 @@ func (a *App) SetSetupCallbacks(
 	onComplete func(cfg *config.MoomboxConfig) error,
 	onInstallYtdlp func(port int, httpsEnabled bool),
 	onStartAutoCookie func(platform string) error,
-	onFinishAutoCookie func() (bool, bool, error),
+	onFinishAutoCookie func() (cookies.SetupResult, error),
 	onCancelAutoCookie func(),
 	onRestart func(),
 ) {

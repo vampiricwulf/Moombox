@@ -1,7 +1,15 @@
 /**
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
-import { formatRelativeTime } from "./utils.js";
+import {
+  browserPathValidationOutcome,
+  cookieSetupAbortReport,
+  cookieSetupAcceptedToast,
+  cookieSetupProbe,
+  cookieSetupRejectedMessage,
+  formatRelativeTime,
+  serverErrorMessage,
+} from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
   {
@@ -903,31 +911,41 @@ export class SettingsController {
         const msgEl = document.getElementById("custom-browser-validation-msg");
         // Clear any previous validation message
         if (msgEl) { msgEl.textContent = ""; msgEl.style.color = ""; }
-        let validateResult;
+        // Only a verdict of "invalid" aborts the save. A validator that could
+        // not be reached, answered non-200 (the heavy limiter's 429 is the
+        // realistic one), or replied with something unparseable has told us
+        // nothing about the path — and abandoning the save over it discards
+        // every other setting edited in the same form. browserPathValidation-
+        // Outcome owns that distinction so it can be executed in a test; this
+        // site only renders the answer and obeys `block`.
+        let outcome;
         try {
           const validateResp = await fetch("/api/auto-cookies/validate-browser-path", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ path, type }),
           });
-          validateResult = await validateResp.json();
+          outcome = validateResp.ok
+            ? browserPathValidationOutcome({ reached: true, body: await validateResp.json() })
+            : browserPathValidationOutcome({ reached: false, detail: await serverErrorMessage(validateResp) });
         } catch (e) {
-          // Network error must not leave the Save button stuck spinning
-          this.app.showToast("Failed to validate browser path: " + e.message, "danger");
-          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
-          return;
-        }
-        if (!validateResult.valid) {
-          if (msgEl) {
-            msgEl.textContent = `Invalid browser: ${validateResult.error}`;
-            msgEl.style.color = "var(--sl-color-danger-600)";
-          }
-          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
-          return;
+          // Unreachable server, or a 200 whose body was not JSON. Either way
+          // the check did not happen — it must not leave the Save button stuck
+          // spinning, and it must not stand in for a rejection.
+          outcome = browserPathValidationOutcome({ reached: false, detail: e.message });
         }
         if (msgEl) {
-          msgEl.textContent = "Path validated.";
-          msgEl.style.color = "var(--sl-color-success-600)";
+          msgEl.textContent = outcome.message;
+          msgEl.style.color = `var(--sl-color-${outcome.variant}-600)`;
+        }
+        if (outcome.block) {
+          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
+          return;
+        }
+        if (outcome.variant === "warning") {
+          // The inline message sits in a section the user may have scrolled
+          // past; the save is proceeding, so say so where it will be seen.
+          this.app.showToast(outcome.message, "warning");
         }
         payload.cookies.browser_path = path;
         payload.cookies.browser_type = type;
@@ -2359,7 +2377,10 @@ export class SettingsController {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ platform }),
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // The server said why. "no supported browser installed" (424) and the
+      // shutdown 503 both arrived here as a bare `HTTP <n>` before this — see
+      // serverErrorMessage.
+      if (!response.ok) throw new Error(await serverErrorMessage(response));
       const data = await response.json();
 
       if (data.success) {
@@ -2411,6 +2432,12 @@ export class SettingsController {
     const doneBtn = document.getElementById("btn-auto-cookie-done");
     const countdownEl = document.getElementById("auto-cookie-countdown");
     const timeoutResultEl = document.getElementById("auto-cookie-result");
+    // Which platform this dialog belongs to, from the label
+    // startAutoCookieSetup set. Hoisted out of the abort path, which used to be
+    // the only branch that needed it: the rejected-outcome copy below now
+    // speaks for the platform the user just signed in to.
+    const dialogLabel = document.getElementById("auto-cookie-setup-dialog")?.label || "";
+    const platform = dialogLabel.includes("Twitch") ? "twitch" : "youtube";
     if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
     if (resultEl) {
       resultEl.textContent = "Extracting cookies...";
@@ -2437,15 +2464,29 @@ export class SettingsController {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
 
+    // Baseline for the abort path, dispatched BEFORE the finish so the
+    // lastRefresh comparison there is server clock against server clock and no
+    // browser/server skew can turn an old stamp into a fresh one.
+    //
+    // Deliberately not awaited: it must not add a round trip to the finish, and
+    // only the abort branch ever reads it. cookieSetupProbe never rejects, so
+    // an unread promise cannot surface as an unhandled rejection.
+    const abortBaseline = cookieSetupProbe();
+
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
       // Set before the ok check: any ANSWER means FinishSetup reached a
       // conclusion and released the slot, success or not. Only the abort path
-      // below skips this line, and it must — a timed-out finish leaves the
-      // setup live, which is exactly when the Skip button and the unload beacon
-      // still have something to cancel.
+      // below skips this line, and it must — an abort says nothing about
+      // whether the setup is still live, which is exactly when the Skip button
+      // and the unload beacon still have something to cancel. That path clears
+      // the flag itself, but only once the server has confirmed the slot is
+      // free.
       this._cookieSetupActive = false;
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // The finish handler's discriminated errors — 422 for an unreadable
+      // cookies.txt or a broken profile, 409 for a locked cookie DB — used to
+      // reach the user as `HTTP <n>`, which points at none of them.
+      if (!response.ok) throw new Error(await serverErrorMessage(response));
       const data = await response.json();
 
       const ytOk = data.authenticated;
@@ -2455,30 +2496,50 @@ export class SettingsController {
         if (resultEl) resultEl.textContent = "";
         const dialog = document.getElementById("auto-cookie-setup-dialog");
         if (dialog) dialog.hide();
+        // Accepted is not verified — see cookieSetupAcceptedToast. A sign-in
+        // Moombox could not reach the site to confirm was reported here as an
+        // unqualified success, so a user whose network blipped mid-check was
+        // told their cookies were configured with nothing having checked them.
         if (ytOk) {
-          this.app.showToast("YouTube cookies configured", "success");
+          const toast = cookieSetupAcceptedToast("YouTube", data.youtubeVerification);
+          this.app.showToast(toast.message, toast.variant);
         }
         if (twOk) {
-          this.app.showToast("Twitch cookies configured", "success");
+          const toast = cookieSetupAcceptedToast("Twitch", data.twitchVerification);
+          this.app.showToast(toast.message, toast.variant);
         }
         this.app.loadStatus();
       } else {
         if (resultEl) {
-          resultEl.textContent = data.error || "No login detected. Try again.";
+          // Speaks from the verification fields, not from `data.error`: that
+          // never exists on a 200, so the fallback was the only thing this
+          // branch ever rendered.
+          resultEl.textContent = cookieSetupRejectedMessage(
+            platform === "twitch" ? data.twitchVerification : data.youtubeVerification,
+          );
           resultEl.style.color = "var(--sl-color-danger-600)";
         }
       }
     } catch (e) {
       if (e.name === "AbortError") {
         if (resultEl) resultEl.textContent = "";
+        // Report what actually happened rather than asserting a timeout. The
+        // server writes the merged cookies.txt and reloads the jar BEFORE it
+        // verifies, so this abort can fire over work that already committed.
+        // The 60 s cap stays as it is — the server-side setup grace window is
+        // priced against that exact number.
+        const probe = await cookieSetupProbe();
+        // Only a definite "no setup here" releases the flag. An unanswered
+        // probe keeps it raised, which is the safe direction: the Skip button
+        // and the unload beacon then still have something to tell the server
+        // about.
+        if (probe.ok && !probe.inProgress) this._cookieSetupActive = false;
         if (timeoutResultEl) {
-          // Determine platform from the dialog label set during startAutoCookieSetup
-          const dialogLabel = document.getElementById("auto-cookie-setup-dialog")?.label || "";
-          const platform = dialogLabel.includes("Twitch") ? "twitch" : "youtube";
+          const report = cookieSetupAbortReport(probe, await abortBaseline);
           timeoutResultEl.innerHTML = `
-            <sl-alert variant="warning" open>
-              <sl-icon slot="icon" name="clock"></sl-icon>
-              Cookie extraction timed out. The browser window may still be open.
+            <sl-alert variant="${report.variant}" open>
+              <sl-icon slot="icon" name="${report.icon}"></sl-icon>
+              ${this.app.escapeHtml(report.message)}
             </sl-alert>
             <div style="display: flex; gap: 0.5em; margin-top: 0.75em;">
               <sl-button variant="primary" size="small" id="cookie-retry-btn">Try Again</sl-button>
@@ -2498,6 +2559,10 @@ export class SettingsController {
             this.cancelAutoCookieSetup();
           });
         }
+        // The finish may well have committed while we stopped waiting, so the
+        // badges and the panel's own status are both potentially stale.
+        this.app.loadStatus();
+        this.loadAutoCookieStatus();
         return;
       }
       if (resultEl) {

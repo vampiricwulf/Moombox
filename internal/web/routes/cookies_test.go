@@ -138,6 +138,63 @@ func TestStartSetupRouteMapsServiceStopped(t *testing.T) {
 	}
 }
 
+// TestAutoStatusCarriesNoFieldNothingCanRead is V10.
+//
+// `configured` was computed as `profileDir != ""` and could not be false:
+// cmd/moombox seeds the profile dir with a "./browser-profile" default before
+// the service is constructed, so every install reported true from its first
+// run. Nothing anywhere read it. A value that is always true and read by nobody
+// is worse than an absent one — the next reader believes it — so it was
+// deleted rather than made to mean something nobody asked for.
+//
+// The second half is the seam the deletion could half-miss: the no-service
+// branch of the same endpoint hand-builds its body, so `configured` lived in
+// two places and removing one would have left the frontend a field the real
+// status never sends.
+//
+// The subset runs one way ONLY, deliberately. The fallback body is missing
+// `availableBrowsers`, which the real status does emit and populateBrowserSelector
+// reads — a pre-existing divergence on a branch that is unreachable in
+// production (services.go always constructs the service). Asserting equality
+// here would fail for a reason V10 is not about.
+func TestAutoStatusCarriesNoFieldNothingCanRead(t *testing.T) {
+	raw, err := json.Marshal(cookies.AutoCookieStatus{})
+	if err != nil {
+		t.Fatalf("marshal AutoCookieStatus: %v", err)
+	}
+	var real map[string]any
+	if err := json.Unmarshal(raw, &real); err != nil {
+		t.Fatalf("unmarshal AutoCookieStatus: %v", err)
+	}
+	if _, ok := real["configured"]; ok {
+		t.Error("AutoCookieStatus emits `configured` again. It cannot be false — the profile dir is " +
+			"seeded with a default before the service exists — so any reader that branches on it " +
+			"takes the same branch on every install, forever")
+	}
+
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, nil, nil, nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/cookies/auto-status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auto-status with no service: status %d, want %d", rec.Code, http.StatusOK)
+	}
+	var fallback map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &fallback); err != nil {
+		t.Fatalf("no-service auto-status body is not JSON: %q", rec.Body.String())
+	}
+	if len(fallback) == 0 {
+		t.Fatal("the no-service branch returned an empty object — this assertion is reading nothing")
+	}
+	for key := range fallback {
+		if _, ok := real[key]; !ok {
+			t.Errorf("the no-service branch of /api/cookies/auto-status emits %q, which "+
+				"cookies.AutoCookieStatus does not — the frontend would learn a field the real "+
+				"status never sends", key)
+		}
+	}
+}
+
 // TestCookieRefreshOutcomeSeparatesDeclinedFromFailed pins the wire fields the
 // manual-refresh toast branches on.
 //

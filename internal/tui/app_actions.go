@@ -166,8 +166,8 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setFeedback("Rechecking cookies...")
 			recheckFn := a.OnRecheckCookies
 			return a, safeCmd(func() tea.Msg {
-				ytAuth, twAuth := recheckFn()
-				return cookieRecheckResultMsg{YouTubeAuth: ytAuth, TwitchAuth: twAuth}
+				yt, tw := recheckFn()
+				return cookieRecheckResultMsg{YouTube: yt, Twitch: tw}
 			})
 		}
 	case "R F":
