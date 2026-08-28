@@ -1405,8 +1405,10 @@ func youtubeGuideAuthVerdictFallback(respBody []byte) (bool, error) {
 //     rather than read a verdict off an exchange made in clear.
 //
 // Errors name a host and a header NAME — never a header value, never response
-// bytes. They reach AutoCookieService.setError and are rendered in the Web UI
-// and TUI.
+// bytes. For where these strings actually go — and why that makes the rule more
+// load-bearing rather than less — see errGuideLoginMarkerUnreadable's doc
+// comment. They do NOT reach AutoCookieService.setError: checkPlatformAuth
+// discards the value.
 func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeader string) error {
 	if sent == nil || sent.URL == nil {
 		return fmt.Errorf("could not determine what was asked")
@@ -1889,10 +1891,11 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 	// mistake the YouTube guide check made, reachable here through the same
 	// checkPlatformAuth mapping.
 	//
-	// The error names the status and nothing else. It reaches
-	// AutoCookieService.setError and is rendered in the Web UI and TUI, so a
-	// response body echoed back by an intermediary must never be
-	// interpolated into it.
+	// The error names the status and nothing else, so a response body echoed
+	// back by an intermediary can never be interpolated into it. It does NOT
+	// reach AutoCookieService.setError — services.go wires VerifyTwitchAuth to
+	// CheckTwitchAuth through checkPlatformAuth, which discards the value. See
+	// errGuideLoginMarkerUnreadable's doc comment for the real surface.
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return true, nil
