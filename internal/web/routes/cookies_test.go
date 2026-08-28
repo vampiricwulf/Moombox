@@ -1,12 +1,142 @@
 package routes
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	webassets "github.com/vampiricwulf/Moombox/web"
 )
+
+// nopRouteLogger satisfies the anonymous logger interface
+// cookies.NewAutoCookieService takes.
+type nopRouteLogger struct{}
+
+func (nopRouteLogger) Debug(string, ...any) {}
+func (nopRouteLogger) Info(string, ...any)  {}
+func (nopRouteLogger) Warn(string, ...any)  {}
+func (nopRouteLogger) Error(string, ...any) {}
+
+// TestCancelSetupRouteAnswers404WhenThereIsNothingToCancel is S18 at the wire.
+//
+// The handler used to answer {"success": true} unconditionally because
+// CancelSetup returned nothing, so a second cancel — or a cancel with no setup
+// ever started — told the caller it had cancelled something. The status code
+// alone is not enough to assert here: chi answers an UNREGISTERED path with a
+// bare 404 too, so a route rename would satisfy a status-only check while the
+// endpoint had ceased to exist. The body is what distinguishes the two, and it
+// has to carry the sentinel's own text.
+func TestCancelSetupRouteAnswers404WhenThereIsNothingToCancel(t *testing.T) {
+	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), nopRouteLogger{})
+
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, svc, nil, nil)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/cancel", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cancel with nothing in progress: status %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("cancel answered 404 with a body that is not the handler's JSON error — the "+
+			"route may simply not be registered any more: %q", rec.Body.String())
+	}
+	if got, _ := body["error"].(string); !strings.Contains(got, cookies.ErrNoSetupInProgress.Error()) {
+		t.Errorf("404 body = %q, want it to carry %q", got, cookies.ErrNoSetupInProgress.Error())
+	}
+	if _, ok := body["success"]; ok {
+		t.Errorf("a refused cancel still reports a success field: %v", body)
+	}
+}
+
+// TestCancelSetupRouteReusesTheFinishHandlerShape guards the instruction that
+// came with S18: the finish handler already had an ErrNoSetupInProgress arm and
+// the cancel handler had to reuse it rather than invent a second convention.
+// Both endpoints answer the same question — "was there a setup here to act
+// on?" — and a reader who learns one mapping should not have to check the
+// other.
+func TestCancelSetupRouteReusesTheFinishHandlerShape(t *testing.T) {
+	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), nopRouteLogger{})
+
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, svc, nil, nil)
+
+	// Neither endpoint has a setup to act on, so both must reach their
+	// ErrNoSetupInProgress arm.
+	statuses := map[string]int{}
+	bodies := map[string]string{}
+	for _, path := range []string{"/api/cookies/auto-setup/cancel", "/api/cookies/auto-setup/finish"} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		statuses[path] = rec.Code
+		var body map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &body)
+		bodies[path], _ = body["error"].(string)
+	}
+
+	if statuses["/api/cookies/auto-setup/finish"] != http.StatusNotFound {
+		t.Fatalf("fixture is broken — finish must already answer 404 here, got %d",
+			statuses["/api/cookies/auto-setup/finish"])
+	}
+	if statuses["/api/cookies/auto-setup/cancel"] != statuses["/api/cookies/auto-setup/finish"] {
+		t.Errorf("cancel answers %d where finish answers %d for the same missing setup",
+			statuses["/api/cookies/auto-setup/cancel"], statuses["/api/cookies/auto-setup/finish"])
+	}
+	if bodies["/api/cookies/auto-setup/cancel"] != bodies["/api/cookies/auto-setup/finish"] {
+		t.Errorf("cancel and finish word the same condition differently:\n\tcancel: %q\n\tfinish: %q",
+			bodies["/api/cookies/auto-setup/cancel"], bodies["/api/cookies/auto-setup/finish"])
+	}
+}
+
+// TestStartSetupRouteMapsServiceStopped covers the new sentinel's only wire
+// mapping. 503 rather than the 409 the two in-progress conflicts get: those
+// clear on their own and this one never does, so "try again shortly" is the
+// wrong advice to encode in the status code.
+func TestStartSetupRouteMapsServiceStopped(t *testing.T) {
+	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), nopRouteLogger{})
+
+	// Browser guard, and it is not decoration. A regression in the stopped
+	// gate lets StartSetup fall through to browser detection, and on any
+	// machine with Firefox or Chrome installed — every developer machine, and
+	// the owner's, which runs real browser windows on other profiles — that
+	// means this test OPENS ONE instead of failing. The cookies-package tests
+	// stub the unexported detectBrowser seam; from here the reachable seam is
+	// ConfiguredBrowserOverride, which resolvedBrowser consults first, so
+	// pointing it at a path inside a fresh temp dir substitutes a browser that
+	// provably cannot launch for whatever is really installed.
+	unlaunchable := filepath.Join(t.TempDir(), "not-a-browser.exe")
+	svc.ConfiguredBrowserOverride = func() (string, string) { return unlaunchable, "chrome" }
+
+	svc.Stop()
+
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, svc, nil, nil)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/start", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("start on a stopped service: status %d, want %d — a 500 would read as a bug "+
+			"rather than as shutdown", rec.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	got, _ := body["error"].(string)
+	if !strings.Contains(got, cookies.ErrServiceStopped.Error()) {
+		t.Errorf("503 body = %q, want it to carry %q — the generic "+
+			"\"auto-cookie service not configured\" 503 above means the same code has to be "+
+			"told apart by its message", got, cookies.ErrServiceStopped.Error())
+	}
+}
 
 // TestCookieRefreshOutcomeSeparatesDeclinedFromFailed pins the wire fields the
 // manual-refresh toast branches on.

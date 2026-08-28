@@ -387,10 +387,15 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 		// for the same reason.
 		if !result.Ran {
 			// The pass DECLINED before doing any work — setup in progress, a
-			// refresh already in flight, or nothing configured to refresh
-			// (refreshDeclined() is RefreshResult{}, so Ran is false and both
-			// verdicts are the zero value). No browser ran, nothing was
-			// checked, and nothing about these cookies changed.
+			// refresh already in flight, nothing configured to refresh, or the
+			// service already stopped (refreshDeclined() is RefreshResult{}, so
+			// Ran is false and both verdicts are the zero value). No browser
+			// ran, nothing was checked, and nothing about these cookies changed.
+			//
+			// The first three are the ones cookies.RefreshDeclinedCauses names
+			// for operators; see its doc for why the stopped latch is
+			// deliberately absent from that copy but belongs in this list, which
+			// is reasoning about control flow rather than wording for a reader.
 			//
 			// Notifying here is worse than useless, because it is REACHABLE BY
 			// RACING OURSELVES and it costs the accurate message. Both

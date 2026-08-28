@@ -199,6 +199,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				jsonError(rw, err.Error(), http.StatusConflict)
 			case errors.Is(err, cookies.ErrNoBrowserFound):
 				jsonError(rw, "no supported browser installed", http.StatusFailedDependency)
+			// Shutdown, not a fault: the service latched stopped and will not
+			// launch another browser. 503 rather than the 409 the two
+			// in-progress cases get, because this one never clears.
+			case errors.Is(err, cookies.ErrServiceStopped):
+				jsonError(rw, err.Error(), http.StatusServiceUnavailable)
 			default:
 				jsonError(rw, "failed to start setup", http.StatusInternalServerError)
 			}
@@ -259,7 +264,22 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			return
 		}
 
-		autoCookieSvc.CancelSetup()
+		// Same shape as the finish handler's ErrNoSetupInProgress arm above,
+		// deliberately: both endpoints are answering "was there a setup here
+		// to act on?" and there is no reason for the two to disagree about
+		// what a missing one looks like on the wire. Before this, cancel
+		// answered {"success": true} unconditionally — a second cancel, or a
+		// cancel with no setup ever started, reported a cancel that never
+		// happened.
+		if err := autoCookieSvc.CancelSetup(); err != nil {
+			switch {
+			case errors.Is(err, cookies.ErrNoSetupInProgress):
+				jsonError(rw, err.Error(), http.StatusNotFound)
+			default:
+				jsonError(rw, "failed to cancel setup", http.StatusInternalServerError)
+			}
+			return
+		}
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 

@@ -95,6 +95,7 @@ func TestSentinelsAreDistinct(t *testing.T) {
 		ErrSetupInProgress,
 		ErrNoSetupInProgress,
 		ErrSetupCancelled,
+		ErrServiceStopped,
 		ErrRefreshInProgress,
 		ErrProfileNotFound,
 		ErrProfileNotADirectory,

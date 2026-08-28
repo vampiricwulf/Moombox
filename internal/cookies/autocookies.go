@@ -155,11 +155,29 @@ type AutoCookieService struct {
 	setupBrowser   *DetectedBrowser
 	browserExited  bool
 	cdpPort        int
-	cancelled      bool
 	lastRefresh    *time.Time
 	lastError      *string
 	needsRelogin   AutoCookieReloginRequired
 	targetPlatform string // "youtube" or "twitch"
+
+	// The two lifecycle flags. Kept together and apart from the state above
+	// because they are DECISIONS — an abort was asked for, the service was
+	// shut down — rather than descriptions of a browser, and because cleanup()
+	// clears neither of them.
+
+	// cancelled is the per-setup abort flag. Raised by CancelSetup and by
+	// Stop, read by StartSetup's mid-preparation check and by FinishSetup, and
+	// cleared in exactly one place: StartSetup's slot claim. cleanup() does
+	// not clear it — see cleanup for why doing so erased every complete cancel
+	// microseconds after it was raised.
+	cancelled bool
+
+	// stopped latches the service's shutdown. Unlike cancelled it is scoped to
+	// the SERVICE, not to one setup attempt: Stop means "this service is done"
+	// for the remaining lifetime of the process, so no cleanup(), no claim and
+	// no later StartSetup may lower it. StartSetup and RefreshCookiesDetailed
+	// both refuse while it is set.
+	stopped bool
 
 	// Optional auth verification callbacks (set by caller for real API verification)
 	VerifyYouTubeAuth func(ctx context.Context) (bool, error)
@@ -384,6 +402,13 @@ func (s *AutoCookieService) FlagManualRelogin(platform string) {
 // StartSetup launches a browser for the user to log in.
 func (s *AutoCookieService) StartSetup(platform string) error {
 	s.mu.Lock()
+	// Checked before the in-progress gate: a stopped service is not "busy",
+	// and telling the caller to try again shortly would be wrong — Stop is
+	// permanent for this service's lifetime.
+	if s.stopped {
+		s.mu.Unlock()
+		return ErrServiceStopped
+	}
 	if s.setupProcess != nil || s.setupClaimed {
 		s.mu.Unlock()
 		return ErrSetupInProgress
@@ -399,8 +424,15 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	// the same profile and leak the first Job Object. The claim drops when
 	// this call returns — by then either setupProcess holds the real
 	// process (success) or the attempt failed and the slot must free up.
-	// cancelled is reset here, at claim time, so a CancelSetup arriving
-	// DURING the preparation below is observed rather than erased.
+	//
+	// Claim time is the ONE place `cancelled` is cleared, and that is what
+	// makes the check at the end of the preparation below mean anything. It
+	// used to be cleared in cleanup() as well; cleanup() runs on every setup
+	// exit path INCLUDING CancelSetup's own last act, so a complete cancel
+	// erased its own flag microseconds after raising it and the check below
+	// could only ever catch a cancel that landed in the sliver between
+	// CancelSetup's flag write and its cleanup(). Clearing it here and nowhere
+	// else means the flag survives until the setup it belongs to consumes it.
 	s.setupClaimed = true
 	s.cancelled = false
 	s.mu.Unlock()
@@ -683,15 +715,33 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	return ytAuth, twAuth, nil
 }
 
-// CancelSetup kills the setup browser.
-func (s *AutoCookieService) CancelSetup() {
+// CancelSetup aborts an in-flight setup: it raises the cancelled flag, kills
+// the setup browser if one is running, and clears the per-setup state.
+//
+// "In flight" is `setupProcess != nil || setupClaimed` — deliberately the same
+// expression GetStatus publishes as SetupInProgress, so a cancel succeeds
+// exactly when the UI is showing the Cancel button that produced it. The claim
+// half is not a technicality: between StartSetup's gate and the browser launch
+// there is no process yet, but there IS a setup to cancel, and StartSetup's
+// mid-preparation check is what consumes the flag this call raises.
+//
+// Returns ErrNoSetupInProgress when there was nothing to cancel — a second
+// cancel, or a cancel with no setup ever started. This used to return nothing
+// at all and the route answered `{"success": true}` unconditionally, so
+// cancelling twice reported a cancel that never happened.
+func (s *AutoCookieService) CancelSetup() error {
 	s.mu.Lock()
+	if s.setupProcess == nil && !s.setupClaimed {
+		s.mu.Unlock()
+		return ErrNoSetupInProgress
+	}
 	s.cancelled = true
 	s.mu.Unlock()
 
 	s.killSetupProcess()
 	s.cleanup()
 	s.logger.Info("auto-cookie setup cancelled")
+	return nil
 }
 
 // RefreshVerdict is what a refresh pass concluded about ONE platform.
@@ -864,14 +914,29 @@ func (r RefreshResult) AnyVerified() bool {
 }
 
 // RefreshDeclinedCauses names every way a refresh pass can decline with a NIL
-// error, for UI copy that has to explain a decline without naming a cause it
-// cannot know.
+// error IN FRONT OF A READER, for UI copy that has to explain a decline
+// without naming a cause it cannot know.
 //
-// Exactly three, and the list must stay exhaustive: the two slot conflicts at
-// the top of RefreshCookiesDetailed (setup in progress, refresh already in
-// flight) and the empty refreshPlatforms() gate. The other two refreshDeclined()
-// returns — no browser and no profile, profile not found — both carry an error,
-// so every caller has already branched away before it reaches this text.
+// Three named, four in the code, and the gap is deliberate — read this before
+// adding a fifth. The named three are the two slot conflicts at the top of
+// RefreshCookiesDetailed (setup in progress, refresh already in flight) and the
+// empty refreshPlatforms() gate. The unnamed fourth is the `stopped` latch,
+// which sits above all of them and declines once Stop() has been called.
+//
+// The latch is left out because this constant is operator-facing copy, rendered
+// by a worker log line, a TUI toast and a Web toast, and a decline caused by
+// Stop() has no reader: the only way to reach it is a "Refresh now" that raced
+// process shutdown, and by the time the toast would render the service it
+// describes is gone. Naming it would put a cause nobody can act on in front of
+// every operator who ever hits one of the three real ones.
+//
+// So the invariant is exhaustiveness over the declines a RUNNING service can
+// produce, not over every refreshDeclined() return. A new decline reachable
+// before Stop() must be added here; one reachable only after it must not.
+//
+// The other two refreshDeclined() returns — no browser and no profile, profile
+// not found — both carry an error, so every caller has already branched away
+// before it reaches this text.
 //
 // Exported because three surfaces render it (the worker's log via
 // cookieRefreshReportFor, the TUI's R F feedback, and the Web toast) and they
@@ -923,6 +988,15 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 // and reports the outcome per platform.
 func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (RefreshResult, error) {
 	s.mu.Lock()
+	// A stopped service must not launch a browser. Declined rather than
+	// errored, matching the two gates below it: nothing was examined, so the
+	// pass has no verdict to report and no failure to blame on the
+	// credentials. Stop() latches, so unlike those two this never clears.
+	if s.stopped {
+		s.mu.Unlock()
+		s.logger.Debug("skipping cookie refresh — service stopped")
+		return refreshDeclined(), nil
+	}
 	if s.setupProcess != nil || s.setupClaimed {
 		s.mu.Unlock()
 		s.logger.Debug("skipping cookie refresh — setup in progress")
@@ -1553,9 +1627,23 @@ func cookiesLostMessage(lost []string) string {
 		"every stored credential had expired or was dropped, so nothing is left to authenticate with; sign in again"
 }
 
-// Stop stops the auto-cookie service.
+// Stop stops the auto-cookie service, permanently for this service's
+// lifetime. After it, StartSetup returns ErrServiceStopped and
+// RefreshCookies/RefreshCookiesDetailed decline.
+//
+// The latch is a separate field from `cancelled` because the two answer
+// different questions and have different lifetimes. `cancelled` aborts ONE
+// setup attempt and is consumed by the next claim; `stopped` is a statement
+// about the service, so nothing downstream may lower it — least of all the
+// cleanup() this very function calls at the end.
 func (s *AutoCookieService) Stop() {
 	s.mu.Lock()
+	s.stopped = true
+	// Raise the per-setup flag too, for one narrow window: a FinishSetup that
+	// reaches its gate after this write but before the cleanup() below nils
+	// setupProcess is turned away as cancelled rather than allowed to drive a
+	// browser that is being killed underneath it. Past that point the nil
+	// setupProcess covers it on its own.
 	s.cancelled = true
 	s.mu.Unlock()
 	s.killSetupProcess()
@@ -1727,6 +1815,29 @@ func (s *AutoCookieService) killRefreshProcess() {
 	}
 }
 
+// cleanup releases the per-attempt setup state so the next StartSetup begins
+// from a clean slate. It runs on EVERY setup exit path — success, extraction
+// failure, the empty-profile "no login detected" case, each of the mkdir /
+// write / jar-load failures, the S9 read-abort that refuses to overwrite an
+// unreadable cookies.txt, the Chromium CDP-timeout bail, CancelSetup and Stop
+// — and that breadth is precisely why the two decision flags below are NOT in
+// the list.
+//
+// `cancelled` is not reset here. It used to be, and because CancelSetup's own
+// last act is to call cleanup(), a complete cancel erased its own flag
+// microseconds after raising it: StartSetup's mid-preparation check could
+// never observe one. It is cleared at claim time in StartSetup instead, which
+// is where a cancel is actually consumed. Do not "fix" a lingering flag by
+// putting the reset back here under some condition — that is the same defect
+// with extra steps.
+//
+// `stopped` is not reset here for a stronger reason: Stop() calls cleanup()
+// itself, so clearing it would un-stop the service inside the very call that
+// stopped it. Nothing may lower that latch.
+//
+// What does get cleared is only ever state describing a browser that is gone:
+// the Job Object handle, the process, the browser record, the exit flag, the
+// CDP port and the target platform.
 func (s *AutoCookieService) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1740,7 +1851,6 @@ func (s *AutoCookieService) cleanup() {
 	s.setupBrowser = nil
 	s.browserExited = false
 	s.cdpPort = 0
-	s.cancelled = false
 	s.targetPlatform = ""
 }
 
