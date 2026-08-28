@@ -80,6 +80,10 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 		s.mu.Lock()
 		if s.setupProcess == proc {
 			s.browserExited = true
+			// Starts the retention grace. Until this stamp existed the exit
+			// was recorded and then ignored: setupProcess stayed non-nil
+			// forever and every consumer kept reporting a setup in progress.
+			s.setupRetainedSince = time.Now()
 		}
 		s.mu.Unlock()
 	}()

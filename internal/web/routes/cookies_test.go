@@ -295,3 +295,65 @@ func TestAppJSMatchesTheDeclinedCauses(t *testing.T) {
 			"is naming a different set of causes.", cookies.RefreshDeclinedCauses)
 	}
 }
+
+// TestCookieSetupClientsTellTheServerWhenTheUserGivesUp is S16, pinned the only
+// way Go can pin browser code: against the embedded asset the binary actually
+// serves.
+//
+// Two abandonment paths existed with no POST behind either of them. Closing the
+// tab fired nothing — the only unload handler in settings.js guards the
+// unsaved-changes flag — and the Skip button on the extraction-timeout alert
+// called dialog.hide() directly, which does NOT fire sl-request-close and so
+// never reached the cancel handler wired to it. Both left the server holding a
+// setup, which is what wedges acquisition; the server-side reap is the backstop
+// for the cases with no client at all, and these are the fast path.
+//
+// The unload beacon is deliberately on pagehide rather than beforeunload: the
+// beforeunload handler beside it can put a "Leave site?" confirm in front of
+// the user, and a beacon fired from there would cancel a setup they chose to
+// stay for.
+func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
+	for _, mod := range []struct {
+		path     string
+		cancelFn string
+	}{
+		{"public/modules/settings.js", "this.cancelAutoCookieSetup()"},
+		{"public/modules/setup.js", "this.cancelCookieSetup()"},
+	} {
+		raw, err := webassets.PublicFS.ReadFile(mod.path)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", mod.path, err)
+		}
+		js := string(raw)
+
+		if !strings.Contains(js, `navigator.sendBeacon("/api/cookies/auto-setup/cancel")`) {
+			t.Errorf("%s never tells the server the tab is going away mid-setup — "+
+				"an abandoned wizard then blocks every setup and every periodic refresh "+
+				"until the grace window expires", mod.path)
+		}
+		if !strings.Contains(js, `window.addEventListener("pagehide"`) {
+			t.Errorf("%s fires its cancel beacon from something other than pagehide; "+
+				"beforeunload can be cancelled by the user and would kill a setup they kept", mod.path)
+		}
+
+		// The Skip button, in the handler the timeout alert wires up. Checked as
+		// a window after the id rather than anywhere in the file, because the
+		// cancel function is called from several other places and a match
+		// elsewhere would prove nothing about this button.
+		const skipHandler = `document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {`
+		at := strings.Index(js, skipHandler)
+		if at < 0 {
+			t.Fatalf("%s no longer wires a click handler on #cookie-skip-btn — "+
+				"re-derive this test against the new shape", mod.path)
+		}
+		body := js[at+len(skipHandler):]
+		if end := strings.Index(body, "});"); end >= 0 {
+			body = body[:end]
+		}
+		if !strings.Contains(body, mod.cancelFn) {
+			t.Errorf("%s: Skip does not route through %s. Hiding the dialog directly does not "+
+				"fire sl-request-close, so the server is never told:\n%s",
+				mod.path, mod.cancelFn, body)
+		}
+	}
+}

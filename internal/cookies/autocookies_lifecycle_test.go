@@ -22,6 +22,15 @@ import (
 // thing downstream is a launch, and this makes that launch fail fast and
 // loudly (as "start browser: …", which no assertion here accepts) instead of
 // opening a real browser window on the machine running the tests.
+//
+// Each test using this costs ~2s, and the cost is an artifact of the fixture
+// rather than a slow code path. CancelSetup's killSetupProcess polls the setup
+// slot for launchWindowKillBudget so a cancel landing in the launch window
+// still catches the browser the launcher is about to publish — and here the
+// call is made from INSIDE StartSetup's own goroutine, so the claim it is
+// waiting on can never resolve and the poll always runs to its cap. A real
+// cancel arrives on another goroutine and returns as soon as the launcher
+// publishes or abandons the slot.
 func cancellingDetector(t *testing.T, s *AutoCookieService, cancelErr *error, calls *int) func() *DetectedBrowser {
 	t.Helper()
 	unlaunchable := filepath.Join(t.TempDir(), "not-a-browser.exe")

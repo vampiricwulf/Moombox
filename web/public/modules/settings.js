@@ -100,6 +100,9 @@ export class SettingsController {
     /** True when the yt-dlp plugin button reads "Reinstall" (installed,
      *  matching port) — the install call must then force a rewrite. */
     this._ytdlpReinstall = false;
+    /** True while the SERVER is holding a setup slot this controller opened —
+     *  not while the dialog is merely visible. The pagehide beacon reads it. */
+    this._cookieSetupActive = false;
   }
 
   setupListeners() {
@@ -393,6 +396,25 @@ export class SettingsController {
         e.preventDefault();
         e.returnValue = "";
       }
+    });
+
+    // Tell the server when the tab goes away mid-setup. Nothing did, so closing
+    // the tab left a browser registered server-side and every later setup and
+    // periodic refresh refused ("setup in progress") until the grace window
+    // expired. The server-side reap is the backstop — it has to be, since a TUI
+    // session or a crashed tab has no client to fire anything — and this is the
+    // fast path that keeps the wedge to milliseconds instead of a minute.
+    //
+    // pagehide, NOT beforeunload, and the difference is not cosmetic: the
+    // beforeunload above can put a "Leave site?" confirm in front of the user,
+    // and a beacon fired from there cancels the setup even when they choose to
+    // stay. pagehide only fires once the page really is going. sendBeacon
+    // survives the unload where fetch does not (player.js does the same for the
+    // resume position); its POST carries an Origin, so it passes CSRF.
+    window.addEventListener("pagehide", () => {
+      if (!this._cookieSetupActive) return;
+      this._cookieSetupActive = false;
+      navigator.sendBeacon("/api/cookies/auto-setup/cancel");
     });
 
     // Handle sl-dialog close (Escape/overlay click)
@@ -2314,6 +2336,9 @@ export class SettingsController {
       const data = await response.json();
 
       if (data.success) {
+        // A browser is now open and the server is holding the setup slot. Until
+        // this is cleared, an unload cancels it (see the pagehide beacon).
+        this._cookieSetupActive = true;
         const dialog = document.getElementById("auto-cookie-setup-dialog");
         const instructions = document.getElementById("auto-cookie-instructions");
 
@@ -2387,6 +2412,12 @@ export class SettingsController {
 
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
+      // Set before the ok check: any ANSWER means FinishSetup reached a
+      // conclusion and released the slot, success or not. Only the abort path
+      // below skips this line, and it must — a timed-out finish leaves the
+      // setup live, which is exactly when the Skip button and the unload beacon
+      // still have something to cancel.
+      this._cookieSetupActive = false;
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
 
@@ -2431,10 +2462,13 @@ export class SettingsController {
             if (countdownEl) countdownEl.textContent = "";
             this.startAutoCookieSetup(platform);
           });
+          // Skip goes through the cancel path. It used to hide() the dialog and
+          // nothing else, which does not fire sl-request-close, so the server
+          // was never told — the setup it is still holding then blocked every
+          // later setup and refresh. cancelAutoCookieSetup hides the dialog and
+          // clears these same two elements itself.
           document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {
-            document.getElementById("auto-cookie-setup-dialog")?.hide();
-            if (countdownEl) countdownEl.textContent = "";
-            timeoutResultEl.innerHTML = "";
+            this.cancelAutoCookieSetup();
           });
         }
         return;
@@ -2452,6 +2486,7 @@ export class SettingsController {
   }
 
   async cancelAutoCookieSetup() {
+    this._cookieSetupActive = false;
     try {
       await fetch("/api/cookies/auto-setup/cancel", { method: "POST" });
     } catch {

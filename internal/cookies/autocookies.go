@@ -57,6 +57,35 @@ const (
 	// that a typical Firefox/Chromium teardown completes within 1-2
 	// iterations while not pinning a CPU core. Audit reports/cookies.md #45.
 	killProcessTreePollDelay = 50 * time.Millisecond
+	// launchWindowKillBudget caps how long a kill will wait for a launcher to
+	// publish the process it is about to start. Both slots have the same
+	// window — the claim is taken (setupClaimed / the refreshCmd sentinel)
+	// before the real process exists — so both killers poll for it, and both
+	// give up rather than let Stop() block on a launcher that errored before
+	// it ever assigned. See killSetupProcess and killRefreshProcess.
+	launchWindowKillBudget = 2 * time.Second
+	// setupAbandonGrace is how long a setup whose browser has already exited
+	// is still held before the next StartSetup / RefreshCookies / GetStatus
+	// reaps it.
+	//
+	// It exists for exactly one caller: a FinishSetup that is already in
+	// flight. Firefox's finish CLOSES the browser itself and then reads the
+	// profile, so "the browser exited" is a normal mid-finish state, not
+	// evidence of abandonment; reaping on the exit alone would pull the slot
+	// out from under the call that is about to succeed.
+	//
+	// 60s is not a guess. Both clients cap one FinishSetup at 60 seconds — the
+	// Web dialog's AbortController (settings.js / setup.js) and the TUI's
+	// finishCtx in cmd/moombox/tui_wiring.go — and FinishSetup re-stamps
+	// setupRetainedSince when it takes the slot, so a finish always gets a full
+	// window from the moment it started rather than whatever was left of one.
+	// The server-side worst case inside it is far shorter: the Firefox read
+	// retries (~2.5s) plus authVerifyTimeout (15s).
+	//
+	// It is also the longest an ABANDONED setup can wedge acquisition, which is
+	// the bug this whole change exists to fix, so it must not grow without a
+	// reason on the finish side.
+	setupAbandonGrace = 60 * time.Second
 )
 
 // platformRefreshURLs maps platform names to their refresh URLs.
@@ -144,21 +173,35 @@ type AutoCookieStatus struct {
 
 // AutoCookieService manages automatic browser-based cookie extraction.
 type AutoCookieService struct {
-	mu             sync.Mutex
-	profileDir     string
-	cookiePath     string
-	jar            *CookieJar
-	setupProcess   *os.Process
-	setupClaimed   bool        // StartSetup slot claim — held from the gate check until the browser process is registered (or the attempt fails)
-	setupJob       *processJob // Windows Job Object for setup browser; nil on non-Windows
-	refreshCmd     *exec.Cmd   // tracks in-flight headless refresh browser
-	setupBrowser   *DetectedBrowser
-	browserExited  bool
-	cdpPort        int
-	lastRefresh    *time.Time
-	lastError      *string
-	needsRelogin   AutoCookieReloginRequired
-	targetPlatform string // "youtube" or "twitch"
+	mu            sync.Mutex
+	profileDir    string
+	cookiePath    string
+	jar           *CookieJar
+	setupProcess  *os.Process
+	setupClaimed  bool        // StartSetup slot claim — held from the gate check until the browser process is registered (or the attempt fails)
+	setupJob      *processJob // Windows Job Object for setup browser; nil on non-Windows
+	refreshCmd    *exec.Cmd   // tracks in-flight headless refresh browser
+	setupBrowser  *DetectedBrowser
+	browserExited bool
+	// setupRetainedSince is when the retention grace started for the setup
+	// currently in the slot — the timestamp setupRetainedLocked measures
+	// setupAbandonGrace from. Two writers, both moving it FORWARD only:
+	//
+	//   - the wait goroutines, at the moment they observe the browser exit
+	//     (guarded by `s.setupProcess == proc`, so a stale wait from an earlier
+	//     attempt cannot stamp the current one); and
+	//   - FinishSetup, when it takes the slot, so a finish that starts near the
+	//     end of a window is not reaped part-way through the read it is doing.
+	//
+	// Meaningless unless browserExited is set, and zeroed by cleanupLocked with
+	// the rest of the per-attempt state. A stale zero value reads as "long
+	// expired", which is the safe direction: it reaps rather than retains.
+	setupRetainedSince time.Time
+	cdpPort            int
+	lastRefresh        *time.Time
+	lastError          *string
+	needsRelogin       AutoCookieReloginRequired
+	targetPlatform     string // "youtube" or "twitch"
 
 	// The two lifecycle flags. Kept together and apart from the state above
 	// because they are DECISIONS — an abort was asked for, the service was
@@ -323,6 +366,85 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 	return platforms
 }
 
+// --- setup slot lifecycle ---
+//
+// Three predicates and one reaper, all requiring s.mu, which together answer
+// "is the setup slot still in use?" without the answer being "yes, forever".
+//
+// It used to be "forever". The wait goroutines set browserExited when the user
+// closed the browser or walked away, and NOTHING ever cleared setupProcess, so
+// SetupInProgress stayed true and StartSetup, RefreshCookies and GetStatus all
+// kept refusing until the process restarted. One abandoned wizard wedged every
+// form of cookie acquisition for the lifetime of the run.
+
+// setupBrowserLiveLocked reports whether a setup browser is genuinely running:
+// a process was registered and its wait goroutine has not seen it exit.
+//
+// Caller must hold s.mu.
+func (s *AutoCookieService) setupBrowserLiveLocked() bool {
+	return s.setupProcess != nil && !s.browserExited
+}
+
+// setupRetainedLocked reports whether a setup whose browser has ALREADY exited
+// is still being held. It is the grace window, and its only purpose is to let a
+// FinishSetup that is in flight finish: see setupAbandonGrace.
+//
+// The distinction from setupBrowserLiveLocked matters because the two decay
+// differently — "live" ends when the browser dies, "retained" ends on a clock —
+// and because only the retained state is ever reaped.
+//
+// Caller must hold s.mu.
+func (s *AutoCookieService) setupRetainedLocked() bool {
+	return s.setupProcess != nil && s.browserExited &&
+		time.Since(s.setupRetainedSince) < setupAbandonGrace
+}
+
+// setupInProgressLocked is the one predicate the consumers share: GetStatus
+// publishes it as SetupInProgress, StartSetup refuses on it and
+// RefreshCookiesDetailed declines on it. Keeping it in one place is the point —
+// the four sites used to spell `setupProcess != nil || setupClaimed` out
+// individually, and a fix applied to three of them would have been silent.
+//
+// The claim is in it for the reason CancelSetup's doc gives: between
+// StartSetup's gate and the browser launch there is no process yet, but there
+// IS a setup in flight.
+//
+// Caller must hold s.mu.
+func (s *AutoCookieService) setupInProgressLocked() bool {
+	return s.setupClaimed || s.setupBrowserLiveLocked() || s.setupRetainedLocked()
+}
+
+// reapAbandonedSetupLocked releases a setup whose browser exited and whose
+// grace window has run out. Called INLINE by the three consumers that are about
+// to test setupInProgressLocked, each already holding s.mu.
+//
+// THERE IS DELIBERATELY NO REAPER GOROUTINE, and one must never be added. A
+// reaper that sleeps and then takes the lock decides what to reap at a moment
+// it did not observe: by the time it wakes, the slot it sampled can hold a
+// NEWER attempt, and cleanupLocked closes the setup Job Object —
+// KILL_ON_JOB_CLOSE — which would terminate the browser window the user is
+// signed into right now. Reaping inline, under the lock the caller already
+// holds, means the predicate and the cleanup see the same instant and no such
+// gap exists. (The cancel-on-timeout that DOES need a clock is a client
+// concern; the TUI wizard's countdown at tui/setup_wizard.go is where it
+// lives, and it POSTs a cancel rather than reaching into this state.)
+//
+// Caller must hold s.mu.
+func (s *AutoCookieService) reapAbandonedSetupLocked() {
+	if s.setupProcess == nil || s.setupClaimed {
+		return // nothing registered, or a StartSetup owns the slot right now
+	}
+	if s.setupBrowserLiveLocked() || s.setupRetainedLocked() {
+		return
+	}
+	if s.logger != nil {
+		s.logger.Info("releasing an abandoned cookie setup — its browser exited and no finish followed",
+			"exited", time.Since(s.setupRetainedSince).Round(time.Second).String()+" ago",
+			"platform", s.targetPlatform)
+	}
+	s.cleanupLocked()
+}
+
 // GetStatus returns the current auto-cookie status.
 func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	// DetectBrowser/DetectBrowsers do filesystem I/O and registry queries —
@@ -337,6 +459,11 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Status polling is the most frequent visitor to this lock, which makes it
+	// the reap that actually fires in practice — both UIs poll it while their
+	// cookie dialog is open, and the TUI polls it with no dialog at all.
+	s.reapAbandonedSetupLocked()
+
 	var lastRefreshStr *string
 	if s.lastRefresh != nil {
 		v := s.lastRefresh.UTC().Format(time.RFC3339)
@@ -345,7 +472,7 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 
 	return AutoCookieStatus{
 		Configured:            s.profileDir != "",
-		SetupInProgress:       s.setupProcess != nil || s.setupClaimed,
+		SetupInProgress:       s.setupInProgressLocked(),
 		Browser:               browser,
 		AvailableBrowsers:     available,
 		ConfiguredBrowserPath: cfgPath,
@@ -409,7 +536,11 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 		s.mu.Unlock()
 		return ErrServiceStopped
 	}
-	if s.setupProcess != nil || s.setupClaimed {
+	// Before the gate, not after: a setup the user walked away from must not be
+	// the reason they cannot start a new one. This is the site the wedge was
+	// reported at.
+	s.reapAbandonedSetupLocked()
+	if s.setupInProgressLocked() {
 		s.mu.Unlock()
 		return ErrSetupInProgress
 	}
@@ -474,6 +605,10 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	s.setupBrowser = browser
 	s.lastError = nil
 	s.browserExited = false
+	// Reset with browserExited, which it only has meaning alongside. The reap
+	// or a cleanup has already zeroed it on every path that reaches here; the
+	// pairing is so the two can never be read out of step.
+	s.setupRetainedSince = time.Time{}
 	if platform == "" {
 		platform = "youtube"
 	}
@@ -502,6 +637,23 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		s.mu.Unlock()
 		return false, false, ErrSetupCancelled
 	}
+	// Restart the retention clock. The grace window exists FOR this call, and
+	// measuring it from the browser's exit alone would let a finish that
+	// started legitimately inside the window be reaped part-way through: the
+	// Chromium path reads s.cdpPort, which cleanupLocked zeroes, so the reap
+	// would turn a working extraction into "CDP port not available".
+	//
+	// Deliberately not a second flag. A "finishing" latch is one more piece of
+	// lifecycle state that one path sets and another has to remember to clear —
+	// this arc's recurring hazard — whereas moving a timestamp forward cannot
+	// leave the slot stuck: the window still expires on its own, and every exit
+	// path from here already calls cleanup().
+	//
+	// Note it stamps even when the browser is still running (browserExited
+	// false), where it means nothing yet; the Firefox path is about to close
+	// the browser itself, and the wait goroutine will re-stamp on the real exit
+	// a moment later.
+	s.setupRetainedSince = time.Now()
 	browser := s.setupBrowser
 	s.mu.Unlock()
 
@@ -997,7 +1149,16 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 		s.logger.Debug("skipping cookie refresh — service stopped")
 		return refreshDeclined(), nil
 	}
-	if s.setupProcess != nil || s.setupClaimed {
+	s.reapAbandonedSetupLocked()
+	// GRACE-GATED, NOT LIVE-GATED, and the difference is a data-loss bug.
+	// setupInProgressLocked stays true for a setup whose browser has exited but
+	// whose FinishSetup may still be running, so a headless refresh cannot
+	// launch a second browser at the same profile directory while that finish
+	// is reading it and merging into cookies.txt. Two writers into one cookie
+	// store is the class of bug the previous arc was entirely about. Weakening
+	// this to setupBrowserLiveLocked() would buy at most 60 seconds of
+	// refresh availability and re-open it.
+	if s.setupInProgressLocked() {
 		s.mu.Unlock()
 		s.logger.Debug("skipping cookie refresh — setup in progress")
 		return refreshDeclined(), nil
@@ -1763,7 +1924,12 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 
 // killProcessTree kills a process and all its children on Windows (taskkill /T /F),
 // or just the process itself on other platforms.
-func killProcessTree(proc *os.Process) {
+//
+// A package variable purely so tests can exercise the kill DECISION without a
+// real process — same reason writeCookieFile below is one. Nothing in
+// production reassigns it, and it is always addressed by PID: never by image
+// name, which on a developer's machine would take out their own browser.
+var killProcessTree = func(proc *os.Process) {
 	if proc == nil {
 		return
 	}
@@ -1774,17 +1940,44 @@ func killProcessTree(proc *os.Process) {
 	}
 }
 
+// killSetupProcess terminates the setup browser, waiting briefly for one that
+// has been decided on but not yet launched.
+//
+// The poll is the same fix killRefreshProcess carries for the refresh slot, for
+// the identical race in the setup slot. StartSetup claims with `setupClaimed`
+// and only assigns setupProcess once the launcher has started the browser, so a
+// CancelSetup or Stop landing between the mid-preparation cancel check and that
+// assignment used to find nil, kill nothing, and return — and the launcher then
+// registered a browser into a slot nobody was watching. The user got a stuck
+// wizard and an open browser window.
+//
+// Deliberately NOT a new flag saying "a launch is in flight": setupClaimed
+// already says exactly that, and a second field describing the same window is
+// one more thing to get wrong. Capped like the refresh side so a launcher that
+// errors before assigning cannot make Stop() hang; past the cap the
+// mid-preparation cancel check is what stops the launch, and what is left is a
+// sub-second window between that check and cmd.Start() returning.
 func (s *AutoCookieService) killSetupProcess() {
-	s.mu.Lock()
-	proc := s.setupProcess
-	s.mu.Unlock()
+	deadline := time.Now().Add(launchWindowKillBudget)
+	for {
+		s.mu.Lock()
+		proc := s.setupProcess
+		claimed := s.setupClaimed
+		s.mu.Unlock()
 
-	if proc == nil {
-		return
+		if proc != nil {
+			killProcessTree(proc)
+			time.Sleep(taskkillDrainDelay)
+			return
+		}
+		if !claimed {
+			return // no process, and no launch on the way — nothing to kill
+		}
+		if !time.Now().Before(deadline) {
+			return // still unpublished — give up rather than block the caller
+		}
+		time.Sleep(killProcessTreePollDelay)
 	}
-
-	killProcessTree(proc)
-	time.Sleep(taskkillDrainDelay)
 }
 
 func (s *AutoCookieService) killRefreshProcess() {
@@ -1795,7 +1988,7 @@ func (s *AutoCookieService) killRefreshProcess() {
 	// (audit reports/cookies.md #22). Poll briefly so the kill catches the
 	// real process once the launcher publishes it, but cap the wait so Stop()
 	// doesn't block indefinitely if the launcher errors before assignment.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(launchWindowKillBudget)
 	for {
 		s.mu.Lock()
 		cmd := s.refreshCmd
@@ -1837,12 +2030,28 @@ func (s *AutoCookieService) killRefreshProcess() {
 //
 // What does get cleared is only ever state describing a browser that is gone:
 // the Job Object handle, the process, the browser record, the exit flag, the
-// CDP port and the target platform.
+// retention timestamp, the CDP port and the target platform.
 func (s *AutoCookieService) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Close the setup Job Object — KILL_ON_JOB_CLOSE terminates any
-	// browser process the user left behind even if killSetupProcess didn't.
+	s.cleanupLocked()
+}
+
+// cleanupLocked is cleanup's body for callers that already hold s.mu — the
+// inline reap in reapAbandonedSetupLocked, which must decide and clean up
+// inside ONE critical section. See cleanup for what is cleared and, more
+// importantly, what is not.
+//
+// CLOSING THE JOB OBJECT KILLS BROWSERS. That is the point of it —
+// KILL_ON_JOB_CLOSE finishes off a setup browser killSetupProcess missed — but
+// it is also why every caller must have established, under the lock it still
+// holds, that the slot it is clearing is the slot it looked at. A caller that
+// sampled the state, released the lock, and came back later can be looking at a
+// different attempt's job, and closing that one kills a browser the user is
+// actively using.
+//
+// Caller must hold s.mu.
+func (s *AutoCookieService) cleanupLocked() {
 	if s.setupJob != nil {
 		s.setupJob.close()
 		s.setupJob = nil
@@ -1850,6 +2059,7 @@ func (s *AutoCookieService) cleanup() {
 	s.setupProcess = nil
 	s.setupBrowser = nil
 	s.browserExited = false
+	s.setupRetainedSince = time.Time{}
 	s.cdpPort = 0
 	s.targetPlatform = ""
 }

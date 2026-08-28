@@ -86,6 +86,18 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	}
 
 	s.mu.Lock()
+	// Never overwrite a live Job Object handle. Dropping one leaks the handle
+	// AND the browser it holds: nothing else has a reference, so
+	// KILL_ON_JOB_CLOSE never fires and the orphan runs until Moombox exits.
+	// StartSetup's reap should have cleared this already — if it did not, the
+	// invariant broke somewhere and closing is still the right answer, because
+	// the only process this job can hold is a setup browser from an attempt the
+	// gate has already declared over. It happens BEFORE cmd.Process is assigned
+	// to the new job, so it cannot touch the browser we just launched.
+	if s.setupJob != nil {
+		s.logger.Warn("closing a setup Job Object left behind by an earlier attempt")
+		s.setupJob.close()
+	}
 	s.setupProcess = cmd.Process
 	s.setupJob = job
 	s.cdpPort = port
@@ -108,6 +120,10 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		s.mu.Lock()
 		if s.setupProcess == proc {
 			s.browserExited = true
+			// Starts the retention grace — see the Firefox wait goroutine and
+			// setupAbandonGrace. Without it this exit was recorded and then
+			// ignored, and the slot never freed.
+			s.setupRetainedSince = time.Now()
 		}
 		s.mu.Unlock()
 	}()
