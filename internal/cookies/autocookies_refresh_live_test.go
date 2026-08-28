@@ -89,17 +89,30 @@ const (
 // this whole test exists to reject. Row counts see the difference; file stamps
 // cannot.
 //
-// # Expected healthy numbers
+// # Reading the drain output
 //
-// The drain is the thing under test. Measured 2026-08-25 on the reference
-// machine (Windows 11), throwaway profile, 6 YouTube cookies each:
+// The one signal that MEANS something is errBrowserDrainTimeout: the job still
+// had a live process when the budget expired, which is the failure mode
+// drainJob's note describes — a browser that leaves an updater, a crash
+// reporter or a content process behind never empties the job, burns the whole
+// processTimeout on every refresh, and turns working refreshes into reported
+// failures. A run that drains and finds YouTube cookies has passed, however
+// long it took.
 //
-//	Waterfox  2.848s over 53 polls   (2.689-3.595s over 51-67 polls across runs)
-//	Firefox   1.734s over 32 polls
+// Elapsed time and poll count are an OBSERVATION, not a threshold, and the
+// spread is wide enough that treating them as one produces a false "this
+// browser is broken" verdict. Measured on throwaway profiles, 6 YouTube
+// cookies each:
 //
-// The launcher exits at ~150-170ms in every case. Wildly more polls, or an
-// errBrowserDrainTimeout, is the signal that a browser leaves something alive
-// in the job — see drainJob's VERIFICATION STATUS note.
+//	Waterfox  2.848s /  53 polls   (2.689-3.595s over 51-67 polls, reference machine, 2026-08-25)
+//	Firefox   1.734s /  32 polls   (reference machine, 2026-08-25)
+//	          13.96s / 276 polls   (a clean pass on different hardware, 2026-08-26)
+//
+// That last row is the same successful outcome as the first two, four to five
+// times slower, with no error — so a slower machine, a colder page cache, or a
+// browser that simply takes longer to settle all land well outside anything the
+// first two rows would suggest. The launcher itself exits at ~150-170ms in
+// every case observed.
 //
 // # Running it
 //

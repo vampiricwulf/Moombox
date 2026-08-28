@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -193,14 +194,21 @@ type (
 		TwitchAuth  bool
 	}
 	cookieForceRefreshResultMsg struct {
-		Success bool
-		// Renewed says whether the pass produced the credentials it verified.
-		// Only meaningful when Success is true: a working cookies.txt outlives
-		// a browser refresh that did nothing, so "the cookies work" and "the
-		// refresh worked" are separate answers and the operator pressed a key
-		// asking the second one.
-		Renewed bool
-		Err     error
+		// Result is carried whole rather than pre-flattened to a bool pair.
+		// The flattened form could not tell a pass that DECLINED to run from
+		// one that ran and concluded the credentials are dead, so R F reported
+		// a verification failure for healthy cookies whenever the 30-minute
+		// tick or an interactive setup already held the single-flight slot.
+		//
+		// Three fields carry three independent facts and the feedback branch
+		// needs all of them: Ran (did this pass do any work), Overall (what it
+		// concluded, if anything), and Renewed (did THIS pass produce the
+		// credentials it verified — a working cookies.txt outlives a browser
+		// refresh that did nothing, so "the cookies work" and "the refresh
+		// worked" are separate answers and the operator pressed a key asking
+		// the second one).
+		Result cookies.RefreshResult
+		Err    error
 	}
 
 	// Async results for channel URL resolution
@@ -440,9 +448,10 @@ type App struct {
 	// Cookie refresh callbacks
 	OnRecheckCookies func() (ytAuth bool, twAuth bool)
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if
-	// auto-cookies are not configured. renewed is meaningful only when ok:
-	// see cookieForceRefreshResultMsg.
-	OnForceRefreshCookies func() (ok, renewed bool, err error)
+	// auto-cookies are not configured. It returns the pass's whole result
+	// rather than a bool: see cookieForceRefreshResultMsg for why the
+	// flattened form could not be worded truthfully.
+	OnForceRefreshCookies func() (cookies.RefreshResult, error)
 
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)

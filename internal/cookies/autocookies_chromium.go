@@ -158,24 +158,30 @@ func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 	return cdpGetCookiesAsNetscape(ctx, port)
 }
 
+// refreshChromium drives one headless Chromium over CDP: navigate to each
+// active platform, then read the cookies back out.
+//
+// The middle return is the ACTED verdict, and it is an AND across every
+// navigation this pass makes — the same shape as refreshFirefox's, for the same
+// reason. It says the pass has PROOF the browser did the work the refresh is
+// about to take credit for, not that the browser did nothing when false.
+//
 // No minPlausibleBrowserRefresh-style floor here, deliberately. That
 // threshold was measured against the Firefox launcher-handoff path — a
 // stamped startTime, a drain wait, a screenshot artifact — none of which
 // exist here: this function drives the browser directly over CDP with no
 // intermediate launcher process. A floor calibrated on a different
 // mechanism, with no timing data of its own, would be a new heuristic
-// guessing at a failure mode this path hasn't been shown to have; see
-// cdpNavigate's discarded error return below for where this path's actual
-// gap lives.
-func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *DetectedBrowser) (string, error) {
+// guessing at a failure mode this path hasn't been shown to have.
+func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *DetectedBrowser) (string, bool, error) {
 	if s.profileDirErr != nil {
-		return "", s.profileDirErr
+		return "", false, s.profileDirErr
 	}
 	cleanChromiumLockFiles(s.profileDir)
 
 	port, err := getFreePort()
 	if err != nil {
-		return "", fmt.Errorf("get free port: %w", err)
+		return "", false, fmt.Errorf("get free port: %w", err)
 	}
 
 	// Mirror the anti-automation flags used in the visible setup launch —
@@ -212,7 +218,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	}()
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start headless browser: %w", err)
+		return "", false, fmt.Errorf("start headless browser: %w", err)
 	}
 
 	if job != nil {
@@ -248,18 +254,24 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	defer cancel()
 
 	if err := waitForCDP(cdpCtx, port, cdpPollTimeout); err != nil {
-		return "", err
+		return "", false, err
 	}
 
-	// Navigate to each active platform
-	for _, platform := range s.refreshPlatforms() {
-		cdpNavigate(cdpCtx, port, platformRefreshURLs[platform])
+	// Navigate to each active platform.
+	allNavigated, navFailures := navigateAllPlatforms(cdpCtx, port, s.refreshPlatforms(), cdpNavigate)
+	for _, f := range navFailures {
+		// Not fatal: another platform may still have navigated, and the
+		// profile read below can still return a usable set. Say what happened
+		// and keep going — the same degrade-don't-abort shape the Firefox path
+		// uses for a drain timeout.
+		s.logger.Warn("chromium "+f.platform+" navigation failed; this pass cannot claim it refreshed that platform",
+			"err", f.err)
 	}
 
 	// Extract cookies
 	netscapeCookies, err := cdpGetCookiesAsNetscape(cdpCtx, port)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	// Close browser, then pause briefly so Chromium flushes any final cookie
@@ -267,7 +279,44 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	cdpCloseBrowser(cdpCtx, port)
 	time.Sleep(cdpCloseFlushDelay)
 
-	return netscapeCookies, nil
+	return netscapeCookies, allNavigated, nil
+}
+
+// navFailure names one platform whose refresh navigation did not succeed.
+type navFailure struct {
+	platform string
+	err      error
+}
+
+// navigateAllPlatforms visits each platform's refresh URL and reports whether
+// EVERY visit succeeded, plus the ones that did not so the caller can name
+// them.
+//
+// The bool is an AND, and it exists because the per-navigation error used to be
+// discarded — the Chromium half of the silent-success hole that the screenshot
+// check closed on the Firefox side. Every navigation could fail and the pass
+// still reported that it had renewed the credentials, because the only thing
+// consulted afterwards was whether the cookie READ succeeded, and that read is
+// satisfied by a profile the previous session already populated.
+//
+// Vacuous truth is the wrong default here for the same reason as on the Firefox
+// path: no platforms means nothing was navigated, not "every navigation
+// succeeded". refreshChromium is only reached with at least one platform, so
+// that guard covers a future caller that does not.
+//
+// navigate is a parameter so the fold can be tested without a browser; the one
+// production caller passes cdpNavigate.
+func navigateAllPlatforms(ctx context.Context, port int, platforms []string,
+	navigate func(context.Context, int, string) error) (bool, []navFailure) {
+	allOK := len(platforms) > 0
+	var failures []navFailure
+	for _, platform := range platforms {
+		if err := navigate(ctx, port, platformRefreshURLs[platform]); err != nil {
+			allOK = false
+			failures = append(failures, navFailure{platform: platform, err: err})
+		}
+	}
+	return allOK, failures
 }
 
 // --- CDP helpers (minimal implementation) ---

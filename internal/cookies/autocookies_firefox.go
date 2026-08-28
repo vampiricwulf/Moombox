@@ -758,6 +758,12 @@ func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
 // still holds. LibreWolf and Zen remain UNVERIFIED, as does every non-Windows
 // platform (where there is no job to drain at all).
 //
+// Those elapsed times and poll counts are observations of these machines, NOT
+// a healthy band: a clean pass on different hardware on 2026-08-26 drained in
+// 13.96s over 276 polls, same successful outcome, no error. The signal that
+// something is actually wrong is errBrowserDrainTimeout below — nothing about
+// the poll count on its own.
+//
 // The risk if one behaves differently: this waits for the job to become EMPTY,
 // which is a stronger condition than "the page finished loading". A browser
 // that leaves any process alive in the job — a background updater, a crash

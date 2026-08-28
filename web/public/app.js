@@ -801,20 +801,40 @@ class MoomboxApp {
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
         if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
-        // Three outcomes, not two. `success` says the cookies work; `renewed`
-        // says THIS pass produced them. A browser that never ran still leaves
-        // a working cookies.txt behind (the background session refresh keeps
-        // it alive), so success alone would toast "successful" while the
-        // Last refresh line below refuses to advance — and on Linux, where a
-        // launch can never be confirmed to have acted, that is every time.
+        // Five branches where there were three. Three independent facts come
+        // back and each can disagree with the others: `ran` (did this pass do
+        // any work), `verdict` (what it concluded, if anything) and `renewed`
+        // (did THIS pass produce the credentials it verified).
         //
-        // The middle message stops at "could not confirm" deliberately: we
-        // cannot tell a browser that did nothing from one that finished after
-        // we looked, so asserting it failed would swap one wrong claim for
-        // another.
+        // A browser that never ran still leaves a working cookies.txt behind
+        // (the background session refresh keeps it alive), so success alone
+        // would toast "successful" while the Last refresh line below refuses
+        // to advance — and on Linux, where a launch can never be confirmed to
+        // have acted, that is every time. That is the `renewed` arm.
+        //
+        // The `ran` arm is the mirror image, and the one that was live: the
+        // single refresh slot is held by the 30-minute periodic tick and by
+        // interactive setup, so clicking this button during either returns a
+        // pass that looked at nothing — and it toasted "auth verification
+        // failed" in the same payload whose cookieStatus above reported the
+        // session authenticated.
+        //
+        // Both un-concluded arms stop short of asserting failure. We cannot
+        // tell a browser that did nothing from one that finished after we
+        // looked, and a verification that never happened says nothing at all
+        // about the credentials; asserting failure would swap one wrong claim
+        // for another. Only verdict === "failed" earns the word.
         let refreshMsg, refreshVariant;
-        if (!data.success) {
+        if (!data.success && data.ran === false) {
+          refreshMsg =
+            "Browser cookie refresh declined to run — a setup or another refresh is already in flight, or no platform has cookies worth refreshing. Nothing was learned about these cookies.";
+          refreshVariant = "neutral";
+        } else if (!data.success && data.verdict === "failed") {
           refreshMsg = "Browser cookie refresh completed — auth verification failed";
+          refreshVariant = "danger";
+        } else if (!data.success) {
+          refreshMsg =
+            "Browser cookie refresh ran but could not establish whether these cookies work — nothing has been concluded about them";
           refreshVariant = "warning";
         } else if (data.renewed === false) {
           refreshMsg =

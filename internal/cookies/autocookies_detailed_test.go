@@ -49,8 +49,8 @@ func TestRefreshCookiesDetailedReportsPerPlatform(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
-	if !ok.anyVerified() {
-		t.Error("anyVerified = false although Twitch verified — the legacy bool semantics moved")
+	if !ok.AnyVerified() {
+		t.Error("AnyVerified = false although Twitch verified — the legacy bool semantics moved")
 	}
 }
 
@@ -118,7 +118,7 @@ func TestRefreshDeclinePathsReportUnknown(t *testing.T) {
 				t.Errorf("verdicts = %v/%v, want unknown/unknown — nothing was established",
 					result.YouTube, result.Twitch)
 			}
-			if result.anyVerified() {
+			if result.AnyVerified() {
 				t.Error("a declined pass must not report the legacy bool as true")
 			}
 		})
@@ -191,7 +191,7 @@ func TestRefreshAbortPathsReportRanButUnknown(t *testing.T) {
 			if result.HasCredentials("youtube") || result.HasCredentials("twitch") {
 				t.Error("a pass that never reached the jar must not report stored credentials")
 			}
-			if result.anyVerified() {
+			if result.AnyVerified() {
 				t.Error("an aborted pass must not report the legacy bool as true")
 			}
 		})
@@ -400,9 +400,9 @@ func TestAnyVerifiedPinsTheLegacyBool(t *testing.T) {
 	for _, yt := range all {
 		for _, tw := range all {
 			want := yt == RefreshOK || tw == RefreshOK
-			got := RefreshResult{Ran: true, YouTube: yt, Twitch: tw}.anyVerified()
+			got := RefreshResult{Ran: true, YouTube: yt, Twitch: tw}.AnyVerified()
 			if got != want {
-				t.Errorf("anyVerified(%v, %v) = %v, want %v", yt, tw, got, want)
+				t.Errorf("AnyVerified(%v, %v) = %v, want %v", yt, tw, got, want)
 			}
 		}
 	}

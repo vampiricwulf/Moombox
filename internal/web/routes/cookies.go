@@ -11,6 +11,50 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
+// cookieRefreshOutcome renders one refresh pass onto the wire.
+//
+// Three of the fields are independent facts the manual-refresh toast needs and
+// none of them can be derived from another: verdict, ran and renewed. The
+// fourth, success, is the legacy alias for verdict == "ok" and is kept because
+// it is the only one a pre-existing caller reads.
+//
+// Everything but success is therefore ADDITIVE: success keeps its exact
+// historical meaning ("at least one platform is conclusively authenticated"),
+// so an older frontend against a newer binary behaves as before. `renewed` set
+// that precedent and `ran`/`verdict` follow it.
+//
+//   - success — can we do authenticated work at all?
+//   - renewed — did THIS pass produce the credentials it verified? A working
+//     cookies.txt outlives a browser refresh that did nothing, because the
+//     independent 30-minute RefreshService keeps the session alive. False here
+//     means "could not confirm", never "the browser failed".
+//   - verdict — what the pass CONCLUDED: "ok", "failed", or "unknown". Only
+//     "failed" is a conclusive negative and only it may be worded as a
+//     verification failure.
+//   - ran — did the pass do any work at all? This is what splits the two very
+//     different events inside "unknown". The single refresh slot is held by
+//     the periodic tick and by interactive setup, so clicking "Refresh now"
+//     during either returns a pass that never looked at anything — and that
+//     was being reported as "auth verification failed", in the same payload
+//     whose cookieStatus said the session was authenticated.
+//
+// The three-way wording of a non-success — declined / ran-but-inconclusive /
+// conclusively failed — follows cookieRefreshReportFor in
+// cmd/moombox/services.go, which draws the same line for the worker's log.
+//
+// Deliberately NOT derived from the cookieStatus block the handler adds
+// alongside: that comes from RefreshService's own check, a different mechanism
+// that can satisfy the same observable, and reading a verdict off it would put
+// the assertion downstream of the junction rather than at the pass itself.
+func cookieRefreshOutcome(result cookies.RefreshResult) map[string]any {
+	return map[string]any{
+		"success": result.AnyVerified(),
+		"renewed": result.Renewed,
+		"verdict": result.Overall().String(),
+		"ran":     result.Ran,
+	}
+}
+
 // CookieRoutes registers cookie-related API routes. The optional rate
 // limiter wraps the headless-browser endpoints (/auto-refresh and the
 // auto-setup start/finish/cancel trio) so a buggy or hostile client
@@ -66,14 +110,14 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			return
 		}
 
-		// Detailed, for `renewed` alone. This is the manual refresh button —
-		// the single most direct place an operator asks "did the browser
-		// refresh actually do anything", and the one place that answered
+		// Detailed, not the bool. This is the manual refresh button — the
+		// single most direct place an operator asks "did the browser refresh
+		// actually do anything" — and the bool cannot answer it: it answered
 		// unconditionally "successful" while the Last refresh line beside it
-		// silently refused to advance. On Linux, where a launch can never be
-		// confirmed to have acted, that pairing is the permanent steady state.
+		// silently refused to advance (on Linux, where a launch can never be
+		// confirmed to have acted, permanently), and it reported a verification
+		// failure for a pass that never ran one. See cookieRefreshOutcome.
 		result, err := autoCookieSvc.RefreshCookiesDetailed(req.Context())
-		ok := result.YouTube == cookies.RefreshOK || result.Twitch == cookies.RefreshOK
 		if err != nil {
 			// Discriminate sentinel errors so the frontend can surface a
 			// useful message (and so XHR callers with `if (!response.ok)`
@@ -106,25 +150,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		refreshSvc.CheckNow(req.Context())
 		status := refreshSvc.GetStatus()
 
-		response := map[string]any{
-			"success": ok,
-			// renewed splits `success` into the two things it was conflating:
-			// "the credentials work" (success) and "this pass produced them"
-			// (renewed). Additive — success keeps its exact old meaning, so an
-			// older frontend against a newer binary behaves as before.
-			//
-			// False here does NOT mean the browser failed. With no Job Object
-			// to drain we cannot tell a browser that did nothing from one that
-			// finished after we looked, so the copy must stop at "could not
-			// confirm".
-			"renewed": result.Renewed,
-			"cookieStatus": map[string]any{
-				"found":         status.HasYouTubeCookies,
-				"authenticated": status.YouTubeAuthenticated,
-			},
-			"twitchAuthStatus": map[string]any{
-				"authenticated": status.TwitchAuthenticated,
-			},
+		response := cookieRefreshOutcome(result)
+		response["cookieStatus"] = map[string]any{
+			"found":         status.HasYouTubeCookies,
+			"authenticated": status.YouTubeAuthenticated,
+		}
+		response["twitchAuthStatus"] = map[string]any{
+			"authenticated": status.TwitchAuthenticated,
 		}
 		autoStatus := autoCookieSvc.GetStatus()
 		response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin

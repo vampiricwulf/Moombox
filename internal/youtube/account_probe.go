@@ -63,7 +63,7 @@ func (s *Service) ProbeAccountLiveness(ctx context.Context) (SessionAuthState, e
 		return SessionAuthUnknown, fmt.Errorf("account liveness probe: %w", err)
 	}
 
-	// livenessVerdict, NOT sessionAuthFromBytes: the strict variant refuses the
+	// livenessVerdict, NOT watchPageSessionAuth: the strict variant refuses the
 	// ytcfg fallback, so a shell carrying a bootstrap but no login key reads as
 	// unknown instead of as a dead session.
 	return livenessVerdict(body), nil

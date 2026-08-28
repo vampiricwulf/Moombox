@@ -51,7 +51,10 @@ func TestFeedbackColorDeletionGray(t *testing.T) {
 	}
 }
 
-// TestFeedbackColorWarningMessages covers all 9 warning sub-prefixes.
+// TestFeedbackColorWarningMessages covers every sub-condition in
+// feedbackColor's warning branch, one row each. (It used to claim a count;
+// the count was wrong before the branch grew, so it is stated as a
+// correspondence instead — add a row whenever you add a condition.)
 // Each is a real string emitted by the TUI today; if any prefix is
 // renamed without updating feedbackColor, this test catches the drift.
 //
@@ -67,7 +70,9 @@ func TestFeedbackColorWarningMessages(t *testing.T) {
 		"No update available",
 		"No stream selected",
 		"A trim is already in progress",
-		"Auth: no cookies acquired",
+		"Browser cookie refresh declined to run (a setup or another refresh is in flight, " +
+			"or no platform has cookies to refresh) — nothing was learned about these cookies",
+		"Browser cookie refresh ran but could not establish whether these cookies work",
 		"YouTube: not authenticated",
 		"No platforms configured",
 		"Already up to date",
