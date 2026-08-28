@@ -4,8 +4,8 @@
 import {
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
+  cookieSetupProbe,
   cookieSetupRejectedMessage,
-  cookieSetupStillRunning,
   formatRelativeTime,
   serverErrorMessage,
 } from "./utils.js";
@@ -2453,6 +2453,15 @@ export class SettingsController {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
 
+    // Baseline for the abort path, dispatched BEFORE the finish so the
+    // lastRefresh comparison there is server clock against server clock and no
+    // browser/server skew can turn an old stamp into a fresh one.
+    //
+    // Deliberately not awaited: it must not add a round trip to the finish, and
+    // only the abort branch ever reads it. cookieSetupProbe never rejects, so
+    // an unread promise cannot surface as an unhandled rejection.
+    const abortBaseline = cookieSetupProbe();
+
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
       // Set before the ok check: any ANSWER means FinishSetup reached a
@@ -2508,13 +2517,14 @@ export class SettingsController {
         // verifies, so this abort can fire over work that already committed.
         // The 60 s cap stays as it is — the server-side setup grace window is
         // priced against that exact number.
-        const stillRunning = await cookieSetupStillRunning();
-        // Only a definite "no setup here" releases the flag. Unknown keeps it
-        // raised, which is the safe direction: the Skip button and the unload
-        // beacon then still have something to tell the server about.
-        if (stillRunning === false) this._cookieSetupActive = false;
+        const probe = await cookieSetupProbe();
+        // Only a definite "no setup here" releases the flag. An unanswered
+        // probe keeps it raised, which is the safe direction: the Skip button
+        // and the unload beacon then still have something to tell the server
+        // about.
+        if (probe.ok && !probe.inProgress) this._cookieSetupActive = false;
         if (timeoutResultEl) {
-          const report = cookieSetupAbortReport(stillRunning);
+          const report = cookieSetupAbortReport(probe, await abortBaseline);
           timeoutResultEl.innerHTML = `
             <sl-alert variant="${report.variant}" open>
               <sl-icon slot="icon" name="${report.icon}"></sl-icon>

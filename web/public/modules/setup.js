@@ -5,8 +5,8 @@ import { renderTemplatePreview } from "./settings.js";
 import {
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
+  cookieSetupProbe,
   cookieSetupRejectedMessage,
-  cookieSetupStillRunning,
   serverErrorMessage,
 } from "./utils.js";
 
@@ -355,6 +355,15 @@ export class SetupController {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
 
+    // Baseline for the abort path, dispatched BEFORE the finish so the
+    // lastRefresh comparison there is server clock against server clock and no
+    // browser/server skew can turn an old stamp into a fresh one.
+    //
+    // Deliberately not awaited: it must not add a round trip to the finish, and
+    // only the abort branch ever reads it. cookieSetupProbe never rejects, so
+    // an unread promise cannot surface as an unhandled rejection.
+    const abortBaseline = cookieSetupProbe();
+
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
       // Any answer means the slot was released; only the abort path below skips
@@ -419,13 +428,18 @@ export class SetupController {
         // verifies, so this abort can fire over work that already committed.
         // The 60 s cap stays as it is — the server-side setup grace window is
         // priced against that exact number.
-        const stillRunning = await cookieSetupStillRunning();
-        // Only a definite "no setup here" releases the flag. Unknown keeps it
-        // raised, which is the safe direction: the Skip button and the unload
-        // beacon then still have something to tell the server about.
-        if (stillRunning === false) this._cookieSetupActive = false;
+        const probe = await cookieSetupProbe();
+        // Only a definite "no setup here" releases the flag. An unanswered
+        // probe keeps it raised, which is the safe direction: the Skip button
+        // and the unload beacon then still have something to tell the server
+        // about.
+        if (probe.ok && !probe.inProgress) this._cookieSetupActive = false;
         if (timeoutResultEl) {
-          const report = cookieSetupAbortReport(stillRunning);
+          // wizard: this path cannot light setup-yt-badge / setup-tw-badge,
+          // and those flags are the sole source of the active_platforms the
+          // wizard is about to write. The alert says so rather than letting
+          // "saved" imply a platform was recorded.
+          const report = cookieSetupAbortReport(probe, await abortBaseline, { wizard: true });
           timeoutResultEl.innerHTML = `
             <sl-alert variant="${report.variant}" open>
               <sl-icon slot="icon" name="${report.icon}"></sl-icon>
@@ -449,9 +463,8 @@ export class SetupController {
         }
         // The finish may well have committed while we stopped waiting, so the
         // dashboard's cookie status is potentially stale. The wizard's own
-        // badges cannot be lit from here — nothing tells this side WHICH
-        // platform the completed finish accepted — so the alert above sends
-        // the user to the cookie status rather than guessing.
+        // badges stay unlit — see the `wizard` note above — and the alert says
+        // so rather than guessing at which platform to mark.
         this.app.loadStatus();
         return;
       }

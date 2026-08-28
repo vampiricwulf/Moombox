@@ -175,21 +175,76 @@ export function cookieSetupRejectedMessage(verification) {
 }
 
 /**
- * Ask the server whether it is still holding the interactive setup slot.
+ * How long the abort-path probe may take before it gives up.
  *
- * Returns true, false, or null when the probe itself could not answer — the
- * third value matters, because "we do not know" is the one thing the abort
- * path must not round to a conclusion.
+ * BOUNDED ON PURPOSE, and the bound is the point. The branch that calls this
+ * exists precisely because the server did not answer within 60 s — so an
+ * unbounded fetch there would leave the user with no alert, no recovery
+ * buttons and a countdown still on screen, all stuck behind the await, in
+ * exactly the situation where the server is the thing that is wedged.
+ *
+ * Unrelated to the 60 s finish cap, which must not move: the server-side setup
+ * grace window is priced against that constant.
  */
-export async function cookieSetupStillRunning() {
+const COOKIE_SETUP_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * Ask the server what became of the interactive setup.
+ *
+ *   ok          — false when the probe itself could not answer. "We do not
+ *                 know" is the one thing the abort path must not round to a
+ *                 conclusion, so it is a field rather than a missing value.
+ *   inProgress  — is the setup slot still held?
+ *   lastError   — the message the finish recorded, or null.
+ *   lastRefresh — the server-side RFC3339 stamp that ONLY a successful finish
+ *                 writes (FinishSetupDetailed sets it immediately before its
+ *                 final cleanup; every failure path returns before it).
+ *
+ * Never throws, so a caller may hold the promise unawaited.
+ *
+ * The last two fields are what make the "already finished" verdict honest.
+ * `setupInProgress` alone cannot say WHICH conclusion was reached: cleanup()
+ * runs on every failure path too, including the 422 that deliberately refuses
+ * to write cookies.txt — so a report built on it announces "your cookies were
+ * saved" in exactly the case where the code guaranteed they were not.
+ */
+export async function cookieSetupProbe() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COOKIE_SETUP_PROBE_TIMEOUT_MS);
+  const unknown = { ok: false, inProgress: false, lastError: null, lastRefresh: null };
   try {
-    const response = await fetch("/api/cookies/auto-status");
-    if (!response.ok) return null;
+    const response = await fetch("/api/cookies/auto-status", { signal: controller.signal });
+    if (!response.ok) return unknown;
     const status = await response.json();
-    return !!status.setupInProgress;
+    return {
+      ok: true,
+      inProgress: !!status.setupInProgress,
+      lastError: typeof status.lastError === "string" && status.lastError !== "" ? status.lastError : null,
+      lastRefresh: typeof status.lastRefresh === "string" ? status.lastRefresh : null,
+    };
   } catch {
-    return null;
+    return unknown;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+/**
+ * Did a successful finish land between the two probes?
+ *
+ * Compared server stamp against server stamp — the baseline is read from the
+ * same endpoint before the finish starts — so no browser/server clock skew can
+ * turn an old stamp into a fresh one.
+ *
+ * Both "no stamp now" and "no trustworthy baseline" answer false. Without a
+ * baseline the server may have carried that stamp all along, and the cost of
+ * the two directions is not symmetric: falsely claiming a save sends the user
+ * away believing they are signed in.
+ */
+function cookieSetupRefreshAdvanced(baseline, probe) {
+  if (!probe.lastRefresh) return false;
+  if (!baseline || !baseline.ok) return false;
+  return probe.lastRefresh !== baseline.lastRefresh;
 }
 
 /**
@@ -201,21 +256,40 @@ export async function cookieSetupStillRunning() {
  * committed, and telling the user it timed out invites them to redo a sign-in
  * that succeeded.
  *
+ * Four arms, because a freed setup slot is not one outcome. In descending
+ * order of what the server actually told us:
+ *
+ *   - it recorded an error → say what it said. This is the 422 that refused to
+ *     overwrite an unreadable cookies.txt, and the empty profile that found no
+ *     login, both of which free the slot exactly like a success does.
+ *   - it stamped a new lastRefresh → the finish completed and committed.
+ *   - neither → the slot is free and nothing was recorded. Three failure paths
+ *     look like this (the MkdirAll, atomic-write and jar-reload returns), and
+ *     none of them saved anything, so this must not claim a save.
+ *   - the probe could not answer → say only that.
+ *
+ * `wizard` adds the one thing the setup wizard cannot do on this path: it
+ * cannot mark a platform configured, because nothing here says WHICH platform
+ * the completed finish accepted, and cookieYTDone/cookieTWDone are the sole
+ * source of the active_platforms the wizard is about to write. Inferring it
+ * from /api/status would read the answer off RefreshService's own check — a
+ * different mechanism — so the alert says so instead of guessing.
+ *
  * The 60 s cap is NOT the thing to change here: the server-side setup grace
  * window is priced against that exact constant, so raising it to buy a slow
  * finish more time would silently break a cross-language relationship. Report
  * what the server says instead.
  */
-export function cookieSetupAbortReport(stillRunning) {
-  if (stillRunning === false) {
+export function cookieSetupAbortReport(probe, baseline, { wizard = false } = {}) {
+  if (!probe.ok) {
     return {
-      message: "Moombox stopped waiting after 60 seconds, but the server had already finished this setup — " +
-        "anything it extracted was saved. Check the cookie status, and try again only if it still shows no sign-in.",
-      variant: "primary",
-      icon: "info-circle",
+      message: "Moombox stopped waiting after 60 seconds and could not reach the server to find out whether " +
+        "the setup finished. The browser window may still be open.",
+      variant: "warning",
+      icon: "question-circle",
     };
   }
-  if (stillRunning === true) {
+  if (probe.inProgress) {
     return {
       message: "Moombox stopped waiting after 60 seconds. The server is still working on this setup, " +
         "and the browser window may still be open.",
@@ -223,9 +297,34 @@ export function cookieSetupAbortReport(stillRunning) {
       icon: "clock",
     };
   }
+  if (probe.lastError) {
+    // Deliberately not attributed to "this setup". The slot is free by the
+    // time we ask, so in principle the periodic refresh could have recorded
+    // the message in between — reporting it as the last thing recorded is true
+    // either way, and is the sentence that actually helps.
+    return {
+      message: "Moombox stopped waiting after 60 seconds. The setup is no longer running, and the last " +
+        `thing the server recorded was: ${probe.lastError}`,
+      variant: "danger",
+      icon: "exclamation-octagon",
+    };
+  }
+  if (cookieSetupRefreshAdvanced(baseline, probe)) {
+    return {
+      message: "Moombox stopped waiting after 60 seconds, but the server had already finished this setup — " +
+        "the cookies it extracted were saved." +
+        (wizard
+          ? " This wizard cannot tell which platform it accepted, so it will not mark one as configured " +
+            "here — press Try Again, or set cookies up from Settings once setup is done."
+          : " Check the cookie status, and try again only if it still shows no sign-in."),
+      variant: "primary",
+      icon: "info-circle",
+    };
+  }
   return {
-    message: "Moombox stopped waiting after 60 seconds and could not reach the server to find out whether " +
-      "the setup finished. The browser window may still be open.",
+    message: "Moombox stopped waiting after 60 seconds. The setup is no longer running on the server, but it " +
+      "recorded neither a result nor an error — nothing may have been saved. Check the cookie status " +
+      "before signing in again.",
     variant: "warning",
     icon: "question-circle",
   };
