@@ -464,7 +464,13 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 // a machine where no browser may be launched — the same seam convention as
 // detectBrowser, killProcessTree and writeCookieFile. Nothing in production
 // reassigns it.
-var setupBrowserGone = func(job *processJob) (gone, known bool) {
+var setupBrowserGone = realSetupBrowserGone
+
+// realSetupBrowserGone is setupBrowserGone's implementation — see there for the
+// contract and for why `known` is the half that matters. Split out and named
+// only so a test that has stubbed the seam can put the genuine probe back for
+// one case; nothing else should call it directly.
+func realSetupBrowserGone(job *processJob) (gone, known bool) {
 	// queryable, not `job != nil`. activeProcesses answers 0 for three
 	// different situations and only one of them is "the job is empty": a nil
 	// job (a launch where newProcessJob failed, or where the assign failed and
@@ -1052,6 +1058,69 @@ func (s *AutoCookieService) CancelSetup() error {
 	s.cleanup()
 	s.logger.Info("auto-cookie setup cancelled")
 	return nil
+}
+
+// AbandonSetup is what a CLIENT reports when the client itself went away — the
+// dashboard tab unloaded. It is NOT CancelSetup, and the difference is the
+// point: a deliberate click is consent to close the browser, a tab unload is
+// not.
+//
+// The beacon behind this used to POST /cancel. That was harmless when it was
+// written, because a Firefox setup had no Job Object and a cancel could not
+// reach the browser. S5 gave it one, so every cancel now closes the window —
+// and the setup flow's own instructions send the user AWAY from the dashboard
+// tab to go and sign in. Closing the now-idle tab became a remote kill of the
+// window they are typing their password into, on the default Windows path.
+//
+// So this releases the slot WITHOUT killing anything, and it releases only
+// where releasing is not itself a kill. The split is not a new rule; it is
+// setupBrowserGone's existing `known`, asked one more time:
+//
+//   - known — the Job Object can be interrogated, so the REAP owns this. It
+//     will release the slot on its own correct predicate (the browser actually
+//     being gone) and cannot fire while a login is in progress. Releasing here
+//     would mean cleanupLocked, which closes that handle, which is
+//     KILL_ON_JOB_CLOSE on a live browser. Do nothing.
+//   - not known — no job, or a platform with no Job Object primitive at all
+//     (every non-Windows target). The reap can NEVER fire there, so this is the
+//     only thing that releases the slot; and with nothing tracking the browser,
+//     releasing kills nothing. Release.
+//
+// Which is to say plainly: this call is redundant on Windows and load-bearing
+// on Linux and in Docker. It is not dead code on Windows — it is the arm that
+// deliberately declines, and deleting the check would restore the kill.
+//
+// Two things it deliberately does NOT do. It does not raise `cancelled`,
+// because it is not an abort: a StartSetup still preparing a launch is left to
+// finish, and the slot it publishes is then governed by the normal rules. And
+// it does not call killSetupProcess, which is the whole point.
+//
+// Returns ErrNoSetupInProgress when there was nothing to release, matching
+// CancelSetup so the route can answer both the same way. `released` reports
+// whether the slot was actually cleared; the beacon cannot read it, but the
+// log line and the tests can.
+func (s *AutoCookieService) AbandonSetup() (released bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.setupProcess == nil && !s.setupClaimed {
+		return false, ErrNoSetupInProgress
+	}
+	if _, known := setupBrowserGone(s.setupJob); known {
+		s.logger.Debug("client abandoned a cookie setup; leaving it to the reap",
+			"platform", s.targetPlatform)
+		return false, nil
+	}
+	if s.setupProcess == nil {
+		// A claim in flight and no browser published yet. There is nothing to
+		// release, and aborting the launch is not this call's business.
+		s.logger.Debug("client abandoned a cookie setup mid-launch; nothing to release yet")
+		return false, nil
+	}
+	s.logger.Info("client abandoned a cookie setup — releasing the slot, leaving the browser alone",
+		"platform", s.targetPlatform)
+	s.cleanupLocked()
+	return true, nil
 }
 
 // RefreshVerdict is what a refresh pass concluded about ONE platform.

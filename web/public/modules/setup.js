@@ -80,16 +80,18 @@ export class SetupController {
     }
 
     // Tell the server when the tab goes away mid-setup — the wizard half of the
-    // same fix settings.js carries; see the comment there for why this is
-    // pagehide rather than beforeunload, why the e.persisted bail-out is not
-    // optional, and why a beacon rather than a fetch. Only the controller that
-    // STARTED a setup has the flag set, so the two controllers sharing this
-    // dialog cannot both fire one.
+    // same fix settings.js carries; see the comment there for why this posts
+    // /abandon rather than /cancel (a tab unload is not consent to close the
+    // browser the user is signing into), why this is pagehide rather than
+    // beforeunload, why the e.persisted bail-out is not optional, and why a
+    // beacon rather than a fetch. Only the controller that STARTED a setup has
+    // the flag set, so the two controllers sharing this dialog cannot both fire
+    // one.
     window.addEventListener("pagehide", (e) => {
       if (e.persisted) return; // bfcache: this page is coming back
       if (!this._cookieSetupActive) return;
       this._cookieSetupActive = false;
-      navigator.sendBeacon("/api/cookies/auto-setup/cancel");
+      navigator.sendBeacon("/api/cookies/auto-setup/abandon");
     });
 
     // Mode selection

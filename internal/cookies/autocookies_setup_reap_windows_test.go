@@ -183,11 +183,16 @@ func expireGrace(s *AutoCookieService) {
 // TestFirefoxSetupIsTrackedByAJobObject is S5 itself.
 //
 // startFirefoxSetup used to create no Job Object at all, which left
-// setupBrowserGone with nothing to interrogate on the most common Windows path
-// — knownBrowsers puts the whole Firefox family ahead of every Chromium entry,
-// and Edge is excluded from default-browser promotion, so this is the path for
-// anyone who merely has Firefox installed. The abandoned-setup reap therefore
-// could not fire there, whatever the reap itself did.
+// setupBrowserGone with nothing to interrogate on a very common Windows path:
+// knownBrowsers puts the whole Firefox family ahead of every Chromium entry, so
+// Firefox wins whenever nothing outranks it. What outranks it is the DETECTED
+// SYSTEM DEFAULT, which detectBrowserUncached promotes to the front — Edge
+// alone excluded. So this is the path on a machine with no detected default, an
+// Edge default, or a Firefox-family default; a Chrome-default machine with
+// Firefox installed uses Chrome. An earlier version of this comment said "anyone
+// who merely has Firefox installed", which skipped the promotion step. The
+// conclusion is unchanged either way — the abandoned-setup reap could not fire
+// on that path, whatever the reap itself did.
 //
 // A witness: against b9a23a4 s.setupJob is nil after a Firefox setup, and the
 // first assertion below is the one that fires.
@@ -385,5 +390,56 @@ func TestAdoptSetupJobLockedClosesTheHandleItReplaces(t *testing.T) {
 	}
 	if stored != second {
 		t.Fatal("adoptSetupJobLocked did not store the job it was given")
+	}
+}
+
+// TestAbandonDefersToARealJobObject is the beacon's deferral arm against the
+// real syscall rather than the stub every other Abandon test uses.
+//
+// A job this process just created and assigned nothing to reports empty, which
+// is `known` — the only thing AbandonSetup asks. The point is not that the job
+// is empty; it is that SOMETHING CAN BE ASKED, so the reap owns the decision and
+// the beacon must keep its hands off the handle. On this platform a release
+// means cleanupLocked, and cleanupLocked closes the job.
+func TestAbandonDefersToARealJobObject(t *testing.T) {
+	killed := captureKills(t)
+	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+	abandonedSetup(t, s, time.Hour)
+
+	job, err := newProcessJob()
+	if err != nil {
+		t.Fatalf("create a Job Object: %v", err)
+	}
+	t.Cleanup(job.close)
+
+	// Put the real probe back — abandonedSetup installed the stub — and give
+	// the slot a handle it can actually interrogate.
+	restoreRealProbe(t)
+	s.mu.Lock()
+	s.setupJob = job
+	s.mu.Unlock()
+
+	released, err := s.AbandonSetup()
+	if err != nil {
+		t.Fatalf("AbandonSetup: %v", err)
+	}
+	if released {
+		t.Fatal("the beacon released a slot holding a queryable Job Object. Whether that job " +
+			"is empty right now is the REAP's question, asked at the moment it acts; the " +
+			"beacon closing the handle pre-empts it and takes any browser inside")
+	}
+	if len(*killed) != 0 {
+		t.Fatalf("a tab unload killed something: %v", *killed)
+	}
+
+	s.mu.Lock()
+	handle, proc := job.handle, s.setupProcess
+	s.mu.Unlock()
+	if handle == 0 {
+		t.Fatal("AbandonSetup closed the Job Object handle — that is KILL_ON_JOB_CLOSE on " +
+			"whatever the job still holds")
+	}
+	if proc == nil {
+		t.Fatal("AbandonSetup cleared the setup slot on the deferral path")
 	}
 }

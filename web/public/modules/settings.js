@@ -400,10 +400,21 @@ export class SettingsController {
 
     // Tell the server when the tab goes away mid-setup. Nothing did, so closing
     // the tab left a browser registered server-side and every later setup and
-    // periodic refresh refused ("setup in progress") until the grace window
-    // expired. The server-side reap is the backstop — it has to be, since a TUI
-    // session or a crashed tab has no client to fire anything — and this is the
-    // fast path that keeps the wedge to milliseconds instead of a minute.
+    // periodic refresh refused ("setup in progress") until something released
+    // the slot. On Windows the server-side reap does that on its own, keyed on
+    // the browser actually being gone; where there is no Job Object to ask —
+    // Linux, Docker — this beacon is the only release there is.
+    //
+    // IT POSTS /abandon, NOT /cancel, AND THE DIFFERENCE IS A BROWSER WINDOW.
+    // Cancel is the user's abort and closes the setup browser; once the Firefox
+    // setup gained a Job Object, that became true on the default Windows path
+    // too. But this flow's own instructions send the user AWAY from this tab —
+    // "a browser window has opened… please sign in" — so closing the now-idle
+    // dashboard tab is an entirely natural thing to do MID-LOGIN, and pointing
+    // this beacon at /cancel made that a remote kill of the window they were
+    // typing their password into. /abandon releases the slot without touching
+    // the browser, and declines even to do that where releasing would itself
+    // close a Job Object. A click is consent; a tab unload is not.
     //
     // pagehide, NOT beforeunload, and the difference is not cosmetic: the
     // beforeunload above can put a "Leave site?" confirm in front of the user,
@@ -414,8 +425,8 @@ export class SettingsController {
     //
     // e.persisted is the other half of picking pagehide. It also fires when the
     // page goes into the back/forward cache — a back navigation, or a phone
-    // backgrounding the tab — and that page is coming BACK. Cancelling there
-    // kills a live setup (on the server host, which in a LAN or Docker
+    // backgrounding the tab — and that page is coming BACK. Releasing there
+    // tears down a live setup (on the server host, which in a LAN or Docker
     // deployment is not even the same machine) and, because the flag is cleared
     // on the way out, leaves the restored page unable to cancel it: the dialog
     // is still up, "I'm Logged In" 404s, and nothing can clean up. Skipping the
@@ -430,7 +441,7 @@ export class SettingsController {
       if (e.persisted) return;
       if (!this._cookieSetupActive) return;
       this._cookieSetupActive = false;
-      navigator.sendBeacon("/api/cookies/auto-setup/cancel");
+      navigator.sendBeacon("/api/cookies/auto-setup/abandon");
     });
 
     // Handle sl-dialog close (Escape/overlay click)

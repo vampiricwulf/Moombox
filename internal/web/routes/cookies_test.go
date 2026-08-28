@@ -329,10 +329,21 @@ func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 		}
 		js := string(raw)
 
-		if !strings.Contains(js, `navigator.sendBeacon("/api/cookies/auto-setup/cancel")`) {
+		if !strings.Contains(js, beaconEndpoint) {
 			t.Errorf("%s never tells the server the tab is going away mid-setup — "+
 				"an abandoned wizard then blocks every setup and every periodic refresh "+
-				"until the grace window expires", mod.path)
+				"until something releases the slot", mod.path)
+		}
+		// The endpoint is the finding, not a detail. /cancel is the user's
+		// abort and closes the setup browser — true on the Firefox path too
+		// since it gained a Job Object. This flow's instructions send the user
+		// AWAY from this tab to sign in, so a beacon pointed at /cancel makes
+		// closing the idle dashboard tab a remote kill of the window they are
+		// typing into. Checked as an absence as well as a presence: adding
+		// /abandon while leaving a /cancel beacon behind fixes nothing.
+		if strings.Contains(js, `navigator.sendBeacon("/api/cookies/auto-setup/cancel")`) {
+			t.Errorf("%s still beacons a CANCEL on unload. A click is consent to close the "+
+				"browser; a tab unload is not — post %s instead", mod.path, beaconEndpoint)
 		}
 		// Matched on the event registration alone, not on the handler's
 		// signature: a missing `e.persisted` must fail as a missing bfcache
@@ -363,13 +374,13 @@ func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 					"cancelled is not, and the flag is cleared on the way out so the restored "+
 					"page cannot cancel either:\n%s", mod.path, guard, compact)
 			}
-			beaconAt := strings.Index(compact, `navigator.sendBeacon("/api/cookies/auto-setup/cancel")`)
+			beaconAt := strings.Index(compact, beaconEndpoint)
 			if beaconAt < 0 {
-				t.Errorf("%s's pagehide handler does not send the cancel beacon:\n%s", mod.path, compact)
+				t.Errorf("%s's pagehide handler does not send the release beacon:\n%s", mod.path, compact)
 			}
 			if guardAt >= 0 && beaconAt >= 0 && guardAt > beaconAt {
 				t.Errorf("%s checks e.persisted only AFTER firing the beacon, which is no check "+
-					"at all — the cancel has already gone:\n%s", mod.path, compact)
+					"at all — the release has already gone:\n%s", mod.path, compact)
 			}
 		}
 
@@ -392,5 +403,68 @@ func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 				"fire sl-request-close, so the server is never told:\n%s",
 				mod.path, mod.cancelFn, body)
 		}
+	}
+}
+
+// beaconEndpoint is the URL the unload beacon posts to, and the one thing the
+// JS pin above and the route check below must agree on. Declared once so a
+// change has to move both.
+const beaconEndpoint = `navigator.sendBeacon("/api/cookies/auto-setup/abandon")`
+
+// TestTheUnloadBeaconPostsToARouteThatExists closes the gap between the two
+// halves of the beacon fix: the JS pin proves the client asks for /abandon, and
+// this proves something is listening.
+//
+// Without it the two could drift into the worst combination — a beacon posting
+// to a route nobody registered, which fails silently (sendBeacon reports
+// nothing) and takes the Linux/Docker release with it, the one platform where
+// the beacon is the ONLY thing that frees an abandoned setup slot.
+//
+// The discriminator is the BODY, not the status. chi answers an unregistered
+// path with 404 too, so a status check alone would pass against a route that
+// does not exist; only a registered handler produces this JSON. The service is
+// real and has no setup in flight, so AbandonSetup returns ErrNoSetupInProgress
+// and the handler renders it through the same arm /cancel and /finish use.
+func TestTheUnloadBeaconPostsToARouteThatExists(t *testing.T) {
+	// Re-derive the path from the JS rather than restating it, so this cannot
+	// keep passing against a URL the client no longer sends.
+	raw, err := webassets.PublicFS.ReadFile("public/modules/settings.js")
+	if err != nil {
+		t.Fatalf("read embedded settings.js: %v", err)
+	}
+	const prefix = `navigator.sendBeacon("`
+	at := strings.Index(string(raw), prefix)
+	if at < 0 {
+		t.Fatal("settings.js sends no beacon at all")
+	}
+	rest := string(raw)[at+len(prefix):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		t.Fatal("could not read the beacon's URL out of settings.js")
+	}
+	path := rest[:end]
+
+	svc := cookies.NewAutoCookieService(t.TempDir(), filepath.Join(t.TempDir(), "cookies.txt"),
+		cookies.NewCookieJar(), nopRouteLogger{})
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, svc, nil, nil)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+
+	var body map[string]any
+	if jsonErr := json.Unmarshal(rec.Body.Bytes(), &body); jsonErr != nil {
+		t.Fatalf("the beacon's endpoint %q is not registered — chi answered %d with %q, "+
+			"which is its own not-found page, not a handler's JSON. On Linux and in Docker "+
+			"this beacon is the only thing that releases an abandoned setup slot, and "+
+			"sendBeacon reports nothing when it lands nowhere.",
+			path, rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("%s with no setup in flight: got %d, want %d to match /cancel and /finish",
+			path, rec.Code, http.StatusNotFound)
+	}
+	if body["error"] == nil {
+		t.Errorf("%s answered a missing setup without an error field: %v", path, body)
 	}
 }

@@ -73,9 +73,13 @@ func jobReports(t *testing.T, gone, known bool) {
 // because the two FinishSetup tests need the Firefox read path to have a
 // profile to read.
 //
-// The job it installs is a FAKE — jobReports replaces the probe outright, so
-// s.setupJob stays nil and nothing here exercises a real handle. The tests that
-// do are Windows-only and live in autocookies_setup_reap_windows_test.go.
+// IT INSTALLS NO JOB AT ALL — not a fake one, which is what this said before.
+// jobReports replaces the probe outright, so s.setupJob stays nil and every
+// answer about it comes from the stub; nothing here exercises a real handle.
+// The tests that do are Windows-only and live in
+// autocookies_setup_reap_windows_test.go. That matters to anyone adding a case
+// here: code reading s.setupJob directly rather than going through the probe
+// sees nil, and will behave as it does with no Job Object.
 func abandonedSetup(t *testing.T, s *AutoCookieService, exitedAgo time.Duration) *os.Process {
 	t.Helper()
 	jobReports(t, true, true)
@@ -557,4 +561,119 @@ func TestCancelSetupGateIsDeliberatelyWiderThanSetupInProgress(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- AbandonSetup: the unload beacon's endpoint ---
+
+// TestAbandonLeavesTheBrowserAloneWhereTheReapCanJudgeIt is the finding the arc
+// review named, at the site that produced it.
+//
+// The Web beacon fires the instant the dashboard tab unloads — and the setup
+// flow's own instructions send the user away from that tab to go and sign in,
+// so closing the now-idle tab mid-login is an entirely natural act. While the
+// beacon posted /cancel that closed the browser they were typing into: harmless
+// when it was written, because a Firefox setup had no Job Object for a cancel to
+// reach, and a remote kill on the default Windows path the moment S5 gave it
+// one.
+//
+// The slot below is that exact moment: a launcher long gone (Firefox exits
+// ~170ms in) and a job that says the real browser is still running. Nothing may
+// be killed and the slot must survive — the reap owns this one, and it cannot
+// fire while a login is in progress because it is keyed on the browser actually
+// being gone.
+func TestAbandonLeavesTheBrowserAloneWhereTheReapCanJudgeIt(t *testing.T) {
+	killed := captureKills(t)
+	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+	abandonedSetup(t, s, time.Hour)
+	jobReports(t, false, true) // queryable, and the browser is still in the job
+
+	released, err := s.AbandonSetup()
+	if err != nil {
+		t.Fatalf("AbandonSetup: %v", err)
+	}
+	if released {
+		t.Fatal("the beacon released a slot whose Job Object still holds a live browser — " +
+			"cleanupLocked closes that handle and KILL_ON_JOB_CLOSE takes the window the " +
+			"user is signing into")
+	}
+	if len(*killed) != 0 {
+		t.Fatalf("a tab unload killed something: %v. A click is consent; an unload is not", *killed)
+	}
+
+	s.mu.Lock()
+	proc := s.setupProcess
+	s.mu.Unlock()
+	if proc == nil {
+		t.Fatal("the setup slot was torn down out from under a running browser")
+	}
+}
+
+// TestAbandonReleasesTheSlotWhereTheReapNeverFires is the other arm, and the
+// reason the beacon still exists at all.
+//
+// Where setupBrowserGone cannot answer — no Job Object, or a platform with no
+// Job Object primitive, which is every non-Windows target — the reap can NEVER
+// release the slot, so this beacon is the only thing that does. Releasing is
+// also safe exactly there: with nothing tracking the browser, clearing the slot
+// closes no handle and kills nothing.
+//
+// So the call is redundant on Windows and load-bearing on Linux and in Docker.
+// Both halves are asserted, here and above, because deleting either one is a
+// live regression: drop the deferral and the kill comes back, drop this and
+// Linux wedges until restart.
+func TestAbandonReleasesTheSlotWhereTheReapNeverFires(t *testing.T) {
+	killed := captureKills(t)
+	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+	abandonedSetup(t, s, time.Hour)
+	jobReports(t, false, false) // nothing can say — no job, or no job primitive
+
+	released, err := s.AbandonSetup()
+	if err != nil {
+		t.Fatalf("AbandonSetup: %v", err)
+	}
+	if !released {
+		t.Fatal("the beacon released nothing on a platform whose reap can never fire — " +
+			"the setup slot wedges every later setup and every periodic refresh until restart")
+	}
+	if len(*killed) != 0 {
+		t.Fatalf("releasing the slot killed %v. Releasing is only safe here BECAUSE "+
+			"nothing is tracking the browser; the release must not go looking for it", *killed)
+	}
+
+	s.mu.Lock()
+	proc := s.setupProcess
+	s.mu.Unlock()
+	if proc != nil {
+		t.Fatal("AbandonSetup reported a release and left the slot occupied")
+	}
+}
+
+// TestAbandonAnswersAMissingSetupLikeCancelDoes keeps the two endpoints
+// agreeing about what "there was nothing here" looks like, so the route can
+// answer both with one arm.
+func TestAbandonAnswersAMissingSetupLikeCancelDoes(t *testing.T) {
+	captureKills(t)
+	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+
+	released, err := s.AbandonSetup()
+	if !errors.Is(err, ErrNoSetupInProgress) {
+		t.Fatalf("AbandonSetup with no setup: got %v, want ErrNoSetupInProgress", err)
+	}
+	if released {
+		t.Fatal("AbandonSetup reported releasing a setup that never existed")
+	}
+	if cancelErr := s.CancelSetup(); !errors.Is(cancelErr, ErrNoSetupInProgress) {
+		t.Fatalf("the two endpoints disagree about a missing setup: abandon %v, cancel %v",
+			err, cancelErr)
+	}
+}
+
+// restoreRealProbe puts the genuine setupBrowserGone back for one test, undoing
+// a jobReports stub installed earlier in the same test (abandonedSetup installs
+// one). Used by the Windows tests that want the real syscall.
+func restoreRealProbe(t *testing.T) {
+	t.Helper()
+	stub := setupBrowserGone
+	setupBrowserGone = realSetupBrowserGone
+	t.Cleanup(func() { setupBrowserGone = stub })
 }
