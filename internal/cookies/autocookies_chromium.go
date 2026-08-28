@@ -82,30 +82,21 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		if assignErr := job.assign(cmd.Process); assignErr != nil {
 			s.logger.Warn("failed to assign chromium setup process to job object",
 				"pid", cmd.Process.Pid, "err", assignErr)
+			// Do not keep a job that tracks nothing. It would answer
+			// activeProcesses() == 0 from a LIVE handle, which setupBrowserGone
+			// reads as "the browser is gone" — and the reap would then release a
+			// setup whose browser is still on screen. A nil job answers "no
+			// idea", which is the honest reading of a failed assign and leaves
+			// the slot alone. See setupBrowserGone.
+			job.close()
+			job = nil
 		}
 	}
 
 	s.mu.Lock()
-	// Never overwrite a live Job Object handle. Dropping one leaks the handle
-	// AND the browser it holds: nothing else has a reference, so
-	// KILL_ON_JOB_CLOSE never fires and the orphan runs until Moombox exits.
-	// StartSetup's reap should have cleared this already — if it did not, the
-	// invariant broke somewhere and closing is still the right answer, because
-	// the only process this job can hold is a setup browser from an attempt the
-	// gate has already declared over. It happens BEFORE cmd.Process is assigned
-	// to the new job, so it cannot touch the browser we just launched.
-	//
-	// DEFENCE-IN-DEPTH WITH NO TEST BEHIND IT, deliberately. Reaching this line
-	// with a non-nil handle is unreachable by construction, and covering it
-	// would need a process that actually launches, which no test in this
-	// package may do — see TestReapClosesTheFirstAttemptsJobObject, which pins
-	// the reap's close and says so rather than claiming this one.
-	if s.setupJob != nil {
-		s.logger.Warn("closing a setup Job Object left behind by an earlier attempt")
-		s.setupJob.close()
-	}
 	s.setupProcess = cmd.Process
-	s.setupJob = job
+	// Closes any handle a previous attempt left behind; see the guard's doc.
+	s.adoptSetupJobLocked(job)
 	s.cdpPort = port
 	s.mu.Unlock()
 

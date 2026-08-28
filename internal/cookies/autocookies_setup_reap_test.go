@@ -68,9 +68,14 @@ func jobReports(t *testing.T, gone, known bool) {
 //
 // It also declares the browser genuinely gone, because a stamped exit is NOT
 // on its own enough for the reap to act — see setupBrowserGone. The Firefox
-// browser record with a job that can answer is a state only Task 3 (S5) makes
-// real; today the same slot state arises on the Chromium path, and the two
-// FinishSetup tests need the Firefox read path to have a profile to read.
+// browser record now describes a real Windows state: startFirefoxSetup creates
+// and stores a job, so a Firefox slot can answer the probe. The record is here
+// because the two FinishSetup tests need the Firefox read path to have a
+// profile to read.
+//
+// The job it installs is a FAKE — jobReports replaces the probe outright, so
+// s.setupJob stays nil and nothing here exercises a real handle. The tests that
+// do are Windows-only and live in autocookies_setup_reap_windows_test.go.
 func abandonedSetup(t *testing.T, s *AutoCookieService, exitedAgo time.Duration) *os.Process {
 	t.Helper()
 	jobReports(t, true, true)
@@ -409,16 +414,17 @@ func TestReapWillNotCloseAJobThatStillHasLiveProcesses(t *testing.T) {
 // TestReapWillNotFireWhenNothingCanSayTheBrowserIsGone is the same rule for the
 // case where there is no evidence at all rather than evidence of life.
 //
-// `known == false` is what the probe returns with no Job Object (every Firefox
-// setup today — S5 has not given that path one — and any Chromium launch where
-// newProcessJob failed) and on the platforms whose processJob cannot count.
+// `known == false` is what the probe returns with no Job Object (a launch where
+// newProcessJob or its assign failed, on either family) and on the platforms
+// whose processJob cannot count — which is every non-Windows one.
 // drainJob draws the identical line on the same syscall: a zero from something
 // that cannot count means "nothing was waited on", not "the browser finished".
 //
 // Refusing to reap there costs the wedge staying put on those paths, which is
-// exactly the pre-existing behaviour. Reaping there would destroy live setups
-// 60 seconds in, on the default path for anyone whose default browser is
-// Firefox. The first is a gap; the second is a regression.
+// exactly the pre-existing behaviour — and on Linux and in Docker it is still
+// EVERY path, since no processJob there can count. Reaping on no evidence would
+// instead destroy live setups 60 seconds in. The first is a gap; the second is
+// a regression.
 func TestReapWillNotFireWhenNothingCanSayTheBrowserIsGone(t *testing.T) {
 	captureKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})

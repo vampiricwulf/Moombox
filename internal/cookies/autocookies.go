@@ -442,19 +442,23 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 // WHERE THAT LEAVES THE REAP, stated so nobody has to derive it:
 //
 //   - Windows + Chromium-family — answerable, and the reap works.
-//   - Windows + Firefox-family — no Job Object on the setup path yet, so the
-//     reap never fires. S5 (Task 3) gives that path one and this starts
-//     answering with no further change here.
+//   - Windows + Firefox-family — answerable too, since startFirefoxSetup
+//     creates and stores a job of its own. That was the last Windows path where
+//     the reap could not fire, and it was the common one: knownBrowsers lists
+//     the Firefox family ahead of every Chromium entry.
 //   - Linux, and every non-Windows target — there is no Job Object PRIMITIVE
 //     at all (job_linux.go / job_other.go are no-op stubs), so nothing is
 //     answerable on ANY path, Chromium included, and the reap never fires.
-//     S5 does NOT change that. Docker and native Linux therefore keep the
-//     abandoned-setup wedge until something other than a Job Object owns the
-//     liveness question there. Recorded as a known residual, not an oversight.
+//     GIVING FIREFOX A JOB DID NOT CHANGE THAT. Docker and native Linux keep
+//     the abandoned-setup wedge until something other than a Job Object owns
+//     the liveness question there. Recorded as a known residual, not an
+//     oversight.
 //
-// On all three of those, the client-side cancel (the unload beacon, Skip,
-// Escape, and the TUI countdown) is what clears an abandoned setup; the gap is
-// specifically "no client survived to say anything".
+// Two answerable cases and one that is not. Wherever it is not — and on Windows
+// wherever newProcessJob or its assign failed — the client-side cancel (the
+// unload beacon, Skip, Escape, and the TUI countdown) is what clears an
+// abandoned setup; the gap is specifically "no client survived to say
+// anything".
 //
 // A package variable so tests can supply the answer a real Job Object gives on
 // a machine where no browser may be launched — the same seam convention as
@@ -463,8 +467,8 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 var setupBrowserGone = func(job *processJob) (gone, known bool) {
 	// queryable, not `job != nil`. activeProcesses answers 0 for three
 	// different situations and only one of them is "the job is empty": a nil
-	// job (every Firefox setup today — S5 has not given that path a Job Object
-	// yet — and any Chromium launch where newProcessJob failed), an
+	// job (a launch where newProcessJob failed, or where the assign failed and
+	// the launcher dropped the untrackable job rather than let it lie), an
 	// already-closed handle, and a platform whose processJob cannot count at
 	// all. The type knows which it is; this does not.
 	if !job.queryable() {
@@ -2196,13 +2200,19 @@ func (s *AutoCookieService) cleanup() {
 // inside ONE critical section. See cleanup for what is cleared and, more
 // importantly, what is not.
 //
-// CLOSING THE JOB OBJECT KILLS BROWSERS. That is the point of it —
-// KILL_ON_JOB_CLOSE finishes off a setup browser killSetupProcess missed — but
-// it is also why every caller must have established, under the lock it still
-// holds, that the slot it is clearing is the slot it looked at. A caller that
-// sampled the state, released the lock, and came back later can be looking at a
-// different attempt's job, and closing that one kills a browser the user is
-// actively using.
+// ON WINDOWS, CLOSING THE JOB OBJECT KILLS BROWSERS. That is the point of it —
+// KILL_ON_JOB_CLOSE finishes off a setup browser killSetupProcess missed, on
+// BOTH families now that startFirefoxSetup creates a job too — but it is also
+// why every caller must have established, under the lock it still holds, that
+// the slot it is clearing is the slot it looked at. A caller that sampled the
+// state, released the lock, and came back later can be looking at a different
+// attempt's job, and closing that one kills a browser the user is actively
+// using.
+//
+// It kills NOTHING anywhere else: job_linux.go and job_other.go are no-op
+// stubs, so on Linux and in Docker this only drops per-attempt state and a
+// browser left behind keeps running (pdeathsig ties it to Moombox's death, not
+// to this call). Do not read the sentence above as cross-platform.
 //
 // Caller must hold s.mu.
 func (s *AutoCookieService) cleanupLocked() {
@@ -2216,6 +2226,33 @@ func (s *AutoCookieService) cleanupLocked() {
 	s.setupRetainedSince = time.Time{}
 	s.cdpPort = 0
 	s.targetPlatform = ""
+}
+
+// adoptSetupJobLocked hands ownership of a freshly created Job Object to the
+// setup slot, closing whatever handle an earlier attempt left there. Both
+// launchers go through it — startChromiumSetup and startFirefoxSetup — so the
+// guard below exists once instead of in two copies free to drift.
+//
+// NEVER OVERWRITE A LIVE JOB OBJECT HANDLE. Dropping one leaks the handle AND
+// the browser it holds: nothing else has a reference, so KILL_ON_JOB_CLOSE
+// never fires and the orphan runs until Moombox exits. StartSetup's reap should
+// have cleared this already — if it did not, the invariant broke somewhere and
+// closing is still the right answer, because the only process such a job can
+// hold is a setup browser from an attempt the gate has already declared over.
+//
+// Closing it cannot touch the browser the caller just launched: that browser
+// was assigned to `job`, and a process is only ever in the job it was assigned
+// to. Callers must therefore assign BEFORE calling, which both do.
+//
+// Caller must hold s.mu.
+func (s *AutoCookieService) adoptSetupJobLocked(job *processJob) {
+	if s.setupJob != nil {
+		if s.logger != nil {
+			s.logger.Warn("closing a setup Job Object left behind by an earlier attempt")
+		}
+		s.setupJob.close()
+	}
+	s.setupJob = job
 }
 
 func (s *AutoCookieService) setError(msg string) {
