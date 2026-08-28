@@ -110,13 +110,40 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 					"refreshing — run at debug level for the specific reason",
 			}
 		}
+		// Same two possibilities as runCookieRecovery's Ineffective copy, for
+		// the same reason and traced the same way — see the long note there.
+		// This sibling had the identical defect and is corrected with it
+		// rather than left behind: "it stopped before verifying" cannot happen
+		// on either path, because every refreshAborted() carries a non-nil
+		// error and BOTH callers return before this line on one
+		// (services.go's OnCookieRefreshNeeded above, runCookieRecovery's
+		// err != nil branch).
 		return cookieRefreshReport{
 			ok:  false,
 			msg: "automatic cookie refresh ran but could not establish whether these cookies work",
-			note: "it stopped before verifying, or the check could not reach the service — the credentials may " +
-				"be perfectly fine, so nothing has been concluded about them",
+			note: "the check could not reach the service, or could not be made at all (no cookie header or no " +
+				"SAPISIDHASH to sign with) — the credentials may be perfectly fine, so nothing has been " +
+				"concluded about them",
 		}
 	}
+}
+
+// livenessFromProbe collapses ProbeAccountLiveness's (verdict, error) pair
+// into the (loggedIn, conclusive) pair RefreshService.FallbackLiveness
+// expects. Written as a function taking the probe's two results so it can be
+// table-tested; the wiring passes the call straight through.
+//
+// The collapse is where the caution lives. An error and SessionAuthUnknown are
+// both "we learned nothing" — a transport failure, a non-2xx, a redirect off
+// the probe host, a cookie-stripped chain, an unrecognisable body — and all of
+// them must report conclusive=false so the refresh service moves no state. A
+// false alarm is worse than a missed one: it sends an operator to replace
+// credentials that were working.
+func livenessFromProbe(verdict youtube.SessionAuthState, err error) (loggedIn, conclusive bool) {
+	if err != nil || verdict == youtube.SessionAuthUnknown {
+		return false, false
+	}
+	return verdict == youtube.SessionAuthLoggedIn, true
 }
 
 // initServices runs the 16 numbered construction sections from the original
@@ -265,7 +292,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 		if err := jar.Load(cfg.Cookies.CookieFile); err != nil {
 			log.Warn("Failed to load cookies", slog.String("error", err.Error()))
 		} else {
-			log.Info("Cookies loaded", slog.Bool("hasAuth", jar.HasYouTubeAuthCookies()))
+			// Two predicates, two fields, because they answer different
+			// questions and the old single "hasAuth" field reported the
+			// wrong one. It carried HasYouTubeAuthCookies — SAPISID (or
+			// __Secure-3PAPISID) AND LOGIN_INFO, i.e. "is the set complete
+			// right now" — while the auth-loss gate and the liveness check
+			// downstream both run off HasAnyYouTubeAuthCookie, "was this
+			// install ever configured for YouTube auth". A real acceptance
+			// run printed `hasAuth=false` and then correctly went on to
+			// probe and fire, so the line contradicted what the subsystem
+			// did on the very next step. Named for what each measures.
+			log.Info("Cookies loaded",
+				slog.Bool("completeAuthSet", jar.HasYouTubeAuthCookies()),
+				slog.Bool("anyAuthCookie", jar.HasAnyYouTubeAuthCookie()))
 			// Auto-detect platforms from cookie file when not already set
 			if len(cfg.Cookies.Platforms) == 0 && len(cfg.Cookies.ActivePlatforms) == 0 {
 				var detected []string
@@ -550,6 +589,26 @@ func (s *runState) initServices(logLevelOverride string) error {
 				refs = append(refs, monitor.ChannelRef{Ch: &ch, ChID: ch.ID, WindowDays: days})
 			}
 		})
+		// HasAuthCookies — the COMPLETE-set predicate — and it stays that way.
+		// The feed monitor's membership gate (monitor_callbacks.go) was
+		// widened to HasAnyAuthCookie so a half-cleared session still gets
+		// probed; do NOT mirror that here for symmetry. This gate is
+		// load-bearing on durable state, and widening it loses data:
+		// flipping WithMembership on satisfies needsBackfill's membership arm
+		// (backfill.go — a RECORDED false plus current eligibility), which
+		// queues a full catalog re-scan; a missing membership tab is "clean
+		// empty exhaustion" to scanTab (browse.go), so the scan COMPLETES and
+		// completeScan persists backfilled_with_membership = true even though
+		// the dead session made that tab come back empty. Since that arm only
+		// re-fires on a recorded false, the AUTOMATIC path never revisits the
+		// channel's members-only backlog once the cookies are fixed — it now
+		// reads as membership-complete forever.
+		//
+		// Recovery exists but is not automatic: Sweep(force=true) skips
+		// needsBackfill entirely (the R B chord, POST /api/backfill/rescan),
+		// and widening archive_window_days re-fires the window arm. An
+		// operator who never does either never gets that backlog. Widening
+		// this gate needs backfilled_with_membership handling to go with it.
 		if membershipOn && ytService.HasAuthCookies() {
 			for i := range refs {
 				refs[i].WithMembership = true
@@ -582,6 +641,35 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	cookieRefresh := cookies.NewRefreshService(jar, 0, log)
 	s.cookieRefresh = cookieRefresh
+
+	// Tier-2 liveness, injected rather than called: internal/cookies cannot
+	// import internal/youtube (internal/youtube/auth.go imports internal/
+	// cookies, so the direct call would be an import cycle), and this file can
+	// import both. Same inversion as VerifyYouTubeAuth just below.
+	//
+	// The probe is only reached when nothing else has reported liveness
+	// recently, which is why it can afford to be a full page fetch. Its three
+	// answers collapse to two here, and the collapse is the important part: an
+	// error and SessionAuthUnknown are both "we learned nothing", and they
+	// must report conclusive=false so the refresh service moves no state. Only
+	// a verdict YouTube actually gave us may.
+	//
+	// The collapse throws the REASON away — the pair has nowhere to put it —
+	// so it is logged here, at the one place that still holds it. Debug
+	// because it recurs every cycle for as long as the obstruction lasts; the
+	// once-per-change Info line that says the probe is learning nothing at all
+	// is emitted by the refresh service, which owns the liveness dedupe. The
+	// error names a status code, a URL or a host and never page content (see
+	// ProbeAccountLiveness), so it is safe to write to a log that fans out
+	// over the WebSocket stream.
+	cookieRefresh.FallbackLiveness = func(ctx context.Context) (bool, bool) {
+		verdict, err := ytService.ProbeAccountLiveness(ctx)
+		loggedIn, conclusive := livenessFromProbe(verdict, err)
+		if !conclusive {
+			log.Debug("tier-2 liveness probe did not answer", "verdict", verdict, "err", err)
+		}
+		return loggedIn, conclusive
+	}
 
 	// =========================================================================
 	// 15b. Auto-cookie service

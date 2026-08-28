@@ -270,14 +270,35 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	return s
 }
 
-// refreshPlatforms returns the platforms that have cookies in the jar and need refreshing.
-// Order is stable: YouTube first, then Twitch.
+// refreshPlatforms returns the platforms that have cookies in the jar and need
+// refreshing. Order is stable: YouTube first, then Twitch. It gates the whole
+// browser refresh (RefreshCookiesDetailed), the Firefox launch loop and the
+// Chromium navigation loop, so a platform missing from this list is never
+// visited at all.
+//
+// The question is "does the jar already hold cookies worth re-fetching" — was
+// this platform ever configured — not "is the credential set complete right
+// now". Hence the permissive predicates.
+//
+// Read strictly, this list makes the remedy unreachable exactly when it is
+// needed. A jar holding SAPISID with LOGIN_INFO cleared is what YouTube's
+// rotation-invalidation leaves behind; doRefresh now fires OnRecoveryNeeded on
+// it, recovery calls RefreshCookiesDetailed, the strict predicate returns an
+// empty list, and the refresh declines — so the one platform the pass existed
+// to fix gets no attempt at all. The operator is not even told: since
+// runCookieRecovery's Unknown branch started splitting on RefreshResult.Ran, a
+// declined pass is a log line and nothing more, which is right for a decline
+// and useless here. Same for a Twitch session left holding only twilight-user.
+//
+// A platform with no auth cookie at all is still excluded, and that is not the
+// same omission: there is no session to re-fetch, so a browser launched at it
+// costs a process and can bring nothing back.
 func (s *AutoCookieService) refreshPlatforms() []string {
 	var platforms []string
-	if s.jar.HasYouTubeAuthCookies() {
+	if s.jar.HasAnyYouTubeAuthCookie() {
 		platforms = append(platforms, "youtube")
 	}
-	if s.jar.HasTwitchAuthCookies() {
+	if s.jar.HasAnyTwitchAuthCookie() {
 		platforms = append(platforms, "twitch")
 	}
 	return platforms
@@ -503,41 +524,78 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		return false, false, err
 	}
 
-	// Validate: first check cookie presence, then verify via API if callbacks available
-	ytAuth = s.jar.HasYouTubeAuthCookies()
-	twAuth = s.jar.HasTwitchAuthCookies()
+	// Presence + real API verification, through the same pairing the refresh
+	// path uses. This was the last inline copy of it; the nil-callback contract
+	// (presence is then the only signal, reported as success with a warning so
+	// callers cannot quietly succeed on cookies that are present-but-invalid —
+	// audit reports/cookies.md #21) lives in checkPlatformAuth now.
+	ytCheck, twCheck := s.checkPlatformAuth(ctx)
 
-	// Real API verification (more reliable than just checking cookie presence).
-	// When the corresponding Verify callback is nil (test wiring or alternate
-	// constructors), the presence check above is the only signal we have —
-	// surface that explicitly so callers can't quietly succeed on cookies that
-	// are present-but-invalid (audit reports/cookies.md #21).
-	ctx, cancel := context.WithTimeout(ctx, authVerifyTimeout)
-	defer cancel()
-	if ytAuth {
-		if s.VerifyYouTubeAuth != nil {
-			if verified, err := s.VerifyYouTubeAuth(ctx); err == nil {
-				ytAuth = verified
-			}
-		} else {
-			s.logger.Warn("YouTube auth verification callback not wired — reporting based on cookie presence alone")
+	// What the CALLER is told, and it is deliberately not the verification
+	// result. A sign-in the user just completed is accepted when the site could
+	// not answer: a 429, a captive portal or a DNS blip is not evidence against
+	// a login that happened thirty seconds ago, and refusing it would send the
+	// user back through a wizard that was working. False failure is the worse
+	// direction there.
+	//
+	// It is NOT accepted when nothing was ever asked. A jar that cannot produce
+	// a cookie header or a SAPISIDHASH made no request, so there is no answer
+	// to extend the benefit of the doubt to — and the caller-facing value is
+	// what setup.js turns into a green "YouTube cookies configured" badge and
+	// an entry in active_platforms. Because FinishSetup merges the pre-existing
+	// cookies.txt before checking, a leftover Google remnant with no SAPISID
+	// would otherwise light that badge up for a user who only signed in to
+	// Twitch. attempted is what separates the two; see platformAuth.
+	accepted := func(p platformAuth) bool {
+		return p.hasCookies && (p.state == verifyOK || (p.state == verifyUnknown && p.attempted))
+	}
+	ytAuth = accepted(ytCheck)
+	twAuth = accepted(twCheck)
+
+	// What gets WRITTEN DOWN, which is a different claim and must be the
+	// stricter one. PersistPlatforms unions into cfg.Cookies.Platforms, a set
+	// that only ever grows and is never retracted, so accepting a login on an
+	// inconclusive check and then recording it as verified turns one rate limit
+	// during setup into a durable, permanent assertion that YouTube was
+	// verified. Accepting is right; recording the acceptance as a verification
+	// is not.
+	ytVerified := ytCheck.ok()
+	twVerified := twCheck.ok()
+
+	// Inconclusive has to read as inconclusive. The nil-callback branch inside
+	// checkPlatformAuth says so; the errored branch said nothing at all, so a
+	// 429 during setup was indistinguishable from a clean pass. No cause is
+	// named and no error is recorded: the check did not complete, which is not
+	// a finding about the credentials, and s.lastError renders in Settings as
+	// "your recordings will fail". The two halves get different wording because
+	// they carry different advice — one is "try again", the other is "this
+	// login is not usable as it stands".
+	warnInconclusive := func(platform string, p platformAuth) {
+		if s.logger == nil || !p.hasCookies || p.state != verifyUnknown {
+			return
 		}
-	}
-	if twAuth {
-		if s.VerifyTwitchAuth != nil {
-			if verified, err := s.VerifyTwitchAuth(ctx); err == nil {
-				twAuth = verified
-			}
-		} else {
-			s.logger.Warn("Twitch auth verification callback not wired — reporting based on cookie presence alone")
+		if p.attempted {
+			s.logger.Warn(platform + " auth check did not complete during setup — accepting the sign-in without verifying it")
+			return
 		}
+		s.logger.Warn(platform + " auth check was never attempted during setup — the extracted cookies cannot form an authenticated request")
+	}
+	warnInconclusive("YouTube", ytCheck)
+	warnInconclusive("Twitch", twCheck)
+
+	if !ytAuth && !twAuth && s.logger != nil {
+		// Not "verification failed": a platform with no auth cookie at all was
+		// never verified, and in a single-platform setup one of the two never
+		// is.
+		s.logger.Warn("cookies extracted, but neither platform is authenticated")
 	}
 
-	if !ytAuth && !twAuth {
-		s.logger.Warn("cookies extracted but authentication verification failed")
-	}
-
-	// Clear re-login flags for verified platforms
+	// Clear the re-login flag for every platform this setup ACCEPTED, not just
+	// the ones it verified. The flag means "go and sign in again", the user
+	// just did exactly that, and leaving it raised because the confirming
+	// request hit a rate limit would nag them about work they have already
+	// done. Unlike the persisted set below, this is process-local and the next
+	// conclusive check re-raises it.
 	s.mu.Lock()
 	if ytAuth {
 		s.needsRelogin["youtube"] = false
@@ -547,10 +605,15 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	}
 	s.mu.Unlock()
 
-	// Persist verified platforms to config so we can detect auth loss after restart
-	// (matches TS autoCookies.ts persistPlatforms)
+	// Persist verified platforms to config so we can detect auth loss after
+	// restart (matches TS autoCookies.ts persistPlatforms). VERIFIED, not
+	// accepted — see above. Withholding an unverified platform costs no
+	// recovery: shouldFireRecovery's first-conclusive-check branch fires for a
+	// platform absent from the persisted list, which is precisely the case
+	// SetExpectedPlatforms's per-platform everConcluded flags exist to keep
+	// working.
 	if s.PersistPlatforms != nil {
-		s.PersistPlatforms(ytAuth, twAuth)
+		s.PersistPlatforms(ytVerified, twVerified)
 	}
 
 	now := time.Now()
@@ -562,10 +625,10 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	// Persist LastRefresh to the sidecar so the next launch doesn't
 	// re-run the refresh immediately. Audit reports/cookies.md #48.
 	persistedPlatforms := []string{}
-	if ytAuth {
+	if ytVerified {
 		persistedPlatforms = append(persistedPlatforms, "youtube")
 	}
-	if twAuth {
+	if twVerified {
 		persistedPlatforms = append(persistedPlatforms, "twitch")
 	}
 	if metaErr := SaveMeta(s.cookiePath, CookieMeta{
@@ -575,11 +638,12 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		s.logger.Warn("could not persist cookies.meta.json", "err", metaErr)
 	}
 
+	// "verified" is the word this line uses, so only what verified goes in it.
 	var verified []string
-	if ytAuth {
+	if ytVerified {
 		verified = append(verified, "YouTube")
 	}
-	if twAuth {
+	if twVerified {
 		verified = append(verified, "Twitch")
 	}
 	if len(verified) > 0 {
@@ -958,8 +1022,16 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// refreshPlatforms() gated on, and the disagreement between the jar
 	// (which ignores expiry) and mergeCookieFiles (which prunes on it) is
 	// precisely how a refresh can end up writing an empty file.
-	hadYTAuth := s.jar.HasYouTubeAuthCookies()
-	hadTWAuth := s.jar.HasTwitchAuthCookies()
+	//
+	// Same predicate as refreshPlatforms() and checkPlatformAuth, so `lost`
+	// below compares like with like. It also makes the sentence
+	// cookiesLostMessage prints true: "nothing is left to authenticate with"
+	// describes a platform that went from some credential to none, which is
+	// what these now measure. Under the complete-set predicate a full set
+	// degrading to a partial one was reported as a total loss (false), and a
+	// partial set vanishing entirely was not reported at all (silent).
+	hadYTAuth := s.jar.HasAnyYouTubeAuthCookie()
+	hadTWAuth := s.jar.HasAnyTwitchAuthCookie()
 	fetchedRows := countNetscapeCookieRows(netscapeCookies)
 
 	if previousCookies != "" {
@@ -989,8 +1061,15 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// Only the import path does this. The browser path writes cookies it just
 	// re-fetched from the live site, which cannot be staler than what was on
 	// disk.
+	//
+	// importCheck is kept under its own name because the rollback branch below
+	// REPLACES postYT/postTW with a re-verification of what was restored. The
+	// question "why did we reject the import" can only be answered by the check
+	// that rejected it, and after the re-verify that check is no longer in
+	// scope. See rollbackWasInconclusive.
+	importCheck := map[string]platformAuth{"youtube": postYT, "twitch": postTW}
 	var restoredPlatforms []string
-	if restore := platformsToRestore(pre, map[string]platformAuth{"youtube": postYT, "twitch": postTW}); len(restore) > 0 {
+	if restore := platformsToRestore(pre, importCheck); len(restore) > 0 {
 		for _, platform := range []string{"youtube", "twitch"} {
 			if restore[platform] {
 				restoredPlatforms = append(restoredPlatforms, platform)
@@ -1081,8 +1160,15 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// failure flags a re-login: an unreachable network told us nothing about
 	// the credentials, and sending the user to sign in again over a blip is
 	// both wrong and, in a container, impossible to act on.
-	ytHasCookies := s.jar.HasYouTubeAuthCookies()
-	twHasCookies := s.jar.HasTwitchAuthCookies()
+	//
+	// Taken from the verdicts rather than re-read from the jar, as the comment
+	// above result says: the presence bit has to describe the same moment and
+	// the same question as the state it is paired with. Re-reading it strictly
+	// here silently dropped the half-cleared platform out of both `failed` and
+	// the re-login flag, so a session YouTube had conclusively rejected
+	// produced no prompt and no targeted message.
+	ytHasCookies := postYT.hasCookies
+	twHasCookies := postTW.hasCookies
 
 	// Platforms that HAD auth cookies going into this refresh and do not
 	// have them coming out. This is per platform on purpose: the jar ignores
@@ -1291,10 +1377,28 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	// that is perfectly fine, which is the misattribution verifyUnknown
 	// exists to prevent. So that combination gets its own message carrying
 	// both facts: what we kept, and why.
+	//
+	// Two different questions, so two different sources. `inconclusive`
+	// describes the credentials in force NOW, which after a rollback are the
+	// restored ones — that is the right input for the no-rollback branches
+	// below. rollbackWasInconclusive describes why the IMPORT was rejected, and
+	// only the check that rejected it can answer that: the re-verification
+	// overwrote postYT/postTW, so reading them would attribute the rollback to
+	// a check performed afterwards on different cookies. When the restored
+	// credentials then verify conclusively-false — the ordinary outcome once a
+	// dead-but-configured platform can reach arm 2 at all — that misattribution
+	// prints "the mounted browser profile did not verify" about a profile that
+	// was never evaluated.
 	inconclusive := postYT.state == verifyUnknown || postTW.state == verifyUnknown
+	rollbackWasInconclusive := false
+	for _, platform := range restoredPlatforms {
+		if importCheck[platform].state == verifyUnknown {
+			rollbackWasInconclusive = true
+		}
+	}
 	var errMsg string
 	switch {
-	case len(restoredPlatforms) > 0 && inconclusive:
+	case len(restoredPlatforms) > 0 && rollbackWasInconclusive:
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
 			" — the auth check did not complete (network?), so the imported profile was not accepted"
 	case len(restoredPlatforms) > 0:

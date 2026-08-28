@@ -532,9 +532,18 @@ const (
 
 // platformAuth pairs "are there credentials on disk for this platform" with
 // what verifying them concluded.
+//
+// attempted splits verifyUnknown in two, because the two halves license
+// different things. "The site could not answer" (a 429, a dropped connection)
+// says nothing about a credential and a caller may reasonably accept a login
+// over it; "we could not form the question" — a jar with no cookie header or
+// no SAPISIDHASH to build, ErrAuthCheckNotAttempted — means no request was ever
+// made, so there is no answer to accept. Both stay verifyUnknown: neither is a
+// finding about the credentials, which is what the state records.
 type platformAuth struct {
 	hasCookies bool
 	state      verificationState
+	attempted  bool
 }
 
 func (p platformAuth) ok() bool { return p.state == verifyOK }
@@ -545,12 +554,30 @@ func (p platformAuth) ok() bool { return p.state == verifyOK }
 // computed inline before, including the "no verify callback wired" contract:
 // presence is then the only signal available, so it is reported as success
 // with a warning rather than counted as a verification failure.
+//
+// hasCookies asks whether the platform was ever CONFIGURED, not whether the
+// credential set is complete. The complete-set predicates conflate "there is
+// nothing here" with "there is something here and part of it is missing", and
+// only the first of those licenses skipping the check: a jar holding SAPISID
+// with LOGIN_INFO cleared can still authenticate, and only the site can say.
+// Reading it strictly reported verifyFailed on a check that never ran, which
+// (a) told a container operator "Moombox now holds no youtube cookies at all"
+// about a file plainly holding SAPISID, contradicting the dashboard's own
+// HasYouTubeCookies at the same instant, and (b) left platformsToRestore
+// unable to see either a regression or an unknown, so a destructive import
+// went in over a working session with no rollback.
 func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platformAuth) {
 	vctx, cancel := context.WithTimeout(ctx, authVerifyTimeout)
 	defer cancel()
 
 	check := func(hasCookies bool, verify func(context.Context) (bool, error), platform string) platformAuth {
 		if !hasCookies {
+			// No credential of any kind for this platform. verifyFailed is a
+			// conclusion, not an assumption: there is nothing to send, so no
+			// request can be authenticated, and the callback would answer the
+			// same after a round trip it does not need to make. Everything
+			// downstream reads hasCookies=false as "nothing to protect / do
+			// not blame the user", so this stays silent rather than alarming.
 			return platformAuth{hasCookies: false, state: verifyFailed}
 		}
 		if verify == nil {
@@ -560,16 +587,25 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 		verified, err := verify(vctx)
 		switch {
 		case err != nil:
-			return platformAuth{hasCookies: true, state: verifyUnknown}
+			// ErrAuthCheckNotAttempted means the callback gave up before any
+			// request left the process. Still unknown — nothing was learned
+			// about the credentials either way — but not the same unknown as a
+			// site that would not answer, and FinishSetup has to tell them
+			// apart before it reports a completed sign-in.
+			return platformAuth{
+				hasCookies: true,
+				state:      verifyUnknown,
+				attempted:  !errors.Is(err, ErrAuthCheckNotAttempted),
+			}
 		case verified:
-			return platformAuth{hasCookies: true, state: verifyOK}
+			return platformAuth{hasCookies: true, state: verifyOK, attempted: true}
 		default:
-			return platformAuth{hasCookies: true, state: verifyFailed}
+			return platformAuth{hasCookies: true, state: verifyFailed, attempted: true}
 		}
 	}
 
-	yt = check(s.jar.HasYouTubeAuthCookies(), s.VerifyYouTubeAuth, "YouTube")
-	tw = check(s.jar.HasTwitchAuthCookies(), s.VerifyTwitchAuth, "Twitch")
+	yt = check(s.jar.HasAnyYouTubeAuthCookie(), s.VerifyYouTubeAuth, "YouTube")
+	tw = check(s.jar.HasAnyTwitchAuthCookie(), s.VerifyTwitchAuth, "Twitch")
 	return yt, tw
 }
 
@@ -590,6 +626,16 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 // A platform that was already dead is deliberately NOT restored: replacing
 // dead cookies with other dead cookies costs nothing, and the fresher set is
 // the better guess for the next attempt.
+//
+// Both arms depend on checkPlatformAuth asking the CONFIGURED question rather
+// than the complete-set one. A half-cleared but still working session used to
+// arrive here as {hasCookies:false, state:verifyFailed} — neither ok() nor
+// hasCookies — so a stale import was committed straight over it and nothing
+// said so. It now arrives as {true, verifyOK} and hits the REGRESSION arm when
+// the import is dead, or the INCONCLUSIVE arm when the post-check cannot
+// complete. A jar with no credential at all is still {false, verifyFailed} and
+// still restores nothing, which is what keeps seeding a fresh container from
+// being treated as a loss.
 func platformsToRestore(pre, post map[string]platformAuth) map[string]bool {
 	restore := map[string]bool{}
 	for platform, before := range pre {

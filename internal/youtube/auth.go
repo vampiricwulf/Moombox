@@ -39,6 +39,18 @@ func (a *Auth) HasAuthCookies() bool {
 	return a.jar.HasYouTubeAuthCookies()
 }
 
+// HasAnyAuthCookie reports whether YouTube auth was ever configured, as
+// opposed to whether a complete working set is present right now. The two
+// diverge on a jar holding SAPISID with LOGIN_INFO gone: HasAuthCookies wants
+// both and so reads that as never-configured, when it is a configured session
+// with broken credentials. See cookies.CookieJar.HasAnyYouTubeAuthCookie.
+//
+// The "YouTube" qualifier is dropped here on purpose — Auth IS the YouTube
+// auth type, matching the existing HasAuthCookies above.
+func (a *Auth) HasAnyAuthCookie() bool {
+	return a.jar.HasAnyYouTubeAuthCookie()
+}
+
 // GetCookieHeader returns the Cookie header string.
 func (a *Auth) GetCookieHeader() string {
 	return a.jar.GetCookieHeader()

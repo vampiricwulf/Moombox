@@ -238,6 +238,83 @@ func (j *CookieJar) HasYouTubeAuthCookies() bool {
 	return hasSapisid && hasLoginInfo
 }
 
+// youtubeAuthCookieNames are the cookies whose presence means "this install
+// was configured for YouTube auth at some point". Deliberately broader than
+// HasYouTubeAuthCookies' SAPISID+LOGIN_INFO pair: that pair answers "is
+// there a complete working set right now", which is the wrong question for
+// the auth-loss gate. A file holding SAPISID with LOGIN_INFO cleared is a
+// CONFIGURED platform with BROKEN credentials — exactly the state worth
+// reporting — and the narrower predicate reads it as never-configured.
+//
+// Every name here must also be in essentialYouTubeCookies above, or Load
+// drops it and this predicate can never observe it. Pinned by
+// TestAuthCookieNameListsDoNotDrift.
+var youtubeAuthCookieNames = []string{
+	"SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+	"SID", "HSID", "SSID", "APISID",
+	"__Secure-1PSID", "__Secure-3PSID",
+	"LOGIN_INFO",
+}
+
+// HasAnyYouTubeAuthCookie reports whether the jar holds ANY YouTube/Google
+// auth cookie with a non-empty value — i.e. whether this install was ever
+// configured for YouTube auth, regardless of whether the set is still
+// complete. See youtubeAuthCookieNames for why this is not
+// HasYouTubeAuthCookies.
+func (j *CookieJar) HasAnyYouTubeAuthCookie() bool {
+	if j == nil {
+		return false
+	}
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	for _, name := range youtubeAuthCookieNames {
+		if j.cookies[name] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// twitchAuthCookieNames is the Twitch counterpart to youtubeAuthCookieNames.
+//
+// twilight-user earns its place because auth-token can disappear while it
+// survives, by a path documented in-tree: the jar ignores cookie expiry but
+// mergeCookieFiles prunes on it (see the comment above hadTWAuth in
+// autocookies.go), so a lapsed auth-token can be pruned out of the file while
+// the rest of the session's cookies are written back. What remains is a Twitch
+// session that WAS configured and now holds no credential — the state the
+// auth-loss gate has to be able to see. twilight-user is the signed-in user's
+// own record, so it is evidence of configuration on its own merits.
+//
+// essentialTwitchCookies also keeps "login" and "name"; those are left out,
+// and NOT for a cross-site reason — Load admits twitch.tv rows only (they
+// reach the jar solely via isTwitchEssential), so another site's "login"
+// cookie never gets in. They are out because nothing in-tree or in
+// references/ establishes that Twitch sets them only for signed-in visitors,
+// and this predicate drives a recovery pass plus an operator-facing alarm.
+// auth-token and twilight-user are unambiguously artifacts of a signed-in
+// session; those two are not, and an alarm raised on a guess is worse than
+// one missed. Adding them is safe mechanically and would close the last
+// silent Twitch state — do it if that assumption is ever confirmed.
+var twitchAuthCookieNames = []string{"auth-token", "twilight-user"}
+
+// HasAnyTwitchAuthCookie reports whether this install was ever configured for
+// Twitch auth, as opposed to HasTwitchAuthCookies' "is the bearer token
+// present right now". See twitchAuthCookieNames.
+func (j *CookieJar) HasAnyTwitchAuthCookie() bool {
+	if j == nil {
+		return false
+	}
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	for _, name := range twitchAuthCookieNames {
+		if j.cookies[name] != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // GetSapisid returns the SAPISID cookie value, falling back to __Secure-3PAPISID.
 func (j *CookieJar) GetSapisid() string {
 	j.mu.RLock()

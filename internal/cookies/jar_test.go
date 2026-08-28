@@ -471,3 +471,112 @@ func TestSapisidCookieVariants(t *testing.T) {
 		t.Errorf("expected sapisid3p_val, got %q", sapisid3p)
 	}
 }
+
+// TestHasAnyYouTubeAuthCookie distinguishes "this platform was never
+// configured" from "it was configured and the session has since been
+// partially cleared". HasYouTubeAuthCookies cannot: it needs SAPISID AND
+// LOGIN_INFO, and YouTube clears LOGIN_INFO on rotation-invalidation, so a
+// half-dead file reads as never-configured and the auth-loss path stays
+// silent forever.
+func TestHasAnyYouTubeAuthCookie(t *testing.T) {
+	tests := []struct {
+		name    string
+		cookies map[string]string
+		wantAny bool
+		wantAll bool
+	}{
+		{"empty jar", map[string]string{}, false, false},
+		{"complete set", map[string]string{"SAPISID": "a", "LOGIN_INFO": "b"}, true, true},
+		{"LOGIN_INFO cleared — configured but broken", map[string]string{"SAPISID": "a"}, true, false},
+		{"SAPISID cleared — configured but broken", map[string]string{"LOGIN_INFO": "b"}, true, false},
+		{"3PAPISID only", map[string]string{"__Secure-3PAPISID": "a"}, true, false},
+		{"secure SID only", map[string]string{"__Secure-1PSID": "a"}, true, false},
+		{"non-auth cookie only", map[string]string{"PREF": "x"}, false, false},
+		{"empty values do not count", map[string]string{"SAPISID": "", "LOGIN_INFO": ""}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := NewCookieJar()
+			j.cookies = tt.cookies
+			if got := j.HasAnyYouTubeAuthCookie(); got != tt.wantAny {
+				t.Errorf("HasAnyYouTubeAuthCookie() = %v, want %v", got, tt.wantAny)
+			}
+			if got := j.HasYouTubeAuthCookies(); got != tt.wantAll {
+				t.Errorf("HasYouTubeAuthCookies() = %v, want %v", got, tt.wantAll)
+			}
+		})
+	}
+}
+
+// TestHasAnyTwitchAuthCookie: the same "was this ever configured" question on
+// the Twitch side. auth-token is the credential itself, and it can be pruned
+// out of the file on expiry while twilight-user survives — so a jar that is
+// plainly a configured session reads as never-configured under the narrow
+// predicate. See twitchAuthCookieNames.
+func TestHasAnyTwitchAuthCookie(t *testing.T) {
+	tests := []struct {
+		name    string
+		cookies map[string]string
+		wantAny bool
+		wantAll bool
+	}{
+		{"empty jar", map[string]string{}, false, false},
+		{"auth-token present", map[string]string{"auth-token": "t"}, true, true},
+		{"expired auth-token pruned away", map[string]string{"twilight-user": `{"id":"1"}`}, true, false},
+		{"both", map[string]string{"auth-token": "t", "twilight-user": `{"id":"1"}`}, true, true},
+		// login/name are deliberately NOT markers — see twitchAuthCookieNames.
+		// Not a cross-site concern (Load admits twitch.tv rows only); they are
+		// out because nothing establishes Twitch sets them only for signed-in
+		// visitors, and this predicate raises an operator-facing alarm.
+		{"unconfirmed markers stay out", map[string]string{"login": "x", "name": "y"}, false, false},
+		{"empty values do not count", map[string]string{"auth-token": "", "twilight-user": ""}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := NewCookieJar()
+			j.cookies = tt.cookies
+			if got := j.HasAnyTwitchAuthCookie(); got != tt.wantAny {
+				t.Errorf("HasAnyTwitchAuthCookie() = %v, want %v", got, tt.wantAny)
+			}
+			if got := j.HasTwitchAuthCookies(); got != tt.wantAll {
+				t.Errorf("HasTwitchAuthCookies() = %v, want %v", got, tt.wantAll)
+			}
+		})
+	}
+}
+
+// TestAuthCookieNameListsDoNotDrift pins youtubeAuthCookieNames as a SUBSET of
+// essentialYouTubeCookies. The same cookie names are now written out in three
+// places — essentialYouTubeCookies (which names decide what gets kept when a
+// file is parsed), youtubeAuthCookieNames (which decide "was YouTube ever
+// configured"), and isGoogleOnlyAuthName in refresh.go (which decide what gets
+// written back to the google.com domain). A name that reaches the "configured"
+// list but not the "keep it" list would be unreachable: the jar would drop it
+// at load and the predicate could never see it. Subset, not equality —
+// essentialYouTubeCookies deliberately also keeps non-auth cookies (PREF,
+// CONSENT, YSC, the rotating SIDTS/SIDCC pair) that must NOT count as evidence
+// the platform was configured.
+func TestAuthCookieNameListsDoNotDrift(t *testing.T) {
+	for _, name := range youtubeAuthCookieNames {
+		if !essentialYouTubeCookies[name] {
+			t.Errorf("youtubeAuthCookieNames has %q, which essentialYouTubeCookies drops at parse time — the predicate can never observe it", name)
+		}
+	}
+	if len(youtubeAuthCookieNames) == 0 {
+		t.Fatal("youtubeAuthCookieNames is empty — the subset check above would pass vacuously")
+	}
+	// The two names the auth-loss gate actually turns on. A refactor that
+	// trimmed the list down to the SAPISID+LOGIN_INFO pair would silently
+	// re-create the bug this predicate exists to close.
+	for _, must := range []string{"SAPISID", "__Secure-3PAPISID", "LOGIN_INFO"} {
+		found := false
+		for _, name := range youtubeAuthCookieNames {
+			if name == must {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("youtubeAuthCookieNames is missing %q", must)
+		}
+	}
+}

@@ -51,6 +51,14 @@ func newDefaultTransport() *http.Transport {
 // shared default transport. timeout=0 means "no client-level timeout"
 // — the caller is expected to use ctx.WithTimeout for per-request
 // cancellation.
+//
+// No CookieJar is installed, and callers rely on that: internal/youtube's
+// liveness probes detect a credential-stripping redirect by checking whether
+// the answering request still carried the Cookie header they set, which a jar
+// would re-add from its own scope rules. Adding one here would silently
+// invalidate that guard — see the comment on internal/utils.utilsHTTPClient
+// and TestUtilsHTTPClientCarriesNoCookieJar, which pins it for the client
+// those probes actually use.
 func Client(timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout, Transport: defaultTransport}
 }

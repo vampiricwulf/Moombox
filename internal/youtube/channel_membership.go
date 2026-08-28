@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
-	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // membershipTabIdentifier is the tabRenderer.tabIdentifier for a channel's
@@ -48,22 +47,43 @@ type MembershipVideo struct {
 // upcoming, or unrecognized — all treated as "now" (see itemAge).
 var relativeAgeRe = regexp.MustCompile(`(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago`)
 
+// membershipPageBase is the origin the /membership probe fetches from. A
+// package var rather than a const solely so tests can point it at an httptest
+// server — the same seam internal/cookies/refresh.go uses for its probe URLs.
+var membershipPageBase = constants.YouTubeURLs.Base
+
 // FetchMembershipVideos fetches a channel's /membership tab with the current
-// auth cookies and returns the members-only videos listed there.
+// auth cookies and returns the members-only videos listed there, together with
+// YouTube's own verdict on whether that fetch was a signed-in session.
 //
-// It returns (nil, nil) — no error — when discovery is simply not possible or
-// not applicable: no auth cookies are loaded, or the account is not a member of
-// the channel (the /membership tab then falls back to a public tab or a "join"
-// upsell that carries no members content, detected by the absence of a selected
-// TAB_ID_SPONSORSHIPS tab). Callers treat an empty result as "nothing to do".
+// The SessionAuthState is the health signal; hasAccess is NOT. Most archived
+// channels are legitimately not membered, so an empty video list says nothing
+// about the credentials — a page YouTube answered as anonymous does. Both used
+// to collapse into a bare (nil, nil), which threw away a live login
+// observation this probe was already paying for once per channel per cycle.
+//
+// The verdict is SessionAuthUnknown — never SessionAuthLoggedOut — whenever no
+// answer was obtained: YouTube auth was never configured, the fetch failed, or
+// the response carried no explicit login marker (livenessVerdict's rule; the
+// ytcfg fallback is deliberately not used here). A false "your cookies are
+// dead" sends an operator off to re-export credentials that were fine, so
+// unknown is the only safe reading of a page we cannot interpret.
+//
+// videos is nil when the account is not a member of the channel: the
+// /membership URL then resolves to a public tab or a "join" upsell with no
+// selected TAB_ID_SPONSORSHIPS tab. Callers may still treat that as "nothing
+// to ingest" — but the verdict has to be read separately.
 //
 // Discovery does NOT require the members badge or SAPISIDHASH — a plain
 // authenticated GET of the HTML page carries the session, exactly like
 // FetchWatchPage. Cookies matter for downloading the stream, which the worker
 // already handles; here they only unlock the membership tab listing.
-func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) ([]MembershipVideo, error) {
-	if !s.Auth.HasAuthCookies() {
-		return nil, nil
+func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) ([]MembershipVideo, SessionAuthState, error) {
+	// "Was YouTube auth ever configured", not "is the set complete right
+	// now". The complete-set predicate would skip the probe precisely when
+	// the session is half-cleared — the state the probe exists to detect.
+	if !s.Auth.HasAnyAuthCookie() {
+		return nil, SessionAuthUnknown, nil
 	}
 	if err := s.Auth.SyncCookies(); err != nil {
 		s.logger.Warn("[YouTube] SyncCookies failed before membership fetch", "error", err)
@@ -72,29 +92,37 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 	// PathEscape the channel ID: it comes from config, so escaping keeps a
 	// malformed value from altering the request path (the fixed https host
 	// prefix already precludes SSRF; this is defense-in-depth).
-	pageURL := fmt.Sprintf("%s/channel/%s/membership", constants.YouTubeURLs.Base, url.PathEscape(channelID))
-	headers := map[string]string{
-		"User-Agent":      constants.UserAgents.Web,
-		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-		"Accept-Language": "en-US,en;q=0.5",
-	}
-	if ch := s.Auth.GetCookieHeader(); ch != "" {
-		headers["Cookie"] = ch
+	pageURL := fmt.Sprintf("%s/channel/%s/membership", membershipPageBase, url.PathEscape(channelID))
+
+	// fetchLivenessPage, not utils.FetchBody. FetchBody returns bytes with no
+	// way to ask where they came from, and this is the arc's PREFERRED liveness
+	// signal — it runs every monitor cycle for every channel, so a false
+	// LoggedOut here is the loudest false alarm in the system. Task 3's strict
+	// livenessVerdict only removes the ytcfg fallback; it does nothing about a
+	// login or consent page that explicitly stamps "LOGGED_IN":false, which is
+	// what an off-origin redirect delivers. The shared helper is what refuses
+	// those pages; see its doc comment.
+	body, err := s.fetchLivenessPage(ctx, pageURL)
+	if err != nil {
+		// A page we never received — or one that did not come from our own
+		// credentialed request — is not an observation of the session.
+		return nil, SessionAuthUnknown, fmt.Errorf("fetch membership tab: %w", err)
 	}
 
-	body, err := utils.FetchBody(ctx, pageURL, 20*time.Second, headers)
-	if err != nil {
-		return nil, fmt.Errorf("fetch membership tab: %w", err)
-	}
+	// Read the verdict off the raw bytes — livenessVerdict, not the permissive
+	// watch-page detector: the strict variant refuses the ytcfg fallback, so a
+	// consent shell that carries a bootstrap but no login key reads as unknown
+	// instead of as a dead session.
+	verdict := livenessVerdict(body)
 
 	// Parse straight off the response bytes — no string(body)/[]byte(raw) copies
 	// of the ~1MB payload. json.Unmarshal copies any strings it keeps, so the
 	// body is free to be GC'd once this returns.
 	videos, hasAccess := parseMembershipTab(body)
 	if !hasAccess {
-		return nil, nil
+		return nil, verdict, nil
 	}
-	return videos, nil
+	return videos, verdict, nil
 }
 
 // membershipTabHeader captures only the fields needed to locate the selected

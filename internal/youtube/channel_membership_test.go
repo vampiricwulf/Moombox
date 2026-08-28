@@ -1,6 +1,10 @@
 package youtube
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -214,5 +218,308 @@ func TestItemAgeTruncatedLowerBound(t *testing.T) {
 		"thumbnailOverlays": []any{map[string]any{"thumbnailOverlayTimeStatusRenderer": map[string]any{"style": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"}}}}
 	if got := itemAge(live); got != 0 {
 		t.Fatalf("live badge must short-circuit to 0, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The probe's login verdict.
+//
+// FetchMembershipVideos already fetches an authenticated page with the real
+// cookie header once per channel per monitor cycle. It used to collapse "the
+// session is dead", "the account is not a member" and "there is no members
+// content" into a single bare (nil, nil), which threw away the only one of
+// the three that says anything about credential health.
+// ---------------------------------------------------------------------------
+
+// halfClearedCookieFile is a configured YouTube session with LOGIN_INFO gone.
+// HasAnyYouTubeAuthCookie accepts it; HasYouTubeAuthCookies rejects it. That
+// is exactly the state the probe exists to detect, so the probe has to run
+// for it rather than being gated out by the complete-set predicate.
+const halfClearedCookieFile = "# Netscape HTTP Cookie File\n" +
+	".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tworking-sapisid\n"
+
+// unconfiguredCookieFile carries no YouTube auth cookie at all — the install
+// was never signed in, which is not a health problem and must stay Unknown.
+const unconfiguredCookieFile = "# Netscape HTTP Cookie File\n" +
+	".youtube.com\tTRUE\t/\tFALSE\t0\tPREF\tf6=40000000\n"
+
+// membershipHTML wraps a ytInitialData literal in a page that also carries
+// YouTube's own login marker, the way a real /membership response does.
+func membershipHTML(loggedIn bool, initialData string) []byte {
+	return []byte(`<!DOCTYPE html><html><head>` +
+		`<script nonce="x">ytcfg.set({"LOGGED_IN":` + strconv.FormatBool(loggedIn) + `});</script>` +
+		`<script nonce="x">var ytInitialData = ` + initialData + `;</script>` +
+		`</head><body></body></html>`)
+}
+
+// homeFallbackJSON is what YouTube serves a signed-in NON-member: the
+// /membership URL resolves with the Home tab selected instead.
+const homeFallbackJSON = `{"contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
+	{"tabRenderer": {"title": "Home", "selected": true, "tabIdentifier": "", "content": {}}}
+]}}}`
+
+// newMembershipProbeService builds a Service whose jar holds cookieFile and
+// whose /membership fetch is aimed at base, restoring the package seam on
+// cleanup.
+func newMembershipProbeService(t *testing.T, base, cookieFile string) *Service {
+	t.Helper()
+	orig := membershipPageBase
+	membershipPageBase = base
+	t.Cleanup(func() { membershipPageBase = orig })
+	return jarServiceFromCookieFile(t, cookieFile)
+}
+
+// TestFetchMembershipVideosReturnsVerdict pins the contract this probe now
+// carries: the LOGIN verdict, not hasAccess. Most archived channels are
+// legitimately not membered, so an empty video list carries no health
+// information at all — a page YouTube answered as anonymous does.
+func TestFetchMembershipVideosReturnsVerdict(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        []byte
+		wantVerdict SessionAuthState
+		wantVideos  int
+	}{
+		{
+			name:        "logged in, not a member",
+			body:        membershipHTML(true, homeFallbackJSON),
+			wantVerdict: SessionAuthLoggedIn,
+			wantVideos:  0,
+		},
+		{
+			name:        "logged in, member",
+			body:        membershipHTML(true, lockupMembershipJSON),
+			wantVerdict: SessionAuthLoggedIn,
+			wantVideos:  2,
+		},
+		{
+			name:        "session is dead",
+			body:        membershipHTML(false, homeFallbackJSON),
+			wantVerdict: SessionAuthLoggedOut,
+			wantVideos:  0,
+		},
+		{
+			// A consent interstitial answers 200 with no login marker.
+			// Reporting that as a dead session would send an operator whose
+			// cookies are fine off to re-export them.
+			name:        "unreadable page carries no verdict",
+			body:        []byte(`<html><body>Before you continue to YouTube</body></html>`),
+			wantVerdict: SessionAuthUnknown,
+			wantVideos:  0,
+		},
+		{
+			// The case that separates livenessVerdict from the permissive
+			// watch-page detector: a shell carrying a ytcfg bootstrap but no
+			// login key at all. watchPageSessionAuth calls that logged-out
+			// (sound for a watch page, which always stamps the key on a real
+			// one); the probe must not, because a consent wall serving a
+			// bootstrap would then read as dead cookies. Giving livenessVerdict
+			// the ytcfg fallback back fails HERE and nowhere else.
+			name:        "ytcfg shell with no login key is not a dead session",
+			body:        []byte(`<html><head><script>ytcfg.set({"VISITOR_DATA":"x"});</script></head></html>`),
+			wantVerdict: SessionAuthUnknown,
+			wantVideos:  0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Write(tc.body)
+			}))
+			defer srv.Close()
+
+			s := newMembershipProbeService(t, srv.URL, halfClearedCookieFile)
+			videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UC_probe_channel")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if verdict != tc.wantVerdict {
+				t.Errorf("verdict = %q, want %q", verdict, tc.wantVerdict)
+			}
+			if len(videos) != tc.wantVideos {
+				t.Errorf("videos = %d, want %d", len(videos), tc.wantVideos)
+			}
+			if want := "/channel/UC_probe_channel/membership"; gotPath != want {
+				t.Errorf("fetched %q, want %q", gotPath, want)
+			}
+		})
+	}
+}
+
+// TestFetchMembershipVideosProbesAHalfClearedSession is the gate half of the
+// change. The probe used to require the COMPLETE credential set, so with
+// LOGIN_INFO cleared it never ran — it skipped precisely the session state it
+// is there to report on, and any verdict it could return would be dead code.
+func TestFetchMembershipVideosProbesAHalfClearedSession(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write(membershipHTML(false, homeFallbackJSON))
+	}))
+	defer srv.Close()
+
+	s := newMembershipProbeService(t, srv.URL, halfClearedCookieFile)
+	if s.HasAuthCookies() {
+		t.Fatal("precondition: the complete-set predicate must reject a half-cleared session")
+	}
+	_, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("membership page fetched %d times, want 1 — the probe was gated out", hits)
+	}
+	if verdict != SessionAuthLoggedOut {
+		t.Errorf("verdict = %q, want %q", verdict, SessionAuthLoggedOut)
+	}
+}
+
+// TestFetchMembershipVideosSkipsWhenNeverConfigured: an install that was never
+// signed in has nothing to report. It must not fetch, and it must not claim a
+// dead session.
+func TestFetchMembershipVideosSkipsWhenNeverConfigured(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write(membershipHTML(false, homeFallbackJSON))
+	}))
+	defer srv.Close()
+
+	s := newMembershipProbeService(t, srv.URL, unconfiguredCookieFile)
+	videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hits != 0 {
+		t.Errorf("fetched %d times, want 0 — nothing was ever configured", hits)
+	}
+	if verdict != SessionAuthUnknown {
+		t.Errorf("verdict = %q, want %q", verdict, SessionAuthUnknown)
+	}
+	if videos != nil {
+		t.Errorf("videos = %+v, want nil", videos)
+	}
+}
+
+// TestFetchMembershipVideosTransportFailureIsNotAVerdict: a page we never got
+// says nothing about the session. This is the failure mode that reaches a
+// container behind a flaky egress path, and it must not read as dead cookies.
+func TestFetchMembershipVideosTransportFailureIsNotAVerdict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream exploded", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	s := newMembershipProbeService(t, srv.URL, halfClearedCookieFile)
+	videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	if err == nil {
+		t.Fatal("expected an error for a 502")
+	}
+	if verdict != SessionAuthUnknown {
+		t.Errorf("verdict = %q, want %q — a transport failure is not a login verdict", verdict, SessionAuthUnknown)
+	}
+	if videos != nil {
+		t.Errorf("videos = %+v, want nil", videos)
+	}
+}
+
+// TestFetchMembershipVideosRejectsAnOffOriginAnswer: the membership probe is
+// the arc's PREFERRED liveness signal and runs every monitor cycle for every
+// channel, so a false LoggedOut here is the loudest false alarm in the system.
+// It used to fetch via utils.FetchBody, which returns bytes with no way to ask
+// where they came from.
+//
+// Task 3's strict livenessVerdict does NOT cover this. It removes only the
+// ytcfg fallback — "a shell with a bootstrap and no login key". A login or
+// consent page that explicitly stamps "LOGGED_IN":false sails straight through
+// it, which is exactly what an off-origin redirect delivers.
+func TestFetchMembershipVideosRejectsAnOffOriginAnswer(t *testing.T) {
+	wall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(membershipHTML(false, homeFallbackJSON))
+	}))
+	defer wall.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, wall.URL+"/ServiceLogin", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	s := newMembershipProbeService(t, origin.URL, halfClearedCookieFile)
+	videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	if err == nil {
+		t.Fatal("expected an error for an answer from another host")
+	}
+	if verdict != SessionAuthUnknown {
+		t.Errorf("verdict = %q, want %q — another host's page is not a verdict on this session", verdict, SessionAuthUnknown)
+	}
+	if videos != nil {
+		t.Errorf("videos = %+v, want nil", videos)
+	}
+}
+
+// TestFetchMembershipVideosSurvivesACookieStrippingBounce is the membership
+// twin of TestProbeAccountLivenessSurvivesACookieStrippingBounce: origin →
+// off-host wall → origin ends on the requested host with Go's sticky
+// Cookie-strip already applied, so a terminal-host check alone still hands the
+// verdict an anonymous page. See that test and fetchLivenessPage for the
+// mechanism.
+func TestFetchMembershipVideosSurvivesACookieStrippingBounce(t *testing.T) {
+	var origin, wall *httptest.Server
+	var finalHopCookie string
+	var sawFinalHop bool
+
+	origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("back") == "" {
+			http.Redirect(w, r, wallURL(wall)+"/consent", http.StatusFound)
+			return
+		}
+		sawFinalHop = true
+		finalHopCookie = r.Header.Get("Cookie")
+		w.Write(membershipHTML(false, homeFallbackJSON))
+	}))
+	defer origin.Close()
+
+	wall = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, origin.URL+"/channel/UCabc/membership?back=1", http.StatusFound)
+	}))
+	defer wall.Close()
+
+	s := newMembershipProbeService(t, origin.URL, halfClearedCookieFile)
+	_, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+
+	if !sawFinalHop {
+		t.Fatal("the chain never bounced back to the origin; this test is not set up as intended")
+	}
+	// Presence only — never the value.
+	if finalHopCookie != "" {
+		t.Fatal("the final hop still carried a Cookie header; this test has stopped reproducing the hazard")
+	}
+	if verdict != SessionAuthUnknown {
+		t.Errorf("verdict = %q, want %q — the page was fetched with no credentials", verdict, SessionAuthUnknown)
+	}
+	if err == nil {
+		t.Error("expected an error; got nil")
+	}
+}
+
+// TestServiceHasAnyAuthCookieSeesAHalfClearedSession pins the predicate the
+// monitor's membership gate now resolves against. HasAuthCookies answers "is
+// the set complete", which is the wrong question for "should we even look".
+func TestServiceHasAnyAuthCookieSeesAHalfClearedSession(t *testing.T) {
+	s := newMembershipProbeService(t, "http://unused.invalid", halfClearedCookieFile)
+	if s.HasAuthCookies() {
+		t.Error("HasAuthCookies() = true, want false for a session with LOGIN_INFO cleared")
+	}
+	if !s.HasAnyAuthCookie() {
+		t.Error("HasAnyAuthCookie() = false, want true — the session was configured, just broken")
+	}
+
+	none := newMembershipProbeService(t, "http://unused.invalid", unconfiguredCookieFile)
+	if none.HasAnyAuthCookie() {
+		t.Error("HasAnyAuthCookie() = true for an install that was never signed in")
 	}
 }

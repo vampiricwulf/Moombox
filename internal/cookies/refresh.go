@@ -23,12 +23,81 @@ import (
 // + refresh round trip amortises the TLS handshake.
 var cookiesHTTPClient = httpx.Client(30 * time.Second)
 
-const (
-	defaultRefreshInterval = 30 * time.Minute
-	authCheckTimeout       = 15 * time.Second
+// Package vars, not consts, solely so tests can point them at an httptest
+// server — these functions have no other seam (see refresh.go's note that
+// the pure predicates were extracted for exactly this reason).
+var (
 	youtubeGuideURL        = "https://www.youtube.com/youtubei/v1/guide"
 	youtubeGuideRefreshURL = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
 	twitchValidateURL      = "https://id.twitch.tv/oauth2/validate"
+)
+
+const (
+	defaultRefreshInterval = 30 * time.Minute
+	authCheckTimeout       = 15 * time.Second
+
+	// livenessRefireWindow bounds how often ONE platform's logged-out
+	// liveness verdict may clear the dedupe and reach OnRecoveryNeeded.
+	//
+	// The membership probe runs once per configured channel per feed cycle,
+	// with a 500ms stagger between channels, so a dead session produces N
+	// verdicts inside a couple of seconds.
+	//
+	// What N un-deduped verdicts cost within ONE cycle is not N headless
+	// browsers. AutoCookieService.RefreshCookiesDetailed single-flights on its
+	// refreshCmd sentinel, so the first call claims the slot and every call
+	// that arrives while it runs returns refreshDeclined() immediately.
+	//
+	// This comment used to say the damage was that each of those declines sent
+	// "Cookie Auto-Refresh Ineffective" and stamped the notification cooldown,
+	// suppressing the real verdict two minutes later. That was true when it was
+	// written and is no longer: runCookieRecovery's Unknown branch now splits on
+	// RefreshResult.Ran and a declined pass reports nothing at all. The hazard
+	// was fixed where it lived rather than being held off by this window.
+	//
+	// What is left is workload, and it is per CYCLE rather than per verdict.
+	// Without this window a dead session fires again on every feed cycle — 10
+	// minutes by default — so the one call that does claim the slot drives a
+	// real headless-browser refresh, under a 2-minute timeout, three times as
+	// often as this window allows, with the rest of each burst spending a
+	// goroutine apiece to be told no.
+	//
+	// Its own constant on purpose. It is NOT the notification cooldown in
+	// cmd/moombox's wireMonitorCallbacks, and it is NOT defaultRefreshInterval
+	// above, however the three numbers happen to line up today. It is set to
+	// match that cooldown so the two coalescing windows do not drift apart —
+	// not because either implies the other.
+	livenessRefireWindow = 30 * time.Minute
+
+	// livenessFreshWindow bounds how old the last conclusive liveness
+	// observation may be before a periodic refresh pays for the
+	// FallbackLiveness probe. That probe is a full first-party page fetch;
+	// an install whose membership probe is already reporting gets the same
+	// answer for free every feed cycle and must not buy a second one.
+	//
+	// The upper bound is a real invariant. It must be strictly SHORTER than
+	// defaultRefreshInterval, because the fallback records its own answer
+	// through the same method. At one full cadence the fallback's own stamp
+	// would still read as fresh on the next tick and the probe would quietly
+	// suppress itself on alternate cycles — halving a coverage nobody decided
+	// to halve. TestFallbackObservationAgesOutWithinOneCadence pins it.
+	//
+	// The lower bound is an ASSUMPTION about configuration, not an invariant,
+	// and it is worth being exact about because nothing enforces it. The skip
+	// only works while membership observations arrive more often than this
+	// window expires. monitors.feed_check_interval defaults to 10 minutes but
+	// validates to 1..1440, so any install that sets it above ~25 minutes lets
+	// the observation age out between refreshes and pays for the fallback on
+	// roughly every other cycle — the very cost the skip exists to remove.
+	// TestFallbackSkipCoversTheDefaultFeedCadence pins the default case.
+	//
+	// That degradation is bounded and one-directional: an extra page fetch per
+	// cycle on a slow-polling install. It is not a correctness problem, which
+	// is why it is a documented assumption rather than a constraint plumbed
+	// through from config — internal/cookies cannot see monitors config, and
+	// deriving this from it would couple the cookie subsystem to the monitor's
+	// schedule for a cost difference measured in one HTTP request per hour.
+	livenessFreshWindow = 25 * time.Minute
 
 	// youtubeClientVersion is the WEB client version sent in Innertube API requests.
 	// Update this when YouTube bumps the client version — it's used in auth check
@@ -81,16 +150,17 @@ type RefreshService struct {
 	// ytEverConcluded / twEverConcluded track, per platform, whether THAT
 	// platform has ever completed a conclusive (checkErr == nil) check.
 	// This is deliberately NOT the same thing as hasCheckedOnce, which is
-	// service-wide: Cookies.Platforms is a monotonic per-platform union
-	// that only grows on successful verification, so SetExpectedPlatforms
-	// can seed hasCheckedOnce=true from YouTube's presence alone while
-	// Twitch cookies exist on disk but were never verified. Using the
-	// shared hasCheckedOnce for the "first conclusive check" decision in
-	// shouldFireRecovery would then treat Twitch's actual first check as a
-	// "subsequent" one (prevTwitchAuth is the false zero value, so the
-	// witnessed-transition condition never fires either) — silently
-	// swallowing recovery for any platform absent from the persisted list
-	// while a sibling platform is present. See shouldFireRecovery.
+	// service-wide: nothing AUTOMATIC ever prunes Cookies.Platforms — both
+	// automatic writers only add, and the sole removal path is an operator
+	// replacing the list wholesale through PATCH /api/config — so
+	// SetExpectedPlatforms can seed hasCheckedOnce=true from YouTube's
+	// presence alone while Twitch cookies exist on disk but were never
+	// verified. Using the shared hasCheckedOnce for the "first conclusive
+	// check" decision in shouldFireRecovery would then treat Twitch's actual
+	// first check as a "subsequent" one (prevTwitchAuth is the false zero
+	// value, so the witnessed-transition condition never fires either) —
+	// silently swallowing recovery for any platform absent from the persisted
+	// list while a sibling platform is present. See shouldFireRecovery.
 	ytEverConcluded bool
 	twEverConcluded bool
 
@@ -110,6 +180,49 @@ type RefreshService struct {
 	// discriminator — and no Twitch failure produces a membership park, so
 	// there is nothing on that side for the signal to unlock.
 	prevYouTubeIdentity string
+
+	// lastLivenessObserved records the last CONCLUSIVE external liveness
+	// observation per platform, in BOTH directions. Consulted by exactly one
+	// thing — the FallbackLiveness skip — which asks "has anything told us
+	// about this session recently?", a question a healthy answer settles just
+	// as well as a dead one.
+	//
+	// Deliberately a different map from lastRecoveryDecided below. One map
+	// serving both questions cannot answer either: a healthy observation has
+	// to make the fallback stand down, and it must not be able to swallow a
+	// dead verdict that lands a moment later.
+	lastLivenessObserved map[string]time.Time
+
+	// lastRecoveryDecided records when a platform's recovery last cleared the
+	// dedupe — from a logged-out liveness verdict in ObserveLiveness, or from
+	// the tier-1 auth check in doRefresh, which stamps it so a dead session
+	// cannot fire recovery twice in one pass. See livenessRefireWindow for
+	// what a redundant fire actually costs: not a second browser — the
+	// auto-cookie service single-flights — but a goroutine and its two-minute
+	// timeout spent being told no.
+	//
+	// "Decided", not "fired": while livenessRecoveryArmed is false a cleared
+	// liveness verdict is logged rather than acted on, so the stamp records
+	// the decision this map exists to de-duplicate and not, in that case, a
+	// call that happened. A LoggedIn observation must never write here.
+	lastRecoveryDecided map[string]time.Time
+
+	// lastLivenessKnown is the last thing this process learned about a
+	// platform's session, kept solely to decide the LOG LEVEL of the next
+	// line (see ObserveLiveness). It steers no behaviour: the zero value is
+	// livenessNever — "nothing learned in this process" — which differs from
+	// every real state and therefore reads as notable, so the worst a missing
+	// entry can do is emit one extra line.
+	//
+	// THREE states, not two, because the fallback probe has a third outcome.
+	// An inconclusive probe is not a verdict and must move no other state, but
+	// it is the outcome the log-only pilot most needs to be able to see: with
+	// only conclusive outcomes recorded, a signal that has gone permanently
+	// dead behind a redirecting intermediary is indistinguishable from a
+	// healthy install with nothing to report. It shares this map rather than
+	// getting its own so there is ONE answer to "has this changed since last
+	// time", whatever the change is between.
+	lastLivenessKnown map[string]livenessRecord
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -147,7 +260,99 @@ type RefreshService struct {
 	// Fires for "youtube" only — see prevYouTubeIdentity for why Twitch has
 	// no usable identity signal and nothing that would need one.
 	OnCredentialsChanged func(platform, identity string)
+
+	// FallbackLiveness is a channel-independent YouTube liveness probe,
+	// injected by cmd/moombox rather than called directly, because this
+	// package cannot import internal/youtube — internal/youtube/auth.go
+	// imports this one, so the direct call would be an import cycle. The
+	// injection matches what VerifyYouTubeAuth, HasActiveJobs and
+	// ConfiguredBrowserOverride already do for the same reason.
+	//
+	// Called at the tail of a PERIODIC refresh, and only when no liveness
+	// observation has arrived within livenessFreshWindow: the membership
+	// probe already answers this for a normally-configured install, for free,
+	// every feed cycle. The CheckNow path never calls it — that path runs
+	// synchronously on an HTTP handler.
+	//
+	// conclusive == false means the probe learned nothing (a consent wall, a
+	// rate limit, a transport failure) and MUST NOT move any state. Only a
+	// conclusive answer is passed on to ObserveLiveness.
+	FallbackLiveness func(ctx context.Context) (loggedIn, conclusive bool)
 }
+
+// livenessRecord is what the liveness signal last told this process about one
+// platform. The zero value is livenessNever so an unwritten map entry means
+// "nothing yet" without a second lookup, and so the first thing learned about
+// a platform always compares as a change.
+//
+// livenessInconclusive is not a verdict and never reaches ObserveLiveness — it
+// is recorded only so a repeated "the probe learned nothing" stops being
+// notable after the first one. See recordInconclusiveLiveness.
+type livenessRecord uint8
+
+const (
+	livenessNever livenessRecord = iota
+	livenessSignedIn
+	livenessSignedOut
+	livenessInconclusive
+)
+
+// livenessRecordOf maps a conclusive verdict onto its record.
+func livenessRecordOf(loggedIn bool) livenessRecord {
+	if loggedIn {
+		return livenessSignedIn
+	}
+	return livenessSignedOut
+}
+
+// livenessRecoveryArmed gates whether an external liveness verdict may
+// actually invoke OnRecoveryNeeded.
+//
+// It is false, and that is the entire point of this landing. What arming would
+// actually do, on BOTH install shapes — cmd/moombox's handleRecoveryNeeded
+// splits on cookies.auto_enabled and neither arm is silent about a session it
+// cannot restore:
+//
+//   - auto_enabled = true: a goroutine runs RefreshCookiesDetailed under a
+//     2-minute timeout, which drives a headless browser. TWO outcomes are
+//     quiet — a successful refresh, and a pass that DECLINED to run at all
+//     (the Ran == false half of runCookieRecovery's Unknown branch, which
+//     logs and returns). The rest notify: "Cookie Auto-Refresh Failed"
+//     (TypeError) for a transport error or a conclusive failure, "Cookie
+//     Auto-Refresh Ineffective" (TypeWarning) for a pass that ran without
+//     reaching an answer. A spurious verdict is by definition one no refresh
+//     can fix, so it lands in a notifying outcome unless it is declined.
+//
+//     Do not read the decline as a safety net. It is a RACE: the pass is
+//     declined only while another one holds the auto-cookie single-flight,
+//     which is likely for a verdict produced in the same pass as a tier-1
+//     fire (that is what noteRecoveryDecided is for) and not otherwise. A
+//     spurious LoggedOut arriving with the slot free runs the browser and
+//     notifies exactly as before.
+//
+//   - auto_enabled = false: no browser, and no quiet case at all — the decline
+//     above cannot help here, because handleRecoveryNeeded returns on this arm
+//     without calling the refresher, so there is no single-flight to lose. A
+//     SYNCHRONOUS "Cookie Re-Authentication Required" (TypeError) naming the
+//     cookie file, every time. This arm used to Debug-log and send nothing;
+//     Task 7 replaced that silence, so arming now alarms the population this
+//     arc elsewhere identifies as LEAST able to reach the remedy it names —
+//     containers, remote dashboards, a loopback-gated setup wizard.
+//
+// A per-platform 30-minute cooldown in wireMonitorCallbacks bounds how often
+// that repeats; it does not withhold the first one.
+//
+// So the risk of arming is NOT scoped to auto_enabled installs, and the reason
+// to stage it is not the browser — the disabled shape is if anything the worse
+// of the two, because the operator it pages has no automated attempt that might
+// have quietly fixed things first. It is that a false LoggedOut sends an
+// operator to re-export credentials that were never wrong, on every install
+// shape, and these verdicts have never been in the health path before. They
+// therefore run log-only first: the observation, the dedupe and the freshness
+// accounting all happen and are logged, and only the last step is withheld.
+// Flipping this to true is a deliberate, separate change — not a side effect of
+// wiring something else.
+const livenessRecoveryArmed = false
 
 // NewRefreshService creates a new cookie refresh service.
 // If refreshInterval is zero, the default of 30 minutes is used.
@@ -162,9 +367,12 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 		interval = defaultRefreshInterval
 	}
 	return &RefreshService{
-		jar:             jar,
-		refreshInterval: interval,
-		logger:          logger,
+		jar:                  jar,
+		refreshInterval:      interval,
+		logger:               logger,
+		lastLivenessObserved: make(map[string]time.Time),
+		lastRecoveryDecided:  make(map[string]time.Time),
+		lastLivenessKnown:    make(map[string]livenessRecord),
 	}
 }
 
@@ -199,8 +407,18 @@ func (rs *RefreshService) Start(ctx context.Context) {
 	rs.cancel = cancel
 	rs.mu.Unlock()
 
-	// Initial check
-	rs.doRefresh(ctx)
+	// Initial check. allowFallback is false, for exactly the reason CheckNow's
+	// is: this call runs SYNCHRONOUSLY on the caller's goroutine, and
+	// cmd/moombox's run() blocks on it before the web server binds. At startup
+	// nothing has observed liveness yet, so the freshness skip cannot help —
+	// every install with a YouTube auth cookie would pay a full page fetch (up
+	// to livenessFetchTimeout, 20s in internal/youtube) ahead of the dashboard
+	// coming up, on every start. Config changes restart the process, so that
+	// would be one delayed startup per settings tweak.
+	//
+	// The cost of skipping it is that tier-2 coverage begins one cadence in
+	// rather than immediately, which is the cheaper of the two.
+	rs.refresh(ctx, false)
 
 	go func() {
 		defer func() {
@@ -245,8 +463,198 @@ func (rs *RefreshService) GetStatus() AuthStatus {
 }
 
 // CheckNow triggers an immediate cookie refresh and auth check.
+//
+// allowFallback is false: POST /api/cookies/recheck runs this synchronously on
+// the HTTP handler goroutine, and the fallback probe is a full page fetch on
+// top of the auth check that is already there. The periodic path owns that
+// probe; a button press does not need to buy one.
 func (rs *RefreshService) CheckNow(ctx context.Context) {
-	rs.doRefresh(ctx)
+	rs.refresh(ctx, false)
+}
+
+// ObserveLiveness records an external verdict about whether `platform`'s
+// stored session is still signed in, and — once livenessRecoveryArmed is true
+// — fires OnRecoveryNeeded for a signed-out one.
+//
+// Callers must filter their own inconclusive results out: reaching this method
+// means "YouTube told us", not "we asked". A consent wall, a rate limit, an
+// off-host redirect and a never-configured jar are all silence, and passing
+// any of them in as loggedIn=false would report working credentials as dead.
+//
+// Two producers exist today, both YouTube: the per-channel membership probe
+// (which runs once per configured channel per feed cycle) and the
+// channel-independent FallbackLiveness probe. The first is why the dedupe is
+// not optional — one dead session must raise one alarm, not one per channel.
+func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
+	due, notable := rs.recordLiveness(platform, loggedIn, time.Now())
+
+	// While the pilot is disarmed this line is the ONLY evidence of what the
+	// new signal would have done, so the level is chosen to keep every line
+	// that evidence needs at Info while a healthy install stays quiet.
+	//
+	// Notable (Info) is every signed-out verdict, every change of verdict, and
+	// the first observation of the process. Everything else is a repeat of an
+	// answer already on the record, and repeats are the volume problem: this
+	// method is called once per configured channel per feed cycle, which at
+	// the default 10-minute cadence is 144*N lines a day — every one of them
+	// also fanned out over the WebSocket log stream to the Web UI and TUI. A
+	// healthy install now emits roughly one line per process instead.
+	//
+	// A signed-out verdict is never demoted, even when the dedupe already
+	// refused it. Losing evidence of a dead session is the one direction this
+	// must not fail in, and wouldFireRecovery on the line says which of the
+	// burst cleared the dedupe.
+	//
+	// The line carries the verdict and the two decisions — never anything read
+	// off the page the verdict came from.
+	logAt := rs.logger.Debug
+	if notable {
+		logAt = rs.logger.Info
+	}
+	logAt("liveness observation",
+		"platform", platform,
+		"loggedIn", loggedIn,
+		"wouldFireRecovery", due,
+		"armed", livenessRecoveryArmed)
+
+	if !livenessRecoveryArmed || !due {
+		return
+	}
+	if fn := rs.OnRecoveryNeeded; fn != nil {
+		// States what this method was told, and stops there. ObserveLiveness
+		// has two producers — the per-channel membership probe and the
+		// channel-independent fallback — and cannot tell which sent this
+		// verdict. This is the line that will page an operator the day the
+		// gate flips, so it must not name a mechanism it cannot know.
+		rs.logger.Warn("a liveness observation reports this platform is signed out, triggering recovery", "platform", platform)
+		fn(platform)
+	}
+}
+
+// recordLiveness folds one conclusive observation into the liveness maps and
+// reports two independent things about it:
+//
+//   - recoveryDue: it is signed out and cleared the dedupe, so it warrants
+//     firing OnRecoveryNeeded.
+//   - notable: it is worth an operator-visible log line — signed out, or a
+//     change from this platform's previous verdict, or the first observation
+//     of the process. See ObserveLiveness for why the distinction exists.
+//
+// Split out of ObserveLiveness so both decisions are testable on their own,
+// upstream of the pilot gate that currently suppresses the call.
+//
+// `now` is a parameter so a test can drive the windows without sleeping
+// through them.
+//
+// The lock is released before ObserveLiveness invokes the callback, following
+// doRefresh's convention: OnRecoveryNeeded reaches out into cmd/moombox and
+// must not run under this service's mutex.
+func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now time.Time) (recoveryDue, notable bool) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	if rs.lastLivenessObserved == nil {
+		rs.lastLivenessObserved = make(map[string]time.Time)
+	}
+	if rs.lastLivenessKnown == nil {
+		rs.lastLivenessKnown = make(map[string]livenessRecord)
+	}
+
+	// Read what was last known BEFORE this observation overwrites it. The
+	// missing entry reads as livenessNever, which differs from both verdicts,
+	// so a platform's first observation is notable on its own: it is the
+	// record that the signal started producing.
+	record := livenessRecordOf(loggedIn)
+	notable = !loggedIn || rs.lastLivenessKnown[platform] != record
+
+	// Both directions. This map answers "did anything tell us recently", and
+	// a healthy answer settles that question exactly as well as a dead one.
+	rs.lastLivenessObserved[platform] = now
+	rs.lastLivenessKnown[platform] = record
+
+	if loggedIn {
+		// Positive evidence is silent, and must not touch lastRecoveryDecided:
+		// stamping it here would let a healthy verdict swallow a dead one
+		// arriving a moment later from another channel in the same cycle.
+		return false, notable
+	}
+	if last, ok := rs.lastRecoveryDecided[platform]; ok && now.Sub(last) < livenessRefireWindow {
+		return false, notable
+	}
+	if rs.lastRecoveryDecided == nil {
+		rs.lastRecoveryDecided = make(map[string]time.Time)
+	}
+	rs.lastRecoveryDecided[platform] = now
+	return true, notable
+}
+
+// recordInconclusiveLiveness folds a fallback probe that learned NOTHING into
+// the same per-platform record a real verdict goes into, and reports whether
+// that is worth an operator-visible line.
+//
+// It exists because the log-only pilot is being read as evidence, and silence
+// was ambiguous: an install whose probe is permanently refused — a redirecting
+// captive portal, a proxy answering on another host, a rate limit that never
+// clears — produced exactly the same log as a perfectly healthy install with
+// nothing new to say. That is the one distinction the pilot has to be able to
+// make about its own signal.
+//
+// Deliberately touches NEITHER of the other two maps:
+//
+//   - not lastLivenessObserved, because recording an observation would make
+//     the next cycle's freshness check skip the probe — silencing the signal
+//     for as long as it keeps failing, which is backwards.
+//   - not lastRecoveryDecided, because that window belongs to real signed-out
+//     verdicts and consuming it here would swallow the next one.
+//
+// TestFallbackInconclusiveMovesNothing pins both.
+//
+// `notable` follows the same rule ObserveLiveness uses: notable on a change of
+// what is known, or on the first thing known about the platform in this
+// process; a repeat is Debug. An install stuck behind an intermediary
+// therefore says so once and then goes quiet, rather than every cycle forever.
+func (rs *RefreshService) recordInconclusiveLiveness(platform string) (notable bool) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.lastLivenessKnown == nil {
+		rs.lastLivenessKnown = make(map[string]livenessRecord)
+	}
+	notable = rs.lastLivenessKnown[platform] != livenessInconclusive
+	rs.lastLivenessKnown[platform] = livenessInconclusive
+	return notable
+}
+
+// noteRecoveryDecided stamps the dedupe map for a recovery that the tier-1
+// auth check is about to fire.
+//
+// One-directional on purpose: the refresh stamps the map so a liveness verdict
+// arriving in the same window cannot fire recovery for a problem the tier-1
+// check is already working on, but it does not CONSULT the map. Suppressing
+// the tier-1 fire would change behaviour that predates this signal entirely,
+// and that check is the one with the longest field record.
+//
+// The second fire would not launch a second browser — RefreshCookiesDetailed
+// single-flights — it would be DECLINED, and since runCookieRecovery's Unknown
+// branch started splitting on RefreshResult.Ran a decline reports nothing. So
+// what this stamp saves is the redundant goroutine and its 2-minute timeout,
+// not an operator-visible mistake; livenessRefireWindow has the accounting.
+func (rs *RefreshService) noteRecoveryDecided(platform string, now time.Time) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.lastRecoveryDecided == nil {
+		rs.lastRecoveryDecided = make(map[string]time.Time)
+	}
+	rs.lastRecoveryDecided[platform] = now
+}
+
+// livenessObservedRecently reports whether any conclusive liveness observation
+// for `platform` landed within livenessFreshWindow — the sole gate on paying
+// for the FallbackLiveness probe.
+func (rs *RefreshService) livenessObservedRecently(platform string, now time.Time) bool {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	last, ok := rs.lastLivenessObserved[platform]
+	return ok && now.Sub(last) < livenessFreshWindow
 }
 
 // CheckYouTubeAuth checks whether the current YouTube cookies are authenticated
@@ -262,7 +670,19 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 	return rs.checkTwitchAuth(ctx)
 }
 
+// doRefresh is the TICKER refresh, and the only path allowed to pay for the
+// FallbackLiveness probe. Both of the other entry points run synchronously on
+// a goroutine somebody is waiting on — CheckNow on an HTTP handler, Start's
+// initial check ahead of the web server binding — and both pass
+// allowFallback=false for that reason.
 func (rs *RefreshService) doRefresh(ctx context.Context) {
+	rs.refresh(ctx, true)
+}
+
+// refresh is the shared body of both entry points; allowFallback is the only
+// thing that separates them. Commentary elsewhere in this file that names
+// doRefresh is describing this body — the split is newer than the comments.
+func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	rs.logger.Debug("refreshing cookies")
 
 	// Reload cookies from file
@@ -300,8 +720,15 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	// Captured once here (not re-read at the shouldFireRecovery call sites
 	// below) so the "cookies present" snapshot lines up with the rest of
 	// this check's other snapshots, all taken under the same lock.
-	hasYTCookies := rs.jar.HasYouTubeAuthCookies()
-	hasTWCookies := rs.jar.HasTwitchAuthCookies()
+	//
+	// "Was this platform ever configured", NOT "is the set complete right
+	// now". shouldFireRecovery's first-check branch returns this value, and
+	// the complete-set predicates cannot tell a never-configured platform
+	// from one whose LOGIN_INFO YouTube has cleared, or from a Twitch session
+	// whose HttpOnly auth-token an exporter dropped — the exact states that
+	// must be reported, and that were silent forever.
+	hasYTCookies := rs.jar.HasAnyYouTubeAuthCookie()
+	hasTWCookies := rs.jar.HasAnyTwitchAuthCookie()
 
 	// Sampled under the same lock as the rest of this check's snapshots, and
 	// AFTER the jar.Reload() at the top of doRefresh, so it reflects whatever
@@ -312,10 +739,14 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	rs.status = AuthStatus{
 		YouTubeAuthenticated: ytAuth,
 		TwitchAuthenticated:  twAuth,
-		HasYouTubeCookies:    hasYTCookies,
-		LastCheck:            time.Now().UTC().Format(time.RFC3339),
-		YouTubeError:         ytErrStr,
-		TwitchError:          twErrStr,
+		// Now "YouTube auth is configured" rather than "the cookie set is
+		// complete", which is what the label this drives has always claimed.
+		// A half-cleared jar consequently renders as configured-but-unverified
+		// instead of as no-cookies-at-all — see AuthStatus.HasYouTubeCookies.
+		HasYouTubeCookies: hasYTCookies,
+		LastCheck:         time.Now().UTC().Format(time.RFC3339),
+		YouTubeError:      ytErrStr,
+		TwitchError:       twErrStr,
 	}
 
 	// Update previous auth state tracking.
@@ -371,12 +802,23 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	// same silent-forever bug for whichever platform is absent from the
 	// list (e.g. Platforms=["youtube"] with unverified Twitch cookies on
 	// disk).
+	//
+	// Each fire stamps the shared dedupe map (noteRecoveryDecided) so a
+	// liveness verdict landing in the same window — including the one the
+	// fallback probe at the tail of this very pass may produce — does not
+	// fire recovery again for a problem this one is already working on. A
+	// redundant fire is declined by the auto-cookie single-flight and, since
+	// that branch started splitting on RefreshResult.Ran, reports nothing at
+	// all; what it still costs is the goroutine and its timeout. See
+	// livenessRefireWindow.
 	if rs.OnRecoveryNeeded != nil {
 		if shouldFireRecovery(ytConcluded, prevYT, ytAuth, ytErr, hasYTCookies) {
+			rs.noteRecoveryDecided("youtube", time.Now())
 			rs.logger.Warn("youtube auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("youtube")
 		}
 		if shouldFireRecovery(twConcluded, prevTW, twAuth, twErr, hasTWCookies) {
+			rs.noteRecoveryDecided("twitch", time.Now())
 			rs.logger.Warn("twitch auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("twitch")
 		}
@@ -407,6 +849,60 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 		rs.OnCredentialsChanged("youtube", ytIdentity)
 	}
 
+	// Tier 2: the channel-independent liveness probe, for the installs the
+	// per-channel one cannot reach — no YouTube channels configured, or
+	// membership discovery off everywhere. Skipped whenever something already
+	// reported inside livenessFreshWindow, which is the normal case and is
+	// what keeps a configured install from paying for a second full page
+	// fetch every cycle.
+	//
+	// Runs inline on the ticker goroutine, which carries Start's inline
+	// recover. Nothing is spawned, so there is no new recover obligation and
+	// no overlap to guard against: the ticker coalesces missed ticks, and
+	// neither synchronous entry point (CheckNow, Start's initial check)
+	// reaches this branch.
+	if allowFallback && rs.FallbackLiveness != nil && !rs.livenessObservedRecently("youtube", time.Now()) {
+		// Only a conclusive answer moves anything. `false, false` is a consent
+		// wall or a rate limit, not a dead session.
+		if loggedIn, conclusive := rs.FallbackLiveness(ctx); conclusive {
+			rs.ObserveLiveness("youtube", loggedIn)
+		} else if hasYTCookies {
+			// Not a verdict, but not nothing either. This branch used to be
+			// absent entirely, which made a probe that has NEVER been able to
+			// answer look identical in the log to a healthy install with
+			// nothing to report — while the pilot's whole purpose is to be
+			// read as evidence about the signal. Deduped through the same
+			// record a verdict uses, so a permanently-refused probe says so
+			// once per process instead of once per cycle.
+			//
+			// Gated on the platform being CONFIGURED, and the gate covers the
+			// record as well as the line. An install with no YouTube auth
+			// cookie at all makes ProbeAccountLiveness return (Unknown, nil)
+			// from its own first gate — there is no session for it to report
+			// on — so "the probe learned nothing about this session" would be
+			// describing a session that does not exist, and the one
+			// distinction this line exists to draw would be diluted by installs
+			// that were never in scope. Recording without logging would be
+			// worse than either: the entry would sit at livenessInconclusive,
+			// and the FIRST genuine failure after cookies arrive would read as
+			// a repeat and land at Debug.
+			//
+			// hasYTCookies is this pass's own snapshot, taken under the lock
+			// with every other one, and it is the permissive
+			// HasAnyYouTubeAuthCookie — so a half-cleared session, the state
+			// the probe exists to detect, still reports.
+			//
+			// The reason is not here because the (loggedIn, conclusive) pair
+			// cannot carry one; cmd/moombox's FallbackLiveness closure logs the
+			// probe's own error at Debug, where it has it.
+			logAt := rs.logger.Debug
+			if rs.recordInconclusiveLiveness("youtube") {
+				logAt = rs.logger.Info
+			}
+			logAt("liveness fallback probe learned nothing about this session", "platform", "youtube")
+		}
+	}
+
 	rs.logger.Debug("cookie refresh done",
 		"youtube", ytAuth,
 		"twitch", twAuth)
@@ -425,8 +921,11 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 // presence in the persisted list masks a sibling platform that was never
 // actually checked (see the ytEverConcluded/twEverConcluded field comment
 // on RefreshService). nowAuth/checkErr are this check's result.
-// cookiesPresent is whether THIS PLATFORM currently has any auth cookies in
-// the jar at all (jar.HasYouTubeAuthCookies / jar.HasTwitchAuthCookies).
+// cookiesPresent is whether THIS PLATFORM was ever configured — any auth
+// cookie in the jar at all (jar.HasAnyYouTubeAuthCookie /
+// jar.HasAnyTwitchAuthCookie), NOT whether the set is currently complete.
+// The complete-set predicates read a half-cleared session as never
+// configured, which is precisely how a dead platform stayed silent.
 // Two cases fire:
 //
 //   - Witnessed transition: everConcluded is true and prevAuth was true —
@@ -448,7 +947,9 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 //     credential-recovery attempt (and possibly a user-facing warning) for
 //     a platform nobody set up. Dead-but-PRESENT cookies still fire —
 //     that's the whole point of this case; only the never-configured
-//     (absent) case is newly excluded.
+//     (absent) case is excluded. "Present" is deliberately the loose
+//     any-auth-cookie test: a half-cleared session is a configured platform
+//     with broken credentials, and reporting it is the point.
 //
 // In both cases checkErr must be nil (a network error is not auth loss) and
 // nowAuth must be false (the platform must actually be unauthenticated).
@@ -549,20 +1050,120 @@ func youtubeGuideRequestBody() string {
 	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
 }
 
+// authResponseIsOurs returns nil only when resp can be read as an answer about
+// THIS install's credential, and otherwise an error saying which way it failed
+// to qualify. `sent` is the request we dispatched; credentialHeader is the
+// header carrying the credential ("Cookie" for YouTube, "Authorization" for
+// Twitch).
+//
+// This is internal/youtube's livenessResponseIsOurs rule, ported rather than
+// shared: that function is unexported, and this package must not import
+// internal/youtube — internal/youtube/auth.go already imports this one, so the
+// dependency only runs the other way. Any change to either should be made to
+// both.
+//
+// Why the tier-1 checks need it at all. cookiesHTTPClient installs no
+// CheckRedirect, so Go follows redirects; on the first hop to a different
+// HOSTNAME it drops the manually-set credential header, and the decision is
+// STICKY (client.go:620 declares stripSensitiveHeaders once before the redirect
+// loop and only ever sets it inside at :688; nothing clears it on a later hop).
+// So origin → wall → origin lands back on the host we asked for and delivers a
+// body fetched with no credentials. Neither guide check nor the Twitch validate
+// check looked at where the answer came from: any 200 whose body lacked both
+// `"logged_in":"1"` and `"loggedIn":true` fell through to a CONCLUSIVE "not
+// authenticated", and any 401 was Twitch's documented dead-token verdict. Both
+// are what shouldFireRecovery acts on, and after Task 7 a fire notifies the
+// operator on BOTH install shapes. Task 1 closed the non-200 half of this; a
+// followed redirect never presents as non-200, so it could not catch this one.
+//
+// The trigger is an intercepting intermediary — captive portal, transparent or
+// corporate proxy (http.ProxyFromEnvironment is on the shared transport at
+// internal/httpx/client.go:40, and this package consults no connectivity gate).
+//
+// A provenance failure is INCONCLUSIVE — an error, matching what Task 1 and
+// Task 1b established for a non-200 — never a verdict. It deliberately does NOT
+// wrap ErrAuthCheckNotAttempted: a request did leave the process, so this is
+// the "the site could not answer for us" unknown, not the "we could not form
+// the question" one, and checkPlatformAuth tells those apart.
+//
+// The check is non-vacuous only because both callers refuse the empty-credential
+// case BEFORE fetching (checkYouTubeAuth/checkAndRefreshYouTube on an empty
+// cookie header, checkTwitchAuth on an empty token). Past that point the header
+// was definitely set, so finding none on the answering request can only mean it
+// was taken away.
+//
+// COUPLING, and it fails silently if broken: the header rule only means
+// anything because cookiesHTTPClient has no http.CookieJar. With one installed
+// the stdlib would re-add a Cookie header on the final hop from the jar's own
+// scope rules, the check would pass on a request that never carried OUR
+// session, and nothing here would fail. httpx.Client documents that property;
+// TestCookiesHTTPClientCarriesNoCookieJar pins it for THIS client, as
+// internal/utils' TestUtilsHTTPClientCarriesNoCookieJar does for the one the
+// tier-2 probes use.
+//
+// Positive confirmation throughout, and deliberately STRICTER than the stdlib
+// rule it defends against, so every disagreement resolves toward inconclusive:
+//
+//   - Host is compared as host:port, raw. Go compares URL.Hostname() —
+//     port-stripped and permitting subdomains (isDomainOrSubdomain,
+//     client.go:1028) — so a port change or a subdomain hop fails here while Go
+//     would still forward the credential.
+//   - Scheme is compared at all. Go's strip decision looks only at Host, so an
+//     https→http downgrade on the same host keeps the credential; we refuse it
+//     rather than read a verdict off an exchange made in clear.
+//
+// Errors name a host and a header NAME — never a header value, never response
+// bytes. They reach AutoCookieService.setError and are rendered in the Web UI
+// and TUI.
+func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeader string) error {
+	if sent == nil || sent.URL == nil {
+		return fmt.Errorf("could not determine what was asked")
+	}
+	if resp == nil || resp.Request == nil || resp.Request.URL == nil {
+		return fmt.Errorf("could not determine what answered %s", sent.URL.Host)
+	}
+	final := resp.Request.URL
+	if !strings.EqualFold(final.Scheme, sent.URL.Scheme) || !strings.EqualFold(final.Host, sent.URL.Host) {
+		return fmt.Errorf("%s was answered by %s://%s; not an observation of this session",
+			sent.URL.Host, final.Scheme, final.Host)
+	}
+	if resp.Request.Header.Get(credentialHeader) == "" {
+		return fmt.Errorf("%s was answered by a request that no longer carried the %s header; not an observation of this session",
+			sent.URL.Host, credentialHeader)
+	}
+	return nil
+}
+
+// checkYouTubeAuth asks YouTube whether the jar's session is still signed in.
+//
+// Its three entry gates appear identically in checkAndRefreshYouTube and
+// encode one rule — the rule this subsystem kept getting wrong. Only the
+// FIRST of them may answer (false, nil).
+//
+//   - Nothing configured at all — no session to have an opinion about, so a
+//     silent "not authenticated" is the truth and shouldFireRecovery's
+//     cookiesPresent gate (fed by the same predicate) keeps it silent.
+//   - Configured but no request could be built — a check that did NOT happen.
+//     (false, nil) would report it as dead credentials, so it errors instead.
+//
+// Everything in between now reaches the network. In particular a jar with
+// SAPISID and a cleared LOGIN_INFO — YouTube's own rotation-invalidation
+// state — is CONFIGURED with BROKEN credentials, and its verdict has to come
+// from YouTube rather than from a missing name in a map.
 func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
-	if !rs.jar.HasYouTubeAuthCookies() {
-		return false, nil // No auth cookies
+	if !rs.jar.HasAnyYouTubeAuthCookie() {
+		return false, nil // Nothing configured at all.
 	}
 
 	cookieHeader := rs.jar.GetCookieHeader()
 	if cookieHeader == "" {
-		return false, nil
+		return false, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
 	}
 
 	origin := "https://www.youtube.com"
 	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
 	if authHeader == "" {
-		return false, nil
+		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
 	}
 
 	// POST to YouTube guide endpoint to check auth
@@ -583,9 +1184,20 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	}
 	defer resp.Body.Close()
 
+	// Before the status, for the same reason internal/youtube checks it first:
+	// a redirected answer is not this session's answer whatever status it
+	// carries, and naming the route is more accurate than naming the code.
+	if err := authResponseIsOurs(resp, req, "Cookie"); err != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return false, fmt.Errorf("youtube auth check: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, nil
+		// NOT (false, nil). That means "conclusively not authenticated" to
+		// shouldFireRecovery, so a 429/503/edge block would be reported as
+		// dead credentials. We learned nothing about the session here.
+		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
 	}
 
 	// YouTube always returns 200 even with invalid cookies — parse body
@@ -638,19 +1250,21 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 // YouTube auth status and refresh session cookies from Set-Cookie headers.
 // This avoids the redundancy of separate check + refresh requests.
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
-	if !rs.jar.HasYouTubeAuthCookies() {
-		return false, nil
+	// See the gate commentary above checkYouTubeAuth — same three gates, same
+	// rule about which one may answer (false, nil).
+	if !rs.jar.HasAnyYouTubeAuthCookie() {
+		return false, nil // Nothing configured at all.
 	}
 
 	cookieHeader := rs.jar.GetCookieHeader()
 	if cookieHeader == "" {
-		return false, nil
+		return false, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
 	}
 
 	origin := "https://www.youtube.com"
 	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
 	if authHeader == "" {
-		return false, nil
+		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
@@ -670,9 +1284,21 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 	}
 	defer resp.Body.Close()
 
+	// Before the status AND before the body, which matters more here than in
+	// checkYouTubeAuth: this function also merges Set-Cookie headers back into
+	// the jar on the authenticated path, and a redirected exchange must not be
+	// allowed to write to it at all.
+	if err := authResponseIsOurs(resp, req, "Cookie"); err != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return false, fmt.Errorf("youtube auth check: %w", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, nil
+		// NOT (false, nil). That means "conclusively not authenticated" to
+		// shouldFireRecovery, so a 429/503/edge block would be reported as
+		// dead credentials. We learned nothing about the session here.
+		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
 	}
 
 	// Read body for auth check
@@ -958,10 +1584,35 @@ func isGoogleOnlyAuthName(name string) bool {
 }
 
 func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
-	if !rs.jar.HasTwitchAuthCookies() {
-		return false, nil // No auth token
+	// Read the token once. It is both the gate and the credential, so asking
+	// HasTwitchAuthCookies first and re-reading the value after would leave a
+	// window in which a concurrent jar.Reload swaps the map between the two.
+	token := rs.jar.GetTwitchAuthToken()
+	if token == "" {
+		// Deliberately NOT broadened the way the YouTube gate above was, and
+		// the reason has nothing to do with what Twitch would answer.
+		//
+		// Twitch auth is a single bearer token. With no auth-token there is
+		// no credential to validate, so a request could not learn anything
+		// about THIS install's session whatever came back — which makes "not
+		// authenticated" true here rather than inferred. That is the whole
+		// difference from a cleared LOGIN_INFO, which says nothing at all
+		// about whether the Google session still works.
+		//
+		// Sending an empty OAuth header just to reach the network therefore
+		// buys nothing, and would force the 200/401-only rule below to read
+		// the reply as if it were a verdict on a token this install does not
+		// have.
+		//
+		// The "was Twitch ever configured" question, which is what decides
+		// whether an alarm fires, is answered by jar.HasAnyTwitchAuthCookie
+		// at the doRefresh gate instead: a jar holding twilight-user and no
+		// auth-token is a session that plainly was configured and now has no
+		// credential, and it reports as configured-and-broken rather than as
+		// never-configured. See twitchAuthCookieNames for how that state
+		// arises.
+		return false, nil
 	}
-	token := rs.jar.GetCookie("auth-token")
 
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()
@@ -981,5 +1632,35 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 		resp.Body.Close()
 	}()
 
-	return resp.StatusCode == http.StatusOK, nil
+	// The 401 rule below is only a statement about OUR token if our token is
+	// what reached the endpoint. Go strips Authorization on a cross-hostname
+	// redirect exactly as it strips Cookie, and the strip is sticky, so an
+	// intermediary that bounces this call and answers 401 would otherwise
+	// produce a conclusive dead-token verdict about a token it never saw.
+	if err := authResponseIsOurs(resp, req, "Authorization"); err != nil {
+		return false, fmt.Errorf("twitch auth check: %w", err)
+	}
+
+	// Twitch documents exactly two answers for oauth2/validate: 200 for a
+	// valid token, 401 for an invalid one. So 401 stays CONCLUSIVE — it is
+	// the one status that genuinely means "sign in again", and folding it
+	// into the error branch below would suppress recovery and the re-login
+	// prompt for every expired token. Everything else is infrastructure (a
+	// rate limiter, an outage, an edge block) and says nothing about the
+	// token, so it must not be reported as dead credentials — the same
+	// mistake the YouTube guide check made, reachable here through the same
+	// checkPlatformAuth mapping.
+	//
+	// The error names the status and nothing else. It reaches
+	// AutoCookieService.setError and is rendered in the Web UI and TUI, so a
+	// response body echoed back by an intermediary must never be
+	// interpolated into it.
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusUnauthorized:
+		return false, nil
+	default:
+		return false, fmt.Errorf("twitch auth check: unexpected status %d", resp.StatusCode)
+	}
 }

@@ -151,6 +151,36 @@ func TestSetConnectivityReporterReplacesAtomically(t *testing.T) {
 	}
 }
 
+// TestUtilsHTTPClientCarriesNoCookieJar pins a property another package
+// silently depends on for correctness.
+//
+// internal/youtube's liveness probes fetch a page with an explicit Cookie
+// header and then decide whether the answer may be read as evidence about the
+// user's YouTube session. The check that makes that sound is "did the request
+// which finally answered still carry that header" — the stdlib strips it,
+// permanently, once a redirect leaves the origin (net/http/client.go:620,
+// :688, :826), so its absence is how a credential-less bounce is detected.
+//
+// Installing an http.CookieJar here breaks that with nothing failing: the
+// stdlib would re-add a Cookie header on the final hop from the jar's own
+// scope rules, the probe's check would pass on a request that never carried
+// the caller's session, and a healthy account would be reported as dead
+// cookies. There is no way for the youtube package to observe this, so the
+// assertion lives next to the client it constrains.
+//
+// CheckRedirect is asserted alongside it: a custom one could re-populate
+// headers on a redirect hop and defeat the same check by a different route.
+func TestUtilsHTTPClientCarriesNoCookieJar(t *testing.T) {
+	if utilsHTTPClient.Jar != nil {
+		t.Error("utilsHTTPClient has a CookieJar — this silently invalidates " +
+			"internal/youtube's liveness guard; see the comment on utilsHTTPClient")
+	}
+	if utilsHTTPClient.CheckRedirect != nil {
+		t.Error("utilsHTTPClient has a custom CheckRedirect — verify it cannot " +
+			"restore headers the stdlib stripped before relaxing this assertion")
+	}
+}
+
 // recordingReporter satisfies ConnectivityReporter and counts callbacks
 // for assertion in tests. Unexported because it lives only here.
 type recordingReporter struct {

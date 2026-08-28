@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,6 +217,171 @@ func TestRefreshCookiesDoesNotCommitOnInconclusiveVerification(t *testing.T) {
 	}
 	if strings.Contains(*status.LastError, "did not verify") {
 		t.Errorf("status blames the profile for a network failure: %q", *status.LastError)
+	}
+}
+
+// TestImportIsNotCommittedWhenTheRealCheckIsRateLimited wires the REAL
+// verification callback instead of a stub, because the stubs above cannot see
+// the cross-subsystem consequence of making a non-200 guide response
+// inconclusive.
+//
+// Production wires cmd/moombox's AutoCookieService.VerifyYouTubeAuth to
+// RefreshService.CheckYouTubeAuth. While a non-200 returned (false, nil) that
+// callback reported a YouTube 429 as a CONCLUSIVE failure, so
+// checkPlatformAuth recorded verifyFailed on both sides of the import,
+// platformsToRestore found no reason to roll back, and an unevaluated profile
+// was committed over credentials that may well have been fine — then the
+// operator was told "manual re-login required" on the strength of a rate
+// limit. With the non-200 inconclusive, both checks land on verifyUnknown, the
+// previous rows are restored, and the status names the incomplete check.
+func TestImportIsNotCommittedWhenTheRealCheckIsRateLimited(t *testing.T) {
+	pointYouTubeGuideAt(t, statusServer(t, http.StatusTooManyRequests))
+
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(youtubeOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	// The real check, over the same jar the service reloads — exactly the
+	// shape cmd/moombox/services.go builds.
+	s.VerifyYouTubeAuth = NewRefreshService(s.jar, 0, nopLogger{}).CheckYouTubeAuth
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+
+	got, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "previous-login-info") {
+		t.Errorf("a rate-limited check let an unevaluated import overwrite the previous credentials:\n%s", got)
+	}
+	if strings.Contains(string(got), "login-info-from-profile") {
+		t.Errorf("imported credentials were committed on the strength of a 429:\n%s", got)
+	}
+
+	status := s.GetStatus()
+	if status.NeedsManualRelogin["youtube"] {
+		t.Error("a 429 must not tell the user their YouTube login is dead")
+	}
+	if status.LastError == nil {
+		t.Fatal("an import that was not committed must leave an explanation")
+	}
+	if !strings.Contains(*status.LastError, "did not complete") {
+		t.Errorf("status must name the incomplete check as the cause, got %q", *status.LastError)
+	}
+}
+
+// twitchOnlyRows / twitchOnlyCookieFile keep the Twitch rollback test to a
+// single platform. A YouTube row on either side would drag the YouTube verdict
+// into the same call, and a platform that verifies routes RefreshCookies down
+// the success branch where the "did not complete" message is never built.
+func twitchOnlyRows(token string) []profileTestCookie {
+	return []profileTestCookie{
+		{name: "auth-token", value: token, host: ".twitch.tv", path: "/", httpOnly: true, secure: true},
+		{name: "login", value: "someuser", host: ".twitch.tv", path: "/"},
+	}
+}
+
+const twitchOnlyCookieFile = "# Netscape HTTP Cookie File\n" +
+	"#HttpOnly_.twitch.tv\tTRUE\t/\tTRUE\t0\tauth-token\t" + goodTwitchToken + "\n" +
+	".twitch.tv\tTRUE\t/\tFALSE\t0\tlogin\tsomeuser\n"
+
+// TestImportIsNotCommittedWhenTheRealTwitchCheckIsRateLimited is the Twitch
+// mirror of TestImportIsNotCommittedWhenTheRealCheckIsRateLimited, and it
+// pins the same data-loss scenario on the other platform.
+//
+// checkPlatformAuth runs both platforms through one three-state mapping
+// (autocookies_profile.go:571-572), so while checkTwitchAuth answered every
+// non-200 with (false, nil) an id.twitch.tv rate limit was recorded as a
+// CONCLUSIVE failure on both sides of the import. platformsToRestore then saw
+// neither a regression nor an unknown, a stale profile token was committed
+// over a working one, and the operator was told to re-login on the strength of
+// a 429.
+func TestImportIsNotCommittedWhenTheRealTwitchCheckIsRateLimited(t *testing.T) {
+	pointTwitchValidateAt(t, statusServer(t, http.StatusTooManyRequests))
+
+	profileDir := writeWALCookieProfile(t, twitchOnlyRows(staleTwitchToken))
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(twitchOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	// The real check over the service's own jar — the shape
+	// cmd/moombox/services.go:602 builds.
+	s.VerifyTwitchAuth = NewRefreshService(s.jar, 0, nopLogger{}).CheckTwitchAuth
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+
+	got, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), goodTwitchToken) {
+		t.Errorf("a rate-limited check let an unevaluated import overwrite the working Twitch token:\n%s", got)
+	}
+	if strings.Contains(string(got), staleTwitchToken) {
+		t.Errorf("the stale profile token was committed on the strength of a 429:\n%s", got)
+	}
+	if s.jar.GetTwitchAuthToken() != goodTwitchToken {
+		t.Errorf("jar holds %q after rollback, want the restored token", s.jar.GetTwitchAuthToken())
+	}
+
+	status := s.GetStatus()
+	if status.NeedsManualRelogin["twitch"] {
+		t.Error("a 429 must not tell the user their Twitch token is dead")
+	}
+	if status.LastError == nil {
+		t.Fatal("an import that was not committed must leave an explanation")
+	}
+	if !strings.Contains(*status.LastError, "did not complete") {
+		t.Errorf("status must name the incomplete check as the cause, got %q", *status.LastError)
+	}
+}
+
+// TestImportIsCommittedWhenTwitchConclusivelyRejectsTheToken is the control
+// that keeps the rule above from swallowing the case it must not. A 401 is
+// Twitch's documented invalid-token verdict, so both sides of the import are
+// conclusively dead — nothing is worth protecting, the fresher set is the
+// better guess for the next attempt, and the re-login prompt is correct.
+func TestImportIsCommittedWhenTwitchConclusivelyRejectsTheToken(t *testing.T) {
+	pointTwitchValidateAt(t, statusServer(t, http.StatusUnauthorized))
+
+	profileDir := writeWALCookieProfile(t, twitchOnlyRows(staleTwitchToken))
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(twitchOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	s.VerifyTwitchAuth = NewRefreshService(s.jar, 0, nopLogger{}).CheckTwitchAuth
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+
+	got, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), staleTwitchToken) {
+		t.Errorf("a conclusively-dead credential was protected from replacement:\n%s", got)
+	}
+	status := s.GetStatus()
+	if !status.NeedsManualRelogin["twitch"] {
+		t.Error("401 is a real verdict — the user must still be told to sign in again")
+	}
+	if status.LastError == nil || !strings.Contains(*status.LastError, "manual re-login required") {
+		t.Errorf("a conclusive rejection must keep saying so, got %v", status.LastError)
 	}
 }
 

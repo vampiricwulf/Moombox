@@ -15,6 +15,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/worker"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // crossMonitorVouchWindow bounds how recently a sibling monitor must have
@@ -189,6 +190,61 @@ func jobCreationForDisposition(d monitor.JobDisposition) (status database.JobSta
 // function and so a test can observe exactly what would have been sent.
 type authFailureNotifier func(platform, title, desc string, ntype notifications.NotificationType)
 
+// withAuthFailureCooldown wraps `send` in a per-platform 30-minute cooldown.
+// wireMonitorCallbacks hands the wrapped notifier to every path that can
+// report an auth problem, so this is the single place a repeat is dropped.
+//
+// A package-level function rather than a closure inside wireMonitorCallbacks
+// because the cooldown is the thing that decides whether the operator hears
+// the ACCURATE message or a vague one that arrived first, and that decision
+// needs a test — see TestDeclinedRecoveryDoesNotSpendTheCooldown. The `send`
+// parameter is the seam: production passes notifyMgr.Send, a test passes a
+// recorder.
+//
+// HOW OFTEN THE WRAPPED NOTIFIER CAN BE REACHED, read off the producers rather
+// than assumed. This comment previously said OnRecoveryNeeded "can re-fire on
+// every periodic auth check while cookies stay dead". Tier-1 cannot do that:
+//
+//   - Today there is exactly one producer, shouldFireRecovery
+//     (internal/cookies/refresh.go), and for a platform whose cookies stay
+//     dead it fires ONCE PER PROCESS. Its first-conclusive-check arm answers
+//     the first check; every later check falls to the witnessed-transition
+//     arm, which returns prevAuth — and prevAuth was just set to that same
+//     dead answer, so it stays false until the platform genuinely
+//     re-authenticates. A platform that flaps dead → alive → dead fires again
+//     on each real transition, which is the case this window still coalesces.
+//   - Arming cookies.livenessRecoveryArmed adds a SECOND producer that is
+//     periodic by design: a signed-out liveness verdict may clear its own
+//     dedupe once per livenessRefireWindow (30 minutes), on every cycle a dead
+//     session persists.
+//
+// So the per-poll alarm this was written to bound does not exist yet; what the
+// window really covers is the armed case and the flap.
+//
+// What must NOT reach here is a recovery pass that DECLINED to run. Stamping
+// this map for a pass that learned nothing suppresses the accurate verdict
+// that follows it inside the window — the failure runCookieRecovery's Unknown
+// branch splits on RefreshResult.Ran to prevent.
+//
+// Guarded by a mutex: recovery attempts run on their own goroutines, so two
+// platforms can arrive here concurrently. The lock covers the read-and-stamp
+// only and is released before `send`, so one target's dispatch cannot hold up
+// the other platform's decision.
+func withAuthFailureCooldown(send authFailureNotifier) authFailureNotifier {
+	var mu sync.Mutex
+	last := make(map[string]time.Time)
+	return func(platform, title, desc string, ntype notifications.NotificationType) {
+		mu.Lock()
+		if time.Since(last[platform]) < 30*time.Minute {
+			mu.Unlock()
+			return
+		}
+		last[platform] = time.Now()
+		mu.Unlock()
+		send(platform, title, desc, ntype)
+	}
+}
+
 // cookieRefresher is the single outward call runCookieRecovery makes on the
 // auto-cookie service.
 //
@@ -201,7 +257,7 @@ type authFailureNotifier func(platform, title, desc string, ntype notifications.
 // live.
 type cookieRefresher func(context.Context) (cookies.RefreshResult, error)
 
-// cookieReplacementGuidance is the tail shared by both failure notifications.
+// cookieReplacementGuidance is the tail shared by the failure notifications.
 //
 // It leads with the cookie FILE rather than the Settings wizard on purpose:
 // the wizard drives a local headed browser and its endpoints are
@@ -230,7 +286,10 @@ const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a br
 // recording failed.
 //
 // The three verdicts map onto the three branches that were already here; only
-// the question being asked changed.
+// the question being asked changed. The Unknown branch then splits once more,
+// on RefreshResult.Ran, because a pass that DECLINED to run and a pass that
+// ran without reaching an answer are the same verdict and not the same event —
+// see that branch.
 func (s *runState) runCookieRecovery(ctx context.Context, platform string, refresh cookieRefresher, notify authFailureNotifier) {
 	result, err := refresh(ctx)
 	if err != nil {
@@ -289,18 +348,183 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 			notifications.TypeError)
 
 	default: // cookies.RefreshUnknown
-		s.log.Warn("auto-cookie recovery did not establish whether this platform is authenticated", "platform", platform)
-		// States no cause, for the same reason the equivalent log line in
-		// services.go states none: Unknown is what comes back when the
-		// refresh DECLINED to run (setup in progress, a refresh already
-		// running, no platforms configured), when it aborted before
-		// verifying, and when the verification could not reach the service —
-		// with the session possibly perfectly healthy throughout. A
-		// notification is more visible than a log line, so an unearned
-		// assertion here is worse, not better.
+		// Two different nothings arrive here, and only one of them is the
+		// operator's problem. RefreshResult.Ran draws exactly that line, and
+		// this is its first production consumer; services.go's
+		// cookieRefreshReport already splits the operator-facing wording on it
+		// for the same reason.
+		if !result.Ran {
+			// The pass DECLINED before doing any work — setup in progress, a
+			// refresh already in flight, or nothing configured to refresh
+			// (refreshDeclined() is RefreshResult{}, so Ran is false and both
+			// verdicts are the zero value). No browser ran, nothing was
+			// checked, and nothing about these cookies changed.
+			//
+			// Notifying here is worse than useless, because it is REACHABLE BY
+			// RACING OURSELVES and it costs the accurate message. Both
+			// platforms losing auth in one pass makes refresh.go fire
+			// OnRecoveryNeeded twice; AutoCookieService.RefreshCookiesDetailed
+			// single-flights, so the second call is declined immediately, and
+			// an "Ineffective" sent for that decline stamps the platform's
+			// 30-minute cooldown (withAuthFailureCooldown). When the one real
+			// attempt finishes ~2 minutes later and genuinely fails, its
+			// actionable "Cookie Auto-Refresh Failed" is inside that window and
+			// is never sent — the operator is left with a vague warning about a
+			// condition Moombox created for itself.
+			//
+			// So: a log line, no notification, and — the load-bearing half —
+			// no cooldown stamp. TestDeclinedRecoveryDoesNotSpendTheCooldown
+			// drives that exact two-platform sequence.
+			s.log.Info("auto-cookie recovery declined to run — no verdict for this platform, and nothing reported",
+				"platform", platform)
+			return
+		}
+		s.log.Warn("auto-cookie recovery ran and did not establish whether this platform is authenticated", "platform", platform)
+		// States no cause about the CREDENTIALS, because with Ran true and no
+		// error the session may be perfectly healthy throughout. A notification
+		// is more visible than a log line, so an unearned assertion here is
+		// worse, not better.
+		//
+		// Two possibilities are named and neither is asserted, and the list is
+		// exhaustive rather than illustrative — traced from verdictOf back
+		// through checkPlatformAuth (internal/cookies/autocookies_profile.go):
+		// a completed pass reports RefreshUnknown for a platform only when its
+		// verify callback returned an error, which splits in two.
+		//
+		//   - The site could not answer: a 429, a dropped connection, a
+		//     response that failed the provenance check.
+		//   - The question could not be formed at all: ErrAuthCheckNotAttempted,
+		//     raised when no cookie header can be built or no SAPISIDHASH can
+		//     be generated. Reachable — HasAnyYouTubeAuthCookie counts
+		//     LOGIN_INFO, so a jar holding it with the whole SAPISID family
+		//     gone is "configured" and still cannot sign a request.
+		//
+		// Deliberately NOT offered: "it stopped before verifying". Every
+		// refreshAborted() in autocookies.go (:918, :988, :995, :1041, :1046,
+		// :1101, :1113) is returned with a non-nil error, so an aborted pass
+		// takes the err != nil branch above and cannot reach this line. Nor
+		// "it declined to run" — the branch above takes every declined pass.
+		// Both would be causes this code cannot have.
+		//
+		// One case is not in the copy because it is not a production cause: an
+		// unrecognised platform key resolves to Unknown through Verdict's
+		// default. That is defence in depth against a wiring mistake or a
+		// future third platform (TestRecoveryUnrecognisedPlatformDoesNotAssertFailure),
+		// and the wording holds for it because it asserts nothing.
 		notify(platform, "Cookie Auto-Refresh Ineffective",
-			fmt.Sprintf("Automatic cookie refresh did not restore %s authentication — it either declined to run or found nothing usable (the log at debug level says which). If the cookies have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
+			fmt.Sprintf("Automatic cookie refresh ran and did not restore %s authentication, but could not establish why — the check either could not reach the service or could not be made at all, so nothing has been concluded about the cookies (the log at debug level says which). If they have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
 			notifications.TypeWarning)
+	}
+}
+
+// handleRecoveryNeeded is the whole body of the OnRecoveryNeeded callback,
+// with the two things a test cannot supply passed in: the config answer
+// (autoEnabled) and the auto-cookie service's refresh entry point.
+//
+// autoEnabled splits two genuinely different situations, not one situation
+// and a silence:
+//
+//   - Automatic refresh is ON: there is something to attempt, so attempt it
+//     on its own goroutine (RefreshCookiesDetailed drives a headless browser
+//     and is bounded here by a 2-minute timeout; the refresh service's loop
+//     must not block on it) and report whatever it concluded.
+//   - Automatic refresh is OFF: there is nothing to attempt. This used to
+//     Debug-log and send nothing, on the implicit reasoning that no
+//     configured recovery means nothing worth saying. That is inverted. A
+//     user with auto-recovery on has an automated attempt that may quietly
+//     fix the problem before they ever see it; a user with it off has none,
+//     so this notification is not redundant for them — it is the only thing
+//     that will tell them their credentials need replacing by hand. The
+//     whole point of this work is that Moombox could hold dead cookies and
+//     never say so, and this gate was the last place it still stayed silent.
+//
+// The disabled path runs SYNCHRONOUSLY and deliberately does not call
+// `refresh`: launching a headless browser the operator explicitly turned off,
+// and paying its timeout, is precisely what "disabled" forbids.
+// notifyMgr.Send hands every target off to its own bounded goroutine
+// (internal/notifications.Manager.Send), so sending inline cannot stall the
+// refresh loop — the same reason OnAuthRecovered and OnCredentialsChanged
+// below send inline.
+func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refresh cookieRefresher, notify authFailureNotifier) {
+	if !autoEnabled {
+		// Warn, not Debug. Debug was right for "we did nothing"; it is not
+		// right for "we are telling the operator their recordings will fail".
+		s.log.Warn("auth lost and automatic cookie refresh is disabled — manual re-authentication required",
+			"platform", platform)
+		// Claims nothing about a refresh, because none ran: no attempt, no
+		// finding, no failure. What IS known is exactly two things — this
+		// platform answered a conclusive "not authenticated", and the config
+		// flag this branch just read is off. Note it does NOT say cookies are
+		// present:
+		// the witnessed-transition arm of shouldFireRecovery never consults
+		// cookiesPresent, so the file may have been deleted outright.
+		//
+		// WHY "conclusive" holds, and what to re-check before it stops. Today
+		// there is exactly one producer: shouldFireRecovery, which fires only on
+		// checkErr == nil && !nowAuth. cookies.livenessRecoveryArmed is false, so
+		// the liveness probes cannot reach here at all. ARMING IT ADDS A SECOND
+		// PRODUCER — and this copy survives it, because ObserveLiveness is
+		// documented to take only conclusive verdicts (SessionAuthUnknown is
+		// dropped upstream in routeLivenessVerdict), so a liveness LoggedOut is
+		// conclusive in the same sense. Nothing here fails loudly if that stops
+		// being true, so any THIRD producer has to be checked against this
+		// sentence by hand: a caller that could pass an inconclusive result would
+		// make this notification assert a dead session it does not have.
+		//
+		// "on its own" scopes the claim to AUTOMATIC attempts, which is all
+		// this branch knows about. POST /api/cookies/auto-refresh
+		// (internal/web/routes/cookies.go) is not gated on AutoEnabled, so an
+		// operator can still trigger a refresh by hand — a flat "nothing will
+		// attempt to restore it" would be a shade stronger than the code.
+		//
+		// Guidance leads with the cookie FILE for the reason spelled out at
+		// cookieReplacementGuidance: this is the notification most likely to
+		// be read somewhere the loopback-gated Settings wizard cannot be
+		// reached at all.
+		notify(platform, "Cookie Re-Authentication Required",
+			fmt.Sprintf("Moombox is not authenticated to %s, and automatic cookie refresh is turned off — nothing will "+
+				"attempt to restore it on its own, so recordings that need an account will fail until the cookies are "+
+				"replaced by hand. "+cookieReplacementGuidance, platform, s.cookieFilePath()),
+			notifications.TypeError)
+		return
+	}
+	// The pass itself, and the per-platform branch it takes, live in
+	// runCookieRecovery — see cookieReplacementGuidance there for why the
+	// notification copy leads with the cookie FILE rather than the Settings
+	// wizard.
+	s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("auto-cookie recovery panic", "panic", r)
+			}
+		}()
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer refreshCancel()
+		s.runCookieRecovery(refreshCtx, platform, refresh, notify)
+	}()
+}
+
+// routeLivenessVerdict hands one YouTube login verdict to the cookie health
+// signal, and drops the one that is not a verdict.
+//
+// Split out of the FetchMembership closure it is called from because the
+// mapping is the whole of the decision and the closure around it needs a
+// monitor, the service graph and the network to exist. `observe` is
+// (*cookies.RefreshService).ObserveLiveness in production.
+//
+// SessionAuthUnknown is absent from the switch deliberately, not by omission.
+// A consent wall, a rate limit, an off-host redirect and a jar that was never
+// configured all arrive as Unknown; none of them is evidence about the
+// session, and reporting any of them as a dead one would send an operator off
+// to re-export credentials that were never wrong — a remedy that, in a
+// container, they may not even be able to reach.
+func routeLivenessVerdict(observe func(platform string, loggedIn bool), verdict youtube.SessionAuthState) {
+	switch verdict {
+	case youtube.SessionAuthLoggedIn:
+		observe("youtube", true)
+	case youtube.SessionAuthLoggedOut:
+		observe("youtube", false)
 	}
 }
 
@@ -314,24 +538,12 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 //
 // Called once between wireRoutes() and the "start services" phase in run().
 func (s *runState) wireMonitorCallbacks() {
-	// Cooldown for auth-recovery failure notifications: OnRecoveryNeeded can
-	// re-fire on every periodic auth check while cookies stay dead, and a
-	// broken refresh should page the operator once per window, not per poll.
-	// Guarded by a mutex — the recovery attempt runs on its own goroutine.
-	var authNotifyMu sync.Mutex
-	lastAuthFailNotify := make(map[string]time.Time)
-	notifyAuthFailure := func(platform, title, desc string, ntype notifications.NotificationType) {
-		authNotifyMu.Lock()
-		defer authNotifyMu.Unlock()
-		if time.Since(lastAuthFailNotify[platform]) < 30*time.Minute {
-			return
-		}
-		lastAuthFailNotify[platform] = time.Now()
+	notifyAuthFailure := withAuthFailureCooldown(func(platform, title, desc string, ntype notifications.NotificationType) {
 		s.notifyMgr.Send(title, desc, ntype,
 			[]notifications.Field{{Name: "Platform", Value: platform, Inline: true}},
 			notifications.SendOptions{Event: "auth"},
 		)
-	}
+	})
 
 	// Cooldown for auto-resume on broadcast re-detection: a restarted
 	// broadcast can be re-detected on every monitor cycle (as often as
@@ -348,25 +560,11 @@ func (s *runState) wireMonitorCallbacks() {
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			autoEnabled = c.Cookies.AutoEnabled
 		})
-		if !autoEnabled {
-			s.log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
-			return
-		}
-		// The pass itself, and the per-platform branch it takes, live in
-		// runCookieRecovery — see cookieReplacementGuidance there for why the
-		// notification copy leads with the cookie FILE rather than the
-		// Settings wizard.
-		s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					s.log.Error("auto-cookie recovery panic", "panic", r)
-				}
-			}()
-			refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer refreshCancel()
-			s.runCookieRecovery(refreshCtx, platform, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
-		}()
+		// Both branches — attempt a recovery, or report that no attempt will
+		// be made — live in handleRecoveryNeeded so each can be driven
+		// directly by a test. The method value is taken unconditionally and
+		// is not called on the disabled path.
+		s.handleRecoveryNeeded(platform, autoEnabled, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
 	}
 
 	// When a platform transitions from not-authenticated to authenticated,
@@ -493,7 +691,24 @@ func (s *runState) wireMonitorCallbacks() {
 	// live each cycle, so toggling the setting or acquiring cookies takes effect
 	// on the next cycle with no restart.
 	s.feedMon.FetchMembership = func(ctx context.Context, channelID string) ([]monitor.MembershipVideo, error) {
-		vids, err := s.ytService.FetchMembershipVideos(ctx, channelID)
+		vids, verdict, err := s.ytService.FetchMembershipVideos(ctx, channelID)
+		// The login verdict is a credential-health signal, not a discovery
+		// result, so MembershipFetchFunc keeps its two-value shape and the
+		// adapter absorbs the third here.
+		//
+		// Routed BEFORE the error return on purpose. Whether the tab scan
+		// produced videos is a different question from whether YouTube
+		// recognised the session, and this placement does not depend on the
+		// two answers being packaged together. It costs nothing today —
+		// FetchMembershipVideos returns SessionAuthUnknown on every failure
+		// path — and it means a conclusive verdict reported alongside a failed
+		// fetch would still reach the health signal rather than being dropped
+		// by an early return nobody re-read.
+		//
+		// This closure runs once per configured channel per feed cycle, so a
+		// dead session arrives as N identical verdicts. ObserveLiveness owns
+		// the de-duplication — see livenessRefireWindow in internal/cookies.
+		routeLivenessVerdict(s.cookieRefresh.ObserveLiveness, verdict)
 		if err != nil {
 			return nil, err
 		}
@@ -508,7 +723,50 @@ func (s *runState) wireMonitorCallbacks() {
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			enabled = c.Monitors.MembershipDiscoveryEnabled()
 		})
-		return enabled && s.ytService.HasAuthCookies()
+		// HasAnyAuthCookie, not HasAuthCookies: this gate asks "should we
+		// even look", and the complete-set predicate answers no for exactly
+		// the half-cleared session the probe exists to detect — SAPISID
+		// present with LOGIN_INFO gone reads as never-configured. Left
+		// strict, FetchMembershipVideos is never called in that state and
+		// the verdict it now returns is unreachable.
+		//
+		// This value reaches FOUR consumers via membershipActive()
+		// (internal/monitor/feed.go:645). Widening was checked against all
+		// four, not just the first:
+		//
+		//	feed.go:513     the discovery arm — upserts only videos it finds
+		//	walk.go:90      skips membership-source rows when inactive
+		//	walk.go:247     same-cycle escalation to the authed probe
+		//	archive.go:131  skips membership-source rows when inactive
+		//
+		// None writes durable state for a dead session: a refusal is
+		// OutcomeDenied, applyProbe runs only on OutcomeProbed, and archive's
+		// denied arm just counts a retry. No job, no classification, no
+		// completion flag — unlike the backfill sweep's own gate
+		// (services.go), which persists backfilled_with_membership and must
+		// stay strict.
+		//
+		// There IS a real cost, in two parts, and the second is the larger.
+		//
+		// Per membership ROW: with a half-cleared session those rows are no
+		// longer parked at walk.go:90 / archive.go:131, so each burns one
+		// refused authenticated probe per cycle, and walk.go:247's same-cycle
+		// escalation fires too.
+		//
+		// Per membership CHANNEL: the discovery arm at feed.go:513 now also runs,
+		// so every feed cycle pays a full authenticated /channel/<id>/membership
+		// page fetch and parse — the ~1MB payload FetchMembershipVideos
+		// describes, capped by utils.MaxFetchBodySize at 50MB
+		// (internal/utils/http.go: 50 << 20) — where the strict gate skipped it
+		// outright. Indefinitely, for as long as the session stays
+		// half-cleared.
+		//
+		// Both are bounded and neither is a regression: this is the same work a
+		// HEALTHY install already does every cycle, and it is exactly the fetch
+		// the liveness verdict is read off — refusing to pay it is refusing to
+		// observe the session at all. It stops the moment the cookies are fixed
+		// or the operator clears them.
+		return enabled && s.ytService.HasAnyAuthCookie()
 	}
 
 	// createYouTubeJob creates a YouTube job per the disposition's creation
