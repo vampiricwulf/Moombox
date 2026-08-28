@@ -508,8 +508,30 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		return false, false, err
 	}
 
-	if existingData, readErr := os.ReadFile(s.cookiePath); readErr == nil && len(existingData) > 0 {
-		netscapeCookies = mergeCookieFiles(string(existingData), netscapeCookies)
+	existingData, readErr := readCookieFile(s.cookiePath)
+	switch {
+	case readErr == nil:
+		if len(existingData) > 0 {
+			netscapeCookies = mergeCookieFiles(string(existingData), netscapeCookies)
+		}
+	case os.IsNotExist(readErr):
+		// No cookies.txt yet — the normal first-run case. Nothing to
+		// merge; proceed with just the freshly extracted cookies exactly
+		// as before.
+	default:
+		// A transient read failure (permission blip, locked file, I/O
+		// error) is NOT the same as "no existing file" and must not be
+		// treated as nothing to merge — that used to fall straight
+		// through to the write below with ONLY the newly extracted
+		// cookies, silently replacing a cookies.txt that may hold
+		// working credentials for the other platform. Abort instead:
+		// don't merge, don't write.
+		mergeErr := fmt.Errorf("could not read existing cookies.txt before merging new cookies: %w", readErr)
+		s.logger.Error("cookie setup: aborting rather than overwrite cookies.txt after a read failure",
+			"path", s.cookiePath, "err", readErr)
+		s.setError(mergeErr.Error())
+		s.cleanup()
+		return false, false, mergeErr
 	}
 
 	// Write merged cookies via temp file + rename to prevent corruption on partial failure
@@ -1055,8 +1077,30 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 		return refreshAborted(), err
 	}
 	var previousCookies string
-	if existingData, readErr := os.ReadFile(s.cookiePath); readErr == nil && len(existingData) > 0 {
-		previousCookies = string(existingData)
+	existingData, readErr := readCookieFile(s.cookiePath)
+	switch {
+	case readErr == nil:
+		if len(existingData) > 0 {
+			previousCookies = string(existingData)
+		}
+	case os.IsNotExist(readErr):
+		// No cookies.txt yet — nothing to merge or protect via rollback.
+	default:
+		// This has to abort BEFORE previousCookies is used for anything:
+		// it gates both the merge below and, on the import path, whether
+		// the pre-import verification that makes rollback possible even
+		// runs at all (`importedFromProfile && previousCookies != ""`
+		// further down). Silently treating a transient read failure as
+		// "no existing file" would leave previousCookies empty, which
+		// both disables that rollback AND lets the write below replace
+		// cookies.txt with only the newly-fetched cookies — losing
+		// whatever the other platform had. Abort instead: don't merge,
+		// don't write, don't touch the rollback gate.
+		mergeErr := fmt.Errorf("could not read existing cookies.txt before merging refreshed cookies: %w", readErr)
+		s.setError(mergeErr.Error())
+		s.logger.Error("cookie refresh: aborting rather than overwrite cookies.txt after a read failure",
+			"path", s.cookiePath, "err", readErr)
+		return refreshAborted(), mergeErr
 	}
 
 	// Verify BEFORE overwriting, on the import path only. Rolling back a
@@ -1701,6 +1745,17 @@ func isWindows() bool {
 // FAILED write — notably a rollback that cannot put the previous credentials
 // back, which decides what the operator is told is on disk.
 var writeCookieFile = writeFileAtomic
+
+// readCookieFile is the read FinishSetup and RefreshCookiesDetailed go
+// through before merging freshly-extracted cookies into an existing
+// cookies.txt, as a package variable so tests can exercise a read that fails
+// for a reason OTHER than "file does not exist" (a permission blip, a locked
+// file, an I/O error) without needing to make a real fixture file
+// unreadable — mirrors writeCookieFile above. See the callers for why that
+// distinction matters: os.IsNotExist is the normal first-run case, and every
+// other error must abort rather than silently proceed as if there were
+// nothing to merge.
+var readCookieFile = os.ReadFile
 
 // writeFileAtomic writes data to a temp file then renames it to the target path,
 // preventing corruption on partial failure. Applies
