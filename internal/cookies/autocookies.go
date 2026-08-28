@@ -1247,6 +1247,51 @@ func (v RefreshVerdict) String() string {
 	}
 }
 
+// RecheckedPlatform pairs one platform's display label with what the manual
+// recheck concluded about it.
+type RecheckedPlatform struct {
+	Label   string
+	Verdict RefreshVerdict
+}
+
+// RecheckReport words the answer to a manual "recheck cookies".
+//
+// TWO SURFACES, ONE SENTENCE, exported for the same reason
+// RefreshDeclinedCauses is: the TUI's R C chord and the Web dashboard's
+// refresh button are THE SAME GESTURE, and they were answering it differently
+// — the TUI with a three-way verdict, the Web with a two-arm
+// "successful"/"completed" keyed on a success bool that is false for a check
+// that never reached the site. The Web copy cannot import Go, so a test pins
+// the rendered string against this function; sharing the sentence is what
+// stops a fourth phrasing appearing the next time one side is edited.
+//
+// Only RefreshFailed says anything about the credentials. RefreshUnknown
+// speaks about the CHECK — "could not establish", the arc's settled wording —
+// because a check that could not reach the site has concluded nothing, and
+// telling an operator their cookies failed is how they get sent off to
+// re-export a session that is perfectly alive.
+//
+// Callers pass only the platforms they actually monitor; an empty list is a
+// real state (nothing configured) and gets its own sentence rather than an
+// empty one.
+func RecheckReport(platforms ...RecheckedPlatform) string {
+	if len(platforms) == 0 {
+		return "Cookies: no platforms configured"
+	}
+	parts := make([]string, 0, len(platforms))
+	for _, p := range platforms {
+		switch p.Verdict {
+		case RefreshOK:
+			parts = append(parts, p.Label+" OK")
+		case RefreshFailed:
+			parts = append(parts, p.Label+" not authenticated")
+		default:
+			parts = append(parts, p.Label+" — could not establish")
+		}
+	}
+	return "Cookies: " + strings.Join(parts, ", ")
+}
+
 // RefreshResult reports a refresh pass PER PLATFORM.
 //
 // The whole-service bool that RefreshCookies still returns cannot answer the

@@ -345,18 +345,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// CONCLUSION, and this line asserted it for every check that failed to
 		// reach the site — the exact claim Arc 1 stopped the internal
 		// machinery from making, still being made to the operator's face.
-		var parts []string
+		//
+		// The wording itself lives in cookies.RecheckReport, not here: the Web
+		// dashboard's refresh button is the same gesture and had drifted to a
+		// different answer entirely. This side decides only WHICH platforms
+		// were checked; the sentence is shared.
+		var checked []cookies.RecheckedPlatform
 		if a.statusBar.ytActive {
-			parts = append(parts, cookieRecheckPart("YouTube", msg.YouTube))
+			checked = append(checked, cookies.RecheckedPlatform{Label: "YouTube", Verdict: msg.YouTube})
 		}
 		if a.statusBar.twActive {
-			parts = append(parts, cookieRecheckPart("Twitch", msg.Twitch))
+			checked = append(checked, cookies.RecheckedPlatform{Label: "Twitch", Verdict: msg.Twitch})
 		}
-		if len(parts) == 0 {
-			a.setFeedback("Cookies: no platforms configured")
-		} else {
-			a.setFeedback("Cookies: " + strings.Join(parts, ", "))
-		}
+		a.setFeedback(cookies.RecheckReport(checked...))
 		return a, nil
 
 	case cookieForceRefreshResultMsg:
@@ -1017,24 +1018,6 @@ func (a *App) channelDisplayName(chID string) string {
 		})
 	}
 	return name
-}
-
-// cookieRecheckPart words one platform's half of the R C feedback line.
-//
-// The phrasing is the arc's settled three-way vocabulary — "failed" for a
-// conclusion, "could not establish" for an absence of one — the same split
-// setupCookieAcceptedMessage below and cookieRefreshReportFor in
-// cmd/moombox/services.go already draw. Only RefreshFailed earns a word about
-// the credentials; RefreshUnknown speaks about the CHECK.
-func cookieRecheckPart(platform string, v cookies.RefreshVerdict) string {
-	switch v {
-	case cookies.RefreshOK:
-		return platform + " OK"
-	case cookies.RefreshFailed:
-		return platform + " not authenticated"
-	default:
-		return platform + " — could not establish"
-	}
 }
 
 // setupCookieAcceptedMessage words a platform the setup ACCEPTED.

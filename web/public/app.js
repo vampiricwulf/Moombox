@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
@@ -771,12 +771,18 @@ class MoomboxApp {
         this.twitchAuthStatus = data.twitchAuthStatus;
         if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
-        this.showToast(
-          data.success
-            ? "Cookies refreshed successfully"
-            : "Cookie check completed",
-          data.success ? "success" : "primary",
+        // Worded from the verdicts, in cookieRecheckToast, where it can be
+        // executed. The two-arm toast this replaces was keyed on
+        // `data.success` — false for a check that never reached the site —
+        // so the one gesture that asks "what are my credentials doing" was
+        // the last surface in this arc that could not say.
+        const recheck = cookieRecheckToast(
+          this.activePlatforms,
+          data.cookieStatus,
+          data.twitchAuthStatus,
+          data.success,
         );
+        this.showToast(recheck.message, recheck.variant);
       } else {
         this.showToast("Failed to recheck cookies", "danger");
       }

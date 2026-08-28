@@ -313,42 +313,76 @@ func TestNoCookiesKeepsItsPlatformSpecificTreatment(t *testing.T) {
 	}
 }
 
-// TestCookieRecheckPartSpeaksFromTheVerdict covers the R C feedback line.
+// TestRecheckFeedbackIsTheSharedSentence covers the R C line, through the
+// Update() that actually produces it.
 //
-// It said "YouTube not authenticated" for every check that failed to REACH
-// YouTube — a conclusion the check did not draw, and the most direct way the
-// operator gets told to go re-export working cookies.
+// Two things it pins, and neither can be seen from the copy helper alone:
 //
-// The invariant at the bottom is the real guard: across every row, the
-// conclusive wording appears if and only if the verdict was conclusive. A
-// fourth verdict added later cannot quietly inherit it.
-func TestCookieRecheckPartSpeaksFromTheVerdict(t *testing.T) {
+//   - DELEGATION. The wording now lives in cookies.RecheckReport, shared with
+//     the Web dashboard's refresh button — the same gesture, which was
+//     answering it with a different sentence entirely. Comparing against the
+//     shared renderer rather than against literals is what makes that
+//     property hold: reword either side alone and this fails. Literals here
+//     would let the two drift apart while both tests stayed green, which is
+//     the exact defect RefreshDeclinedCauses was exported to stop one surface
+//     over.
+//   - GATING. Which platforms appear is a TUI decision (ytActive/twActive)
+//     and nothing covered it. The inactive-platform rows below are the point:
+//     an operator running YouTube only must not be told anything about a
+//     Twitch session they never configured.
+//
+// The verdict pair is deliberately OK/failed rather than something uniform,
+// so a gating bug that dropped the wrong platform produces a different
+// sentence rather than the same one twice.
+func TestRecheckFeedbackIsTheSharedSentence(t *testing.T) {
+	const (
+		yt = cookies.RefreshOK
+		tw = cookies.RefreshFailed
+	)
 	for _, tc := range []struct {
-		name       string
-		verdict    cookies.RefreshVerdict
-		wantSaid   []string
-		wantUnsaid []string
+		name               string
+		ytActive, twActive bool
+		want               string
 	}{
-		{"alive", cookies.RefreshOK, []string{"YouTube OK"}, []string{"not authenticated", "could not establish"}},
-		{"rejected", cookies.RefreshFailed, []string{"not authenticated"}, []string{"could not establish"}},
-		{"unreachable", cookies.RefreshUnknown, []string{"could not establish"}, []string{"not authenticated"}},
+		{
+			name: "both platforms", ytActive: true, twActive: true,
+			want: cookies.RecheckReport(
+				cookies.RecheckedPlatform{Label: "YouTube", Verdict: yt},
+				cookies.RecheckedPlatform{Label: "Twitch", Verdict: tw},
+			),
+		},
+		{
+			name: "youtube only", ytActive: true,
+			want: cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: yt}),
+		},
+		{
+			name: "twitch only", twActive: true,
+			want: cookies.RecheckReport(cookies.RecheckedPlatform{Label: "Twitch", Verdict: tw}),
+		},
+		{
+			// A real state, and it must not render an empty or half-formed
+			// sentence.
+			name: "neither", want: cookies.RecheckReport(),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := cookieRecheckPart("YouTube", tc.verdict)
-			for _, want := range tc.wantSaid {
-				if !strings.Contains(got, want) {
-					t.Errorf("%v feedback does not say %q: %q", tc.verdict, want, got)
-				}
-			}
-			for _, unwanted := range tc.wantUnsaid {
-				if strings.Contains(got, unwanted) {
-					t.Errorf("%v feedback asserts %q, which this verdict does not establish: %q",
-						tc.verdict, unwanted, got)
-				}
-			}
-			if !strings.HasPrefix(got, "YouTube") {
-				t.Errorf("feedback lost the platform name it is joined under: %q", got)
+			app := NewApp()
+			app.statusBar.SetActivePlatforms(tc.ytActive, tc.twActive)
+			app.Update(cookieRecheckResultMsg{YouTube: yt, Twitch: tw})
+
+			if app.feedbackMsg != tc.want {
+				t.Errorf("R C feedback = %q, want %q — the TUI and the Web dashboard answer the "+
+					"same gesture and must render the same sentence", app.feedbackMsg, tc.want)
 			}
 		})
+	}
+
+	// THE PREMISE. If the shared renderer produced the same string for every
+	// verdict, every row above would pass while saying nothing at all about
+	// what the operator is told.
+	if cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshUnknown}) ==
+		cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshFailed}) {
+		t.Fatal("premise lost: an inconclusive check and a conclusive rejection render identically, " +
+			"so the equality checks above distinguish nothing")
 	}
 }

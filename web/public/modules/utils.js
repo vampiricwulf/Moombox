@@ -466,3 +466,80 @@ export function cookieIndicatorState(platform, status, reloginRequired) {
   }
   return { className: "indicator-error", title: `${meta.name}: Not authenticated` };
 }
+
+/**
+ * Word the toast for a manual cookie recheck: {message, variant}.
+ *
+ * THE SAME GESTURE AS THE TUI'S R C CHORD, and it was answering it
+ * differently. This toast said "Cookies refreshed successfully" or "Cookie
+ * check completed", keyed on `data.success` — which is
+ * `youtubeAuthenticated || twitchAuthenticated`, and therefore false for a
+ * check that never reached the site. So the one gesture whose entire purpose
+ * is "tell me what my credentials are doing" answered with a sentence that
+ * named neither the platform nor the finding, in the arc that taught every
+ * other surface to say exactly that.
+ *
+ * `message` is deliberately NOT worded here. It is rendered by
+ * cookies.RecheckReport in Go and reproduced below character for character,
+ * pinned by a test that runs this function and compares against the Go output
+ * — the same discipline RefreshDeclinedCauses is held to, because "the two
+ * UIs answer the same question the same way" is a property that decays the
+ * moment one side is edited alone.
+ *
+ * `variant` is web-only (Shoelace has no counterpart in the TUI) and ranks
+ * the outcomes: a conclusive failure is the thing to act on, so it outranks a
+ * check that concluded nothing, which in turn outranks a clean pass.
+ *
+ * The `default` arm is the additive contract, and it degrades to the
+ * UNQUALIFIED legacy copy rather than to the hedged one — same rule
+ * cookieIndicatorState follows. An older binary emits no `verification` at
+ * all, and hedging about every recheck on every older build would be a new
+ * wrong answer in place of the old one.
+ */
+export function cookieRecheckToast(activePlatforms, cookieStatus, twitchAuthStatus, success) {
+  // The legacy two-arm copy, reached only where this function cannot word a
+  // truthful answer. Written once so the fallback cannot drift from itself.
+  const legacy = () => ({
+    message: success ? "Cookies refreshed successfully" : "Cookie check completed",
+    variant: success ? "success" : "primary",
+  });
+
+  // MISSING is not EMPTY. An absent activePlatforms means we do not know which
+  // platforms are configured; an empty one means none are, and only the second
+  // may be reported as such.
+  if (!activePlatforms) return legacy();
+
+  const rows = [
+    ["youtube", "YouTube", cookieStatus],
+    ["twitch", "Twitch", twitchAuthStatus],
+  ].filter(([key]) => activePlatforms[key] === true);
+
+  const parts = [];
+  let failed = false;
+  let unestablished = false;
+  for (const [, label, status] of rows) {
+    switch (status?.verification) {
+      case "ok":
+        parts.push(`${label} OK`);
+        break;
+      case "failed":
+        parts.push(`${label} not authenticated`);
+        failed = true;
+        break;
+      case "unknown":
+        parts.push(`${label} — could not establish`);
+        unestablished = true;
+        break;
+      default:
+        return legacy();
+    }
+  }
+
+  if (parts.length === 0) {
+    return { message: "Cookies: no platforms configured", variant: "neutral" };
+  }
+  return {
+    message: "Cookies: " + parts.join(", "),
+    variant: failed ? "danger" : unestablished ? "warning" : "success",
+  };
+}

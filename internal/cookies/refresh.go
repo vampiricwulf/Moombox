@@ -195,14 +195,48 @@ type AuthStatus struct {
 // verdictFromCheck projects one platform's (authenticated, err) pair onto the
 // shared three-way enum.
 //
-// The err argument is the INCONCLUSIVE signal, not a failure signal: a non-200,
-// a redirected answer and a 200 with no recognisable login marker all arrive
-// here as a non-nil error, and none of them is evidence against the
-// credentials. Only a check that completed may return RefreshFailed — which
-// covers both "the credentials were rejected" and "there are none", exactly as
-// RefreshFailed is documented.
+// err is ALMOST ALWAYS the inconclusive signal, not a failure signal: a
+// non-200, a redirected answer and a 200 with no recognisable login marker all
+// arrive here as a non-nil error, and none of them is evidence against the
+// credentials.
+//
+// ONE SENTINEL IS THE EXCEPTION, and it is a finding rather than an absence of
+// one. ErrAuthCheckNotAttempted is raised only AFTER HasAnyYouTubeAuthCookie
+// has said the platform is configured, when the jar still cannot produce a
+// cookie header or a SAPISIDHASH — the realistic shape being LOGIN_INFO
+// surviving while the whole SAPISID family is gone. No request will ever be
+// signable out of that jar, and no amount of waiting changes it; the operator
+// has to re-export. "Authenticated requests will not work" is precisely what
+// RefreshFailed is documented to mean, and it covers "there are no usable
+// credentials" as squarely as it covers "the site rejected them".
+//
+// Folding it into RefreshUnknown reported a permanent, actionable failure as
+// uncertainty: hedged copy on both UIs, and on the TUI bar an indicator that
+// then drops out at tierEssential — where before the tri-state landed it was
+// an always-visible red alarm. That is this arc's own defect class running
+// backwards, and it is the only residual that could leave a user UNWARNED
+// rather than merely under-informed.
+//
+// PRESENTATION ONLY, which is what makes the split safe to make here. This
+// function's result reaches nothing but AuthStatus's two verdict fields.
+// Everything that DECIDES anything reads the error itself and never a verdict:
+// shouldFireRecovery keys on checkErr, prev-state advancement gates on
+// `ytErr == nil`, and advanceIdentityBaseline takes the error directly. The
+// sentinel therefore stays inconclusive everywhere it drives behaviour — it
+// must, or a structural failure would be read as a verdict on the credentials
+// and fire recovery for a jar no browser refresh can repair — and becomes a
+// conclusion only where a human reads it.
+//
+// The tier ladder is NOT the lever for this and was rejected as one:
+// promoting the whole Unknown class closes no hole, because the actionable
+// failures already reach the narrowest bar by two tier-surviving routes
+// (RefreshFailed → CookieStatusCookiesOnly, and a parked COOKIES? job →
+// cookiesRejected, independent of the check entirely). The defect was that
+// THIS error was classified as Unknown, not that Unknown is too quiet.
 func verdictFromCheck(authenticated bool, err error) RefreshVerdict {
 	switch {
+	case errors.Is(err, ErrAuthCheckNotAttempted):
+		return RefreshFailed
 	case err != nil:
 		return RefreshUnknown
 	case authenticated:
