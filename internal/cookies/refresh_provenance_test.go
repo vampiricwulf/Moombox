@@ -137,8 +137,9 @@ func TestGuideBouncedThroughAnotherHostIsInconclusive(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want non-nil — a page fetched without our cookies is not a verdict on our session")
 	}
-	// Same rule as TestTwitchValidateErrorNamesOnlyTheStatus: this string is
-	// rendered in the Web UI and TUI, so it may never carry cookie material.
+	// Same rule as TestTwitchValidateErrorNamesOnlyTheStatus: this string may
+	// never carry cookie material. For where it actually goes, see
+	// errGuideLoginMarkerUnreadable's doc comment — not the UIs.
 	if strings.Contains(err.Error(), "sapisid-value") || strings.Contains(err.Error(), "login-info-value") {
 		t.Errorf("the error carries cookie material: %q", err)
 	}

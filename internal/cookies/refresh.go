@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -692,8 +693,13 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 
 	// Check YouTube auth and refresh session cookies in a single request
 	// Returns: (authenticated bool, err error)
-	//   err != nil       => network/request error (not auth loss)
-	//   false, nil       => genuine auth failure or no cookies
+	//   err != nil       => INCONCLUSIVE. Not auth loss, and not necessarily a
+	//                       network fault either: a non-200, a redirected
+	//                       answer, or a 200 whose body carries no login
+	//                       marker we recognise all land here. All that is
+	//                       claimed is that this check learned nothing.
+	//   false, nil       => conclusive. An explicit negative marker, or no
+	//                       cookies configured at all.
 	ytAuth, ytErr := rs.checkAndRefreshYouTube(ctx)
 	ytErrStr := ""
 	if ytErr != nil {
@@ -752,8 +758,11 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	}
 
 	// Update previous auth state tracking.
-	// Only update previous state when the check was conclusive (no network error).
-	// A network-error check deliberately does NOT mark the platform
+	// Only update previous state when the check was CONCLUSIVE. That is not
+	// the same as "no network error": a non-200, an answer from the wrong
+	// host, and a 200 whose body carries no marker we recognise are all
+	// inconclusive too, and none of them may move this baseline.
+	// An inconclusive check deliberately does NOT mark the platform
 	// "concluded" — the next conclusive check still counts as that
 	// platform's first, so shouldFireRecovery's startup-dead-auth case
 	// still applies to it.
@@ -785,7 +794,9 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	}
 
 	// Detect auth loss transitions: previously authenticated -> not authenticated,
-	// and the failure is genuine auth loss (err == nil), not a network error.
+	// and the failure is genuine auth loss (err == nil) rather than any of the
+	// inconclusive outcomes — a network fault, a non-200, a redirected answer,
+	// or a 200 we could not read a marker out of.
 	//
 	// Startup case: auth already dead when the process began never produces
 	// a witnessed transition, so it previously stayed silent forever
@@ -1052,6 +1063,285 @@ func youtubeGuideRequestBody() string {
 	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
 }
 
+// errGuideLoginMarkerUnreadable is what a 200 whose body carries no login
+// marker we recognise resolves to. It is an INCONCLUSIVE outcome, in the same
+// family as a non-200 and a failed provenance check, and every consumer already
+// handles it: shouldFireRecovery returns false on any checkErr, and
+// checkPlatformAuth maps it to verifyUnknown.
+//
+// It deliberately does NOT wrap ErrAuthCheckNotAttempted. That sentinel means
+// the question could not be FORMED — no cookie header, no SAPISIDHASH, nothing
+// left the process. Here a request went out and came back; we simply could not
+// read the answer. autocookies_profile.go's `attempted` flag turns on exactly
+// that distinction.
+//
+// WHERE THIS STRING ACTUALLY GOES, checked rather than assumed, because an
+// earlier draft of this comment claimed the Web UI and TUI and that was FALSE:
+// AuthStatus.YouTubeError, the field doRefresh assigns it to, has no reader
+// anywhere in the tree. Every consumer of AuthStatus builds its own projection
+// from the three booleans — internal/web/routes/cookies.go (both handlers),
+// cmd/moombox/routes_wiring.go (status route) and tui_wiring.go
+// (authStatusToTUI's badge, OnRecheckCookies' two bools). The second possible
+// route is closed too: checkPlatformAuth consumes the error for an errors.Is
+// test and discards the value, so the rollback messaging composes from the
+// verification STATE and never interpolates this text.
+//
+// The one sink is rs.logger.Debug in doRefresh, and what that means depends on
+// the operator's log level — which makes the no-body-bytes rule below MORE
+// load-bearing than "it goes to a log", not less:
+//
+//   - At the default INFO (config.go's LogLevel) the line has NO sink at all.
+//     Logger.log returns at its slog.Enabled gate before formatting, the ring
+//     buffer, or any subscriber.
+//   - At DEBUG the same line fans out to FIVE places: the rotating log file;
+//     the in-memory ring buffer, which GET /api/logs serves to any authenticated
+//     client; the Web UI's live log stream (cmd/moombox's log-forwarder
+//     subscriber → wsHub.BroadcastLog → the frontend's "log" case); the per-job
+//     log buffers that same forwarder writes to the DATABASE; and the TUI log
+//     panel via its own subscriber.
+//
+// So the surface is conditional, persistent (file + DB), and remotely readable
+// — and DEBUG is exactly the level an operator raises to when their cookies
+// look broken, i.e. precisely when this error fires. TestUnreadableGuideError-
+// CarriesNoBody earns its place on that basis: this error names no host, no
+// header and no body bytes. The unreadable body is the subject of the report
+// and must never become its content.
+//
+// The wording says "learned nothing", not "failed", for when that changes.
+// Follow-up 1 of the remediation plan is to surface the inconclusive state in
+// both UIs; until it lands, an install behind an intercepting intermediary
+// still RENDERS as "cookies found, not authenticated" (doRefresh sets
+// YouTubeAuthenticated: ytAuth, which is false on an inconclusive check). What
+// this change stops is the false recovery FIRE and the notification — not yet
+// the false badge.
+var errGuideLoginMarkerUnreadable = errors.New(
+	"the guide reply carried no login marker we recognise, so this check learned nothing about the session")
+
+// The guide reply's login marker, in the two shapes it has been observed in.
+//
+// Measured anonymously against the live endpoint on 2026-08-27 (an anonymous
+// POST needs no credentials, so this is cheap to re-verify):
+//
+//	"serviceTrackingParams":[...{"key":"logged_in","value":"0"}...]
+//	"mainAppWebResponseContext":{"loggedOut":true,...}
+//
+// Two things in that are worth writing down. The negative marker really is
+// `logged_in` = `"0"` — a STRING "0", not a JSON false — which is why the
+// sibling reader in internal/youtube deliberately refuses to map 1/0 and this
+// one must: the two layers read different serialisations of the same flag.
+// And an anonymous reply carries NO `loggedIn` key at all; it carries
+// `loggedOut:true` instead. So a bare `bool` field could not tell "the flag
+// said false" from "the flag was absent", which is precisely the distinction
+// this fix turns on — hence the pointers on the struct below.
+const (
+	guideLoginParamKey = "logged_in"
+	guideLoginParamIn  = "1"
+	guideLoginParamOut = "0"
+)
+
+// guideLoginMarkersIn / guideLoginMarkersOut are the literal needles for the
+// string fallback, which runs ONLY when the body is not valid JSON at all.
+//
+// Positive needles only ever grew: the two that were here before are kept
+// verbatim, and the third is the shape actually measured on the wire (the
+// params are objects, so `"logged_in":"1"` never matched a real reply — a
+// latent miss that was harmless while every real reply parsed as JSON, and is
+// still harmless now because a miss is inconclusive). Never removing an
+// accepted positive form is the rule that keeps this change from costing an
+// authenticated session its verdict.
+//
+// Negative needles are new and are what make a conclusion possible here at
+// all, so each is either measured on the wire or the unambiguous negation of a
+// positive already accepted above.
+//
+// Deliberately NOT tolerant of whitespace or alternate quoting, unlike the
+// sibling reader in internal/youtube: see youtubeGuideAuthVerdict.
+var (
+	guideLoginMarkersIn = []string{
+		`"key":"logged_in","value":"1"`,
+		`"logged_in":"1"`,
+		`"loggedIn":true`,
+	}
+	guideLoginMarkersOut = []string{
+		`"key":"logged_in","value":"0"`,
+		`"logged_in":"0"`,
+		`"loggedIn":false`,
+		`"loggedOut":true`,
+	}
+)
+
+// youtubeGuideAuthVerdict reads a 200 guide reply and says whether it is an
+// observation of a signed-in session, a signed-out one, or neither.
+//
+// A conclusive "not authenticated" now requires an EXPLICIT negative marker.
+// This used to be the fall-off-the-end answer: three separate exits — JSON
+// parse failure with no positive needle, no `logged_in` = "1" among the
+// tracking params, and `loggedIn` not true — all ended in `(false, nil)`,
+// which is the one thing shouldFireRecovery acts on.
+//
+// The body that breaks that shape is a 200 carrying no marker at all. A
+// transparent, NON-redirecting intermediary — captive portal, corporate proxy
+// (http.ProxyFromEnvironment is on the shared transport) — answering our POST
+// with HTML passes the provenance guard (same host, same scheme, credential
+// header intact) and passes the status check, then produces a conclusive
+// verdict of "your cookies are dead" about cookies that are perfectly fine.
+// The same shape covers the fleet-wide case: one serialisation change upstream
+// would tell every install at once, at the only tier that notifies today.
+// A false failure is worse than a missed one, so anything unrecognisable is
+// now errGuideLoginMarkerUnreadable.
+//
+// This is the rule livenessVerdict (internal/youtube/watch_page.go) already
+// applies to the watch page: an explicit marker or nothing. The RULE is
+// mirrored, not the code — internal/cookies must not import internal/youtube
+// (internal/youtube/auth.go already imports this package, so the dependency
+// only runs the other way), and the two read different serialisations anyway:
+// booleans in a ytcfg blob there, "1"/"0" strings in a JSON object here.
+//
+// Whitespace and quoting tolerance, decided deliberately rather than copied:
+//
+//   - The JSON path already has FULL tolerance, and better tolerance than the
+//     sibling's hand-rolled reader — encoding/json is a real parser, so
+//     arbitrary whitespace, key order, unknown sibling fields and escaped
+//     strings all cost nothing. Every real reply reaches this path.
+//   - The string fallback stays literal-substring, with no whitespace or
+//     quote-form tolerance. It runs only when the body is NOT valid JSON, i.e.
+//     when the serialisation is already broken, and under the new rule every
+//     needle it misses lands on inconclusive rather than on a verdict. Adding
+//     a tolerant scanner would mean duplicating ~120 lines of the sibling's
+//     generic marker reader to buy accuracy on a path whose failure mode is
+//     already the safe one — and a redundant helper is its own defect.
+//
+// Positive wins over negative, and is checked first, so no reply that read as
+// authenticated before reads as anything else now.
+func youtubeGuideAuthVerdict(respBody []byte) (bool, error) {
+	var data struct {
+		ResponseContext struct {
+			ServiceTrackingParams []struct {
+				Params []struct {
+					Key string `json:"key"`
+					// RawMessage, not string, and the reason is a real failure
+					// mode rather than tidiness. encoding/json fails the WHOLE
+					// body if any single field mistypes, so one unrelated param
+					// gaining a non-string value — `cver`, `e`, `visitor_data`,
+					// keys this reader has no interest in — would collapse the
+					// JSON path to the literal-needle fallback for every reply.
+					// That fallback cannot see the measured wire shape's
+					// positive as reliably as a parser can, so tier-1 would
+					// degrade to permanently inconclusive: safe, but blind, and
+					// triggered by a field we never asked about. Deferring the
+					// decode confines that failure to the one param it actually
+					// happened on.
+					//
+					// Key stays a plain string, and the residual is real: a
+					// non-string `key` on ANY param collapses the whole body
+					// exactly the same way, through the field this does not
+					// confine. (An earlier version of this comment claimed such
+					// a key would be unsurvivable in any typing. That is wrong —
+					// a lazy Key would survive it fine, for the same reason a
+					// lazy Value survives a mistyped Value.)
+					//
+					// It stays strict on COST, not on impossibility. Key is
+					// compared on every param in the reply, so deferring it
+					// means a decode per param on a ~15KB body on every refresh
+					// cycle, where Value is decoded at most a handful of times —
+					// only for params whose key already matched. Paying that to
+					// guard a param NAME, the half of a key/value list least
+					// likely to change type, is the wrong trade.
+					//
+					// If it ever happens the failure direction is the safe one:
+					// the body falls to the literal-needle fallback and tier-1
+					// degrades toward inconclusive, never toward a false alarm.
+					Value json.RawMessage `json:"value"`
+				} `json:"params"`
+			} `json:"serviceTrackingParams"`
+			MainAppWebResponseContext struct {
+				// Pointers on purpose: absent and present-false are different
+				// answers here, and only one of them is a verdict. See the
+				// marker commentary above — a real anonymous reply omits
+				// loggedIn entirely and sends loggedOut instead.
+				LoggedIn  *bool `json:"loggedIn"`
+				LoggedOut *bool `json:"loggedOut"`
+			} `json:"mainAppWebResponseContext"`
+		} `json:"responseContext"`
+	}
+
+	if err := json.Unmarshal(respBody, &data); err != nil {
+		return youtubeGuideAuthVerdictFallback(respBody)
+	}
+
+	// An explicit negative anywhere is remembered but never returned early:
+	// the scan keeps looking for a positive, because losing a signed-in read
+	// is the one regression this must not introduce.
+	negative := false
+
+	// Primary: serviceTrackingParams carries logged_in across all Innertube
+	// responses (several services each stamp their own copy).
+	for _, service := range data.ResponseContext.ServiceTrackingParams {
+		for _, param := range service.Params {
+			if param.Key != guideLoginParamKey {
+				continue
+			}
+			// Decoded here, for this param only — see the Value field comment.
+			var value string
+			if err := json.Unmarshal(param.Value, &value); err != nil {
+				// The marker itself is no longer a string. A marker we found
+				// and could not read is not a verdict; keep going.
+				continue
+			}
+			switch value {
+			case guideLoginParamIn:
+				return true, nil
+			case guideLoginParamOut:
+				negative = true
+			}
+			// Any other value is a marker we found and could not read. Not a
+			// verdict — fall through and let the rest of the reply speak.
+		}
+	}
+
+	// Secondary: mainAppWebResponseContext's own flag, in whichever direction
+	// it is emitted.
+	if in := data.ResponseContext.MainAppWebResponseContext.LoggedIn; in != nil {
+		if *in {
+			return true, nil
+		}
+		negative = true
+	}
+	if out := data.ResponseContext.MainAppWebResponseContext.LoggedOut; out != nil && *out {
+		negative = true
+	}
+	// `loggedOut:false` is deliberately not read as a positive. It has never
+	// been observed, and inferring "signed in" from it would be a guess; the
+	// cost of not guessing is an inconclusive result, which is safe.
+
+	if negative {
+		return false, nil
+	}
+	return false, errGuideLoginMarkerUnreadable
+}
+
+// youtubeGuideAuthVerdictFallback is youtubeGuideAuthVerdict for a body that
+// is not valid JSON. Same rule, literal needles.
+//
+// The slice is capped so the resulting Go string never carries the full
+// multi-MB payload — the marker lives in the first few hundred bytes of the
+// responseContext block, and scanning past 16KB only inflates memory and
+// widens the surface for session material to reach a log line (#24).
+func youtubeGuideAuthVerdictFallback(respBody []byte) (bool, error) {
+	respStr := string(respBody[:min(len(respBody), authBodyFallbackLimit)])
+	for _, marker := range guideLoginMarkersIn {
+		if strings.Contains(respStr, marker) {
+			return true, nil
+		}
+	}
+	for _, marker := range guideLoginMarkersOut {
+		if strings.Contains(respStr, marker) {
+			return false, nil
+		}
+	}
+	return false, errGuideLoginMarkerUnreadable
+}
+
 // authResponseIsOurs returns nil only when resp can be read as an answer about
 // THIS install's credential, and otherwise an error saying which way it failed
 // to qualify. `sent` is the request we dispatched; credentialHeader is the
@@ -1115,8 +1405,10 @@ func youtubeGuideRequestBody() string {
 //     rather than read a verdict off an exchange made in clear.
 //
 // Errors name a host and a header NAME — never a header value, never response
-// bytes. They reach AutoCookieService.setError and are rendered in the Web UI
-// and TUI.
+// bytes. For where these strings actually go — and why that makes the rule more
+// load-bearing rather than less — see errGuideLoginMarkerUnreadable's doc
+// comment. They do NOT reach AutoCookieService.setError: checkPlatformAuth
+// discards the value.
 func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeader string) error {
 	if sent == nil || sent.URL == nil {
 		return fmt.Errorf("could not determine what was asked")
@@ -1202,50 +1494,19 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
 	}
 
-	// YouTube always returns 200 even with invalid cookies — parse body
-	// and check for authentication indicators in the structured response.
-	var data struct {
-		ResponseContext struct {
-			ServiceTrackingParams []struct {
-				Params []struct {
-					Key   string `json:"key"`
-					Value string `json:"value"`
-				} `json:"params"`
-			} `json:"serviceTrackingParams"`
-			MainAppWebResponseContext struct {
-				LoggedIn bool `json:"loggedIn"`
-			} `json:"mainAppWebResponseContext"`
-		} `json:"responseContext"`
-	}
-
+	// YouTube always returns 200 even with invalid cookies, so the verdict has
+	// to come out of the body. youtubeGuideAuthVerdict owns that rule for both
+	// entry points; in particular a 200 carrying no marker it recognises is an
+	// inconclusive error here, NOT (false, nil).
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return false, fmt.Errorf("read YouTube auth response: %w", err)
 	}
-	if err := json.Unmarshal(respBody, &data); err != nil {
-		// Fallback to string matching if JSON parse fails. Cap the slice so
-		// the resulting Go string never carries the full multi-MB payload —
-		// the auth marker lives in the first few hundred bytes (#24).
-		respStr := string(respBody[:min(len(respBody), authBodyFallbackLimit)])
-		return strings.Contains(respStr, `"logged_in":"1"`) ||
-			strings.Contains(respStr, `"loggedIn":true`), nil
+	authenticated, err := youtubeGuideAuthVerdict(respBody)
+	if err != nil {
+		return false, fmt.Errorf("youtube auth check: %w", err)
 	}
-
-	// Primary: serviceTrackingParams contains logged_in across all Innertube responses
-	for _, service := range data.ResponseContext.ServiceTrackingParams {
-		for _, param := range service.Params {
-			if param.Key == "logged_in" && param.Value == "1" {
-				return true, nil
-			}
-		}
-	}
-
-	// Fallback: mainAppWebResponseContext.loggedIn
-	if data.ResponseContext.MainAppWebResponseContext.LoggedIn {
-		return true, nil
-	}
-
-	return false, nil
+	return authenticated, nil
 }
 
 // checkAndRefreshYouTube makes a single guide API request to both check
@@ -1309,38 +1570,15 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 		return false, fmt.Errorf("read YouTube auth response: %w", err)
 	}
 
-	// Check auth status from response
-	authenticated := false
-	var data struct {
-		ResponseContext struct {
-			ServiceTrackingParams []struct {
-				Params []struct {
-					Key   string `json:"key"`
-					Value string `json:"value"`
-				} `json:"params"`
-			} `json:"serviceTrackingParams"`
-			MainAppWebResponseContext struct {
-				LoggedIn bool `json:"loggedIn"`
-			} `json:"mainAppWebResponseContext"`
-		} `json:"responseContext"`
-	}
-
-	if err := json.Unmarshal(respBody, &data); err != nil {
-		// Same cap as the checkYouTubeAuth fallback (#24).
-		respStr := string(respBody[:min(len(respBody), authBodyFallbackLimit)])
-		authenticated = strings.Contains(respStr, `"logged_in":"1"`) ||
-			strings.Contains(respStr, `"loggedIn":true`)
-	} else {
-		for _, service := range data.ResponseContext.ServiceTrackingParams {
-			for _, param := range service.Params {
-				if param.Key == "logged_in" && param.Value == "1" {
-					authenticated = true
-				}
-			}
-		}
-		if !authenticated {
-			authenticated = data.ResponseContext.MainAppWebResponseContext.LoggedIn
-		}
+	// Same body rule as checkYouTubeAuth, through the same function — these two
+	// are near-duplicates and a rule applied to only one of them is a rule with
+	// a hole in it.
+	authenticated, err := youtubeGuideAuthVerdict(respBody)
+	if err != nil {
+		// No Set-Cookie merge on this path. A reply we could not read is not a
+		// reply we may write the jar from, for the same reason a redirected one
+		// is not: we do not know whose session it describes.
+		return false, fmt.Errorf("youtube auth check: %w", err)
 	}
 
 	// If authenticated, process Set-Cookie headers to refresh session cookies
@@ -1653,10 +1891,11 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 	// mistake the YouTube guide check made, reachable here through the same
 	// checkPlatformAuth mapping.
 	//
-	// The error names the status and nothing else. It reaches
-	// AutoCookieService.setError and is rendered in the Web UI and TUI, so a
-	// response body echoed back by an intermediary must never be
-	// interpolated into it.
+	// The error names the status and nothing else, so a response body echoed
+	// back by an intermediary can never be interpolated into it. It does NOT
+	// reach AutoCookieService.setError — services.go wires VerifyTwitchAuth to
+	// CheckTwitchAuth through checkPlatformAuth, which discards the value. See
+	// errGuideLoginMarkerUnreadable's doc comment for the real surface.
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return true, nil

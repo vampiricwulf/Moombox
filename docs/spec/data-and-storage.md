@@ -711,8 +711,32 @@ On startup, if `network.password_hash` contains a plaintext password (detected b
 
 | Platform | Method | Endpoint | Auth Check |
 |----------|--------|----------|------------|
-| YouTube | POST | `youtube.com/youtubei/v1/guide` | Parse response for `logged_in: "1"` in serviceTrackingParams or `loggedIn: true` in mainAppWebResponseContext |
-| Twitch | GET | `id.twitch.tv/oauth2/validate` | HTTP 200 = valid |
+| YouTube | POST | `youtube.com/youtubei/v1/guide` | Explicit login marker in the response, or inconclusive — see below |
+| Twitch | GET | `id.twitch.tv/oauth2/validate` | HTTP 200 = valid, 401 = conclusively invalid, anything else = inconclusive |
+
+**Liveness over presence.** Both checks distinguish three outcomes, not two. A
+conclusive "not authenticated" is the only thing that fires credential
+recovery, so it is claimed only from evidence — never from the absence of
+evidence.
+
+For YouTube that means an explicit marker in the guide reply:
+
+- **Authenticated:** `logged_in: "1"` in `serviceTrackingParams`, or
+  `loggedIn: true` in `mainAppWebResponseContext`.
+- **Conclusively not authenticated:** `logged_in: "0"` in
+  `serviceTrackingParams`, or `loggedOut: true` / `loggedIn: false` in
+  `mainAppWebResponseContext`. (Measured 2026-08-27: an anonymous reply sends
+  `logged_in` = the *string* `"0"` and `loggedOut: true`; it carries no
+  `loggedIn` key at all.)
+- **Inconclusive (an error, not a verdict):** anything else — a non-200, an
+  answer that came back from a different host or without our credential
+  header, or a 200 whose body carries no marker we recognise. A transparent
+  intermediary such as a captive portal or corporate proxy answering 200 with
+  HTML lands here; reading it as a verdict would tell an operator their
+  working cookies were dead.
+
+Positive markers are checked before negative ones, so a reply that
+authenticated before always still does.
 
 **YouTube session refresh:**
 
@@ -725,7 +749,9 @@ During the YouTube auth check, Set-Cookie headers from the response are processe
 
 **Auth loss detection:**
 
-The service tracks previous auth state per platform. When a platform transitions from authenticated to not-authenticated (and the check was conclusive -- no network error), it fires `OnRecoveryNeeded(platform)`. This triggers the auto-cookie service to attempt re-authentication.
+The service tracks previous auth state per platform. When a platform transitions from authenticated to not-authenticated **and the check was conclusive**, it fires `OnRecoveryNeeded(platform)`. This triggers the auto-cookie service to attempt re-authentication.
+
+"Conclusive" is the three-outcome rule above, not merely "no network error": a non-200, an answer from the wrong host, and a 200 whose body carries no recognisable marker are all inconclusive too, and none of them fires recovery. Recovery is only ever fired by evidence that the session is dead.
 
 `SetExpectedPlatforms(platforms)` seeds the previous auth state from persisted config platforms so auth loss is detectable even after an app restart.
 
