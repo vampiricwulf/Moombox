@@ -363,12 +363,25 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}()
 	}
 
+	// lastSegmentTime is the live loop's "a NEW segment landed" clock —
+	// armed here (and re-armed at runLiveStreamDownload entry), advanced by
+	// that loop's echo-suppressed onSegmentProgress. Shared with the
+	// mayResume closure below so the chat-open resume signal releases once
+	// chat AND segments have both been quiet for over
+	// chatSignalJointIdleAfter — the chat endpoint often keeps issuing
+	// continuations after a stream truly ends, and ungated that pinned the
+	// pre-mux wait until the InterruptionTimeout ceiling. atomicTimeValue:
+	// written from engine progress callbacks, read from the engine
+	// download-loop goroutines and the worker live loop.
+	var lastSegmentTime atomicTimeValue
+	lastSegmentTime.StoreNow()
+
 	// Interruption spec Tier 1 evidence (built once chatDl is resolved so it
 	// closes over the final chatDl, not a pre-resolution nil/stale value).
 	// Only consulted by the live branch below — VOD downloads never set
 	// engine.SegmentDownloader.MayResume, so building this unconditionally
 	// here is harmless for the VOD branch (simply unused).
-	mayResume := buildMayResume(jobCtx.Interruption, chatDl)
+	mayResume := buildMayResume(jobCtx.Interruption, chatDl, &lastSegmentTime)
 
 	// Run download loop
 	if isVod {
@@ -428,7 +441,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// reassigns result locally on every quality refresh/split, so the
 		// pre-call `result` variable would otherwise go stale the moment a
 		// single refresh happens.
-		result, waitedForResume, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker, mayResume)
+		result, waitedForResume, err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker, mayResume, &lastSegmentTime)
 
 		if err == nil {
 			// Same eviction guard as the VOD branch (see its call site

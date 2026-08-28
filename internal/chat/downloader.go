@@ -54,12 +54,18 @@ type ChatDownloader struct {
 	cancelFlag           bool
 	streamEnded          bool
 	liveContinuationOpen bool
-	messages             []ChatMessage // Unwritten messages in memory
-	messageCount         int
-	dedup                *utils.OrderedDedup[string]
-	continuation         string
-	streamStartMs        int64
-	flushedToDisk        bool
+	// lastMessageAt is when processBatch last committed NEW (post-dedup)
+	// messages — the "chat is actually moving" clock behind LastMessageAt,
+	// as opposed to liveContinuationOpen's "the endpoint still answers".
+	// Initialized to construction/run-start time so "no message yet" reads
+	// as idle-since-this-run, not idle-since-1970. Guarded by mu.
+	lastMessageAt time.Time
+	messages      []ChatMessage // Unwritten messages in memory
+	messageCount  int
+	dedup         *utils.OrderedDedup[string]
+	continuation  string
+	streamStartMs int64
+	flushedToDisk bool
 	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
 	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
 	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
@@ -176,6 +182,7 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 		continuation:   opts.InitialContinuation,
 		streamStartMs:  streamStartMs,
 		resumeFileAuto: resumeFileAuto,
+		lastMessageAt:  time.Now(),
 	}
 }
 
@@ -206,6 +213,10 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	// LiveContinuationOpen's doc comment) — a run that hasn't polled yet
 	// has none, same as a run that just died.
 	cd.liveContinuationOpen = false
+	// Re-arm the message-idle clock at run start for the same reason: a
+	// fresh run's "no new messages yet" is measured from THIS run's start,
+	// not from whenever a prior run on this instance last saw one.
+	cd.lastMessageAt = time.Now()
 	cd.done = make(chan struct{})
 	// Propagate Logger to the API so parse-level drift diagnostics are captured.
 	if cd.api != nil {
@@ -394,6 +405,32 @@ func (cd *ChatDownloader) LiveContinuationOpen() bool {
 func (cd *ChatDownloader) setLiveContinuationOpen(open bool) {
 	cd.mu.Lock()
 	cd.liveContinuationOpen = open
+	cd.mu.Unlock()
+}
+
+// LastMessageAt reports when the last NEW (post-dedup) chat message was
+// committed — or, when none has arrived yet, when the current run (or the
+// downloader itself) began. The worker's MayResume closure combines this
+// with its own last-segment clock to release the chat-open resume signal
+// once BOTH have been quiet for over the joint-idle window: the chat
+// endpoint keeps issuing live continuations for minutes after many
+// ordinary stream ends, so LiveContinuationOpen alone cannot distinguish
+// "interrupted, may resume" from "ended, chat lingering".
+func (cd *ChatDownloader) LastMessageAt() time.Time {
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	return cd.lastMessageAt
+}
+
+// SetLastMessageAtForTesting force-sets the message-idle clock. Exported
+// ONLY so cross-package tests (internal/worker's MayResume joint-idle
+// table, which consults the real LastMessageAt() accessor against a real
+// *ChatDownloader) can age or refresh the clock without driving a poll
+// loop — production code must never call this; the real update site is
+// processBatch.
+func (cd *ChatDownloader) SetLastMessageAtForTesting(t time.Time) {
+	cd.mu.Lock()
+	cd.lastMessageAt = t
 	cd.mu.Unlock()
 }
 
@@ -620,6 +657,10 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 		cd.mu.Lock()
 		cd.messages = append(cd.messages, fresh...)
 		cd.messageCount += len(fresh)
+		// Genuinely NEW messages only — a poll that returns nothing but
+		// already-seen (deduped) items is not chat activity and must not
+		// keep the LastMessageAt idle clock alive.
+		cd.lastMessageAt = time.Now()
 		cd.mu.Unlock()
 		newInBatch = len(fresh)
 	}

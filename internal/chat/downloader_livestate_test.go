@@ -166,6 +166,72 @@ func TestStartResetsLiveContinuationOpenOnFreshRun(t *testing.T) {
 	}
 }
 
+// --- LastMessageAt: the message-idle clock behind the joint-idle release ---
+
+// TestLastMessageAtAdvancesOnlyOnNewMessages pins the clock's single
+// production update site — processBatch — at the granularity the worker's
+// joint-idle gate depends on: genuinely NEW (post-dedup) messages advance
+// it; a poll returning only already-seen messages, or none at all, is not
+// chat activity and must leave it untouched. A clock that advanced on every
+// poll would hold the chat-open resume signal alive forever on a lingering
+// post-stream continuation — the exact bug the gate exists to close.
+func TestLastMessageAtAdvancesOnlyOnNewMessages(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "unused"})
+	if cd.LastMessageAt().IsZero() {
+		t.Fatal("construction must arm the clock (idle-since-this-run, not idle-since-1970)")
+	}
+
+	past := time.Now().Add(-time.Hour)
+
+	// A batch with one NEW message must advance the clock.
+	cd.SetLastMessageAtForTesting(past)
+	if n, _ := cd.processBatch(&ChatApiResponse{Messages: []ChatMessage{{ID: "m1"}}}); n != 1 {
+		t.Fatalf("processBatch new-message count = %d, want 1", n)
+	}
+	if got := cd.LastMessageAt(); !got.After(past) {
+		t.Error("a committed NEW message must advance LastMessageAt")
+	}
+
+	// The same message again is deduped — not new activity.
+	cd.SetLastMessageAtForTesting(past)
+	if n, _ := cd.processBatch(&ChatApiResponse{Messages: []ChatMessage{{ID: "m1"}}}); n != 0 {
+		t.Fatalf("deduped batch new-message count = %d, want 0", n)
+	}
+	if got := cd.LastMessageAt(); !got.Equal(past) {
+		t.Error("a batch of only already-seen messages must NOT advance LastMessageAt")
+	}
+
+	// An empty batch is not activity either.
+	if n, _ := cd.processBatch(&ChatApiResponse{}); n != 0 {
+		t.Fatalf("empty batch new-message count = %d, want 0", n)
+	}
+	if got := cd.LastMessageAt(); !got.Equal(past) {
+		t.Error("an empty batch must NOT advance LastMessageAt")
+	}
+}
+
+// TestStartResetsLastMessageAtOnFreshRun mirrors
+// TestStartResetsLiveContinuationOpenOnFreshRun for the idle clock: a fresh
+// run's "no new messages yet" is measured from THIS run's start, not from
+// whenever a prior run on the same instance last saw one — otherwise a
+// restarted job would begin its life already past the joint-idle window.
+func TestStartResetsLastMessageAtOnFreshRun(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:    "v1",
+		OutputFile: filepath.Join(t.TempDir(), "chat.json"),
+	})
+	cd.SetLastMessageAtForTesting(time.Now().Add(-time.Hour)) // stale leftover state
+
+	before := time.Now()
+	if err := cd.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got := cd.LastMessageAt(); got.Before(before) {
+		t.Error("Start() must re-arm the message-idle clock at the start of a fresh run")
+	}
+}
+
 // --- Real integration tests: runChatLoop signal wiring ---
 
 // rewriteTransport redirects requests to a test server.

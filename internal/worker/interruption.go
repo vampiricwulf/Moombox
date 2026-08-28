@@ -142,30 +142,94 @@ func (s *interruptionSignal) fresh() bool {
 	return !t.IsZero() && time.Since(t) < interruptionSignalStaleAfter
 }
 
+// chatSignalJointIdleAfter is how long BOTH activity clocks — the last NEW
+// chat message (chat.ChatDownloader.LastMessageAt) and the last NEW segment
+// (the live loop's lastSegTime) — must be quiet before the chat-open resume
+// signal (LiveContinuationOpen) stops counting as resume evidence in
+// buildMayResume's closure.
+//
+// Why it exists: the chat endpoint keeps issuing live continuations (and
+// viewers keep chatting) for minutes after many ordinary stream ends, so an
+// open continuation by itself cannot distinguish "interrupted, may resume"
+// from "ended, chat lingering" — ungated, it pinned the wait branches
+// (engine stallForPossibleResume + the worker's refresh-failure wait) until
+// the InterruptionTimeout ceiling instead of letting the normal bounded
+// verify timers run. The interruption SIGNATURE (sig.fresh()) is untouched
+// by this window — it remains the primary evidence, and it keeps
+// re-arming at the ~30s CheckStreamStatus cadence through a genuine
+// ingestion outage.
+//
+// What the value trades off: shorter risks releasing the chat evidence
+// during an ordinary lull in a quiet chat while segments are stalled by a
+// genuine interruption, leaving only the signature (one ~30s probe cadence)
+// to hold the stall — a single missed probe could then finalize a resumable
+// capture early. Longer keeps a job whose stream actually ended pinned in
+// the pre-mux wait for the whole window whenever its chat continuation
+// lingers open — the exact bug this gates. 30s covers the live chat poll
+// cadence (~5s default, YouTube TimeoutMs hints) and one full engine
+// stream-status check interval, so an active stream almost always refreshes
+// one of the two clocks (or the signature) inside the window.
+const chatSignalJointIdleAfter = 30 * time.Second
+
+// chatSignalJointIdle reports whether the chat-open resume signal has gone
+// stale: strictly MORE than chatSignalJointIdleAfter since the last new
+// chat message AND since the last new segment. BOTH must be quiet — a
+// segment arriving with silent chat means the stream is plainly still live
+// (releasing on chat idleness alone would risk truncating it), and chat
+// messages arriving with stalled segments is exactly the interruption the
+// chat signal exists to bridge. Pure so the boundary is unit-testable with
+// an injected now.
+func chatSignalJointIdle(lastChatMsg, lastSegment, now time.Time) bool {
+	return now.Sub(lastChatMsg) > chatSignalJointIdleAfter &&
+		now.Sub(lastSegment) > chatSignalJointIdleAfter
+}
+
 // buildMayResume builds the MayResume closure installed on every live
 // YouTube downloader (interruption spec Tier 1 evidence — engine
 // DownloaderOptions.MayResume): true when the interruption signal is fresh
 // (a recent player-response fetch showed the broadcast-interrupted
 // signature), OR the job's chat downloader still has its LIVE continuation
 // open (the chat endpoint keeps issuing continuations even while ingestion
-// is stalled). chatDl nil — chat disabled, unavailable, or not a YouTube
-// job — falls back to the signal alone.
+// is stalled) AND the joint-idle window has not yet released it. chatDl
+// nil — chat disabled, unavailable, or not a YouTube job — falls back to
+// the signal alone.
+//
+// The chat half is gated by chatSignalJointIdle: chat can persist after a
+// stream truly ends, so an open continuation only counts while something is
+// actually moving — a new chat message or a new segment within
+// chatSignalJointIdleAfter. Once both have been quiet for over the window
+// the chat evidence is released and the proper bounded waiting timers (the
+// engine's finalize budget, the worker's verify loop) take over. The
+// signature half is deliberately NOT gated — see chatSignalJointIdleAfter.
+//
+// lastSegment is the live loop's shared last-new-segment clock (advanced by
+// runLiveStreamDownload's echo-suppressed onSegmentProgress). nil — only
+// test-built closures — keeps the pre-gate behavior: with no segment clock
+// the joint-idle release cannot be judged, so the open continuation counts,
+// the conservative (keep waiting) direction. Production always passes it.
 //
 // A single shared function so ExecuteWithChat and this package's tests
 // build the exact same closure rather than a test-only reimplementation of
 // its logic.
 //
 // The engine consults the returned closure from its own download-loop
-// goroutine (see stallForPossibleResume). Both reads here are safe without
-// any additional locking in the closure: interruptionSignal.fresh() is
-// atomic.Int64-backed and chat.ChatDownloader.LiveContinuationOpen() is
+// goroutine (see stallForPossibleResume). All reads here are safe without
+// any additional locking in the closure: interruptionSignal.fresh() and
+// atomicTimeValue.Load() are atomic.Int64-backed, and
+// chat.ChatDownloader.LiveContinuationOpen() / LastMessageAt() are
 // mutex-guarded internally.
-func buildMayResume(sig *interruptionSignal, chatDl *chat.ChatDownloader) func() bool {
+func buildMayResume(sig *interruptionSignal, chatDl *chat.ChatDownloader, lastSegment *atomicTimeValue) func() bool {
 	return func() bool {
 		if sig.fresh() {
 			return true
 		}
-		return chatDl != nil && chatDl.LiveContinuationOpen()
+		if chatDl == nil || !chatDl.LiveContinuationOpen() {
+			return false
+		}
+		if lastSegment == nil {
+			return true
+		}
+		return !chatSignalJointIdle(chatDl.LastMessageAt(), lastSegment.Load(), time.Now())
 	}
 }
 
