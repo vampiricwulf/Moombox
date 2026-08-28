@@ -436,6 +436,26 @@ func cookieUnknownLabel(code string, t barTier) string {
 // also land on YouTube here. That is not an oversight this function can fix
 // alone — every platform test named above would have to move together — so it
 // stays binary, matching them, rather than inventing a third answer here.
+//
+// One site deliberately decides the empty case the OTHER way and is not a
+// counter-example to the above: worker.go:1072 is choosing which platform to
+// drive a refresh AGAINST, where guessing wrong does work on the wrong
+// credentials. Attributing a badge and dispatching a refresh carry different
+// costs for the same unknown, so they are allowed to differ — but a survey
+// that listed only the agreeing sites would have read as more settled than it
+// is.
+//
+// This deliberately does NOT filter on ParkReason, and the distinction is
+// worth stating because the badge is coarser than the status it reads.
+// StatusCookies carries two reasons (database/types.go:41-54): ParkReasonAuth,
+// where the credentials are genuinely dead; and ParkReasonMembership, where
+// the request WAS signed in and YouTube refused anyway — worker.go:1058 logs
+// "the credentials are alive and the account simply lacks access". Both still
+// escalate, because in both the remedy is cookies: for the second, cookies
+// from an account that actually holds the membership. Filtering membership
+// parks out would lose a real alarm. What the red badge means is therefore
+// "a download stopped for want of usable credentials", NOT "your cookies
+// expired" — job_details.go:548-554 is where the operator gets the difference.
 func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
 	for _, j := range m.jobs {
 		if j.Status != database.StatusCookies {
