@@ -1070,12 +1070,31 @@ func youtubeGuideRequestBody() string {
 // read the answer. autocookies_profile.go's `attempted` flag turns on exactly
 // that distinction.
 //
-// The wording says "learned nothing", not "failed": it surfaces in the Web UI
-// and TUI, and telling an operator their credentials are bad when we only
-// failed to parse a page is the misattribution this whole change removes. It
-// names no host, no header and — most importantly here — no body bytes. The
-// unreadable body is the subject of the report and must never become its
-// content.
+// WHERE THIS STRING ACTUALLY GOES, checked rather than assumed, because an
+// earlier draft of this comment claimed the Web UI and TUI and that was FALSE:
+// AuthStatus.YouTubeError, the field doRefresh assigns it to, has no reader
+// anywhere in the tree. Every consumer of AuthStatus builds its own projection
+// from the three booleans — internal/web/routes/cookies.go (both handlers),
+// cmd/moombox/routes_wiring.go (status route) and tui_wiring.go
+// (authStatusToTUI's badge, OnRecheckCookies' two bools). The second possible
+// route is closed too: checkPlatformAuth consumes the error for an errors.Is
+// test and discards the value, so the rollback messaging composes from the
+// verification STATE and never interpolates this text.
+//
+// The one sink is rs.logger.Debug in doRefresh — which the TUI log panel
+// renders. So the no-body-bytes rule below is load-bearing on a log surface,
+// not a UI one, and TestUnreadableGuideErrorCarriesNoBody still earns its
+// place: it names no host, no header and — most importantly here — no body
+// bytes. The unreadable body is the subject of the report and must never
+// become its content.
+//
+// The wording says "learned nothing", not "failed", for when that changes.
+// Follow-up 1 of the remediation plan is to surface the inconclusive state in
+// both UIs; until it lands, an install behind an intercepting intermediary
+// still RENDERS as "cookies found, not authenticated" (doRefresh sets
+// YouTubeAuthenticated: ytAuth, which is false on an inconclusive check). What
+// this change stops is the false recovery FIRE and the notification — not yet
+// the false badge.
 var errGuideLoginMarkerUnreadable = errors.New(
 	"the guide reply carried no login marker we recognise, so this check learned nothing about the session")
 
@@ -1180,8 +1199,27 @@ func youtubeGuideAuthVerdict(respBody []byte) (bool, error) {
 		ResponseContext struct {
 			ServiceTrackingParams []struct {
 				Params []struct {
-					Key   string `json:"key"`
-					Value string `json:"value"`
+					Key string `json:"key"`
+					// RawMessage, not string, and the reason is a real failure
+					// mode rather than tidiness. encoding/json fails the WHOLE
+					// body if any single field mistypes, so one unrelated param
+					// gaining a non-string value — `cver`, `e`, `visitor_data`,
+					// keys this reader has no interest in — would collapse the
+					// JSON path to the literal-needle fallback for every reply.
+					// That fallback cannot see the measured wire shape's
+					// positive as reliably as a parser can, so tier-1 would
+					// degrade to permanently inconclusive: safe, but blind, and
+					// triggered by a field we never asked about. Deferring the
+					// decode confines that failure to the one param it actually
+					// happened on.
+					//
+					// Key stays a plain string on purpose. A non-string `key`
+					// would mean serviceTrackingParams is no longer a key/value
+					// list at all — a schema change this reader could not
+					// survive in any typing — and making it lazy too would cost
+					// a decode on every param in a 15KB body to guard against
+					// that.
+					Value json.RawMessage `json:"value"`
 				} `json:"params"`
 			} `json:"serviceTrackingParams"`
 			MainAppWebResponseContext struct {
@@ -1211,7 +1249,14 @@ func youtubeGuideAuthVerdict(respBody []byte) (bool, error) {
 			if param.Key != guideLoginParamKey {
 				continue
 			}
-			switch param.Value {
+			// Decoded here, for this param only — see the Value field comment.
+			var value string
+			if err := json.Unmarshal(param.Value, &value); err != nil {
+				// The marker itself is no longer a string. A marker we found
+				// and could not read is not a verdict; keep going.
+				continue
+			}
+			switch value {
 			case guideLoginParamIn:
 				return true, nil
 			case guideLoginParamOut:

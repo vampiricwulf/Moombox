@@ -749,7 +749,9 @@ During the YouTube auth check, Set-Cookie headers from the response are processe
 
 **Auth loss detection:**
 
-The service tracks previous auth state per platform. When a platform transitions from authenticated to not-authenticated (and the check was conclusive -- no network error), it fires `OnRecoveryNeeded(platform)`. This triggers the auto-cookie service to attempt re-authentication.
+The service tracks previous auth state per platform. When a platform transitions from authenticated to not-authenticated **and the check was conclusive**, it fires `OnRecoveryNeeded(platform)`. This triggers the auto-cookie service to attempt re-authentication.
+
+"Conclusive" is the three-outcome rule above, not merely "no network error": a non-200, an answer from the wrong host, and a 200 whose body carries no recognisable marker are all inconclusive too, and none of them fires recovery. Recovery is only ever fired by evidence that the session is dead.
 
 `SetExpectedPlatforms(platforms)` seeds the previous auth state from persisted config platforms so auth loss is detectable even after an app restart.
 

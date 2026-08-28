@@ -140,23 +140,68 @@ func TestUnreadableGuideErrorCarriesNoBody(t *testing.T) {
 	}
 }
 
-// TestUnreadableGuideReplyDoesNotWriteTheJar: checkAndRefreshYouTube is also the
-// Set-Cookie merge path. A reply we could not read is not a reply we may write
-// the jar from — we do not know whose session it describes — which is the same
-// reason the provenance guard bails before the merge.
-func TestUnreadableGuideReplyDoesNotWriteTheJar(t *testing.T) {
-	srv := bodyServer(t, captivePortalBody, "SAPISID=rotated-by-the-portal; Domain=.youtube.com; Path=/")
-	pointYouTubeGuideAt(t, srv)
+// rotatedSetCookie is ONE fixture used by both halves of the merge test below.
+// It has to be one, or the negative half proves nothing: a Set-Cookie the merge
+// path would have discarded anyway (wrong domain, tripped by the substring
+// pre-filter, rejected by isYouTubeDomain) would produce an identical "not in
+// the jar" result no matter what the verdict logic did.
+const rotatedSetCookie = "SAPISID=rotated-by-the-server; Domain=.youtube.com; Path=/"
 
-	jar := jarWithAuth(t)
-	rs := NewRefreshService(jar, 0, nopLogger{})
-	if _, err := rs.checkAndRefreshYouTube(context.Background()); err == nil {
-		t.Fatal("premise broken: err = nil, want the inconclusive error")
-	}
+// TestGuideReplySetCookieMergeFollowsTheVerdict: checkAndRefreshYouTube is also
+// the Set-Cookie merge path, and the merge must follow the verdict.
+//
+// The two halves are inseparable, which is why they share a fixture and a test.
+// The negative alone would be the junction pattern this subsystem keeps getting
+// caught by: "the value is not in the jar" is satisfied by several mechanisms —
+// the domain filter, the atomic write failing, the fixture never having been
+// mergeable — and only one of them is the rule being pinned. The positive
+// control is what makes the negative mean anything: same fixture, same harness,
+// same server, and it DOES land. So when the negative holds, the verdict is the
+// only thing that can have stopped it.
+//
+// Note what the negative half is and is not. It is NOT a regression test for
+// F1 — pre-change an unreadable body produced authenticated=false and the
+// pre-existing `if authenticated` guard already skipped the merge, so this
+// assertion held before too. It is a forward guard: it fails the day someone
+// moves the merge ahead of the verdict, which is the shape of mistake that put
+// a redirected reply's cookies within reach of the jar in the first place.
+func TestGuideReplySetCookieMergeFollowsTheVerdict(t *testing.T) {
+	// Positive control: an authenticated reply, so the merge is supposed to
+	// run. If this fails the negative below is vacuous.
+	t.Run("authenticated_reply_merges", func(t *testing.T) {
+		pointYouTubeGuideAt(t, bodyServer(t,
+			`{"responseContext":{"serviceTrackingParams":[{"params":[{"key":"logged_in","value":"1"}]}]}}`,
+			rotatedSetCookie))
 
-	if header := jar.GetCookieHeader(); strings.Contains(header, "rotated-by-the-portal") {
-		t.Error("the jar took a Set-Cookie from a reply we could not read")
-	}
+		jar := jarWithAuth(t)
+		rs := NewRefreshService(jar, 0, nopLogger{})
+		auth, err := rs.checkAndRefreshYouTube(context.Background())
+		if err != nil || !auth {
+			t.Fatalf("premise broken: auth=%v err=%v, want true/nil", auth, err)
+		}
+
+		if header := jar.GetCookieHeader(); !strings.Contains(header, "rotated-by-the-server") {
+			t.Fatal("the merge path did not take this fixture even on an authenticated reply — " +
+				"the negative case below would prove nothing")
+		}
+	})
+
+	// The guard: a reply we could not read is not a reply we may write the jar
+	// from. We do not know whose session it describes — the same reason the
+	// provenance guard bails before the merge.
+	t.Run("unreadable_reply_does_not_merge", func(t *testing.T) {
+		pointYouTubeGuideAt(t, bodyServer(t, captivePortalBody, rotatedSetCookie))
+
+		jar := jarWithAuth(t)
+		rs := NewRefreshService(jar, 0, nopLogger{})
+		if _, err := rs.checkAndRefreshYouTube(context.Background()); err == nil {
+			t.Fatal("premise broken: err = nil, want the inconclusive error")
+		}
+
+		if header := jar.GetCookieHeader(); strings.Contains(header, "rotated-by-the-server") {
+			t.Error("the jar took a Set-Cookie from a reply we could not read")
+		}
+	})
 }
 
 // --- The two controls: the fix must not be a blanket widening ---
@@ -284,6 +329,77 @@ func TestGuideVerdictMirrorsLivenessVerdictsRule(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestUnrelatedParamTypeDriftDoesNotBlindTheReader: encoding/json fails the
+// WHOLE body if any single field mistypes, so a param this reader has no
+// interest in — visitor_data, cver, e — gaining a numeric value used to
+// collapse the entire JSON path to the literal-needle fallback.
+//
+// That degradation is safe (it lands on inconclusive, not on a false alarm) but
+// it is permanent and it is triggered by a field we never asked about, so
+// Value is decoded lazily per-param. This pins that: the real logged_in marker
+// must still be read with a mistyped sibling next to it, in both directions.
+//
+// The fixtures put the marker's own keys in the order {"value":…,"key":…}, and
+// that detail is what makes this test decisive rather than vacuous. With the
+// measured wire order ({"key":…,"value":…}) the literal-needle fallback happens
+// to catch the marker anyway, so a type-strict reader and a lazy one give the
+// same answer and the test would pass either way — the junction pattern. The
+// needles are order-specific, so reversing the pair removes the fallback as an
+// explanation and leaves the JSON path as the only thing that can produce a
+// verdict. That reversal is also precisely the drift the finding named: one
+// serialiser change away.
+func TestUnrelatedParamTypeDriftDoesNotBlindTheReader(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantAuth bool
+	}{
+		{"numeric sibling, positive marker", `{"responseContext":{"serviceTrackingParams":[` +
+			`{"service":"GFEEDBACK","params":[{"value":123,"key":"cver"},{"value":"1","key":"logged_in"}]}]}}`, true},
+		{"numeric sibling, negative marker", `{"responseContext":{"serviceTrackingParams":[` +
+			`{"service":"GFEEDBACK","params":[{"value":123,"key":"cver"},{"value":"0","key":"logged_in"}]}]}}`, false},
+		{"object sibling, negative marker", `{"responseContext":{"serviceTrackingParams":[` +
+			`{"service":"GFEEDBACK","params":[{"value":{"nested":true},"key":"e"},{"value":"0","key":"logged_in"}]}]}}`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			auth, err := youtubeGuideAuthVerdict([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("err = %v, want nil — an unrelated param's type must not cost us the marker", err)
+			}
+			if auth != tc.wantAuth {
+				t.Errorf("authenticated = %v, want %v", auth, tc.wantAuth)
+			}
+		})
+	}
+
+	// The control for the paragraph above: the SAME mistyped sibling in the
+	// measured wire order really is rescued by the fallback, on both readers.
+	// Without this, the reversal could look like an arbitrary fixture choice
+	// rather than the thing that isolates the JSON path.
+	t.Run("wire order is rescued by the fallback either way", func(t *testing.T) {
+		body := `{"responseContext":{"serviceTrackingParams":[` +
+			`{"service":"GFEEDBACK","params":[{"key":"cver","value":123},{"key":"logged_in","value":"1"}]}]}}`
+		auth, err := youtubeGuideAuthVerdict([]byte(body))
+		if err != nil || !auth {
+			t.Fatalf("auth=%v err=%v, want true/nil", auth, err)
+		}
+	})
+
+	// The marker's OWN value going non-string is different: that is a marker we
+	// found and could not read, which is inconclusive rather than a verdict.
+	t.Run("the marker itself is not a string", func(t *testing.T) {
+		body := `{"responseContext":{"serviceTrackingParams":[{"params":[{"key":"logged_in","value":0}]}]}}`
+		auth, err := youtubeGuideAuthVerdict([]byte(body))
+		if auth {
+			t.Error("authenticated = true, want false")
+		}
+		if !errors.Is(err, errGuideLoginMarkerUnreadable) {
+			t.Errorf("err = %v, want errGuideLoginMarkerUnreadable", err)
+		}
+	})
 }
 
 // TestGuideVerdictFallbackRespectsTheBodyCap: the string fallback promotes at
