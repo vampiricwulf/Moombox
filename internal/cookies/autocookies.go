@@ -831,7 +831,12 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	// the route's default 500 "failed to finish setup" for a state that is not
 	// a failure at all.
 	if errors.Is(err, ErrNoCookiesInProfile) {
-		s.logger.Info("cookie setup finished with an empty profile — no login detected")
+		// The error rides into the log line. On the Chromium path it can carry
+		// a tier failure that was out-voted by another tier's empty answer, and
+		// cdpGetCookiesAsNetscape has no logger of its own — so dropping it here
+		// would leave the only evidence that this verdict might be wrong with
+		// nowhere to go.
+		s.logger.Info("cookie setup finished with an empty profile — no login detected", "detail", err)
 		s.setError("no login detected — sign in before finishing setup")
 		s.cleanup()
 		return false, false, nil
