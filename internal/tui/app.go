@@ -229,11 +229,18 @@ type (
 		Err string
 	}
 
-	// Async results for setup wizard cookie extraction
+	// Async results for setup wizard cookie extraction.
+	//
+	// Carries the whole SetupResult rather than the bool pair it used to. Two
+	// of the three outcomes look identical through a bool: cookies verified,
+	// and cookies saved that the check could not reach the site to confirm.
+	// The wizard reported both as "configured", so a network blip during the
+	// check was invisible — and its mirror image, an extraction whose cookies
+	// cannot form an authenticated request at all, was reported as "no login
+	// detected", which is a different problem with different advice.
 	setupCookieFinishMsg struct {
 		Platform string // "youtube" or "twitch"
-		YTAuth   bool
-		TWAuth   bool
+		Result   cookies.SetupResult
 		Err      string // error message from extraction (empty on success)
 	}
 
@@ -537,7 +544,7 @@ func (a *App) SetSetupCallbacks(
 	onComplete func(cfg *config.MoomboxConfig) error,
 	onInstallYtdlp func(port int, httpsEnabled bool),
 	onStartAutoCookie func(platform string) error,
-	onFinishAutoCookie func() (bool, bool, error),
+	onFinishAutoCookie func() (cookies.SetupResult, error),
 	onCancelAutoCookie func(),
 	onRestart func(),
 ) {

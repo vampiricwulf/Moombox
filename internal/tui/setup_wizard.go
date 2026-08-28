@@ -14,6 +14,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // cookieSetupCountdownSeconds is how long the wizard waits for the user to
@@ -242,10 +243,14 @@ type SetupWizardModel struct {
 	spinner spinner.Model
 
 	// Callbacks for finishing setup
-	OnComplete         func(cfg *config.MoomboxConfig) error
-	OnInstallYtdlp     func(port int, httpsEnabled bool)
-	OnStartAutoCookie  func(platform string) error
-	OnFinishAutoCookie func() (bool, bool, error)
+	OnComplete        func(cfg *config.MoomboxConfig) error
+	OnInstallYtdlp    func(port int, httpsEnabled bool)
+	OnStartAutoCookie func(platform string) error
+	// The whole result, not a bool pair: a setup that saved cookies it could
+	// not check is a third outcome, and the pair can only say yes or no. See
+	// setupCookieFinishMsg — this mirrors OnForceRefreshCookies, which was
+	// widened from a bool for the same reason.
+	OnFinishAutoCookie func() (cookies.SetupResult, error)
 	OnCancelAutoCookie func()
 	OnRestart          func()
 	OnCheckFFmpeg      func() (valid bool, version string) // returns FFmpeg status

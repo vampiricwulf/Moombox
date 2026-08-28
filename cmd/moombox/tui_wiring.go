@@ -337,15 +337,23 @@ func (s *runState) runTUI() {
 			}
 			return nil
 		},
-		func() (bool, bool, error) {
+		// The whole result, not a bool pair. A sign-in the site could not be
+		// reached to confirm is ACCEPTED but not verified, and the pair reports
+		// it identically to a verified one — so the wizard said "configured"
+		// about cookies nothing had checked. See cookies.SetupResult.
+		//
+		// The 60 s cap is load-bearing beyond this call: the server-side setup
+		// grace window is priced against it. Do not raise it to buy a slow
+		// finish more time.
+		func() (cookies.SetupResult, error) {
 			finishCtx, finishCancel := context.WithTimeout(s.ctx, 60*time.Second)
 			defer finishCancel()
-			yt, tw, err := s.autoCookieSvc.FinishSetup(finishCtx)
+			result, err := s.autoCookieSvc.FinishSetupDetailed(finishCtx)
 			if err != nil {
 				s.log.Error("Failed to finish auto-cookie setup", slog.String("error", err.Error()))
-				return yt, tw, err
+				return result, err
 			}
-			return yt, tw, nil
+			return result, nil
 		},
 		func() {
 			s.autoCookieSvc.CancelSetup()

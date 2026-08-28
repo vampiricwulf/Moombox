@@ -55,6 +55,45 @@ func cookieRefreshOutcome(result cookies.RefreshResult) map[string]any {
 	}
 }
 
+// cookieSetupOutcome renders one interactive setup onto the wire.
+//
+// Two facts per platform, and the whole point is that they can disagree:
+//
+//   - authenticated / twitchAuthenticated — did the setup ACCEPT the sign-in?
+//     This is what lights the "cookies configured" badge and what goes into
+//     active_platforms. Its meaning is UNCHANGED: a sign-in the user just
+//     completed is accepted when the site could not answer, exactly as before.
+//   - youtubeVerification / twitchVerification — what the auth check
+//     CONCLUDED: "ok", "failed" or "unknown". Only "failed" is a conclusive
+//     negative and only it may be worded as a verification failure.
+//
+// The pair (accepted, "unknown") is the state this exists for and the one the
+// dialog could not say: the cookies are saved and in use, and Moombox could
+// not reach the site to confirm them. FinishSetup has computed it since the
+// tri-state landed; it survived only as a server log line, so a user whose
+// network blipped during the check was told their login failed.
+//
+// The two verification fields are ADDITIVE. `authenticated` keeps its exact
+// historical meaning, so an older frontend against a newer binary behaves as
+// it did; and the new frontend branches POSITIVELY on the strings ("=== ok",
+// "=== unknown"), so against an older binary that omits them it degrades to
+// the unqualified copy rather than to the hedged one. Same precedent
+// `ran`/`verdict` set for the refresh outcome.
+//
+// The vocabulary is RefreshVerdict's, deliberately shared rather than
+// re-invented: the manual-refresh surfaces already say "failed" / "could not
+// establish" / "nothing was learned", and a fourth phrasing for the same three
+// states is how the copy drifts apart.
+func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
+	return map[string]any{
+		"success":             true,
+		"authenticated":       result.YouTubeAccepted,
+		"twitchAuthenticated": result.TwitchAccepted,
+		"youtubeVerification": result.YouTube.String(),
+		"twitchVerification":  result.Twitch.String(),
+	}
+}
+
 // CookieRoutes registers cookie-related API routes. The optional rate
 // limiter wraps the headless-browser endpoints (/auto-refresh and the
 // auto-setup start/finish/cancel trio) so a buggy or hostile client
@@ -219,7 +258,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			return
 		}
 
-		ytAuth, twAuth, err := autoCookieSvc.FinishSetup(req.Context())
+		result, err := autoCookieSvc.FinishSetupDetailed(req.Context())
 		if err != nil {
 			switch {
 			case errors.Is(err, cookies.ErrNoSetupInProgress):
@@ -253,11 +292,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			return
 		}
-		jsonResponse(rw, map[string]any{
-			"success":             true,
-			"authenticated":       ytAuth,
-			"twitchAuthenticated": twAuth,
-		})
+		jsonResponse(rw, cookieSetupOutcome(result))
 	})
 
 	// POST /api/cookies/auto-setup/cancel

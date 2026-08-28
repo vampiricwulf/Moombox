@@ -2,6 +2,13 @@
  * Setup Wizard Controller — Mode selection, simplified + advanced flows, FFmpeg check
  */
 import { renderTemplatePreview } from "./settings.js";
+import {
+  cookieSetupAbortReport,
+  cookieSetupAcceptedToast,
+  cookieSetupRejectedMessage,
+  cookieSetupStillRunning,
+  serverErrorMessage,
+} from "./utils.js";
 
 export class SetupController {
   constructor(app) {
@@ -277,7 +284,10 @@ export class SetupController {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ platform }),
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // The server said why — "no supported browser installed" (424), a
+      // conflicting setup or refresh (409), shutdown (503). All of them used
+      // to arrive as a bare `HTTP <n>`. See serverErrorMessage.
+      if (!response.ok) throw new Error(await serverErrorMessage(response));
       const data = await response.json();
       if (data.success) {
         // The server is now holding the setup slot; an unload must cancel it.
@@ -347,10 +357,15 @@ export class SetupController {
 
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
-      // Any answer means the slot was released; only the abort path below keeps
-      // the flag raised, because a timed-out finish leaves the setup live.
+      // Any answer means the slot was released; only the abort path below skips
+      // this line, because an abort says nothing about whether the setup is
+      // still live. That path clears the flag itself, but only once the server
+      // has confirmed the slot is free.
       this._cookieSetupActive = false;
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // The finish handler's discriminated errors — 422 for an unreadable
+      // cookies.txt or a broken profile, 409 for a locked cookie DB — used to
+      // reach the user as `HTTP <n>`, which points at none of them.
+      if (!response.ok) throw new Error(await serverErrorMessage(response));
       const data = await response.json();
       const ytOk = data.authenticated;
       const twOk = data.twitchAuthenticated;
@@ -373,26 +388,48 @@ export class SetupController {
             if (badge) { badge.style.display = ""; badge.variant = "success"; }
           }
         }
+        // Accepted is not verified — see cookieSetupAcceptedToast. A sign-in
+        // Moombox could not reach the site to confirm was reported here as an
+        // unqualified success, so a user whose network blipped mid-check was
+        // told their cookies were configured with nothing having checked them.
         if (ytOk) {
-          this.app.showToast("YouTube cookies configured", "success");
+          const toast = cookieSetupAcceptedToast("YouTube", data.youtubeVerification);
+          this.app.showToast(toast.message, toast.variant);
         }
         if (twOk) {
-          this.app.showToast("Twitch cookies configured", "success");
+          const toast = cookieSetupAcceptedToast("Twitch", data.twitchVerification);
+          this.app.showToast(toast.message, toast.variant);
         }
       } else {
         if (resultEl) {
-          resultEl.textContent = data.error || "No login detected. Try again.";
+          // Speaks from the verification fields, not from `data.error`: that
+          // never exists on a 200, so the fallback was the only thing this
+          // branch ever rendered.
+          resultEl.textContent = cookieSetupRejectedMessage(
+            platform === "twitch" ? data.twitchVerification : data.youtubeVerification,
+          );
           resultEl.style.color = "var(--sl-color-danger-600)";
         }
       }
     } catch (e) {
       if (e.name === "AbortError") {
         if (resultEl) resultEl.textContent = "";
+        // Report what actually happened rather than asserting a timeout. The
+        // server writes the merged cookies.txt and reloads the jar BEFORE it
+        // verifies, so this abort can fire over work that already committed.
+        // The 60 s cap stays as it is — the server-side setup grace window is
+        // priced against that exact number.
+        const stillRunning = await cookieSetupStillRunning();
+        // Only a definite "no setup here" releases the flag. Unknown keeps it
+        // raised, which is the safe direction: the Skip button and the unload
+        // beacon then still have something to tell the server about.
+        if (stillRunning === false) this._cookieSetupActive = false;
         if (timeoutResultEl) {
+          const report = cookieSetupAbortReport(stillRunning);
           timeoutResultEl.innerHTML = `
-            <sl-alert variant="warning" open>
-              <sl-icon slot="icon" name="clock"></sl-icon>
-              Cookie extraction timed out. The browser window may still be open.
+            <sl-alert variant="${report.variant}" open>
+              <sl-icon slot="icon" name="${report.icon}"></sl-icon>
+              ${this.app.escapeHtml(report.message)}
             </sl-alert>
             <div style="display: flex; gap: 0.5em; margin-top: 0.75em;">
               <sl-button variant="primary" size="small" id="cookie-retry-btn">Try Again</sl-button>
@@ -410,6 +447,12 @@ export class SetupController {
             this.cancelCookieSetup();
           });
         }
+        // The finish may well have committed while we stopped waiting, so the
+        // dashboard's cookie status is potentially stale. The wizard's own
+        // badges cannot be lit from here — nothing tells this side WHICH
+        // platform the completed finish accepted — so the alert above sends
+        // the user to the cookie status rather than guessing.
+        this.app.loadStatus();
         return;
       }
       if (resultEl) {

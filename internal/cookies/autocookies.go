@@ -774,16 +774,62 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	return s.startChromiumSetup(browser, loginTarget)
 }
 
-// FinishSetup extracts cookies from the running browser and saves them.
+// SetupResult reports what ONE interactive setup concluded, per platform.
+//
+// Two independent facts per platform, and the reason this type exists is that
+// they can disagree:
+//
+//   - the verdict — what the auth check CONCLUDED, in the same three-way
+//     vocabulary a refresh pass uses. RefreshUnknown is the zero value on
+//     purpose, so any path that returns without checking cannot accidentally
+//     assert health or failure.
+//   - Accepted — what the CALLER is told, which is deliberately not the
+//     verdict. A sign-in the user just completed is accepted when the site
+//     could not answer; see the acceptance predicate in FinishSetupDetailed
+//     for why, and why it is not extended to a check that never ran.
+//
+// Accepted with a verdict of RefreshUnknown is the state this type exists to
+// carry: the cookies are saved and in use, and Moombox could not reach the
+// site to confirm them. Collapsing that into either neighbour is what tells a
+// user whose network blipped mid-check that their sign-in failed.
+type SetupResult struct {
+	YouTube RefreshVerdict
+	Twitch  RefreshVerdict
+
+	YouTubeAccepted bool
+	TwitchAccepted  bool
+}
+
+// FinishSetup extracts cookies from the running browser and saves them, and
+// reports only whether each platform was ACCEPTED.
+//
+// A thin wrapper over FinishSetupDetailed, the same split RefreshCookies /
+// RefreshCookiesDetailed already draws — with one honest difference: both of
+// the callers that RENDER a finish (the HTTP route and the TUI wizard) had to
+// move to the detailed form, so nothing but the tests calls this today. It is
+// kept because the projection is the thing worth pinning: the acceptance
+// answer must not drift as the verdicts gain consumers, and a caller whose
+// question really is "did this platform end up usable" should not have to
+// know about verdicts to ask it.
+//
+// A caller that renders the outcome must NOT use this: the bool pair cannot
+// say "saved, but we could not check them", and a UI built on it has to guess.
 func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth bool, err error) {
+	result, err := s.FinishSetupDetailed(ctx)
+	return result.YouTubeAccepted, result.TwitchAccepted, err
+}
+
+// FinishSetupDetailed extracts cookies from the running browser, saves them,
+// and reports both what it accepted and what it concluded.
+func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResult, error) {
 	s.mu.Lock()
 	if s.setupProcess == nil || s.setupBrowser == nil {
 		s.mu.Unlock()
-		return false, false, ErrNoSetupInProgress
+		return SetupResult{}, ErrNoSetupInProgress
 	}
 	if s.cancelled {
 		s.mu.Unlock()
-		return false, false, ErrSetupCancelled
+		return SetupResult{}, ErrSetupCancelled
 	}
 	// Restart the retention clock. The grace window exists FOR this call, and
 	// measuring it from the browser's exit alone would let a finish that
@@ -806,6 +852,7 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	s.mu.Unlock()
 
 	var netscapeCookies string
+	var err error
 
 	if isFirefoxBased(browser.Type) {
 		s.closeFirefoxGracefully()
@@ -839,19 +886,31 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		s.logger.Info("cookie setup finished with an empty profile — no login detected", "detail", err)
 		s.setError("no login detected — sign in before finishing setup")
 		s.cleanup()
-		return false, false, nil
+		// RefreshFailed, not RefreshUnknown, and the difference is what the
+		// dialog says. This attempt produced no credential of any kind, which
+		// is the same conclusion checkPlatformAuth reaches for a platform with
+		// nothing on disk — "there is nothing to send, so no request can be
+		// authenticated". Unknown would route the UI to its "we could not
+		// check" copy, which is the one wrong thing to say about a browser
+		// that plainly held no login.
+		//
+		// It is a statement about THIS setup, not about cookies.txt: this path
+		// deliberately merges nothing and reloads nothing, so a working session
+		// already on disk is untouched and unexamined. The UI branch it selects
+		// says "no login detected" and makes no verification claim.
+		return SetupResult{YouTube: RefreshFailed, Twitch: RefreshFailed}, nil
 	}
 
 	if err != nil {
 		s.setError(err.Error())
 		s.cleanup()
-		return false, false, err
+		return SetupResult{}, err
 	}
 
 	// Merge with existing cookies using temp file + rename for atomicity
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
 		s.cleanup()
-		return false, false, err
+		return SetupResult{}, err
 	}
 
 	existingData, readErr := readCookieFile(s.cookiePath)
@@ -884,19 +943,19 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 			"path", s.cookiePath, "err", readErr)
 		s.setError(mergeErr.Error())
 		s.cleanup()
-		return false, false, mergeErr
+		return SetupResult{}, mergeErr
 	}
 
 	// Write merged cookies via temp file + rename to prevent corruption on partial failure
 	if err := writeFileAtomic(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
 		s.cleanup()
-		return false, false, err
+		return SetupResult{}, err
 	}
 
 	// Reload jar and verify
 	if err := s.jar.Load(s.cookiePath); err != nil {
 		s.cleanup()
-		return false, false, err
+		return SetupResult{}, err
 	}
 
 	// Presence + real API verification, through the same pairing the refresh
@@ -924,8 +983,8 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	accepted := func(p platformAuth) bool {
 		return p.hasCookies && (p.state == verifyOK || (p.state == verifyUnknown && p.attempted))
 	}
-	ytAuth = accepted(ytCheck)
-	twAuth = accepted(twCheck)
+	ytAuth := accepted(ytCheck)
+	twAuth := accepted(twCheck)
 
 	// What gets WRITTEN DOWN, which is a different claim and must be the
 	// stricter one. PersistPlatforms unions into cfg.Cookies.Platforms, a set
@@ -1025,7 +1084,16 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		s.logger.Info("[AutoCookies] Setup complete — verified: " + strings.Join(verified, " + "))
 	}
 
-	return ytAuth, twAuth, nil
+	// The distinction the three log lines above draw used to end at the log.
+	// verdictOf is the same projection the refresh path publishes, so the
+	// dialog can render "saved, but we could not check them" in the wording
+	// the manual-refresh surfaces already use.
+	return SetupResult{
+		YouTube:         verdictOf(ytCheck),
+		Twitch:          verdictOf(twCheck),
+		YouTubeAccepted: ytAuth,
+		TwitchAccepted:  twAuth,
+	}, nil
 }
 
 // CancelSetup aborts an in-flight setup: it raises the cancelled flag, kills
