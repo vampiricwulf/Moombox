@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -293,6 +294,37 @@ const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a br
 func (s *runState) runCookieRecovery(ctx context.Context, platform string, refresh cookieRefresher, notify authFailureNotifier) {
 	result, err := refresh(ctx)
 	if err != nil {
+		// Narrowed IN FRONT of the generic branch below, which must stay
+		// generic — it also carries write/reload/restore failures that make
+		// the same false claim today, and fixing those is a different task
+		// with a different blast radius.
+		//
+		// This one gets its own message because the generic copy is not
+		// merely imprecise for it, it is BACKWARDS: the S9 abort in
+		// autocookies.go refused to write to cookies.txt BECAUSE it could
+		// not read it — the file may hold a working credential for a
+		// platform this pass never touched — and the generic text ("...
+		// recordings will fail until the cookies are replaced") tells the
+		// operator to overwrite the one file Moombox just went out of its
+		// way not to destroy. The code destroys nothing; that message would
+		// solicit the destruction. Same species as 76f6d79 ("stop the sweep
+		// notification asserting a cause it cannot know"): say only what is
+		// actually known — a read failed, nothing was written — and name the
+		// remedy that is actually true (fix the permission/mount, then it
+		// retries on its own).
+		if errors.Is(err, cookies.ErrCookieFileUnreadable) {
+			s.log.Error("auto-cookie recovery could not read the existing cookie file — nothing was written",
+				"platform", platform, "err", err)
+			notify(platform, "Cookie File Unreadable",
+				fmt.Sprintf("Moombox could not read the existing cookies.txt at %s while refreshing %s cookies, and deliberately did NOT "+
+					"write to it — that file may hold a working credential for another platform, so it was left exactly as it was rather than "+
+					"replaced with an incomplete refresh. This is a filesystem or permissions problem, not a credential one: confirm the path is "+
+					"readable by the account Moombox runs as (in a container, confirm the volume actually mounted). Do not replace cookies.txt "+
+					"over this — Moombox will retry automatically once it can read the file again.",
+					s.cookieFilePath(), platform),
+				notifications.TypeError)
+			return
+		}
 		s.log.Error("auto-cookie recovery failed", "platform", platform, "err", err)
 		// Previously log-only: the operator learned cookies were dead
 		// only when a recording actually failed. 30-min per-platform

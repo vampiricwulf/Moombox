@@ -47,6 +47,9 @@ func TestFinishSetupAbortsOnUnreadableExistingCookieFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("FinishSetup must return an error when the existing cookie file could not be read")
 	}
+	if !errors.Is(err, ErrCookieFileUnreadable) {
+		t.Errorf("returned error does not wrap ErrCookieFileUnreadable, which is what every consumer discriminates on: %v", err)
+	}
 	if !errors.Is(err, readErr) {
 		t.Errorf("returned error does not wrap the underlying read failure: %v", err)
 	}
@@ -111,12 +114,18 @@ func TestFinishSetupProceedsWhenNoExistingCookieFile(t *testing.T) {
 // the per-platform rollback that exists to catch exactly that regression
 // never even runs — it is gated on previousCookies != "".
 //
-// verifyCalls stays at zero specifically because that gate
-// (importedFromProfile && previousCookies != "") is what calls
-// checkPlatformAuth for the pre-import snapshot, and the unconditional
-// post-write verification is further still. Zero calls proves the function
-// returned before EITHER ran — i.e. before anything that could disable the
-// rollback — not merely that it returned before writing.
+// verifyCalls does NOT witness the rollback pre-check specifically — that
+// gate (importedFromProfile && previousCookies != "") is skipped in the OLD,
+// buggy code too, for the same fixture: a transient read failure was already
+// treated as "file absent" there, so previousCookies is "" on both the
+// fixed and unfixed paths, and the pre-check never distinguishes them. What
+// does distinguish them is the UNCONDITIONAL post-write verification further
+// down ("Verify auth via API callbacks"): the unfixed code reaches the write
+// and then that check, calling both verify callbacks once each (confirmed
+// against the unfixed baseline — 2 calls, not 0), while the fixed code
+// returns before either ever runs. Zero calls therefore proves the abort
+// precedes every checkPlatformAuth call in the function — including the one
+// that would otherwise run right after a write this pass must not make.
 func TestRefreshCookiesAbortsOnUnreadableExistingCookieFile(t *testing.T) {
 	profileDir := writeWALCookieProfile(t, youtubeAndTwitchRows(staleTwitchToken))
 	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
@@ -144,6 +153,9 @@ func TestRefreshCookiesAbortsOnUnreadableExistingCookieFile(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("RefreshCookiesDetailed must return an error when the existing cookie file could not be read")
+	}
+	if !errors.Is(err, ErrCookieFileUnreadable) {
+		t.Errorf("returned error does not wrap ErrCookieFileUnreadable, which is what every consumer discriminates on: %v", err)
 	}
 	if !errors.Is(err, readErr) {
 		t.Errorf("returned error does not wrap the underlying read failure: %v", err)
@@ -202,5 +214,35 @@ func TestRefreshCookiesProceedsWhenNoExistingCookieFile(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "login-info-from-profile") {
 		t.Errorf("cookies.txt does not contain the imported cookies:\n%s", data)
+	}
+}
+
+// TestRefreshCookiesWrapperPropagatesCookieFileUnreadable pins
+// ErrCookieFileUnreadable one layer further out than the return site: through
+// RefreshCookies, the thin bool-returning wrapper every whole-service caller
+// (the startup seed, the periodic tick, the Settings "refresh now" button,
+// runCookieRecovery) actually calls instead of RefreshCookiesDetailed. It
+// passes err straight through today, but that is exactly the kind of
+// assumption this plan has been burned by asserting instead of checking —
+// see the coordinator's note that a discriminating error must survive to
+// "the outermost caller, not just at the return site".
+func TestRefreshCookiesWrapperPropagatesCookieFileUnreadable(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(previousCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+
+	failCookieRead(t, errors.New("permission denied (simulated)"))
+
+	ok, err := s.RefreshCookies(context.Background())
+	if ok {
+		t.Error("RefreshCookies = true on an aborted pass")
+	}
+	if !errors.Is(err, ErrCookieFileUnreadable) {
+		t.Errorf("RefreshCookies's returned error lost ErrCookieFileUnreadable somewhere between it and RefreshCookiesDetailed: %v", err)
 	}
 }

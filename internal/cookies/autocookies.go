@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -514,7 +515,7 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		if len(existingData) > 0 {
 			netscapeCookies = mergeCookieFiles(string(existingData), netscapeCookies)
 		}
-	case os.IsNotExist(readErr):
+	case errors.Is(readErr, fs.ErrNotExist):
 		// No cookies.txt yet — the normal first-run case. Nothing to
 		// merge; proceed with just the freshly extracted cookies exactly
 		// as before.
@@ -526,7 +527,14 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 		// cookies, silently replacing a cookies.txt that may hold
 		// working credentials for the other platform. Abort instead:
 		// don't merge, don't write.
-		mergeErr := fmt.Errorf("could not read existing cookies.txt before merging new cookies: %w", readErr)
+		//
+		// Wraps ErrCookieFileUnreadable so callers can tell this apart from
+		// every other setup failure — see the sentinel's doc comment for
+		// why that distinction has to survive to the operator: the file was
+		// deliberately left untouched, and must not be the thing they are
+		// told to replace.
+		mergeErr := fmt.Errorf("%w — refusing to merge or overwrite an existing cookies.txt that could not be read (%w)",
+			ErrCookieFileUnreadable, readErr)
 		s.logger.Error("cookie setup: aborting rather than overwrite cookies.txt after a read failure",
 			"path", s.cookiePath, "err", readErr)
 		s.setError(mergeErr.Error())
@@ -1083,7 +1091,7 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 		if len(existingData) > 0 {
 			previousCookies = string(existingData)
 		}
-	case os.IsNotExist(readErr):
+	case errors.Is(readErr, fs.ErrNotExist):
 		// No cookies.txt yet — nothing to merge or protect via rollback.
 	default:
 		// This has to abort BEFORE previousCookies is used for anything:
@@ -1096,7 +1104,14 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 		// cookies.txt with only the newly-fetched cookies — losing
 		// whatever the other platform had. Abort instead: don't merge,
 		// don't write, don't touch the rollback gate.
-		mergeErr := fmt.Errorf("could not read existing cookies.txt before merging refreshed cookies: %w", readErr)
+		//
+		// Wraps ErrCookieFileUnreadable so callers can tell this apart from
+		// every other refresh failure — see the sentinel's doc comment for
+		// why that distinction has to survive to the operator: the file was
+		// deliberately left untouched, and must not be the thing they are
+		// told to replace.
+		mergeErr := fmt.Errorf("%w — refusing to merge or overwrite an existing cookies.txt that could not be read (%w)",
+			ErrCookieFileUnreadable, readErr)
 		s.setError(mergeErr.Error())
 		s.logger.Error("cookie refresh: aborting rather than overwrite cookies.txt after a read failure",
 			"path", s.cookiePath, "err", readErr)
