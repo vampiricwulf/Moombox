@@ -677,7 +677,6 @@ func (s *runState) initServices(logLevelOverride string) error {
 	if browserProfileDir == "" {
 		browserProfileDir = "./browser-profile"
 	}
-	s.browserProfileDir = browserProfileDir
 	autoCookieSvc := cookies.NewAutoCookieService(
 		browserProfileDir,
 		cfg.Cookies.CookieFile,

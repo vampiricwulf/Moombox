@@ -243,9 +243,9 @@ func TestBrowserLaunchAllowedDefaultsToPermissive(t *testing.T) {
 		t.Fatal("the constructor now sets BrowserLaunchAllowed, so the nil default is no longer what callers get")
 	}
 	want := s.resolvedBrowser()
-	if got := s.refreshBrowser(); got != want {
-		t.Errorf("refreshBrowser() = %v with a nil predicate, want resolvedBrowser()'s %v — every "+
-			"caller that never heard of this field just lost its browser", got, want)
+	if got := s.refreshBrowser(gateApplies); got != want {
+		t.Errorf("refreshBrowser(gateApplies) = %v with a nil predicate, want resolvedBrowser()'s %v — "+
+			"every caller that never heard of this field just lost its browser", got, want)
 	}
 }
 

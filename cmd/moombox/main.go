@@ -201,7 +201,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		twitchMon         = s.twitchMon
 		cookieRefresh     = s.cookieRefresh
 		autoCookieSvc     = s.autoCookieSvc
-		browserProfileDir = s.browserProfileDir
 		webServer         = s.webServer
 		wsHub             = s.wsHub
 		tuiUpdateStatusCh = s.tuiUpdateStatusCh
@@ -282,13 +281,37 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		log.Debug("[CookieRefresh] No cookie file configured, skipping refresh service")
 	}
 
-	// Start auto-cookie periodic refresh if enabled and profile exists
+	// One browser-free import out of the configured browser profile, at most
+	// once per boot, on an install that has no cookies to lose.
+	//
+	// UNCONDITIONAL, and deliberately not under the flag below. This used to
+	// live inside the periodic goroutine, which coupled it to
+	// cookies.auto_enabled for no reason it could justify: the flag exists to
+	// govern a REPEATING read of a profile that nothing changes between ticks,
+	// and a boot is the one moment a mounted profile plausibly did change —
+	// something replaced it while the process was down. Its real safety
+	// condition is the cookie file, not the flag, and that condition lives in
+	// AutoCookieService.decideStartupSeed so there is exactly one site deciding
+	// it: no browser, an importable profile, and no cookies.txt worth
+	// protecting. An install that already has cookies is never touched here.
+	autoCookieSvc.StartProfileSeed(ctx)
+
+	// Start the headless-browser refresh timer. cookies.auto_enabled IS this
+	// timer — it governs nothing else automatic — so the flag is the whole
+	// start condition, along with an interval that means something.
+	//
+	// It deliberately no longer os.Stat's browserProfileDir first. That probe
+	// froze at boot the one thing that changes at runtime: completing setup is
+	// what CREATES the profile directory, so an operator who turned the setting
+	// on and then ran setup — the exact sequence an "auth lost" notification
+	// asks for — got no timer until the next restart, and nothing told them. No
+	// setting had changed by then, so the restart-required labelling could not
+	// fire either. The question is asked per tick now, quietly, by
+	// periodicRefreshHasSource.
 	if cfg.Cookies.AutoEnabled {
-		if _, err := os.Stat(browserProfileDir); err == nil {
-			interval := cfg.Cookies.RefreshInterval.AsDuration(time.Minute)
-			if interval > 0 {
-				autoCookieSvc.StartPeriodicRefresh(ctx, interval)
-			}
+		interval := cfg.Cookies.RefreshInterval.AsDuration(time.Minute)
+		if interval > 0 {
+			autoCookieSvc.StartPeriodicRefresh(ctx, interval)
 		}
 	}
 

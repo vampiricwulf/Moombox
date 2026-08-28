@@ -114,11 +114,14 @@ func childrenOf(n ast.Node) []ast.Node {
 	return out
 }
 
-// readsAutoEnabled reports whether an expression mentions the AutoEnabled
-// config field anywhere inside it. Matched on the SELECTOR, so it holds however
-// the surrounding read is spelled — a direct s.cfg read, a configStore.Read
+// readsAutoEnabled reports whether a node mentions the AutoEnabled config field
+// anywhere inside it. Matched on the SELECTOR, so it holds however the
+// surrounding read is spelled — a direct s.cfg read, a configStore.Read
 // closure, a local copied out first.
-func readsAutoEnabled(expr ast.Expr) bool {
+//
+// Takes ast.Node rather than ast.Expr because main_periodic_start_test.go asks
+// the same question of `if` Init STATEMENTS, where a gate can hide its work.
+func readsAutoEnabled(expr ast.Node) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
 		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "AutoEnabled" {

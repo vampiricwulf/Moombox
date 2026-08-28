@@ -147,12 +147,20 @@ Docker-specific behavior:
   afterwards: continuing to browse in the source profile rotates the
   session and invalidates the export.
 - Alternatively, mount a **Firefox profile directory** into the `./data`
-  volume as `./data/browser-profile` and set `auto_enabled = true` under
-  `[cookies]`. Moombox reads `cookies.sqlite` out of it directly — no
-  browser process involved — and keeps `cookies.txt` topped up from it.
+  volume as `./data/browser-profile`. Moombox reads `cookies.sqlite` out
+  of it directly — no browser process involved, and nothing is written
+  back into the profile — and writes what it finds into `cookies.txt`.
   Close Firefox before copying the profile, and copy `cookies.sqlite`
   together with any `cookies.sqlite-wal` beside it; the main file alone
-  can read as empty. See [Cookie Setup](#cookie-setup).
+  can read as empty. Leave `auto_enabled` off: it only starts a
+  headless-browser refresh timer, and the image has no browser. A first
+  start with no `cookies.txt` imports the profile on its own; after that
+  the profile is read when **you** ask for it — the Settings page's
+  "Refresh cookies from browser profile" button, shift+click on the
+  header's "Refresh cookies", or `R F` in the TUI —
+  because nothing inside the container changes the profile, so nothing
+  else can know when there is something new to read. See
+  [Cookie Setup](#cookie-setup).
 - Update by pulling a new image (`docker compose pull && docker compose
   up -d`) — an in-app update would be lost when the container is
   recreated, so the seeded config disables automatic update checks
@@ -526,7 +534,9 @@ Cookies are needed for member-only content (YouTube) and authenticated access (T
 
 ### Automatic (recommended on a desktop)
 
-Enable automatic cookie acquisition in `config.toml`:
+Use the web dashboard Settings page or TUI settings panel to launch a browser, log into YouTube and/or Twitch, and Moombox stores the result in an isolated profile of its own. Firefox is recommended (cookies are read directly from SQLite). Edge and Chrome are supported as fallback via Chrome DevTools Protocol. That setup runs whatever `auto_enabled` says — it is how you supply cookies, not something the flag switches on.
+
+Then, on a desktop, turn the flag on:
 
 ```toml
 [cookies]
@@ -534,29 +544,45 @@ auto_enabled = true
 browser_profile_dir = "./browser-profile"
 ```
 
-Then use the web dashboard Settings page or TUI settings panel to launch a browser, log into YouTube and/or Twitch, and Moombox will manage cookie refresh automatically. Firefox is recommended (cookies are read directly from SQLite). Edge and Chrome are supported as fallback via Chrome DevTools Protocol.
+`auto_enabled` governs exactly two things: a slow second refresh that re-opens that profile in a headless browser on a timer, and one automatic browser attempt when authentication fails (with it off, Moombox notifies you instead). Everything else runs either way — the in-process refresh that keeps the YouTube session alive is gated only on `cookie_file`, and so is the manual re-import described below. Changing the flag takes effect on restart.
 
 ### Browser profile import (headless hosts and Docker)
 
 If no supported browser is installed — the Docker image ships none — Moombox
-falls back to reading a Firefox profile directory you point it at, with no
-browser launch and no writes into the profile:
+reads a Firefox profile directory you point it at, with no browser launch and
+no writes into the profile. This needs **no config beyond `cookie_file`**:
 
 ```toml
 [cookies]
-auto_enabled = true
+cookie_file = "/data/cookies.txt"
 ```
+
+Leave `auto_enabled` off here. It only starts the headless-browser refresh
+timer and allows one automatic browser attempt on auth failure, and there is
+no browser on such a host to run either; it has never gated the import.
 
 `browser_profile_dir` needs no entry: it defaults to `./browser-profile`,
 which resolves to `/data/browser-profile` inside the container. Mount or copy
 in the **single** Firefox profile directory there (the one containing
 `prefs.js` and `cookies.sqlite`), not its parent.
 
-Moombox imports shortly after startup, whenever it detects that authentication
-has died, and on refresh ticks where there is active work — the periodic tick
-is skipped while nothing is downloading or live, so an idle instance will not
-re-read the profile on a timer. The "Refresh cookies now" button in Settings
-(and `R F` in the TUI) forces an import at any time.
+**The first import is automatic.** On a start where there is no `cookies.txt`
+yet, Moombox reads the mounted profile once, shortly after boot — there is
+nothing on disk to lose. Mount a profile and start; you do not have to press
+anything.
+
+**After that, you trigger it.** Press **"Refresh cookies from browser
+profile"** on the dashboard's Settings page (under Automatic Cookie Login) —
+or shift+click the header's "Refresh cookies" button, or press `R F` in the
+TUI. All three read straight from the profile with no browser, whatever
+`auto_enabled` says and whatever `cookies.txt` already holds. Use the Settings
+button on a phone or tablet: shift+click needs a keyboard.
+Moombox does not re-read the profile on a timer once you have cookies,
+deliberately: nothing on the host side of the mount changes it, so a timer
+would re-read identical bytes over credentials that may still be working. When
+the session ages out, refresh the profile and press the button. Between
+imports the in-process refresh keeps the imported YouTube session alive on its
+own.
 
 Copy the profile with Firefox **closed**, and bring `cookies.sqlite-wal` along
 with `cookies.sqlite` if you copy the files individually — recent cookies live

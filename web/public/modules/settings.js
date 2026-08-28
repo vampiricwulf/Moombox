@@ -71,10 +71,16 @@ const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 //
 // The three cookie entries are not cosmetic. AutoCookieService is constructed
 // once at startup from cookie_file and browser_profile_dir, and main.go decides
-// there and then whether the periodic refresh runs at all — it reads
-// auto_enabled and os.Stat's the profile directory before this page exists. An
-// operator acting on a "your cookies are dead" notification can otherwise turn
-// the setting on, watch it save, and have nothing whatever happen.
+// there and then whether the headless-browser refresh timer runs at all — it
+// reads auto_enabled before this page exists. An operator acting on a "your
+// cookies are dead" notification can otherwise turn the setting on, watch it
+// save, and have no timer until they restart.
+//
+// What auto_enabled does NOT need a restart for is the manual triggers: R F and
+// this dashboard's shift+click read it live. And the profile DIRECTORY is no
+// longer part of the start condition — main.go used to os.Stat it at boot,
+// which meant completing setup at runtime left the timer unstarted with nothing
+// saying so; the loop asks per tick now (periodicRefreshHasSource).
 //
 // Kept in step with restartRequiredKeys in internal/tui/settings.go; the two
 // lists are pinned against each other by TestRestartRequiredListsAgree.
@@ -379,10 +385,33 @@ export class SettingsController {
         btn.loading = false;
       });
 
-    // Auto-cookie toggle → show/hide action buttons
-    const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
-    if (autoCookiesSwitch) {
-      autoCookiesSwitch.addEventListener("sl-change", () => this.updateAutoCookieUI());
+    // The auto-cookie switch no longer shows or hides anything — see
+    // updateAutoCookieUI — so no listener is wired to it here. The per-platform
+    // toggles below still are, because they do.
+
+    // The touch-reachable route to the auto-cookie refresh.
+    //
+    // The other one is shift+clicking the header's "Refresh cookies" button, and
+    // a modifier key does not exist on a phone or tablet. That left a
+    // mobile-only operator with dead cookies, an updated browser profile and NO
+    // trigger at all — on precisely the workflow that is designated for Docker,
+    // where the profile import is the only cookie path there is.
+    //
+    // Calls app.autoCookieRefresh directly: same method, same endpoint, same
+    // three-rung fallback (browser if allowed and available, else an immediate
+    // profile import, else a plain recheck). There is deliberately no second
+    // implementation here — only the await and the spinner, so the button does
+    // not read as dead while the pass runs.
+    const importProfileBtn = document.getElementById("btn-import-browser-profile");
+    if (importProfileBtn) {
+      importProfileBtn.addEventListener("click", async () => {
+        importProfileBtn.loading = true;
+        try {
+          await this.app.autoCookieRefresh();
+        } finally {
+          importProfileBtn.loading = false;
+        }
+      });
     }
 
     // Per-platform setup buttons
@@ -918,9 +947,9 @@ export class SettingsController {
     // Resolve browser selection into payload.cookies.browser_path / browser_type.
     // Must happen before the fetch so validation errors can abort early.
     // Only when the selector has actually been populated (loadAutoCookieStatus
-    // runs async, and only with auto-cookies enabled) — otherwise the select
-    // reads "" and the save would silently erase a configured browser. Omitting
-    // both keys keeps the server's stored values.
+    // runs async) — otherwise the select reads "" and the save would silently
+    // erase a configured browser. Omitting both keys keeps the server's stored
+    // values.
     if (this._browserSelectLoaded) {
       if (browserSelectVal === "__custom__") {
         const path = document.getElementById("cfg-cookies-browser-path")?.value || "";
@@ -2247,27 +2276,44 @@ export class SettingsController {
 
   // ─── Auto Cookie Methods ─────────────────────────────────────
 
+  // NOT gated on cfg-auto-cookies-enabled, deliberately. Everything below is
+  // ACQUISITION — the browser login that puts cookies on disk, and the choice of
+  // which browser runs it. The flag governs one thing: whether a slow
+  // headless-browser refresh timer exists, plus one automatic browser retry when
+  // auth fails. It has never governed setup (auto_enabled does not appear
+  // anywhere in internal/cookies, and StartSetup is deliberately reachable with
+  // it off), and hiding setup behind it made the setting impossible to reach the
+  // honest way: a fresh install has it false by definition, and running setup is
+  // what earns turning it on.
+  //
+  // It is the same shape as the R F chord that used to be wired only when the
+  // flag was on — an install with the flag off is exactly the install that needs
+  // the manual path, and it was the one with the buttons hidden.
+  //
+  // The per-platform toggles below still apply: a "Setup Twitch" button for a
+  // platform the operator has switched off is noise.
   updateAutoCookieUI() {
-    const enabled = document.getElementById("cfg-auto-cookies-enabled")?.checked;
     const actionsDiv = document.getElementById("auto-cookie-actions");
     if (actionsDiv) {
-      actionsDiv.style.display = enabled ? "" : "none";
+      actionsDiv.style.display = "";
     }
     const selectorDiv = document.getElementById("auto-cookie-browser-selector");
     if (selectorDiv) {
-      selectorDiv.style.display = enabled ? "" : "none";
+      selectorDiv.style.display = "";
     }
     // Show/hide per-platform setup buttons based on active toggles
     const ytActive = document.getElementById("cfg-active-youtube")?.checked;
     const twActive = document.getElementById("cfg-active-twitch")?.checked;
     const ytBtn = document.getElementById("btn-auto-cookie-setup-yt");
     const twBtn = document.getElementById("btn-auto-cookie-setup-tw");
-    if (ytBtn) ytBtn.style.display = (enabled && ytActive) ? "" : "none";
-    if (twBtn) twBtn.style.display = (enabled && twActive) ? "" : "none";
-    // Fetch and show detected browser info
-    if (enabled) {
-      this.loadAutoCookieStatus();
-    }
+    if (ytBtn) ytBtn.style.display = ytActive ? "" : "none";
+    if (twBtn) twBtn.style.display = twActive ? "" : "none";
+    // Unconditional too, and it has to be: it is what fills the browser
+    // selector we just showed and what writes "No supported browser detected"
+    // into auto-cookie-browser-info. Showing an empty selector would be worse
+    // than hiding it. It also flips _browserSelectLoaded, which is what lets a
+    // save carry the browser choice — see saveConfig.
+    this.loadAutoCookieStatus();
   }
 
   populateBrowserSelector(status) {

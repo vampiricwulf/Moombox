@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,21 @@ func youtubeAuthRows() []profileTestCookie {
 // (yt_dlp/cookies.py shutil.copy of the main file only); Moombox must not.
 func writeWALCookieProfile(t *testing.T, rows []profileTestCookie) string {
 	t.Helper()
-	profileDir := t.TempDir()
+	return writeWALCookieProfileAt(t, t.TempDir(), rows)
+}
+
+// writeWALCookieProfileAt is writeWALCookieProfile at a CHOSEN path, creating
+// it if it is not there.
+//
+// The choice matters for one test: the periodic loop's start condition depends
+// on the profile directory being absent and then APPEARING, which is what
+// completing setup does at runtime (StartSetup MkdirAlls it). Nothing may
+// pre-create it, so the fixture cannot own the path.
+func writeWALCookieProfileAt(t *testing.T, profileDir string, rows []profileTestCookie) string {
+	t.Helper()
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatalf("create synthetic profile dir: %v", err)
+	}
 	dbPath := filepath.Join(profileDir, "cookies.sqlite")
 
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
@@ -451,43 +466,181 @@ func TestFinishSetupTreatsEmptyProfileAsNoLogin(t *testing.T) {
 	}
 }
 
-// TestShouldSeedFromProfileAtStartup covers the startup one-shot gate: it
-// fires only when there is no browser to drive AND the profile actually
-// holds a cookie DB to import.
-func TestShouldSeedFromProfileAtStartup(t *testing.T) {
-	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+// authCookieRows is a Netscape cookies.txt body that a per-platform predicate
+// would call "no auth for either platform" — one unrelated cookie, no SAPISID,
+// no LOGIN_INFO, no Twitch auth-token. The seed gate must still refuse to touch
+// it: see the decoy row below.
+const nonAuthCookieFile = "# Netscape HTTP Cookie File\n" +
+	".youtube.com\tTRUE\t/\tFALSE\t0\tPREF\tsomething\n"
 
-	t.Run("browserless with cookie db", func(t *testing.T) {
-		s := NewAutoCookieService(profileDir, "", NewCookieJar(), nopAutoCookieLogger{})
-		s.detectBrowser = func() *DetectedBrowser { return nil }
-		if !s.shouldSeedFromProfileAtStartup() {
-			t.Error("want true: no browser but a readable profile is the container case")
-		}
-	})
+// TestDecideStartupSeed covers the startup one-shot gate.
+//
+// Two independent questions, and the second is why this gate no longer needs
+// cookies.auto_enabled at all:
+//
+//  1. Is there anything to import FROM? No browser to drive, and a profile that
+//     actually holds a cookies.sqlite.
+//  2. Is there anything to LOSE? The import runs only over a cookies.txt that
+//     is absent or empty. Everything else is left for R F, which is a
+//     deliberate act rather than a side effect of restarting.
+//
+// The verdict is asserted, not the bool, because the reasons are not
+// interchangeable: exactly one of them is reported to the operator, and the
+// unreadable row is the one that must never be mistaken for absence.
+func TestDecideStartupSeed(t *testing.T) {
+	populatedProfile := writeWALCookieProfile(t, youtubeAuthRows())
 
-	t.Run("browser present", func(t *testing.T) {
-		s := NewAutoCookieService(profileDir, "", NewCookieJar(), nopAutoCookieLogger{})
-		s.detectBrowser = func() *DetectedBrowser {
-			return &DetectedBrowser{Type: "firefox", Path: "/usr/bin/firefox", Name: "Firefox"}
+	// cookieFile writes body to a fresh path and returns it; a nil body leaves
+	// the file absent.
+	cookieFile := func(t *testing.T, body *string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "cookies.txt")
+		if body != nil {
+			if err := os.WriteFile(path, []byte(*body), 0o600); err != nil {
+				t.Fatalf("write fixture cookies.txt: %v", err)
+			}
 		}
-		if s.shouldSeedFromProfileAtStartup() {
-			t.Error("want false: a real browser drives the normal refresh path")
-		}
-	})
+		return path
+	}
+	str := func(s string) *string { return &s }
 
-	t.Run("no cookie db", func(t *testing.T) {
-		s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
-		s.detectBrowser = func() *DetectedBrowser { return nil }
-		if s.shouldSeedFromProfileAtStartup() {
-			t.Error("want false: nothing to import")
-		}
-	})
+	for _, tc := range []struct {
+		name         string
+		profileDir   string
+		browser      *DetectedBrowser
+		cookieBody   *string // nil = the file does not exist
+		noCookiePath bool
+		readErr      error // installed on the readCookieFile seam
+		want         autoImportVerdict
+		why          string
+	}{
+		{
+			name:       "browserless, importable profile, no cookies.txt",
+			profileDir: populatedProfile, cookieBody: nil,
+			want: autoImportOK,
+			why:  "the cold-start container case: nothing to lose, and a boot is when a mounted profile plausibly changed",
+		},
+		{
+			name:       "cookies.txt exists but holds no rows",
+			profileDir: populatedProfile, cookieBody: str("# Netscape HTTP Cookie File\n\n"),
+			want: autoImportOK,
+			why: "a header-only file is what a bind mount of a missing host file, or a touch, leaves " +
+				"behind — it has no credentials to destroy, so it must not block the seed",
+		},
+		{
+			// THE DECOY. A narrower "no AUTH cookies for either platform"
+			// definition would import here. This package has already been
+			// wrong with a per-platform predicate — a half-cleared but working
+			// YouTube session read as hasCookies:false — so the gate refuses
+			// anything with rows in it.
+			name:       "cookies.txt holds rows that are not auth cookies",
+			profileDir: populatedProfile, cookieBody: str(nonAuthCookieFile),
+			want: autoImportCookiesPresent,
+			why: "'holds no auth cookies' needs a per-platform predicate to be certain, and being wrong " +
+				"about one destroys a working session. Rows present is the answer that needs no predicate",
+		},
+		{
+			// The SAFE-DIRECTION property, pinned because automaticImportGuard's
+			// doc now asserts it. countNetscapeCookieRows counts LINES, not valid
+			// cookies, so garbage counts as "something to lose". That is the cheap
+			// error (one ungated R F); reading it as "nothing to lose" is the
+			// expensive one (credentials gone, noticed when a recording fails).
+			name:       "cookies.txt holds only malformed rows",
+			profileDir: populatedProfile, cookieBody: str("not\ta\tvalid\tcookie\n"),
+			want: autoImportCookiesPresent,
+			why: "the row counter over-counts by construction and must keep doing so — a replacement " +
+				"that parsed rows properly would answer 'nothing to lose' here and import over a file " +
+				"whose contents it merely failed to understand",
+		},
+		{
+			name:       "cookies.txt holds real auth cookies",
+			profileDir: populatedProfile,
+			cookieBody: str("#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tv\n.youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tv\n"),
+			want:       autoImportCookiesPresent,
+			why:        "working credentials are replaced deliberately with R F, never as a side effect of a restart",
+		},
+		{
+			// ARC 2's LESSON. Unreadable is not absent.
+			name:       "cookies.txt cannot be read",
+			profileDir: populatedProfile, cookieBody: str(nonAuthCookieFile),
+			readErr: fs.ErrPermission,
+			want:    autoImportCookieFileUnreadable,
+			why: "a permission or mount blip over a file that may hold working credentials must stand " +
+				"down, not import over it — that is exactly what ErrCookieFileUnreadable exists to stop",
+		},
+		{
+			name:       "a browser is installed",
+			profileDir: populatedProfile, cookieBody: nil,
+			browser: &DetectedBrowser{Type: "firefox", Path: "/usr/bin/firefox", Name: "Firefox"},
+			want:    autoImportBrowserPresent,
+			why:     "a real browser drives the normal refresh path; an unsolicited startup pass would launch it",
+		},
+		{
+			name:       "profile directory holds no cookies.sqlite",
+			profileDir: t.TempDir(), cookieBody: nil,
+			want: autoImportNoProfileDB,
+			why:  "nothing to import",
+		},
+		{
+			name:       "no profile directory configured",
+			profileDir: "", cookieBody: nil,
+			want: autoImportNotConfigured,
+			why:  "auto-cookies not configured",
+		},
+		{
+			name:       "no cookie file configured",
+			profileDir: populatedProfile, noCookiePath: true,
+			want: autoImportNotConfigured,
+			why:  "an import would have nowhere to write",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := ""
+			if !tc.noCookiePath {
+				path = cookieFile(t, tc.cookieBody)
+			}
+			if tc.readErr != nil {
+				real := readCookieFile
+				readCookieFile = func(name string) ([]byte, error) {
+					if name == path {
+						return nil, &fs.PathError{Op: "open", Path: name, Err: tc.readErr}
+					}
+					return real(name)
+				}
+				t.Cleanup(func() { readCookieFile = real })
+			}
 
-	t.Run("unconfigured profile dir", func(t *testing.T) {
-		s := NewAutoCookieService("", "", NewCookieJar(), nopAutoCookieLogger{})
-		s.detectBrowser = func() *DetectedBrowser { return nil }
-		if s.shouldSeedFromProfileAtStartup() {
-			t.Error("want false: auto-cookies not configured")
+			s := NewAutoCookieService(tc.profileDir, path, NewCookieJar(), nopAutoCookieLogger{})
+			s.detectBrowser = func() *DetectedBrowser { return tc.browser }
+
+			if got := s.decideStartupSeed(); got != tc.want {
+				t.Errorf("decideStartupSeed() = %v, want %v — %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// TestAutoImportVerdictsAreDistinct guards the reporting half.
+//
+// Both automatic sites log why they stood down, and StartProfileSeed promotes
+// exactly one verdict to a Warn the operator is meant to act on (the unreadable
+// cookies.txt). Two verdicts rendering the same string would leave that log
+// line unable to say which situation the install is in — and the strings are
+// the only thing the reader gets.
+func TestAutoImportVerdictsAreDistinct(t *testing.T) {
+	all := []autoImportVerdict{
+		autoImportOK, autoImportNotConfigured, autoImportBrowserPresent,
+		autoImportNoProfileDB, autoImportCookiesPresent, autoImportCookieFileUnreadable,
+	}
+	seen := map[string]autoImportVerdict{}
+	for _, v := range all {
+		s := v.String()
+		if s == "" || s == "unknown" {
+			t.Errorf("verdict %d renders as %q, so the log line naming it says nothing", int(v), s)
 		}
-	})
+		if prev, dup := seen[s]; dup {
+			t.Errorf("verdicts %d and %d both render as %q", int(prev), int(v), s)
+		}
+		seen[s] = v
+	}
 }

@@ -601,6 +601,21 @@ func (s *runState) wireMonitorCallbacks() {
 		// be made — live in handleRecoveryNeeded so each can be driven
 		// directly by a test. The method value is taken unconditionally and
 		// is not called on the disabled path.
+		//
+		// THIS IMPORT DELIBERATELY BYPASSES cookies.automaticImportGuard, and
+		// it is the only automatic import that does. The guard's rule — never
+		// import over an existing cookies.txt — protects credentials that MIGHT
+		// BE WORKING. This path runs only when they are known not to be:
+		// shouldFireRecovery fires on a conclusive not-authenticated for this
+		// platform (see the "WHY conclusive holds" note in
+		// handleRecoveryNeeded). Applying the rule here would refuse the one
+		// automatic import most likely to fix the problem, because a file
+		// exists that has just been proven dead.
+		//
+		// Do not "fix" this by adding the guard. A surviving second platform is
+		// protected by RefreshCookiesDetailed's own pre/post verification and
+		// platformsToRestore, not by the guard. The full derivation is at
+		// automaticImportGuard.
 		s.handleRecoveryNeeded(platform, autoEnabled, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
 	}
 
