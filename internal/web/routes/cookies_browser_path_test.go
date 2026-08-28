@@ -150,10 +150,19 @@ func TestBrowserPathValidationBlocksOnlyAConclusiveRejection(t *testing.T) {
 //
 // A presence check ("saveConfig calls the helper") cannot see the bug: the
 // helper can be called and its verdict ignored, and the old `return` left in
-// place beside it. What the fix actually claims is that the custom-browser
-// branch has exactly ONE way to abandon the save, and that it is the one
-// guarded by `outcome.block`. Counting the exits is the shape a re-added abort
-// on the 429 path cannot satisfy — it necessarily adds a second one.
+// place beside it. Two counts carry this test, and it is worth being exact
+// about which one carries what, because a future editor trimming "redundant"
+// assertions will keep whichever the comment credits:
+//
+//   - The EXIT count catches an abort ADDED beside the block — a second
+//     `return;` on the warning path, which is the shape the original defect had.
+//   - The CALL count is what catches an abort that keeps one exit. Replacing the
+//     non-ok branch with an inline `{ block: true, ... }` literal reintroduces
+//     the whole of S14 — a 429 abandons the save — while leaving exactly one
+//     `return;`, still guarded by `outcome.block`, and never naming
+//     `validateResult`. Three calls means every way the check can end (a
+//     verdict, a non-200, a throw) goes through the helper; a branch that
+//     decides for itself what a non-answer means is a branch that skipped it.
 //
 // Bracketed twice over: to saveConfig, and then to the span between the
 // validation fetch and the payload assignment it guards. saveConfig is long and
@@ -177,9 +186,9 @@ func TestSaveConfigHasOneExitFromBrowserValidation(t *testing.T) {
 	span := body[start : start+end]
 
 	if n := strings.Count(span, "return;"); n != 1 {
-		t.Errorf("the browser-path validation has %d exits, want exactly 1. The extra one is how a "+
-			"429 — or any answer that is not a verdict — goes back to discarding every other "+
-			"setting in the save:\n%s", n, span)
+		t.Errorf("the browser-path validation has %d exits, want exactly 1. An abort added beside "+
+			"the block is how a 429 — or any answer that is not a verdict — goes back to "+
+			"discarding every other setting in the save:\n%s", n, span)
 	}
 	if !strings.Contains(span, "outcome.block") {
 		t.Error("the single exit is no longer guarded by outcome.block — the save can be abandoned " +
@@ -194,12 +203,15 @@ func TestSaveConfigHasOneExitFromBrowserValidation(t *testing.T) {
 		t.Errorf("browserPathValidationOutcome is called with %d arguments (%v), want 1 options object",
 			len(args), args)
 	}
-	// Every way the check can end has to route through the helper: the 200, the
-	// non-200, and the throw. Three call sites, and the throw is the one that
-	// was a bare abort before.
+	// THE ASSERTION THAT CATCHES A DISGUISED ABORT — see the doc comment. The
+	// exit count above does not: an inline `{ block: true, ... }` on the non-ok
+	// branch reinstates the whole defect with one exit and no new `return;`.
+	// Three calls means the 200, the non-200 and the throw each go through the
+	// helper, which is the only way none of them can decide for itself what a
+	// non-answer means.
 	if n := strings.Count(span, "browserPathValidationOutcome("); n != 3 {
 		t.Errorf("the validation has %d calls to browserPathValidationOutcome, want 3 — one per way "+
-			"it can end (a verdict, a non-200, a throw). A path that skips the helper is a path "+
-			"that decides for itself what a non-answer means", n)
+			"it can end (a verdict, a non-200, a throw). A branch that builds its own outcome is "+
+			"a branch that has gone back to treating \"could not check\" as \"invalid\"", n)
 	}
 }

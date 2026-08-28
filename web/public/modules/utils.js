@@ -133,10 +133,17 @@ export async function serverErrorMessage(response) {
  *
  * `block` is reserved for the one answer that earns it: the server ran the check
  * and said no. Everything else — unreachable, non-200, unparseable, or a 200
- * carrying no verdict — warns and lets the save through. Nothing is lost by
- * that: PATCH /api/config runs ValidateBrowserPathQuick on browser_path itself
- * and rejects the save with a field error if the path is genuinely unusable, so
- * a bad path cannot be stored just because this pre-check was skipped.
+ * carrying no verdict — warns and lets the save through.
+ *
+ * Letting it through is not unguarded, but it is not equivalent either, and the
+ * difference is worth stating exactly. PATCH /api/config runs
+ * ValidateBrowserPathQuick on browser_path and rejects the save with a field
+ * error, so a path that is missing, relative, not a regular file, not
+ * executable, or of an unknown browser type still cannot be stored. What the
+ * backstop does NOT run is the `--version` probe this endpoint adds — so a real
+ * executable that is not actually that browser CAN now be stored when the
+ * pre-check could not run. That failure surfaces later as a legible refresh
+ * error; the alternative cost the user every other edit in the form.
  *
  * Written as a pure function over `{reached, body, detail}` so it can be RUN in
  * a test — saveConfig is DOM-coupled and cannot be. The comparison against
@@ -431,9 +438,14 @@ const COOKIE_INDICATOR_PLATFORMS = {
  *     undefined; ordering the absence test first would render a working,
  *     authenticated Twitch session as "Anonymous".
  *
- * The relogin arm stays first and stays a caller decision: it is gated on the
- * auto_enabled config flag at the call site, and that gating is not this
- * function's to change.
+ * The relogin arm stays first, and it is the caller's flag to compute because it
+ * arrives on a different key of the status payload than the per-platform check
+ * result the rest of this function reads — NOT because the caller filters it.
+ * It used to be conjoined with the auto_enabled config flag at the call site,
+ * and that gate is gone: "a human must sign in again" is exactly as true, and
+ * exactly as actionable, for an install that maintains cookies.txt by hand. Do
+ * not reintroduce it here or there — the TUI has never had one, and the two
+ * surfaces are supposed to agree. See updateStatusBar in app.js.
  */
 export function cookieIndicatorState(platform, status, reloginRequired) {
   const meta = COOKIE_INDICATOR_PLATFORMS[platform];

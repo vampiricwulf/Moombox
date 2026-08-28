@@ -446,16 +446,26 @@ func cookieUnknownLabel(code string, t barTier) string {
 // is.
 //
 // This deliberately does NOT filter on ParkReason, and the distinction is
-// worth stating because the badge is coarser than the status it reads.
-// StatusCookies carries two reasons (database/types.go:41-54): ParkReasonAuth,
-// where the credentials are genuinely dead; and ParkReasonMembership, where
-// the request WAS signed in and YouTube refused anyway — worker.go:1058 logs
-// "the credentials are alive and the account simply lacks access". Both still
-// escalate, because in both the remedy is cookies: for the second, cookies
-// from an account that actually holds the membership. Filtering membership
-// parks out would lose a real alarm. What the red badge means is therefore
-// "a download stopped for want of usable credentials", NOT "your cookies
-// expired" — job_details.go:548-554 is where the operator gets the difference.
+// worth stating because the badge is coarser than the status it reads. Coarser
+// in two ways, not one — an earlier draft of this comment said "two reasons,
+// dead credentials or membership", and that is a tidier split than the code:
+//
+//   - ParkReasonMembership: the request WAS signed in and YouTube refused
+//     anyway. worker.go:1058 logs "the credentials are alive and the account
+//     simply lacks access". The remedy is cookies from a DIFFERENT account.
+//   - ParkReasonAuth: usually dead credentials — but not only. worker.go:884-890
+//     files twitch.ErrSubscriberOnly here ON PURPOSE, because Usher's 403 cannot
+//     tell an anonymous session from an un-entitled one. So an Auth park can sit
+//     on a perfectly healthy, signed-in Twitch session.
+//   - ParkReasonNone: the zero value every pre-v18 COOKIES? row still carries,
+//     because migrateV18 deliberately backfills nothing. Sweeps treat it as
+//     Auth; so does this, by not looking.
+//
+// All three escalate, because in all three the remedy is credentials of some
+// kind, and filtering any of them out would lose a real alarm. What the red
+// badge means is therefore "a download stopped for want of usable credentials",
+// NOT "your cookies expired" — job_details.go:548-554 is where the operator
+// gets the difference.
 func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
 	for _, j := range m.jobs {
 		if j.Status != database.StatusCookies {

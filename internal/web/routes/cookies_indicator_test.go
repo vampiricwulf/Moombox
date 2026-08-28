@@ -388,18 +388,37 @@ func TestReloginWarningIsNotGatedOnAutoCookies(t *testing.T) {
 	}
 
 	// The badge's third argument is the same decision one layer down, and it
-	// carried the same conjunction. Taken off the PARSED call, so a mention of
-	// the flag in a neighbouring comment cannot stand in for passing it.
+	// carried the same conjunction. It gets the SAME exact-rendering treatment
+	// as the two warning conditions, and that is not belt-and-braces: a
+	// containment check ("does the expression still mention
+	// autoCookieReloginRequired?") passes for
+	//
+	//     const relogin = !!(this.autoCookieReloginRequired?.[platform] && this._autoOn);
+	//
+	// which re-gates the badge on a local the absence check above cannot name,
+	// while leaving both warning pushes ungated. The shipped result is the
+	// status bar saying "YT: Re-login" in text beside a Re-login badge that
+	// never lights — one surface disagreeing with itself about one fact, which
+	// is this arc's defect at its smallest. A name-based or substring check is
+	// not a guard when the decoy can rename or extend; the exact rendering is.
+	const wantRelogin = "const relogin = !!this.autoCookieReloginRequired?.[platform];"
+	if !strings.Contains(code, wantRelogin) {
+		t.Errorf("the badge's re-login flag is no longer exactly %q (line is %q) — anything else "+
+			"conditions the red badge on something the two warning pushes are not conditioned on, "+
+			"and the two halves of the status bar stop agreeing",
+			wantRelogin, strings.TrimSpace(jsLineContaining(code, "const relogin")))
+	}
+
+	// And it must still be what reaches the helper. Taken off the PARSED call,
+	// so a mention of the flag in a neighbouring comment cannot stand in for
+	// passing it, and so an exactly-rendered local that is then ignored fails.
 	args := jsCallArgs(code, "cookieIndicatorState")
 	if len(args) != 3 {
 		t.Fatalf("updateStatusBar calls cookieIndicatorState with %d arguments (%v), want 3", len(args), args)
 	}
-	// Either the local computed just above, or the expression inlined here.
-	// Whichever it is, the absence check above has already established that no
-	// auto-cookies gate survives anywhere in this method.
-	if !strings.Contains(args[2]+jsLineContaining(code, "const relogin"), "autoCookieReloginRequired") {
-		t.Errorf("the badge's re-login argument (%q) no longer traces back to "+
-			"autoCookieReloginRequired — the red Re-login badge would never light", args[2])
+	if args[2] != "relogin" {
+		t.Errorf("the badge's third argument is %q, not the `relogin` local the assertion above "+
+			"pins — the exactly-rendered flag is being computed and then not used", args[2])
 	}
 }
 
