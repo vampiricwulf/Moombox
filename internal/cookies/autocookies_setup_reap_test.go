@@ -474,27 +474,49 @@ func TestSetupBrowserGoneRefusesToAnswerWithoutAJobObject(t *testing.T) {
 	}
 }
 
-// TestCancelSucceedsWheneverTheUIIsOfferingIt pins the deliberate divergence
+// TestCancelSetupGateIsDeliberatelyWiderThanSetupInProgress pins the divergence
 // F-3 named: CancelSetup's gate is NOT setupInProgressLocked, and it must stay
-// a strict superset of it.
+// a STRICT superset of it.
 //
-// The direction is what matters. A cancel may succeed on a slot GetStatus has
-// stopped advertising — that cancel is what tears a dead slot down. It must
-// never do the reverse and answer "nothing to cancel" while the dialog is still
-// showing the Cancel button that produced it.
+// Two obligations, and only one of them is the obvious one:
 //
-// A guard, not a witness: at 6b00559 the two predicates were literally the same
-// expression, so it passed there for a reason that no longer holds.
-func TestCancelSucceedsWheneverTheUIIsOfferingIt(t *testing.T) {
+//   - ⊇ : a cancel must never answer "nothing to cancel" while the dialog is
+//     still showing the Cancel button that produced it. The first three rows.
+//   - ≠ : and it must still succeed on a slot setupInProgressLocked has stopped
+//     advertising — an expired setup nothing has reaped yet. THAT cancel is
+//     what tears the dead slot down, and answering 404 while leaving state
+//     behind would be worse. The last row.
+//
+// THE LAST ROW IS THE POINT. An earlier version of this test had only the first
+// three, and every one of them is satisfied by BOTH predicates — so it passed
+// with CancelSetup's gate mutated to setupInProgressLocked(), which is the exact
+// change its own doc claimed to forbid. That is this plan's junction defect
+// again: an assertion sited where two mechanisms agree. Mutation-checked now,
+// and it fails.
+//
+// `advertised` is read straight from setupInProgressLocked rather than through
+// GetStatus, because GetStatus reaps — on the last row that would clear the slot
+// before CancelSetup ever saw it, and the row would prove nothing.
+//
+// A guard rather than a witness, and its evidence is the mutation above rather
+// than a run against an earlier commit: setupInProgressLocked did not exist at
+// 6b00559, so there is no version of this test that both compiles there and
+// asserts what this one asserts.
+func TestCancelSetupGateIsDeliberatelyWiderThanSetupInProgress(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
+		name string
+		// exitedAgo/gone/known place the slot in one lifecycle state.
 		exitedAgo time.Duration
 		gone      bool
 		known     bool
+		// advertised is what setupInProgressLocked says about that state — the
+		// predicate CancelSetup must NOT be narrowed to.
+		advertised bool
 	}{
-		{"a browser still running", time.Hour, false, true},
-		{"an exited browser inside its grace window", time.Second, true, true},
-		{"a launcher exit nothing can corroborate", time.Hour, false, false},
+		{"a browser still running", time.Hour, false, true, true},
+		{"an exited browser inside its grace window", time.Second, true, true, true},
+		{"a launcher exit nothing can corroborate", time.Hour, false, false, true},
+		{"an expired slot nothing has reaped yet", time.Hour, true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			captureKills(t)
@@ -502,12 +524,30 @@ func TestCancelSucceedsWheneverTheUIIsOfferingIt(t *testing.T) {
 			abandonedSetup(t, s, tc.exitedAgo)
 			jobReports(t, tc.gone, tc.known)
 
-			if !s.GetStatus().SetupInProgress {
-				t.Fatal("fixture: this state is supposed to be one the UI advertises")
+			s.mu.Lock()
+			advertised := s.setupInProgressLocked()
+			s.mu.Unlock()
+			if advertised != tc.advertised {
+				t.Fatalf("fixture: setupInProgressLocked = %v, want %v — this row is not "+
+					"exercising the state it is named for", advertised, tc.advertised)
 			}
+
 			if err := s.CancelSetup(); err != nil {
-				t.Fatalf("the UI is showing a Cancel button for this state and the cancel "+
-					"behind it reported nothing to cancel: %v", err)
+				if tc.advertised {
+					t.Fatalf("the UI is showing a Cancel button for this state and the cancel "+
+						"behind it reported nothing to cancel: %v", err)
+				}
+				t.Fatalf("CancelSetup was narrowed to setupInProgressLocked. An expired slot "+
+					"nothing has reaped yet still holds state, and the cancel that would have "+
+					"cleared it now declines instead: %v", err)
+			}
+
+			// The cancel is only useful if it actually emptied the slot.
+			s.mu.Lock()
+			proc := s.setupProcess
+			s.mu.Unlock()
+			if proc != nil {
+				t.Fatal("CancelSetup reported success and left the setup slot occupied")
 			}
 		})
 	}

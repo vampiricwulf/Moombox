@@ -69,10 +69,12 @@ const (
 	// reaps it.
 	//
 	// It exists for exactly one caller: a FinishSetup that is already in
-	// flight. Firefox's finish CLOSES the browser itself and then reads the
-	// profile, so "the browser exited" is a normal mid-finish state, not
-	// evidence of abandonment; reaping on the exit alone would pull the slot
-	// out from under the call that is about to succeed.
+	// flight. A finish routinely runs with its spawned process already gone —
+	// Chromium's closes the browser itself, and every Firefox-family launcher
+	// exits ~170ms after start (see setupBrowserGone) — so "the process
+	// exited" is a normal mid-finish state, not evidence of abandonment.
+	// Reaping on that alone would pull the slot out from under the call that is
+	// about to succeed.
 	//
 	// 60s is not a guess, and the headroom is much thinner than it looks. Both
 	// clients cap one FinishSetup at 60 seconds — the Web dialog's
@@ -83,21 +85,31 @@ const (
 	//
 	// Server-side worst case inside that window, summed rather than sampled:
 	//
-	//   Firefox   firefoxGracefulCloseTimeout   8.0s
-	//             cdpCloseFlushDelay (force-kill) 0.5s
-	//             readFirefoxCookies retries    ~2.0s   (5 × 500ms)
+	//   Firefox   taskkillDrainDelay            0.3s
+	//             readFirefoxCookies retries   ~2.0s   (5 × 500ms)
 	//             authVerifyTimeout            15.0s
-	//                                        ≈ 25.5s
+	//                                        ≈ 17.3s
 	//   Chromium  cdpExtractTimeout            30.0s
 	//             taskkillDrainDelay            0.3s
 	//             authVerifyTimeout            15.0s
 	//                                        ≈ 45.3s
 	//
-	// plus merge / write / jar-load I/O in both columns. So the real margin is
-	// ~15s, not the ~42s an "authVerifyTimeout plus the read retries" reading
-	// suggests. DO NOT LOWER THIS TO 30s: a slow Chromium finish would be reaped
+	// plus merge / write / jar-load I/O in both columns. CHROMIUM IS THE
+	// BINDING COLUMN, so the real margin is ~14.7s — not the ~42s an
+	// "authVerifyTimeout plus the read retries" reading suggests.
+	//
+	// The Firefox column deliberately does NOT price closeFirefoxGracefully's
+	// 8.0s poll or the 0.5s cdpCloseFlushDelay behind it. That branch is
+	// unreachable on the path it was written for: the launcher has already
+	// exited by the time a finish runs, so the `exited` check at the top of
+	// closeFirefoxGracefully short-circuits BEFORE the taskkill and the
+	// function returns after one taskkillDrainDelay. Those 8.5s only come back
+	// if a Firefox-family binary stops handing off, and even then the column
+	// stays under Chromium's.
+	//
+	// DO NOT LOWER THIS TO 30s: a slow Chromium finish would be reaped
 	// mid-flight, which is precisely what the re-stamp above exists to prevent.
-	// Raising any of the four constants above eats the margin directly.
+	// Raising any of the constants above eats the margin directly.
 	//
 	// It is also the longest an ABANDONED setup can wedge acquisition, which is
 	// the bug this whole change exists to fix, so it must not grow without a
@@ -200,19 +212,28 @@ type AutoCookieService struct {
 	refreshCmd    *exec.Cmd   // tracks in-flight headless refresh browser
 	setupBrowser  *DetectedBrowser
 	browserExited bool
-	// setupRetainedSince is when the retention grace started for the setup
-	// currently in the slot — the timestamp setupRetainedLocked measures
-	// setupAbandonGrace from. Two writers, both moving it FORWARD only:
+	// setupRetainedSince is the last moment the setup in the slot was known to
+	// be in use — the timestamp setupRetainedLocked measures setupAbandonGrace
+	// from. THREE writers, all moving it FORWARD only:
 	//
-	//   - the wait goroutines, at the moment they observe the browser exit
-	//     (guarded by `s.setupProcess == proc`, so a stale wait from an earlier
-	//     attempt cannot stamp the current one); and
+	//   - the wait goroutines, at the moment they observe the spawned process
+	//     exit (guarded by `s.setupProcess == proc`, so a stale wait from an
+	//     earlier attempt cannot stamp the current one);
 	//   - FinishSetup, when it takes the slot, so a finish that starts near the
-	//     end of a window is not reaped part-way through the read it is doing.
+	//     end of a window is not reaped part-way through the read it is doing;
+	//     and
+	//   - reapAbandonedSetupLocked, every time it finds the setup still alive,
+	//     because a browser that outlives its launcher would otherwise burn its
+	//     whole window while running. See the re-arm there.
 	//
-	// Meaningless unless browserExited is set, and zeroed by cleanupLocked with
-	// the rest of the per-attempt state. A stale zero value reads as "long
-	// expired", which is the safe direction: it reaps rather than retains.
+	// Keep this list honest when a fourth appears. It said "two writers" for
+	// one commit after the third landed, which is the same doc drift F-3 was
+	// raised about.
+	//
+	// Meaningless unless browserExited is set. Cleared by cleanupLocked with
+	// the rest of the per-attempt state, and again by StartSetup alongside its
+	// browserExited reset. A stale zero value reads as "long expired", which is
+	// the safe direction: it reaps rather than retains.
 	setupRetainedSince time.Time
 	cdpPort            int
 	lastRefresh        *time.Time
@@ -417,6 +438,23 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 // running" — never as "gone". drainJob draws the identical line on the same
 // syscall: a zero from a platform that cannot count is "nothing was waited on",
 // which is a different statement from "the browser finished".
+//
+// WHERE THAT LEAVES THE REAP, stated so nobody has to derive it:
+//
+//   - Windows + Chromium-family — answerable, and the reap works.
+//   - Windows + Firefox-family — no Job Object on the setup path yet, so the
+//     reap never fires. S5 (Task 3) gives that path one and this starts
+//     answering with no further change here.
+//   - Linux, and every non-Windows target — there is no Job Object PRIMITIVE
+//     at all (job_linux.go / job_other.go are no-op stubs), so nothing is
+//     answerable on ANY path, Chromium included, and the reap never fires.
+//     S5 does NOT change that. Docker and native Linux therefore keep the
+//     abandoned-setup wedge until something other than a Job Object owns the
+//     liveness question there. Recorded as a known residual, not an oversight.
+//
+// On all three of those, the client-side cancel (the unload beacon, Skip,
+// Escape, and the TUI countdown) is what clears an abandoned setup; the gap is
+// specifically "no client survived to say anything".
 //
 // A package variable so tests can supply the answer a real Job Object gives on
 // a machine where no browser may be launched — the same seam convention as

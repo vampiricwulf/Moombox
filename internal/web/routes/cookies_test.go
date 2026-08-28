@@ -349,13 +349,27 @@ func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 			if end := strings.Index(hideBody, "});"); end >= 0 {
 				hideBody = hideBody[:end]
 			}
-			if !strings.Contains(hideBody, "e.persisted") {
-				t.Errorf("%s cancels the setup on a bfcache pagehide. That page is coming back, "+
-					"the setup it just killed is not, and the flag is cleared on the way out so the "+
-					"restored page cannot cancel either:\n%s", mod.path, hideBody)
+			// Whitespace-normalised and matched on the WHOLE guard, sense
+			// included. Asking only whether "e.persisted" appears passes against
+			// `if (!e.persisted) return;` — an inverted guard that fires the
+			// beacon on exactly the case it exists to skip and skips every real
+			// unload. Verified: the earlier version of this check did.
+			compact := strings.Join(strings.Fields(hideBody), " ")
+			const guard = "if (e.persisted) return"
+			guardAt := strings.Index(compact, guard)
+			if guardAt < 0 {
+				t.Errorf("%s does not bail out of its pagehide beacon on the bfcache case "+
+					"(want %q, sense and all). That page is coming back, the setup it just "+
+					"cancelled is not, and the flag is cleared on the way out so the restored "+
+					"page cannot cancel either:\n%s", mod.path, guard, compact)
 			}
-			if !strings.Contains(hideBody, `navigator.sendBeacon("/api/cookies/auto-setup/cancel")`) {
-				t.Errorf("%s's pagehide handler does not send the cancel beacon:\n%s", mod.path, hideBody)
+			beaconAt := strings.Index(compact, `navigator.sendBeacon("/api/cookies/auto-setup/cancel")`)
+			if beaconAt < 0 {
+				t.Errorf("%s's pagehide handler does not send the cancel beacon:\n%s", mod.path, compact)
+			}
+			if guardAt >= 0 && beaconAt >= 0 && guardAt > beaconAt {
+				t.Errorf("%s checks e.persisted only AFTER firing the beacon, which is no check "+
+					"at all — the cancel has already gone:\n%s", mod.path, compact)
 			}
 		}
 
