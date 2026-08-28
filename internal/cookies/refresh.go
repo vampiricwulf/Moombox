@@ -1842,13 +1842,24 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 					//     never the right answer.
 					//  2. The server has two unambiguous ways to say "delete"
 					//     (a past Expires, Max-Age<=0) and both are honoured
-					//     above. A bare "NAME=" states no intent — and this
-					//     function only ever runs on a response YouTube just
-					//     told us was AUTHENTICATED (refresh.go's `if
-					//     authenticated` gate), so a blanked essential cookie
-					//     here is likelier a truncated or value-stripping
-					//     proxy than a real logout. Keeping a stale value is
-					//     recoverable; destroying a live one is not.
+					//     above, and a real Google logout carries a past
+					//     Expires — so it takes the deletion branch and never
+					//     reaches here. A bare "NAME=" states no intent.
+					//     Stronger still: this function only ever runs on a
+					//     response YouTube just told us was AUTHENTICATED
+					//     (refresh.go's `if authenticated` gate, further
+					//     narrowed by authResponseIsOurs, the non-200 check
+					//     and the unreadable-body check). A reply that asserts
+					//     "you are signed in" while blanking the credential
+					//     that proves it is self-contradictory; a value-
+					//     stripping intermediary explains it, a logout does
+					//     not. Keeping a stale value is recoverable — the
+					//     auth check fails, park/sweep flags it, and the Warn
+					//     below says so. Destroying a live one is not.
+					//
+					//     (Not "a truncated response": Set-Cookie is a header,
+					//     and net/http parses the whole header block before Do
+					//     returns, so a truncated body cannot blank one.)
 					if cu.Value == "" {
 						if essentialYouTubeCookies[cookieName] && strings.Join(parts[6:], "\t") != "" {
 							rs.logger.Warn("youtube session refresh: refused to blank an essential cookie — the Set-Cookie carried an empty value but no expiry, so it is not a deletion and the existing value was kept",
