@@ -620,6 +620,11 @@ func (s *runState) runTUI() {
 		tw := cookieBadgeFor(auth.TwitchAuthenticated, auth.HasTwitchCookies, auth.TwitchVerification)
 		// Check auto-cookie relogin state. As of test.36 the relogin map
 		// is keyed by lowercase platform name (audit cookies.md #44).
+		//
+		// Applied unconditionally, and NOT gated on cookies.auto_enabled: the
+		// flag means a human has to sign in again, which a manual-cookie
+		// install must do by hand. The Web dashboard used to gate its copy of
+		// this and now does not — see updateStatusBar in web/public/app.js.
 		relogin := s.autoCookieSvc.GetStatus().NeedsManualRelogin
 		if relogin["youtube"] {
 			yt = tui.CookieStatusRelogin

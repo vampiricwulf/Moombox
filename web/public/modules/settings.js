@@ -2,6 +2,7 @@
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
 import {
+  browserPathValidationOutcome,
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
   cookieSetupProbe,
@@ -910,31 +911,41 @@ export class SettingsController {
         const msgEl = document.getElementById("custom-browser-validation-msg");
         // Clear any previous validation message
         if (msgEl) { msgEl.textContent = ""; msgEl.style.color = ""; }
-        let validateResult;
+        // Only a verdict of "invalid" aborts the save. A validator that could
+        // not be reached, answered non-200 (the heavy limiter's 429 is the
+        // realistic one), or replied with something unparseable has told us
+        // nothing about the path — and abandoning the save over it discards
+        // every other setting edited in the same form. browserPathValidation-
+        // Outcome owns that distinction so it can be executed in a test; this
+        // site only renders the answer and obeys `block`.
+        let outcome;
         try {
           const validateResp = await fetch("/api/auto-cookies/validate-browser-path", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ path, type }),
           });
-          validateResult = await validateResp.json();
+          outcome = validateResp.ok
+            ? browserPathValidationOutcome({ reached: true, body: await validateResp.json() })
+            : browserPathValidationOutcome({ reached: false, detail: await serverErrorMessage(validateResp) });
         } catch (e) {
-          // Network error must not leave the Save button stuck spinning
-          this.app.showToast("Failed to validate browser path: " + e.message, "danger");
-          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
-          return;
-        }
-        if (!validateResult.valid) {
-          if (msgEl) {
-            msgEl.textContent = `Invalid browser: ${validateResult.error}`;
-            msgEl.style.color = "var(--sl-color-danger-600)";
-          }
-          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
-          return;
+          // Unreachable server, or a 200 whose body was not JSON. Either way
+          // the check did not happen — it must not leave the Save button stuck
+          // spinning, and it must not stand in for a rejection.
+          outcome = browserPathValidationOutcome({ reached: false, detail: e.message });
         }
         if (msgEl) {
-          msgEl.textContent = "Path validated.";
-          msgEl.style.color = "var(--sl-color-success-600)";
+          msgEl.textContent = outcome.message;
+          msgEl.style.color = `var(--sl-color-${outcome.variant}-600)`;
+        }
+        if (outcome.block) {
+          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
+          return;
+        }
+        if (outcome.variant === "warning") {
+          // The inline message sits in a section the user may have scrolled
+          // past; the save is proceeding, so say so where it will be seen.
+          this.app.showToast(outcome.message, "warning");
         }
         payload.cookies.browser_path = path;
         payload.cookies.browser_type = type;

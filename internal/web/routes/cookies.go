@@ -416,8 +416,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	// GET /api/cookies/auto-status
 	r.Get("/api/cookies/auto-status", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
+			// Every key here has to exist on cookies.AutoCookieStatus too, or
+			// this branch teaches the frontend a field the real one never
+			// sends. `configured` used to sit at the top and was deleted with
+			// the struct field — see the type's doc comment.
 			jsonResponse(rw, map[string]any{
-				"configured":      false,
 				"setupInProgress": false,
 				"browser":         nil,
 				"lastRefresh":     nil,

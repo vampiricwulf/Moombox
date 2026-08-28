@@ -301,7 +301,7 @@ func TestDashboardBadgeDelegatesToTheTestableHelper(t *testing.T) {
 	}
 }
 
-// jsMethodBody brackets one CLASS METHOD out of app.js.
+// jsMethodBody brackets one CLASS METHOD out of a module.
 //
 // jsFunctionBody in the sibling file handles module-level `function` and
 // `export function` declarations; a class method has neither keyword. Same
@@ -310,14 +310,126 @@ func TestDashboardBadgeDelegatesToTheTestableHelper(t *testing.T) {
 // behaviour inside that window.
 func jsMethodBody(t *testing.T, js, name string) string {
 	t.Helper()
-	header := "\n  " + name + "() {"
-	at := strings.Index(js, header)
+	var header string
+	at := -1
+	for _, candidate := range []string{
+		"\n  " + name + "() {",
+		"\n  async " + name + "() {",
+	} {
+		if i := strings.Index(js, candidate); i >= 0 {
+			header, at = candidate, i
+			break
+		}
+	}
 	if at < 0 {
-		t.Fatalf("app.js no longer defines a %s() method", name)
+		t.Fatalf("no %s() method found — the module was restructured and this assertion is "+
+			"reading nothing", name)
 	}
 	body := js[at+len(header):]
 	if end := strings.Index(body, "\n  }\n"); end >= 0 {
 		body = body[:end]
 	}
 	return body
+}
+
+// TestReloginWarningIsNotGatedOnAutoCookies is V6.
+//
+// The dashboard computed `autoCookiesEnabled` from cookies.auto_enabled and
+// conjoined it into all three places the re-login state is surfaced: both
+// status-bar warning items and the third argument to cookieIndicatorState. The
+// TUI (cmd/moombox/tui_wiring.go) applies the same flag unconditionally, so the
+// two UIs disagreed about whether a true alarm is worth showing.
+//
+// The flag means "the session Moombox holds has been rejected; a human must
+// sign in again". That is exactly as true, and as actionable, for a
+// manual-cookie install — they do theirs by hand — and it is reachable for
+// them: POST /api/cookies/auto-refresh is not gated on AutoEnabled. Gating hid
+// the alarm from the users least able to find it another way. The same ruling
+// was already made for the auth-loss notification.
+//
+// updateStatusBar is DOM-coupled and cannot be executed, so this is a bracketed
+// source assertion — but it is written as an ABSENCE plus an exact rendering of
+// each condition, because a presence check cannot see a gate and a bracket
+// alone cannot see a gate that sits inside the bracket. Any reintroduced gate
+// has to name the config key `auto_enabled` somewhere in this method, whatever
+// local it is bound to.
+func TestReloginWarningIsNotGatedOnAutoCookies(t *testing.T) {
+	body := jsMethodBody(t, readEmbeddedModule(t, "public/app.js"), "updateStatusBar")
+	// The absence check runs against CODE. The method carries a comment naming
+	// the flag and saying why it is not read, and that comment is the durable
+	// half of the fix — a check that forbade the token outright would forbid
+	// explaining it.
+	code := jsWithoutLineComments(body)
+
+	for _, gate := range []string{"auto_enabled", "autoCookiesEnabled"} {
+		if strings.Contains(code, gate) {
+			t.Errorf("updateStatusBar reads %s again. The re-login indicator must not be gated on "+
+				"auto-cookies: a manual-cookie install has to re-login by hand, which makes them the "+
+				"audience that most needs to be told — and the TUI shows it to them either way", gate)
+		}
+	}
+
+	// The exact condition, rendered. Each warning turns on the platform being
+	// active and the platform's own re-login flag, and on nothing else.
+	for _, want := range []string{
+		"if (ytActive && this.autoCookieReloginRequired?.youtube)",
+		"if (twActive && this.autoCookieReloginRequired?.twitch)",
+	} {
+		if !strings.Contains(code, want) {
+			t.Errorf("the status-bar warning is no longer exactly %q — either a condition was added "+
+				"to it or the warning was dropped; both change who is told to re-login", want)
+		}
+	}
+	for _, action := range []string{"yt-relogin", "tw-relogin"} {
+		if !strings.Contains(code, action) {
+			t.Errorf("updateStatusBar no longer pushes the %s warning at all — removing the gate by "+
+				"removing the indicator is not the fix", action)
+		}
+	}
+
+	// The badge's third argument is the same decision one layer down, and it
+	// carried the same conjunction. Taken off the PARSED call, so a mention of
+	// the flag in a neighbouring comment cannot stand in for passing it.
+	args := jsCallArgs(code, "cookieIndicatorState")
+	if len(args) != 3 {
+		t.Fatalf("updateStatusBar calls cookieIndicatorState with %d arguments (%v), want 3", len(args), args)
+	}
+	// Either the local computed just above, or the expression inlined here.
+	// Whichever it is, the absence check above has already established that no
+	// auto-cookies gate survives anywhere in this method.
+	if !strings.Contains(args[2]+jsLineContaining(code, "const relogin"), "autoCookieReloginRequired") {
+		t.Errorf("the badge's re-login argument (%q) no longer traces back to "+
+			"autoCookieReloginRequired — the red Re-login badge would never light", args[2])
+	}
+}
+
+// jsLineContaining returns the first line of src that contains needle, or "".
+// Used to look at the one statement an assertion is about without bracketing a
+// whole method around it.
+func jsLineContaining(src, needle string) string {
+	for _, line := range strings.Split(src, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
+}
+
+// jsWithoutLineComments drops whole-line `//` comments.
+//
+// Absence assertions are about what the code DOES, and a comment explaining why
+// something is not done necessarily names the thing. Deliberately naive: it
+// removes only lines whose first non-space characters are `//`, so a trailing
+// comment on a code line still counts as code — which is the safe direction,
+// since that is where a decoy would hide.
+func jsWithoutLineComments(src string) string {
+	lines := strings.Split(src, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }

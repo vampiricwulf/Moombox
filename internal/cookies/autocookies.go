@@ -155,10 +155,10 @@ var dangerousProfilePathSubstrings = []string{
 
 // validateBrowserProfileDir refuses configured profile directories that
 // sit inside any user-installed browser's real profile tree. Empty
-// input is allowed — that just signals "auto-cookies not configured"
-// and the service's Configured status reports false. Otherwise the
-// path is resolved to absolute, lowercased, and checked against the
-// dangerous-substring list above. Audit reports/cookies.md #26.
+// input is allowed — it just leaves the service inert, since every entry
+// point that needs a profile dir returns ErrProfileNotFound without one.
+// Otherwise the path is resolved to absolute, lowercased, and checked
+// against the dangerous-substring list above. Audit reports/cookies.md #26.
 func validateBrowserProfileDir(profileDir string) error {
 	if profileDir == "" {
 		return nil
@@ -188,8 +188,16 @@ func validateBrowserProfileDir(profileDir string) error {
 type AutoCookieReloginRequired map[string]bool
 
 // AutoCookieStatus holds the current status of the auto-cookie service.
+//
+// There is deliberately no `configured` flag. One existed, computed as
+// `profileDir != ""`, and it could not be false: cmd/moombox seeds the profile
+// dir with a "./browser-profile" default before the service is constructed, so
+// every install reported true from the first run. Nothing read it — not the
+// dashboard, not the settings dialog, not the TUI — and a value that is always
+// true and read by nobody is worse than an absent one, because the next reader
+// believes it. Whether auto-cookies were ever set up is answered honestly by
+// lastRefresh and needsManualRelogin, which describe what actually happened.
 type AutoCookieStatus struct {
-	Configured            bool                      `json:"configured"`
 	SetupInProgress       bool                      `json:"setupInProgress"`
 	Browser               *DetectedBrowser          `json:"browser"`
 	AvailableBrowsers     []DetectedBrowser         `json:"availableBrowsers"`
@@ -331,9 +339,10 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	// Validate ONCE at construction; subprocess-launching entry points
 	// fast-fail with the cached error rather than each running the
 	// scan independently. A malformed dir doesn't return an error from
-	// the constructor — Configured will simply report false (empty
-	// case) or the entry-point fast-fail kicks in (dangerous case)
-	// — to preserve the current "constructor never errors" contract.
+	// the constructor — the empty case simply leaves every profile-
+	// dependent entry point returning ErrProfileNotFound, and the
+	// dangerous case hits the entry-point fast-fail — to preserve the
+	// current "constructor never errors" contract.
 	// Audit reports/cookies.md #26.
 	profileDirErr := validateBrowserProfileDir(profileDir)
 	if profileDirErr != nil && logger != nil {
@@ -619,7 +628,6 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	}
 
 	return AutoCookieStatus{
-		Configured:            s.profileDir != "",
 		SetupInProgress:       s.setupInProgressLocked(),
 		Browser:               browser,
 		AvailableBrowsers:     available,

@@ -121,6 +121,55 @@ export async function serverErrorMessage(response) {
 }
 
 /**
+ * What a browser-path validation attempt means for the save in progress.
+ *
+ * THREE outcomes, and the middle one is the whole point. The save used to have
+ * two: `await resp.json()` with no `ok` check, then `if (!validateResult.valid)`
+ * — so a 429 off the heavy rate limiter, a 400, or a proxy's HTML error page all
+ * produced an object with no `valid` key, rendered as "Invalid browser:
+ * undefined", and RETURNED. Every unrelated setting the user had just edited in
+ * the same form went with it. "The server could not check the path" is not
+ * "the path is wrong", and it must not cost the user their other edits.
+ *
+ * `block` is reserved for the one answer that earns it: the server ran the check
+ * and said no. Everything else — unreachable, non-200, unparseable, or a 200
+ * carrying no verdict — warns and lets the save through. Nothing is lost by
+ * that: PATCH /api/config runs ValidateBrowserPathQuick on browser_path itself
+ * and rejects the save with a field error if the path is genuinely unusable, so
+ * a bad path cannot be stored just because this pre-check was skipped.
+ *
+ * Written as a pure function over `{reached, body, detail}` so it can be RUN in
+ * a test — saveConfig is DOM-coupled and cannot be. The comparison against
+ * `valid` is POSITIVE in both directions (`=== false` blocks, `=== true`
+ * passes); a `!body.valid` shorthand would fold the missing-key case back into
+ * the blocking arm, which is the defect this exists to remove.
+ */
+export function browserPathValidationOutcome({ reached = false, body = null, detail = "" } = {}) {
+  if (!reached) {
+    return {
+      block: false,
+      variant: "warning",
+      message: `Could not check the browser path (${detail || "no answer from the server"}). Saving anyway — the server runs its own check on the path when it stores it.`,
+    };
+  }
+  if (body && body.valid === false) {
+    return {
+      block: true,
+      variant: "danger",
+      message: `Invalid browser: ${body.error || "the server did not say why"}`,
+    };
+  }
+  if (body && body.valid === true) {
+    return { block: false, variant: "success", message: "Path validated." };
+  }
+  return {
+    block: false,
+    variant: "warning",
+    message: "Could not check the browser path (the server answered without a verdict). Saving anyway — the server runs its own check on the path when it stores it.",
+  };
+}
+
+/**
  * Word the toast for a platform an interactive cookie setup ACCEPTED.
  *
  * Accepted is not verified. FinishSetup takes a sign-in the user just
