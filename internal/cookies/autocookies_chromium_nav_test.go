@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -77,6 +78,11 @@ func TestNavigateAllPlatformsFoldsEveryFailure(t *testing.T) {
 				return nil
 			}
 
+			wantVisited := make([]string, 0, len(tt.platforms))
+			for _, platform := range tt.platforms {
+				wantVisited = append(wantVisited, platformRefreshURLs[platform])
+			}
+
 			gotAll, gotFailures := navigateAllPlatforms(context.Background(), 9222, tt.platforms, navigate)
 			if gotAll != tt.wantAll {
 				t.Errorf("allNavigated = %v, want %v — a pass with no proof it navigated "+
@@ -93,11 +99,13 @@ func TestNavigateAllPlatformsFoldsEveryFailure(t *testing.T) {
 					t.Errorf("failures[%d].err = %v, want the navigate error passed through", i, gotFailures[i].err)
 				}
 			}
-			// Every platform is still attempted: one failure must not skip the
-			// sibling, or a YouTube outage would silently stop refreshing
-			// Twitch.
-			if len(visited) != len(tt.platforms) {
-				t.Errorf("navigated %d URLs, want one per platform (%d)", len(visited), len(tt.platforms))
+			// Every platform is attempted, each exactly once, in order. The
+			// WHICH matters as much as the how-many: one failure must not skip
+			// the sibling (a YouTube outage would silently stop refreshing
+			// Twitch), and a loop that visited one platform twice would satisfy
+			// a bare count.
+			if !slices.Equal(visited, wantVisited) {
+				t.Errorf("navigated %v, want exactly %v", visited, wantVisited)
 			}
 		})
 	}

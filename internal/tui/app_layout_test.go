@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // TestFeedbackColorChordMessages exercises the chord-prefix branch of
@@ -70,8 +71,8 @@ func TestFeedbackColorWarningMessages(t *testing.T) {
 		"No update available",
 		"No stream selected",
 		"A trim is already in progress",
-		"Browser cookie refresh declined to run (a setup or another refresh is in flight, " +
-			"or no platform has cookies to refresh) — nothing was learned about these cookies",
+		"Browser cookie refresh declined to run (" + cookies.RefreshDeclinedCauses +
+			") — nothing was learned about these cookies",
 		"Browser cookie refresh ran but could not establish whether these cookies work",
 		"YouTube: not authenticated",
 		"No platforms configured",

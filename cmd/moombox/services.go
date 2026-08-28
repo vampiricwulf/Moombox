@@ -104,10 +104,9 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 		// find out which; the result already knew.
 		if !result.Ran {
 			return cookieRefreshReport{
-				ok:  false,
-				msg: "automatic cookie refresh declined to run, so nothing was learned about these cookies",
-				note: "a setup or another refresh is already in flight, or no platform has cookies worth " +
-					"refreshing — run at debug level for the specific reason",
+				ok:   false,
+				msg:  "automatic cookie refresh declined to run, so nothing was learned about these cookies",
+				note: cookies.RefreshDeclinedCauses + " — run at debug level for the specific reason",
 			}
 		}
 		// Same two possibilities as runCookieRecovery's Ineffective copy, for

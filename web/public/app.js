@@ -826,6 +826,10 @@ class MoomboxApp {
         // for another. Only verdict === "failed" earns the word.
         let refreshMsg, refreshVariant;
         if (!data.success && data.ran === false) {
+          // The cause list is one exhaustive set rendered in three places (see
+          // cookies.RefreshDeclinedCauses). This copy cannot import it, so
+          // TestAppJSMatchesTheDeclinedCauses pins the two against each other —
+          // keep the phrase below byte-identical to the constant.
           refreshMsg =
             "Browser cookie refresh declined to run — a setup or another refresh is already in flight, or no platform has cookies worth refreshing. Nothing was learned about these cookies.";
           refreshVariant = "neutral";

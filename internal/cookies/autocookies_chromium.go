@@ -163,8 +163,22 @@ func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 //
 // The middle return is the ACTED verdict, and it is an AND across every
 // navigation this pass makes — the same shape as refreshFirefox's, for the same
-// reason. It says the pass has PROOF the browser did the work the refresh is
-// about to take credit for, not that the browser did nothing when false.
+// reason.
+//
+// Read it precisely: TRUE means no navigation reported a transport failure. It
+// is NOT the positive artifact the Firefox path demands. cdpNavigateAndWait
+// returns nil when its own 30 s budget expires without a Page.loadEventFired
+// ("navigation likely complete, just no event"), so a page that connected and
+// never finished loading folds in as a success. FALSE, in the other direction,
+// says only that the pass has no proof — never that the browser did nothing.
+//
+// That asymmetry with Firefox — a positive artifact there, the absence of an
+// error from a function that swallows its own timeout here — is pre-existing
+// and deliberately left alone. It errs toward a MISSED alarm, which is also
+// what keeps slow pages from producing spurious Renewed=false. Tightening it
+// (having the budget-exhausted branch return an error, so a page that never
+// fired its load event stops counting) is a behaviour change with its own
+// false-alarm risk and wants its own decision, not a side effect of this one.
 //
 // No minPlausibleBrowserRefresh-style floor here, deliberately. That
 // threshold was measured against the Firefox launcher-handoff path — a
@@ -289,8 +303,9 @@ type navFailure struct {
 }
 
 // navigateAllPlatforms visits each platform's refresh URL and reports whether
-// EVERY visit succeeded, plus the ones that did not so the caller can name
-// them.
+// EVERY visit came back without an error, plus the ones that did not so the
+// caller can name them. See refreshChromium for how much that does and does not
+// establish — navigate swallows its own load-event timeout.
 //
 // The bool is an AND, and it exists because the per-navigation error used to be
 // discarded — the Chromium half of the silent-success hole that the screenshot

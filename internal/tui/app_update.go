@@ -394,8 +394,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.Err != nil:
 			a.setFeedback("Browser cookie refresh failed: " + msg.Err.Error())
 		case !msg.Result.Ran:
-			a.setFeedback("Browser cookie refresh declined to run (a setup or another refresh is in flight, " +
-				"or no platform has cookies to refresh) — nothing was learned about these cookies")
+			// Causes from the shared constant, not restated: this line, the
+			// worker's log note and the Web toast are three renderings of one
+			// exhaustive list, and they had already drifted apart once.
+			a.setFeedback("Browser cookie refresh declined to run (" + cookies.RefreshDeclinedCauses +
+				") — nothing was learned about these cookies")
 		case msg.Result.Overall() == cookies.RefreshFailed:
 			a.setFeedback("Browser cookie refresh ran and auth verification failed")
 		case msg.Result.Overall() == cookies.RefreshUnknown:

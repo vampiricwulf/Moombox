@@ -833,8 +833,27 @@ func (r RefreshResult) AnyVerified() bool {
 	return r.Overall() == RefreshOK
 }
 
+// RefreshDeclinedCauses names every way a refresh pass can decline with a NIL
+// error, for UI copy that has to explain a decline without naming a cause it
+// cannot know.
+//
+// Exactly three, and the list must stay exhaustive: the two slot conflicts at
+// the top of RefreshCookiesDetailed (setup in progress, refresh already in
+// flight) and the empty refreshPlatforms() gate. The other two refreshDeclined()
+// returns — no browser and no profile, profile not found — both carry an error,
+// so every caller has already branched away before it reaches this text.
+//
+// Exported because three surfaces render it (the worker's log via
+// cookieRefreshReportFor, the TUI's R F feedback, and the Web toast) and they
+// had already begun to drift — "cookies to refresh" against "cookies worth
+// refreshing" — with nothing to catch it. The Go callers share this constant;
+// the Web copy is pinned against it by a test, since app.js cannot import it.
+const RefreshDeclinedCauses = "a setup or another refresh is already in flight, " +
+	"or no platform has cookies worth refreshing"
+
 // refreshDeclined is the result of a pass that did no work: it says nothing
-// about either platform, because it never looked.
+// about either platform, because it never looked. See RefreshDeclinedCauses for
+// the ways to get here with a nil error.
 func refreshDeclined() RefreshResult { return RefreshResult{} }
 
 // refreshAborted is the result of a pass that started work and stopped before
@@ -983,14 +1002,16 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 			// Chromium needs no screenshot: the navigations are driven over
 			// CDP, so each one reports its own outcome and refreshChromium
 			// ANDs them, exactly as refreshFirefox ANDs its per-launch
-			// verdicts.
+			// verdicts. It is a weaker signal than the Firefox screenshot —
+			// "no navigation reported a transport failure", see
+			// refreshChromium — but it is the one this path can produce.
 			//
-			// A nil error alone is NOT that proof, which is what this used to
-			// take it for. The error being checked here comes from the cookie
-			// READ, and the read is satisfied by a profile the previous
-			// session already populated — so every navigation could have
-			// failed and the pass would still have claimed it renewed the
-			// credentials. Both halves are required.
+			// The READ error alone is not it, which is what this used to take
+			// it for. That error comes from cdpGetCookiesAsNetscape, and the
+			// read is satisfied by a profile the previous session already
+			// populated — so every navigation could have failed and the pass
+			// would still have claimed it renewed the credentials. Both halves
+			// are required.
 			var navigated bool
 			netscapeCookies, navigated, err = s.refreshChromium(ctx, browser)
 			browserActed = err == nil && navigated
