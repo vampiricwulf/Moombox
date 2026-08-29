@@ -80,9 +80,8 @@ type runState struct {
 	backfillWorker *monitor.BackfillWorker
 
 	// --- Cookie refresh ---
-	cookieRefresh     *cookies.RefreshService
-	autoCookieSvc     *cookies.AutoCookieService
-	browserProfileDir string
+	cookieRefresh *cookies.RefreshService
+	autoCookieSvc *cookies.AutoCookieService
 
 	// --- Web server core (section 16) ---
 	webServer  *web.Server

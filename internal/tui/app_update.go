@@ -387,7 +387,42 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// earns the word "failed"; the wording of the other two follows
 		// cookieRefreshReportFor in cmd/moombox/services.go, which draws the
 		// same three-way line for the worker's log.
+		// R F's bottom rung, resolved before the switch so the arm below can
+		// both test it and return it without building the command twice. nil
+		// whenever this is not a no-profile failure, or the recheck is not
+		// wired — either way the ordinary error arm takes over.
+		var noProfileFallback tea.Cmd
+		if cookies.IsNoBrowserProfile(msg.Err) {
+			noProfileFallback = a.recheckCookiesCmd()
+		}
 		switch {
+		case noProfileFallback != nil:
+			// THE BOTTOM RUNG OF R F, and it must not be a message on its own.
+			//
+			// R F asks for the strongest refresh available: the headless
+			// browser when cookies.auto_enabled permits one and a browser is
+			// there, otherwise an immediate import from the browser profile.
+			// With no profile at all both of those are gone — and the operator
+			// still has the in-process Go refresh, which is what R C runs and
+			// what every install has. Reporting "failed" here would be a dead
+			// end in front of a working remedy.
+			//
+			// The command returned is R C's own (recheckCookiesCmd), so the
+			// fallback IS the recheck rather than a second implementation of
+			// it, and its result arrives at cookieRecheckResultMsg below and
+			// renders through the shared cookies.RecheckReport. The sentence
+			// therefore leads a real refresh, and the feedback it sets is
+			// replaced by that refresh's own report a moment later.
+			//
+			// The wording names the CHORD, and the dashboard's twin of this
+			// message (app.js, autoCookieRefresh) says "a normal cookie
+			// refresh" instead. That divergence is deliberate: each surface
+			// names its own affordance for the in-process refresh, and a
+			// dashboard user has no R C to press. Do not unify them, and do
+			// not paraphrase either — both are pinned exactly, and their
+			// difference asserted, by TestRungThreeSentencesDivergeByDesign.
+			a.setFeedback("No browser profile found, running R C instead...")
+			return a, noProfileFallback
 		case msg.Err != nil:
 			a.setFeedback("Browser cookie refresh failed: " + msg.Err.Error())
 		case !msg.Result.Ran:

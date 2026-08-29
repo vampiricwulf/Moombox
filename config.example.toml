@@ -163,16 +163,38 @@
 # Firefox is recommended (reads cookies directly from SQLite).
 # Edge and Chrome are supported as fallback (uses Chrome DevTools Protocol).
 #
-# Setup: enable below, then use the web dashboard Settings page or TUI
-# setup wizard to launch the browser and complete login.
+# Setup: use the web dashboard Settings page or TUI setup wizard to
+# launch the browser and complete login. That works whatever auto_enabled
+# says — it is how you SUPPLY cookies, not something this flag switches
+# on.
+#
+# auto_enabled itself governs exactly two things: a slow second refresh
+# that re-opens the profile below in a headless browser on a timer, and
+# one automatic browser attempt when authentication fails (with it off,
+# Moombox notifies you instead). The in-process refresh that keeps the
+# YouTube session alive runs either way — it is gated on cookie_file
+# alone — and so does the manual import below. Takes effect on restart.
 #
 # HEADLESS HOSTS AND DOCKER: when no supported browser is installed,
-# Moombox falls back to importing cookies straight out of the profile
-# directory below — no browser launch, and nothing is written into the
-# profile. Point browser_profile_dir at a SINGLE Firefox profile (the
-# directory holding prefs.js and cookies.sqlite), not its parent. In the
-# Docker image the default resolves to /data/browser-profile, so a bind
-# mount there needs no config change beyond auto_enabled.
+# Moombox imports cookies straight out of the profile directory below —
+# no browser launch, and nothing is written into the profile. Point
+# browser_profile_dir at a SINGLE Firefox profile (the directory holding
+# prefs.js and cookies.sqlite), not its parent. In the Docker image the
+# default resolves to /data/browser-profile, so a bind mount there needs
+# no config change at all — leave auto_enabled off, since there is no
+# browser in the image for it to start.
+#
+# On such a host, a start with no cookies.txt yet imports the profile
+# once on its own — there is nothing on disk to lose. (On a desktop with
+# a browser installed this does not happen: the browser drives the normal
+# refresh path instead.) After that YOU trigger the import:
+# press "Refresh cookies from browser profile" on the Settings page
+# (shift+clicking the header's "Refresh cookies" does the same, and R F
+# does it in the TUI; the Settings button is the one that works on a
+# phone). Moombox does not re-read the profile on a timer once you have
+# cookies, deliberately — nothing on such a host changes the profile, so
+# a timer would re-read identical bytes over credentials that may still
+# be working.
 #
 # Copy the profile with Firefox closed, and keep cookies.sqlite-wal
 # alongside cookies.sqlite — recent cookies live in that sidecar and a

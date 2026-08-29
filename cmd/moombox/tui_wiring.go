@@ -319,25 +319,48 @@ func (s *runState) runTUI() {
 		// reported "not authenticated" — a conclusion the check never drew.
 		return status.YouTubeVerification, status.TwitchVerification
 	}
-	if s.cfg.Cookies.AutoEnabled {
-		app.OnForceRefreshCookies = func() (cookies.RefreshResult, error) {
-			s.log.Info("Browser cookie refresh requested from TUI")
-			refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer refreshCancel()
-			// The whole result, not a flattened bool. R F is a key the operator
-			// presses to ask whether the browser refresh works, and three of
-			// the four answers it can get are distinct: the cookies on disk
-			// still authenticate (Overall), this pass produced them (Renewed),
-			// and this pass did any work at all (Ran). Flattening lost the
-			// last two — reporting success for a refresh that did nothing, and
-			// reporting a verification failure for a pass that never looked.
-			result, err := s.autoCookieSvc.RefreshCookiesDetailed(refreshCtx)
-			if err != nil {
-				return result, err
-			}
-			s.cookieRefresh.CheckNow(context.Background())
-			return result, nil
+	// WIRED UNCONDITIONALLY. Do not put a cookies.auto_enabled gate back here,
+	// in either shape — not around the assignment, and not as a live read
+	// inside the closure.
+	//
+	// The assignment used to sit behind `if s.cfg.Cookies.AutoEnabled`, read
+	// once at process start, and that did far more than skip a refresh. A nil
+	// OnForceRefreshCookies does not make the chord inert, it DELETES it:
+	// dispatchAction, buildMenuItems and the help overlay all test the field
+	// (internal/tui/app_actions.go). So on an install with the flag off, an
+	// operator told their cookies were dead had no key to press and no entry
+	// naming one — the same hiding the previous arc removed from the Web
+	// re-login indicator, on the same flag, one surface over.
+	//
+	// A live read that refused would only move that hiding behind a different
+	// mechanism, and it would be wrong on its own terms. R F is "refresh these
+	// cookies by the strongest means available", and with the headless browser
+	// switched off the strongest available means is an immediate import from
+	// the browser profile — which is exactly what an operator who has just
+	// hand-updated that profile is asking for. The flag reaches the pass one
+	// level down, where it drops the browser rather than the work; see
+	// AutoCookieService.BrowserLaunchAllowed.
+	//
+	// R C is the other manual trigger — the in-process Go refresh — and is
+	// never gated by anything. The two are not substitutes and neither may
+	// stand in for the other.
+	app.OnForceRefreshCookies = func() (cookies.RefreshResult, error) {
+		s.log.Info("Browser cookie refresh requested from TUI")
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer refreshCancel()
+		// The whole result, not a flattened bool. R F is a key the operator
+		// presses to ask whether the browser refresh works, and three of
+		// the four answers it can get are distinct: the cookies on disk
+		// still authenticate (Overall), this pass produced them (Renewed),
+		// and this pass did any work at all (Ran). Flattening lost the
+		// last two — reporting success for a refresh that did nothing, and
+		// reporting a verification failure for a pass that never looked.
+		result, err := s.autoCookieSvc.RefreshCookiesDetailed(refreshCtx)
+		if err != nil {
+			return result, err
 		}
+		s.cookieRefresh.CheckNow(context.Background())
+		return result, nil
 	}
 
 	app.OnHashPassword = func(password string) string {

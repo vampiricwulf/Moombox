@@ -43,16 +43,37 @@ type settingsSection struct {
 }
 
 // Keys that require a restart when changed.
+//
+// The three cookie keys are not cosmetic entries. AutoCookieService is built
+// once, at startup, from cookie_file and browser_profile_dir, and run() decides
+// there and then whether the headless-browser refresh timer starts at all — it
+// reads auto_enabled before any of this UI exists. So an operator acting on a
+// "your cookies are dead" notification can turn the setting on, watch it save,
+// and have no timer until they restart. Keep them here until those reads are
+// genuinely live.
+//
+// What auto_enabled does NOT need a restart for is the manual triggers: R F and
+// the dashboard's shift+click read it live and pick the browser or the
+// browser-free profile import accordingly. And the profile DIRECTORY is no
+// longer part of the start condition — run() used to os.Stat it at boot, which
+// meant completing setup at runtime left the timer unstarted with nothing
+// saying so; the loop asks per tick now (periodicRefreshHasSource).
+//
+// Kept in step with RESTART_REQUIRED_FIELDS in web/public/modules/settings.js;
+// the two lists are pinned against each other by TestRestartRequiredListsAgree.
 var restartRequiredKeys = map[string]bool{
-	"port":              true,
-	"network_access":    true,
-	"https_enabled":     true,
-	"tls_cert_path":     true,
-	"tls_key_path":      true,
-	"database_path":     true,
-	"log_file_path":     true,
-	"log_max_file_size": true,
-	"log_max_files":     true,
+	"port":                true,
+	"network_access":      true,
+	"https_enabled":       true,
+	"tls_cert_path":       true,
+	"tls_key_path":        true,
+	"database_path":       true,
+	"log_file_path":       true,
+	"log_max_file_size":   true,
+	"log_max_files":       true,
+	"cookie_file":         true,
+	"auto_enabled":        true,
+	"browser_profile_dir": true,
 }
 
 var sections = []settingsSection{
@@ -126,7 +147,7 @@ var sections = []settingsSection{
 			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt", nil},
 			{"active_youtube", "YouTube cookies", fieldToggle, nil, "YouTube cookie indicator in status bar", nil},
 			{"active_twitch", "Twitch cookies", fieldToggle, nil, "Twitch cookie indicator in status bar", nil},
-			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "browser-based cookie acquisition", nil},
+			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer + one browser retry on auth failure; R F imports either way", nil},
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data", nil},
 			{"browser_path", "Browser path", fieldText, nil, "override (empty = auto-detect)", nil},
 			{"browser_type", "Browser type", fieldText, nil, "firefox/chrome/brave/edge/etc. (required if path set)", nil},

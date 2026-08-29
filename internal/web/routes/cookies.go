@@ -208,16 +208,47 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// branches treat this as a real error rather than the previous
 			// HTTP 200 + {success:false,...} that was easy to mis-handle).
 			switch {
+			// Verbatim, NOT the static "no supported browser installed" this
+			// used to substitute. Two states reach this sentinel on a refresh —
+			// no browser is installed, or one is installed and
+			// cookies.auto_enabled has switched headless runs off — and that
+			// sentence is a claim only the first can support. Telling the
+			// second operator to install a browser they already have is the
+			// unearned cause this plan keeps finding: a sentence that outlived
+			// the condition it was written for. RefreshCookiesDetailed writes
+			// both messages and each says which cookie source was missing.
+			//
+			// The auto-setup/start handler below keeps the static string, and
+			// correctly: StartSetup is never gated, so there the sentinel means
+			// exactly one thing.
 			case errors.Is(err, cookies.ErrNoBrowserFound):
-				jsonError(rw, "no supported browser installed", http.StatusFailedDependency)
-			case errors.Is(err, cookies.ErrProfileNotFound),
-				errors.Is(err, cookies.ErrProfileNotADirectory):
+				jsonError(rw, err.Error(), http.StatusFailedDependency)
+			case errors.Is(err, cookies.ErrProfileNotFound):
 				jsonError(rw, "browser profile not found — run setup first", http.StatusNotFound)
 			// Browser-free profile import failures. These carry the only
 			// actionable detail the operator has (there is no browser UI in a
 			// container), so pass the message through verbatim instead of
 			// flattening it to "cookie refresh failed".
-			case errors.Is(err, cookies.ErrCookieDBNotFound),
+			//
+			// ErrProfileNotADirectory belongs HERE and not with the case above,
+			// which is where it used to sit. It is the classic "bind-mounted
+			// cookies.txt onto browser_profile_dir" mistake: the path exists,
+			// the pass RAN, and the remedy is to fix the mount — so "browser
+			// profile not found — run setup first" was wrong on both counts.
+			// It is also what keeps the two manual surfaces in step: the
+			// dashboard's shift+click falls back to the in-process refresh on
+			// this arm's 404, and the TUI's R F does not fall back for this
+			// error (see cookies.IsNoBrowserProfile). One gesture, one rule.
+			// ErrProfileDirUnreadable belongs here for the same reason as
+			// ErrProfileNotADirectory, and is the likelier of the two in a
+			// container: a bind-mounted profile the process cannot stat because
+			// the host owns it and compose's `user:` says otherwise. It used to
+			// wrap ErrProfileNotFound, which routed it to the 404 above and so
+			// into the dashboard's fallback — losing the permissions sentence
+			// on the deployment that had no other way to find out.
+			case errors.Is(err, cookies.ErrProfileDirUnreadable),
+				errors.Is(err, cookies.ErrProfileNotADirectory),
+				errors.Is(err, cookies.ErrCookieDBNotFound),
 				errors.Is(err, cookies.ErrNoCookiesInProfile):
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			case errors.Is(err, cookies.ErrCookieDBLocked):

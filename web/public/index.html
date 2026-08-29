@@ -993,11 +993,15 @@
                             <sl-divider></sl-divider>
                             <h4>Automatic Cookie Login</h4>
                             <sl-switch id="cfg-auto-cookies-enabled">
-                                Enable automatic cookie acquisition
+                                Enable the headless-browser refresh timer
                                 <span slot="help-text"
-                                    >Detects a browser on your system (Firefox, Chrome, Brave, Edge, etc.), creates
-                                    an isolated profile for Moombox login.
-                                    Cookies refresh automatically on auth failure.</span
+                                    >Adds a slow second refresh that re-opens your saved browser profile in the
+                                    background, plus one automatic browser attempt when authentication fails.
+                                    Moombox's in-process cookie refresh runs either way, and so does an
+                                    immediate profile import from the "Refresh cookies from browser profile"
+                                    button below (or shift+click the header's "Refresh cookies", or
+                                    <code>R F</code> in the TUI). Setup below works with this off. Takes
+                                    effect on restart.</span
                                 >
                             </sl-switch>
                             <sl-input
@@ -1050,6 +1054,18 @@
                                     </sl-select>
                                     <div id="custom-browser-validation-msg" style="margin-top: 0.4em; font-size: var(--sl-font-size-small);"></div>
                                 </div>
+                            </div>
+                            <div id="auto-cookie-import-now" style="margin-top: 0.75em;">
+                                <sl-button id="btn-import-browser-profile" size="small">
+                                    Refresh cookies from browser profile
+                                </sl-button>
+                                <p class="settings-help" style="margin-top: 0.4em;">
+                                    Re-reads the browser profile above and updates cookies.txt now. With the
+                                    timer above switched off, no browser is launched — the profile is imported
+                                    directly, which is how you refresh cookies on a headless host or in Docker
+                                    after updating the mounted profile. Identical to shift+clicking the header's
+                                    "Refresh cookies" button, which a touch device cannot do.
+                                </p>
                             </div>
                             <sl-divider></sl-divider>
                             <sl-switch id="cfg-cookies-dpapi-fallback">

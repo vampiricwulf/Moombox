@@ -13,6 +13,29 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
+// recheckCookiesCmd is the work behind the R C chord: the in-process Go cookie
+// refresh, and the per-platform verdicts it reports.
+//
+// Extracted so R F's no-profile rung can run THE SAME THING rather than a
+// second copy of it. R F is a ladder — launch the headless browser, else import
+// the browser profile, else fall back to this — and the fallback has to be the
+// real refresh, not a message about one. Two hand-written copies would let the
+// two triggers drift, which is the defect the shared cookies.RecheckReport was
+// introduced to close one level up.
+//
+// nil when the callback is not wired, so callers keep their own "not available"
+// behaviour rather than dispatching a command that does nothing.
+func (a *App) recheckCookiesCmd() tea.Cmd {
+	if a.OnRecheckCookies == nil {
+		return nil
+	}
+	recheckFn := a.OnRecheckCookies
+	return safeCmd(func() tea.Msg {
+		yt, tw := recheckFn()
+		return cookieRecheckResultMsg{YouTube: yt, Twitch: tw}
+	})
+}
+
 // dispatchAction executes a chord action. For job-specific actions, job comes from
 // the selected task (keyboard chords) or from the menu's job picker (menu flow).
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
@@ -162,13 +185,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			})
 		}
 	case "R C":
-		if a.OnRecheckCookies != nil {
+		if cmd := a.recheckCookiesCmd(); cmd != nil {
 			a.setFeedback("Rechecking cookies...")
-			recheckFn := a.OnRecheckCookies
-			return a, safeCmd(func() tea.Msg {
-				yt, tw := recheckFn()
-				return cookieRecheckResultMsg{YouTube: yt, Twitch: tw}
-			})
+			return a, cmd
 		}
 	case "R F":
 		if a.OnForceRefreshCookies != nil {

@@ -479,9 +479,28 @@ func (s *AutoCookieService) importProfileCookies() (string, error) {
 		return "", fmt.Errorf("no browser_profile_dir configured: %w", ErrProfileNotFound)
 	}
 
-	info, err := os.Stat(s.profileDir)
-	if err != nil {
-		return "", fmt.Errorf("browser profile dir %q is not readable: %w", s.profileDir, ErrProfileNotFound)
+	info, err := statProfileDir(s.profileDir)
+	switch {
+	case err == nil:
+	case os.IsNotExist(err):
+		// Genuinely absent. This IS the manual ladder's bottom rung, and it
+		// keeps ErrProfileNotFound. Normally unreachable from a refresh —
+		// RefreshCookiesDetailed's own gate catches it first — but the two
+		// stats are not atomic, and a profile deleted between them must not be
+		// reported as a permissions problem.
+		return "", fmt.Errorf("browser profile dir %q does not exist: %w", s.profileDir, ErrProfileNotFound)
+	default:
+		// Everything else: EACCES, ENOTDIR, an over-long path. The profile IS
+		// there and this process cannot look at it, which is a different state
+		// with a different remedy — so NOT ErrProfileNotFound, which is what
+		// this returned for every stat failure before. That put the compose
+		// uid-mismatch case on the ladder's bottom rung: R F and the
+		// dashboard's shift+click both reported "No browser profile found",
+		// ran a plain recheck instead, and threw away the one sentence that
+		// would have fixed it — on the exact path a container operator uses.
+		return "", fmt.Errorf("browser profile dir %q is not readable by this process (%v) — check "+
+			"ownership and permissions on the mounted profile, and that every parent directory is "+
+			"traversable: %w", s.profileDir, err, ErrProfileDirUnreadable)
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("browser profile dir %q is a file: %w", s.profileDir, ErrProfileNotADirectory)
@@ -650,21 +669,181 @@ func platformsToRestore(pre, post map[string]platformAuth) map[string]bool {
 	return restore
 }
 
-// shouldSeedFromProfileAtStartup reports whether the service should run one
-// import immediately instead of waiting a full refresh interval.
+// autoImportVerdict is why an AUTOMATIC browser-free profile import will or
+// will not run. Every non-running answer is a different operator situation and
+// only one of them is worth telling them about, so the reason survives the
+// decision rather than collapsing into a bool at the call site.
+type autoImportVerdict int
+
+const (
+	// autoImportOK: run the import.
+	autoImportOK autoImportVerdict = iota
+	// autoImportNotConfigured: no browser profile directory, or nowhere to put
+	// what an import would produce.
+	autoImportNotConfigured
+	// autoImportBrowserPresent: a real browser drives the normal refresh path.
+	autoImportBrowserPresent
+	// autoImportNoProfileDB: the profile directory holds no cookies.sqlite.
+	autoImportNoProfileDB
+	// autoImportCookiesPresent: the install already has cookies, which may be
+	// working ones. R F replaces those deliberately; nothing automatic does.
+	autoImportCookiesPresent
+	// autoImportCookieFileUnreadable: cookies.txt could not be read, so nothing
+	// is known about it. See ErrCookieFileUnreadable.
+	autoImportCookieFileUnreadable
+)
+
+func (v autoImportVerdict) String() string {
+	switch v {
+	case autoImportOK:
+		return "import"
+	case autoImportNotConfigured:
+		return "auto-cookies not configured"
+	case autoImportBrowserPresent:
+		return "a browser is installed"
+	case autoImportNoProfileDB:
+		return "no cookies.sqlite in the browser profile"
+	case autoImportCookiesPresent:
+		return "cookies.txt already holds cookies"
+	case autoImportCookieFileUnreadable:
+		return "cookies.txt could not be read"
+	default:
+		return "unknown"
+	}
+}
+
+// automaticImportGuard is THE RULE for every automatic browser-free import:
+// run only when there is no cookies.txt to lose.
 //
-// It fires only in the browserless case. On a desktop with a browser
-// installed the normal refresh path already owns the profile, and an
-// unsolicited startup pass there would just launch a browser nobody asked
-// for. In a container there is no browser and the periodic interval defaults
-// to six hours — an operator who just mounted a profile (or restarted after
-// their cookies died) should not wait that long for it to be read.
-func (s *AutoCookieService) shouldSeedFromProfileAtStartup() bool {
+// ONE rule, and it must stay one. Both automatic sites call this and neither
+// re-implements it:
+//
+//   - the one-shot boot import (decideStartupSeed, below), and
+//   - the periodic timer's tick when that tick would be browser-free
+//     (StartPeriodicRefresh).
+//
+// **NOT FOR THE MANUAL TRIGGERS.** R F and the Web dashboard's shift+click (and
+// the Settings page's profile-import button, which calls the same thing) MUST
+// keep importing whatever cookies.txt holds — replacing a live cookie file out
+// of a profile the operator just updated by hand is not a side effect there,
+// it is the entire gesture, and "update the profile, press R F" is the
+// designated workflow on a browserless host. Routing them through this guard
+// would delete the one path a container has. If a future change wants to
+// "unify" the triggers onto this predicate, that is the thing it would break.
+//
+// **AND NOT FOR THE RECOVERY PATH**, which is automatic and is the one
+// exception worth stating rather than leaving to be rediscovered. The monitor's
+// OnRecoveryNeeded and the download worker's OnCookieRefreshNeeded both reach
+// RefreshCookiesDetailed without passing through here, deliberately:
+//
+// This guard protects credentials that MIGHT BE WORKING. Recovery runs only
+// when they are known not to be — shouldFireRecovery fires on
+// `checkErr == nil && !nowAuth`, a conclusive not-authenticated for that
+// platform, and livenessRecoveryArmed is false so there is no second, weaker
+// producer. Applying the rule there would refuse the one automatic import most
+// likely to fix the problem, on the grounds that a file exists which has just
+// been proven not to work.
+//
+// The case that could have made that unsafe is a two-platform install where
+// only one platform died: the import rewrites cookies.txt, and the survivor's
+// rows go with it. That is covered, and not by luck — RefreshCookiesDetailed
+// verifies per platform BEFORE the import and platformsToRestore hands back the
+// rows of any platform that was ok() beforehand and verifyFailed after. So the
+// guard is not the last line of defence here; Arc 2's abort/merge/rollback is,
+// and it re-checks at write time.
+//
+// If a future change adds a recovery producer that can fire on an INCONCLUSIVE
+// verdict, this exemption stops being safe and has to be revisited — that is
+// the same sentence handleRecoveryNeeded's comment depends on, for the same
+// reason.
+//
+// "No cookies to lose" means: absent, or present with zero cookie rows.
+//
+// THE ASYMMETRY IS THE WHOLE ARGUMENT, and it is why this definition is not a
+// conservative guess to be tightened later. The two ways to be wrong do not
+// cost the same:
+//
+//   - A false "nothing to lose" IMPORTS OVER CREDENTIALS. The operator may not
+//     find out until a recording fails, and by then the old cookies are gone.
+//   - A false "something to lose" costs one keypress — R F, which is ungated
+//     and imports whatever the file holds.
+//
+// So the predicate does not need to be accurate. It needs ZERO false
+// "nothing to lose" answers, and it may be as pessimistic as it likes.
+//
+// That is what rules out "present but holding no auth cookies for either
+// platform": deciding it needs a per-platform predicate, and a wrong one is a
+// false "nothing to lose" — the expensive direction. This package has already
+// been wrong with one, a half-cleared but still WORKING YouTube session reading
+// as {hasCookies:false} until checkPlatformAuth was fixed to ask the configured
+// question.
+//
+// countNetscapeCookieRows errs the safe way by construction: it counts LINES
+// that are not blank and not plain comments, so a malformed row, a row for an
+// unrelated domain and an expired one all count. It OVER-counts, and
+// over-counting can only produce "something to lose" — the cheap error. Any
+// replacement must keep that direction.
+//
+// And an unreadable file is NOT an absent one. Arc 2's lesson, in
+// ErrCookieFileUnreadable: a transient permission or mount failure over a file
+// that may hold working credentials must abort, never be treated as absence.
+// Importing over it is precisely the loss that sentinel exists to prevent.
+func (s *AutoCookieService) automaticImportGuard() autoImportVerdict {
+	// No configured cookie file means an import has nowhere to write. The
+	// service is constructed with cfg.Cookies.CookieFile verbatim.
+	if s.cookiePath == "" {
+		return autoImportNotConfigured
+	}
+	holds, known := s.cookieFileHoldsCookies()
+	switch {
+	case !known:
+		return autoImportCookieFileUnreadable
+	case holds:
+		return autoImportCookiesPresent
+	default:
+		return autoImportOK
+	}
+}
+
+// decideStartupSeed reports whether the service should run one import
+// immediately at boot instead of waiting for a manual trigger.
+//
+// It fires only in the browserless case. On a desktop with a browser installed
+// the normal refresh path already owns the profile, and an unsolicited startup
+// pass there would just launch a browser nobody asked for.
+//
+// Everything after that is automaticImportGuard, which is what lets this run
+// without consulting cookies.auto_enabled at all: a boot is when a mounted
+// profile most plausibly changed, and an install with nothing on disk cannot be
+// harmed by reading it.
+func (s *AutoCookieService) decideStartupSeed() autoImportVerdict {
 	if s.profileDirErr != nil || s.profileDir == "" {
-		return false
+		return autoImportNotConfigured
 	}
 	if s.resolvedBrowser() != nil {
-		return false
+		return autoImportBrowserPresent
 	}
-	return firefoxCookieDBExists(s.profileDir)
+	if !firefoxCookieDBExists(s.profileDir) {
+		return autoImportNoProfileDB
+	}
+	return s.automaticImportGuard()
+}
+
+// cookieFileHoldsCookies reports whether cookies.txt has anything in it worth
+// protecting, and whether that question could be answered at all.
+//
+// The three-way split is the same one RefreshCookiesDetailed makes before it
+// merges, and for the same reason: nil, "does not exist", and everything else
+// are three different facts, and folding the third into the second is how a
+// working cookies.txt gets replaced by a permission blip.
+func (s *AutoCookieService) cookieFileHoldsCookies() (holds, known bool) {
+	data, err := readCookieFile(s.cookiePath)
+	switch {
+	case err == nil:
+		return countNetscapeCookieRows(string(data)) > 0, true
+	case errors.Is(err, fs.ErrNotExist):
+		return false, true
+	default:
+		return false, false
+	}
 }

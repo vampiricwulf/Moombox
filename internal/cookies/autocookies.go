@@ -292,6 +292,42 @@ type AutoCookieService struct {
 	// once the primary CDP launch returns an error. DECISIONS #6.
 	DpapiFallback bool
 
+	// BrowserLaunchAllowed reports whether a REFRESH PASS may execute a
+	// headless browser. It is the injected form of cookies.auto_enabled, which
+	// this package deliberately cannot read: internal/cookies has no dependency
+	// on internal/config and keeping it that way is why this is a predicate
+	// rather than a bool copied in at construction — the flag is read live
+	// everywhere else, so a snapshot would go stale the moment it is edited.
+	//
+	// Moombox keeps cookies alive with two independent mechanisms on two
+	// independent timers: the in-process Go refresh (RefreshService, gated on
+	// cookies.cookie_file alone) and, only when the operator turns this flag on,
+	// a much slower headless-browser pass. The flag decides whether the second
+	// mechanism runs on a timer at all — that decision lives in main.go and does
+	// not come through here.
+	//
+	// What comes through here is the MANUAL trigger for that mechanism: the
+	// TUI's R F chord and the Web dashboard's shift+click. Those are wired
+	// unconditionally, because an operator who has hand-updated their browser
+	// profile wants them to import from it immediately, and a disabled install
+	// is exactly the install that does so. So a false answer does not refuse
+	// the pass — it drops the browser, and every branch below takes the
+	// browser-free import path that already exists for containers.
+	//
+	// Consulted only from browserLaunchBlocked, inside RefreshCookiesDetailed,
+	// and deliberately NOT inside resolvedBrowser itself: StartSetup resolves a
+	// browser too, and setup is acquisition — an explicit gesture in a visible
+	// window, and the thing that turns this flag on. Gating it there would make
+	// the setting unreachable on a fresh install, where it is false by
+	// definition.
+	//
+	// The periodic goroutine is exempt (see browserGatePolicy): the flag IS
+	// that timer, main.go answered it at boot, and re-asking it per tick would
+	// let a runtime flip leave the timer running on a different mechanism.
+	//
+	// nil = allowed, so every existing caller and test keeps today's behaviour.
+	BrowserLaunchAllowed func() bool
+
 	// ConfiguredBrowserOverride, when set, returns the user's configured
 	// browser_path and browser_type from the active config. Empty values
 	// mean "no override; use auto-detect". Used by GetStatus to surface
@@ -668,6 +704,69 @@ func (s *AutoCookieService) resolvedBrowser() *DetectedBrowser {
 		return s.detectBrowser()
 	}
 	return DetectBrowser()
+}
+
+// browserGatePolicy says whether one refresh pass consults
+// BrowserLaunchAllowed at all.
+//
+// It exists because the flag answers two different questions and only one of
+// them is live. "May THIS gesture launch a browser?" is asked fresh, by the
+// manual triggers, and must see the operator's current setting. "Does the
+// periodic headless-browser timer exist?" was answered once, at boot, in
+// main.go — cookies.auto_enabled is labelled restart-required in both UIs
+// precisely because that is where it is read.
+//
+// The zero value is gateApplies, so anything that forgets to say gets the
+// safe answer.
+type browserGatePolicy int
+
+const (
+	// gateApplies is every caller acting on a live operator intention: the
+	// TUI's R F, the dashboard's shift+click and its "refresh now", and the
+	// automatic recovery attempt. Turning the flag off must reach them
+	// immediately — that is what makes "switch it off, press R F, get a
+	// browser-free import from the profile I just updated" work.
+	gateApplies browserGatePolicy = iota
+
+	// gateExempt is StartPeriodicRefresh's goroutine, and nothing else.
+	//
+	// The flag IS that timer. If a tick re-asked it, an operator who turned
+	// the setting off without restarting would leave the timer running while
+	// it silently switched to browser-free imports of the browser profile —
+	// re-reading a profile nothing has changed, on a schedule, forever. That
+	// is the behaviour the periodic loop is deliberately NOT given (see
+	// StartPeriodicRefresh); arriving at it by accident is worse than
+	// arriving at it on purpose. The timer keeps the mechanism it was started
+	// with until the restart both settings pages already ask for.
+	gateExempt
+)
+
+// browserLaunchBlocked reports whether this pass is forbidden a headless
+// browser. Both consultations of the gate go through here so they cannot drift
+// apart: one decides whether a browser is used, the other decides which of two
+// sentences explains its absence, and a reader given the wrong sentence is sent
+// to install a browser they already have.
+//
+// nil predicate = allowed, so a service built without it behaves exactly as
+// before.
+func (s *AutoCookieService) browserLaunchBlocked(policy browserGatePolicy) bool {
+	return policy == gateApplies && s.BrowserLaunchAllowed != nil && !s.BrowserLaunchAllowed()
+}
+
+// refreshBrowser is resolvedBrowser as a REFRESH PASS sees it: the configured
+// or detected browser, or nil when cookies.auto_enabled has switched headless
+// browser runs off and this pass is one the flag speaks for.
+//
+// The wrapper exists so the gate applies to refreshes only. resolvedBrowser has
+// two other callers — StartSetup, which is acquisition and must never be gated
+// (see BrowserLaunchAllowed), and decideStartupSeed, which uses it to ask "is
+// this a browserless host?", a question about the machine rather than about a
+// setting.
+func (s *AutoCookieService) refreshBrowser(policy browserGatePolicy) *DetectedBrowser {
+	if s.browserLaunchBlocked(policy) {
+		return nil
+	}
+	return s.resolvedBrowser()
 }
 
 // FlagManualRelogin marks a platform as needing manual re-login.
@@ -1493,13 +1592,48 @@ func verdictOf(p platformAuth) RefreshVerdict {
 // the TUI's equivalent. Callers acting ON BEHALF of one platform must use
 // RefreshCookiesDetailed instead — see RefreshResult.
 func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
-	result, err := s.RefreshCookiesDetailed(ctx)
+	return s.refreshCookies(ctx, gateApplies)
+}
+
+func (s *AutoCookieService) refreshCookies(ctx context.Context, policy browserGatePolicy) (bool, error) {
+	result, err := s.refreshCookiesDetailed(ctx, policy)
 	return result.AnyVerified(), err
 }
 
 // RefreshCookiesDetailed performs a headless browser visit to refresh cookies
 // and reports the outcome per platform.
+//
+// The exported form always honours cookies.auto_enabled. The periodic timer is
+// the one exception and calls refreshCookiesDetailed directly — see
+// browserGatePolicy.
+//
+// FOUR callers outside this package, and the count matters because getting it
+// wrong hid a real question once already (a review wrote "three" and the missing
+// one was the only automatic caller):
+//
+//	internal/web/routes/cookies.go   the dashboard's shift+click, and the
+//	                                 Settings page's profile-import button
+//	cmd/moombox/tui_wiring.go        the TUI's R F chord
+//	cmd/moombox/services.go          the download worker's auth-failure retry
+//	cmd/moombox/monitor_callbacks.go the monitor's recovery attempt — PASSED AS
+//	                                 A METHOD VALUE (s.autoCookieSvc.Refresh-
+//	                                 CookiesDetailed, handed to
+//	                                 handleRecoveryNeeded), which is why it is
+//	                                 easy to miss: it is not a call expression,
+//	                                 so a structural search for call sites walks
+//	                                 straight past it. TestRefreshCookiesDetailed-
+//	                                 CallersAreEnumerated matches references
+//	                                 rather than calls for exactly that reason.
+//
+// The last two are AUTOMATIC and deliberately do NOT consult
+// automaticImportGuard, so on a browserless host they import over an existing
+// cookies.txt. That is correct and is not an oversight — see the guard's doc
+// for why, and the comment at the monitor_callbacks.go call site.
 func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (RefreshResult, error) {
+	return s.refreshCookiesDetailed(ctx, gateApplies)
+}
+
+func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy browserGatePolicy) (RefreshResult, error) {
 	s.mu.Lock()
 	// A stopped service must not launch a browser. Declined rather than
 	// errored, matching the two gates below it: nothing was examined, so the
@@ -1537,27 +1671,58 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 		s.mu.Unlock()
 	}()
 
-	browser := s.resolvedBrowser()
+	// refreshBrowser, not resolvedBrowser: this is the one site where
+	// cookies.auto_enabled reaches a refresh, and it reaches it by answering
+	// nil rather than by refusing the pass. See BrowserLaunchAllowed.
+	browser := s.refreshBrowser(policy)
 
-	if _, err := os.Stat(s.profileDir); os.IsNotExist(err) {
+	if _, err := statProfileDir(s.profileDir); os.IsNotExist(err) {
 		// Neither a browser to drive nor a profile to import from: the
 		// install genuinely has no cookie source, so keep the historical
 		// answer and the "install a supported browser" UI copy that hangs
 		// off it.
 		if browser == nil {
+			// Two ways to arrive with no browser, and they do not share a
+			// remedy. The gate above can drop a browser that is installed and
+			// working, and "no browser found" would send that operator to
+			// install a second copy of one they already have — the unearned
+			// cause this arc exists to stop. Same sentinel either way, because
+			// every consumer's branch is genuinely the same (there is no
+			// browser to use); different sentence, because the reader's next
+			// action is not.
+			if s.browserLaunchBlocked(policy) {
+				disabled := fmt.Errorf(
+					"cookies.auto_enabled is false so no headless browser was launched, and there is no "+
+						"browser profile at %s to import from (%w for this pass)",
+					s.profileDir, ErrNoBrowserFound)
+				s.setError(disabled.Error())
+				return refreshDeclined(), disabled
+			}
+			// Wrapped rather than bare, and symmetrically with the arm above,
+			// because the Web route renders this message verbatim now — the
+			// static sentence it used to substitute ("no supported browser
+			// installed") is a claim only ONE of these two arms can support.
+			// Both now say which of the two cookie sources was missing and why.
+			missing := fmt.Errorf("%w, and there is no browser profile at %s to import from",
+				ErrNoBrowserFound, s.profileDir)
 			s.setError("no browser found for refresh, and no browser profile to import from")
-			return refreshDeclined(), ErrNoBrowserFound
+			return refreshDeclined(), missing
 		}
 		s.setError("browser profile not found — run setup first")
 		return refreshDeclined(), fmt.Errorf("run setup first: %w", ErrProfileNotFound)
 	}
 
 	// importedFromProfile selects the browser-free path: no browser is
-	// installed (a container, or a headless host), but the configured
-	// profile directory is present and may hold a readable cookies.sqlite.
+	// installed (a container, or a headless host) or none may be launched
+	// (cookies.auto_enabled is off), but the configured profile directory is
+	// present and may hold a readable cookies.sqlite.
 	// Before this branch existed, RefreshCookies bailed on `browser == nil`
 	// BEFORE it ever looked at the profile — so a perfectly readable
 	// mounted profile was refused on a technicality.
+	//
+	// The disabled case is the same shape and lands here for the same reason:
+	// an operator who hand-updates their browser profile presses R F to have it
+	// read, and launching nothing is precisely what they want.
 	importedFromProfile := browser == nil
 
 	var netscapeCookies string
@@ -2220,6 +2385,31 @@ func (s *AutoCookieService) shouldSkipPeriodicRefresh(interval time.Duration) bo
 	return false
 }
 
+// periodicRefreshHasSource reports whether a periodic tick has anything to work
+// with: the browser profile directory must exist. Both refresh mechanisms need
+// it — the headless browser is launched against it, and the browser-free import
+// reads out of it — so RefreshCookiesDetailed returns without doing anything
+// useful when it is absent.
+//
+// This used to be answered ONCE, by an os.Stat in main.go, before the periodic
+// goroutine was allowed to start at all. That silently punished the operator it
+// was meant to serve: turn cookies.auto_enabled on, complete setup — which is
+// what CREATES the directory — and the timer that the setting exists to start
+// stayed unstarted until the next restart, with nothing saying so. No setting
+// had changed, so even the restart-required labelling never fired.
+//
+// Asked per tick instead, so a setup completed at runtime is picked up by the
+// next one. The other side of that trade is the reason this is a quiet skip
+// rather than a pass that fails: on a flag-on install where setup has never
+// been run, a real pass would call setError("browser profile not found — run
+// setup first") and log a warning on every interval forever, putting a
+// permanent error on the settings page for a state the operator has not been
+// asked to fix yet.
+func (s *AutoCookieService) periodicRefreshHasSource() bool {
+	_, err := statProfileDir(s.profileDir)
+	return err == nil
+}
+
 // profileImportStartupDelay is how long the browserless startup import waits
 // before running. RefreshCookies verifies the imported cookies over the
 // network, and firing that the instant the process comes up — before DNS,
@@ -2227,15 +2417,97 @@ func (s *AutoCookieService) shouldSkipPeriodicRefresh(interval time.Duration) bo
 // "auth verification failed" and flag a re-login the user does not need.
 const profileImportStartupDelay = 15 * time.Second
 
+// StartProfileSeed runs AT MOST ONE browser-free import out of the configured
+// browser profile, shortly after start, on an install that has no cookies to
+// lose. It returns immediately; the import happens on its own goroutine.
+//
+// NOT gated on cookies.auto_enabled, and that separation is the point. The flag
+// owns the periodic timer — a repeating read of a profile nothing changes
+// between ticks, which is why the operator triggers those reads with R F. This
+// is not that. It is once per boot, and a boot is the moment a mounted profile
+// most plausibly DID change: the container was down while somebody replaced it.
+//
+// The condition that keeps it safe is the cookie file, not the flag. A cold
+// start with no usable cookies.txt has nothing to lose and everything to gain
+// from reading the profile once; an install that already has cookies is never
+// touched here, because whatever is on disk may be working credentials and R F
+// is the way to replace those deliberately. decideStartupSeed owns that call.
+func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
+	switch d := s.decideStartupSeed(); d {
+	case autoImportOK:
+	case autoImportCookieFileUnreadable:
+		// The one stand-down that is operator-actionable, and the one that
+		// must never be silent — see ErrCookieFileUnreadable. An unreadable
+		// file is not an absent one: it may hold working credentials for a
+		// platform this process has not looked at, so it is left alone.
+		s.logger.Warn("startup browser-profile cookie import stood down — the existing cookies.txt "+
+			"could not be read, so it was left untouched rather than imported over. Fix the "+
+			"permission or mount problem; nothing here needs replacing.",
+			"path", s.cookiePath)
+		return
+	default:
+		s.logger.Debug("startup browser-profile cookie import not applicable", "reason", d.String())
+		return
+	}
+
+	s.logger.Info("no browser and no cookies to lose — seeding cookies from the configured browser profile",
+		"profile_dir", s.profileDir, "cookie_file", s.cookiePath,
+		"delay", profileImportStartupDelay.String())
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("panic in startup cookie seed goroutine", "panic", fmt.Sprintf("%v", r))
+			}
+		}()
+		if err := utils.Sleep(ctx, profileImportStartupDelay); err != nil {
+			return
+		}
+		// Asked again, because the whole gate is "there is nothing here to
+		// lose" and the wait is long enough for that to stop being true — an
+		// interactive setup finishing, or an operator dropping a hand-exported
+		// cookies.txt in, both write the file this decision was made about.
+		if s.decideStartupSeed() != autoImportOK {
+			s.logger.Debug("startup browser-profile cookie import stood down — cookies appeared while it waited")
+			return
+		}
+		seedCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
+		// RefreshCookies, i.e. gateApplies: this is not the timer, so it has no
+		// claim on the exemption. The two policies are provably identical here
+		// anyway — decideStartupSeed runs this only when resolvedBrowser() is
+		// nil, and the gate's only power is to turn a non-nil browser into nil
+		// — so gateExempt would buy nothing and would blur what it means.
+		ok, err := s.RefreshCookies(seedCtx)
+		cancel()
+		switch {
+		case err != nil:
+			s.logger.Warn("startup browser-profile cookie import failed", "err", err)
+		case ok:
+			s.logger.Info("startup browser-profile cookie import succeeded")
+		default:
+			s.logger.Warn("startup browser-profile cookie import did not authenticate any platform")
+		}
+	}()
+}
+
 // StartPeriodicRefresh starts a background goroutine that periodically
 // refreshes cookies via headless browser visit. When HasActiveJobs is set,
 // ticks where it returns false are skipped to avoid spawning a headless
 // browser when nothing needs authenticated YouTube/Twitch access.
 //
-// On a browserless host with an importable profile (the Docker case) the
-// goroutine also runs ONE import shortly after start, instead of leaving a
-// freshly-mounted profile unread until the first tick — which with the
-// default six-hour interval would be most of a day.
+// The one-shot startup import used to live in here, which coupled it to
+// cookies.auto_enabled for no reason it could justify. It is StartProfileSeed
+// now, and main.go calls that unconditionally.
+//
+// EVERY pass this goroutine runs is gateExempt, and that is the whole reason
+// the policy exists. main.go starts this loop only when cookies.auto_enabled
+// was true at boot, so the flag has already been consulted; re-consulting it
+// per pass would mean an operator who switched it off without restarting kept
+// the timer AND had it quietly change mechanism, importing an unchanged browser
+// profile on a schedule. Moombox's answer for a profile the operator updates by
+// hand is the manual trigger — R F in the TUI, shift+click on the dashboard —
+// because a refresh is only meaningful when something changed the profile, and
+// the operator is the only thing that can.
 func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval time.Duration) {
 	s.logger.Info("auto-cookie periodic refresh enabled", "interval", interval.String())
 	go func() {
@@ -2245,28 +2517,6 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 			}
 		}()
 
-		if s.shouldSeedFromProfileAtStartup() {
-			s.logger.Info("no browser detected — seeding cookies from the configured browser profile",
-				"profile_dir", s.profileDir, "delay", profileImportStartupDelay.String())
-			if err := utils.Sleep(ctx, profileImportStartupDelay); err == nil {
-				// Deliberately bypasses shouldSkipPeriodicRefresh: the
-				// profile may have been swapped while we were down, so
-				// "nothing is downloading" and "we refreshed recently" are
-				// both the wrong reasons to skip the first read of it.
-				seedCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
-				ok, err := s.RefreshCookies(seedCtx)
-				cancel()
-				switch {
-				case err != nil:
-					s.logger.Warn("startup browser-profile cookie import failed", "err", err)
-				case ok:
-					s.logger.Info("startup browser-profile cookie import succeeded")
-				default:
-					s.logger.Warn("startup browser-profile cookie import did not authenticate any platform")
-				}
-			}
-		}
-
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -2275,13 +2525,40 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if !s.periodicRefreshHasSource() {
+					s.logger.Debug("periodic auto-cookie refresh skipped — no browser profile directory yet",
+						"profile_dir", s.profileDir)
+					continue
+				}
+				// THE RULE, at its second automatic site: a browser-free import
+				// runs only when there is no cookies.txt to lose.
+				//
+				// Scoped to a tick that would BE a browser-free import, and the
+				// scope is load-bearing. Refreshing a LIVE cookies.txt through a
+				// headless browser is what this timer is for, so a host with a
+				// browser must keep doing exactly that. Only the browserless
+				// pass is an import, and an import over an existing cookie file
+				// is the thing the owner ruled out: nothing between two ticks
+				// changes a mounted profile, so it re-reads identical bytes over
+				// credentials that may be working.
+				//
+				// gateExempt to match the pass this tick would actually run —
+				// asking with a different policy could answer "browser" here
+				// and "no browser" three lines down.
+				if s.refreshBrowser(gateExempt) == nil {
+					if v := s.automaticImportGuard(); v != autoImportOK {
+						s.logger.Debug("periodic auto-cookie refresh skipped — a browser-free import "+
+							"may only run when there is nothing to lose", "reason", v.String())
+						continue
+					}
+				}
 				if s.shouldSkipPeriodicRefresh(interval) {
 					s.logger.Debug("periodic auto-cookie refresh skipped — no active jobs or recent refresh")
 					continue
 				}
 				s.logger.Debug("periodic auto-cookie refresh triggered")
 				refreshCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
-				ok, err := s.RefreshCookies(refreshCtx)
+				ok, err := s.refreshCookies(refreshCtx, gateExempt)
 				cancel()
 				if err != nil {
 					s.logger.Warn("periodic auto-cookie refresh failed", "err", err)
@@ -2590,6 +2867,25 @@ var writeCookieFile = writeFileAtomic
 // other error must abort rather than silently proceed as if there were
 // nothing to merge.
 var readCookieFile = os.ReadFile
+
+// statProfileDir is os.Stat, behind a seam, for the three places that ask
+// whether the configured browser profile directory can be looked at: the
+// missing-profile gate in RefreshCookiesDetailed, the import in
+// importProfileCookies, and the periodic loop's per-tick precondition in
+// periodicRefreshHasSource. The first two are the reason it is a seam at all:
+// a test needs to drive the real sequence — the gate sees a non-ENOENT error
+// and proceeds, and the import classifies it. The third goes through it for
+// consistency, so all three answer the same way when a test does substitute;
+// TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime does not substitute, and
+// creates a real directory mid-test instead.
+//
+// A seam rather than a fixture because the states that matter are not portably
+// constructible: EACCES needs a chmod that means nothing on Windows, and the
+// ENOTDIR shape (a file in the middle of the path) surfaces as ERROR_PATH_NOT_
+// FOUND there, which os.IsNotExist reports as true. Building the failure by
+// hand would pin the case on one platform and skip it on the other, and the one
+// it would skip is the one this seam exists to test.
+var statProfileDir = os.Stat
 
 // writeFileAtomic writes data to a temp file then renames it to the target path,
 // preventing corruption on partial failure. Applies

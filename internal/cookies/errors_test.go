@@ -98,6 +98,7 @@ func TestSentinelsAreDistinct(t *testing.T) {
 		ErrServiceStopped,
 		ErrRefreshInProgress,
 		ErrProfileNotFound,
+		ErrProfileDirUnreadable,
 		ErrProfileNotADirectory,
 		ErrCookieDBNotFound,
 		ErrCookieDBLocked,

@@ -57,7 +57,7 @@ staging_directory = "/data/staging"
 cookie_file = "/data/cookies.txt"
 # Alternative to exporting cookies.txt by hand: bind-mount a Firefox
 # profile directory (the one holding prefs.js and cookies.sqlite, not its
-# parent) at /data/browser-profile and uncomment the line below.
+# parent) at /data/browser-profile.
 # browser_profile_dir needs no entry — it defaults to ./browser-profile,
 # which resolves to /data/browser-profile here.
 # This image ships no browser, so Moombox reads the profile directly
@@ -65,6 +65,31 @@ cookie_file = "/data/cookies.txt"
 # with Firefox closed, and keep cookies.sqlite-wal next to
 # cookies.sqlite; recent cookies live in that sidecar and a copy without
 # it reads as empty.
+#
+# auto_enabled is left OFF here on purpose, and should stay off. All it
+# does is start a slow headless-browser refresh timer and allow one
+# automatic browser attempt when auth fails — and there is no browser in
+# this image to run either. It does NOT gate the profile import.
+#
+# FIRST BOOT IS AUTOMATIC. If there is no cookies.txt yet, Moombox
+# imports the mounted profile once, shortly after start, on its own —
+# there is nothing on disk to lose, so mount a profile and start.
+#
+# After that the profile is deliberately NOT re-read on a timer: nothing
+# inside the container changes it, so a timer would re-read identical
+# bytes over credentials that may still be working. YOU are what changes
+# it, so you trigger the read: refresh the profile on the host (Firefox
+# closed, .sqlite-wal included), then press "Refresh cookies from browser
+# profile" on the dashboard's Settings page — or shift+click the header's
+# "Refresh cookies", or press R F in the TUI. All three import straight
+# from the profile with no browser, whatever auto_enabled says and
+# whatever cookies.txt already holds. On a phone or tablet use the
+# Settings button: shift+click needs a keyboard.
+#
+# The in-process refresh that keeps the imported YouTube session alive
+# between imports runs regardless; it needs only cookie_file above.
+#
+# Shown for reference and deliberately NOT enabled:
 # auto_enabled = true
 
 [updates]
