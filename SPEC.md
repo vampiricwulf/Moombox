@@ -2,7 +2,7 @@
 
 Comprehensive AI-first reference for the Moombox project. Written for machine comprehension — explicit, unambiguous, no assumed context. Each section stands alone; an LLM reading just one section should understand that subsystem well enough to modify its code correctly. For deeper implementation details, follow the deep-dive pointer at the end of each section.
 
-Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary. Windows x64 + Linux x64 + Linux arm64.
+Module: `github.com/vampiricwulf/Moombox` — Go 1.26, single binary. Windows x64 + Linux x64 + Linux arm64.
 
 ---
 
@@ -789,7 +789,7 @@ go test ./...                              # Run all tests
 go vet ./...                               # Static analysis
 ```
 
-Go 1.25 required. Runtime requires FFmpeg on PATH. Windows resource embedding (exe icon, version info) via `go-winres`: `go install github.com/tc-hib/go-winres@latest && cd cmd/moombox && go-winres make`. This generates `.syso` files in `cmd/moombox/winres/` — CI generates these at build time, none are committed to the repo.
+Go 1.26 required. Runtime requires FFmpeg on PATH. Windows resource embedding (exe icon, version info) via `go-winres`: `go install github.com/tc-hib/go-winres@latest && cd cmd/moombox && go-winres make`. This generates `.syso` files in `cmd/moombox/winres/` — CI generates these at build time, none are committed to the repo.
 
 ### CI/CD
 
