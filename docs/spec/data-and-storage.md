@@ -519,14 +519,19 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 
 #### [cookies]
 
-| Field | Type | Default | TOML Key |
-|-------|------|---------|----------|
-| CookieFile | string | "./cookies.txt" | `cookie_file` | |
-| AutoEnabled | bool | false | `auto_enabled` | |
-| BrowserProfileDir | string | "./browser-profile" | `browser_profile_dir` | |
-| Platforms | []string | [] | `platforms` | Platforms with verified cookies |
-| ActivePlatforms | []string | [] | `active_platforms` | Explicit override for UI display |
-| RefreshInterval | FlexDuration | 360 (minutes = 6h) | `refresh_interval` | Min: 10 |
+| Field | Type | Default | TOML Key | Notes |
+|-------|------|---------|----------|-------|
+| CookieFile | string | "./cookies.txt" | `cookie_file` | **Restart-required.** `AutoCookieService` is constructed from this once, at startup (`initServices`, `cmd/moombox/services.go`). |
+| AutoEnabled | bool | false | `auto_enabled` | **Restart-required.** Owns exactly three things: the headless-browser periodic timer, the one automatic recovery attempt, and G5's `SetExpectedPlatforms` read. See §Auto-Cookie Service for the full settled meaning. |
+| BrowserProfileDir | string | "./browser-profile" | `browser_profile_dir` | **Restart-required.** The directory's *existence* is not part of the start condition — `periodicRefreshHasSource` (`internal/cookies/autocookies.go`) asks per tick. |
+| BrowserPath | string | "" | `browser_path` | Explicit browser override. Only a real override when paired with `browser_type` (`browserOverrideConfigured`, `internal/cookies/autocookies.go`). |
+| BrowserType | string | "" | `browser_type` | Which extraction backend applies to `browser_path` — Firefox `cookies.sqlite` vs Chromium CDP. Validated against `knownBrowserTypes` (`internal/cookies/browser_validate.go`). |
+| Platforms | []string | [] | `platforms` | Platforms with verified cookies. Seeded on first run by `detectCookiePlatforms` (`cmd/moombox/services.go`) — sidecar first, loose cookie-name predicates second. Nothing automatic ever prunes it; the sole removal path is an operator replacing the list through `PATCH /api/config`. |
+| ActivePlatforms | []string | [] | `active_platforms` | Explicit override for UI display; consumed by `config.GetActivePlatforms`. |
+| RefreshInterval | FlexDuration | 360 (minutes = 6h) | `refresh_interval` | Valid: 10-10080 minutes. Drives `AutoCookieService.StartPeriodicRefresh` (the browser timer) only — **not** `RefreshService`, whose interval is the hardcoded 30-minute default. |
+| DpapiFallback | bool | false | `dpapi_fallback` | Windows-only. Opt-in: reads the user's REAL Chromium-family profile via `CryptUnprotectData` when the CDP refresh cannot acquire the managed profile. |
+
+`cookie_file`, `auto_enabled` and `browser_profile_dir` are the three cookie keys in `restartRequiredKeys` (`internal/tui/settings.go`) and in `RESTART_REQUIRED_FIELDS` (`web/public/modules/settings.js`); `TestRestartRequiredListsAgree` pins the two lists against each other. What `auto_enabled` does *not* need a restart for is the manual triggers — they read it live.
 
 #### [disk]
 
@@ -676,43 +681,77 @@ On startup, if `network.password_hash` contains a plaintext password (detected b
 
 ## Cookies (internal/cookies/)
 
+ONE `cookies.txt` on disk, three pieces above it. `CookieJar` (`internal/cookies/jar.go`) parses the file and answers typed questions about it. `RefreshService` (`internal/cookies/refresh.go`) validates the credentials in-process and rotates YouTube's session cookies out of `Set-Cookie` headers. `AutoCookieService` (`internal/cookies/autocookies.go` and its `autocookies_*.go` siblings) acquires credentials — through a browser, or browser-free out of a browser profile.
+
 ### Cookie Jar
 
 `CookieJar` parses Netscape-format cookie files and provides typed access to authentication cookies for YouTube and Twitch.
 
-**Loading behavior:**
+**One file, two in-memory jars.** `CookieJar` holds two maps — `youtube` (youtube.com *and* google.com rows) and `twitch` (twitch.tv rows) — and `loadFrom` (`internal/cookies/jar.go`) routes each row to one of them by domain before any name test runs. `cookies.txt` itself stays a single store holding every platform's rows, and every writer keeps updating it in place; the split is purely how the parsed state is represented. It is not cosmetic: one map keyed by bare cookie NAME cannot hold a `.twitch.tv` `SID` and a `.google.com` `SID` at once, so one silently evicted the other and the winner was whichever row the file listed last.
 
-1. Read the file line by line.
-2. Skip comments (lines starting with `#`), except `#HttpOnly_` lines (those are data).
-3. Parse tab-separated fields: domain, include_subdomains, path, secure, expiry, name, value.
-4. Filter by domain: only YouTube (`youtube.com`), Google (`google.com`), and Twitch (`twitch.tv`) domains.
-5. Filter by name: only essential authentication cookies (defined in `essentialYouTubeCookies` and `essentialTwitchCookies` maps).
-6. Deduplication: prefer `youtube.com` cookies over `google.com` when both have the same cookie name.
+**Loading behavior** (`Load` → `loadFrom`, `internal/cookies/jar.go`):
+
+1. Read the whole file, parse into fresh maps, then swap. A transient read error (EIO, a permission flip) leaves the previous state intact rather than wiping valid authentication.
+2. Skip comments, except `#HttpOnly_` lines (those are data).
+3. Parse tab-separated fields: domain, include_subdomains, path, secure, expiry, name, value. Fewer than 7 fields is a malformed row — logged at Debug, skipped. Fields 6.. are re-joined, so a value that legitimately contains a tab is preserved rather than truncated.
+4. **Admission is DOMAIN-FIRST**, and that ordering is the fix rather than a tidy-up. `isYouTubeDomain`/`isGoogleDomain` select the `youtube` jar, `isTwitchDomain` the `twitch` jar, and any other domain is dropped; only then is the name tested — `essentialYouTubeCookies` (or, on google.com only, the `SID`/`HSID`/`SSID`/`APISID`/`SAPISID`/`__Secure-1P*`/`__Secure-3P*` auth names) for the first, `essentialTwitchCookies` for the second. Under the old name-first rule a `.twitch.tv` row named `SID` was admitted, because that name is in `essentialYouTubeCookies`. Domain matchers are suffix-anchored (`domainMatches`, `internal/cookies/autocookies_merge.go`), so `.fakegoogle.com.evil.tld` is not google.com.
+5. **Within one jar** a name can still arrive from several domains. `compareCookieDomains` (`internal/cookies/jar.go`) is a total order that settles it: youtube.com beats google.com, then fewer labels wins, then dot-prefixed wins, then lexically smaller on the stored domain string. A row is skipped only when the incumbent ranks strictly better, so any permutation of the same set of rows loads to the same jar. Rule 3 (dot-prefixed) is subsumed by rule 4 today and is kept deliberately — the agreement is an accident of ASCII, not of intent.
+6. Both maps are swapped under ONE `Lock`, so no reader can observe the new YouTube rows beside the old Twitch ones. Accessors that need two values to agree take a single `RLock` to match (`GetTwitchCredentials`, `YouTubeIdentity`).
+
+**Expiry is CAPTURED, never filtered.** `cookieEntry` (`internal/cookies/jar.go`) is `{value, domain, expiry}`; `loadFrom` parses Netscape field 5 with exactly `rowExpired`'s semantics (TrimSpace, ParseInt, 0 on a parse error), so "expired" means the same thing to the jar and to the merge. Nothing in the jar acts on it, and that disagreement is load-bearing: `mergeCookieFiles`/`rowExpired` (`internal/cookies/autocookies_merge.go`) remain the only pruner, and `RefreshCookiesDetailed` detects credential loss by comparing what the jar holds against what the merge produced. Make the two agree here and the signal vanishes; drop rows here and `GetCookieHeader` silently sends less. Expiry surfaces as diagnostics only — `ExpiredAuthCookiesFor(platform, now)` and `AuthCookieHorizonFor(platform)`, reported per platform as `expiredYouTubeAuth`/`expiredTwitchAuth` on the startup cookie line (`initServices`, `cmd/moombox/services.go`). Per-platform rather than YouTube-only because `RefreshService` has no Twitch refresh at all: `checkTwitchAuth` is a check with no rotation, so the expiry count is the earliest warning a Twitch credential is running out.
+
+**ENOENT-as-empty is a ruling, not an oversight.** A missing file loads as an EMPTY jar, both maps cleared (`Load`, `internal/cookies/jar.go`). Deleting `cookies.txt` is how an operator logs Moombox out, and keeping the last good session in memory until restart would make a deliberate delete do nothing observable. The race objection does not apply, and `Load`'s doc comment carries the derivation: every writer goes through `writeFileAtomic` (`internal/cookies/autocookies.go`), which writes a temp file and renames without unlinking the destination; on Windows `os.Rename` is one `MoveFileEx(..., MOVEFILE_REPLACE_EXISTING)` with no `DeleteFile` ahead of it, and `os.ReadFile`'s open asks for `FILE_SHARE_READ|FILE_SHARE_WRITE` and *not* `FILE_SHARE_DELETE` — so a `Load` in flight makes the RENAME fail loudly instead of being made to read a missing file. On Linux `rename(2)` replaces the name atomically. Re-derive that paragraph if a writer ever stops going through `writeFileAtomic` or starts removing the target first.
 
 **Essential YouTube cookies (20):** SAPISID, __Secure-1PAPISID, __Secure-3PAPISID, SID, HSID, SSID, APISID, __Secure-1PSID, __Secure-3PSID, __Secure-1PSIDTS, __Secure-3PSIDTS, __Secure-1PSIDCC, __Secure-3PSIDCC, LOGIN_INFO, VISITOR_INFO1_LIVE, VISITOR_PRIVACY_METADATA, YSC, __Secure-ROLLOUT_TOKEN, CONSENT, PREF.
 
 **Essential Twitch cookies (4):** auth-token, twilight-user, login, name.
 
+**Two predicate tiers per platform.** The STRICT pair answers "is a complete working set present right now"; the LOOSE pair answers "was this install ever configured for the platform", which is the question the auth-loss gate and the status badges actually ask.
+
+| Platform | Strict | Loose | Loose name set |
+|----------|--------|-------|----------------|
+| YouTube | `HasYouTubeAuthCookies()` — SAPISID (or __Secure-3PAPISID) AND LOGIN_INFO | `HasAnyYouTubeAuthCookie()` | `youtubeAuthCookieNames` (10) — SAPISID, __Secure-1PAPISID, __Secure-3PAPISID, SID, HSID, SSID, APISID, __Secure-1PSID, __Secure-3PSID, LOGIN_INFO |
+| Twitch | `HasTwitchAuthCookies()` — auth-token present | `HasAnyTwitchAuthCookie()` | `twitchAuthCookieNames` — auth-token, twilight-user |
+
+A file holding SAPISID with LOGIN_INFO cleared is a CONFIGURED platform with BROKEN credentials — exactly the state worth reporting — and the strict predicate reads it as never-configured. Every name in a loose set must also be in the corresponding essential set or `loadFrom` drops it before the predicate can see it; `TestAuthCookieNameListsDoNotDrift` pins that.
+
+**`login` is deliberately NOT in `twitchAuthCookieNames`**, and the reason is the alarm the list drives, traced end to end in that variable's doc comment: `HasAnyTwitchAuthCookie` → `refresh`'s `hasTWCookies` → `shouldFireRecovery` → `OnRecoveryNeeded("twitch")` → `runState.handleRecoveryNeeded` (`cmd/moombox/monitor_callbacks.go`). The alarm does not require a failed validate — `checkTwitchAuth` (`internal/cookies/refresh.go`) returns a conclusive `(false, nil)` **without issuing any request** when auth-token is absent, and `shouldFireRecovery`'s first-conclusive-check arm then returns `cookiesPresent` verbatim. A file holding `login` and no auth-token would therefore fire "twitch auth lost" on the first check of every start. `twilight-user` earns its place instead: it is Twitch's own record of the signed-in user, and `mergeCookieFiles` can prune a lapsed auth-token out from under it. That variable's comment also ENUMERATES the four silent Twitch states rather than claiming a superlative — the list has been wrong twice — and names which of them `ChatDownloader.noteMissingLogin` (`internal/twitch`) now reports.
+
 **Key methods:**
 
-- `HasYouTubeAuthCookies()`: true if SAPISID (or __Secure-3PAPISID) AND LOGIN_INFO are present.
-- `HasTwitchAuthCookies()`: true if auth-token is present.
-- `GetCookieHeader()`: builds a `Cookie:` header string from all loaded cookies.
-- `GenerateAuthorizationHeader(origin)`: generates SAPISIDHASH + SAPISID1PHASH + SAPISID3PHASH header using SHA1(timestamp + SAPISID + origin).
-- `Reload()`: re-reads from the same file path.
+- `GetCookieHeaderFor(platform)`: builds a `Cookie:` header from one platform's rows and no other's, pairs sorted by name for determinism. `GetCookieHeader()` is the YOUTUBE one — every production caller is a YouTube request path — so Twitch rows no longer ride along on authenticated youtube.com requests.
+- `GetCookieFor(platform, name)`: one platform's value by name. `GetCookie(name)` reads the **Twitch** jar; the generic name is a deliberate mismatch, since its sole in-tree consumer is `internal/twitch/auth.go` fetching `auth-token`, and routing it to the YouTube jar would de-authenticate Twitch silently (IRC treats an empty token as "connect anonymously").
+- `GetTwitchCredentials()`: returns `auth-token` and `login` as a pair under ONE `RLock`, because `internal/twitch/chat_irc.go` builds one IRC handshake out of both and a pair read under two locks is not a pair.
+- `GenerateAuthorizationHeader(origin)`: SAPISIDHASH + SAPISID1PHASH + SAPISID3PHASH, each `SHA1(timestamp + " " + sid + " " + origin)` with one timestamp shared across all three (`makeSidAuthorization`). Returns "" for any origin outside `allowedSAPISIDHASHOrigins`, which is defence in depth — Google's auth uses the origin as a shared secret, so a caller must never be handed a valid hash bound to an attacker-supplied one.
+- `YouTubeIdentity()`: SHA-256 over `SAPISID + NUL + LOGIN_INFO`, "" when either is missing. An opaque equality token for "which Google account is this" — never a credential, never displayed. LOGIN_INFO is the load-bearing half: SAPISID identifies a SESSION, not an account, so a fingerprint over it alone would be blind to an account switch. The rotating `__Secure-*PSIDTS`/`SIDCC` names are excluded because they would fire on every refresh cycle.
+- `Reload()`: re-reads from the same file path; a no-op when the jar came from no file.
 
-**Thread safety:** All methods are protected by `sync.RWMutex`.
+**Thread safety:** All methods are protected by `sync.RWMutex`. Nil-receiver-safe where a caller may legitimately hold none (`HasAnyYouTubeAuthCookie`, `HasAnyTwitchAuthCookie`, `ExpiredAuthCookiesFor`, `AuthCookieHorizonFor`, `YouTubeIdentity`).
 
 ### Refresh Service
 
-`RefreshService` periodically validates cookies against the actual platform APIs and refreshes session cookies from YouTube Set-Cookie headers.
+`RefreshService` periodically validates cookies against the actual platform APIs and refreshes YouTube session cookies from `Set-Cookie` headers.
+
+**Lifecycle and the single-flight.** Three entry points share one body, `refresh(ctx, allowFallback)` (`internal/cookies/refresh.go`); `allowFallback` is the only thing that separates them.
+
+- `Start(ctx)` runs the initial pass **synchronously on the caller's goroutine** with `allowFallback=false`, wrapped in its own inline `recover` — `cmd/moombox`'s `run()` blocks on it before the web server binds, so an unrecovered panic there takes the process down at boot with no dashboard, no TUI and no log surface. It then launches the ticker goroutine, which carries the same recover.
+- `CheckNow(ctx)` is `POST /api/cookies/recheck` and the TUI's `R C`, also `allowFallback=false`: it runs on a handler goroutine and must not buy a full page fetch.
+- `doRefresh(ctx)` is the ticker, and the only path allowed `allowFallback=true`.
+
+All three single-flight on `RefreshService.refreshInFlight` (guarded by `rs.mu`). A second caller is a **no-op** that returns `started=false` and logs at Debug — it does not queue and does not wait. It is **never** a `RefreshDeclinedCauses` member: that vocabulary belongs to `AutoCookieService`'s browser refresh and is pinned across three consumers. A dropped ticker tick waits a full interval rather than doubling up. A caller that has just rewritten `cookies.txt` and wants *that file* re-verified cannot be given that guarantee — the in-flight pass may have read the old file — so the two callers in that position log the skip at **Info**: the post-recovery re-check (`handleRecoveryNeeded`, `cmd/moombox/monitor_callbacks.go`) and the post-`R F` re-check (`cmd/moombox/tui_wiring.go`), both saying "status may lag until the next refresh". The `POST /api/cookies/recheck` handler ignores the bool on purpose — its payload is a status snapshot, not a claim that this request produced it. Before the guard existed, a manual recheck landing during a ticker pass produced two guide fetches, two `Set-Cookie` merges and two interleaved `updateCookieFile` rewrites of the same file. An operator counting passes from clicks will therefore occasionally see a recheck produce no new pass in the log; that is the guard, not a broken button.
+
+**Every `rs.mu` section inside `refresh` releases through `defer`.** This is a standing rule, not a style preference. The guard-release defer takes `rs.mu`, and `rs.mu` is a plain non-reentrant `RWMutex`: a panic unwinding with the write lock held would block that defer forever, park the goroutine holding `rs.mu`, and turn a loud crash into a silent hang in which every later `GetStatus()` blocks. The status update is scoped into a func literal for exactly that reason. Two unexported test seams, `refreshPassHook` (outside the lock) and `refreshLockedHook` (inside it), exist because the two windows need opposite things.
 
 **Validation endpoints:**
 
 | Platform | Method | Endpoint | Auth Check |
 |----------|--------|----------|------------|
-| YouTube | POST | `youtube.com/youtubei/v1/guide` | Explicit login marker in the response, or inconclusive — see below |
-| Twitch | GET | `id.twitch.tv/oauth2/validate` | HTTP 200 = valid, 401 = conclusively invalid, anything else = inconclusive |
+| YouTube | POST | `youtubeGuideURL` = `www.youtube.com/youtubei/v1/guide?prettyPrint=false` | Explicit login marker in the response, or inconclusive — see below |
+| Twitch | GET | `twitchValidateURL` = `id.twitch.tv/oauth2/validate` | HTTP 200 = valid, 401 = conclusively invalid, anything else = inconclusive |
+
+There is **one** guide URL. Two package vars used to name it — `youtubeGuideURL` and `youtubeGuideRefreshURL`, described as different endpoints kept apart on purpose — and they were byte-identical; folding the two guide functions into one exchange made the duplicate visible. Both vars (rather than consts) exist solely so tests can point them at an `httptest` server.
+
+Provenance is asserted before status and before body, on both platforms: `authResponseIsOurs` (`internal/cookies/refresh.go`) requires the answering request's scheme and raw `host:port` to match what was sent AND the credential header (`Cookie` for YouTube, `Authorization` for Twitch) to still be present. Go strips manually-set credential headers on a cross-hostname redirect and the decision is sticky, so `origin → wall → origin` lands back on the right host carrying an uncredentialed body. The check is non-vacuous only because both callers refuse the empty-credential case before fetching, and it means anything only because `cookiesHTTPClient` carries no `http.CookieJar` — `TestCookiesHTTPClientCarriesNoCookieJar` pins that.
 
 **Liveness over presence.** Both checks distinguish three outcomes, not two. A
 conclusive "not authenticated" is the only thing that fires credential
@@ -738,81 +777,201 @@ For YouTube that means an explicit marker in the guide reply:
 Positive markers are checked before negative ones, so a reply that
 authenticated before always still does.
 
-**YouTube session refresh:**
+`youtubeGuideAuthVerdict` (`internal/cookies/refresh.go`) reads the body with `encoding/json` and falls back to literal substring needles (`guideLoginMarkersIn`/`guideLoginMarkersOut`) only when the body is not valid JSON at all. `loggedIn`/`loggedOut` are `*bool` because a real anonymous reply omits `loggedIn` entirely, and a plain `bool` cannot tell "the flag said false" from "the flag was absent". The `logged_in` param's `value` is `json.RawMessage`, decoded only for params whose key already matched, so one unrelated param gaining a non-string type cannot collapse the whole body to the fallback. The fallback caps the promoted string at `authBodyFallbackLimit` (16 KB) so session material deeper in the payload cannot reach a log line. An unreadable marker resolves to `errGuideLoginMarkerUnreadable`, which deliberately does **not** wrap `ErrAuthCheckNotAttempted`: a request did leave the process here, and `autocookies_profile.go`'s `attempted` flag turns on that distinction.
 
-During the YouTube auth check, Set-Cookie headers from the response are processed:
+**One guide exchange, one writer.** `youtubeGuideExchange` (`internal/cookies/refresh.go`) makes the POST, reads the body to a verdict, closes it, and hands the verdict *and* the response back. It never writes anything. Two callers:
 
-1. Parse each Set-Cookie header for YouTube/Google domains.
-2. Extract name, value, and expiry (from `expires` or `max-age` directives).
-3. Update the cookie file: replace existing entries, append new ones.
-4. Reload the jar.
+- `checkYouTubeAuth` — the VERIFY path, exported as `CheckYouTubeAuth` and wired into `AutoCookieService.VerifyYouTubeAuth` (`cmd/moombox/services.go`), where `checkPlatformAuth` runs it on the **rollback** decision of a profile import. It discards the response. A shared exchange that merged `Set-Cookie` headers itself would write the jar from the very response being used to judge the import.
+- `checkAndRefreshYouTube` — the sole writer. Only on an authenticated, readable reply does it call `processYouTubeSetCookies`. Every error path and the never-configured gate return a nil response, so "a reply we could not read is not a reply anyone may write the jar from" is a fact about the return values rather than a rule to remember.
 
-**Auth loss detection:**
+`youtubeGuideExchange`'s three entry gates encode one rule, and only the FIRST may answer `(false, nil)`: nothing configured at all is a silent negative; configured-but-no-request-could-be-built errors with `ErrAuthCheckNotAttempted`, because a check that did not happen is not dead credentials. A jar with SAPISID and a cleared LOGIN_INFO is configured with broken credentials and its verdict has to come from YouTube.
 
-The service tracks previous auth state per platform. When a platform transitions from authenticated to not-authenticated **and the check was conclusive**, it fires `OnRecoveryNeeded(platform)`. This triggers the auto-cookie service to attempt re-authentication.
+**Set-Cookie ADMISSION, by parsed attributes.** `admitSetCookie(sc, origin)` (`internal/cookies/refresh.go`) is the outer layer: a header it turns down never reaches the write path in any form. The substring pre-filter that used to open this loop is **gone** — it ran before `Domain=` was parsed, dropped every legitimate unscoped first-party rotation (RFC 6265 §4.1.2.3 host-scopes a Domain-less `Set-Cookie` to the responding host), and was never the guard it looked like, since `x=youtube.com; Domain=evil.tld` passes a substring test on its value. Admission now happens after the whole attribute list is read:
 
-"Conclusive" is the three-outcome rule above, not merely "no network error": a non-200, an answer from the wrong host, and a 200 whose body carries no recognisable marker are all inconclusive too, and none of them fires recovery. Recovery is only ever fired by evidence that the session is dead.
+1. **Row-breaking characters** in the name, the value or the domain are refused outright (`hasRowBreakingChar`, `rowBreakingChars` = tab, CR, LF, NUL). Only the TAB is a live vector — `net/textproto` cannot deliver CR, LF or NUL inside a header value — and the other three are defence in depth for a write into a line-oriented file. This governs only what *this writer* may add; `CookieJar.Load`'s tolerance of tab-carrying rows is unchanged.
+2. **SCOPED** (`Domain=` present): admitted only when the domain lies on the declared origin's credential platform (`cookiePlatformOf`). `accounts.google.com.evil.tld`, `evil.tld` and a bare `.` are all refused; the emptiness test is load-bearing, since an undeclared origin has no platform and bare equality would read `"" == ""` as a match.
+3. **UNSCOPED** (no `Domain=`): the key keeps `Domain: ""` and stays host-scoped to the declared origin. Admitted only under a name the jar actually tracks — `trackedCookieName`, the union of `essentialYouTubeCookies` and `isGoogleOnlyAuthName`, neither of which contains the other — so an unscoped `foo=bar` never enters the file.
 
-`SetExpectedPlatforms(platforms)` seeds the previous auth state from persisted config platforms so auth loss is detectable even after an app restart.
+Parsing details that are decisions rather than incidentals: leading and trailing SP/HTAB are trimmed from the name and the value **separately**, per RFC 6265 §5.2 step 3 (`strings.Trim`, not `TrimSpace`, so a stray CR cannot be quietly rescued past step 1). Quoted values are **not** de-quoted — §5.2 never strips DQUOTEs and no browser does; CPython's `SimpleCookie` strips because it implements the older RFC 2109. `Domain=` is lowercased at parse, not at comparison, because it becomes a map key. `Max-Age` takes precedence over `Expires` and is clamped to `maxCookieLifetime` (400 days, RFC 6265bis §5.5), which also makes the `now + maxAge` int64 overflow unreachable — a wrapped negative expiry reads as "not expired" to every `exp > 0 && exp < now` guard in the package. `Expires` is deliberately *not* clamped. Every attribute is read to the end of the header; the old loop broke out early on `Max-Age<=0` and threw away the `Domain=` that usually follows it.
+
+**Deletion semantics are CPython's**, from `http.cookiejar._cookie_from_cookie_tuple`: `Max-Age<=0` or an `Expires` at or before now deletes the row, keyed by domain+path+name, rather than storing it with an empty value. A bare `NAME=` with no expiry attribute is **REFUSED**, not treated as a third deletion form — this package cannot represent an empty-valued row at all (`CookieJar.Load` TrimSpaces the line, the trailing tab disappears, and the row reads as 6 fields and is skipped as malformed), and a reply that asserts "you are signed in" while blanking the credential that proves it is self-contradictory. `updateCookieFile` logs that refusal at Warn when the row carries an essential cookie.
+
+**What an admitted header may do, by verb.** `admitSetCookie`'s doc comment is the authority here and states the rule in full; the summary below must agree with it. The design comes first, because the enforcement rules read wrongly in isolation — the owner's rule, verbatim: *"youtube cookies should allow Google cookies as well."* YouTube and Google are ONE credential platform (`cookiePlatformOf`), `.google.com` and `.youtube.com` rows live in one jar keyed by bare name, so a youtube.com reply is ENTITLED to move Google rows and does. The one thing declined is MISATTRIBUTION: a host-only cookie from www.youtube.com carrying no `Domain=` is a youtube.com cookie, so a NEW row for it goes on `.youtube.com` and is not invented on `.google.com`. As *observed*, Google's own cookies carry an explicit `Domain=` — that is a fact about Google's servers, not an invariant this code enforces — so nothing real is caught by that rule; the retired branch that guessed `.google.com` from the cookie NAME was minting a different cookie under a real one's name.
+
+The three verbs have three different scopes, each enforced somewhere else:
+
+| Verb | Unscoped header | Scoped header | Enforced by |
+|------|-----------------|---------------|-------------|
+| **REFRESH** | May rewrite an existing same-name row anywhere inside the declared origin's PLATFORM — an unscoped `SID=fresh` from a youtube.com reply *does* rewrite an existing `.google.com SID` row | Same fan-out; a `Domain=.google.com` rotation also repairs a stale `.youtube.com` twin | `resolveRowUpdate` rule 2 (`origin.covers`) for the origin's own site, rule 3 + `sameCookiePlatform` for the rest of the platform. Rule 3 DISAMBIGUATES rather than guessing: it fires only when exactly one non-deleting candidate qualifies (`refreshes == 1`), so two same-name updates decline rather than let map order pick |
+| **CREATE** | Only on the declared origin's own SITE — the insertion loop derives `domain = "." + string(origin)` and nothing else contributes | On the domain it declared, whenever that domain is inside the origin's platform. An admitted `SID=x; Domain=.google.com` from a youtube.com reply DOES create a `.google.com` row against a file holding none, and that is correct | `updateCookieFile`'s insertion loop, plus its platform guard (`cookiePlatformOf(domain) == origin.platform()`) |
+| **DELETE** | Only inside the declared origin's own SITE, through `resolveRowUpdate` rule 2 alone — rule 1 needs a `Domain=`, rule 3 skips deletions, and the insertion loop skips them too | Rule 1's, reaching only rows whose domain it exactly scope-matches (`sameCookieScope`) | `resolveRowUpdate` |
+
+Unscoped CREATE is narrower than unscoped REFRESH because a rewrite repairs a row the FILE has already asserted belongs to this platform, while a creation has no such prior assertion to lean on. Narrower still for one batch shape: an unscoped key is not INSERTED beside a scoped NON-deleting sibling of the same name (`hasScopedSibling`), because the scoped header has already claimed a row and the unscoped twin would override it by name in the jar. A scoped DELETION is not such a sibling — delete-plus-insert is "replace", and counting it would eat the replacement. The wider rule ("once any key of this name matched, treat every key of that name as handled") is wrong: a response rotating `SID` on both domains against a file holding only the `.google.com` row must still insert the `.youtube.com` one.
+
+**The write path.** `processYouTubeSetCookies` declares `originYouTube` twice — once to `admitSetCookie`, once to `updateCookieFile` — because a Domain-less `Set-Cookie` is host-scoped to a response that no longer exists by the time the updates reach the writer. `cookieOrigin` is a SITE (`youtube.com` / `google.com` / `twitch.tv`), and it feeds three decisions: `resolveRowUpdate`'s rule 2, `sameCookiePlatform`'s Domain-less default, and the insertion loop's platform guard. The zero value is deliberately inert — `covers` reports false for every row and the insertion loop refuses everything — because declining to MATCH is not declining to WRITE: every update the matching rules turn down arrives at the insertion loop, which without an origin check appended new rows under a domain nobody declared.
+
+Other write-path rules (`updateCookieFile`, `internal/cookies/refresh.go`):
+
+- **Every** matching row is rewritten, not just the first, so multi-domain duplicates do not drift out of sync.
+- Rows are rebuilt from exactly the first seven fields of the row being replaced, with the new expiry and value substituted. A live row can arrive split into 8+ parts (a value containing a tab), and assigning `parts[6]` left the old tail dangling.
+- `#HttpOnly_` is **preserved** on rewrite (`parts[0]` is emitted verbatim — the file's own row is the authority) and **added** only on insertion, from `cu.HTTPOnly`. Nothing in the package treats the flag as a control, so a server that starts or stops sending `HttpOnly` costs a stale annotation, not a downgraded cookie.
+- The include-subdomains flag is derived from a leading dot rather than hardcoded TRUE; `secure` follows a `__Secure-` name prefix.
+- Deletions remove the row. Grow broadly, destroy narrowly: a deletion scoped to `.youtube.com` does **not** remove a host-only `www.youtube.com` row, even though RFC 6265 domain-matching covers it — browser extraction really does write host-only rows, and a stale row that keeps being sent is recoverable where a deleted credential is not.
+- A read failure aborts (`ErrCookieFileUnreadable`, `internal/cookies/errors.go`): an unreadable `cookies.txt` is not an absent one, and consumers MUST discriminate it from every other failure, because the correct instruction is "fix the permission or mount problem", never "replace cookies.txt".
+- The write ends in `writeFileAtomic`. A failure Warns and names the deployment mistake that causes it: a rename cannot replace a single-file bind mount, so `cookies.txt` belongs *inside* a mounted directory, not mounted as an individual file.
+- Refused headers are counted, never logged. A `Set-Cookie` is the credential itself.
+
+**Auth loss detection.** The service tracks previous auth state per platform. `shouldFireRecovery(everConcluded, prevAuth, nowAuth, checkErr, cookiesPresent)` is a pure function (table-testable without a network seam) and fires in two cases, both requiring `checkErr == nil && !nowAuth`: a **witnessed transition** (this platform concluded before and was authenticated then), and **startup dead-auth** (this platform's first conclusive check ever), the latter gated on `cookiesPresent`. `everConcluded` is per-platform (`ytEverConcluded`/`twEverConcluded`) and not the service-wide `hasCheckedOnce`, because `SetExpectedPlatforms` seeds `hasCheckedOnce=true` as soon as ANY platform is in the persisted list — using the shared flag would let one platform's presence mask a sibling that was never checked. `cookiesPresent` is the LOOSE predicate: a half-cleared session is a configured platform with broken credentials.
+
+"Conclusive" is the three-outcome rule above, not merely "no network error": a non-200, an answer from the wrong host, and a 200 whose body carries no recognisable marker are all inconclusive too, and none of them fires recovery, moves the previous-auth baseline, or marks the platform concluded.
+
+`SetExpectedPlatforms(platforms)` seeds the previous auth state from persisted config platforms so auth loss is detectable after a restart. `OnAuthRecovered` fires on the inverse transition. `OnCredentialsChanged` is separate and not a weaker `OnAuthRecovered`: a job parked because the signed-in account lacks a membership parked while auth was HEALTHY, so swapping accounts produces no auth transition to ride. `shouldObserveCredentials` and `advanceIdentityBaseline` (both pure) govern it — the baseline advances only on a check that was conclusive **and** authenticated, so a stale intermediate export cannot consume the edge, and the `baseline == ""` case fires once per process on purpose so an offline cookie swap is noticed at all.
+
+**Two-tier liveness, and its pilot is DISARMED.** Tier 1 is the auth check above. Tier 2 is `ObserveLiveness(platform, loggedIn)`, fed by two YouTube producers — the per-channel membership probe (once per configured channel per feed cycle) and the channel-independent `FallbackLiveness` probe injected by `cmd/moombox` (this package cannot import `internal/youtube`). Callers must filter their own inconclusive results out; reaching the method means "YouTube told us", not "we asked". Twitch has no tier-2 producer.
+
+`const livenessRecoveryArmed = false` (`internal/cookies/refresh.go:632`) gates whether a tier-2 verdict may invoke `OnRecoveryNeeded`. It is false today. The observation, the dedupe and the freshness accounting all happen and are logged; only the last step is withheld, and `ObserveLiveness`'s single log line carries `wouldFireRecovery` and `armed` so the pilot can be read as evidence. Arming is a deliberate, separate change — not a side effect of wiring something else — and its risk is not scoped to `auto_enabled` installs: on `auto_enabled = true` a spurious verdict drives a headless browser and notifies unless it races the auto-cookie single-flight; on `auto_enabled = false` there is no quiet case at all — `handleRecoveryNeeded` returns without calling the refresher, so a synchronous "Cookie Re-Authentication Required" (TypeError) fires every time, at a 30-minute per-platform cooldown, to the population least able to reach the remedy it names.
+
+The documented arming checklist is the plan's §"Staged rollout", items 1-11. Item 7 — whether a genuinely dead session should re-alarm once per `livenessRefireWindow` indefinitely, once per process, or on a back-off — is an **open owner decision**, to be made at arming rather than discovered afterwards.
+
+Three maps, deliberately separate (`internal/cookies/refresh.go`):
+
+| Map | Written by | Read by |
+|-----|-----------|---------|
+| `lastLivenessObserved` | conclusive verdicts, **both** directions | `livenessObservedRecently` — the sole gate on paying for the fallback probe |
+| `lastRecoveryDecided` | a signed-out verdict that cleared the dedupe (`recordLiveness`), and `noteRecoveryDecided` from a tier-1 fire | `recordLiveness`'s `livenessRefireWindow` check. A `LoggedIn` observation must never write here, or a healthy verdict could swallow a dead one from another channel in the same cycle |
+| `lastLivenessKnown` | every outcome including `livenessInconclusive` | log-level selection only (`notable`) |
+
+`noteRecoveryDecided` is one-directional: the tier-1 fire stamps the map but never consults it, because suppressing the tier-1 fire would change behaviour that predates this signal entirely. `recordInconclusiveLiveness` touches neither of the other two maps — recording an observation would make the next cycle skip the probe, silencing the signal for as long as it keeps failing.
+
+`livenessFreshWindow` (25 min) bounds how old the last conclusive observation may be before a periodic pass pays for the fallback probe. It **must** be strictly shorter than the refresh interval, because the fallback records its own answer through the same method — at one full cadence the probe would suppress itself on alternate cycles, halving coverage with no symptom. `NewRefreshService` enforces that against the interval it is actually handed, replacing anything at or below the window with the default and warning with both numbers. The lower bound is an *assumption about configuration*, not an invariant: the skip only works while membership observations arrive more often than the window expires, so an install with `monitors.feed_check_interval` above ~25 minutes pays for the fallback on roughly every other cycle. That degradation is bounded and one-directional.
+
+**`authStatusChanged` is a CONTRACT, not an observation.** It is the `OnAuthChange` gate (`internal/cookies/refresh.go`) and compares six fields: the two auth booleans, the two cookies-present flags, and the two `RefreshVerdict`s. It deliberately excludes `YouTubeError`/`TwitchError`, whose text can vary between two occurrences of the same outcome, so comparing them would fire the callback on churn no verdict transition accompanies. The rule is stated forwards: **no `OnAuthChange`-driven surface may render the two strings; per-request surfaces may.** Both of today's readers are per-request — each pulls a `GetStatus()` snapshot it asked for — so neither depends on this callback and neither can go stale on screen. Widening the gate is the *precondition* for a push-driven surface that renders them, and is a deliberate change with its own cost. The verdicts and the cookies-present flags have to be in the gate: a platform going from conclusively-rejected to could-not-check leaves both booleans false, and on a boolean-only gate that badge transition was silent.
+
+`AuthStatus` (`internal/cookies/refresh.go`) is never marshalled — every consumer hand-projects it — and **every field has a reader**, which is a property to keep. A `LastCheck` string was removed rather than wired: no projection carried it, and the obvious misreading ("the credentials were valid as of this time") is not what the timestamp of a pass that may have concluded nothing says. Anything re-added needs a reader in the same change, and if it moves on every tick it also needs a line in `authStatusChanged`'s exclusion list.
 
 **Timing:**
 
-- Default refresh interval: 30 minutes (hardcoded; the config `cookies.refresh_interval` controls the auto-cookie periodic refresh, not the auth-check refresh service).
-- Auth check timeout: 15 seconds per platform.
-- Initial check runs immediately on `Start()`.
+- `RefreshService` interval: `defaultRefreshInterval` = 30 minutes. `NewRefreshService(jar, 0, log)` is how `initServices` constructs it, so nothing in production feeds the interval parameter; `cookies.refresh_interval` drives the *auto-cookie* periodic refresh instead.
+- `authCheckTimeout` = 15 seconds per platform.
+- `livenessRefireWindow` = 30 minutes (its own constant on purpose — it is neither the notification cooldown in `wireMonitorCallbacks` nor `defaultRefreshInterval`, however the three numbers line up today).
+- `livenessFreshWindow` = 25 minutes.
+- Initial check runs synchronously on `Start()`; tier-2 coverage therefore begins one cadence in.
 
 ### Auto-Cookie Service
 
-`AutoCookieService` launches a headless browser to capture authentication cookies via an interactive login flow.
+`AutoCookieService` acquires credentials into `cookies.txt` — through an interactive browser login, through a headless browser refresh, or browser-free by importing a browser profile directly.
 
-**Supported browsers:**
+**What `cookies.auto_enabled` means.** Two independent liveness mechanisms on two independent timers, **not** a primary and a fallback. The in-process Go refresh (`RefreshService`) always runs, with the monitors and its own timer. The headless-browser refresh is a **much slower** second timer that exists only when the flag is on. The flag owns that timer, the one automatic recovery attempt, and — the exception this table has to name — G5's `SetExpectedPlatforms` read at `cmd/moombox/main.go:276`. Nothing else.
 
-| Browser | Engine | Detection |
-|---------|--------|-----------|
-| Firefox | Gecko | Windows registry + common install paths |
-| Waterfox | Gecko | Windows registry + common install paths |
-| Chrome | Chromium | Windows registry + common install paths |
-| Brave | Chromium | Windows registry + common install paths |
-| Edge | Chromium | Windows registry + common install paths |
-| Opera | Chromium | Windows registry + common install paths |
+| Surface | Mechanism | Gated on `auto_enabled`? |
+|---------|-----------|--------------------------|
+| `RefreshService` (monitors + own timer) | in-process | never |
+| `StartPeriodicRefresh` | headless browser | yes — it *is* that timer |
+| automatic recovery (`OnRecoveryNeeded` → `handleRecoveryNeeded`) | headless browser, one attempt | yes |
+| `SetExpectedPlatforms` seeding (`main.go:276`) | — | yes (G5) |
+| `R F` / Web shift+click / the Settings-page twin | best-available ladder | **no** — the flag only picks the rung, and never causes a decline |
+| `R C` / `POST /api/cookies/recheck` | in-process | never |
+| `StartSetup` (interactive login) | browser | never — acquisition, and an explicit gesture |
 
-Browser detection results are cached for 60 seconds.
+**The periodic timer is `gateExempt`.** `browserGatePolicy` (`internal/cookies/autocookies.go`) has two values: `gateApplies` (the zero value, so anything that forgets to say gets the safe answer) for every caller acting on a live operator intention, and `gateExempt` for `StartPeriodicRefresh`'s goroutine and nothing else. `main.go` starts that loop only when the flag was true at boot, so the flag has already been consulted; re-asking it per tick would leave an operator who switched it off without restarting with the timer still running *and* silently switched to browser-free imports of a profile nothing changes between ticks. Flipping the flag off at runtime therefore leaves the timer launching browsers until restart, **by ruling** — the restart-required label both UIs carry is the honest cover. Do not "fix" it.
 
-**Login flow by engine:**
+**`R F` is a three-rung ladder and never dead-ends.** `R F` (TUI), the dashboard header's shift+click, and the Settings page's "Refresh cookies from browser profile" button are one gesture: refresh by the strongest means available. The Settings twin exists because a modifier key does not exist on a phone or tablet, which left a mobile-only operator with dead cookies, an updated profile and no trigger at all on exactly the workflow designated for Docker; it calls `app.autoCookieRefresh()` directly rather than adding a second implementation.
 
-| Engine | Launch Args | Profile |
-|--------|-------------|---------|
-| Firefox/Gecko | `-profile <DIR> -new-instance <LOGIN_URL>` | User.js suppresses first-run dialogs |
-| Chromium | `--user-data-dir=<DIR> <LOGIN_URL>` | Clean data dir |
+1. Browser launching allowed AND a browser available → launch the headless browser, refresh the profile, import.
+2. No browser launch (flag off, or no browser present) but a profile IS present → import from the profile immediately.
+3. No browser profile at all → run what `R C` runs, and say so.
+
+Rung 3 is one exported predicate, `cookies.IsNoBrowserProfile` (`internal/cookies/errors.go`), so the two surfaces cannot diverge: it is exactly `ErrProfileNotFound` or `ErrNoBrowserFound`, both from the same pre-work missing-directory check. The TUI branches on it in `internal/tui/app_update.go` and returns `recheckCookiesCmd()` — R C's own command, not a second implementation — so the sentence leads a real refresh. The Web half (`autoCookieRefresh`, `web/public/app.js`) branches on the STATUS (404 for `ErrProfileNotFound`, 424 for `ErrNoBrowserFound`), never on the prose, and then awaits `recheckCookies()`. The two sentences differ **on purpose**, each naming its own surface's affordance: the TUI's is the owner's copy verbatim, `No browser profile found, running R C instead...` (ellipsis included), and the Web's is `No browser profile found, running a normal cookie refresh instead...`; `TestRungThreeSentencesDivergeByDesign` asserts the divergence. The ladder still declines nil-error on the running-service causes in `RefreshDeclinedCauses` (a setup or another refresh already in flight, or no platform with cookies worth refreshing) — unchanged and correct. `R C` is never gated.
+
+Rung 3 deliberately EXCLUDES every profile-import failure — `ErrProfileDirUnreadable`, `ErrProfileNotADirectory`, `ErrCookieDBNotFound`, `ErrCookieDBLocked`, `ErrCookieDBUnreadable`, `ErrNoCookiesInProfile`. Those mean the profile IS there and is wrong in a diagnosable way, each from a pass that RAN, and each carries the only guidance the operator has. Folding them into the fallback would replace real diagnosis with a recheck that cannot fix any of them.
+
+**Every AUTOMATIC browser-free import runs only when there is no `cookies.txt` to lose.** `automaticImportGuard` (`internal/cookies/autocookies_profile.go`) is that rule, and it is ONE rule with exactly two automatic callers: `decideStartupSeed` (the boot import) and `StartPeriodicRefresh`'s tick when that tick would be browser-free. "Nothing to lose" means **absent, or present with zero cookie rows**; an **unreadable** file ABORTS (`autoImportCookieFileUnreadable`) rather than counting as absent, and `StartProfileSeed` Warns on that one stand-down because it is the operator-actionable case.
+
+The asymmetry is the whole argument: a false "nothing to lose" imports over credentials and the operator may not find out until a recording fails, while a false "something to lose" costs one keypress. So the predicate does not need to be accurate — it needs zero false "nothing to lose" answers. `countNetscapeCookieRows` (`internal/cookies/autocookies_profile.go`) therefore **must over-count**: it counts lines that are neither blank nor plain comments, so a malformed row, an unrelated domain and an expired row all count. Over-counting can only produce the cheap error. Any replacement must keep that direction, which is also why "present but holding no auth cookies for either platform" is ruled out as a definition — deciding it needs a per-platform predicate, and a wrong one fails in the expensive direction.
+
+The guard is **not for the manual triggers**: `R F`, shift+click and the Settings twin must keep importing over whatever `cookies.txt` holds, because replacing a live cookie file out of a profile the operator just updated by hand *is* the gesture, and it is the only path a container has. And it is **not for the recovery path**: `OnRecoveryNeeded` and the worker's `OnCookieRefreshNeeded` reach `RefreshCookiesDetailed` without passing through it, because recovery fires only on a conclusive not-authenticated — refusing the one automatic import most likely to fix the problem, on the grounds that a file exists which has just been proven not to work, would be backwards. That exemption stops being safe if a recovery producer is ever added that can fire on an INCONCLUSIVE verdict. The two-platform case (only one platform died) is covered not by the guard but by Arc 2's abort/merge/rollback, which re-checks at write time.
+
+**`StartProfileSeed(ctx)`** (`internal/cookies/autocookies.go`) runs AT MOST ONE browser-free import shortly after start, and `main.go` calls it **unconditionally** — it is not under the flag. The flag owns a *repeating* read of a profile nothing changes between ticks; a boot is the one moment a mounted profile plausibly did change, because something replaced it while the process was down. Its safety condition is the cookie file, not the flag, and lives in `decideStartupSeed`. It returns immediately; the import runs on its own goroutine after `profileImportStartupDelay` (15 s) and **re-asks** `decideStartupSeed` after the wait, because an interactive setup finishing or a hand-dropped `cookies.txt` both write the file the first decision was made about. `shouldSeedFromProfileAtStartup` is deleted.
+
+**Docker guidance.** Leave `auto_enabled` off, update the mounted browser profile, then press `R F` (or shift+click the header button, or the Settings-page twin). That is the designated workflow on a headless host: no browser is launched, the profile is imported directly, and the manual triggers are exempt from `automaticImportGuard` precisely so it works over an existing file. `cookies.txt` must live *inside* a mounted directory rather than being bind-mounted as an individual file — `writeFileAtomic`'s rename cannot replace a single-file mount.
+
+**The `lastError` write policy.** `lastError` (`AutoCookieService`, `internal/cookies/autocookies.go`) is the last thing a cookie pass concluded that the OPERATOR has to act on, published as `AutoCookieStatus.LastError`. One rule: **a write is allowed only where THIS pass established the thing it is asserting.** Setting asserts a problem; CLEARING asserts that whatever was recorded is not wrong any more, and that is the half that keeps being written by paths with no basis for it.
+
+- `setError` is the single SET funnel and the only place a message enters the field. Every exit that returns an error from a cookie pass sets — `FinishSetup`'s empty-profile, read-failure, merge-abort, mkdir, write and jar-load exits, and the refresh's import-failure, merge-abort, credential-loss and verification-failure exits.
+- **Two exits deliberately do NOT set**: the guard clauses at the top of `FinishSetupDetailed` (`ErrNoSetupInProgress`, `ErrSetupCancelled`). No pass has run when they fire, so there is no failure to see afterwards, and the caller gets the answer synchronously in the same dialog. "A pass" is the boundary; a guard that refuses to start one is not an exit from one.
+- Three CLEARS, each earned: `StartSetup`'s slot claim (a new attempt is starting, so the recorded message belongs to an attempt that is over — the one clear about intent rather than evidence); `RefreshCookiesDetailed`'s `case renewed` in the any-platform-verified arm (the pass actually produced the credentials it verified); and that switch's "nothing to verify" branch, kept with a note because no route to it has been found and "I could not find a route" is not "there is none". The `default` beside `renewed` deliberately does not clear — a pass whose browser did nothing has established that the credentials on disk work, not that the refresh mechanism does.
+- The loss branch of the same arm writes `s.lastError` directly, because a partial success still has to report the platform that was lost.
+- **`cleanup()` / `cleanupLocked()` MUST NOT clear it.** `cleanup` runs on every setup exit path including the failed ones — `FinishSetup` calls `setError` and then `cleanup` on each failure exit — so clearing there would erase the message microseconds after it was written. Pinned by `TestCleanupAfterAFailedSetupKeepsLastError` and `TestFinishSetupRecordsTheFailureItReturns`.
+
+It has two readers: the Web settings panel's `lastError` line and the TUI's `R C` result line (`Last cookie error:`).
+
+**`fetchedNoCredential`** (`RefreshCookiesDetailed`, `internal/cookies/autocookies.go`) is a NEW flag, never a redefinition of `fetchedRows`: rows came back and **not one of them is a session credential** — a signed-out browser profile, or one set to clear cookies on exit and re-seeded with `YSC`/`VISITOR_INFO1_LIVE` by the navigation this pass just made. Read as either neighbouring case it was wrong: "the browser profile contained no cookies" is false, and "auth verification failed — manual re-login required" says nothing an operator can act on. It is measured on what THIS PASS fetched, before the merge folds the previous `cookies.txt` in, and it is computed with `netscapeCookiesHoldACredential` — which loads the text into a THROWAWAY jar and asks the jar's own loose predicates, so "is this a credential" has one answer across the package. Overloading `fetchedRows == 0` was rejected because that counter's deliberate over-counting is load-bearing for the import guard.
+
+**`GetStatus()` versus `ReloginStatus()`.** Both take `s.mu` and both call `reapAbandonedSetupLocked`; `ReloginStatus` returns only the cloned `needsRelogin` map and skips `GetStatus`'s browser/registry detection (~155 ms measured 2026-08-25). Four of `GetStatus`'s five production callers read nothing else, so they were paying that on every poll. Status polling is the most frequent visitor to this lock, which makes it the reap that actually fires in practice — so `ReloginStatus` **must** keep calling the reap. A "simplification" that drops it because the method "only reads `needsRelogin`" would silently stop the abandoned-setup reap from firing in production, with no test noticing.
+
+**Browser detection is cached, both halves.** `DetectBrowser()` (the single best pick) and `DetectBrowsers()` (the full list) share one mutex and one 60-second TTL in `browserDetectCache` (`internal/cookies/autocookies_detect.go`). `DetectBrowsers` used to be uncached, so every status poll rebuilt the list from a filesystem+registry scan (a `reg.exe` spawn on Windows) it almost always threw away. Both return the cache's own backing value — callers must treat them as read-only. `InvalidateBrowserDetection()` clears both, and is called whenever the configured browser changes, since that is exactly when an operator has most likely just installed the browser they are pointing Moombox at.
+
+**Supported browsers** — `knownBrowsers` (`internal/cookies/autocookies_detect.go`), ten entries in search order. Firefox-family first, so the `cookies.sqlite` path is preferred when both kinds are installed; within each family, less-common forks come ahead of mainline so a LibreWolf user is not auto-detected as Firefox.
+
+| Browser | Engine | Type key |
+|---------|--------|----------|
+| LibreWolf | Gecko | `librewolf` |
+| Zen Browser | Gecko | `zen` |
+| Waterfox | Gecko | `waterfox` |
+| Firefox | Gecko | `firefox` |
+| Vivaldi | Chromium | `vivaldi` |
+| Thorium | Chromium | `thorium` |
+| Brave | Chromium | `brave` |
+| Google Chrome | Chromium | `chrome` |
+| Opera GX | Chromium | `opera` |
+| Microsoft Edge | Chromium | `edge` |
+
+Detection is `exec.LookPath` over each entry's candidate names plus, on Windows, `PROGRAMFILES` / `PROGRAMFILES(X86)` / `LOCALAPPDATA` install paths, deduped by absolute path. The system default browser is promoted to the front of the order when it can be read, **except Edge**, which frequently hijacks the Windows registry default.
+
+**Launch args by engine:**
+
+| Engine | Interactive setup | Headless refresh |
+|--------|-------------------|------------------|
+| Firefox/Gecko | `--new-instance --profile <DIR> <LOGIN_URL>`; a `user.js` written first suppresses first-run dialogs and explicitly disables telemetry upload | `--new-instance --screenshot <tmp> --profile <DIR> <URL>`, one launch per platform, `firefoxLaunchSpacing` (5 s) apart |
+| Chromium | `--user-data-dir=<DIR> --no-first-run --no-default-browser-check --disable-blink-features=AutomationControlled --remote-debugging-port=<port> <LOGIN_URL>` | the same plus `--headless=new`, `--disable-gpu`, `--disable-session-crashed-bubble`, `--disable-features=InfiniteSessionRestore`, `--window-size=1280,720`, and **no URL** — navigation happens over CDP |
+
+The anti-automation flags are mirrored on the headless launch deliberately: YouTube raises fraud scores for a browser that advertises itself as automated, which would invalidate the very cookies the pass is refreshing. `dangerousProfilePathSubstrings` (`internal/cookies/autocookies.go`) refuses a configured profile directory that belongs to a real installed browser, so a hostile config cannot launch Chrome against the user's actual signed-in profile and exfiltrate it through the `cookies.txt` export.
 
 **Cookie extraction:**
 
 | Engine | Source | Method |
 |--------|--------|--------|
-| Firefox | `cookies.sqlite` in profile dir | SQL query against `moz_cookies` table |
-| Chromium | `Default/Cookies` in user-data-dir | SQL query against `cookies` table; values decrypted via DPAPI on Windows |
+| Firefox | `cookies.sqlite` in the profile dir | `readFirefoxCookies` (`internal/cookies/autocookies_firefox.go`) SNAPSHOTS the DB **together with its `-wal` sidecar** into a temp dir and queries the copy; copying without the sidecar silently returns rows that are missing every uncommitted write. Falls back to querying in place if the snapshot itself fails, and retries up to 5 times at 500 ms for WAL lock contention and torn snapshots, breaking early on anything non-retryable. NULL columns are defaulted and unusable rows counted, both reported by the caller |
+| Chromium | the live browser over CDP | `cdpGetCookiesAsNetscape` (`internal/cookies/autocookies_chromium.go`) runs a three-tier ladder: browser-level `Storage.getCookies`, then per-page `Network.getAllCookies`, then per-page `Network.getCookies`. The gate between tiers is the RELEVANT row count, not the raw one, so a tier-1 answer full of other sites' cookies does not stop the ladder |
+| Chromium (opt-in fallback) | the user's REAL profile under `%LOCALAPPDATA%`, decrypted with `CryptUnprotectData` | `dpapiExtractAsNetscape` (`internal/cookies/autocookies_dpapi.go`). Reached only when the browser refresh already returned an error, `cookies.dpapi_fallback` is on, and the resolved browser is non-Firefox — DPAPI launches nothing, so it sidesteps "Chromium is already running our profile" entirely. Off by default: it reads the user's actual signed-in cookies, so it is a privacy surface they have to enable consciously |
 
-**CDP (Chrome DevTools Protocol) polling:**
+An empty result and an unanswered read are different facts. `cdpCookieReadOutcome` distinguishes them: `ErrBrowserLadderBlocked` when a structural failure (the `/json` target listing) stopped the fallbacks from running at all, `ErrBrowserReadUnanswered` when no query answered. Neither is `IsNoBrowserProfile`, so neither triggers rung 3 — both come from a pass that RAN, and a plain recheck cannot fix either. `writeBrowserReadError` (`internal/web/routes/cookies.go`) maps the first to **409** and the second to **502**, each with a machine-readable `cause`, and passes the composed message through verbatim.
 
-For Chromium browsers, the auto-cookie service connects via CDP WebSocket to poll for login completion:
+**The DPAPI fallback reads exactly ONE profile.** It used to walk every profile `dpapi.FindBrowserProfiles` returned and merge them before dedup, so with two signed-in Chromium profiles `deduplicateAndFormat`'s bare-name dedup let whichever profile was listed LAST silently win each cookie name — an order-dependent coin flip that could pair a SAPISID from profile A with a LOGIN_INFO from profile B. Selection now: filter by the configured browser type (empty **and** `"chrome"` both mean "every profile is a candidate" — the Web UI's only Chromium option is literally the whole family; a type with no layout in `dpapi.KnownBrowserFamilies()` also falls back to every profile, logged at Debug, because that is a coverage gap rather than a missing browser), score each candidate with `dpapiProfileScore` using the same loose/strict predicates `jar.go` keeps, take the highest, break ties by scan order with an Info line naming every tied profile, and discard the rest whole. Known limitation, deliberately not built here: the score sums both platforms into one number, so YouTube-on-profile-A / Twitch-on-profile-B still loses one platform — deterministically and logged, instead of silently. **S8 is open**: whether `modernc.org/sqlite`'s `mode=ro` path reads a live Chrome `Cookies` DB's `-wal` frames is unverified, so the Firefox path's copy-the-sidecar shape has not been applied here.
 
-- Poll interval: 500ms
-- Poll timeout: 15 seconds
-- Detects login by checking for authentication cookies in the browser's cookie store
+**CDP readiness** (`waitForCDP`, `internal/cookies/autocookies_chromium.go`) polls `http://127.0.0.1:<port>/json/version` with exponential backoff — 200 ms doubling to a 2 s cap — until `cdpPollTimeout` (15 s). It waits for the debugging endpoint to come up; it does **not** poll for login completion. Interactive login completion is the operator pressing "I'm Logged In", which calls `FinishSetup`. Other CDP budgets: `cdpExtractTimeout` 30 s, `cdpRefreshTimeout` 60 s (cold start plus sequential per-platform navigations plus extraction, all sharing it), `cdpNavigateTimeout` 30 s per `Page.navigate` + `loadEventFired` wait. A navigation whose read loop hits its deadline without ever seeing `Page.loadEventFired` returns `errNavigateBudgetExhausted`. `navigateAllPlatforms` treats that per platform as NOT OBSERVED rather than as a failure — it never joins `navFailures` — and lets it flip the pass's "navigated" answer only when it is **every** platform's outcome. One platform timing out beside a sibling that fired its load event is a slow page on a browser that demonstrably works; do not loosen "every" to "any".
 
-**Lock file cleanup:**
+**Lock file cleanup.** Before launching, the service removes stale lock files that would otherwise prevent a launch:
 
-Before launching, the service removes stale lock files that could prevent browser launch:
+- Chromium (`cleanChromiumLockFiles`): `lockfile`, `SingletonLock`, `SingletonSocket`, `SingletonCookie`, plus the `Singleton*` and `*lockfile*` globs for variants newer builds leave behind.
+- Firefox (`cleanFirefoxLockFiles`): `parent.lock`, `.parentlock`.
 
-- Chromium: `lockfile`, `SingletonLock`, `SingletonSocket`, `SingletonCookie`
-- Firefox: `parent.lock`, `.parentlock`
+Both go through `removeStaleLock`, which **skips any file touched within `lockFileFreshThreshold` (5 s)** — a truly stale lock from a crashed run is older than that, while one held by a live browser is not, so this cannot yank the lock out from under a running instance.
+
+**Orphaned temp files and directory permissions.** `writeFileAtomic` writes `<base>.<random>.tmp` beside the target and renames; a crash, a kill or a panic in between leaves a full copy of `cookies.txt` — the highest-value secret in the app — under a name nothing reads. `sweepStaleCookieTempFiles` (`internal/cookies/autocookies.go`) removes those, ONCE per process (`cookieTempFileSweepOnce`, wired at `NewAutoCookieService` because that is the one place holding the real cookie path up front), matching only `<base>.*.tmp` in the cookie file's own directory and only when older than `cookieTempFileMaxAge` (1 hour). Age is the only guard against sweeping a write in progress. Every failure is Debug-logged with the path only and left for the next start.
+
+`tightenCookieDirOnce` applies `utils.ApplyUserOnlyDACL` to the cookie file's parent — `icacls` on Windows, a real `chmod` to 0700/0600 on Linux (not a no-op there). It is **memoised on SUCCESS, not on attempt**, with three states per directory (absent = not started, `dirTighteningInFlight`, `dirTighteningDone`): a transient failure or a panic mid-apply deletes the entry so the NEXT cookie write retries, rather than disabling hardening for the rest of the process because the failure was demoted to a Debug line. Cost if it fails permanently on a host: one extra ~30-80 ms shell-out per cookie write instead of one per process, bounded by the write cadence. No failure cap and no backoff — either would be a mechanism to contain a mechanism.
+
+**First-run platform detection is sidecar-first.** `detectCookiePlatforms(meta, jar)` (`cmd/moombox/services.go`) decides `cfg.Cookies.Platforms` when the config has none. `cookies.meta.json`'s `Platforms` — the on-disk record of what an import ACTUALLY verified — wins outright whenever non-empty, and is never unioned with a guess. Only when the sidecar is absent, unreadable or empty does it fall through to the jar, and then to the **loose** predicates (`HasAnyYouTubeAuthCookie` / `HasAnyTwitchAuthCookie`), not the strict pair: a `cookies.txt` holding SAPISID with LOGIN_INFO cleared is a configured platform with broken credentials, and persisting "unconfigured" for it made every downstream gate that reads `Platforms` — the auth-loss notification, G5's `SetExpectedPlatforms`, the recovery path — treat it as never having existed, permanently, since nothing automatic re-runs this once `Platforms` is non-empty.
 
 **Platform URLs:**
 
-| Platform | Login URL | Refresh URL |
-|----------|-----------|-------------|
+| Platform | Login URL (`StartSetup`) | Refresh URL (`platformRefreshURLs`) |
+|----------|--------------------------|-------------------------------------|
 | YouTube | `accounts.google.com/ServiceLogin?service=youtube` | `www.youtube.com` |
 | Twitch | `www.twitch.tv/login` | `www.twitch.tv` |
+
+**Budgets:** `processTimeout` 30 s per browser launch, `authVerifyTimeout` 15 s for ONE verification window covering BOTH platforms, `refreshOverallBudget` 2 minutes end to end. These are coupled — raising `processTimeout` without raising `refreshOverallBudget` makes the outer context cancel the second platform's launch mid-flight instead of granting it the budget it was just given.
 
 ---
 
