@@ -181,13 +181,15 @@ func TestMayResumeClosureTruthTable(t *testing.T) {
 //   - "joint idle releases" is the fix itself: the pre-fix closure returns
 //     TRUE here (chat open = evidence, unconditionally), so this case FAILS
 //     against unfixed code.
-//   - "chat active holds" catches an either-idle (OR) implementation and a
-//     swapped chat-clock read.
+//   - "chat active holds" catches an either-idle (OR) implementation and
+//     the segment clock being read for both arguments.
 //   - "segments arriving hold" catches releasing on chat idleness alone —
 //     the truncation direction (a segment landing with silent chat means
-//     the stream is plainly still live) — and a swapped segment-clock read.
-//   - "within the window holds" catches an inverted/premature comparison
-//     (releasing at <= the window instead of strictly over it).
+//     the stream is plainly still live) — and the chat clock being read for
+//     both arguments.
+//   - "within the window holds" catches releasing before the window has
+//     elapsed at all; the exact > vs >= boundary is pinned by
+//     TestChatSignalJointIdleBoundary with an injected now, not here.
 //   - "fresh signature ungated" catches the gate being applied above
 //     sig.fresh() — the interruption signature is the primary evidence and
 //     the window must never silence it.
@@ -214,13 +216,14 @@ func TestMayResumeChatSignalJointIdle(t *testing.T) {
 		return c
 	}
 
-	// Margins of a full minute on either side of the window so the
-	// closure's own time.Now() (microseconds after these are computed)
-	// cannot drift a case across the boundary. Exact-boundary arithmetic
-	// lives in TestChatSignalJointIdleBoundary with an injected now.
+	// idle sits a full minute past the window and within sits at half the
+	// window — both far enough from the boundary that the closure's own
+	// time.Now() (microseconds after these are computed) cannot drift a case
+	// across it. Exact-boundary arithmetic lives in
+	// TestChatSignalJointIdleBoundary with an injected now.
 	idle := time.Now().Add(-chatSignalJointIdleAfter - time.Minute)
 	active := time.Now()
-	within := time.Now().Add(-chatSignalJointIdleAfter + time.Minute) // quiet, but not yet over the window
+	within := time.Now().Add(-chatSignalJointIdleAfter / 2) // quiet, but only half way through the window
 
 	cases := []struct {
 		name    string
