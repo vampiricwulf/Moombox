@@ -22,6 +22,18 @@ type cookieJarLogger interface {
 	Debug(msg string, args ...any)
 }
 
+// Platform names one of the two cookie stores a caller can mean. The values
+// are exactly the strings the config already uses for platform names
+// (cfg.Cookies.Platforms / cfg.Cookies.ActivePlatforms, read by
+// config.GetActivePlatforms), so a config string converts to a Platform
+// without a translation table.
+type Platform string
+
+const (
+	PlatformYouTube Platform = "youtube"
+	PlatformTwitch  Platform = "twitch"
+)
+
 // cookieEntry is one cookie's stored state: the value plus the two fields the
 // jar needs to reason about identity and lifetime.
 //
@@ -42,9 +54,25 @@ type cookieEntry struct {
 }
 
 // CookieJar parses and manages cookies from a Netscape-format cookie file.
+//
+// One FILE, two in-memory jars. cookies.txt stays a single store holding every
+// platform's rows and every write path keeps updating it in place; the split
+// here is purely how the parsed state is REPRESENTED. Twitch does not need
+// YouTube's cookies and YouTube does not need Twitch's, so they are kept apart.
+//
+// The split is not cosmetic. A single map keyed by bare cookie NAME cannot hold
+// a .twitch.tv "SID" and a .google.com "SID" at once — they are the same map
+// key — so one silently evicted the other, and the winner was whichever row the
+// file happened to list last. Partitioning by domain at parse time makes the
+// collision structurally impossible instead of arbitrating it.
 type CookieJar struct {
-	mu       sync.RWMutex
-	cookies  map[string]cookieEntry // name -> entry
+	mu sync.RWMutex
+	// youtube holds youtube.com and google.com rows; twitch holds twitch.tv
+	// rows. Two named fields rather than map[Platform]map[string]cookieEntry:
+	// there are exactly two platforms, and a map-of-maps only adds a
+	// nil-inner-map failure mode.
+	youtube  map[string]cookieEntry // name -> entry
+	twitch   map[string]cookieEntry // name -> entry
 	filePath string
 	logger   cookieJarLogger // optional; set via SetLogger
 }
@@ -68,7 +96,23 @@ var essentialTwitchCookies = map[string]bool{
 // NewCookieJar creates an empty CookieJar.
 func NewCookieJar() *CookieJar {
 	return &CookieJar{
-		cookies: make(map[string]cookieEntry),
+		youtube: make(map[string]cookieEntry),
+		twitch:  make(map[string]cookieEntry),
+	}
+}
+
+// jarFor returns the map backing one platform, or nil for an unrecognised one.
+// Callers must hold j.mu. A nil map is safe to read from and to range over, so
+// every read accessor degrades to "empty" rather than panicking on a Platform
+// value that does not name a jar.
+func (j *CookieJar) jarFor(p Platform) map[string]cookieEntry {
+	switch p {
+	case PlatformYouTube:
+		return j.youtube
+	case PlatformTwitch:
+		return j.twitch
+	default:
+		return nil
 	}
 }
 
@@ -113,14 +157,16 @@ func (j *CookieJar) Load(filePath string) error {
 			// No cookies file is OK; clear state so callers see an empty jar.
 			j.mu.Lock()
 			j.filePath = filePath
-			j.cookies = make(map[string]cookieEntry)
+			j.youtube = make(map[string]cookieEntry)
+			j.twitch = make(map[string]cookieEntry)
 			j.mu.Unlock()
 			return nil
 		}
 		return fmt.Errorf("failed to read cookie file: %w", err)
 	}
 
-	cookies := make(map[string]cookieEntry)
+	youtube := make(map[string]cookieEntry)
+	twitch := make(map[string]cookieEntry)
 
 	lines := strings.SplitSeq(string(data), "\n")
 	for line := range lines {
@@ -170,84 +216,95 @@ func (j *CookieJar) Load(filePath string) error {
 			continue
 		}
 
-		// Only include YouTube/Google and Twitch cookies. Use suffix-anchored
-		// matchers so a malicious or hand-edited file entry like
-		// ".fakegoogle.com.evil.tld" does not get treated as google.com.
-		isYouTubeGoogle := isYouTubeDomain(domain) || isGoogleDomain(domain)
-		isTwitch := isTwitchDomain(domain)
-
-		if !isYouTubeGoogle && !isTwitch {
-			continue
-		}
-
-		// Filter to essential cookies
-		isGoogleAuth := isGoogleDomain(domain) && (name == "SID" || name == "HSID" ||
-			name == "SSID" || name == "APISID" || name == "SAPISID" ||
-			strings.HasPrefix(name, "__Secure-1P") || strings.HasPrefix(name, "__Secure-3P"))
-		isTwitchEssential := isTwitch && essentialTwitchCookies[name]
-
-		if !essentialYouTubeCookies[name] && !isGoogleAuth && !isTwitchEssential {
-			continue
-		}
-
-		// A name can arrive from several domains. The clause above admits
-		// essentialYouTubeCookies with NO domain guard, so a .twitch.tv row named
-		// SID lands under the bare name "SID" — the same slot Google's real auth
-		// SID occupies, which arrives on a .google.com domain. Under the previous
-		// rule (skip only when the incumbent is YouTube and the incoming is not)
-		// neither of those is YouTube, so whichever row the FILE listed last won:
-		// a stray Twitch-domain SID could displace a live Google auth cookie.
+		// Admission is DOMAIN-FIRST, and that ordering is the fix rather than a
+		// tidy-up. The rule used to read
 		//
-		// Decide by a TOTAL order on the domain instead, so a set of rows loads
-		// to the same jar under any permutation. See compareCookieDomains.
+		//	if !essentialYouTubeCookies[name] && !isGoogleAuth && !isTwitchEssential { continue }
+		//
+		// whose first clause carries no domain guard at all. Every one of "SID",
+		// "SAPISID", "__Secure-3PSID" and the rest is in essentialYouTubeCookies,
+		// so a .twitch.tv row carrying one of those names was ADMITTED — and
+		// then, in a single map keyed by bare name, it landed in the same slot as
+		// Google's real auth cookie of that name and one of the two was lost.
+		//
+		// A three-tier domain comparator (youtube < google < twitch) was written
+		// to decide which of the two survived. That was containment for a problem
+		// the storage shape created. Deciding the platform first, and giving each
+		// platform its own map, means the twitch-domain "SID" is never admitted
+		// in the first place and there is nothing left to arbitrate.
+		//
+		// Suffix-anchored matchers throughout, so a hand-edited or malicious row
+		// on ".fakegoogle.com.evil.tld" is not treated as google.com.
+		var dest map[string]cookieEntry
+		switch {
+		case isYouTubeDomain(domain) || isGoogleDomain(domain):
+			// The google.com auth names are admitted on google.com only; the
+			// broader essential set is admitted on either YouTube or Google.
+			isGoogleAuth := isGoogleDomain(domain) && (name == "SID" || name == "HSID" ||
+				name == "SSID" || name == "APISID" || name == "SAPISID" ||
+				strings.HasPrefix(name, "__Secure-1P") || strings.HasPrefix(name, "__Secure-3P"))
+			if !essentialYouTubeCookies[name] && !isGoogleAuth {
+				continue
+			}
+			dest = youtube
+		case isTwitchDomain(domain):
+			if !essentialTwitchCookies[name] {
+				continue
+			}
+			dest = twitch
+		default:
+			// Not a domain this jar tracks. isRelevantDomain agrees.
+			continue
+		}
+
+		// Within ONE jar a name can still arrive from several domains — a
+		// youtube.com and a google.com SAPISID, or ".youtube.com" beside
+		// "www.youtube.com". That is a real question and it is settled by a
+		// TOTAL order on the domain, so a set of rows loads to the same jar
+		// under any permutation of the file. See compareCookieDomains.
 		//
 		// Skip only when the incumbent ranks STRICTLY better. Rows that compare
 		// equal are rows whose stored domain string is identical, i.e. true
 		// duplicates: those keep today's last-wins behaviour. The property this
 		// buys is permutation-invariance of a SET of rows, not a reordering of
 		// duplicate-identical ones.
-		if existing, exists := cookies[name]; exists && compareCookieDomains(existing.domain, domain) < 0 {
+		if existing, exists := dest[name]; exists && compareCookieDomains(existing.domain, domain) < 0 {
 			continue
 		}
 
-		cookies[name] = cookieEntry{value: value, domain: domain, expiry: expiry}
+		dest[name] = cookieEntry{value: value, domain: domain, expiry: expiry}
 	}
 
 	j.mu.Lock()
 	j.filePath = filePath
-	j.cookies = cookies
+	j.youtube = youtube
+	j.twitch = twitch
 	j.mu.Unlock()
 
 	return nil
 }
 
-// domainTier ranks a cookie's domain by platform, lowest wins. This preserves
-// the jar's original youtube-over-google preference and extends it to a third
-// tier so google-vs-twitch stops being decided by file order.
-//
-// Load rejects any domain outside these three before the comparison is
-// reached, so the default is unreachable in practice; it ranks worst rather
-// than panicking so a future caller cannot turn a stray domain into a crash.
-func domainTier(domain string) int {
-	switch {
-	case isYouTubeDomain(domain):
-		return 0
-	case isGoogleDomain(domain):
-		return 1
-	case isTwitchDomain(domain):
-		return 2
-	default:
-		return 3
-	}
-}
-
 // compareCookieDomains is a total order over the domains two rows sharing one
-// cookie name can carry. Negative means a is the better carrier, positive
-// means b is, and 0 means the two domain strings are identical — the only tie.
+// cookie name can carry WITHIN ONE JAR. Negative means a is the better carrier,
+// positive means b is, and 0 means the two domain strings are identical — the
+// only tie.
+//
+// It is never asked a cross-platform question. Load routes each row to a jar by
+// domain before this is reached, so the two domains compared here always belong
+// to the same platform. The cross-platform rungs this function used to carry
+// (a google-beats-twitch tier, and a fallback rank for an unreachable fourth
+// domain class) existed only because one flat map forced rows from both
+// platforms into the same key.
 //
 // Ordering, in priority:
 //
-//  1. Platform tier (youtube < google < twitch).
+//  1. youtube.com beats google.com. This one is REAL and survives the split:
+//     Google auth cookies legitimately appear on both domains inside the
+//     youtube jar, and preferring the YouTube-domain copy is long-standing
+//     intended behaviour. In the twitch jar every domain is a twitch.tv domain,
+//     so isYouTubeDomain is false for both sides and this rule cannot fire —
+//     which is exactly the "no tier on the Twitch side" the split gives for
+//     free, rather than as a second code path.
 //  2. Fewer labels wins: ".youtube.com" (2) beats "www.youtube.com" (3).
 //     Broader scope is the better carrier for a shared name.
 //  3. Dot-prefixed wins over host-only: ".youtube.com" beats "youtube.com",
@@ -266,8 +323,11 @@ func domainTier(domain string) int {
 // Compared on the STORED domain, i.e. after Load strips "#HttpOnly_" — so a
 // row and its HttpOnly twin tie and fall to last-wins, exactly as before.
 func compareCookieDomains(a, b string) int {
-	if ta, tb := domainTier(a), domainTier(b); ta != tb {
-		return ta - tb
+	if ya, yb := isYouTubeDomain(a), isYouTubeDomain(b); ya != yb {
+		if ya {
+			return -1
+		}
+		return 1
 	}
 	if la, lb := domainLabelCount(a), domainLabelCount(b); la != lb {
 		return la - lb
@@ -300,11 +360,31 @@ func (j *CookieJar) Reload() error {
 	return j.Load(path)
 }
 
-// GetCookie returns a cookie value by name.
-func (j *CookieJar) GetCookie(name string) string {
+// GetCookieFor returns one platform's cookie value by name, or "" when that
+// jar does not hold the name (or p names no jar).
+func (j *CookieJar) GetCookieFor(p Platform, name string) string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	return j.cookies[name].value
+	return j.jarFor(p)[name].value
+}
+
+// GetCookie returns a TWITCH cookie value by name.
+//
+// The name reads generic; the behaviour is not, and the mismatch is deliberate
+// rather than an oversight. This method has exactly ONE consumer in the tree —
+// internal/twitch/auth.go, fetching "auth-token" — so it is a Twitch accessor
+// in everything but spelling, and routing it to the YouTube jar to match its
+// name would de-authenticate Twitch.
+//
+// That failure would be silent, which is why this comment is here: Twitch IRC
+// treats an empty token as "log in anonymously" (PASS SCHMOOPIIE,
+// internal/twitch/chat_irc.go) rather than as an error, so chat would keep
+// connecting and would simply stop seeing subscriber-only messages and badges.
+// Nothing would report a fault.
+//
+// Use GetCookieFor when you know which platform you mean.
+func (j *CookieJar) GetCookie(name string) string {
+	return j.GetCookieFor(PlatformTwitch, name)
 }
 
 // cookieValueSanitizer strips characters that could enable header injection.
@@ -320,7 +400,8 @@ func sanitizeCookieValue(v string) string {
 	return cookieValueSanitizer.Replace(v)
 }
 
-// GetCookieHeader returns a Cookie header string with all cookies.
+// GetCookieHeaderFor returns a Cookie header string carrying one platform's
+// cookies and no other platform's. An unrecognised Platform yields "".
 //
 // Pairs are emitted in a stable sorted-by-name order. Go's map iteration is
 // deliberately randomized, which meant two successive calls could produce
@@ -328,20 +409,33 @@ func sanitizeCookieValue(v string) string {
 // SAPISIDHASH flows where an attacker-controlled reshuffle makes HTTP-level
 // debugging painful and occasionally trips YouTube endpoints that inspect
 // __Secure-* ordering. Alphabetical is simple and deterministic.
-func (j *CookieJar) GetCookieHeader() string {
+func (j *CookieJar) GetCookieHeaderFor(p Platform) string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
-	names := make([]string, 0, len(j.cookies))
-	for name := range j.cookies {
+	entries := j.jarFor(p)
+	names := make([]string, 0, len(entries))
+	for name := range entries {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	pairs := make([]string, 0, len(names))
 	for _, name := range names {
-		pairs = append(pairs, name+"="+sanitizeCookieValue(j.cookies[name].value))
+		pairs = append(pairs, name+"="+sanitizeCookieValue(entries[name].value))
 	}
 	return strings.Join(pairs, "; ")
+}
+
+// GetCookieHeader returns the YOUTUBE Cookie header.
+//
+// Every one of this method's production callers is a YouTube request path
+// (internal/youtube, the YouTube worker strategies, and the refresh service's
+// own YouTube probes), which is why the unqualified name means YouTube. Their
+// behaviour is unchanged except that Twitch rows no longer ride along in the
+// header — before the jar was partitioned, a Twitch "login" or "auth-token"
+// cookie was emitted to youtube.com on every authenticated request.
+func (j *CookieJar) GetCookieHeader() string {
+	return j.GetCookieHeaderFor(PlatformYouTube)
 }
 
 // HasYouTubeAuthCookies returns true if SAPISID (or __Secure-3PAPISID) AND LOGIN_INFO are present.
@@ -349,8 +443,8 @@ func (j *CookieJar) HasYouTubeAuthCookies() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
-	hasSapisid := j.cookies["SAPISID"].value != "" || j.cookies["__Secure-3PAPISID"].value != ""
-	hasLoginInfo := j.cookies["LOGIN_INFO"].value != ""
+	hasSapisid := j.youtube["SAPISID"].value != "" || j.youtube["__Secure-3PAPISID"].value != ""
+	hasLoginInfo := j.youtube["LOGIN_INFO"].value != ""
 	return hasSapisid && hasLoginInfo
 }
 
@@ -384,36 +478,60 @@ func (j *CookieJar) HasAnyYouTubeAuthCookie() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	for _, name := range youtubeAuthCookieNames {
-		if j.cookies[name].value != "" {
+		if j.youtube[name].value != "" {
 			return true
 		}
 	}
 	return false
 }
 
-// ExpiredAuthCookies reports how many of the jar's YouTube/Google auth cookies
-// carry an expiry that has already passed at `now` (unix seconds).
+// authCookieNamesFor is the "was this platform configured, and is its session
+// still alive" name set for one platform. Nil for an unrecognised Platform, so
+// every caller degrades to "nothing to report".
+func authCookieNamesFor(p Platform) []string {
+	switch p {
+	case PlatformYouTube:
+		return youtubeAuthCookieNames
+	case PlatformTwitch:
+		return twitchAuthCookieNames
+	default:
+		return nil
+	}
+}
+
+// ExpiredAuthCookiesFor reports how many of one platform's auth cookies carry
+// an expiry that has already passed at `now` (unix seconds).
 //
-// "Auth" is youtubeAuthCookieNames — the same deliberately-broad set
-// HasAnyYouTubeAuthCookie reasons about, for the same reason: a half-dead
-// session is exactly the state worth reporting, and the narrower
-// SAPISID+LOGIN_INFO pair cannot see it.
+// Per-platform rather than YouTube-only, and that matters most on the Twitch
+// side. RefreshService rotates YouTube credentials in-process
+// (checkAndRefreshYouTube / processYouTubeSetCookies); for Twitch it only has
+// checkTwitchAuth, a check with no refresh, so this count is the earliest
+// warning that a Twitch credential is running out. And a dead Twitch auth-token
+// does not error — it downgrades chat capture to anonymous and quietly loses
+// subscriber-only messages and badges. Folding Twitch into a single YouTube
+// number would report expired=0 for exactly that state.
+//
+// "Auth" is authCookieNamesFor — the same deliberately-broad sets
+// HasAnyYouTubeAuthCookie / HasAnyTwitchAuthCookie reason about, for the same
+// reason: a half-dead session is exactly the state worth reporting, and the
+// narrower "is the set complete" predicates cannot see it.
 //
 // "Expired" is exactly rowExpired's rule: expiry > 0 && expiry < now. A jar of
 // session cookies (expiry 0) therefore returns 0 — 0 is a live session cookie,
 // not an ancient one.
 //
 // Diagnostic only. Nothing in the jar acts on this; Load does not filter.
-func (j *CookieJar) ExpiredAuthCookies(now int64) int {
+func (j *CookieJar) ExpiredAuthCookiesFor(p Platform, now int64) int {
 	if j == nil {
 		return 0
 	}
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
+	entries := j.jarFor(p)
 	count := 0
-	for _, name := range youtubeAuthCookieNames {
-		entry, ok := j.cookies[name]
+	for _, name := range authCookieNamesFor(p) {
+		entry, ok := entries[name]
 		if !ok {
 			continue
 		}
@@ -424,22 +542,23 @@ func (j *CookieJar) ExpiredAuthCookies(now int64) int {
 	return count
 }
 
-// AuthCookieHorizon returns the soonest non-zero expiry among the jar's
-// YouTube/Google auth cookies, or 0 when none of them carries one.
+// AuthCookieHorizonFor returns the soonest non-zero expiry among one platform's
+// auth cookies, or 0 when none of them carries one.
 //
-// Same auth set as ExpiredAuthCookies. Zero is not a timestamp here: it means
-// "no auth cookie in this jar has an expiry to run out", which is the honest
-// answer for a jar of session cookies and for an empty jar alike.
-func (j *CookieJar) AuthCookieHorizon() int64 {
+// Same auth sets as ExpiredAuthCookiesFor. Zero is not a timestamp here: it
+// means "no auth cookie in this jar has an expiry to run out", which is the
+// honest answer for a jar of session cookies and for an empty jar alike.
+func (j *CookieJar) AuthCookieHorizonFor(p Platform) int64 {
 	if j == nil {
 		return 0
 	}
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
+	entries := j.jarFor(p)
 	var soonest int64
-	for _, name := range youtubeAuthCookieNames {
-		entry, ok := j.cookies[name]
+	for _, name := range authCookieNamesFor(p) {
+		entry, ok := entries[name]
 		if !ok || entry.expiry <= 0 {
 			continue
 		}
@@ -483,7 +602,7 @@ func (j *CookieJar) HasAnyTwitchAuthCookie() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	for _, name := range twitchAuthCookieNames {
-		if j.cookies[name].value != "" {
+		if j.twitch[name].value != "" {
 			return true
 		}
 	}
@@ -495,10 +614,10 @@ func (j *CookieJar) GetSapisid() string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
-	if v := j.cookies["SAPISID"].value; v != "" {
+	if v := j.youtube["SAPISID"].value; v != "" {
 		return v
 	}
-	return j.cookies["__Secure-3PAPISID"].value
+	return j.youtube["__Secure-3PAPISID"].value
 }
 
 // YouTubeIdentity returns a stable, non-reversible fingerprint of WHICH
@@ -548,11 +667,11 @@ func (j *CookieJar) YouTubeIdentity() string {
 	// The SAPISID fallback is inlined rather than delegated for that reason —
 	// KEEP IN SYNC with GetSapisid.
 	j.mu.RLock()
-	sapisid := j.cookies["SAPISID"].value
+	sapisid := j.youtube["SAPISID"].value
 	if sapisid == "" {
-		sapisid = j.cookies["__Secure-3PAPISID"].value
+		sapisid = j.youtube["__Secure-3PAPISID"].value
 	}
-	loginInfo := j.cookies["LOGIN_INFO"].value
+	loginInfo := j.youtube["LOGIN_INFO"].value
 	j.mu.RUnlock()
 
 	if sapisid == "" || loginInfo == "" {
@@ -569,12 +688,12 @@ func (j *CookieJar) GetSapisidCookies() (sapisid, sapisid1p, sapisid3p string) {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
-	sapisid = j.cookies["SAPISID"].value
+	sapisid = j.youtube["SAPISID"].value
 	if sapisid == "" {
-		sapisid = j.cookies["__Secure-3PAPISID"].value
+		sapisid = j.youtube["__Secure-3PAPISID"].value
 	}
-	sapisid1p = j.cookies["__Secure-1PAPISID"].value
-	sapisid3p = j.cookies["__Secure-3PAPISID"].value
+	sapisid1p = j.youtube["__Secure-1PAPISID"].value
+	sapisid3p = j.youtube["__Secure-3PAPISID"].value
 	return
 }
 
@@ -635,7 +754,7 @@ func makeSidAuthorization(scheme, sid, origin string, unixTime int64) string {
 func (j *CookieJar) GetTwitchAuthToken() string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	return j.cookies["auth-token"].value
+	return j.twitch["auth-token"].value
 }
 
 // HasTwitchAuthCookies returns true if the Twitch auth-token is present.
@@ -643,11 +762,12 @@ func (j *CookieJar) HasTwitchAuthCookies() bool {
 	return j.GetTwitchAuthToken() != ""
 }
 
-// IsEmpty returns true if no cookies are loaded.
+// IsEmpty returns true when NEITHER platform's jar holds a cookie. A file that
+// configured only one platform is not an empty jar.
 func (j *CookieJar) IsEmpty() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	return len(j.cookies) == 0
+	return len(j.youtube) == 0 && len(j.twitch) == 0
 }
 
 // GetFilePath returns the path to the cookie file.

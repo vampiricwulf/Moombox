@@ -302,18 +302,28 @@ func (s *runState) initServices(logLevelOverride string) error {
 			// probe and fire, so the line contradicted what the subsystem
 			// did on the very next step. Named for what each measures.
 			//
-			// expiredAuth is the third field and the one a stale file shows
-			// up in. The jar deliberately does not filter on expiry (see
+			// The expired counts are the fields a stale file shows up in. The
+			// jar deliberately does not filter on expiry (see
 			// CookieJar.Load), so an auth cookie that lapsed days ago is
 			// still loaded and still sent — and the two booleans above both
 			// read TRUE for that file. This line is the one place an operator
 			// sees what their cookie file actually contains at boot, and
 			// "N auth cookies are already expired" is the fact a cookies.txt
 			// that has not been refreshed in a day most needs to report.
+			//
+			// BOTH platforms are printed, always, and neither is allowed to be
+			// implied by the other's silence. A single combined number cannot
+			// say which credential is dying, and the Twitch one has no other
+			// warning: RefreshService rotates YouTube in-process but only
+			// CHECKS Twitch, and an expired Twitch auth-token downgrades chat
+			// capture to anonymous instead of failing, so it is invisible
+			// everywhere else.
+			now := time.Now().Unix()
 			log.Info("Cookies loaded",
 				slog.Bool("completeAuthSet", jar.HasYouTubeAuthCookies()),
 				slog.Bool("anyAuthCookie", jar.HasAnyYouTubeAuthCookie()),
-				slog.Int("expiredAuth", jar.ExpiredAuthCookies(time.Now().Unix())))
+				slog.Int("expiredYouTubeAuth", jar.ExpiredAuthCookiesFor(cookies.PlatformYouTube, now)),
+				slog.Int("expiredTwitchAuth", jar.ExpiredAuthCookiesFor(cookies.PlatformTwitch, now)))
 			// Auto-detect platforms from cookie file when not already set
 			if len(cfg.Cookies.Platforms) == 0 && len(cfg.Cookies.ActivePlatforms) == 0 {
 				var detected []string

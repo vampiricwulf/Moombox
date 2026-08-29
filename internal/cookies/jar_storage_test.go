@@ -57,33 +57,60 @@ func permutations(rows []string, fn func([]string)) {
 	rec(0)
 }
 
-// jarSnapshot renders the jar's ENTIRE stored state — every name with its
-// value, winning domain and captured expiry — in a canonical order. Comparing
-// snapshots is what makes the permutation test an assertion about the jar
-// rather than about one lucky accessor.
+// jarSnapshot renders BOTH jars' ENTIRE stored state — every name with the
+// platform that holds it, its value, its winning domain and its captured
+// expiry — in a canonical order.
+//
+// The platform prefix is what makes this a snapshot of the PARTITION and not
+// merely of a merged view: a row that migrated between jars changes the
+// snapshot even when its value and domain are untouched. Comparing snapshots
+// is what makes the permutation test an assertion about the jar rather than
+// about one lucky accessor.
 func jarSnapshot(j *CookieJar) string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	lines := make([]string, 0, len(j.cookies))
-	for name, entry := range j.cookies {
-		lines = append(lines, fmt.Sprintf("%s|%s|%d|%s", name, entry.domain, entry.expiry, entry.value))
+	lines := make([]string, 0, len(j.youtube)+len(j.twitch))
+	for _, p := range []Platform{PlatformYouTube, PlatformTwitch} {
+		for name, entry := range j.jarFor(p) {
+			lines = append(lines, fmt.Sprintf("%s/%s|%s|%d|%s", p, name, entry.domain, entry.expiry, entry.value))
+		}
 	}
 	slices.Sort(lines)
 	return strings.Join(lines, "\n")
 }
 
-// entryOf reads one stored entry, so a test can assert on the domain and
-// expiry the jar actually kept and not merely on the value a public accessor
-// happens to surface.
-func entryOf(t *testing.T, j *CookieJar, name string) cookieEntry {
-	t.Helper()
+// lookupEntry reads one platform's stored entry without failing when it is
+// absent, so a test can assert ABSENCE from a named jar.
+func lookupEntry(j *CookieJar, p Platform, name string) (cookieEntry, bool) {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	entry, ok := j.cookies[name]
+	entry, ok := j.jarFor(p)[name]
+	return entry, ok
+}
+
+// entryOf reads one platform's stored entry, so a test can assert on the
+// domain and expiry the jar actually kept and not merely on the value a public
+// accessor happens to surface.
+func entryOf(t *testing.T, j *CookieJar, p Platform, name string) cookieEntry {
+	t.Helper()
+	entry, ok := lookupEntry(j, p, name)
 	if !ok {
-		t.Fatalf("cookie %q is not in the jar at all", name)
+		t.Fatalf("cookie %q is not in the %s jar at all", name, p)
 	}
 	return entry
+}
+
+// assertAbsent fails unless the name is in NEITHER jar. Used for rows the
+// admission rule must reject outright, where "the header does not contain it"
+// would also pass for a row that was admitted to the other platform.
+func assertAbsent(t *testing.T, j *CookieJar, name, why string) {
+	t.Helper()
+	for _, p := range []Platform{PlatformYouTube, PlatformTwitch} {
+		if e, ok := lookupEntry(j, p, name); ok {
+			t.Errorf("%q is in the %s jar (value %q from %q), want it admitted to no jar at all — %s",
+				name, p, e.value, e.domain, why)
+		}
+	}
 }
 
 // headerPairs splits a Cookie header into its exact "name=value" pairs. A
@@ -118,15 +145,15 @@ func TestLoadCapturesExpiryButNeverFilters(t *testing.T) {
 	})
 
 	// Half 1: the row is in the jar, with the file's expiry captured verbatim.
-	entry := entryOf(t, jar, "SAPISID")
+	entry := entryOf(t, jar, PlatformYouTube, "SAPISID")
 	if entry.value != "expired-sapisid" {
 		t.Errorf("stored value = %q, want %q — an expired row was dropped at parse time", entry.value, "expired-sapisid")
 	}
 	if entry.expiry != 1000000000 {
 		t.Errorf("stored expiry = %d, want 1000000000 — field 5 was not captured", entry.expiry)
 	}
-	if got := jar.GetCookie("SAPISID"); got != "expired-sapisid" {
-		t.Errorf("GetCookie = %q, want %q", got, "expired-sapisid")
+	if got := jar.GetCookieFor(PlatformYouTube, "SAPISID"); got != "expired-sapisid" {
+		t.Errorf("GetCookieFor = %q, want %q", got, "expired-sapisid")
 	}
 
 	// Half 2: it is still SENT. Exact pair, not a substring of the header.
@@ -152,33 +179,65 @@ func TestLoadCapturesExpiryButNeverFilters(t *testing.T) {
 var permutationFixtures = []struct {
 	name string
 	rows []string
-	// wantWinners maps a contested cookie name to the domain that must win,
-	// under every ordering. Asserted on the STORED DOMAIN rather than the
-	// value, so a fixture whose values were reshuffled cannot fake a pass.
-	wantWinners map[string]string
+	// wantWinners maps a platform to the domain that must win each contested
+	// name in THAT platform's jar, under every ordering. Asserted on the
+	// STORED DOMAIN rather than the value, so a fixture whose values were
+	// reshuffled cannot fake a pass.
+	wantWinners map[Platform]map[string]string
+	// wantAbsent names cookies that must be in NEITHER jar. Distinct from
+	// wantWinners on purpose: "the youtube jar holds the Google value" is a
+	// ranking claim, while "the Twitch row is nowhere" is the admission claim,
+	// and only the second one distinguishes a partition from a comparator.
+	wantAbsent []string
 }{
 	{
-		// Rule 1 (platform tier), and the case that lifts this whole change
-		// from a determinism nicety to a correctness fix.
+		// The admission fix, in the fixture that used to justify a
+		// cross-platform tier.
 		//
-		// Load's admission clause carries NO domain guard on
-		// essentialYouTubeCookies, so a .twitch.tv row named SID is admitted
+		// The old admission clause carried NO domain guard on
+		// essentialYouTubeCookies, so a .twitch.tv row named SID was admitted
 		// and stored under the bare name "SID" — the same slot Google's real
-		// auth SID occupies, which arrives on a .google.com domain. Neither
-		// row is a YouTube domain, so the old youtube-beats-everything check
-		// never fired and whichever row the FILE listed last became the jar's
-		// SID: a stray Twitch-domain SID could displace a live Google auth
-		// cookie. Tier order (youtube < google < twitch) settles it.
-		name: "tier decides an auth name contested across platforms",
+		// auth SID occupies. Neither is a YouTube domain, so file order decided
+		// which survived, and a tier (youtube < google < twitch) was added to
+		// arbitrate. With admission decided by domain first, the Twitch SID is
+		// never admitted at all: not to the youtube jar (wrong domain) and not
+		// to the twitch jar (SID is not an essential Twitch cookie).
+		//
+		// The Google domains are chosen to LOSE to ".twitch.tv" on ranking:
+		// "google.com" is host-only (rule 3 favours the dotted Twitch domain)
+		// and "accounts.google.com" has three labels (rule 2 favours the
+		// two-label Twitch domain). So the stated winner is only reachable if
+		// the Twitch row was never admitted — with ".google.com" here instead,
+		// the lexical backstop would hand Google the win anyway and the fixture
+		// would pass without the partition.
+		name: "a twitch-domain auth name is admitted nowhere",
 		rows: []string{
 			cookieRow(".twitch.tv", "0", "SID", "sid-from-twitch"),
 			cookieRow("google.com", "0", "SID", "sid-from-google-host"),
-			cookieRow(".google.com", "0", "SID", "sid-from-google-dot"),
+			cookieRow("accounts.google.com", "0", "SID", "sid-from-google-accounts"),
 			cookieRow(".youtube.com", "0", "LOGIN_INFO", "login-from-youtube"),
 		},
-		// google beats twitch by tier; among the two google rows the dotted
-		// form beats the host-only one by rule 3.
-		wantWinners: map[string]string{"SID": ".google.com", "LOGIN_INFO": ".youtube.com"},
+		// Among the two google rows the 2-label one beats the 3-label one by
+		// rule 2; the twitch row is not a competitor because it is not present.
+		wantWinners: map[Platform]map[string]string{
+			PlatformYouTube: {"SID": "google.com", "LOGIN_INFO": ".youtube.com"},
+		},
+		wantAbsent: []string{"SAPISID"}, // nothing in this fixture supplies one
+	},
+	{
+		// Rule 1 in isolation, the one cross-domain preference the split KEEPS:
+		// Google auth cookies legitimately live on both youtube.com and
+		// google.com, and the YouTube-domain copy is the intended winner.
+		// Rule 1 must overrule rule 2 here — ".google.com" has fewer labels
+		// than "www.youtube.com", so without rule 1 the Google copy wins.
+		name: "youtube beats google even with more labels",
+		rows: []string{
+			cookieRow(".google.com", "0", "SAPISID", "sapisid-from-google"),
+			cookieRow("www.youtube.com", "0", "SAPISID", "sapisid-from-youtube-www"),
+		},
+		wantWinners: map[Platform]map[string]string{
+			PlatformYouTube: {"SAPISID": "www.youtube.com"},
+		},
 	},
 	{
 		// Rule 2 (fewer labels), isolated: CONSENT pits a 3-label DOTTED
@@ -193,13 +252,34 @@ var permutationFixtures = []struct {
 			cookieRow(".youtube.com", "0", "YSC", "ysc-from-dot"),
 			cookieRow("music.youtube.com", "0", "YSC", "ysc-from-music"),
 		},
-		wantWinners: map[string]string{"CONSENT": "google.com", "YSC": ".youtube.com"},
+		wantWinners: map[Platform]map[string]string{
+			PlatformYouTube: {"CONSENT": "google.com", "YSC": ".youtube.com"},
+		},
+	},
+	{
+		// Rules 2 and 3 INSIDE the twitch jar. Rule 1 cannot fire here — no
+		// twitch.tv domain is a youtube.com one — which is what "no tier on the
+		// Twitch side" means in practice; the remaining rules still have to
+		// produce one deterministic winner, or auth-token falls back to file
+		// order and the Twitch credential becomes whichever row was last.
+		name: "the twitch jar orders its own domains without a tier",
+		rows: []string{
+			cookieRow("www.twitch.tv", "0", "auth-token", "token-from-www"),
+			cookieRow("twitch.tv", "0", "auth-token", "token-from-host"),
+			cookieRow(".twitch.tv", "0", "auth-token", "token-from-dot"),
+			cookieRow(".youtube.com", "0", "LOGIN_INFO", "login-from-youtube"),
+		},
+		wantWinners: map[Platform]map[string]string{
+			// rule 2 drops www (3 labels); rule 3 picks the dotted form.
+			PlatformTwitch:  {"auth-token": ".twitch.tv"},
+			PlatformYouTube: {"LOGIN_INFO": ".youtube.com"},
+		},
 	},
 	{
 		// Rule 4 (lexical backstop), isolated: three domains identical in
-		// tier, label count and dot-ness. Rules 1-3 cannot separate them, so
-		// without the backstop they tie and fall to file order — which is
-		// exactly what permutation-invariance would catch.
+		// every earlier rule. Rules 1-3 cannot separate them, so without the
+		// backstop they tie and fall to file order — which is exactly what
+		// permutation-invariance would catch.
 		name: "lexical backstop separates otherwise identical domains",
 		rows: []string{
 			cookieRow("www.youtube.com", "0", "PREF", "pref-from-www"),
@@ -207,7 +287,10 @@ var permutationFixtures = []struct {
 			cookieRow("studio.youtube.com", "0", "PREF", "pref-from-studio"),
 			cookieRow(".twitch.tv", "0", "auth-token", "token-from-twitch"),
 		},
-		wantWinners: map[string]string{"PREF": "music.youtube.com", "auth-token": ".twitch.tv"},
+		wantWinners: map[Platform]map[string]string{
+			PlatformYouTube: {"PREF": "music.youtube.com"},
+			PlatformTwitch:  {"auth-token": ".twitch.tv"},
+		},
 	},
 }
 
@@ -253,54 +336,303 @@ func TestLoadIsPermutationInvariant(t *testing.T) {
 			}
 
 			// Invariance alone is satisfied by ANY deterministic rule,
-			// including a wrong one. Pin which row won.
+			// including a wrong one. Pin which row won, in which jar.
 			jar := loadRows(t, fx.rows)
-			for name, wantDomain := range fx.wantWinners {
-				if e := entryOf(t, jar, name); e.domain != wantDomain {
-					t.Errorf("%s winner domain = %q, want %q", name, e.domain, wantDomain)
+			for p, winners := range fx.wantWinners {
+				for name, wantDomain := range winners {
+					if e := entryOf(t, jar, p, name); e.domain != wantDomain {
+						t.Errorf("%s/%s winner domain = %q, want %q", p, name, e.domain, wantDomain)
+					}
 				}
+			}
+			for _, name := range fx.wantAbsent {
+				assertAbsent(t, jar, name, "no row in this fixture may admit it")
 			}
 		})
 	}
 }
 
-// TestTwitchDomainAuthNameCannotDisplaceGoogle is the correctness case stated
-// on its own, at the smallest size that shows it.
+// TestTwitchDomainAuthNameIsNeverAdmitted is the correctness case stated on
+// its own, at the smallest size that shows it — and it asserts the ADMISSION
+// claim, not a ranking one.
 //
-// Both rows are admitted: the Twitch one because essentialYouTubeCookies[name]
-// is checked with no domain guard, the Google one because isGoogleAuth matches.
-// Neither is a YouTube domain, so before the tier order existed the winner was
-// whichever line the file listed last — meaning a Twitch-domain SID or SAPISID
-// could evict the credential Moombox actually authenticates with. Asserted in
-// BOTH arrival orders, on the value the auth accessors return, because that is
-// the thing that would have been wrong.
-func TestTwitchDomainAuthNameCannotDisplaceGoogle(t *testing.T) {
+// Under the old flat map both rows were admitted: the Twitch one because
+// essentialYouTubeCookies[name] was checked with no domain guard, the Google
+// one because isGoogleAuth matched. They then collided on the bare name, and a
+// Twitch-domain SID or SAPISID could evict the credential Moombox actually
+// authenticates with. A domain comparator was added to arbitrate that.
+//
+// Domain-first admission removes the collision instead of resolving it, so the
+// assertion has to distinguish "never admitted" from "admitted and then
+// out-ranked". Absence from the twitch jar does not do that on its own — a
+// wrongly-admitted row lands in the YOUTUBE jar, so the twitch jar is empty of
+// it either way.
+//
+// The discriminator is the choice of Google domain. "google.com" is HOST-ONLY,
+// and comparator rule 3 gives a dot-prefixed domain the win over a host-only
+// one at equal label count, so a ".twitch.tv" row that reached the youtube jar
+// would BEAT it and take the slot. Asserting the Google row still holds the
+// slot is therefore only satisfiable if the Twitch row was never admitted.
+// With ".google.com" on the Google side the two would tie down to the lexical
+// backstop, which happens to favour "google" — and the test would pass for the
+// wrong reason.
+func TestTwitchDomainAuthNameIsNeverAdmitted(t *testing.T) {
 	for _, name := range []string{"SID", "SAPISID", "__Secure-3PAPISID", "__Secure-1PSID"} {
-		google := cookieRow(".google.com", "0", name, "the-real-google-credential")
+		google := cookieRow("google.com", "0", name, "the-real-google-credential")
 		twitch := cookieRow(".twitch.tv", "0", name, "a-stray-twitch-row")
+
+		// Guard the discriminator itself: if the comparator ever stopped
+		// preferring the Twitch domain here, the assertions below would go
+		// quiet without anyone noticing.
+		if compareCookieDomains(".twitch.tv", "google.com") >= 0 {
+			t.Fatalf("fixture no longer discriminates: a wrongly-admitted .twitch.tv row would lose to " +
+				"google.com on ranking alone, so this test could pass without the admission rule")
+		}
+
 		for _, order := range [][]string{{google, twitch}, {twitch, google}} {
 			jar := loadRows(t, order)
-			e := entryOf(t, jar, name)
-			if e.value != "the-real-google-credential" || e.domain != ".google.com" {
-				t.Errorf("%s = %q from %q, want %q from %q — a twitch.tv row displaced a Google auth cookie",
-					name, e.value, e.domain, "the-real-google-credential", ".google.com")
+
+			// The Google row is intact in the youtube jar — impossible unless
+			// the Twitch row never entered the contest.
+			e := entryOf(t, jar, PlatformYouTube, name)
+			if e.value != "the-real-google-credential" || e.domain != "google.com" {
+				t.Errorf("youtube/%s = %q from %q, want %q from %q — a twitch.tv row was admitted to the "+
+					"youtube jar and outranked a Google auth cookie",
+					name, e.value, e.domain, "the-real-google-credential", "google.com")
+			}
+			// And it is not in the twitch jar either: a YouTube auth name is
+			// not an essential Twitch cookie.
+			if e, ok := lookupEntry(jar, PlatformTwitch, name); ok {
+				t.Errorf("twitch/%s = %q from %q, want absent — a twitch.tv row carrying a YouTube auth name "+
+					"must not be admitted to any jar", name, e.value, e.domain)
 			}
 		}
 	}
 
-	// The converse direction is closed by a different mechanism and is worth
-	// pinning so a later "simplification" of the admission clause cannot open
-	// it: Twitch's own four names reach the jar ONLY via isTwitchEssential,
-	// which requires isTwitchDomain. A google.com or youtube.com row carrying
-	// one of them is never admitted at all.
+	// The converse direction is closed by the same domain-first switch and is
+	// worth pinning so a later "simplification" cannot open it: Twitch's own
+	// four names are only consulted on the twitch.tv branch. A google.com or
+	// youtube.com row carrying one of them is never admitted at all.
 	for _, name := range []string{"auth-token", "twilight-user", "login", "name"} {
 		jar := loadRows(t, []string{
 			cookieRow(".google.com", "0", name, "cross-site-row"),
 			cookieRow(".youtube.com", "0", name, "cross-site-row"),
 		})
-		if got := jar.GetCookie(name); got != "" {
-			t.Errorf("%s = %q from a non-Twitch domain, want empty — the Twitch name set must stay domain-guarded", name, got)
+		assertAbsent(t, jar, name, "the Twitch name set must stay domain-guarded")
+	}
+}
+
+// TestPartitionIsStructural is the claim the two-jar design makes, asserted on
+// the structure rather than on any single accessor's answer.
+//
+// Fixture: a file where .twitch.tv rows carry the exact names Google's auth
+// cookies use, alongside the real Google rows. Under one flat name-keyed map
+// these are the same map keys and one set had to lose. Under two jars the
+// question does not arise, and every permutation of the file must produce the
+// identical partition — enumerated programmatically, because two hand-picked
+// orderings cannot distinguish a total order from a rule that merely reverses
+// the old file-order bias.
+//
+// THE GOOGLE DOMAINS ARE CHOSEN TO LOSE. Every assertion below sits downstream
+// of a junction two different mechanisms can satisfy: "the Google value is in
+// the youtube jar" is true both when the Twitch row was never admitted (the
+// partition, under test) and when it was admitted and then out-ranked (the
+// comparator, which this change deletes). The fixture closes that junction by
+// picking Google domains a wrongly-admitted ".twitch.tv" row would BEAT:
+//
+//   - SID on "google.com" — host-only, so rule 3 hands the win to the dotted
+//     ".twitch.tv" at equal label count.
+//   - SAPISID on "accounts.google.com" — three labels, so rule 2 hands the win
+//     to the two-label ".twitch.tv".
+//
+// Two different rungs on purpose, so the discrimination does not rest on one.
+// With ".google.com" on the Google side both pairs would fall through to the
+// lexical backstop, which happens to spell "google" before "twitch" — and the
+// test would pass without the partition existing at all.
+func TestPartitionIsStructural(t *testing.T) {
+	rows := []string{
+		cookieRow(".twitch.tv", "0", "SID", "twitch-row-named-SID"),
+		cookieRow(".twitch.tv", "0", "SAPISID", "twitch-row-named-SAPISID"),
+		cookieRow(".twitch.tv", "0", "auth-token", "the-real-twitch-token"),
+		cookieRow("google.com", "0", "SID", "the-real-google-SID"),
+		cookieRow("accounts.google.com", "0", "SAPISID", "the-real-google-SAPISID"),
+	}
+
+	// Guard the discriminator: if either Google domain ever stopped losing to
+	// ".twitch.tv" on ranking, the assertions below would go quiet.
+	for _, loser := range []string{"google.com", "accounts.google.com"} {
+		if compareCookieDomains(".twitch.tv", loser) >= 0 {
+			t.Fatalf("fixture no longer discriminates: a wrongly-admitted .twitch.tv row would lose to %q "+
+				"on ranking alone, so this test could pass without the partition", loser)
 		}
+	}
+
+	assert := func(t *testing.T, jar *CookieJar, order string) {
+		t.Helper()
+
+		// 1. The YouTube header carries the Google values — exact pairs, so a
+		//    truncated or mangled rendering cannot pass on a substring. Because
+		//    the Twitch rows out-rank these domains, this can only hold if they
+		//    were never admitted.
+		ytPairs := headerPairs(jar.GetCookieHeader())
+		for _, want := range []string{"SID=the-real-google-SID", "SAPISID=the-real-google-SAPISID"} {
+			if !slices.Contains(ytPairs, want) {
+				t.Errorf("[%s] YouTube header pairs = %v, want %q present — a twitch.tv row was admitted "+
+					"to the youtube jar and out-ranked the Google row", order, ytPairs, want)
+			}
+		}
+		// The same fact on stored state, and pinning the winning DOMAIN, so a
+		// value collision cannot be mistaken for a domain one.
+		for name, wantDomain := range map[string]string{"SID": "google.com", "SAPISID": "accounts.google.com"} {
+			if e := entryOf(t, jar, PlatformYouTube, name); e.domain != wantDomain {
+				t.Errorf("[%s] youtube/%s came from %q, want %q", order, name, e.domain, wantDomain)
+			}
+		}
+
+		// 2. The Twitch rows named SID/SAPISID are in the twitch jar either —
+		//    those names are not essential Twitch cookies. Together with (1)
+		//    this pins them to NO jar.
+		for _, name := range []string{"SID", "SAPISID"} {
+			if e, ok := lookupEntry(jar, PlatformTwitch, name); ok {
+				t.Errorf("[%s] twitch/%s = %q, want absent", order, name, e.value)
+			}
+		}
+
+		// 3. The Twitch jar holds exactly its own credential and nothing else.
+		twPairs := headerPairs(jar.GetCookieHeaderFor(PlatformTwitch))
+		if want := []string{"auth-token=the-real-twitch-token"}; !slices.Equal(twPairs, want) {
+			t.Errorf("[%s] Twitch header pairs = %v, want exactly %v", order, twPairs, want)
+		}
+
+		// 4. Neither header carries the other platform's rows.
+		for _, p := range ytPairs {
+			if strings.HasPrefix(p, "auth-token=") {
+				t.Errorf("[%s] YouTube header carries a Twitch cookie: %q", order, p)
+			}
+		}
+	}
+
+	// Every ordering, and the whole partition identical across all of them.
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	var want, wantOrder string
+	count := 0
+	permutations(rows, func(perm []string) {
+		if t.Failed() {
+			return
+		}
+		count++
+		order := strings.Join(perm, " | ")
+		jar := loadRowsInto(t, path, perm)
+		assert(t, jar, order)
+		got := jarSnapshot(jar)
+		if want == "" {
+			want, wantOrder = got, order
+			return
+		}
+		if got != want {
+			t.Errorf("load order changed the partition.\n  order A: %s\n  order B: %s\n\n  jar A:\n%s\n\n  jar B:\n%s",
+				wantOrder, order, want, got)
+		}
+	})
+	if wantCount := 120; count != wantCount { // 5!
+		t.Fatalf("enumerated %d orderings of %d rows, want %d — the enumeration is not exhaustive",
+			count, len(rows), wantCount)
+	}
+}
+
+// TestGetCookieReadsTheTwitchJar pins the single most dangerous routing
+// decision in the split.
+//
+// GetCookie reads as a generic accessor and has exactly ONE consumer in the
+// tree: internal/twitch/auth.go, fetching "auth-token". Routing it to the
+// youtube jar on the strength of its name de-authenticates Twitch, and does so
+// SILENTLY — internal/twitch/chat_irc.go logs in with PASS SCHMOOPIIE when the
+// token is empty, so chat keeps connecting and merely stops seeing
+// subscriber-only messages and badges. Nothing raises a fault.
+func TestGetCookieReadsTheTwitchJar(t *testing.T) {
+	jar := loadRows(t, []string{
+		cookieRow(".twitch.tv", "0", "auth-token", "the-real-twitch-token"),
+		cookieRow(".youtube.com", "0", "SAPISID", "a-youtube-cookie"),
+		cookieRow(".youtube.com", "0", "LOGIN_INFO", "a-youtube-cookie"),
+	})
+
+	// The exact call internal/twitch/auth.go makes.
+	if got := jar.GetCookie("auth-token"); got != "the-real-twitch-token" {
+		t.Errorf("GetCookie(%q) = %q, want %q — internal/twitch/auth.go would hand the IRC client an "+
+			"empty token and chat_irc.go would fall back to anonymous login without erroring",
+			"auth-token", got, "the-real-twitch-token")
+	}
+	// GetTwitchAuthToken is the same fact by another route; both must agree, so
+	// a change that fixes one and not the other cannot pass.
+	if got := jar.GetTwitchAuthToken(); got != "the-real-twitch-token" {
+		t.Errorf("GetTwitchAuthToken() = %q, want %q", got, "the-real-twitch-token")
+	}
+	// And it does NOT read the youtube jar: a YouTube cookie name is invisible
+	// through it. Asserted with a name that is genuinely present in the other
+	// jar, so "" here can only mean "the twitch jar was consulted".
+	if got := jar.GetCookie("SAPISID"); got != "" {
+		t.Errorf("GetCookie(%q) = %q, want empty — GetCookie must read the Twitch jar only", "SAPISID", got)
+	}
+	if got := jar.GetCookieFor(PlatformYouTube, "SAPISID"); got != "a-youtube-cookie" {
+		t.Errorf("GetCookieFor(youtube, SAPISID) = %q, want %q — the cookie must still be reachable "+
+			"through the explicit accessor", got, "a-youtube-cookie")
+	}
+}
+
+// TestIsEmptyNeedsBothJarsEmpty: a file that configured only one platform is
+// not an empty jar. IsEmpty gates "no cookies at all" messaging, so reading it
+// off one map would report a Twitch-only install as unconfigured.
+func TestIsEmptyNeedsBothJarsEmpty(t *testing.T) {
+	if !NewCookieJar().IsEmpty() {
+		t.Error("a fresh jar must be empty")
+	}
+	twitchOnly := loadRows(t, []string{cookieRow(".twitch.tv", "0", "auth-token", "t")})
+	if twitchOnly.IsEmpty() {
+		t.Error("a Twitch-only file reports IsEmpty — IsEmpty is reading the YouTube jar alone")
+	}
+	youtubeOnly := loadRows(t, []string{cookieRow(".youtube.com", "0", "LOGIN_INFO", "l")})
+	if youtubeOnly.IsEmpty() {
+		t.Error("a YouTube-only file reports IsEmpty — IsEmpty is reading the Twitch jar alone")
+	}
+	// A file whose every row is rejected still leaves both jars empty.
+	rejected := loadRows(t, []string{cookieRow(".example.invalid", "0", "SAPISID", "v")})
+	if !rejected.IsEmpty() {
+		t.Error("a file of irrelevant-domain rows must leave the jar empty")
+	}
+}
+
+// TestGetCookieHeaderForIsPlatformScoped: each platform's header carries that
+// platform's cookies and nothing else, and an unknown Platform yields "" rather
+// than a panic or a merged view.
+func TestGetCookieHeaderForIsPlatformScoped(t *testing.T) {
+	jar := loadRows(t, []string{
+		cookieRow(".youtube.com", "0", "LOGIN_INFO", "yt-login"),
+		cookieRow(".youtube.com", "0", "SAPISID", "yt-sapisid"),
+		cookieRow(".twitch.tv", "0", "auth-token", "tw-token"),
+		cookieRow(".twitch.tv", "0", "login", "tw-login"),
+	})
+
+	// Exact pair sets, in the documented sorted-by-name order — not a
+	// containment check, which would pass for a header that also carried the
+	// other platform's rows.
+	if got, want := headerPairs(jar.GetCookieHeaderFor(PlatformYouTube)),
+		[]string{"LOGIN_INFO=yt-login", "SAPISID=yt-sapisid"}; !slices.Equal(got, want) {
+		t.Errorf("YouTube header = %v, want exactly %v", got, want)
+	}
+	if got, want := headerPairs(jar.GetCookieHeaderFor(PlatformTwitch)),
+		[]string{"auth-token=tw-token", "login=tw-login"}; !slices.Equal(got, want) {
+		t.Errorf("Twitch header = %v, want exactly %v", got, want)
+	}
+	// The unqualified name means YouTube; all ten production callers are
+	// YouTube request paths.
+	if got, want := jar.GetCookieHeader(), jar.GetCookieHeaderFor(PlatformYouTube); got != want {
+		t.Errorf("GetCookieHeader() = %q, want the YouTube header %q", got, want)
+	}
+	if got := jar.GetCookieHeaderFor(Platform("mastodon")); got != "" {
+		t.Errorf("GetCookieHeaderFor(unknown) = %q, want empty", got)
+	}
+	if got := jar.GetCookieFor(Platform("mastodon"), "auth-token"); got != "" {
+		t.Errorf("GetCookieFor(unknown) = %q, want empty", got)
 	}
 }
 
@@ -313,7 +645,7 @@ func TestLoadDuplicateIdenticalRowsKeepLastWins(t *testing.T) {
 		cookieRow(".youtube.com", "0", "LOGIN_INFO", "first"),
 		cookieRow(".youtube.com", "0", "LOGIN_INFO", "second"),
 	})
-	if got := jar.GetCookie("LOGIN_INFO"); got != "second" {
+	if got := jar.GetCookieFor(PlatformYouTube, "LOGIN_INFO"); got != "second" {
 		t.Errorf("LOGIN_INFO = %q, want %q — duplicate-identical rows still keep last-wins", got, "second")
 	}
 
@@ -323,19 +655,24 @@ func TestLoadDuplicateIdenticalRowsKeepLastWins(t *testing.T) {
 		cookieRow("#HttpOnly_.youtube.com", "0", "SSID", "httponly-first"),
 		cookieRow(".youtube.com", "0", "SSID", "plain-second"),
 	})
-	if got := jar.GetCookie("SSID"); got != "plain-second" {
+	if got := jar.GetCookieFor(PlatformYouTube, "SSID"); got != "plain-second" {
 		t.Errorf("SSID = %q, want %q — the HttpOnly prefix must not create a domain distinction", got, "plain-second")
 	}
-	if e := entryOf(t, jar, "SSID"); e.domain != ".youtube.com" {
+	if e := entryOf(t, jar, PlatformYouTube, "SSID"); e.domain != ".youtube.com" {
 		t.Errorf("stored domain = %q, want %q — the #HttpOnly_ prefix must be stripped before storage", e.domain, ".youtube.com")
 	}
 }
 
-// TestLoadDomainPreferenceInBothArrivalOrders pins the cross-tier rules
-// independently of the permutation sweep, in BOTH arrival orders each. The
-// youtube-over-google pair is a regression guard on behaviour that already
-// held; the google-over-twitch pair is the behaviour this change adds, and it
-// is the one that used to be decided by whichever row the file listed last.
+// TestLoadDomainPreferenceInBothArrivalOrders pins the one cross-domain
+// preference that survives the split, in BOTH arrival orders: inside the
+// youtube jar, a youtube.com row beats a google.com one. Google auth cookies
+// legitimately exist on both domains and the YouTube-domain copy is the
+// long-standing intended winner, so this is a real question rather than an
+// artefact of the storage shape.
+//
+// The cross-platform rows this test used to carry are gone with the tier they
+// tested. Their replacement is the last case: a PREF row on twitch.tv is not a
+// competitor for anything, because it is never admitted.
 func TestLoadDomainPreferenceInBothArrivalOrders(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -361,42 +698,19 @@ func TestLoadDomainPreferenceInBothArrivalOrders(t *testing.T) {
 			cookie: "SAPISID", wantValue: "from-youtube", wantDomain: ".youtube.com",
 		},
 		{
-			name: "google before twitch",
+			// Rule 1 must outrank rule 2, or the shorter google domain wins.
+			name: "youtube wins even from a longer subdomain",
 			rows: []string{
-				cookieRow(".google.com", "0", "PREF", "from-google"),
-				cookieRow(".twitch.tv", "0", "PREF", "from-twitch"),
+				cookieRow(".google.com", "0", "SID", "from-google"),
+				cookieRow("accounts.youtube.com", "0", "SID", "from-youtube-sub"),
 			},
-			cookie: "PREF", wantValue: "from-google", wantDomain: ".google.com",
-		},
-		{
-			name: "twitch before google",
-			rows: []string{
-				cookieRow(".twitch.tv", "0", "PREF", "from-twitch"),
-				cookieRow(".google.com", "0", "PREF", "from-google"),
-			},
-			cookie: "PREF", wantValue: "from-google", wantDomain: ".google.com",
-		},
-		{
-			name: "youtube before twitch",
-			rows: []string{
-				cookieRow(".youtube.com", "0", "PREF", "from-youtube"),
-				cookieRow(".twitch.tv", "0", "PREF", "from-twitch"),
-			},
-			cookie: "PREF", wantValue: "from-youtube", wantDomain: ".youtube.com",
-		},
-		{
-			name: "twitch before youtube",
-			rows: []string{
-				cookieRow(".twitch.tv", "0", "PREF", "from-twitch"),
-				cookieRow(".youtube.com", "0", "PREF", "from-youtube"),
-			},
-			cookie: "PREF", wantValue: "from-youtube", wantDomain: ".youtube.com",
+			cookie: "SID", wantValue: "from-youtube-sub", wantDomain: "accounts.youtube.com",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jar := loadRows(t, tt.rows)
-			entry := entryOf(t, jar, tt.cookie)
+			entry := entryOf(t, jar, PlatformYouTube, tt.cookie)
 			if entry.value != tt.wantValue {
 				t.Errorf("%s value = %q, want %q", tt.cookie, entry.value, tt.wantValue)
 			}
@@ -405,6 +719,24 @@ func TestLoadDomainPreferenceInBothArrivalOrders(t *testing.T) {
 			}
 		})
 	}
+
+	// A YouTube-essential name on a twitch.tv domain never enters the contest.
+	// PREF is not in essentialTwitchCookies either, so it lands nowhere.
+	t.Run("a twitch-domain YouTube cookie is not a competitor", func(t *testing.T) {
+		for _, order := range [][]string{
+			{cookieRow(".google.com", "0", "PREF", "from-google"), cookieRow(".twitch.tv", "0", "PREF", "from-twitch")},
+			{cookieRow(".twitch.tv", "0", "PREF", "from-twitch"), cookieRow(".google.com", "0", "PREF", "from-google")},
+		} {
+			jar := loadRows(t, order)
+			if e := entryOf(t, jar, PlatformYouTube, "PREF"); e.value != "from-google" || e.domain != ".google.com" {
+				t.Errorf("youtube/PREF = %q from %q, want %q from %q", e.value, e.domain, "from-google", ".google.com")
+			}
+			if e, ok := lookupEntry(jar, PlatformTwitch, "PREF"); ok {
+				t.Errorf("twitch/PREF = %q from %q, want absent — PREF is not an essential Twitch cookie",
+					e.value, e.domain)
+			}
+		}
+	})
 }
 
 // TestLoadExpiryParsing pins the parse convention, which is deliberately
@@ -428,12 +760,12 @@ func TestLoadExpiryParsing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jar := loadRows(t, []string{cookieRow(".youtube.com", tt.field, "LOGIN_INFO", "v")})
-			if got := entryOf(t, jar, "LOGIN_INFO").expiry; got != tt.want {
+			if got := entryOf(t, jar, PlatformYouTube, "LOGIN_INFO").expiry; got != tt.want {
 				t.Errorf("expiry for field %q = %d, want %d", tt.field, got, tt.want)
 			}
 			// Whatever the field said, the row is still loaded and still sent.
-			if got := jar.GetCookie("LOGIN_INFO"); got != "v" {
-				t.Errorf("GetCookie = %q, want %q — the expiry field must never gate loading", got, "v")
+			if got := jar.GetCookieFor(PlatformYouTube, "LOGIN_INFO"); got != "v" {
+				t.Errorf("GetCookieFor = %q, want %q — the expiry field must never gate loading", got, "v")
 			}
 		})
 	}
@@ -446,77 +778,138 @@ const (
 	nowForExpiry    = int64(1700000000) // 2023-11-14
 )
 
-// TestExpiredAuthCookies counts only AUTH cookies, and only those whose expiry
-// is a positive timestamp already in the past.
+// TestExpiredAuthCookiesFor counts only AUTH cookies, only those whose expiry
+// is a positive timestamp already in the past, and only within the platform
+// asked about.
 //
 // The fixture deliberately carries decoys that a looser implementation would
 // swallow: a NON-auth essential cookie (PREF) expired long ago, a negative
 // expiry, and a session cookie. Each is a way the count could be inflated
 // without the rule under test holding.
-func TestExpiredAuthCookies(t *testing.T) {
-	t.Run("counts expired auth cookies only", func(t *testing.T) {
+func TestExpiredAuthCookiesFor(t *testing.T) {
+	t.Run("counts expired auth cookies only, per platform", func(t *testing.T) {
 		jar := loadRows(t, []string{
-			cookieRow(".youtube.com", expiredLongAgo, "SAPISID", "v"),     // auth, expired  -> counts
-			cookieRow(".youtube.com", expiredLessLong, "LOGIN_INFO", "v"), // auth, expired  -> counts
-			cookieRow(".youtube.com", expiresIn2100, "SID", "v"),          // auth, live     -> no
-			cookieRow(".youtube.com", "0", "HSID", "v"),                   // auth, session  -> no
-			cookieRow(".youtube.com", "-5", "SSID", "v"),                  // auth, negative -> no
-			cookieRow(".youtube.com", expiredLongAgo, "PREF", "v"),        // NOT auth       -> no
-			cookieRow(".youtube.com", expiredLongAgo, "CONSENT", "v"),     // NOT auth       -> no
-			cookieRow(".twitch.tv", expiredLongAgo, "auth-token", "v"),    // twitch         -> no
-			cookieRow(".twitch.tv", expiredLongAgo, "twilight-user", "v"), // twitch        -> no
+			cookieRow(".youtube.com", expiredLongAgo, "SAPISID", "v"),     // yt auth, expired  -> counts
+			cookieRow(".youtube.com", expiredLessLong, "LOGIN_INFO", "v"), // yt auth, expired  -> counts
+			cookieRow(".youtube.com", expiresIn2100, "SID", "v"),          // yt auth, live     -> no
+			cookieRow(".youtube.com", "0", "HSID", "v"),                   // yt auth, session  -> no
+			cookieRow(".youtube.com", "-5", "SSID", "v"),                  // yt auth, negative -> no
+			cookieRow(".youtube.com", expiredLongAgo, "PREF", "v"),        // NOT auth          -> no
+			cookieRow(".youtube.com", expiredLongAgo, "CONSENT", "v"),     // NOT auth          -> no
+			cookieRow(".twitch.tv", expiredLongAgo, "auth-token", "v"),    // tw auth, expired  -> counts (twitch)
+			cookieRow(".twitch.tv", expiresIn2100, "twilight-user", "v"),  // tw auth, live     -> no
+			cookieRow(".twitch.tv", expiredLongAgo, "login", "v"),         // NOT a tw auth marker -> no
 		})
-		if got := jar.ExpiredAuthCookies(nowForExpiry); got != 2 {
-			t.Errorf("ExpiredAuthCookies = %d, want 2 (SAPISID and LOGIN_INFO only)", got)
+		if got := jar.ExpiredAuthCookiesFor(PlatformYouTube, nowForExpiry); got != 2 {
+			t.Errorf("ExpiredAuthCookiesFor(youtube) = %d, want 2 (SAPISID and LOGIN_INFO only)", got)
+		}
+		if got := jar.ExpiredAuthCookiesFor(PlatformTwitch, nowForExpiry); got != 1 {
+			t.Errorf("ExpiredAuthCookiesFor(twitch) = %d, want 1 (auth-token only)", got)
 		}
 	})
 
-	t.Run("a jar of session cookies has none expired", func(t *testing.T) {
+	// The case the owner asked for, and the reason the count cannot stay
+	// YouTube-only: an expired Twitch auth-token must be visible ON ITS OWN,
+	// not folded into a YouTube number that a healthy YouTube session reports
+	// as zero. A dead Twitch token does not error — it downgrades chat capture
+	// to anonymous and loses subscriber-only messages and badges — so a zero
+	// here is an operator being told nothing is wrong.
+	t.Run("a dying Twitch token is visible while YouTube is healthy", func(t *testing.T) {
+		jar := loadRows(t, []string{
+			cookieRow(".youtube.com", expiresIn2100, "SAPISID", "v"),
+			cookieRow(".youtube.com", expiresIn2100, "LOGIN_INFO", "v"),
+			cookieRow(".twitch.tv", expiredLongAgo, "auth-token", "v"),
+		})
+		if got := jar.ExpiredAuthCookiesFor(PlatformYouTube, nowForExpiry); got != 0 {
+			t.Errorf("ExpiredAuthCookiesFor(youtube) = %d, want 0 — the Twitch token was folded into the YouTube count", got)
+		}
+		if got := jar.ExpiredAuthCookiesFor(PlatformTwitch, nowForExpiry); got != 1 {
+			t.Errorf("ExpiredAuthCookiesFor(twitch) = %d, want 1 — an expired Twitch auth-token reported nothing, "+
+				"which is the state that silently downgrades chat capture to anonymous", got)
+		}
+	})
+
+	// And the converse, so a per-platform count that simply reports the whole
+	// file twice cannot pass either.
+	t.Run("a dying YouTube session is not charged to Twitch", func(t *testing.T) {
+		jar := loadRows(t, []string{
+			cookieRow(".youtube.com", expiredLongAgo, "SAPISID", "v"),
+			cookieRow(".twitch.tv", expiresIn2100, "auth-token", "v"),
+		})
+		if got := jar.ExpiredAuthCookiesFor(PlatformYouTube, nowForExpiry); got != 1 {
+			t.Errorf("ExpiredAuthCookiesFor(youtube) = %d, want 1", got)
+		}
+		if got := jar.ExpiredAuthCookiesFor(PlatformTwitch, nowForExpiry); got != 0 {
+			t.Errorf("ExpiredAuthCookiesFor(twitch) = %d, want 0 — the YouTube count leaked into Twitch's", got)
+		}
+	})
+
+	t.Run("a jar of session cookies has none expired on either platform", func(t *testing.T) {
 		jar := loadRows(t, []string{
 			cookieRow(".youtube.com", "0", "SAPISID", "v"),
 			cookieRow(".youtube.com", "0", "LOGIN_INFO", "v"),
 			cookieRow(".youtube.com", "0", "SID", "v"),
+			cookieRow(".twitch.tv", "0", "auth-token", "v"),
+			cookieRow(".twitch.tv", "0", "twilight-user", "v"),
 		})
-		if got := jar.ExpiredAuthCookies(nowForExpiry); got != 0 {
-			t.Errorf("ExpiredAuthCookies = %d, want 0 — expiry 0 is a live session cookie, not an ancient one", got)
+		for _, p := range []Platform{PlatformYouTube, PlatformTwitch} {
+			if got := jar.ExpiredAuthCookiesFor(p, nowForExpiry); got != 0 {
+				t.Errorf("ExpiredAuthCookiesFor(%s) = %d, want 0 — expiry 0 is a live session cookie, not an ancient one", p, got)
+			}
 		}
 	})
 
 	t.Run("now is the comparison point", func(t *testing.T) {
-		jar := loadRows(t, []string{cookieRow(".youtube.com", "1500000000", "SAPISID", "v")})
-		if got := jar.ExpiredAuthCookies(1499999999); got != 0 {
-			t.Errorf("ExpiredAuthCookies(before) = %d, want 0", got)
-		}
-		if got := jar.ExpiredAuthCookies(1500000001); got != 1 {
-			t.Errorf("ExpiredAuthCookies(after) = %d, want 1", got)
+		jar := loadRows(t, []string{
+			cookieRow(".youtube.com", "1500000000", "SAPISID", "v"),
+			cookieRow(".twitch.tv", "1500000000", "auth-token", "v"),
+		})
+		for _, p := range []Platform{PlatformYouTube, PlatformTwitch} {
+			if got := jar.ExpiredAuthCookiesFor(p, 1499999999); got != 0 {
+				t.Errorf("ExpiredAuthCookiesFor(%s, before) = %d, want 0", p, got)
+			}
+			if got := jar.ExpiredAuthCookiesFor(p, 1500000001); got != 1 {
+				t.Errorf("ExpiredAuthCookiesFor(%s, after) = %d, want 1", p, got)
+			}
 		}
 	})
 
-	t.Run("empty and nil jars", func(t *testing.T) {
-		if got := NewCookieJar().ExpiredAuthCookies(nowForExpiry); got != 0 {
-			t.Errorf("empty jar = %d, want 0", got)
+	t.Run("empty, nil and unknown-platform jars", func(t *testing.T) {
+		for _, p := range []Platform{PlatformYouTube, PlatformTwitch} {
+			if got := NewCookieJar().ExpiredAuthCookiesFor(p, nowForExpiry); got != 0 {
+				t.Errorf("empty jar (%s) = %d, want 0", p, got)
+			}
+			if got := (*CookieJar)(nil).ExpiredAuthCookiesFor(p, nowForExpiry); got != 0 {
+				t.Errorf("nil jar (%s) = %d, want 0", p, got)
+			}
 		}
-		if got := (*CookieJar)(nil).ExpiredAuthCookies(nowForExpiry); got != 0 {
-			t.Errorf("nil jar = %d, want 0", got)
+		jar := loadRows(t, []string{cookieRow(".youtube.com", expiredLongAgo, "SAPISID", "v")})
+		if got := jar.ExpiredAuthCookiesFor(Platform("mastodon"), nowForExpiry); got != 0 {
+			t.Errorf("unknown platform = %d, want 0", got)
 		}
 	})
 }
 
-// TestAuthCookieHorizon: the soonest non-zero expiry among AUTH cookies. The
-// fixture puts an even sooner expiry on a non-auth cookie so a version that
-// scanned the whole jar would return the wrong number rather than merely a
-// different one.
-func TestAuthCookieHorizon(t *testing.T) {
-	t.Run("soonest auth expiry, ignoring non-auth", func(t *testing.T) {
+// TestAuthCookieHorizonFor: the soonest non-zero expiry among one platform's
+// AUTH cookies. The fixture puts an even sooner expiry on a non-auth cookie,
+// and on the OTHER platform, so a version that scanned everything would return
+// the wrong number rather than merely a different one.
+func TestAuthCookieHorizonFor(t *testing.T) {
+	t.Run("soonest auth expiry, ignoring non-auth and the other platform", func(t *testing.T) {
 		jar := loadRows(t, []string{
 			cookieRow(".youtube.com", "1600000000", "SAPISID", "v"),
-			cookieRow(".youtube.com", "1500000000", "LOGIN_INFO", "v"), // soonest auth
-			cookieRow(".youtube.com", "0", "SID", "v"),                 // session: skipped
-			cookieRow(".youtube.com", "1400000000", "PREF", "v"),       // sooner, but NOT auth
-			cookieRow(".twitch.tv", "1300000000", "auth-token", "v"),   // sooner, but not YouTube auth
+			cookieRow(".youtube.com", "1500000000", "LOGIN_INFO", "v"),  // soonest YouTube auth
+			cookieRow(".youtube.com", "0", "SID", "v"),                  // session: skipped
+			cookieRow(".youtube.com", "1400000000", "PREF", "v"),        // sooner, but NOT auth
+			cookieRow(".twitch.tv", "1300000000", "auth-token", "v"),    // sooner, but not YouTube
+			cookieRow(".twitch.tv", "1200000000", "login", "v"),         // sooner, but NOT a tw auth marker
+			cookieRow(".twitch.tv", "1350000000", "twilight-user", "v"), // later than auth-token
 		})
-		if got := jar.AuthCookieHorizon(); got != 1500000000 {
-			t.Errorf("AuthCookieHorizon = %d, want 1500000000 (LOGIN_INFO)", got)
+		if got := jar.AuthCookieHorizonFor(PlatformYouTube); got != 1500000000 {
+			t.Errorf("AuthCookieHorizonFor(youtube) = %d, want 1500000000 (LOGIN_INFO)", got)
+		}
+		if got := jar.AuthCookieHorizonFor(PlatformTwitch); got != 1300000000 {
+			t.Errorf("AuthCookieHorizonFor(twitch) = %d, want 1300000000 (auth-token)", got)
 		}
 	})
 
@@ -525,34 +918,53 @@ func TestAuthCookieHorizon(t *testing.T) {
 			cookieRow(".youtube.com", "0", "SAPISID", "v"),
 			cookieRow(".youtube.com", "0", "LOGIN_INFO", "v"),
 			cookieRow(".youtube.com", "1400000000", "PREF", "v"), // non-auth expiry must not leak in
+			cookieRow(".twitch.tv", "0", "auth-token", "v"),
+			cookieRow(".twitch.tv", "1200000000", "login", "v"), // non-auth expiry must not leak in
 		})
-		if got := jar.AuthCookieHorizon(); got != 0 {
-			t.Errorf("AuthCookieHorizon = %d, want 0 — no auth cookie has an expiry to run out", got)
+		for _, p := range []Platform{PlatformYouTube, PlatformTwitch} {
+			if got := jar.AuthCookieHorizonFor(p); got != 0 {
+				t.Errorf("AuthCookieHorizonFor(%s) = %d, want 0 — no auth cookie has an expiry to run out", p, got)
+			}
 		}
 	})
 
 	t.Run("negative expiries are not a horizon", func(t *testing.T) {
-		jar := loadRows(t, []string{cookieRow(".youtube.com", "-5", "SAPISID", "v")})
-		if got := jar.AuthCookieHorizon(); got != 0 {
-			t.Errorf("AuthCookieHorizon = %d, want 0", got)
+		jar := loadRows(t, []string{
+			cookieRow(".youtube.com", "-5", "SAPISID", "v"),
+			cookieRow(".twitch.tv", "-5", "auth-token", "v"),
+		})
+		for _, p := range []Platform{PlatformYouTube, PlatformTwitch} {
+			if got := jar.AuthCookieHorizonFor(p); got != 0 {
+				t.Errorf("AuthCookieHorizonFor(%s) = %d, want 0", p, got)
+			}
 		}
 	})
 
-	t.Run("empty and nil jars", func(t *testing.T) {
-		if got := NewCookieJar().AuthCookieHorizon(); got != 0 {
-			t.Errorf("empty jar = %d, want 0", got)
+	t.Run("empty, nil and unknown-platform jars", func(t *testing.T) {
+		for _, p := range []Platform{PlatformYouTube, PlatformTwitch} {
+			if got := NewCookieJar().AuthCookieHorizonFor(p); got != 0 {
+				t.Errorf("empty jar (%s) = %d, want 0", p, got)
+			}
+			if got := (*CookieJar)(nil).AuthCookieHorizonFor(p); got != 0 {
+				t.Errorf("nil jar (%s) = %d, want 0", p, got)
+			}
 		}
-		if got := (*CookieJar)(nil).AuthCookieHorizon(); got != 0 {
-			t.Errorf("nil jar = %d, want 0", got)
+		jar := loadRows(t, []string{cookieRow(".youtube.com", "1500000000", "SAPISID", "v")})
+		if got := jar.AuthCookieHorizonFor(Platform("mastodon")); got != 0 {
+			t.Errorf("unknown platform = %d, want 0", got)
 		}
 	})
 }
 
 // TestCompareCookieDomainsIsATotalOrder checks the comparator directly:
-// antisymmetric, transitive by construction of its tiers, and returning 0 only
-// for identical strings. Without the last property a "tie" could silently mean
-// "two different domains the rule cannot separate", which is exactly the
-// file-order dependence this replaces.
+// antisymmetric and returning 0 only for identical strings. Without the last
+// property a "tie" could silently mean "two different domains the rule cannot
+// separate", which is exactly the file-order dependence this replaces.
+//
+// The domain list still spans both platforms even though Load never asks a
+// cross-platform question any more — totality is a property of the function,
+// and a comparator that panicked or tied on an unexpected input would be a
+// latent trap for whichever future caller reaches it first.
 func TestCompareCookieDomainsIsATotalOrder(t *testing.T) {
 	domains := []string{
 		".youtube.com", "youtube.com", "www.youtube.com", "music.youtube.com",
@@ -583,12 +995,12 @@ func TestCompareCookieDomainsIsATotalOrder(t *testing.T) {
 	// named is the one that decides it — and where two rules could disagree,
 	// so the higher-priority one has to overrule the lower.
 	ordered := []struct{ better, worse, why string }{
-		{".youtube.com", ".google.com", "rule 1: tier youtube < google"},
-		{".google.com", ".twitch.tv", "rule 1: tier google < twitch"},
-		{"www.twitch.tv", "example.invalid", "rule 1: a known platform outranks the unreachable default tier"},
-		{"google.com", ".twitch.tv", "rule 1 overrules rule 3: tier decides before the leading dot"},
+		{".youtube.com", ".google.com", "rule 1: youtube beats google"},
+		{"www.youtube.com", ".google.com", "rule 1 overrules rule 2: youtube wins with MORE labels"},
+		{"youtube.com", ".google.com", "rule 1 overrules rule 3: youtube wins host-only against a dotted google"},
 		{".youtube.com", "www.youtube.com", "rule 2: fewer labels"},
 		{"google.com", ".accounts.google.com", "rule 2 overrules rule 3: label count decides before the leading dot"},
+		{"twitch.tv", "www.twitch.tv", "rule 2 inside the twitch jar, where rule 1 cannot fire"},
 		// Rule 3 is subsumed by rule 4 today ('.' sorts below every leading
 		// hostname character), so DELETING it does not change any answer —
 		// only reversing it does, and these two pairs catch that. The
@@ -596,13 +1008,45 @@ func TestCompareCookieDomainsIsATotalOrder(t *testing.T) {
 		// lost: drop it AND make the lexical backstop dot-insensitive, and
 		// these two domains compare equal. See compareCookieDomains.
 		{".youtube.com", "youtube.com", "rule 3: dot-prefixed beats host-only"},
-		{".twitch.tv", "twitch.tv", "rule 3: dot-prefixed beats host-only"},
-		{"music.youtube.com", "www.youtube.com", "rule 4: lexical backstop, same tier/labels/dot"},
+		{".twitch.tv", "twitch.tv", "rule 3: dot-prefixed beats host-only, inside the twitch jar"},
+		{"music.youtube.com", "www.youtube.com", "rule 4: lexical backstop, same platform/labels/dot"},
 		{"accounts.google.com", "myaccount.google.com", "rule 4: lexical backstop"},
 	}
 	for _, o := range ordered {
 		if got := compareCookieDomains(o.better, o.worse); got >= 0 {
 			t.Errorf("compareCookieDomains(%q, %q) = %d, want negative — %s", o.better, o.worse, got, o.why)
+		}
+	}
+
+	// Rule 1 must be INERT inside the twitch jar. That is what "no tier on the
+	// Twitch side" means, and the split gets it from the inputs rather than
+	// from a second code path — so it is asserted as behaviour, not assumed.
+	//
+	// rulesTwoToFour is written out independently here: for every pair of
+	// twitch.tv domains the real comparator must return exactly what the
+	// rule-1-less tail returns. A rule 1 that ever fired on a twitch pair (say,
+	// a resurrected tier that ranked twitch against something) would diverge.
+	rulesTwoToFour := func(a, b string) int {
+		if la, lb := domainLabelCount(a), domainLabelCount(b); la != lb {
+			return la - lb
+		}
+		da, db := strings.HasPrefix(a, "."), strings.HasPrefix(b, ".")
+		if da != db {
+			if da {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a, b)
+	}
+	twitchDomains := []string{".twitch.tv", "twitch.tv", "www.twitch.tv", "m.twitch.tv", "clips.twitch.tv"}
+	for _, a := range twitchDomains {
+		for _, b := range twitchDomains {
+			got, want := compareCookieDomains(a, b), rulesTwoToFour(a, b)
+			if (got < 0) != (want < 0) || (got == 0) != (want == 0) {
+				t.Errorf("compareCookieDomains(%q, %q) = %d but rules 2-4 alone give %d — "+
+					"rule 1 fired inside the twitch jar", a, b, got, want)
+			}
 		}
 	}
 }

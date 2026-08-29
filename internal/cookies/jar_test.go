@@ -41,7 +41,7 @@ func TestLoadCookies(t *testing.T) {
 	}
 
 	// Login info
-	if jar.GetCookie("LOGIN_INFO") != "logininfo123" {
+	if jar.GetCookieFor(PlatformYouTube, "LOGIN_INFO") != "logininfo123" {
 		t.Error("expected LOGIN_INFO cookie")
 	}
 
@@ -51,7 +51,7 @@ func TestLoadCookies(t *testing.T) {
 	}
 
 	// HttpOnly_ cookies should be parsed
-	if jar.GetCookie("SSID") != "ssid123" {
+	if jar.GetCookieFor(PlatformYouTube, "SSID") != "ssid123" {
 		t.Error("expected SSID from HttpOnly_ line")
 	}
 
@@ -63,10 +63,8 @@ func TestLoadCookies(t *testing.T) {
 		t.Error("expected HasTwitchAuthCookies to be true")
 	}
 
-	// Irrelevant domain should be skipped
-	if jar.GetCookie("irrelevant") != "" {
-		t.Error("expected irrelevant cookie to be filtered out")
-	}
+	// Irrelevant domain should be skipped — from BOTH jars.
+	assertAbsent(t, jar, "irrelevant", "the .example.com row is on no tracked domain")
 }
 
 func TestCookieHeader(t *testing.T) {
@@ -85,6 +83,22 @@ func TestCookieHeader(t *testing.T) {
 	}
 	if !strings.Contains(header, "SAPISID=") {
 		t.Error("expected SAPISID in cookie header")
+	}
+
+	// The unqualified header is the YouTube one, so the fixture's two Twitch
+	// rows must not appear in it. Before the jar was partitioned they did:
+	// every authenticated youtube.com request carried the Twitch session's
+	// auth-token and login cookies along with it.
+	for _, pair := range strings.Split(header, "; ") {
+		name, _, _ := strings.Cut(pair, "=")
+		if name == "auth-token" || name == "login" {
+			t.Errorf("YouTube Cookie header carries the Twitch cookie %q: %q", name, header)
+		}
+	}
+	// And the Twitch header carries those two and no YouTube cookie.
+	twitch := jar.GetCookieHeaderFor(PlatformTwitch)
+	if twitch != "auth-token=twitchtoken123; login=testuser" {
+		t.Errorf("Twitch header = %q, want exactly the two twitch.tv rows", twitch)
 	}
 }
 
@@ -239,16 +253,14 @@ short_line	only_two_fields
 	}
 
 	// Valid cookies should be loaded
-	if jar.GetCookie("SAPISID") != "valid_sapisid" {
+	if jar.GetCookieFor(PlatformYouTube, "SAPISID") != "valid_sapisid" {
 		t.Error("expected valid SAPISID cookie")
 	}
-	if jar.GetCookie("LOGIN_INFO") != "valid_login" {
+	if jar.GetCookieFor(PlatformYouTube, "LOGIN_INFO") != "valid_login" {
 		t.Error("expected valid LOGIN_INFO cookie")
 	}
 	// Empty name cookie should be skipped
-	if jar.GetCookie("") != "" {
-		t.Error("empty-name cookie should not be loaded")
-	}
+	assertAbsent(t, jar, "", "an empty cookie name is never stored")
 }
 
 func TestReloadCookies(t *testing.T) {
@@ -265,7 +277,7 @@ func TestReloadCookies(t *testing.T) {
 	jar := NewCookieJar()
 	jar.Load(path)
 
-	if jar.GetCookie("SAPISID") != "first_value" {
+	if jar.GetCookieFor(PlatformYouTube, "SAPISID") != "first_value" {
 		t.Error("expected first_value")
 	}
 
@@ -281,7 +293,7 @@ func TestReloadCookies(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if jar.GetCookie("SAPISID") != "second_value" {
+	if jar.GetCookieFor(PlatformYouTube, "SAPISID") != "second_value" {
 		t.Error("expected second_value after reload")
 	}
 }
@@ -498,7 +510,7 @@ func TestHasAnyYouTubeAuthCookie(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			j := NewCookieJar()
 			for name, value := range tt.cookies {
-				j.cookies[name] = cookieEntry{value: value}
+				j.youtube[name] = cookieEntry{value: value}
 			}
 			if got := j.HasAnyYouTubeAuthCookie(); got != tt.wantAny {
 				t.Errorf("HasAnyYouTubeAuthCookie() = %v, want %v", got, tt.wantAny)
@@ -537,7 +549,7 @@ func TestHasAnyTwitchAuthCookie(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			j := NewCookieJar()
 			for name, value := range tt.cookies {
-				j.cookies[name] = cookieEntry{value: value}
+				j.twitch[name] = cookieEntry{value: value}
 			}
 			if got := j.HasAnyTwitchAuthCookie(); got != tt.wantAny {
 				t.Errorf("HasAnyTwitchAuthCookie() = %v, want %v", got, tt.wantAny)
@@ -546,6 +558,52 @@ func TestHasAnyTwitchAuthCookie(t *testing.T) {
 				t.Errorf("HasTwitchAuthCookies() = %v, want %v", got, tt.wantAll)
 			}
 		})
+	}
+}
+
+// TestAuthPredicatesReadOnlyTheirOwnJar pins the routing rather than the name
+// sets: every predicate is fed its own platform's credential planted in the
+// OTHER platform's jar, and must report "not configured".
+//
+// Load can no longer produce this state — a twitch.tv auth-token cannot reach
+// the youtube map — so the fixture is staged directly on the fields. That is
+// the point: the state is unreachable through Load precisely BECAUSE these
+// predicates each read one jar, and a predicate that scanned both would pass
+// every other test in this file while quietly re-merging the two platforms.
+func TestAuthPredicatesReadOnlyTheirOwnJar(t *testing.T) {
+	misplaced := NewCookieJar()
+	// Twitch credentials sitting in the YouTube jar.
+	misplaced.youtube["auth-token"] = cookieEntry{value: "t"}
+	misplaced.youtube["twilight-user"] = cookieEntry{value: `{"id":"1"}`}
+	// YouTube credentials sitting in the Twitch jar.
+	misplaced.twitch["SAPISID"] = cookieEntry{value: "s"}
+	misplaced.twitch["LOGIN_INFO"] = cookieEntry{value: "l"}
+
+	checks := []struct {
+		name string
+		got  bool
+	}{
+		{"HasAnyTwitchAuthCookie", misplaced.HasAnyTwitchAuthCookie()},
+		{"HasTwitchAuthCookies", misplaced.HasTwitchAuthCookies()},
+		{"HasAnyYouTubeAuthCookie", misplaced.HasAnyYouTubeAuthCookie()},
+		{"HasYouTubeAuthCookies", misplaced.HasYouTubeAuthCookies()},
+	}
+	for _, c := range checks {
+		if c.got {
+			t.Errorf("%s() = true on a jar where that platform's cookies live in the OTHER jar — "+
+				"the predicate is scanning both maps", c.name)
+		}
+	}
+	// Same for the value accessors, so a "fix" that routed only the booleans
+	// cannot pass.
+	if got := misplaced.GetTwitchAuthToken(); got != "" {
+		t.Errorf("GetTwitchAuthToken() = %q, want empty — it read the YouTube jar", got)
+	}
+	if got := misplaced.GetSapisid(); got != "" {
+		t.Errorf("GetSapisid() = %q, want empty — it read the Twitch jar", got)
+	}
+	if got := misplaced.YouTubeIdentity(); got != "" {
+		t.Errorf("YouTubeIdentity() = %q, want empty — it read the Twitch jar", got)
 	}
 }
 

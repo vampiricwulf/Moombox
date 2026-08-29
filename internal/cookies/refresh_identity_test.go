@@ -15,7 +15,7 @@ func TestYouTubeIdentity(t *testing.T) {
 	jarWith := func(kv map[string]string) *CookieJar {
 		j := NewCookieJar()
 		for k, v := range kv {
-			j.cookies[k] = cookieEntry{value: v}
+			j.youtube[k] = cookieEntry{value: v}
 		}
 		return j
 	}
@@ -79,7 +79,7 @@ func TestYouTubeIdentitySeparatesAccountsInOneSession(t *testing.T) {
 	jarWith := func(kv map[string]string) *CookieJar {
 		j := NewCookieJar()
 		for k, v := range kv {
-			j.cookies[k] = cookieEntry{value: v}
+			j.youtube[k] = cookieEntry{value: v}
 		}
 		return j
 	}
@@ -101,7 +101,7 @@ func TestYouTubeIdentityNeedsBothCookies(t *testing.T) {
 	jarWith := func(kv map[string]string) *CookieJar {
 		j := NewCookieJar()
 		for k, v := range kv {
-			j.cookies[k] = cookieEntry{value: v}
+			j.youtube[k] = cookieEntry{value: v}
 		}
 		return j
 	}
