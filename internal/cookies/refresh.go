@@ -2261,53 +2261,101 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 //
 //   - A scoped header can only land on the declared platform's domains (2).
 //   - An unscoped header is admitted only under a tracked name (3), and what it
-//     may then DO is scoped by verb — see THE UNSCOPED CASE, BY VERB below. In
-//     particular an unscoped DELETION still cannot reach .google.com auth from a
-//     youtube.com reply: that was already true, and it is now true and reachable
-//     rather than true and dead.
+//     may then DO is scoped by verb — see WHAT AN ADMITTED HEADER MAY DO, BY
+//     VERB below. In particular an unscoped DELETION still cannot reach
+//     .google.com auth from a youtube.com reply: that was already true, and it
+//     is now true and reachable rather than true and dead.
 //   - Row-breaking characters cannot reach the file (1).
 //   - Everything downstream is untouched: updateCookieFile's refusal to blank an
 //     essential cookie, the seven-field rebuild, writeFileAtomic.
 //
-// THE UNSCOPED CASE, BY VERB. Three verbs, three scopes, and the three scopes
-// are NOT the same scope. It is written out here because no single downstream
-// rule states it: each of the three is enforced somewhere else, so reading any
-// one of them gives the wrong answer about the other two.
+// WHAT AN ADMITTED HEADER MAY DO, BY VERB. The design first, because the rules
+// below are only its enforcement and reading them in isolation gives the wrong
+// shape: YOUTUBE COOKIES SHOULD ALLOW GOOGLE COOKIES AS WELL. YouTube and Google
+// are ONE credential platform — .google.com and .youtube.com rows live in one
+// jar, keyed by bare cookie name — so a youtube.com reply is ENTITLED to move
+// Google rows, and does:
 //
-// REFRESH — anywhere inside the declared origin's PLATFORM. An unscoped
-// `SID=fresh` from a youtube.com reply DOES rewrite an existing `.google.com
-// SID` row. Two rules carry that between them: resolveRowUpdate's rule 2 (:2926)
-// takes the rows the origin's own site covers, and rule 3 (:2933-2945) takes the
-// rest of the platform through sameCookiePlatform (:2960-2966), whose
-// Domain-less default is the DECLARED ORIGIN's platform — and youtube.com and
-// google.com are one platform. The fan-out is deliberate (Arc 2 built it, Arc 8
-// preserved it): it is what stops one domain variant going stale while the other
-// moves on, the drift finding #4 was about. Pinned by
+//   - a YouTube reply sending a cookie explicitly scoped `Domain=.google.com` is
+//     admitted, and CREATES that Google row if the file holds none;
+//   - an unscoped rotation from YouTube REFRESHES existing Google rows of the
+//     same name.
+//
+// The one thing declined is MISATTRIBUTION. A host-only cookie from
+// www.youtube.com carrying no Domain= is, per RFC 6265 §4.1.2.3, a youtube.com
+// cookie — so a NEW row for it goes on .youtube.com and is not invented on
+// .google.com. Google's own cookies always carry an explicit Domain=, so nothing
+// real is caught by that: the retired branch that guessed .google.com from the
+// cookie NAME was minting a DIFFERENT cookie under a real one's name.
+//
+// Three verbs, and their scopes are not one scope. Written out here because no
+// single downstream rule states it — each verb is enforced somewhere else, so
+// reading any one of them gives the wrong answer about the other two.
+//
+// REFRESH — an unscoped header may rewrite an existing same-name row anywhere
+// inside the declared origin's PLATFORM. An unscoped `SID=fresh` from a
+// youtube.com reply DOES rewrite an existing `.google.com SID` row. Two rules
+// carry that between them: resolveRowUpdate's rule 2 (:2974) takes the rows the
+// origin's own site covers, and rule 3 (:2981-2993) takes the rest of the
+// platform through sameCookiePlatform (:3008-3014), whose Domain-less default is
+// the DECLARED ORIGIN's platform. Rule 3 also DISAMBIGUATES rather than
+// guessing: it fires only when exactly one non-deleting candidate qualifies
+// (`refreshes == 1`, :2991), so two same-name updates inside the platform
+// decline rather than let map order pick. The fan-out is deliberate (Arc 2 built
+// it, Arc 8 preserved it): it is what stops one domain variant going stale while
+// the other moves on, the drift finding #4 was about. Pinned by
 // TestUnscopedRefreshCrossesDomainsOnlyInsideTheDeclaredPlatform.
 //
-// CREATE — only inside the declared origin's own SITE. updateCookieFile's
-// insertion loop derives the new row's domain from the origin and nothing else
-// (`domain = "." + string(origin)`, :2779), then refuses any domain off the
-// declared platform (:2811-2816). So a youtube.com reply cannot invent a
-// `.google.com` row; the branch that used to — by guessing the domain from the
-// cookie NAME — is the one Arc 8 Task 2 removed.
+// A SCOPED header refreshes across the platform on the same rule and is not
+// narrowed here — rule 3 reads `sameCookiePlatform(k.Domain, …)`, so a
+// `Domain=.google.com` rotation also repairs a stale `.youtube.com` twin when it
+// is the only candidate. REFRESH is stated for the unscoped case because that is
+// the case bullet 3 above admits and the one the deleted comment got wrong; the
+// scoped/unscoped split appears under CREATE, and nowhere else.
 //
-// DELETE — only inside the declared origin's own SITE, through rule 2 alone.
-// Rule 1 needs a Domain=, rule 3 skips deletions (`!updates[k].Delete`, :2939)
-// and the insertion loop skips them as well (:2703), so origin.covers is the
-// only door a Domain-less deletion has.
+// CREATE — the verb where scoped and unscoped part company, and that difference
+// IS the misattribution rule:
 //
-// WHY THE MIDDLE ONE IS NARROWER THAN THE FIRST, given that both are "the same
-// cookie": a rewrite repairs a row the FILE has already asserted belongs to this
-// platform. That domain came from a browser export or an earlier scoped
-// Set-Cookie, and the response is only supplying a fresher value for a scope
-// something else established. A creation has no such prior assertion to lean on,
-// so writing `.google.com` out of a youtube.com reply would be THIS WRITER
-// asserting a scope the response never named — and asserting a false one: the
-// real .google.com SID is rotated by accounts.google.com with an explicit
-// Domain=, which takes the scoped path and never reaches the insertion loop at
-// all. Same name, different cookie. Deletion is narrow for the ordinary reason,
-// that it is the unrecoverable verb.
+//   - a SCOPED header creates on the domain it declared, whenever that domain is
+//     inside the origin's platform. It reaches the insertion loop like any other
+//     update that matched no row — that loop's own doc (:2743-2749) says
+//     "everything the matching rules turned down arrives here" — keeps
+//     `domain = key.Domain` (:2759) and passes the platform guard
+//     (:2859-2864). So an admitted `SID=x; Domain=.google.com` from a
+//     youtube.com reply DOES create a `.google.com` row against a file holding
+//     none, and that is CORRECT: it is the rule above, not a leak past it.
+//   - an UNSCOPED header creates only on the declared origin's own SITE. The
+//     loop derives that row's domain from the origin and nothing else
+//     (`domain = "." + string(origin)`, :2827). The branch that used to guess
+//     it from the cookie NAME — writing `.google.com SID` out of an ordinary
+//     youtube.com reply — is the one Arc 8 Task 2 removed. The real .google.com
+//     SID is rotated by accounts.google.com with an explicit Domain=, which
+//     takes the scoped path and never reaches that branch at all. Same name,
+//     different cookie.
+//   - narrower still, for one batch shape: an unscoped key is not inserted
+//     beside a scoped NON-DELETING sibling of the same name (hasScopedSibling,
+//     :2786), because the scoped header has already claimed a row and the
+//     unscoped twin would override it by name in the jar. A scoped DELETION is
+//     not such a sibling — delete-plus-insert is "replace" — see
+//     hasScopedSibling's own doc.
+//
+// DELETE — an unscoped header may delete only inside the declared origin's own
+// SITE, through rule 2 alone. Rule 1 needs a Domain=, rule 3 skips deletions
+// (`!updates[k].Delete`, :2987) and the insertion loop skips them as well
+// (:2751), so origin.covers is the only door a Domain-less deletion has. (A
+// SCOPED deletion is rule 1's, and reaches only rows whose domain it exactly
+// scope-matches — the scope the server actually named.)
+//
+// WHY UNSCOPED CREATE IS NARROWER THAN UNSCOPED REFRESH, given that both are
+// "the same cookie": a rewrite repairs a row the FILE has already asserted
+// belongs to this platform. That domain came from a browser export or an earlier
+// scoped Set-Cookie, and the response is only supplying a fresher value for a
+// scope something else established. A creation has no such prior assertion to
+// lean on, so inventing `.google.com` out of an unscoped youtube.com header
+// would be THIS WRITER asserting a scope nobody named — and a false one, per the
+// misattribution rule above. A scoped header carries its own assertion, which is
+// exactly why its CREATE is not narrowed. Deletion is narrow for the ordinary
+// reason, that it is the unrecoverable verb.
 //
 // Two layers, and they are not redundant. THIS one decides what becomes an
 // update at all, and it is the only code that ever sees the raw header — so
