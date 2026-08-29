@@ -2279,12 +2279,13 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 //   - a YouTube reply sending a cookie explicitly scoped `Domain=.google.com` is
 //     admitted, and CREATES that Google row if the file holds none;
 //   - an unscoped rotation from YouTube REFRESHES existing Google rows of the
-//     same name.
+//     same name, when it is the only candidate (rule 3's disambiguation, below).
 //
 // The one thing declined is MISATTRIBUTION. A host-only cookie from
 // www.youtube.com carrying no Domain= is, per RFC 6265 §4.1.2.3, a youtube.com
 // cookie — so a NEW row for it goes on .youtube.com and is not invented on
-// .google.com. Google's own cookies always carry an explicit Domain=, so nothing
+// .google.com. As observed, Google's own cookies carry an explicit Domain= (that
+// is a fact about Google's servers, not one this code can enforce), so nothing
 // real is caught by that: the retired branch that guessed .google.com from the
 // cookie NAME was minting a DIFFERENT cookie under a real one's name.
 //
@@ -2311,7 +2312,9 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 // `Domain=.google.com` rotation also repairs a stale `.youtube.com` twin when it
 // is the only candidate. REFRESH is stated for the unscoped case because that is
 // the case bullet 3 above admits and the one the deleted comment got wrong; the
-// scoped/unscoped split appears under CREATE, and nowhere else.
+// scoped/unscoped split appears under CREATE and, in narrower form, under DELETE
+// (an unscoped deletion matches subdomain-wide through rule 2, a scoped one
+// exact-host through rule 1).
 //
 // CREATE — the verb where scoped and unscoped part company, and that difference
 // IS the misattribution rule:
