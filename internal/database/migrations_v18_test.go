@@ -5,9 +5,11 @@ import "testing"
 // TestMigrationV18 mirrors TestMigrationV17's shape: newTestDB already runs
 // createSchema at the current schemaVersion, so this pins the fresh-install
 // side — a legacy-shaped row (INSERT omitting park_reason) must read back the
-// column's DEFAULT ''.
+// column's default below.
 //
-// The default is load-bearing beyond tidiness: '' is ParkReasonNone, which
+//	DEFAULT ''
+//
+// That default is load-bearing beyond tidiness: it is ParkReasonNone, which
 // every sweep treats as ParkReasonAuth, so a pre-v18 COOKIES? row keeps
 // exactly the resume behavior it had before the column existed.
 func TestMigrationV18(t *testing.T) {

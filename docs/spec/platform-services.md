@@ -121,7 +121,7 @@ All client configs are defined in `internal/constants/constants.go`:
 
 | Client | ClientName | ClientID | ClientVersion | User-Agent | Primary Use |
 |--------|-----------|----------|---------------|------------|-------------|
-| TV_DOWNGRADED | `TVHTML5` | `7` | `5.20260114` | TV Cobalt | Best format coverage. Primary client for both auth and public paths. |
+| TV_DOWNGRADED | `TVHTML5` | `7` | `5.20260707` | TV Cobalt | Best format coverage. Primary client for both auth and public paths. |
 | WEB | `WEB` | `1` | `2.20260708.00.00` | Chrome desktop | DASH manifest URLs. Always tried alongside TV to get manifest. |
 | WEB_CREATOR | `WEB_CREATOR` | `62` | `1.20260708.06.00` | Chrome desktop | Member-only content. Fallback when TV returns `members_only` or `login_required`. |
 | WEB_EMBEDDED | `WEB_EMBEDDED_PLAYER` | `56` | `2.20260708.00.00` | Chrome desktop | Age-gate bypass, and first call of the authed cascade (yt-dlp's `_DEFAULT_AUTHED_CLIENTS` lead since 2026.08.19). Needs no PO token. |

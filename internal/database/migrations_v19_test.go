@@ -8,7 +8,9 @@ import (
 // TestMigrationV19 mirrors TestMigrationV18: newTestDB runs createSchema at
 // the current schemaVersion, so this pins the fresh-install side — a
 // legacy-shaped row (INSERT omitting park_identity) must read back the
-// column's DEFAULT ''.
+// column's default below.
+//
+//	DEFAULT ''
 func TestMigrationV19(t *testing.T) {
 	db := newTestDB(t)
 	defer db.Close()
