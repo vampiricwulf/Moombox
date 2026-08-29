@@ -312,6 +312,19 @@ func (s *runState) runTUI() {
 	}
 	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict) {
 		s.log.Info("Cookie recheck requested from TUI")
+		// The bool is deliberately ignored, and the feedback line is deliberately
+		// unchanged when it is false.
+		//
+		// R C asks "what is the state of my cookies", and GetStatus answers that
+		// whether or not THIS keypress is the pass that produced the answer — a
+		// pass colliding with the 30-minute ticker returns the in-flight pass's
+		// verdicts, at worst one snapshot old, and every one of them is still a
+		// true statement about the credentials. The alternative would be to tell
+		// the operator "a refresh was already running", and there is no vocabulary
+		// for that here: cookies.RecheckReport renders per-platform VERDICTS and
+		// nothing else, and cookies.RefreshDeclinedCauses is the browser
+		// refresher's exhaustive, three-consumer-pinned set — not this one's.
+		// Adding a cause is a separate change; see CheckNow's own doc.
 		s.cookieRefresh.CheckNow(context.Background())
 		status := s.cookieRefresh.GetStatus()
 		// The verdicts, not the booleans. Both booleans are false for a check
@@ -359,7 +372,15 @@ func (s *runState) runTUI() {
 		if err != nil {
 			return result, err
 		}
-		s.cookieRefresh.CheckNow(context.Background())
+		// Same shape as the auto-cookie recovery path in monitor_callbacks.go:
+		// the browser pass has just rewritten cookies.txt, and a refresh already
+		// in flight read the OLD file, so a skipped re-check leaves the status
+		// bar behind until the next tick. R F's own feedback is built from
+		// `result`, not from GetStatus, so what the operator is told about the
+		// refresh itself is unaffected — this line explains only the badge.
+		if !s.cookieRefresh.CheckNow(context.Background()) {
+			s.log.Info("auth re-check after browser refresh was skipped, a cookie refresh was already in flight — status may lag until the next refresh")
+		}
 		return result, nil
 	}
 

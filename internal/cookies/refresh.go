@@ -83,6 +83,13 @@ const (
 	// suppress itself on alternate cycles — halving a coverage nobody decided
 	// to halve. TestFallbackObservationAgesOutWithinOneCadence pins it.
 	//
+	// NewRefreshService enforces that upper bound against the interval it is
+	// actually handed, not just against the default constant: an interval at
+	// or below this window is refused and replaced with the default, with a
+	// Warn naming both numbers. Nothing in production reaches that clamp today
+	// — no config knob feeds the constructor's refreshInterval parameter — so
+	// it exists for the test constructor and for the day a knob appears.
+	//
 	// The lower bound is an ASSUMPTION about configuration, not an invariant,
 	// and it is worth being exact about because nothing enforces it. The skip
 	// only works while membership observations arrive more often than this
@@ -282,6 +289,34 @@ type RefreshService struct {
 	cancel          context.CancelFunc
 	status          AuthStatus
 	refreshInterval time.Duration
+
+	// refreshInFlight is true for the duration of one refresh pass. It is the
+	// single-flight for all three entry points — Start's initial check,
+	// CheckNow and the ticker — and it deliberately reuses mu rather than
+	// adding a second lock, because the thing it protects is service state
+	// that mu already owns.
+	//
+	// A second caller is a NO-OP, not a queued pass. See refresh for what two
+	// overlapping passes actually do to the cookie file, and for the arming
+	// note about a manual recheck that appears to do nothing.
+	refreshInFlight bool
+
+	// refreshPassHook, when non-nil, is called once per pass that gets PAST
+	// the in-flight guard, before any work begins.
+	//
+	// TEST SEAM. Nothing in cmd/ or internal/web ever sets it; it is
+	// unexported and has no setter, so only this package can. It exists
+	// because refresh's two lifecycle properties have no other seam: a test
+	// cannot make a pass panic (every failure mode inside is caught and
+	// downgraded to an inconclusive verdict, by design), and it cannot hold a
+	// pass open long enough for a second caller to collide with it. Counting
+	// calls here also counts PASSES rather than log lines, which is what the
+	// concurrency test has to assert on — a guard that is deleted shows up as
+	// a second call here and nowhere else.
+	//
+	// Read under mu with the guard, called after mu is released, so a hook
+	// that blocks holds the single-flight without holding the lock.
+	refreshPassHook func()
 
 	// Track previous auth state to detect auth → no-auth transitions.
 	prevYouTubeAuth bool
@@ -497,6 +532,18 @@ const livenessRecoveryArmed = false
 
 // NewRefreshService creates a new cookie refresh service.
 // If refreshInterval is zero, the default of 30 minutes is used.
+//
+// An interval at or below livenessFreshWindow is also refused, and for a
+// reason that has nothing to do with how often the service runs: that window
+// bounds how old a liveness observation may be and still suppress the fallback
+// probe, and the fallback records its own answer through the same method. Let
+// the two meet and the probe's own stamp is still fresh on the next tick, so it
+// suppresses itself on alternate cycles — coverage silently halved, with no
+// symptom anywhere. The invariant is documented at livenessFreshWindow; this is
+// where it is enforced. Substituting the default is deliberately louder than
+// clamping to "window + 1": a caller who asked for 10 minutes and silently got
+// 25 would be no better informed than one who got 30, and the default is the
+// only value this file has ever reasoned about.
 func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -504,7 +551,14 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 	Error(msg string, args ...any)
 }) *RefreshService {
 	interval := refreshInterval
-	if interval <= 0 {
+	switch {
+	case interval <= 0:
+		interval = defaultRefreshInterval
+	case interval <= livenessFreshWindow:
+		logger.Warn("cookie refresh interval is too short for the liveness freshness window, using the default",
+			"requested", interval.String(),
+			"livenessFreshWindow", livenessFreshWindow.String(),
+			"using", defaultRefreshInterval.String())
 		interval = defaultRefreshInterval
 	}
 	return &RefreshService{
@@ -559,7 +613,28 @@ func (rs *RefreshService) Start(ctx context.Context) {
 	//
 	// The cost of skipping it is that tier-2 coverage begins one cadence in
 	// rather than immediately, which is the cheaper of the two.
-	rs.refresh(ctx, false)
+	//
+	// Wrapped in the same recover the ticker goroutine below carries, and for
+	// a sharper reason. This call runs on the CALLER's goroutine — cmd/moombox's
+	// run(), before the web server binds — so an unrecovered panic in the first
+	// pass does not lose a refresh, it takes the whole process down at boot,
+	// with no dashboard, no TUI and no log surface up to say why. The ticker's
+	// identical panic one cadence later is survivable purely because something
+	// recovers it.
+	//
+	// The wrap goes around the CALL, not around a new goroutine: CLAUDE.md's
+	// rule is that every goroutine carries an inline recover, and making this
+	// one asynchronous to satisfy that rule would break what the comment above
+	// documents — run() blocks on this pass so a dead-credential install is
+	// told within seconds of launch.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				rs.logger.Error("startup cookie refresh panic", "panic", r)
+			}
+		}()
+		rs.refresh(ctx, false)
+	}()
 
 	go func() {
 		defer func() {
@@ -603,14 +678,31 @@ func (rs *RefreshService) GetStatus() AuthStatus {
 	return rs.status
 }
 
-// CheckNow triggers an immediate cookie refresh and auth check.
+// CheckNow triggers an immediate cookie refresh and auth check, and reports
+// whether a pass actually RAN.
 //
 // allowFallback is false: POST /api/cookies/recheck runs this synchronously on
 // the HTTP handler goroutine, and the fallback probe is a full page fetch on
 // top of the auth check that is already there. The periodic path owns that
 // probe; a button press does not need to buy one.
-func (rs *RefreshService) CheckNow(ctx context.Context) {
-	rs.refresh(ctx, false)
+//
+// The bool is false when another pass — the 30-minute ticker, or a second
+// manual gesture — was already in flight, in which case this call did nothing
+// at all. It is NOT a failure and it is NOT a decline in the sense
+// RefreshDeclinedCauses means: that vocabulary belongs to AutoCookieService's
+// browser refresh and is pinned exhaustively across three consumers, while this
+// is the in-process check's own single-flight. Do not report it through those
+// causes.
+//
+// What a caller should do with false depends on what it wanted the pass FOR.
+// A caller that only wants the UI to catch up can ignore it: the pass already
+// running publishes its own result through OnAuthChange and GetStatus, one
+// pass later at worst. A caller that has just REWRITTEN cookies.txt and wants
+// this specific file re-verified cannot be given that guarantee here — the
+// in-flight pass may have read the old file — and should say so in its log.
+// Nothing today blocks or queues on this; a skipped pass is skipped.
+func (rs *RefreshService) CheckNow(ctx context.Context) bool {
+	return rs.refresh(ctx, false)
 }
 
 // ObserveLiveness records an external verdict about whether `platform`'s
@@ -816,14 +908,70 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 // a goroutine somebody is waiting on — CheckNow on an HTTP handler, Start's
 // initial check ahead of the web server binding — and both pass
 // allowFallback=false for that reason.
+//
+// Subject to the same single-flight as the other two, and in this direction it
+// is a tick that gets dropped: a tick arriving while a manual recheck is in
+// flight does nothing rather than doubling up, and the next one is a full
+// interval away. That is the right trade — the manual pass currently running
+// answers the same question — but it is why the guard is not merely a
+// protection for the manual button. The return is deliberately discarded: a
+// dropped tick needs no caller-side handling, only the Debug line.
 func (rs *RefreshService) doRefresh(ctx context.Context) {
 	rs.refresh(ctx, true)
 }
 
-// refresh is the shared body of both entry points; allowFallback is the only
-// thing that separates them. Commentary elsewhere in this file that names
+// refresh is the shared body of all three entry points; allowFallback is the
+// only thing that separates them. Commentary elsewhere in this file that names
 // doRefresh is describing this body — the split is newer than the comments.
-func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
+//
+// Returns whether a pass RAN. False means another one was already in flight and
+// this call did nothing whatever — see the guard below.
+func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool {
+	// THE SINGLE-FLIGHT. Three entry points reach this body — Start's initial
+	// check, CheckNow (POST /api/cookies/recheck and the TUI's R C), and the
+	// 30-minute ticker — and until this guard existed none of them looked to
+	// see whether another was already running. A manual recheck landing during
+	// a ticker pass ran a second full pass alongside the first: two guide
+	// fetches, two Set-Cookie merges, and two updateCookieFile rewrites of the
+	// SAME file interleaved, which is the part that is not merely wasteful.
+	//
+	// A second caller does nothing and returns. It does not queue and it does
+	// not wait: waiting would put an HTTP handler behind a pass that may spend
+	// two auth-check timeouts, to deliver an answer the first pass is about to
+	// publish through OnAuthChange anyway.
+	//
+	// ARMING NOTE, and this is the line to read when a recheck "did nothing":
+	// the ticker and a manual gesture collide on a real install, so an operator
+	// following the A4/A5 acceptance methodology can press recheck, see no new
+	// pass in the log, and conclude the button is broken. It is not — the
+	// answer they get back is the in-flight pass's, one status snapshot behind
+	// at worst. Any methodology that counts passes has to allow for that, and
+	// the Debug line below is the only evidence that it happened.
+	rs.mu.Lock()
+	if rs.refreshInFlight {
+		rs.mu.Unlock()
+		// Debug, not Info. A ticker pass overlapping a manual one is routine on
+		// any install where somebody presses the button, and this line would
+		// otherwise be fanned out over the WebSocket log stream to both UIs for
+		// an event that changes nothing.
+		rs.logger.Debug("cookie refresh skipped, another pass is already in flight")
+		return false
+	}
+	rs.refreshInFlight = true
+	hook := rs.refreshPassHook
+	rs.mu.Unlock()
+	// Deferred, so a panic anywhere below still releases the guard — otherwise
+	// one panic would wedge the service into "always in flight" and every later
+	// pass, ticker included, would silently no-op forever.
+	defer func() {
+		rs.mu.Lock()
+		rs.refreshInFlight = false
+		rs.mu.Unlock()
+	}()
+	if hook != nil {
+		hook()
+	}
+
 	rs.logger.Debug("refreshing cookies")
 
 	// Reload cookies from file
@@ -1069,6 +1217,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	rs.logger.Debug("cookie refresh done",
 		"youtube", ytAuth,
 		"twitch", twAuth)
+	return true
 }
 
 // shouldFireRecovery reports whether OnRecoveryNeeded should fire for a

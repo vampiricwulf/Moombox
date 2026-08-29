@@ -152,6 +152,24 @@ func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
 func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool, rl *web.RateLimiter) {
 	// POST /api/cookies/recheck
 	r.Post("/api/cookies/recheck", func(rw http.ResponseWriter, req *http.Request) {
+		// CheckNow's bool — "did a pass actually run" — is deliberately ignored,
+		// and this handler is the TUI's R C by another door, so it ignores it for
+		// the same reason (see OnRecheckCookies in cmd/moombox/tui_wiring.go).
+		// The payload below is a STATUS SNAPSHOT, not a claim that this request
+		// produced it: every field is read from GetStatus and is true of the
+		// credentials whichever pass last computed it. A collision with the
+		// 30-minute ticker costs at most one snapshot of freshness.
+		//
+		// Surfacing "a refresh was already running" would need a new key and a
+		// new sentence, and neither exists: the toast is rendered from
+		// cookies.RecheckReport's per-platform verdicts (pinned across both UIs
+		// by cookies_recheck_toast_test.go), and cookies.RefreshDeclinedCauses is
+		// the BROWSER refresher's exhaustive set, pinned in three consumers —
+		// this guard is the in-process refresh's own single-flight and must not
+		// be reported through it.
+		//
+		// The guard is also why this route can stay on the plain router: with it
+		// in place, hammering the endpoint cannot start a second pass.
 		refreshSvc.CheckNow(req.Context())
 		status := refreshSvc.GetStatus()
 		response := map[string]any{
@@ -270,7 +288,17 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			return
 		}
 
-		// Re-check auth status after browser refresh
+		// Re-check auth status after browser refresh.
+		//
+		// This is the dashboard twin of the TUI's R F, which logs when CheckNow
+		// reports that a refresh was already in flight (the pass already running
+		// read the cookie file BEFORE this browser pass rewrote it, so the status
+		// below can be pre-refresh and stays that way until the next tick). The
+		// routes package has no operational logger — SetPanicLogger installs an
+		// Error-only sink for recovered panics and is not one — so this side
+		// records the same fact in a comment rather than borrowing that. The
+		// refresh's OWN outcome comes from `result` via cookieRefreshOutcome and
+		// is unaffected; only cookieStatus/twitchAuthStatus can lag.
 		refreshSvc.CheckNow(req.Context())
 		status := refreshSvc.GetStatus()
 
