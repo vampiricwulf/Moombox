@@ -197,8 +197,16 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		// Ctx-aware so a shutdown during a multi-platform refresh doesn't
 		// have to wait the spacing out — the ctx check below observes it.
 		if i > 0 {
-			s.logger.Info("waiting before next Firefox launch", "platform", platform, "spacing", firefoxLaunchSpacing)
-			utils.Sleep(ctx, firefoxLaunchSpacing)
+			// s.firefoxLaunchSpacing is the injection seam (Arc 8 7(d)): zero
+			// (services built via struct literal, not NewAutoCookieService)
+			// falls back to the production const, same convention as
+			// detectBrowser's nil fallback.
+			spacing := s.firefoxLaunchSpacing
+			if spacing <= 0 {
+				spacing = firefoxLaunchSpacing
+			}
+			s.logger.Info("waiting before next Firefox launch", "platform", platform, "spacing", spacing)
+			utils.Sleep(ctx, spacing)
 		}
 
 		if ctx.Err() != nil {

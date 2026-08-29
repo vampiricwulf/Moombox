@@ -443,9 +443,11 @@ func TestRefreshWithNoErrorAndNothingDoneClaimsNoCredit(t *testing.T) {
 // half really did render, so a pass here cannot come from a stub that never
 // writes anything.
 //
-// Costs firefoxLaunchSpacing (5s) — the wait between launches is what makes the
-// two launches distinct, and shortening it via ctx would abort the second one
-// and make the test vacuous.
+// Uses the firefoxLaunchSpacing seam (Arc 8 7(d)) to shrink the wait between
+// the two launches from the production 5s down to a few milliseconds —
+// shortening it via ctx instead would abort the second launch outright and
+// make the test vacuous, which is exactly why the seam exists on the
+// service rather than as a ctx deadline.
 func TestScreenshotIsClearedBeforeEachLaunch(t *testing.T) {
 	t.Setenv(fakeBrowserModeEnv, fakeBrowserYouTubeOnly)
 
@@ -456,6 +458,7 @@ func TestScreenshotIsClearedBeforeEachLaunch(t *testing.T) {
 	}
 
 	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.firefoxLaunchSpacing = 10 * time.Millisecond
 	if err := s.jar.Load(cookiePath); err != nil {
 		t.Fatal(err)
 	}
@@ -470,6 +473,21 @@ func TestScreenshotIsClearedBeforeEachLaunch(t *testing.T) {
 	if acted {
 		t.Error("the Twitch launch rendered nothing and was credited anyway — the YouTube screenshot survived into it, " +
 			"so clearBrowserRenderProof is no longer running inside the loop")
+	}
+}
+
+// TestFirefoxLaunchSpacingDefaultsToProductionValue pins the seam's default
+// so a later tidy-up of NewAutoCookieService cannot silently zero the real
+// spacing in production while every test that overrides the seam keeps
+// passing regardless (Arc 8 7(d)). It asserts the field a fresh service
+// carries, not the const alone, because the const staying 5s while the
+// constructor stops copying it into the field would be exactly that defect.
+func TestFirefoxLaunchSpacingDefaultsToProductionValue(t *testing.T) {
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	s := NewAutoCookieService(t.TempDir(), cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	if s.firefoxLaunchSpacing != 5*time.Second {
+		t.Errorf("firefoxLaunchSpacing default = %v, want 5s — the cost-budget comment in "+
+			"autocookies.go sums this constant into the worst-case refresh time", s.firefoxLaunchSpacing)
 	}
 }
 

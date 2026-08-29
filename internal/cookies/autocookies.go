@@ -350,6 +350,16 @@ type AutoCookieService struct {
 	// via struct literal keep working.
 	detectBrowser func() *DetectedBrowser
 
+	// firefoxLaunchSpacing overrides the delay refreshFirefox waits between
+	// consecutive Firefox launches — see the package-level firefoxLaunchSpacing
+	// const (autocookies_firefox.go) for the production value and why it
+	// exists. Defaults to that const in NewAutoCookieService; tests lower it
+	// so a two-platform Firefox refresh doesn't burn 5 real seconds per run.
+	// Zero/negative is treated as the const so services built via struct
+	// literal keep launching at the production spacing. Same seam
+	// convention as detectBrowser. Arc 8 7(d).
+	firefoxLaunchSpacing time.Duration
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -385,11 +395,12 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 		logger.Error("auto-cookie profile dir rejected at construction", "err", profileDirErr)
 	}
 	s := &AutoCookieService{
-		profileDir:    profileDir,
-		cookiePath:    cookiePath,
-		jar:           jar,
-		profileDirErr: profileDirErr,
-		detectBrowser: DetectBrowser,
+		profileDir:           profileDir,
+		cookiePath:           cookiePath,
+		jar:                  jar,
+		profileDirErr:        profileDirErr,
+		detectBrowser:        DetectBrowser,
+		firefoxLaunchSpacing: firefoxLaunchSpacing,
 		// Always populated with both supported platforms so the JSON wire
 		// shape stays {"youtube": false, "twitch": false} even for
 		// fresh-install state. Audit reports/cookies.md #44.

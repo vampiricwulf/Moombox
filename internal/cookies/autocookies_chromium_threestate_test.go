@@ -161,6 +161,14 @@ type stubCDPOptions struct {
 	// failTargetList makes GET /json fail, which is what stops the page-level
 	// fallback ladder from running at all.
 	failTargetList bool
+	// suppressLoadEvent acks Page.navigate but never follows it with
+	// Page.loadEventFired — the connect-then-stall shape (Arc 8 7(e)): the
+	// browser accepted the connection and answered Page.enable and
+	// Page.navigate, then never loaded anything. cdpNavigateAndWait's read
+	// loop is left blocking on the caller's context, so the test supplies a
+	// short-lived one rather than waiting out cdpNavigateTimeout, which stays
+	// untouched.
+	suppressLoadEvent bool
 }
 
 // startStubCDP runs an httptest server that speaks enough of the Chrome
@@ -218,13 +226,14 @@ func startStubCDP(t *testing.T, opts stubCDPOptions) int {
 			return
 		}
 		defer conn.Close(websocket.StatusInternalError, "stub done")
-		serveStubCDP(r.Context(), conn, opts.answers)
+		serveStubCDP(r.Context(), conn, opts)
 	})
 
 	return port
 }
 
-func serveStubCDP(ctx context.Context, conn *websocket.Conn, answers map[string]cdpAnswer) {
+func serveStubCDP(ctx context.Context, conn *websocket.Conn, opts stubCDPOptions) {
+	answers := opts.answers
 	write := func(payload string) error {
 		return conn.Write(ctx, websocket.MessageText, []byte(payload))
 	}
@@ -262,11 +271,14 @@ func serveStubCDP(ctx context.Context, conn *websocket.Conn, answers map[string]
 				err = write(fmt.Sprintf(`{"id":%d,"result":{"cookies":[]}}`, msg.ID))
 			}
 		case "Page.navigate":
-			if err = write(fmt.Sprintf(`{"id":%d,"result":{}}`, msg.ID)); err == nil {
+			if err = write(fmt.Sprintf(`{"id":%d,"result":{}}`, msg.ID)); err == nil && !opts.suppressLoadEvent {
 				// So cdpNavigateAndWait returns immediately instead of
 				// burning its 30s budget waiting for a load event.
 				err = write(`{"method":"Page.loadEventFired","params":{}}`)
 			}
+			// suppressLoadEvent: the ack above is the only reply. The loop
+			// falls through to conn.Read, which blocks on the caller's ctx
+			// until it disconnects — the connect-then-stall shape.
 		default:
 			err = write(fmt.Sprintf(`{"id":%d,"result":{}}`, msg.ID))
 		}
