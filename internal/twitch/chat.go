@@ -33,21 +33,29 @@ type ChatDownloader struct {
 	channelDisplay string
 	channelID      string
 	streamID       string
-	// authToken returns the CURRENT Twitch OAuth token, re-read on every IRC
-	// reconnect. A getter and not a captured string because this downloader
-	// lives for the whole stream: a token that rotates, dies, or is
-	// re-imported mid-job would otherwise never be picked up, and the failure
-	// is SILENT — a rejected token falls through to the anonymous
-	// justinfan login (see runIRCSession), which keeps capturing chat minus
-	// subscriber-only messages and badges. nil-safe via currentAuthToken.
-	authToken func() string
-	// login returns the CURRENT Twitch account name, re-read on every IRC
-	// reconnect for exactly the reason authToken is. It is the NICK half of
-	// the handshake and the two are ONE decision (ircHandshakeLines): a
-	// reconnect that re-read the token but kept a nick from construction
-	// could pair a new session's credential with the previous session's
-	// identity. nil-safe via currentLogin.
-	login func() string
+	// credentials returns the CURRENT Twitch OAuth token AND the account name
+	// it belongs to, re-read on every IRC reconnect.
+	//
+	// A getter and not captured strings because this downloader lives for the
+	// whole stream: a credential that rotates, dies, or is re-imported mid-job
+	// would otherwise never be picked up, and the failure is SILENT — the
+	// handshake falls through to the anonymous justinfan login (see
+	// runIRCSession), which keeps capturing chat minus subscriber-only
+	// messages and badges.
+	//
+	// ONE getter returning BOTH halves, not two getters. The handshake is a
+	// single authenticated-or-anonymous decision over the pair
+	// (ircHandshakeLines), so the two values must describe one session: two
+	// calls could straddle a concurrent jar Reload and hand the handshake one
+	// account's token beside another's login. The atomicity is provided by
+	// CookieJar.GetTwitchCredentials' single RLock; this field's job is to keep
+	// it a single call all the way to the wire. nil-safe via
+	// sessionCredentials, which is also where the anonymous fallback is
+	// applied.
+	credentials func() (token, login string)
+	// authRefused latches the one-shot anonymous fallback. See
+	// noteHandshakeOutcome.
+	authRefused atomic.Bool
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.
@@ -115,12 +123,15 @@ func (cd *ChatDownloader) callOnProgress(count int) {
 
 // ChatDownloaderOptions configures the chat downloader.
 type ChatDownloaderOptions struct {
-	ChannelLogin    string
-	ChannelDisplay  string
-	ChannelID       string
-	StreamID        string
-	AuthToken       func() string // Returns the CURRENT OAuth token, re-read per reconnect (nil = anonymous)
-	Login           func() string // Returns the CURRENT account name for NICK, re-read per reconnect (nil = anonymous)
+	ChannelLogin   string
+	ChannelDisplay string
+	ChannelID      string
+	StreamID       string
+	// Credentials returns the CURRENT OAuth token AND the account name it
+	// belongs to, re-read per reconnect. One getter for both halves so the
+	// pair cannot be torn by a concurrent cookie reload; nil, or either half
+	// empty, means anonymous. See ChatDownloader.credentials.
+	Credentials     func() (token, login string)
 	OutputPath      string
 	StreamStartTime string
 	EmoteResolver   *EmoteResolver
@@ -145,8 +156,7 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		channelDisplay:  opts.ChannelDisplay,
 		channelID:       opts.ChannelID,
 		streamID:        opts.StreamID,
-		authToken:       opts.AuthToken,
-		login:           opts.Login,
+		credentials:     opts.Credentials,
 		outputPath:      opts.OutputPath,
 		streamStartTime: opts.StreamStartTime,
 		streamStartMs:   streamStartMs,
@@ -180,27 +190,62 @@ func (cd *ChatDownloader) currentOutputPath() string {
 	return cd.outputPath
 }
 
-// currentAuthToken reads the live OAuth token. Returns "" when no getter was
-// supplied — tests and cookieless installs construct the downloader without
-// credentials, and "" is the anonymous-login signal runIRCSession already
-// handles.
-func (cd *ChatDownloader) currentAuthToken() string {
-	if cd.authToken == nil {
-		return ""
+// sessionCredentials reads the credentials for ONE handshake: the live pair,
+// unless the anonymous fallback has latched.
+//
+// Returns ("", "") when no getter was supplied — tests and cookieless installs
+// construct the downloader without credentials, and an empty pair is the
+// anonymous-login signal ircHandshakeLines already handles. It is also what a
+// latched fallback returns, so the latch needs no separate branch at the
+// handshake: "we have no usable credentials" and "Twitch refused the ones we
+// have" produce the same wire bytes by construction.
+func (cd *ChatDownloader) sessionCredentials() (token, login string) {
+	if cd.credentials == nil || cd.authRefused.Load() {
+		return "", ""
 	}
-	return cd.authToken()
+	return cd.credentials()
 }
 
-// currentLogin reads the live account name. Returns "" when no getter was
-// supplied, which ircHandshakeLines treats exactly as a missing token: the
-// full anonymous login. A token without a login must NOT produce a
-// token-with-justinfan hybrid — that pairing is what this whole path exists to
-// stop sending.
-func (cd *ChatDownloader) currentLogin() string {
-	if cd.login == nil {
-		return ""
+// noteHandshakeOutcome runs at the end of every session that presented
+// credentials and decides whether to fall back to anonymous chat for the rest
+// of the job.
+//
+// The floor this restores: before the account nickname was sent at all, EVERY
+// install used the anonymous handshake, which Twitch always accepts. An
+// authenticated handshake is new, and if Twitch refuses it — a stale login
+// cookie, a web-session token tmi will not take — nothing here parses the
+// refusal, the socket closes, and Start's reconnect loop burns all ten attempts
+// on a login that cannot succeed and then abandons chat for the whole job. A
+// working degraded capture would become no capture at all. So: authenticated if
+// Twitch accepts it, anonymous if it does not, never nothing.
+//
+// The trigger is the ABSENCE of RPL_WELCOME (numeric 001) on a session that
+// sent real credentials. Not "no chat arrived" — a quiet channel produces none
+// for minutes. Not the NOTICE text alone — 001 covers every way a login can be
+// refused, including a torn credential pair, while the NOTICE only names the
+// two cases Twitch happens to spell out.
+//
+// ONE-SHOT per job: once anonymous, the job stays anonymous. Flapping between
+// the two would re-pay the rejected handshake on every reconnect, which is the
+// cost this exists to bound. Cost if wrong: a cookie repaired mid-job does not
+// re-authenticate chat until the next job — exactly the behaviour that shipped
+// before the nickname existed, so a floor rather than a regression.
+//
+// Neither the token nor the login is named in the log line.
+func (cd *ChatDownloader) noteHandshakeOutcome(welcomed, sawLoginFailure bool) {
+	if welcomed || cd.authRefused.Swap(true) {
+		return
 	}
-	return cd.login()
+	if sawLoginFailure {
+		cd.logger.Warn("twitch rejected the authenticated IRC login (Twitch replied that the login "+
+			"failed); continuing anonymously — subscriber-only messages and badges will not be "+
+			"captured for this job",
+			"channel", cd.channelLogin)
+		return
+	}
+	cd.logger.Warn("twitch never acknowledged the authenticated IRC login; continuing anonymously "+
+		"— subscriber-only messages and badges will not be captured for this job",
+		"channel", cd.channelLogin)
 }
 
 // getResumeFilePath returns the path to the resume state file.

@@ -31,12 +31,12 @@ func writeTwitchSessionCookies(t *testing.T, path, token, login string) {
 }
 
 // TestTwitchChatCredentialsReturnsBothHalves is the claim: a configured Auth
-// yields BOTH getters, each reading its own cookie.
+// yields ONE getter that produces BOTH halves, each read from its own cookie.
 //
-// Asserting only that the token getter is non-nil is the failure mode — that is
-// exactly the state that shipped, and it produces `PASS oauth:<token>` beside
-// the anonymous `justinfan<random>` nickname, which Twitch refuses or silently
-// downgrades. So both getters are invoked and both values are checked.
+// Asserting only that the getter is non-nil is the failure mode. A wiring that
+// supplied a token and no login produces `PASS oauth:<token>` beside the
+// anonymous `justinfan<random>` nickname, which Twitch refuses or silently
+// downgrades — so both values are pulled and both are checked.
 func TestTwitchChatCredentialsReturnsBothHalves(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cookies.txt")
 	writeTwitchSessionCookies(t, path, "synthetic-token", "syntheticaccount")
@@ -46,26 +46,24 @@ func TestTwitchChatCredentialsReturnsBothHalves(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	token, login := twitchChatCredentials(twitch.NewAuth(jar, nopWorkerLogger{}))
-	if token == nil {
-		t.Fatal("token getter is nil for a configured Auth")
+	credentials := twitchChatCredentials(twitch.NewAuth(jar, nopWorkerLogger{}))
+	if credentials == nil {
+		t.Fatal("credential getter is nil for a configured Auth")
 	}
-	if login == nil {
-		t.Fatal("login getter is nil for a configured Auth — the IRC handshake would send the " +
-			"anonymous justinfan nickname alongside a real OAuth token")
+	token, login := credentials()
+	if token != "synthetic-token" {
+		t.Errorf("token = %q, want %q", token, "synthetic-token")
 	}
-	if got := token(); got != "synthetic-token" {
-		t.Errorf("token getter returned %q, want %q", got, "synthetic-token")
-	}
-	if got := login(); got != "syntheticaccount" {
-		t.Errorf("login getter returned %q, want %q", got, "syntheticaccount")
+	if login != "syntheticaccount" {
+		t.Errorf("login = %q, want %q — the IRC handshake would send the anonymous justinfan "+
+			"nickname alongside a real OAuth token", login, "syntheticaccount")
 	}
 }
 
-// TestTwitchChatCredentialsTrackTheJar: both getters are METHOD VALUES, so a
+// TestTwitchChatCredentialsTrackTheJar: the getter is a METHOD VALUE, so a
 // cookie re-import underneath a running job moves both halves together. A
-// snapshot of either would leave the next reconnect presenting one session's
-// credential under another session's identity.
+// snapshot would leave the next reconnect presenting one session's credential
+// under another session's identity.
 func TestTwitchChatCredentialsTrackTheJar(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cookies.txt")
 	writeTwitchSessionCookies(t, path, "token-before", "accountbefore")
@@ -75,12 +73,10 @@ func TestTwitchChatCredentialsTrackTheJar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	token, login := twitchChatCredentials(twitch.NewAuth(jar, nopWorkerLogger{}))
-	if got, want := token(), "token-before"; got != want {
-		t.Fatalf("token getter returned %q, want %q", got, want)
-	}
-	if got, want := login(), "accountbefore"; got != want {
-		t.Fatalf("login getter returned %q, want %q", got, want)
+	credentials := twitchChatCredentials(twitch.NewAuth(jar, nopWorkerLogger{}))
+	if token, login := credentials(); token != "token-before" || login != "accountbefore" {
+		t.Fatalf("credentials = (%q, %q), want (%q, %q)",
+			token, login, "token-before", "accountbefore")
 	}
 
 	writeTwitchSessionCookies(t, path, "token-after", "accountafter")
@@ -88,26 +84,24 @@ func TestTwitchChatCredentialsTrackTheJar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := token(), "token-after"; got != want {
-		t.Errorf("token getter returned %q after a re-import, want %q", got, want)
+	token, login := credentials()
+	if token != "token-after" {
+		t.Errorf("token = %q after a re-import, want %q", token, "token-after")
 	}
-	if got, want := login(), "accountafter"; got != want {
-		t.Errorf("login getter returned %q after a re-import, want %q — the credential moved and "+
-			"the identity did not", got, want)
+	if login != "accountafter" {
+		t.Errorf("login = %q after a re-import, want %q — the credential moved and the identity "+
+			"did not", login, "accountafter")
 	}
 }
 
-// TestTwitchChatCredentialsNilAuthIsFullyAnonymous: neither half without the
-// other. A service constructed before cookies are wired yields two nils, which
-// the downloader reads as the anonymous login on both lines — never a token
-// with no identity behind it, and never an identity with no token.
+// TestTwitchChatCredentialsNilAuthIsFullyAnonymous: no half without the other.
+// A service constructed before cookies are wired yields a nil getter, which the
+// downloader reads as the anonymous login on both lines — never a token with no
+// identity behind it, and never an identity with no token.
 func TestTwitchChatCredentialsNilAuthIsFullyAnonymous(t *testing.T) {
-	token, login := twitchChatCredentials(nil)
-	if token != nil {
-		t.Error("token getter is non-nil for a nil Auth")
-	}
-	if login != nil {
-		t.Error("login getter is non-nil for a nil Auth")
+	if credentials := twitchChatCredentials(nil); credentials != nil {
+		token, login := credentials()
+		t.Errorf("credential getter is non-nil for a nil Auth (yields %q, %q)", token, login)
 	}
 }
 

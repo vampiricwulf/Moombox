@@ -101,15 +101,15 @@ func TestGetAuthTokenNilJar(t *testing.T) {
 	}
 }
 
-// TestGetLoginReadsTheTwitchCookie is the NICK half of the same cookie-jar
-// contract. The login names the account the IRC session identifies as, and it
-// must come from the same twitch.tv rows as the auth-token so the pair belongs
-// to one session.
+// TestGetCredentialsReadsTheTwitchCookies is the IRC handshake's half of the
+// cookie-jar contract. The login names the account the session identifies as
+// and must come from the same twitch.tv rows as the auth-token, so both halves
+// are asserted from ONE call — which is also the only way they are reachable.
 //
-// The fixture carries YouTube rows too, so "" here cannot be explained by an
-// empty jar — and a "" here is silent: chat_irc.go falls all the way back to
-// the anonymous handshake rather than erroring.
-func TestGetLoginReadsTheTwitchCookie(t *testing.T) {
+// The fixture carries YouTube rows too, so an empty half here cannot be
+// explained by an empty jar. An empty half is silent: chat_irc.go falls all the
+// way back to the anonymous handshake rather than erroring.
+func TestGetCredentialsReadsTheTwitchCookies(t *testing.T) {
 	jar := jarFromRows(t,
 		row(".twitch.tv", "auth-token", "synthetic-twitch-token"),
 		row(".twitch.tv", "login", "syntheticuser"),
@@ -118,35 +118,44 @@ func TestGetLoginReadsTheTwitchCookie(t *testing.T) {
 	)
 	a := NewAuth(jar, nopLogger{})
 
-	if got := a.GetLogin(); got != "syntheticuser" {
-		t.Errorf("GetLogin() = %q, want %q — without it the IRC handshake sends the anonymous "+
-			"justinfan nickname and the session captures no subscriber-only chat", got, "syntheticuser")
+	token, login := a.GetCredentials()
+	if token != "synthetic-twitch-token" {
+		t.Errorf("GetCredentials() token = %q, want %q", token, "synthetic-twitch-token")
+	}
+	if login != "syntheticuser" {
+		t.Errorf("GetCredentials() login = %q, want %q — without it the IRC handshake sends the "+
+			"anonymous justinfan nickname and the session captures no subscriber-only chat",
+			login, "syntheticuser")
 	}
 }
 
-// TestGetLoginIsEmptyWithoutATwitchCookie: "login" is a plausible cookie name
-// on any site, so the fixture plants a .youtube.com row literally named "login"
-// — which Load refuses, because Twitch's cookie names are only honoured on
-// twitch.tv. Presenting another site's "login" as a Twitch nickname would pair
-// a real Twitch token with a foreign identity.
-func TestGetLoginIsEmptyWithoutATwitchCookie(t *testing.T) {
+// TestGetCredentialsIsEmptyWithoutTwitchCookies: "login" is a plausible cookie
+// name on any site, so the fixture plants .youtube.com rows literally named
+// "login" and "auth-token" — which Load refuses, because Twitch's cookie names
+// are only honoured on twitch.tv. Presenting another site's rows as a Twitch
+// session would authenticate as nobody.
+func TestGetCredentialsIsEmptyWithoutTwitchCookies(t *testing.T) {
 	jar := jarFromRows(t,
 		row(".youtube.com", "login", "a-youtube-row-wearing-the-twitch-name"),
+		row(".youtube.com", "auth-token", "another-youtube-row-wearing-a-twitch-name"),
 		row(".youtube.com", "SAPISID", "synthetic-youtube-cookie"),
 	)
 	a := NewAuth(jar, nopLogger{})
 
-	if got := a.GetLogin(); got != "" {
-		t.Errorf("GetLogin() = %q, want empty — a youtube.com row named login is not a Twitch "+
-			"identity and must never be presented as one", got)
+	token, login := a.GetCredentials()
+	if token != "" || login != "" {
+		t.Errorf("GetCredentials() = (%q, %q), want both empty — youtube.com rows wearing Twitch "+
+			"cookie names are not a Twitch session and must never be presented as one", token, login)
 	}
 }
 
-// TestGetLoginNilJar: the guard in GetLogin, mirroring GetAuthToken's, so a
-// service constructed before cookies are wired cannot panic.
-func TestGetLoginNilJar(t *testing.T) {
+// TestGetCredentialsNilJar: the guard in GetCredentials, mirroring
+// GetAuthToken's, so a service constructed before cookies are wired cannot
+// panic.
+func TestGetCredentialsNilJar(t *testing.T) {
 	a := NewAuth(nil, nopLogger{})
-	if got := a.GetLogin(); got != "" {
-		t.Errorf("GetLogin() = %q on a nil jar, want empty", got)
+	token, login := a.GetCredentials()
+	if token != "" || login != "" {
+		t.Errorf("GetCredentials() = (%q, %q) on a nil jar, want both empty", token, login)
 	}
 }

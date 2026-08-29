@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -579,44 +581,157 @@ func TestGetCookieReadsTheTwitchJar(t *testing.T) {
 	}
 }
 
-// TestGetTwitchLoginReadsTheTwitchJar pins the NICK half of the IRC handshake's
-// credential pair.
+// TestGetTwitchCredentialsReadsTheTwitchJar pins the IRC handshake's credential
+// pair.
 //
 // The login names the account the IRC session identifies as, and it must come
 // from the SAME twitch.tv rows as the auth-token: the two are presented
 // together (PASS + NICK) and a pair drawn from different places is a session
-// authenticated as nobody. Reading it from the youtube jar, or from a foreign
-// site's "login" row, returns "" — and "" is silent, because chat_irc.go then
+// authenticated as nobody. Reading either from the youtube jar, or from a
+// foreign site's row, returns "" — and "" is silent, because chat_irc.go then
 // falls all the way back to the anonymous handshake instead of erroring.
 //
-// The fixture plants a .youtube.com row literally named "login" so that "" here
-// cannot be explained by "no login anywhere in the file".
-func TestGetTwitchLoginReadsTheTwitchJar(t *testing.T) {
+// The fixture plants .youtube.com rows literally named "login" and "auth-token"
+// so that "" here cannot be explained by "that name appears nowhere in the
+// file".
+func TestGetTwitchCredentialsReadsTheTwitchJar(t *testing.T) {
 	jar := loadRows(t, []string{
 		cookieRow(".twitch.tv", "0", "auth-token", "the-real-twitch-token"),
 		cookieRow(".twitch.tv", "0", "login", "the-real-twitch-login"),
 		cookieRow(".youtube.com", "0", "login", "a-youtube-row-wearing-the-twitch-name"),
+		cookieRow(".youtube.com", "0", "auth-token", "another-youtube-row-wearing-a-twitch-name"),
 		cookieRow(".youtube.com", "0", "LOGIN_INFO", "a-youtube-cookie"),
 	})
 
-	if got := jar.GetTwitchLogin(); got != "the-real-twitch-login" {
-		t.Errorf("GetTwitchLogin() = %q, want %q — internal/twitch would hand the IRC client no "+
-			"nickname and the handshake would drop to anonymous without erroring",
-			got, "the-real-twitch-login")
+	token, login := jar.GetTwitchCredentials()
+	if token != "the-real-twitch-token" {
+		t.Errorf("GetTwitchCredentials() token = %q, want %q", token, "the-real-twitch-token")
 	}
-	// The pair must come from one place: both accessors read the twitch jar.
-	if got := jar.GetTwitchAuthToken(); got != "the-real-twitch-token" {
-		t.Errorf("GetTwitchAuthToken() = %q, want %q", got, "the-real-twitch-token")
+	if login != "the-real-twitch-login" {
+		t.Errorf("GetTwitchCredentials() login = %q, want %q — internal/twitch would hand the IRC "+
+			"client no nickname and the handshake would drop to anonymous without erroring",
+			login, "the-real-twitch-login")
 	}
-	// A jar holding only the YouTube "login" row yields nothing: Load admits
-	// Twitch cookie names on twitch.tv only, so the foreign row is not merely
-	// out-ranked, it is never stored.
+	// GetTwitchAuthToken is the same fact by another route; both must agree, so
+	// a change that fixes one and not the other cannot pass.
+	if got := jar.GetTwitchAuthToken(); got != token {
+		t.Errorf("GetTwitchAuthToken() = %q, want the paired accessor's %q", got, token)
+	}
+	// A jar holding only the YouTube rows yields nothing: Load admits Twitch
+	// cookie names on twitch.tv only, so the foreign rows are not merely
+	// out-ranked, they are never stored.
 	ytOnly := loadRows(t, []string{
 		cookieRow(".youtube.com", "0", "login", "a-youtube-row-wearing-the-twitch-name"),
+		cookieRow(".youtube.com", "0", "auth-token", "another-youtube-row-wearing-a-twitch-name"),
 		cookieRow(".youtube.com", "0", "LOGIN_INFO", "a-youtube-cookie"),
 	})
-	if got := ytOnly.GetTwitchLogin(); got != "" {
-		t.Errorf("GetTwitchLogin() = %q on a YouTube-only jar, want empty", got)
+	if token, login := ytOnly.GetTwitchCredentials(); token != "" || login != "" {
+		t.Errorf("GetTwitchCredentials() = (%q, %q) on a YouTube-only jar, want both empty",
+			token, login)
+	}
+}
+
+// TestGetTwitchCredentialsIsAtomicAcrossReload is the claim the paired accessor
+// exists for: the two halves are read under ONE RLock, so no concurrent Reload
+// can be observed halfway.
+//
+// Reload swaps the jar's maps under Lock from the refresh loop, the Twitch
+// service and the YouTube auth path — all goroutines other than the one running
+// an IRC handshake. Two separate accessors could therefore straddle the swap
+// and pair one account's token with another's login: a session that
+// authenticates as neither, and whose failure is silent.
+//
+// The fixture accounts are chosen so a torn pair is *detectable*: token and
+// login always carry the same account suffix, so any observed pair whose halves
+// disagree can only have come from two different jar states. Run under -race,
+// this also fails on an unsynchronised read.
+func TestGetTwitchCredentialsIsAtomicAcrossReload(t *testing.T) {
+	// Three complete account files, written once. The reload loop below then
+	// costs a small read plus a parse — no write — which is what makes the swap
+	// frequent enough relative to the reads for a two-lock reader to be caught
+	// reliably rather than once in a hundred thousand tries.
+	dir := t.TempDir()
+	accounts := []string{"alpha", "beta", "gamma"}
+	paths := make([]string, len(accounts))
+	for i, account := range accounts {
+		paths[i] = filepath.Join(dir, "cookies-"+account+".txt")
+		content := "# Netscape HTTP Cookie File\n" +
+			cookieRow(".twitch.tv", "0", "auth-token", "token-"+account) + "\n" +
+			cookieRow(".twitch.tv", "0", "login", "login-"+account) + "\n"
+		if err := os.WriteFile(paths[i], []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	jar := NewCookieJar()
+	if err := jar.Load(paths[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	var writer, readers sync.WaitGroup
+
+	// Writer: swaps the jar between whole accounts as fast as it can. Errors
+	// are counted rather than raised — t.Fatal is not valid off the test
+	// goroutine.
+	var loadErrs, swaps atomic.Int64
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := jar.Load(paths[i%len(paths)]); err != nil {
+				loadErrs.Add(1)
+				return
+			}
+			swaps.Add(1)
+		}
+	}()
+
+	// Readers: every pair they observe must name ONE account. More goroutines
+	// than a typical core count, so the scheduler preempts between whatever
+	// lock acquisitions the accessor makes.
+	var torn, observed atomic.Int64
+	for range 8 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for range 200000 {
+				token, login := jar.GetTwitchCredentials()
+				if token == "" || login == "" {
+					continue // never expected here; not what this test is about
+				}
+				observed.Add(1)
+				if strings.TrimPrefix(token, "token-") != strings.TrimPrefix(login, "login-") {
+					torn.Add(1)
+				}
+			}
+		}()
+	}
+
+	readers.Wait()
+	close(stop)
+	writer.Wait()
+
+	if n := loadErrs.Load(); n != 0 {
+		t.Fatalf("the rotating loader failed %d times; the race window was never opened", n)
+	}
+	// Both sides must actually have run, or a green result means nothing.
+	if observed.Load() == 0 {
+		t.Fatal("no credential pair was ever observed; the test proved nothing")
+	}
+	if swaps.Load() < 100 {
+		t.Fatalf("only %d jar swaps happened during %d reads; the race window was too narrow for "+
+			"this test to prove anything", swaps.Load(), observed.Load())
+	}
+	if n := torn.Load(); n != 0 {
+		t.Errorf("observed %d torn (token, login) pairs out of %d — the two halves were read under "+
+			"separate locks, so a concurrent Reload paired one account's token with another's login",
+			n, observed.Load())
 	}
 }
 

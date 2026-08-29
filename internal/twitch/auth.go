@@ -40,23 +40,26 @@ func (a *Auth) GetAuthToken() string {
 	return a.cookieJar.GetCookie("auth-token")
 }
 
-// GetLogin extracts the login (account name) from the cookie jar.
+// GetCredentials extracts the auth-token and the account name it belongs to,
+// as one atomic pair.
 //
-// The IRC handshake needs it: NICK identifies the session's user and Twitch
+// The IRC handshake needs both: NICK identifies the session's user and Twitch
 // binds the OAuth token to it, so an authenticated session must send the
-// account's own nickname rather than the anonymous justinfan one.
+// account's own nickname rather than the anonymous justinfan one. Reading them
+// through two accessors would let a concurrent jar Reload pair one session's
+// token with another's login — see CookieJar.GetTwitchCredentials, which does
+// the reading under a single RLock so this cannot happen.
 //
-// The cookie is preferred over the authoritative login in ValidateToken's
-// response because it is local: the IRC connect path must work when the
-// network is flaky, and caching a validated login would add a lifecycle to
-// get wrong. Both values come from the same cookie file as the auth-token, so
-// the pair belongs to one session unless the file was hand-edited across
-// accounts — in which case the login is simply rejected, visibly.
-func (a *Auth) GetLogin() string {
+// The login cookie is preferred over the authoritative login in ValidateToken's
+// response because it is local: the IRC connect path must work when the network
+// is flaky, and caching a validated login would add a lifecycle to get wrong.
+// Both values come from the same cookie file as each other, so the pair belongs
+// to one session unless the file was hand-edited across accounts.
+func (a *Auth) GetCredentials() (token, login string) {
 	if a.cookieJar == nil {
-		return ""
+		return "", ""
 	}
-	return a.cookieJar.GetTwitchLogin()
+	return a.cookieJar.GetTwitchCredentials()
 }
 
 // HasAuthToken returns true if a Twitch auth token is available.

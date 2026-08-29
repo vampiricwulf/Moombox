@@ -48,12 +48,65 @@ const anonymousIRCPass = "PASS SCHMOOPIIE"
 // The nick is lowercased: IRC nicknames are case-insensitive and Twitch
 // expects the lowercase login.
 //
+// The returned `authenticated` says which of the two handshakes was rendered.
+// It is the same decision, reported rather than re-derived: the caller needs it
+// to know whether a session that never got RPL_WELCOME was a refused login (see
+// noteHandshakeOutcome), and re-testing the credentials at that point could
+// disagree with what was actually sent.
+//
 // Neither argument is ever logged.
-func ircHandshakeLines(token, login string) (pass, nick string) {
+func ircHandshakeLines(token, login string) (pass, nick string, authenticated bool) {
 	if token != "" && login != "" && !strings.ContainsAny(login, " \t\r\n\x00") {
-		return "PASS oauth:" + token, "NICK " + strings.ToLower(login)
+		return "PASS oauth:" + token, "NICK " + strings.ToLower(login), true
 	}
-	return anonymousIRCPass, fmt.Sprintf("NICK justinfan%d", rand.IntN(100000))
+	return anonymousIRCPass, fmt.Sprintf("NICK justinfan%d", rand.IntN(100000)), false
+}
+
+// ircCommandOf returns an IRC line's command word — "001", "NOTICE",
+// "PRIVMSG" — and everything after it, skipping IRCv3 tags and the sender
+// prefix. Both are "" for a line with no command.
+//
+// Deliberately minimal. It exists for the two facts noteHandshakeOutcome needs
+// and nothing else; the message parser proper is parseLine.
+func ircCommandOf(line string) (cmd, params string) {
+	if after, ok := strings.CutPrefix(line, "@"); ok {
+		_, rest, found := strings.Cut(after, " ")
+		if !found {
+			return "", ""
+		}
+		line = rest
+	}
+	if strings.HasPrefix(line, ":") {
+		_, rest, found := strings.Cut(line, " ")
+		if !found {
+			return "", ""
+		}
+		line = rest
+	}
+	cmd, params, _ = strings.Cut(line, " ")
+	return cmd, params
+}
+
+// ircIsWelcome reports whether a line is RPL_WELCOME, the numeric Twitch sends
+// once it has accepted the login. Its arrival is the only positive proof the
+// handshake was taken; its absence is what noteHandshakeOutcome acts on.
+func ircIsWelcome(line string) bool {
+	cmd, _ := ircCommandOf(line)
+	return cmd == "001"
+}
+
+// ircIsLoginFailureNotice recognises the two NOTICE texts Twitch sends when it
+// refuses a login. This is NOT a general NOTICE parser and must not become one:
+// it exists only so the fallback's single Warn can say Twitch spoke, rather
+// than merely that nothing arrived. The command is checked so a chat message
+// quoting either phrase cannot masquerade as one.
+func ircIsLoginFailureNotice(line string) bool {
+	cmd, params := ircCommandOf(line)
+	if cmd != "NOTICE" {
+		return false
+	}
+	return strings.Contains(params, "Login authentication failed") ||
+		strings.Contains(params, "Login unsuccessful")
 }
 
 // runIRCSession runs a single IRC connection session.
@@ -85,17 +138,37 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 
 	conn.SetReadLimit(512 * 1024) // 512KB cap on incoming IRC messages
 
-	// Authenticate. Both credentials are read HERE, per session, so a
-	// reconnect that happens hours into a stream presents whatever the jar
-	// holds now rather than what was captured at construction — and ONE call
-	// decides both lines, so the two can never disagree about whether this
-	// session is authenticated.
-	pass, nick := ircHandshakeLines(cd.currentAuthToken(), cd.currentLogin())
+	// Authenticate. The credentials are read HERE, per session, so a reconnect
+	// that happens hours into a stream presents whatever the jar holds now
+	// rather than what was captured at construction — and they arrive from ONE
+	// call, so the token and the login always describe the same session even if
+	// a Reload lands mid-handshake on another goroutine. ONE more call turns
+	// them into both wire lines, so the two can never disagree about whether
+	// this session is authenticated.
+	token, login := cd.sessionCredentials()
+	pass, nick, authenticated := ircHandshakeLines(token, login)
 	if err := conn.Write(sessionCtx, websocket.MessageText, []byte(pass)); err != nil {
 		return fmt.Errorf("IRC PASS failed: %w", err)
 	}
 	if err := conn.Write(sessionCtx, websocket.MessageText, []byte(nick)); err != nil {
 		return fmt.Errorf("IRC NICK failed: %w", err)
+	}
+
+	// A credentialed session that ends without RPL_WELCOME had its login
+	// refused; fall back to anonymous for the rest of the job rather than
+	// spending the reconnect budget on a handshake that cannot succeed. Skipped
+	// when WE ended the session — a caller cancel or a Stop/MarkStreamEnded is
+	// not a refusal, and neither is the immediate return below when the
+	// downloader was never started.
+	welcomed := false
+	sawLoginFailure := false
+	if authenticated {
+		defer func() {
+			if ctx.Err() != nil || !cd.IsRunning() {
+				return
+			}
+			cd.noteHandshakeOutcome(welcomed, sawLoginFailure)
+		}()
 	}
 
 	// Request capabilities
@@ -179,6 +252,18 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		for line := range lines {
 			if line == "" {
 				continue
+			}
+
+			// Handshake outcome. Only tracked for a credentialed session —
+			// the anonymous one is always accepted and has no fallback to
+			// take — and only until 001 lands, after which nothing can
+			// change the verdict.
+			if authenticated && !welcomed {
+				if ircIsWelcome(line) {
+					welcomed = true
+				} else if ircIsLoginFailureNotice(line) {
+					sawLoginFailure = true
+				}
 			}
 
 			// Handle PING

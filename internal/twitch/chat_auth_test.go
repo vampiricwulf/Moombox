@@ -95,24 +95,54 @@ func runOneIRCSession(t *testing.T, cd *ChatDownloader) {
 }
 
 // newAuthTestChatDownloader builds an IRC downloader with the given credential
-// getters and nothing else that touches disk.
-func newAuthTestChatDownloader(t *testing.T, token, login func() string) *ChatDownloader {
+// getter and nothing else that touches disk.
+func newAuthTestChatDownloader(t *testing.T, credentials func() (string, string)) *ChatDownloader {
+	t.Helper()
+	return newAuthTestChatDownloaderWithLogger(t, credentials, &testLogger{})
+}
+
+// newAuthTestChatDownloaderWithLogger is the same, with a logger the caller can
+// inspect.
+func newAuthTestChatDownloaderWithLogger(t *testing.T, credentials func() (string, string), logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) *ChatDownloader {
 	t.Helper()
 	return NewChatDownloader(ChatDownloaderOptions{
 		ChannelLogin:   "testchan",
 		ChannelDisplay: "TestChan",
 		StreamID:       "stream-1",
-		AuthToken:      token,
-		Login:          login,
+		Credentials:    credentials,
 		OutputPath:     filepath.Join(t.TempDir(), "chat.json"),
-	}, &testLogger{})
+	}, logger)
 }
 
-// staticGetter is a credential that never changes.
-func staticGetter(v string) func() string { return func() string { return v } }
+// staticCredentials is a credential pair that never changes.
+func staticCredentials(token, login string) func() (string, string) {
+	return func() (string, string) { return token, login }
+}
+
+// credentialSequence yields pairs in order, repeating the last once exhausted —
+// a stand-in for credentials that rotate underneath a running job. The pair is
+// produced by ONE call, so a test can never accidentally observe a half-rotated
+// state the production getter cannot produce either.
+func credentialSequence(pairs ...[2]string) func() (string, string) {
+	var mu sync.Mutex
+	i := 0
+	return func() (string, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		p := pairs[min(i, len(pairs)-1)]
+		i++
+		return p[0], p[1]
+	}
+}
 
 // tokenSequence yields values in order, repeating the last once exhausted —
-// a stand-in for a credential that rotates underneath a running job.
+// a stand-in for a credential that rotates underneath a running job. Used by
+// the VOD comment path, which is bearer-only and has no pair to protect.
 func tokenSequence(values ...string) func() string {
 	var mu sync.Mutex
 	i := 0
@@ -185,7 +215,7 @@ func assertNotOnTheWire(t *testing.T, lines []string, secret string) {
 // PASS line passes in exactly that broken state.
 func TestIRCHandshakeAuthenticatesUnderTheAccountNickname(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t, staticGetter("token-one"), staticGetter("archiveraccount"))
+	cd := newAuthTestChatDownloader(t, staticCredentials("token-one", "archiveraccount"))
 
 	runOneIRCSession(t, cd)
 	pass, nick := handshakeLines(t, rec.nextSession(t))
@@ -204,7 +234,7 @@ func TestIRCHandshakeAuthenticatesUnderTheAccountNickname(t *testing.T) {
 // produce the canonical nick.
 func TestIRCHandshakeLowercasesTheNickname(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t, staticGetter("token-one"), staticGetter("ArchiverAccount"))
+	cd := newAuthTestChatDownloader(t, staticCredentials("token-one", "ArchiverAccount"))
 
 	runOneIRCSession(t, cd)
 	pass, nick := handshakeLines(t, rec.nextSession(t))
@@ -224,7 +254,9 @@ func TestIRCHandshakeLowercasesTheNickname(t *testing.T) {
 // passes without the fix.
 func TestIRCHandshakeReadsTokenPerSession(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t, tokenSequence("token-one", "token-two"), staticGetter("archiveraccount"))
+	cd := newAuthTestChatDownloader(t, credentialSequence(
+		[2]string{"token-one", "archiveraccount"},
+		[2]string{"token-two", "archiveraccount"}))
 
 	runOneIRCSession(t, cd)
 	firstPass, firstNick := handshakeLines(t, rec.nextSession(t))
@@ -251,9 +283,9 @@ func TestIRCHandshakeReadsTokenPerSession(t *testing.T) {
 // identifying the session as the previous account while the PASS line moved on.
 func TestIRCHandshakeReadsLoginPerSession(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t,
-		staticGetter("token-one"),
-		tokenSequence("firstaccount", "secondaccount"))
+	cd := newAuthTestChatDownloader(t, credentialSequence(
+		[2]string{"token-one", "firstaccount"},
+		[2]string{"token-one", "secondaccount"}))
 
 	runOneIRCSession(t, cd)
 	_, firstNick := handshakeLines(t, rec.nextSession(t))
@@ -275,7 +307,7 @@ func TestIRCHandshakeReadsLoginPerSession(t *testing.T) {
 // an error.
 func TestIRCHandshakeNilGettersLogInAnonymously(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t, nil, nil)
+	cd := newAuthTestChatDownloader(t, nil)
 
 	runOneIRCSession(t, cd)
 
@@ -285,7 +317,7 @@ func TestIRCHandshakeNilGettersLogInAnonymously(t *testing.T) {
 // TestIRCHandshakeEmptyGettersLogInAnonymously preserves the != "" guards.
 func TestIRCHandshakeEmptyGettersLogInAnonymously(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t, staticGetter(""), staticGetter(""))
+	cd := newAuthTestChatDownloader(t, staticCredentials("", ""))
 
 	runOneIRCSession(t, cd)
 
@@ -300,7 +332,7 @@ func TestIRCHandshakeEmptyGettersLogInAnonymously(t *testing.T) {
 // The token must therefore not appear anywhere in the handshake at all.
 func TestIRCHandshakeTokenWithoutLoginIsFullyAnonymous(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t, staticGetter("token-without-an-account"), staticGetter(""))
+	cd := newAuthTestChatDownloader(t, staticCredentials("token-without-an-account", ""))
 
 	runOneIRCSession(t, cd)
 	lines := rec.nextSession(t)
@@ -315,7 +347,7 @@ func TestIRCHandshakeTokenWithoutLoginIsFullyAnonymous(t *testing.T) {
 // cannot prove.
 func TestIRCHandshakeLoginWithoutTokenIsFullyAnonymous(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t, staticGetter(""), staticGetter("archiveraccount"))
+	cd := newAuthTestChatDownloader(t, staticCredentials("", "archiveraccount"))
 
 	runOneIRCSession(t, cd)
 	lines := rec.nextSession(t)
@@ -342,7 +374,7 @@ func TestIRCHandshakeUnsendableLoginIsFullyAnonymous(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := startIRCRecorder(t, 4)
-			cd := newAuthTestChatDownloader(t, staticGetter("token-one"), staticGetter(tc.login))
+			cd := newAuthTestChatDownloader(t, staticCredentials("token-one", tc.login))
 
 			runOneIRCSession(t, cd)
 			lines := rec.nextSession(t)
@@ -360,9 +392,9 @@ func TestIRCHandshakeUnsendableLoginIsFullyAnonymous(t *testing.T) {
 // reconnect instead of staying anonymous for the rest of the stream.
 func TestIRCHandshakeRecoversFromAnonymousWhenCredentialsArrive(t *testing.T) {
 	rec := startIRCRecorder(t, 4)
-	cd := newAuthTestChatDownloader(t,
-		tokenSequence("", "token-imported-mid-job"),
-		tokenSequence("", "archiveraccount"))
+	cd := newAuthTestChatDownloader(t, credentialSequence(
+		[2]string{"", ""},
+		[2]string{"token-imported-mid-job", "archiveraccount"}))
 
 	runOneIRCSession(t, cd)
 	firstLines := rec.nextSession(t)
@@ -514,15 +546,15 @@ func jarLoadedFrom(t *testing.T, path string) *cookies.CookieJar {
 	return jar
 }
 
-// TestAuthGettersAreUsableGetters pins the composition the worker construction
-// site relies on: twitch.Auth.GetAuthToken and twitch.Auth.GetLogin taken as
-// METHOD VALUES both track the jar, so re-importing cookies underneath a live
-// downloader changes BOTH halves of what the next reconnect presents.
+// TestAuthCredentialsGetterIsUsable pins the composition the worker
+// construction site relies on: twitch.Auth.GetCredentials taken as a METHOD
+// VALUE tracks the jar, so re-importing cookies underneath a live downloader
+// changes BOTH halves of what the next reconnect presents.
 //
-// Both getters, one jar, one rewrite: an account switch moves the token and the
+// One getter, one jar, one rewrite: an account switch moves the token and the
 // login together, and a reconnect that picked up one but not the other would
 // present the new session's credential under the old session's identity.
-func TestAuthGettersAreUsableGetters(t *testing.T) {
+func TestAuthCredentialsGetterIsUsable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cookies.txt")
 	writeTwitchCookieFile(t, path, "synthetic-token-before", "accountbefore")
@@ -532,7 +564,7 @@ func TestAuthGettersAreUsableGetters(t *testing.T) {
 
 	rec := startIRCRecorder(t, 4)
 	// Exactly what internal/worker now assigns to AuthToken and Login.
-	cd := newAuthTestChatDownloader(t, auth.GetAuthToken, auth.GetLogin)
+	cd := newAuthTestChatDownloader(t, auth.GetCredentials)
 
 	runOneIRCSession(t, cd)
 	firstPass, firstNick := handshakeLines(t, rec.nextSession(t))

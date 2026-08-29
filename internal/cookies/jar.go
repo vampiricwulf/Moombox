@@ -127,11 +127,17 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 
 // Load reads and parses a Netscape cookie file.
 //
-// The file is fully read and parsed into a new map before the jar's live state
-// is replaced. This way a transient read error (EIO, permission flip) cannot
-// silently wipe authentication that was valid a moment ago — either the load
-// fully succeeds and swaps in the new map, or the previous state is left
-// intact. A not-exist file is still treated as an empty jar.
+// The file is fully read and parsed into fresh per-platform maps before the
+// jar's live state is replaced. This way a transient read error (EIO,
+// permission flip) cannot silently wipe authentication that was valid a moment
+// ago — either the load fully succeeds and swaps in both new maps, or the
+// previous state is left intact. A not-exist file is still treated as an empty
+// jar.
+//
+// Both maps are swapped under ONE Lock, so no reader can observe a jar holding
+// the new YouTube rows beside the old Twitch ones. Accessors that need two
+// values to agree must take a single RLock to match — see GetTwitchCredentials
+// and YouTubeIdentity.
 //
 // Load CAPTURES the expiry column; it deliberately does NOT filter on it. Two
 // reasons, both load-bearing:
@@ -144,7 +150,7 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 //   - Dropping rows here would silently change what GetCookieHeader sends.
 //
 // The jar loads what the file says. Expiry is a diagnostic
-// (ExpiredAuthCookies / AuthCookieHorizon), not a gate.
+// (ExpiredAuthCookiesFor / AuthCookieHorizonFor), not a gate.
 func (j *CookieJar) Load(filePath string) error {
 	// Snapshot logger once; the field is protected by the mutex.
 	j.mu.RLock()
@@ -762,24 +768,34 @@ func (j *CookieJar) HasTwitchAuthCookies() bool {
 	return j.GetTwitchAuthToken() != ""
 }
 
-// GetTwitchLogin returns the Twitch "login" cookie value — the account name
-// Twitch's own web client stores beside the auth-token.
+// GetTwitchCredentials returns the auth-token and the "login" account name it
+// belongs to, read together under ONE RLock.
 //
-// It is the NICK half of the IRC handshake. Twitch binds an IRC session to the
-// token's user through NICK, so a session that presents `PASS oauth:<token>`
-// must present that account's own nickname; pairing a real token with the
-// anonymous `justinfan<random>` convention is either refused or silently
-// downgraded to an anonymous session (see internal/twitch/chat_irc.go).
+// They are returned as a pair because they are USED as a pair, and because a
+// pair read under two locks is not a pair. internal/twitch/chat_irc.go builds
+// one IRC handshake out of both — `PASS oauth:<token>` binds the session to a
+// user and `NICK <login>` names that user — so a token from one account beside
+// a login from another authenticates as neither. That interleaving is
+// reachable: Reload swaps the jar's maps under Lock from the refresh loop, the
+// Twitch service and the YouTube auth path, all on goroutines other than the
+// one running the handshake, and a reconnect hours into a stream re-reads both
+// values at exactly that moment.
 //
-// Read from the TWITCH jar, so it comes from the same rows as
-// GetTwitchAuthToken and the two belong to one session by construction. There
-// is no platform parameter because this cookie exists on one platform only.
+// This is the same discipline YouTubeIdentity uses for the same reason (see the
+// ONE-RLock note there): two reads that must describe one session cannot be two
+// calls.
 //
-// Never log, print or persist the result: it names the signed-in account.
-func (j *CookieJar) GetTwitchLogin() string {
+// Read from the TWITCH jar, so both come from the same rows. There is no
+// platform parameter because neither cookie exists on another platform. Either
+// half may be "" — a jar with a token and no login is not authenticated, and
+// chat_irc.go treats it as fully anonymous rather than as half a session.
+//
+// Never log, print or persist either value: one is a credential and the other
+// names the signed-in account.
+func (j *CookieJar) GetTwitchCredentials() (token, login string) {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	return j.twitch["login"].value
+	return j.twitch["auth-token"].value, j.twitch["login"].value
 }
 
 // IsEmpty returns true when NEITHER platform's jar holds a cookie. A file that
