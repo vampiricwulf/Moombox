@@ -124,14 +124,32 @@ func twitchChatDowngradeReason(reason string) string {
 // getter, or to a chat line, so no title, description, or field can carry a
 // token, a login, or a viewer's message. The check is structural; the test that
 // asserts on the rendered payload is the second lock, not the first.
+//
+// The description names the VIDEO consequence as well as the chat one, and that
+// sentence is the part an operator acts on. Chat is where the broken credential
+// is DETECTED, not the extent of what it costs. The playback access token is
+// fetched once per capture — Service.GetHLSMasterPlaylist calls
+// GetStreamAccessToken with whatever auth-token the jar held at that moment —
+// and the signed playlist is then polled without re-checking it, so THIS
+// download keeps the entitlements it was issued and finishes normally. The next
+// one does not: it requests its token anonymously, and an anonymous token is
+// served stitched ads, which the downloader skips (correctly — the real feed
+// is not served during the break) leaving a timestamp jump in the archive, and
+// is refused outright on subscriber-only content.
+//
+// A notice that said "chat only" would therefore be read as "no rush", and the
+// cost of that misreading lands silently: an archive with holes in it, hours
+// later, with nothing above Info in the log to explain them.
 func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
 	title, description string, fields []notifications.Field, opts notifications.SendOptions,
 ) {
 	title = "Twitch chat is anonymous for " + channel
 	description = twitchChatDowngradeReason(reason) +
 		" Chat is still being recorded, but subscriber-only messages and badges will be missing " +
-		"for this job. Re-export cookies from a browser signed in to Twitch, or run R F (Force " +
-		"Cookie Refresh)."
+		"for this job. This download is unaffected — its playback token was already issued — but " +
+		"the NEXT capture will start anonymous: expect ad-break gaps in the archive, and outright " +
+		"failure on subscriber-only content, until the cookies are fixed. Re-export cookies from " +
+		"a browser signed in to Twitch, or run R F (Force Cookie Refresh)."
 	fields = []notifications.Field{
 		{Name: "Channel", Value: channel, Inline: true},
 		{Name: "Job", Value: job.ID, Inline: true},
@@ -150,9 +168,10 @@ func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
 
 // sendTwitchChatDowngrade delivers exactly one downgrade notice through send.
 //
-// TypeWarning, not TypeError: the capture is still running and still producing a
-// usable archive. Nothing is lost that a re-export cannot restore for the NEXT
-// job, and dressing a degradation as a failure trains an operator to ignore it.
+// TypeWarning, not TypeError: nothing has failed. This job's capture is running
+// and will produce a usable archive; what the notice is about is a credential
+// that will not serve the NEXT one. Dressing a degradation as a failure trains
+// an operator to ignore the ones that are.
 //
 // nil send is the no-notifier install and is not an error — every other
 // notification site in this package is guarded the same way.
@@ -164,26 +183,40 @@ func sendTwitchChatDowngrade(send notifySend, job *database.Job, channel, reason
 	send(title, description, notifications.TypeWarning, fields, opts)
 }
 
+// notifierSend resolves the notification manager to a send seam, or nil when
+// none is wired.
+//
+// Read at CALL time rather than captured. The field is written once, by
+// SetNotifier during worker construction and long before any job goroutine
+// exists, so this read races nothing; and a config hot-reload swaps the
+// manager's TARGET LIST rather than the pointer, so a notice reaches whatever
+// webhooks are configured when it fires rather than whatever was configured
+// when the stream started.
+func (sp *StreamProcessor) notifierSend() notifySend {
+	if sp.notifier == nil {
+		return nil
+	}
+	return sp.notifier.Send
+}
+
 // twitchChatDowngradeCallback builds the OnAuthDowngrade callback for one live
 // chat downloader.
+//
+// resolve is called at FIRE time and yields the send seam, or nil for the
+// no-notifier install. Injecting the LOOKUP rather than the sender is what makes
+// this closure the same object in production and under test — and the closure is
+// the one place a reason could be dropped, rewritten, or replaced by a constant
+// on its way from the downloader to the payload, which is a defect no test that
+// calls sendTwitchChatDowngrade directly can see. The production lookup is
+// StreamProcessor.notifierSend, whose nil arm is driven by its own test.
 //
 // The downloader guarantees at most one call per job, so there is no dedup here
 // — and dedup ACROSS jobs is deliberately absent: a second job on the same
 // channel an hour later with the same dead cookies must notify again, because
 // by then the operator may believe they fixed it.
-//
-// sp.notifier is read at FIRE time rather than captured into the closure. The
-// field is written once, by SetNotifier during worker construction and long
-// before any job goroutine exists, so this read races nothing; and a config
-// hot-reload swaps the manager's TARGET LIST rather than the pointer, so the
-// notice reaches whatever webhooks are configured when it fires rather than
-// whatever was configured when the stream started.
-func (sp *StreamProcessor) twitchChatDowngradeCallback(job *database.Job, channel string) func(reason string) {
+func twitchChatDowngradeCallback(resolve func() notifySend, job *database.Job, channel string) func(reason string) {
 	return func(reason string) {
-		if sp.notifier == nil {
-			return
-		}
-		sendTwitchChatDowngrade(sp.notifier.Send, job, channel, reason)
+		sendTwitchChatDowngrade(resolve(), job, channel, reason)
 	}
 }
 
@@ -466,7 +499,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				// operator is already looking. Fires only when this job HAD
 				// credentials — a cookieless install captures chat anonymously
 				// by design and must never be notified about it.
-				OnAuthDowngrade: sp.twitchChatDowngradeCallback(job, chatChannel),
+				OnAuthDowngrade: twitchChatDowngradeCallback(sp.notifierSend, job, chatChannel),
 				EmoteResolver:   sp.tw.Emotes,
 			}, sp.logger)
 
