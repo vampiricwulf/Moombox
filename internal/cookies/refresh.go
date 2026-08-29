@@ -148,6 +148,57 @@ type cookieUpdate struct {
 	Delete bool
 }
 
+// cookieOrigin names the SITE whose response produced a batch of cookie
+// updates, stated as that site's registrable domain.
+//
+// It exists because a Set-Cookie with no Domain= attribute is host-scoped to
+// the response that carried it, and by the time the updates reach
+// updateCookieFile that response is gone: the map holds a nil Domain and
+// nothing else. Two of the matching rules need to know where it came from
+// anyway — resolveRowUpdate's rule 2 and sameCookiePlatform's Domain-less
+// default — and both used to assume youtube.com, which was a true statement
+// about the ONE call site rather than about those functions. Declaring it makes
+// the assumption an argument.
+//
+// The three constants are the complete set. The zero value names no site and is
+// deliberately inert: covers reports false for every row and platform reports
+// nothing, so a caller that forgets to declare an origin gets the NARROWEST
+// behaviour (only updates whose own Domain= scope-matches a row apply) rather
+// than inheriting YouTube's.
+type cookieOrigin string
+
+const (
+	originYouTube cookieOrigin = "youtube.com"
+	originGoogle  cookieOrigin = "google.com"
+	originTwitch  cookieOrigin = "twitch.tv"
+)
+
+// covers reports whether a cookie file row's domain lies inside this origin's
+// site, which is the scope a Domain-less Set-Cookie from it may reach.
+func (o cookieOrigin) covers(rowDomain string) bool {
+	return o != "" && domainMatches(rowDomain, string(o))
+}
+
+// platform reports the credential platform this origin belongs to, in the same
+// vocabulary cookiePlatformOf uses for domains — so originYouTube and
+// originGoogle are one platform, exactly as .youtube.com and .google.com rows
+// are.
+func (o cookieOrigin) platform() string { return cookiePlatformOf(string(o)) }
+
+// cookiePlatformOf maps a domain to its credential platform. YouTube and Google
+// are ONE platform: a Google session covers both, which is why a value refresh
+// is allowed to fan out across them. Twitch is another. A domain on neither has
+// no platform and therefore matches nothing — see sameCookiePlatform.
+func cookiePlatformOf(domain string) string {
+	switch {
+	case isTwitchDomain(domain):
+		return "twitch"
+	case isYouTubeDomain(domain) || isGoogleDomain(domain):
+		return "google"
+	}
+	return ""
+}
+
 // AuthStatus tracks the authentication state for each platform.
 //
 // The two *Authenticated booleans and the two *Verification verdicts answer
@@ -1733,11 +1784,40 @@ func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeade
 	return nil
 }
 
-// checkYouTubeAuth asks YouTube whether the jar's session is still signed in.
+// youtubeGuideExchange makes the guide POST that both YouTube auth entry points
+// are built on, and hands the verdict AND the response back to its caller. It
+// never acts on the response itself, and that is the whole reason it has this
+// shape.
 //
-// Its three entry gates appear identically in checkAndRefreshYouTube and
-// encode one rule — the rule this subsystem kept getting wrong. Only the
-// FIRST of them may answer (false, nil).
+// # Why it returns the response instead of using it
+//
+// checkYouTubeAuth is exported as CheckYouTubeAuth and wired into
+// AutoCookieService.VerifyYouTubeAuth (cmd/moombox/services.go), where
+// checkPlatformAuth runs it on the ROLLBACK path of a profile import: its answer
+// is what decides whether the PREVIOUS cookies are restored. A shared exchange
+// that merged Set-Cookie headers itself would therefore write the jar from the
+// very response being used to judge the import — a bad import would rewrite the
+// credentials it was about to be rolled back for, and the rollback would then
+// restore them over a file that had already moved.
+//
+// So the write decision stays with the caller that owns it. This function reads
+// the jar and never writes it; only checkAndRefreshYouTube calls
+// processYouTubeSetCookies, and only on its own authenticated path. The
+// invariant is structural rather than a matter of discipline: there is no jar
+// write reachable from here to delete.
+//
+// The returned response has already had its body read to a verdict and CLOSED,
+// so only its headers are still meaningful — which is all
+// processYouTubeSetCookies reads. It is non-nil exactly when a request was made
+// and a readable answer came back. Every error path returns nil, and so does the
+// never-configured gate, which is what makes "a reply we could not read is not a
+// reply anyone may write the jar from" a fact about the return values rather
+// than a rule someone has to remember.
+//
+// # The gates
+//
+// The three entry gates encode one rule — the rule this subsystem kept getting
+// wrong. Only the FIRST of them may answer (false, nil).
 //
 //   - Nothing configured at all — no session to have an opinion about, so a
 //     silent "not authenticated" is the truth and shouldFireRecovery's
@@ -1745,42 +1825,47 @@ func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeade
 //   - Configured but no request could be built — a check that did NOT happen.
 //     (false, nil) would report it as dead credentials, so it errors instead.
 //
-// Everything in between now reaches the network. In particular a jar with
-// SAPISID and a cleared LOGIN_INFO — YouTube's own rotation-invalidation
-// state — is CONFIGURED with BROKEN credentials, and its verdict has to come
-// from YouTube rather than from a missing name in a map.
-func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
+// Everything in between reaches the network. In particular a jar with SAPISID
+// and a cleared LOGIN_INFO — YouTube's own rotation-invalidation state — is
+// CONFIGURED with BROKEN credentials, and its verdict has to come from YouTube
+// rather than from a missing name in a map.
+//
+// The order after the request is load-bearing and is asserted in that order:
+// provenance, then status, then body.
+func (rs *RefreshService) youtubeGuideExchange(ctx context.Context, guideURL string) (bool, *http.Response, error) {
 	if !rs.jar.HasAnyYouTubeAuthCookie() {
-		return false, nil // Nothing configured at all.
+		return false, nil, nil // Nothing configured at all.
 	}
 
 	cookieHeader := rs.jar.GetCookieHeader()
 	if cookieHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
+		return false, nil, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
 	}
 
 	origin := "https://www.youtube.com"
 	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
 	if authHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
+		return false, nil, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
 	}
 
-	// POST to YouTube guide endpoint to check auth
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()
 
 	body := youtubeGuideRequestBody()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideURL+"?prettyPrint=false", strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guideURL, strings.NewReader(body))
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 
 	setYouTubeHeaders(req, cookieHeader, origin, authHeader)
 
 	resp, err := cookiesHTTPClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("youtube auth check: %w", err)
+		return false, nil, fmt.Errorf("youtube auth check: %w", err)
 	}
+	// Closed here, not by the caller: by the time this returns the body has
+	// been read to a verdict and nothing downstream needs it. The headers
+	// survive the close.
 	defer resp.Body.Close()
 
 	// Before the status, for the same reason internal/youtube checks it first:
@@ -1788,7 +1873,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	// carries, and naming the route is more accurate than naming the code.
 	if err := authResponseIsOurs(resp, req, "Cookie"); err != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, fmt.Errorf("youtube auth check: %w", err)
+		return false, nil, fmt.Errorf("youtube auth check: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -1796,7 +1881,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 		// NOT (false, nil). That means "conclusively not authenticated" to
 		// shouldFireRecovery, so a 429/503/edge block would be reported as
 		// dead credentials. We learned nothing about the session here.
-		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
+		return false, nil, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
 	}
 
 	// YouTube always returns 200 even with invalid cookies, so the verdict has
@@ -1805,93 +1890,54 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	// inconclusive error here, NOT (false, nil).
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
-		return false, fmt.Errorf("read YouTube auth response: %w", err)
+		return false, nil, fmt.Errorf("read YouTube auth response: %w", err)
 	}
 	authenticated, err := youtubeGuideAuthVerdict(respBody)
 	if err != nil {
-		return false, fmt.Errorf("youtube auth check: %w", err)
+		return false, nil, fmt.Errorf("youtube auth check: %w", err)
 	}
-	return authenticated, nil
+	return authenticated, resp, nil
+}
+
+// checkYouTubeAuth asks YouTube whether the jar's session is still signed in,
+// and does nothing else.
+//
+// This is the VERIFY path. It is exported as CheckYouTubeAuth and its answer
+// decides whether an autocookies profile import is committed or ROLLED BACK, so
+// it must not touch the jar — see youtubeGuideExchange's doc comment for why
+// that invariant is expressed by discarding the response here rather than by a
+// guard somewhere inside.
+func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
+	authenticated, _, err := rs.youtubeGuideExchange(ctx, youtubeGuideURL+"?prettyPrint=false")
+	return authenticated, err
 }
 
 // checkAndRefreshYouTube makes a single guide API request to both check
 // YouTube auth status and refresh session cookies from Set-Cookie headers.
 // This avoids the redundancy of separate check + refresh requests.
+//
+// It is the only caller in this file that writes the jar from a guide reply.
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
-	// See the gate commentary above checkYouTubeAuth — same three gates, same
-	// rule about which one may answer (false, nil).
-	if !rs.jar.HasAnyYouTubeAuthCookie() {
-		return false, nil // Nothing configured at all.
+	authenticated, resp, err := rs.youtubeGuideExchange(ctx, youtubeGuideRefreshURL)
+	if err != nil || !authenticated {
+		// Anything short of an authenticated, readable reply stops here without
+		// the jar being touched. Two of those cases are worth naming at the
+		// write decision itself:
+		//
+		//   - Provenance. youtubeGuideExchange runs authResponseIsOurs before
+		//     the status AND before the body, which matters more on THIS path
+		//     than on the verify one: this is where Set-Cookie headers are
+		//     merged back into the jar, and a redirected exchange must not be
+		//     allowed to write to it at all.
+		//   - An unreadable body. A reply we could not read is not a reply we
+		//     may write the jar from, for the same reason a redirected one is
+		//     not: we do not know whose session it describes. Both cases return
+		//     a nil response, so there would be nothing to merge here even if
+		//     this branch were deleted.
+		return authenticated, err
 	}
-
-	cookieHeader := rs.jar.GetCookieHeader()
-	if cookieHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
-	}
-
-	origin := "https://www.youtube.com"
-	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
-	if authHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
-	defer cancel()
-
-	body := youtubeGuideRequestBody()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideRefreshURL, strings.NewReader(body))
-	if err != nil {
-		return false, err
-	}
-
-	setYouTubeHeaders(req, cookieHeader, origin, authHeader)
-
-	resp, err := cookiesHTTPClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("youtube auth check: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Before the status AND before the body, which matters more here than in
-	// checkYouTubeAuth: this function also merges Set-Cookie headers back into
-	// the jar on the authenticated path, and a redirected exchange must not be
-	// allowed to write to it at all.
-	if err := authResponseIsOurs(resp, req, "Cookie"); err != nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, fmt.Errorf("youtube auth check: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		// NOT (false, nil). That means "conclusively not authenticated" to
-		// shouldFireRecovery, so a 429/503/edge block would be reported as
-		// dead credentials. We learned nothing about the session here.
-		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
-	}
-
-	// Read body for auth check
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
-	if err != nil {
-		return false, fmt.Errorf("read YouTube auth response: %w", err)
-	}
-
-	// Same body rule as checkYouTubeAuth, through the same function — these two
-	// are near-duplicates and a rule applied to only one of them is a rule with
-	// a hole in it.
-	authenticated, err := youtubeGuideAuthVerdict(respBody)
-	if err != nil {
-		// No Set-Cookie merge on this path. A reply we could not read is not a
-		// reply we may write the jar from, for the same reason a redirected one
-		// is not: we do not know whose session it describes.
-		return false, fmt.Errorf("youtube auth check: %w", err)
-	}
-
-	// If authenticated, process Set-Cookie headers to refresh session cookies
-	if authenticated {
-		rs.processYouTubeSetCookies(resp)
-	}
-
-	return authenticated, nil
+	rs.processYouTubeSetCookies(resp)
+	return true, nil
 }
 
 // processYouTubeSetCookies parses Set-Cookie headers from a YouTube API response
@@ -2037,7 +2083,10 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 	// deployment mistake that actually causes it — updateCookieFile ends in
 	// writeFileAtomic (temp file + rename), and a rename cannot replace a
 	// single-file bind mount.
-	if err := rs.updateCookieFile(updates); err != nil {
+	// originYouTube: this function is only ever fed a youtube.com guide
+	// response. Stating that is what lets the write path scope a Domain-less
+	// Set-Cookie without assuming where it came from — see updateCookieFile.
+	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
 		rs.logger.Warn("youtube session refresh: failed to update cookie file — rotated session cookies were discarded and the file will go stale",
 			"err", err,
 			"hint", "if this is Docker, do not bind-mount cookies.txt as an individual file; put it inside the mounted /data directory so the atomic rename can replace it")
@@ -2064,7 +2113,24 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 //     the legacy .youtube.com / .google.com heuristic only as a last resort.
 //   - Deletions remove the row. See resolveRowUpdate for why a value refresh
 //     may cross domain variants while a deletion may not.
-func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate) error {
+//
+// origin is the SITE whose response produced these updates, and the caller has
+// to state it because two of the matching rules need it and neither can recover
+// it from the map: a Set-Cookie with no Domain= is host-scoped to the response
+// that carried it, and that response is not in `updates`. resolveRowUpdate's
+// rule 2 and sameCookiePlatform's Domain-less default both used to assume
+// youtube.com, which was a true statement about the single call site rather than
+// about those functions — correct today, and silently wrong in the
+// DESTROY-SCOPE direction the day a second caller appears (the open one being a
+// re-auth ingest response from accounts.google.com, whose unscoped deletions
+// would have reached .youtube.com rows).
+//
+// This parameter is ENFORCEMENT of the existing rule, not a change to it: with
+// originYouTube every case behaves exactly as before. The
+// grow-broadly/destroy-narrowly asymmetry is likewise unchanged and deliberate —
+// name-loose updates re-sync stale twins on purpose, domain-strict deletions
+// keep .google.com auth out of reach of an unscoped YouTube deletion.
+func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin) error {
 	filePath := rs.jar.GetFilePath()
 	if filePath == "" {
 		return fmt.Errorf("no cookie file path configured")
@@ -2103,12 +2169,27 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 			if len(parts) >= 7 {
 				cookieName := strings.TrimSpace(parts[5])
 				rowDomain := strings.TrimPrefix(strings.TrimSpace(parts[0]), "#HttpOnly_")
-				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain); ok {
+				// essentialYouTubeCookies is a set of NAMES, and several of them
+				// (PREF, CONSENT, YSC, LOGIN_INFO, the rotating SIDTS/SIDCC
+				// pair) are not YouTube-exclusive strings — just names YouTube
+				// happens to use. So a row only carries an essential YouTube
+				// cookie when its DOMAIN says so too, the same guard Arc 5 put on
+				// jar.Load and isEssentialCookie.
+				//
+				// Both readers below select log SEVERITY only and gate no
+				// mutation, which is why the unguarded form was not wrong on the
+				// wire. It is guarded because it was the last surviving copy of a
+				// shape this plan has now removed three times, and the next
+				// reader would reasonably lift it somewhere it does decide
+				// something.
+				rowHasEssential := essentialYouTubeCookies[cookieName] &&
+					(isYouTubeDomain(rowDomain) || isGoogleDomain(rowDomain))
+				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain, origin); ok {
 					handled[key] = true
 					if cu.Delete {
 						// Drop the row. Writing it back with an empty value
 						// left a credential-shaped hole nothing could prune.
-						if essentialYouTubeCookies[cookieName] {
+						if rowHasEssential {
 							rs.logger.Info("youtube session refresh: the server deleted an essential cookie — the signed-in session may have ended",
 								"name", cookieName, "domain", rowDomain)
 						} else {
@@ -2150,7 +2231,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 					//     and net/http parses the whole header block before Do
 					//     returns, so a truncated body cannot blank one.)
 					if cu.Value == "" {
-						if essentialYouTubeCookies[cookieName] && strings.Join(parts[6:], "\t") != "" {
+						if rowHasEssential && strings.Join(parts[6:], "\t") != "" {
 							rs.logger.Warn("youtube session refresh: refused to blank an essential cookie — the Set-Cookie carried an empty value but no expiry, so it is not a deletion and the existing value was kept",
 								"name", cookieName, "domain", rowDomain)
 						} else {
@@ -2160,11 +2241,37 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 						result.WriteString("\n")
 						continue
 					}
-					// Rebuild the row as EXACTLY seven tab-separated fields.
-					// CookieJar.Load reads fields 6.. as one value that may
-					// itself contain tabs, so a live row can split into 8+
-					// parts; assigning parts[6] and re-joining left the tail
-					// of the replaced value dangling on the end of the new one.
+					// Rebuild the row from EXACTLY the first seven fields of the
+					// row being replaced, with the new expiry and value
+					// substituted in. That is a claim about the row READ, and it
+					// is the one that matters: CookieJar.Load reads fields 6.. as
+					// one value that may itself contain tabs, so a live row can
+					// arrive split into 8+ parts, and assigning parts[6] and
+					// re-joining left the tail of the replaced value dangling on
+					// the end of the new one.
+					//
+					// It is NOT a claim about the row WRITTEN. A tab inside
+					// cu.Value emits 8+ fields again, and both readers in this
+					// package handle that correctly — CookieJar.Load joins fields
+					// 6.. back into one value, and mergeCookieFiles keys on
+					// fields 0 and 5 and carries the whole line verbatim.
+					//
+					// parts[0] is emitted verbatim, which also settles the
+					// "#HttpOnly_" question for this path: the prefix is
+					// PRESERVED when the existing row carries it and never ADDED
+					// when it does not. For a rewrite the file's own row is the
+					// authority on HttpOnly-ness — it is what a browser export or
+					// a previous insertion recorded — and this path is changing a
+					// value and an expiry, not re-deciding the flag. A
+					// Set-Cookie's HttpOnly attribute only matters on INSERTION,
+					// where no existing row can be that authority and cu.HTTPOnly
+					// is read instead (below). The consequence is that a server
+					// which starts or stops sending HttpOnly for a cookie already
+					// in the file does not flip the prefix; nothing in this
+					// package treats the flag as a control (CookieJar.Load,
+					// rowExpired and mergeCookieFiles all merely strip it, and
+					// the jar does not retain it), so the cost is a stale
+					// annotation rather than a downgraded cookie.
 					result.WriteString(strings.Join([]string{
 						parts[0], parts[1], parts[2], parts[3],
 						strconv.FormatInt(cu.Expiry, 10),
@@ -2275,7 +2382,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 // for one name always name different hosts. Both halves of that normalization
 // are load-bearing — without the lowercasing, ".YouTube.com" and ".youtube.com"
 // are separate keys that both match, and which one wins is map-iteration order.
-func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []cookieUpdateKey, rowDomain string) (cookieUpdateKey, cookieUpdate, bool) {
+func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []cookieUpdateKey, rowDomain string, origin cookieOrigin) (cookieUpdateKey, cookieUpdate, bool) {
 	if len(candidates) == 0 {
 		return cookieUpdateKey{}, cookieUpdate{}, false
 	}
@@ -2286,10 +2393,13 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 		}
 	}
 	// 2. A Set-Cookie with no Domain= is host-scoped to the response that
-	//    carried it, and processYouTubeSetCookies is only ever fed a
-	//    youtube.com API response (single call site). Confining it to YouTube
-	//    rows is what stops an unscoped deletion reaching .google.com auth.
-	if isYouTubeDomain(rowDomain) {
+	//    carried it, so it may only reach rows inside the site the CALLER
+	//    declared that response came from. Confining it that way is what stops
+	//    an unscoped deletion in a youtube.com reply reaching .google.com auth —
+	//    and, the day a second caller exists, an unscoped deletion in a
+	//    google.com reply reaching .youtube.com. An undeclared origin covers
+	//    nothing, so the rule simply does not fire.
+	if origin.covers(rowDomain) {
 		for _, k := range candidates {
 			if k.Domain == "" {
 				return k, updates[k], true
@@ -2302,7 +2412,7 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 	var only cookieUpdateKey
 	refreshes := 0
 	for _, k := range candidates {
-		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain) {
+		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain, origin) {
 			only, refreshes = k, refreshes+1
 		}
 	}
@@ -2317,24 +2427,18 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 // a Google session covers both, which is exactly why a refresh is allowed to
 // fan out across them. Twitch is another, and a row on neither matches nothing.
 //
-// An update with no Domain= counts as the YouTube/Google platform — like rule 2
-// above, that is a property of the single call site (processYouTubeSetCookies
-// is only ever fed a youtube.com API response), not of this function.
-func sameCookiePlatform(updateDomain, rowDomain string) bool {
-	platform := func(d string) string {
-		switch {
-		case isTwitchDomain(d):
-			return "twitch"
-		case isYouTubeDomain(d) || isGoogleDomain(d):
-			return "google"
-		}
-		return ""
-	}
-	up := "google"
+// An update with no Domain= counts as the platform of the site the CALLER
+// declared the response came from. Like rule 2 in resolveRowUpdate, that is a
+// property of the call site and not of this function, which is why it arrives as
+// a parameter instead of the hardcoded "google" that used to stand here. An
+// undeclared origin has no platform, so a Domain-less update matches nothing —
+// the narrow direction, which is the safe one.
+func sameCookiePlatform(updateDomain, rowDomain string, origin cookieOrigin) bool {
+	up := origin.platform()
 	if updateDomain != "" {
-		up = platform(updateDomain)
+		up = cookiePlatformOf(updateDomain)
 	}
-	return up != "" && up == platform(rowDomain)
+	return up != "" && up == cookiePlatformOf(rowDomain)
 }
 
 // sameCookieScope reports whether two domain strings name the same host. The

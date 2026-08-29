@@ -40,7 +40,12 @@ func TestUpdateCookieFileReplacesDuplicateRows(t *testing.T) {
 	updates := map[cookieUpdateKey]cookieUpdate{
 		{Name: "SAPISID", Domain: ".youtube.com"}: {Value: "fresh_value", Expiry: 2000},
 	}
-	if err := rs.updateCookieFile(updates); err != nil {
+	// originYouTube is what processYouTubeSetCookies declares. It does not
+	// enter this case at all — the update carries its own Domain=, so
+	// resolveRowUpdate reaches the .google.com row through rule 3's
+	// within-one-platform refresh — but the parameter is required and stating
+	// the real caller's value keeps the test faithful to the production path.
+	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
 		t.Fatalf("updateCookieFile: %v", err)
 	}
 
@@ -80,7 +85,11 @@ func TestUpdateCookieFileSubdomainFlag(t *testing.T) {
 		{Name: "LOGIN_INFO", Domain: ".youtube.com"}: {Value: "v1", Expiry: 1000},
 		{Name: "login", Domain: "host.twitch.tv"}:    {Value: "v2", Expiry: 1000},
 	}
-	if err := rs.updateCookieFile(updates); err != nil {
+	// The file is empty, so both rows take the INSERTION path, which reads the
+	// key's own Domain= and never consults the declared origin. The Twitch-
+	// scoped update therefore lands under host.twitch.tv regardless of what is
+	// declared here — which is the point of the case.
+	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
 		t.Fatalf("updateCookieFile: %v", err)
 	}
 
@@ -137,7 +146,10 @@ func TestUpdateCookieFileFallsBackToDomainHeuristic(t *testing.T) {
 		{Name: "SAPISID"}:    {Value: "s", Expiry: 1}, // no Domain= -> fallback = google
 		{Name: "LOGIN_INFO"}: {Value: "l", Expiry: 1}, // no Domain= -> fallback = youtube
 	}
-	if err := rs.updateCookieFile(updates); err != nil {
+	// Insertion path again: the name-based fallback below is what picks the
+	// domain for a Domain-less update with no row to match, and it is
+	// independent of the declared origin.
+	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
 		t.Fatalf("updateCookieFile: %v", err)
 	}
 
