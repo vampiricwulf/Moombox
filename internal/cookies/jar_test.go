@@ -497,7 +497,9 @@ func TestHasAnyYouTubeAuthCookie(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			j := NewCookieJar()
-			j.cookies = tt.cookies
+			for name, value := range tt.cookies {
+				j.cookies[name] = cookieEntry{value: value}
+			}
 			if got := j.HasAnyYouTubeAuthCookie(); got != tt.wantAny {
 				t.Errorf("HasAnyYouTubeAuthCookie() = %v, want %v", got, tt.wantAny)
 			}
@@ -534,7 +536,9 @@ func TestHasAnyTwitchAuthCookie(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			j := NewCookieJar()
-			j.cookies = tt.cookies
+			for name, value := range tt.cookies {
+				j.cookies[name] = cookieEntry{value: value}
+			}
 			if got := j.HasAnyTwitchAuthCookie(); got != tt.wantAny {
 				t.Errorf("HasAnyTwitchAuthCookie() = %v, want %v", got, tt.wantAny)
 			}

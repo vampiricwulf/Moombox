@@ -301,9 +301,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 			// run printed `hasAuth=false` and then correctly went on to
 			// probe and fire, so the line contradicted what the subsystem
 			// did on the very next step. Named for what each measures.
+			//
+			// expiredAuth is the third field and the one a stale file shows
+			// up in. The jar deliberately does not filter on expiry (see
+			// CookieJar.Load), so an auth cookie that lapsed days ago is
+			// still loaded and still sent — and the two booleans above both
+			// read TRUE for that file. This line is the one place an operator
+			// sees what their cookie file actually contains at boot, and
+			// "N auth cookies are already expired" is the fact a cookies.txt
+			// that has not been refreshed in a day most needs to report.
 			log.Info("Cookies loaded",
 				slog.Bool("completeAuthSet", jar.HasYouTubeAuthCookies()),
-				slog.Bool("anyAuthCookie", jar.HasAnyYouTubeAuthCookie()))
+				slog.Bool("anyAuthCookie", jar.HasAnyYouTubeAuthCookie()),
+				slog.Int("expiredAuth", jar.ExpiredAuthCookies(time.Now().Unix())))
 			// Auto-detect platforms from cookie file when not already set
 			if len(cfg.Cookies.Platforms) == 0 && len(cfg.Cookies.ActivePlatforms) == 0 {
 				var detected []string
