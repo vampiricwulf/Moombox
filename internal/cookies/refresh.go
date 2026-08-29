@@ -2036,125 +2036,25 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 		return
 	}
 
+	// originYouTube: this function is only ever fed a youtube.com guide
+	// response, and admitSetCookie needs to be told so — a Set-Cookie with no
+	// Domain= is host-scoped to the response that carried it, and the header
+	// alone does not say which response that was.
 	updates := make(map[cookieUpdateKey]cookieUpdate)
+	refused := 0
 	for _, sc := range setCookies {
-		// Cheap early filter before tokenizing — only cookies that mention
-		// youtube.com or google.com anywhere in the Set-Cookie string are
-		// candidates. The authoritative check against the parsed Domain=
-		// attribute happens below via domainMatches so hosts like
-		// "fakegoogle.com" that merely embed the substring are rejected.
-		scLower := strings.ToLower(sc)
-		if !strings.Contains(scLower, "youtube.com") && !strings.Contains(scLower, "google.com") {
+		key, cu, ok := admitSetCookie(sc, originYouTube)
+		if !ok {
+			refused++
 			continue
 		}
-
-		parts := strings.Split(sc, ";")
-		if len(parts) == 0 {
-			continue
-		}
-		nameValue := strings.TrimSpace(parts[0])
-		name, value, ok := strings.Cut(nameValue, "=")
-		if !ok || name == "" {
-			continue
-		}
-
-		now := time.Now().Unix()
-		expiry := now + 365*24*60*60
-
-		var (
-			expiresAt  int64
-			hasExpires bool
-			maxAge     int64
-			hasMaxAge  bool
-			httpOnly   bool
-			domainAttr string
-		)
-		// Every attribute is read to the end of the header. The old loop broke
-		// out early on Max-Age<=0, which threw away the Domain= that usually
-		// follows it — and Domain= is what scopes the deletion below.
-		for _, part := range parts[1:] {
-			trimmed := strings.TrimSpace(strings.ToLower(part))
-			switch {
-			case strings.HasPrefix(trimmed, "expires="):
-				_, dateStr, _ := strings.Cut(part, "=")
-				dateStr = strings.TrimSpace(dateStr)
-				if t, err := time.Parse(time.RFC1123, dateStr); err == nil {
-					expiresAt, hasExpires = t.Unix(), true
-				} else if t, err := time.Parse("Mon, 02-Jan-2006 15:04:05 MST", dateStr); err == nil {
-					expiresAt, hasExpires = t.Unix(), true
-				} else if t, err := time.Parse(time.RFC1123Z, dateStr); err == nil {
-					expiresAt, hasExpires = t.Unix(), true
-				}
-				// If all date formats fail, hasExpires stays false and the
-				// default one-year expiry below applies. An unreadable date
-				// must not fall through as "expired" and delete the row.
-			case strings.HasPrefix(trimmed, "max-age="):
-				if v, err := strconv.ParseInt(strings.TrimSpace(trimmed[len("max-age="):]), 10, 64); err == nil {
-					maxAge, hasMaxAge = v, true
-				}
-			case strings.HasPrefix(trimmed, "domain="):
-				_, dom, _ := strings.Cut(part, "=")
-				// Lowercased here, not just at comparison time. Domains are
-				// case-insensitive and this string becomes a MAP KEY: without
-				// this, "Domain=.YouTube.com" and "Domain=.youtube.com" are two
-				// distinct keys that both scope-match the same row, and which
-				// one wins is map-iteration order. CPython normalizes the same
-				// way (_normalized_cookie_tuples: `if k == "domain": v = v.lower()`).
-				domainAttr = strings.ToLower(strings.TrimSpace(dom))
-			case trimmed == "httponly":
-				httpOnly = true
-			}
-		}
-
-		// RFC 6265 §4.1.2.2: Max-Age takes precedence over Expires.
-		//
-		// An expiry at or before now is a DELETION request and is treated
-		// exactly as Max-Age<=0 is. This is the same rule yt-dlp gets from
-		// Python's http.cookiejar: _cookie_from_cookie_tuple converts Max-Age
-		// to an absolute expiry and then, for `expires <= self._now`, calls
-		// self.clear(domain, path, name) and returns None — the cookie is
-		// dropped from the jar entirely, keyed by domain+path+name. It is
-		// never stored with an empty value, which is what this code used to
-		// write: a row with value "" and expiry 0 that rowExpired will not
-		// prune (it ignores exp == 0) and that CookieJar.Load cannot even see
-		// (TrimSpace eats the trailing tab, leaving a 6-field "malformed" row).
-		deleteCookie := false
-		switch {
-		case hasMaxAge:
-			if maxAge <= 0 {
-				deleteCookie = true
-			} else {
-				expiry = now + maxAge
-			}
-		case hasExpires:
-			if expiresAt <= now {
-				deleteCookie = true
-			} else {
-				expiry = expiresAt
-			}
-		}
-
-		// Normalize domain so the Netscape row uses a leading-dot form when
-		// the Set-Cookie explicitly said Domain= (which implies subdomain
-		// scope per RFC 6265).
-		if domainAttr != "" && !strings.HasPrefix(domainAttr, ".") {
-			domainAttr = "." + domainAttr
-		}
-
-		// When the server supplied Domain=, reject anything that is not an
-		// actual YouTube or Google host — blocks the corner case where the
-		// early substring pre-filter let through a Set-Cookie carrying a
-		// Domain= for e.g. accounts.google.com.evil.tld.
-		if domainAttr != "" && !isYouTubeDomain(domainAttr) && !isGoogleDomain(domainAttr) {
-			continue
-		}
-
-		updates[cookieUpdateKey{Name: name, Domain: domainAttr}] = cookieUpdate{
-			Value:    value,
-			Expiry:   expiry,
-			HTTPOnly: httpOnly,
-			Delete:   deleteCookie,
-		}
+		updates[key] = cu
+	}
+	if refused > 0 {
+		// A COUNT, never the header. A Set-Cookie is the credential itself, and
+		// a refused one is by definition the shape we did not vouch for, so
+		// neither its value nor its raw text may be written to a log.
+		rs.logger.Debug("youtube session refresh: Set-Cookie headers not admitted", "count", refused)
 	}
 
 	if len(updates) == 0 {
@@ -2170,9 +2070,9 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 	// deployment mistake that actually causes it — updateCookieFile ends in
 	// writeFileAtomic (temp file + rename), and a rename cannot replace a
 	// single-file bind mount.
-	// originYouTube: this function is only ever fed a youtube.com guide
-	// response. Stating that is what lets the write path scope a Domain-less
-	// Set-Cookie without assuming where it came from — see updateCookieFile.
+	//
+	// The same originYouTube is declared a second time here, to the write path,
+	// which needs it for its own three decisions — see updateCookieFile.
 	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
 		rs.logger.Warn("youtube session refresh: failed to update cookie file — rotated session cookies were discarded and the file will go stale",
 			"err", err,
@@ -2183,6 +2083,233 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 	if err := rs.jar.Reload(); err != nil {
 		rs.logger.Warn("youtube session refresh: failed to reload jar", "err", err)
 	}
+}
+
+// rowBreakingChars are the bytes a Netscape cookie row cannot carry inside its
+// domain or name field: tab is the field separator, CR and LF end the row, and
+// NUL is not representable in a line-oriented text file at all.
+const rowBreakingChars = "\t\r\n\x00"
+
+// hasRowBreakingChar reports whether s would corrupt the row it is written into.
+func hasRowBreakingChar(s string) bool { return strings.ContainsAny(s, rowBreakingChars) }
+
+// trackedCookieName reports whether name is one the cookie file tracks for the
+// declared origin's credential platform. It is the admission set for an
+// UNSCOPED Set-Cookie — one with no Domain= of its own to be judged on.
+//
+// The set is the union of the two the rest of this package already uses for the
+// Google platform: essentialYouTubeCookies (the names CookieJar.Load keeps) and
+// isGoogleOnlyAuthName (the names updateCookieFile's insertion fallback routes
+// to .google.com). Neither contains the other — isGoogleOnlyAuthName matches the
+// whole __Secure-1P/3P families, essentialYouTubeCookies names PREF, CONSENT,
+// YSC and the rest — so the union is exactly "a name this package can store",
+// and a random unscoped foo=bar is not one.
+//
+// Only the Google platform has a set here, and that is a limitation of the write
+// path rather than an oversight: updateCookieFile derives a domain for a
+// Domain-less update from the cookie NAME, and that fallback knows only
+// .youtube.com and .google.com. An unscoped Twitch cookie has no destination it
+// could be given, so admitting one would produce an update the write path then
+// refuses — a path that looks reachable and goes nowhere. Adding Twitch here
+// means teaching that fallback first.
+func trackedCookieName(name string, origin cookieOrigin) bool {
+	if origin.platform() != originYouTube.platform() {
+		return false
+	}
+	return essentialYouTubeCookies[name] || isGoogleOnlyAuthName(name)
+}
+
+// admitSetCookie parses ONE raw Set-Cookie header from a response that came from
+// origin and decides whether it may become a pending cookie-file update. It is
+// the OUTER admission layer: a header it turns down never reaches the write path
+// in any form.
+//
+// B2. This loop used to open with a substring pre-filter — the header had to
+// mention "youtube.com" or "google.com" somewhere — and it ran BEFORE Domain=
+// was parsed. It was wrong in both directions at once:
+//
+//   - It dropped every legitimate unscoped rotation. RFC 6265 §4.1.2.3: a
+//     Set-Cookie with no Domain= is host-scoped to the responding host, which is
+//     an ordinary way for youtube.com to rotate its own first-party cookies.
+//     Such a header contains neither substring, so it never reached the parser —
+//     while the rest of this package plainly expected it to. isGoogleOnlyAuthName
+//     exists to give a Domain-less update a domain on the insertion path, and
+//     resolveRowUpdate's rule 2 exists to confine a Domain-less deletion; both
+//     were unreachable. That is the "cookies.txt untouched for a day" symptom:
+//     it fails safe, and it still strands the session.
+//   - It was never the guard it looked like. `x=youtube.com; Domain=evil.tld`
+//     passes a substring test on its VALUE. The real guard has always been the
+//     parsed-Domain= check below, which its own comment already claimed it was —
+//     true only for headers that carried a Domain= at all.
+//
+// Admission is therefore by what the header SAYS, in three steps, after the
+// whole attribute list has been read:
+//
+//  1. Row-breaking characters in the NAME or the DOMAIN are refused outright,
+//     before either branch. A tab splits the Netscape row into the wrong fields
+//     on the next Load; a CR or LF splits it into two rows. VALUES are exempt on
+//     purpose and that is not an oversight — CookieJar.Load joins fields 6.. back
+//     into one value and updateCookieFile rebuilds from exactly seven fields, so
+//     a tab in a value is legal input rather than an injection.
+//  2. SCOPED (Domain= present): admitted only when the domain lies on the
+//     declared origin's credential platform. For originYouTube that is precisely
+//     `isYouTubeDomain || isGoogleDomain` — the test this branch has always made,
+//     since those two are one platform and nothing is both Google and Twitch — so
+//     the only caller's behaviour is unchanged. accounts.google.com.evil.tld,
+//     evil.tld, a bare "." and a value that merely contains "youtube.com" are all
+//     refused here.
+//  3. UNSCOPED (no Domain=): the key keeps Domain "" and stays host-scoped to the
+//     declared origin, which resolveRowUpdate rule 2, sameCookiePlatform and the
+//     insertion loop each enforce downstream. This is the newly-reachable surface,
+//     so it is also the narrow one: admitted only under a name the jar actually
+//     tracks (trackedCookieName), which keeps an unscoped foo=bar out of the file.
+//
+// Why none of this widens what a hostile header can reach:
+//
+//   - A scoped header can only land on the declared platform's domains (2).
+//   - An unscoped header can only land on the declared origin's own rows, and
+//     only under a tracked name (3). An unscoped DELETION therefore still cannot
+//     reach .google.com auth from a youtube.com reply — that was already true,
+//     and it is now true and reachable rather than true and dead.
+//   - Row-breaking characters cannot reach the file (1).
+//   - Everything downstream is untouched: updateCookieFile's refusal to blank an
+//     essential cookie, the seven-field rebuild, writeFileAtomic.
+//
+// Two layers, and they are not redundant. THIS one decides what becomes an
+// update at all, and it is the only code that ever sees the raw header — so
+// row-breaking characters and the tracked-name rule belong here and nowhere else.
+// updateCookieFile's insertion guard is the last check before a row is WRITTEN,
+// and it also covers the domain that loop INVENTS from the cookie name for an
+// unscoped update — a domain that does not exist yet when this function returns,
+// and which this function therefore cannot judge. Neither subsumes the other.
+//
+// Scoped headers are admitted under ANY name; only unscoped ones are name-gated.
+// That asymmetry is pre-existing and deliberately left alone here: narrowing it
+// would mix a widening and a narrowing into one commit.
+func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpdate, bool) {
+	parts := strings.Split(sc, ";")
+	if len(parts) == 0 {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+	nameValue := strings.TrimSpace(parts[0])
+	name, value, ok := strings.Cut(nameValue, "=")
+	if !ok || name == "" {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+
+	now := time.Now().Unix()
+	expiry := now + 365*24*60*60
+
+	var (
+		expiresAt  int64
+		hasExpires bool
+		maxAge     int64
+		hasMaxAge  bool
+		httpOnly   bool
+		domainAttr string
+	)
+	// Every attribute is read to the end of the header. The old loop broke
+	// out early on Max-Age<=0, which threw away the Domain= that usually
+	// follows it — and Domain= is what scopes the deletion below.
+	for _, part := range parts[1:] {
+		trimmed := strings.TrimSpace(strings.ToLower(part))
+		switch {
+		case strings.HasPrefix(trimmed, "expires="):
+			_, dateStr, _ := strings.Cut(part, "=")
+			dateStr = strings.TrimSpace(dateStr)
+			if t, err := time.Parse(time.RFC1123, dateStr); err == nil {
+				expiresAt, hasExpires = t.Unix(), true
+			} else if t, err := time.Parse("Mon, 02-Jan-2006 15:04:05 MST", dateStr); err == nil {
+				expiresAt, hasExpires = t.Unix(), true
+			} else if t, err := time.Parse(time.RFC1123Z, dateStr); err == nil {
+				expiresAt, hasExpires = t.Unix(), true
+			}
+			// If all date formats fail, hasExpires stays false and the
+			// default one-year expiry below applies. An unreadable date
+			// must not fall through as "expired" and delete the row.
+		case strings.HasPrefix(trimmed, "max-age="):
+			if v, err := strconv.ParseInt(strings.TrimSpace(trimmed[len("max-age="):]), 10, 64); err == nil {
+				maxAge, hasMaxAge = v, true
+			}
+		case strings.HasPrefix(trimmed, "domain="):
+			_, dom, _ := strings.Cut(part, "=")
+			// Lowercased here, not just at comparison time. Domains are
+			// case-insensitive and this string becomes a MAP KEY: without
+			// this, "Domain=.YouTube.com" and "Domain=.youtube.com" are two
+			// distinct keys that both scope-match the same row, and which
+			// one wins is map-iteration order. CPython normalizes the same
+			// way (_normalized_cookie_tuples: `if k == "domain": v = v.lower()`).
+			domainAttr = strings.ToLower(strings.TrimSpace(dom))
+		case trimmed == "httponly":
+			httpOnly = true
+		}
+	}
+
+	// RFC 6265 §4.1.2.2: Max-Age takes precedence over Expires.
+	//
+	// An expiry at or before now is a DELETION request and is treated
+	// exactly as Max-Age<=0 is. This is the same rule yt-dlp gets from
+	// Python's http.cookiejar: _cookie_from_cookie_tuple converts Max-Age
+	// to an absolute expiry and then, for `expires <= self._now`, calls
+	// self.clear(domain, path, name) and returns None — the cookie is
+	// dropped from the jar entirely, keyed by domain+path+name. It is
+	// never stored with an empty value, which is what this code used to
+	// write: a row with value "" and expiry 0 that rowExpired will not
+	// prune (it ignores exp == 0) and that CookieJar.Load cannot even see
+	// (TrimSpace eats the trailing tab, leaving a 6-field "malformed" row).
+	deleteCookie := false
+	switch {
+	case hasMaxAge:
+		if maxAge <= 0 {
+			deleteCookie = true
+		} else {
+			expiry = now + maxAge
+		}
+	case hasExpires:
+		if expiresAt <= now {
+			deleteCookie = true
+		} else {
+			expiry = expiresAt
+		}
+	}
+
+	// Normalize domain so the Netscape row uses a leading-dot form when
+	// the Set-Cookie explicitly said Domain= (which implies subdomain
+	// scope per RFC 6265). A bare "Domain=" carries no value at all and
+	// leaves domainAttr empty, which RFC 6265 §5.2.3 also says to treat as
+	// host-only — so it takes the unscoped branch, not a "." one.
+	if domainAttr != "" && !strings.HasPrefix(domainAttr, ".") {
+		domainAttr = "." + domainAttr
+	}
+
+	// Step 1. Before either admission branch, and on both fields that become
+	// their own tab-separated column in the row. Normalization above can only
+	// lowercase and prepend a dot, so checking after it sees the same characters
+	// checking before it would.
+	if hasRowBreakingChar(name) || hasRowBreakingChar(domainAttr) {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+
+	if domainAttr != "" {
+		// Step 2. cookiePlatformOf returns "" for a domain on no known platform
+		// (evil.tld, accounts.google.com.evil.tld, a bare "."), and an undeclared
+		// origin has no platform either — so the emptiness test is load-bearing:
+		// without it, bare equality would read "" == "" as a match.
+		p := cookiePlatformOf(domainAttr)
+		if p == "" || p != origin.platform() {
+			return cookieUpdateKey{}, cookieUpdate{}, false
+		}
+	} else if !trackedCookieName(name, origin) {
+		// Step 3.
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+
+	return cookieUpdateKey{Name: name, Domain: domainAttr}, cookieUpdate{
+		Value:    value,
+		Expiry:   expiry,
+		HTTPOnly: httpOnly,
+		Delete:   deleteCookie,
+	}, true
 }
 
 // updateCookieFile re-reads the cookie file, updates matching cookies with new
@@ -2437,8 +2564,8 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		// fallback, so a key carrying an explicit cross-platform Domain= is
 		// refused on the same rule. Nothing legitimate is lost: a Google session
 		// covers youtube.com and google.com alike, so the two never fail this
-		// against each other, and processYouTubeSetCookies already drops a
-		// Domain= that is neither.
+		// against each other, and admitSetCookie already drops a Domain= that
+		// is neither.
 		//
 		// A domain with no recognised platform is refused by the same test — an
 		// undeclared origin and an unplaceable domain both yield "", and equality
