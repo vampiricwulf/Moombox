@@ -139,6 +139,47 @@ func loadChromeMasterKey(profilePath string) ([]byte, error) {
 // that hit "database is locked" should retry after the user closes
 // Chrome, or copy Cookies to a tempdir first (Chrome doesn't lock the
 // copy).
+//
+// S8 (Arc 8, 2026-08-29): re-check attempted, NOT completed — no
+// Chromium-family browser (chrome.exe, msedge.exe, brave.exe,
+// vivaldi.exe, chromium.exe) was running on this machine at check time,
+// and this task may not launch one to manufacture the condition (the
+// owner runs real browser profiles here). Analysis only, recorded so the
+// next person with a live browser to test against doesn't have to
+// re-derive it:
+//
+//   - "database is locked" from a lock conflict is already handled —
+//     that is what mode=ro + busy_timeout is FOR, and it degrades to a
+//     clean error, not a hang. That part of the existing doc is fine.
+//   - The real open question is WAL STALENESS, not lock errors: is
+//     Chrome's Cookies DB in WAL mode (PRAGMA journal_mode), and if so,
+//     does THIS driver (modernc.org/sqlite, pure Go, no CGo) merge
+//     committed -wal frames into a mode=ro read of the LIVE file the way
+//     the C SQLite library's WAL reader protocol does? If yes, reads are
+//     current and no snapshot is needed — this read is of the live files
+//     in place, not a copy missing its -wal sidecar (the Firefox path's
+//     failure mode, which snapshotFirefoxCookieDB exists to avoid). If
+//     modernc.org/sqlite's mode=ro path does NOT read -wal on this
+//     platform, every read here silently returns whatever was last
+//     checkpointed into the main file — a stale-but-well-formed row set,
+//     which busy_timeout cannot see and Failed/ScanFailed cannot count,
+//     because nothing errors.
+//   - This cannot be resolved by reading SQLite's own documentation or
+//     this driver's source alone with any confidence for THIS specific
+//     "reader on the same machine as a live writer" case — it needs an
+//     empirical check: query journal_mode and a row count/timestamp
+//     twice, a few seconds apart, while the signed-in browser is known to
+//     still be receiving Set-Cookie responses, and confirm the numbers
+//     move. That check is what a running browser on this machine would
+//     have given and did not.
+//
+// Until that check runs, treat this as UNRESOLVED, not "closed as not
+// needed" — do not read the absence of a bug report as evidence either
+// way. If it comes back stale, the fix is a snapshot mirroring
+// snapshotFirefoxCookieDB's shape (copy Cookies AND Cookies-wal /
+// Cookies-journal if present, sweep with sweepStaleCookieSnapshots,
+// wired at autocookies_profile.go:108) — do not invent a second
+// snapshot idiom for Chromium.
 func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, ChromeReadStats, error) {
 	var stats ChromeReadStats
 

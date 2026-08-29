@@ -1829,7 +1829,16 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// already has its own SQLite-direct path. DECISIONS #6.
 	if err != nil && browser != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
 		s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
-		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger)
+		// H7: the configured browser OVERRIDE, not the resolved/auto-detected
+		// `browser` above — an operator who explicitly named a browser in
+		// settings gets DPAPI restricted to it; auto-detect leaves every
+		// Chromium-family profile as a candidate for dpapiExtractAsNetscape's
+		// own selection (it picks exactly one, it never merges).
+		var cfgBrowserType string
+		if s.ConfiguredBrowserOverride != nil {
+			_, cfgBrowserType = s.ConfiguredBrowserOverride()
+		}
+		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger, cfgBrowserType)
 		if fallbackErr != nil {
 			s.logger.Warn("DPAPI fallback also failed; surfacing original CDP error",
 				"dpapi_err", fallbackErr)
