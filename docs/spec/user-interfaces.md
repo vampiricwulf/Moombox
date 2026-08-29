@@ -536,7 +536,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `status` | `"running"` | Constant |
 | `uptime` | seconds since start | `deps.StartTime` |
 | `timestamp` | RFC 3339 UTC | Request time |
-| `memory` | `{ rss, heapUsed, heapTotal, external, goroutines }`, MiB | `runtime.ReadMemStats` |
+| `memory` | `{ rss, heapUsed, heapTotal, external }` in MiB (`Sys`, `HeapAlloc`, `HeapSys`, `MSpanSys` / 1048576) plus `goroutines`, a count (`runtime.NumGoroutine`) | `runtime.ReadMemStats` (`internal/web/routes/jobs.go:1362-1368`) |
 | `version` | string | `deps.Version` |
 | `updateAvailable` | `{ version, tagName, releaseNotes, releaseNotesHtml, publishedAt }` | `SharedUpdateInfo` atomic; absent when no update is pending |
 | `disk` | `{ free, total, usedPct, warnLevel }` | `SharedDiskStatus` atomic; absent until the first disk sample |
