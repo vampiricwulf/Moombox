@@ -17,6 +17,37 @@ func setPassHook(rs *RefreshService, h func()) {
 	rs.mu.Unlock()
 }
 
+// setLockedHook installs the seam that fires INSIDE refresh's status-update
+// critical section, with rs.mu held for writing. See refreshLockedHook for why
+// it is a second field and not a second call to the first.
+func setLockedHook(rs *RefreshService, h func()) {
+	rs.mu.Lock()
+	rs.refreshLockedHook = h
+	rs.mu.Unlock()
+}
+
+// awaitOrFail runs fn on its own goroutine and fails the test if it has not
+// returned within d.
+//
+// Used wherever the regression under test is a DEADLOCK rather than a wrong
+// answer. Calling such a function directly would hang the whole package binary
+// until go test's global timeout and report as an unattributable "test timed
+// out" naming whatever ran last; this names the call that never came back and
+// lets the rest of the suite finish.
+func awaitOrFail(t *testing.T, d time.Duration, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %v — a panic almost certainly unwound with rs.mu held, so the in-flight guard's release defer is blocked on Lock() and the goroutine is parked holding the lock", what, d)
+	}
+}
+
 // warnRecordingLogger counts Warn calls and only Warn calls.
 //
 // Deliberately not recordingCookieLogger, which flattens all four levels into
@@ -76,31 +107,56 @@ func blockingPass(rs *RefreshService) (passes *atomic.Int64, entered <-chan stru
 // satisfied equally well by a working recover and by a seam that never fired,
 // and the test would stay green against a build with the recover deleted and
 // the hook call deleted too.
+//
+// THE PANIC IS INJECTED INSIDE THE STATUS-UPDATE CRITICAL SECTION, with rs.mu
+// held for writing, and that is the whole point of the seam choice. A panic
+// raised outside every lock unwinds to Start's recover trivially and proves only
+// that the recover and the guard-release defer exist. The case that can actually
+// go wrong is a panic while rs.mu is held: the release defer needs that same
+// non-reentrant lock, so it blocks on Lock() forever, the goroutine parks
+// holding rs.mu, the panic never leaves refresh, Start's recover never runs, and
+// every later GetStatus() (RLock) queues behind it. At boot that is not a crash,
+// it is a silent hang with no dashboard, no TUI and no log line — strictly worse
+// than the loud crash this task set out to fix.
+//
+// Every step therefore runs through awaitOrFail: the failure mode is a deadlock,
+// so a broken build must produce a named failure, not a hung binary.
 func TestStartupRefreshPanicDoesNotEscapeStart(t *testing.T) {
 	healthyRefreshSeams(t)
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 
+	// Counts outside the lock (the premise: a pass really started), panics
+	// inside it (the property: the unwind releases rs.mu AND the guard).
 	var passes atomic.Int64
-	setPassHook(rs, func() {
-		passes.Add(1)
-		panic("synthetic panic inside the startup refresh")
+	setPassHook(rs, func() { passes.Add(1) })
+	setLockedHook(rs, func() {
+		panic("synthetic panic inside refresh's status-update critical section")
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rs.Start(ctx)
+	awaitOrFail(t, 10*time.Second, "Start", func() { rs.Start(ctx) })
 	rs.Stop()
 
 	if got := passes.Load(); got != 1 {
 		t.Fatalf("the startup pass ran %d times, want 1 — the panic seam never fired, so Start returning proves nothing", got)
 	}
 
-	// The service must still be USABLE, not merely alive. The guard the same
-	// change adds is released by a defer, so it has to survive stack unwinding;
-	// a guard left latched by the panic would make every later pass — ticker
-	// included — a silent no-op for the life of the process.
-	setPassHook(rs, func() { passes.Add(1) })
-	if !rs.CheckNow(context.Background()) {
+	// rs.mu must be free. This is the reader every surface uses — the Web
+	// indicators, the TUI badge — and it takes RLock, so a write lock stranded
+	// by the unwind blocks it forever even though Start itself returned.
+	awaitOrFail(t, 10*time.Second, "GetStatus after the panic", func() { rs.GetStatus() })
+
+	// The service must still be USABLE, not merely alive. The in-flight guard is
+	// released by a defer, so it has to survive stack unwinding; a guard left
+	// latched by the panic would make every later pass — ticker included — a
+	// silent no-op for the life of the process.
+	setLockedHook(rs, nil)
+	var ran bool
+	awaitOrFail(t, 10*time.Second, "CheckNow after the panic", func() {
+		ran = rs.CheckNow(context.Background())
+	})
+	if !ran {
 		t.Error("a refresh after the startup panic reported that it did not run — the in-flight guard was left latched by the unwind")
 	}
 	if got := passes.Load(); got != 2 {

@@ -369,6 +369,22 @@ type RefreshService struct {
 	// that blocks holds the single-flight without holding the lock.
 	refreshPassHook func()
 
+	// refreshLockedHook is the same seam INSIDE refresh's status-update
+	// critical section, called with rs.mu held for writing.
+	//
+	// TEST SEAM, and a second one rather than a second call to the first,
+	// because the two windows need opposite things. refreshPassHook must be
+	// callable outside the lock so a test can BLOCK a pass there without
+	// wedging every other rs.mu reader; this one must be inside it, because
+	// the property it exists to test is what a panic does while the write lock
+	// is held — the case that used to deadlock the guard release, and the only
+	// case where "the release defer exists" is not the same claim as "the guard
+	// is actually released".
+	//
+	// A hook installed here MUST NOT call back into RefreshService: rs.mu is a
+	// plain non-reentrant RWMutex.
+	refreshLockedHook func()
+
 	// Track previous auth state to detect auth → no-auth transitions.
 	prevYouTubeAuth bool
 	prevTwitchAuth  bool
@@ -998,22 +1014,47 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 	// answer they get back is the in-flight pass's, one status snapshot behind
 	// at worst. Any methodology that counts passes has to allow for that, and
 	// the Debug line below is the only evidence that it happened.
-	rs.mu.Lock()
-	if rs.refreshInFlight {
-		rs.mu.Unlock()
+	var hook, lockedHook func()
+	claimed := func() bool {
+		rs.mu.Lock()
+		defer rs.mu.Unlock()
+		if rs.refreshInFlight {
+			return false
+		}
+		rs.refreshInFlight = true
+		hook, lockedHook = rs.refreshPassHook, rs.refreshLockedHook
+		return true
+	}()
+	if !claimed {
 		// Debug, not Info. A ticker pass overlapping a manual one is routine on
 		// any install where somebody presses the button, and this line would
 		// otherwise be fanned out over the WebSocket log stream to both UIs for
 		// an event that changes nothing.
+		//
+		// Logged AFTER the section above returns, never inside it: nothing that
+		// can panic may run while rs.mu is held. See the release defer's rule.
 		rs.logger.Debug("cookie refresh skipped, another pass is already in flight")
 		return false
 	}
-	rs.refreshInFlight = true
-	hook := rs.refreshPassHook
-	rs.mu.Unlock()
-	// Deferred, so a panic anywhere below still releases the guard — otherwise
-	// one panic would wedge the service into "always in flight" and every later
-	// pass, ticker included, would silently no-op forever.
+	// THE RELEASE, and the rule that makes it safe.
+	//
+	// This defer takes rs.mu, and rs.mu is a plain non-reentrant RWMutex. So it
+	// releases the guard on a panic ONLY IF the unwinding stack is not already
+	// holding that lock. It is not, and that is not an accident: every rs.mu
+	// critical section in this function — the claim above and the status update
+	// below — releases through `defer`, so a panic anywhere in this body reaches
+	// here with rs.mu free.
+	//
+	// STANDING RULE for anyone editing refresh: a bare `rs.mu.Lock()` whose
+	// `rs.mu.Unlock()` is a plain statement rather than a defer re-arms a trap
+	// that is invisible in review and catastrophic in the field. A panic inside
+	// such a window would unwind with the write lock held, this defer would
+	// block on Lock() forever, and the goroutine would park holding rs.mu — so
+	// the panic never leaves refresh, Start's recover never runs, and every
+	// later GetStatus() (RLock) blocks behind it. At boot that turns a loud
+	// crash with a stack trace into a silent hang with no dashboard, no TUI and
+	// no log line. Lock and defer-unlock together, or scope the section into a
+	// func literal that does.
 	defer func() {
 		rs.mu.Lock()
 		rs.refreshInFlight = false
@@ -1054,89 +1095,118 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		rs.logger.Debug("twitch auth check failed", "err", twErr)
 	}
 
-	rs.mu.Lock()
-	prevStatus := rs.status
-	prevYT := rs.prevYouTubeAuth
-	prevTW := rs.prevTwitchAuth
-	hasChecked := rs.hasCheckedOnce
-	ytConcluded := rs.ytEverConcluded
-	twConcluded := rs.twEverConcluded
-
-	// Captured once here (not re-read at the shouldFireRecovery call sites
-	// below) so the "cookies present" snapshot lines up with the rest of
-	// this check's other snapshots, all taken under the same lock.
+	// THE STATUS UPDATE, scoped into a func literal so its unlock is DEFERRED.
 	//
-	// "Was this platform ever configured", NOT "is the set complete right
-	// now". shouldFireRecovery's first-check branch returns this value, and
-	// the complete-set predicates cannot tell a never-configured platform
-	// from one whose LOGIN_INFO YouTube has cleared, or from a Twitch session
-	// whose auth-token was pruned out on expiry while twilight-user survived
-	// (the jar ignores expiry, mergeCookieFiles prunes on it — see
-	// twitchAuthCookieNames) — the exact states that must be reported, and
-	// that were silent forever.
-	hasYTCookies := rs.jar.HasAnyYouTubeAuthCookie()
-	hasTWCookies := rs.jar.HasAnyTwitchAuthCookie()
+	// This section holds the write lock across ~80 lines that read the jar, build
+	// an AuthStatus and advance five pieces of baseline state. It used to end in
+	// a plain rs.mu.Unlock(), which meant a panic anywhere inside it unwound with
+	// rs.mu held — and the guard release above, which needs that same lock, would
+	// then block forever. See that defer for what the resulting hang costs at
+	// boot. Every value the rest of the pass needs is declared outside and
+	// assigned inside; prevStatus is not, because nothing below uses it.
+	var (
+		prevYT, prevTW             bool
+		ytConcluded, twConcluded   bool
+		hasChecked                 bool
+		hasYTCookies, hasTWCookies bool
+		ytIdentity, prevYTIdentity string
+		changed                    bool
+		statusCopy                 AuthStatus
+	)
+	func() {
+		rs.mu.Lock()
+		defer rs.mu.Unlock()
 
-	// Sampled under the same lock as the rest of this check's snapshots, and
-	// AFTER the jar.Reload() at the top of doRefresh, so it reflects whatever
-	// account is on disk right now.
-	ytIdentity := rs.jar.YouTubeIdentity()
-	prevYTIdentity := rs.prevYouTubeIdentity
+		// TEST SEAM, inside the lock on purpose — this is the window whose panic
+		// behaviour the deadlock rule above is about, and a seam that fired
+		// outside it would prove only that the release defer exists. See
+		// refreshLockedHook.
+		if lockedHook != nil {
+			lockedHook()
+		}
 
-	rs.status = AuthStatus{
-		YouTubeAuthenticated: ytAuth,
-		TwitchAuthenticated:  twAuth,
-		// Now "YouTube auth is configured" rather than "the cookie set is
-		// complete", which is what the label this drives has always claimed.
-		// A half-cleared jar consequently renders as configured-but-unverified
-		// instead of as no-cookies-at-all — see AuthStatus.HasYouTubeCookies.
-		HasYouTubeCookies: hasYTCookies,
-		// The Twitch counterpart was computed here and thrown away for as long
-		// as hasTWCookies has existed — which is why the TUI could only ever
-		// assign CookieStatusOK for Twitch, leaving its CookiesOnly arm dead:
-		// a Twitch session whose auth-token was pruned on expiry was reported
-		// exactly like one that was never configured.
-		HasTwitchCookies: hasTWCookies,
-		// The reason the two booleans above cannot carry on their own. See
-		// verdictFromCheck: err means "this check learned nothing", never
-		// "the credentials are dead".
-		YouTubeVerification: verdictFromCheck(ytAuth, ytErr),
-		TwitchVerification:  verdictFromCheck(twAuth, twErr),
-		LastCheck:           time.Now().UTC().Format(time.RFC3339),
-		YouTubeError:        ytErrStr,
-		TwitchError:         twErrStr,
-	}
+		prevStatus := rs.status
+		prevYT = rs.prevYouTubeAuth
+		prevTW = rs.prevTwitchAuth
+		hasChecked = rs.hasCheckedOnce
+		ytConcluded = rs.ytEverConcluded
+		twConcluded = rs.twEverConcluded
 
-	// Update previous auth state tracking.
-	// Only update previous state when the check was CONCLUSIVE. That is not
-	// the same as "no network error": a non-200, an answer from the wrong
-	// host, and a 200 whose body carries no marker we recognise are all
-	// inconclusive too, and none of them may move this baseline.
-	// An inconclusive check deliberately does NOT mark the platform
-	// "concluded" — the next conclusive check still counts as that
-	// platform's first, so shouldFireRecovery's startup-dead-auth case
-	// still applies to it.
-	if ytErr == nil {
-		rs.prevYouTubeAuth = ytAuth
-		rs.ytEverConcluded = true
-	}
-	// Deliberately outside the ytErr == nil block above: the baseline advances
-	// only on a check that also AUTHENTICATED, so a stale intermediate export
-	// cannot consume the edge. See advanceIdentityBaseline.
-	rs.prevYouTubeIdentity = advanceIdentityBaseline(rs.prevYouTubeIdentity, ytIdentity, ytAuth, ytErr)
-	if twErr == nil {
-		rs.prevTwitchAuth = twAuth
-		rs.twEverConcluded = true
-	}
-	rs.hasCheckedOnce = true
+		// Captured once here (not re-read at the shouldFireRecovery call sites
+		// below) so the "cookies present" snapshot lines up with the rest of
+		// this check's other snapshots, all taken under the same lock.
+		//
+		// "Was this platform ever configured", NOT "is the set complete right
+		// now". shouldFireRecovery's first-check branch returns this value, and
+		// the complete-set predicates cannot tell a never-configured platform
+		// from one whose LOGIN_INFO YouTube has cleared, or from a Twitch session
+		// whose auth-token was pruned out on expiry while twilight-user survived
+		// (the jar ignores expiry, mergeCookieFiles prunes on it — see
+		// twitchAuthCookieNames) — the exact states that must be reported, and
+		// that were silent forever.
+		hasYTCookies = rs.jar.HasAnyYouTubeAuthCookie()
+		hasTWCookies = rs.jar.HasAnyTwitchAuthCookie()
 
-	changed := authStatusChanged(prevStatus, rs.status)
-	// Snapshot under the lock: a concurrent doRefresh (ticker vs CheckNow)
-	// writes rs.status under rs.mu, so reading it after Unlock is a race —
-	// and the callback could observe a status newer than the transition
-	// that triggered it.
-	statusCopy := rs.status
-	rs.mu.Unlock()
+		// Sampled under the same lock as the rest of this check's snapshots, and
+		// AFTER the jar.Reload() at the top of doRefresh, so it reflects whatever
+		// account is on disk right now.
+		ytIdentity = rs.jar.YouTubeIdentity()
+		prevYTIdentity = rs.prevYouTubeIdentity
+
+		rs.status = AuthStatus{
+			YouTubeAuthenticated: ytAuth,
+			TwitchAuthenticated:  twAuth,
+			// Now "YouTube auth is configured" rather than "the cookie set is
+			// complete", which is what the label this drives has always claimed.
+			// A half-cleared jar consequently renders as configured-but-unverified
+			// instead of as no-cookies-at-all — see AuthStatus.HasYouTubeCookies.
+			HasYouTubeCookies: hasYTCookies,
+			// The Twitch counterpart was computed here and thrown away for as long
+			// as hasTWCookies has existed — which is why the TUI could only ever
+			// assign CookieStatusOK for Twitch, leaving its CookiesOnly arm dead:
+			// a Twitch session whose auth-token was pruned on expiry was reported
+			// exactly like one that was never configured.
+			HasTwitchCookies: hasTWCookies,
+			// The reason the two booleans above cannot carry on their own. See
+			// verdictFromCheck: err means "this check learned nothing", never
+			// "the credentials are dead".
+			YouTubeVerification: verdictFromCheck(ytAuth, ytErr),
+			TwitchVerification:  verdictFromCheck(twAuth, twErr),
+			LastCheck:           time.Now().UTC().Format(time.RFC3339),
+			YouTubeError:        ytErrStr,
+			TwitchError:         twErrStr,
+		}
+
+		// Update previous auth state tracking.
+		// Only update previous state when the check was CONCLUSIVE. That is not
+		// the same as "no network error": a non-200, an answer from the wrong
+		// host, and a 200 whose body carries no marker we recognise are all
+		// inconclusive too, and none of them may move this baseline.
+		// An inconclusive check deliberately does NOT mark the platform
+		// "concluded" — the next conclusive check still counts as that
+		// platform's first, so shouldFireRecovery's startup-dead-auth case
+		// still applies to it.
+		if ytErr == nil {
+			rs.prevYouTubeAuth = ytAuth
+			rs.ytEverConcluded = true
+		}
+		// Deliberately outside the ytErr == nil block above: the baseline advances
+		// only on a check that also AUTHENTICATED, so a stale intermediate export
+		// cannot consume the edge. See advanceIdentityBaseline.
+		rs.prevYouTubeIdentity = advanceIdentityBaseline(rs.prevYouTubeIdentity, ytIdentity, ytAuth, ytErr)
+		if twErr == nil {
+			rs.prevTwitchAuth = twAuth
+			rs.twEverConcluded = true
+		}
+		rs.hasCheckedOnce = true
+
+		changed = authStatusChanged(prevStatus, rs.status)
+		// Snapshot under the lock: a concurrent doRefresh (ticker vs CheckNow)
+		// writes rs.status under rs.mu, so reading it after Unlock is a race —
+		// and the callback could observe a status newer than the transition
+		// that triggered it.
+		statusCopy = rs.status
+	}()
 
 	if changed && rs.OnAuthChange != nil {
 		rs.OnAuthChange(statusCopy)
