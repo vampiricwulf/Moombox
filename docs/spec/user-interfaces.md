@@ -295,7 +295,7 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 | `JobsUpdateMsg` | Database subscriber | Full job list changed (job added or deleted). Contains `[]*database.Job`. |
 | `LogBatchMsg` | Logger subscriber | Batch of log lines accumulated over a 250ms flush window. Contains `[]string`. |
 | `CheckTimersMsg` | Monitor callbacks | Next check times for Feed, DECAPI, and Twitch monitors. |
-| `CookieStatusMsg` | Cookie service | YouTube and Twitch authentication status (logged in, expired, missing). |
+| `CookieStatusMsg` | Cookie service | `{YT, TW, YTActive, TWActive}` — one `CookieStatus` per platform (`None`, `OK`, `CookiesOnly`, `Relogin`, `Unknown`) plus each platform's active flag. There is no *expired* state: expiry has no UI reader at all. See §Status Bar. |
 | `DiskStatusMsg` | Disk monitor | Disk usage percentage and warning/critical thresholds. |
 | `UpdateStatusMsg` | Updater | New version available (tag name, release notes). |
 
@@ -364,13 +364,35 @@ This means the TUI has the same API surface as the Web UI — it calls the same 
 
 The status bar occupies the bottom row of the terminal. It displays at-a-glance system health and state:
 
-The left side shows chord hints (key labels for A, R, O, F, M, Tab, backtick, ?) — compact mode when width < 100 chars. The right side shows metrics and status:
+The left side shows chord hints (key labels for A, R, O, F, M, Tab, backtick, ?) — compact mode when width < 100 chars. The right side shows metrics and status.
+
+**Everything on the right is rendered against a width tier** (`barTier` in `internal/tui/status_bar.go`): `tierFull` → `tierCompact` → `tierKeys` → `tierTight` → `tierEssential` → `tierNone`. The tier decides both the label length and whether an element appears at all, and the rule the cookie indicators follow is that **reassurance is dropped before an alarm is**.
 
 | Element | Content | Behavior |
 |---------|---------|----------|
-| Disk Usage | Percentage + free space (GB) | Green normally, yellow (warn) above threshold, red (critical) above higher threshold |
-| Active Downloads | Count of downloading/live/muxing jobs | Only shown when > 0 |
-| Cookie Status | YouTube and Twitch auth indicators | Shows whether cookies are valid, expired, or missing for each platform |
+| Connectivity | `OFFLINE`, abbreviated to `OFF` at `tierTight` | An alert, so it outlives every counter and only ever abbreviates |
+| Batch selection | `N selected`, `N sel` at `tierKeys` | Shown when > 0 and only at `tierKeys` or wider; the count is the point, so it abbreviates before disappearing |
+| Backfill scan | `Backfill <channel>: <tab> p<n>`, `BF:<tab> p<n>` at `tierCompact` | Routine background activity, so it is the first thing dropped (gone at `tierKeys`). One in-flight scan at a time — scans are serial — and the display name is clipped to 16 runes. |
+| Disk Usage | `Disk 45% (120G free)` → `D:45% 120G` → `D:45%` | Green normally, yellow (`warn`), red (`critical`). Survives `tierEssential` only when warn/critical — a healthy disk says nothing there. |
+| Active Downloads | Count of `Downloading` / `Live` / `Muxing` jobs | Shown when > 0 and only at `tierKeys` or wider. `Queued` is deliberately excluded — a queued job is waiting for an archive slot, not downloading. |
+| Cookie Status | Per-platform `YT` / `TW` indicators | `renderCookieStatus`. See below. |
+
+**Cookie indicators.** One indicator per *active* platform (`SetActivePlatforms`, fed from `config.GetActivePlatforms`); an inactive platform renders nothing. Each is a `CookieStatus` (`internal/tui/status_bar.go`), projected from one `cookies.AuthStatus` triple by `cookieBadgeFor` in `cmd/moombox/tui_wiring.go` — `authenticated` wins outright, then "no cookies at all" reports `None` whatever the verdict says, then `RefreshFailed` with cookies present is `CookiesOnly`, and everything else is `Unknown`. `cookieBadgeFor` never returns `Relogin` — that state is applied one level up, where `authStatusToTUI` (same file) overwrites the badge whenever `AutoCookieService.ReloginStatus()` flags the platform, unconditionally and not gated on `auto_enabled`, matching the Web badge's first arm. `hasCookies` is the loose predicate on both sides, so a half-cleared jar reads as configured rather than as never-set-up (see `data-and-storage.md §Cookie Jar`).
+
+| State | Render | Colour | Tier behavior |
+|-------|--------|--------|---------------|
+| `CookieStatusRelogin` | `YT: Re-login` / `TW: Re-login`, abbreviated to `YT!` / `TW!` at `tierTight` | Red | Survives to `tierEssential` |
+| `CookieStatusCookiesOnly` | `YT` / `TW` | Red | Survives to `tierEssential` |
+| `CookieStatusUnknown` | `YT: Unknown` / `TW: Unknown`, abbreviated to `YT` / `TW` at `tierTight` | Warning | **Dropped** at `tierEssential` |
+| `CookieStatusNone` | `YT` (YouTube only) | Yellow | Dropped at `tierEssential` |
+| `CookieStatusOK` | `YT` / `TW` | Green | Dropped at `tierEssential` |
+| default — Twitch `None`, or any unmapped value on either side | `YT` / `TW` | Dim | Dropped at `tierEssential` |
+
+`CookieStatusUnknown` sits in the dropped group **on purpose**. "The last check could not reach YouTube" is not something the operator can act on; it used to render as the always-visible red `CookiesOnly` alert, so a DNS blip shouted at the volume of a dead session for as long as it lasted. Only a conclusive rejection and a re-login prompt earn the surviving red. Twitch without cookies is ordinary anonymous mode and takes the neutral dim indicator, unlike YouTube's yellow.
+
+**A job parked in `COOKIES?` escalates its own platform's indicator to the surviving red**, ranked immediately below `Relogin` and above every check-derived state. `parkedCookieJobs` attributes the park per platform — an absent `Platform` counts as YouTube, matching every other platform test in the TUI — and deliberately does **not** filter on `ParkReason`: membership parks, auth parks and the pre-v18 zero value all escalate, because in all three the remedy is credentials of some kind. What the red badge means is therefore "a download stopped for want of usable credentials", not "your cookies expired"; the job detail panel carries the difference. A park is evidence from a real download attempt, so it outranks a check that merely asked.
+
+**The reason strings are deliberately absent from this bar.** `cookies.AuthStatus` carries `YouTubeError` / `TwitchError` — why a check reached `Unknown` — and they have readers on the two **per-request** paths only: the REST cookie-status payload and the TUI's `R C` result line. This panel is push-driven, fed from `RefreshService.OnAuthChange`, and `authStatusChanged` (`internal/cookies/refresh.go`) excludes the two strings from its change-detection gate. That exclusion is a **contract**, not an oversight: no `OnAuthChange`-driven surface may render them, because a reason-only change produces no push and the line would sit stale beside a verdict that is still correct. Widening the gate is the precondition for putting a reason here, and it is a later owner's code change. Until then the operator gets the reason on the next `R C`.
 
 ---
 
@@ -443,13 +465,17 @@ All routes use the `/api/` prefix unless otherwise noted. PO Token routes use ba
 
 ### Authentication
 
+This is **dashboard** authentication — the operator's password and session. It is unrelated to the platform credentials in §Cookies below, which is why the two never share a payload.
+
 | Method | Path | Rate Limit | Notes |
 |--------|------|:----------:|-------|
-| `GET` | `/api/auth/status` | — | Returns `{ authRequired, authenticated, hasPassword }`. Public. |
-| `POST` | `/api/auth/login` | 5 req / 60s | Password body. Returns session token cookie. |
-| `POST` | `/api/auth/logout` | — | Invalidates session. |
-| `POST` | `/api/auth/set-password` | 3 req / 60s | Sets or changes the password. |
-| `POST` | `/api/auth/remove-password` | 3 req / 60s | Removes password (disables auth). |
+| `GET` | `/api/auth/status` | — | Public. Returns `{ authRequired, authenticated, hasPassword, passwordlessExternal }` (`AuthRoutes`, `internal/web/routes/auth.go`). `passwordlessExternal` is `network_access` of `external`/`public` with no password hash — a state only a hand-edited config file can produce, and it drives the Web UI's persistent security banner. |
+| `POST` | `/api/auth/login` | 5 req / 60s | `{ password }` body, max 128 chars. Sets the session cookie and — when a database is wired — issues a persistent `moombox_client` token cookie, revoking any previous one from the same browser. Returns `{ success: true }`; the token itself is never in the body. |
+| `POST` | `/api/auth/logout` | — | Invalidates the session and revokes the presented client token, then clears both cookies. |
+| `POST` | `/api/auth/set-password` | 3 req / 60s | Sets or changes the password. Requires a valid session **or** a loopback/private-network origin. |
+| `POST` | `/api/auth/remove-password` | 3 req / 60s | Removes password (disables auth). Same session-or-local gate. |
+
+The two limiters are per-IP and separate from the shared API limiter: `rateLimitLoginPerMinute = 5` and `rateLimitPasswordPerMinute = 3` in `cmd/moombox/main.go`. A refused request answers `429` with `Retry-After` and `{ error, retryAfter }`.
 
 ### Client Tokens
 
@@ -501,7 +527,31 @@ All routes use the `/api/` prefix unless otherwise noted. PO Token routes use ba
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/status` | Aggregate status: version, uptime, active platforms, cookie status, Twitch auth, monitor timers, auto-cookie state. |
+| `GET` | `/api/status` | Aggregate status. `StatusRoute` in `internal/web/routes/jobs.go`, wired in `cmd/moombox/routes_wiring.go`. |
+
+**The complete key set.** Every key below `version` is conditional — on an atomic having been populated, or on the matching dependency being wired — so a consumer must treat each as optional rather than assume the full shape:
+
+| Key | Shape | Source |
+|-----|-------|--------|
+| `status` | `"running"` | Constant |
+| `uptime` | seconds since start | `deps.StartTime` |
+| `timestamp` | RFC 3339 UTC | Request time |
+| `memory` | `{ rss, heapUsed, heapTotal, external }` in MiB (`Sys`, `HeapAlloc`, `HeapSys`, `MSpanSys` / 1048576) plus `goroutines`, a count (`runtime.NumGoroutine`) | `runtime.ReadMemStats` (`internal/web/routes/jobs.go:1362-1368`) |
+| `version` | string | `deps.Version` |
+| `updateAvailable` | `{ version, tagName, releaseNotes, releaseNotesHtml, publishedAt }` | `SharedUpdateInfo` atomic; absent when no update is pending |
+| `disk` | `{ free, total, usedPct, warnLevel }` | `SharedDiskStatus` atomic; absent until the first disk sample |
+| `activePlatforms` | `{ youtube, twitch }` booleans | `config.GetActivePlatforms` |
+| `cookieStatus` | `{ found, authenticated, verification, youtubeError }` | `routes.CookieStatusPayload(cookieRefresh.GetStatus())` |
+| `twitchAuthStatus` | `{ found, authenticated, verification, twitchError }` | `routes.TwitchAuthStatusPayload(cookieRefresh.GetStatus())` |
+| `autoCookieReloginRequired` | `{ youtube, twitch }` booleans | `AutoCookieService.ReloginStatus()` |
+| `nextFeedCheck` / `nextDecapiCheck` / `nextTwitchCheck` | epoch ms | Monitor `GetNextCheckAt` |
+| `channelHealth` | `{ youtube, twitch }` — per-channel last check, last error, consecutive failures | Feed and DECAPI health merged per YouTube channel (fresher last-check wins), plus Twitch |
+
+The two cookie blocks come from `routes`' own projections rather than being rebuilt here, and that is load-bearing: three hand-written copies of the `cookieStatus` map existed across two packages, and a field added to two of them left this endpoint — the one the dashboard reads on every load and reconnect — quietly serving the old meaning. Their field contract is documented under §Cookies.
+
+`autoCookieReloginRequired` calls `ReloginStatus()` and **not** `GetStatus()`, deliberately: the closure reads nothing but the relogin map, and `GetStatus`'s browser/registry detection scan would otherwise run on the dashboard's most frequent request for a field it never uses.
+
+**There is no cookie-status WebSocket event.** The Web UI's cookie state arrives only in responses the page asked for: this endpoint, plus the two manual triggers, which return the same two blocks. `loadStatus()` is not polled on a timer — it runs on page init, on every WebSocket (re)connect, after a settings save, and after an interactive setup finishes or aborts (both the settings dialog's paths and the first-run wizard's). The two manual triggers do not re-fetch it at all: they assign `cookieStatus` / `twitchAuthStatus` / `autoCookieReloginRequired` straight off their own response bodies and call `updateStatusBar()`. Status and reason therefore always arrive together in one fetch, which is why the header badge may render `youtubeError` / `twitchError` in its tooltip while the push-driven TUI status bar may not (see §Status Bar).
 
 ### Backfill
 
@@ -521,14 +571,153 @@ All routes use the `/api/` prefix unless otherwise noted. PO Token routes use ba
 
 ### Cookies
 
-| Method | Path | Notes |
-|--------|------|-------|
-| `POST` | `/api/cookies/recheck` | Force a cookie validity recheck. |
-| `POST` | `/api/cookies/auto-refresh` | Trigger automatic cookie refresh. |
-| `POST` | `/api/cookies/auto-setup/start` | Begin the auto-cookie setup flow (browser automation). |
-| `POST` | `/api/cookies/auto-setup/finish` | Complete auto-cookie setup. |
-| `POST` | `/api/cookies/auto-setup/cancel` | Cancel in-progress auto-cookie setup. |
-| `GET` | `/api/cookies/auto-status` | Get current auto-cookie service status. |
+`CookieRoutes` in `internal/web/routes/cookies.go`. The mechanisms behind these endpoints — the jar, the in-process `RefreshService`, and the `AutoCookieService`'s browser and profile-import paths — are specified in `data-and-storage.md §Cookies`; this section is what reaches the wire and what each UI does with it.
+
+| Method | Path | Rate limit | Notes |
+|--------|------|:----------:|-------|
+| `POST` | `/api/cookies/recheck` | — | The in-process Go refresh + check (`RefreshService.CheckNow`, then `GetStatus`). Always 200. |
+| `POST` | `/api/cookies/auto-refresh` | shared API | `AutoCookieService.RefreshCookiesDetailed` — headless browser when the gate allows one, otherwise an immediate browser-profile import. Discriminated error codes below. |
+| `POST` | `/api/cookies/auto-setup/start` | shared API | Begin interactive setup. Body `{ platform }`, defaulting to `"youtube"` on an absent or unparseable body. Returns `{ success: true }`. |
+| `POST` | `/api/cookies/auto-setup/finish` | shared API | `FinishSetupDetailed` — extract, merge, write, then verify. |
+| `POST` | `/api/cookies/auto-setup/cancel` | shared API | Cancel and close the setup browser. `{ success: true }`, or 404 when there is nothing to cancel. |
+| `POST` | `/api/cookies/auto-setup/abandon` | shared API | The dashboard's unload beacon, and deliberately **not** `/cancel`: a user pressing Cancel consents to the setup window closing, a tab unloading does not. Releases the slot without killing the browser. Returns `{ success, released }`; 404 when there is no setup. |
+| `POST` | `/api/auto-cookies/validate-browser-path` | shared API | Validates a user-supplied browser executable (spawns `--version`). 400 on an undecodable body; otherwise 200 with `{ valid: true }` or `{ valid: false, error }` — a rejected path is a *verdict*, not a transport failure, so it does not get an error status. A successful validation calls `InvalidateBrowserDetection()` so the next status poll sees the new browser instead of riding out the 60s detection TTL. |
+| `GET` | `/api/cookies/auto-status` | — | `AutoCookieService.GetStatus()`. |
+
+"shared API" is the single per-IP `apiRL` limiter (20 requests / 60s, `rateLimitAPIPerMinute`), shared with job creation and import. It wraps the endpoints that spawn or steer a browser: `AutoCookieService` already serialises them, but rate-limiting the request flow stops a caller burning CPU on the fast-fail path.
+
+`/auto-refresh` and the four `/auto-setup/*` endpoints answer `503 auto-cookie service not configured` when no `AutoCookieService` is wired. `/recheck` needs only the `RefreshService`, `/auto-cookies/validate-browser-path` calls a package-level function and needs neither, and `/auto-status` answers a full zero-value body instead (below).
+
+#### The two auth-status payloads
+
+`CookieStatusPayload` and `TwitchAuthStatusPayload` (`internal/web/routes/cookies.go`) are the **only** two projections of `cookies.AuthStatus` onto the wire. `/api/status`, `/api/cookies/recheck` and `/api/cookies/auto-refresh` all render through them.
+
+| Key | YouTube payload | Twitch payload | Meaning |
+|-----|-----------------|----------------|---------|
+| `found` | `HasYouTubeCookies` | `HasTwitchCookies` | Was this install ever **configured** for the platform — the loose predicate, not "is the cookie set complete". A Twitch session whose `auth-token` was pruned on expiry is a configured session with no credential, which is a different thing to say than "no cookies". |
+| `authenticated` | `YouTubeAuthenticated` | `TwitchAuthenticated` | "Can we do authenticated work right now." Unchanged in meaning on purpose — it is the one key a pre-existing frontend reads — and **false on an inconclusive check**. |
+| `verification` | `YouTubeVerification.String()` | `TwitchVerification.String()` | What the check **concluded**: `"ok"`, `"failed"` or `"unknown"`. Only `"failed"` is a conclusive negative and only it may be worded as one. |
+| `youtubeError` / `twitchError` | `YouTubeError` | `TwitchError` | **Why** the check could not conclude. Empty whenever it did. |
+
+`verification` is `cookies.RefreshVerdict` rendered through `String()` — never as an ordinal; the enum is an `int` and its field carries `json:"-"` for exactly that reason. `AuthStatus` has no `lastCheck`: the field existed, was written on every pass, was read by nothing, and was removed rather than wired — a timestamp from a pass that may have concluded nothing does not say "the credentials were valid as of this time".
+
+The reason strings answer the half `verification` cannot carry. Without them the UI could say "could not check" and never say what stopped it, so an install behind a captive portal, one being rate-limited, and one behind an intercepting proxy all rendered identically and none named the thing to fix. They are **safe to render** because of a rule at the producers, not at this projection: every string that can reach them names a status code, a scheme+host, a header *name*, a transport error over a constant URL, or one of two static sentinels, and no branch interpolates a response body.
+
+`verification`, `found` (Twitch) and the reason strings are all **additive**: an older frontend ignores them and behaves as before, and the current frontend branches *positively* on the strings, so against an older binary that omits them it degrades to the unqualified copy rather than to the hedged one.
+
+#### Per-endpoint response bodies
+
+**`POST /api/cookies/recheck`** — a status *snapshot*, not a claim that this request produced it. `CheckNow`'s "did a pass actually run" bool is deliberately ignored: a collision with the 30-minute ticker costs at most one snapshot of freshness, and every field is still a true statement about the credentials.
+
+| Key | Value |
+|-----|-------|
+| `success` | `youtubeAuthenticated \|\| twitchAuthenticated` |
+| `cookieStatus` | `CookieStatusPayload` |
+| `twitchAuthStatus` | `TwitchAuthStatusPayload` |
+| `autoCookieReloginRequired` | `ReloginStatus()`, or `{youtube:false, twitch:false}` when no auto-cookie service is wired — both platforms always present, so the frontend needs no missing-key fallback |
+| `activePlatforms` | present when the callback is wired |
+
+**`POST /api/cookies/auto-refresh`** on success adds the four `cookieRefreshOutcome` keys to the same status block. Three of them are independent facts and none can be derived from another:
+
+| Key | Question it answers |
+|-----|---------------------|
+| `success` | `RefreshResult.AnyVerified()` — can we do authenticated work at all? The legacy alias for `verdict === "ok"`, kept because it is the only key a pre-existing caller reads. |
+| `renewed` | Did **this** pass produce the credentials it verified? False means "could not confirm", never "the browser failed" — a working `cookies.txt` outlives a browser refresh that did nothing, because the independent 30-minute refresh keeps the session alive. |
+| `verdict` | What the pass **concluded**: `"ok"`, `"failed"` or `"unknown"`. |
+| `ran` | Did the pass do any work at all? This splits the two very different events inside `"unknown"`. |
+
+plus `cookieStatus`, `twitchAuthStatus`, `autoCookieReloginRequired` and `activePlatforms`. The status block is re-read after the browser pass, and it can lag: a refresh already in flight read the cookie file *before* this pass rewrote it. The refresh's own outcome comes from the four keys above and is unaffected.
+
+Its error arms are discriminated so the frontend can both branch and show something actionable:
+
+| Sentinel | Status | Body |
+|----------|:------:|------|
+| `ErrBrowserLadderBlocked` | 409 | `{ error, cause: "browser-ladder-blocked" }` |
+| `ErrBrowserReadUnanswered` | 502 | `{ error, cause: "browser-read-unanswered" }` |
+| `ErrNoBrowserFound` | 424 | Message **verbatim**, not a static "no supported browser installed": two states reach this sentinel on a refresh — no browser is installed, or one is and `auto_enabled` has switched headless runs off — and only the first can support that sentence. |
+| `ErrProfileNotFound` | 404 | `browser profile not found — run setup first` |
+| `ErrProfileDirUnreadable`, `ErrProfileNotADirectory`, `ErrCookieDBNotFound`, `ErrNoCookiesInProfile`, `ErrCookieDBUnreadable`, `ErrCookieFileUnreadable` | 422 | Message verbatim — these carry the only actionable detail the operator has, and there is no browser UI in a container. |
+| `ErrCookieDBLocked` | 409 | Message verbatim |
+| anything else | 500 | `cookie refresh failed` |
+
+**`POST /api/cookies/auto-setup/finish`** returns `cookieSetupOutcome`: `{ success: true, authenticated, twitchAuthenticated, youtubeVerification, twitchVerification }`. The two facts per platform exist because they can disagree — `authenticated` is whether the setup **accepted** the sign-in (a login the user completed thirty seconds ago is accepted even when the site could not be reached to confirm it), and `*Verification` is what the check **concluded**. The pair `(accepted, "unknown")` is the state this exists for: the cookies are saved and in use, and Moombox could not reach the site to confirm them. It was computed long before it was rendered and survived only as a server log line, so a user whose network blipped during the check was told their login failed.
+
+Its errors: `writeBrowserReadError` runs first, so the two browser-read sentinels answer 409/502 with a `cause` here too. Then `ErrNoSetupInProgress` → 404, `ErrSetupCancelled` and `ErrCookieDBLocked` → 409, `ErrCookieDBNotFound` / `ErrCookieDBUnreadable` / `ErrCookieFileUnreadable` → 422 verbatim, everything else → 500 `failed to finish setup`. An **empty** profile is not an error at all for either browser family: `FinishSetup` translates it to "no login detected" and returns a 200 the dialog renders inline.
+
+`POST /api/cookies/auto-setup/start` keeps the static `no supported browser installed` for `ErrNoBrowserFound`, and correctly — `StartSetup` is never gated, so there the sentinel means exactly one thing. `ErrSetupInProgress` / `ErrRefreshInProgress` → 409; `ErrServiceStopped` → 503, because that one never clears.
+
+`cause` is a **short stable token**, never the sentinel's message: prose gets reworded, and a frontend branch keyed on prose breaks silently the first time it is. The wording still rides along as `error`, which is the half a human reads. The two tokens must stay distinct because the operator's next move differs — a blocked ladder is a condition on this machine to change (something is holding or intercepting the debugging port), an unanswered read is the browser side having produced nothing at all. **Nothing branches on `cause` today** — the dashboard renders `error` (directly on `/auto-refresh`, through `serverErrorMessage` on `/auto-setup/finish`) and the TUI never sees these responses at all. It is emitted for the machine reader that does not exist yet, and is pinned by `internal/web/routes/cookies_browserread_test.go`.
+
+**`GET /api/cookies/auto-status`** marshals `cookies.AutoCookieStatus`: `setupInProgress`, `browser`, `availableBrowsers`, `configuredBrowserPath` (`omitempty`), `configuredBrowserType` (`omitempty`), `lastRefresh`, `lastError`, `needsManualRelogin`. There is deliberately no `configured` flag — one existed, computed as `profileDir != ""`, could never be false, and was read by nobody.
+
+When no auto-cookie service is wired the handler answers a hand-built object that must match the real one key for key, or this branch teaches the frontend a field the real service never sends. `availableBrowsers` is `[]` and **not** `null`, because `AvailableBrowsers` has no `omitempty` and `DetectBrowsers` never returns a nil slice — the frontend iterates it unconditionally. `configuredBrowserPath` / `configuredBrowserType` are *omitted* here for the mirror-image reason: both carry `omitempty`, so a zero-value `AutoCookieStatus` omits them too. `needsManualRelogin` always carries both supported platforms.
+
+#### What the Web UI renders
+
+| Surface | Reads | Behavior |
+|---------|-------|----------|
+| Header platform badges | `/api/status`'s `cookieStatus` / `twitchAuthStatus` / `autoCookieReloginRequired`, plus the in-memory job list | `cookieIndicatorState` in `web/public/modules/utils.js`, called from `updateStatusBar` in `app.js` |
+| Header warnings (`YT: Re-login` / `TW: Re-login`) | `autoCookieReloginRequired` | Text on desktop, a collapsed `exclamation-triangle` icon on mobile; clicking either starts interactive setup for that platform |
+| Refresh-cookies button | — | Plain click → `recheckCookies()`; **shift+click** → `autoCookieRefresh()` |
+| Settings → "Refresh cookies from browser profile" button (`btn-import-browser-profile`) | — | Calls `app.autoCookieRefresh()` — the same method and endpoint as shift+click, existing because a modifier key does not exist on a phone |
+| Settings auto-cookie panel | `/api/cookies/auto-status` | Browser selector, `Last refresh: …`, and a `Last cookie error: …` line shown only when `lastError` is non-empty |
+| Setup dialog | `/auto-setup/finish` | `cookieSetupAcceptedToast` per accepted platform, `cookieSetupRejectedMessage` inline when neither was accepted |
+
+`cookieIndicatorState` decides one platform's badge in a fixed order, and the order is the contract:
+
+1. **re-login required** → red, `<Platform>: Re-login required`. Not gated on `auto_enabled` — "a human must sign in again" is exactly as true, and exactly as actionable, for an install that maintains `cookies.txt` by hand. Do not reintroduce the gate here or at the call site; the TUI has never had one.
+2. **a job parked in `COOKIES?` for this platform** → red, `<Platform>: A download stopped for want of usable credentials`. `parkedCookiePlatforms` is the Web half of the TUI's `parkedCookieJobs`, ported deliberately rather than re-derived, with the same per-platform attribution, the same absent-platform-counts-as-YouTube rule, and the same absence of a `ParkReason` filter.
+3. `authenticated` → green, `Authenticated`.
+4. `!found` → the platform's absent state, and the asymmetry mirrors the TUI's yellow/dim split: `YouTube: No cookies` is a warning because almost everything Moombox does with YouTube wants them, `Twitch: Anonymous` is the neutral off dot because that is the ordinary mode.
+5. `verification === "unknown"` → warning, `Cookies saved — Moombox could not establish whether they work`, with `(reason)` appended from `youtubeError` / `twitchError` when present. The reason is appended to **this arm only** — a conclusive `"ok"` or `"failed"` has no cause to give, and the producers leave the field empty there.
+6. otherwise → red, `Not authenticated`.
+
+`authenticated` is tested **before** `found`, and the `"unknown"` comparison is positive rather than `!== "ok"`. Both are the additive contract in the other direction: an older binary sends no `verification` and no Twitch `found`, and either inversion would render a healthy session as broken.
+
+The badge is repainted from four job events — `job_update`, `jobs_update`, `initial_state`, `job_deleted` — through `_syncParkedBadge`, which is **change-gated**: the scan over jobs already in memory runs every time (it is cheap and stops at the second platform) and only the DOM write is conditioned, so a 60 Hz progress tick never repaints. `job_deleted` matters because deleting the last parked job is the one gesture that *clears* the escalation. `updateStatusBar` re-computes `parkedCookiePlatforms` fresh rather than reading the memoised value, so the four pre-existing triggers (config load, status load, manual recheck, manual browser refresh) paint the same badge.
+
+The **recheck toast** is worded by `cookieRecheckToast` from the two `verification` fields, filtered to the active platforms — deliberately not from `success`, which is `youtubeAuthenticated || twitchAuthenticated` and therefore false for a check that never reached the site. Its `message` is reproduced character for character from `cookies.RecheckReport` in Go and pinned by a test that runs both; only the Shoelace `variant` is web-only, and it ranks danger (a conclusive failure) over warning (nothing established) over success.
+
+The **browser-refresh toast** has five branches over `ran`, `verdict` and `renewed`, and both un-concluded arms stop short of asserting failure: `!success && ran === false` → neutral, using `cookies.RefreshDeclinedCauses` verbatim; `!success && verdict === "failed"` → danger; `!success` → warning ("ran but could not establish"); `renewed === false` → warning ("cookies still work — but this pass could not confirm the browser refreshed them"); otherwise success. A 404 or 424 is **not** an error here: it is the bottom rung of the ladder, and the dashboard falls through to `recheckCookies()` after toasting `No browser profile found, running a normal cookie refresh instead...`. It branches on the status code, not on the message.
+
+#### What the TUI renders
+
+The TUI's cookie chords do **not** go through these REST endpoints. `OnRecheckCookies`, `OnAutoCookieLastError` and `OnForceRefreshCookies` (`cmd/moombox/tui_wiring.go`) call `RefreshService` and `AutoCookieService` in-process, so both surfaces exercise the same services but not the same handlers — which is why every shared sentence here is held by an executed test rather than by the transport.
+
+**`R C` — Recheck Cookies.** Never gated by anything. `recheckCookiesCmd` (`internal/tui/app_actions.go`) collects four values — the two verdicts and the two reason strings — plus `AutoCookieStatus.LastError` from a *different service*, and `cookieRecheckFeedback` (`internal/tui/app_update.go`) composes one line:
+
+```
+Cookies: YouTube OK, Twitch — could not establish (Twitch: <reason>) | Last cookie error: <lastError>
+```
+
+The verdict clause is `cookies.RecheckReport`, shared with the Web toast. A reason is appended only for an *active* platform whose verdict is `RefreshUnknown`. The `LastError` clause is ungated by any verdict and goes last, so the width clamp eats it before it eats the verdicts: it belongs to the auto-cookie service, not to the check this line reports, and it can be non-empty while both verdicts are OK — a browser refresh that has been failing for days behind a `cookies.txt` the 30-minute session refresh is still renewing. This is the TUI's only surface for that fact; it has no auto-cookie status panel, where the Web UI has the settings panel.
+
+**Severity is stated by the composer, never inferred from the finished sentence.** `cookieRecheckFeedback` returns a `feedbackSeverity` beside the line and `feedbackColor` obeys a stated severity outright. The line is clamped to the pane width by `fitFeedback` *before* the colorizer sees it, so at 40 columns `"… | Last cookie err…"` loses the marker the warning branch matched on and a line announcing a recorded failure rendered **green**; at 30 columns `"Cookies: YouTube not authen…"` lost `not authenticated` and a conclusive refusal rendered green too. Each contributing fact raises the severity independently and none can lower it: `RefreshFailed` → error, `RefreshUnknown` → warning, no configured platforms → warning, a non-empty `LastError` → at least warning (never more — what was recorded is a fact about a *previous* pass).
+
+`not authenticated` is **red** on both `R C` and `R F`. Red is the actionable end — the remedy is to re-export credentials — and yellow is reserved for "we could not check", which asks for nothing. A mixed line, one platform refused and the other unreachable, is red: the conclusive half is the half to act on, which is the same precedence the badge and the dashboard toast apply.
+
+**`R F` — Force Cookie Refresh.** Wired unconditionally; do not put an `auto_enabled` gate back, in either shape. A nil `OnForceRefreshCookies` does not make the chord inert, it *deletes* it — `dispatchAction`, `buildMenuItems` and the help overlay all test the field — so on an install with the flag off, an operator told their cookies were dead had no key to press and no entry naming one. It is a three-rung ladder; the rungs are chosen inside `RefreshCookiesDetailed` (see `data-and-storage.md §Auto-Cookie Service`) and the TUI only renders the outcome:
+
+| Outcome | Line |
+|---------|------|
+| `cookies.IsNoBrowserProfile(err)` (rung 3) | `No browser profile found, running R C instead...` — then it dispatches `R C`'s own command, so the sentence leads a real refresh and is replaced by that refresh's report a moment later |
+| any other error | `Browser cookie refresh failed: <err>` |
+| `!Ran` | `Browser cookie refresh declined to run (<RefreshDeclinedCauses>) — nothing was learned about these cookies` |
+| `Overall() == RefreshFailed` | `Browser cookie refresh ran and auth verification failed` |
+| `Overall() == RefreshUnknown` | `Browser cookie refresh ran but could not establish whether these cookies work` |
+| `!Renewed` | `Cookies still work, but this pass could not confirm the browser refreshed them` |
+| otherwise | `Browser cookie refresh successful` |
+
+The rung-3 sentence and its Web twin (`No browser profile found, running a normal cookie refresh instead...`) **diverge by design**: each surface names its own affordance for the in-process refresh, and a dashboard user has no `R C` to press. Both are pinned exactly, and their difference asserted, by `TestRungThreeSentencesDivergeByDesign`.
+
+#### Restart-required cookie settings
+
+Three cookie keys are labelled restart-required in **both** settings UIs — `cookie_file`, `auto_enabled`, `browser_profile_dir`. The Web UI inserts a `Restart` badge after the named element (`RESTART_REQUIRED_FIELDS` in `web/public/modules/settings.js`) and offers a restart on save; the TUI colours the change marker yellow instead of green for these keys (`restartRequiredKeys` in `internal/tui/settings.go`, rendered in `settings_view.go`). The two lists are pinned against each other by `TestRestartRequiredListsAgree`. What `auto_enabled` does **not** need a restart for is the manual triggers: `R F` and the dashboard's shift+click read it live. See `data-and-storage.md §[cookies]` for why the three are restart-required at all.
+
+#### Facts these surfaces deliberately do not carry
+
+- **Cookie expiry has no UI field**, and the jar's two expiry accessors are not equally shipped. `ExpiredAuthCookiesFor` has exactly one production consumer — the `Cookies loaded` startup log line in `cmd/moombox/services.go`, emitted once per boot when a cookie file is configured and loads, which prints `expiredYouTubeAuth` and `expiredTwitchAuth`, both platforms always, neither implied by the other's silence. `AuthCookieHorizonFor` has no production consumer at all: it is exported, has test callers only, and no badge, payload key or log line carries a horizon timestamp today (`data-and-storage.md §Cookie Jar`). Nothing on either UI reads either accessor. An expired Twitch `auth-token` in particular has no other warning: `RefreshService` rotates YouTube in-process but only *checks* Twitch, and an expired token downgrades chat capture to anonymous instead of failing.
+- **The chat-downgrade notification is not a UI surface**, but it is how one credential failure reaches an operator who is looking at neither dashboard — a state neither badge can show, because the download itself is healthy. When a job that **had** Twitch credentials falls back to the anonymous IRC login, the worker sends exactly one notification per job — title `Twitch chat is anonymous for <channel>`, `TypeWarning`, event `"auth"` so it filters alongside the worker's and monitor's other credential alerts. The reason comes from a closed four-value vocabulary in `internal/twitch/chat.go` with no format verb to interpolate a token, a login or a chat line into, and `twitchChatDowngradeReason` in `internal/worker/stream_processor_twitch.go` turns it into the operator's sentence. The description names the **next-capture** consequence, not just the chat one: this download keeps the entitlements its playback token was issued, but the next starts anonymous — ad-break gaps in the archive, and outright failure on subscriber-only content. A notice that said "chat only" would read as "no rush". A job with chat recording disabled gets no such signal, and neither does a cookieless install: the callback is only wired when a live chat downloader is created, and it fires only when the job had credentials to lose.
 
 ### Trims
 
@@ -646,8 +835,23 @@ Both UIs display the same status information in a persistent status bar / footer
 | Connection status | WebSocket connected/disconnected indicator | Backend reachability indicator |
 | Disk usage | Output drive usage with warning/critical thresholds | Same, with color-coded thresholds |
 | Monitor timers | Next check times for Feed, DECAPI, Twitch | Same, countdown format |
-| Cookie status | YouTube/Twitch auth status (valid/expired/missing) | Same, icon-based |
+| Cookie status | Per-platform badge, `cookieIndicatorState` | Per-platform indicator, `renderCookieStatus` |
+| Re-login required | `YT: Re-login` / `TW: Re-login` in the warnings area, clickable to start setup | Folded into the platform indicator as `YT: Re-login` / `YT!` |
 | Update indicator | New version badge | New version indicator |
+
+**Cookie parity, and where it stops.** The two indicators agree on the facts that matter and are held to that by shared code and by tests, not by convention:
+
+| Property | Status |
+|----------|--------|
+| Escalation order | **Same.** Both rank re-login first and a parked `COOKIES?` job second, above every check-derived state, for the same stated reason: a park is evidence from a real download attempt and outranks a check that merely asked. Below that rank the check-derived states are mutually exclusive by construction, so the two branch orders are not observably different. |
+| Parked-job attribution | **Same.** `parkedCookiePlatforms` (`web/public/modules/utils.js`) is a deliberate port of `parkedCookieJobs` (`internal/tui/status_bar.go`), down to the absent-platform rule and the absence of a `ParkReason` filter. The Web side was knowingly divergent before that port — the TUI reflected parked jobs and the Web did not. |
+| Re-login gating | **Same, and both ungated.** Neither surface conditions the re-login prompt on `cookies.auto_enabled`. The dashboard used to, in all three places it surfaces the state, and the TUI never has; removing the Web gate is what brought them into step. A manual-cookie install is the audience least able to discover the state any other way. |
+| Manual recheck wording | **Same sentence.** `cookies.RecheckReport` is the Go authority and the Web copy is reproduced character for character, pinned by a test that executes both. |
+| Manual refresh gesture | **Same gesture, different affordances.** The TUI's `R F` and the dashboard's shift+click (and the Settings page's "Refresh cookies from browser profile" button, which calls the same method) run the same `RefreshCookiesDetailed` ladder — the TUI in-process, the dashboard over `POST /api/cookies/auto-refresh`. Their rung-3 sentences differ **by design** and are pinned apart by `TestRungThreeSentencesDivergeByDesign`. |
+| Inconclusive-check reason | **Divergent, by contract.** The Web badge appends `youtubeError` / `twitchError` to its tooltip; the TUI status bar never does. The web has no cookie-status WebSocket event, so status and reason always arrive together in one `/api/status` fetch; the TUI bar is push-driven off `OnAuthChange`, whose gate excludes the two strings. The TUI surfaces the reason on the next `R C` instead. |
+| `AutoCookieStatus.LastError` | **Divergent surfaces.** The Web UI has a persistent `Last cookie error:` line in the settings auto-cookie panel; the TUI has no such panel and appends the same fact to the `R C` result line. |
+
+A divergence stated here is a specification. A divergence omitted is a bug report waiting.
 
 ### First-Run Setup Wizard
 

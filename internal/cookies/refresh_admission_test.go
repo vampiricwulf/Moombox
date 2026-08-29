@@ -722,6 +722,136 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 	})
 }
 
+// TestScopedInsertionCreatesOnItsDeclaredDomain pins the owner's rule — YOUTUBE
+// COOKIES SHOULD ALLOW GOOGLE COOKIES AS WELL — on the one verb that had nothing
+// behind it. YouTube and Google are ONE credential platform, so a youtube.com
+// reply that sends a cookie explicitly scoped Domain=.google.com is entitled to
+// CREATE that row when the file holds none, and the created row has to reach the
+// YouTube jar.
+//
+// WHAT THIS ADDS, stated honestly because the first draft of this comment
+// overclaimed and was measured: the behaviour was ALREADY pinned from two
+// directions, and neither of the mutants below is uniquely caught here.
+//
+//   - Admission is pinned by TestAdmitSetCookieOriginDecidesAdmission's "scoped
+//     google from a youtube caller" row — the header is admitted.
+//   - Creation is pinned by TestInsertionStaysInsideTheDeclaredPlatform's
+//     "explicit google domain from a youtube caller" row — a hand-built
+//     {Name: "SAPISID", Domain: ".google.com"} against an empty file lands on
+//     .google.com.
+//
+// What no single existing test spans is the COMPOSITION for this case: a real
+// Set-Cookie header entering at the production entry point, surviving admission,
+// creating a row that did not exist, and that row then being READABLE as a
+// YouTube-platform credential. The scoped subtests that do drive
+// processYouTubeSetCookies (TestUnscopedIsNotInsertedBesideAScopedSibling) all
+// SEED the .google.com row first, so they compose the path for REWRITE and say
+// nothing about creation. This test is the one place the owner's rule is stated
+// end to end.
+//
+// Three cases, the two edges giving it shape:
+//
+//   - .google.com from a youtube.com reply CREATES. The claim itself.
+//   - .twitch.tv from a youtube.com reply creates NOTHING. Note where that is
+//     decided: admitSetCookie's step 2 refuses it, because cookiePlatformOf(
+//     ".twitch.tv") is not the origin's platform, so the header never becomes an
+//     update and the insertion loop never sees it. updateCookieFile's insertion
+//     guard is the independent SECOND net for the same class, reachable only by a
+//     caller that hand-builds an update; TestInsertionStaysInsideTheDeclared-
+//     Platform's "explicit twitch domain from a youtube caller" row drives that
+//     one directly.
+//   - an UNSCOPED SID against the same empty file lands on .youtube.com, NOT
+//     .google.com. The misattribution rule, and the row that separates this test
+//     from an over-confinement. Fully pinned by
+//     TestUnscopedInsertionLandsOnTheDeclaredOrigin; repeated here so the
+//     mutant below can be seen to spare it.
+//
+// MUTANTS RUN AGAINST THIS TEST, both killed here and both also killed
+// elsewhere — recorded so the next reader does not have to re-derive them:
+//
+//   - OVER-CONFINEMENT: make the insertion loop force
+//     `domain = "." + string(origin)` unconditionally rather than only when
+//     key.Domain is empty. The first subtest writes .youtube.com and fails while
+//     the third still passes, which is the asymmetry this test exists to show.
+//     Also caught by TestInsertionStaysInsideTheDeclaredPlatform.
+//   - SEAM: drop scoped keys outside the origin's own SITE inside
+//     processYouTubeSetCookies — the literal implementation of the false claim
+//     that a youtube.com reply "cannot invent a .google.com row". Also caught by
+//     the three sibling subtests and TestProcessSetCookiesPerDomainValues.
+func TestScopedInsertionCreatesOnItsDeclaredDomain(t *testing.T) {
+	const empty = "# Netscape HTTP Cookie File\n"
+
+	t.Run("a scoped google cookie from a youtube reply creates its row", func(t *testing.T) {
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, empty)
+
+		rs.processYouTubeSetCookies(setCookieResponse("SID=scoped-google; Domain=.google.com; Path=/"))
+
+		rows := rowsNamed(readCookieRows(t, path), "SID")
+		if len(rows) != 1 {
+			var where []string
+			for _, r := range rows {
+				where = append(where, r.domain)
+			}
+			t.Fatalf("the file holds %d SID rows %v, want exactly 1 — a scoped Set-Cookie that matches "+
+				"no row must be created, once, on the domain it named", len(rows), where)
+		}
+		if rows[0].domain != ".google.com" {
+			t.Errorf("the created SID row landed on %q, want .google.com — a youtube.com reply may "+
+				"create a Google row when the server scoped the cookie there itself; re-scoping it "+
+				"onto the origin's own site writes a different cookie under this one's name",
+				rows[0].domain)
+		}
+		if rows[0].value != "scoped-google" {
+			t.Errorf("SID = %q, want scoped-google", rows[0].value)
+		}
+		// The row has to reach the SESSION, not just the file: a row written but
+		// unreadable would satisfy every file assertion above and still be inert.
+		// The arm that carries it is jar.go's `isYouTubeDomain(domain) ||
+		// isGoogleDomain(domain)` case, which sends BOTH domains to the one
+		// youtube map — that is what "one credential platform" means downstream.
+		// Admission within it is by essentialYouTubeCookies["SID"], NOT by the
+		// isGoogleAuth clause beside it (checked: removing SID from isGoogleAuth
+		// changes nothing here, because the essential set already covers it).
+		fresh := NewCookieJar()
+		if err := fresh.Load(path); err != nil {
+			t.Fatal(err)
+		}
+		if got := fresh.GetCookieFor(PlatformYouTube, "SID"); got != "scoped-google" {
+			t.Errorf("a freshly loaded jar reads SID as %q, want scoped-google — the created row must "+
+				"be the one the YouTube session actually sends", got)
+		}
+	})
+
+	t.Run("a scoped twitch cookie from a youtube reply creates nothing", func(t *testing.T) {
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, empty)
+
+		rs.processYouTubeSetCookies(setCookieResponse("SID=scoped-twitch; Domain=.twitch.tv; Path=/"))
+
+		if rows := rowsNamed(readCookieRows(t, path), "SID"); len(rows) != 0 {
+			t.Errorf("a .twitch.tv SID from a youtube.com reply created a row under %q — one "+
+				"platform's reply may not place another platform's credential, and the entitlement "+
+				"above is to the DECLARED platform, not to any Domain= the header cares to name",
+				rows[0].domain)
+		}
+	})
+
+	t.Run("an unscoped cookie against the same file lands on the origin's site", func(t *testing.T) {
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, empty)
+
+		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped; Path=/; Secure"))
+
+		rows := rowsNamed(readCookieRows(t, path), "SID")
+		if len(rows) != 1 {
+			t.Fatalf("want exactly 1 SID row, got %d: %+v", len(rows), rows)
+		}
+		if rows[0].domain != ".youtube.com" {
+			t.Errorf("an unscoped SID from a youtube.com reply landed on %q, want .youtube.com — a "+
+				"Domain-less cookie belongs to the responding site, and inventing .google.com for it "+
+				"mints a different cookie under a real one's name", rows[0].domain)
+		}
+	})
+}
+
 // TestUnscopedUntrackedNameIsNotWritten is the narrow half of the new surface,
 // end to end. Opening the unscoped path must not turn every stray first-party
 // cookie youtube.com sets into a row in a credential file.
