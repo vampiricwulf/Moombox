@@ -412,6 +412,14 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 		t := meta.LastRefresh
 		s.lastRefresh = &t
 	}
+	// Reclaim writeFileAtomic temp files orphaned by a previous run that was
+	// killed between os.CreateTemp and the rename — each one is a full copy
+	// of cookies.txt. Service construction is the one place that always has
+	// the real cookie path up front (see cookieTempFileSweepOnce's doc).
+	// Empty cookiePath (no cookie file configured yet) has nothing to sweep.
+	if cookiePath != "" {
+		sweepCookieTempFilesOnce(&cookieTempFileSweepOnce, filepath.Dir(cookiePath), filepath.Base(cookiePath), cookieTempFileMaxAge)
+	}
 	return s
 }
 
@@ -3021,16 +3029,19 @@ var statProfileDir = os.Stat
 
 // writeFileAtomic writes data to a temp file then renames it to the target path,
 // preventing corruption on partial failure. Applies
-// utils.ApplyUserOnlyDACL ONCE per parent directory across the process
-// lifetime so the highest-value secret in the app (auth-token + SAPISID
-// for the user's session) doesn't sit on disk with a parent-inherited
-// world-readable ACL when the cookie file lives outside the config dir
-// (e.g. default `./cookies.txt` in the project root). The DACL is
-// applied to the parent dir rather than the file because (a) icacls
-// /inheritance:r on individual files has corner cases where the new
-// ACL ends up over-restrictive, and (b) propagating from the dir
-// covers any future writes (rotated cookies, side-files) without
-// per-write icacls latency. No-op on non-Windows; idempotent.
+// utils.ApplyUserOnlyDACL to the parent directory (successful attempts are
+// memoised per directory; see tightenCookieDirOnce) so the highest-value
+// secret in the app (auth-token + SAPISID for the user's session) doesn't
+// sit on disk with a parent-inherited world-readable ACL when the cookie
+// file lives outside the config dir (e.g. default `./cookies.txt` in the
+// project root). The DACL is applied to the parent dir rather than the file
+// because (a) icacls /inheritance:r on individual files has corner cases
+// where the new ACL ends up over-restrictive, and (b) propagating from the
+// dir covers any future writes (rotated cookies, side-files) without
+// per-write icacls latency. Real hardening on non-Windows too — see
+// utils.ApplyUserOnlyDACL's non-Windows implementation, which chmods to
+// 0700/0600 rather than no-op'ing — not just Windows; idempotent once
+// applied.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Unique temp name (os.CreateTemp): the RefreshService rewrites the same
 	// cookies.txt through its own temp file, and a shared fixed ".tmp" name
@@ -3070,25 +3081,159 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// tightenCookieDirOnce applies utils.ApplyUserOnlyDACL to the given
-// parent dir at most once per process. Memoised because icacls is a
-// ~30-80ms shell-out that would otherwise fire on every cookie write.
+// cookieTempFileMaxAge bounds how long an orphaned writeFileAtomic temp file
+// may survive before the sweep below reclaims it. A write completes in
+// milliseconds; this is three orders of magnitude of margin, so nothing but
+// a genuinely abandoned temp file — left behind by a crash, a kill, or a
+// panic between os.CreateTemp and the rename — is ever old enough to match.
+// Do not lower this "to be thorough": age is the only guard against
+// sweeping a write in progress.
+const cookieTempFileMaxAge = time.Hour
+
+// cookieTempFileSweepOnce fires sweepStaleCookieTempFiles exactly once per
+// process. Package-level state, same shape as snapshotSweepOnce in
+// autocookies_profile.go — different root (the cookie file's own directory,
+// not os.TempDir()) and a different secret (the whole cookie file, not a
+// browser DB snapshot), so it stays a sibling rather than merging with it.
+//
+// Wired at service construction (NewAutoCookieService), which is the one
+// place in the package that always holds the REAL cookie file path up
+// front. writeFileAtomic itself is a generic temp-then-rename helper shared
+// with meta.go's cookies.meta.json sidecar writes and refresh.go's own
+// cookies.txt rewrite, so keying the "once" off whichever path happens to
+// call writeFileAtomic first would risk sweeping with the wrong base name
+// if call order ever changed.
+var cookieTempFileSweepOnce sync.Once
+
+// sweepCookieTempFilesOnce runs sweepStaleCookieTempFiles through the given
+// *sync.Once. Production code always passes &cookieTempFileSweepOnce; tests
+// pass a local one so the process-lifetime package var doesn't make every
+// test but the first one in the binary a no-op.
+func sweepCookieTempFilesOnce(once *sync.Once, dir, base string, maxAge time.Duration) {
+	once.Do(func() { sweepStaleCookieTempFiles(dir, base, maxAge) })
+}
+
+// sweepStaleCookieTempFiles removes orphaned writeFileAtomic temp files left
+// beside the cookie file: a crash, a kill, or a panic between os.CreateTemp
+// and the rename leaves `<base>.<random>.tmp` on disk forever, and each one
+// is a full copy of cookies.txt — the highest-value secret in the app —
+// under a name nothing reads and nothing else removes.
+//
+// Matches ONLY <base>.<anything>.tmp in dir — the exact shape
+// os.CreateTemp(dir, base+".*.tmp") produces in writeFileAtomic. The prefix
+// check is anchored on base+"." (not on the directory as a whole), so this
+// can never match base itself (no .tmp suffix), never matches an operator
+// file like cookies.txt.bak, and never matches an unrelated file's temp
+// (other.txt.NNN.tmp).
+//
+// Age (see cookieTempFileMaxAge) is the guard against sweeping a live
+// write. Best-effort — every failure is logged at Debug, with the path only
+// and never content or size, and left for the next process start to retry;
+// this is housekeeping, not correctness, and must never fail a caller over
+// a stale file it couldn't remove.
+func sweepStaleCookieTempFiles(dir, base string, maxAge time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Debug("cookie temp file sweep: could not read directory", "dir", dir, "err", err)
+		return
+	}
+	prefix := base + "."
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			slog.Debug("cookie temp file sweep: could not remove orphaned temp file", "path", path, "err", err)
+			continue
+		}
+		slog.Debug("cookie temp file sweep: removed orphaned temp file", "path", path)
+	}
+}
+
+// applyUserOnlyDACL is utils.ApplyUserOnlyDACL behind a seam, so
+// tightenCookieDirOnce's retry-on-failure memoisation (below) can be tested
+// with a fake that fails once then succeeds, instead of shelling out to a
+// real icacls (Windows) or depending on real chmod failure modes (Linux) in
+// CI. Mirrors writeCookieFile/readCookieFile/statProfileDir above.
+var applyUserOnlyDACL = utils.ApplyUserOnlyDACL
+
+// dirTightenState is tightenCookieDirOnce's per-directory memo. Two states,
+// not one boolean, because "an apply is running right now" and "an apply
+// already succeeded" must be told apart: the first still says "don't spawn
+// another", the second says "there is nothing left to do, ever". A dir
+// absent from the map is the implicit third state, not started.
+type dirTightenState int
+
+const (
+	dirTighteningInFlight dirTightenState = iota
+	dirTighteningDone
+)
+
+// tightenCookieDirOnce applies utils.ApplyUserOnlyDACL to the given parent
+// dir. Memoised on SUCCESS, not on attempt: icacls (Windows) / chmod
+// (Linux — see utils.ApplyUserOnlyDACL's non-Windows implementation, which
+// really chmods to 0700/0600 there, not a no-op) is a ~30-80ms shell-out/
+// syscall that would otherwise fire on every cookie write, but a transient
+// failure (an AV scanner holding the dir, a first-write race with the dir's
+// own creation) must not disable hardening for the rest of the process just
+// because the failure is demoted to a Debug log line.
+//
+// Three states per dir (dirTightenState above, plus "absent = not
+// started"):
+//   - not started: this call marks the dir in flight, synchronously, before
+//     spawning the goroutine that runs the apply — so a second write
+//     landing during the 30-80ms shell-out sees "in flight" and returns
+//     without spawning a second one.
+//   - in flight: return; the goroutine already running will resolve it.
+//   - done: return; already applied, nothing left to do.
+//
+// A failure — or a panic mid-apply — deletes the entry, putting the dir
+// back to "not started" so the NEXT cookie write retries rather than
+// leaving it stuck in flight or falsely memoised as done.
+//
+// Cost if icacls/chmod fails permanently on a given host: one extra
+// ~30-80ms shell-out per cookie write instead of one per process. Writes
+// happen on the refresh cadence (30 min) and on imports, so the bound is a
+// handful of shell-outs an hour. No failure cap, no backoff — either would
+// be a mechanism to contain a mechanism, and nothing has profiled the plain
+// retry as costing anything.
 var (
 	tightenedCookieDirsMu sync.Mutex
-	tightenedCookieDirs   = make(map[string]struct{})
+	tightenedCookieDirs   = make(map[string]dirTightenState)
 )
 
 func tightenCookieDirOnce(dir string) {
 	tightenedCookieDirsMu.Lock()
-	defer tightenedCookieDirsMu.Unlock()
 	if _, ok := tightenedCookieDirs[dir]; ok {
-		return
+		tightenedCookieDirsMu.Unlock()
+		return // in flight or already done
 	}
-	tightenedCookieDirs[dir] = struct{}{}
+	tightenedCookieDirs[dir] = dirTighteningInFlight
+	tightenedCookieDirsMu.Unlock()
+
 	go func() {
+		succeeded := false
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Warn("cookie dir DACL tightening panicked", "dir", dir, "panic", fmt.Sprint(r))
+			}
+			if !succeeded {
+				// Covers both a returned error and a recovered panic: either
+				// way the apply did not finish successfully, so the memo
+				// goes back to "not started" for the next write to retry.
+				tightenedCookieDirsMu.Lock()
+				delete(tightenedCookieDirs, dir)
+				tightenedCookieDirsMu.Unlock()
 			}
 		}()
 		// This is the hardening for the auth-cookie file (highest-value
@@ -3096,9 +3241,16 @@ func tightenCookieDirOnce(dir string) {
 		// sidecar + profile dir sites): the common failure is ACCESS_DENIED
 		// on a dir created under an elevated/admin context, and on the
 		// single-user host this app targets nobody else can read it anyway.
-		// Raise the log level to Debug to surface the miss.
-		if err := utils.ApplyUserOnlyDACL(dir); err != nil {
+		// Raise the log level to Debug to surface the miss. A failure here
+		// is retried on the NEXT cookie write, not memoised — see the
+		// doc comment above.
+		if err := applyUserOnlyDACL(dir); err != nil {
 			slog.Debug("could not restrict cookie dir to current user", "dir", dir, "err", err)
+			return
 		}
+		tightenedCookieDirsMu.Lock()
+		tightenedCookieDirs[dir] = dirTighteningDone
+		tightenedCookieDirsMu.Unlock()
+		succeeded = true
 	}()
 }
