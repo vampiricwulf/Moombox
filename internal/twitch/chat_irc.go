@@ -43,9 +43,11 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 
 	conn.SetReadLimit(512 * 1024) // 512KB cap on incoming IRC messages
 
-	// Authenticate
-	if cd.authToken != "" {
-		if err := conn.Write(sessionCtx, websocket.MessageText, []byte("PASS oauth:"+cd.authToken)); err != nil {
+	// Authenticate. The token is read HERE, per session, so a reconnect that
+	// happens hours into a stream presents whatever credential the jar holds
+	// now rather than the one captured at construction.
+	if authToken := cd.currentAuthToken(); authToken != "" {
+		if err := conn.Write(sessionCtx, websocket.MessageText, []byte("PASS oauth:"+authToken)); err != nil {
 			return fmt.Errorf("IRC PASS failed: %w", err)
 		}
 	} else {

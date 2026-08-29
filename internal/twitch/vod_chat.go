@@ -38,12 +38,16 @@ const (
 // touch `messages` directly. Callers must NOT read `messages` from
 // outside Start's goroutine — use MessageCount() instead.
 type VodChatDownloader struct {
-	api           *API
-	vodID         string
-	channelLogin  string
-	channelName   string
-	channelID     string
-	authToken     string
+	api          *API
+	vodID        string
+	channelLogin string
+	channelName  string
+	channelID    string
+	// authToken returns the CURRENT Twitch OAuth token, re-read on every
+	// comment page. Same reason as ChatDownloader.authToken: the paging loop
+	// runs for the length of a VOD, and a token captured at construction goes
+	// stale underneath it. nil-safe via currentAuthToken.
+	authToken     func() string
 	outputPath    string
 	vodDuration   int                 // seconds, used for progress % estimation
 	vodStartMs    int64               // epoch ms when VOD started
@@ -93,7 +97,7 @@ type VodChatOptions struct {
 	ChannelLogin  string
 	ChannelName   string
 	ChannelID     string
-	AuthToken     string
+	AuthToken     func() string // Returns the CURRENT OAuth token, re-read per page (nil = anonymous)
 	OutputPath    string
 	VodDuration   int   // seconds, used for progress % estimation
 	VodStartMs    int64 // epoch ms when VOD started, for computing absolute timestamps
@@ -121,6 +125,15 @@ func NewVodChatDownloader(api *API, opts VodChatOptions, logger interface {
 		dedup:         utils.NewOrderedDedup[string](),
 		logger:        logger,
 	}
+}
+
+// currentAuthToken reads the live OAuth token. Returns "" when no getter was
+// supplied — an anonymous comment fetch, exactly as an empty token behaved.
+func (vcd *VodChatDownloader) currentAuthToken() string {
+	if vcd.authToken == nil {
+		return ""
+	}
+	return vcd.authToken()
 }
 
 // Start downloads all VOD chat comments.
@@ -163,7 +176,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		default:
 		}
 
-		edges, hasNext, err := vcd.api.GetVodComments(ctx, vcd.vodID, contentOffset, vcd.authToken)
+		edges, hasNext, err := vcd.api.GetVodComments(ctx, vcd.vodID, contentOffset, vcd.currentAuthToken())
 		if err != nil {
 			consecutiveErrors++
 			if consecutiveErrors >= vodChatMaxConsecutiveErrors {

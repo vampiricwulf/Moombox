@@ -33,7 +33,14 @@ type ChatDownloader struct {
 	channelDisplay string
 	channelID      string
 	streamID       string
-	authToken      string
+	// authToken returns the CURRENT Twitch OAuth token, re-read on every IRC
+	// reconnect. A getter and not a captured string because this downloader
+	// lives for the whole stream: a token that rotates, dies, or is
+	// re-imported mid-job would otherwise never be picked up, and the failure
+	// is SILENT — a rejected token falls through to the anonymous
+	// justinfan login (see runIRCSession), which keeps capturing chat minus
+	// subscriber-only messages and badges. nil-safe via currentAuthToken.
+	authToken func() string
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.
@@ -105,7 +112,7 @@ type ChatDownloaderOptions struct {
 	ChannelDisplay  string
 	ChannelID       string
 	StreamID        string
-	AuthToken       string
+	AuthToken       func() string // Returns the CURRENT OAuth token, re-read per reconnect (nil = anonymous)
 	OutputPath      string
 	StreamStartTime string
 	EmoteResolver   *EmoteResolver
@@ -162,6 +169,17 @@ func (cd *ChatDownloader) currentOutputPath() string {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
 	return cd.outputPath
+}
+
+// currentAuthToken reads the live OAuth token. Returns "" when no getter was
+// supplied — tests and cookieless installs construct the downloader without
+// credentials, and "" is the anonymous-login signal runIRCSession already
+// handles.
+func (cd *ChatDownloader) currentAuthToken() string {
+	if cd.authToken == nil {
+		return ""
+	}
+	return cd.authToken()
 }
 
 // getResumeFilePath returns the path to the resume state file.

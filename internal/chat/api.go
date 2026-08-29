@@ -62,9 +62,15 @@ type ChatApiResponse struct {
 
 // ChatAPI handles YouTube live chat API interactions.
 type ChatAPI struct {
-	apiKey       string
-	visitorData  string
-	cookieHeader string
+	apiKey      string
+	visitorData string
+	// cookieHeader returns the CURRENT Cookie header, re-read on every
+	// request. It is a getter and not a captured string because live chat
+	// polls this API every ~5 s for hours while the in-process cookie refresh
+	// rotates Google's cookies roughly every 30 minutes; a snapshot taken at
+	// construction goes stale mid-job, 401s, and ends chat capture for good.
+	// nil-safe — see generateAuth below, whose shape this mirrors.
+	cookieHeader func() string
 	generateAuth func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
 	client       *http.Client
 	// clientContext is the constant Innertube "context" object (client info +
@@ -94,7 +100,11 @@ func (api *ChatAPI) logDebug(msg string, args ...any) {
 // Live chat polls every ~5 s for hours at a time. Backed by the shared
 // httpx transport (MaxIdleConnsPerHost=8) so keep-alive amortises the
 // handshake across the per-poll cadence. Audit chat.md R3.
-func NewChatAPI(apiKey, visitorData, cookieHeader string) *ChatAPI {
+//
+// cookieHeader is a getter, not a value: it is called at request time so the
+// client presents whatever cookies the jar holds now, not the ones it started
+// with. nil is allowed and means "send no Cookie header".
+func NewChatAPI(apiKey, visitorData string, cookieHeader func() string) *ChatAPI {
 	client := map[string]any{
 		"clientName":    "WEB",
 		"clientVersion": constants.WebClient.ClientVersion,
@@ -128,8 +138,10 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 	// (audit chat.md C14).
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("DNT", "1")
-	if api.cookieHeader != "" {
-		req.Header.Set("Cookie", api.cookieHeader)
+	if api.cookieHeader != nil {
+		if ch := api.cookieHeader(); ch != "" {
+			req.Header.Set("Cookie", ch)
+		}
 	}
 
 	resp, err := api.client.Do(req)
@@ -202,8 +214,10 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
 	req.Header.Set("Origin", youtubeBase)
 	req.Header.Set("Referer", youtubeBase)
-	if api.cookieHeader != "" {
-		req.Header.Set("Cookie", api.cookieHeader)
+	if api.cookieHeader != nil {
+		if ch := api.cookieHeader(); ch != "" {
+			req.Header.Set("Cookie", ch)
+		}
 	}
 	// Add SAPISIDHASH authorization for member-gated chat
 	if api.generateAuth != nil {

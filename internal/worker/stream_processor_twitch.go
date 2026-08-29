@@ -153,9 +153,12 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 				}
 			}
 
-			authToken := ""
+			// Method value, not a snapshot: the comment-paging loop below runs
+			// for the length of the VOD, and a token captured here would be
+			// presented unchanged long after it rotated or died.
+			var authToken func() string
 			if sp.tw != nil && sp.tw.Auth != nil {
-				authToken = sp.tw.Auth.GetAuthToken()
+				authToken = sp.tw.Auth.GetAuthToken
 			}
 
 			vodChatDl := twitch.NewVodChatDownloader(sp.tw.API, twitch.VodChatOptions{
@@ -322,8 +325,11 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				StreamID:        streamInfo.StreamID,
 				OutputPath:      chatPath,
 				StreamStartTime: streamInfo.StartedAt,
-				AuthToken:       sp.tw.GetAuthToken(),
-				EmoteResolver:   sp.tw.Emotes,
+				// Method value, not a snapshot — read fresh on every IRC
+				// reconnect so a rotated token doesn't silently downgrade the
+				// rest of the stream to anonymous chat capture.
+				AuthToken:     sp.tw.GetAuthToken,
+				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
 
 			sp.db.UpdateJobFields(job.ID, map[string]any{
