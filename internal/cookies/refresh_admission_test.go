@@ -661,6 +661,54 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 		}
 	})
 
+	t.Run("a scoped DELETE sibling does not suppress the insert", func(t *testing.T) {
+		// The case the guard got wrong when it looked only at the key. A response
+		// carrying `SID=; Domain=.google.com; Max-Age=0` beside an unscoped
+		// `SID=fresh` is saying REPLACE — retire the cookie on google.com, set it
+		// host-scoped here. Counting the deletion as a scoped claim ate the
+		// replacement: the delete removed the .google.com row, the unscoped
+		// insert was then suppressed as "beside a scoped one", and the fresh
+		// value reached nothing at all. A deletion claims no row an insertion
+		// could duplicate, because after it runs there is no row.
+		//
+		// Discriminates: pre-fix the file ends with ZERO SID rows and the jar
+		// with no SID — a silent credential loss, not a stale value.
+		initial := "# Netscape HTTP Cookie File\n" +
+			".google.com\tTRUE\t/\tTRUE\t2000000000\tSID\tfixture-google\n"
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
+
+		rs.processYouTubeSetCookies(setCookieResponse(
+			"SID=; Domain=.google.com; Max-Age=0",
+			"SID=fresh; Path=/; Secure",
+		))
+
+		rows := rowsNamed(readCookieRows(t, path), "SID")
+		if len(rows) != 1 {
+			var where []string
+			for _, r := range rows {
+				where = append(where, r.domain)
+			}
+			t.Fatalf("the file holds %d SID rows %v, want exactly 1 — a scoped DELETION is not a "+
+				"scoped sibling, and suppressing the unscoped insert beside it loses the replacement",
+				len(rows), where)
+		}
+		if rows[0].domain != ".youtube.com" {
+			t.Errorf("the replacement SID landed on %q, want .youtube.com — the unscoped header is "+
+				"host-scoped to the declared origin", rows[0].domain)
+		}
+		if rows[0].value != "fresh" {
+			t.Errorf("SID = %q, want fresh", rows[0].value)
+		}
+		// The value has to reach the session, not just the file.
+		fresh := NewCookieJar()
+		if err := fresh.Load(path); err != nil {
+			t.Fatal(err)
+		}
+		if got := fresh.GetCookieFor(PlatformYouTube, "SID"); got != "fresh" {
+			t.Errorf("a freshly loaded jar reads SID as %q, want fresh", got)
+		}
+	})
+
 	t.Run("an unscoped cookie with no sibling still lands", func(t *testing.T) {
 		// The other control: the rule keys on the SIBLING, not on being unscoped.
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")

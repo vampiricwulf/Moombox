@@ -2621,20 +2621,32 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		name := key.Name
 		domain := key.Domain
 		// An unscoped update may not be INSERTED when the same response also
-		// carried a scoped one of the same name. The scoped header has already
-		// claimed whichever row it matches; inserting the unscoped twin appends a
-		// SECOND row under the same domain, and CookieJar.Load keeps the LAST one
-		// it reads — so the unscoped value silently defeats the scoped value the
-		// server was more specific about.
+		// carried a scoped one of the same name that it means to keep. The scoped
+		// header has already claimed whichever row it matches; inserting the
+		// unscoped twin appends a row that then OVERRIDES it in the jar.
 		//
-		// Narrow on purpose, and both halves of that matter. It fires only for an
-		// unscoped key, and only when a scoped SIBLING of the same name is in this
-		// batch. The obvious wider rule — "once any key of this name matched a
-		// row, treat every key of that name as handled" — destroys the legitimate
-		// case: a response rotating SID on both .google.com and .youtube.com
-		// against a file holding only the .google.com row must still insert the
-		// .youtube.com one.
-		if domain == "" && hasScopedSibling(byName[name]) {
+		// The override is by NAME, not by domain, and stating that correctly
+		// matters because the two rows are usually on different domains. Since
+		// fix round 1 the twin lands on the declared origin's own site, so an
+		// originYouTube response carrying `SID=v1` and `SID=v2; Domain=.google.com`
+		// against a file holding the .google.com row leaves `.google.com` and
+		// `.youtube.com` SID rows side by side — not two rows on one domain, which
+		// is only what the originGoogle case would produce. It is still a
+		// downgrade: CookieJar.Load puts youtube.com and google.com rows in ONE
+		// map keyed by bare cookie name, so the last row read wins and the
+		// unscoped value silently defeats the value the server was more specific
+		// about.
+		//
+		// Narrow on purpose, and all three halves of that matter. It fires only
+		// for an unscoped key; only when a scoped SIBLING of the same name is in
+		// this batch; and not when that sibling is a DELETION (see
+		// hasScopedSibling — a delete plus an insert of one name is "replace",
+		// and suppressing the insert loses the replacement). The obvious wider
+		// rule — "once any key of this name matched a row, treat every key of
+		// that name as handled" — destroys the legitimate case: a response
+		// rotating SID on both .google.com and .youtube.com against a file
+		// holding only the .google.com row must still insert the .youtube.com one.
+		if domain == "" && hasScopedSibling(updates, byName[name]) {
 			rs.logger.Debug("cookie update: not inserting an unscoped cookie beside a scoped one of the same name",
 				"name", name, "origin", string(origin))
 			continue
@@ -2756,11 +2768,22 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 }
 
 // hasScopedSibling reports whether any of these same-name update keys carries an
-// explicit Domain=. The caller has the keys for one name already grouped (the
-// byName index), so this is a walk over one or two entries, not a scan.
-func hasScopedSibling(candidates []cookieUpdateKey) bool {
+// explicit Domain= AND is a value it intends to keep. The caller has the keys for
+// one name already grouped (the byName index), so this is a walk over one or two
+// entries, not a scan.
+//
+// A scoped DELETION is not a sibling for this purpose, and that exclusion is the
+// whole reason this takes the updates map rather than the keys alone. `SID=;
+// Domain=.google.com; Max-Age=0` beside an unscoped `SID=fresh` is one response
+// saying REPLACE — retire the cookie on google.com, set it host-scoped here.
+// Counting the deletion as a claim on the name made the guard eat the
+// replacement: the delete removed the .google.com row, the unscoped insert was
+// then suppressed as "beside a scoped one", and the fresh value reached nothing.
+// A deletion claims no row that an insertion could duplicate, because after it
+// runs there is no row.
+func hasScopedSibling(updates map[cookieUpdateKey]cookieUpdate, candidates []cookieUpdateKey) bool {
 	for _, k := range candidates {
-		if k.Domain != "" {
+		if k.Domain != "" && !updates[k].Delete {
 			return true
 		}
 	}
