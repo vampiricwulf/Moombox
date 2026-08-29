@@ -113,11 +113,6 @@ const (
 	// schedule for a cost difference measured in one HTTP request per hour.
 	livenessFreshWindow = 25 * time.Minute
 
-	// youtubeClientVersion is the WEB client version sent in Innertube API requests.
-	// Update this when YouTube bumps the client version — it's used in auth check
-	// and session refresh requests. Format: "2.YYYYMMDD.00.00".
-	youtubeClientVersion = "2.20260708.00.00"
-
 	// authBodyFallbackLimit caps how much of the response body we promote to a
 	// Go string for the JSON-parse-failed fallback path. The real
 	// `"logged_in":"1"` / `"loggedIn":true` markers live in the first hundreds
@@ -1491,9 +1486,11 @@ func setYouTubeHeaders(req *http.Request, cookieHeader, origin, authHeader strin
 
 // youtubeGuideRequestBody returns the standard Innertube WEB request body
 // for /youtubei/v1/guide. Centralised here so a clientVersion bump only
-// touches one site (audit reports/cookies.md #35).
+// touches one site (audit reports/cookies.md #35) — that site is now
+// constants.WebClient.ClientVersion, the single source of truth for every
+// WEB-family client's version string.
 func youtubeGuideRequestBody() string {
-	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
+	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + constants.WebClient.ClientVersion + `","hl":"en"}}}`
 }
 
 // errGuideLoginMarkerUnreadable is what a 200 whose body carries no login
