@@ -149,7 +149,7 @@ func (a *App) View() tea.View {
 
 	// Feedback / confirmation messages
 	if a.feedbackMsg != "" {
-		msgColor := feedbackColor(a.feedbackMsg)
+		msgColor := feedbackColor(a.feedbackMsg, a.feedbackSev)
 		content = addOverlayMessage(content, a.width,
 			lipgloss.NewStyle().Foreground(msgColor).Render(a.feedbackMsg),
 		)
@@ -226,9 +226,72 @@ func addOverlayMessage(content string, width int, msg string) string {
 	return strings.Join(lines, "\n")
 }
 
+// feedbackSeverity is what the COMPOSER of a feedback line knew about it, as
+// opposed to what a scan of the finished sentence can guess.
+//
+// THE SCAN IS DOWNSTREAM OF TWO LOSSY STEPS and that is why this type exists.
+// feedbackColor reads a.feedbackMsg, which is the line AFTER fitFeedback has
+// clamped it to the terminal width — so at 40 columns
+//
+//	"Cookies: YouTube OK | Last cookie error: the browser profile held no…"
+//
+// arrives as "Cookies: YouTube OK | Last cookie err…", the marker the warning
+// branch matches on is gone, and a line announcing a recorded failure renders
+// in the SUCCESS colour. An operator in a split pane presses R C, is told their
+// cookies are fine, and the browser refresh has been failing for days. The
+// second step is subtler: precedence in the scan is decided by branch order
+// over the whole string, so an appended clause can move the colour in either
+// direction — the gray "deleted:" branch sits above the warning branch, so a
+// recorded error whose words happened to contain it would render NEUTRAL.
+//
+// Both are the same defect: severity was being re-derived from prose by a
+// reader that never saw the facts. The composer HAS the facts — the verdicts
+// and whether anything was recorded — so it states the severity and the reader
+// obeys it. The scan survives as the fallback for the forty-odd call sites that
+// state nothing, where it is the only thing available and where the strings are
+// composed from bounded vocabulary that it handles correctly.
+type feedbackSeverity int
+
+const (
+	// severityUnstated is the ZERO VALUE, and that placement is load-bearing:
+	// every setFeedback / setFeedbackWithDuration call site writes it without
+	// naming it, so adding this type changed the colour of exactly nothing.
+	severityUnstated feedbackSeverity = iota
+	severitySuccess
+	severityWarning
+	severityError
+)
+
+// color maps a stated severity to its display colour, reporting false when
+// nothing was stated. Deliberately has no gray: gray is a CATEGORY (a deletion
+// happened), not a severity, and no composer that states a severity is
+// reporting one.
+func (s feedbackSeverity) color() (color.Color, bool) {
+	switch s {
+	case severitySuccess:
+		return ColorGreen, true
+	case severityWarning:
+		return ColorYellow, true
+	case severityError:
+		return ColorRed, true
+	default:
+		return nil, false
+	}
+}
+
 // feedbackColor returns the display color for a feedback message.
-// Order: chord (yellow) > error (red) > neutral (gray) > warning (yellow) > success (green).
-func feedbackColor(msg string) color.Color {
+//
+// A STATED severity wins outright. Everything below it is the fallback for
+// messages that state nothing — see feedbackSeverity for what the fallback
+// cannot see and why that mattered.
+//
+// Fallback order: chord (yellow) > error (red) > neutral (gray) > warning
+// (yellow) > success (green).
+func feedbackColor(msg string, stated feedbackSeverity) color.Color {
+	if c, ok := stated.color(); ok {
+		return c
+	}
+
 	lower := strings.ToLower(msg)
 
 	// Chord feedback (yellow) — prefix match on known chord categories
@@ -256,6 +319,16 @@ func feedbackColor(msg string) color.Color {
 		// too, and correctly: the conclusive half is the half to act on, which
 		// is the same precedence the status-bar badge and the dashboard toast
 		// already apply.
+		//
+		// R C NO LONGER DEPENDS ON THIS, and the reason is the same one that
+		// moved the LastError clause below: at 30 columns the clamp leaves
+		// "Cookies: YouTube not authen…" and this substring is gone, so the
+		// conclusive refusal rendered GREEN. cookieRecheckFeedback states
+		// severityError for RefreshFailed and the stated severity wins at the
+		// top of this function. The entry stays as the fallback for factless
+		// callers and is exercised as such by TestFeedbackColorErrorMessages;
+		// the rendered R C line is pinned by
+		// TestRecheckColourSurvivesTheClampUnchanged.
 		strings.Contains(lower, "not authenticated") {
 		return ColorRed
 	}
@@ -278,20 +351,20 @@ func feedbackColor(msg string) color.Color {
 		strings.Contains(lower, "could not establish") ||
 		strings.Contains(lower, "no platforms") ||
 		// The AutoCookieStatus.LastError clause R C appends (see
-		// cookieRecheckFeedback). It exists so a line that CARRIES a recorded
-		// failure can never fall through to the green default: "Cookies:
-		// YouTube OK | Last cookie error: the browser profile contained no
-		// cookies" is a real and common state — cookies.txt alive on the
-		// in-process session refresh while the browser refresh is broken — and
-		// rendering it green is the one outcome that is simply wrong.
+		// cookieRecheckFeedback), kept as a FALLBACK and no longer as the
+		// guard. cookieRecheckFeedback states severityWarning or higher
+		// whenever it appends this clause, and a stated severity wins above —
+		// which is what actually delivers the property, because this branch
+		// cannot: the marker is at the END of the line and fitFeedback has
+		// already truncated it away on any terminal narrower than about 42
+		// columns, at which point the line falls through to green.
 		//
-		// It sits BELOW the error branch deliberately, which is what makes the
-		// only property worth having true: appending a lastError can raise the
-		// line's severity and can never lower it. A recorded error whose own
-		// words say "failed" is red, and that is the substring colorizer being
-		// coarse rather than being wrong — a recorded verification failure is
-		// the actionable end of the scale either way. Pinned by
-		// TestLastCookieErrorNeverLowersSeverity.
+		// It stays because it costs nothing and because a future composer that
+		// writes this clause without stating a severity would otherwise get the
+		// green default. It is exercised in that factless domain by
+		// TestFeedbackColorWarningMessages; the domain that matters is pinned
+		// by TestLastCookieErrorNeverLowersSeverity, which now renders through
+		// the real clamp.
 		strings.Contains(lower, "last cookie error") ||
 		strings.Contains(lower, "already exists") ||
 		strings.HasPrefix(msg, "Already up to date") {

@@ -140,7 +140,10 @@ func TestCookieForceRefreshFeedbackColour(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			app := NewApp()
 			app.Update(tc.msg)
-			if got := feedbackColor(app.feedbackMsg); got != want[tc.want] {
+			// The pair View uses, not the message alone: R F states no severity
+			// today, but reading only half of what the renderer reads would let
+			// a future stated severity change the colour with this test green.
+			if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != want[tc.want] {
 				t.Errorf("feedbackColor(%q) = %v, want %s", app.feedbackMsg, got, tc.want)
 			}
 		})

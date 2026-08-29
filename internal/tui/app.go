@@ -348,7 +348,19 @@ type App struct {
 	actionMenu *ActionMenuModel
 
 	// Feedback message (auto-clears after 3s)
-	feedbackMsg   string
+	feedbackMsg string
+	// feedbackSev is what the composer of feedbackMsg KNEW about its severity,
+	// where it knew anything. severityUnstated — the zero value — means it did
+	// not, and feedbackColor falls back to scanning the text.
+	//
+	// Only ever read while feedbackMsg != "" (see View), and every write of a
+	// non-empty feedbackMsg goes through setFeedback, setFeedbackWithDuration
+	// or setFeedbackWithSeverity, each of which writes this field in the same
+	// statement pair. So a severity can never be read against a message other
+	// than the one it was stated for; the sites that only CLEAR feedbackMsg
+	// leave this behind harmlessly, and the next setter overwrites it.
+	// TestStatedSeverityDoesNotLeakToTheNextMessage pins that.
+	feedbackSev   feedbackSeverity
 	feedbackTimer time.Time
 
 	// Log batching buffer (250ms flush cycle like TypeScript)
