@@ -62,7 +62,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | web/ | ~2,900 | 7 | 6 | chi router, WebSocket, auth, middleware, embed |
 | bgutils/ | ~2,100 | 6 | 5 | PO token: PotProvider, Challenge, BotGuard, WebPoMinter (goja fallback) |
 | utils/ | ~1,950 | 17 | 16 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL |
-| config/ | ~1,900 | 6 | 3 | TOML config, FlexDuration, channel terms, migrations |
+| config/ | ~1,950 | 6 | 3 | TOML config, FlexDuration, channel terms, migrations |
 | chat/ | ~1,850 | 3 | 5 | YouTube live chat downloader (polling + batching) |
 | goja/ | ~1,500 | 5 | 11 | JS runtime shims (minimal DOM, timers, encoding) |
 | bgutils/sidecar/ | ~1,300 | 5 | 3 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |

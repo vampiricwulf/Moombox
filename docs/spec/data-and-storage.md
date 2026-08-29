@@ -868,7 +868,7 @@ Three maps, deliberately separate (`internal/cookies/refresh.go`):
 
 `AutoCookieService` acquires credentials into `cookies.txt` — through an interactive browser login, through a headless browser refresh, or browser-free by importing a browser profile directly.
 
-**What `cookies.auto_enabled` means.** Two independent liveness mechanisms on two independent timers, **not** a primary and a fallback. The in-process Go refresh (`RefreshService`) always runs, with the monitors and its own timer. The headless-browser refresh is a **much slower** second timer that exists only when the flag is on. The flag owns that timer, the one automatic recovery attempt, and — the exception this table has to name — the `SetExpectedPlatforms` read at `cmd/moombox/main.go:276-278`. Nothing else.
+**What `cookies.auto_enabled` means.** Two independent liveness mechanisms on two independent timers, **not** a primary and a fallback. The in-process Go refresh (`RefreshService`) always runs, on its own timer and on demand from either UI (`R C` / `POST /api/cookies/recheck`); the monitors reach it only through `ObserveLiveness`, never `CheckNow`. The headless-browser refresh is a **much slower** second timer that exists only when the flag is on. The flag owns that timer, the one automatic recovery attempt, and — the exception this table has to name — the `SetExpectedPlatforms` read at `cmd/moombox/main.go:276-278`. Nothing else.
 
 | Surface | Mechanism | Gated on `auto_enabled`? |
 |---------|-----------|--------------------------|
