@@ -220,10 +220,30 @@ func (cd *ChatDownloader) sessionCredentials() (token, login string) {
 // Twitch accepts it, anonymous if it does not, never nothing.
 //
 // The trigger is the ABSENCE of RPL_WELCOME (numeric 001) on a session that
-// sent real credentials. Not "no chat arrived" — a quiet channel produces none
-// for minutes. Not the NOTICE text alone — 001 covers every way a login can be
-// refused, including a torn credential pair, while the NOTICE only names the
-// two cases Twitch happens to spell out.
+// sent real credentials AND heard something back. Not "no chat arrived" — a
+// quiet channel produces none for minutes. Not the NOTICE text alone — 001
+// covers every way a login can be refused, including a torn credential pair,
+// while the NOTICE only names the two cases Twitch happens to spell out.
+//
+// heardFromServer is the second half of that trigger and it separates a REFUSAL
+// from a DROP. Twitch answers a refused login with a NOTICE before closing —
+// the documented shape, and what references/chatterino7 relies on — so a
+// refusal always arrives with at least one inbound line. A session that read
+// NOTHING at all learned nothing about the login: the socket died, and the
+// credentials are as unproven as before it opened.
+//
+// That distinction is load-bearing rather than fastidious.
+// orchestrator_twitch.go relaunches startChat() on this same downloader the
+// moment a connectivity outage is declared over — precisely when the link is
+// least trustworthy — so without this bit a single unlucky reconnect on a
+// marathon stream would latch subscriber-only chat off for the remaining days,
+// on evidence that never mentioned the login.
+//
+// Cost if wrong: a Twitch that refuses SILENTLY — closing with no NOTICE, which
+// is undocumented and not the observed behaviour — reads as a drop, and the job
+// keeps spending its reconnect budget on a credentialed login that cannot
+// succeed. That is the pre-fallback outcome, for that one hypothetical case
+// only, traded against a real and reachable path.
 //
 // ONE-SHOT per job: once anonymous, the job stays anonymous. Flapping between
 // the two would re-pay the rejected handshake on every reconnect, which is the
@@ -232,8 +252,10 @@ func (cd *ChatDownloader) sessionCredentials() (token, login string) {
 // before the nickname existed, so a floor rather than a regression.
 //
 // Neither the token nor the login is named in the log line.
-func (cd *ChatDownloader) noteHandshakeOutcome(welcomed, sawLoginFailure bool) {
-	if welcomed || cd.authRefused.Swap(true) {
+func (cd *ChatDownloader) noteHandshakeOutcome(welcomed, heardFromServer, sawLoginFailure bool) {
+	// Order matters: a drop must leave the latch untouched, so the Swap is
+	// reached only once both exits above have been ruled out.
+	if welcomed || !heardFromServer || cd.authRefused.Swap(true) {
 		return
 	}
 	if sawLoginFailure {

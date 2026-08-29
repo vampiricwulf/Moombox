@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -24,6 +25,12 @@ import (
 // that cannot succeed before abandoning chat for the whole job. A working
 // degraded capture would become no capture at all.
 //
+// The floor has two edges and both are pinned here. A session that HEARD from
+// Twitch and was never welcomed is a refusal and falls back. A session that
+// heard NOTHING is a dropped socket — it learned nothing about the login, and
+// treating it as a refusal would surrender subscriber-only chat for the rest of
+// a marathon stream on the strength of one bad reconnect.
+//
 // Every credential below is synthetic and none is ever logged.
 
 // ircReplier is a local websocket server standing in for Twitch IRC that reads
@@ -34,16 +41,39 @@ type ircReplier struct {
 	mu       sync.Mutex
 	replies  [][]string
 	conns    int
+	// echoes, when non-nil, receives one further message read from the client
+	// AFTER the script has been written. It is proof the client actually
+	// processed an inbound line, which a test that must act at that exact
+	// moment cannot get any other way — the write returning says only that the
+	// bytes left the server.
+	echoes chan string
 }
 
 // startIRCReplier brings up the server and repoints the IRC endpoint at it.
 // replies[i] is sent on connection i after its four handshake messages are
 // read; a connection past the end of the script is answered with silence and a
-// close, which is exactly how a refused login looks on the wire — no
-// RPL_WELCOME, socket gone.
+// close — a dropped socket that says nothing about the login.
 func startIRCReplier(t *testing.T, replies ...[]string) *ircReplier {
 	t.Helper()
-	rep := &ircReplier{sessions: make(chan []string, 8), replies: replies}
+	return newIRCReplier(t, nil, replies...)
+}
+
+// startIRCReplierAwaitingEcho is the same, but after the script it reads ONE
+// more message from the client and publishes it on the returned replier's
+// echoes channel. Pair it with a PING script: the client answers PONG only
+// after it has read and handled the PING, so the echo is a round-trip proof
+// that an inbound line was processed.
+//
+// Opt-in, because that extra read holds the connection open — a client with no
+// reply to send would keep it parked until its own read deadline.
+func startIRCReplierAwaitingEcho(t *testing.T, replies ...[]string) *ircReplier {
+	t.Helper()
+	return newIRCReplier(t, make(chan string, 8), replies...)
+}
+
+func newIRCReplier(t *testing.T, echoes chan string, replies ...[]string) *ircReplier {
+	t.Helper()
+	rep := &ircReplier{sessions: make(chan []string, 8), replies: replies, echoes: echoes}
 	rep.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -72,6 +102,16 @@ func startIRCReplier(t *testing.T, replies ...[]string) *ircReplier {
 		for _, line := range script {
 			if writeErr := conn.Write(r.Context(), websocket.MessageText, []byte(line)); writeErr != nil {
 				return
+			}
+		}
+
+		// Only a connection that was actually given a script waits for an echo.
+		// An unscripted one has said nothing the client could answer, so the
+		// read would park until the client's own 6-minute deadline while the
+		// client parks waiting for the server — a deadlock, not a test.
+		if rep.echoes != nil && len(script) > 0 {
+			if _, data, readErr := conn.Read(r.Context()); readErr == nil {
+				rep.echoes <- string(data)
 			}
 		}
 	}))
@@ -257,8 +297,9 @@ func TestIRCChatQuotingTheRefusalIsNotANotice(t *testing.T) {
 // unfixed code satisfies too, by presenting the same rejected credentials
 // again.
 func TestIRCRefusedLoginFallsBackToAnonymous(t *testing.T) {
-	// One connection, no reply: read the handshake, close. No RPL_WELCOME.
-	rep := startIRCReplier(t)
+	// Twitch's documented refusal: the NOTICE, then the socket closes. No
+	// RPL_WELCOME ever arrives.
+	rep := startIRCReplier(t, []string{loginFailedNotice})
 	logger := &recordingLogger{}
 	cd := newAuthTestChatDownloaderWithLogger(t,
 		staticCredentials("token-one", "archiveraccount"), logger)
@@ -285,6 +326,78 @@ func TestIRCRefusedLoginFallsBackToAnonymous(t *testing.T) {
 		if strings.Contains(w, "token-one") || strings.Contains(w, "archiveraccount") {
 			t.Errorf("a warning named a credential: %q", w)
 		}
+	}
+}
+
+// TestIRCSilentDropIsNotARefusal is the claim of this round: a session that
+// heard NOTHING before the socket died learned nothing about the login, so the
+// job must stay credentialed.
+//
+// The path that makes this matter is real, not hypothetical.
+// orchestrator_twitch.go relaunches startChat() on this same downloader the
+// instant a connectivity outage is declared over — exactly when the link is
+// least trustworthy. Classifying that first shaky reconnect as a refusal would
+// latch subscriber-only chat off for the rest of a marathon stream, on evidence
+// that never mentioned the credentials.
+//
+// The assertion is on the SECOND session's wire bytes. "A reconnect happened"
+// is satisfied by the broken behaviour too — it would reconnect anonymously.
+func TestIRCSilentDropIsNotARefusal(t *testing.T) {
+	// No script at all: read the handshake, close, say nothing. A dead socket.
+	rep := startIRCReplier(t)
+	logger := &recordingLogger{}
+	cd := newAuthTestChatDownloaderWithLogger(t,
+		staticCredentials("token-one", "archiveraccount"), logger)
+
+	runLiveIRCSession(t, cd)
+	firstPass, firstNick := handshakeLines(t, rep.nextSession(t))
+
+	runLiveIRCSession(t, cd)
+	secondPass, secondNick := handshakeLines(t, rep.nextSession(t))
+
+	if firstPass != "PASS oauth:token-one" || firstNick != "NICK archiveraccount" {
+		t.Fatalf("first handshake = (%q, %q), want the authenticated pair", firstPass, firstNick)
+	}
+	if cd.authRefused.Load() {
+		t.Error("a session that heard nothing at all latched the anonymous fallback")
+	}
+	if secondPass != "PASS oauth:token-one" {
+		t.Errorf("second handshake PASS = %q, want %q — a dropped socket demoted the job's chat "+
+			"without Twitch ever saying a word about the login", secondPass, "PASS oauth:token-one")
+	}
+	if secondNick != "NICK archiveraccount" {
+		t.Errorf("second handshake NICK = %q, want %q", secondNick, "NICK archiveraccount")
+	}
+	if got := logger.fallbackWarnings(); len(got) != 0 {
+		t.Errorf("fallback warnings = %q, want none for a dropped connection", got)
+	}
+}
+
+// TestIRCStrayLineWithoutWelcomeIsARefusal pins the discriminator itself: it is
+// "did Twitch talk to us at all without welcoming us", NOT "did it send the
+// refusal NOTICE".
+//
+// Narrowing it to the NOTICE text would mean a Twitch wording change silently
+// restores the whole-job chat loss the fallback exists to prevent — the failure
+// would be invisible, because chat keeps connecting. So a single stray line
+// with no 001 behind it is enough.
+func TestIRCStrayLineWithoutWelcomeIsARefusal(t *testing.T) {
+	rep := startIRCReplier(t, []string{"PING :tmi.twitch.tv"})
+	logger := &recordingLogger{}
+	cd := newAuthTestChatDownloaderWithLogger(t,
+		staticCredentials("token-one", "archiveraccount"), logger)
+
+	runLiveIRCSession(t, cd)
+	rep.nextSession(t)
+
+	runLiveIRCSession(t, cd)
+	second := rep.nextSession(t)
+
+	assertAnonymousHandshake(t, second)
+	assertNotOnTheWire(t, second, "token-one")
+	if got := logger.fallbackWarnings(); len(got) != 1 {
+		t.Errorf("fallback warnings = %q, want exactly one — a server that spoke without welcoming "+
+			"us refused the login, whatever it happened to say", got)
 	}
 }
 
@@ -342,7 +455,10 @@ func TestIRCRefusedLoginNoticeIsNamedInTheWarning(t *testing.T) {
 // would re-pay the rejected handshake on every reconnect, which is the cost the
 // fallback exists to bound — and it would re-log on every one.
 func TestIRCFallbackIsOneShot(t *testing.T) {
-	rep := startIRCReplier(t)
+	// Only the FIRST connection is scripted: it is the credentialed attempt and
+	// the only one that can be refused. The three that follow are anonymous and
+	// need no reply.
+	rep := startIRCReplier(t, []string{loginFailedNotice})
 	logger := &recordingLogger{}
 	cd := newAuthTestChatDownloaderWithLogger(t,
 		staticCredentials("token-one", "archiveraccount"), logger)
@@ -367,7 +483,9 @@ func TestIRCFallbackIsOneShot(t *testing.T) {
 // connection there must not raise an alarm about a login that was never
 // attempted — most installs are this install.
 func TestIRCAnonymousSessionNeverWarns(t *testing.T) {
-	rep := startIRCReplier(t)
+	// The server talks and never welcomes — everything a refusal looks like
+	// except that this session never presented credentials.
+	rep := startIRCReplier(t, []string{loginFailedNotice})
 	logger := &recordingLogger{}
 	cd := newAuthTestChatDownloaderWithLogger(t, nil, logger)
 
@@ -384,7 +502,11 @@ func TestIRCAnonymousSessionNeverWarns(t *testing.T) {
 // refusal. Latching anonymous there would demote the next job's chat on the
 // strength of a clean shutdown.
 func TestIRCShutdownIsNotARefusal(t *testing.T) {
-	rep := startIRCReplier(t)
+	// The server PINGs and never welcomes, so by the time this test cancels,
+	// the session has heard from Twitch without being accepted — every
+	// condition of a refusal except that WE ended it. The caller-ended guard is
+	// therefore the only thing standing between this session and the latch.
+	rep := startIRCReplierAwaitingEcho(t, []string{"PING :tmi.twitch.tv"})
 	logger := &recordingLogger{}
 	cd := newAuthTestChatDownloaderWithLogger(t,
 		staticCredentials("token-one", "archiveraccount"), logger)
@@ -402,6 +524,19 @@ func TestIRCShutdownIsNotARefusal(t *testing.T) {
 		_ = cd.runIRCSession(ctx)
 	}()
 	rep.nextSession(t)
+
+	// Cancel only once the client's PONG proves it read and handled the PING.
+	// Cancelling before that would leave the session having heard nothing, and
+	// the DROP rule rather than the caller-ended guard would be what kept the
+	// latch clear — the test would pass without testing anything.
+	select {
+	case echo := <-rep.echoes:
+		if !strings.HasPrefix(echo, "PONG") {
+			t.Fatalf("echo = %q, want the client's PONG", echo)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the client to answer the server's PING")
+	}
 	cancel()
 	<-done
 

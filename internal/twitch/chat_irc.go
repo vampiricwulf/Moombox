@@ -154,20 +154,23 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		return fmt.Errorf("IRC NICK failed: %w", err)
 	}
 
-	// A credentialed session that ends without RPL_WELCOME had its login
-	// refused; fall back to anonymous for the rest of the job rather than
-	// spending the reconnect budget on a handshake that cannot succeed. Skipped
-	// when WE ended the session — a caller cancel or a Stop/MarkStreamEnded is
-	// not a refusal, and neither is the immediate return below when the
-	// downloader was never started.
+	// A credentialed session that ends having HEARD from Twitch but never
+	// received RPL_WELCOME had its login refused; fall back to anonymous for the
+	// rest of the job rather than spending the reconnect budget on a handshake
+	// that cannot succeed. A session that read nothing at all is a dropped
+	// socket, not a verdict on the credentials — see noteHandshakeOutcome, which
+	// owns both halves of that rule. Skipped entirely when WE ended the session
+	// — a caller cancel or a Stop/MarkStreamEnded is not a refusal, and neither
+	// is the immediate return below when the downloader was never started.
 	welcomed := false
+	heardFromServer := false
 	sawLoginFailure := false
 	if authenticated {
 		defer func() {
 			if ctx.Err() != nil || !cd.IsRunning() {
 				return
 			}
-			cd.noteHandshakeOutcome(welcomed, sawLoginFailure)
+			cd.noteHandshakeOutcome(welcomed, heardFromServer, sawLoginFailure)
 		}()
 	}
 
@@ -253,6 +256,15 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			if line == "" {
 				continue
 			}
+
+			// The server said SOMETHING. Recorded for every line and
+			// before any of them is interpreted, because the question this
+			// answers is only "did Twitch talk to us at all" — a session
+			// that heard nothing cannot have been refused, it was dropped.
+			// Deliberately not narrowed to the refusal NOTICE: a wording
+			// change there would silently turn every refusal back into a
+			// whole-job chat loss.
+			heardFromServer = true
 
 			// Handshake outcome. Only tracked for a credentialed session —
 			// the anonymous one is always accepted and has no fallback to
