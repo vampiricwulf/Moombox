@@ -375,7 +375,7 @@ Twitch integration uses the GQL API with persisted query hashes (SHA256). No RES
 
 **HLS variant selection:** The flow is: get stream/VOD access token via GQL, build Usher URL with the token, fetch the master playlist, parse `#EXT-X-STREAM-INF` lines into variant structs (resolution, frame rate, bandwidth, codecs, group ID). Selection uses the quality preference string (e.g., "1080p60", "best", "720p", "audio_only") matched against variant names, with fallback to max resolution config. If the preferred quality is unavailable, falls back to the best available variant.
 
-**IRC chat:** Connects to `wss://irc-ws.chat.twitch.tv:443` via WebSocket. Authenticates as anonymous (`NICK justinfan{random}`) or with OAuth token (`PASS oauth:{token}`). Joins the channel with `JOIN #{channel}`. Requests capabilities (`CAP REQ :twitch.tv/tags twitch.tv/commands`) for rich message metadata. Parses IRC messages into structured chat events, handling: PRIVMSG (chat messages with badges, emotes, color), USERNOTICE (subscriptions, raids, gifts), CLEARCHAT (bans/timeouts), CLEARMSG (single message deletions), ROOMSTATE (slow mode, emote-only, etc.). Maintains PING/PONG keepalive.
+**IRC chat:** Connects to `wss://irc-ws.chat.twitch.tv:443` via WebSocket. PASS and NICK are a PAIR rendered from one decision per session: authenticated is `PASS oauth:{token}` **with** `NICK {login}` (the account's own name, from the `login` cookie), anonymous is `PASS SCHMOOPIIE` with `NICK justinfan{random}`. A token beside the `justinfan` nickname is the hybrid Twitch refuses, so anything short of a complete, sendable pair falls all the way back to anonymous. A credentialed session Twitch never welcomes falls back to anonymous once, for the rest of the job, and notifies. Joins with `JOIN #{channel}`; requests capabilities (`CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership`) for rich message metadata. Parses IRC messages into structured chat events, handling: PRIVMSG (chat messages with badges, emotes, color), USERNOTICE (subscriptions, raids, gifts), CLEARCHAT (bans/timeouts), CLEARMSG (single message deletions), ROOMSTATE (slow mode, emote-only, etc.). Maintains PING/PONG keepalive. See [docs/spec/platform-services.md](docs/spec/platform-services.md) § IRC Chat (Live).
 
 **VOD chat:** Paginated GQL queries using `VideoCommentsByOffsetOrCursor`. Each page returns comments and a cursor for the next page. Comments are fetched in chronological order by content offset (seconds into the VOD). The pagination continues until no more comments are returned or the VOD end is reached.
 
@@ -665,11 +665,19 @@ TOML format parsed by `BurntSushi/toml`. Search order: custom path (CLI flag), `
 
 ### Cookies
 
-Netscape-format cookie file (`cookies.txt`). The `CookieJar` parses the file into an in-memory map of name-value pairs with domain tracking. Essential YouTube cookies include SAPISID, SID, HSID, __Secure-1PSID, LOGIN_INFO, etc. Essential Twitch cookies: auth-token, twilight-user.
+Netscape-format cookie file (`cookies.txt`). The `CookieJar` parses it into TWO per-platform in-memory maps, not one — YouTube rows never reach a Twitch request and vice versa. Essential YouTube cookies include SAPISID (or `__Secure-3PAPISID`), SID, HSID, `__Secure-1PSID`, LOGIN_INFO; essential Twitch cookies: `auth-token`, `twilight-user`. Expiry is captured per entry and reported per platform but never filtered — the only operator-visible surface for it is the `Cookies loaded` line at startup.
 
-**Cookie refresh service:** Validates auth every 30 minutes by making test API calls (YouTube `account/account_menu`, Twitch GQL `UseLive`). Reports auth status changes via `OnAuthChange` callback. Triggers `OnRecoveryNeeded` when auth is lost.
+**Cookie refresh service (`RefreshService`).** Always runs — on its own 30-minute timer and on monitor demand — and is never gated on any config flag. It validates YouTube via `account/account_menu` and Twitch via `id.twitch.tv/oauth2/validate`, reports changes through `OnAuthChange`, and fires `OnRecoveryNeeded` when auth is lost. **It rotates YouTube cookies only.** Google's `Set-Cookie` responses are admitted back into `cookies.txt` under `admitSetCookie`'s rules; there is no Twitch refresh anywhere in the process, because the only issuer of a fresh `auth-token` is a browser sign-in at `passport.twitch.tv/login`. The Twitch side is a check with no rotation.
 
-**Auto-cookie service:** Extracts cookies from installed browser profiles (Firefox: `cookies.sqlite`, Chromium: `Cookies` file with DPAPI decryption on Windows). Manages a dedicated browser profile directory. Supports setup flow (start/login/finish) and periodic refresh.
+**Auto-cookie service (`AutoCookieService`).** Acquires credentials three ways: an interactive browser login, a headless browser refresh (Firefox reads `cookies.sqlite` **together with its `-wal` sidecar**; Chromium is driven over CDP, with an opt-in Windows DPAPI read of the user's real profile as a fallback, off by default), or browser-free by importing a mounted browser profile. It manages a dedicated profile directory and refuses one that points inside a real installed browser's profile tree.
+
+**What `cookies.auto_enabled` does.** It owns the headless-browser refresh TIMER, the one automatic browser recovery attempt, and the `SetExpectedPlatforms` seeding — and nothing else. It is not a master switch: `RefreshService` never consults it, `R C` / `POST /api/cookies/recheck` never consults it, and `R F` / the dashboard header's shift+click / the Settings page's "Refresh cookies from browser profile" button only let it decide WHICH rung of the refresh ladder runs — the flag never causes a decline. Flipping it off at runtime does not stop the already-running timer, which is why both UIs label it restart-required.
+
+**Docker works, with one manual step.** Leave `auto_enabled` off (the image ships no browser), mount a Firefox profile, and press `R F` / shift+click / the Settings button after each host-side profile refresh. The very first import is automatic — but only when there is no `cookies.txt` to lose. What is NOT built is a re-authentication ingest path: no endpoint accepts a pasted or uploaded cookie file, so a container whose mounted profile has also gone stale must have the file replaced on the volume from outside.
+
+**The two-tier cookie liveness pilot is OFF.** `livenessRecoveryArmed` is `false`, so tier 2 observes, dedupes and logs but sends no notification and triggers no recovery. Arming it is a deliberate, separate change.
+
+**Deep-dive:** [docs/spec/data-and-storage.md](docs/spec/data-and-storage.md) § Cookies for the jar, the refresh service and every acquisition path; [docs/spec/operations.md](docs/spec/operations.md) § Browser Cookie Acquisition for the platform differences (the Job-Object reap, `AbandonSetup`, the drain) and § Credential Notifications for what an operator is actually told.
 
 ### File Output
 
@@ -711,6 +719,8 @@ Uses Origin and Referer header validation (not CSRF tokens). Mutating requests (
 **Internal token bypass:** Same-process clients (TUI) send `X-Internal-Token` header. The token is 16 bytes of crypto/rand hex, generated at server startup, compared with `crypto/subtle.ConstantTimeCompare`. This bypasses CSRF checks entirely — the TUI is trusted as it runs in the same process.
 
 ### Authentication
+
+This section is about DASHBOARD authentication — who may use the web UI and the API. It is unrelated to the platform credentials in [§ Cookies](#cookies), which is why the two never share a payload, a status field or a notification.
 
 **Password hashing:** scrypt with parameters N=16384, r=8, p=1, key length=64, salt length=16. Stored format: `scrypt:{salt_hex}:{hash_hex}`. Plaintext passwords in config are auto-converted to scrypt hashes on startup.
 
