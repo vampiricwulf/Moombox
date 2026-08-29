@@ -354,3 +354,80 @@ func TestInconclusiveHedgeSaysNeverAttemptedWhenNoRequestWasMade(t *testing.T) {
 		t.Errorf("LastError = %q, want %q", *status.LastError, want)
 	}
 }
+
+// TestInconclusiveHedgeNamesEachPlatformWhenTheyDisagree is reviewer round 1,
+// finding 1: YouTube's cookies never formed a request at all
+// (ErrAuthCheckNotAttempted) while Twitch's check went out and ate a 429
+// (attempted). Both land on verifyUnknown, but for different reasons — a
+// single collapsed hedge would assert one platform's cause about the other.
+// No previous cookies.txt, so nothing is restored and this is the
+// no-rollback arm.
+//
+// Mutation check: collapsing to AND semantics (require every platform to
+// have attempted before saying "did not complete") renders "YouTube +
+// Twitch auth could not be verified — the auth check was never attempted —
+// ..." — a false claim about Twitch, which DID attempt. Collapsing to OR
+// (any platform attempted is enough) renders "...the auth check did not
+// complete" — a false claim about YouTube, which never attempted at all.
+// Both fail this test; only the per-platform breakdown passes.
+func TestInconclusiveHedgeNamesEachPlatformWhenTheyDisagree(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAndTwitchRows(goodTwitchToken))
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return false, ErrAuthCheckNotAttempted }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) {
+		return false, errors.New("twitch auth check: unexpected status 429")
+	}
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+	status := s.GetStatus()
+	if status.LastError == nil {
+		t.Fatal("an inconclusive verification must leave an explanation")
+	}
+	const want = "YouTube: the auth check was never attempted — the extracted cookies cannot form " +
+		"an authenticated request; Twitch: the auth check did not complete"
+	if *status.LastError != want {
+		t.Errorf("LastError = %q, want %q", *status.LastError, want)
+	}
+}
+
+// TestRollbackHedgeNamesEachPlatformWhenTheyDisagree is
+// TestInconclusiveHedgeNamesEachPlatformWhenTheyDisagree's twin for the
+// restored-platforms arm: a healthy cookies.txt for BOTH platforms already
+// on disk, a fresh import that neither check can evaluate conclusively, and
+// the same attempted split. Both platforms are restored (their pre-import
+// checks had cookies and the post-import checks are inconclusive), so this
+// exercises rollbackHedge rather than inconclusiveHedge.
+func TestRollbackHedgeNamesEachPlatformWhenTheyDisagree(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAndTwitchRows(staleTwitchToken))
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(previousCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser { return nil }
+	// Ignores jar state on purpose, unlike the regression fixtures elsewhere
+	// in this package: the point here is an inconclusive check on BOTH sides
+	// of the import, not a verified-then-broken regression.
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return false, ErrAuthCheckNotAttempted }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) {
+		return false, errors.New("dial tcp: no such host")
+	}
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+	status := s.GetStatus()
+	if status.LastError == nil {
+		t.Fatal("an import that was not committed must leave an explanation")
+	}
+	const want = "kept the previous cookies for youtube + twitch — YouTube: the auth check was never " +
+		"attempted — the extracted cookies cannot form an authenticated request; Twitch: the auth check " +
+		"did not complete, so the imported profile was not accepted"
+	if *status.LastError != want {
+		t.Errorf("LastError = %q, want %q", *status.LastError, want)
+	}
+}

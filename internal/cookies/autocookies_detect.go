@@ -93,6 +93,10 @@ var knownBrowsers = []browserInfo{
 // DetectBrowser finds the best available browser, caching the result for 60s.
 // It checks the system's default browser first, then falls back to the
 // knownBrowsers order (Firefox-family ahead of Chromium-family).
+//
+// Returns the cache's own *DetectedBrowser, shared across every caller until
+// the next scan replaces it — callers must not mutate what it points to. See
+// DetectBrowsers' doc for the same invariant on its slice.
 func DetectBrowser() *DetectedBrowser {
 	browserDetectCache.mu.Lock()
 	defer browserDetectCache.mu.Unlock()
@@ -179,6 +183,16 @@ func detectBrowserUncachedImpl() *DetectedBrowser {
 // fresh enough to reflect a browser install that happened in the last
 // minute. InvalidateBrowserDetection clears this early when the configured
 // browser changes.
+//
+// The returned slice is the CACHE'S OWN backing array, shared across every
+// caller until the next scan replaces it wholesale (always under
+// browserDetectCache.mu, never mutated in place) — callers must treat it as
+// read-only. DetectBrowser has shared its single *DetectedBrowser the same
+// way since before this cache existed; both of today's callers (GetStatus,
+// resolvedBrowser) only ever range or read, never write, so this is
+// currently safe but is a new invariant to keep now that a second caller
+// (a future one) could plausibly want to sort or filter its own copy rather
+// than the shared one.
 func DetectBrowsers() []DetectedBrowser {
 	browserDetectCache.mu.Lock()
 	defer browserDetectCache.mu.Unlock()

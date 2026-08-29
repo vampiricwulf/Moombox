@@ -96,13 +96,24 @@ func TestAutoRefreshRouteCarriesReloginStatus(t *testing.T) {
 	}
 }
 
-// TestStatusRouteCarriesReloginStatus exercises cmd/moombox's
-// GetAutoCookieReloginNeeded wiring pattern directly: StatusRoute is the same
-// exported registration routes_wiring.go calls, and the closure below is
-// byte-for-byte what that file wires GetAutoCookieReloginNeeded to. This is
-// the closest an internal/web/routes test can get to routes_wiring.go's own
-// switched caller, since cmd/moombox itself has no standalone HTTP harness.
-func TestStatusRouteCarriesReloginStatus(t *testing.T) {
+// TestStatusRouteWiresGetAutoCookieReloginNeededOntoTheWire proves ONLY that
+// StatusRoute plumbs whatever GetAutoCookieReloginNeeded returns onto the
+// wire as autoCookieReloginRequired, unmangled.
+//
+// It does NOT guard cmd/moombox's own routes_wiring.go call site — that
+// file wires GetAutoCookieReloginNeeded to a closure calling
+// autoCookieSvc.ReloginStatus(), but this test supplies its OWN closure
+// below rather than executing wireRoutes (which needs the whole runState
+// service graph to call at all). Reverting routes_wiring.go's closure back
+// to GetStatus().NeedsManualRelogin compiles fine and leaves this test
+// green, since the value shape is identical either way — only the
+// detection-scan cost differs, and nothing HTTP-observable can see that.
+// cmd/moombox's TestGetAutoCookieReloginNeededCallsReloginStatus (an AST
+// check, parsed the same way tui_wiring_cookiechords_test.go guards runTUI)
+// is what actually guards that call site; this test's closure is
+// deliberately named after what routes_wiring.go does today so a reader
+// sees the intended shape, not as a claim that reverting it here would fail.
+func TestStatusRouteWiresGetAutoCookieReloginNeededOntoTheWire(t *testing.T) {
 	autoSvc := cookies.NewAutoCookieService(t.TempDir(), filepath.Join(t.TempDir(), "cookies.txt"),
 		cookies.NewCookieJar(), nopRouteLogger{})
 	autoSvc.FlagManualRelogin("youtube")

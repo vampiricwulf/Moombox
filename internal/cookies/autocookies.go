@@ -2314,60 +2314,45 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// was never evaluated.
 	inconclusive := postYT.state == verifyUnknown || postTW.state == verifyUnknown
 	rollbackWasInconclusive := false
-	// rollbackAttempted starts true and is pulled false by any inconclusive
-	// restored platform that never attempted a request at all — see the
-	// (network?) hedge split below for why the two halves of verifyUnknown
-	// get different wording. AND rather than OR because "the extracted
-	// cookies cannot form a request" is the more actionable finding of the
-	// two: if it is true for even one restored platform, saying only "did
-	// not complete" (which reads as transient — retry and it may resolve)
-	// would bury a structural problem that retrying cannot fix. The only
-	// production shape today restores at most one platform at a time, so
-	// this tie-break is untested territory rather than a witnessed case.
-	rollbackAttempted := true
 	for _, platform := range restoredPlatforms {
-		pc := importCheck[platform]
-		if pc.state == verifyUnknown {
+		if importCheck[platform].state == verifyUnknown {
 			rollbackWasInconclusive = true
-			if !pc.attempted {
-				rollbackAttempted = false
-			}
 		}
 	}
-	// inconclusiveAttempted is rollbackAttempted's twin for the no-rollback
-	// arm below, over postYT/postTW instead of importCheck — same AND
-	// tie-break, same reasoning.
-	inconclusiveAttempted := true
-	if postYT.state == verifyUnknown && !postYT.attempted {
-		inconclusiveAttempted = false
-	}
-	if postTW.state == verifyUnknown && !postTW.attempted {
-		inconclusiveAttempted = false
-	}
+	// rollbackHedge is the (network?) hedge's replacement across whichever
+	// restored platforms are inconclusive. combinedInconclusiveHedge folds
+	// them to ONE hedge when they agree (the common case: at most one
+	// platform is usually restored at all) and to a per-platform breakdown
+	// when they do not — see its doc for why collapsing a disagreement to
+	// one hedge would assert a cause about a platform the code knows is
+	// false. Reviewer round 1 finding 1 caught the previous AND/OR
+	// tie-break doing exactly that for this arm's twin below; this arm
+	// shares the same fix rather than getting its own tie-break.
+	rollbackHedge, _ := combinedInconclusiveHedge(restoredPlatforms, importCheck)
+	// inconclusiveHedge/inconclusiveAgree is rollbackHedge's twin for the
+	// no-rollback arm below, over postYT/postTW instead of importCheck.
+	inconclusiveHedge, inconclusiveAgree := combinedInconclusiveHedge(
+		[]string{"youtube", "twitch"},
+		map[string]platformAuth{"youtube": postYT, "twitch": postTW})
 	var errMsg string
 	switch {
-	case len(restoredPlatforms) > 0 && rollbackWasInconclusive && rollbackAttempted:
-		// A request went out and came back unusable — network, an
-		// intermediary, a timeout. Say that; no question mark, because this
-		// is no longer a guess.
-		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
-			" — the auth check did not complete, so the imported profile was not accepted"
 	case len(restoredPlatforms) > 0 && rollbackWasInconclusive:
-		// No request was ever attempted — the extracted cookies could not
-		// form one. Same wording the Warn at checkPlatformAuth's caller
-		// (FinishSetup, ":1122" as of the audit that named this) already
-		// uses for the same fact, minus the "during setup" qualifier that
-		// does not apply to a refresh pass.
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
-			" — the auth check was never attempted — the extracted cookies cannot form an authenticated request, so the imported profile was not accepted"
+			" — " + rollbackHedge + ", so the imported profile was not accepted"
 	case len(restoredPlatforms) > 0:
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
 			" — the mounted browser profile did not verify"
-	case inconclusive && inconclusiveAttempted:
-		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the auth check did not complete"
+	case inconclusive && inconclusiveAgree:
+		// Single hedge, one sentence — the shape every existing test and
+		// every single-platform (the overwhelmingly common) inconclusive
+		// check already expects.
+		errMsg = strings.Join(failed, " + ") + " auth could not be verified — " + inconclusiveHedge
 	case inconclusive:
-		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the auth check was never attempted — " +
-			"the extracted cookies cannot form an authenticated request"
+		// The platforms disagree on why, so the "<platforms> auth could not
+		// be verified —" lead-in is dropped rather than paired with a
+		// per-platform breakdown that already names each platform: the
+		// combined hedge IS the message.
+		errMsg = inconclusiveHedge
 	case emptyBrowserProfile:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed, and the browser profile contained " +
 			"no cookies to refresh from — check whether the browser is clearing cookies on exit"
@@ -2385,6 +2370,89 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	s.logger.Warn("refresh completed but auth verification failed",
 		"platforms", strings.Join(failed, ","), "lost", strings.Join(lost, ","), "detail", errMsg)
 	return result, nil
+}
+
+// platformDisplayName maps the lowercase platform keys used internally in
+// this file (restoredPlatforms, importCheck, the map literal
+// combinedInconclusiveHedge is called with) to the capitalized names
+// `failed`/`lost` already render to the operator.
+func platformDisplayName(platform string) string {
+	switch platform {
+	case "youtube":
+		return "YouTube"
+	case "twitch":
+		return "Twitch"
+	default:
+		return platform
+	}
+}
+
+// inconclusiveHedge renders the (network?) hedge's replacement wording for
+// ONE platform's inconclusive check, disambiguated by attempted — see
+// platformAuth's doc for what the two halves of verifyUnknown mean.
+func inconclusiveHedge(p platformAuth) string {
+	if p.attempted {
+		// A request went out and came back unusable — network, an
+		// intermediary, a timeout. Say that; no question mark, because this
+		// is no longer a guess.
+		return "the auth check did not complete"
+	}
+	// No request was ever attempted — the extracted cookies could not form
+	// one. Same wording the Warn at checkPlatformAuth's caller (FinishSetup)
+	// already uses for the same fact — see attempted's doc on platformAuth —
+	// minus the "during setup" qualifier, which does not apply to a refresh
+	// pass.
+	return "the auth check was never attempted — the extracted cookies cannot form an authenticated request"
+}
+
+// combinedInconclusiveHedge renders the (network?) hedge across every
+// platform in order whose check in checks landed on verifyUnknown.
+//
+// When every one of them agrees on attempted — true for a single inconclusive
+// platform, which is the overwhelmingly common shape — it returns ONE hedge
+// and allAgree=true, the joined-sentence form callers had before this
+// existed. When they disagree — one platform's check went out and came back
+// unusable while the other's cookies could never form a request at all —
+// collapsing them to a single hedge asserts a cause about a platform the
+// code knows is false (reviewer round 1, finding 1, caught this for the
+// AND/OR tie-break this function replaced). allAgree=false then, and hedge
+// is a full "Platform: cause; Platform: cause" breakdown naming each one, not
+// a fragment meant to be embedded after a shared lead-in — see the two call
+// sites for how each folds allAgree=false into its own sentence.
+//
+// order fixes iteration to a stable sequence (callers pass
+// []string{"youtube", "twitch"} or restoredPlatforms, which is already built
+// in that order) so the rendered message is deterministic.
+func combinedInconclusiveHedge(order []string, checks map[string]platformAuth) (hedge string, allAgree bool) {
+	var names []string
+	var pairs []platformAuth
+	for _, platform := range order {
+		p, ok := checks[platform]
+		if !ok || p.state != verifyUnknown {
+			continue
+		}
+		names = append(names, platform)
+		pairs = append(pairs, p)
+	}
+	if len(pairs) == 0 {
+		return "", true
+	}
+	agreedHedge := inconclusiveHedge(pairs[0])
+	allAgree = true
+	for _, p := range pairs[1:] {
+		if inconclusiveHedge(p) != agreedHedge {
+			allAgree = false
+			break
+		}
+	}
+	if allAgree {
+		return agreedHedge, true
+	}
+	parts := make([]string, len(pairs))
+	for i, p := range pairs {
+		parts[i] = platformDisplayName(names[i]) + ": " + inconclusiveHedge(p)
+	}
+	return strings.Join(parts, "; "), false
 }
 
 // cookiesLostMessage names the platforms whose credentials were on disk
