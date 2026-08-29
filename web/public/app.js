@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, parkedCookiePlatforms } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
@@ -70,6 +70,11 @@ class MoomboxApp {
     // True when archivedJobs changed while the Archived panel was hidden —
     // the panel re-renders on activation instead of on every change.
     this._archivedRenderDirty = false;
+    // Which platforms the status bar was last told have a job parked in
+    // COOKIES?. null means "never computed", which is distinct from
+    // {youtube:false,twitch:false} — see _syncParkedBadge, where the first
+    // sync must run even when nothing is parked.
+    this._parkedPlatforms = null;
     // Theme: respect explicit user choice in localStorage; otherwise follow
     // the OS light/dark preference and keep tracking it across the session.
     const storedTheme = localStorage.getItem("moombox-theme");
@@ -911,6 +916,37 @@ class MoomboxApp {
     }
   }
 
+  /**
+   * Re-render the status bar when the set of platforms holding a parked job
+   * changes. Returns whether it did.
+   *
+   * THE MISSING EDGE. updateStatusBar had four call sites — the config load,
+   * the status load, the manual recheck and the manual browser refresh — and
+   * not one of them is a job event, so a job the worker parked for a
+   * membership or cookie reason showed its remedy in the list while the
+   * aggregate badge above it stayed whatever it last was. The TUI has
+   * reflected parked jobs in its equivalent since the per-platform split; the
+   * Web was knowingly divergent, and this is the edge that closes it.
+   *
+   * GATED ON A CHANGE, not called per event. Job events arrive at roughly
+   * 60 Hz per active download and updateStatusBar writes DOM; the standing
+   * rule is to make updates cheaper rather than rarer, so the scan runs every
+   * time (it is a status compare over jobs already in memory, and it stops at
+   * the second platform) and only the DOM write is conditioned. `null` on the
+   * first call is deliberately not equal to "nothing parked": the badge has to
+   * be reconciled once against the initial job list, whatever it holds.
+   */
+  _syncParkedBadge() {
+    const parked = parkedCookiePlatforms(this.jobs);
+    const prev = this._parkedPlatforms;
+    if (prev && prev.youtube === parked.youtube && prev.twitch === parked.twitch) {
+      return false;
+    }
+    this._parkedPlatforms = parked;
+    this.updateStatusBar();
+    return true;
+  }
+
   updateStatusBar() {
     const ytActive = this.activePlatforms?.youtube === true;
     const twActive = this.activePlatforms?.twitch === true;
@@ -977,6 +1013,13 @@ class MoomboxApp {
     // arrives on a different key of the status payload than the per-platform
     // check result the badge reads. It is NOT gated on auto_enabled — see the
     // warnings block above for why.
+    //
+    // `parked` is computed here for the mirror-image reason: it comes off the
+    // JOB LIST, not off the status payload at all. Read fresh rather than from
+    // _parkedPlatforms, so that the four pre-existing triggers above — which
+    // never went through _syncParkedBadge — render the same badge this one
+    // does; a memoised value would let a config load paint a stale escalation.
+    const parked = parkedCookiePlatforms(this.jobs);
     for (const [platform, id, active, status] of [
       ["youtube", "yt-indicator", ytActive, this.cookieStatus],
       ["twitch", "tw-indicator", twActive, this.twitchAuthStatus],
@@ -986,7 +1029,7 @@ class MoomboxApp {
       el.style.display = active ? "" : "none";
       if (!active) continue;
       const relogin = !!this.autoCookieReloginRequired?.[platform];
-      const { className, title } = cookieIndicatorState(platform, status, relogin);
+      const { className, title } = cookieIndicatorState(platform, status, relogin, parked[platform]);
       el.className = className;
       el.title = title;
     }
@@ -1285,6 +1328,7 @@ class MoomboxApp {
         const archivedMoved = this._evaluateArchiveBoundary({ silent: true });
         this.renderJobs();
         if (archivedMoved || archivedPruned) this.renderArchivedJobs();
+        this._syncParkedBadge();
         this.renderLogs();
         this.updateCheckCountdown();
         if (p.connectivity !== undefined) {
@@ -1312,6 +1356,7 @@ class MoomboxApp {
         const archivedMoved = this._evaluateArchiveBoundary({ silent: true });
         this.renderJobs();
         if (archivedMoved || archivedPruned) this.renderArchivedJobs();
+        this._syncParkedBadge();
         // Update details dialog if open (but don't reload logs)
         if (this.selectedJobId) {
           const job = this.jobs.find((j) => j.id === this.selectedJobId);
@@ -1372,6 +1417,11 @@ class MoomboxApp {
           this.renderJobs();
           this._evaluateArchiveBoundary();
         }
+        // Outside both branches on purpose: a park arrives either as a status
+        // change on a job already held or as a row this tab has not seen, and
+        // the badge owes the same answer to both. The change gate inside is
+        // what keeps this off the DOM on a progress tick.
+        this._syncParkedBadge();
         break;
       }
 
@@ -1403,6 +1453,9 @@ class MoomboxApp {
         if (deletedIdx !== -1) {
           this.jobs.splice(deletedIdx, 1);
           this.renderJobs();
+          // Deleting the last parked job is the one gesture that CLEARS this
+          // escalation. Without it the badge stays red over an empty list.
+          this._syncParkedBadge();
         }
         // A Finished job may have aged into the archived list (client-side
         // sweep or a prior fetch); drop it there too, or a server-side delete

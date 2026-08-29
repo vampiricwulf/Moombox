@@ -29,12 +29,35 @@ func TestFeedbackColorChordMessages(t *testing.T) {
 }
 
 // TestFeedbackColorErrorMessages covers the red-error branch.
+//
+// The two RecheckReport rows are Arc 8 Task 12b's ruling, and they are built
+// from the function that emits them rather than typed out — the wording is
+// shared with the dashboard and pinned there, so a reword must move this test
+// with it instead of silently leaving the branch unexercised.
+//
+// The state is CONCLUSIVE: RecheckReport says "<platform> not authenticated"
+// only for RefreshFailed, and "<platform> — could not establish" for the
+// inconclusive verdict. R F's wording for the identical state ("...ran and auth
+// verification failed") has always been red on the "failed" substring, so
+// leaving R C's yellow made one surface answer one fact at two severities. Red
+// is the actionable end — re-export the credentials — and yellow is reserved
+// for a check that concluded nothing and asks for nothing.
+//
+// The mixed row is the precedence claim: a line naming one refused platform and
+// one unreachable one is red, because the conclusive half is the half to act
+// on. That is the same order the status-bar badge and the dashboard toast
+// already apply.
 func TestFeedbackColorErrorMessages(t *testing.T) {
 	tests := []string{
 		"Cancelled: User aborted",
 		"Invalid Chord: A R Z",
 		"Job download failed",
 		"Save failed: disk full",
+		cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshFailed}),
+		cookies.RecheckReport(
+			cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshFailed},
+			cookies.RecheckedPlatform{Label: "Twitch", Verdict: cookies.RefreshUnknown},
+		),
 	}
 	for _, msg := range tests {
 		t.Run(msg, func(t *testing.T) {
@@ -74,7 +97,12 @@ func TestFeedbackColorWarningMessages(t *testing.T) {
 		"Browser cookie refresh declined to run (" + cookies.RefreshDeclinedCauses +
 			") — nothing was learned about these cookies",
 		"Browser cookie refresh ran but could not establish whether these cookies work",
-		"YouTube: not authenticated",
+		// The INCONCLUSIVE recheck, and the row that keeps the ruling above
+		// from being "everything cookie-shaped is red". Built from the same
+		// function as the two conclusive rows in the error table, so the two
+		// halves of the split cannot drift apart.
+		cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshUnknown}),
+		"Cookies: YouTube OK | Last cookie error: the browser profile held no credentials",
 		"No platforms configured",
 		"Already up to date",
 		"Channel already exists in config",
@@ -118,6 +146,67 @@ func TestFeedbackColorPriorityOrder(t *testing.T) {
 	// "Cancelled:" prefix wins over the warning prefix later.
 	if got := feedbackColor("Cancelled: user aborted"); got != ColorRed {
 		t.Errorf("Cancelled prefix should be red: got %v", got)
+	}
+}
+
+// feedbackSeverity ranks the colours the recheck line can take, so the
+// invariant below can be stated as a comparison instead of a table.
+func feedbackSeverity(t *testing.T, msg string) int {
+	t.Helper()
+	switch got := feedbackColor(msg); got {
+	case ColorGreen:
+		return 0
+	case ColorYellow:
+		return 1
+	case ColorRed:
+		return 2
+	default:
+		t.Fatalf("feedbackColor(%q) = %v, which is not a severity the recheck line can take", msg, got)
+		return -1
+	}
+}
+
+// TestLastCookieErrorNeverLowersSeverity is the property that makes appending
+// AutoCookieStatus.LastError to the R C line safe.
+//
+// feedbackColor is a substring colorizer over the WHOLE line, so a suffix
+// carrying somebody else's prose can move the colour. Only one direction is
+// dangerous: a recorded failure that made the line LESS alarming would be the
+// append actively hiding something. Raising it is at worst coarse — a recorded
+// error whose own words say "failed" lands red, and a recorded verification
+// failure is the actionable end of the scale by every other rule in this arc.
+//
+// The green case is why the marker exists at all rather than being left to
+// chance: "Cookies: YouTube OK" is green, and a line that carries a recorded
+// error must never be. Delete the "last cookie error" entry from feedbackColor
+// and the first row below drops to green while announcing a failure.
+func TestLastCookieErrorNeverLowersSeverity(t *testing.T) {
+	verdicts := []string{
+		cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshOK}),
+		cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshUnknown}),
+		cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshFailed}),
+	}
+	recorded := []string{
+		"the browser profile contained no cookies",
+		"auth verification failed — manual re-login required",
+		"refusing to overwrite cookies.txt",
+	}
+
+	for _, verdict := range verdicts {
+		base := feedbackSeverity(t, verdict)
+		for _, last := range recorded {
+			line := verdict + " | Last cookie error: " + last
+			got := feedbackSeverity(t, line)
+			if got < base {
+				t.Errorf("appending %q LOWERED the line's severity (%d → %d): %q. The append may "+
+					"only ever raise it — a recorded failure that makes the line calmer is the "+
+					"suffix hiding the thing it was added to show", last, base, got, line)
+			}
+			if got == 0 {
+				t.Errorf("a line announcing a recorded cookie error renders as success: %q. That is "+
+					"the one outcome that is simply wrong, whatever the verdict beside it says", line)
+			}
+		}
 	}
 }
 

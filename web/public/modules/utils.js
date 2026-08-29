@@ -412,9 +412,64 @@ export function cookieSetupAbortReport(probe, baseline, { wizard = false } = {})
  * "off" dot. Keeping it as data is what lets one function serve both badges.
  */
 const COOKIE_INDICATOR_PLATFORMS = {
-  youtube: { name: "YouTube", absent: { className: "indicator-warn", title: "YouTube: No cookies" } },
-  twitch: { name: "Twitch", absent: { className: "indicator-off", title: "Twitch: Anonymous" } },
+  youtube: {
+    name: "YouTube",
+    absent: { className: "indicator-warn", title: "YouTube: No cookies" },
+    // Which key of the platform's status payload carries WHY an inconclusive
+    // check could not conclude. See CookieStatusPayload / TwitchAuthStatus-
+    // Payload in internal/web/routes/cookies.go — the two halves land on
+    // differently-named keys because they come off one AuthStatus.
+    errorKey: "youtubeError",
+  },
+  twitch: {
+    name: "Twitch",
+    absent: { className: "indicator-off", title: "Twitch: Anonymous" },
+    errorKey: "twitchError",
+  },
 };
+
+/**
+ * The job status a park lands on. database.StatusCookies in Go
+ * (internal/database/types.go); app.js carries its own copies for the action
+ * sets. Pinned against the Go constant by TestWebParkedStatusMatchesGo.
+ */
+const PARKED_JOB_STATUS = "COOKIES?";
+
+/**
+ * Which platforms have at least one job parked in COOKIES?, as
+ * {youtube, twitch}.
+ *
+ * THE WEB HALF of the TUI's parkedCookieJobs (internal/tui/status_bar.go),
+ * ported deliberately rather than re-derived, so the two dashboards attribute
+ * the same alarm to the same platform:
+ *
+ *   - PER PLATFORM. A single unfiltered flag is what the TUI shipped first, and
+ *     it reddened YouTube for a parked TWITCH job — an alarm pointed at the
+ *     platform that was fine, which sends the operator to re-export credentials
+ *     that were never the problem.
+ *   - An ABSENT platform counts as YouTube, matching the TUI and matching every
+ *     other platform test in app.js (`job.platform === "twitch"`, everything
+ *     else is YouTube). Pre-Twitch rows really do carry "", and the importer
+ *     backfills exactly "youtube" when it meets one.
+ *   - NO ParkReason FILTER, also matching the TUI. Membership, dead
+ *     credentials and the pre-v18 zero value all escalate, because in all three
+ *     the remedy is credentials of some kind. What the red badge means is "a
+ *     download stopped for want of usable credentials", not "your cookies
+ *     expired"; the job row's own progress text carries the difference.
+ *
+ * Pure over the jobs already in memory — no fetch — and it stops as soon as
+ * both platforms are seen, because it runs on every job event.
+ */
+export function parkedCookiePlatforms(jobs) {
+  const parked = { youtube: false, twitch: false };
+  for (const job of jobs || []) {
+    if (job?.status !== PARKED_JOB_STATUS) continue;
+    if (job.platform === "twitch") parked.twitch = true;
+    else parked.youtube = true;
+    if (parked.youtube && parked.twitch) break;
+  }
+  return parked;
+}
 
 /**
  * Decide the dashboard indicator for one platform: {className, title}.
@@ -446,11 +501,34 @@ const COOKIE_INDICATOR_PLATFORMS = {
  * exactly as actionable, for an install that maintains cookies.txt by hand. Do
  * not reintroduce it here or there — the TUI has never had one, and the two
  * surfaces are supposed to agree. See updateStatusBar in app.js.
+ *
+ * `parked` is the fourth state and the Web half of a divergence: a job stopped
+ * in COOKIES? for want of usable credentials. It ranks SECOND, immediately
+ * under re-login and above `authenticated`, which is exactly where the TUI
+ * ranks it (renderCookieStatus, internal/tui/status_bar.go) and for the TUI's
+ * stated reason — a park is evidence from a real download attempt that
+ * something tried these credentials and could not proceed, and it therefore
+ * outranks a check that merely asked. Ranking it below `authenticated` would
+ * hide it behind a healthy check, which is the state it exists to contradict.
+ * It comes from the caller because it is computed from the job list rather than
+ * from the status payload; see parkedCookiePlatforms.
+ *
+ * The reason line is `youtubeError` / `twitchError` off the same payload, and
+ * it is appended ONLY to the inconclusive arm. That is the one verdict a reason
+ * explains: a conclusive "ok" or "failed" has no cause to give, and the
+ * producers leave the field empty there. An older binary sends no such key at
+ * all and the title degrades to exactly today's sentence.
  */
-export function cookieIndicatorState(platform, status, reloginRequired) {
+export function cookieIndicatorState(platform, status, reloginRequired, parked) {
   const meta = COOKIE_INDICATOR_PLATFORMS[platform];
   if (reloginRequired) {
     return { className: "indicator-error", title: `${meta.name}: Re-login required` };
+  }
+  if (parked) {
+    return {
+      className: "indicator-error",
+      title: `${meta.name}: A download stopped for want of usable credentials`,
+    };
   }
   if (status?.authenticated) {
     return { className: "indicator-ok", title: `${meta.name}: Authenticated` };
@@ -459,9 +537,11 @@ export function cookieIndicatorState(platform, status, reloginRequired) {
     return meta.absent;
   }
   if (status?.verification === "unknown") {
+    const reason = status?.[meta.errorKey];
     return {
       className: "indicator-warn",
-      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work`,
+      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work`
+        + (reason ? ` (${reason})` : ""),
     };
   }
   return { className: "indicator-error", title: `${meta.name}: Not authenticated` };

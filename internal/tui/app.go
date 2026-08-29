@@ -209,11 +209,26 @@ type (
 	// sentence; none carries a response body. See CookieStatusPayload in
 	// internal/web/routes/cookies.go, which projects the same two fields onto
 	// the wire and states that rule in full.
+	//
+	// LastError is a DIFFERENT SERVICE'S fact, carried on the same message
+	// because R C is where the TUI answers "what are my cookies doing" and an
+	// operator asking that is owed both halves. The verdicts above come from
+	// the in-process RefreshService's own check; this is
+	// AutoCookieStatus.LastError — the last thing a cookie pass (browser
+	// refresh or interactive setup) concluded that the operator has to act on,
+	// and it can be non-empty while both verdicts are RefreshOK. That is not a
+	// contradiction: cookies.txt can be alive on a session refresh while the
+	// mechanism that RENEWS it is broken, and the field's write policy
+	// (internal/cookies/autocookies.go) exists precisely so a recorded failure
+	// is not retracted by a pass that never established it was over. Empty
+	// whenever nothing is recorded, and empty from any wiring that does not
+	// supply it.
 	cookieRecheckResultMsg struct {
 		YouTube       cookies.RefreshVerdict
 		Twitch        cookies.RefreshVerdict
 		YouTubeReason string
 		TwitchReason  string
+		LastError     string
 	}
 	cookieForceRefreshResultMsg struct {
 		// Result is carried whole rather than pre-flattened to a bool pair.
@@ -484,6 +499,17 @@ type App struct {
 	// return "" for the other two, and the renderer ignores a reason that
 	// arrives with a conclusive verdict rather than trusting the caller.
 	OnRecheckCookies func() (yt, tw cookies.RefreshVerdict, ytReason, twReason string)
+	// OnAutoCookieLastError reports AutoCookieStatus.LastError, or "" when
+	// nothing is recorded. nil when there is no auto-cookie service, and the
+	// R C line then reads exactly as it does today.
+	//
+	// A CALLBACK OF ITS OWN rather than two more returns on OnRecheckCookies,
+	// because it comes off a different service and a different call
+	// (AutoCookieService.GetStatus, not RefreshService.GetStatus). Folding it
+	// into that signature would make the two facts look like one measurement,
+	// and would force every wiring that has an auth check but no auto-cookie
+	// service to answer for a field it cannot see.
+	OnAutoCookieLastError func() string
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if
 	// auto-cookies are not configured. It returns the pass's whole result
 	// rather than a bool: see cookieForceRefreshResultMsg for why the

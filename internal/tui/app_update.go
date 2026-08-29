@@ -796,6 +796,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // "could not establish" is the only state a reason explains: attaching one to
 // "OK" or "not authenticated" would read as a cause for a conclusion that has
 // none.
+//
+// LastError is a THIRD part, and it is ungated by any verdict on purpose. It
+// belongs to the auto-cookie service, not to the check this line reports, and
+// it can be non-empty while both verdicts are OK — a browser refresh that
+// failed leaves working credentials behind whenever the in-process session
+// refresh is still renewing them. That combination is exactly the one an
+// operator has no other way to find out about from this key, so it is rendered
+// whenever it is set and never inferred from anything else on this message. It
+// goes LAST so the clamp below eats it before it eats the verdicts.
 func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) string {
 	var checked []cookies.RecheckedPlatform
 	var reasons []string
@@ -814,6 +823,9 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) string {
 	line := cookies.RecheckReport(checked...)
 	if len(reasons) > 0 {
 		line += " (" + strings.Join(reasons, "; ") + ")"
+	}
+	if msg.LastError != "" {
+		line += " | Last cookie error: " + msg.LastError
 	}
 	return a.fitFeedback(line)
 }

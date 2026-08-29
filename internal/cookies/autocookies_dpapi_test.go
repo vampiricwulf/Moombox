@@ -244,7 +244,7 @@ func TestDpapiExtractConfiguredBrowserFilterOverridesScore(t *testing.T) {
 //
 // Arc 8 fix round 1: this used "chrome"/"chrome-beta" before Finding 1's
 // fix. "chrome" is now intercepted earlier as the Web UI's whole-family
-// sentinel (see dpapiChromiumFamilyValue) and never reaches
+// sentinel (see DpapiChromiumFamilyValue) and never reaches
 // dpapiBrowserMatchesConfigured at all, which would have made this test
 // decorative — it would keep passing (unfiltered scoring also finds the
 // beta profile) but for the wrong reason, no longer exercising the

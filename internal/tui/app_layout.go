@@ -240,7 +240,23 @@ func feedbackColor(msg string) color.Color {
 
 	// Errors (red) — cancelled jobs, invalid chords, or any failure
 	if strings.HasPrefix(msg, "Cancelled:") || strings.HasPrefix(msg, "Invalid Chord:") ||
-		strings.Contains(lower, "failed") {
+		strings.Contains(lower, "failed") ||
+		// A CONCLUSIVE verdict, and it belongs on this side of the line.
+		// cookies.RecheckReport words RefreshFailed as "<platform> not
+		// authenticated" and RefreshUnknown as "<platform> — could not
+		// establish", so this substring is reachable only from a check that
+		// REACHED the site and was refused. R F's wording for the same state
+		// ("...ran and auth verification failed") already landed here on the
+		// "failed" substring above, so R C rendering yellow made one surface
+		// answer one fact at two severities.
+		//
+		// Red is the actionable end: the remedy is to re-export credentials.
+		// Yellow is reserved for "we could not check", which asks for nothing.
+		// A MIXED line — one platform refused, the other unreachable — is red
+		// too, and correctly: the conclusive half is the half to act on, which
+		// is the same precedence the status-bar badge and the dashboard toast
+		// already apply.
+		strings.Contains(lower, "not authenticated") {
 		return ColorRed
 	}
 
@@ -260,8 +276,23 @@ func feedbackColor(msg string) color.Color {
 		// chase. Only a conclusive verdict says "failed" and earns red.
 		strings.Contains(lower, "declined to run") ||
 		strings.Contains(lower, "could not establish") ||
-		strings.Contains(lower, "not authenticated") ||
 		strings.Contains(lower, "no platforms") ||
+		// The AutoCookieStatus.LastError clause R C appends (see
+		// cookieRecheckFeedback). It exists so a line that CARRIES a recorded
+		// failure can never fall through to the green default: "Cookies:
+		// YouTube OK | Last cookie error: the browser profile contained no
+		// cookies" is a real and common state — cookies.txt alive on the
+		// in-process session refresh while the browser refresh is broken — and
+		// rendering it green is the one outcome that is simply wrong.
+		//
+		// It sits BELOW the error branch deliberately, which is what makes the
+		// only property worth having true: appending a lastError can raise the
+		// line's severity and can never lower it. A recorded error whose own
+		// words say "failed" is red, and that is the substring colorizer being
+		// coarse rather than being wrong — a recorded verification failure is
+		// the actionable end of the scale either way. Pinned by
+		// TestLastCookieErrorNeverLowersSeverity.
+		strings.Contains(lower, "last cookie error") ||
 		strings.Contains(lower, "already exists") ||
 		strings.HasPrefix(msg, "Already up to date") {
 		return ColorYellow

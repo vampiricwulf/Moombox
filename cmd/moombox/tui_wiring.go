@@ -361,6 +361,31 @@ func (s *runState) runTUI() {
 		return status.YouTubeVerification, status.TwitchVerification,
 			status.YouTubeError, status.TwitchError
 	}
+	// The other half of R C's answer, and it comes off a DIFFERENT SERVICE.
+	// AutoCookieStatus.LastError records what the last browser refresh or
+	// interactive setup concluded that the operator has to act on; the verdicts
+	// above come from the in-process RefreshService's own check. The two can
+	// disagree in the direction that matters — cookies.txt still authenticating
+	// because the 30-minute session refresh keeps it alive, while the mechanism
+	// that RENEWS it has been failing for days — and until now the TUI had no
+	// surface for the second fact at all. The field's write policy
+	// (internal/cookies/autocookies.go) is what makes it safe to show
+	// permanently: one SET funnel, three earned clears, and cleanup() forbidden
+	// from clearing.
+	//
+	// GetStatus, not a narrower accessor, and this is the caller the Task 4 note
+	// carves out: the panel that renders the full status keeps GetStatus. Its
+	// browser/registry detection scan is behind a 60 s cache and this runs once
+	// per R C keypress, not per auth-change dispatch.
+	app.OnAutoCookieLastError = func() string {
+		if s.autoCookieSvc == nil {
+			return ""
+		}
+		if le := s.autoCookieSvc.GetStatus().LastError; le != nil {
+			return *le
+		}
+		return ""
+	}
 	// WIRED UNCONDITIONALLY. Do not put a cookies.auto_enabled gate back here,
 	// in either shape — not around the assignment, and not as a live read
 	// inside the closure.

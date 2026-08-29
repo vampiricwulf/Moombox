@@ -501,6 +501,20 @@ func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
 // same volume as a dead session for as long as it lasted. The tier rule
 // already says what to do with un-actionable information; this state simply
 // belongs on that side of it.
+//
+// THE REASON IS DELIBERATELY ABSENT HERE, and it is the one place in the tree
+// where that is a decision rather than an omission. AuthStatus carries
+// YouTubeError / TwitchError — WHY a check reached CookieStatusUnknown — and
+// Arc 8 Task 12a gave them readers on the two PER-REQUEST paths: the REST
+// payload (CookieStatusPayload) and the R C result line. This panel is not one
+// of those. It is fed by pushes from RefreshService.OnAuthChange, and
+// authStatusChanged (internal/cookies/refresh.go:324-327) deliberately
+// excludes the two reason strings from its change-detection gate — so a
+// reason-only change produces no push, and a reason rendered here would sit
+// unchanged beside a verdict that is still correct. Widening that gate is the
+// precondition for putting the reason on this line; refresh.go is not this
+// task's to change. Until then the operator gets the reason on the next R C,
+// which is a recheck away, rather than live.
 func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 	if t >= tierNone || (!m.ytActive && !m.twActive) {
 		return ""

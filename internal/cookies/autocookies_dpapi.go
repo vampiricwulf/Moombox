@@ -118,7 +118,7 @@ func dpapiExtractAsNetscape(logger interface {
 	switch {
 	case configuredBrowserType == "":
 		// Auto-detect: every profile is a candidate.
-	case configuredBrowserType == dpapiChromiumFamilyValue:
+	case configuredBrowserType == DpapiChromiumFamilyValue:
 		// Finding 1 (Arc 8 fix round 1): the Web UI's ONLY Chromium option
 		// stores this literal value for "some Chromium-family browser",
 		// not "Google Chrome specifically" — see the doc comment above.
@@ -274,7 +274,7 @@ func dpapiExtractAsNetscape(logger interface {
 	return strings.Join(lines, "\n") + "\n", nil
 }
 
-// dpapiChromiumFamilyValue is the browser_type value the Web UI's
+// DpapiChromiumFamilyValue is the browser_type value the Web UI's
 // cfg-cookies-browser-type dropdown stores for ANY Chromium-family choice
 // (web/public/index.html: `<sl-option value="chrome">Chromium-family
 // (chrome, brave, edge, vivaldi, thorium, opera)</sl-option>` — its only
@@ -283,7 +283,17 @@ func dpapiExtractAsNetscape(logger interface {
 // free-text browser_type field can (browser_validate.go's
 // knownBrowserTypes allows "brave"/"edge"/"vivaldi"/"opera"/"thorium"
 // individually there). See dpapiExtractAsNetscape's Finding 1 note.
-const dpapiChromiumFamilyValue = "chrome"
+//
+// EXPORTED FOR THE DRIFT PIN, and for nothing else in production. Three
+// independent literals encode one agreement — this constant, the option's
+// `value` in index.html, and knownBrowserTypes — and nothing tied them: change
+// the HTML value to "chromium" and the sentinel below simply stops firing,
+// Brave/Edge users silently lose every profile again, and every Go test stays
+// green. TestChromiumFamilyOptionMatchesTheDpapiSentinel in
+// internal/web/routes reads the shipped index.html and asserts the value
+// against this name, which is why it has to be reachable from outside the
+// package. Keep the two in step by changing them together.
+const DpapiChromiumFamilyValue = "chrome"
 
 // dpapiBrowserMatchesConfigured reports whether one FindBrowserProfiles
 // entry's Browser family matches the operator's configured browser type
