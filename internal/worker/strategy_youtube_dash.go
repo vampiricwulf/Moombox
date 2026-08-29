@@ -244,10 +244,13 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.VideoFps = videoStream.FPS
 	}
 
-	// Get cookie header for authenticated downloads
-	var dashCookieHeader string
+	// Get cookie header for authenticated downloads. Method value, not a
+	// snapshot: a DASH capture runs for the length of the broadcast while the
+	// in-process refresh rotates the jar every ~30 minutes, so a header read
+	// here would still be presented to the last segment hours later.
+	var dashCookieHeader func() string
 	if job.YT != nil {
-		dashCookieHeader = job.YT.GetCookieHeader()
+		dashCookieHeader = job.YT.GetCookieHeader
 	}
 
 	// Orchestrator-provided StartSeq takes priority (quality recovery/split).

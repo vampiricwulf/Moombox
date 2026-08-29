@@ -14,7 +14,9 @@ import (
 // Fetches the watch page to extract the chat continuation token, visitor data,
 // and determines whether chat is live or replay. Returns nil if chat is unavailable.
 func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool) *chat.ChatDownloader {
-	// Fetch watch page to get chat continuation and visitor data
+	// Fetch watch page to get chat continuation and visitor data. This is a
+	// ONE-SHOT call, so a snapshot of the header is the right thing here — the
+	// long-lived chat downloader below gets a live getter instead.
 	cookieHeader := ""
 	if jobCtx.YT != nil && jobCtx.YT.Auth != nil {
 		cookieHeader = jobCtx.YT.Auth.GetCookieHeader()
@@ -57,12 +59,17 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		InitialContinuation: continuation,
 		ApiKey:              constants.DefaultAPIKey,
 		VisitorData:         visitorData,
-		CookieHeader:        cookieHeader,
 		IsReplay:            isReplay,
 		IsLiveOrUpcoming:    videoInfo.IsLive || videoInfo.IsUpcoming,
 	}
 	if jobCtx.YT != nil && jobCtx.YT.Auth != nil {
 		opts.GenerateAuth = jobCtx.YT.Auth.GenerateAuthorizationHeader
+		// Method value, exactly like GenerateAuth above: it re-reads the jar
+		// on every chat poll, so the hours-long download follows the ~30-min
+		// cookie rotation instead of presenting the header it started with.
+		// A nil Auth leaves the field nil, which the API treats as "no
+		// Cookie header" — no poll-time panic.
+		opts.CookieHeader = jobCtx.YT.Auth.GetCookieHeader
 	}
 
 	if videoInfo.ScheduledStartTime != "" {

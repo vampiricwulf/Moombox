@@ -190,7 +190,7 @@ func TestFetchChatReturnsErrAuthRequiredOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	api := NewChatAPI("", "", "")
+	api := NewChatAPI("", "", nil)
 	_, err := api.fetchChat(context.Background(), server.URL, "some-continuation-token")
 	if err == nil {
 		t.Fatal("expected error from 401 response, got nil")
@@ -208,7 +208,7 @@ func TestFetchChatOtherStatusDoesNotMapToAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	api := NewChatAPI("", "", "")
+	api := NewChatAPI("", "", nil)
 	_, err := api.fetchChat(context.Background(), server.URL, "some-continuation-token")
 	if err == nil {
 		t.Fatal("expected error from 500 response, got nil")

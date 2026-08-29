@@ -37,7 +37,7 @@ type ChatDownloaderOptions struct {
 	InitialContinuation string
 	ApiKey              string
 	VisitorData         string
-	CookieHeader        string
+	CookieHeader        func() string // Returns the CURRENT Cookie header, re-read per request (nil = send none)
 	GenerateAuth        func() string // Returns SAPISIDHASH Authorization header for member-gated chat
 	IsReplay            bool
 	IsLiveOrUpcoming    bool

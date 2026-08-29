@@ -12,6 +12,20 @@ import (
 	"testing"
 )
 
+// clearCookieValue blanks one cookie's value in place within one platform's
+// jar, leaving its domain and expiry alone — the shape a platform-side clear
+// actually leaves behind. Used to stage the rotation-invalidation state
+// without rewriting the file. The platform is explicit because routing a read
+// or write to the wrong jar is the exact failure this split has to avoid.
+func clearCookieValue(j *CookieJar, p Platform, name string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	entries := j.jarFor(p)
+	entry := entries[name]
+	entry.value = ""
+	entries[name] = entry
+}
+
 // jarWithAuth writes a minimal Netscape file with the two cookies
 // HasYouTubeAuthCookies requires, and loads it.
 func jarWithAuth(t *testing.T) *CookieJar {
@@ -280,7 +294,7 @@ func TestHalfClearedJarStillProbes(t *testing.T) {
 	pointYouTubeGuideAt(t, srv)
 
 	jar := jarWithAuth(t)
-	jar.cookies["LOGIN_INFO"] = "" // the rotation-invalidation state
+	clearCookieValue(jar, PlatformYouTube, "LOGIN_INFO") // the rotation-invalidation state
 
 	rs := NewRefreshService(jar, 0, nopLogger{})
 	auth, err := rs.checkAndRefreshYouTube(context.Background())
@@ -302,7 +316,7 @@ func TestCheckYouTubeAuthHalfClearedJarStillProbes(t *testing.T) {
 	pointYouTubeGuideAt(t, srv)
 
 	jar := jarWithAuth(t)
-	jar.cookies["LOGIN_INFO"] = ""
+	clearCookieValue(jar, PlatformYouTube, "LOGIN_INFO")
 
 	rs := NewRefreshService(jar, 0, nopLogger{})
 	auth, err := rs.CheckYouTubeAuth(context.Background())
@@ -344,7 +358,7 @@ func TestNoSAPISIDIsInconclusiveNotDead(t *testing.T) {
 	pointYouTubeGuideAt(t, srv)
 
 	jar := jarWithAuth(t)
-	jar.cookies["SAPISID"] = ""
+	clearCookieValue(jar, PlatformYouTube, "SAPISID")
 
 	rs := NewRefreshService(jar, 0, nopLogger{})
 	auth, err := rs.checkAndRefreshYouTube(context.Background())

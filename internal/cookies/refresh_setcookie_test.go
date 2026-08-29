@@ -225,7 +225,7 @@ func TestProcessSetCookiesPreservesTabbedValue(t *testing.T) {
 
 	// Sanity: the jar really does carry the tab through, which is what makes
 	// the 8-field row a legal input rather than a corrupt one.
-	if got := jar.GetCookie("PREF"); got != "old-head\told-tail" {
+	if got := jar.GetCookieFor(PlatformYouTube, "PREF"); got != "old-head\told-tail" {
 		t.Fatalf("fixture precondition failed: jar read PREF as %q", got)
 	}
 
@@ -413,7 +413,7 @@ func TestProcessSetCookiesRefusesEmptyValueWithoutExpiry(t *testing.T) {
 		if err := fresh.Load(path); err != nil {
 			t.Fatal(err)
 		}
-		if got := fresh.GetCookie("LOGIN_INFO"); got != "fixture-login" {
+		if got := fresh.GetCookieFor(PlatformYouTube, "LOGIN_INFO"); got != "fixture-login" {
 			t.Errorf("a freshly loaded jar reads LOGIN_INFO as %q — the row is unreadable", got)
 		}
 	})

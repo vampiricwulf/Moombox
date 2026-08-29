@@ -59,6 +59,29 @@ func twitchAuthSentinel(err error) error {
 	return nil
 }
 
+// twitchChatCredentials returns the getter a live Twitch chat session
+// authenticates with, or nil when there is no auth to read from.
+//
+// ONE getter for the token AND the login, because the handshake is a single
+// authenticated-or-anonymous decision over the pair: a real OAuth token beside
+// the anonymous `justinfan<random>` nickname is refused or downgraded by
+// Twitch, and the symptom is chat that connects normally and never carries
+// subscriber-only messages or badges. Wiring the two halves separately could
+// produce that state two ways — one half left nil, or both read either side of
+// a concurrent cookie Reload — so the pair is never split, here or in the jar
+// (see cookies.CookieJar.GetTwitchCredentials, which reads both under one
+// RLock).
+//
+// A method value, not a snapshot: it is re-read on every IRC reconnect, so a
+// credential re-imported mid-stream reaches the next session. nil is the
+// documented "log in anonymously" signal.
+func twitchChatCredentials(auth *twitch.Auth) func() (token, login string) {
+	if auth == nil {
+		return nil
+	}
+	return auth.GetCredentials
+}
+
 // processTwitch handles Twitch stream/VOD processing.
 func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
 	if sp.tw == nil {
@@ -153,9 +176,12 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 				}
 			}
 
-			authToken := ""
+			// Method value, not a snapshot: the comment-paging loop below runs
+			// for the length of the VOD, and a token captured here would be
+			// presented unchanged long after it rotated or died.
+			var authToken func() string
 			if sp.tw != nil && sp.tw.Auth != nil {
-				authToken = sp.tw.Auth.GetAuthToken()
+				authToken = sp.tw.Auth.GetAuthToken
 			}
 
 			vodChatDl := twitch.NewVodChatDownloader(sp.tw.API, twitch.VodChatOptions{
@@ -315,6 +341,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		chatStagingDir := filepath.Join(stagingBase, job.ID)
 		if err := os.MkdirAll(chatStagingDir, 0o755); err == nil {
 			chatPath := filepath.Join(chatStagingDir, "chat.json")
+			chatCredentials := twitchChatCredentials(sp.tw.Auth)
 			twitchChatDl = twitch.NewChatDownloader(twitch.ChatDownloaderOptions{
 				ChannelLogin:    login,
 				ChannelDisplay:  streamInfo.ChannelDisplayName,
@@ -322,8 +349,11 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				StreamID:        streamInfo.StreamID,
 				OutputPath:      chatPath,
 				StreamStartTime: streamInfo.StartedAt,
-				AuthToken:       sp.tw.GetAuthToken(),
-				EmoteResolver:   sp.tw.Emotes,
+				// Method value, not a snapshot — read fresh on every IRC
+				// reconnect so a rotated credential doesn't silently downgrade
+				// the rest of the stream to anonymous chat capture.
+				Credentials:   chatCredentials,
+				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
 
 			sp.db.UpdateJobFields(job.ID, map[string]any{

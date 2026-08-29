@@ -396,7 +396,8 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 // onProgress is wired before Start so callers don't need a follow-up SetOnProgress
 // (per audit reports/worker.md F16 — keeps initial+retry paths in sync).
 func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.Job, info *youtube.VideoInfo, onProgress func(chat.ChatProgress)) *chat.ChatDownloader {
-	// Fetch watch page to get chat continuation token
+	// Fetch watch page to get chat continuation token. One-shot call, so a
+	// snapshot is correct here; the chat downloader below gets a live getter.
 	cookieHeader := ""
 	if sp.yt != nil && sp.yt.Auth != nil {
 		cookieHeader = sp.yt.Auth.GetCookieHeader()
@@ -443,12 +444,15 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		InitialContinuation: continuation,
 		ApiKey:              constants.DefaultAPIKey,
 		VisitorData:         visitorData,
-		CookieHeader:        cookieHeader,
 		IsReplay:            isReplay,
 		IsLiveOrUpcoming:    true,
 	}
 	if sp.yt != nil && sp.yt.Auth != nil {
 		opts.GenerateAuth = sp.yt.Auth.GenerateAuthorizationHeader
+		// Method value, exactly like GenerateAuth above — re-read per poll so
+		// a multi-hour early-chat run tracks the rotating cookie jar. nil Auth
+		// leaves the field nil, which the API reads as "no Cookie header".
+		opts.CookieHeader = sp.yt.Auth.GetCookieHeader
 	}
 	if info.ScheduledStartTime != "" {
 		opts.StreamStartTime = info.ScheduledStartTime
