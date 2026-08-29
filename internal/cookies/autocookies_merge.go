@@ -45,8 +45,28 @@ func isRelevantDomain(domain string) bool {
 
 // isEssentialCookie checks if a cookie should be included in extraction (matching TS).
 func isEssentialCookie(name, domain string) bool {
-	// YouTube essential cookies
-	if essentialYouTubeCookies[name] {
+	// YouTube essential cookies. Domain-guarded for the same reason the
+	// other two clauses below already are: several names in
+	// essentialYouTubeCookies (PREF, CONSENT, YSC, LOGIN_INFO, the rotating
+	// SIDTS/SIDCC pair) are not YouTube-exclusive strings, just names YouTube
+	// happens to use. Without this guard, a row carrying one of those names
+	// on ANY domain — a .twitch.tv row, or a third party's cookie of the same
+	// name — was admitted here under YouTube's identity.
+	//
+	// That is worse than a leak on this path specifically: deduplicateAndFormat
+	// below keys its byName map by bare name across platforms, and its only
+	// skip rule protects an incumbent youtube.com row, not a google.com one.
+	// A wrongly-admitted .twitch.tv row landing after a .google.com row of the
+	// same name overwrites it — the real Google auth cookie is evicted before
+	// the file is ever written, someplace CookieJar.Load's domain-aware
+	// admission can never reach because a row that was never written is a row
+	// the jar never sees.
+	//
+	// Currently unreachable: no real Twitch cookie name collides with
+	// essentialYouTubeCookies today. It becomes reachable the day one does, or
+	// the day a third party sets one of these generically-named cookies on a
+	// domain this extractor visits.
+	if (isYouTubeDomain(domain) || isGoogleDomain(domain)) && essentialYouTubeCookies[name] {
 		return true
 	}
 	// Google domain auth cookies

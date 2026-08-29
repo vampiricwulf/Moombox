@@ -627,6 +627,22 @@ func TestAuthCookieNameListsDoNotDrift(t *testing.T) {
 	if len(youtubeAuthCookieNames) == 0 {
 		t.Fatal("youtubeAuthCookieNames is empty — the subset check above would pass vacuously")
 	}
+
+	// Twitch counterpart. jar.go:590-592 explicitly invites a name added to
+	// twitchAuthCookieNames without a matching essentialTwitchCookies entry
+	// ("safe mechanically") — it is not: Load drops such a name at parse
+	// time, so HasAnyTwitchAuthCookie / ExpiredAuthCookiesFor /
+	// AuthCookieHorizonFor go silently blind to it, on the platform whose
+	// failure mode is already silent (a dead Twitch token downgrades chat to
+	// anonymous rather than erroring).
+	for _, name := range twitchAuthCookieNames {
+		if !essentialTwitchCookies[name] {
+			t.Errorf("twitchAuthCookieNames has %q, which essentialTwitchCookies drops at parse time — the predicate can never observe it", name)
+		}
+	}
+	if len(twitchAuthCookieNames) == 0 {
+		t.Fatal("twitchAuthCookieNames is empty — the subset check above would pass vacuously")
+	}
 	// The two names the auth-loss gate actually turns on. A refactor that
 	// trimmed the list down to the SAPISID+LOGIN_INFO pair would silently
 	// re-create the bug this predicate exists to close.

@@ -45,18 +45,40 @@ func TestIsEssentialCookie(t *testing.T) {
 		// Google-only auth cookies need a google.com domain.
 		{"SID", ".google.com", true},
 		{"HSID", ".google.com", true},
+		{"SAPISID", ".google.com", true},
 		{"__Secure-1PSID", "accounts.google.com", true},
 		{"__Secure-3PSID", "accounts.google.com", true},
 		// SID on a non-google domain is rejected (the YouTube essential list
 		// already covers SID on youtube.com since it's in essentialYouTubeCookies).
+		// All four Twitch-essential names, so a domain-guard fix on the
+		// YouTube clause cannot be mistaken for over-tightening the Twitch one.
 		{"auth-token", ".twitch.tv", true},
+		{"twilight-user", ".twitch.tv", true},
 		{"login", ".twitch.tv", true},
+		{"name", ".twitch.tv", true},
 		// Unknown name is rejected.
 		{"random", ".youtube.com", false},
 		{"auth-token", ".youtube.com", false}, // twitch cookie name, not on twitch.tv
 		// Note: the upstream caller gates on isRelevantDomain first, so
 		// isEssentialCookie doesn't separately re-check domain relevance
 		// for known YouTube names like "SID" — it trusts essential names.
+
+		// PREF, CONSENT, YSC and LOGIN_INFO are the names guarded ONLY by the
+		// essentialYouTubeCookies clause — unlike SID/SAPISID/HSID/etc, they
+		// are not repeated in the explicit google-domain auth list below, so
+		// they are the names that actually exercise the domain guard on the
+		// first clause (finding: Arc 5 Task 6). None of these strings is
+		// YouTube-exclusive; a .twitch.tv row (or any third party's cookie)
+		// using one of them must NOT pass under YouTube's identity.
+		{"PREF", ".twitch.tv", false},
+		{"CONSENT", ".twitch.tv", false},
+		{"YSC", ".twitch.tv", false},
+		{"LOGIN_INFO", ".twitch.tv", false},
+		// The guard must accept BOTH youtube.com and google.com — Google auth
+		// legitimately mints these on accounts.google.com too. A guard
+		// narrowed to isYouTubeDomain only would wrongly reject this.
+		{"PREF", "accounts.google.com", true},
+		{"CONSENT", ".google.com", true},
 	}
 	for _, tc := range cases {
 		if got := isEssentialCookie(tc.name, tc.domain); got != tc.want {
@@ -85,6 +107,78 @@ func TestDeduplicateAndFormatPrefersYouTube(t *testing.T) {
 	}
 	if strings.Contains(joined, "ignored") {
 		t.Errorf("expected non-relevant domain to be filtered, got:\n%s", joined)
+	}
+}
+
+// crossPlatformCollisionRows returns a .google.com SID and a .twitch.tv SID —
+// the same bare name on two platforms that isEssentialCookie's first clause
+// (before the Arc 5 Task 6 domain guard) admitted identically, and that
+// deduplicateAndFormat's byName map (keyed by bare name — see its comment)
+// cannot tell apart.
+//
+// google.com is used for the incumbent rather than youtube.com deliberately:
+// deduplicateAndFormat's ONLY collision guard is "skip a non-youtube.com row
+// when a youtube.com row already holds the name" (:87-89). A youtube.com
+// incumbent would survive on that rule alone regardless of whether the
+// isEssentialCookie fix is present, which would make the test pass for the
+// wrong reason. google.com is not youtube.com, so that guard does not fire
+// here and the outcome depends entirely on whether the Twitch row is
+// admitted at all.
+func crossPlatformCollisionRows(googleFirst bool) []extractedCookie {
+	google := extractedCookie{domain: ".google.com", name: "SID", value: "google_sid_value", path: "/", secure: true, expiry: 4102444800}
+	twitch := extractedCookie{domain: ".twitch.tv", name: "SID", value: "twitch_sid_value", path: "/", secure: true, expiry: 4102444800}
+	if googleFirst {
+		return []extractedCookie{google, twitch}
+	}
+	return []extractedCookie{twitch, google}
+}
+
+// TestDeduplicateAndFormatDropsCrossPlatformNameCollision is the eviction
+// case from Arc 5 Task 6: a .twitch.tv row named SID must never survive to
+// the formatted output, and — this is the half a name-collision fix can get
+// wrong — the .google.com SID present in the very same input must survive
+// alongside it. Asserting "the Twitch row is absent" alone would pass even if
+// isEssentialCookie's bug were still live and BOTH rows fell out of the
+// output for some unrelated reason, or if the Google row were the one lost;
+// neither is the property this guards.
+//
+// Google is placed FIRST (see crossPlatformCollisionRows): with the domain
+// guard removed, the Twitch row is admitted and arrives SECOND, so it is the
+// row that overwrites byName["SID"] — the Twitch row genuinely wins the
+// eviction, not merely coexists with the Google one. Reversing the order
+// makes deduplicateAndFormat's plain last-write-wins behaviour hand the win
+// back to Google even under the bug, which would satisfy this exact
+// assertion for the wrong reason — see
+// TestDeduplicateAndFormatCollisionOrderIndependent for why both orders must
+// agree.
+func TestDeduplicateAndFormatDropsCrossPlatformNameCollision(t *testing.T) {
+	lines := deduplicateAndFormat(crossPlatformCollisionRows(true))
+	joined := strings.Join(lines, "\n")
+
+	if strings.Contains(joined, "twitch_sid_value") {
+		t.Errorf("expected the .twitch.tv SID row to be dropped entirely, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "google_sid_value") {
+		t.Errorf("expected the .google.com SID row to survive — it must not be the row that was evicted, got:\n%s", joined)
+	}
+}
+
+// TestDeduplicateAndFormatCollisionOrderIndependent asserts the same two
+// colliding rows (see crossPlatformCollisionRows) produce IDENTICAL output
+// regardless of input order. The eviction this guards against is
+// order-dependent — deduplicateAndFormat's collision handling is plain
+// last-write-wins once two non-youtube.com rows share a name — so a test that
+// only checks one ordering can pass by accident of which row happened to
+// arrive last, rather than because the Twitch row was never admitted.
+func TestDeduplicateAndFormatCollisionOrderIndependent(t *testing.T) {
+	googleFirst := strings.Join(deduplicateAndFormat(crossPlatformCollisionRows(true)), "\n")
+	twitchFirst := strings.Join(deduplicateAndFormat(crossPlatformCollisionRows(false)), "\n")
+
+	if googleFirst != twitchFirst {
+		t.Fatalf("output depends on input order:\n  google-first: %q\n  twitch-first: %q", googleFirst, twitchFirst)
+	}
+	if !strings.Contains(googleFirst, "google_sid_value") || strings.Contains(googleFirst, "twitch_sid_value") {
+		t.Fatalf("order-independent output is still wrong: %q", googleFirst)
 	}
 }
 
