@@ -153,11 +153,126 @@ func TestMayResumeClosureTruthTable(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := buildMayResume(c.sig, c.chatDl)()
+			// nil lastSegment clock: the documented test-closure fallback —
+			// the joint-idle gate is skipped, so this table keeps pinning
+			// the pure signal/chat-open truth values it always did. The
+			// gate itself is pinned by TestMayResumeChatSignalJointIdle.
+			got := buildMayResume(c.sig, c.chatDl, nil)()
 			if got != c.want {
 				t.Errorf("buildMayResume(...)() = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// TestMayResumeChatSignalJointIdle pins the joint-idle release on the REAL
+// buildMayResume closure (owner ruling 2026-08-27): the chat-open signal
+// only counts as resume evidence while something is actually moving — a NEW
+// chat message or a NEW segment within chatSignalJointIdleAfter. Chat can
+// persist after a stream truly ends, so once BOTH clocks have been quiet
+// for over the window the chat evidence releases and the proper bounded
+// waiting timers take over.
+//
+// Each case targets a specific wrong implementation — several of these pass
+// against the ungated pre-fix closure BY DESIGN (they pin the release's
+// boundaries, not its existence), so the case that must fail pre-fix is
+// called out explicitly:
+//
+//   - "joint idle releases" is the fix itself: the pre-fix closure returns
+//     TRUE here (chat open = evidence, unconditionally), so this case FAILS
+//     against unfixed code.
+//   - "chat active holds" catches an either-idle (OR) implementation and
+//     the segment clock being read for both arguments.
+//   - "segments arriving hold" catches releasing on chat idleness alone —
+//     the truncation direction (a segment landing with silent chat means
+//     the stream is plainly still live) — and the chat clock being read for
+//     both arguments.
+//   - "within the window holds" catches releasing before the window has
+//     elapsed at all; the exact > vs >= boundary is pinned by
+//     TestChatSignalJointIdleBoundary with an injected now, not here.
+//   - "fresh signature ungated" catches the gate being applied above
+//     sig.fresh() — the interruption signature is the primary evidence and
+//     the window must never silence it.
+//   - "activity alone is never evidence" catches the clocks being promoted
+//     into evidence: they only ever GATE the chat-open signal, never
+//     replace it.
+func TestMayResumeChatSignalJointIdle(t *testing.T) {
+	freshSignal := func() *interruptionSignal {
+		sig := &interruptionSignal{}
+		sig.observe(&youtube.VideoInfo{StreamStatus: youtube.StreamLive, Formats: nil})
+		return sig
+	}
+	staleSignal := &interruptionSignal{} // never observed -- never fresh
+
+	newChat := func(open bool, lastMsg time.Time) *chat.ChatDownloader {
+		cd := chat.NewChatDownloader(chat.ChatDownloaderOptions{VideoID: "x", OutputFile: "unused"})
+		cd.SetLiveContinuationOpenForTesting(open)
+		cd.SetLastMessageAtForTesting(lastMsg)
+		return cd
+	}
+	segClock := func(at time.Time) *atomicTimeValue {
+		c := &atomicTimeValue{}
+		c.Store(at)
+		return c
+	}
+
+	// idle sits a full minute past the window and within sits at half the
+	// window — both far enough from the boundary that the closure's own
+	// time.Now() (microseconds after these are computed) cannot drift a case
+	// across it. Exact-boundary arithmetic lives in
+	// TestChatSignalJointIdleBoundary with an injected now.
+	idle := time.Now().Add(-chatSignalJointIdleAfter - time.Minute)
+	active := time.Now()
+	within := time.Now().Add(-chatSignalJointIdleAfter / 2) // quiet, but only half way through the window
+
+	cases := []struct {
+		name    string
+		sig     *interruptionSignal
+		chatDl  *chat.ChatDownloader
+		lastSeg *atomicTimeValue
+		want    bool
+	}{
+		{"joint idle releases: chat open but no message and no segment for over the window", staleSignal, newChat(true, idle), segClock(idle), false},
+		{"chat active holds through segment idleness until the window elapses", staleSignal, newChat(true, active), segClock(idle), true},
+		{"segments arriving hold through silent chat regardless", staleSignal, newChat(true, idle), segClock(active), true},
+		{"both quiet but within the window still holds", staleSignal, newChat(true, within), segClock(within), true},
+		{"fresh signature ungated: joint idleness never silences the primary evidence", freshSignal(), newChat(true, idle), segClock(idle), true},
+		{"activity alone is never evidence: chat closed, both clocks active", staleSignal, newChat(false, active), segClock(active), false},
+		{"nil segment clock keeps the ungated chat signal (test-closure fallback)", staleSignal, newChat(true, idle), nil, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := buildMayResume(c.sig, c.chatDl, c.lastSeg)()
+			if got != c.want {
+				t.Errorf("buildMayResume(...)() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestChatSignalJointIdleBoundary pins chatSignalJointIdle's exact
+// arithmetic with an injected now (no wall-clock drift): release requires
+// strictly OVER the window ("over 30 seconds" per the owner's contract, so
+// > not >=), and requires it on BOTH clocks.
+func TestChatSignalJointIdleBoundary(t *testing.T) {
+	now := time.Unix(1_000_000_000, 0)
+	at := func(age time.Duration) time.Time { return now.Add(-age) }
+	w := chatSignalJointIdleAfter
+
+	if chatSignalJointIdle(at(w), at(w), now) {
+		t.Error("exactly AT the window is not yet over it -- must not be idle (> not >=)")
+	}
+	if !chatSignalJointIdle(at(w+time.Nanosecond), at(w+time.Nanosecond), now) {
+		t.Error("just past the window on both clocks must be idle")
+	}
+	if chatSignalJointIdle(at(0), at(w+time.Hour), now) {
+		t.Error("a fresh chat message must veto idleness no matter how stale the segment clock is")
+	}
+	if chatSignalJointIdle(at(w+time.Hour), at(0), now) {
+		t.Error("a fresh segment must veto idleness no matter how stale the chat clock is")
+	}
+	if !chatSignalJointIdle(time.Time{}, at(w+time.Second), now) {
+		t.Error("a zero chat clock (defensive: no clock ever armed) reads as idle-forever, not fresh")
 	}
 }
 

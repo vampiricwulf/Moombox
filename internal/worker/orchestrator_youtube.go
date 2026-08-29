@@ -58,6 +58,16 @@ import (
 // stalls (see engine.SegmentDownloader.stallForPossibleResume's
 // InterruptionNoStall branch).
 //
+// lastSegTime is the shared last-new-segment clock created alongside
+// mayResume by ExecuteWithChat (both close over/observe the SAME clock):
+// this loop is its writer — re-armed at entry and advanced by the
+// echo-suppressed onSegmentProgress below — while the mayResume closure
+// reads it to judge the chat-open signal's joint-idle release (see
+// chatSignalJointIdleAfter, interruption.go). It doubles as this loop's own
+// streamSegmentTimeout clock, which is exactly the point: one clock, no
+// drift between "what the verify branch considers segment activity" and
+// "what the chat gate considers segment activity".
+//
 // The second return value, waitedForResume, is worker-level Tier 2
 // evidence — FINALIZE-scoped, not history-scoped: true only when the loop
 // is CURRENTLY in (or gives up directly out of) an unresolved
@@ -94,9 +104,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	result *DownloadResult,
 	tracker *ProgressTracker,
 	mayResume func() bool,
+	lastSegTime *atomicTimeValue,
 ) (*DownloadResult, bool, error) {
-	var lastSegTime atomic.Int64
-	lastSegTime.Store(time.Now().UnixNano())
+	lastSegTime.StoreNow()
 	var consecutiveLiveChecks atomic.Int32
 	// waitedForResume latches true when shouldWaitForResume's branch fires
 	// below and clears again at every later successful refresh — see the
@@ -155,7 +165,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// downloader's first real report still counts.
 	onSegmentProgress := func(p engine.DownloadProgress, lastBytes *atomic.Int64) {
 		if segmentProgressResetsStallCounters(p, lastBytes) {
-			lastSegTime.Store(time.Now().UnixNano())
+			lastSegTime.StoreNow()
 			consecutiveLiveChecks.Store(0)
 		}
 	}
@@ -483,7 +493,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		}
 
 		// Normal download stop — verify stream ended (existing logic)
-		timeSinceLastSeg := time.Since(time.Unix(0, lastSegTime.Load()))
+		timeSinceLastSeg := time.Since(lastSegTime.Load())
 		o.logger.Info("segment downloaders stopped",
 			"timeSinceLastSeg", timeSinceLastSeg.Round(time.Second),
 			"jobID", jobCtx.Job.ID)
