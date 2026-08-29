@@ -350,14 +350,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dashboard's refresh button is the same gesture and had drifted to a
 		// different answer entirely. This side decides only WHICH platforms
 		// were checked; the sentence is shared.
-		var checked []cookies.RecheckedPlatform
-		if a.statusBar.ytActive {
-			checked = append(checked, cookies.RecheckedPlatform{Label: "YouTube", Verdict: msg.YouTube})
-		}
-		if a.statusBar.twActive {
-			checked = append(checked, cookies.RecheckedPlatform{Label: "Twitch", Verdict: msg.Twitch})
-		}
-		a.setFeedback(cookies.RecheckReport(checked...))
+		a.setFeedback(a.cookieRecheckFeedback(msg))
 		return a, nil
 
 	case cookieForceRefreshResultMsg:
@@ -786,6 +779,70 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+// cookieRecheckFeedback words one R C result.
+//
+// TWO PARTS, and the split is what keeps the shared sentence shared. The lead
+// is cookies.RecheckReport verbatim — the Web dashboard renders the identical
+// string for the identical gesture, and both copies are pinned against that
+// function — so nothing here may reword it. The reason, when there is one, is
+// APPENDED after it: a suffix cannot change the sentence a mutation test
+// compares, and a check that concluded produces no suffix at all, so the
+// pinned string is what an operator with working cookies still sees.
+//
+// A reason is rendered only for a platform that is ACTIVE and whose verdict is
+// RefreshUnknown. The verdict gate is here rather than at the wiring because
+// "could not establish" is the only state a reason explains: attaching one to
+// "OK" or "not authenticated" would read as a cause for a conclusion that has
+// none.
+func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) string {
+	var checked []cookies.RecheckedPlatform
+	var reasons []string
+	consider := func(label string, verdict cookies.RefreshVerdict, reason string) {
+		checked = append(checked, cookies.RecheckedPlatform{Label: label, Verdict: verdict})
+		if verdict == cookies.RefreshUnknown && reason != "" {
+			reasons = append(reasons, label+": "+reason)
+		}
+	}
+	if a.statusBar.ytActive {
+		consider("YouTube", msg.YouTube, msg.YouTubeReason)
+	}
+	if a.statusBar.twActive {
+		consider("Twitch", msg.Twitch, msg.TwitchReason)
+	}
+	line := cookies.RecheckReport(checked...)
+	if len(reasons) > 0 {
+		line += " (" + strings.Join(reasons, "; ") + ")"
+	}
+	return a.fitFeedback(line)
+}
+
+// fitFeedback clamps a feedback line to the room the overlay actually has.
+//
+// addOverlayMessage renders the line as "  "+msg and pads it out to a.width; it
+// does NOT clip. A line wider than the terminal therefore wraps, and because it
+// is written into a fixed row of an already-composed frame, the wrap pushes
+// every row below it down — the whole dashboard shifts for three seconds.
+//
+// Every other string reaching setFeedback is composed here out of bounded
+// vocabulary, so nothing needed this before. The recheck reason is the first
+// one whose length is decided elsewhere (a resolver's DNS wording, a proxy's
+// host name), which is why the clamp lives at the composer rather than inside
+// setFeedback: putting it there would silently truncate messages whose exact
+// text other tests pin.
+//
+// truncateString is the task list's own ellipsis helper, so an over-long line
+// ends the same way an over-long title does. Below the first WindowSizeMsg
+// a.width is 0 and the line is returned whole: there is no frame to break yet,
+// and clamping to a width nobody has reported would cut every message to
+// nothing.
+func (a *App) fitFeedback(line string) string {
+	const overlayIndent = 2 // addOverlayMessage's leading "  "
+	if a.width <= overlayIndent {
+		return line
+	}
+	return truncateString(line, a.width-overlayIndent)
 }
 
 func (a *App) setFeedback(msg string) {

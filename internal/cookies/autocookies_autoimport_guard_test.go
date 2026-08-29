@@ -44,6 +44,33 @@ const guardSkipped = "periodic auto-cookie refresh skipped — a browser-free im
 // This was never an exotic configuration: the Settings page's auto-cookie
 // switch just writes the config, so a browserless operator toggling it is one
 // click away from here.
+// standDownsObserved is how many guard stand-downs each case below waits for
+// before judging, and waitForStandDowns is how it waits.
+//
+// TICKS, NOT WALL-CLOCK, and that replacement is the fix rather than a
+// tidy-up. This test used to advance on two fixed sleeps — 5*interval and
+// 200ms of real time against a 20ms ticker — which is a bet that the machine
+// delivers five and ten ticks inside those windows. Under a full-suite run,
+// with every package's tests competing for the CPU, it does not: the subtest
+// below failed once as "the loop imported and then never stood down", an
+// assertion about the RULE, reported on a machine that had simply not run the
+// tick that would have stood down. It passed 27/27 on the next run and 3/3 in
+// isolation.
+//
+// Waiting for the stand-downs themselves makes every judgement here rest on
+// ticks that demonstrably happened, and turns "the machine was busy" into a
+// timeout with its own message instead of into a false claim about the rule.
+// Widening the sleeps was the alternative and is the wrong one: it makes the
+// same bet with a bigger stake, spends the extra seconds on every green run,
+// and still loses on a slow enough host.
+const standDownsObserved = 3
+
+// waitForStandDowns blocks until the guard has stood a tick down at least n
+// times, and reports whether it got there inside the budget.
+func waitForStandDowns(log *recordingCookieLogger, n int) bool {
+	return waitFor(func() bool { return log.count(guardSkipped) >= n }, 10*time.Second)
+}
+
 func TestPeriodicBrowserlessTickImportsOnlyWithNothingToLose(t *testing.T) {
 	run := func(t *testing.T, cookiePath string) (*recordingCookieLogger, *atomic.Int64) {
 		t.Helper()
@@ -57,14 +84,12 @@ func TestPeriodicBrowserlessTickImportsOnlyWithNothingToLose(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		const interval = 20 * time.Millisecond
-		s.StartPeriodicRefresh(ctx, interval)
-		// Wait for a decision either way, then let more ticks run so a rule
-		// that only holds on the first one fails.
+		s.StartPeriodicRefresh(ctx, 20*time.Millisecond)
+		// Wait for a decision either way. Each case then waits for the ticks it
+		// needs; see waitForStandDowns.
 		waitFor(func() bool {
 			return verified.Load() > 0 || log.count(guardSkipped) > 0
 		}, 10*time.Second)
-		time.Sleep(5 * interval)
 		return log, &verified
 	}
 
@@ -78,34 +103,47 @@ func TestPeriodicBrowserlessTickImportsOnlyWithNothingToLose(t *testing.T) {
 		// quiet on its own — no "re-read identical bytes on a timer", with no
 		// separate latch to get wrong.
 		log, verified := run(t, filepath.Join(t.TempDir(), "cookies.txt"))
-		afterFirstWait := verified.Load()
-		if afterFirstWait == 0 {
+		if verified.Load() == 0 {
 			t.Fatal("a browserless tick with no cookie file did not import. That install has nothing " +
 				"to lose and everything to gain from reading the profile — refusing it is how a " +
 				"container ends up with no cookies at all")
 		}
-		if log.count(guardSkipped) == 0 {
-			t.Error("the loop imported and then never stood down. The import writes cookies.txt, so " +
+		if !waitForStandDowns(log, 1) {
+			t.Fatal("the loop imported and then never stood down. The import writes cookies.txt, so " +
 				"from the next tick on there IS something to lose and the rule must say so")
 		}
-		// Nothing more may happen from here: the file now has rows.
-		time.Sleep(200 * time.Millisecond)
-		if got := verified.Load(); got != afterFirstWait {
+		// Sampled AFTER the first stand-down, not before it, and the order is
+		// load-bearing. The tick loop is a single goroutine, so a tick that
+		// reached the rule is a tick the importing pass has already returned
+		// from — which means the write this rule has to see is on disk and the
+		// count below cannot be raced by the pass that produced it.
+		afterFirstImport := verified.Load()
+		// Nothing more may happen from here: the file now has rows. Measured in
+		// further TICKS, each of which reached the rule and refused.
+		if !waitForStandDowns(log, standDownsObserved+1) {
+			t.Fatalf("the loop stopped ticking after %d stand-downs, so the count below observes "+
+				"nothing", log.count(guardSkipped))
+		}
+		if got := verified.Load(); got != afterFirstImport {
 			t.Errorf("imports kept running after cookies.txt was written (%d -> %d). The rule has to "+
 				"see its own output, or a browserless install re-imports on every tick forever",
-				afterFirstWait, got)
+				afterFirstImport, got)
 		}
 	})
 
 	t.Run("cookies.txt holds cookies — stands down", func(t *testing.T) {
 		log, verified := run(t, ytAuthCookieFile(t))
+		// More than one, so a rule that only holds on the FIRST tick fails
+		// here — the property the discarded sleep was reaching for.
+		if !waitForStandDowns(log, standDownsObserved) {
+			t.Fatalf("the loop stood down %d times, want at least %d — either it is dead or it never "+
+				"reached the guard, and the zero below would prove nothing",
+				log.count(guardSkipped), standDownsObserved)
+		}
 		if got := verified.Load(); got != 0 {
 			t.Errorf("a browserless tick imported over an existing cookies.txt %d times. Nothing "+
 				"between two ticks changes a mounted profile, so this re-reads identical bytes on a "+
 				"timer over credentials that may be working — R F is how those get replaced", got)
-		}
-		if log.count(guardSkipped) == 0 {
-			t.Error("the loop never reached the guard, so the zero above proves nothing")
 		}
 	})
 
@@ -122,22 +160,24 @@ func TestPeriodicBrowserlessTickImportsOnlyWithNothingToLose(t *testing.T) {
 		t.Cleanup(func() { readCookieFile = real })
 
 		log, verified := run(t, path)
-		if got := verified.Load(); got != 0 {
-			t.Errorf("a browserless tick imported %d times over a cookies.txt it could not read. A "+
-				"permission or mount blip is not an absent file — see ErrCookieFileUnreadable", got)
-		}
-		if log.count(guardSkipped) == 0 {
+		if !waitForStandDowns(log, standDownsObserved) {
 			// Worded for what actually goes wrong here. If the rule starts
 			// reading an unreadable file as an absent one, the tick is NOT
 			// stood down — it runs, and the only thing that then prevents the
 			// loss is RefreshCookiesDetailed's own merge abort. That is a real
-			// second line of defence and it is why the count above can still be
-			// zero, which is exactly why this assertion cannot be dropped: the
-			// rule must refuse on its own, not be rescued downstream.
-			t.Error("the tick was never stood down by the rule. Either the loop is dead, or an " +
-				"unreadable cookies.txt is being read as an absent one and the pass ran — leaving " +
-				"the merge's ErrCookieFileUnreadable abort as the only thing between a permission " +
-				"blip and a destroyed cookie file")
+			// second line of defence and it is why the import count below can
+			// still be zero, which is exactly why this assertion cannot be
+			// dropped: the rule must refuse on its own, not be rescued
+			// downstream.
+			t.Fatalf("the tick was stood down %d times, want at least %d. Either the loop is dead, "+
+				"or an unreadable cookies.txt is being read as an absent one and the pass ran — "+
+				"leaving the merge's ErrCookieFileUnreadable abort as the only thing between a "+
+				"permission blip and a destroyed cookie file",
+				log.count(guardSkipped), standDownsObserved)
+		}
+		if got := verified.Load(); got != 0 {
+			t.Errorf("a browserless tick imported %d times over a cookies.txt it could not read. A "+
+				"permission or mount blip is not an absent file — see ErrCookieFileUnreadable", got)
 		}
 	})
 }

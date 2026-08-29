@@ -324,7 +324,7 @@ func (s *runState) runTUI() {
 			return info.TagName, info.ReleaseNotes, nil
 		}
 	}
-	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict) {
+	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
 		s.log.Info("Cookie recheck requested from TUI")
 		// The bool is deliberately ignored, and the feedback line is deliberately
 		// unchanged when it is false.
@@ -344,7 +344,22 @@ func (s *runState) runTUI() {
 		// The verdicts, not the booleans. Both booleans are false for a check
 		// that could not reach the site, and the feedback line built on them
 		// reported "not authenticated" — a conclusion the check never drew.
-		return status.YouTubeVerification, status.TwitchVerification
+		//
+		// And the two error strings beside them, which is what the verdict on
+		// its own cannot say: RefreshUnknown means "this check learned nothing"
+		// and every cause produces the same three words. These fields had no
+		// reader anywhere in the tree until Arc 8 Task 12a — the same status
+		// object is projected onto the wire by CookieStatusPayload, which now
+		// carries them too, so both surfaces answer R C's question with the same
+		// two facts.
+		//
+		// Passed through untouched, and safely: every producer of these strings
+		// is status-and-cause only and none interpolates a response body (the
+		// rule is stated in full at CookieStatusPayload). The TUI clamps the
+		// rendered line to the panel width — see fitFeedback — so length is the
+		// renderer's problem, not this closure's.
+		return status.YouTubeVerification, status.TwitchVerification,
+			status.YouTubeError, status.TwitchError
 	}
 	// WIRED UNCONDITIONALLY. Do not put a cookies.auto_enabled gate back here,
 	// in either shape — not around the assignment, and not as a live read

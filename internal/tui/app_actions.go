@@ -31,8 +31,11 @@ func (a *App) recheckCookiesCmd() tea.Cmd {
 	}
 	recheckFn := a.OnRecheckCookies
 	return safeCmd(func() tea.Msg {
-		yt, tw := recheckFn()
-		return cookieRecheckResultMsg{YouTube: yt, Twitch: tw}
+		yt, tw, ytReason, twReason := recheckFn()
+		return cookieRecheckResultMsg{
+			YouTube: yt, Twitch: tw,
+			YouTubeReason: ytReason, TwitchReason: twReason,
+		}
 	})
 }
 

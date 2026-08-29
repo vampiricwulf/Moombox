@@ -190,11 +190,6 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 // The jar loads what the file says. Expiry is a diagnostic
 // (ExpiredAuthCookiesFor / AuthCookieHorizonFor), not a gate.
 func (j *CookieJar) Load(filePath string) error {
-	// Snapshot logger once; the field is protected by the mutex.
-	j.mu.RLock()
-	logger := j.logger
-	j.mu.RUnlock()
-
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -208,6 +203,28 @@ func (j *CookieJar) Load(filePath string) error {
 		}
 		return fmt.Errorf("failed to read cookie file: %w", err)
 	}
+
+	j.loadFrom(data, filePath)
+	return nil
+}
+
+// loadFrom is Load's parser, over bytes a caller already holds. Split out of
+// Load — behaviour identical, the ONLY caller that does not come through Load
+// is netscapeCookiesHoldACredential — so that a caller with the Netscape text
+// in memory can ask the jar's own predicates about it without inventing a
+// second parser or round-tripping through a temp file. The domain routing, the
+// name admission and the total order on duplicate domains are subtle enough
+// that a second reading of the same text would drift; there is one.
+//
+// filePath is recorded as the jar's origin exactly as Load records it. Pass ""
+// for a jar that came from no file: GetFilePath then answers "" and Reload
+// becomes a no-op, which is the honest answer for a throwaway jar built out of
+// a buffer.
+func (j *CookieJar) loadFrom(data []byte, filePath string) {
+	// Snapshot logger once; the field is protected by the mutex.
+	j.mu.RLock()
+	logger := j.logger
+	j.mu.RUnlock()
 
 	youtube := make(map[string]cookieEntry)
 	twitch := make(map[string]cookieEntry)
@@ -324,8 +341,6 @@ func (j *CookieJar) Load(filePath string) error {
 	j.youtube = youtube
 	j.twitch = twitch
 	j.mu.Unlock()
-
-	return nil
 }
 
 // compareCookieDomains is a total order over the domains two rows sharing one

@@ -36,13 +36,29 @@ import (
 //   - `the ladder was blocked` is deliberately NOT the empty verdict. An answer
 //     with no relevant rows only means "the profile is empty" once the
 //     fallbacks paired with it have been asked.
+//
+// wantSentinel is the fourth claim, added in Arc 8 Task 12a. The three verdicts
+// above were told apart in PROSE only, so every consumer past this function saw
+// one undifferentiated error and the setup route flattened all of them to a 500
+// that gave no hint. Each non-nil outcome now wraps a sentinel, and the rows
+// assert WHICH — a distinction that exists only in a message is a distinction
+// the wire cannot carry.
 func TestCdpCookieReadOutcome(t *testing.T) {
 	boom := errors.New("CDP error: 'Storage.getCookies' wasn't found")
+
+	// The three sentinels this function may produce, so a row asserting one can
+	// deny the other two. Their separation is the point: ErrNoCookiesInProfile
+	// is a verdict about the PROFILE, which FinishSetup turns into "no login
+	// detected" and RefreshCookiesDetailed downgrades to a fall-back; the other
+	// two mean the read never got far enough to have a verdict, so routing
+	// either one there would tell a signed-in user they are not signed in.
+	allSentinels := []error{ErrNoCookiesInProfile, ErrBrowserLadderBlocked, ErrBrowserReadUnanswered}
 
 	tests := []struct {
 		name             string
 		read             cdpCookieRead
-		wantEmptyProfile bool // errors.Is(err, ErrNoCookiesInProfile)
+		wantEmptyProfile bool  // errors.Is(err, ErrNoCookiesInProfile)
+		wantSentinel     error // the ONE sentinel this outcome must wrap; nil for a success
 		wantErr          bool
 		wantCause        bool // the message names lastErr
 	}{
@@ -52,15 +68,17 @@ func TestCdpCookieReadOutcome(t *testing.T) {
 			name:             "every tier answered and every answer was empty",
 			read:             cdpCookieRead{anyQuerySucceeded: true},
 			wantEmptyProfile: true,
+			wantSentinel:     ErrNoCookiesInProfile,
 			wantErr:          true,
 		},
 		{
 			// Route 2: nothing could be read. Says nothing about whether the
 			// user is signed in, so it must not claim they are not.
-			name:      "every tier errored",
-			read:      cdpCookieRead{lastErr: boom},
-			wantErr:   true,
-			wantCause: true,
+			name:         "every tier errored",
+			read:         cdpCookieRead{lastErr: boom},
+			wantSentinel: ErrBrowserReadUnanswered,
+			wantErr:      true,
+			wantCause:    true,
 		},
 		{
 			// Route 3: the mix. One tier is missing from this build, another
@@ -69,6 +87,7 @@ func TestCdpCookieReadOutcome(t *testing.T) {
 			name:             "some tiers errored and one answered empty",
 			read:             cdpCookieRead{anyQuerySucceeded: true, lastErr: boom},
 			wantEmptyProfile: true,
+			wantSentinel:     ErrNoCookiesInProfile,
 			wantErr:          true,
 			wantCause:        true,
 		},
@@ -82,8 +101,9 @@ func TestCdpCookieReadOutcome(t *testing.T) {
 				ladderBlocked:     true,
 				lastErr:           errors.New("CDP cookie fallback listing failed: connection refused"),
 			},
-			wantErr:   true,
-			wantCause: true,
+			wantSentinel: ErrBrowserLadderBlocked,
+			wantErr:      true,
+			wantCause:    true,
 		},
 		{
 			name: "a tier answered with relevant rows",
@@ -98,9 +118,15 @@ func TestCdpCookieReadOutcome(t *testing.T) {
 		{
 			// Defensive: nothing answered, nothing failed. "We never looked"
 			// must not render as "the profile is empty".
-			name:    "nothing was attempted",
-			read:    cdpCookieRead{},
-			wantErr: true,
+			// Same sentinel as "every tier errored", and deliberately: from a
+			// caller's side the two ARE one state — no query answered, so
+			// nothing was learned — and the only difference is whether the
+			// bookkeeping recorded a cause. A sentinel of its own would put a
+			// bookkeeping bug on the wire as a distinct operator-facing case.
+			name:         "nothing was attempted",
+			read:         cdpCookieRead{},
+			wantSentinel: ErrBrowserReadUnanswered,
+			wantErr:      true,
 		},
 	}
 
@@ -115,6 +141,19 @@ func TestCdpCookieReadOutcome(t *testing.T) {
 					"an empty profile, an unreadable one and a half-finished read need "+
 					"different messages and different remedies",
 					got, tt.wantEmptyProfile, err)
+			}
+			// EXACTLY ONE sentinel, asserted in both directions. Checking only
+			// the wanted one would be satisfied by an error that wrapped all
+			// three, which is the shape that reads as "any of these remedies
+			// might apply" — the collapse these sentinels exist to undo.
+			for _, sentinel := range allSentinels {
+				want := sentinel == tt.wantSentinel
+				if got := errors.Is(err, sentinel); got != want {
+					t.Errorf("errors.Is(err, %v) = %v, want %v (err = %v) — the route maps each "+
+						"of these to a different status, so an outcome that matches the wrong "+
+						"one sends the operator after the wrong problem",
+						sentinel, got, want, err)
+				}
 			}
 			// Every failing outcome must carry WHY, the empty verdict included.
 			// The old terminal error named the three methods and nothing else,

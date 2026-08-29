@@ -245,9 +245,60 @@ type AutoCookieService struct {
 	setupRetainedSince time.Time
 	cdpPort            int
 	lastRefresh        *time.Time
-	lastError          *string
-	needsRelogin       AutoCookieReloginRequired
-	targetPlatform     string // "youtube" or "twitch"
+
+	// lastError is the last thing a cookie pass concluded that the OPERATOR has
+	// to act on. It is published as AutoCookieStatus.LastError and is meant to
+	// sit beside the cookie status in both dashboards, so it is read as "your
+	// recordings will fail" — which is what the write policy below exists to
+	// keep true.
+	//
+	// THE POLICY, in one rule: a write is allowed only where THIS pass
+	// established the thing it is asserting. Setting asserts a problem;
+	// CLEARING asserts that whatever was recorded is not wrong any more, and
+	// that is the half that keeps getting written by paths with no basis for it.
+	//
+	// The writers, audited (Arc 8 Task 12a). Nothing else may write it:
+	//
+	//   - setError — the single SET. Every failure path funnels through it, so
+	//     there is one place a message enters this field. Callers: FinishSetup's
+	//     empty-profile, read-failure and merge-abort exits; the refresh's
+	//     import failure, merge abort, credential-loss and verification-failure
+	//     exits. Each of those is a conclusion the pass reached.
+	//   - the loss branch in RefreshCookiesDetailed's any-platform-verified arm
+	//     — sets, via s.lastError directly, because a partial success still has
+	//     to report the platform that was lost.
+	//   - that same arm's `case renewed` — CLEARS, and only when the pass
+	//     actually produced the credentials it verified. The `default` beside it
+	//     deliberately does NOT clear: a pass whose browser did nothing has
+	//     established that the credentials on disk work, not that the refresh
+	//     mechanism does, and retracting an earlier "the browser profile
+	//     contained no cookies" off it is how a twice-broken refresh presents a
+	//     clean bill of health.
+	//   - StartSetup, at the slot claim — CLEARS. Correct, and the one clear
+	//     that is about intent rather than evidence: a new setup attempt is
+	//     starting, the recorded message belongs to an attempt that is over, and
+	//     leaving it would make the wizard open under a stale red line.
+	//   - the "nothing to verify" branch of the same switch as the loss branch —
+	//     CLEARS. Reachability: no route to it has been found (it needs
+	//     fetchedRows == 0 with neither platform having had a credential, and
+	//     the only path that fetches nothing is the empty-browser-profile
+	//     downgrade, which is gated on refreshPlatforms() having found one).
+	//     Left in place with this note rather than deleted, because "I could not
+	//     find a route" is not "there is none".
+	//
+	// cleanup() / cleanupLocked() MUST NOT clear it, and that is the rule this
+	// audit exists for. cleanup runs on every setup exit path INCLUDING the
+	// failed ones — FinishSetup calls setError and then cleanup on each of its
+	// three failure exits — so clearing there would erase the message the
+	// failure had just produced, microseconds after it was written, and the
+	// dialog would report a failure the status page had no record of. See
+	// cleanupLocked: it touches only state describing a browser that is gone.
+	//
+	// Pinned by TestCleanupAfterAFailedSetupKeepsLastError.
+	lastError *string
+
+	needsRelogin   AutoCookieReloginRequired
+	targetPlatform string // "youtube" or "twitch"
 
 	// The two lifecycle flags. Kept together and apart from the state above
 	// because they are DECISIONS — an abort was asked for, the service was
@@ -827,18 +878,6 @@ func (s *AutoCookieService) refreshBrowser(policy browserGatePolicy) *DetectedBr
 		return nil
 	}
 	return s.resolvedBrowser()
-}
-
-// FlagManualRelogin marks a platform as needing manual re-login.
-func (s *AutoCookieService) FlagManualRelogin(platform string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	switch platform {
-	case "youtube":
-		s.needsRelogin["youtube"] = true
-	case "twitch":
-		s.needsRelogin["twitch"] = true
-	}
 }
 
 // StartSetup launches a browser for the user to log in.
@@ -2006,6 +2045,30 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	hadYTAuth := s.jar.HasAnyYouTubeAuthCookie()
 	hadTWAuth := s.jar.HasAnyTwitchAuthCookie()
 	fetchedRows := countNetscapeCookieRows(netscapeCookies)
+	// fetchedNoCredential is the state the outcome switch at the bottom of this
+	// function could not name: rows came back, and NOT ONE of them is a session
+	// credential. A browser profile that is signed out, or one set to clear
+	// cookies on exit and re-seeded with YSC/VISITOR_INFO1_LIVE by the
+	// navigation this pass just made, lands here every time.
+	//
+	// Read as either of the two nearest existing cases it was wrong: "the
+	// browser profile contained no cookies" is FALSE (rows came back — that arm
+	// is emptyBrowserProfile, which is only set when the read produced nothing
+	// at all), and "auth verification failed — manual re-login required" is true
+	// but says nothing an operator can act on, because the thing to fix is that
+	// the browser is not signed in rather than that Moombox's check failed.
+	//
+	// A NEW FLAG, never a redefinition of fetchedRows. Overloading `fetchedRows
+	// == 0` would put this state inside the counter, whose deliberate
+	// over-counting is load-bearing for the import guard and is mutation-pinned;
+	// and reusing emptyBrowserProfile would make "the profile was empty" mean
+	// two different things one line apart.
+	//
+	// Measured on what THIS PASS FETCHED, before the merge below folds the
+	// previous cookies.txt in. After the merge the answer would be about the
+	// file rather than about the browser, and the file's credentials are exactly
+	// the ones this state is not a statement about.
+	fetchedNoCredential := fetchedRows > 0 && !netscapeCookiesHoldACredential(netscapeCookies)
 
 	if previousCookies != "" {
 		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
@@ -2330,6 +2393,25 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 			// Genuinely nothing to do and nothing lost (e.g. first run before
 			// setup). The refresh completed cleanly; there was just nothing
 			// to refresh yet.
+			//
+			// NO ROUTE TO HERE HAS BEEN FOUND, as of Arc 8 Task 12a. Reaching it
+			// needs `failed` and `lost` both empty with fetchedRows == 0, i.e.
+			// a pass that fetched nothing while neither platform had a
+			// credential going in. The only path that fetches nothing is the
+			// ErrNoCookiesInProfile downgrade above, which lives on the browser
+			// branch — and that branch is gated on refreshPlatforms() being
+			// non-empty, which is the same pair of loose predicates hadYTAuth /
+			// hadTWAuth are read from. The import branch has no such gate but
+			// cannot fetch nothing: importProfileCookies raises
+			// ErrNoCookiesInProfile rather than returning an empty blob.
+			//
+			// Kept, with the derivation written down, rather than deleted:
+			// "I could not find a route" is not "there is none", and the arm is
+			// the right behaviour for the state it describes. If a future change
+			// does open a route, note that this is a CLEAR — see the write
+			// policy on the lastError field for why clears are the dangerous
+			// half — and it may only stay correct while the state really is
+			// "nothing happened and nothing was lost".
 			s.logger.Debug("cookie refresh completed with no cookies to verify")
 			s.mu.Lock()
 			s.lastError = nil
@@ -2406,6 +2488,20 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	case emptyBrowserProfile:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed, and the browser profile contained " +
 			"no cookies to refresh from — check whether the browser is clearing cookies on exit"
+	case fetchedNoCredential:
+		// PLACED HERE, immediately above default, and the position is the
+		// constraint rather than an aesthetic choice: this case carves its state
+		// out of `default` and out of nothing else.
+		//
+		// It cannot overlap emptyBrowserProfile above — that arm is only set on
+		// a read that produced no text at all, so fetchedRows is 0 there and
+		// this flag is false. It is kept BELOW the two inconclusive arms
+		// deliberately: "the browser is signed out" is a strong claim about the
+		// profile, and a check that could not reach the site has not earned it.
+		// Moving it up would silently change what those arms cover, which is
+		// exactly what this case was forbidden from doing.
+		errMsg = fmt.Sprintf("the browser profile returned %d cookies but none of them is a session "+
+			"credential — the browser is signed out", fetchedRows)
 	default:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
 	}

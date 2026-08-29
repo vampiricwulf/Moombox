@@ -195,9 +195,25 @@ type (
 	// the site" — so a DNS blip answered "YouTube not authenticated", which is
 	// a claim the check did not make and sends the user off to re-export
 	// perfectly good cookies.
+	//
+	// The two Reason strings are the WHY behind an inconclusive verdict, and
+	// they exist because the verdict alone cannot carry it: "could not
+	// establish" is the same sentence for a rate limit, a captive portal and an
+	// intercepting proxy, and only one of those is worth waiting out. Empty
+	// whenever the check concluded — a conclusive answer has no reason to give
+	// — and empty from any wiring that does not supply one.
+	//
+	// They are cookies.AuthStatus's YouTubeError / TwitchError, which had no
+	// reader anywhere in the tree until Arc 8 Task 12a. Every string that can
+	// reach them names a status code, a scheme+host, a header NAME or a static
+	// sentence; none carries a response body. See CookieStatusPayload in
+	// internal/web/routes/cookies.go, which projects the same two fields onto
+	// the wire and states that rule in full.
 	cookieRecheckResultMsg struct {
-		YouTube cookies.RefreshVerdict
-		Twitch  cookies.RefreshVerdict
+		YouTube       cookies.RefreshVerdict
+		Twitch        cookies.RefreshVerdict
+		YouTubeReason string
+		TwitchReason  string
 	}
 	cookieForceRefreshResultMsg struct {
 		// Result is carried whole rather than pre-flattened to a bool pair.
@@ -460,9 +476,14 @@ type App struct {
 
 	// Cookie refresh callbacks
 	// OnRecheckCookies runs the auth check and reports what it CONCLUDED per
-	// platform. See cookieRecheckResultMsg for why the bool pair it used to
-	// return could not be worded truthfully.
-	OnRecheckCookies func() (yt, tw cookies.RefreshVerdict)
+	// platform, plus WHY for a platform that concluded nothing. See
+	// cookieRecheckResultMsg for why the bool pair it used to return could not
+	// be worded truthfully, and for what the two reason strings may contain.
+	//
+	// A reason is meaningful only alongside a RefreshUnknown verdict; wirings
+	// return "" for the other two, and the renderer ignores a reason that
+	// arrives with a conclusive verdict rather than trusting the caller.
+	OnRecheckCookies func() (yt, tw cookies.RefreshVerdict, ytReason, twReason string)
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if
 	// auto-cookies are not configured. It returns the pass's whole result
 	// rather than a bool: see cookieForceRefreshResultMsg for why the

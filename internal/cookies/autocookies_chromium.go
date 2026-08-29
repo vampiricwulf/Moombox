@@ -658,24 +658,30 @@ func cdpCookieReadOutcome(read cdpCookieRead) error {
 		return nil
 	}
 	if !read.anyQuerySucceeded {
+		// BOTH arms wrap ErrBrowserReadUnanswered, including the one that has no
+		// cause to name. From the caller's side they are the same state — no
+		// query answered, so nothing was learned — and the difference between
+		// them is only whether the bookkeeping recorded why. Giving the
+		// cause-less arm its own sentinel would put a bookkeeping bug on the
+		// wire as if it were a distinct operator-facing situation.
 		if read.lastErr == nil {
 			// Nothing answered and nothing failed, so nothing was asked. Only
 			// reachable if the bookkeeping ever drops an error, and it must not
 			// read as "the profile is empty": we never looked.
-			return errors.New("CDP cookie read: no query was attempted " +
-				"(Storage.getCookies, Network.getAllCookies, Network.getCookies)")
+			return fmt.Errorf("%w — no query was attempted "+
+				"(Storage.getCookies, Network.getAllCookies, Network.getCookies)", ErrBrowserReadUnanswered)
 		}
-		return fmt.Errorf("CDP cookie read failed — no query answered "+
-			"(Storage.getCookies, Network.getAllCookies, Network.getCookies): %w", read.lastErr)
+		return fmt.Errorf("%w (Storage.getCookies, Network.getAllCookies, Network.getCookies): %w",
+			ErrBrowserReadUnanswered, read.lastErr)
 	}
 	if read.ladderBlocked {
 		cause := read.lastErr
 		if cause == nil {
 			cause = errors.New("the CDP target listing did not complete")
 		}
-		return fmt.Errorf("CDP cookie read incomplete — a query answered with no YouTube/Twitch "+
+		return fmt.Errorf("%w — a query answered with no YouTube/Twitch "+
 			"cookies, but the page-level fallbacks could not be run, so this is not a verdict "+
-			"on the profile: %w", cause)
+			"on the profile: %w", ErrBrowserLadderBlocked, cause)
 	}
 	if read.lastErr != nil {
 		// The cause rides along rather than being dropped. cdpGetCookiesAsNetscape
