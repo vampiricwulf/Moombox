@@ -278,7 +278,13 @@ type AutoCookieService struct {
 	//
 	//     So: EVERY exit that returns an error from a cookie pass sets. Adding an
 	//     early return here without one puts the field back in that state, and
-	//     nothing about the code will look wrong.
+	//     nothing about the code will look wrong. The two exits that do NOT set
+	//     are the guard clauses at the top of FinishSetupDetailed —
+	//     ErrNoSetupInProgress and ErrSetupCancelled — and they are excluded on
+	//     purpose, not overlooked: no pass has run when they fire, so there is
+	//     no failure for the operator to see afterwards, and the caller gets the
+	//     answer synchronously in the same dialog. "A pass" is the boundary; a
+	//     guard that refuses to start one is not an exit from one.
 	//   - the loss branch in RefreshCookiesDetailed's any-platform-verified arm
 	//     — sets, via s.lastError directly, because a partial success still has
 	//     to report the platform that was lost.
