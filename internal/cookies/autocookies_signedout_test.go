@@ -71,8 +71,8 @@ func signedOutRefreshService(t *testing.T) *AutoCookieService {
 // only asserted its own string would pass just as happily if the switch
 // collapsed to one message.
 const (
-	signedOutMessage = "the browser profile returned 2 cookies but none of them is a session " +
-		"credential — the browser is signed out"
+	signedOutMessage = "YouTube auth verification failed, and the browser profile returned 2 " +
+		"cookies but none of them is a session credential — the browser is signed out"
 	emptyProfileMessage = "YouTube auth verification failed, and the browser profile contained " +
 		"no cookies to refresh from — check whether the browser is clearing cookies on exit"
 	reloginMessage = "YouTube auth verification failed — manual re-login required"

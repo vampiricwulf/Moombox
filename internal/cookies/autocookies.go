@@ -259,11 +259,26 @@ type AutoCookieService struct {
 	//
 	// The writers, audited (Arc 8 Task 12a). Nothing else may write it:
 	//
-	//   - setError — the single SET. Every failure path funnels through it, so
-	//     there is one place a message enters this field. Callers: FinishSetup's
-	//     empty-profile, read-failure and merge-abort exits; the refresh's
-	//     import failure, merge abort, credential-loss and verification-failure
-	//     exits. Each of those is a conclusion the pass reached.
+	//   - setError — the single SET, and the only place a message enters this
+	//     field. Callers: FinishSetup's empty-profile, read-failure, merge-abort,
+	//     mkdir, write and jar-load exits; the refresh's import failure, merge
+	//     abort, credential-loss and verification-failure exits. Each of those is
+	//     a conclusion the pass reached.
+	//
+	//     THE LAST THREE OF FINISHSETUP'S WERE MISSING until Arc 8 Task 12a fix
+	//     round 1, and the shape of the miss is worth keeping written down
+	//     because it is what the rule below is for: the mkdir, writeFileAtomic
+	//     and jar.Load exits called cleanup() and returned an error with no set
+	//     at all, so a setup that died on a permission or mount problem put one
+	//     sentence in a modal dialog and left this field — the thing an operator
+	//     looks at AFTERWARDS, on both dashboards — blank. An audit that stops at
+	//     "every failure funnels through setError" without walking the exits is
+	//     how that survived; the first version of this comment said exactly that
+	//     and was wrong.
+	//
+	//     So: EVERY exit that returns an error from a cookie pass sets. Adding an
+	//     early return here without one puts the field back in that state, and
+	//     nothing about the code will look wrong.
 	//   - the loss branch in RefreshCookiesDetailed's any-platform-verified arm
 	//     — sets, via s.lastError directly, because a partial success still has
 	//     to report the platform that was lost.
@@ -289,12 +304,16 @@ type AutoCookieService struct {
 	// cleanup() / cleanupLocked() MUST NOT clear it, and that is the rule this
 	// audit exists for. cleanup runs on every setup exit path INCLUDING the
 	// failed ones — FinishSetup calls setError and then cleanup on each of its
-	// three failure exits — so clearing there would erase the message the
-	// failure had just produced, microseconds after it was written, and the
-	// dialog would report a failure the status page had no record of. See
-	// cleanupLocked: it touches only state describing a browser that is gone.
+	// six failure exits — so clearing there would erase the message the failure
+	// had just produced, microseconds after it was written, and the dialog would
+	// report a failure the status page had no record of. See cleanupLocked: it
+	// touches only state describing a browser that is gone.
 	//
-	// Pinned by TestCleanupAfterAFailedSetupKeepsLastError.
+	// That also makes the set/cleanup ORDER a convention rather than a
+	// requirement, which is worth knowing before rearranging one of those exits.
+	//
+	// Pinned by TestCleanupAfterAFailedSetupKeepsLastError and
+	// TestFinishSetupRecordsTheFailureItReturns.
 	lastError *string
 
 	needsRelogin   AutoCookieReloginRequired
@@ -1115,6 +1134,19 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 
 	// Merge with existing cookies using temp file + rename for atomicity
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
+		// THE SET, which this exit and the two below it were missing. The
+		// policy on the lastError field says every failure exit records what it
+		// concluded, and these three returned an error to the caller while
+		// leaving the field both dashboards render blank — so a setup that died
+		// on a permission or mount problem showed one sentence in the dialog and
+		// then, once the dialog closed, nothing anywhere. The dialog is modal and
+		// transient; the status field is where an operator looks afterwards.
+		//
+		// Ordering is a convention rather than a requirement: cleanup() never
+		// clears (see the field's policy and
+		// TestCleanupAfterAFailedSetupKeepsLastError), so the set survives it
+		// either way. Kept before cleanup to match every other exit here.
+		s.setError("could not create the directory for cookies.txt: " + err.Error())
 		s.cleanup()
 		return SetupResult{}, err
 	}
@@ -1154,12 +1186,26 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 
 	// Write merged cookies via temp file + rename to prevent corruption on partial failure
 	if err := writeFileAtomic(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
+		// Sets, for the reason spelled out at the MkdirAll exit above. The hint
+		// names the one deployment mistake that actually produces this — the
+		// write ends in a rename, and a rename cannot replace a single-file bind
+		// mount — and is kept SHORT, unlike the paragraph refresh.go attaches to
+		// its own failed write: that one goes to a log, this one goes to a status
+		// line both dashboards render.
+		s.setError("could not write cookies.txt: " + err.Error() +
+			" — if this is Docker, mount the data directory rather than cookies.txt itself")
 		s.cleanup()
 		return SetupResult{}, err
 	}
 
 	// Reload jar and verify
 	if err := s.jar.Load(s.cookiePath); err != nil {
+		// Sets, for the reason spelled out at the MkdirAll exit above. This one
+		// is the worst of the three to leave silent: the cookies were extracted
+		// AND written, so the file on disk is fine and nothing about the state
+		// looks wrong — the setup simply reports nothing and the user has no
+		// idea whether to run it again.
+		s.setError("cookies.txt was written but could not be loaded: " + err.Error())
 		s.cleanup()
 		return SetupResult{}, err
 	}
@@ -2500,8 +2546,15 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		// profile, and a check that could not reach the site has not earned it.
 		// Moving it up would silently change what those arms cover, which is
 		// exactly what this case was forbidden from doing.
-		errMsg = fmt.Sprintf("the browser profile returned %d cookies but none of them is a session "+
-			"credential — the browser is signed out", fetchedRows)
+		//
+		// NAMES THE PLATFORMS, like every sibling arm. It did not, and was the
+		// only arm in this switch that did not: with two platforms configured
+		// and one of them failing, a message that opens on the browser leaves
+		// the operator to guess which session the verdict is about — and this
+		// arm is reachable in exactly that mixed state.
+		errMsg = fmt.Sprintf("%s auth verification failed, and the browser profile returned %d "+
+			"cookies but none of them is a session credential — the browser is signed out",
+			strings.Join(failed, " + "), fetchedRows)
 	default:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
 	}

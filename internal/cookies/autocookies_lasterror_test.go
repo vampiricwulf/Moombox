@@ -3,6 +3,8 @@ package cookies
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,6 +64,91 @@ func TestCleanupAfterAFailedSetupKeepsLastError(t *testing.T) {
 		t.Errorf("cleanupLocked() erased the failure message (%q -> %q) — the reap runs from a "+
 			"status poll, so this would clear the field at an interval nobody asked for",
 			failure, got)
+	}
+}
+
+// TestFinishSetupRecordsTheFailureItReturns is the other half of the policy:
+// every exit that returns an error records what it concluded.
+//
+// Three of FinishSetup's exits did not, and the audit that produced the policy
+// comment missed them because it stopped at "every failure funnels through
+// setError" instead of walking the exits. The mkdir, writeFileAtomic and
+// jar.Load exits called cleanup() and returned an error with no set at all — so
+// a setup that died on a permission or mount problem put one sentence in a modal
+// dialog and left the field both dashboards render blank. The dialog is
+// transient; the status field is where an operator looks afterwards.
+//
+// TWO of the three are staged here. The jar.Load exit is not, and cannot
+// honestly be: it fires only when the file this function has just written
+// successfully becomes unreadable before the very next statement reads it, which
+// no fixture in this package can arrange without a second process. Its set is
+// reviewed by eye and named in the field's policy comment.
+func TestFinishSetupRecordsTheFailureItReturns(t *testing.T) {
+	t.Run("the cookies.txt directory cannot be created", func(t *testing.T) {
+		s := finishSetupService(t, youtubeAuthRows(), nopAutoCookieLogger{})
+		// A regular FILE where the cookie directory should be, so MkdirAll
+		// cannot make a directory out of it. That is the compose bind-mount
+		// mistake in miniature and is the shape that actually reaches this exit.
+		blocked := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(blocked, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s.cookiePath = filepath.Join(blocked, "cookies.txt")
+
+		assertFinishSetupRecordedItsFailure(t, s)
+	})
+
+	t.Run("cookies.txt cannot be written", func(t *testing.T) {
+		s := finishSetupService(t, youtubeAuthRows(), nopAutoCookieLogger{})
+		// A DIRECTORY at the cookie path: the atomic write's final rename cannot
+		// replace it, on either platform.
+		s.cookiePath = filepath.Join(t.TempDir(), "cookies.txt")
+		if err := os.Mkdir(s.cookiePath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Stubbed to the ordinary first-run answer, so the merge-abort exit
+		// above — which already sets, and would make this row prove nothing —
+		// is not the one that fires. Reading a directory errors, and that error
+		// is not ENOENT.
+		real := readCookieFile
+		readCookieFile = func(name string) ([]byte, error) {
+			if name == s.cookiePath {
+				return nil, fs.ErrNotExist
+			}
+			return real(name)
+		}
+		t.Cleanup(func() { readCookieFile = real })
+
+		assertFinishSetupRecordedItsFailure(t, s)
+	})
+}
+
+// assertFinishSetupRecordedItsFailure runs the setup and checks that the error
+// it hands the caller also reached the status field.
+func assertFinishSetupRecordedItsFailure(t *testing.T, s *AutoCookieService) {
+	t.Helper()
+
+	_, err := s.FinishSetupDetailed(context.Background())
+
+	// THE PREMISE. A row that reached a DIFFERENT exit — the empty-profile
+	// translation, or the merge abort, both of which already set — would satisfy
+	// the assertion below while testing nothing that was missing.
+	if err == nil {
+		t.Fatal("fixture is broken — FinishSetup succeeded, so no failure exit was taken")
+	}
+	if errors.Is(err, ErrNoCookiesInProfile) || errors.Is(err, ErrCookieFileUnreadable) ||
+		errors.Is(err, ErrNoSetupInProgress) {
+		t.Fatalf("fixture is broken — FinishSetup left by an exit that already recorded its "+
+			"failure (%v), so this row is not exercising one of the three that did not", err)
+	}
+
+	if got := lastErrorSnapshot(s); got == "" {
+		t.Fatalf("FinishSetup returned %v and recorded nothing. The dialog error is modal and "+
+			"transient; LastError is what both dashboards render afterwards, and a blank one "+
+			"says the last cookie pass had nothing to report", err)
+	} else if !strings.Contains(got, "cookies.txt") {
+		t.Errorf("LastError = %q — it must name what failed. A message that does not say which "+
+			"file or step is the problem is the same dead end as no message", got)
 	}
 }
 
