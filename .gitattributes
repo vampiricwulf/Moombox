@@ -7,6 +7,7 @@
 *.go text eol=lf
 
 # JS/TS, JSON, and config we control are LF too — same reasoning.
+*.html text eol=lf
 *.js text eol=lf
 *.mjs text eol=lf
 *.ts text eol=lf
