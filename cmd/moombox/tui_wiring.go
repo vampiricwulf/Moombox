@@ -237,6 +237,20 @@ func (s *runState) runTUI() {
 			s.log.Error("Failed to save config from TUI", slog.String("error", saveErr.Error()))
 		} else {
 			s.log.Info("Config saved from TUI settings")
+			// Invalidate the browser-detection caches on every TUI settings
+			// save, unconditionally — not gated on browser_path/browser_type
+			// actually changing. The settings model mutates the SAME
+			// *config.MoomboxConfig the store holds live (Open stores the
+			// store's own pointer; applyValues writes straight into it) before
+			// this callback ever runs, so by the time updatedCfg reaches here
+			// there is no pre-mutation snapshot left to diff against from
+			// this side of the package boundary. Invalidating on every save
+			// costs one extra detection scan on a rare, human-triggered
+			// event; a missed invalidation would instead leave a stale
+			// browser list for up to browserDetectCacheTTL, silently. See
+			// the validate-browser-path handler in routes/cookies.go for the
+			// other, precisely-targeted invalidation site.
+			cookies.InvalidateBrowserDetection()
 		}
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
 		if updatedCfg.Logs.LogLevel != "" {
@@ -669,7 +683,11 @@ func (s *runState) runTUI() {
 		// flag means a human has to sign in again, which a manual-cookie
 		// install must do by hand. The Web dashboard used to gate its copy of
 		// this and now does not — see updateStatusBar in web/public/app.js.
-		relogin := s.autoCookieSvc.GetStatus().NeedsManualRelogin
+		// ReloginStatus, not GetStatus: this reads nothing but the relogin
+		// map, and GetStatus's browser/registry detection scan would run on
+		// every auth-change dispatch — including the TUI's, which fires with
+		// no cookie dialog open at all.
+		relogin := s.autoCookieSvc.ReloginStatus()
 		if relogin["youtube"] {
 			yt = tui.CookieStatusRelogin
 		}

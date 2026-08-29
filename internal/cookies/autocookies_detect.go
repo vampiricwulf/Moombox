@@ -17,14 +17,35 @@ func runtimeGOOS() string {
 
 // browserDetectCache caches the DetectBrowser result to avoid repeated registry
 // queries and filesystem I/O on every GetStatus call.
+//
+// The available/availableChecked/availableExpires fields are DetectBrowsers'
+// slot — same TTL, same mutex as the single-browser slot above, added so
+// GetStatus (the most-polled method in this package; see its doc comment)
+// stops paying for a second full filesystem+registry scan on every call.
+// Before this, DetectBrowser was cached but DetectBrowsers was not, so every
+// status poll still rebuilt the full list from scratch.
 var browserDetectCache struct {
 	mu      sync.Mutex
 	browser *DetectedBrowser
 	checked bool
 	expires time.Time
+
+	available        []DetectedBrowser
+	availableChecked bool
+	availableExpires time.Time
 }
 
 const browserDetectCacheTTL = 60 * time.Second
+
+// detectBrowserUncached and detectBrowsersUncached are package vars, not
+// plain funcs, so a test can swap either out — to count invocations or to
+// fake a result entirely — without spawning a real reg.exe or touching the
+// filesystem. Same seam convention as killProcessTree / setupBrowserGone
+// elsewhere in this package. Production never reassigns them.
+var (
+	detectBrowserUncached  = detectBrowserUncachedImpl
+	detectBrowsersUncached = detectBrowsersUncachedImpl
+)
 
 // DetectedBrowser holds info about a detected browser.
 type DetectedBrowser struct {
@@ -87,8 +108,9 @@ func DetectBrowser() *DetectedBrowser {
 	return result
 }
 
-// detectBrowserUncached performs the actual browser detection (registry + filesystem I/O).
-func detectBrowserUncached() *DetectedBrowser {
+// detectBrowserUncachedImpl performs the actual browser detection (registry + filesystem I/O).
+// Assigned to the detectBrowserUncached var above; see its doc for why.
+func detectBrowserUncachedImpl() *DetectedBrowser {
 	// Build search order: default browser first, then remaining browsers.
 	// Edge is excluded from promotion — it frequently hijacks the Windows
 	// registry default even when the user has set another browser.
@@ -147,10 +169,35 @@ func detectBrowserUncached() *DetectedBrowser {
 // Returns an empty (non-nil) slice when none are detected so callers
 // can range without nil-checks.
 //
-// Unlike DetectBrowser, the result is NOT cached — callers asking for
-// the full list typically render a UI on top, where freshness is more
-// important than the ~ms cost of re-scanning.
+// Cached the same way DetectBrowser is — same 60s TTL, same mutex (see
+// browserDetectCache's available/availableChecked/availableExpires fields).
+// It used to be uncached on the theory that a caller rendering a UI on top
+// wants freshness more than it wants to save a ~ms scan; in practice its one
+// caller is GetStatus, the most-polled method in the package, and every poll
+// paid for a full filesystem+registry scan (a reg.exe spawn on Windows) it
+// almost always threw away unread — the AVAILABLE list only needs to be
+// fresh enough to reflect a browser install that happened in the last
+// minute. InvalidateBrowserDetection clears this early when the configured
+// browser changes.
 func DetectBrowsers() []DetectedBrowser {
+	browserDetectCache.mu.Lock()
+	defer browserDetectCache.mu.Unlock()
+
+	if browserDetectCache.availableChecked && time.Now().Before(browserDetectCache.availableExpires) {
+		return browserDetectCache.available
+	}
+
+	result := detectBrowsersUncached()
+	browserDetectCache.available = result
+	browserDetectCache.availableChecked = true
+	browserDetectCache.availableExpires = time.Now().Add(browserDetectCacheTTL)
+	return result
+}
+
+// detectBrowsersUncachedImpl performs the actual DetectBrowsers scan
+// (registry + filesystem I/O). Assigned to the detectBrowsersUncached var
+// declared above; see its doc for why.
+func detectBrowsersUncachedImpl() []DetectedBrowser {
 	out := make([]DetectedBrowser, 0, 4)
 
 	// Build search order: default browser first, then remaining.
@@ -208,6 +255,27 @@ func DetectBrowsers() []DetectedBrowser {
 	}
 
 	return out
+}
+
+// InvalidateBrowserDetection clears both detection caches — DetectBrowser's
+// single pick and DetectBrowsers' full list — so the next call re-scans
+// immediately instead of riding out the remainder of the 60s TTL.
+//
+// Call this whenever the configured browser changes: a freshly-validated
+// custom path, or a browser_path/browser_type edit through Settings, is
+// exactly the moment an operator is most likely to have just installed the
+// browser they are pointing Moombox at, and a stale "not found" (or a stale
+// list missing the new install) is most visible right then. Getting this
+// wrong costs at most browserDetectCacheTTL of staleness — the same window
+// that existed with no invalidation at all — so a missed call site is a
+// freshness nit, not a correctness bug.
+func InvalidateBrowserDetection() {
+	browserDetectCache.mu.Lock()
+	defer browserDetectCache.mu.Unlock()
+	browserDetectCache.checked = false
+	browserDetectCache.browser = nil
+	browserDetectCache.availableChecked = false
+	browserDetectCache.available = nil
 }
 
 // detectDefaultBrowserType returns the type of the system's default browser

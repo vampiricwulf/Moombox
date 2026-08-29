@@ -46,7 +46,11 @@ func (s *runState) wireRoutes() func() {
 			return routes.TwitchAuthStatusPayload(s.cookieRefresh.GetStatus())
 		},
 		GetAutoCookieReloginNeeded: func() any {
-			return s.autoCookieSvc.GetStatus().NeedsManualRelogin
+			// ReloginStatus, not GetStatus: this closure reads nothing but
+			// NeedsManualRelogin, and GetStatus's browser/registry detection
+			// scan runs on every /api/status poll — the dashboard's most
+			// frequent request — for a field this never uses.
+			return s.autoCookieSvc.ReloginStatus()
 		},
 		GetNextFeedCheck:   s.feedMon.GetNextCheckAt,
 		GetNextDecapiCheck: s.decapiMon.GetNextCheckAt,

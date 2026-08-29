@@ -178,8 +178,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			"twitchAuthStatus": TwitchAuthStatusPayload(status),
 		}
 		if autoCookieSvc != nil {
-			autoStatus := autoCookieSvc.GetStatus()
-			response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
+			// ReloginStatus, not GetStatus: this response reads nothing but
+			// the relogin map, and GetStatus's browser/registry detection
+			// scan would otherwise run on every recheck — the TUI's R C by
+			// another door (see the comment above).
+			response["autoCookieReloginRequired"] = autoCookieSvc.ReloginStatus()
 		} else {
 			// Always emit both supported platforms so the frontend doesn't
 			// need to handle a missing-key fallback (audit cookies.md #44).
@@ -305,8 +308,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		response := cookieRefreshOutcome(result)
 		response["cookieStatus"] = CookieStatusPayload(status)
 		response["twitchAuthStatus"] = TwitchAuthStatusPayload(status)
-		autoStatus := autoCookieSvc.GetStatus()
-		response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
+		// ReloginStatus, not GetStatus: this response reads nothing but the
+		// relogin map, and GetStatus's browser/registry detection scan would
+		// otherwise run on every manual refresh click for a field this never
+		// uses.
+		response["autoCookieReloginRequired"] = autoCookieSvc.ReloginStatus()
 		if getActivePlatforms != nil {
 			response["activePlatforms"] = getActivePlatforms()
 		}
@@ -469,6 +475,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			jsonResponse(rw, map[string]any{"valid": false, "error": err.Error()})
 			return
 		}
+		// A successfully validated custom path is exactly the moment an
+		// operator has proven a browser exists somewhere the routine
+		// filesystem+registry scan may not have looked (or may have looked
+		// before it was installed) — invalidate so the next status poll's
+		// detection reflects it instead of riding out the remainder of the
+		// 60s TTL.
+		cookies.InvalidateBrowserDetection()
 		jsonResponse(rw, map[string]any{"valid": true})
 	})
 
@@ -482,8 +495,19 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			jsonResponse(rw, map[string]any{
 				"setupInProgress": false,
 				"browser":         nil,
-				"lastRefresh":     nil,
-				"lastError":       nil,
+				// AvailableBrowsers has no `omitempty` on AutoCookieStatus
+				// and the real GetStatus() never sends a nil slice (DetectBrowsers
+				// returns non-nil so callers can range without a nil check) — []
+				// here, not nil, so this branch cannot teach the frontend's
+				// unconditional iteration a null it would never see from the
+				// real service. ConfiguredBrowserPath/Type are NOT added here:
+				// both carry `omitempty` and are empty on a fresh install, so a
+				// zero-value AutoCookieStatus omits them too — adding them would
+				// be the drift in the other direction, a key this branch sends
+				// that the real zero-value response does not.
+				"availableBrowsers": []cookies.DetectedBrowser{},
+				"lastRefresh":       nil,
+				"lastError":         nil,
 				// Both supported platforms always present — see audit
 				// cookies.md #44.
 				"needsManualRelogin": cookies.AutoCookieReloginRequired{

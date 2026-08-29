@@ -152,11 +152,11 @@ func TestStartSetupRouteMapsServiceStopped(t *testing.T) {
 // two places and removing one would have left the frontend a field the real
 // status never sends.
 //
-// The subset runs one way ONLY, deliberately. The fallback body is missing
-// `availableBrowsers`, which the real status does emit and populateBrowserSelector
-// reads — a pre-existing divergence on a branch that is unreachable in
-// production (services.go always constructs the service). Asserting equality
-// here would fail for a reason V10 is not about.
+// The subset runs one way here, deliberately: this test is about `configured`
+// specifically, and TestAutoStatusNoServiceMapMatchesRealStatusKeys below is
+// the one that pins the full bidirectional key-set equality (including
+// `availableBrowsers`, which used to be missing from this branch entirely —
+// see that test's doc for the history).
 func TestAutoStatusCarriesNoFieldNothingCanRead(t *testing.T) {
 	raw, err := json.Marshal(cookies.AutoCookieStatus{})
 	if err != nil {
@@ -192,6 +192,77 @@ func TestAutoStatusCarriesNoFieldNothingCanRead(t *testing.T) {
 				"cookies.AutoCookieStatus does not — the frontend would learn a field the real "+
 				"status never sends", key)
 		}
+	}
+}
+
+// TestAutoStatusNoServiceMapMatchesRealStatusKeys pins the FULL key-set
+// equality the no-service branch's own comment claims ("Every key here has
+// to exist on cookies.AutoCookieStatus too") but nothing previously checked
+// in the direction that actually drifted: `availableBrowsers` exists on
+// AutoCookieStatus and populateBrowserSelector (web/public) reads it, but the
+// no-service fallback map omitted it entirely — unreachable in production
+// (services.go always constructs the service unconditionally) but exactly
+// the kind of drift that becomes a live bug the day that stops being true.
+//
+// ConfiguredBrowserPath/ConfiguredBrowserType are deliberately NOT in the
+// fallback map, and this test is what makes that safe to assert: both carry
+// `omitempty` on AutoCookieStatus, and a zero-value struct — no configured
+// override, which is exactly the no-service branch's situation — omits them
+// from its JSON entirely. Adding them to the fallback map would have been
+// the drift in the OTHER direction: keys the fallback sends that a real
+// zero-value response does not.
+//
+// A zero-value AutoCookieStatus is the right comparison basis, not a live
+// GetStatus() call: the no-service branch exists precisely because there is
+// no service to call GetStatus on, so "what would an unconfigured install's
+// status look like" is a zero value by construction.
+func TestAutoStatusNoServiceMapMatchesRealStatusKeys(t *testing.T) {
+	raw, err := json.Marshal(cookies.AutoCookieStatus{})
+	if err != nil {
+		t.Fatalf("marshal zero-value AutoCookieStatus: %v", err)
+	}
+	var real map[string]any
+	if err := json.Unmarshal(raw, &real); err != nil {
+		t.Fatalf("unmarshal AutoCookieStatus: %v", err)
+	}
+
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, nil, nil, nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/cookies/auto-status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auto-status with no service: status %d, want %d", rec.Code, http.StatusOK)
+	}
+	var fallback map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &fallback); err != nil {
+		t.Fatalf("no-service auto-status body is not JSON: %q", rec.Body.String())
+	}
+
+	for key := range real {
+		if _, ok := fallback[key]; !ok {
+			t.Errorf("cookies.AutoCookieStatus emits %q but the no-service branch of "+
+				"/api/cookies/auto-status does not — a frontend that always reads this key "+
+				"(without a missing-key fallback) breaks on an unconfigured install", key)
+		}
+	}
+	for key := range fallback {
+		if _, ok := real[key]; !ok {
+			t.Errorf("the no-service branch of /api/cookies/auto-status emits %q, which a "+
+				"zero-value cookies.AutoCookieStatus does not — the frontend would learn a "+
+				"field the real status never sends on a fresh install", key)
+		}
+	}
+
+	// The specific drift this test exists to catch, named directly so a
+	// future key-set change that happens to keep the counts equal cannot
+	// silently satisfy the loops above while dropping this one.
+	if _, ok := fallback["availableBrowsers"]; !ok {
+		t.Error("the no-service branch is missing availableBrowsers — populateBrowserSelector " +
+			"(web/public) iterates this field unconditionally")
+	}
+	if list, ok := fallback["availableBrowsers"].([]any); !ok || list == nil {
+		t.Errorf("availableBrowsers = %#v, want a non-nil (possibly empty) array — "+
+			"the frontend iterates it with no null-check", fallback["availableBrowsers"])
 	}
 }
 

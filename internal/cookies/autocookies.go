@@ -679,6 +679,31 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	}
 }
 
+// ReloginStatus returns which platforms need the user to sign in again,
+// without GetStatus's browser/registry detection scan (~155ms measured
+// 2026-08-25: DetectBrowser + DetectBrowsers, filesystem I/O and a reg.exe
+// spawn on Windows). Four of GetStatus's five production callers read
+// nothing else from the returned AutoCookieStatus, so they pay that cost on
+// every poll for a field this method computes identically — same lock,
+// same clone-under-lock copy of s.needsRelogin GetStatus returns.
+//
+// Status polling is the most frequent visitor to this lock, which makes it
+// the reap that actually fires in practice — both UIs poll it while their
+// cookie dialog is open, and the TUI polls it with no dialog at all (see
+// GetStatus's doc comment, which this one must keep agreeing with). Moving
+// GetStatus's four highest-frequency callers here means THIS method is now
+// that most-frequent visitor, so it MUST call reapAbandonedSetupLocked
+// exactly as GetStatus does — a future "simplification" that drops the call
+// because ReloginStatus "only reads needsRelogin" would silently stop Arc
+// 3's abandoned-setup reap from firing in production, with no existing test
+// noticing because the reap still exists, it would just never run.
+func (s *AutoCookieService) ReloginStatus() AutoCookieReloginRequired {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reapAbandonedSetupLocked()
+	return maps.Clone(s.needsRelogin)
+}
+
 // resolvedBrowser returns the user's configured browser when set, else
 // the auto-detected best match. Used by StartSetup and RefreshCookies
 // so the UI's browser_path/browser_type setting actually drives
@@ -2289,21 +2314,60 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// was never evaluated.
 	inconclusive := postYT.state == verifyUnknown || postTW.state == verifyUnknown
 	rollbackWasInconclusive := false
+	// rollbackAttempted starts true and is pulled false by any inconclusive
+	// restored platform that never attempted a request at all — see the
+	// (network?) hedge split below for why the two halves of verifyUnknown
+	// get different wording. AND rather than OR because "the extracted
+	// cookies cannot form a request" is the more actionable finding of the
+	// two: if it is true for even one restored platform, saying only "did
+	// not complete" (which reads as transient — retry and it may resolve)
+	// would bury a structural problem that retrying cannot fix. The only
+	// production shape today restores at most one platform at a time, so
+	// this tie-break is untested territory rather than a witnessed case.
+	rollbackAttempted := true
 	for _, platform := range restoredPlatforms {
-		if importCheck[platform].state == verifyUnknown {
+		pc := importCheck[platform]
+		if pc.state == verifyUnknown {
 			rollbackWasInconclusive = true
+			if !pc.attempted {
+				rollbackAttempted = false
+			}
 		}
+	}
+	// inconclusiveAttempted is rollbackAttempted's twin for the no-rollback
+	// arm below, over postYT/postTW instead of importCheck — same AND
+	// tie-break, same reasoning.
+	inconclusiveAttempted := true
+	if postYT.state == verifyUnknown && !postYT.attempted {
+		inconclusiveAttempted = false
+	}
+	if postTW.state == verifyUnknown && !postTW.attempted {
+		inconclusiveAttempted = false
 	}
 	var errMsg string
 	switch {
-	case len(restoredPlatforms) > 0 && rollbackWasInconclusive:
+	case len(restoredPlatforms) > 0 && rollbackWasInconclusive && rollbackAttempted:
+		// A request went out and came back unusable — network, an
+		// intermediary, a timeout. Say that; no question mark, because this
+		// is no longer a guess.
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
-			" — the auth check did not complete (network?), so the imported profile was not accepted"
+			" — the auth check did not complete, so the imported profile was not accepted"
+	case len(restoredPlatforms) > 0 && rollbackWasInconclusive:
+		// No request was ever attempted — the extracted cookies could not
+		// form one. Same wording the Warn at checkPlatformAuth's caller
+		// (FinishSetup, ":1122" as of the audit that named this) already
+		// uses for the same fact, minus the "during setup" qualifier that
+		// does not apply to a refresh pass.
+		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
+			" — the auth check was never attempted — the extracted cookies cannot form an authenticated request, so the imported profile was not accepted"
 	case len(restoredPlatforms) > 0:
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
 			" — the mounted browser profile did not verify"
+	case inconclusive && inconclusiveAttempted:
+		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the auth check did not complete"
 	case inconclusive:
-		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the check did not complete (network?)"
+		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the auth check was never attempted — " +
+			"the extracted cookies cannot form an authenticated request"
 	case emptyBrowserProfile:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed, and the browser profile contained " +
 			"no cookies to refresh from — check whether the browser is clearing cookies on exit"
