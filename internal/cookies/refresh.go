@@ -239,6 +239,17 @@ func cookiePlatformOf(domain string) string {
 // internal/web/routes/cookies.go, which is where the two wire shapes now live
 // exactly once each). RefreshVerdict is an int, so it is deliberately NOT
 // given a tag: it must reach the wire through String(), never as an ordinal.
+//
+// EVERY FIELD HERE HAS A READER, and that is a property to keep rather than a
+// coincidence. There used to be a LastCheck string, set by doRefresh on every
+// pass and read by nothing — no projection carried it, and since the struct is
+// never marshalled its `json:"lastCheck"` tag put it on no wire either. It was
+// removed rather than wired: a field nobody reads on a status struct that two
+// dashboards consume is a claim waiting to be misread — the obvious misreading
+// being "the credentials were valid as of this time", which the timestamp of a
+// pass that may have concluded NOTHING does not say. Anything re-added here
+// needs a reader in the same change, and if it moves on every tick it also
+// needs a line in authStatusChanged's exclusion list.
 type AuthStatus struct {
 	YouTubeAuthenticated bool `json:"youtubeAuthenticated"`
 	TwitchAuthenticated  bool `json:"twitchAuthenticated"`
@@ -253,7 +264,6 @@ type AuthStatus struct {
 	YouTubeVerification RefreshVerdict `json:"-"`
 	TwitchVerification  RefreshVerdict `json:"-"`
 
-	LastCheck    string `json:"lastCheck,omitempty"`
 	YouTubeError string `json:"youtubeError,omitempty"`
 	TwitchError  string `json:"twitchError,omitempty"`
 }
@@ -319,12 +329,28 @@ func verdictFromCheck(authenticated bool, err error) RefreshVerdict {
 // verdicts — i.e. every input to the TUI badge in cmd/moombox/tui_wiring.go and
 // to the Web indicators. Deliberately NOT compared:
 //
-//   - LastCheck, which moves on every single tick and would make the callback
-//     fire unconditionally, defeating the whole point of the gate.
 //   - YouTubeError / TwitchError, whose text can vary between two occurrences
-//     of the same outcome (a DNS message carries the resolver's wording). The
-//     verdict already carries the part a surface renders, and nothing renders
-//     the strings — see the note above errGuideLoginMarkerUnreadable.
+//     of the same outcome (a DNS message carries the resolver's wording), so
+//     comparing them would fire the callback on churn no verdict transition
+//     accompanies. The verdict carries the part a PUSH surface renders.
+//
+// That second exclusion is now a CONTRACT rather than an observation, and the
+// distinction is the whole of it. This comment used to say "nothing renders the
+// strings"; Arc 8 Task 12a made that false — they reach the REST cookie-status
+// payload (`youtubeError` / `twitchError`) and the TUI's R C result line. Both
+// of those are PER-REQUEST: each pulls a GetStatus() snapshot it asked for, so
+// neither depends on this callback firing and neither can go stale on screen.
+// The rule that keeps this gate correct is therefore stated forwards: NO
+// OnAuthChange-driven surface may render the two strings; per-request surfaces
+// may. Widening this gate to include them is the PRECONDITION for a push-driven
+// surface that renders them — and it is a deliberate change with its own cost,
+// not something to slip in beside one. See errGuideLoginMarkerUnreadable's doc
+// comment for why per-request is the concession that let the fields be read at
+// all.
+//
+// (There used to be a third exclusion, LastCheck, which moved on every tick and
+// would have fired the callback unconditionally. The field is gone — see
+// AuthStatus — so the exclusion is not needed.)
 //
 // The verdicts and the cookies-present flags have to be in here, not just the
 // booleans. A platform going from conclusively-rejected to could-not-check
@@ -1180,7 +1206,6 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			// "the credentials are dead".
 			YouTubeVerification: verdictFromCheck(ytAuth, ytErr),
 			TwitchVerification:  verdictFromCheck(twAuth, twErr),
-			LastCheck:           time.Now().UTC().Format(time.RFC3339),
 			YouTubeError:        ytErrStr,
 			TwitchError:         twErrStr,
 		}
@@ -1505,26 +1530,42 @@ func youtubeGuideRequestBody() string {
 // read the answer. autocookies_profile.go's `attempted` flag turns on exactly
 // that distinction.
 //
-// WHERE THIS STRING ACTUALLY GOES, checked rather than assumed, because an
-// earlier draft of this comment claimed the Web UI and TUI and that was FALSE:
-// AuthStatus.YouTubeError, the field doRefresh assigns it to, still has no
-// reader anywhere in the tree, and that is now a DECISION rather than an
-// oversight. Every consumer projects from the booleans and the verdicts
-// instead — internal/web/routes/cookies.go's CookieStatusPayload /
-// TwitchAuthStatusPayload (the one copy of each wire shape, shared with
-// cmd/moombox/routes_wiring.go's status route) and tui_wiring.go
-// (authStatusToTUI's badge, OnRecheckCookies' two verdicts). The fact the
-// operator needs — "this check could not conclude" — is carried by
-// RefreshUnknown, which is a bounded value; this string is server-authored
-// prose whose lifecycle nothing establishes, so rendering it in an always-on
-// panel would put unattributable text on screen indefinitely. The second
-// possible route is closed too: checkPlatformAuth consumes the error for an
-// errors.Is test and discards the value, so the rollback messaging composes
-// from the verification STATE and never interpolates this text.
+// WHERE THIS STRING ACTUALLY GOES, checked rather than assumed, because this
+// comment has been wrong in both directions: an early draft claimed the Web UI
+// and TUI when nothing read the field at all, and its replacement claimed no
+// reader anywhere when Arc 8 Task 12a had given it two.
+// AuthStatus.YouTubeError, the field doRefresh assigns it to, has exactly two
+// readers today and both are PER-REQUEST:
 //
-// The one sink is rs.logger.Debug in doRefresh, and what that means depends on
-// the operator's log level — which makes the no-body-bytes rule below MORE
-// load-bearing than "it goes to a log", not less:
+//   - internal/web/routes/cookies.go's CookieStatusPayload /
+//     TwitchAuthStatusPayload — the one copy of each wire shape, shared with
+//     cmd/moombox/routes_wiring.go's status route — which project it as
+//     `youtubeError` / `twitchError`;
+//   - cmd/moombox/tui_wiring.go's OnRecheckCookies, which passes it through as
+//     the reason on the R C result line.
+//
+// Nothing else reads it. authStatusToTUI's badge and the Web indicators still
+// project from the booleans and the verdicts alone, and the second possible
+// route stays closed: checkPlatformAuth consumes the error for an errors.Is
+// test and discards the value, so the rollback messaging composes from the
+// verification STATE and never interpolates this text.
+//
+// PER-REQUEST IS THE WHOLE CONCESSION, and it is what answered the objection
+// that kept this field unread for two arcs. The fact the operator needs —
+// "this check could not conclude" — is carried by RefreshUnknown, which is a
+// bounded value; this string is server-authored prose whose lifecycle nothing
+// establishes, so rendering it in an ALWAYS-ON panel would put unattributable
+// text on screen indefinitely. A surface the operator asked for a moment ago
+// has a lifecycle by construction: it answers one question once and is replaced
+// by the next answer. authStatusChanged is where that rule is enforced — it
+// excludes these two fields from the OnAuthChange gate as a contract, so no
+// push-driven surface can start rendering them without someone widening the
+// gate on purpose.
+//
+// The remaining sink is rs.logger.Debug in doRefresh, and what that means
+// depends on the operator's log level — which makes the no-body-bytes rule
+// below MORE load-bearing than "it goes to a log", not less, and more
+// load-bearing again now that the same string also reaches two screens:
 //
 //   - At the default INFO (config.go's LogLevel) the line has NO sink at all.
 //     Logger.log returns at its slog.Enabled gate before formatting, the ring
@@ -1536,20 +1577,28 @@ func youtubeGuideRequestBody() string {
 //     log buffers that same forwarder writes to the DATABASE; and the TUI log
 //     panel via its own subscriber.
 //
-// So the surface is conditional, persistent (file + DB), and remotely readable
+// So that sink is conditional, persistent (file + DB), and remotely readable
 // — and DEBUG is exactly the level an operator raises to when their cookies
 // look broken, i.e. precisely when this error fires. TestUnreadableGuideError-
 // CarriesNoBody earns its place on that basis: this error names no host, no
 // header and no body bytes. The unreadable body is the subject of the report
 // and must never become its content.
 //
-// The wording says "learned nothing", not "failed", for when that changes.
-// Follow-up 1 of the remediation plan is to surface the inconclusive state in
-// both UIs; until it lands, an install behind an intercepting intermediary
-// still RENDERS as "cookies found, not authenticated" (doRefresh sets
-// YouTubeAuthenticated: ytAuth, which is false on an inconclusive check). What
-// this change stops is the false recovery FIRE and the notification — not yet
-// the false badge.
+// The wording says "learned nothing", not "failed", and both UIs now agree with
+// it. Follow-up 1 of the remediation plan — surface the inconclusive state in
+// both UIs — landed as Arc 4+7's S12 (merge f2b4e30): verdictFromCheck maps this
+// error to RefreshUnknown, AuthStatus carries that verdict beside each boolean,
+// CookieStatusPayload projects it as `verification` for the Web indicators
+// (cookieIndicatorState in web/public/modules/utils.js) and cookieBadgeFor reads
+// it for the TUI status bar. So an install behind an intercepting intermediary
+// renders as could-not-check, not as the "cookies found, not authenticated" this
+// paragraph used to warn was still on screen.
+//
+// doRefresh does still set YouTubeAuthenticated: ytAuth, false on an
+// inconclusive check, and that is deliberate rather than left over:
+// `authenticated` keeps its "can we do authenticated work right now" meaning for
+// every reader that predates the verdicts, and the verdict is what carries the
+// distinction they cannot.
 var errGuideLoginMarkerUnreadable = errors.New(
 	"the guide reply carried no login marker we recognise, so this check learned nothing about the session")
 
@@ -1841,10 +1890,12 @@ func youtubeGuideAuthVerdictFallback(respBody []byte) (bool, error) {
 //     rather than read a verdict off an exchange made in clear.
 //
 // Errors name a host and a header NAME — never a header value, never response
-// bytes. For where these strings actually go — and why that makes the rule more
-// load-bearing rather than less — see errGuideLoginMarkerUnreadable's doc
-// comment. They do NOT reach AutoCookieService.setError: checkPlatformAuth
-// discards the value.
+// bytes. Since Arc 8 Task 12a they reach two PER-REQUEST screens as
+// AuthStatus.YouTubeError / TwitchError — the REST cookie-status payload and the
+// TUI's R C result line — besides the Debug log; for the full accounting, and
+// why that makes the rule more load-bearing rather than less, see
+// errGuideLoginMarkerUnreadable's doc comment. They do NOT reach
+// AutoCookieService.setError: checkPlatformAuth discards the value.
 func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeader string) error {
 	if sent == nil || sent.URL == nil {
 		return fmt.Errorf("could not determine what was asked")
@@ -2209,13 +2260,54 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 // Why none of this widens what a hostile header can reach:
 //
 //   - A scoped header can only land on the declared platform's domains (2).
-//   - An unscoped header can only land on the declared origin's own rows, and
-//     only under a tracked name (3). An unscoped DELETION therefore still cannot
-//     reach .google.com auth from a youtube.com reply — that was already true,
-//     and it is now true and reachable rather than true and dead.
+//   - An unscoped header is admitted only under a tracked name (3), and what it
+//     may then DO is scoped by verb — see THE UNSCOPED CASE, BY VERB below. In
+//     particular an unscoped DELETION still cannot reach .google.com auth from a
+//     youtube.com reply: that was already true, and it is now true and reachable
+//     rather than true and dead.
 //   - Row-breaking characters cannot reach the file (1).
 //   - Everything downstream is untouched: updateCookieFile's refusal to blank an
 //     essential cookie, the seven-field rebuild, writeFileAtomic.
+//
+// THE UNSCOPED CASE, BY VERB. Three verbs, three scopes, and the three scopes
+// are NOT the same scope. It is written out here because no single downstream
+// rule states it: each of the three is enforced somewhere else, so reading any
+// one of them gives the wrong answer about the other two.
+//
+// REFRESH — anywhere inside the declared origin's PLATFORM. An unscoped
+// `SID=fresh` from a youtube.com reply DOES rewrite an existing `.google.com
+// SID` row. Two rules carry that between them: resolveRowUpdate's rule 2 (:2926)
+// takes the rows the origin's own site covers, and rule 3 (:2933-2945) takes the
+// rest of the platform through sameCookiePlatform (:2960-2966), whose
+// Domain-less default is the DECLARED ORIGIN's platform — and youtube.com and
+// google.com are one platform. The fan-out is deliberate (Arc 2 built it, Arc 8
+// preserved it): it is what stops one domain variant going stale while the other
+// moves on, the drift finding #4 was about. Pinned by
+// TestUnscopedRefreshCrossesDomainsOnlyInsideTheDeclaredPlatform.
+//
+// CREATE — only inside the declared origin's own SITE. updateCookieFile's
+// insertion loop derives the new row's domain from the origin and nothing else
+// (`domain = "." + string(origin)`, :2779), then refuses any domain off the
+// declared platform (:2811-2816). So a youtube.com reply cannot invent a
+// `.google.com` row; the branch that used to — by guessing the domain from the
+// cookie NAME — is the one Arc 8 Task 2 removed.
+//
+// DELETE — only inside the declared origin's own SITE, through rule 2 alone.
+// Rule 1 needs a Domain=, rule 3 skips deletions (`!updates[k].Delete`, :2939)
+// and the insertion loop skips them as well (:2703), so origin.covers is the
+// only door a Domain-less deletion has.
+//
+// WHY THE MIDDLE ONE IS NARROWER THAN THE FIRST, given that both are "the same
+// cookie": a rewrite repairs a row the FILE has already asserted belongs to this
+// platform. That domain came from a browser export or an earlier scoped
+// Set-Cookie, and the response is only supplying a fresher value for a scope
+// something else established. A creation has no such prior assertion to lean on,
+// so writing `.google.com` out of a youtube.com reply would be THIS WRITER
+// asserting a scope the response never named — and asserting a false one: the
+// real .google.com SID is rotated by accounts.google.com with an explicit
+// Domain=, which takes the scoped path and never reaches the insertion loop at
+// all. Same name, different cookie. Deletion is narrow for the ordinary reason,
+// that it is the unrecoverable verb.
 //
 // Two layers, and they are not redundant. THIS one decides what becomes an
 // update at all, and it is the only code that ever sees the raw header — so
@@ -2973,8 +3065,11 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 	// The error names the status and nothing else, so a response body echoed
 	// back by an intermediary can never be interpolated into it. It does NOT
 	// reach AutoCookieService.setError — services.go wires VerifyTwitchAuth to
-	// CheckTwitchAuth through checkPlatformAuth, which discards the value. See
-	// errGuideLoginMarkerUnreadable's doc comment for the real surface.
+	// CheckTwitchAuth through checkPlatformAuth, which discards the value. Since
+	// Arc 8 Task 12a it DOES reach two per-request screens as
+	// AuthStatus.TwitchError: the REST payload's `twitchError` and the TUI's R C
+	// result line. See errGuideLoginMarkerUnreadable's doc comment for the full
+	// accounting of where these strings go and why the rule above governs it.
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return true, nil

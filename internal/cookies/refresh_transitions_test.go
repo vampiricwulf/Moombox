@@ -206,13 +206,19 @@ func TestSeedingIsUnnecessaryForStartupDeadAuthAndFiresFalselyWithoutCookies(t *
 // TestGetStatusReturnsSnapshot verifies the AuthStatus returned by
 // GetStatus is a value copy — mutations to the returned struct must
 // not bleed back into the service.
+//
+// The second assertion is the non-boolean half: a string field has to survive
+// the round trip untouched, which catches a GetStatus that starts rebuilding
+// the struct instead of copying it. It read LastCheck until Arc 9 removed that
+// field for having no reader; YouTubeError stands in its place because it is
+// the other string on the struct, and it has two.
 func TestGetStatusReturnsSnapshot(t *testing.T) {
 	rs := newTransitionService(nil)
 	rs.mu.Lock()
 	rs.status = AuthStatus{
 		YouTubeAuthenticated: true,
 		TwitchAuthenticated:  false,
-		LastCheck:            "2026-04-25T00:00:00Z",
+		YouTubeError:         "unexpected status 503",
 	}
 	rs.mu.Unlock()
 
@@ -223,8 +229,8 @@ func TestGetStatusReturnsSnapshot(t *testing.T) {
 	if !got2.YouTubeAuthenticated {
 		t.Error("GetStatus return is not a value copy — service state was mutated")
 	}
-	if got2.LastCheck != "2026-04-25T00:00:00Z" {
-		t.Errorf("LastCheck round-trip: want stable, got %q", got2.LastCheck)
+	if got2.YouTubeError != "unexpected status 503" {
+		t.Errorf("YouTubeError round-trip: want stable, got %q", got2.YouTubeError)
 	}
 }
 

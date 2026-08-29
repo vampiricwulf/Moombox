@@ -120,12 +120,17 @@ func TestGuide200WithNoLoginMarkerIsInconclusive(t *testing.T) {
 // this error and must never become its content — a portal page can echo back a
 // request, and the request carries the session.
 //
-// NOT because the string reaches the Web UI and TUI status surfaces. It does
-// not; AuthStatus.YouTubeError has no reader. An earlier version of this comment
-// said otherwise, and the same false claim stood in the sentinel's own doc
-// comment — see errGuideLoginMarkerUnreadable in refresh.go for where the string
-// actually goes and for the five log surfaces it fans out to once the operator
-// raises the level to DEBUG. Those are the reason this test exists.
+// This comment has been wrong in both directions and is now checked: an early
+// version said the string reaches the Web UI and TUI status surfaces when
+// AuthStatus.YouTubeError had no reader at all, and its replacement said it has
+// no reader when Arc 8 Task 12a had given it two. What is true today is BOTH
+// halves: the field is rendered by the REST cookie-status payload and by the
+// TUI's R C result line — per-request surfaces, never a push-driven one — and it
+// still fans out to five log surfaces once the operator raises the level to
+// DEBUG, which is precisely the level someone reaches for when their cookies
+// look broken. See errGuideLoginMarkerUnreadable in refresh.go for the full
+// accounting. Every one of those sinks is a reason this test exists, and the two
+// screens are the reason it is not optional.
 //
 // Same rule as TestTwitchValidateErrorNamesOnlyTheStatus and the provenance
 // errors, which name a status, a host or a header NAME and nothing else.

@@ -436,11 +436,20 @@ func TestRecheckReportOnlySaysFailedWhenItIs(t *testing.T) {
 //     un-dead-codes; gated on the booleans it would light only when some
 //     unrelated flip happened to fire the callback.
 //
-// The two negative rows are the reason the gate is not simply `prev != next`.
-// LastCheck moves on EVERY tick, so including it fires the callback
-// unconditionally and the gate stops being a gate; the error strings vary in
-// wording between two occurrences of one outcome, and nothing renders them.
-// Both rows fail if either field is added to authStatusChanged.
+// The negative row is the reason the gate is not simply `prev != next`, and it
+// is now a CONTRACT row rather than an observation. The error strings vary in
+// wording between two occurrences of one outcome, so comparing them would fire
+// the callback on churn no verdict transition accompanies. Since Arc 8 Task 12a
+// the strings ARE rendered — by the REST payload and the TUI's R C line — but
+// only per-request, off a snapshot each surface asked for; authStatusChanged's
+// doc states the rule those surfaces live under, and this row is what fails if
+// someone widens the gate without also moving that rule. It fails if either
+// error field is added to authStatusChanged.
+//
+// There was a second negative row, "only the clock moved", covering LastCheck —
+// a field that moved on every tick and would have made the gate fire
+// unconditionally. Arc 9 deleted the field (nothing read it), so the row went
+// with it; the exclusion it pinned no longer has anything to exclude.
 func TestAuthStatusChangedGateCoversEverySurfaceInput(t *testing.T) {
 	base := AuthStatus{
 		YouTubeAuthenticated: false,
@@ -449,7 +458,6 @@ func TestAuthStatusChangedGateCoversEverySurfaceInput(t *testing.T) {
 		HasTwitchCookies:     false,
 		YouTubeVerification:  RefreshFailed,
 		TwitchVerification:   RefreshFailed,
-		LastCheck:            "2026-08-28T10:00:00Z",
 	}
 	with := func(mutate func(*AuthStatus)) AuthStatus {
 		next := base
@@ -487,11 +495,6 @@ func TestAuthStatusChangedGateCoversEverySurfaceInput(t *testing.T) {
 			"youtube cookies disappeared",
 			with(func(s *AuthStatus) { s.HasYouTubeCookies = false }),
 			true,
-		},
-		{
-			"only the clock moved",
-			with(func(s *AuthStatus) { s.LastCheck = "2026-08-28T10:30:00Z" }),
-			false,
 		},
 		{
 			"only the error wording changed",
