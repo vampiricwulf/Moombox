@@ -131,8 +131,46 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 // jar's live state is replaced. This way a transient read error (EIO,
 // permission flip) cannot silently wipe authentication that was valid a moment
 // ago — either the load fully succeeds and swaps in both new maps, or the
-// previous state is left intact. A not-exist file is still treated as an empty
-// jar.
+// previous state is left intact.
+//
+// ENOENT is deliberately NOT on that list: a missing file loads as an EMPTY
+// jar, both maps cleared. That is a ruling, not an oversight. Deleting
+// cookies.txt is how an operator logs Moombox out, and keeping the last good
+// session in memory until the next restart would make a deliberate delete do
+// nothing observable — on the one path where "it forgot my account" is the
+// point.
+//
+// The objection to that ruling is a race, and the race does not exist. Every
+// writer of this file goes through writeFileAtomic (autocookies.go); the
+// refresh service's own updateCookieFile ends there too. It writes a temp file
+// and calls os.Rename, and never unlinks the destination first — so the only
+// question is whether the rename itself can leave the name momentarily absent,
+// and on both shipped platforms it cannot:
+//
+//   - Windows, verified against the go1.26.1 sources rather than assumed:
+//     os.Rename → os.rename (src/os/file_windows.go) →
+//     internal/syscall/windows.Rename
+//     (src/internal/syscall/windows/syscall_windows.go), whose entire body is
+//     one MoveFileEx(from, to, MOVEFILE_REPLACE_EXISTING). One syscall, no
+//     DeleteFile ahead of it, so cookies.txt never transiently ceases to
+//     exist. The traffic in fact runs the other way, on the open path Load
+//     actually takes: os.ReadFile → os.Open → openFileNolog
+//     (src/os/file_windows.go) → syscall.Open, which asks for
+//     FILE_SHARE_READ|FILE_SHARE_WRITE and NOT FILE_SHARE_DELETE
+//     (src/syscall/syscall_windows.go), so a Load in flight makes the RENAME
+//     fail rather than being made to read a missing file — and that failure is
+//     returned and logged by writeFileAtomic's caller instead of vanishing.
+//     That is a property of THAT open, not of "os opens" generally: an
+//     os.Root-rooted open goes through internal/syscall/windows.Openat
+//     (src/internal/syscall/windows/at_windows.go), which DOES pass
+//     FILE_SHARE_DELETE, so a Load rewritten onto os.Root would trade this
+//     loud failure for a silent one and would need its own re-derivation.
+//   - Linux: rename(2) replaces the destination name atomically, by POSIX.
+//
+// A concurrent Reload during a write therefore reads the old file or the new
+// one, never no file. Re-verify this paragraph if a writer ever stops going
+// through writeFileAtomic, or starts removing the target before renaming over
+// it: that, and not this branch, is where an empty read would be introduced.
 //
 // Both maps are swapped under ONE Lock, so no reader can observe a jar holding
 // the new YouTube rows beside the old Twitch ones. Accessors that need two
@@ -152,11 +190,6 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 // The jar loads what the file says. Expiry is a diagnostic
 // (ExpiredAuthCookiesFor / AuthCookieHorizonFor), not a gate.
 func (j *CookieJar) Load(filePath string) error {
-	// Snapshot logger once; the field is protected by the mutex.
-	j.mu.RLock()
-	logger := j.logger
-	j.mu.RUnlock()
-
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -170,6 +203,28 @@ func (j *CookieJar) Load(filePath string) error {
 		}
 		return fmt.Errorf("failed to read cookie file: %w", err)
 	}
+
+	j.loadFrom(data, filePath)
+	return nil
+}
+
+// loadFrom is Load's parser, over bytes a caller already holds. Split out of
+// Load — behaviour identical, the ONLY caller that does not come through Load
+// is netscapeCookiesHoldACredential — so that a caller with the Netscape text
+// in memory can ask the jar's own predicates about it without inventing a
+// second parser or round-tripping through a temp file. The domain routing, the
+// name admission and the total order on duplicate domains are subtle enough
+// that a second reading of the same text would drift; there is one.
+//
+// filePath is recorded as the jar's origin exactly as Load records it. Pass ""
+// for a jar that came from no file: GetFilePath then answers "" and Reload
+// becomes a no-op, which is the honest answer for a throwaway jar built out of
+// a buffer.
+func (j *CookieJar) loadFrom(data []byte, filePath string) {
+	// Snapshot logger once; the field is protected by the mutex.
+	j.mu.RLock()
+	logger := j.logger
+	j.mu.RUnlock()
 
 	youtube := make(map[string]cookieEntry)
 	twitch := make(map[string]cookieEntry)
@@ -286,8 +341,6 @@ func (j *CookieJar) Load(filePath string) error {
 	j.youtube = youtube
 	j.twitch = twitch
 	j.mu.Unlock()
-
-	return nil
 }
 
 // compareCookieDomains is a total order over the domains two rows sharing one
@@ -586,16 +639,74 @@ func (j *CookieJar) AuthCookieHorizonFor(p Platform) int64 {
 // auth-loss gate has to be able to see. twilight-user is the signed-in user's
 // own record, so it is evidence of configuration on its own merits.
 //
-// essentialTwitchCookies also keeps "login" and "name"; those are left out,
-// and NOT for a cross-site reason — Load admits twitch.tv rows only (they
-// reach the jar solely via isTwitchEssential), so another site's "login"
-// cookie never gets in. They are out because nothing in-tree or in
-// references/ establishes that Twitch sets them only for signed-in visitors,
-// and this predicate drives a recovery pass plus an operator-facing alarm.
-// auth-token and twilight-user are unambiguously artifacts of a signed-in
-// session; those two are not, and an alarm raised on a guess is worse than
-// one missed. Adding them is safe mechanically and would close the last
-// silent Twitch state — do it if that assumption is ever confirmed.
+// essentialTwitchCookies also keeps "login" and "name". Both are left out of
+// this list, and NOT for a cross-site reason — Load admits twitch.tv rows only
+// (they reach the jar solely via isTwitchEssential), so another site's "login"
+// cookie never gets in.
+//
+// What changed since that was first written: "login" is no longer inert.
+// internal/twitch SENDS it, as the IRC NICK (see ircHandshakeLines), so a live
+// auth-token with no USABLE "login" beside it is a functional degradation this
+// tree can NAME — chat captured anonymously, with no subscriber-only messages
+// and no badges — rather than a guess about what Twitch means by the cookie.
+// That degradation is now reported where it is observed, by a
+// once-per-downloader Warn on the IRC path (ChatDownloader.noteMissingLogin)
+// and a once-per-job report to the worker, which notifies. That is the right
+// site for it: the consumer knows the handshake actually went anonymous,
+// whereas this list can only know that a name is absent — and absent is not the
+// same as unusable, which is state 2 below.
+//
+// "login" still does NOT join this list, and the reason is the alarm the list
+// drives — traced end to end rather than assumed:
+//
+//	HasAnyTwitchAuthCookie → doRefresh's hasTWCookies (refresh.go)
+//	  → shouldFireRecovery(…, cookiesPresent) → OnRecoveryNeeded("twitch")
+//	  → runState.handleRecoveryNeeded (cmd/moombox/monitor_callbacks.go)
+//
+// The alarm does not require a failed validate, which is what makes adding a
+// name here expensive. checkTwitchAuth returns a CONCLUSIVE (false, nil)
+// WITHOUT issuing any request at all when auth-token is absent, and
+// shouldFireRecovery's first-conclusive-check arm then returns cookiesPresent
+// verbatim. A file holding "login" and no auth-token would therefore fire
+// "twitch auth lost" on the first check of every start: a TypeError
+// notification telling the operator to re-export credentials that may never
+// have existed, or, with automatic refresh on, a headless-browser launch. That
+// is exactly the "alarm raised on a guess" cost, and it survives unchanged —
+// nothing in-tree or in references/ establishes that Twitch sets "login" only
+// for signed-in visitors, and being CONSUMED when present says nothing about
+// who it is set FOR.
+//
+// The silent Twitch states, ENUMERATED. "The last silent state" is a claim
+// this comment has made and got wrong TWICE — first as a superlative, then as a
+// list that was one entry short. A list can be checked; a superlative cannot,
+// and neither can an unfinished one, so add to it rather than re-declaring it
+// complete:
+//
+//  1. auth-token present, "login" absent. HasTwitchAuthCookies reads true and
+//     both UIs show green, while IRC goes anonymous WITHOUT ATTEMPTING the
+//     login — so no refusal happens and the chat fallback's Warn never runs. A
+//     minimal hand-written cookies.txt lands here on day one. No longer
+//     silent: noteMissingLogin logs it, once per downloader. Not fixed by this
+//     list, which already reads such a jar as configured.
+//  2. auth-token present, "login" present but not sendable as a single IRC
+//     parameter — it holds a space, tab, CR, LF or NUL (see
+//     twitch.hasRowBreakingChar). ircHandshakeLines throws such a value away
+//     and renders the full anonymous pair, so this reaches the wire exactly
+//     as state 1 does while looking, to every predicate here, like a complete
+//     credential pair. A hand-edited cookies.txt whose login row was filled in
+//     with a display name — "archiver account" — lands here. No longer silent:
+//     noteMissingLogin's condition is login-UNUSABLE, not login-absent, so it
+//     covers both. This entry is why that condition is not `login == ""`.
+//  3. "login" present, auth-token absent. Reads as never-configured here, and
+//     is left that way deliberately — see the alarm trace above. The reachable
+//     way to produce it is mergeCookieFiles pruning an expired auth-token, and
+//     whenever the export also carried twilight-user (Twitch's own client sets
+//     it on login) that case is already covered by the name above.
+//  4. "name" present alone. Same reasoning as 3, on thinner evidence still.
+//
+// Add "login" here only together with a change that stops checkTwitchAuth's
+// empty-token early return from reading as a conclusive negative. That early
+// return is the alarm's precondition, and it is not this list's to fix.
 var twitchAuthCookieNames = []string{"auth-token", "twilight-user"}
 
 // HasAnyTwitchAuthCookie reports whether this install was ever configured for

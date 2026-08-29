@@ -111,9 +111,9 @@ func TestForceRefreshFallsBackToTheRecheck(t *testing.T) {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			app := NewApp()
 			recheckCalls := 0
-			app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict) {
+			app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
 				recheckCalls++
-				return cookies.RefreshOK, cookies.RefreshUnknown
+				return cookies.RefreshOK, cookies.RefreshUnknown, "", ""
 			}
 
 			// Wrapped, because both sentinels reach the TUI wrapped in context
@@ -164,10 +164,10 @@ func TestForceRefreshFallsBackToTheRecheck(t *testing.T) {
 	} {
 		t.Run("diagnosable: "+sentinel.Error(), func(t *testing.T) {
 			app := NewApp()
-			app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict) {
+			app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
 				t.Error("a profile-import failure fell back to the recheck, which cannot fix it and " +
 					"throws away the only sentence that says what went wrong")
-				return cookies.RefreshUnknown, cookies.RefreshUnknown
+				return cookies.RefreshUnknown, cookies.RefreshUnknown, "", ""
 			}
 			const detail = "check ownership and permissions on the mounted profile"
 			if _, cmd := app.Update(cookieForceRefreshResultMsg{
@@ -227,8 +227,8 @@ func TestRungThreeSentencesDivergeByDesign(t *testing.T) {
 	// The TUI sentence, EXECUTED — the string the operator actually reads,
 	// through the arm that produces it, not the literal in the source.
 	app := NewApp()
-	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict) {
-		return cookies.RefreshOK, cookies.RefreshOK
+	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
+		return cookies.RefreshOK, cookies.RefreshOK, "", ""
 	}
 	app.Update(cookieForceRefreshResultMsg{
 		Err: fmt.Errorf("refresh pass gave up: %w", cookies.ErrProfileNotFound),

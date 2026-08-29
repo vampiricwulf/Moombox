@@ -142,7 +142,7 @@ func TestSetupCookieUncheckedOutcomeIsNotRed(t *testing.T) {
 		YouTube: cookies.RefreshUnknown, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
 	}})
 
-	if got := feedbackColor(app.feedbackMsg); got != ColorYellow {
+	if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != ColorYellow {
 		t.Errorf("an accepted-but-unverified sign-in renders %v, want %v (yellow): %q",
 			got, ColorYellow, app.feedbackMsg)
 	}
@@ -152,7 +152,7 @@ func TestSetupCookieUncheckedOutcomeIsNotRed(t *testing.T) {
 	app.Update(setupCookieFinishMsg{Platform: "youtube", Result: cookies.SetupResult{
 		YouTube: cookies.RefreshOK, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
 	}})
-	if got := feedbackColor(app.feedbackMsg); got != ColorGreen {
+	if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != ColorGreen {
 		t.Errorf("a confirmed sign-in renders %v, want %v (green): %q", got, ColorGreen, app.feedbackMsg)
 	}
 }

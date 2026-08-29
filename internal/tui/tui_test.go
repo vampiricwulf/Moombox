@@ -174,7 +174,9 @@ func TestFeedbackColor(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := feedbackColor(tc.msg)
+		// severityUnstated: this table is about the FALLBACK scan, which is what
+		// the forty-odd call sites that state nothing still rely on.
+		got := feedbackColor(tc.msg, severityUnstated)
 		if got != tc.wantColor {
 			t.Errorf("feedbackColor(%q) = %v, want %v", tc.msg, got, tc.wantColor)
 		}

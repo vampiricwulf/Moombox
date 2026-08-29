@@ -245,9 +245,85 @@ type AutoCookieService struct {
 	setupRetainedSince time.Time
 	cdpPort            int
 	lastRefresh        *time.Time
-	lastError          *string
-	needsRelogin       AutoCookieReloginRequired
-	targetPlatform     string // "youtube" or "twitch"
+
+	// lastError is the last thing a cookie pass concluded that the OPERATOR has
+	// to act on. It is published as AutoCookieStatus.LastError and is meant to
+	// sit beside the cookie status in both dashboards, so it is read as "your
+	// recordings will fail" — which is what the write policy below exists to
+	// keep true.
+	//
+	// THE POLICY, in one rule: a write is allowed only where THIS pass
+	// established the thing it is asserting. Setting asserts a problem;
+	// CLEARING asserts that whatever was recorded is not wrong any more, and
+	// that is the half that keeps getting written by paths with no basis for it.
+	//
+	// The writers, audited (Arc 8 Task 12a). Nothing else may write it:
+	//
+	//   - setError — the single SET, and the only place a message enters this
+	//     field. Callers: FinishSetup's empty-profile, read-failure, merge-abort,
+	//     mkdir, write and jar-load exits; the refresh's import failure, merge
+	//     abort, credential-loss and verification-failure exits. Each of those is
+	//     a conclusion the pass reached.
+	//
+	//     THE LAST THREE OF FINISHSETUP'S WERE MISSING until Arc 8 Task 12a fix
+	//     round 1, and the shape of the miss is worth keeping written down
+	//     because it is what the rule below is for: the mkdir, writeFileAtomic
+	//     and jar.Load exits called cleanup() and returned an error with no set
+	//     at all, so a setup that died on a permission or mount problem put one
+	//     sentence in a modal dialog and left this field — the thing an operator
+	//     looks at AFTERWARDS, on both dashboards — blank. An audit that stops at
+	//     "every failure funnels through setError" without walking the exits is
+	//     how that survived; the first version of this comment said exactly that
+	//     and was wrong.
+	//
+	//     So: EVERY exit that returns an error from a cookie pass sets. Adding an
+	//     early return here without one puts the field back in that state, and
+	//     nothing about the code will look wrong. The two exits that do NOT set
+	//     are the guard clauses at the top of FinishSetupDetailed —
+	//     ErrNoSetupInProgress and ErrSetupCancelled — and they are excluded on
+	//     purpose, not overlooked: no pass has run when they fire, so there is
+	//     no failure for the operator to see afterwards, and the caller gets the
+	//     answer synchronously in the same dialog. "A pass" is the boundary; a
+	//     guard that refuses to start one is not an exit from one.
+	//   - the loss branch in RefreshCookiesDetailed's any-platform-verified arm
+	//     — sets, via s.lastError directly, because a partial success still has
+	//     to report the platform that was lost.
+	//   - that same arm's `case renewed` — CLEARS, and only when the pass
+	//     actually produced the credentials it verified. The `default` beside it
+	//     deliberately does NOT clear: a pass whose browser did nothing has
+	//     established that the credentials on disk work, not that the refresh
+	//     mechanism does, and retracting an earlier "the browser profile
+	//     contained no cookies" off it is how a twice-broken refresh presents a
+	//     clean bill of health.
+	//   - StartSetup, at the slot claim — CLEARS. Correct, and the one clear
+	//     that is about intent rather than evidence: a new setup attempt is
+	//     starting, the recorded message belongs to an attempt that is over, and
+	//     leaving it would make the wizard open under a stale red line.
+	//   - the "nothing to verify" branch of the same switch as the loss branch —
+	//     CLEARS. Reachability: no route to it has been found (it needs
+	//     fetchedRows == 0 with neither platform having had a credential, and
+	//     the only path that fetches nothing is the empty-browser-profile
+	//     downgrade, which is gated on refreshPlatforms() having found one).
+	//     Left in place with this note rather than deleted, because "I could not
+	//     find a route" is not "there is none".
+	//
+	// cleanup() / cleanupLocked() MUST NOT clear it, and that is the rule this
+	// audit exists for. cleanup runs on every setup exit path INCLUDING the
+	// failed ones — FinishSetup calls setError and then cleanup on each of its
+	// six failure exits — so clearing there would erase the message the failure
+	// had just produced, microseconds after it was written, and the dialog would
+	// report a failure the status page had no record of. See cleanupLocked: it
+	// touches only state describing a browser that is gone.
+	//
+	// That also makes the set/cleanup ORDER a convention rather than a
+	// requirement, which is worth knowing before rearranging one of those exits.
+	//
+	// Pinned by TestCleanupAfterAFailedSetupKeepsLastError and
+	// TestFinishSetupRecordsTheFailureItReturns.
+	lastError *string
+
+	needsRelogin   AutoCookieReloginRequired
+	targetPlatform string // "youtube" or "twitch"
 
 	// The two lifecycle flags. Kept together and apart from the state above
 	// because they are DECISIONS — an abort was asked for, the service was
@@ -350,6 +426,16 @@ type AutoCookieService struct {
 	// via struct literal keep working.
 	detectBrowser func() *DetectedBrowser
 
+	// firefoxLaunchSpacing overrides the delay refreshFirefox waits between
+	// consecutive Firefox launches — see the package-level firefoxLaunchSpacing
+	// const (autocookies_firefox.go) for the production value and why it
+	// exists. Defaults to that const in NewAutoCookieService; tests lower it
+	// so a two-platform Firefox refresh doesn't burn 5 real seconds per run.
+	// Zero/negative is treated as the const so services built via struct
+	// literal keep launching at the production spacing. Same seam
+	// convention as detectBrowser. Arc 8 7(d).
+	firefoxLaunchSpacing time.Duration
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -385,11 +471,12 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 		logger.Error("auto-cookie profile dir rejected at construction", "err", profileDirErr)
 	}
 	s := &AutoCookieService{
-		profileDir:    profileDir,
-		cookiePath:    cookiePath,
-		jar:           jar,
-		profileDirErr: profileDirErr,
-		detectBrowser: DetectBrowser,
+		profileDir:           profileDir,
+		cookiePath:           cookiePath,
+		jar:                  jar,
+		profileDirErr:        profileDirErr,
+		detectBrowser:        DetectBrowser,
+		firefoxLaunchSpacing: firefoxLaunchSpacing,
 		// Always populated with both supported platforms so the JSON wire
 		// shape stays {"youtube": false, "twitch": false} even for
 		// fresh-install state. Audit reports/cookies.md #44.
@@ -411,6 +498,14 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	} else if meta != nil && !meta.LastRefresh.IsZero() {
 		t := meta.LastRefresh
 		s.lastRefresh = &t
+	}
+	// Reclaim writeFileAtomic temp files orphaned by a previous run that was
+	// killed between os.CreateTemp and the rename — each one is a full copy
+	// of cookies.txt. Service construction is the one place that always has
+	// the real cookie path up front (see cookieTempFileSweepOnce's doc).
+	// Empty cookiePath (no cookie file configured yet) has nothing to sweep.
+	if cookiePath != "" {
+		sweepCookieTempFilesOnce(&cookieTempFileSweepOnce, filepath.Dir(cookiePath), filepath.Base(cookiePath), cookieTempFileMaxAge)
 	}
 	return s
 }
@@ -679,6 +774,47 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	}
 }
 
+// ReloginStatus returns which platforms need the user to sign in again,
+// without GetStatus's browser/registry detection scan (~155ms measured
+// 2026-08-25: DetectBrowser + DetectBrowsers, filesystem I/O and a reg.exe
+// spawn on Windows). Four of GetStatus's five production callers read
+// nothing else from the returned AutoCookieStatus, so they pay that cost on
+// every poll for a field this method computes identically — same lock,
+// same clone-under-lock copy of s.needsRelogin GetStatus returns.
+//
+// Status polling is the most frequent visitor to this lock, which makes it
+// the reap that actually fires in practice — both UIs poll it while their
+// cookie dialog is open, and the TUI polls it with no dialog at all (see
+// GetStatus's doc comment, which this one must keep agreeing with). Moving
+// GetStatus's four highest-frequency callers here means THIS method is now
+// that most-frequent visitor, so it MUST call reapAbandonedSetupLocked
+// exactly as GetStatus does — a future "simplification" that drops the call
+// because ReloginStatus "only reads needsRelogin" would silently stop Arc
+// 3's abandoned-setup reap from firing in production, with no existing test
+// noticing because the reap still exists, it would just never run.
+func (s *AutoCookieService) ReloginStatus() AutoCookieReloginRequired {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reapAbandonedSetupLocked()
+	return maps.Clone(s.needsRelogin)
+}
+
+// browserOverrideConfigured reports whether a (path, browserType) pair
+// read from ConfiguredBrowserOverride is a REAL override, as opposed to a
+// partially-filled setting. Both must be non-empty: the TUI's browser_type
+// field is free text with no matching path field required
+// (tui/settings.go's Save writes BrowserType independently of
+// BrowserPath), so a type typed in without a path is reachable in
+// practice, not just in theory. resolvedBrowser and
+// dpapiExtractAsNetscape's caller (autocookies.go's DPAPI fallback branch)
+// both gate on this SAME predicate — Arc 8 fix round 1, Finding 3: before
+// this existed, the DPAPI call site keyed off browserType alone, so a
+// type-only setting was "no override" everywhere else but a hard filter
+// there.
+func browserOverrideConfigured(path, browserType string) bool {
+	return path != "" && browserType != ""
+}
+
 // resolvedBrowser returns the user's configured browser when set, else
 // the auto-detected best match. Used by StartSetup and RefreshCookies
 // so the UI's browser_path/browser_type setting actually drives
@@ -686,7 +822,7 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 func (s *AutoCookieService) resolvedBrowser() *DetectedBrowser {
 	if s.ConfiguredBrowserOverride != nil {
 		path, btype := s.ConfiguredBrowserOverride()
-		if path != "" && btype != "" {
+		if browserOverrideConfigured(path, btype) {
 			// Try to find the matching DetectedBrowser entry from
 			// DetectBrowsers so Name is human-readable; fall back to
 			// path-as-name if the configured path isn't in the
@@ -767,18 +903,6 @@ func (s *AutoCookieService) refreshBrowser(policy browserGatePolicy) *DetectedBr
 		return nil
 	}
 	return s.resolvedBrowser()
-}
-
-// FlagManualRelogin marks a platform as needing manual re-login.
-func (s *AutoCookieService) FlagManualRelogin(platform string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	switch platform {
-	case "youtube":
-		s.needsRelogin["youtube"] = true
-	case "twitch":
-		s.needsRelogin["twitch"] = true
-	}
 }
 
 // StartSetup launches a browser for the user to log in.
@@ -1016,6 +1140,19 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 
 	// Merge with existing cookies using temp file + rename for atomicity
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
+		// THE SET, which this exit and the two below it were missing. The
+		// policy on the lastError field says every failure exit records what it
+		// concluded, and these three returned an error to the caller while
+		// leaving the field both dashboards render blank — so a setup that died
+		// on a permission or mount problem showed one sentence in the dialog and
+		// then, once the dialog closed, nothing anywhere. The dialog is modal and
+		// transient; the status field is where an operator looks afterwards.
+		//
+		// Ordering is a convention rather than a requirement: cleanup() never
+		// clears (see the field's policy and
+		// TestCleanupAfterAFailedSetupKeepsLastError), so the set survives it
+		// either way. Kept before cleanup to match every other exit here.
+		s.setError("could not create the directory for cookies.txt: " + err.Error())
 		s.cleanup()
 		return SetupResult{}, err
 	}
@@ -1055,12 +1192,26 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 
 	// Write merged cookies via temp file + rename to prevent corruption on partial failure
 	if err := writeFileAtomic(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
+		// Sets, for the reason spelled out at the MkdirAll exit above. The hint
+		// names the one deployment mistake that actually produces this — the
+		// write ends in a rename, and a rename cannot replace a single-file bind
+		// mount — and is kept SHORT, unlike the paragraph refresh.go attaches to
+		// its own failed write: that one goes to a log, this one goes to a status
+		// line both dashboards render.
+		s.setError("could not write cookies.txt: " + err.Error() +
+			" — if this is Docker, mount the data directory rather than cookies.txt itself")
 		s.cleanup()
 		return SetupResult{}, err
 	}
 
 	// Reload jar and verify
 	if err := s.jar.Load(s.cookiePath); err != nil {
+		// Sets, for the reason spelled out at the MkdirAll exit above. This one
+		// is the worst of the three to leave silent: the cookies were extracted
+		// AND written, so the file on disk is fine and nothing about the state
+		// looks wrong — the setup simply reports nothing and the user has no
+		// idea whether to run it again.
+		s.setError("cookies.txt was written but could not be loaded: " + err.Error())
 		s.cleanup()
 		return SetupResult{}, err
 	}
@@ -1796,7 +1947,22 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// already has its own SQLite-direct path. DECISIONS #6.
 	if err != nil && browser != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
 		s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
-		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger)
+		// H7: the configured browser OVERRIDE, not the resolved/auto-detected
+		// `browser` above — an operator who explicitly named a browser in
+		// settings gets DPAPI restricted to it; auto-detect leaves every
+		// Chromium-family profile as a candidate for dpapiExtractAsNetscape's
+		// own selection (it picks exactly one, it never merges). Gated by
+		// browserOverrideConfigured — the SAME predicate resolvedBrowser
+		// uses — so a browser_type set with no path (Finding 3, Arc 8 fix
+		// round 1: reachable from the TUI's free-text field) is "no
+		// override" here too, not a hard filter on a half-configured value.
+		var cfgBrowserType string
+		if s.ConfiguredBrowserOverride != nil {
+			if path, btype := s.ConfiguredBrowserOverride(); browserOverrideConfigured(path, btype) {
+				cfgBrowserType = btype
+			}
+		}
+		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger, cfgBrowserType)
 		if fallbackErr != nil {
 			s.logger.Warn("DPAPI fallback also failed; surfacing original CDP error",
 				"dpapi_err", fallbackErr)
@@ -1931,6 +2097,30 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	hadYTAuth := s.jar.HasAnyYouTubeAuthCookie()
 	hadTWAuth := s.jar.HasAnyTwitchAuthCookie()
 	fetchedRows := countNetscapeCookieRows(netscapeCookies)
+	// fetchedNoCredential is the state the outcome switch at the bottom of this
+	// function could not name: rows came back, and NOT ONE of them is a session
+	// credential. A browser profile that is signed out, or one set to clear
+	// cookies on exit and re-seeded with YSC/VISITOR_INFO1_LIVE by the
+	// navigation this pass just made, lands here every time.
+	//
+	// Read as either of the two nearest existing cases it was wrong: "the
+	// browser profile contained no cookies" is FALSE (rows came back — that arm
+	// is emptyBrowserProfile, which is only set when the read produced nothing
+	// at all), and "auth verification failed — manual re-login required" is true
+	// but says nothing an operator can act on, because the thing to fix is that
+	// the browser is not signed in rather than that Moombox's check failed.
+	//
+	// A NEW FLAG, never a redefinition of fetchedRows. Overloading `fetchedRows
+	// == 0` would put this state inside the counter, whose deliberate
+	// over-counting is load-bearing for the import guard and is mutation-pinned;
+	// and reusing emptyBrowserProfile would make "the profile was empty" mean
+	// two different things one line apart.
+	//
+	// Measured on what THIS PASS FETCHED, before the merge below folds the
+	// previous cookies.txt in. After the merge the answer would be about the
+	// file rather than about the browser, and the file's credentials are exactly
+	// the ones this state is not a statement about.
+	fetchedNoCredential := fetchedRows > 0 && !netscapeCookiesHoldACredential(netscapeCookies)
 
 	if previousCookies != "" {
 		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
@@ -2255,6 +2445,25 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 			// Genuinely nothing to do and nothing lost (e.g. first run before
 			// setup). The refresh completed cleanly; there was just nothing
 			// to refresh yet.
+			//
+			// NO ROUTE TO HERE HAS BEEN FOUND, as of Arc 8 Task 12a. Reaching it
+			// needs `failed` and `lost` both empty with fetchedRows == 0, i.e.
+			// a pass that fetched nothing while neither platform had a
+			// credential going in. The only path that fetches nothing is the
+			// ErrNoCookiesInProfile downgrade above, which lives on the browser
+			// branch — and that branch is gated on refreshPlatforms() being
+			// non-empty, which is the same pair of loose predicates hadYTAuth /
+			// hadTWAuth are read from. The import branch has no such gate but
+			// cannot fetch nothing: importProfileCookies raises
+			// ErrNoCookiesInProfile rather than returning an empty blob.
+			//
+			// Kept, with the derivation written down, rather than deleted:
+			// "I could not find a route" is not "there is none", and the arm is
+			// the right behaviour for the state it describes. If a future change
+			// does open a route, note that this is a CLEAR — see the write
+			// policy on the lastError field for why clears are the dangerous
+			// half — and it may only stay correct while the state really is
+			// "nothing happened and nothing was lost".
 			s.logger.Debug("cookie refresh completed with no cookies to verify")
 			s.mu.Lock()
 			s.lastError = nil
@@ -2294,19 +2503,64 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 			rollbackWasInconclusive = true
 		}
 	}
+	// rollbackHedge is the (network?) hedge's replacement across whichever
+	// restored platforms are inconclusive. combinedInconclusiveHedge folds
+	// them to ONE hedge when they agree (the common case: at most one
+	// platform is usually restored at all) and to a per-platform breakdown
+	// when they do not — see its doc for why collapsing a disagreement to
+	// one hedge would assert a cause about a platform the code knows is
+	// false. Reviewer round 1 finding 1 caught the previous AND/OR
+	// tie-break doing exactly that for this arm's twin below; this arm
+	// shares the same fix rather than getting its own tie-break.
+	rollbackHedge, _ := combinedInconclusiveHedge(restoredPlatforms, importCheck)
+	// inconclusiveHedge/inconclusiveAgree is rollbackHedge's twin for the
+	// no-rollback arm below, over postYT/postTW instead of importCheck.
+	inconclusiveHedge, inconclusiveAgree := combinedInconclusiveHedge(
+		[]string{"youtube", "twitch"},
+		map[string]platformAuth{"youtube": postYT, "twitch": postTW})
 	var errMsg string
 	switch {
 	case len(restoredPlatforms) > 0 && rollbackWasInconclusive:
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
-			" — the auth check did not complete (network?), so the imported profile was not accepted"
+			" — " + rollbackHedge + ", so the imported profile was not accepted"
 	case len(restoredPlatforms) > 0:
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
 			" — the mounted browser profile did not verify"
+	case inconclusive && inconclusiveAgree:
+		// Single hedge, one sentence — the shape every existing test and
+		// every single-platform (the overwhelmingly common) inconclusive
+		// check already expects.
+		errMsg = strings.Join(failed, " + ") + " auth could not be verified — " + inconclusiveHedge
 	case inconclusive:
-		errMsg = strings.Join(failed, " + ") + " auth could not be verified — the check did not complete (network?)"
+		// The platforms disagree on why, so the "<platforms> auth could not
+		// be verified —" lead-in is dropped rather than paired with a
+		// per-platform breakdown that already names each platform: the
+		// combined hedge IS the message.
+		errMsg = inconclusiveHedge
 	case emptyBrowserProfile:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed, and the browser profile contained " +
 			"no cookies to refresh from — check whether the browser is clearing cookies on exit"
+	case fetchedNoCredential:
+		// PLACED HERE, immediately above default, and the position is the
+		// constraint rather than an aesthetic choice: this case carves its state
+		// out of `default` and out of nothing else.
+		//
+		// It cannot overlap emptyBrowserProfile above — that arm is only set on
+		// a read that produced no text at all, so fetchedRows is 0 there and
+		// this flag is false. It is kept BELOW the two inconclusive arms
+		// deliberately: "the browser is signed out" is a strong claim about the
+		// profile, and a check that could not reach the site has not earned it.
+		// Moving it up would silently change what those arms cover, which is
+		// exactly what this case was forbidden from doing.
+		//
+		// NAMES THE PLATFORMS, like every sibling arm. It did not, and was the
+		// only arm in this switch that did not: with two platforms configured
+		// and one of them failing, a message that opens on the browser leaves
+		// the operator to guess which session the verdict is about — and this
+		// arm is reachable in exactly that mixed state.
+		errMsg = fmt.Sprintf("%s auth verification failed, and the browser profile returned %d "+
+			"cookies but none of them is a session credential — the browser is signed out",
+			strings.Join(failed, " + "), fetchedRows)
 	default:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
 	}
@@ -2321,6 +2575,89 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	s.logger.Warn("refresh completed but auth verification failed",
 		"platforms", strings.Join(failed, ","), "lost", strings.Join(lost, ","), "detail", errMsg)
 	return result, nil
+}
+
+// platformDisplayName maps the lowercase platform keys used internally in
+// this file (restoredPlatforms, importCheck, the map literal
+// combinedInconclusiveHedge is called with) to the capitalized names
+// `failed`/`lost` already render to the operator.
+func platformDisplayName(platform string) string {
+	switch platform {
+	case "youtube":
+		return "YouTube"
+	case "twitch":
+		return "Twitch"
+	default:
+		return platform
+	}
+}
+
+// inconclusiveHedge renders the (network?) hedge's replacement wording for
+// ONE platform's inconclusive check, disambiguated by attempted — see
+// platformAuth's doc for what the two halves of verifyUnknown mean.
+func inconclusiveHedge(p platformAuth) string {
+	if p.attempted {
+		// A request went out and came back unusable — network, an
+		// intermediary, a timeout. Say that; no question mark, because this
+		// is no longer a guess.
+		return "the auth check did not complete"
+	}
+	// No request was ever attempted — the extracted cookies could not form
+	// one. Same wording the Warn at checkPlatformAuth's caller (FinishSetup)
+	// already uses for the same fact — see attempted's doc on platformAuth —
+	// minus the "during setup" qualifier, which does not apply to a refresh
+	// pass.
+	return "the auth check was never attempted — the extracted cookies cannot form an authenticated request"
+}
+
+// combinedInconclusiveHedge renders the (network?) hedge across every
+// platform in order whose check in checks landed on verifyUnknown.
+//
+// When every one of them agrees on attempted — true for a single inconclusive
+// platform, which is the overwhelmingly common shape — it returns ONE hedge
+// and allAgree=true, the joined-sentence form callers had before this
+// existed. When they disagree — one platform's check went out and came back
+// unusable while the other's cookies could never form a request at all —
+// collapsing them to a single hedge asserts a cause about a platform the
+// code knows is false (reviewer round 1, finding 1, caught this for the
+// AND/OR tie-break this function replaced). allAgree=false then, and hedge
+// is a full "Platform: cause; Platform: cause" breakdown naming each one, not
+// a fragment meant to be embedded after a shared lead-in — see the two call
+// sites for how each folds allAgree=false into its own sentence.
+//
+// order fixes iteration to a stable sequence (callers pass
+// []string{"youtube", "twitch"} or restoredPlatforms, which is already built
+// in that order) so the rendered message is deterministic.
+func combinedInconclusiveHedge(order []string, checks map[string]platformAuth) (hedge string, allAgree bool) {
+	var names []string
+	var pairs []platformAuth
+	for _, platform := range order {
+		p, ok := checks[platform]
+		if !ok || p.state != verifyUnknown {
+			continue
+		}
+		names = append(names, platform)
+		pairs = append(pairs, p)
+	}
+	if len(pairs) == 0 {
+		return "", true
+	}
+	agreedHedge := inconclusiveHedge(pairs[0])
+	allAgree = true
+	for _, p := range pairs[1:] {
+		if inconclusiveHedge(p) != agreedHedge {
+			allAgree = false
+			break
+		}
+	}
+	if allAgree {
+		return agreedHedge, true
+	}
+	parts := make([]string, len(pairs))
+	for i, p := range pairs {
+		parts[i] = platformDisplayName(names[i]) + ": " + inconclusiveHedge(p)
+	}
+	return strings.Join(parts, "; "), false
 }
 
 // cookiesLostMessage names the platforms whose credentials were on disk
@@ -2889,16 +3226,19 @@ var statProfileDir = os.Stat
 
 // writeFileAtomic writes data to a temp file then renames it to the target path,
 // preventing corruption on partial failure. Applies
-// utils.ApplyUserOnlyDACL ONCE per parent directory across the process
-// lifetime so the highest-value secret in the app (auth-token + SAPISID
-// for the user's session) doesn't sit on disk with a parent-inherited
-// world-readable ACL when the cookie file lives outside the config dir
-// (e.g. default `./cookies.txt` in the project root). The DACL is
-// applied to the parent dir rather than the file because (a) icacls
-// /inheritance:r on individual files has corner cases where the new
-// ACL ends up over-restrictive, and (b) propagating from the dir
-// covers any future writes (rotated cookies, side-files) without
-// per-write icacls latency. No-op on non-Windows; idempotent.
+// utils.ApplyUserOnlyDACL to the parent directory (successful attempts are
+// memoised per directory; see tightenCookieDirOnce) so the highest-value
+// secret in the app (auth-token + SAPISID for the user's session) doesn't
+// sit on disk with a parent-inherited world-readable ACL when the cookie
+// file lives outside the config dir (e.g. default `./cookies.txt` in the
+// project root). The DACL is applied to the parent dir rather than the file
+// because (a) icacls /inheritance:r on individual files has corner cases
+// where the new ACL ends up over-restrictive, and (b) propagating from the
+// dir covers any future writes (rotated cookies, side-files) without
+// per-write icacls latency. Real hardening on non-Windows too — see
+// utils.ApplyUserOnlyDACL's non-Windows implementation, which chmods to
+// 0700/0600 rather than no-op'ing — not just Windows; idempotent once
+// applied.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Unique temp name (os.CreateTemp): the RefreshService rewrites the same
 	// cookies.txt through its own temp file, and a shared fixed ".tmp" name
@@ -2938,25 +3278,159 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// tightenCookieDirOnce applies utils.ApplyUserOnlyDACL to the given
-// parent dir at most once per process. Memoised because icacls is a
-// ~30-80ms shell-out that would otherwise fire on every cookie write.
+// cookieTempFileMaxAge bounds how long an orphaned writeFileAtomic temp file
+// may survive before the sweep below reclaims it. A write completes in
+// milliseconds; this is three orders of magnitude of margin, so nothing but
+// a genuinely abandoned temp file — left behind by a crash, a kill, or a
+// panic between os.CreateTemp and the rename — is ever old enough to match.
+// Do not lower this "to be thorough": age is the only guard against
+// sweeping a write in progress.
+const cookieTempFileMaxAge = time.Hour
+
+// cookieTempFileSweepOnce fires sweepStaleCookieTempFiles exactly once per
+// process. Package-level state, same shape as snapshotSweepOnce in
+// autocookies_profile.go — different root (the cookie file's own directory,
+// not os.TempDir()) and a different secret (the whole cookie file, not a
+// browser DB snapshot), so it stays a sibling rather than merging with it.
+//
+// Wired at service construction (NewAutoCookieService), which is the one
+// place in the package that always holds the REAL cookie file path up
+// front. writeFileAtomic itself is a generic temp-then-rename helper shared
+// with meta.go's cookies.meta.json sidecar writes and refresh.go's own
+// cookies.txt rewrite, so keying the "once" off whichever path happens to
+// call writeFileAtomic first would risk sweeping with the wrong base name
+// if call order ever changed.
+var cookieTempFileSweepOnce sync.Once
+
+// sweepCookieTempFilesOnce runs sweepStaleCookieTempFiles through the given
+// *sync.Once. Production code always passes &cookieTempFileSweepOnce; tests
+// pass a local one so the process-lifetime package var doesn't make every
+// test but the first one in the binary a no-op.
+func sweepCookieTempFilesOnce(once *sync.Once, dir, base string, maxAge time.Duration) {
+	once.Do(func() { sweepStaleCookieTempFiles(dir, base, maxAge) })
+}
+
+// sweepStaleCookieTempFiles removes orphaned writeFileAtomic temp files left
+// beside the cookie file: a crash, a kill, or a panic between os.CreateTemp
+// and the rename leaves `<base>.<random>.tmp` on disk forever, and each one
+// is a full copy of cookies.txt — the highest-value secret in the app —
+// under a name nothing reads and nothing else removes.
+//
+// Matches ONLY <base>.<anything>.tmp in dir — the exact shape
+// os.CreateTemp(dir, base+".*.tmp") produces in writeFileAtomic. The prefix
+// check is anchored on base+"." (not on the directory as a whole), so this
+// can never match base itself (no .tmp suffix), never matches an operator
+// file like cookies.txt.bak, and never matches an unrelated file's temp
+// (other.txt.NNN.tmp).
+//
+// Age (see cookieTempFileMaxAge) is the guard against sweeping a live
+// write. Best-effort — every failure is logged at Debug, with the path only
+// and never content or size, and left for the next process start to retry;
+// this is housekeeping, not correctness, and must never fail a caller over
+// a stale file it couldn't remove.
+func sweepStaleCookieTempFiles(dir, base string, maxAge time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Debug("cookie temp file sweep: could not read directory", "dir", dir, "err", err)
+		return
+	}
+	prefix := base + "."
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			slog.Debug("cookie temp file sweep: could not remove orphaned temp file", "path", path, "err", err)
+			continue
+		}
+		slog.Debug("cookie temp file sweep: removed orphaned temp file", "path", path)
+	}
+}
+
+// applyUserOnlyDACL is utils.ApplyUserOnlyDACL behind a seam, so
+// tightenCookieDirOnce's retry-on-failure memoisation (below) can be tested
+// with a fake that fails once then succeeds, instead of shelling out to a
+// real icacls (Windows) or depending on real chmod failure modes (Linux) in
+// CI. Mirrors writeCookieFile/readCookieFile/statProfileDir above.
+var applyUserOnlyDACL = utils.ApplyUserOnlyDACL
+
+// dirTightenState is tightenCookieDirOnce's per-directory memo. Two states,
+// not one boolean, because "an apply is running right now" and "an apply
+// already succeeded" must be told apart: the first still says "don't spawn
+// another", the second says "there is nothing left to do, ever". A dir
+// absent from the map is the implicit third state, not started.
+type dirTightenState int
+
+const (
+	dirTighteningInFlight dirTightenState = iota
+	dirTighteningDone
+)
+
+// tightenCookieDirOnce applies utils.ApplyUserOnlyDACL to the given parent
+// dir. Memoised on SUCCESS, not on attempt: icacls (Windows) / chmod
+// (Linux — see utils.ApplyUserOnlyDACL's non-Windows implementation, which
+// really chmods to 0700/0600 there, not a no-op) is a ~30-80ms shell-out/
+// syscall that would otherwise fire on every cookie write, but a transient
+// failure (an AV scanner holding the dir, a first-write race with the dir's
+// own creation) must not disable hardening for the rest of the process just
+// because the failure is demoted to a Debug log line.
+//
+// Three states per dir (dirTightenState above, plus "absent = not
+// started"):
+//   - not started: this call marks the dir in flight, synchronously, before
+//     spawning the goroutine that runs the apply — so a second write
+//     landing during the 30-80ms shell-out sees "in flight" and returns
+//     without spawning a second one.
+//   - in flight: return; the goroutine already running will resolve it.
+//   - done: return; already applied, nothing left to do.
+//
+// A failure — or a panic mid-apply — deletes the entry, putting the dir
+// back to "not started" so the NEXT cookie write retries rather than
+// leaving it stuck in flight or falsely memoised as done.
+//
+// Cost if icacls/chmod fails permanently on a given host: one extra
+// ~30-80ms shell-out per cookie write instead of one per process. Writes
+// happen on the refresh cadence (30 min) and on imports, so the bound is a
+// handful of shell-outs an hour. No failure cap, no backoff — either would
+// be a mechanism to contain a mechanism, and nothing has profiled the plain
+// retry as costing anything.
 var (
 	tightenedCookieDirsMu sync.Mutex
-	tightenedCookieDirs   = make(map[string]struct{})
+	tightenedCookieDirs   = make(map[string]dirTightenState)
 )
 
 func tightenCookieDirOnce(dir string) {
 	tightenedCookieDirsMu.Lock()
-	defer tightenedCookieDirsMu.Unlock()
 	if _, ok := tightenedCookieDirs[dir]; ok {
-		return
+		tightenedCookieDirsMu.Unlock()
+		return // in flight or already done
 	}
-	tightenedCookieDirs[dir] = struct{}{}
+	tightenedCookieDirs[dir] = dirTighteningInFlight
+	tightenedCookieDirsMu.Unlock()
+
 	go func() {
+		succeeded := false
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Warn("cookie dir DACL tightening panicked", "dir", dir, "panic", fmt.Sprint(r))
+			}
+			if !succeeded {
+				// Covers both a returned error and a recovered panic: either
+				// way the apply did not finish successfully, so the memo
+				// goes back to "not started" for the next write to retry.
+				tightenedCookieDirsMu.Lock()
+				delete(tightenedCookieDirs, dir)
+				tightenedCookieDirsMu.Unlock()
 			}
 		}()
 		// This is the hardening for the auth-cookie file (highest-value
@@ -2964,9 +3438,16 @@ func tightenCookieDirOnce(dir string) {
 		// sidecar + profile dir sites): the common failure is ACCESS_DENIED
 		// on a dir created under an elevated/admin context, and on the
 		// single-user host this app targets nobody else can read it anyway.
-		// Raise the log level to Debug to surface the miss.
-		if err := utils.ApplyUserOnlyDACL(dir); err != nil {
+		// Raise the log level to Debug to surface the miss. A failure here
+		// is retried on the NEXT cookie write, not memoised — see the
+		// doc comment above.
+		if err := applyUserOnlyDACL(dir); err != nil {
 			slog.Debug("could not restrict cookie dir to current user", "dir", dir, "err", err)
+			return
 		}
+		tightenedCookieDirsMu.Lock()
+		tightenedCookieDirs[dir] = dirTighteningDone
+		tightenedCookieDirsMu.Unlock()
+		succeeded = true
 	}()
 }

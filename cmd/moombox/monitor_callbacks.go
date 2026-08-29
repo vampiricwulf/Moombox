@@ -339,8 +339,26 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	switch result.Verdict(platform) {
 	case cookies.RefreshOK:
 		s.log.Info("auto-cookie recovery succeeded", "platform", platform)
-		// Re-check auth status immediately so the UI updates
-		s.cookieRefresh.CheckNow(context.Background())
+		// Re-check auth status immediately so the UI updates.
+		//
+		// CheckNow now single-flights with the periodic refresh, and this is the
+		// one caller where a skip is worth a line at Info rather than the
+		// service's own Debug. Recovery is TRIGGERED from inside a refresh pass
+		// (OnRecoveryNeeded fires mid-pass and this runs on the goroutine
+		// handleRecoveryNeeded spawns), so a recovery that finishes quickly —
+		// the browser-free profile import, which needs no browser launch — can
+		// still land while its own trigger pass is finishing, e.g. inside the
+		// ticker path's fallback probe. The pass in flight read the cookie file
+		// BEFORE this recovery rewrote it, so its status is pre-recovery, and
+		// the badge then stays stale until the next tick a full interval away.
+		//
+		// Nothing here retries or waits: the guard's contract is that a second
+		// caller does nothing, and a queued retry would be a second mechanism to
+		// contain the first. The line is what makes the stale badge explicable.
+		if !s.cookieRefresh.CheckNow(context.Background()) {
+			s.log.Info("auth re-check after recovery was skipped, a cookie refresh was already in flight — status may lag until the next refresh",
+				"platform", platform)
+		}
 
 	case cookies.RefreshFailed:
 		// The case that was silently swallowed whenever the sibling platform

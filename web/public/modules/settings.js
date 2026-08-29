@@ -2414,6 +2414,29 @@ export class SettingsController {
           infoEl.textContent = parts.join(" | ");
         }
 
+        // lastError, as a secondary line under the browser/last-refresh line.
+        //
+        // The field had no reader on this side of the wire at all: it reached
+        // the setup dialog's abort report and nowhere else, so a refresh that
+        // recorded "the browser profile contained no cookies" or "refusing to
+        // overwrite cookies.txt" left the settings page looking clean. Arc 8
+        // Task 12a wrote the field's write policy down — one SET funnel, three
+        // earned clears, and cleanup() explicitly forbidden from clearing —
+        // which is what makes a non-empty value worth showing permanently
+        // rather than only inside the dialog that produced it.
+        //
+        // ONLY WHEN NON-EMPTY, and hidden otherwise: an empty line under the
+        // browser info would read as a state of its own. The colour is the
+        // warning token this panel already uses for its inline validation
+        // message and for the setup countdown — no new class.
+        const lastErrorEl = document.getElementById("auto-cookie-last-error");
+        if (lastErrorEl) {
+          const lastError = status.lastError || "";
+          lastErrorEl.textContent = lastError ? `Last cookie error: ${lastError}` : "";
+          lastErrorEl.style.color = "var(--sl-color-warning-600)";
+          lastErrorEl.style.display = lastError ? "" : "none";
+        }
+
         // If setup is in progress, show the dialog
         if (status.setupInProgress) {
           const dialog = document.getElementById("auto-cookie-setup-dialog");

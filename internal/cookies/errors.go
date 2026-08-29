@@ -137,6 +137,41 @@ var (
 	// nothing) and of a profile snapshotted out from under a live Firefox.
 	ErrNoCookiesInProfile = errors.New("no YouTube/Twitch cookies found in browser profile")
 
+	// --- the two ways a Chromium cookie read fails without being a verdict ---
+	//
+	// cdpCookieReadOutcome has always told these apart from ErrNoCookiesInProfile
+	// — that distinction is the whole reason it exists — but told them apart in
+	// PROSE only, so every consumer past it saw one undifferentiated error. The
+	// setup handler's default arm flattened both to 500 "failed to finish setup",
+	// which its own comment called out as giving no hint, and the sentence that
+	// promised the cause ("until Task 2 adds it") outlived two arcs.
+	//
+	// They are two sentinels rather than one because the operator's next move
+	// differs, which is the same rule the six profile-import errors above are
+	// grouped by: a blocked ladder is a state to change (something is holding
+	// the debugging port, or a security product is intercepting it), an
+	// unanswered read is the browser side having failed outright. HTTP consumers
+	// map them to 409 and 502 respectively.
+	//
+	// NEITHER may wrap ErrNoCookiesInProfile, and that is the property to
+	// preserve when adding a third. "The profile holds no cookies" is a verdict
+	// about the PROFILE that FinishSetup turns into "no login detected" and
+	// RefreshCookiesDetailed downgrades to a fall-back-to-cookies.txt; both of
+	// these mean the read never got far enough to have a verdict, so routing
+	// either one there would tell a user who is perfectly signed in that they
+	// are not.
+
+	// ErrBrowserLadderBlocked is returned when a browser cookie read got an
+	// answer from one query but a STRUCTURAL failure — the CDP target listing —
+	// stopped the page-level fallbacks that answer would have to be corroborated
+	// by. It is not a tier ERRORING: a tier that errors has still been asked.
+	ErrBrowserLadderBlocked = errors.New("browser cookie read incomplete — the fallback queries could not be run")
+
+	// ErrBrowserReadUnanswered is returned when NO cookie query answered at all,
+	// with or without a recorded cause. Nothing was learned about the profile,
+	// so it must never be reported as an empty one.
+	ErrBrowserReadUnanswered = errors.New("browser cookie read failed — no query answered")
+
 	// ErrCookieFileUnreadable is returned by FinishSetup and
 	// RefreshCookiesDetailed when the EXISTING cookies.txt could not be read
 	// for a reason other than "the file does not exist" — a permission blip,

@@ -69,9 +69,14 @@ func bodyServer(t *testing.T, body string, setCookies ...string) *httptest.Serve
 // A conclusive negative now requires an explicit negative marker. Everything
 // else is an error: we asked, we got an answer, we could not read it.
 //
-// Both entry points and both body-reader paths are covered, because
-// checkYouTubeAuth and checkAndRefreshYouTube are near-duplicates and a rule
-// applied to only one of them is a rule with a hole in it.
+// Both entry points and both body-reader paths are covered. That doubling was
+// written when checkYouTubeAuth and checkAndRefreshYouTube were near-duplicate
+// copies and a rule applied to one of them was a rule with a hole in it. The
+// copies are gone — both now call youtubeGuideExchange — and the doubling is
+// kept for what it proves now: that each entry point still REACHES the shared
+// exchange and returns its verdict unaltered. A wrapper that swallowed the
+// error, or grew a second body reader of its own, would pass on one side and
+// fail here.
 func TestGuide200WithNoLoginMarkerIsInconclusive(t *testing.T) {
 	bodies := map[string]string{
 		"captive_portal_html": captivePortalBody, // string-fallback path

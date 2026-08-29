@@ -114,6 +114,25 @@ func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
 //     right now", false on an inconclusive check.
 //   - verification — what the check CONCLUDED: "ok", "failed" or "unknown".
 //     Only "failed" is a conclusive negative and only it may be worded as one.
+//   - youtubeError / twitchError — WHY the check could not conclude. Empty
+//     whenever it did. This is the half `verification` cannot carry: the UI
+//     could say "could not check" and never say what stopped it, so an install
+//     behind a captive portal, a rate limit and an intercepting proxy all
+//     rendered identically and none of them named the thing to fix.
+//
+// SAFE TO RENDER, and that is a property of the producers rather than of this
+// projection — checked at both of them before this was wired, not assumed. Every
+// string that can reach these two fields is status-and-cause only: refresh.go's
+// checkAndRefreshYouTube and checkTwitchAuth name a status code, a scheme+host,
+// a header NAME, a transport error over a constant URL, or one of two static
+// sentinels, and no branch of either interpolates a response body. The one
+// error that is ABOUT a body — errGuideLoginMarkerUnreadable — is a fixed
+// sentence naming no host, no header and no bytes, pinned by
+// TestUnreadableGuideErrorCarriesNoBody. internal/twitch's ValidateToken, which
+// did echo up to 1 MB of body until Arc 8 Task 9 clamped it, is NOT on this
+// path at all: AuthStatus.TwitchError comes only from refresh.go's own
+// checkTwitchAuth. Anything added to either producer must keep that rule, or
+// this projection puts an intermediary's HTML on the dashboard.
 //
 // `verification` (and, for Twitch, `found`) are ADDITIVE, by the precedent
 // `renewed` set and `ran`/`verdict` and the setup's two verification fields
@@ -130,18 +149,88 @@ func CookieStatusPayload(status cookies.AuthStatus) map[string]any {
 		"found":         status.HasYouTubeCookies,
 		"authenticated": status.YouTubeAuthenticated,
 		"verification":  status.YouTubeVerification.String(),
+		"youtubeError":  status.YouTubeError,
 	}
 }
 
 // TwitchAuthStatusPayload is CookieStatusPayload's Twitch counterpart. See
-// there for the field contract; `found` is new on this side because
+// there for the field contract — including the no-response-bodies rule that
+// makes `twitchError` safe to render — ; `found` is new on this side because
 // AuthStatus had no HasTwitchCookies to project until this arc.
 func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
 	return map[string]any{
 		"found":         status.HasTwitchCookies,
 		"authenticated": status.TwitchAuthenticated,
 		"verification":  status.TwitchVerification.String(),
+		"twitchError":   status.TwitchError,
 	}
+}
+
+// The `cause` values the two browser-read sentinels reach the frontend as.
+//
+// A SHORT STABLE TOKEN, never the sentinel's message. The message is prose that
+// will be reworded; a frontend branch keyed on prose breaks silently the first
+// time it is, and the wording is the half a human reads anyway — it still rides
+// along as `error`. These are the machine half.
+//
+// One per sentinel, and the two must stay distinct for the same reason the
+// sentinels are two: a blocked ladder is a state the operator changes, an
+// unanswered read is the browser side having failed. Collapsing them on the
+// wire would undo that distinction one layer after it was made.
+const (
+	causeBrowserLadderBlocked  = "browser-ladder-blocked"
+	causeBrowserReadUnanswered = "browser-read-unanswered"
+)
+
+// jsonErrorCause is jsonError plus a machine-readable `cause`.
+//
+// Deliberately NOT a field on AutoCookieStatus, and not a widened jsonError.
+// The cause describes THIS request's failure, not the service's state, so it
+// belongs to the response that carries it; and every other jsonError call site
+// in the tree answers a state that has no sentinel to name, so giving them all
+// an empty key would teach the frontend a field that is absent exactly when it
+// would be interesting.
+func jsonErrorCause(w http.ResponseWriter, msg, cause string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "cause": cause})
+}
+
+// writeBrowserReadError answers the two browser-read sentinels and reports
+// whether it did. Nothing is written when it returns false.
+//
+// ONE function for BOTH the setup-finish and the refresh handler, called ahead
+// of each one's own switch. The residual that prompted these sentinels was
+// reported against the setup wire, but cdpGetCookiesAsNetscape is reached from
+// both endpoints — so teaching one of two consumers about an error introduced
+// in the same change would be the junction defect rather than an inherited one,
+// and two hand-written copies of the mapping would be free to drift on the
+// status code.
+//
+// The message passes through VERBATIM, like the profile-import failures below
+// it: cdpCookieReadOutcome composes the only description of what actually
+// stopped the read, and it is the sentence the operator has to act on.
+//
+//   - blocked ladder → 409. Something on this machine is holding or
+//     intercepting the debugging port; that is a CONDITION the operator changes
+//     and then retries, the same shape as the locked cookie DB.
+//   - unanswered read → 502. Moombox asked and the browser side produced
+//     nothing at all. The failure is upstream of this server, which is what
+//     separates it from a 500 (Moombox itself broke).
+//
+// NEITHER is cookies.IsNoBrowserProfile, so the dashboard's shift+click
+// fallback to the in-process refresh is unaffected — correctly: both come from
+// a pass that RAN, and a plain recheck cannot fix either.
+func writeBrowserReadError(rw http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, cookies.ErrBrowserLadderBlocked):
+		jsonErrorCause(rw, err.Error(), causeBrowserLadderBlocked, http.StatusConflict)
+	case errors.Is(err, cookies.ErrBrowserReadUnanswered):
+		jsonErrorCause(rw, err.Error(), causeBrowserReadUnanswered, http.StatusBadGateway)
+	default:
+		return false
+	}
+	return true
 }
 
 // CookieRoutes registers cookie-related API routes. The optional rate
@@ -152,6 +241,24 @@ func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
 func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool, rl *web.RateLimiter) {
 	// POST /api/cookies/recheck
 	r.Post("/api/cookies/recheck", func(rw http.ResponseWriter, req *http.Request) {
+		// CheckNow's bool — "did a pass actually run" — is deliberately ignored,
+		// and this handler is the TUI's R C by another door, so it ignores it for
+		// the same reason (see OnRecheckCookies in cmd/moombox/tui_wiring.go).
+		// The payload below is a STATUS SNAPSHOT, not a claim that this request
+		// produced it: every field is read from GetStatus and is true of the
+		// credentials whichever pass last computed it. A collision with the
+		// 30-minute ticker costs at most one snapshot of freshness.
+		//
+		// Surfacing "a refresh was already running" would need a new key and a
+		// new sentence, and neither exists: the toast is rendered from
+		// cookies.RecheckReport's per-platform verdicts (pinned across both UIs
+		// by cookies_recheck_toast_test.go), and cookies.RefreshDeclinedCauses is
+		// the BROWSER refresher's exhaustive set, pinned in three consumers —
+		// this guard is the in-process refresh's own single-flight and must not
+		// be reported through it.
+		//
+		// The guard is also why this route can stay on the plain router: with it
+		// in place, hammering the endpoint cannot start a second pass.
 		refreshSvc.CheckNow(req.Context())
 		status := refreshSvc.GetStatus()
 		response := map[string]any{
@@ -160,8 +267,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			"twitchAuthStatus": TwitchAuthStatusPayload(status),
 		}
 		if autoCookieSvc != nil {
-			autoStatus := autoCookieSvc.GetStatus()
-			response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
+			// ReloginStatus, not GetStatus: this response reads nothing but
+			// the relogin map, and GetStatus's browser/registry detection
+			// scan would otherwise run on every recheck — the TUI's R C by
+			// another door (see the comment above).
+			response["autoCookieReloginRequired"] = autoCookieSvc.ReloginStatus()
 		} else {
 			// Always emit both supported platforms so the frontend doesn't
 			// need to handle a missing-key fallback (audit cookies.md #44).
@@ -203,6 +313,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// failure for a pass that never ran one. See cookieRefreshOutcome.
 		result, err := autoCookieSvc.RefreshCookiesDetailed(req.Context())
 		if err != nil {
+			// Ahead of the switch, and shared with the finish handler below —
+			// see writeBrowserReadError for why one function answers both.
+			if writeBrowserReadError(rw, err) {
+				return
+			}
 			// Discriminate sentinel errors so the frontend can surface a
 			// useful message (and so XHR callers with `if (!response.ok)`
 			// branches treat this as a real error rather than the previous
@@ -270,15 +385,28 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			return
 		}
 
-		// Re-check auth status after browser refresh
+		// Re-check auth status after browser refresh.
+		//
+		// This is the dashboard twin of the TUI's R F, which logs when CheckNow
+		// reports that a refresh was already in flight (the pass already running
+		// read the cookie file BEFORE this browser pass rewrote it, so the status
+		// below can be pre-refresh and stays that way until the next tick). The
+		// routes package has no operational logger — SetPanicLogger installs an
+		// Error-only sink for recovered panics and is not one — so this side
+		// records the same fact in a comment rather than borrowing that. The
+		// refresh's OWN outcome comes from `result` via cookieRefreshOutcome and
+		// is unaffected; only cookieStatus/twitchAuthStatus can lag.
 		refreshSvc.CheckNow(req.Context())
 		status := refreshSvc.GetStatus()
 
 		response := cookieRefreshOutcome(result)
 		response["cookieStatus"] = CookieStatusPayload(status)
 		response["twitchAuthStatus"] = TwitchAuthStatusPayload(status)
-		autoStatus := autoCookieSvc.GetStatus()
-		response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
+		// ReloginStatus, not GetStatus: this response reads nothing but the
+		// relogin map, and GetStatus's browser/registry detection scan would
+		// otherwise run on every manual refresh click for a field this never
+		// uses.
+		response["autoCookieReloginRequired"] = autoCookieSvc.ReloginStatus()
 		if getActivePlatforms != nil {
 			response["activePlatforms"] = getActivePlatforms()
 		}
@@ -331,6 +459,15 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		result, err := autoCookieSvc.FinishSetupDetailed(req.Context())
 		if err != nil {
+			// Ahead of the switch. Both browser-read failures used to fall to
+			// its default arm, whose "failed to finish setup" this file's own
+			// comment called out as giving no hint — and one of them, the
+			// blocked ladder, is specifically the case where the dialog's other
+			// answer ("no login detected") would be wrong, because the read
+			// never got far enough to have a verdict.
+			if writeBrowserReadError(rw, err) {
+				return
+			}
 			switch {
 			case errors.Is(err, cookies.ErrNoSetupInProgress):
 				jsonError(rw, err.Error(), http.StatusNotFound)
@@ -441,6 +578,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			jsonResponse(rw, map[string]any{"valid": false, "error": err.Error()})
 			return
 		}
+		// A successfully validated custom path is exactly the moment an
+		// operator has proven a browser exists somewhere the routine
+		// filesystem+registry scan may not have looked (or may have looked
+		// before it was installed) — invalidate so the next status poll's
+		// detection reflects it instead of riding out the remainder of the
+		// 60s TTL.
+		cookies.InvalidateBrowserDetection()
 		jsonResponse(rw, map[string]any{"valid": true})
 	})
 
@@ -454,8 +598,19 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			jsonResponse(rw, map[string]any{
 				"setupInProgress": false,
 				"browser":         nil,
-				"lastRefresh":     nil,
-				"lastError":       nil,
+				// AvailableBrowsers has no `omitempty` on AutoCookieStatus
+				// and the real GetStatus() never sends a nil slice (DetectBrowsers
+				// returns non-nil so callers can range without a nil check) — []
+				// here, not nil, so this branch cannot teach the frontend's
+				// unconditional iteration a null it would never see from the
+				// real service. ConfiguredBrowserPath/Type are NOT added here:
+				// both carry `omitempty` and are empty on a fresh install, so a
+				// zero-value AutoCookieStatus omits them too — adding them would
+				// be the drift in the other direction, a key this branch sends
+				// that the real zero-value response does not.
+				"availableBrowsers": []cookies.DetectedBrowser{},
+				"lastRefresh":       nil,
+				"lastError":         nil,
 				// Both supported platforms always present — see audit
 				// cookies.md #44.
 				"needsManualRelogin": cookies.AutoCookieReloginRequired{

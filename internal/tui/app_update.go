@@ -350,14 +350,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dashboard's refresh button is the same gesture and had drifted to a
 		// different answer entirely. This side decides only WHICH platforms
 		// were checked; the sentence is shared.
-		var checked []cookies.RecheckedPlatform
-		if a.statusBar.ytActive {
-			checked = append(checked, cookies.RecheckedPlatform{Label: "YouTube", Verdict: msg.YouTube})
-		}
-		if a.statusBar.twActive {
-			checked = append(checked, cookies.RecheckedPlatform{Label: "Twitch", Verdict: msg.Twitch})
-		}
-		a.setFeedback(cookies.RecheckReport(checked...))
+		a.setFeedbackWithSeverity(a.cookieRecheckFeedback(msg))
 		return a, nil
 
 	case cookieForceRefreshResultMsg:
@@ -788,13 +781,140 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// cookieRecheckFeedback words one R C result.
+//
+// TWO PARTS, and the split is what keeps the shared sentence shared. The lead
+// is cookies.RecheckReport verbatim — the Web dashboard renders the identical
+// string for the identical gesture, and both copies are pinned against that
+// function — so nothing here may reword it. The reason, when there is one, is
+// APPENDED after it: a suffix cannot change the sentence a mutation test
+// compares, and a check that concluded produces no suffix at all, so the
+// pinned string is what an operator with working cookies still sees.
+//
+// A reason is rendered only for a platform that is ACTIVE and whose verdict is
+// RefreshUnknown. The verdict gate is here rather than at the wiring because
+// "could not establish" is the only state a reason explains: attaching one to
+// "OK" or "not authenticated" would read as a cause for a conclusion that has
+// none.
+//
+// LastError is a THIRD part, and it is ungated by any verdict on purpose. It
+// belongs to the auto-cookie service, not to the check this line reports, and
+// it can be non-empty while both verdicts are OK — a browser refresh that
+// failed leaves working credentials behind whenever the in-process session
+// refresh is still renewing them. That combination is exactly the one an
+// operator has no other way to find out about from this key, so it is rendered
+// whenever it is set and never inferred from anything else on this message. It
+// goes LAST so the clamp below eats it before it eats the verdicts.
+//
+// AND THAT IS WHY THE SEVERITY IS RETURNED RATHER THAN LEFT TO THE COLORIZER.
+// The clamp runs here and feedbackColor runs on what survives it, so on a
+// narrow terminal the LastError clause — the whole reason the line is not
+// green — is truncated away before anything looks at it. Measured: at 40
+// columns the line rendered in the SUCCESS colour while announcing a recorded
+// failure. Every fact the colour depends on is in hand at this point and none
+// of it is in hand afterwards, so the answer is computed here and carried.
+func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbackSeverity) {
+	var checked []cookies.RecheckedPlatform
+	var reasons []string
+	// stated starts at the bottom and only ever rises. Each contributing fact
+	// raises it independently, so a new one cannot quietly cancel an older —
+	// which is the property the substring scan could not offer at all.
+	stated := severitySuccess
+	consider := func(label string, verdict cookies.RefreshVerdict, reason string) {
+		checked = append(checked, cookies.RecheckedPlatform{Label: label, Verdict: verdict})
+		switch verdict {
+		case cookies.RefreshFailed:
+			// Conclusive: the site was reached and refused. The actionable end
+			// — re-export the credentials — and the same ruling the fallback
+			// scan's "not authenticated" entry encodes for factless callers.
+			stated = max(stated, severityError)
+		case cookies.RefreshUnknown:
+			// "Could not establish" asks for nothing and must not alarm.
+			stated = max(stated, severityWarning)
+		}
+		if verdict == cookies.RefreshUnknown && reason != "" {
+			reasons = append(reasons, label+": "+reason)
+		}
+	}
+	if a.statusBar.ytActive {
+		consider("YouTube", msg.YouTube, msg.YouTubeReason)
+	}
+	if a.statusBar.twActive {
+		consider("Twitch", msg.Twitch, msg.TwitchReason)
+	}
+	if len(checked) == 0 {
+		// "Cookies: no platforms configured" — an advisory, not a success.
+		// Without this arm the empty case would report severitySuccess and
+		// render green, where the scan's "no platforms" entry renders yellow.
+		stated = max(stated, severityWarning)
+	}
+	line := cookies.RecheckReport(checked...)
+	if len(reasons) > 0 {
+		line += " (" + strings.Join(reasons, "; ") + ")"
+	}
+	if msg.LastError != "" {
+		line += " | Last cookie error: " + msg.LastError
+		// AT LEAST warning, whatever the verdicts said. A recorded failure is
+		// something to act on even beside two healthy platforms, and this is
+		// the fact the clamp destroys. Never more than warning: what was
+		// recorded is a fact about a PREVIOUS pass, and the conclusive verdict
+		// of THIS one is the only thing that earns red.
+		stated = max(stated, severityWarning)
+	}
+	return a.fitFeedback(line), stated
+}
+
+// fitFeedback clamps a feedback line to the room the overlay actually has.
+//
+// addOverlayMessage renders the line as "  "+msg and pads it out to a.width; it
+// does NOT clip. A line wider than the terminal therefore wraps, and because it
+// is written into a fixed row of an already-composed frame, the wrap pushes
+// every row below it down — the whole dashboard shifts for three seconds.
+//
+// Every other string reaching setFeedback is composed here out of bounded
+// vocabulary, so nothing needed this before. The recheck reason is the first
+// one whose length is decided elsewhere (a resolver's DNS wording, a proxy's
+// host name), which is why the clamp lives at the composer rather than inside
+// setFeedback: putting it there would silently truncate messages whose exact
+// text other tests pin.
+//
+// truncateString is the task list's own ellipsis helper, so an over-long line
+// ends the same way an over-long title does. Below the first WindowSizeMsg
+// a.width is 0 and the line is returned whole: there is no frame to break yet,
+// and clamping to a width nobody has reported would cut every message to
+// nothing.
+func (a *App) fitFeedback(line string) string {
+	const overlayIndent = 2 // addOverlayMessage's leading "  "
+	if a.width <= overlayIndent {
+		return line
+	}
+	return truncateString(line, a.width-overlayIndent)
+}
+
 func (a *App) setFeedback(msg string) {
+	a.setFeedbackWithSeverity(msg, severityUnstated)
+}
+
+// setFeedbackWithSeverity is setFeedback for a composer that KNOWS how alarming
+// its line is, rather than leaving feedbackColor to infer it from the finished
+// prose. See feedbackSeverity for why the inference is not good enough on the
+// one line that carries it.
+//
+// It takes the pair in the order cookieRecheckFeedback returns it, so the call
+// site reads `a.setFeedbackWithSeverity(a.cookieRecheckFeedback(msg))` and the
+// message and the fact about it cannot be assembled apart.
+func (a *App) setFeedbackWithSeverity(msg string, stated feedbackSeverity) {
 	a.feedbackMsg = msg
+	a.feedbackSev = stated
 	a.feedbackTimer = time.Now().Add(3 * time.Second)
 }
 
 func (a *App) setFeedbackWithDuration(msg string, d time.Duration) {
 	a.feedbackMsg = msg
+	// Reset, never left alone: every one of these is a chord message whose
+	// severity the scan reads correctly, and inheriting the previous line's
+	// stated fact would colour it by something that is no longer on screen.
+	a.feedbackSev = severityUnstated
 	a.feedbackTimer = time.Now().Add(d)
 }
 

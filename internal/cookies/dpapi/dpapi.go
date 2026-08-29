@@ -188,7 +188,43 @@ const chromeV11Prefix = "v11"
 // SYSTEM-level service and is NOT recoverable with a plain CURRENT_USER
 // CryptUnprotectData, so this fallback cannot decrypt them — but the prefix
 // must be recognized so the error explains WHY the fallback yields nothing
-// on current Chrome/Edge profiles (Brave kept v10 and still works).
+// on current Chrome/Edge profiles.
+//
+// Re-checked 2026-08-29 (H6), hedged 2026-08-29 (Arc 8 fix round 1,
+// Finding 4): the previous version of this comment claimed "Brave kept
+// v10 and still works". references/yt-dlp's cookies.py (@81ecd58,
+// v2026.08.19) implements no App-Bound Encryption handling at all — grepped
+// for v20/app_bound/App-Bound/elevat, zero matches — on Windows it treats
+// any non-"v10" prefix as a raw DPAPI blob, so it is silent on which
+// browsers use v20 and cannot be used to confirm OR deny the original
+// claim either way.
+//
+// As of 2026-08-29, PER THIRD-PARTY SECURITY RESEARCH — not Brave's own
+// changelog, and not independently cross-confirmed — Brave appears to have
+// moved off plain v10: xaitax/Chrome-App-Bound-Encryption-Decryption
+// (github.com/xaitax/Chrome-App-Bound-Encryption-Decryption)'s RESEARCH.md
+// documents Brave registering its OWN IElevator COM elevation service
+// (IID 5A9A9462-2FA1-4FEB-B7F2-DF3D19134463), with functional support in
+// that tool landing in its v0.18.1 (release notes dated 2026-01-24). The
+// load-bearing fact is that Brave registers an elevation service AT ALL —
+// a browser with no App-Bound-style key service has nothing for this
+// prefix to name. (An earlier draft of this note additionally compared
+// that IID against "Chrome/Edge's shared" A949CB4E-C4F9-44C4-B213-
+// 6BF8AA9AC69C — dropped: Chrome and Edge are separate products, and
+// whether they share one IID was never verified here, nor is it what the
+// conclusion rests on.) Vivaldi, per the same single source, was still
+// v10/DPAPI-only.
+//
+// Given one third-party source and no confirmation from Brave itself,
+// treat "Brave has moved to v20" as the current best guess, not an
+// established fact — re-verify before it drives anything more consequential
+// than this fallback's own error message. No code change follows from
+// this either way: v20 detection here is prefix-based, not
+// browser-name-based, so a Brave cookie using v20 already hits
+// ErrAppBoundEncryption and the AppBound counter exactly like Chrome's or
+// Edge's. Any future user-facing copy that says "Brave" and "DPAPI
+// fallback" in the same sentence should be re-checked against this note
+// before shipping.
 const chromeV20Prefix = "v20"
 
 // chromeHashPrefixMetaVersion is the Cookies-database `meta.version` at

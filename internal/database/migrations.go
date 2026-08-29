@@ -733,11 +733,13 @@ func (db *Database) migrateV17() error {
 // There is deliberately NO backfill. Existing COOKIES? rows parked before the
 // distinction existed, and nothing on the row can tell retroactively whether
 // the session was signed in at the time — the error text of that era says
-// "Member-only" for both cases. They keep the '' default, which every sweep
-// treats as ParkReasonAuth, so their behavior is byte-identical to what it was
-// before this column existed. Guessing "membership" for them would silently
-// strand genuinely dead-cookie jobs, which is the one regression this change
-// must not cause.
+// "Member-only" for both cases. They keep the column's default below, which
+// every sweep treats as ParkReasonAuth, so their behavior is byte-identical to
+// what it was before this column existed. Guessing "membership" for them
+// would silently strand genuinely dead-cookie jobs, which is the one
+// regression this change must not cause.
+//
+//	park_reason TEXT NOT NULL DEFAULT ''
 func (db *Database) migrateV18() error {
 	ctx := db.getCtx()
 	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is
@@ -754,8 +756,11 @@ func (db *Database) migrateV18() error {
 // No backfill, for the same reason v18 had none and one more besides: the
 // value is an opaque fingerprint of credentials as they were at park time, and
 // nothing in the database can reconstruct it after the fact. Existing rows keep
-// '' and are treated as "parked under an unknown account", which resolves
-// permissively — one retry rather than a permanent strand.
+// the column's default below and are treated as "parked under an unknown
+// account", which resolves permissively — one retry rather than a permanent
+// strand.
+//
+//	park_identity TEXT NOT NULL DEFAULT ''
 func (db *Database) migrateV19() error {
 	ctx := db.getCtx()
 	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is

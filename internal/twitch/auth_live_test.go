@@ -31,18 +31,18 @@ import (
 // Enable with MOOMBOX_LIVE_TWITCH_COOKIES=<path to a Netscape cookie file for
 // a signed-in Twitch session>. The path alone is the opt-in; no second flag.
 // The cookie file is read by the jar and never printed: this test asserts a
-// verdict and reports presence, never any cookie value, and Auth is built
-// with nopLogger so the probe's own logging is discarded too — ValidateToken
-// logs the account's login and user_id at Debug on success
-// (internal/twitch/auth.go:107), which a real logger would put in test
-// output or CI logs.
+// verdict and reports presence, never any cookie value, and Auth is built with
+// nopLogger so the probe's own logging is discarded too. ValidateToken's
+// success line no longer names the account's login — it logs the opaque
+// user_id alone — but nopLogger stays, because a live test has no business
+// deciding which of a subject's log lines are safe to print.
 //
-// ValidateToken also has a pre-existing hazard on its error path: on an
-// unexpected (non-200, non-401) status it interpolates up to 1 MB of Twitch's
-// response body into the returned error (internal/twitch/auth.go:91-93).
-// That is tracked elsewhere and not fixed here, but this test does not
-// forward that error unbounded — it truncates what it prints so a single
-// odd response from Twitch cannot dump that body into test output.
+// The unbounded-body hazard this test used to defend against is fixed at the
+// source: an unexpected (non-200, non-401) status now yields the status, the
+// media type, and at most a 200-byte prefix of a text/plain or
+// application/json body (validateErrorDetail). The truncation below stays
+// anyway — it costs one verb and it is the last line of defence if that rule
+// is ever widened.
 func TestLiveAuthenticatedTokenValidate(t *testing.T) {
 	path := os.Getenv("MOOMBOX_LIVE_TWITCH_COOKIES")
 	if path == "" {
@@ -64,8 +64,8 @@ func TestLiveAuthenticatedTokenValidate(t *testing.T) {
 
 	ok, err := auth.ValidateToken(ctx)
 	if err != nil {
-		// Bounded on purpose: see the doc comment above on why the error
-		// this wraps can carry up to 1 MB of response body.
+		// Bounded on purpose: see the doc comment above. validateErrorDetail
+		// already bounds what the error can carry; this is belt and braces.
 		t.Fatalf("validate token against %s errored: %.300s", constants.TwitchURLs.OAuthValidate, err)
 	}
 	if !ok {

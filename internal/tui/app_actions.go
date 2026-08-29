@@ -30,9 +30,20 @@ func (a *App) recheckCookiesCmd() tea.Cmd {
 		return nil
 	}
 	recheckFn := a.OnRecheckCookies
+	// Read off the App here, on the update goroutine, and captured into the
+	// closure — the command below runs on a bubbletea worker and must not
+	// touch App fields. Same discipline recheckFn is already held to.
+	lastErrorFn := a.OnAutoCookieLastError
 	return safeCmd(func() tea.Msg {
-		yt, tw := recheckFn()
-		return cookieRecheckResultMsg{YouTube: yt, Twitch: tw}
+		yt, tw, ytReason, twReason := recheckFn()
+		msg := cookieRecheckResultMsg{
+			YouTube: yt, Twitch: tw,
+			YouTubeReason: ytReason, TwitchReason: twReason,
+		}
+		if lastErrorFn != nil {
+			msg.LastError = lastErrorFn()
+		}
+		return msg
 	})
 }
 

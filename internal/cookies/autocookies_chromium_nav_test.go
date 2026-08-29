@@ -3,12 +3,14 @@ package cookies
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // TestNavigateAllPlatformsFoldsEveryFailure is the Chromium half of the hole
@@ -83,7 +85,7 @@ func TestNavigateAllPlatformsFoldsEveryFailure(t *testing.T) {
 				wantVisited = append(wantVisited, platformRefreshURLs[platform])
 			}
 
-			gotAll, gotFailures := navigateAllPlatforms(context.Background(), 9222, tt.platforms, navigate)
+			gotAll, gotFailures, gotExhausted := navigateAllPlatforms(context.Background(), 9222, tt.platforms, navigate)
 			if gotAll != tt.wantAll {
 				t.Errorf("allNavigated = %v, want %v — a pass with no proof it navigated "+
 					"must not be credited with renewing the credentials", gotAll, tt.wantAll)
@@ -106,6 +108,11 @@ func TestNavigateAllPlatformsFoldsEveryFailure(t *testing.T) {
 			// a bare count.
 			if !slices.Equal(visited, wantVisited) {
 				t.Errorf("navigated %v, want exactly %v", visited, wantVisited)
+			}
+			// None of these rows produce a budget-exhaustion outcome --
+			// that fold has its own table, TestNavigateAllPlatformsFoldsBudgetExhaustion.
+			if len(gotExhausted) != 0 {
+				t.Errorf("exhausted = %v, want none -- this table only exercises success/failure", gotExhausted)
 			}
 		})
 	}
@@ -141,5 +148,125 @@ func TestCdpNavigateReportsAMissingPageTarget(t *testing.T) {
 	if err := cdpNavigate(context.Background(), port, "https://www.youtube.com"); err == nil {
 		t.Fatal("cdpNavigate returned nil with no page target to navigate — " +
 			"the verdict downstream would be folding a value that is always nil")
+	}
+}
+
+// TestCdpNavigateAndWaitReturnsSentinelOnBudgetExhaustion is the connect-then-
+// stall case Arc 8 7(e) decided: a Chromium that accepts the CDP connection,
+// answers Page.enable and the Page.navigate ack, and then never fires
+// Page.loadEventFired must not be indistinguishable from a page that merely
+// took a moment to load.
+//
+// Never launches a real browser — startStubCDP (autocookies_chromium_threestate_test.go)
+// is the fake-websocket-server this test extends via suppressLoadEvent. The
+// short-lived ctx, not cdpNavigateTimeout, is what makes the budget expire
+// quickly; the production 30s constant is untouched (see the Traps in the
+// Arc 8 task 11 brief).
+//
+// Standing mutation check: revert the exhaustion branch in cdpNavigateAndWait
+// to `return nil` and this test fails, because errors.Is(nil, ...) is false.
+func TestCdpNavigateAndWaitReturnsSentinelOnBudgetExhaustion(t *testing.T) {
+	port := startStubCDP(t, stubCDPOptions{suppressLoadEvent: true})
+	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/devtools/page/stub", port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := cdpNavigateAndWait(ctx, wsURL, "https://www.youtube.com")
+	if !errors.Is(err, errNavigateBudgetExhausted) {
+		t.Fatalf("cdpNavigateAndWait = %v, want errors.Is(err, errNavigateBudgetExhausted) — "+
+			"a connect-then-stall browser must be distinguishable from a genuine transport failure, "+
+			"not string-matched", err)
+	}
+}
+
+// TestNavigateAllPlatformsFoldsBudgetExhaustion is 7(e)'s bounded rule: a
+// platform whose navigation only exhausted its read budget is "not observed",
+// not a failure, and it costs the returned bool (what becomes browserActed at
+// the call site) only when EVERY platform ends that way. One slow page beside
+// a platform that fired its load event is not connect-then-stall — the
+// browser demonstrably works — and must still read as acted.
+//
+// Standing mutation check: loosen the "every platform" fold in
+// navigateAllPlatforms to "any platform" and the second case below (one
+// exhausted, one loaded) flips from true to false.
+func TestNavigateAllPlatformsFoldsBudgetExhaustion(t *testing.T) {
+	transportErr := errors.New("CDP connect: EOF")
+
+	tests := []struct {
+		name      string
+		outcomes  map[string]error // platform -> the error navigate returns; nil = loaded
+		wantActed bool
+	}{
+		{
+			name: "every platform exhausted its budget",
+			outcomes: map[string]error{
+				"youtube": errNavigateBudgetExhausted,
+				"twitch":  errNavigateBudgetExhausted,
+			},
+			// Connect-then-stall: nothing was confirmed on either platform,
+			// so there is no proof the browser did anything.
+			wantActed: false,
+		},
+		{
+			name: "one exhausted, the other fired its load event",
+			outcomes: map[string]error{
+				"youtube": nil,
+				"twitch":  errNavigateBudgetExhausted,
+			},
+			// A slow page next to a working one — the browser demonstrably
+			// works, so this is not connect-then-stall.
+			wantActed: true,
+		},
+		{
+			name: "one exhausted, the other a genuine transport failure",
+			outcomes: map[string]error{
+				"youtube": transportErr,
+				"twitch":  errNavigateBudgetExhausted,
+			},
+			// Lands false, but via the PRE-EXISTING P2 rule (a real
+			// navigation error always fails the fold) — not because of the
+			// new exhaustion rule. The sibling's exhaustion plays no part in
+			// this verdict.
+			wantActed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			platforms := []string{"youtube", "twitch"}
+			navigate := func(_ context.Context, _ int, target string) error {
+				for platform, refreshURL := range platformRefreshURLs {
+					if refreshURL == target {
+						return tt.outcomes[platform]
+					}
+				}
+				return nil
+			}
+
+			gotActed, gotFailures, gotExhausted := navigateAllPlatforms(context.Background(), 9222, platforms, navigate)
+			if gotActed != tt.wantActed {
+				t.Errorf("navigateAllPlatforms acted = %v, want %v", gotActed, tt.wantActed)
+			}
+			// A budget-exhaustion outcome must never be reported as a
+			// navFailure — it did not fail, it was merely not observed, and
+			// refreshChromium logs the two lists at different levels (Warn
+			// vs Debug) because of that distinction.
+			for _, f := range gotFailures {
+				if errors.Is(f.err, errNavigateBudgetExhausted) {
+					t.Errorf("budget exhaustion on %q was folded into navFailures — "+
+						"it is not a failure, see the Debug-vs-Warn split in refreshChromium", f.platform)
+				}
+			}
+			wantExhaustedCount := 0
+			for _, err := range tt.outcomes {
+				if errors.Is(err, errNavigateBudgetExhausted) {
+					wantExhaustedCount++
+				}
+			}
+			if len(gotExhausted) != wantExhaustedCount {
+				t.Errorf("exhausted = %v, want %d platform(s) named", gotExhausted, wantExhaustedCount)
+			}
+		})
 	}
 }

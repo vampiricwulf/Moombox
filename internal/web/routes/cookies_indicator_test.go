@@ -21,9 +21,17 @@ import (
 // why they had already drifted apart between the two platforms.
 
 // indicatorState calls cookieIndicatorState and unpacks {className, title}.
-func indicatorState(t *testing.T, vm *goja.Runtime, platform string, status map[string]any, relogin bool) (className, title string) {
+//
+// `parked` is variadic so the rows written before it existed keep reading as
+// they did — omitting it passes `undefined`, which is what a caller with no
+// parked job supplies anyway.
+func indicatorState(t *testing.T, vm *goja.Runtime, platform string, status map[string]any, relogin bool, parked ...bool) (className, title string) {
 	t.Helper()
-	raw := jsCall(t, vm, "cookieIndicatorState", platform, status, relogin)
+	args := []any{platform, status, relogin}
+	if len(parked) > 0 {
+		args = append(args, parked[0])
+	}
+	raw := jsCall(t, vm, "cookieIndicatorState", args...)
 	m, ok := raw.(map[string]any)
 	if !ok {
 		t.Fatalf("cookieIndicatorState returned %T, want the {className, title} object", raw)
@@ -284,9 +292,9 @@ func TestDashboardBadgeDelegatesToTheTestableHelper(t *testing.T) {
 	body := jsMethodBody(t, app, "updateStatusBar")
 
 	args := jsCallArgs(body, "cookieIndicatorState")
-	if len(args) != 3 {
-		t.Fatalf("updateStatusBar calls cookieIndicatorState with %d arguments (%v), want 3 "+
-			"(platform, status, reloginRequired)", len(args), args)
+	if len(args) != 4 {
+		t.Fatalf("updateStatusBar calls cookieIndicatorState with %d arguments (%v), want 4 "+
+			"(platform, status, reloginRequired, parked)", len(args), args)
 	}
 	for _, want := range []string{"this.cookieStatus", "this.twitchAuthStatus"} {
 		if !strings.Contains(body, want) {
@@ -298,6 +306,173 @@ func TestDashboardBadgeDelegatesToTheTestableHelper(t *testing.T) {
 		t.Error("updateStatusBar words an indicator class itself again. That is where the two " +
 			"platform chains drifted apart in the first place, and it is the half no test can " +
 			"execute — the decision belongs in cookieIndicatorState")
+	}
+}
+
+// TestParkedJobOutranksTheCheckOnTheDashboardBadge is the Web half of the TUI's
+// arm-order ruling (TestParkedCookieJobsOutrankAnUnknownCheck).
+//
+// A job stopped in COOKIES? is evidence from a real download attempt: something
+// tried these credentials and could not proceed. That outranks any verdict the
+// periodic check reports, including "ok" — a session can authenticate a status
+// probe and still be refused the thing an archive actually needs, which is
+// precisely the state a park records. Ranked below `authenticated` it would be
+// invisible behind a green badge; ranked above `reloginRequired` it would
+// replace the more specific instruction ("sign in again") with a vaguer one.
+//
+// Every row asserts both the class and that the badge SAYS what happened. The
+// last row is the pairing that makes the others mean something: with no park,
+// the identical status renders healthy.
+func TestParkedJobOutranksTheCheckOnTheDashboardBadge(t *testing.T) {
+	vm := utilsVM(t)
+
+	const parkedTitle = "A download stopped for want of usable credentials"
+
+	t.Run("a park reddens a badge the check calls healthy", func(t *testing.T) {
+		className, title := indicatorState(t, vm, "youtube",
+			map[string]any{"found": true, "authenticated": true, "verification": "ok"}, false, true)
+		if className != "indicator-error" {
+			t.Errorf("className = %q, want indicator-error — a parked job is evidence from a real "+
+				"download attempt and outranks a check that merely asked (title %q)", className, title)
+		}
+		if !strings.Contains(title, parkedTitle) {
+			t.Errorf("title = %q, want it to say %q. A red badge with no explanation sends the "+
+				"operator to guess", title, parkedTitle)
+		}
+	})
+
+	t.Run("a park outranks an inconclusive check", func(t *testing.T) {
+		className, title := indicatorState(t, vm, "twitch",
+			map[string]any{"found": true, "authenticated": false, "verification": "unknown"}, false, true)
+		if className != "indicator-error" {
+			t.Errorf("className = %q, want indicator-error", className)
+		}
+		if strings.Contains(title, "could not establish") {
+			t.Errorf("a parked Twitch job is being reported as an inconclusive check: %q. Evidence "+
+				"of a real failure must not be displayed as uncertainty", title)
+		}
+	})
+
+	t.Run("re-login still outranks a park", func(t *testing.T) {
+		_, title := indicatorState(t, vm, "youtube",
+			map[string]any{"found": true, "authenticated": false, "verification": "failed"}, true, true)
+		if !strings.Contains(title, "Re-login") {
+			t.Errorf("title = %q, want the re-login instruction. Both are red; the more specific "+
+				"one — the one that names what to do — has to survive", title)
+		}
+	})
+
+	t.Run("premise: no park, no escalation", func(t *testing.T) {
+		className, title := indicatorState(t, vm, "youtube",
+			map[string]any{"found": true, "authenticated": true, "verification": "ok"}, false, false)
+		if className != "indicator-ok" {
+			t.Fatalf("premise lost: without a park the same status no longer renders healthy "+
+				"(%q / %q), so every assertion above is satisfied by a badge that alarms "+
+				"unconditionally", className, title)
+		}
+		if strings.Contains(title, parkedTitle) {
+			t.Fatalf("the park wording appears with no parked job: %q", title)
+		}
+	})
+}
+
+// TestIndicatorTitleNamesWhyACheckCouldNotConclude is the reason strings
+// reaching a user-visible surface.
+//
+// AuthStatus.YouTubeError / TwitchError carry WHY a check reached
+// RefreshUnknown, and until Arc 8 Task 12a nothing read them: a captive portal,
+// a rate limit and an intercepting proxy all rendered as the same six words,
+// and none of them named the thing to fix. 12a put them on the wire; this is
+// the Web reading them.
+//
+// GATED ON THE VERDICT, not on the field being present. A reason attached to
+// "ok" or "not authenticated" would read as a cause for a conclusion that has
+// none — the producers leave the field empty there, and the renderer does not
+// trust that. The last row is the additive contract: an older binary sends no
+// such key and the sentence is exactly today's.
+func TestIndicatorTitleNamesWhyACheckCouldNotConclude(t *testing.T) {
+	vm := utilsVM(t)
+
+	const reason = "GET https://www.youtube.com/ returned HTTP 429"
+
+	t.Run("an inconclusive check names its cause", func(t *testing.T) {
+		_, title := indicatorState(t, vm, "youtube", map[string]any{
+			"found": true, "authenticated": false, "verification": "unknown",
+			"youtubeError": reason,
+		}, false)
+		if !strings.Contains(title, "could not establish") {
+			t.Errorf("title = %q, want the hedged sentence kept intact — the reason is appended to "+
+				"it, never woven into it", title)
+		}
+		if !strings.Contains(title, reason) {
+			t.Errorf("title = %q, want it to name %q. Without it every cause renders identically "+
+				"and none of them says what to fix", title, reason)
+		}
+	})
+
+	t.Run("twitch reads its own key", func(t *testing.T) {
+		_, title := indicatorState(t, vm, "twitch", map[string]any{
+			"found": true, "authenticated": false, "verification": "unknown",
+			"twitchError": reason,
+		}, false)
+		if !strings.Contains(title, reason) {
+			t.Errorf("the Twitch badge reads the wrong payload key: %q. The two halves come off one "+
+				"AuthStatus and land on differently-named keys", title)
+		}
+	})
+
+	t.Run("a conclusive verdict carries no cause", func(t *testing.T) {
+		_, title := indicatorState(t, vm, "youtube", map[string]any{
+			"found": true, "authenticated": false, "verification": "failed",
+			"youtubeError": reason,
+		}, false)
+		if strings.Contains(title, reason) {
+			t.Errorf("title = %q attaches a cause to a conclusion that has none. \"Not "+
+				"authenticated\" is what the site said; there is nothing left to explain", title)
+		}
+	})
+
+	t.Run("an older binary sends no reason", func(t *testing.T) {
+		_, title := indicatorState(t, vm, "youtube",
+			map[string]any{"found": true, "authenticated": false, "verification": "unknown"}, false)
+		if strings.Contains(title, "(") {
+			t.Errorf("title = %q — with no reason field the sentence must be exactly the one every "+
+				"older install already shows, with no empty parenthetical", title)
+		}
+	})
+}
+
+// TestHandlerPayloadCarriesTheReasonToTheBadge closes the Go↔JS seam for the
+// two reason keys, the way TestCookieIndicatorReadsTheHandlersOwnPayload does
+// for `verification` and `found`.
+//
+// A rename on either side is invisible to a table of hand-written literals:
+// `undefined` is falsy, so the suffix simply stops appearing and the badge
+// reverts to the sentence that names no cause — the exact state 12a fixed,
+// restored silently.
+func TestHandlerPayloadCarriesTheReasonToTheBadge(t *testing.T) {
+	vm := utilsVM(t)
+
+	status := cookies.AuthStatus{
+		HasYouTubeCookies: true, HasTwitchCookies: true,
+		YouTubeVerification: cookies.RefreshUnknown, TwitchVerification: cookies.RefreshUnknown,
+		YouTubeError: "youtube.com: no answer within 10s",
+		TwitchError:  "gql.twitch.tv returned HTTP 503",
+	}
+
+	for _, side := range []struct {
+		platform string
+		payload  map[string]any
+		want     string
+	}{
+		{"youtube", CookieStatusPayload(status), status.YouTubeError},
+		{"twitch", TwitchAuthStatusPayload(status), status.TwitchError},
+	} {
+		_, title := indicatorState(t, vm, side.platform, side.payload, false)
+		if !strings.Contains(title, side.want) {
+			t.Errorf("%s: the handler's own payload no longer reaches the badge's reason arm — "+
+				"title %q does not name %q", side.platform, title, side.want)
+		}
 	}
 }
 
@@ -413,8 +588,8 @@ func TestReloginWarningIsNotGatedOnAutoCookies(t *testing.T) {
 	// so a mention of the flag in a neighbouring comment cannot stand in for
 	// passing it, and so an exactly-rendered local that is then ignored fails.
 	args := jsCallArgs(code, "cookieIndicatorState")
-	if len(args) != 3 {
-		t.Fatalf("updateStatusBar calls cookieIndicatorState with %d arguments (%v), want 3", len(args), args)
+	if len(args) != 4 {
+		t.Fatalf("updateStatusBar calls cookieIndicatorState with %d arguments (%v), want 4", len(args), args)
 	}
 	if args[2] != "relogin" {
 		t.Errorf("the badge's third argument is %q, not the `relogin` local the assertion above "+

@@ -28,9 +28,15 @@ var cookiesHTTPClient = httpx.Client(30 * time.Second)
 // server — these functions have no other seam (see refresh.go's note that
 // the pure predicates were extracted for exactly this reason).
 var (
-	youtubeGuideURL        = "https://www.youtube.com/youtubei/v1/guide"
-	youtubeGuideRefreshURL = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
-	twitchValidateURL      = "https://id.twitch.tv/oauth2/validate"
+	// One endpoint, and there was only ever one. This used to be two vars —
+	// youtubeGuideURL and youtubeGuideRefreshURL — described as different
+	// endpoints kept apart on purpose. They were not: checkYouTubeAuth sent
+	// youtubeGuideURL+"?prettyPrint=false", which is youtubeGuideRefreshURL
+	// character for character. Folding the two guide functions into one
+	// exchange made the duplicate visible, since both call sites then read the
+	// same expression from two different names.
+	youtubeGuideURL   = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
+	twitchValidateURL = "https://id.twitch.tv/oauth2/validate"
 )
 
 const (
@@ -83,6 +89,13 @@ const (
 	// suppress itself on alternate cycles — halving a coverage nobody decided
 	// to halve. TestFallbackObservationAgesOutWithinOneCadence pins it.
 	//
+	// NewRefreshService enforces that upper bound against the interval it is
+	// actually handed, not just against the default constant: an interval at
+	// or below this window is refused and replaced with the default, with a
+	// Warn naming both numbers. Nothing in production reaches that clamp today
+	// — no config knob feeds the constructor's refreshInterval parameter — so
+	// it exists for the test constructor and for the day a knob appears.
+	//
 	// The lower bound is an ASSUMPTION about configuration, not an invariant,
 	// and it is worth being exact about because nothing enforces it. The skip
 	// only works while membership observations arrive more often than this
@@ -99,11 +112,6 @@ const (
 	// deriving this from it would couple the cookie subsystem to the monitor's
 	// schedule for a cost difference measured in one HTTP request per hour.
 	livenessFreshWindow = 25 * time.Minute
-
-	// youtubeClientVersion is the WEB client version sent in Innertube API requests.
-	// Update this when YouTube bumps the client version — it's used in auth check
-	// and session refresh requests. Format: "2.YYYYMMDD.00.00".
-	youtubeClientVersion = "2.20260708.00.00"
 
 	// authBodyFallbackLimit caps how much of the response body we promote to a
 	// Go string for the JSON-parse-failed fallback path. The real
@@ -139,6 +147,64 @@ type cookieUpdate struct {
 	// Delete marks a deletion request: Max-Age<=0, or an Expires at or before
 	// now. The row is removed, not rewritten empty — see processYouTubeSetCookies.
 	Delete bool
+}
+
+// cookieOrigin names the SITE whose response produced a batch of cookie
+// updates, stated as that site's registrable domain.
+//
+// It exists because a Set-Cookie with no Domain= attribute is host-scoped to
+// the response that carried it, and by the time the updates reach
+// updateCookieFile that response is gone: the map holds a nil Domain and
+// nothing else. Two of the matching rules need to know where it came from
+// anyway — resolveRowUpdate's rule 2 and sameCookiePlatform's Domain-less
+// default — and both used to assume youtube.com, which was a true statement
+// about the ONE call site rather than about those functions. Declaring it makes
+// the assumption an argument.
+//
+// The three constants are the complete set. The zero value names no site and is
+// deliberately inert: covers reports false for every row, platform reports
+// nothing, and updateCookieFile's insertion loop refuses every row whose
+// platform does not match the declared one — which for the zero value is all of
+// them. So a caller that forgets to declare an origin updates only rows whose
+// own Domain= scope-matches, and writes nothing new at all.
+//
+// That last clause is load-bearing and was wrong when this type was introduced.
+// "Matches nothing" and "does nothing" are different: an update no row accepts
+// falls through to the insertion loop, which invents a domain from the cookie
+// name. Without the platform check there, an inert origin was not narrow — it
+// appended new rows under a domain nobody declared.
+type cookieOrigin string
+
+const (
+	originYouTube cookieOrigin = "youtube.com"
+	originGoogle  cookieOrigin = "google.com"
+	originTwitch  cookieOrigin = "twitch.tv"
+)
+
+// covers reports whether a cookie file row's domain lies inside this origin's
+// site, which is the scope a Domain-less Set-Cookie from it may reach.
+func (o cookieOrigin) covers(rowDomain string) bool {
+	return o != "" && domainMatches(rowDomain, string(o))
+}
+
+// platform reports the credential platform this origin belongs to, in the same
+// vocabulary cookiePlatformOf uses for domains — so originYouTube and
+// originGoogle are one platform, exactly as .youtube.com and .google.com rows
+// are.
+func (o cookieOrigin) platform() string { return cookiePlatformOf(string(o)) }
+
+// cookiePlatformOf maps a domain to its credential platform. YouTube and Google
+// are ONE platform: a Google session covers both, which is why a value refresh
+// is allowed to fan out across them. Twitch is another. A domain on neither has
+// no platform and therefore matches nothing — see sameCookiePlatform.
+func cookiePlatformOf(domain string) string {
+	switch {
+	case isTwitchDomain(domain):
+		return "twitch"
+	case isYouTubeDomain(domain) || isGoogleDomain(domain):
+		return "google"
+	}
+	return ""
 }
 
 // AuthStatus tracks the authentication state for each platform.
@@ -282,6 +348,50 @@ type RefreshService struct {
 	cancel          context.CancelFunc
 	status          AuthStatus
 	refreshInterval time.Duration
+
+	// refreshInFlight is true for the duration of one refresh pass. It is the
+	// single-flight for all three entry points — Start's initial check,
+	// CheckNow and the ticker — and it deliberately reuses mu rather than
+	// adding a second lock, because the thing it protects is service state
+	// that mu already owns.
+	//
+	// A second caller is a NO-OP, not a queued pass. See refresh for what two
+	// overlapping passes actually do to the cookie file, and for the arming
+	// note about a manual recheck that appears to do nothing.
+	refreshInFlight bool
+
+	// refreshPassHook, when non-nil, is called once per pass that gets PAST
+	// the in-flight guard, before any work begins.
+	//
+	// TEST SEAM. Nothing in cmd/ or internal/web ever sets it; it is
+	// unexported and has no setter, so only this package can. It exists
+	// because refresh's two lifecycle properties have no other seam: a test
+	// cannot make a pass panic (every failure mode inside is caught and
+	// downgraded to an inconclusive verdict, by design), and it cannot hold a
+	// pass open long enough for a second caller to collide with it. Counting
+	// calls here also counts PASSES rather than log lines, which is what the
+	// concurrency test has to assert on — a guard that is deleted shows up as
+	// a second call here and nowhere else.
+	//
+	// Read under mu with the guard, called after mu is released, so a hook
+	// that blocks holds the single-flight without holding the lock.
+	refreshPassHook func()
+
+	// refreshLockedHook is the same seam INSIDE refresh's status-update
+	// critical section, called with rs.mu held for writing.
+	//
+	// TEST SEAM, and a second one rather than a second call to the first,
+	// because the two windows need opposite things. refreshPassHook must be
+	// callable outside the lock so a test can BLOCK a pass there without
+	// wedging every other rs.mu reader; this one must be inside it, because
+	// the property it exists to test is what a panic does while the write lock
+	// is held — the case that used to deadlock the guard release, and the only
+	// case where "the release defer exists" is not the same claim as "the guard
+	// is actually released".
+	//
+	// A hook installed here MUST NOT call back into RefreshService: rs.mu is a
+	// plain non-reentrant RWMutex.
+	refreshLockedHook func()
 
 	// Track previous auth state to detect auth → no-auth transitions.
 	prevYouTubeAuth bool
@@ -497,6 +607,18 @@ const livenessRecoveryArmed = false
 
 // NewRefreshService creates a new cookie refresh service.
 // If refreshInterval is zero, the default of 30 minutes is used.
+//
+// An interval at or below livenessFreshWindow is also refused, and for a
+// reason that has nothing to do with how often the service runs: that window
+// bounds how old a liveness observation may be and still suppress the fallback
+// probe, and the fallback records its own answer through the same method. Let
+// the two meet and the probe's own stamp is still fresh on the next tick, so it
+// suppresses itself on alternate cycles — coverage silently halved, with no
+// symptom anywhere. The invariant is documented at livenessFreshWindow; this is
+// where it is enforced. Substituting the default is deliberately louder than
+// clamping to "window + 1": a caller who asked for 10 minutes and silently got
+// 25 would be no better informed than one who got 30, and the default is the
+// only value this file has ever reasoned about.
 func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -504,7 +626,14 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 	Error(msg string, args ...any)
 }) *RefreshService {
 	interval := refreshInterval
-	if interval <= 0 {
+	switch {
+	case interval <= 0:
+		interval = defaultRefreshInterval
+	case interval <= livenessFreshWindow:
+		logger.Warn("cookie refresh interval is too short for the liveness freshness window, using the default",
+			"requested", interval.String(),
+			"livenessFreshWindow", livenessFreshWindow.String(),
+			"using", defaultRefreshInterval.String())
 		interval = defaultRefreshInterval
 	}
 	return &RefreshService{
@@ -559,7 +688,28 @@ func (rs *RefreshService) Start(ctx context.Context) {
 	//
 	// The cost of skipping it is that tier-2 coverage begins one cadence in
 	// rather than immediately, which is the cheaper of the two.
-	rs.refresh(ctx, false)
+	//
+	// Wrapped in the same recover the ticker goroutine below carries, and for
+	// a sharper reason. This call runs on the CALLER's goroutine — cmd/moombox's
+	// run(), before the web server binds — so an unrecovered panic in the first
+	// pass does not lose a refresh, it takes the whole process down at boot,
+	// with no dashboard, no TUI and no log surface up to say why. The ticker's
+	// identical panic one cadence later is survivable purely because something
+	// recovers it.
+	//
+	// The wrap goes around the CALL, not around a new goroutine: CLAUDE.md's
+	// rule is that every goroutine carries an inline recover, and making this
+	// one asynchronous to satisfy that rule would break what the comment above
+	// documents — run() blocks on this pass so a dead-credential install is
+	// told within seconds of launch.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				rs.logger.Error("startup cookie refresh panic", "panic", r)
+			}
+		}()
+		rs.refresh(ctx, false)
+	}()
 
 	go func() {
 		defer func() {
@@ -603,14 +753,31 @@ func (rs *RefreshService) GetStatus() AuthStatus {
 	return rs.status
 }
 
-// CheckNow triggers an immediate cookie refresh and auth check.
+// CheckNow triggers an immediate cookie refresh and auth check, and reports
+// whether a pass actually RAN.
 //
 // allowFallback is false: POST /api/cookies/recheck runs this synchronously on
 // the HTTP handler goroutine, and the fallback probe is a full page fetch on
 // top of the auth check that is already there. The periodic path owns that
 // probe; a button press does not need to buy one.
-func (rs *RefreshService) CheckNow(ctx context.Context) {
-	rs.refresh(ctx, false)
+//
+// The bool is false when another pass — the 30-minute ticker, or a second
+// manual gesture — was already in flight, in which case this call did nothing
+// at all. It is NOT a failure and it is NOT a decline in the sense
+// RefreshDeclinedCauses means: that vocabulary belongs to AutoCookieService's
+// browser refresh and is pinned exhaustively across three consumers, while this
+// is the in-process check's own single-flight. Do not report it through those
+// causes.
+//
+// What a caller should do with false depends on what it wanted the pass FOR.
+// A caller that only wants the UI to catch up can ignore it: the pass already
+// running publishes its own result through OnAuthChange and GetStatus, one
+// pass later at worst. A caller that has just REWRITTEN cookies.txt and wants
+// this specific file re-verified cannot be given that guarantee here — the
+// in-flight pass may have read the old file — and should say so in its log.
+// Nothing today blocks or queues on this; a skipped pass is skipped.
+func (rs *RefreshService) CheckNow(ctx context.Context) bool {
+	return rs.refresh(ctx, false)
 }
 
 // ObserveLiveness records an external verdict about whether `platform`'s
@@ -816,14 +983,95 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 // a goroutine somebody is waiting on — CheckNow on an HTTP handler, Start's
 // initial check ahead of the web server binding — and both pass
 // allowFallback=false for that reason.
+//
+// Subject to the same single-flight as the other two, and in this direction it
+// is a tick that gets dropped: a tick arriving while a manual recheck is in
+// flight does nothing rather than doubling up, and the next one is a full
+// interval away. That is the right trade — the manual pass currently running
+// answers the same question — but it is why the guard is not merely a
+// protection for the manual button. The return is deliberately discarded: a
+// dropped tick needs no caller-side handling, only the Debug line.
 func (rs *RefreshService) doRefresh(ctx context.Context) {
 	rs.refresh(ctx, true)
 }
 
-// refresh is the shared body of both entry points; allowFallback is the only
-// thing that separates them. Commentary elsewhere in this file that names
+// refresh is the shared body of all three entry points; allowFallback is the
+// only thing that separates them. Commentary elsewhere in this file that names
 // doRefresh is describing this body — the split is newer than the comments.
-func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
+//
+// Returns whether a pass RAN. False means another one was already in flight and
+// this call did nothing whatever — see the guard below.
+func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool {
+	// THE SINGLE-FLIGHT. Three entry points reach this body — Start's initial
+	// check, CheckNow (POST /api/cookies/recheck and the TUI's R C), and the
+	// 30-minute ticker — and until this guard existed none of them looked to
+	// see whether another was already running. A manual recheck landing during
+	// a ticker pass ran a second full pass alongside the first: two guide
+	// fetches, two Set-Cookie merges, and two updateCookieFile rewrites of the
+	// SAME file interleaved, which is the part that is not merely wasteful.
+	//
+	// A second caller does nothing and returns. It does not queue and it does
+	// not wait: waiting would put an HTTP handler behind a pass that may spend
+	// two auth-check timeouts, to deliver an answer the first pass is about to
+	// publish through OnAuthChange anyway.
+	//
+	// ARMING NOTE, and this is the line to read when a recheck "did nothing":
+	// the ticker and a manual gesture collide on a real install, so an operator
+	// following the A4/A5 acceptance methodology can press recheck, see no new
+	// pass in the log, and conclude the button is broken. It is not — the
+	// answer they get back is the in-flight pass's, one status snapshot behind
+	// at worst. Any methodology that counts passes has to allow for that, and
+	// the Debug line below is the only evidence that it happened.
+	var hook, lockedHook func()
+	claimed := func() bool {
+		rs.mu.Lock()
+		defer rs.mu.Unlock()
+		if rs.refreshInFlight {
+			return false
+		}
+		rs.refreshInFlight = true
+		hook, lockedHook = rs.refreshPassHook, rs.refreshLockedHook
+		return true
+	}()
+	if !claimed {
+		// Debug, not Info. A ticker pass overlapping a manual one is routine on
+		// any install where somebody presses the button, and this line would
+		// otherwise be fanned out over the WebSocket log stream to both UIs for
+		// an event that changes nothing.
+		//
+		// Logged AFTER the section above returns, never inside it: nothing that
+		// can panic may run while rs.mu is held. See the release defer's rule.
+		rs.logger.Debug("cookie refresh skipped, another pass is already in flight")
+		return false
+	}
+	// THE RELEASE, and the rule that makes it safe.
+	//
+	// This defer takes rs.mu, and rs.mu is a plain non-reentrant RWMutex. So it
+	// releases the guard on a panic ONLY IF the unwinding stack is not already
+	// holding that lock. It is not, and that is not an accident: every rs.mu
+	// critical section in this function — the claim above and the status update
+	// below — releases through `defer`, so a panic anywhere in this body reaches
+	// here with rs.mu free.
+	//
+	// STANDING RULE for anyone editing refresh: a bare `rs.mu.Lock()` whose
+	// `rs.mu.Unlock()` is a plain statement rather than a defer re-arms a trap
+	// that is invisible in review and catastrophic in the field. A panic inside
+	// such a window would unwind with the write lock held, this defer would
+	// block on Lock() forever, and the goroutine would park holding rs.mu — so
+	// the panic never leaves refresh, Start's recover never runs, and every
+	// later GetStatus() (RLock) blocks behind it. At boot that turns a loud
+	// crash with a stack trace into a silent hang with no dashboard, no TUI and
+	// no log line. Lock and defer-unlock together, or scope the section into a
+	// func literal that does.
+	defer func() {
+		rs.mu.Lock()
+		rs.refreshInFlight = false
+		rs.mu.Unlock()
+	}()
+	if hook != nil {
+		hook()
+	}
+
 	rs.logger.Debug("refreshing cookies")
 
 	// Reload cookies from file
@@ -855,89 +1103,118 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 		rs.logger.Debug("twitch auth check failed", "err", twErr)
 	}
 
-	rs.mu.Lock()
-	prevStatus := rs.status
-	prevYT := rs.prevYouTubeAuth
-	prevTW := rs.prevTwitchAuth
-	hasChecked := rs.hasCheckedOnce
-	ytConcluded := rs.ytEverConcluded
-	twConcluded := rs.twEverConcluded
-
-	// Captured once here (not re-read at the shouldFireRecovery call sites
-	// below) so the "cookies present" snapshot lines up with the rest of
-	// this check's other snapshots, all taken under the same lock.
+	// THE STATUS UPDATE, scoped into a func literal so its unlock is DEFERRED.
 	//
-	// "Was this platform ever configured", NOT "is the set complete right
-	// now". shouldFireRecovery's first-check branch returns this value, and
-	// the complete-set predicates cannot tell a never-configured platform
-	// from one whose LOGIN_INFO YouTube has cleared, or from a Twitch session
-	// whose auth-token was pruned out on expiry while twilight-user survived
-	// (the jar ignores expiry, mergeCookieFiles prunes on it — see
-	// twitchAuthCookieNames) — the exact states that must be reported, and
-	// that were silent forever.
-	hasYTCookies := rs.jar.HasAnyYouTubeAuthCookie()
-	hasTWCookies := rs.jar.HasAnyTwitchAuthCookie()
+	// This section holds the write lock across ~80 lines that read the jar, build
+	// an AuthStatus and advance five pieces of baseline state. It used to end in
+	// a plain rs.mu.Unlock(), which meant a panic anywhere inside it unwound with
+	// rs.mu held — and the guard release above, which needs that same lock, would
+	// then block forever. See that defer for what the resulting hang costs at
+	// boot. Every value the rest of the pass needs is declared outside and
+	// assigned inside; prevStatus is not, because nothing below uses it.
+	var (
+		prevYT, prevTW             bool
+		ytConcluded, twConcluded   bool
+		hasChecked                 bool
+		hasYTCookies, hasTWCookies bool
+		ytIdentity, prevYTIdentity string
+		changed                    bool
+		statusCopy                 AuthStatus
+	)
+	func() {
+		rs.mu.Lock()
+		defer rs.mu.Unlock()
 
-	// Sampled under the same lock as the rest of this check's snapshots, and
-	// AFTER the jar.Reload() at the top of doRefresh, so it reflects whatever
-	// account is on disk right now.
-	ytIdentity := rs.jar.YouTubeIdentity()
-	prevYTIdentity := rs.prevYouTubeIdentity
+		// TEST SEAM, inside the lock on purpose — this is the window whose panic
+		// behaviour the deadlock rule above is about, and a seam that fired
+		// outside it would prove only that the release defer exists. See
+		// refreshLockedHook.
+		if lockedHook != nil {
+			lockedHook()
+		}
 
-	rs.status = AuthStatus{
-		YouTubeAuthenticated: ytAuth,
-		TwitchAuthenticated:  twAuth,
-		// Now "YouTube auth is configured" rather than "the cookie set is
-		// complete", which is what the label this drives has always claimed.
-		// A half-cleared jar consequently renders as configured-but-unverified
-		// instead of as no-cookies-at-all — see AuthStatus.HasYouTubeCookies.
-		HasYouTubeCookies: hasYTCookies,
-		// The Twitch counterpart was computed here and thrown away for as long
-		// as hasTWCookies has existed — which is why the TUI could only ever
-		// assign CookieStatusOK for Twitch, leaving its CookiesOnly arm dead:
-		// a Twitch session whose auth-token was pruned on expiry was reported
-		// exactly like one that was never configured.
-		HasTwitchCookies: hasTWCookies,
-		// The reason the two booleans above cannot carry on their own. See
-		// verdictFromCheck: err means "this check learned nothing", never
-		// "the credentials are dead".
-		YouTubeVerification: verdictFromCheck(ytAuth, ytErr),
-		TwitchVerification:  verdictFromCheck(twAuth, twErr),
-		LastCheck:           time.Now().UTC().Format(time.RFC3339),
-		YouTubeError:        ytErrStr,
-		TwitchError:         twErrStr,
-	}
+		prevStatus := rs.status
+		prevYT = rs.prevYouTubeAuth
+		prevTW = rs.prevTwitchAuth
+		hasChecked = rs.hasCheckedOnce
+		ytConcluded = rs.ytEverConcluded
+		twConcluded = rs.twEverConcluded
 
-	// Update previous auth state tracking.
-	// Only update previous state when the check was CONCLUSIVE. That is not
-	// the same as "no network error": a non-200, an answer from the wrong
-	// host, and a 200 whose body carries no marker we recognise are all
-	// inconclusive too, and none of them may move this baseline.
-	// An inconclusive check deliberately does NOT mark the platform
-	// "concluded" — the next conclusive check still counts as that
-	// platform's first, so shouldFireRecovery's startup-dead-auth case
-	// still applies to it.
-	if ytErr == nil {
-		rs.prevYouTubeAuth = ytAuth
-		rs.ytEverConcluded = true
-	}
-	// Deliberately outside the ytErr == nil block above: the baseline advances
-	// only on a check that also AUTHENTICATED, so a stale intermediate export
-	// cannot consume the edge. See advanceIdentityBaseline.
-	rs.prevYouTubeIdentity = advanceIdentityBaseline(rs.prevYouTubeIdentity, ytIdentity, ytAuth, ytErr)
-	if twErr == nil {
-		rs.prevTwitchAuth = twAuth
-		rs.twEverConcluded = true
-	}
-	rs.hasCheckedOnce = true
+		// Captured once here (not re-read at the shouldFireRecovery call sites
+		// below) so the "cookies present" snapshot lines up with the rest of
+		// this check's other snapshots, all taken under the same lock.
+		//
+		// "Was this platform ever configured", NOT "is the set complete right
+		// now". shouldFireRecovery's first-check branch returns this value, and
+		// the complete-set predicates cannot tell a never-configured platform
+		// from one whose LOGIN_INFO YouTube has cleared, or from a Twitch session
+		// whose auth-token was pruned out on expiry while twilight-user survived
+		// (the jar ignores expiry, mergeCookieFiles prunes on it — see
+		// twitchAuthCookieNames) — the exact states that must be reported, and
+		// that were silent forever.
+		hasYTCookies = rs.jar.HasAnyYouTubeAuthCookie()
+		hasTWCookies = rs.jar.HasAnyTwitchAuthCookie()
 
-	changed := authStatusChanged(prevStatus, rs.status)
-	// Snapshot under the lock: a concurrent doRefresh (ticker vs CheckNow)
-	// writes rs.status under rs.mu, so reading it after Unlock is a race —
-	// and the callback could observe a status newer than the transition
-	// that triggered it.
-	statusCopy := rs.status
-	rs.mu.Unlock()
+		// Sampled under the same lock as the rest of this check's snapshots, and
+		// AFTER the jar.Reload() at the top of doRefresh, so it reflects whatever
+		// account is on disk right now.
+		ytIdentity = rs.jar.YouTubeIdentity()
+		prevYTIdentity = rs.prevYouTubeIdentity
+
+		rs.status = AuthStatus{
+			YouTubeAuthenticated: ytAuth,
+			TwitchAuthenticated:  twAuth,
+			// Now "YouTube auth is configured" rather than "the cookie set is
+			// complete", which is what the label this drives has always claimed.
+			// A half-cleared jar consequently renders as configured-but-unverified
+			// instead of as no-cookies-at-all — see AuthStatus.HasYouTubeCookies.
+			HasYouTubeCookies: hasYTCookies,
+			// The Twitch counterpart was computed here and thrown away for as long
+			// as hasTWCookies has existed — which is why the TUI could only ever
+			// assign CookieStatusOK for Twitch, leaving its CookiesOnly arm dead:
+			// a Twitch session whose auth-token was pruned on expiry was reported
+			// exactly like one that was never configured.
+			HasTwitchCookies: hasTWCookies,
+			// The reason the two booleans above cannot carry on their own. See
+			// verdictFromCheck: err means "this check learned nothing", never
+			// "the credentials are dead".
+			YouTubeVerification: verdictFromCheck(ytAuth, ytErr),
+			TwitchVerification:  verdictFromCheck(twAuth, twErr),
+			LastCheck:           time.Now().UTC().Format(time.RFC3339),
+			YouTubeError:        ytErrStr,
+			TwitchError:         twErrStr,
+		}
+
+		// Update previous auth state tracking.
+		// Only update previous state when the check was CONCLUSIVE. That is not
+		// the same as "no network error": a non-200, an answer from the wrong
+		// host, and a 200 whose body carries no marker we recognise are all
+		// inconclusive too, and none of them may move this baseline.
+		// An inconclusive check deliberately does NOT mark the platform
+		// "concluded" — the next conclusive check still counts as that
+		// platform's first, so shouldFireRecovery's startup-dead-auth case
+		// still applies to it.
+		if ytErr == nil {
+			rs.prevYouTubeAuth = ytAuth
+			rs.ytEverConcluded = true
+		}
+		// Deliberately outside the ytErr == nil block above: the baseline advances
+		// only on a check that also AUTHENTICATED, so a stale intermediate export
+		// cannot consume the edge. See advanceIdentityBaseline.
+		rs.prevYouTubeIdentity = advanceIdentityBaseline(rs.prevYouTubeIdentity, ytIdentity, ytAuth, ytErr)
+		if twErr == nil {
+			rs.prevTwitchAuth = twAuth
+			rs.twEverConcluded = true
+		}
+		rs.hasCheckedOnce = true
+
+		changed = authStatusChanged(prevStatus, rs.status)
+		// Snapshot under the lock: a concurrent doRefresh (ticker vs CheckNow)
+		// writes rs.status under rs.mu, so reading it after Unlock is a race —
+		// and the callback could observe a status newer than the transition
+		// that triggered it.
+		statusCopy = rs.status
+	}()
 
 	if changed && rs.OnAuthChange != nil {
 		rs.OnAuthChange(statusCopy)
@@ -1069,6 +1346,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) {
 	rs.logger.Debug("cookie refresh done",
 		"youtube", ytAuth,
 		"twitch", twAuth)
+	return true
 }
 
 // shouldFireRecovery reports whether OnRecoveryNeeded should fire for a
@@ -1208,9 +1486,11 @@ func setYouTubeHeaders(req *http.Request, cookieHeader, origin, authHeader strin
 
 // youtubeGuideRequestBody returns the standard Innertube WEB request body
 // for /youtubei/v1/guide. Centralised here so a clientVersion bump only
-// touches one site (audit reports/cookies.md #35).
+// touches one site (audit reports/cookies.md #35) — that site is now
+// constants.WebClient.ClientVersion, the single source of truth for every
+// WEB-family client's version string.
 func youtubeGuideRequestBody() string {
-	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
+	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + constants.WebClient.ClientVersion + `","hl":"en"}}}`
 }
 
 // errGuideLoginMarkerUnreadable is what a 200 whose body carries no login
@@ -1584,11 +1864,40 @@ func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeade
 	return nil
 }
 
-// checkYouTubeAuth asks YouTube whether the jar's session is still signed in.
+// youtubeGuideExchange makes the guide POST that both YouTube auth entry points
+// are built on, and hands the verdict AND the response back to its caller. It
+// never acts on the response itself, and that is the whole reason it has this
+// shape.
 //
-// Its three entry gates appear identically in checkAndRefreshYouTube and
-// encode one rule — the rule this subsystem kept getting wrong. Only the
-// FIRST of them may answer (false, nil).
+// # Why it returns the response instead of using it
+//
+// checkYouTubeAuth is exported as CheckYouTubeAuth and wired into
+// AutoCookieService.VerifyYouTubeAuth (cmd/moombox/services.go), where
+// checkPlatformAuth runs it on the ROLLBACK path of a profile import: its answer
+// is what decides whether the PREVIOUS cookies are restored. A shared exchange
+// that merged Set-Cookie headers itself would therefore write the jar from the
+// very response being used to judge the import — a bad import would rewrite the
+// credentials it was about to be rolled back for, and the rollback would then
+// restore them over a file that had already moved.
+//
+// So the write decision stays with the caller that owns it. This function reads
+// the jar and never writes it; only checkAndRefreshYouTube calls
+// processYouTubeSetCookies, and only on its own authenticated path. The
+// invariant is structural rather than a matter of discipline: there is no jar
+// write reachable from here to delete.
+//
+// The returned response has already had its body read to a verdict and CLOSED,
+// so only its headers are still meaningful — which is all
+// processYouTubeSetCookies reads. It is non-nil exactly when a request was made
+// and a readable answer came back. Every error path returns nil, and so does the
+// never-configured gate, which is what makes "a reply we could not read is not a
+// reply anyone may write the jar from" a fact about the return values rather
+// than a rule someone has to remember.
+//
+// # The gates
+//
+// The three entry gates encode one rule — the rule this subsystem kept getting
+// wrong. Only the FIRST of them may answer (false, nil).
 //
 //   - Nothing configured at all — no session to have an opinion about, so a
 //     silent "not authenticated" is the truth and shouldFireRecovery's
@@ -1596,42 +1905,51 @@ func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeade
 //   - Configured but no request could be built — a check that did NOT happen.
 //     (false, nil) would report it as dead credentials, so it errors instead.
 //
-// Everything in between now reaches the network. In particular a jar with
-// SAPISID and a cleared LOGIN_INFO — YouTube's own rotation-invalidation
-// state — is CONFIGURED with BROKEN credentials, and its verdict has to come
-// from YouTube rather than from a missing name in a map.
-func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
+// Everything in between reaches the network. In particular a jar with SAPISID
+// and a cleared LOGIN_INFO — YouTube's own rotation-invalidation state — is
+// CONFIGURED with BROKEN credentials, and its verdict has to come from YouTube
+// rather than from a missing name in a map.
+//
+// The order after the request is load-bearing and is asserted in that order:
+// provenance, then status, then body.
+//
+// It takes no URL: the two entry points were reading the same endpoint from two
+// differently-named vars (see youtubeGuideURL), so the URL was never a thing
+// they varied on.
+func (rs *RefreshService) youtubeGuideExchange(ctx context.Context) (bool, *http.Response, error) {
 	if !rs.jar.HasAnyYouTubeAuthCookie() {
-		return false, nil // Nothing configured at all.
+		return false, nil, nil // Nothing configured at all.
 	}
 
 	cookieHeader := rs.jar.GetCookieHeader()
 	if cookieHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
+		return false, nil, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
 	}
 
 	origin := "https://www.youtube.com"
 	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
 	if authHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
+		return false, nil, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
 	}
 
-	// POST to YouTube guide endpoint to check auth
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()
 
 	body := youtubeGuideRequestBody()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideURL+"?prettyPrint=false", strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideURL, strings.NewReader(body))
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 
 	setYouTubeHeaders(req, cookieHeader, origin, authHeader)
 
 	resp, err := cookiesHTTPClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("youtube auth check: %w", err)
+		return false, nil, fmt.Errorf("youtube auth check: %w", err)
 	}
+	// Closed here, not by the caller: by the time this returns the body has
+	// been read to a verdict and nothing downstream needs it. The headers
+	// survive the close.
 	defer resp.Body.Close()
 
 	// Before the status, for the same reason internal/youtube checks it first:
@@ -1639,7 +1957,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	// carries, and naming the route is more accurate than naming the code.
 	if err := authResponseIsOurs(resp, req, "Cookie"); err != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, fmt.Errorf("youtube auth check: %w", err)
+		return false, nil, fmt.Errorf("youtube auth check: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -1647,7 +1965,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 		// NOT (false, nil). That means "conclusively not authenticated" to
 		// shouldFireRecovery, so a 429/503/edge block would be reported as
 		// dead credentials. We learned nothing about the session here.
-		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
+		return false, nil, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
 	}
 
 	// YouTube always returns 200 even with invalid cookies, so the verdict has
@@ -1656,93 +1974,54 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	// inconclusive error here, NOT (false, nil).
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
-		return false, fmt.Errorf("read YouTube auth response: %w", err)
+		return false, nil, fmt.Errorf("read YouTube auth response: %w", err)
 	}
 	authenticated, err := youtubeGuideAuthVerdict(respBody)
 	if err != nil {
-		return false, fmt.Errorf("youtube auth check: %w", err)
+		return false, nil, fmt.Errorf("youtube auth check: %w", err)
 	}
-	return authenticated, nil
+	return authenticated, resp, nil
+}
+
+// checkYouTubeAuth asks YouTube whether the jar's session is still signed in,
+// and does nothing else.
+//
+// This is the VERIFY path. It is exported as CheckYouTubeAuth and its answer
+// decides whether an autocookies profile import is committed or ROLLED BACK, so
+// it must not touch the jar — see youtubeGuideExchange's doc comment for why
+// that invariant is expressed by discarding the response here rather than by a
+// guard somewhere inside.
+func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
+	authenticated, _, err := rs.youtubeGuideExchange(ctx)
+	return authenticated, err
 }
 
 // checkAndRefreshYouTube makes a single guide API request to both check
 // YouTube auth status and refresh session cookies from Set-Cookie headers.
 // This avoids the redundancy of separate check + refresh requests.
+//
+// It is the only caller in this file that writes the jar from a guide reply.
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
-	// See the gate commentary above checkYouTubeAuth — same three gates, same
-	// rule about which one may answer (false, nil).
-	if !rs.jar.HasAnyYouTubeAuthCookie() {
-		return false, nil // Nothing configured at all.
+	authenticated, resp, err := rs.youtubeGuideExchange(ctx)
+	if err != nil || !authenticated {
+		// Anything short of an authenticated, readable reply stops here without
+		// the jar being touched. Two of those cases are worth naming at the
+		// write decision itself:
+		//
+		//   - Provenance. youtubeGuideExchange runs authResponseIsOurs before
+		//     the status AND before the body, which matters more on THIS path
+		//     than on the verify one: this is where Set-Cookie headers are
+		//     merged back into the jar, and a redirected exchange must not be
+		//     allowed to write to it at all.
+		//   - An unreadable body. A reply we could not read is not a reply we
+		//     may write the jar from, for the same reason a redirected one is
+		//     not: we do not know whose session it describes. Both cases return
+		//     a nil response, so there would be nothing to merge here even if
+		//     this branch were deleted.
+		return authenticated, err
 	}
-
-	cookieHeader := rs.jar.GetCookieHeader()
-	if cookieHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no cookie header could be built: %w", ErrAuthCheckNotAttempted)
-	}
-
-	origin := "https://www.youtube.com"
-	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
-	if authHeader == "" {
-		return false, fmt.Errorf("youtube auth check: no SAPISIDHASH could be generated: %w", ErrAuthCheckNotAttempted)
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
-	defer cancel()
-
-	body := youtubeGuideRequestBody()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideRefreshURL, strings.NewReader(body))
-	if err != nil {
-		return false, err
-	}
-
-	setYouTubeHeaders(req, cookieHeader, origin, authHeader)
-
-	resp, err := cookiesHTTPClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("youtube auth check: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Before the status AND before the body, which matters more here than in
-	// checkYouTubeAuth: this function also merges Set-Cookie headers back into
-	// the jar on the authenticated path, and a redirected exchange must not be
-	// allowed to write to it at all.
-	if err := authResponseIsOurs(resp, req, "Cookie"); err != nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return false, fmt.Errorf("youtube auth check: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		// NOT (false, nil). That means "conclusively not authenticated" to
-		// shouldFireRecovery, so a 429/503/edge block would be reported as
-		// dead credentials. We learned nothing about the session here.
-		return false, fmt.Errorf("youtube auth check: unexpected status %d", resp.StatusCode)
-	}
-
-	// Read body for auth check
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
-	if err != nil {
-		return false, fmt.Errorf("read YouTube auth response: %w", err)
-	}
-
-	// Same body rule as checkYouTubeAuth, through the same function — these two
-	// are near-duplicates and a rule applied to only one of them is a rule with
-	// a hole in it.
-	authenticated, err := youtubeGuideAuthVerdict(respBody)
-	if err != nil {
-		// No Set-Cookie merge on this path. A reply we could not read is not a
-		// reply we may write the jar from, for the same reason a redirected one
-		// is not: we do not know whose session it describes.
-		return false, fmt.Errorf("youtube auth check: %w", err)
-	}
-
-	// If authenticated, process Set-Cookie headers to refresh session cookies
-	if authenticated {
-		rs.processYouTubeSetCookies(resp)
-	}
-
-	return authenticated, nil
+	rs.processYouTubeSetCookies(resp)
+	return true, nil
 }
 
 // processYouTubeSetCookies parses Set-Cookie headers from a YouTube API response
@@ -1754,125 +2033,25 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 		return
 	}
 
+	// originYouTube: this function is only ever fed a youtube.com guide
+	// response, and admitSetCookie needs to be told so — a Set-Cookie with no
+	// Domain= is host-scoped to the response that carried it, and the header
+	// alone does not say which response that was.
 	updates := make(map[cookieUpdateKey]cookieUpdate)
+	refused := 0
 	for _, sc := range setCookies {
-		// Cheap early filter before tokenizing — only cookies that mention
-		// youtube.com or google.com anywhere in the Set-Cookie string are
-		// candidates. The authoritative check against the parsed Domain=
-		// attribute happens below via domainMatches so hosts like
-		// "fakegoogle.com" that merely embed the substring are rejected.
-		scLower := strings.ToLower(sc)
-		if !strings.Contains(scLower, "youtube.com") && !strings.Contains(scLower, "google.com") {
+		key, cu, ok := admitSetCookie(sc, originYouTube)
+		if !ok {
+			refused++
 			continue
 		}
-
-		parts := strings.Split(sc, ";")
-		if len(parts) == 0 {
-			continue
-		}
-		nameValue := strings.TrimSpace(parts[0])
-		name, value, ok := strings.Cut(nameValue, "=")
-		if !ok || name == "" {
-			continue
-		}
-
-		now := time.Now().Unix()
-		expiry := now + 365*24*60*60
-
-		var (
-			expiresAt  int64
-			hasExpires bool
-			maxAge     int64
-			hasMaxAge  bool
-			httpOnly   bool
-			domainAttr string
-		)
-		// Every attribute is read to the end of the header. The old loop broke
-		// out early on Max-Age<=0, which threw away the Domain= that usually
-		// follows it — and Domain= is what scopes the deletion below.
-		for _, part := range parts[1:] {
-			trimmed := strings.TrimSpace(strings.ToLower(part))
-			switch {
-			case strings.HasPrefix(trimmed, "expires="):
-				_, dateStr, _ := strings.Cut(part, "=")
-				dateStr = strings.TrimSpace(dateStr)
-				if t, err := time.Parse(time.RFC1123, dateStr); err == nil {
-					expiresAt, hasExpires = t.Unix(), true
-				} else if t, err := time.Parse("Mon, 02-Jan-2006 15:04:05 MST", dateStr); err == nil {
-					expiresAt, hasExpires = t.Unix(), true
-				} else if t, err := time.Parse(time.RFC1123Z, dateStr); err == nil {
-					expiresAt, hasExpires = t.Unix(), true
-				}
-				// If all date formats fail, hasExpires stays false and the
-				// default one-year expiry below applies. An unreadable date
-				// must not fall through as "expired" and delete the row.
-			case strings.HasPrefix(trimmed, "max-age="):
-				if v, err := strconv.ParseInt(strings.TrimSpace(trimmed[len("max-age="):]), 10, 64); err == nil {
-					maxAge, hasMaxAge = v, true
-				}
-			case strings.HasPrefix(trimmed, "domain="):
-				_, dom, _ := strings.Cut(part, "=")
-				// Lowercased here, not just at comparison time. Domains are
-				// case-insensitive and this string becomes a MAP KEY: without
-				// this, "Domain=.YouTube.com" and "Domain=.youtube.com" are two
-				// distinct keys that both scope-match the same row, and which
-				// one wins is map-iteration order. CPython normalizes the same
-				// way (_normalized_cookie_tuples: `if k == "domain": v = v.lower()`).
-				domainAttr = strings.ToLower(strings.TrimSpace(dom))
-			case trimmed == "httponly":
-				httpOnly = true
-			}
-		}
-
-		// RFC 6265 §4.1.2.2: Max-Age takes precedence over Expires.
-		//
-		// An expiry at or before now is a DELETION request and is treated
-		// exactly as Max-Age<=0 is. This is the same rule yt-dlp gets from
-		// Python's http.cookiejar: _cookie_from_cookie_tuple converts Max-Age
-		// to an absolute expiry and then, for `expires <= self._now`, calls
-		// self.clear(domain, path, name) and returns None — the cookie is
-		// dropped from the jar entirely, keyed by domain+path+name. It is
-		// never stored with an empty value, which is what this code used to
-		// write: a row with value "" and expiry 0 that rowExpired will not
-		// prune (it ignores exp == 0) and that CookieJar.Load cannot even see
-		// (TrimSpace eats the trailing tab, leaving a 6-field "malformed" row).
-		deleteCookie := false
-		switch {
-		case hasMaxAge:
-			if maxAge <= 0 {
-				deleteCookie = true
-			} else {
-				expiry = now + maxAge
-			}
-		case hasExpires:
-			if expiresAt <= now {
-				deleteCookie = true
-			} else {
-				expiry = expiresAt
-			}
-		}
-
-		// Normalize domain so the Netscape row uses a leading-dot form when
-		// the Set-Cookie explicitly said Domain= (which implies subdomain
-		// scope per RFC 6265).
-		if domainAttr != "" && !strings.HasPrefix(domainAttr, ".") {
-			domainAttr = "." + domainAttr
-		}
-
-		// When the server supplied Domain=, reject anything that is not an
-		// actual YouTube or Google host — blocks the corner case where the
-		// early substring pre-filter let through a Set-Cookie carrying a
-		// Domain= for e.g. accounts.google.com.evil.tld.
-		if domainAttr != "" && !isYouTubeDomain(domainAttr) && !isGoogleDomain(domainAttr) {
-			continue
-		}
-
-		updates[cookieUpdateKey{Name: name, Domain: domainAttr}] = cookieUpdate{
-			Value:    value,
-			Expiry:   expiry,
-			HTTPOnly: httpOnly,
-			Delete:   deleteCookie,
-		}
+		updates[key] = cu
+	}
+	if refused > 0 {
+		// A COUNT, never the header. A Set-Cookie is the credential itself, and
+		// a refused one is by definition the shape we did not vouch for, so
+		// neither its value nor its raw text may be written to a log.
+		rs.logger.Debug("youtube session refresh: Set-Cookie headers not admitted", "count", refused)
 	}
 
 	if len(updates) == 0 {
@@ -1888,7 +2067,10 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 	// deployment mistake that actually causes it — updateCookieFile ends in
 	// writeFileAtomic (temp file + rename), and a rename cannot replace a
 	// single-file bind mount.
-	if err := rs.updateCookieFile(updates); err != nil {
+	//
+	// The same originYouTube is declared a second time here, to the write path,
+	// which needs it for its own three decisions — see updateCookieFile.
+	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
 		rs.logger.Warn("youtube session refresh: failed to update cookie file — rotated session cookies were discarded and the file will go stale",
 			"err", err,
 			"hint", "if this is Docker, do not bind-mount cookies.txt as an individual file; put it inside the mounted /data directory so the atomic rename can replace it")
@@ -1898,6 +2080,315 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 	if err := rs.jar.Reload(); err != nil {
 		rs.logger.Warn("youtube session refresh: failed to reload jar", "err", err)
 	}
+}
+
+// maxCookieLifetime caps how far into the future a Max-Age may push a row's
+// expiry: 400 days, which is RFC 6265bis §5.5's limit and what Chrome, Edge and
+// Safari already enforce. A browser-exported cookies.txt therefore never carries
+// a longer one, so the clamp brings this writer into line with the rest of the
+// file rather than shortening anything the file could otherwise hold.
+//
+// It is also what makes the arithmetic safe. `now + maxAge` on an int64 wraps:
+// Max-Age=9223372036854775807 parses fine and produces a large NEGATIVE expiry,
+// which lands in Netscape field 5 — and every expiry guard in this package is
+// `exp > 0 && exp < now` (rowExpired, CookieJar.Load's capture,
+// ExpiredAuthCookiesFor), so a negative value reads as "not expired" everywhere.
+// The row would be unprunable AND invisible to the freshness accounting, and
+// yt-dlp's loader would reject it outright on its `[0-9]+` expires match.
+// Clamping the addend below the cap makes the overflow unreachable rather than
+// detected.
+//
+// Deliberately applied to Max-Age ONLY. Expires stays exactly as it is: real
+// Google auth cookies carry multi-year Expires values, and clamping those would
+// shorten what ExpiredAuthCookiesFor and AuthCookieHorizonFor report about a
+// session this code did not actually change.
+const maxCookieLifetime = int64(400 * 24 * 60 * 60)
+
+// rowBreakingChars are the bytes a Netscape cookie row cannot carry inside any
+// of its fields: tab is the field separator, CR and LF end the row, and NUL is
+// not representable in a line-oriented text file at all.
+//
+// Only the TAB is a live vector, and the distinction is worth stating so nobody
+// later reads this as a defence against header injection. Go's HTTP client
+// cannot hand this package a CR, LF or NUL inside a header value at all:
+// net/textproto's validHeaderValueByte admits only VCHAR, SP, HTAB and %x80-FF,
+// and readMIMEHeader fails the entire header block otherwise — so
+// resp.Header.Values("Set-Cookie") can never carry one. They are checked anyway
+// because this predicate guards a WRITE into a line-oriented file, and the cost
+// of the belt is one ContainsAny over strings that are already in cache.
+const rowBreakingChars = "\t\r\n\x00"
+
+// hasRowBreakingChar reports whether s would corrupt the row it is written into.
+func hasRowBreakingChar(s string) bool { return strings.ContainsAny(s, rowBreakingChars) }
+
+// trackedCookieName reports whether name is one the cookie file tracks for the
+// declared origin's credential platform. It is the admission set for an
+// UNSCOPED Set-Cookie — one with no Domain= of its own to be judged on.
+//
+// The set is the union of the two name predicates the rest of this package
+// already uses for the Google platform: essentialYouTubeCookies (the names
+// CookieJar.Load keeps) and isGoogleOnlyAuthName. Neither contains the other —
+// isGoogleOnlyAuthName matches the whole __Secure-1P/3P families,
+// essentialYouTubeCookies names PREF, CONSENT, YSC and the rest — so the union
+// is exactly "a name this package can store", and a random unscoped foo=bar is
+// not one.
+//
+// isGoogleOnlyAuthName is used here as a NAME predicate and nothing more. It
+// used to double as updateCookieFile's domain-inventor for a Domain-less update
+// and no longer does; see the insertion loop for why that was wrong.
+//
+// Only the Google platform has a set here, and the reason is now simply that
+// only a Google-platform caller exists. Until this fix round there was a
+// structural reason as well — updateCookieFile invented a Domain-less update's
+// domain from the cookie NAME and knew only youtube.com and google.com, so an
+// admitted Twitch cookie would have been refused at the write — but that
+// fallback now uses the declared origin's own site and would place a .twitch.tv
+// row correctly. What remains is that a new admission surface is not something
+// to open speculatively. Adding essentialTwitchCookies here is a one-line change
+// the day a Twitch caller arrives, and it needs that caller's tests, not a
+// guess.
+func trackedCookieName(name string, origin cookieOrigin) bool {
+	if origin.platform() != originYouTube.platform() {
+		return false
+	}
+	return essentialYouTubeCookies[name] || isGoogleOnlyAuthName(name)
+}
+
+// admitSetCookie parses ONE raw Set-Cookie header from a response that came from
+// origin and decides whether it may become a pending cookie-file update. It is
+// the OUTER admission layer: a header it turns down never reaches the write path
+// in any form.
+//
+// B2. This loop used to open with a substring pre-filter — the header had to
+// mention "youtube.com" or "google.com" somewhere — and it ran BEFORE Domain=
+// was parsed. It was wrong in both directions at once:
+//
+//   - It dropped every legitimate unscoped rotation. RFC 6265 §4.1.2.3: a
+//     Set-Cookie with no Domain= is host-scoped to the responding host, which is
+//     an ordinary way for youtube.com to rotate its own first-party cookies.
+//     Such a header contains neither substring, so it never reached the parser —
+//     while the rest of this package plainly expected it to. resolveRowUpdate's
+//     rule 2 exists to confine a Domain-less deletion, and updateCookieFile's
+//     insertion loop has a whole branch for a Domain-less update; both were
+//     unreachable. That is the "cookies.txt untouched for a day" symptom: it
+//     fails safe, and it still strands the session. (The insertion branch had
+//     rotted while it was dead — it invented a domain from the cookie NAME —
+//     and had to be corrected when this commit made it live.)
+//   - It was never the guard it looked like. `x=youtube.com; Domain=evil.tld`
+//     passes a substring test on its VALUE. The real guard has always been the
+//     parsed-Domain= check below, which its own comment already claimed it was —
+//     true only for headers that carried a Domain= at all.
+//
+// Admission is therefore by what the header SAYS, in three steps, after the
+// whole attribute list has been read:
+//
+//  1. Row-breaking characters in the NAME, the VALUE or the DOMAIN are refused
+//     outright, before either branch. A tab splits the Netscape row into the
+//     wrong fields on the next Load; CR, LF and NUL are checked as belt (see
+//     rowBreakingChars — Go's header parser cannot deliver them). The VALUE is
+//     included because RFC 6265's cookie-octet excludes HTAB and every control
+//     character, and browsers reject them, so no legitimate rotation carries one
+//     — a tab in a value is a malformed header, not a shape worth preserving.
+//     CookieJar.Load's tolerance of tab-carrying rows is a separate question and
+//     is unchanged: it must keep reading whatever a browser export or a
+//     third-party tool already wrote into the file. This rule governs only what
+//     THIS writer may add.
+//  2. SCOPED (Domain= present): admitted only when the domain lies on the
+//     declared origin's credential platform. For originYouTube that is precisely
+//     `isYouTubeDomain || isGoogleDomain` — the test this branch has always made,
+//     since those two are one platform and nothing is both Google and Twitch — so
+//     the only caller's behaviour is unchanged. accounts.google.com.evil.tld,
+//     evil.tld, a bare "." and a value that merely contains "youtube.com" are all
+//     refused here.
+//  3. UNSCOPED (no Domain=): the key keeps Domain "" and stays host-scoped to the
+//     declared origin, which resolveRowUpdate rule 2, sameCookiePlatform and the
+//     insertion loop each enforce downstream. This is the newly-reachable surface,
+//     so it is also the narrow one: admitted only under a name the jar actually
+//     tracks (trackedCookieName), which keeps an unscoped foo=bar out of the file.
+//
+// Why none of this widens what a hostile header can reach:
+//
+//   - A scoped header can only land on the declared platform's domains (2).
+//   - An unscoped header can only land on the declared origin's own rows, and
+//     only under a tracked name (3). An unscoped DELETION therefore still cannot
+//     reach .google.com auth from a youtube.com reply — that was already true,
+//     and it is now true and reachable rather than true and dead.
+//   - Row-breaking characters cannot reach the file (1).
+//   - Everything downstream is untouched: updateCookieFile's refusal to blank an
+//     essential cookie, the seven-field rebuild, writeFileAtomic.
+//
+// Two layers, and they are not redundant. THIS one decides what becomes an
+// update at all, and it is the only code that ever sees the raw header — so
+// row-breaking characters and the tracked-name rule belong here and nowhere else.
+// updateCookieFile's insertion guard is the last check before a row is WRITTEN,
+// and it covers the domain that loop DERIVES from the declared origin for an
+// unscoped update — a domain that does not exist yet when this function returns,
+// and which this function therefore cannot judge. Neither subsumes the other.
+//
+// This layer is also per-header and pure: it cannot see the other Set-Cookie
+// headers in the same response. The one rule that needs that view — an unscoped
+// key must not be INSERTED beside a scoped key of the same name — therefore
+// lives in the insertion loop, which holds the whole batch.
+//
+// Scoped headers are admitted under ANY name; only unscoped ones are name-gated.
+// That asymmetry is pre-existing and deliberately left alone here: narrowing it
+// would mix a widening and a narrowing into one commit.
+func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpdate, bool) {
+	parts := strings.Split(sc, ";")
+	if len(parts) == 0 {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+	nameValue := strings.TrimSpace(parts[0])
+	name, value, ok := strings.Cut(nameValue, "=")
+	if !ok {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+	// RFC 6265 §5.2 step 3: remove leading and trailing WS from the name-string
+	// AND the value-string, separately. Trimming only the whole `name=value`
+	// pair (the line above, kept because it also eats a stray line ending) left
+	// `SAPISID = v` parsed as the name "SAPISID " and the value " v" — a name no
+	// predicate in this package recognises and a value with a leading space.
+	//
+	// WS here is SP and HTAB exactly, per the grammar, which is why this is
+	// strings.Trim and not strings.TrimSpace: TrimSpace would also eat a leading
+	// CR or LF and quietly rescue a header that step 1 below should refuse.
+	//
+	// NOT de-quoted, and that is deliberate rather than unfinished. §5.2 takes
+	// everything up to the first ";" as the name/value pair and never strips
+	// DQUOTEs, so `Customer="WILE_E_COYOTE"` has the quotes as part of its value
+	// and `chips="a;hoy"` really does truncate at the semicolon — every browser
+	// behaves this way. CPython's SimpleCookie strips quotes because it
+	// implements the older RFC 2109; matching it here would diverge from both
+	// RFC 6265 and the browsers whose exports fill this file.
+	name = strings.Trim(name, " \t")
+	value = strings.Trim(value, " \t")
+	if name == "" {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+
+	now := time.Now().Unix()
+	expiry := now + 365*24*60*60
+
+	var (
+		expiresAt  int64
+		hasExpires bool
+		maxAge     int64
+		hasMaxAge  bool
+		httpOnly   bool
+		domainAttr string
+	)
+	// Every attribute is read to the end of the header. The old loop broke
+	// out early on Max-Age<=0, which threw away the Domain= that usually
+	// follows it — and Domain= is what scopes the deletion below.
+	for _, part := range parts[1:] {
+		trimmed := strings.TrimSpace(strings.ToLower(part))
+		switch {
+		case strings.HasPrefix(trimmed, "expires="):
+			_, dateStr, _ := strings.Cut(part, "=")
+			dateStr = strings.TrimSpace(dateStr)
+			if t, err := time.Parse(time.RFC1123, dateStr); err == nil {
+				expiresAt, hasExpires = t.Unix(), true
+			} else if t, err := time.Parse("Mon, 02-Jan-2006 15:04:05 MST", dateStr); err == nil {
+				expiresAt, hasExpires = t.Unix(), true
+			} else if t, err := time.Parse(time.RFC1123Z, dateStr); err == nil {
+				expiresAt, hasExpires = t.Unix(), true
+			}
+			// If all date formats fail, hasExpires stays false and the
+			// default one-year expiry below applies. An unreadable date
+			// must not fall through as "expired" and delete the row.
+		case strings.HasPrefix(trimmed, "max-age="):
+			if v, err := strconv.ParseInt(strings.TrimSpace(trimmed[len("max-age="):]), 10, 64); err == nil {
+				maxAge, hasMaxAge = v, true
+			}
+		case strings.HasPrefix(trimmed, "domain="):
+			_, dom, _ := strings.Cut(part, "=")
+			// Lowercased here, not just at comparison time. Domains are
+			// case-insensitive and this string becomes a MAP KEY: without
+			// this, "Domain=.YouTube.com" and "Domain=.youtube.com" are two
+			// distinct keys that both scope-match the same row, and which
+			// one wins is map-iteration order. CPython normalizes the same
+			// way (_normalized_cookie_tuples: `if k == "domain": v = v.lower()`).
+			domainAttr = strings.ToLower(strings.TrimSpace(dom))
+		case trimmed == "httponly":
+			httpOnly = true
+		}
+	}
+
+	// RFC 6265 §4.1.2.2: Max-Age takes precedence over Expires.
+	//
+	// An expiry at or before now is a DELETION request and is treated
+	// exactly as Max-Age<=0 is. This is the same rule yt-dlp gets from
+	// Python's http.cookiejar: _cookie_from_cookie_tuple converts Max-Age
+	// to an absolute expiry and then, for `expires <= self._now`, calls
+	// self.clear(domain, path, name) and returns None — the cookie is
+	// dropped from the jar entirely, keyed by domain+path+name. It is
+	// never stored with an empty value, which is what this code used to
+	// write: a row with value "" and expiry 0 that rowExpired will not
+	// prune (it ignores exp == 0) and that CookieJar.Load cannot even see
+	// (TrimSpace eats the trailing tab, leaving a 6-field "malformed" row).
+	deleteCookie := false
+	switch {
+	case hasMaxAge:
+		switch {
+		case maxAge <= 0:
+			deleteCookie = true
+		case maxAge > maxCookieLifetime:
+			// Clamped, not refused. A too-long Max-Age is a statement about
+			// lifetime, not a malformed header, and refusing it would throw away
+			// a perfectly good rotated VALUE over an attribute every browser
+			// silently caps anyway. See maxCookieLifetime for why the clamp also
+			// closes the int64 overflow.
+			expiry = now + maxCookieLifetime
+		default:
+			expiry = now + maxAge
+		}
+	case hasExpires:
+		if expiresAt <= now {
+			deleteCookie = true
+		} else {
+			expiry = expiresAt
+		}
+	}
+
+	// Normalize domain so the Netscape row uses a leading-dot form when
+	// the Set-Cookie explicitly said Domain= (which implies subdomain
+	// scope per RFC 6265). A bare "Domain=" carries no value at all and
+	// leaves domainAttr empty, which RFC 6265 §5.2.3 also says to treat as
+	// host-only — so it takes the unscoped branch, not a "." one.
+	if domainAttr != "" && !strings.HasPrefix(domainAttr, ".") {
+		domainAttr = "." + domainAttr
+	}
+
+	// Step 1. Before either admission branch, and on all three fields that become
+	// their own tab-separated column in the row. Normalization above can only
+	// lowercase and prepend a dot, so checking after it sees the same characters
+	// checking before it would; the WSP trim above has already removed the tabs
+	// that RFC 6265 §5.2 says are not part of the name or the value at all, so
+	// what reaches here is an INTERIOR one.
+	if hasRowBreakingChar(name) || hasRowBreakingChar(value) || hasRowBreakingChar(domainAttr) {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+
+	if domainAttr != "" {
+		// Step 2. cookiePlatformOf returns "" for a domain on no known platform
+		// (evil.tld, accounts.google.com.evil.tld, a bare "."), and an undeclared
+		// origin has no platform either — so the emptiness test is load-bearing:
+		// without it, bare equality would read "" == "" as a match.
+		p := cookiePlatformOf(domainAttr)
+		if p == "" || p != origin.platform() {
+			return cookieUpdateKey{}, cookieUpdate{}, false
+		}
+	} else if !trackedCookieName(name, origin) {
+		// Step 3.
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+
+	return cookieUpdateKey{Name: name, Domain: domainAttr}, cookieUpdate{
+		Value:    value,
+		Expiry:   expiry,
+		HTTPOnly: httpOnly,
+		Delete:   deleteCookie,
+	}, true
 }
 
 // updateCookieFile re-reads the cookie file, updates matching cookies with new
@@ -1911,11 +2402,40 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 //   - The Netscape "include subdomains" flag is derived from whether the
 //     domain begins with "." (finding #5) instead of being hardcoded TRUE.
 //   - Domain for newly-inserted rows is taken from the Set-Cookie Domain=
-//     attribute when the server provided one (finding #40); falling back to
-//     the legacy .youtube.com / .google.com heuristic only as a last resort.
+//     attribute when the server provided one (finding #40); when it did not,
+//     from the DECLARED ORIGIN's own site. It used to be guessed from the
+//     cookie name — see the insertion loop for why that was wrong and why
+//     nobody noticed for so long.
 //   - Deletions remove the row. See resolveRowUpdate for why a value refresh
 //     may cross domain variants while a deletion may not.
-func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate) error {
+//
+// origin is the SITE whose response produced these updates, and the caller has
+// to state it because three decisions here need it and none can recover it from
+// the map: a Set-Cookie with no Domain= is host-scoped to the response that
+// carried it, and that response is not in `updates`. resolveRowUpdate's rule 2
+// and sameCookiePlatform's Domain-less default both used to assume youtube.com,
+// which was a true statement about the single call site rather than about those
+// functions — correct today, and silently wrong in the DESTROY-SCOPE direction
+// the day a second caller appears (the open one being a re-auth ingest response
+// from accounts.google.com, whose unscoped deletions would have reached
+// .youtube.com rows).
+//
+// The third is the INSERTION loop, and it is the one that is easy to miss:
+// declining to match a row is not declining to write. Every update the two
+// matching rules turn down lands in that loop, which derives a domain from the
+// cookie name alone — so without an origin check there, a caller whose updates
+// were refused everywhere still appended new rows, under a domain nobody
+// declared. The loop now refuses any row outside the declared platform, and
+// refuses everything when no origin was declared.
+//
+// This parameter is ENFORCEMENT of the existing rule, not a change to it: with
+// originYouTube every case behaves exactly as before, insertion included (a
+// youtube.com response's cookies land on youtube.com and google.com, which are
+// one platform). The grow-broadly/destroy-narrowly asymmetry is likewise
+// unchanged and deliberate — name-loose updates re-sync stale twins on purpose,
+// domain-strict deletions keep .google.com auth out of reach of an unscoped
+// YouTube deletion.
+func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin) error {
 	filePath := rs.jar.GetFilePath()
 	if filePath == "" {
 		return fmt.Errorf("no cookie file path configured")
@@ -1954,12 +2474,31 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 			if len(parts) >= 7 {
 				cookieName := strings.TrimSpace(parts[5])
 				rowDomain := strings.TrimPrefix(strings.TrimSpace(parts[0]), "#HttpOnly_")
-				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain); ok {
+				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain, origin); ok {
 					handled[key] = true
+					// essentialYouTubeCookies is a set of NAMES, and several of
+					// them (PREF, CONSENT, YSC, LOGIN_INFO, the rotating
+					// SIDTS/SIDCC pair) are not YouTube-exclusive strings — just
+					// names YouTube happens to use. So a row only carries an
+					// essential YouTube cookie when its DOMAIN says so too, the
+					// same guard Arc 5 put on jar.Load and isEssentialCookie.
+					//
+					// Both readers below select log SEVERITY only and gate no
+					// mutation, which is why the unguarded form was not wrong on
+					// the wire. It is guarded because it was the last surviving
+					// copy of a shape this plan has now removed three times, and
+					// the next reader would reasonably lift it somewhere it does
+					// decide something.
+					//
+					// Computed inside this branch: nearly every row in a real
+					// cookies.txt matches no pending update, and neither reader
+					// below is reachable for those.
+					rowHasEssential := essentialYouTubeCookies[cookieName] &&
+						(isYouTubeDomain(rowDomain) || isGoogleDomain(rowDomain))
 					if cu.Delete {
 						// Drop the row. Writing it back with an empty value
 						// left a credential-shaped hole nothing could prune.
-						if essentialYouTubeCookies[cookieName] {
+						if rowHasEssential {
 							rs.logger.Info("youtube session refresh: the server deleted an essential cookie — the signed-in session may have ended",
 								"name", cookieName, "domain", rowDomain)
 						} else {
@@ -2001,7 +2540,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 					//     and net/http parses the whole header block before Do
 					//     returns, so a truncated body cannot blank one.)
 					if cu.Value == "" {
-						if essentialYouTubeCookies[cookieName] && strings.Join(parts[6:], "\t") != "" {
+						if rowHasEssential && strings.Join(parts[6:], "\t") != "" {
 							rs.logger.Warn("youtube session refresh: refused to blank an essential cookie — the Set-Cookie carried an empty value but no expiry, so it is not a deletion and the existing value was kept",
 								"name", cookieName, "domain", rowDomain)
 						} else {
@@ -2011,11 +2550,37 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 						result.WriteString("\n")
 						continue
 					}
-					// Rebuild the row as EXACTLY seven tab-separated fields.
-					// CookieJar.Load reads fields 6.. as one value that may
-					// itself contain tabs, so a live row can split into 8+
-					// parts; assigning parts[6] and re-joining left the tail
-					// of the replaced value dangling on the end of the new one.
+					// Rebuild the row from EXACTLY the first seven fields of the
+					// row being replaced, with the new expiry and value
+					// substituted in. That is a claim about the row READ, and it
+					// is the one that matters: CookieJar.Load reads fields 6.. as
+					// one value that may itself contain tabs, so a live row can
+					// arrive split into 8+ parts, and assigning parts[6] and
+					// re-joining left the tail of the replaced value dangling on
+					// the end of the new one.
+					//
+					// It is NOT a claim about the row WRITTEN. A tab inside
+					// cu.Value emits 8+ fields again, and both readers in this
+					// package handle that correctly — CookieJar.Load joins fields
+					// 6.. back into one value, and mergeCookieFiles keys on
+					// fields 0 and 5 and carries the whole line verbatim.
+					//
+					// parts[0] is emitted verbatim, which also settles the
+					// "#HttpOnly_" question for this path: the prefix is
+					// PRESERVED when the existing row carries it and never ADDED
+					// when it does not. For a rewrite the file's own row is the
+					// authority on HttpOnly-ness — it is what a browser export or
+					// a previous insertion recorded — and this path is changing a
+					// value and an expiry, not re-deciding the flag. A
+					// Set-Cookie's HttpOnly attribute only matters on INSERTION,
+					// where no existing row can be that authority and cu.HTTPOnly
+					// is read instead (below). The consequence is that a server
+					// which starts or stops sending HttpOnly for a cookie already
+					// in the file does not flip the prefix; nothing in this
+					// package treats the flag as a control (CookieJar.Load,
+					// rowExpired and mergeCookieFiles all merely strip it, and
+					// the jar does not retain it), so the cost is a stale
+					// annotation rather than a downgraded cookie.
 					result.WriteString(strings.Join([]string{
 						parts[0], parts[1], parts[2], parts[3],
 						strconv.FormatInt(cu.Expiry, 10),
@@ -2039,6 +2604,9 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	// a row that is not there is simply done — it must never be inserted. Nor
 	// may an empty value: same refusal as the rewrite path above, and an
 	// inserted empty row would be one this package's own reader cannot read.
+	// Nor, per the origin check below, may a row outside the platform the
+	// caller declared: everything the matching rules turned down arrives here,
+	// so this loop is where "declined" has to become "not written".
 	for key, cu := range updates {
 		if handled[key] || cu.Delete {
 			continue
@@ -2049,13 +2617,110 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		}
 		name := key.Name
 		domain := key.Domain
+		// An unscoped update may not be INSERTED when the same response also
+		// carried a scoped one of the same name that it means to keep. The scoped
+		// header has already claimed whichever row it matches; inserting the
+		// unscoped twin appends a row that then OVERRIDES it in the jar.
+		//
+		// The override is by NAME, not by domain, and stating that correctly
+		// matters because the two rows are usually on different domains. Since
+		// fix round 1 the twin lands on the declared origin's own site, so an
+		// originYouTube response carrying `SID=v1` and `SID=v2; Domain=.google.com`
+		// against a file holding the .google.com row leaves `.google.com` and
+		// `.youtube.com` SID rows side by side — not two rows on one domain, which
+		// is only what the originGoogle case would produce. It is still a
+		// downgrade: CookieJar.Load puts youtube.com and google.com rows in ONE
+		// map keyed by bare cookie name, so the last row read wins and the
+		// unscoped value silently defeats the value the server was more specific
+		// about.
+		//
+		// Narrow on purpose, and all three halves of that matter. It fires only
+		// for an unscoped key; only when a scoped SIBLING of the same name is in
+		// this batch; and not when that sibling is a DELETION (see
+		// hasScopedSibling — a delete plus an insert of one name is "replace",
+		// and suppressing the insert loses the replacement). The obvious wider
+		// rule — "once any key of this name matched a row, treat every key of
+		// that name as handled" — destroys the legitimate case: a response
+		// rotating SID on both .google.com and .youtube.com against a file
+		// holding only the .google.com row must still insert the .youtube.com one.
+		if domain == "" && hasScopedSibling(updates, byName[name]) {
+			rs.logger.Debug("cookie update: not inserting an unscoped cookie beside a scoped one of the same name",
+				"name", name, "origin", string(origin))
+			continue
+		}
 		if domain == "" {
-			// Fallback when the Set-Cookie lacked Domain=. Prefer YouTube;
-			// Google-only auth cookies are only emitted by google.com paths.
-			domain = ".youtube.com"
-			if isGoogleOnlyAuthName(name) {
-				domain = ".google.com"
-			}
+			// The Set-Cookie carried no Domain=, so RFC 6265 §4.1.2.3 host-scopes
+			// it to the response that carried it — and the only thing here that
+			// knows which response that was is the declared origin. So the domain
+			// is the origin's own site, and nothing else contributes to it.
+			//
+			// It used to be guessed from the cookie NAME: .youtube.com, or
+			// .google.com when isGoogleOnlyAuthName said so. That branch was DEAD
+			// CODE for as long as it existed — processYouTubeSetCookies opened
+			// with a substring pre-filter that dropped every Domain-less header
+			// before it could become an unscoped key — and going live exposed it
+			// as the exact inverse of resolveRowUpdate's rule 2. An unscoped SID
+			// from an ordinary youtube.com reply was written as `.google.com SID`
+			// and then sent to accounts.google.com on the next request. It is a
+			// DIFFERENT COOKIE: the real .google.com SID is rotated by
+			// accounts.google.com with an explicit Domain=, which takes the scoped
+			// path and never reaches this branch at all. isGoogleOnlyAuthName is
+			// retired as a domain-inventor and survives only as half of
+			// trackedCookieName's admission set.
+			//
+			// The leading-dot registrable domain (".youtube.com") rather than the
+			// host-only form the response literally scopes it to
+			// ("www.youtube.com") because that is the shape the rest of the file
+			// speaks: browser exports, mergeCookieFiles and CookieJar.Load all key
+			// on the registrable domain with include-subdomains set, and
+			// resolveRowUpdate's rule 2 matches through origin.covers(), which
+			// accepts exactly this. A host-only row would be a shape no other
+			// writer in this package produces, and the next refresh would not
+			// match it.
+			//
+			// This makes the cross-platform hazard structural rather than caught:
+			// an unscoped insertion now lands inside the declaring origin by
+			// construction, so it CANNOT reach another platform's rows. The check
+			// below still earns its place for the two cases construction does not
+			// cover — an explicit cross-platform Domain=, and an undeclared origin
+			// (which yields "." here, a domain on no platform at all).
+			domain = "." + string(origin)
+		}
+		// An insertion may not leave the declared origin's platform, and an
+		// undeclared origin may not insert at all.
+		//
+		// This is the half of the rule the matching rules cannot enforce, and
+		// missing it inverted the whole point of declaring an origin. Declining
+		// to MATCH is not declining to WRITE: when resolveRowUpdate turns down
+		// every row, the update is not dropped, it arrives here. When this branch
+		// guessed the domain from the cookie name, a Twitch (or undeclared)
+		// caller's unscoped "SID" was refused by rules 2 and 3 and then appended a
+		// brand-new .google.com SID row anyway, landing a foreign credential in
+		// the Google jar — WIDER than the hardcoded behaviour the origin parameter
+		// replaced, not narrower.
+		//
+		// The unscoped half of that is now impossible by construction (the domain
+		// IS the origin's site), so what this check still decides is the explicit
+		// -Domain= case and the undeclared origin. Kept whole rather than narrowed
+		// to those two: it is one sentence about the row about to be written, and
+		// splitting it would make the guarantee depend on which branch produced
+		// the domain.
+		//
+		// Checked against the domain actually about to be written, not only the
+		// fallback, so a key carrying an explicit cross-platform Domain= is
+		// refused on the same rule. Nothing legitimate is lost: a Google session
+		// covers youtube.com and google.com alike, so the two never fail this
+		// against each other, and admitSetCookie already drops a Domain= that
+		// is neither.
+		//
+		// A domain with no recognised platform is refused by the same test — an
+		// undeclared origin and an unplaceable domain both yield "", and equality
+		// alone would read that as a match.
+		insertPlatform := cookiePlatformOf(domain)
+		if insertPlatform == "" || insertPlatform != origin.platform() {
+			rs.logger.Debug("cookie update: refusing to insert a row outside the declaring origin's platform",
+				"name", name, "domain", domain, "origin", string(origin))
+			continue
 		}
 		// Subdomain flag follows RFC 6265: leading-dot domain = include
 		// subdomains. The legacy code hardcoded TRUE even for no-dot domains.
@@ -2099,6 +2764,29 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	return nil
 }
 
+// hasScopedSibling reports whether any of these same-name update keys carries an
+// explicit Domain= AND is a value it intends to keep. The caller has the keys for
+// one name already grouped (the byName index), so this is a walk over one or two
+// entries, not a scan.
+//
+// A scoped DELETION is not a sibling for this purpose, and that exclusion is the
+// whole reason this takes the updates map rather than the keys alone. `SID=;
+// Domain=.google.com; Max-Age=0` beside an unscoped `SID=fresh` is one response
+// saying REPLACE — retire the cookie on google.com, set it host-scoped here.
+// Counting the deletion as a claim on the name made the guard eat the
+// replacement: the delete removed the .google.com row, the unscoped insert was
+// then suppressed as "beside a scoped one", and the fresh value reached nothing.
+// A deletion claims no row that an insertion could duplicate, because after it
+// runs there is no row.
+func hasScopedSibling(updates map[cookieUpdateKey]cookieUpdate, candidates []cookieUpdateKey) bool {
+	for _, k := range candidates {
+		if k.Domain != "" && !updates[k].Delete {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveRowUpdate picks the pending update that applies to one file row, from
 // the candidate keys that already share the row's cookie name.
 //
@@ -2126,7 +2814,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 // for one name always name different hosts. Both halves of that normalization
 // are load-bearing — without the lowercasing, ".YouTube.com" and ".youtube.com"
 // are separate keys that both match, and which one wins is map-iteration order.
-func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []cookieUpdateKey, rowDomain string) (cookieUpdateKey, cookieUpdate, bool) {
+func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []cookieUpdateKey, rowDomain string, origin cookieOrigin) (cookieUpdateKey, cookieUpdate, bool) {
 	if len(candidates) == 0 {
 		return cookieUpdateKey{}, cookieUpdate{}, false
 	}
@@ -2137,10 +2825,13 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 		}
 	}
 	// 2. A Set-Cookie with no Domain= is host-scoped to the response that
-	//    carried it, and processYouTubeSetCookies is only ever fed a
-	//    youtube.com API response (single call site). Confining it to YouTube
-	//    rows is what stops an unscoped deletion reaching .google.com auth.
-	if isYouTubeDomain(rowDomain) {
+	//    carried it, so it may only reach rows inside the site the CALLER
+	//    declared that response came from. Confining it that way is what stops
+	//    an unscoped deletion in a youtube.com reply reaching .google.com auth —
+	//    and, the day a second caller exists, an unscoped deletion in a
+	//    google.com reply reaching .youtube.com. An undeclared origin covers
+	//    nothing, so the rule simply does not fire.
+	if origin.covers(rowDomain) {
 		for _, k := range candidates {
 			if k.Domain == "" {
 				return k, updates[k], true
@@ -2153,7 +2844,7 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 	var only cookieUpdateKey
 	refreshes := 0
 	for _, k := range candidates {
-		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain) {
+		if !updates[k].Delete && sameCookiePlatform(k.Domain, rowDomain, origin) {
 			only, refreshes = k, refreshes+1
 		}
 	}
@@ -2168,24 +2859,18 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 // a Google session covers both, which is exactly why a refresh is allowed to
 // fan out across them. Twitch is another, and a row on neither matches nothing.
 //
-// An update with no Domain= counts as the YouTube/Google platform — like rule 2
-// above, that is a property of the single call site (processYouTubeSetCookies
-// is only ever fed a youtube.com API response), not of this function.
-func sameCookiePlatform(updateDomain, rowDomain string) bool {
-	platform := func(d string) string {
-		switch {
-		case isTwitchDomain(d):
-			return "twitch"
-		case isYouTubeDomain(d) || isGoogleDomain(d):
-			return "google"
-		}
-		return ""
-	}
-	up := "google"
+// An update with no Domain= counts as the platform of the site the CALLER
+// declared the response came from. Like rule 2 in resolveRowUpdate, that is a
+// property of the call site and not of this function, which is why it arrives as
+// a parameter instead of the hardcoded "google" that used to stand here. An
+// undeclared origin has no platform, so a Domain-less update matches nothing —
+// the narrow direction, which is the safe one.
+func sameCookiePlatform(updateDomain, rowDomain string, origin cookieOrigin) bool {
+	up := origin.platform()
 	if updateDomain != "" {
-		up = platform(updateDomain)
+		up = cookiePlatformOf(updateDomain)
 	}
-	return up != "" && up == platform(rowDomain)
+	return up != "" && up == cookiePlatformOf(rowDomain)
 }
 
 // sameCookieScope reports whether two domain strings name the same host. The
@@ -2203,6 +2888,12 @@ func sameCookieScope(a, b string) bool {
 // legacy code used strings.Contains(name, "GOOGLE") which matched nothing
 // real — most google.com auth cookies are named SID, HSID, SSID, APISID,
 // SAPISID, or the __Secure- variants.
+//
+// It is a statement about NAMES, and it must not be used to decide a DOMAIN.
+// updateCookieFile's insertion loop used to do exactly that for a Set-Cookie
+// with no Domain=, which wrote a host-only youtube.com SID onto .google.com —
+// a different cookie, sent to a different host. The sole caller now is
+// trackedCookieName, which asks only whether the jar tracks the name.
 func isGoogleOnlyAuthName(name string) bool {
 	switch name {
 	case "SID", "HSID", "SSID", "APISID", "SAPISID":

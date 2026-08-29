@@ -70,3 +70,34 @@ var chromiumBrowsers = []chromiumBrowserLayout{
 	{"edge-dev", `Microsoft\Edge Dev\User Data`},
 	{"edge-canary", `Microsoft\Edge SxS\User Data`},
 }
+
+// KnownBrowserFamilies returns the distinct base browser families
+// FindBrowserProfiles knows a layout for — channel variants collapsed to
+// their base id, so "chrome-beta" contributes "chrome", not a second
+// entry. Order matches chromiumBrowsers' first occurrence of each base id.
+//
+// Exists so a caller outside this package can tell "this configured
+// browser_type has NO possible dpapi layout at all" (e.g. Opera — excluded
+// above for a real layout-shape reason — or Thorium, which
+// browser_validate.go's knownBrowserTypes accepts as a launchable browser
+// but this package has never had a layout for) apart from "this type DOES
+// have a layout, but this machine happens to have no profile for it".
+// Those two cases need different responses from a caller filtering
+// profiles by configured type: the first must not filter at all (there is
+// nothing to filter TO), the second is a legitimate "not found" the
+// caller should still be able to report. Without this, that caller would
+// otherwise have to hardcode a second copy of this id list to tell them
+// apart.
+func KnownBrowserFamilies() []string {
+	seen := make(map[string]bool, len(chromiumBrowsers))
+	out := make([]string, 0, len(chromiumBrowsers))
+	for _, b := range chromiumBrowsers {
+		base, _, _ := strings.Cut(b.id, "-")
+		if seen[base] {
+			continue
+		}
+		seen[base] = true
+		out = append(out, base)
+	}
+	return out
+}

@@ -63,16 +63,19 @@ func jarWithTwitchAuth(t *testing.T) *CookieJar {
 	return jar
 }
 
-// pointYouTubeGuideAt redirects BOTH guide seams at srv for the duration of
-// the test. Both, always: checkYouTubeAuth reads youtubeGuideURL while
-// checkAndRefreshYouTube reads youtubeGuideRefreshURL, so overriding only the
-// one a test happens to exercise today leaves the test one refactor away from
-// issuing a real request to youtube.com.
+// pointYouTubeGuideAt redirects the guide seam at srv for the duration of the
+// test. A test that forgets it issues a real request to youtube.com.
+//
+// There used to be two seams here, because checkYouTubeAuth read
+// youtubeGuideURL while checkAndRefreshYouTube read youtubeGuideRefreshURL and
+// overriding one left the other live. Those two vars held the same URL; folding
+// the guide functions into one exchange collapsed them, and the doubled
+// override with them.
 func pointYouTubeGuideAt(t *testing.T, srv *httptest.Server) {
 	t.Helper()
-	origPlain, origRefresh := youtubeGuideURL, youtubeGuideRefreshURL
-	youtubeGuideURL, youtubeGuideRefreshURL = srv.URL, srv.URL
-	t.Cleanup(func() { youtubeGuideURL, youtubeGuideRefreshURL = origPlain, origRefresh })
+	orig := youtubeGuideURL
+	youtubeGuideURL = srv.URL
+	t.Cleanup(func() { youtubeGuideURL = orig })
 }
 
 // pointTwitchValidateAt is the Twitch equivalent. One seam, but the same rule:
@@ -145,6 +148,12 @@ func TestGuide200LoggedOutIsConclusive(t *testing.T) {
 // AutoCookieService.VerifyYouTubeAuth (via the exported CheckYouTubeAuth), so
 // its non-200 answer decides whether a profile import is committed or rolled
 // back — see TestImportIsNotCommittedWhenTheRealCheckIsRateLimited.
+//
+// Both entry points share one exchange now, so this is no longer a second copy
+// of the status rule being checked. It pins that this entry point reaches the
+// shared exchange and hands its error back: deleting the non-200 branch must
+// kill this test AND its twin above, and killing only one would mean a wrapper
+// had grown a status path of its own.
 func TestCheckYouTubeAuthNon200IsInconclusive(t *testing.T) {
 	pointYouTubeGuideAt(t, statusServer(t, http.StatusTooManyRequests))
 
@@ -311,6 +320,11 @@ func TestHalfClearedJarStillProbes(t *testing.T) {
 // calls, so its answer decides whether a freshly imported profile is committed
 // — that answer has to come from YouTube, not from a name lookup. Here the
 // server says logged_in=1, so the half-cleared jar is reported WORKING.
+//
+// Since the fold, the gate it exercises lives in the shared exchange; what this
+// pins on this side is that the verify wrapper reaches it and reports a POSITIVE
+// verdict faithfully. Its twin above covers the negative, so between them no
+// wrapper can invert or short-circuit the answer it was handed.
 func TestCheckYouTubeAuthHalfClearedJarStillProbes(t *testing.T) {
 	srv, hits := countingGuide(t, `{"responseContext":{"serviceTrackingParams":[{"params":[{"key":"logged_in","value":"1"}]}]}}`)
 	pointYouTubeGuideAt(t, srv)

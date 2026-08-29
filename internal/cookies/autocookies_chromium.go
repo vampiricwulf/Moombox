@@ -178,20 +178,23 @@ func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 // navigation this pass makes — the same shape as refreshFirefox's, for the same
 // reason.
 //
-// Read it precisely: TRUE means no navigation reported a transport failure. It
-// is NOT the positive artifact the Firefox path demands. cdpNavigateAndWait
-// returns nil when its own 30 s budget expires without a Page.loadEventFired
-// ("navigation likely complete, just no event"), so a page that connected and
-// never finished loading folds in as a success. FALSE, in the other direction,
-// says only that the pass has no proof — never that the browser did nothing.
+// Read it precisely: TRUE means either a platform's load event actually fired,
+// or — the bounded exception, see navigateAllPlatforms — its navigation merely
+// timed out waiting for one while a SIBLING platform's did fire. It is NOT the
+// positive artifact the Firefox path demands, and does not need to be: a
+// single load event anywhere in the pass is proof the browser itself works,
+// which is the fact this verdict is asking for. FALSE says the pass has no
+// such proof on any platform — a transport failure, or every platform ending
+// in cdpNavigateAndWait's read-budget expiring with no load event anywhere
+// (connect-then-stall) — never that the browser is confirmed to have done
+// nothing.
 //
-// That asymmetry with Firefox — a positive artifact there, the absence of an
-// error from a function that swallows its own timeout here — is pre-existing
-// and deliberately left alone. It errs toward a MISSED alarm, which is also
-// what keeps slow pages from producing spurious Renewed=false. Tightening it
-// (having the budget-exhausted branch return an error, so a page that never
-// fired its load event stops counting) is a behaviour change with its own
-// false-alarm risk and wants its own decision, not a side effect of this one.
+// This used to be looser: cdpNavigateAndWait returned nil on budget
+// exhaustion ("navigation likely complete, just no event"), which folded a
+// connect-then-stall browser in as success right alongside a merely slow one.
+// Arc 8 7(e) is the decision that closed that gap — bounded to "every
+// platform", specifically so one slow page next to a working one still reads
+// as acted; see navigateAllPlatforms for why.
 //
 // No minPlausibleBrowserRefresh-style floor here, deliberately. That
 // threshold was measured against the Firefox launcher-handoff path — a
@@ -285,7 +288,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	}
 
 	// Navigate to each active platform.
-	allNavigated, navFailures := navigateAllPlatforms(cdpCtx, port, s.refreshPlatforms(), cdpNavigate)
+	allNavigated, navFailures, budgetExhausted := navigateAllPlatforms(cdpCtx, port, s.refreshPlatforms(), cdpNavigate)
 	for _, f := range navFailures {
 		// Not fatal: another platform may still have navigated, and the
 		// profile read below can still return a usable set. Say what happened
@@ -293,6 +296,13 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		// uses for a drain timeout.
 		s.logger.Warn("chromium "+f.platform+" navigation failed; this pass cannot claim it refreshed that platform",
 			"err", f.err)
+	}
+	for _, platform := range budgetExhausted {
+		// Debug, not Warn: this is not a failure, and navigateAllPlatforms has
+		// already decided whether it costs allNavigated (only when every
+		// platform ended this way). Named by platform only — never the URL —
+		// see errNavigateBudgetExhausted. Arc 8 7(e).
+		s.logger.Debug("chromium " + platform + " navigation budget exhausted before Page.loadEventFired")
 	}
 
 	// Extract cookies
@@ -332,19 +342,45 @@ type navFailure struct {
 // succeeded". refreshChromium is only reached with at least one platform, so
 // that guard covers a future caller that does not.
 //
+// A third outcome sits between "navigated" and "failed": errNavigateBudgetExhausted,
+// which cdpNavigateAndWait returns when its read loop's context deadline runs out
+// without ever seeing Page.loadEventFired — a healthy-but-slow page and a
+// connect-then-stall browser look the same from inside that one call. Treated
+// per platform as NOT OBSERVED rather than a failure: it does not join
+// navFailures (nothing actually broke) and does not by itself flip the returned
+// bool. It only does that when it is EVERY platform's outcome — one platform
+// timing out while a sibling fires its load event is a slow page, and the
+// browser demonstrably works, so that pass still counts as navigated. Only when
+// NOTHING was confirmed on ANY platform does this report false, which is the
+// conservative reading: "could not confirm" on a browser that never loads
+// anything beats crediting it with a renewal it did not perform. Arc 8 7(e) —
+// do not loosen "every" to "any"; that credits the one-slow-page case as
+// unconfirmed too.
+//
 // navigate is a parameter so the fold can be tested without a browser; the one
 // production caller passes cdpNavigate.
 func navigateAllPlatforms(ctx context.Context, port int, platforms []string,
-	navigate func(context.Context, int, string) error) (bool, []navFailure) {
+	navigate func(context.Context, int, string) error) (bool, []navFailure, []string) {
 	allOK := len(platforms) > 0
+	allExhausted := len(platforms) > 0
 	var failures []navFailure
+	var exhausted []string
 	for _, platform := range platforms {
-		if err := navigate(ctx, port, platformRefreshURLs[platform]); err != nil {
+		switch err := navigate(ctx, port, platformRefreshURLs[platform]); {
+		case err == nil:
+			allExhausted = false
+		case errors.Is(err, errNavigateBudgetExhausted):
+			exhausted = append(exhausted, platform)
+		default:
 			allOK = false
+			allExhausted = false
 			failures = append(failures, navFailure{platform: platform, err: err})
 		}
 	}
-	return allOK, failures
+	if allExhausted {
+		allOK = false
+	}
+	return allOK, failures, exhausted
 }
 
 // --- CDP helpers (minimal implementation) ---
@@ -471,6 +507,22 @@ func cdpEnsurePageTarget(ctx context.Context, port int, targetURL string) error 
 	return nil
 }
 
+// errNavigateBudgetExhausted marks that cdpNavigateAndWait's read loop hit its
+// context deadline without ever seeing Page.loadEventFired. It wraps nothing,
+// so errors.Is compares it by identity — a genuine transport failure (the
+// read erroring before the deadline) returns its own distinct wrapped error
+// instead, never this one.
+//
+// It exists because "budget ran out" used to be silently folded into
+// success ("navigation likely complete, just no event"), which is a fair
+// guess for a healthy-but-slow page and a wrong one for a Chromium that
+// connected, answered Page.enable, and then never loaded anything —
+// connect-then-stall. This function has no way to tell those two apart by
+// itself; navigateAllPlatforms does, because it sees every platform's
+// outcome, so the distinguishable sentinel is what lets it decide. Arc 8
+// 7(e).
+var errNavigateBudgetExhausted = errors.New("cdp: navigate budget exhausted before Page.loadEventFired")
+
 // cdpNavigateAndWait navigates to a URL via CDP and waits for Page.loadEventFired.
 // Matches TS CdpClient.navigate(): Page.enable -> Page.navigate -> wait for load.
 func cdpNavigateAndWait(ctx context.Context, wsURL string, targetURL string) error {
@@ -512,8 +564,13 @@ func cdpNavigateAndWait(ctx context.Context, wsURL string, targetURL string) err
 		_, data, err := conn.Read(navCtx)
 		if err != nil {
 			if navCtx.Err() != nil {
-				// Budget exhausted — navigation likely complete, just no event.
-				return nil
+				// Budget exhausted. See errNavigateBudgetExhausted: this is
+				// not claimed as success here, because a page that is merely
+				// slow to fire the event and a browser that connected and
+				// never loads anything look identical from inside this one
+				// call. The caller has the context (every platform's
+				// outcome) to tell them apart.
+				return errNavigateBudgetExhausted
 			}
 			return fmt.Errorf("CDP read during navigate: %w", err)
 		}
@@ -601,24 +658,30 @@ func cdpCookieReadOutcome(read cdpCookieRead) error {
 		return nil
 	}
 	if !read.anyQuerySucceeded {
+		// BOTH arms wrap ErrBrowserReadUnanswered, including the one that has no
+		// cause to name. From the caller's side they are the same state — no
+		// query answered, so nothing was learned — and the difference between
+		// them is only whether the bookkeeping recorded why. Giving the
+		// cause-less arm its own sentinel would put a bookkeeping bug on the
+		// wire as if it were a distinct operator-facing situation.
 		if read.lastErr == nil {
 			// Nothing answered and nothing failed, so nothing was asked. Only
 			// reachable if the bookkeeping ever drops an error, and it must not
 			// read as "the profile is empty": we never looked.
-			return errors.New("CDP cookie read: no query was attempted " +
-				"(Storage.getCookies, Network.getAllCookies, Network.getCookies)")
+			return fmt.Errorf("%w — no query was attempted "+
+				"(Storage.getCookies, Network.getAllCookies, Network.getCookies)", ErrBrowserReadUnanswered)
 		}
-		return fmt.Errorf("CDP cookie read failed — no query answered "+
-			"(Storage.getCookies, Network.getAllCookies, Network.getCookies): %w", read.lastErr)
+		return fmt.Errorf("%w (Storage.getCookies, Network.getAllCookies, Network.getCookies): %w",
+			ErrBrowserReadUnanswered, read.lastErr)
 	}
 	if read.ladderBlocked {
 		cause := read.lastErr
 		if cause == nil {
 			cause = errors.New("the CDP target listing did not complete")
 		}
-		return fmt.Errorf("CDP cookie read incomplete — a query answered with no YouTube/Twitch "+
+		return fmt.Errorf("%w — a query answered with no YouTube/Twitch "+
 			"cookies, but the page-level fallbacks could not be run, so this is not a verdict "+
-			"on the profile: %w", cause)
+			"on the profile: %w", ErrBrowserLadderBlocked, cause)
 	}
 	if read.lastErr != nil {
 		// The cause rides along rather than being dropped. cdpGetCookiesAsNetscape

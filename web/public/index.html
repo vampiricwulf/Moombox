@@ -1030,6 +1030,20 @@
                                     style="margin-left: 0.5em; color: var(--sl-color-neutral-500)"
                                 ></span>
                             </div>
+                            <!--
+                                AutoCookieStatus.lastError — the last thing a
+                                cookie pass concluded that the operator has to
+                                act on. Filled by loadAutoCookieStatus and
+                                hidden whenever the field is empty; see the
+                                write policy on the Go field
+                                (internal/cookies/autocookies.go) for why a
+                                non-empty value is trustworthy enough to sit
+                                here permanently.
+                            -->
+                            <div
+                                id="auto-cookie-last-error"
+                                style="display: none; margin-top: 0.4em; font-size: var(--sl-font-size-small)"
+                            ></div>
                             <div id="auto-cookie-browser-selector" style="display: none; margin-top: 0.75em;">
                                 <sl-select
                                     id="cfg-cookies-browser-select"

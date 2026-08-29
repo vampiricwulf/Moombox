@@ -237,6 +237,20 @@ func (s *runState) runTUI() {
 			s.log.Error("Failed to save config from TUI", slog.String("error", saveErr.Error()))
 		} else {
 			s.log.Info("Config saved from TUI settings")
+			// Invalidate the browser-detection caches on every TUI settings
+			// save, unconditionally — not gated on browser_path/browser_type
+			// actually changing. The settings model mutates the SAME
+			// *config.MoomboxConfig the store holds live (Open stores the
+			// store's own pointer; applyValues writes straight into it) before
+			// this callback ever runs, so by the time updatedCfg reaches here
+			// there is no pre-mutation snapshot left to diff against from
+			// this side of the package boundary. Invalidating on every save
+			// costs one extra detection scan on a rare, human-triggered
+			// event; a missed invalidation would instead leave a stale
+			// browser list for up to browserDetectCacheTTL, silently. See
+			// the validate-browser-path handler in routes/cookies.go for the
+			// other, precisely-targeted invalidation site.
+			cookies.InvalidateBrowserDetection()
 		}
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
 		if updatedCfg.Logs.LogLevel != "" {
@@ -310,14 +324,67 @@ func (s *runState) runTUI() {
 			return info.TagName, info.ReleaseNotes, nil
 		}
 	}
-	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict) {
+	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
 		s.log.Info("Cookie recheck requested from TUI")
+		// The bool is deliberately ignored, and the feedback line is deliberately
+		// unchanged when it is false.
+		//
+		// R C asks "what is the state of my cookies", and GetStatus answers that
+		// whether or not THIS keypress is the pass that produced the answer — a
+		// pass colliding with the 30-minute ticker returns the in-flight pass's
+		// verdicts, at worst one snapshot old, and every one of them is still a
+		// true statement about the credentials. The alternative would be to tell
+		// the operator "a refresh was already running", and there is no vocabulary
+		// for that here: cookies.RecheckReport renders per-platform VERDICTS and
+		// nothing else, and cookies.RefreshDeclinedCauses is the browser
+		// refresher's exhaustive, three-consumer-pinned set — not this one's.
+		// Adding a cause is a separate change; see CheckNow's own doc.
 		s.cookieRefresh.CheckNow(context.Background())
 		status := s.cookieRefresh.GetStatus()
 		// The verdicts, not the booleans. Both booleans are false for a check
 		// that could not reach the site, and the feedback line built on them
 		// reported "not authenticated" — a conclusion the check never drew.
-		return status.YouTubeVerification, status.TwitchVerification
+		//
+		// And the two error strings beside them, which is what the verdict on
+		// its own cannot say: RefreshUnknown means "this check learned nothing"
+		// and every cause produces the same three words. These fields had no
+		// reader anywhere in the tree until Arc 8 Task 12a — the same status
+		// object is projected onto the wire by CookieStatusPayload, which now
+		// carries them too, so both surfaces answer R C's question with the same
+		// two facts.
+		//
+		// Passed through untouched, and safely: every producer of these strings
+		// is status-and-cause only and none interpolates a response body (the
+		// rule is stated in full at CookieStatusPayload). The TUI clamps the
+		// rendered line to the panel width — see fitFeedback — so length is the
+		// renderer's problem, not this closure's.
+		return status.YouTubeVerification, status.TwitchVerification,
+			status.YouTubeError, status.TwitchError
+	}
+	// The other half of R C's answer, and it comes off a DIFFERENT SERVICE.
+	// AutoCookieStatus.LastError records what the last browser refresh or
+	// interactive setup concluded that the operator has to act on; the verdicts
+	// above come from the in-process RefreshService's own check. The two can
+	// disagree in the direction that matters — cookies.txt still authenticating
+	// because the 30-minute session refresh keeps it alive, while the mechanism
+	// that RENEWS it has been failing for days — and until now the TUI had no
+	// surface for the second fact at all. The field's write policy
+	// (internal/cookies/autocookies.go) is what makes it safe to show
+	// permanently: one SET funnel, three earned clears, and cleanup() forbidden
+	// from clearing.
+	//
+	// GetStatus, not a narrower accessor, and this is the caller the Task 4 note
+	// carves out: the panel that renders the full status keeps GetStatus. Its
+	// browser/registry detection scan is behind a 60 s cache and this runs once
+	// per R C keypress, not per auth-change dispatch.
+	app.OnAutoCookieLastError = func() string {
+		if s.autoCookieSvc == nil {
+			return ""
+		}
+		if le := s.autoCookieSvc.GetStatus().LastError; le != nil {
+			return *le
+		}
+		return ""
 	}
 	// WIRED UNCONDITIONALLY. Do not put a cookies.auto_enabled gate back here,
 	// in either shape — not around the assignment, and not as a live read
@@ -359,7 +426,15 @@ func (s *runState) runTUI() {
 		if err != nil {
 			return result, err
 		}
-		s.cookieRefresh.CheckNow(context.Background())
+		// Same shape as the auto-cookie recovery path in monitor_callbacks.go:
+		// the browser pass has just rewritten cookies.txt, and a refresh already
+		// in flight read the OLD file, so a skipped re-check leaves the status
+		// bar behind until the next tick. R F's own feedback is built from
+		// `result`, not from GetStatus, so what the operator is told about the
+		// refresh itself is unaffected — this line explains only the badge.
+		if !s.cookieRefresh.CheckNow(context.Background()) {
+			s.log.Info("auth re-check after browser refresh was skipped, a cookie refresh was already in flight — status may lag until the next refresh")
+		}
 		return result, nil
 	}
 
@@ -648,7 +723,11 @@ func (s *runState) runTUI() {
 		// flag means a human has to sign in again, which a manual-cookie
 		// install must do by hand. The Web dashboard used to gate its copy of
 		// this and now does not — see updateStatusBar in web/public/app.js.
-		relogin := s.autoCookieSvc.GetStatus().NeedsManualRelogin
+		// ReloginStatus, not GetStatus: this reads nothing but the relogin
+		// map, and GetStatus's browser/registry detection scan would run on
+		// every auth-change dispatch — including the TUI's, which fires with
+		// no cookie dialog open at all.
+		relogin := s.autoCookieSvc.ReloginStatus()
 		if relogin["youtube"] {
 			yt = tui.CookieStatusRelogin
 		}

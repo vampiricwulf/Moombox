@@ -195,9 +195,40 @@ type (
 	// the site" — so a DNS blip answered "YouTube not authenticated", which is
 	// a claim the check did not make and sends the user off to re-export
 	// perfectly good cookies.
+	//
+	// The two Reason strings are the WHY behind an inconclusive verdict, and
+	// they exist because the verdict alone cannot carry it: "could not
+	// establish" is the same sentence for a rate limit, a captive portal and an
+	// intercepting proxy, and only one of those is worth waiting out. Empty
+	// whenever the check concluded — a conclusive answer has no reason to give
+	// — and empty from any wiring that does not supply one.
+	//
+	// They are cookies.AuthStatus's YouTubeError / TwitchError, which had no
+	// reader anywhere in the tree until Arc 8 Task 12a. Every string that can
+	// reach them names a status code, a scheme+host, a header NAME or a static
+	// sentence; none carries a response body. See CookieStatusPayload in
+	// internal/web/routes/cookies.go, which projects the same two fields onto
+	// the wire and states that rule in full.
+	//
+	// LastError is a DIFFERENT SERVICE'S fact, carried on the same message
+	// because R C is where the TUI answers "what are my cookies doing" and an
+	// operator asking that is owed both halves. The verdicts above come from
+	// the in-process RefreshService's own check; this is
+	// AutoCookieStatus.LastError — the last thing a cookie pass (browser
+	// refresh or interactive setup) concluded that the operator has to act on,
+	// and it can be non-empty while both verdicts are RefreshOK. That is not a
+	// contradiction: cookies.txt can be alive on a session refresh while the
+	// mechanism that RENEWS it is broken, and the field's write policy
+	// (internal/cookies/autocookies.go) exists precisely so a recorded failure
+	// is not retracted by a pass that never established it was over. Empty
+	// whenever nothing is recorded, and empty from any wiring that does not
+	// supply it.
 	cookieRecheckResultMsg struct {
-		YouTube cookies.RefreshVerdict
-		Twitch  cookies.RefreshVerdict
+		YouTube       cookies.RefreshVerdict
+		Twitch        cookies.RefreshVerdict
+		YouTubeReason string
+		TwitchReason  string
+		LastError     string
 	}
 	cookieForceRefreshResultMsg struct {
 		// Result is carried whole rather than pre-flattened to a bool pair.
@@ -317,7 +348,19 @@ type App struct {
 	actionMenu *ActionMenuModel
 
 	// Feedback message (auto-clears after 3s)
-	feedbackMsg   string
+	feedbackMsg string
+	// feedbackSev is what the composer of feedbackMsg KNEW about its severity,
+	// where it knew anything. severityUnstated — the zero value — means it did
+	// not, and feedbackColor falls back to scanning the text.
+	//
+	// Only ever read while feedbackMsg != "" (see View), and every write of a
+	// non-empty feedbackMsg goes through setFeedback, setFeedbackWithDuration
+	// or setFeedbackWithSeverity, each of which writes this field in the same
+	// statement pair. So a severity can never be read against a message other
+	// than the one it was stated for; the sites that only CLEAR feedbackMsg
+	// leave this behind harmlessly, and the next setter overwrites it.
+	// TestStatedSeverityDoesNotLeakToTheNextMessage pins that.
+	feedbackSev   feedbackSeverity
 	feedbackTimer time.Time
 
 	// Log batching buffer (250ms flush cycle like TypeScript)
@@ -460,9 +503,25 @@ type App struct {
 
 	// Cookie refresh callbacks
 	// OnRecheckCookies runs the auth check and reports what it CONCLUDED per
-	// platform. See cookieRecheckResultMsg for why the bool pair it used to
-	// return could not be worded truthfully.
-	OnRecheckCookies func() (yt, tw cookies.RefreshVerdict)
+	// platform, plus WHY for a platform that concluded nothing. See
+	// cookieRecheckResultMsg for why the bool pair it used to return could not
+	// be worded truthfully, and for what the two reason strings may contain.
+	//
+	// A reason is meaningful only alongside a RefreshUnknown verdict; wirings
+	// return "" for the other two, and the renderer ignores a reason that
+	// arrives with a conclusive verdict rather than trusting the caller.
+	OnRecheckCookies func() (yt, tw cookies.RefreshVerdict, ytReason, twReason string)
+	// OnAutoCookieLastError reports AutoCookieStatus.LastError, or "" when
+	// nothing is recorded. nil when there is no auto-cookie service, and the
+	// R C line then reads exactly as it does today.
+	//
+	// A CALLBACK OF ITS OWN rather than two more returns on OnRecheckCookies,
+	// because it comes off a different service and a different call
+	// (AutoCookieService.GetStatus, not RefreshService.GetStatus). Folding it
+	// into that signature would make the two facts look like one measurement,
+	// and would force every wiring that has an auth check but no auto-cookie
+	// service to answer for a field it cannot see.
+	OnAutoCookieLastError func() string
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if
 	// auto-cookies are not configured. It returns the pass's whole result
 	// rather than a bool: see cookieForceRefreshResultMsg for why the

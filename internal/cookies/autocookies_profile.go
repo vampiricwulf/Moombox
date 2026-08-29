@@ -353,6 +353,34 @@ func countNetscapeCookieRows(content string) int {
 	return n
 }
 
+// netscapeCookiesHoldACredential reports whether a freshly-fetched Netscape
+// blob carries a session credential for EITHER platform.
+//
+// It answers a DIFFERENT question from countNetscapeCookieRows and the two must
+// not be conflated. The counter asks "is there anything here at all", over-counts
+// by construction (see its callers), and is what the import guard's safety
+// rests on. This asks "is any of it a login", and it has to be exact in the
+// other direction: a false positive here would leave the refresh unable to say
+// that a signed-out browser is signed out, which is the whole point of the flag
+// it feeds.
+//
+// Built by loading the text into a THROWAWAY jar and asking the jar's own loose
+// predicates, rather than by matching names against the Netscape text. Those
+// predicates are the same ones refreshPlatforms(), checkPlatformAuth and
+// doRefresh use, so "is this a credential" gets one answer across the package;
+// re-implementing them over raw rows would need the domain routing, the name
+// admission and the #HttpOnly_ handling all repeated, and would drift the first
+// time any of the three changed.
+//
+// The jar is discarded. It is never the service's jar and never touches disk:
+// loadFrom takes the bytes directly, so this costs one parse and no I/O, and
+// nothing about the credentials in force is changed by asking.
+func netscapeCookiesHoldACredential(netscape string) bool {
+	probe := NewCookieJar()
+	probe.loadFrom([]byte(netscape), "")
+	return probe.HasAnyYouTubeAuthCookie() || probe.HasAnyTwitchAuthCookie()
+}
+
 // cookieRowPlatform returns which platform a Netscape row belongs to
 // ("youtube", "twitch") or "" for anything else. Google rows count as YouTube
 // because that is where the shared auth cookies (SID/HSID/SAPISID) live and

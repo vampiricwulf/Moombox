@@ -102,7 +102,8 @@ func newAuthTestChatDownloader(t *testing.T, credentials func() (string, string)
 }
 
 // newAuthTestChatDownloaderWithLogger is the same, with a logger the caller can
-// inspect.
+// inspect. The downgrade report is nil here — the ordinary case, and the one
+// every test that does not care about it must keep exercising.
 func newAuthTestChatDownloaderWithLogger(t *testing.T, credentials func() (string, string), logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -110,12 +111,25 @@ func newAuthTestChatDownloaderWithLogger(t *testing.T, credentials func() (strin
 	Error(msg string, args ...any)
 }) *ChatDownloader {
 	t.Helper()
+	return newDowngradeTestChatDownloader(t, credentials, logger, nil)
+}
+
+// newDowngradeTestChatDownloader adds an OnAuthDowngrade sink to the same
+// downloader, so the report and the log line can be observed on one session.
+func newDowngradeTestChatDownloader(t *testing.T, credentials func() (string, string), logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, onAuthDowngrade func(reason string)) *ChatDownloader {
+	t.Helper()
 	return NewChatDownloader(ChatDownloaderOptions{
-		ChannelLogin:   "testchan",
-		ChannelDisplay: "TestChan",
-		StreamID:       "stream-1",
-		Credentials:    credentials,
-		OutputPath:     filepath.Join(t.TempDir(), "chat.json"),
+		ChannelLogin:    "testchan",
+		ChannelDisplay:  "TestChan",
+		StreamID:        "stream-1",
+		Credentials:     credentials,
+		OnAuthDowngrade: onAuthDowngrade,
+		OutputPath:      filepath.Join(t.TempDir(), "chat.json"),
 	}, logger)
 }
 

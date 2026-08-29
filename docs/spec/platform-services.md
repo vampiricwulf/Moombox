@@ -121,9 +121,9 @@ All client configs are defined in `internal/constants/constants.go`:
 
 | Client | ClientName | ClientID | ClientVersion | User-Agent | Primary Use |
 |--------|-----------|----------|---------------|------------|-------------|
-| TV_DOWNGRADED | `TVHTML5` | `7` | `5.20260114` | TV Cobalt | Best format coverage. Primary client for both auth and public paths. |
-| WEB | `WEB` | `1` | `2.20260120.01.00` | Chrome desktop | DASH manifest URLs. Always tried alongside TV to get manifest. |
-| WEB_CREATOR | `WEB_CREATOR` | `62` | `1.20260120.01.00` | Chrome desktop | Member-only content. Fallback when TV returns `members_only` or `login_required`. |
+| TV_DOWNGRADED | `TVHTML5` | `7` | `5.20260707` | TV Cobalt | Best format coverage. Primary client for both auth and public paths. |
+| WEB | `WEB` | `1` | `2.20260708.00.00` | Chrome desktop | DASH manifest URLs. Always tried alongside TV to get manifest. |
+| WEB_CREATOR | `WEB_CREATOR` | `62` | `1.20260708.06.00` | Chrome desktop | Member-only content. Fallback when TV returns `members_only` or `login_required`. |
 | WEB_EMBEDDED | `WEB_EMBEDDED_PLAYER` | `56` | `2.20260708.00.00` | Chrome desktop | Age-gate bypass, and first call of the authed cascade (yt-dlp's `_DEFAULT_AUTHED_CLIENTS` lead since 2026.08.19). Needs no PO token. |
 | VISIONOS | `VISIONOS` | `101` | `1.02` | Safari / visionOS | Cookieless last resort, yt-dlp's lead default since 2026.08.19. Direct URLs without cipher. HLS-only for live (no `dashManifestUrl`). "Made for kids" videos unavailable. |
 | ANDROID_VR | `ANDROID_VR` | `28` | `1.65.10` | Oculus Quest VR | Cookieless last resort behind VISIONOS, and the only cookieless source of a live `dashManifestUrl`. Pinned at 1.65.10 (>1.65 may return SABR-only streams). |

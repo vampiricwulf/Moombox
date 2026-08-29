@@ -145,6 +145,56 @@ func livenessFromProbe(verdict youtube.SessionAuthState, err error) (loggedIn, c
 	return verdict == youtube.SessionAuthLoggedIn, true
 }
 
+// cookiePlatformDetector is the jar surface detectCookiePlatforms needs — the
+// LOOSE "was this install ever configured for this platform" predicates, not
+// the STRICT "is the complete working set present right now" pair. Naming
+// only these two methods means the strict pair cannot be wired back into this
+// decision without widening this type first.
+type cookiePlatformDetector interface {
+	HasAnyYouTubeAuthCookie() bool
+	HasAnyTwitchAuthCookie() bool
+}
+
+// detectCookiePlatforms decides what cfg.Cookies.Platforms should become on
+// first run (no explicit config yet) and which of two sources decided it, for
+// the log line. Extracted out of initServices's inline block because that
+// block was hard to test in place — Arc 5's Task 1 accepted an untested log
+// field there for exactly that reason; this does not repeat it.
+//
+// meta.Platforms — the on-disk sidecar's record of what an import ACTUALLY
+// verified — wins outright whenever it is non-empty, even if the jar's loose
+// predicates would answer differently: it is a real verification result, not
+// a guess from cookie names, so it is never unioned with the guess.
+//
+// Only when the sidecar is absent, unreadable, or has never recorded a
+// platform does this fall through to the jar, and even then it uses the LOOSE
+// predicates (HasAnyYouTubeAuthCookie / HasAnyTwitchAuthCookie) rather than
+// the strict HasYouTubeAuthCookies / HasTwitchAuthCookies pair that first-run
+// detection used before. The strict pair answers "is the complete set present
+// right now" — a cookies.txt holding SAPISID with LOGIN_INFO already cleared
+// (or Twitch's twilight-user with auth-token already pruned) is a CONFIGURED
+// platform with BROKEN credentials, not an unconfigured one, and persisting
+// "unconfigured" for it made every downstream gate that reads
+// cfg.Cookies.Platforms (the auth-loss notification, G5's
+// SetExpectedPlatforms, the recovery path) treat that platform as never
+// having existed — permanently, since nothing automatic re-runs this once
+// Platforms is non-empty. See youtubeAuthCookieNames and twitchAuthCookieNames
+// in jar.go for why the loose predicates are still a safe "was this ever
+// configured" answer rather than a false-positive risk.
+func detectCookiePlatforms(meta *cookies.CookieMeta, jar cookiePlatformDetector) (platforms []string, source string) {
+	if meta != nil && len(meta.Platforms) > 0 {
+		return append([]string(nil), meta.Platforms...), "sidecar"
+	}
+	var detected []string
+	if jar != nil && jar.HasAnyYouTubeAuthCookie() {
+		detected = append(detected, "youtube")
+	}
+	if jar != nil && jar.HasAnyTwitchAuthCookie() {
+		detected = append(detected, "twitch")
+	}
+	return detected, "cookie-names"
+}
+
 // initServices runs the 16 numbered construction sections from the original
 // run() — config load, logger, updater, database, connectivity, cookies,
 // platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
@@ -324,15 +374,15 @@ func (s *runState) initServices(logLevelOverride string) error {
 				slog.Bool("anyAuthCookie", jar.HasAnyYouTubeAuthCookie()),
 				slog.Int("expiredYouTubeAuth", jar.ExpiredAuthCookiesFor(cookies.PlatformYouTube, now)),
 				slog.Int("expiredTwitchAuth", jar.ExpiredAuthCookiesFor(cookies.PlatformTwitch, now)))
-			// Auto-detect platforms from cookie file when not already set
+			// Auto-detect platforms from cookie file when not already set.
+			// detectCookiePlatforms prefers the sidecar's verified Platforms
+			// over guessing from cookie names; see its doc comment.
 			if len(cfg.Cookies.Platforms) == 0 && len(cfg.Cookies.ActivePlatforms) == 0 {
-				var detected []string
-				if jar.HasYouTubeAuthCookies() {
-					detected = append(detected, "youtube")
+				meta, metaErr := cookies.LoadMeta(cfg.Cookies.CookieFile)
+				if metaErr != nil {
+					log.Warn("could not load cookies.meta.json", slog.String("error", metaErr.Error()))
 				}
-				if jar.HasTwitchAuthCookies() {
-					detected = append(detected, "twitch")
-				}
+				detected, source := detectCookiePlatforms(meta, jar)
 				if len(detected) > 0 {
 					saveErr := s.configStore.Update(func(c *config.MoomboxConfig) {
 						c.Cookies.Platforms = detected
@@ -340,7 +390,8 @@ func (s *runState) initServices(logLevelOverride string) error {
 					if saveErr != nil {
 						log.Warn("Failed to persist detected cookie platforms", slog.String("error", saveErr.Error()))
 					} else {
-						log.Info("Detected cookie platforms from cookie file", slog.Any("platforms", detected))
+						log.Info("Detected cookie platforms from cookie file",
+							slog.Any("platforms", detected), slog.String("source", source))
 					}
 				}
 			}

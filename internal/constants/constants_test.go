@@ -113,3 +113,39 @@ func TestIOSClientInternallyConsistent(t *testing.T) {
 		t.Errorf("UserAgents.IOS %q does not contain client version %q", UserAgents.IOS, IOSClient.ClientVersion)
 	}
 }
+
+// TestWebClientInternallyConsistent, TestWebSafariClientInternallyConsistent,
+// and TestWebEmbeddedClientInternallyConsistent mirror
+// TestIOSClientInternallyConsistent for the three WEB-family clients: each
+// struct's ClientVersion field must agree with its own Innertube
+// Context["clientVersion"] entry, or YouTube sees a contradictory
+// fingerprint from the same process.
+//
+// These three intentionally omit the UA-contains-version check that closes
+// out the iOS test. That check only makes sense for native-app clients,
+// whose UserAgent literally embeds the app version yt-dlp's clientVersion
+// tracks (e.g. "com.google.ios.youtube/21.26.4"). The WEB-family clients'
+// UserAgent is a real browser UA (desktop Chrome or Safari) whose version
+// numbering is unrelated to the Innertube WEB clientVersion string — Chrome's
+// major and YouTube's internal WEB build number do not correspond, so there
+// is nothing for a "UA contains it" assertion to pin here.
+func TestWebClientInternallyConsistent(t *testing.T) {
+	if WebClient.ClientVersion != WebClient.Context["clientVersion"] {
+		t.Errorf("WebClient.ClientVersion %q != Context[clientVersion] %v",
+			WebClient.ClientVersion, WebClient.Context["clientVersion"])
+	}
+}
+
+func TestWebSafariClientInternallyConsistent(t *testing.T) {
+	if WebSafariClient.ClientVersion != WebSafariClient.Context["clientVersion"] {
+		t.Errorf("WebSafariClient.ClientVersion %q != Context[clientVersion] %v",
+			WebSafariClient.ClientVersion, WebSafariClient.Context["clientVersion"])
+	}
+}
+
+func TestWebEmbeddedClientInternallyConsistent(t *testing.T) {
+	if WebEmbeddedClient.ClientVersion != WebEmbeddedClient.Context["clientVersion"] {
+		t.Errorf("WebEmbeddedClient.ClientVersion %q != Context[clientVersion] %v",
+			WebEmbeddedClient.ClientVersion, WebEmbeddedClient.Context["clientVersion"])
+	}
+}
