@@ -12,6 +12,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
@@ -80,6 +81,110 @@ func twitchChatCredentials(auth *twitch.Auth) func() (token, login string) {
 		return nil
 	}
 	return auth.GetCredentials
+}
+
+// notifySend is Manager.Send's shape, taken as a value so the downgrade notice
+// can be delivered through a recorder in a test. The production value is
+// literally the method — nothing reimplements dispatch.
+type notifySend func(title, description string, ntype notifications.NotificationType,
+	fields []notifications.Field, opts notifications.SendOptions)
+
+// twitchChatDowngradeReason turns one of twitch's fixed AuthDowngrade* tokens
+// into the sentence an operator reads.
+//
+// The mapping lives at THIS end on purpose. internal/twitch reports a state; the
+// operator-facing wording, and the remedy attached to it, belong beside the
+// other things this process tells an operator to do. The four inputs are a
+// closed vocabulary, so the default arm exists only for a future value added
+// upstream without a matching arm here — it must still describe the degradation
+// rather than say nothing, because a notification that names no problem is
+// worse than the log line it was meant to escape.
+func twitchChatDowngradeReason(reason string) string {
+	switch reason {
+	case twitch.AuthDowngradeLoginRefused:
+		return "Twitch refused the saved login."
+	case twitch.AuthDowngradeLoginUnacknowledged:
+		return "Twitch never acknowledged the saved login."
+	case twitch.AuthDowngradeNoLoginCookie:
+		return "The cookie file has a Twitch auth-token but no login cookie beside it."
+	case twitch.AuthDowngradeUnusableLoginCookie:
+		return "The Twitch login cookie is not a name that can be sent to chat."
+	default:
+		return "The saved Twitch login could not be used."
+	}
+}
+
+// twitchChatDowngradeNotice renders the whole operator-facing payload for one
+// chat auth downgrade. Pure, and split from the send so a test can assert on
+// what a target would actually receive rather than on the fact that something
+// was sent.
+//
+// The inputs are the reason token, the job, and the channel — and that is the
+// leak proof. There is no path from here to the cookie jar, to the credential
+// getter, or to a chat line, so no title, description, or field can carry a
+// token, a login, or a viewer's message. The check is structural; the test that
+// asserts on the rendered payload is the second lock, not the first.
+func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
+	title, description string, fields []notifications.Field, opts notifications.SendOptions,
+) {
+	title = "Twitch chat is anonymous for " + channel
+	description = twitchChatDowngradeReason(reason) +
+		" Chat is still being recorded, but subscriber-only messages and badges will be missing " +
+		"for this job. Re-export cookies from a browser signed in to Twitch, or run R F (Force " +
+		"Cookie Refresh)."
+	fields = []notifications.Field{
+		{Name: "Channel", Value: channel, Inline: true},
+		{Name: "Job", Value: job.ID, Inline: true},
+		{Name: "Reason", Value: reason, Inline: true},
+	}
+	opts = notifications.SendOptions{
+		URL:       job.URL,
+		Thumbnail: job.ThumbnailURL,
+		// The same event as the worker's "Authentication Required" and the
+		// monitor's auth-loss alerts: an operator filtering for credential
+		// trouble is filtering for this too.
+		Event: "auth",
+	}
+	return title, description, fields, opts
+}
+
+// sendTwitchChatDowngrade delivers exactly one downgrade notice through send.
+//
+// TypeWarning, not TypeError: the capture is still running and still producing a
+// usable archive. Nothing is lost that a re-export cannot restore for the NEXT
+// job, and dressing a degradation as a failure trains an operator to ignore it.
+//
+// nil send is the no-notifier install and is not an error — every other
+// notification site in this package is guarded the same way.
+func sendTwitchChatDowngrade(send notifySend, job *database.Job, channel, reason string) {
+	if send == nil {
+		return
+	}
+	title, description, fields, opts := twitchChatDowngradeNotice(job, channel, reason)
+	send(title, description, notifications.TypeWarning, fields, opts)
+}
+
+// twitchChatDowngradeCallback builds the OnAuthDowngrade callback for one live
+// chat downloader.
+//
+// The downloader guarantees at most one call per job, so there is no dedup here
+// — and dedup ACROSS jobs is deliberately absent: a second job on the same
+// channel an hour later with the same dead cookies must notify again, because
+// by then the operator may believe they fixed it.
+//
+// sp.notifier is read at FIRE time rather than captured into the closure. The
+// field is written once, by SetNotifier during worker construction and long
+// before any job goroutine exists, so this read races nothing; and a config
+// hot-reload swaps the manager's TARGET LIST rather than the pointer, so the
+// notice reaches whatever webhooks are configured when it fires rather than
+// whatever was configured when the stream started.
+func (sp *StreamProcessor) twitchChatDowngradeCallback(job *database.Job, channel string) func(reason string) {
+	return func(reason string) {
+		if sp.notifier == nil {
+			return
+		}
+		sendTwitchChatDowngrade(sp.notifier.Send, job, channel, reason)
+	}
 }
 
 // processTwitch handles Twitch stream/VOD processing.
@@ -342,6 +447,10 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		if err := os.MkdirAll(chatStagingDir, 0o755); err == nil {
 			chatPath := filepath.Join(chatStagingDir, "chat.json")
 			chatCredentials := twitchChatCredentials(sp.tw.Auth)
+			chatChannel := streamInfo.ChannelDisplayName
+			if chatChannel == "" {
+				chatChannel = login
+			}
 			twitchChatDl = twitch.NewChatDownloader(twitch.ChatDownloaderOptions{
 				ChannelLogin:    login,
 				ChannelDisplay:  streamInfo.ChannelDisplayName,
@@ -352,8 +461,13 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				// Method value, not a snapshot — read fresh on every IRC
 				// reconnect so a rotated credential doesn't silently downgrade
 				// the rest of the stream to anonymous chat capture.
-				Credentials:   chatCredentials,
-				EmoteResolver: sp.tw.Emotes,
+				Credentials: chatCredentials,
+				// And when it downgrades anyway, say so ONCE, where the
+				// operator is already looking. Fires only when this job HAD
+				// credentials — a cookieless install captures chat anonymously
+				// by design and must never be notified about it.
+				OnAuthDowngrade: sp.twitchChatDowngradeCallback(job, chatChannel),
+				EmoteResolver:   sp.tw.Emotes,
 			}, sp.logger)
 
 			sp.db.UpdateJobFields(job.ID, map[string]any{

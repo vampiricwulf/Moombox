@@ -153,11 +153,18 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 //     (src/internal/syscall/windows/syscall_windows.go), whose entire body is
 //     one MoveFileEx(from, to, MOVEFILE_REPLACE_EXISTING). One syscall, no
 //     DeleteFile ahead of it, so cookies.txt never transiently ceases to
-//     exist. The traffic in fact runs the other way: os file opens ask for
+//     exist. The traffic in fact runs the other way, on the open path Load
+//     actually takes: os.ReadFile → os.Open → openFileNolog
+//     (src/os/file_windows.go) → syscall.Open, which asks for
 //     FILE_SHARE_READ|FILE_SHARE_WRITE and NOT FILE_SHARE_DELETE
 //     (src/syscall/syscall_windows.go), so a Load in flight makes the RENAME
 //     fail rather than being made to read a missing file — and that failure is
 //     returned and logged by writeFileAtomic's caller instead of vanishing.
+//     That is a property of THAT open, not of "os opens" generally: an
+//     os.Root-rooted open goes through internal/syscall/windows.Openat
+//     (src/internal/syscall/windows/at_windows.go), which DOES pass
+//     FILE_SHARE_DELETE, so a Load rewritten onto os.Root would trade this
+//     loud failure for a silent one and would need its own re-derivation.
 //   - Linux: rename(2) replaces the destination name atomically, by POSIX.
 //
 // A concurrent Reload during a write therefore reads the old file or the new
@@ -623,14 +630,16 @@ func (j *CookieJar) AuthCookieHorizonFor(p Platform) int64 {
 // cookie never gets in.
 //
 // What changed since that was first written: "login" is no longer inert.
-// internal/twitch SENDS it, as the IRC NICK (see ircHandshakeLines), so its
-// ABSENCE beside a live auth-token is a functional degradation this tree can
-// NAME — chat captured anonymously, with no subscriber-only messages and no
-// badges — rather than a guess about what Twitch means by the cookie. That
-// degradation is now reported where it is observed, by a once-per-downloader
-// Warn on the IRC path (ChatDownloader.noteMissingLogin). That is the right
+// internal/twitch SENDS it, as the IRC NICK (see ircHandshakeLines), so a live
+// auth-token with no USABLE "login" beside it is a functional degradation this
+// tree can NAME — chat captured anonymously, with no subscriber-only messages
+// and no badges — rather than a guess about what Twitch means by the cookie.
+// That degradation is now reported where it is observed, by a
+// once-per-downloader Warn on the IRC path (ChatDownloader.noteMissingLogin)
+// and a once-per-job report to the worker, which notifies. That is the right
 // site for it: the consumer knows the handshake actually went anonymous,
-// whereas this list can only know that a name is absent.
+// whereas this list can only know that a name is absent — and absent is not the
+// same as unusable, which is state 2 below.
 //
 // "login" still does NOT join this list, and the reason is the alarm the list
 // drives — traced end to end rather than assumed:
@@ -653,8 +662,10 @@ func (j *CookieJar) AuthCookieHorizonFor(p Platform) int64 {
 // who it is set FOR.
 //
 // The silent Twitch states, ENUMERATED. "The last silent state" is a claim
-// this comment has made and got wrong; a list can be checked, a superlative
-// cannot:
+// this comment has made and got wrong TWICE — first as a superlative, then as a
+// list that was one entry short. A list can be checked; a superlative cannot,
+// and neither can an unfinished one, so add to it rather than re-declaring it
+// complete:
 //
 //  1. auth-token present, "login" absent. HasTwitchAuthCookies reads true and
 //     both UIs show green, while IRC goes anonymous WITHOUT ATTEMPTING the
@@ -662,12 +673,21 @@ func (j *CookieJar) AuthCookieHorizonFor(p Platform) int64 {
 //     minimal hand-written cookies.txt lands here on day one. No longer
 //     silent: noteMissingLogin logs it, once per downloader. Not fixed by this
 //     list, which already reads such a jar as configured.
-//  2. "login" present, auth-token absent. Reads as never-configured here, and
+//  2. auth-token present, "login" present but not sendable as a single IRC
+//     parameter — it holds a space, tab, CR, LF or NUL (see
+//     twitch.hasRowBreakingChar). ircHandshakeLines throws such a value away
+//     and renders the full anonymous pair, so this reaches the wire exactly
+//     as state 1 does while looking, to every predicate here, like a complete
+//     credential pair. A hand-edited cookies.txt whose login row was filled in
+//     with a display name — "archiver account" — lands here. No longer silent:
+//     noteMissingLogin's condition is login-UNUSABLE, not login-absent, so it
+//     covers both. This entry is why that condition is not `login == ""`.
+//  3. "login" present, auth-token absent. Reads as never-configured here, and
 //     is left that way deliberately — see the alarm trace above. The reachable
 //     way to produce it is mergeCookieFiles pruning an expired auth-token, and
 //     whenever the export also carried twilight-user (Twitch's own client sets
 //     it on login) that case is already covered by the name above.
-//  3. "name" present alone. Same reasoning as 2, on thinner evidence still.
+//  4. "name" present alone. Same reasoning as 3, on thinner evidence still.
 //
 // Add "login" here only together with a change that stops checkTwitchAuth's
 // empty-token early return from reading as a conclusive negative. That early

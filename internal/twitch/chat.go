@@ -21,6 +21,38 @@ const (
 	ircReadDeadline = 6 * time.Minute
 )
 
+// The fixed vocabulary of ChatDownloaderOptions.OnAuthDowngrade's reason: one
+// value per route from "this job HAD Twitch credentials" to "this job's chat is
+// being captured anonymously".
+//
+// Opaque tokens for the consumer to switch on, deliberately not sentences — the
+// consumer renders the operator-facing wording, and the same fact has to reach
+// a Discord embed, a log line, and whatever comes next without four of them
+// drifting apart.
+//
+// None of them carries anything read from the cookie file or off the wire. That
+// is a property of the vocabulary itself and not of the caller's discipline:
+// there is no format verb here to interpolate a token, a login, or a chat
+// message into, so the consumer can put the reason anywhere — including a
+// notification body — without a leak being possible.
+const (
+	// AuthDowngradeLoginRefused: Twitch answered the authenticated login with
+	// one of the two refusal NOTICEs. See noteHandshakeOutcome.
+	AuthDowngradeLoginRefused = "login-refused"
+	// AuthDowngradeLoginUnacknowledged: Twitch spoke on the session but never
+	// sent RPL_WELCOME and never named a reason. See noteHandshakeOutcome.
+	AuthDowngradeLoginUnacknowledged = "login-never-acknowledged"
+	// AuthDowngradeNoLoginCookie: an auth-token with no "login" cookie beside
+	// it, so the authenticated handshake is never attempted at all. See
+	// noteMissingLogin.
+	AuthDowngradeNoLoginCookie = "no-login-cookie"
+	// AuthDowngradeUnusableLoginCookie: an auth-token beside a "login" that
+	// cannot be sent as an IRC nickname (see hasRowBreakingChar) — a
+	// hand-edited cookies.txt carrying a display name with a space in it lands
+	// here. Same silence as the case above, from a different input.
+	AuthDowngradeUnusableLoginCookie = "unusable-login-cookie"
+)
+
 // ChatDownloader connects to Twitch IRC and records live chat messages.
 type ChatDownloader struct {
 	mu sync.Mutex
@@ -61,6 +93,15 @@ type ChatDownloader struct {
 	// makes sessionCredentials return an empty pair, and this condition must
 	// change nothing about what goes on the wire.
 	warnedNoLogin atomic.Bool
+	// onAuthDowngrade reports to the OWNER of this downloader that a job which
+	// HAD Twitch credentials is now capturing chat anonymously. nil-safe, and
+	// fired at most once per downloader — see reportAuthDowngrade.
+	onAuthDowngrade func(reason string)
+	// downgradeReported latches onAuthDowngrade across ALL of its trigger
+	// sites. A third flag, not a reuse of either above: warnedNoLogin is
+	// per-site (the fallback's own Warns never touch it) and authRefused is a
+	// behaviour switch rather than a report. See reportAuthDowngrade.
+	downgradeReported atomic.Bool
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.
@@ -136,7 +177,16 @@ type ChatDownloaderOptions struct {
 	// belongs to, re-read per reconnect. One getter for both halves so the
 	// pair cannot be torn by a concurrent cookie reload; nil, or either half
 	// empty, means anonymous. See ChatDownloader.credentials.
-	Credentials     func() (token, login string)
+	Credentials func() (token, login string)
+	// OnAuthDowngrade is called AT MOST ONCE per downloader, when a job that
+	// had Twitch credentials is capturing chat anonymously anyway. reason is
+	// one of the AuthDowngrade* constants and never contains a credential, so
+	// it is safe to put in front of an operator verbatim. Optional — nil is
+	// the ordinary case (tests, and any caller with nowhere to route it).
+	//
+	// Called on the IRC session goroutine, so it must not block: the read loop
+	// is waiting behind it.
+	OnAuthDowngrade func(reason string)
 	OutputPath      string
 	StreamStartTime string
 	EmoteResolver   *EmoteResolver
@@ -162,6 +212,7 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		channelID:       opts.ChannelID,
 		streamID:        opts.StreamID,
 		credentials:     opts.Credentials,
+		onAuthDowngrade: opts.OnAuthDowngrade,
 		outputPath:      opts.OutputPath,
 		streamStartTime: opts.StreamStartTime,
 		streamStartMs:   streamStartMs,
@@ -211,21 +262,65 @@ func (cd *ChatDownloader) sessionCredentials() (token, login string) {
 	return cd.credentials()
 }
 
-// noteMissingLogin reports the one anonymous handshake nothing else can see:
-// an auth-token with no login cookie beside it.
+// reportAuthDowngrade tells this downloader's owner, at most once, that a job
+// which HAD Twitch credentials is capturing chat anonymously.
 //
-// Every other way chat ends up anonymous is either visible or benign. No
-// credentials at all is the ordinary cookieless install. A login Twitch
-// REFUSES produces noteHandshakeOutcome's Warn. But a token with no login
-// never attempts the authenticated handshake at all — ircHandshakeLines
-// renders the full anonymous pair, because a token beside the justinfan
-// nickname is the hybrid Twitch rejects — so there is no refusal to observe,
-// nothing logs, and the operator-facing predicates disagree with reality:
-// HasTwitchAuthCookies reads true (the token IS there) and both UIs show
-// green, while the capture quietly drops every subscriber-only message and
-// badge for the whole job. A minimal hand-written cookies.txt carrying only
-// auth-token lands exactly here on day one, and mergeCookieFiles can
-// manufacture it later by pruning an expired login row.
+// ONE report per downloader across every trigger site, not one per site. All of
+// them mean the same thing to an operator — subscriber-only messages and badges
+// are being lost for this job — and the consumer turns the report into a
+// notification, so a job that reported "no login cookie", had its cookies
+// re-imported mid-stream, and was then REFUSED would notify twice about one
+// broken capture. The log keeps every line; the report is one.
+//
+// The latch is a THIRD flag rather than a reuse of the two that already exist,
+// and both refusals are load-bearing. authRefused is not a report flag:
+// sessionCredentials returns an empty pair once it is set, so latching through
+// it would demote a job to anonymous chat as a side effect of describing it
+// (see noteMissingLogin's own note on that trap). warnedNoLogin is per-SITE —
+// the fallback's Warns never touch it — so latching through that one would let
+// noteHandshakeOutcome report a second time for the same job.
+//
+// Fired synchronously on the IRC session goroutine, AFTER the Warn at each
+// site. The consumer's delivery is asynchronous, so this does not hold the read
+// loop; ordering it after the Warn keeps the log line ahead of the notification
+// it explains.
+//
+// reason is one of the AuthDowngrade* constants and nothing else — never the
+// token, never the login, never anything read off the wire.
+func (cd *ChatDownloader) reportAuthDowngrade(reason string) {
+	if cd.onAuthDowngrade == nil || cd.downgradeReported.Swap(true) {
+		return
+	}
+	cd.onAuthDowngrade(reason)
+}
+
+// noteMissingLogin reports the anonymous handshakes nothing else can see: an
+// auth-token with no USABLE login cookie beside it.
+//
+// The states Twitch chat can be anonymous in are enumerated in
+// cookies.twitchAuthCookieNames; this function owns two of them, and they are
+// the two that reach the wire without anything else noticing. No credentials at
+// all is the ordinary cookieless install and is not a degradation. A login
+// Twitch REFUSES produces noteHandshakeOutcome's Warn. But a token whose login
+// is absent — or present and unsendable as an IRC nickname — never attempts the
+// authenticated handshake at all: ircHandshakeLines renders the full anonymous
+// pair, because a token beside the justinfan nickname is the hybrid Twitch
+// rejects. So there is no refusal to observe, nothing logs, and the
+// operator-facing predicates disagree with reality — HasTwitchAuthCookies reads
+// true (the token IS there) and both UIs show green, while the capture quietly
+// drops every subscriber-only message and badge for the whole job.
+//
+// Both inputs are reachable on day one. A minimal hand-written cookies.txt
+// carrying only auth-token is the first; mergeCookieFiles can manufacture it
+// later by pruning an expired login row. The second is the same file with
+// `login` filled in by hand as a display name — "archiver account", with the
+// space — which HasTwitchAuthCookies also reads as green.
+//
+// UNUSABLE rather than ABSENT is the condition, and the narrower one was wrong
+// rather than merely incomplete: `login != ""` passes a value that
+// ircHandshakeLines then throws away, which is precisely a silent anonymous
+// session with credentials in the file. One predicate decides both — see
+// hasRowBreakingChar.
 //
 // It is reported HERE rather than by the jar's auth predicates, and that split
 // is the point: this site knows the handshake actually went anonymous, whereas
@@ -239,19 +334,35 @@ func (cd *ChatDownloader) sessionCredentials() (token, login string) {
 // cost if the cookies are repaired mid-job: nothing is said when the next
 // reconnect starts authenticating properly, which is a silence about GOOD news.
 //
+// ONE line for both inputs, because the remedy is one thing — re-export the
+// cookies — and an operator who hand-wrote either of them re-exports out of
+// both. The two are still told apart where the difference can be acted on
+// programmatically: reportAuthDowngrade's reason.
+//
 // Neither the token nor the login is named — this line names neither, and
 // there is nothing here to name them with.
 func (cd *ChatDownloader) noteMissingLogin(token, login string) {
 	// The token check is load-bearing, not defensive: without it every
 	// cookieless install — most installs — would get this warning about
 	// credentials it never had.
-	if token == "" || login != "" || cd.warnedNoLogin.Swap(true) {
+	if token == "" {
 		return
 	}
-	cd.logger.Warn("twitch chat: auth-token present but no login cookie — chat will be captured "+
-		"anonymously (subscriber-only messages and badges will be missing); re-export cookies "+
-		"from a signed-in browser",
+	reason := AuthDowngradeNoLoginCookie
+	if login != "" {
+		if !hasRowBreakingChar(login) {
+			return // a complete, sendable pair — nothing is degraded
+		}
+		reason = AuthDowngradeUnusableLoginCookie
+	}
+	if cd.warnedNoLogin.Swap(true) {
+		return
+	}
+	cd.logger.Warn("twitch chat: auth-token present but no usable login cookie — chat will be "+
+		"captured anonymously (subscriber-only messages and badges will be missing); re-export "+
+		"cookies from a signed-in browser",
 		"channel", cd.channelLogin)
+	cd.reportAuthDowngrade(reason)
 }
 
 // noteHandshakeOutcome runs at the end of every session that presented
@@ -300,6 +411,11 @@ func (cd *ChatDownloader) noteMissingLogin(token, login string) {
 // before the nickname existed, so a floor rather than a regression.
 //
 // Neither the token nor the login is named in the log line.
+//
+// Both Warns are followed by reportAuthDowngrade, which carries the same fact
+// out of the log to whoever owns this downloader. That report is latched ONCE
+// PER DOWNLOADER across this site and noteMissingLogin together, so it is not
+// the one-shot above by another name — see reportAuthDowngrade.
 func (cd *ChatDownloader) noteHandshakeOutcome(welcomed, heardFromServer, sawLoginFailure bool) {
 	// Order matters: a drop must leave the latch untouched, so the Swap is
 	// reached only once both exits above have been ruled out.
@@ -311,11 +427,13 @@ func (cd *ChatDownloader) noteHandshakeOutcome(welcomed, heardFromServer, sawLog
 			"failed); continuing anonymously — subscriber-only messages and badges will not be "+
 			"captured for this job",
 			"channel", cd.channelLogin)
+		cd.reportAuthDowngrade(AuthDowngradeLoginRefused)
 		return
 	}
 	cd.logger.Warn("twitch never acknowledged the authenticated IRC login; continuing anonymously "+
 		"— subscriber-only messages and badges will not be captured for this job",
 		"channel", cd.channelLogin)
+	cd.reportAuthDowngrade(AuthDowngradeLoginUnacknowledged)
 }
 
 // getResumeFilePath returns the path to the resume state file.
