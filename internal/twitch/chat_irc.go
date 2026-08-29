@@ -14,6 +14,48 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
+// anonymousIRCPass is Twitch's documented password for an unauthenticated IRC
+// session. It is load-bearing, not a placeholder: most installs hold no Twitch
+// cookies at all, and PASS SCHMOOPIIE + NICK justinfan<random> is how they read
+// public chat. It is not an error and is never logged as one.
+const anonymousIRCPass = "PASS SCHMOOPIIE"
+
+// ircHandshakeLines renders the PASS and NICK lines of one IRC handshake from
+// one decision.
+//
+// The two lines are a PAIR, and returning both from a single function is the
+// point rather than a convenience. Twitch binds an IRC session to the token's
+// user through NICK, so the only two coherent handshakes are:
+//
+//   - authenticated: PASS oauth:<token> + NICK <login>
+//   - anonymous:     PASS SCHMOOPIIE    + NICK justinfan<random>
+//
+// The hybrid this replaced — a real token beside the anonymous justinfan
+// nickname — is refused with a `Login authentication failed` NOTICE or
+// silently downgraded to an anonymous session, and nothing here parses NOTICE.
+// The visible result either way is chat that connects and simply never carries
+// subscriber-only messages or badges, which is why the two halves must not come
+// from two conditions that can drift apart.
+//
+// A token with no login therefore falls all the way back to anonymous. So does
+// a login that could not be sent as a single IRC parameter: a space or a bare
+// CR splits the frame, and a value that cannot be spoken as a nickname is not
+// a usable identity, so it is treated as no identity at all rather than
+// smuggled onto the wire. Twitch logins are ASCII word characters, so no real
+// one is rejected here. Upstream shape:
+// references/chatterino7/src/providers/twitch/TwitchIrcServer.cpp:303-332.
+//
+// The nick is lowercased: IRC nicknames are case-insensitive and Twitch
+// expects the lowercase login.
+//
+// Neither argument is ever logged.
+func ircHandshakeLines(token, login string) (pass, nick string) {
+	if token != "" && login != "" && !strings.ContainsAny(login, " \t\r\n\x00") {
+		return "PASS oauth:" + token, "NICK " + strings.ToLower(login)
+	}
+	return anonymousIRCPass, fmt.Sprintf("NICK justinfan%d", rand.IntN(100000))
+}
+
 // runIRCSession runs a single IRC connection session.
 func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	cd.logger.Info("connecting to twitch IRC", "channel", cd.channelLogin)
@@ -43,20 +85,16 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 
 	conn.SetReadLimit(512 * 1024) // 512KB cap on incoming IRC messages
 
-	// Authenticate. The token is read HERE, per session, so a reconnect that
-	// happens hours into a stream presents whatever credential the jar holds
-	// now rather than the one captured at construction.
-	if authToken := cd.currentAuthToken(); authToken != "" {
-		if err := conn.Write(sessionCtx, websocket.MessageText, []byte("PASS oauth:"+authToken)); err != nil {
-			return fmt.Errorf("IRC PASS failed: %w", err)
-		}
-	} else {
-		if err := conn.Write(sessionCtx, websocket.MessageText, []byte("PASS SCHMOOPIIE")); err != nil {
-			return fmt.Errorf("IRC PASS failed: %w", err)
-		}
+	// Authenticate. Both credentials are read HERE, per session, so a
+	// reconnect that happens hours into a stream presents whatever the jar
+	// holds now rather than what was captured at construction — and ONE call
+	// decides both lines, so the two can never disagree about whether this
+	// session is authenticated.
+	pass, nick := ircHandshakeLines(cd.currentAuthToken(), cd.currentLogin())
+	if err := conn.Write(sessionCtx, websocket.MessageText, []byte(pass)); err != nil {
+		return fmt.Errorf("IRC PASS failed: %w", err)
 	}
-	nick := fmt.Sprintf("justinfan%d", rand.IntN(100000))
-	if err := conn.Write(sessionCtx, websocket.MessageText, []byte("NICK "+nick)); err != nil {
+	if err := conn.Write(sessionCtx, websocket.MessageText, []byte(nick)); err != nil {
 		return fmt.Errorf("IRC NICK failed: %w", err)
 	}
 

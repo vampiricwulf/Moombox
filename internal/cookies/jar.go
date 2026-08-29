@@ -762,6 +762,26 @@ func (j *CookieJar) HasTwitchAuthCookies() bool {
 	return j.GetTwitchAuthToken() != ""
 }
 
+// GetTwitchLogin returns the Twitch "login" cookie value — the account name
+// Twitch's own web client stores beside the auth-token.
+//
+// It is the NICK half of the IRC handshake. Twitch binds an IRC session to the
+// token's user through NICK, so a session that presents `PASS oauth:<token>`
+// must present that account's own nickname; pairing a real token with the
+// anonymous `justinfan<random>` convention is either refused or silently
+// downgraded to an anonymous session (see internal/twitch/chat_irc.go).
+//
+// Read from the TWITCH jar, so it comes from the same rows as
+// GetTwitchAuthToken and the two belong to one session by construction. There
+// is no platform parameter because this cookie exists on one platform only.
+//
+// Never log, print or persist the result: it names the signed-in account.
+func (j *CookieJar) GetTwitchLogin() string {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.twitch["login"].value
+}
+
 // IsEmpty returns true when NEITHER platform's jar holds a cookie. A file that
 // configured only one platform is not an empty jar.
 func (j *CookieJar) IsEmpty() bool {

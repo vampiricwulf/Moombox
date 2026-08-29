@@ -41,6 +41,13 @@ type ChatDownloader struct {
 	// justinfan login (see runIRCSession), which keeps capturing chat minus
 	// subscriber-only messages and badges. nil-safe via currentAuthToken.
 	authToken func() string
+	// login returns the CURRENT Twitch account name, re-read on every IRC
+	// reconnect for exactly the reason authToken is. It is the NICK half of
+	// the handshake and the two are ONE decision (ircHandshakeLines): a
+	// reconnect that re-read the token but kept a nick from construction
+	// could pair a new session's credential with the previous session's
+	// identity. nil-safe via currentLogin.
+	login func() string
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.
@@ -113,6 +120,7 @@ type ChatDownloaderOptions struct {
 	ChannelID       string
 	StreamID        string
 	AuthToken       func() string // Returns the CURRENT OAuth token, re-read per reconnect (nil = anonymous)
+	Login           func() string // Returns the CURRENT account name for NICK, re-read per reconnect (nil = anonymous)
 	OutputPath      string
 	StreamStartTime string
 	EmoteResolver   *EmoteResolver
@@ -138,6 +146,7 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		channelID:       opts.ChannelID,
 		streamID:        opts.StreamID,
 		authToken:       opts.AuthToken,
+		login:           opts.Login,
 		outputPath:      opts.OutputPath,
 		streamStartTime: opts.StreamStartTime,
 		streamStartMs:   streamStartMs,
@@ -180,6 +189,18 @@ func (cd *ChatDownloader) currentAuthToken() string {
 		return ""
 	}
 	return cd.authToken()
+}
+
+// currentLogin reads the live account name. Returns "" when no getter was
+// supplied, which ircHandshakeLines treats exactly as a missing token: the
+// full anonymous login. A token without a login must NOT produce a
+// token-with-justinfan hybrid — that pairing is what this whole path exists to
+// stop sending.
+func (cd *ChatDownloader) currentLogin() string {
+	if cd.login == nil {
+		return ""
+	}
+	return cd.login()
 }
 
 // getResumeFilePath returns the path to the resume state file.

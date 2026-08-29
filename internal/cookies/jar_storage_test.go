@@ -579,6 +579,47 @@ func TestGetCookieReadsTheTwitchJar(t *testing.T) {
 	}
 }
 
+// TestGetTwitchLoginReadsTheTwitchJar pins the NICK half of the IRC handshake's
+// credential pair.
+//
+// The login names the account the IRC session identifies as, and it must come
+// from the SAME twitch.tv rows as the auth-token: the two are presented
+// together (PASS + NICK) and a pair drawn from different places is a session
+// authenticated as nobody. Reading it from the youtube jar, or from a foreign
+// site's "login" row, returns "" — and "" is silent, because chat_irc.go then
+// falls all the way back to the anonymous handshake instead of erroring.
+//
+// The fixture plants a .youtube.com row literally named "login" so that "" here
+// cannot be explained by "no login anywhere in the file".
+func TestGetTwitchLoginReadsTheTwitchJar(t *testing.T) {
+	jar := loadRows(t, []string{
+		cookieRow(".twitch.tv", "0", "auth-token", "the-real-twitch-token"),
+		cookieRow(".twitch.tv", "0", "login", "the-real-twitch-login"),
+		cookieRow(".youtube.com", "0", "login", "a-youtube-row-wearing-the-twitch-name"),
+		cookieRow(".youtube.com", "0", "LOGIN_INFO", "a-youtube-cookie"),
+	})
+
+	if got := jar.GetTwitchLogin(); got != "the-real-twitch-login" {
+		t.Errorf("GetTwitchLogin() = %q, want %q — internal/twitch would hand the IRC client no "+
+			"nickname and the handshake would drop to anonymous without erroring",
+			got, "the-real-twitch-login")
+	}
+	// The pair must come from one place: both accessors read the twitch jar.
+	if got := jar.GetTwitchAuthToken(); got != "the-real-twitch-token" {
+		t.Errorf("GetTwitchAuthToken() = %q, want %q", got, "the-real-twitch-token")
+	}
+	// A jar holding only the YouTube "login" row yields nothing: Load admits
+	// Twitch cookie names on twitch.tv only, so the foreign row is not merely
+	// out-ranked, it is never stored.
+	ytOnly := loadRows(t, []string{
+		cookieRow(".youtube.com", "0", "login", "a-youtube-row-wearing-the-twitch-name"),
+		cookieRow(".youtube.com", "0", "LOGIN_INFO", "a-youtube-cookie"),
+	})
+	if got := ytOnly.GetTwitchLogin(); got != "" {
+		t.Errorf("GetTwitchLogin() = %q on a YouTube-only jar, want empty", got)
+	}
+}
+
 // TestIsEmptyNeedsBothJarsEmpty: a file that configured only one platform is
 // not an empty jar. IsEmpty gates "no cookies at all" messaging, so reading it
 // off one map would report a Twitch-only install as unconfigured.

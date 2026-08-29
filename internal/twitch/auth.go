@@ -40,6 +40,25 @@ func (a *Auth) GetAuthToken() string {
 	return a.cookieJar.GetCookie("auth-token")
 }
 
+// GetLogin extracts the login (account name) from the cookie jar.
+//
+// The IRC handshake needs it: NICK identifies the session's user and Twitch
+// binds the OAuth token to it, so an authenticated session must send the
+// account's own nickname rather than the anonymous justinfan one.
+//
+// The cookie is preferred over the authoritative login in ValidateToken's
+// response because it is local: the IRC connect path must work when the
+// network is flaky, and caching a validated login would add a lifecycle to
+// get wrong. Both values come from the same cookie file as the auth-token, so
+// the pair belongs to one session unless the file was hand-edited across
+// accounts — in which case the login is simply rejected, visibly.
+func (a *Auth) GetLogin() string {
+	if a.cookieJar == nil {
+		return ""
+	}
+	return a.cookieJar.GetTwitchLogin()
+}
+
 // HasAuthToken returns true if a Twitch auth token is available.
 func (a *Auth) HasAuthToken() bool {
 	return a.GetAuthToken() != ""

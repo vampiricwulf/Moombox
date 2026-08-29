@@ -100,3 +100,53 @@ func TestGetAuthTokenNilJar(t *testing.T) {
 		t.Error("HasAuthToken() = true on a nil jar")
 	}
 }
+
+// TestGetLoginReadsTheTwitchCookie is the NICK half of the same cookie-jar
+// contract. The login names the account the IRC session identifies as, and it
+// must come from the same twitch.tv rows as the auth-token so the pair belongs
+// to one session.
+//
+// The fixture carries YouTube rows too, so "" here cannot be explained by an
+// empty jar — and a "" here is silent: chat_irc.go falls all the way back to
+// the anonymous handshake rather than erroring.
+func TestGetLoginReadsTheTwitchCookie(t *testing.T) {
+	jar := jarFromRows(t,
+		row(".twitch.tv", "auth-token", "synthetic-twitch-token"),
+		row(".twitch.tv", "login", "syntheticuser"),
+		row(".youtube.com", "SAPISID", "synthetic-youtube-cookie"),
+		row(".youtube.com", "LOGIN_INFO", "synthetic-youtube-cookie"),
+	)
+	a := NewAuth(jar, nopLogger{})
+
+	if got := a.GetLogin(); got != "syntheticuser" {
+		t.Errorf("GetLogin() = %q, want %q — without it the IRC handshake sends the anonymous "+
+			"justinfan nickname and the session captures no subscriber-only chat", got, "syntheticuser")
+	}
+}
+
+// TestGetLoginIsEmptyWithoutATwitchCookie: "login" is a plausible cookie name
+// on any site, so the fixture plants a .youtube.com row literally named "login"
+// — which Load refuses, because Twitch's cookie names are only honoured on
+// twitch.tv. Presenting another site's "login" as a Twitch nickname would pair
+// a real Twitch token with a foreign identity.
+func TestGetLoginIsEmptyWithoutATwitchCookie(t *testing.T) {
+	jar := jarFromRows(t,
+		row(".youtube.com", "login", "a-youtube-row-wearing-the-twitch-name"),
+		row(".youtube.com", "SAPISID", "synthetic-youtube-cookie"),
+	)
+	a := NewAuth(jar, nopLogger{})
+
+	if got := a.GetLogin(); got != "" {
+		t.Errorf("GetLogin() = %q, want empty — a youtube.com row named login is not a Twitch "+
+			"identity and must never be presented as one", got)
+	}
+}
+
+// TestGetLoginNilJar: the guard in GetLogin, mirroring GetAuthToken's, so a
+// service constructed before cookies are wired cannot panic.
+func TestGetLoginNilJar(t *testing.T) {
+	a := NewAuth(nil, nopLogger{})
+	if got := a.GetLogin(); got != "" {
+		t.Errorf("GetLogin() = %q on a nil jar, want empty", got)
+	}
+}

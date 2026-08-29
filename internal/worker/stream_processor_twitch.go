@@ -59,6 +59,29 @@ func twitchAuthSentinel(err error) error {
 	return nil
 }
 
+// twitchChatCredentials returns the two getters a live Twitch chat session
+// authenticates with — as a PAIR, from ONE guard on ONE object.
+//
+// Both or neither, and that is the whole reason this is a function rather than
+// two field assignments. twitch.ircHandshakeLines makes a single
+// authenticated-or-anonymous decision out of the token and the login, so a
+// wiring that supplied the token and left the login nil would present a real
+// OAuth token beside the anonymous `justinfan<random>` nickname. Twitch either
+// refuses that handshake or downgrades it to an anonymous session, and the
+// symptom is chat that connects normally and never carries subscriber-only
+// messages or badges. Two independent conditions could drift into exactly that
+// state; one cannot.
+//
+// Method values, not snapshots: both are re-read on every IRC reconnect, so a
+// credential re-imported mid-stream reaches the next session. nil is the
+// documented "log in anonymously" signal on both sides.
+func twitchChatCredentials(auth *twitch.Auth) (token, login func() string) {
+	if auth == nil {
+		return nil, nil
+	}
+	return auth.GetAuthToken, auth.GetLogin
+}
+
 // processTwitch handles Twitch stream/VOD processing.
 func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
 	if sp.tw == nil {
@@ -318,6 +341,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		chatStagingDir := filepath.Join(stagingBase, job.ID)
 		if err := os.MkdirAll(chatStagingDir, 0o755); err == nil {
 			chatPath := filepath.Join(chatStagingDir, "chat.json")
+			chatAuthToken, chatLogin := twitchChatCredentials(sp.tw.Auth)
 			twitchChatDl = twitch.NewChatDownloader(twitch.ChatDownloaderOptions{
 				ChannelLogin:    login,
 				ChannelDisplay:  streamInfo.ChannelDisplayName,
@@ -325,10 +349,11 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				StreamID:        streamInfo.StreamID,
 				OutputPath:      chatPath,
 				StreamStartTime: streamInfo.StartedAt,
-				// Method value, not a snapshot — read fresh on every IRC
-				// reconnect so a rotated token doesn't silently downgrade the
-				// rest of the stream to anonymous chat capture.
-				AuthToken:     sp.tw.GetAuthToken,
+				// Method values, not snapshots — read fresh on every IRC
+				// reconnect so a rotated credential doesn't silently downgrade
+				// the rest of the stream to anonymous chat capture.
+				AuthToken:     chatAuthToken,
+				Login:         chatLogin,
 				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
 
