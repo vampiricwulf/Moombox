@@ -522,7 +522,7 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | Field | Type | Default | TOML Key | Notes |
 |-------|------|---------|----------|-------|
 | CookieFile | string | "./cookies.txt" | `cookie_file` | **Restart-required.** `AutoCookieService` is constructed from this once, at startup (`initServices`, `cmd/moombox/services.go`). |
-| AutoEnabled | bool | false | `auto_enabled` | **Restart-required.** Owns exactly three things: the headless-browser periodic timer, the one automatic recovery attempt, and the `SetExpectedPlatforms` seeding at `cmd/moombox/main.go:276`. See §Auto-Cookie Service for the full settled meaning. |
+| AutoEnabled | bool | false | `auto_enabled` | **Restart-required.** Owns exactly three things: the headless-browser periodic timer, the one automatic recovery attempt, and the `SetExpectedPlatforms` seeding at `cmd/moombox/main.go:276-278`. See §Auto-Cookie Service for the full settled meaning. |
 | BrowserProfileDir | string | "./browser-profile" | `browser_profile_dir` | **Restart-required.** The directory's *existence* is not part of the start condition — `periodicRefreshHasSource` (`internal/cookies/autocookies.go`) asks per tick. |
 | BrowserPath | string | "" | `browser_path` | Explicit browser override. Only a real override when paired with `browser_type` (`browserOverrideConfigured`, `internal/cookies/autocookies.go`). |
 | BrowserType | string | "" | `browser_type` | Which extraction backend applies to `browser_path` — Firefox `cookies.sqlite` vs Chromium CDP. Validated against `knownBrowserTypes` (`internal/cookies/browser_validate.go`). |
@@ -868,14 +868,14 @@ Three maps, deliberately separate (`internal/cookies/refresh.go`):
 
 `AutoCookieService` acquires credentials into `cookies.txt` — through an interactive browser login, through a headless browser refresh, or browser-free by importing a browser profile directly.
 
-**What `cookies.auto_enabled` means.** Two independent liveness mechanisms on two independent timers, **not** a primary and a fallback. The in-process Go refresh (`RefreshService`) always runs, with the monitors and its own timer. The headless-browser refresh is a **much slower** second timer that exists only when the flag is on. The flag owns that timer, the one automatic recovery attempt, and — the exception this table has to name — the `SetExpectedPlatforms` read at `cmd/moombox/main.go:276`. Nothing else.
+**What `cookies.auto_enabled` means.** Two independent liveness mechanisms on two independent timers, **not** a primary and a fallback. The in-process Go refresh (`RefreshService`) always runs, with the monitors and its own timer. The headless-browser refresh is a **much slower** second timer that exists only when the flag is on. The flag owns that timer, the one automatic recovery attempt, and — the exception this table has to name — the `SetExpectedPlatforms` read at `cmd/moombox/main.go:276-278`. Nothing else.
 
 | Surface | Mechanism | Gated on `auto_enabled`? |
 |---------|-----------|--------------------------|
 | `RefreshService` (monitors + own timer) | in-process | never |
 | `StartPeriodicRefresh` | headless browser | yes — it *is* that timer |
 | automatic recovery (`OnRecoveryNeeded` → `handleRecoveryNeeded`) | headless browser, one attempt | yes |
-| `SetExpectedPlatforms` seeding (`cmd/moombox/main.go:276`) | — | yes |
+| `SetExpectedPlatforms` seeding (`cmd/moombox/main.go:276-278`) | — | yes |
 | `R F` / Web shift+click / the Settings-page twin | best-available ladder | **no** — the flag only picks the rung, and never causes a decline |
 | `R C` / `POST /api/cookies/recheck` | in-process | never |
 | `StartSetup` (interactive login) | browser | never — acquisition, and an explicit gesture |
