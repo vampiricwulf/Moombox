@@ -88,8 +88,9 @@ func stubDpapiProfiles(t *testing.T, profiles []dpapi.BrowserProfile, byPath map
 
 // Fixture profiles shared across the H7 test cases below.
 var (
-	dpapiProfileA = dpapi.BrowserProfile{Browser: "chrome", Name: "Default", Path: `C:\fake\chrome\Default`, IsDefault: true}
-	dpapiProfileB = dpapi.BrowserProfile{Browser: "edge", Name: "Default", Path: `C:\fake\edge\Default`, IsDefault: true}
+	dpapiProfileA     = dpapi.BrowserProfile{Browser: "chrome", Name: "Default", Path: `C:\fake\chrome\Default`, IsDefault: true}
+	dpapiProfileB     = dpapi.BrowserProfile{Browser: "edge", Name: "Default", Path: `C:\fake\edge\Default`, IsDefault: true}
+	dpapiProfileBrave = dpapi.BrowserProfile{Browser: "brave", Name: "Default", Path: `C:\fake\brave\Default`, IsDefault: true}
 )
 
 // dpapiFullYouTubeSet is profile A's cookies: SAPISID + LOGIN_INFO, a
@@ -152,14 +153,31 @@ func TestDpapiExtractChoosesHigherScoringProfile(t *testing.T) {
 
 // TestDpapiExtractChoosesHigherScoringProfileRegardlessOfScanOrder pins that
 // the winner is decided by SCORE, not by which profile FindBrowserProfiles
-// happens to list first or last — reversing the order must not flip the
-// result the way the old last-writer-wins merge would have.
+// happens to list first or last.
+//
+// Arc 8 fix round 1, Finding 5: the original version of this test reversed
+// the SCAN ORDER ([]dpapi.BrowserProfile{B, A}) but left A as the
+// higher-scoring profile. That is decorative — the merge-all bug's rule is
+// "whichever profile is SCANNED LAST wins", and reversing the order moved
+// A (already the higher scorer) into last place, so the bug's answer and
+// the correct answer both came out "A". A test that can't tell the bug
+// from the fix apart is not testing anything. This version instead swaps
+// WHICH profile has the complete set: B is scanned first and now holds it,
+// A is scanned last and holds only the partial set. Correct behavior
+// (highest score wins) still picks B, unconditionally. The buggy behavior
+// (last-scanned wins the bare-name dedup) would instead let A's
+// last-scanned SAPISID row overwrite B's, while B's LOGIN_INFO survives
+// untouched (A never had one to overwrite it) — producing the exact
+// "two halves of one session from different profiles" hybrid H7 exists to
+// prevent. Asserting B's SAPISID specifically (not merely that A's
+// SAPISID is present, and not merely that the output is non-empty) is what
+// catches that hybrid.
 func TestDpapiExtractChoosesHigherScoringProfileRegardlessOfScanOrder(t *testing.T) {
 	stubDpapiProfiles(t,
-		[]dpapi.BrowserProfile{dpapiProfileB, dpapiProfileA}, // reversed
+		[]dpapi.BrowserProfile{dpapiProfileB, dpapiProfileA}, // B scanned first, A scanned LAST
 		map[string][]dpapi.ChromeCookie{
-			dpapiProfileA.Path: dpapiFullYouTubeSet("A"),
-			dpapiProfileB.Path: dpapiSapisidOnly("B"),
+			dpapiProfileB.Path: dpapiFullYouTubeSet("B2"), // now the COMPLETE set
+			dpapiProfileA.Path: dpapiSapisidOnly("A2"),    // now the PARTIAL set, and scanned last
 		},
 	)
 	log := &dpapiTestLogger{}
@@ -168,11 +186,22 @@ func TestDpapiExtractChoosesHigherScoringProfileRegardlessOfScanOrder(t *testing
 	if err != nil {
 		t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
 	}
-	if !strings.Contains(out, "A-SAPISID") || !strings.Contains(out, "A-LOGIN-INFO") {
-		t.Errorf("output missing profile A's rows with reversed scan order:\n%s", out)
+	// Correct (score-driven): B wins outright, both of B's rows present,
+	// neither of A's.
+	//
+	// Under the old merge-all bug (last-scanned wins the bare-name dedup),
+	// A is scanned last and DOES have a same-named "SAPISID" row, so the
+	// bug would overwrite B's SAPISID with A's while B's LOGIN_INFO
+	// survives untouched (A never had one to overwrite it) — the exact
+	// "two halves of one session from different profiles" failure mode H7
+	// exists to prevent. Asserting B-SAPISID is present (not A2-SAPISID)
+	// catches that hybrid outcome; a bare "output is non-empty" or "some
+	// SAPISID line exists" would not.
+	if !strings.Contains(out, "B2-SAPISID") || !strings.Contains(out, "B2-LOGIN-INFO") {
+		t.Errorf("output missing profile B's rows (the higher scorer, scanned FIRST):\n%s", out)
 	}
-	if strings.Contains(out, "B-SAPISID") {
-		t.Errorf("output contains profile B's SAPISID value with reversed scan order — order should not decide the winner:\n%s", out)
+	if strings.Contains(out, "A2-SAPISID") {
+		t.Errorf("output contains profile A's SAPISID value — the last-scanned profile won a shared name instead of the higher scorer:\n%s", out)
 	}
 }
 
@@ -208,27 +237,158 @@ func TestDpapiExtractConfiguredBrowserFilterOverridesScore(t *testing.T) {
 }
 
 // TestDpapiExtractConfiguredBrowserFilterMatchesChannelSiblings pins
-// dpapiBrowserMatchesConfigured's family rule: "chrome" also matches a
-// "chrome-beta" profile, because knownBrowserTypes (browser_validate.go)
-// only ever offers the coarse family name — an operator who configured
-// "chrome" cannot even express "chrome-beta specifically".
+// dpapiBrowserMatchesConfigured's family rule: "edge" also matches an
+// "edge-beta" profile, because knownBrowserTypes (browser_validate.go)
+// only ever offers the coarse per-browser name — an operator who
+// configured "edge" cannot even express "edge-beta specifically".
+//
+// Arc 8 fix round 1: this used "chrome"/"chrome-beta" before Finding 1's
+// fix. "chrome" is now intercepted earlier as the Web UI's whole-family
+// sentinel (see dpapiChromiumFamilyValue) and never reaches
+// dpapiBrowserMatchesConfigured at all, which would have made this test
+// decorative — it would keep passing (unfiltered scoring also finds the
+// beta profile) but for the wrong reason, no longer exercising the
+// channel-sibling matching it claims to. "edge" still reaches the real
+// per-browser filtering branch, so it still tests the real thing.
 func TestDpapiExtractConfiguredBrowserFilterMatchesChannelSiblings(t *testing.T) {
-	beta := dpapi.BrowserProfile{Browser: "chrome-beta", Name: "Default", Path: `C:\fake\chrome-beta\Default`}
+	beta := dpapi.BrowserProfile{Browser: "edge-beta", Name: "Default", Path: `C:\fake\edge-beta\Default`}
 	stubDpapiProfiles(t,
-		[]dpapi.BrowserProfile{dpapiProfileB, beta},
+		[]dpapi.BrowserProfile{dpapiProfileA, beta},
 		map[string][]dpapi.ChromeCookie{
-			dpapiProfileB.Path: dpapiSapisidOnly("B"),
+			// "CHR" not "A": "A-SAPISID" is a substring of "BETA-SAPISID"
+			// ("BETA" ends in "A"), which would make the exclusion check
+			// below pass vacuously against BETA's own row.
+			dpapiProfileA.Path: dpapiSapisidOnly("CHR"),
 			beta.Path:          dpapiFullYouTubeSet("BETA"),
+		},
+	)
+	log := &dpapiTestLogger{}
+
+	out, err := dpapiExtractAsNetscape(log, "edge")
+	if err != nil {
+		t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
+	}
+	if !strings.Contains(out, "BETA-SAPISID") {
+		t.Errorf("configured browser \"edge\" should match \"edge-beta\" as a candidate:\n%s", out)
+	}
+	if strings.Contains(out, "CHR-SAPISID") {
+		t.Errorf("configured browser \"edge\" should have excluded profile A (\"chrome\"):\n%s", out)
+	}
+}
+
+// TestDpapiExtractChromeMeansWholeChromiumFamily is Finding 1 (Arc 8 fix
+// round 1, CRITICAL): web/public/index.html's cfg-cookies-browser-type
+// dropdown has exactly one Chromium option, `<sl-option value="chrome">`,
+// covering "chrome, brave, edge, vivaldi, thorium, opera" — so a Web UI
+// user who points a custom path at brave.exe stores browser_type="chrome".
+// The original fix round narrowed the DPAPI filter to profiles literally
+// named "chrome", which excluded that user's real Brave profile — a
+// regression the review confirmed against BOTH failure shapes: a
+// Brave-only machine hard-errors, and a machine with an unused Chrome
+// install silently picks the wrong (signed-out) profile. This covers the
+// first shape: only Brave is present, configured type is "chrome", Brave
+// must be chosen with no error.
+func TestDpapiExtractChromeMeansWholeChromiumFamily(t *testing.T) {
+	stubDpapiProfiles(t,
+		[]dpapi.BrowserProfile{dpapiProfileBrave},
+		map[string][]dpapi.ChromeCookie{
+			dpapiProfileBrave.Path: dpapiFullYouTubeSet("BRAVE"),
 		},
 	)
 	log := &dpapiTestLogger{}
 
 	out, err := dpapiExtractAsNetscape(log, "chrome")
 	if err != nil {
-		t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
+		t.Fatalf(`dpapiExtractAsNetscape(_, "chrome") = %v, want nil error on a Brave-only machine`, err)
 	}
-	if !strings.Contains(out, "BETA-SAPISID") {
-		t.Errorf("configured browser \"chrome\" should match \"chrome-beta\" as a candidate:\n%s", out)
+	if !strings.Contains(out, "BRAVE-SAPISID") || !strings.Contains(out, "BRAVE-LOGIN-INFO") {
+		t.Errorf("output missing the Brave profile's rows:\n%s", out)
+	}
+}
+
+// TestDpapiExtractChromeMeansWholeChromiumFamilyScoresAcrossIt covers
+// Finding 1's second failure shape: a machine with an UNUSED Chrome
+// install alongside a signed-in Brave. browser_type="chrome" must not
+// narrow to the (signed-out) Chrome profile and report "no relevant
+// cookies" — it must score every Chromium-family profile and pick Brave.
+func TestDpapiExtractChromeMeansWholeChromiumFamilyScoresAcrossIt(t *testing.T) {
+	stubDpapiProfiles(t,
+		[]dpapi.BrowserProfile{dpapiProfileA, dpapiProfileBrave},
+		map[string][]dpapi.ChromeCookie{
+			dpapiProfileA.Path:     nil, // Chrome installed but signed out: no cookies at all
+			dpapiProfileBrave.Path: dpapiFullYouTubeSet("BRAVE"),
+		},
+	)
+	log := &dpapiTestLogger{}
+
+	out, err := dpapiExtractAsNetscape(log, "chrome")
+	if err != nil {
+		t.Fatalf(`dpapiExtractAsNetscape(_, "chrome") = %v, want nil error`, err)
+	}
+	if !strings.Contains(out, "BRAVE-SAPISID") || !strings.Contains(out, "BRAVE-LOGIN-INFO") {
+		t.Errorf("output missing the signed-in Brave profile's rows — signed-out Chrome must not have won:\n%s", out)
+	}
+	if !dpapiLinesContain(log.infos, "chose one profile", "browser=brave") {
+		t.Errorf("expected an Info line naming brave/Default as chosen; infos=%v", log.infos)
+	}
+}
+
+// TestDpapiExtractPerBrowserValueStillNarrowsDespiteLowerScore is the
+// reviewer's third fix-round-1 test: a genuine per-browser value ("brave",
+// reachable only from the TUI's free-text browser_type field) must still
+// narrow to that one browser, even when a DIFFERENT browser's profile
+// would have scored higher. Finding 1's fix must not have widened every
+// configured value to "unfiltered" — only the "chrome" family sentinel.
+func TestDpapiExtractPerBrowserValueStillNarrowsDespiteLowerScore(t *testing.T) {
+	stubDpapiProfiles(t,
+		[]dpapi.BrowserProfile{dpapiProfileA, dpapiProfileBrave},
+		map[string][]dpapi.ChromeCookie{
+			dpapiProfileA.Path:     dpapiFullYouTubeSet("CHROME"), // higher score, WRONG browser
+			dpapiProfileBrave.Path: dpapiSapisidOnly("BRAVE"),     // lower score, configured browser
+		},
+	)
+	log := &dpapiTestLogger{}
+
+	out, err := dpapiExtractAsNetscape(log, "brave")
+	if err != nil {
+		t.Fatalf(`dpapiExtractAsNetscape(_, "brave") = %v, want nil error`, err)
+	}
+	if !strings.Contains(out, "BRAVE-SAPISID") {
+		t.Errorf(`configured browser "brave" should have chosen the Brave profile despite its lower score:\n%s`, out)
+	}
+	if strings.Contains(out, "CHROME-SAPISID") || strings.Contains(out, "CHROME-LOGIN-INFO") {
+		t.Errorf(`configured browser "brave" should have EXCLUDED the higher-scoring Chrome profile:\n%s`, out)
+	}
+}
+
+// TestDpapiExtractUnknownDpapiLayoutFallsBackToUnfiltered is Finding 2
+// (Arc 8 fix round 1, HIGH): browser_validate.go's knownBrowserTypes
+// accepts "opera" and "thorium" as configured browser_type values, and
+// neither is Firefox-based, so both can reach dpapiExtractAsNetscape — but
+// dpapi/profiles.go's chromiumBrowsers has no layout for either (Opera's
+// profile layout differs and is deliberately excluded; Thorium was simply
+// never added). Filtering by either would ALWAYS produce zero candidates
+// regardless of what's actually installed, which is a dpapi coverage gap,
+// not "this browser isn't installed" — it must fall back to unfiltered
+// scoring with a Debug line, never a hard error.
+func TestDpapiExtractUnknownDpapiLayoutFallsBackToUnfiltered(t *testing.T) {
+	stubDpapiProfiles(t,
+		[]dpapi.BrowserProfile{dpapiProfileA},
+		map[string][]dpapi.ChromeCookie{
+			dpapiProfileA.Path: dpapiFullYouTubeSet("A"),
+		},
+	)
+	log := &dpapiTestLogger{}
+
+	out, err := dpapiExtractAsNetscape(log, "opera")
+	if err != nil {
+		t.Fatalf(`dpapiExtractAsNetscape(_, "opera") = %v, want nil error (unfiltered fallback)`, err)
+	}
+	if !strings.Contains(out, "A-SAPISID") || !strings.Contains(out, "A-LOGIN-INFO") {
+		t.Errorf("output missing profile A's rows — \"opera\" should have fallen back to unfiltered scoring:\n%s", out)
+	}
+	if !dpapiLinesContain(log.debugs, "no dpapi profile layout", "configured=opera") {
+		t.Errorf("expected a Debug line naming \"opera\" as having no dpapi layout; debugs=%v", log.debugs)
 	}
 }
 
@@ -389,6 +549,37 @@ func TestDpapiBrowserMatchesConfigured(t *testing.T) {
 		t.Run(tc.configured+"_vs_"+tc.profile, func(t *testing.T) {
 			if got := dpapiBrowserMatchesConfigured(tc.configured, tc.profile); got != tc.want {
 				t.Errorf("dpapiBrowserMatchesConfigured(%q, %q) = %v, want %v", tc.configured, tc.profile, got, tc.want)
+			}
+		})
+	}
+}
+
+// --- browserOverrideConfigured ---
+
+// TestBrowserOverrideConfigured is Finding 3 (Arc 8 fix round 1, MEDIUM):
+// resolvedBrowser and the DPAPI fallback's configured-browser-type read
+// (autocookies.go's refreshCookiesDetailed) must gate on the IDENTICAL
+// predicate, or a browser_type set with no browser_path — reachable from
+// the TUI's free-text browser_type field (tui/settings.go's Save writes
+// BrowserType independently of BrowserPath) — is "no override" in one
+// place and a hard filter in the other. This pins the shared predicate
+// directly; both call sites are required to use it rather than
+// re-deriving their own condition.
+func TestBrowserOverrideConfigured(t *testing.T) {
+	cases := []struct {
+		name        string
+		path, btype string
+		want        bool
+	}{
+		{"both set", "/path/to/brave.exe", "brave", true},
+		{"type only, no path (TUI free-text without a path)", "", "brave", false},
+		{"path only, no type", "/path/to/brave.exe", "", false},
+		{"neither set", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := browserOverrideConfigured(tc.path, tc.btype); got != tc.want {
+				t.Errorf("browserOverrideConfigured(%q, %q) = %v, want %v", tc.path, tc.btype, got, tc.want)
 			}
 		})
 	}

@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies/dpapi"
@@ -43,13 +44,38 @@ var (
 // discarded whole; deduplicateAndFormat never sees more than one profile's
 // rows. Selection:
 //
-//  1. If configuredBrowserType names a browser (the operator's
-//     browser_type setting, via ConfiguredBrowserOverride), only that
-//     browser FAMILY's profiles are candidates — "chrome" also matches
-//     "chrome-beta"/"chrome-dev"/"chrome-canary" (same physical browser,
-//     different release channel); others are skipped and logged at Debug.
-//     Empty configuredBrowserType (auto-detect) leaves every profile a
-//     candidate.
+//  1. configuredBrowserType is the operator's browser_type setting,
+//     already gated to a genuine override by the caller (a type with no
+//     path is not a real override — see autocookies.go's call site). Three
+//     cases (Arc 8 fix round 1 / Finding 1 + 2):
+//     - Empty (auto-detect): every profile is a candidate.
+//     - "chrome": the Web UI's ONLY Chromium option is literally
+//     `<sl-option value="chrome">Chromium-family (chrome, brave, edge,
+//     vivaldi, thorium, opera)</sl-option>` (web/public/index.html) —
+//     so "chrome" from config means "the operator picked SOME
+//     Chromium browser", not literally Google Chrome. Narrowing to
+//     profiles named exactly "chrome" here regressed every Brave/Edge/
+//     Vivaldi user who set a custom path through the Web UI. Treated
+//     as "every profile is a candidate", identically to empty —
+//     dpapi.FindBrowserProfiles only ever returns Chromium-family
+//     profiles in the first place, so "the whole family" and "no
+//     filter" are the same set.
+//     - Any other configured type (reachable only via the TUI's
+//     free-text browser_type field — browser_validate.go's
+//     knownBrowserTypes allows "brave"/"edge"/"vivaldi"/"opera"/
+//     "thorium" individually): if dpapi.KnownBrowserFamilies() has NO
+//     layout for it at all (Opera's profile layout differs and is
+//     deliberately excluded from dpapi.chromiumBrowsers; Thorium has
+//     simply never been added), filtering would always produce zero
+//     candidates regardless of what's installed — that is a dpapi
+//     coverage gap, not a "browser not found", so it falls back to
+//     every profile being a candidate, logged at Debug. Otherwise
+//     ("brave", "edge", "vivaldi", literal "chrome" if it were ever
+//     reached this way) it narrows to that browser FAMILY —
+//     dpapiBrowserMatchesConfigured also matches release-channel
+//     siblings ("edge" matches "edge-beta"); non-matches are skipped
+//     and logged at Debug; zero matches here IS a real "browser not
+//     found" and is a hard error.
 //  2. Each candidate is scored by dpapiProfileScore (the loose/strict auth
 //     predicates jar.go already keeps, applied to the profile's own rows
 //     without building a full CookieJar). Highest score wins; a tie keeps
@@ -89,7 +115,32 @@ func dpapiExtractAsNetscape(logger interface {
 	}
 
 	profiles := allProfiles
-	if configuredBrowserType != "" {
+	switch {
+	case configuredBrowserType == "":
+		// Auto-detect: every profile is a candidate.
+	case configuredBrowserType == dpapiChromiumFamilyValue:
+		// Finding 1 (Arc 8 fix round 1): the Web UI's ONLY Chromium option
+		// stores this literal value for "some Chromium-family browser",
+		// not "Google Chrome specifically" — see the doc comment above.
+		// Narrowing to it would exclude every Brave/Edge/Vivaldi profile a
+		// Web UI user configured. dpapi.FindBrowserProfiles only returns
+		// Chromium-family profiles anyway, so "the whole family" and "no
+		// filter" are the same set — no Debug line needed, this is the
+		// expected common case, not a fallback from a broken one.
+	case !slices.Contains(dpapi.KnownBrowserFamilies(), configuredBrowserType):
+		// Finding 2: a browser_type browser_validate.go accepts (Opera,
+		// Thorium) but dpapi has no profile layout for at all — filtering
+		// would always yield zero candidates on every machine, which is a
+		// dpapi coverage gap, not "this browser isn't installed". Falling
+		// back to unfiltered scoring instead of a hard error here is what
+		// the OLD code effectively did (it never filtered by browser at
+		// all), so this restores that behavior for exactly the types H7
+		// cannot filter for.
+		if logger != nil {
+			logger.Debug("DPAPI fallback: configured browser has no dpapi profile layout — scoring every profile instead of filtering",
+				"configured", configuredBrowserType)
+		}
+	default:
 		var filtered []dpapi.BrowserProfile
 		for _, p := range allProfiles {
 			if dpapiBrowserMatchesConfigured(configuredBrowserType, p.Browser) {
@@ -222,6 +273,17 @@ func dpapiExtractAsNetscape(logger interface {
 	lines = append(lines, filtered...)
 	return strings.Join(lines, "\n") + "\n", nil
 }
+
+// dpapiChromiumFamilyValue is the browser_type value the Web UI's
+// cfg-cookies-browser-type dropdown stores for ANY Chromium-family choice
+// (web/public/index.html: `<sl-option value="chrome">Chromium-family
+// (chrome, brave, edge, vivaldi, thorium, opera)</sl-option>` — its only
+// other option is "firefox" for the whole Firefox family). The Web UI has
+// no way to express a narrower per-browser choice; only the TUI's
+// free-text browser_type field can (browser_validate.go's
+// knownBrowserTypes allows "brave"/"edge"/"vivaldi"/"opera"/"thorium"
+// individually there). See dpapiExtractAsNetscape's Finding 1 note.
+const dpapiChromiumFamilyValue = "chrome"
 
 // dpapiBrowserMatchesConfigured reports whether one FindBrowserProfiles
 // entry's Browser family matches the operator's configured browser type

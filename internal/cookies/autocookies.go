@@ -712,6 +712,22 @@ func (s *AutoCookieService) ReloginStatus() AutoCookieReloginRequired {
 	return maps.Clone(s.needsRelogin)
 }
 
+// browserOverrideConfigured reports whether a (path, browserType) pair
+// read from ConfiguredBrowserOverride is a REAL override, as opposed to a
+// partially-filled setting. Both must be non-empty: the TUI's browser_type
+// field is free text with no matching path field required
+// (tui/settings.go's Save writes BrowserType independently of
+// BrowserPath), so a type typed in without a path is reachable in
+// practice, not just in theory. resolvedBrowser and
+// dpapiExtractAsNetscape's caller (autocookies.go's DPAPI fallback branch)
+// both gate on this SAME predicate — Arc 8 fix round 1, Finding 3: before
+// this existed, the DPAPI call site keyed off browserType alone, so a
+// type-only setting was "no override" everywhere else but a hard filter
+// there.
+func browserOverrideConfigured(path, browserType string) bool {
+	return path != "" && browserType != ""
+}
+
 // resolvedBrowser returns the user's configured browser when set, else
 // the auto-detected best match. Used by StartSetup and RefreshCookies
 // so the UI's browser_path/browser_type setting actually drives
@@ -719,7 +735,7 @@ func (s *AutoCookieService) ReloginStatus() AutoCookieReloginRequired {
 func (s *AutoCookieService) resolvedBrowser() *DetectedBrowser {
 	if s.ConfiguredBrowserOverride != nil {
 		path, btype := s.ConfiguredBrowserOverride()
-		if path != "" && btype != "" {
+		if browserOverrideConfigured(path, btype) {
 			// Try to find the matching DetectedBrowser entry from
 			// DetectBrowsers so Name is human-readable; fall back to
 			// path-as-name if the configured path isn't in the
@@ -1833,10 +1849,16 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		// `browser` above — an operator who explicitly named a browser in
 		// settings gets DPAPI restricted to it; auto-detect leaves every
 		// Chromium-family profile as a candidate for dpapiExtractAsNetscape's
-		// own selection (it picks exactly one, it never merges).
+		// own selection (it picks exactly one, it never merges). Gated by
+		// browserOverrideConfigured — the SAME predicate resolvedBrowser
+		// uses — so a browser_type set with no path (Finding 3, Arc 8 fix
+		// round 1: reachable from the TUI's free-text field) is "no
+		// override" here too, not a hard filter on a half-configured value.
 		var cfgBrowserType string
 		if s.ConfiguredBrowserOverride != nil {
-			_, cfgBrowserType = s.ConfiguredBrowserOverride()
+			if path, btype := s.ConfiguredBrowserOverride(); browserOverrideConfigured(path, btype) {
+				cfgBrowserType = btype
+			}
 		}
 		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger, cfgBrowserType)
 		if fallbackErr != nil {
