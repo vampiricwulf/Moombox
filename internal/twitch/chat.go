@@ -56,6 +56,11 @@ type ChatDownloader struct {
 	// authRefused latches the one-shot anonymous fallback. See
 	// noteHandshakeOutcome.
 	authRefused atomic.Bool
+	// warnedNoLogin latches noteMissingLogin's single Warn for the life of this
+	// downloader. A SEPARATE flag from authRefused on purpose: that one also
+	// makes sessionCredentials return an empty pair, and this condition must
+	// change nothing about what goes on the wire.
+	warnedNoLogin atomic.Bool
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.
@@ -204,6 +209,49 @@ func (cd *ChatDownloader) sessionCredentials() (token, login string) {
 		return "", ""
 	}
 	return cd.credentials()
+}
+
+// noteMissingLogin reports the one anonymous handshake nothing else can see:
+// an auth-token with no login cookie beside it.
+//
+// Every other way chat ends up anonymous is either visible or benign. No
+// credentials at all is the ordinary cookieless install. A login Twitch
+// REFUSES produces noteHandshakeOutcome's Warn. But a token with no login
+// never attempts the authenticated handshake at all — ircHandshakeLines
+// renders the full anonymous pair, because a token beside the justinfan
+// nickname is the hybrid Twitch rejects — so there is no refusal to observe,
+// nothing logs, and the operator-facing predicates disagree with reality:
+// HasTwitchAuthCookies reads true (the token IS there) and both UIs show
+// green, while the capture quietly drops every subscriber-only message and
+// badge for the whole job. A minimal hand-written cookies.txt carrying only
+// auth-token lands exactly here on day one, and mergeCookieFiles can
+// manufacture it later by pruning an expired login row.
+//
+// It is reported HERE rather than by the jar's auth predicates, and that split
+// is the point: this site knows the handshake actually went anonymous, whereas
+// twitchAuthCookieNames could only know a name is absent — and making that
+// list say so fires the auth-loss alarm on installs whose login cookie may
+// never have meant anything. See twitchAuthCookieNames for that trace.
+//
+// ONCE PER DOWNLOADER, not per session. The condition is a property of the
+// cookie file, so a job that reconnects hourly for three days would otherwise
+// repeat this line hourly for three days and bury the rest of its log. The
+// cost if the cookies are repaired mid-job: nothing is said when the next
+// reconnect starts authenticating properly, which is a silence about GOOD news.
+//
+// Neither the token nor the login is named — this line names neither, and
+// there is nothing here to name them with.
+func (cd *ChatDownloader) noteMissingLogin(token, login string) {
+	// The token check is load-bearing, not defensive: without it every
+	// cookieless install — most installs — would get this warning about
+	// credentials it never had.
+	if token == "" || login != "" || cd.warnedNoLogin.Swap(true) {
+		return
+	}
+	cd.logger.Warn("twitch chat: auth-token present but no login cookie — chat will be captured "+
+		"anonymously (subscriber-only messages and badges will be missing); re-export cookies "+
+		"from a signed-in browser",
+		"channel", cd.channelLogin)
 }
 
 // noteHandshakeOutcome runs at the end of every session that presented

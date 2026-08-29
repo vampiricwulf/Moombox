@@ -171,6 +171,22 @@ func (l *recordingLogger) fallbackWarnings() []string {
 	return out
 }
 
+// missingLoginWarnings returns only the warnings noteMissingLogin emits.
+//
+// Two separate filters over one recorder, and the two phrases must stay
+// distinct: every fallback test counts fallbackWarnings exactly, so a
+// missing-login line that also said "continuing anonymously" would be counted
+// as a fallback and quietly defang all of them.
+func (l *recordingLogger) missingLoginWarnings() []string {
+	var out []string
+	for _, w := range l.warnings() {
+		if strings.Contains(w, "no login cookie") {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // runLiveIRCSession drives one session with the downloader marked RUNNING, so
 // the read loop actually executes and the handshake outcome is observed.
 //
@@ -552,5 +568,255 @@ func TestIRCShutdownIsNotARefusal(t *testing.T) {
 	pass, nick := handshakeLines(t, rep.nextSession(t))
 	if pass != "PASS oauth:token-one" || nick != "NICK archiveraccount" {
 		t.Errorf("next handshake = (%q, %q), want the authenticated pair", pass, nick)
+	}
+}
+
+// TestIRCCallerEndedSessionIsNotARefusal pins the OTHER half of the
+// caller-ended guard.
+//
+// The guard reads `ctx.Err() != nil || !cd.IsRunning()`, and only the first
+// half has a test — TestIRCShutdownIsNotARefusal above cancels the parent
+// context. Deleting `|| !cd.IsRunning()` survived the whole tree, because no
+// Twitch test ended a credentialed session through Stop or MarkStreamEnded
+// after it had heard a line but before it was welcomed. Those are the two
+// ordinary ways a real job ends: the orchestrator marks the stream over, or
+// the operator cancels.
+//
+// The parent context stays LIVE here on purpose. Cancelling it would let the
+// already-pinned half carry this test and the assertion would prove nothing.
+func TestIRCCallerEndedSessionIsNotARefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// end is how the caller finishes with this downloader. Stop is an
+		// interruption; MarkStreamEnded is the clean end of a live stream.
+		// Both clear cd.running and both reach the guard identically.
+		end func(*ChatDownloader)
+	}{
+		{"Stop", (*ChatDownloader).Stop},
+		{"MarkStreamEnded", (*ChatDownloader).MarkStreamEnded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The server PINGs and never welcomes, so by the time the session
+			// is ended it has heard from Twitch without being accepted — every
+			// condition of a refusal except that WE ended it.
+			rep := startIRCReplierAwaitingEcho(t, []string{"PING :tmi.twitch.tv"})
+			logger := &recordingLogger{}
+			cd := newAuthTestChatDownloaderWithLogger(t,
+				staticCredentials("token-one", "archiveraccount"), logger)
+
+			cd.mu.Lock()
+			cd.running = true
+			cd.mu.Unlock()
+
+			// The session runs on its own goroutine so nextSession's t.Fatal
+			// is always called from the test's goroutine.
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = cd.runIRCSession(context.Background())
+			}()
+			rep.nextSession(t)
+
+			// End it only once the client's PONG proves it read and handled
+			// the PING. Ending before that would leave the session having
+			// heard nothing, and the DROP rule rather than the caller-ended
+			// guard would be what kept the latch clear.
+			select {
+			case echo := <-rep.echoes:
+				if !strings.HasPrefix(echo, "PONG") {
+					t.Fatalf("echo = %q, want the client's PONG", echo)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("timed out waiting for the client to answer the server's PING")
+			}
+			tc.end(cd)
+			<-done
+
+			if cd.authRefused.Load() {
+				t.Errorf("a session ended by %s latched the anonymous fallback — a clean shutdown "+
+					"was read as Twitch refusing the login", tc.name)
+			}
+			if got := logger.fallbackWarnings(); len(got) != 0 {
+				t.Errorf("fallback warnings = %q, want none for a session the caller ended", got)
+			}
+
+			// And the next session still authenticates. Without this the latch
+			// could be re-armed by any later change and only the boolean above
+			// would notice.
+			runLiveIRCSession(t, cd)
+			pass, nick := handshakeLines(t, rep.nextSession(t))
+			if pass != "PASS oauth:token-one" || nick != "NICK archiveraccount" {
+				t.Errorf("next handshake = (%q, %q), want the authenticated pair", pass, nick)
+			}
+		})
+	}
+}
+
+// --- the token-without-a-login state ---
+
+// TestIRCMissingLoginWarnsOncePerDownloader is the fourth silent state.
+//
+// A cookies.txt holding auth-token and no login is not an error anywhere: the
+// handshake renders the full anonymous pair (correctly — a token beside the
+// justinfan nickname is the hybrid Twitch rejects), Twitch accepts it, and
+// nothing is refused, so the anonymous fallback's Warn cannot fire. Meanwhile
+// HasTwitchAuthCookies reads true and both UIs show green. The capture simply
+// never carries a subscriber-only message or a badge, for the whole job.
+//
+// ONCE, across sessions: the condition is a property of the cookie file, so a
+// job reconnecting hourly for three days would otherwise repeat the line
+// hourly for three days. Three sessions here, one warning.
+func TestIRCMissingLoginWarnsOncePerDownloader(t *testing.T) {
+	rec := startIRCRecorder(t, 4)
+	logger := &recordingLogger{}
+	cd := newAuthTestChatDownloaderWithLogger(t, staticCredentials("token-one", ""), logger)
+
+	for range 3 {
+		runOneIRCSession(t, cd)
+		lines := rec.nextSession(t)
+		// The wire bytes stay exactly what they were: this is a report, not a
+		// behaviour change. In particular the token is still withheld.
+		assertAnonymousHandshake(t, lines)
+		assertNotOnTheWire(t, lines, "token-one")
+	}
+
+	if got := logger.missingLoginWarnings(); len(got) != 1 {
+		t.Errorf("missing-login warnings = %q, want exactly one across three sessions", got)
+	}
+	// It must not be counted as a fallback: every fallback test asserts an
+	// exact fallbackWarnings length, so an overlapping phrase would defang
+	// them all.
+	if got := logger.fallbackWarnings(); len(got) != 0 {
+		t.Errorf("fallback warnings = %q, want none — nothing was refused here", got)
+	}
+	for _, w := range logger.warnings() {
+		if strings.Contains(w, "token-one") {
+			t.Errorf("a warning named a credential: %q", w)
+		}
+	}
+}
+
+// TestIRCCompleteCredentialsRaiseNoMissingLoginWarning: a working authenticated
+// session must say nothing. The warning describes a degradation, and there is
+// none here.
+func TestIRCCompleteCredentialsRaiseNoMissingLoginWarning(t *testing.T) {
+	rec := startIRCRecorder(t, 4)
+	logger := &recordingLogger{}
+	cd := newAuthTestChatDownloaderWithLogger(t,
+		staticCredentials("token-one", "archiveraccount"), logger)
+
+	runOneIRCSession(t, cd)
+	pass, nick := handshakeLines(t, rec.nextSession(t))
+
+	if pass != "PASS oauth:token-one" || nick != "NICK archiveraccount" {
+		t.Fatalf("handshake = (%q, %q), want the authenticated pair — a session that never "+
+			"authenticated would make the silence below meaningless", pass, nick)
+	}
+	if got := logger.missingLoginWarnings(); len(got) != 0 {
+		t.Errorf("missing-login warnings = %q, want none for a complete credential pair", got)
+	}
+}
+
+// TestIRCCookielessInstallRaisesNoMissingLoginWarning is the mutant this
+// warning is one edit away from becoming.
+//
+// MOST installs hold no Twitch cookies at all and read public chat through the
+// anonymous handshake. A condition that keyed on the missing login alone —
+// dropping the `token == ""` half — would warn all of them, on every job, about
+// credentials they never had and do not want. That is the difference between
+// reporting a degradation and nagging.
+func TestIRCCookielessInstallRaisesNoMissingLoginWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		credentials func() (string, string)
+	}{
+		{"no getter at all", nil},
+		{"both halves empty", staticCredentials("", "")},
+		{"a login with no token behind it", staticCredentials("", "archiveraccount")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := startIRCRecorder(t, 4)
+			logger := &recordingLogger{}
+			cd := newAuthTestChatDownloaderWithLogger(t, tc.credentials, logger)
+
+			runOneIRCSession(t, cd)
+			assertAnonymousHandshake(t, rec.nextSession(t))
+
+			if got := logger.missingLoginWarnings(); len(got) != 0 {
+				t.Errorf("missing-login warnings = %q, want none — this install has no Twitch "+
+					"credentials and is not missing anything", got)
+			}
+		})
+	}
+}
+
+// TestIRCMissingLoginWarningDoesNotDemoteTheJob is the cost of getting the
+// latch wrong, and it is not the extra log line.
+//
+// The obvious economy is to latch this warning on authRefused, which already
+// exists and is already one-shot per job. Every other test in this file passes
+// if you do — but authRefused is not a log flag: sessionCredentials returns an
+// EMPTY PAIR once it is set, so warning through it would permanently demote a
+// job to anonymous chat as a side effect of REPORTING that it is anonymous.
+// The state this warning describes is the one most likely to be repaired
+// mid-job — the operator reads the line and re-exports their cookies — so the
+// reconnect that picks the login up is exactly what must keep working.
+func TestIRCMissingLoginWarningDoesNotDemoteTheJob(t *testing.T) {
+	rec := startIRCRecorder(t, 4)
+	logger := &recordingLogger{}
+	cd := newAuthTestChatDownloaderWithLogger(t, credentialSequence(
+		[2]string{"token-one", ""},
+		[2]string{"token-one", "archiveraccount"}), logger)
+
+	runOneIRCSession(t, cd)
+	firstLines := rec.nextSession(t)
+
+	runOneIRCSession(t, cd)
+	secondPass, secondNick := handshakeLines(t, rec.nextSession(t))
+
+	assertAnonymousHandshake(t, firstLines)
+	if got := logger.missingLoginWarnings(); len(got) != 1 {
+		t.Fatalf("missing-login warnings = %q, want exactly one — the state this test repairs was "+
+			"never reported", got)
+	}
+	if cd.authRefused.Load() {
+		t.Error("reporting the missing login also latched the anonymous fallback — a log line " +
+			"turned into a demotion")
+	}
+	if secondPass != "PASS oauth:token-one" || secondNick != "NICK archiveraccount" {
+		t.Errorf("second handshake = (%q, %q), want the authenticated pair — the re-exported login "+
+			"cookie never reached the wire", secondPass, secondNick)
+	}
+}
+
+// TestIRCMissingLoginWarningSurvivesTheFallbackLatch: the two latches are
+// independent and must stay so.
+//
+// authRefused makes sessionCredentials return an empty pair, so once the
+// anonymous fallback has latched, every later session looks exactly like a
+// cookieless install from inside runIRCSession. If noteMissingLogin keyed off
+// anything the fallback also sets — or if the fallback reused warnedNoLogin —
+// a refused login would start producing this warning too, telling the operator
+// to fix a login cookie that is present and was rejected.
+func TestIRCMissingLoginWarningSurvivesTheFallbackLatch(t *testing.T) {
+	rep := startIRCReplier(t, []string{loginFailedNotice})
+	logger := &recordingLogger{}
+	cd := newAuthTestChatDownloaderWithLogger(t,
+		staticCredentials("token-one", "archiveraccount"), logger)
+
+	for range 3 {
+		runLiveIRCSession(t, cd)
+		rep.nextSession(t)
+	}
+
+	if !cd.authRefused.Load() {
+		t.Fatal("the refusal never latched — the state this test is about was never reached")
+	}
+	if got := logger.fallbackWarnings(); len(got) != 1 {
+		t.Errorf("fallback warnings = %q, want exactly one", got)
+	}
+	if got := logger.missingLoginWarnings(); len(got) != 0 {
+		t.Errorf("missing-login warnings = %q, want none — the login cookie is present and was "+
+			"refused, which is a different problem with a different remedy", got)
 	}
 }

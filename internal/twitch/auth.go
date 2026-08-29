@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -50,11 +52,13 @@ func (a *Auth) GetAuthToken() string {
 // token with another's login — see CookieJar.GetTwitchCredentials, which does
 // the reading under a single RLock so this cannot happen.
 //
-// The login cookie is preferred over the authoritative login in ValidateToken's
-// response because it is local: the IRC connect path must work when the network
-// is flaky, and caching a validated login would add a lifecycle to get wrong.
-// Both values come from the same cookie file as each other, so the pair belongs
-// to one session unless the file was hand-edited across accounts.
+// The login cookie is preferred over the authoritative login Twitch's
+// oauth2/validate response carries because it is local: the IRC connect path
+// must work when the network is flaky, and caching a validated login would add
+// a lifecycle to get wrong. Both values come from the same cookie file as each
+// other, so the pair belongs to one session unless the file was hand-edited
+// across accounts. ValidateToken consequently does not decode that response
+// field at all.
 func (a *Auth) GetCredentials() (token, login string) {
 	if a.cookieJar == nil {
 		return "", ""
@@ -92,23 +96,82 @@ func (a *Auth) ValidateToken(ctx context.Context) (bool, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return false, fmt.Errorf("validate unexpected status %d: %s", resp.StatusCode, string(body))
+		return false, fmt.Errorf("validate unexpected status %d%s", resp.StatusCode, validateErrorDetail(resp))
 	}
 
-	// Parse response for login info (body is consumed by Decode, no drain needed)
+	// Parse response for the user id (body is consumed by Decode, no drain
+	// needed). The response also carries `login` and `client_id`; neither is
+	// decoded. `login` deliberately so — it is the IRC NICK half of this
+	// install's credentials (see GetCredentials), nothing here needs it, and a
+	// field that does not exist cannot be added to a log line by accident.
 	var result struct {
-		Login    string `json:"login"`
-		UserID   string `json:"user_id"`
-		ClientID string `json:"client_id"`
+		UserID string `json:"user_id"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return false, fmt.Errorf("parse validate response: %w", err)
 	}
 
-	a.logger.Debug("twitch auth validated", "login", result.Login, "userID", result.UserID)
+	// userID only. The login used to ride along here and must not come back:
+	// it is a credential half, every line of the IRC handshake work was careful
+	// never to log it, and this line runs on the ordinary success path where a
+	// debug-level install would write it to disk on every check. An opaque
+	// numeric user id is not a credential and is what support actually needs.
+	a.logger.Debug("twitch auth validated", "userID", result.UserID)
 	return true, nil
+}
+
+// validateErrorBodyPrefix bounds how much of an unexpected response body may
+// reach the error string, and validateErrorTypeMax bounds the reported media
+// type. Both values are remote input; neither is trusted for length.
+const (
+	validateErrorBodyPrefix = 200
+	validateErrorTypeMax    = 64
+)
+
+// validateErrorDetail renders what an unexpected oauth2/validate status may
+// safely say about the response it came with.
+//
+// This body used to be read to 1 MB and interpolated whole into the returned
+// error, and every caller that logs that error logged the body with it. The
+// two answers that actually show up on this path are the ones that must not:
+// an intermediary's HTML sign-in or block page, and a service error page that
+// echoes the request — including, in the echo case, the Authorization header
+// carrying this install's bearer token. A non-200 needs none of that to be
+// diagnosable, so what survives is the status (rendered by the caller), the
+// media type, and at most a short prefix of the two types that cannot carry
+// markup.
+//
+// The media type is reported PARSED and clamped, never as the raw header: the
+// raw value is remote input of unbounded length, so %q on it would put
+// whatever an intermediary chose to send into the log verbatim. The body
+// prefix is %q-rendered for the same reason — a text/plain body may hold
+// newlines, and a log line must stay one line.
+//
+// The remainder of the body is drained, bounded, so a small error response
+// still leaves the connection reusable. That is what the old 1 MB read did as
+// a side effect of its hazard.
+func validateErrorDetail(resp *http.Response) string {
+	defer io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		mediaType = ""
+	}
+	mediaType = strings.ToLower(mediaType)
+	if len(mediaType) > validateErrorTypeMax {
+		mediaType = mediaType[:validateErrorTypeMax]
+	}
+
+	switch mediaType {
+	case "text/plain", "application/json":
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, validateErrorBodyPrefix))
+		return fmt.Sprintf(" (content-type %s, body %q)", mediaType, body)
+	case "":
+		return " (no parseable content-type; body omitted)"
+	default:
+		return fmt.Sprintf(" (content-type %s; body omitted)", mediaType)
+	}
 }
 
 // Reload reloads the cookie jar to pick up new tokens.

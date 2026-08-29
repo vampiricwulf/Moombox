@@ -231,6 +231,69 @@ func TestNonExistentFile(t *testing.T) {
 	}
 }
 
+// TestLoadOfADeletedFileClearsAPopulatedJar pins the half of Load's ENOENT
+// ruling that the test above cannot reach.
+//
+// A fresh jar is already empty, so loading a missing file into one proves
+// nothing about the branch: an implementation that returned nil and touched
+// neither map would pass it. What the ruling actually commits to is that
+// DELETING cookies.txt logs Moombox out — the operator removes the file, the
+// next reload forgets the session, and no consumer keeps serving it from
+// memory until restart. That is a deliberate path with a user behind it, and
+// it is the reason ENOENT is excluded from the "a read error leaves the
+// previous state intact" rule that the rest of Load is built around.
+//
+// So the fixture loads a real session first and asserts it arrived. A Load
+// that preserved state on ENOENT — the change repeatedly proposed to close a
+// rename race that does not exist; see Load's doc comment for the MoveFileEx
+// derivation — passes every other test in this file and fails here.
+func TestLoadOfADeletedFileClearsAPopulatedJar(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	content := "# Netscape HTTP Cookie File\n" +
+		".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsynthetic-youtube-cookie\n" +
+		".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tsynthetic-youtube-cookie\n" +
+		".twitch.tv\tTRUE\t/\tTRUE\t0\tauth-token\tsynthetic-twitch-token\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Both platforms, because the clear must be BOTH maps: they are swapped
+	// under one lock everywhere else, and a branch that cleared one would be a
+	// jar holding half a session.
+	if !jar.HasAnyYouTubeAuthCookie() || !jar.HasAnyTwitchAuthCookie() {
+		t.Fatal("the fixture did not load — the assertions below would pass vacuously")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := jar.Load(path); err != nil {
+		t.Fatalf("load of a deleted file errored: %v", err)
+	}
+
+	if jar.HasAnyYouTubeAuthCookie() {
+		t.Error("the YouTube session survived the file being deleted — removing cookies.txt is " +
+			"how an operator logs out, and it did nothing")
+	}
+	if jar.HasAnyTwitchAuthCookie() {
+		t.Error("the Twitch session survived the file being deleted")
+	}
+	if got := jar.GetCookieHeader(); got != "" {
+		t.Errorf("GetCookieHeader() = %q after the file was deleted, want empty — requests would "+
+			"still be sent with the deleted session's cookies", got)
+	}
+	if got := jar.GetTwitchAuthToken(); got != "" {
+		t.Errorf("GetTwitchAuthToken() = %q after the file was deleted, want empty", got)
+	}
+	if !jar.IsEmpty() {
+		t.Error("IsEmpty() = false after the file was deleted")
+	}
+}
+
 func TestMalformedCookieLines(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cookies.txt")
@@ -538,10 +601,14 @@ func TestHasAnyTwitchAuthCookie(t *testing.T) {
 		{"auth-token present", map[string]string{"auth-token": "t"}, true, true},
 		{"expired auth-token pruned away", map[string]string{"twilight-user": `{"id":"1"}`}, true, false},
 		{"both", map[string]string{"auth-token": "t", "twilight-user": `{"id":"1"}`}, true, true},
-		// login/name are deliberately NOT markers — see twitchAuthCookieNames.
-		// Not a cross-site concern (Load admits twitch.tv rows only); they are
-		// out because nothing establishes Twitch sets them only for signed-in
-		// visitors, and this predicate raises an operator-facing alarm.
+		// login/name are deliberately NOT markers — see twitchAuthCookieNames,
+		// which enumerates the states this costs and traces why. Not a
+		// cross-site concern (Load admits twitch.tv rows only): they are out
+		// because a true answer here fires OnRecoveryNeeded on the first
+		// conclusive check of every start (checkTwitchAuth concludes "not
+		// authenticated" with no request at all when auth-token is absent), and
+		// nothing establishes Twitch sets either name only for signed-in
+		// visitors. "login" being CONSUMED as the IRC NICK does not change that.
 		{"unconfirmed markers stay out", map[string]string{"login": "x", "name": "y"}, false, false},
 		{"empty values do not count", map[string]string{"auth-token": "", "twilight-user": ""}, false, false},
 	}
@@ -628,9 +695,10 @@ func TestAuthCookieNameListsDoNotDrift(t *testing.T) {
 		t.Fatal("youtubeAuthCookieNames is empty — the subset check above would pass vacuously")
 	}
 
-	// Twitch counterpart. jar.go:590-592 explicitly invites a name added to
-	// twitchAuthCookieNames without a matching essentialTwitchCookies entry
-	// ("safe mechanically") — it is not: Load drops such a name at parse
+	// Twitch counterpart. twitchAuthCookieNames' comment ends by naming the
+	// one condition under which "login" would join this list, so a later
+	// addition is invited by design — and an addition that skipped
+	// essentialTwitchCookies would be inert: Load drops such a name at parse
 	// time, so HasAnyTwitchAuthCookie / ExpiredAuthCookiesFor /
 	// AuthCookieHorizonFor go silently blind to it, on the platform whose
 	// failure mode is already silent (a dead Twitch token downgrades chat to

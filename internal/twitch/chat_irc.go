@@ -37,9 +37,12 @@ const anonymousIRCPass = "PASS SCHMOOPIIE"
 // subscriber-only messages or badges, which is why the two halves must not come
 // from two conditions that can drift apart.
 //
-// A token with no login therefore falls all the way back to anonymous. So does
-// a login that could not be sent as a single IRC parameter: a space or a bare
-// CR splits the frame, and a value that cannot be spoken as a nickname is not
+// A token with no login therefore falls all the way back to anonymous. That
+// one input is reported by the caller — see noteMissingLogin — because it is
+// the only route to the anonymous pair that nothing else in the system can
+// observe. So does a login that could not be sent as a single IRC parameter: a
+// space or a bare CR splits the frame, and a value that cannot be spoken as a
+// nickname is not
 // a usable identity, so it is treated as no identity at all rather than
 // smuggled onto the wire. Twitch logins are ASCII word characters, so no real
 // one is rejected here. Upstream shape:
@@ -147,6 +150,11 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	// this session is authenticated.
 	token, login := cd.sessionCredentials()
 	pass, nick, authenticated := ircHandshakeLines(token, login)
+	// Beside the handshake decision, never inside it: ircHandshakeLines is pure
+	// and logs nothing, and the anonymous pair it just rendered is correct for
+	// this input. What is worth saying is that ONE of the ways to reach that
+	// pair is invisible everywhere else. See noteMissingLogin.
+	cd.noteMissingLogin(token, login)
 	if err := conn.Write(sessionCtx, websocket.MessageText, []byte(pass)); err != nil {
 		return fmt.Errorf("IRC PASS failed: %w", err)
 	}
