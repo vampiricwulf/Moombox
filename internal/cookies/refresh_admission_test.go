@@ -37,6 +37,11 @@ const b2UnscopedHeader = "SAPISID=rotated-without-a-domain; Path=/; Secure"
 // oneYear is admitSetCookie's default expiry when the server named none.
 const oneYear = int64(365 * 24 * 60 * 60)
 
+// fourHundredDays is RFC 6265bis §5.5's lifetime cap, restated here rather than
+// read from maxCookieLifetime so that changing the constant fails these rows
+// instead of silently moving them with it.
+const fourHundredDays = int64(400 * 24 * 60 * 60)
+
 // TestB2HeaderCannotPassTheOldPreFilter guards the fixture, not the code. If
 // somebody edits b2UnscopedHeader into something containing either substring,
 // every B2 assertion in this file silently degrades into a test of the scoped
@@ -123,10 +128,58 @@ func TestAdmitSetCookieTable(t *testing.T) {
 		},
 		{
 			// Regression guard on Max-Age's positive branch, reached through the
-			// newly-live unscoped path.
+			// newly-live unscoped path. It is also the control for the clamp two
+			// rows down: without it "always 400 days" would pass.
 			name:  "unscoped Max-Age sets the expiry it names",
 			admit: true, header: "YSC=fixture-ysc; Max-Age=600; Path=/",
 			wantKey: cookieUpdateKey{Name: "YSC"}, wantValue: "fixture-ysc", wantExpiryOffset: 600,
+		},
+		{
+			// RFC 6265bis §5.5 caps a cookie's lifetime at 400 days, and Chrome,
+			// Edge and Safari all enforce it — so a browser-exported cookies.txt
+			// never carries a longer expiry, and the clamp writes the shape the
+			// rest of the file already speaks. 63072000 is two years.
+			name:  "an over-long Max-Age is clamped to 400 days",
+			admit: true, header: "PREF=fixture-pref; Max-Age=63072000; Path=/",
+			wantKey: cookieUpdateKey{Name: "PREF"}, wantValue: "fixture-pref",
+			wantExpiryOffset: fourHundredDays,
+		},
+		{
+			// The overflow, and it is the reason the clamp is not merely tidy.
+			// `now + 9223372036854775807` wraps to a large NEGATIVE expiry, and
+			// every expiry guard in this package is `exp > 0 && exp < now`
+			// (rowExpired, CookieJar.Load's capture, ExpiredAuthCookiesFor) — so
+			// a negative field 5 reads as "not expired" everywhere: an unprunable
+			// row, invisible to the freshness accounting, and one yt-dlp's loader
+			// rejects outright on its `[0-9]+` expires match. Clamping the addend
+			// makes the addition unreachable rather than checked afterwards.
+			//
+			// Asserted as an expiry WINDOW, which also pins that it is positive.
+			name:  "a Max-Age that would overflow int64 is clamped, not wrapped",
+			admit: true, header: "SAPISID=fixture-sapisid; Max-Age=9223372036854775807; Path=/",
+			wantKey: cookieUpdateKey{Name: "SAPISID"}, wantValue: "fixture-sapisid",
+			wantExpiryOffset: fourHundredDays,
+		},
+		{
+			// RFC 6265 §5.2 step 3: WS is trimmed from the name-string and the
+			// value-string SEPARATELY. Trimming only the whole `name=value` pair
+			// left this parsed as the name "SAPISID " — which no predicate in this
+			// package recognises, so the unscoped branch refused it — and the
+			// value " fixture-sapisid".
+			//
+			// This widens admission slightly, in the conformant direction.
+			name:  "whitespace around the equals sign is trimmed from both halves",
+			admit: true, header: "SAPISID = fixture-sapisid ; Path=/",
+			wantKey: cookieUpdateKey{Name: "SAPISID"}, wantValue: "fixture-sapisid",
+		},
+		{
+			// WS in §5.2 is SP *and* HTAB, so a tab that is only padding is
+			// TRIMMED rather than refused by step 1. The trim rule and the
+			// interior-tab rule do not collide: this row and "a tab in the value
+			// is refused" below have to hold at the same time.
+			name:  "a padding tab is trimmed, not read as row-breaking",
+			admit: true, header: "SAPISID=\tfixture-sapisid\t; Path=/",
+			wantKey: cookieUpdateKey{Name: "SAPISID"}, wantValue: "fixture-sapisid",
 		},
 
 		// --- the scoped branch: unchanged, and now the only domain check ---
@@ -217,13 +270,24 @@ func TestAdmitSetCookieTable(t *testing.T) {
 			admit: false, header: "SAPISID=v; Domain=.goo\ngle.com",
 		},
 		{
-			// The exemption, and it is deliberate: CookieJar.Load joins fields
-			// 6.. back into one value and updateCookieFile rebuilds from exactly
-			// seven fields, so a tab inside a VALUE is legal input. Refusing it
-			// would drop a legitimate rotation.
-			name:  "a tab in the value is admitted and preserved verbatim",
-			admit: true, header: "SAPISID=a\tb; Domain=.google.com",
-			wantKey: cookieUpdateKey{Name: "SAPISID", Domain: ".google.com"}, wantValue: "a\tb",
+			// Overturned in fix round 1. This row used to assert "admitted, value
+			// preserved verbatim", on the reasoning that CookieJar.Load joins
+			// fields 6.. so a tab in a value is legal input and refusing it would
+			// drop a legitimate rotation. That last clause was false: RFC 6265's
+			// cookie-octet excludes HTAB and every control character, browsers
+			// reject them, and no real rotation carries one. What admitting it
+			// actually bought was a row with EIGHT tab-separated fields — which
+			// yt-dlp's own MozillaCookieJar.load refuses (`invalid length 8`,
+			// it requires exactly 7), so the cookie silently vanished for anyone
+			// sharing the file with yt-dlp.
+			//
+			// CookieJar.Load's tolerance of tab-carrying rows ALREADY in the file
+			// is a separate rule and is unchanged — it must keep reading whatever
+			// a browser export or another tool wrote. See
+			// TestProcessSetCookiesPreservesTabbedValue, which still passes. This
+			// rule governs only what THIS writer may add.
+			name:  "a tab in the value is refused",
+			admit: false, header: "SAPISID=a\tb; Domain=.google.com",
 		},
 
 		// --- malformed shapes ---
@@ -231,6 +295,13 @@ func TestAdmitSetCookieTable(t *testing.T) {
 			// Pins the pre-existing name == "" check.
 			name:  "an empty name is refused",
 			admit: false, header: "=v; Domain=.google.com",
+		},
+		{
+			// Regression guard on the same check after fix round 1 moved it BELOW
+			// the per-field WS trim: a name that is only whitespace must still be
+			// no name at all.
+			name:  "an all-whitespace name is refused",
+			admit: false, header: " \t =v; Domain=.google.com",
 		},
 		{
 			name:  "a header with no equals sign is refused",
@@ -416,6 +487,191 @@ func TestUnscopedDeletionFromTheWireStaysInsideTheOrigin(t *testing.T) {
 	if google.expiry != "2000000000" {
 		t.Errorf(".google.com SAPISID expiry = %q, want unchanged", google.expiry)
 	}
+}
+
+// TestUnscopedInsertionLandsOnTheDeclaredOrigin covers the branch this task's
+// own fix brought back to life, and the defect that was waiting in it.
+//
+// updateCookieFile's insertion loop has always had a `domain == ""` fallback for
+// a Set-Cookie with no Domain=. It was DEAD CODE for as long as it existed —
+// the substring pre-filter dropped every Domain-less header before it could
+// become an unscoped key — and while it was dead it guessed the domain from the
+// cookie NAME: .google.com whenever isGoogleOnlyAuthName said so. Making the
+// unscoped path reachable made that guess live, and it is the exact inverse of
+// resolveRowUpdate's rule 2: an ordinary youtube.com reply host-scoping SID to
+// www.youtube.com had it written as a `.google.com` row, and every later request
+// to accounts.google.com carried it. A host-only youtube.com SID and the
+// .google.com SID are DIFFERENT COOKIES; the real one is rotated by
+// accounts.google.com with an explicit Domain=, which takes the scoped path and
+// never reaches this branch.
+//
+// Discriminates in both directions. The name heuristic put SID on .google.com
+// regardless of caller; the origin rule puts it on the caller's own site, so the
+// two disagree for originYouTube (the live case) and agree for originGoogle —
+// which is why the originGoogle row is a control and not a proof.
+func TestUnscopedInsertionLandsOnTheDeclaredOrigin(t *testing.T) {
+	// The live path first: a real Set-Cookie, through processYouTubeSetCookies.
+	t.Run("from the wire", func(t *testing.T) {
+		rs, jar, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
+
+		// SID is isGoogleOnlyAuthName's headline name, so this is precisely the
+		// header the old heuristic sent to .google.com. No substring anywhere, so
+		// only the unscoped path can admit it.
+		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped-only; Path=/; Secure"))
+
+		rows := rowsNamed(readCookieRows(t, path), "SID")
+		if len(rows) != 1 {
+			t.Fatalf("want exactly 1 SID row, got %d: %+v", len(rows), rows)
+		}
+		if rows[0].domain != ".youtube.com" {
+			t.Errorf("an unscoped SID from a youtube.com reply landed on %q, want .youtube.com — "+
+				"a cookie the response host-scoped to youtube.com is now sent to accounts.google.com",
+				rows[0].domain)
+		}
+		if rows[0].value != "unscoped-only" {
+			t.Errorf("SID value = %q, want unscoped-only", rows[0].value)
+		}
+		// And it is readable: the jar was reloaded from the file this wrote.
+		if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != "unscoped-only" {
+			t.Errorf("jar SID = %q, want unscoped-only", got)
+		}
+	})
+
+	// The rule itself, across origins, through the write path directly.
+	cases := []struct {
+		name       string
+		origin     cookieOrigin
+		wantDomain string // "" means: nothing may be written
+	}{
+		// The discriminator: the name says google, the origin says youtube, and
+		// the origin wins.
+		{"youtube caller", originYouTube, ".youtube.com"},
+		// The control. Agrees with the retired heuristic, so it proves nothing on
+		// its own — without it, "never insert" would pass.
+		{"google caller", originGoogle, ".google.com"},
+		// Now placed correctly rather than refused: the invented domain is the
+		// origin's own site, so a Twitch caller's unscoped row lands on
+		// .twitch.tv. It used to be refused because the NAME heuristic sent it to
+		// .google.com and the platform guard caught it — the right outcome for
+		// the wrong reason, and the reason is what mattered.
+		{"twitch caller", originTwitch, ".twitch.tv"},
+		// An undeclared origin invents ".", which is on no platform, so the
+		// insertion guard refuses it. The narrow direction.
+		{"no declared origin", cookieOrigin(""), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
+
+			updates := map[cookieUpdateKey]cookieUpdate{
+				{Name: "SID"}: {Value: "inserted-value", Expiry: 2100000000},
+			}
+			if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+				t.Fatalf("updateCookieFile: %v", err)
+			}
+
+			rows := rowsNamed(readCookieRows(t, path), "SID")
+			if tc.wantDomain == "" {
+				if len(rows) != 0 {
+					t.Errorf("origin %q inserted SID under %q; nothing may be written", tc.origin, rows[0].domain)
+				}
+				return
+			}
+			if len(rows) != 1 {
+				t.Fatalf("want exactly 1 SID row for origin %q, got %d: %+v", tc.origin, len(rows), rows)
+			}
+			if rows[0].domain != tc.wantDomain {
+				t.Errorf("origin %q inserted SID under %q, want %q — the domain must come from the "+
+					"declared origin, not from the cookie name", tc.origin, rows[0].domain, tc.wantDomain)
+			}
+		})
+	}
+}
+
+// TestUnscopedIsNotInsertedBesideAScopedSibling covers the duplicate row.
+//
+// One response may legitimately carry both `SID=v1` (no Domain=) and
+// `SID=v2; Domain=.google.com`. The scoped header matches and rewrites the
+// existing .google.com row; the unscoped one matches nothing left and falls into
+// the insertion loop, which appends a SECOND row. CookieJar.Load keeps the LAST
+// row it reads for a name, so the unscoped value defeats the scoped value the
+// server was more specific about — a silent downgrade with no error anywhere.
+//
+// The fix is in the insertion loop and is deliberately narrow: an unscoped key
+// may not be inserted when a SCOPED key of the same name is in the same batch.
+// It cannot live in admitSetCookie, which is per-header and pure and cannot see
+// siblings. And it must not be the wider "once any key of this name matched,
+// treat them all as handled" — the second subtest is the case that rule breaks.
+func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
+	t.Run("the unscoped twin is dropped", func(t *testing.T) {
+		initial := "# Netscape HTTP Cookie File\n" +
+			".google.com\tTRUE\t/\tTRUE\t2000000000\tSID\tfixture-google\n"
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
+
+		rs.processYouTubeSetCookies(setCookieResponse(
+			"SID=unscoped-v1; Path=/; Secure",
+			"SID=scoped-v2; Domain=.google.com; Path=/",
+		))
+
+		rows := rowsNamed(readCookieRows(t, path), "SID")
+		if len(rows) != 1 {
+			var where []string
+			for _, r := range rows {
+				where = append(where, r.domain)
+			}
+			t.Fatalf("the file holds %d SID rows %v, want 1 — an unscoped Set-Cookie was inserted "+
+				"beside the scoped one that had already claimed the row", len(rows), where)
+		}
+		if rows[0].value != "scoped-v2" {
+			t.Errorf("SID = %q, want scoped-v2 — the more specific header must win", rows[0].value)
+		}
+		// The reason the row COUNT matters: Load keeps the last row for a name,
+		// so a duplicate is not merely untidy, it decides the value.
+		fresh := NewCookieJar()
+		if err := fresh.Load(path); err != nil {
+			t.Fatal(err)
+		}
+		if got := fresh.GetCookieFor(PlatformYouTube, "SID"); got != "scoped-v2" {
+			t.Errorf("a freshly loaded jar reads SID as %q, want scoped-v2", got)
+		}
+	})
+
+	t.Run("two scoped siblings still both land", func(t *testing.T) {
+		// The case that kills the wider rule. Both keys are scoped, the file
+		// holds only one of the two rows, and the missing one must be inserted —
+		// this is the ordinary shape of a rotation that covers both domains.
+		initial := "# Netscape HTTP Cookie File\n" +
+			".google.com\tTRUE\t/\tTRUE\t2000000000\tSID\tfixture-google\n"
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
+
+		rs.processYouTubeSetCookies(setCookieResponse(
+			"SID=scoped-google; Domain=.google.com; Path=/",
+			"SID=scoped-youtube; Domain=.youtube.com; Path=/",
+		))
+
+		rows := readCookieRows(t, path)
+		if got := len(rowsNamed(rows, "SID")); got != 2 {
+			t.Fatalf("want 2 SID rows, got %d — the sibling rule must not swallow a scoped insertion", got)
+		}
+		if got := rowFor(t, rows, "SID", ".google.com").value; got != "scoped-google" {
+			t.Errorf(".google.com SID = %q, want scoped-google", got)
+		}
+		if got := rowFor(t, rows, "SID", ".youtube.com").value; got != "scoped-youtube" {
+			t.Errorf(".youtube.com SID = %q, want scoped-youtube", got)
+		}
+	})
+
+	t.Run("an unscoped cookie with no sibling still lands", func(t *testing.T) {
+		// The other control: the rule keys on the SIBLING, not on being unscoped.
+		rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
+
+		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped-alone; Path=/; Secure"))
+
+		rows := rowsNamed(readCookieRows(t, path), "SID")
+		if len(rows) != 1 || rows[0].value != "unscoped-alone" {
+			t.Errorf("want one .youtube.com SID row carrying unscoped-alone, got %+v", rows)
+		}
+	})
 }
 
 // TestUnscopedUntrackedNameIsNotWritten is the narrow half of the new surface,

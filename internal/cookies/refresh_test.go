@@ -131,46 +131,80 @@ func TestUpdateCookieFileSubdomainFlag(t *testing.T) {
 	}
 }
 
-// TestUpdateCookieFileFallsBackToDomainHeuristic verifies that when the
-// Set-Cookie did not carry a Domain= attribute, the fallback classification
-// routes SID/HSID/SSID/APISID/SAPISID/__Secure-[13]P* to .google.com and
-// everything else to .youtube.com (finding #40 in reports/cookies.md).
-func TestUpdateCookieFileFallsBackToDomainHeuristic(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cookies.txt")
-	initial := "# Netscape HTTP Cookie File\n"
-	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
-		t.Fatal(err)
+// TestUpdateCookieFileUnscopedInsertUsesTheDeclaredOrigin replaces
+// TestUpdateCookieFileFallsBackToDomainHeuristic, which pinned the rule this
+// test overturns.
+//
+// The old rule (finding #40): with no Domain=, route SID/HSID/SSID/APISID/
+// SAPISID/__Secure-[13]P* to .google.com and everything else to .youtube.com.
+// That branch was unreachable for its whole life — processYouTubeSetCookies
+// dropped every Domain-less header before it could become an unscoped key — so
+// the heuristic was never exercised against a real response. When B2 made the
+// unscoped path live it turned out to be backwards: a Set-Cookie with no Domain=
+// is host-scoped to the RESPONSE, not classified by its name, so an ordinary
+// youtube.com reply rotating SID had it written onto .google.com and sent to
+// accounts.google.com from then on. The two are different cookies.
+//
+// The domain now comes from the declared origin and nothing else. This test is
+// the same two names under two origins, which separates the rules cleanly: the
+// heuristic says "SAPISID→google, LOGIN_INFO→youtube" regardless of caller, and
+// the origin rule says "both go wherever the caller came from".
+func TestUpdateCookieFileUnscopedInsertUsesTheDeclaredOrigin(t *testing.T) {
+	cases := []struct {
+		name   string
+		origin cookieOrigin
+		want   string
+	}{
+		// Discriminates: the heuristic would have split these two across
+		// .google.com and .youtube.com.
+		{"youtube caller", originYouTube, ".youtube.com"},
+		// Discriminates the other way: the heuristic would have put LOGIN_INFO on
+		// .youtube.com even though the response came from google.com.
+		{"google caller", originGoogle, ".google.com"},
 	}
 
-	jar := NewCookieJar()
-	if err := jar.Load(path); err != nil {
-		t.Fatal(err)
-	}
-	rs := NewRefreshService(jar, 0, nopLogger{})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "cookies.txt")
+			if err := os.WriteFile(path, []byte("# Netscape HTTP Cookie File\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	updates := map[cookieUpdateKey]cookieUpdate{
-		{Name: "SAPISID"}:    {Value: "s", Expiry: 1}, // no Domain= -> fallback = google
-		{Name: "LOGIN_INFO"}: {Value: "l", Expiry: 1}, // no Domain= -> fallback = youtube
-	}
-	// Insertion path again: the name-based fallback is what picks the domain for
-	// a Domain-less update with no row to match. It reads the NAME only — it
-	// cannot tell whose response the name arrived in — so the origin is what
-	// decides whether the row it picked may be written at all. Both fallbacks
-	// here land inside originYouTube's platform (youtube.com and google.com are
-	// one), which is why both rows appear.
-	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
-		t.Fatalf("updateCookieFile: %v", err)
-	}
+			jar := NewCookieJar()
+			if err := jar.Load(path); err != nil {
+				t.Fatal(err)
+			}
+			rs := NewRefreshService(jar, 0, nopLogger{})
 
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got), ".google.com\tTRUE\t/\t") || !strings.Contains(string(got), "SAPISID\ts") {
-		t.Errorf("expected SAPISID row under .google.com, got:\n%s", string(got))
-	}
-	if !strings.Contains(string(got), ".youtube.com\tTRUE\t/\t") || !strings.Contains(string(got), "LOGIN_INFO\tl") {
-		t.Errorf("expected LOGIN_INFO row under .youtube.com, got:\n%s", string(got))
+			updates := map[cookieUpdateKey]cookieUpdate{
+				{Name: "SAPISID"}:    {Value: "s", Expiry: 1},
+				{Name: "LOGIN_INFO"}: {Value: "l", Expiry: 1},
+			}
+			if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+				t.Fatalf("updateCookieFile: %v", err)
+			}
+
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, value := range map[string]string{"SAPISID": "s", "LOGIN_INFO": "l"} {
+				want := tc.want + "\tTRUE\t/\t"
+				if !strings.Contains(string(got), want) || !strings.Contains(string(got), name+"\t"+value) {
+					t.Errorf("expected %s row under %s, got:\n%s", name, tc.want, string(got))
+				}
+			}
+			// Nothing may land on the OTHER domain of the same platform. Without
+			// this the assertion above passes on a file that has both.
+			other := ".google.com"
+			if tc.want == ".google.com" {
+				other = ".youtube.com"
+			}
+			if strings.Contains(string(got), other) {
+				t.Errorf("a %s caller wrote a %s row — the domain must come from the origin, "+
+					"not from the cookie name:\n%s", tc.origin, other, string(got))
+			}
+		})
 	}
 }

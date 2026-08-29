@@ -2085,9 +2085,40 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 	}
 }
 
-// rowBreakingChars are the bytes a Netscape cookie row cannot carry inside its
-// domain or name field: tab is the field separator, CR and LF end the row, and
-// NUL is not representable in a line-oriented text file at all.
+// maxCookieLifetime caps how far into the future a Max-Age may push a row's
+// expiry: 400 days, which is RFC 6265bis §5.5's limit and what Chrome, Edge and
+// Safari already enforce. A browser-exported cookies.txt therefore never carries
+// a longer one, so the clamp brings this writer into line with the rest of the
+// file rather than shortening anything the file could otherwise hold.
+//
+// It is also what makes the arithmetic safe. `now + maxAge` on an int64 wraps:
+// Max-Age=9223372036854775807 parses fine and produces a large NEGATIVE expiry,
+// which lands in Netscape field 5 — and every expiry guard in this package is
+// `exp > 0 && exp < now` (rowExpired, CookieJar.Load's capture,
+// ExpiredAuthCookiesFor), so a negative value reads as "not expired" everywhere.
+// The row would be unprunable AND invisible to the freshness accounting, and
+// yt-dlp's loader would reject it outright on its `[0-9]+` expires match.
+// Clamping the addend below the cap makes the overflow unreachable rather than
+// detected.
+//
+// Deliberately applied to Max-Age ONLY. Expires stays exactly as it is: real
+// Google auth cookies carry multi-year Expires values, and clamping those would
+// shorten what ExpiredAuthCookiesFor and AuthCookieHorizonFor report about a
+// session this code did not actually change.
+const maxCookieLifetime = int64(400 * 24 * 60 * 60)
+
+// rowBreakingChars are the bytes a Netscape cookie row cannot carry inside any
+// of its fields: tab is the field separator, CR and LF end the row, and NUL is
+// not representable in a line-oriented text file at all.
+//
+// Only the TAB is a live vector, and the distinction is worth stating so nobody
+// later reads this as a defence against header injection. Go's HTTP client
+// cannot hand this package a CR, LF or NUL inside a header value at all:
+// net/textproto's validHeaderValueByte admits only VCHAR, SP, HTAB and %x80-FF,
+// and readMIMEHeader fails the entire header block otherwise — so
+// resp.Header.Values("Set-Cookie") can never carry one. They are checked anyway
+// because this predicate guards a WRITE into a line-oriented file, and the cost
+// of the belt is one ContainsAny over strings that are already in cache.
 const rowBreakingChars = "\t\r\n\x00"
 
 // hasRowBreakingChar reports whether s would corrupt the row it is written into.
@@ -2097,21 +2128,28 @@ func hasRowBreakingChar(s string) bool { return strings.ContainsAny(s, rowBreaki
 // declared origin's credential platform. It is the admission set for an
 // UNSCOPED Set-Cookie — one with no Domain= of its own to be judged on.
 //
-// The set is the union of the two the rest of this package already uses for the
-// Google platform: essentialYouTubeCookies (the names CookieJar.Load keeps) and
-// isGoogleOnlyAuthName (the names updateCookieFile's insertion fallback routes
-// to .google.com). Neither contains the other — isGoogleOnlyAuthName matches the
-// whole __Secure-1P/3P families, essentialYouTubeCookies names PREF, CONSENT,
-// YSC and the rest — so the union is exactly "a name this package can store",
-// and a random unscoped foo=bar is not one.
+// The set is the union of the two name predicates the rest of this package
+// already uses for the Google platform: essentialYouTubeCookies (the names
+// CookieJar.Load keeps) and isGoogleOnlyAuthName. Neither contains the other —
+// isGoogleOnlyAuthName matches the whole __Secure-1P/3P families,
+// essentialYouTubeCookies names PREF, CONSENT, YSC and the rest — so the union
+// is exactly "a name this package can store", and a random unscoped foo=bar is
+// not one.
 //
-// Only the Google platform has a set here, and that is a limitation of the write
-// path rather than an oversight: updateCookieFile derives a domain for a
-// Domain-less update from the cookie NAME, and that fallback knows only
-// .youtube.com and .google.com. An unscoped Twitch cookie has no destination it
-// could be given, so admitting one would produce an update the write path then
-// refuses — a path that looks reachable and goes nowhere. Adding Twitch here
-// means teaching that fallback first.
+// isGoogleOnlyAuthName is used here as a NAME predicate and nothing more. It
+// used to double as updateCookieFile's domain-inventor for a Domain-less update
+// and no longer does; see the insertion loop for why that was wrong.
+//
+// Only the Google platform has a set here, and the reason is now simply that
+// only a Google-platform caller exists. Until this fix round there was a
+// structural reason as well — updateCookieFile invented a Domain-less update's
+// domain from the cookie NAME and knew only youtube.com and google.com, so an
+// admitted Twitch cookie would have been refused at the write — but that
+// fallback now uses the declared origin's own site and would place a .twitch.tv
+// row correctly. What remains is that a new admission surface is not something
+// to open speculatively. Adding essentialTwitchCookies here is a one-line change
+// the day a Twitch caller arrives, and it needs that caller's tests, not a
+// guess.
 func trackedCookieName(name string, origin cookieOrigin) bool {
 	if origin.platform() != originYouTube.platform() {
 		return false
@@ -2132,11 +2170,13 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 //     Set-Cookie with no Domain= is host-scoped to the responding host, which is
 //     an ordinary way for youtube.com to rotate its own first-party cookies.
 //     Such a header contains neither substring, so it never reached the parser —
-//     while the rest of this package plainly expected it to. isGoogleOnlyAuthName
-//     exists to give a Domain-less update a domain on the insertion path, and
-//     resolveRowUpdate's rule 2 exists to confine a Domain-less deletion; both
-//     were unreachable. That is the "cookies.txt untouched for a day" symptom:
-//     it fails safe, and it still strands the session.
+//     while the rest of this package plainly expected it to. resolveRowUpdate's
+//     rule 2 exists to confine a Domain-less deletion, and updateCookieFile's
+//     insertion loop has a whole branch for a Domain-less update; both were
+//     unreachable. That is the "cookies.txt untouched for a day" symptom: it
+//     fails safe, and it still strands the session. (The insertion branch had
+//     rotted while it was dead — it invented a domain from the cookie NAME —
+//     and had to be corrected when this commit made it live.)
 //   - It was never the guard it looked like. `x=youtube.com; Domain=evil.tld`
 //     passes a substring test on its VALUE. The real guard has always been the
 //     parsed-Domain= check below, which its own comment already claimed it was —
@@ -2145,12 +2185,17 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 // Admission is therefore by what the header SAYS, in three steps, after the
 // whole attribute list has been read:
 //
-//  1. Row-breaking characters in the NAME or the DOMAIN are refused outright,
-//     before either branch. A tab splits the Netscape row into the wrong fields
-//     on the next Load; a CR or LF splits it into two rows. VALUES are exempt on
-//     purpose and that is not an oversight — CookieJar.Load joins fields 6.. back
-//     into one value and updateCookieFile rebuilds from exactly seven fields, so
-//     a tab in a value is legal input rather than an injection.
+//  1. Row-breaking characters in the NAME, the VALUE or the DOMAIN are refused
+//     outright, before either branch. A tab splits the Netscape row into the
+//     wrong fields on the next Load; CR, LF and NUL are checked as belt (see
+//     rowBreakingChars — Go's header parser cannot deliver them). The VALUE is
+//     included because RFC 6265's cookie-octet excludes HTAB and every control
+//     character, and browsers reject them, so no legitimate rotation carries one
+//     — a tab in a value is a malformed header, not a shape worth preserving.
+//     CookieJar.Load's tolerance of tab-carrying rows is a separate question and
+//     is unchanged: it must keep reading whatever a browser export or a
+//     third-party tool already wrote into the file. This rule governs only what
+//     THIS writer may add.
 //  2. SCOPED (Domain= present): admitted only when the domain lies on the
 //     declared origin's credential platform. For originYouTube that is precisely
 //     `isYouTubeDomain || isGoogleDomain` — the test this branch has always made,
@@ -2179,9 +2224,14 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 // update at all, and it is the only code that ever sees the raw header — so
 // row-breaking characters and the tracked-name rule belong here and nowhere else.
 // updateCookieFile's insertion guard is the last check before a row is WRITTEN,
-// and it also covers the domain that loop INVENTS from the cookie name for an
+// and it covers the domain that loop DERIVES from the declared origin for an
 // unscoped update — a domain that does not exist yet when this function returns,
 // and which this function therefore cannot judge. Neither subsumes the other.
+//
+// This layer is also per-header and pure: it cannot see the other Set-Cookie
+// headers in the same response. The one rule that needs that view — an unscoped
+// key must not be INSERTED beside a scoped key of the same name — therefore
+// lives in the insertion loop, which holds the whole batch.
 //
 // Scoped headers are admitted under ANY name; only unscoped ones are name-gated.
 // That asymmetry is pre-existing and deliberately left alone here: narrowing it
@@ -2193,7 +2243,29 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 	}
 	nameValue := strings.TrimSpace(parts[0])
 	name, value, ok := strings.Cut(nameValue, "=")
-	if !ok || name == "" {
+	if !ok {
+		return cookieUpdateKey{}, cookieUpdate{}, false
+	}
+	// RFC 6265 §5.2 step 3: remove leading and trailing WS from the name-string
+	// AND the value-string, separately. Trimming only the whole `name=value`
+	// pair (the line above, kept because it also eats a stray line ending) left
+	// `SAPISID = v` parsed as the name "SAPISID " and the value " v" — a name no
+	// predicate in this package recognises and a value with a leading space.
+	//
+	// WS here is SP and HTAB exactly, per the grammar, which is why this is
+	// strings.Trim and not strings.TrimSpace: TrimSpace would also eat a leading
+	// CR or LF and quietly rescue a header that step 1 below should refuse.
+	//
+	// NOT de-quoted, and that is deliberate rather than unfinished. §5.2 takes
+	// everything up to the first ";" as the name/value pair and never strips
+	// DQUOTEs, so `Customer="WILE_E_COYOTE"` has the quotes as part of its value
+	// and `chips="a;hoy"` really does truncate at the semicolon — every browser
+	// behaves this way. CPython's SimpleCookie strips quotes because it
+	// implements the older RFC 2109; matching it here would diverge from both
+	// RFC 6265 and the browsers whose exports fill this file.
+	name = strings.Trim(name, " \t")
+	value = strings.Trim(value, " \t")
+	if name == "" {
 		return cookieUpdateKey{}, cookieUpdate{}, false
 	}
 
@@ -2260,9 +2332,17 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 	deleteCookie := false
 	switch {
 	case hasMaxAge:
-		if maxAge <= 0 {
+		switch {
+		case maxAge <= 0:
 			deleteCookie = true
-		} else {
+		case maxAge > maxCookieLifetime:
+			// Clamped, not refused. A too-long Max-Age is a statement about
+			// lifetime, not a malformed header, and refusing it would throw away
+			// a perfectly good rotated VALUE over an attribute every browser
+			// silently caps anyway. See maxCookieLifetime for why the clamp also
+			// closes the int64 overflow.
+			expiry = now + maxCookieLifetime
+		default:
 			expiry = now + maxAge
 		}
 	case hasExpires:
@@ -2282,11 +2362,13 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 		domainAttr = "." + domainAttr
 	}
 
-	// Step 1. Before either admission branch, and on both fields that become
+	// Step 1. Before either admission branch, and on all three fields that become
 	// their own tab-separated column in the row. Normalization above can only
 	// lowercase and prepend a dot, so checking after it sees the same characters
-	// checking before it would.
-	if hasRowBreakingChar(name) || hasRowBreakingChar(domainAttr) {
+	// checking before it would; the WSP trim above has already removed the tabs
+	// that RFC 6265 §5.2 says are not part of the name or the value at all, so
+	// what reaches here is an INTERIOR one.
+	if hasRowBreakingChar(name) || hasRowBreakingChar(value) || hasRowBreakingChar(domainAttr) {
 		return cookieUpdateKey{}, cookieUpdate{}, false
 	}
 
@@ -2323,8 +2405,10 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 //   - The Netscape "include subdomains" flag is derived from whether the
 //     domain begins with "." (finding #5) instead of being hardcoded TRUE.
 //   - Domain for newly-inserted rows is taken from the Set-Cookie Domain=
-//     attribute when the server provided one (finding #40); falling back to
-//     the legacy .youtube.com / .google.com heuristic only as a last resort.
+//     attribute when the server provided one (finding #40); when it did not,
+//     from the DECLARED ORIGIN's own site. It used to be guessed from the
+//     cookie name — see the insertion loop for why that was wrong and why
+//     nobody noticed for so long.
 //   - Deletions remove the row. See resolveRowUpdate for why a value refresh
 //     may cross domain variants while a deletion may not.
 //
@@ -2536,16 +2620,62 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		}
 		name := key.Name
 		domain := key.Domain
+		// An unscoped update may not be INSERTED when the same response also
+		// carried a scoped one of the same name. The scoped header has already
+		// claimed whichever row it matches; inserting the unscoped twin appends a
+		// SECOND row under the same domain, and CookieJar.Load keeps the LAST one
+		// it reads — so the unscoped value silently defeats the scoped value the
+		// server was more specific about.
+		//
+		// Narrow on purpose, and both halves of that matter. It fires only for an
+		// unscoped key, and only when a scoped SIBLING of the same name is in this
+		// batch. The obvious wider rule — "once any key of this name matched a
+		// row, treat every key of that name as handled" — destroys the legitimate
+		// case: a response rotating SID on both .google.com and .youtube.com
+		// against a file holding only the .google.com row must still insert the
+		// .youtube.com one.
+		if domain == "" && hasScopedSibling(byName[name]) {
+			rs.logger.Debug("cookie update: not inserting an unscoped cookie beside a scoped one of the same name",
+				"name", name, "origin", string(origin))
+			continue
+		}
 		if domain == "" {
-			// Fallback when the Set-Cookie lacked Domain=. Prefer YouTube;
-			// Google-only auth cookies are only emitted by google.com paths.
-			// Note what this fallback reads: the cookie NAME, and nothing else.
-			// It cannot tell whose response the name arrived in, which is why
-			// the origin check below has to be here rather than folded into it.
-			domain = ".youtube.com"
-			if isGoogleOnlyAuthName(name) {
-				domain = ".google.com"
-			}
+			// The Set-Cookie carried no Domain=, so RFC 6265 §4.1.2.3 host-scopes
+			// it to the response that carried it — and the only thing here that
+			// knows which response that was is the declared origin. So the domain
+			// is the origin's own site, and nothing else contributes to it.
+			//
+			// It used to be guessed from the cookie NAME: .youtube.com, or
+			// .google.com when isGoogleOnlyAuthName said so. That branch was DEAD
+			// CODE for as long as it existed — processYouTubeSetCookies opened
+			// with a substring pre-filter that dropped every Domain-less header
+			// before it could become an unscoped key — and going live exposed it
+			// as the exact inverse of resolveRowUpdate's rule 2. An unscoped SID
+			// from an ordinary youtube.com reply was written as `.google.com SID`
+			// and then sent to accounts.google.com on the next request. It is a
+			// DIFFERENT COOKIE: the real .google.com SID is rotated by
+			// accounts.google.com with an explicit Domain=, which takes the scoped
+			// path and never reaches this branch at all. isGoogleOnlyAuthName is
+			// retired as a domain-inventor and survives only as half of
+			// trackedCookieName's admission set.
+			//
+			// The leading-dot registrable domain (".youtube.com") rather than the
+			// host-only form the response literally scopes it to
+			// ("www.youtube.com") because that is the shape the rest of the file
+			// speaks: browser exports, mergeCookieFiles and CookieJar.Load all key
+			// on the registrable domain with include-subdomains set, and
+			// resolveRowUpdate's rule 2 matches through origin.covers(), which
+			// accepts exactly this. A host-only row would be a shape no other
+			// writer in this package produces, and the next refresh would not
+			// match it.
+			//
+			// This makes the cross-platform hazard structural rather than caught:
+			// an unscoped insertion now lands inside the declaring origin by
+			// construction, so it CANNOT reach another platform's rows. The check
+			// below still earns its place for the two cases construction does not
+			// cover — an explicit cross-platform Domain=, and an undeclared origin
+			// (which yields "." here, a domain on no platform at all).
+			domain = "." + string(origin)
 		}
 		// An insertion may not leave the declared origin's platform, and an
 		// undeclared origin may not insert at all.
@@ -2553,12 +2683,19 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		// This is the half of the rule the matching rules cannot enforce, and
 		// missing it inverted the whole point of declaring an origin. Declining
 		// to MATCH is not declining to WRITE: when resolveRowUpdate turns down
-		// every row, the update is not dropped, it arrives here — and the
-		// fallback above then invents a domain from the name alone. So a Twitch
-		// (or undeclared) caller sending an unscoped "SID" was refused by rules 2
-		// and 3 and then appended a brand-new .google.com SID row anyway, landing
-		// a foreign credential in the Google jar. That is WIDER than the hardcoded
-		// behaviour this parameter replaced, not narrower.
+		// every row, the update is not dropped, it arrives here. When this branch
+		// guessed the domain from the cookie name, a Twitch (or undeclared)
+		// caller's unscoped "SID" was refused by rules 2 and 3 and then appended a
+		// brand-new .google.com SID row anyway, landing a foreign credential in
+		// the Google jar — WIDER than the hardcoded behaviour the origin parameter
+		// replaced, not narrower.
+		//
+		// The unscoped half of that is now impossible by construction (the domain
+		// IS the origin's site), so what this check still decides is the explicit
+		// -Domain= case and the undeclared origin. Kept whole rather than narrowed
+		// to those two: it is one sentence about the row about to be written, and
+		// splitting it would make the guarantee depend on which branch produced
+		// the domain.
 		//
 		// Checked against the domain actually about to be written, not only the
 		// fallback, so a key carrying an explicit cross-platform Domain= is
@@ -2616,6 +2753,18 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	}
 
 	return nil
+}
+
+// hasScopedSibling reports whether any of these same-name update keys carries an
+// explicit Domain=. The caller has the keys for one name already grouped (the
+// byName index), so this is a walk over one or two entries, not a scan.
+func hasScopedSibling(candidates []cookieUpdateKey) bool {
+	for _, k := range candidates {
+		if k.Domain != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveRowUpdate picks the pending update that applies to one file row, from
@@ -2719,6 +2868,12 @@ func sameCookieScope(a, b string) bool {
 // legacy code used strings.Contains(name, "GOOGLE") which matched nothing
 // real — most google.com auth cookies are named SID, HSID, SSID, APISID,
 // SAPISID, or the __Secure- variants.
+//
+// It is a statement about NAMES, and it must not be used to decide a DOMAIN.
+// updateCookieFile's insertion loop used to do exactly that for a Set-Cookie
+// with no Domain=, which wrote a host-only youtube.com SID onto .google.com —
+// a different cookie, sent to a different host. The sole caller now is
+// trackedCookieName, which asks only whether the jar tracks the name.
 func isGoogleOnlyAuthName(name string) bool {
 	switch name {
 	case "SID", "HSID", "SSID", "APISID", "SAPISID":
