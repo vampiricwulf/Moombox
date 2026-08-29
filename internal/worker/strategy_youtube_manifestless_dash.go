@@ -227,9 +227,12 @@ func DownloadManifestlessDash(
 
 	result := &DownloadResult{}
 
-	var cookieHeader string
+	// Method value, not a snapshot — same reason as the DASH-manifest strategy:
+	// the recording outlives the ~30-minute cookie rotation, and a header read
+	// here would be sent unchanged to the final segment.
+	var cookieHeader func() string
 	if job.YT != nil {
-		cookieHeader = job.YT.GetCookieHeader()
+		cookieHeader = job.YT.GetCookieHeader
 	}
 
 	// Orchestrator-provided start sequences (quality recovery / split path);

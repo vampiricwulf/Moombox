@@ -119,12 +119,27 @@ var (
 
 // DownloaderOptions configures a SegmentDownloader.
 type DownloaderOptions struct {
-	BaseURL      string
-	OutputFile   string
-	StartSeq     int
-	EndSeq       int // -1 for unlimited
-	PoToken      string
-	CookieHeader string // Cookie header for authenticated downloads
+	BaseURL    string
+	OutputFile string
+	StartSeq   int
+	EndSeq     int // -1 for unlimited
+	PoToken    string
+	// CookieHeader returns the CURRENT Cookie header, re-read on every
+	// request. A getter and not a captured string because a download is the
+	// longest-lived HTTP consumer in the program: a multi-hour archive runs
+	// while the in-process refresh rotates Google's cookies roughly every 30
+	// minutes, and a header snapshotted at construction was still being sent
+	// to the last segment of the recording.
+	//
+	// What it returns is deliberately NOT filtered or host-scoped here. Making
+	// the header live keeps the bytes on the wire identical to what an
+	// unrotated jar sent before; deciding that entitlement rides the signed URL
+	// rather than the session — and dropping cookies for *.googlevideo.com —
+	// is an unmeasured premise whose failure would land on exactly the
+	// members-only and age-gated captures cookies exist to serve.
+	//
+	// nil is safe and means "send no Cookie header", as an empty string did.
+	CookieHeader func() string
 	IsHls        bool
 	IsDirectURL  bool // Direct URL download (not segmented)
 	MaxRetries   int
@@ -931,10 +946,23 @@ func (d *SegmentDownloader) cancelErr(ctx context.Context) error {
 }
 
 // setCommonHeaders applies User-Agent and Cookie headers to a request.
+//
+// The Cookie header is READ HERE, per request, rather than snapshotted at
+// construction — see DownloaderOptions.CookieHeader. All six callers reach
+// this once per outbound HTTP request (never inside a loop within one
+// request), so the getter costs one cookie-jar RLock per request; no caller
+// holds a downloader lock across it.
+//
+// The `!= ""` guard is unchanged, so an empty value still sends no header at
+// all rather than an empty one. Nothing here inspects req.URL: which cookies
+// go to which host is the jar's business and is deliberately not re-decided
+// per request.
 func (d *SegmentDownloader) setCommonHeaders(req *http.Request, ua string) {
 	req.Header.Set("User-Agent", ua)
-	if d.opts.CookieHeader != "" {
-		req.Header.Set("Cookie", d.opts.CookieHeader)
+	if d.opts.CookieHeader != nil {
+		if ch := d.opts.CookieHeader(); ch != "" {
+			req.Header.Set("Cookie", ch)
+		}
 	}
 }
 
