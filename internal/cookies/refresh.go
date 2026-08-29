@@ -28,9 +28,15 @@ var cookiesHTTPClient = httpx.Client(30 * time.Second)
 // server — these functions have no other seam (see refresh.go's note that
 // the pure predicates were extracted for exactly this reason).
 var (
-	youtubeGuideURL        = "https://www.youtube.com/youtubei/v1/guide"
-	youtubeGuideRefreshURL = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
-	twitchValidateURL      = "https://id.twitch.tv/oauth2/validate"
+	// One endpoint, and there was only ever one. This used to be two vars —
+	// youtubeGuideURL and youtubeGuideRefreshURL — described as different
+	// endpoints kept apart on purpose. They were not: checkYouTubeAuth sent
+	// youtubeGuideURL+"?prettyPrint=false", which is youtubeGuideRefreshURL
+	// character for character. Folding the two guide functions into one
+	// exchange made the duplicate visible, since both call sites then read the
+	// same expression from two different names.
+	youtubeGuideURL   = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
+	twitchValidateURL = "https://id.twitch.tv/oauth2/validate"
 )
 
 const (
@@ -161,10 +167,17 @@ type cookieUpdate struct {
 // the assumption an argument.
 //
 // The three constants are the complete set. The zero value names no site and is
-// deliberately inert: covers reports false for every row and platform reports
-// nothing, so a caller that forgets to declare an origin gets the NARROWEST
-// behaviour (only updates whose own Domain= scope-matches a row apply) rather
-// than inheriting YouTube's.
+// deliberately inert: covers reports false for every row, platform reports
+// nothing, and updateCookieFile's insertion loop refuses every row whose
+// platform does not match the declared one — which for the zero value is all of
+// them. So a caller that forgets to declare an origin updates only rows whose
+// own Domain= scope-matches, and writes nothing new at all.
+//
+// That last clause is load-bearing and was wrong when this type was introduced.
+// "Matches nothing" and "does nothing" are different: an update no row accepts
+// falls through to the insertion loop, which invents a domain from the cookie
+// name. Without the platform check there, an inert origin was not narrow — it
+// appended new rows under a domain nobody declared.
 type cookieOrigin string
 
 const (
@@ -1902,7 +1915,11 @@ func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeade
 //
 // The order after the request is load-bearing and is asserted in that order:
 // provenance, then status, then body.
-func (rs *RefreshService) youtubeGuideExchange(ctx context.Context, guideURL string) (bool, *http.Response, error) {
+//
+// It takes no URL: the two entry points were reading the same endpoint from two
+// differently-named vars (see youtubeGuideURL), so the URL was never a thing
+// they varied on.
+func (rs *RefreshService) youtubeGuideExchange(ctx context.Context) (bool, *http.Response, error) {
 	if !rs.jar.HasAnyYouTubeAuthCookie() {
 		return false, nil, nil // Nothing configured at all.
 	}
@@ -1922,7 +1939,7 @@ func (rs *RefreshService) youtubeGuideExchange(ctx context.Context, guideURL str
 	defer cancel()
 
 	body := youtubeGuideRequestBody()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guideURL, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideURL, strings.NewReader(body))
 	if err != nil {
 		return false, nil, err
 	}
@@ -1978,7 +1995,7 @@ func (rs *RefreshService) youtubeGuideExchange(ctx context.Context, guideURL str
 // that invariant is expressed by discarding the response here rather than by a
 // guard somewhere inside.
 func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
-	authenticated, _, err := rs.youtubeGuideExchange(ctx, youtubeGuideURL+"?prettyPrint=false")
+	authenticated, _, err := rs.youtubeGuideExchange(ctx)
 	return authenticated, err
 }
 
@@ -1988,7 +2005,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 //
 // It is the only caller in this file that writes the jar from a guide reply.
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
-	authenticated, resp, err := rs.youtubeGuideExchange(ctx, youtubeGuideRefreshURL)
+	authenticated, resp, err := rs.youtubeGuideExchange(ctx)
 	if err != nil || !authenticated {
 		// Anything short of an authenticated, readable reply stops here without
 		// the jar being touched. Two of those cases are worth naming at the
@@ -2185,21 +2202,31 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 //     may cross domain variants while a deletion may not.
 //
 // origin is the SITE whose response produced these updates, and the caller has
-// to state it because two of the matching rules need it and neither can recover
-// it from the map: a Set-Cookie with no Domain= is host-scoped to the response
-// that carried it, and that response is not in `updates`. resolveRowUpdate's
-// rule 2 and sameCookiePlatform's Domain-less default both used to assume
-// youtube.com, which was a true statement about the single call site rather than
-// about those functions — correct today, and silently wrong in the
-// DESTROY-SCOPE direction the day a second caller appears (the open one being a
-// re-auth ingest response from accounts.google.com, whose unscoped deletions
-// would have reached .youtube.com rows).
+// to state it because three decisions here need it and none can recover it from
+// the map: a Set-Cookie with no Domain= is host-scoped to the response that
+// carried it, and that response is not in `updates`. resolveRowUpdate's rule 2
+// and sameCookiePlatform's Domain-less default both used to assume youtube.com,
+// which was a true statement about the single call site rather than about those
+// functions — correct today, and silently wrong in the DESTROY-SCOPE direction
+// the day a second caller appears (the open one being a re-auth ingest response
+// from accounts.google.com, whose unscoped deletions would have reached
+// .youtube.com rows).
+//
+// The third is the INSERTION loop, and it is the one that is easy to miss:
+// declining to match a row is not declining to write. Every update the two
+// matching rules turn down lands in that loop, which derives a domain from the
+// cookie name alone — so without an origin check there, a caller whose updates
+// were refused everywhere still appended new rows, under a domain nobody
+// declared. The loop now refuses any row outside the declared platform, and
+// refuses everything when no origin was declared.
 //
 // This parameter is ENFORCEMENT of the existing rule, not a change to it: with
-// originYouTube every case behaves exactly as before. The
-// grow-broadly/destroy-narrowly asymmetry is likewise unchanged and deliberate —
-// name-loose updates re-sync stale twins on purpose, domain-strict deletions
-// keep .google.com auth out of reach of an unscoped YouTube deletion.
+// originYouTube every case behaves exactly as before, insertion included (a
+// youtube.com response's cookies land on youtube.com and google.com, which are
+// one platform). The grow-broadly/destroy-narrowly asymmetry is likewise
+// unchanged and deliberate — name-loose updates re-sync stale twins on purpose,
+// domain-strict deletions keep .google.com auth out of reach of an unscoped
+// YouTube deletion.
 func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin) error {
 	filePath := rs.jar.GetFilePath()
 	if filePath == "" {
@@ -2239,23 +2266,27 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 			if len(parts) >= 7 {
 				cookieName := strings.TrimSpace(parts[5])
 				rowDomain := strings.TrimPrefix(strings.TrimSpace(parts[0]), "#HttpOnly_")
-				// essentialYouTubeCookies is a set of NAMES, and several of them
-				// (PREF, CONSENT, YSC, LOGIN_INFO, the rotating SIDTS/SIDCC
-				// pair) are not YouTube-exclusive strings — just names YouTube
-				// happens to use. So a row only carries an essential YouTube
-				// cookie when its DOMAIN says so too, the same guard Arc 5 put on
-				// jar.Load and isEssentialCookie.
-				//
-				// Both readers below select log SEVERITY only and gate no
-				// mutation, which is why the unguarded form was not wrong on the
-				// wire. It is guarded because it was the last surviving copy of a
-				// shape this plan has now removed three times, and the next
-				// reader would reasonably lift it somewhere it does decide
-				// something.
-				rowHasEssential := essentialYouTubeCookies[cookieName] &&
-					(isYouTubeDomain(rowDomain) || isGoogleDomain(rowDomain))
 				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain, origin); ok {
 					handled[key] = true
+					// essentialYouTubeCookies is a set of NAMES, and several of
+					// them (PREF, CONSENT, YSC, LOGIN_INFO, the rotating
+					// SIDTS/SIDCC pair) are not YouTube-exclusive strings — just
+					// names YouTube happens to use. So a row only carries an
+					// essential YouTube cookie when its DOMAIN says so too, the
+					// same guard Arc 5 put on jar.Load and isEssentialCookie.
+					//
+					// Both readers below select log SEVERITY only and gate no
+					// mutation, which is why the unguarded form was not wrong on
+					// the wire. It is guarded because it was the last surviving
+					// copy of a shape this plan has now removed three times, and
+					// the next reader would reasonably lift it somewhere it does
+					// decide something.
+					//
+					// Computed inside this branch: nearly every row in a real
+					// cookies.txt matches no pending update, and neither reader
+					// below is reachable for those.
+					rowHasEssential := essentialYouTubeCookies[cookieName] &&
+						(isYouTubeDomain(rowDomain) || isGoogleDomain(rowDomain))
 					if cu.Delete {
 						// Drop the row. Writing it back with an empty value
 						// left a credential-shaped hole nothing could prune.
@@ -2365,6 +2396,9 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	// a row that is not there is simply done — it must never be inserted. Nor
 	// may an empty value: same refusal as the rewrite path above, and an
 	// inserted empty row would be one this package's own reader cannot read.
+	// Nor, per the origin check below, may a row outside the platform the
+	// caller declared: everything the matching rules turned down arrives here,
+	// so this loop is where "declined" has to become "not written".
 	for key, cu := range updates {
 		if handled[key] || cu.Delete {
 			continue
@@ -2378,10 +2412,42 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		if domain == "" {
 			// Fallback when the Set-Cookie lacked Domain=. Prefer YouTube;
 			// Google-only auth cookies are only emitted by google.com paths.
+			// Note what this fallback reads: the cookie NAME, and nothing else.
+			// It cannot tell whose response the name arrived in, which is why
+			// the origin check below has to be here rather than folded into it.
 			domain = ".youtube.com"
 			if isGoogleOnlyAuthName(name) {
 				domain = ".google.com"
 			}
+		}
+		// An insertion may not leave the declared origin's platform, and an
+		// undeclared origin may not insert at all.
+		//
+		// This is the half of the rule the matching rules cannot enforce, and
+		// missing it inverted the whole point of declaring an origin. Declining
+		// to MATCH is not declining to WRITE: when resolveRowUpdate turns down
+		// every row, the update is not dropped, it arrives here — and the
+		// fallback above then invents a domain from the name alone. So a Twitch
+		// (or undeclared) caller sending an unscoped "SID" was refused by rules 2
+		// and 3 and then appended a brand-new .google.com SID row anyway, landing
+		// a foreign credential in the Google jar. That is WIDER than the hardcoded
+		// behaviour this parameter replaced, not narrower.
+		//
+		// Checked against the domain actually about to be written, not only the
+		// fallback, so a key carrying an explicit cross-platform Domain= is
+		// refused on the same rule. Nothing legitimate is lost: a Google session
+		// covers youtube.com and google.com alike, so the two never fail this
+		// against each other, and processYouTubeSetCookies already drops a
+		// Domain= that is neither.
+		//
+		// A domain with no recognised platform is refused by the same test — an
+		// undeclared origin and an unplaceable domain both yield "", and equality
+		// alone would read that as a match.
+		insertPlatform := cookiePlatformOf(domain)
+		if insertPlatform == "" || insertPlatform != origin.platform() {
+			rs.logger.Debug("cookie update: refusing to insert a row outside the declaring origin's platform",
+				"name", name, "domain", domain, "origin", string(origin))
+			continue
 		}
 		// Subdomain flag follows RFC 6265: leading-dot domain = include
 		// subdomains. The legacy code hardcoded TRUE even for no-dot domains.

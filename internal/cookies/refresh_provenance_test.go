@@ -171,8 +171,13 @@ func TestGuideSameHostRedirectStillReadsTheVerdict(t *testing.T) {
 // TestCheckYouTubeAuthBouncedThroughAnotherHostIsInconclusive is the same rule
 // on the other entry point. checkYouTubeAuth is what AutoCookieService's
 // VerifyYouTubeAuth calls, so its answer decides whether a freshly imported
-// profile is committed or rolled back — the two functions are near-duplicates
-// and a rule applied to only one of them is a rule with a hole in it.
+// profile is committed or rolled back.
+//
+// The two used to be near-duplicate copies and this test existed because a rule
+// applied to one copy is a rule with a hole in it. They share one exchange now,
+// so what it pins is that this entry point still reaches that exchange and
+// cannot drift from it — the provenance mutant has to kill this test and its
+// twin above together, or one of the two wrappers has grown a path of its own.
 func TestCheckYouTubeAuthBouncedThroughAnotherHostIsInconclusive(t *testing.T) {
 	srv, hops, carried := redirectChain(t, "localhost", "Cookie", http.StatusOK, loggedOutGuideBody)
 	pointYouTubeGuideAt(t, srv)

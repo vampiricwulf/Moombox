@@ -15,8 +15,9 @@ import (
 // declared-origin parameter on the write path.
 //
 // The fold removed a ~60-line copy: checkYouTubeAuth and checkAndRefreshYouTube
-// now share one request/gate/verdict function and differ only in their URL and
-// in whether they merge Set-Cookie afterwards. That merge asymmetry is the
+// now share one request/gate/verdict function and differ in exactly one thing —
+// whether they merge Set-Cookie afterwards. (They appeared to differ in their
+// URL too; the two URL vars held the same string.) That merge asymmetry is the
 // thing worth a test, and it is the first one below.
 
 // The authenticated fixture is loggedInGuideBody from refresh_liveness_test.go —
@@ -163,7 +164,7 @@ func TestGuideExchangeHandsBackNoResponseOnAnyError(t *testing.T) {
 		pointYouTubeGuideAt(t, srv)
 
 		rs := NewRefreshService(NewCookieJar(), 0, nopLogger{})
-		auth, resp, err := rs.youtubeGuideExchange(context.Background(), youtubeGuideRefreshURL)
+		auth, resp, err := rs.youtubeGuideExchange(context.Background())
 		if auth || err != nil {
 			t.Errorf("auth=%v err=%v, want false/nil", auth, err)
 		}
@@ -177,7 +178,7 @@ func TestGuideExchangeHandsBackNoResponseOnAnyError(t *testing.T) {
 		pointYouTubeGuideAt(t, bodyServer(t, loggedInGuideBody, rotatedSetCookie))
 
 		rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
-		auth, resp, err := rs.youtubeGuideExchange(context.Background(), youtubeGuideRefreshURL)
+		auth, resp, err := rs.youtubeGuideExchange(context.Background())
 		if err != nil || !auth {
 			t.Fatalf("auth=%v err=%v, want true/nil", auth, err)
 		}
@@ -194,7 +195,7 @@ func TestGuideExchangeHandsBackNoResponseOnAnyError(t *testing.T) {
 
 func assertNoResponseWithError(t *testing.T, rs *RefreshService) {
 	t.Helper()
-	auth, resp, err := rs.youtubeGuideExchange(context.Background(), youtubeGuideRefreshURL)
+	auth, resp, err := rs.youtubeGuideExchange(context.Background())
 	if err == nil {
 		t.Fatal("premise broken: err = nil, want the inconclusive error")
 	}
@@ -352,6 +353,14 @@ func TestUnscopedUpdateStaysInsideTheDeclaredOrigin(t *testing.T) {
 // with the Twitch caller's value. The Google case is the control that stops
 // "never cross" from passing — the asymmetry is deliberate and the grow half
 // must still grow.
+//
+// The ROW COUNT is asserted alongside the value, and it is not decoration. An
+// update that no row accepts is not dropped: it falls through to the insertion
+// loop, which used to invent a domain from the cookie NAME alone and append a
+// brand-new row. Checking one row's value cannot see that — rowFor returns the
+// first match — so "the Twitch caller did not overwrite the YouTube row" was
+// true while the same caller was quietly adding a .google.com row of its own.
+// Declining to match and declining to write have to be asserted together.
 func TestUnscopedRefreshCrossesDomainsOnlyInsideTheDeclaredPlatform(t *testing.T) {
 	const initial = "# Netscape HTTP Cookie File\n" +
 		".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSID\tfixture-youtube-sid\n"
@@ -383,10 +392,115 @@ func TestUnscopedRefreshCrossesDomainsOnlyInsideTheDeclaredPlatform(t *testing.T
 				t.Fatalf("updateCookieFile: %v", err)
 			}
 
-			row := rowFor(t, readCookieRows(t, path), "SID", ".youtube.com")
+			rows := readCookieRows(t, path)
+			if got := len(rowsNamed(rows, "SID")); got != 1 {
+				var where []string
+				for _, r := range rowsNamed(rows, "SID") {
+					where = append(where, r.domain)
+				}
+				t.Errorf("the file holds %d SID rows %v, want the 1 it started with — "+
+					"an update from %q that no row accepted was INSERTED under a domain "+
+					"invented from the cookie name", got, where, tc.origin)
+			}
+			row := rowFor(t, rows, "SID", ".youtube.com")
 			if row.value != tc.wantValue {
 				t.Errorf(".youtube.com SID = %q, want %q — an unscoped update from %q "+
 					"was classified into the wrong platform", row.value, tc.wantValue, tc.origin)
+			}
+		})
+	}
+}
+
+// TestInsertionStaysInsideTheDeclaredPlatform covers the third place the origin
+// decides something, and the one that is easy to miss.
+//
+// Declining to MATCH is not declining to WRITE. Every update that
+// resolveRowUpdate turns down falls through to the insertion loop, and that loop
+// derives a domain from the cookie NAME alone — it cannot tell whose response
+// the name arrived in. So before this check existed, a caller whose updates were
+// refused by rules 2 and 3 still appended a brand-new row, under a domain nobody
+// declared: an originTwitch caller's unscoped "SID" landed a .google.com row in
+// the Google jar. That is WIDER than the hardcoded youtube.com assumption the
+// origin parameter replaced, which is the opposite of what declaring it is for.
+//
+// The same-platform case is the control. youtube.com and google.com are one
+// credential platform, so a youtube.com response must still be able to insert a
+// .google.com row — that is the grow-broadly half, and refusing it would break
+// every real rotation.
+func TestInsertionStaysInsideTheDeclaredPlatform(t *testing.T) {
+	cases := []struct {
+		name       string
+		key        cookieUpdateKey
+		origin     cookieOrigin
+		wantDomain string // "" means: nothing may be written
+	}{
+		// The fallback path: no Domain=, so the domain is invented from the name
+		// (isGoogleOnlyAuthName routes SID to .google.com).
+		{"unscoped name from a twitch caller", cookieUpdateKey{Name: "SID"}, originTwitch, ""},
+		{"unscoped name from no caller at all", cookieUpdateKey{Name: "SID"}, cookieOrigin(""), ""},
+		{"unscoped name from a google caller", cookieUpdateKey{Name: "SID"}, originGoogle, ".google.com"},
+
+		// The explicit-Domain path: checked on the same rule, so a key carrying a
+		// cross-platform Domain= cannot slip past by naming its own destination.
+		{"explicit twitch domain from a youtube caller",
+			cookieUpdateKey{Name: "auth-token", Domain: ".twitch.tv"}, originYouTube, ""},
+		{"explicit youtube domain from no caller at all",
+			cookieUpdateKey{Name: "LOGIN_INFO", Domain: ".youtube.com"}, cookieOrigin(""), ""},
+		// A domain on no known platform is refused too. The zero-origin case is
+		// the one that isolates the `insertPlatform == ""` clause: an unplaceable
+		// domain and an undeclared origin both classify as "", so a bare equality
+		// test would read the pair as a MATCH and write the row. The youtube case
+		// beside it is a regression guard only — it is refused either way, since
+		// "" and "google" differ.
+		{"unplaceable domain from no caller at all",
+			cookieUpdateKey{Name: "LOGIN_INFO", Domain: ".example.invalid"}, cookieOrigin(""), ""},
+		{"unplaceable domain from a youtube caller",
+			cookieUpdateKey{Name: "LOGIN_INFO", Domain: ".example.invalid"}, originYouTube, ""},
+
+		// The controls — one platform, two domains, still allowed.
+		{"explicit google domain from a youtube caller",
+			cookieUpdateKey{Name: "SAPISID", Domain: ".google.com"}, originYouTube, ".google.com"},
+		{"explicit youtube domain from a youtube caller",
+			cookieUpdateKey{Name: "LOGIN_INFO", Domain: ".youtube.com"}, originYouTube, ".youtube.com"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const initial = "# Netscape HTTP Cookie File\n"
+			rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
+
+			updates := map[cookieUpdateKey]cookieUpdate{
+				tc.key: {Value: "inserted-value", Expiry: 2100000000},
+			}
+			if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+				t.Fatalf("updateCookieFile: %v", err)
+			}
+
+			rows := rowsNamed(readCookieRows(t, path), tc.key.Name)
+			if tc.wantDomain == "" {
+				if len(rows) != 0 {
+					t.Errorf("origin %q inserted %q under %q; nothing may be written outside the declared platform",
+						tc.origin, tc.key.Name, rows[0].domain)
+				}
+				// The file must be untouched, not merely free of this row.
+				after, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(after) != initial {
+					t.Errorf("the file changed on a refused insertion:\n%q", string(after))
+				}
+				return
+			}
+			if len(rows) != 1 {
+				t.Fatalf("origin %q wrote %d %q rows, want 1 under %q — the control is not controlling",
+					tc.origin, len(rows), tc.key.Name, tc.wantDomain)
+			}
+			if rows[0].domain != tc.wantDomain {
+				t.Errorf("%q landed under %q, want %q", tc.key.Name, rows[0].domain, tc.wantDomain)
+			}
+			if rows[0].value != "inserted-value" {
+				t.Errorf("%q value = %q, want the inserted value", tc.key.Name, rows[0].value)
 			}
 		})
 	}
