@@ -38,6 +38,10 @@ import (
 //	                             signed-in Twitch session>
 //	MOOMBOX_LIVE_TWITCH_CHANNEL=<the login of a channel that is LIVE right now>
 //
+// Always run with -count=1: a cached PASS on a live probe is not a fresh
+// measurement, and the report this test feeds is only as current as its
+// last real round trip.
+//
 // The path alone is the credential opt-in, matching TestLiveAuthenticatedToken-
 // Validate in auth_live_test.go. The channel is a second required input rather
 // than a hardcoded default: a default would rot, and an offline channel yields
@@ -168,7 +172,7 @@ func jsonKindOf(raw json.RawMessage) string {
 // replies. This is the finding Task 8 branches on.
 func reportKeyDifference(t *testing.T, authed, anon map[string]playbackTokenField) {
 	t.Helper()
-	var onlyAuthed, onlyAnon, differingBools, sameShape []string
+	var onlyAuthed, onlyAnon, differingFields, sameShape []string
 	for name, f := range authed {
 		other, ok := anon[name]
 		if !ok {
@@ -177,10 +181,10 @@ func reportKeyDifference(t *testing.T, authed, anon map[string]playbackTokenFiel
 		}
 		switch {
 		case f.kind != other.kind:
-			differingBools = append(differingBools,
+			differingFields = append(differingFields,
 				name+": authenticated="+f.kind+" anonymous="+other.kind)
 		case f.kind == "bool" && f.boolValue != other.boolValue:
-			differingBools = append(differingBools,
+			differingFields = append(differingFields,
 				name+": authenticated=bool("+boolText(f.boolValue)+") anonymous=bool("+boolText(other.boolValue)+")")
 		default:
 			sameShape = append(sameShape, name)
@@ -193,15 +197,15 @@ func reportKeyDifference(t *testing.T, authed, anon map[string]playbackTokenFiel
 	}
 	sort.Strings(onlyAuthed)
 	sort.Strings(onlyAnon)
-	sort.Strings(differingBools)
+	sort.Strings(differingFields)
 	sort.Strings(sameShape)
 
 	t.Logf("KEYS ONLY IN THE AUTHENTICATED REPLY: %v", onlyAuthed)
 	t.Logf("KEYS ONLY IN THE ANONYMOUS REPLY:     %v", onlyAnon)
-	t.Logf("KEYS WHOSE TYPE OR BOOLEAN DIFFERS:   %v", differingBools)
+	t.Logf("KEYS WHOSE TYPE OR BOOLEAN DIFFERS:   %v", differingFields)
 	t.Logf("KEYS THAT LOOK THE SAME IN BOTH:      %v", sameShape)
 
-	if len(onlyAuthed) == 0 && len(onlyAnon) == 0 && len(differingBools) == 0 {
+	if len(onlyAuthed) == 0 && len(onlyAnon) == 0 && len(differingFields) == 0 {
 		t.Log("FINDING: the two replies are indistinguishable by name, type and boolean. " +
 			"Arc 10 Task 8 takes BRANCH B — record the finding in the spec docs and build nothing on the HLS side.")
 		return
