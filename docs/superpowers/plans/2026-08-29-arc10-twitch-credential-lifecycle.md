@@ -45,10 +45,10 @@ Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN
 | 6 | The worker seam: a downgrade marks the platform | sonnet |
 | 7 | `cmd/moombox` wiring: mark, broadcast, adapted sweep | opus |
 | 7a | Every credential write reaches the fingerprint comparison | opus |
-| 8 | The HLS side, per Task 0's report (branch A or branch B) | opus |
+| 8 | The HLS side, per Task 0's report (branch A builds; branch B records — neither edits a doc) | opus |
 | 9 | The doc sentences that change with the code | sonnet |
 
-Tasks 1-7a are strictly ordered (each Consumes the previous). Task 0 runs first and only its REPORT is a dependency (of Task 8). Task 8 depends on Tasks 0 and 2. Task 9 depends on everything.
+Tasks 1-7a are strictly ordered (each Consumes the previous). Task 0 runs first and only its REPORT is a dependency (of Task 8). **Task 8 depends on Tasks 0, 2, 6 and 7** — 0 for the branch decision, 2 for the reason vocabulary it extends, 6 for `twitch_auth_loss_vocabulary_test.go`'s `reasons` slice, and 7 for the `dlWorker.SetOnTwitchAuthLoss(...)` block its wiring anchors to. Task 9 depends on everything, Task 0's report included.
 
 Task 5 is opus despite its code being given verbatim: the registry's lock discipline, a `defer` placed inside an 850-line function with its own session loop, and the two-registries pitfall are concurrency judgement calls that a verbatim paste does not remove.
 
@@ -364,7 +364,7 @@ Spec R4. The jar has `YouTubeIdentity()` (`internal/cookies/jar.go:773-801`) and
 
 **Interfaces:**
 - Consumes: `j.twitch map[string]cookieEntry` and `j.mu sync.RWMutex` (jar-internal), `crypto/sha256` and `encoding/hex` (already imported by `jar.go` for `YouTubeIdentity`)
-- Produces: `func (j *CookieJar) TwitchIdentity() string` — Tasks 2, 3 and 7 all call it
+- Produces: `func (j *CookieJar) TwitchIdentity() string` — called by Task 2 (`NoteTwitchAuthLoss` samples it when taking the mark) and Task 3 (the status block samples it every pass). Task 7 does NOT call it: it receives the already-computed identity as `OnCredentialsChanged`'s second parameter, and only names this method in a corrected comment.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1241,7 +1241,7 @@ and the Twitch arm of the recovered transition (`:1301`):
 - [ ] **Step 8: Run the tests and confirm they pass**
 
 Run: `go test ./internal/cookies/ -run 'TestValidate200|TestATwitchCredential|TestAChangeToDead|TestTwitchMark|TestTwitchAuthLoss' -v`
-Expected: PASS for all seven tests.
+Expected: PASS for all eight tests. (`TestTwitchMark` alone matches four of them: `...FiresRecoveryOncePerLoss`, `...NeverFiresRecoveryForAnUnconfiguredPlatform`, `...LeavesYouTubeAlone`, `...FiresAuthChangeOnAVerdictTransitionOnly`.)
 
 Then the whole package, because this edit is inside the block every cookie test drives:
 Run: `go test ./internal/cookies/ -count=1`
@@ -1313,6 +1313,8 @@ Spec R4's signalling half. `OnCredentialsChanged` exists (`internal/cookies/refr
 | `twitch.Service.ReloadAuth` | `internal/twitch/service.go:112` | n/a | No production callers. |
 | Startup | `cmd/moombox/services.go:341` `jar.Load` → `RefreshService.Start`'s initial pass | yes, today | `Start` runs `refresh(ctx, false)` synchronously before the web server binds. |
 | Arc 11's import endpoint | not built | — | Arc 11 must end in `recheckAfterCookieWrite`; recorded in the Arc 11 handoff. |
+
+**Every line number below was verified at pristine `main`, and Task 2 inserts roughly 70-90 lines into this same file above most of them.** Re-derive by SYMBOL — `prevYouTubeIdentity`, `OnCredentialsChanged`'s doc comment, the status func literal's `ytIdentity = rs.jar.YouTubeIdentity()` pair, the YouTube `OnCredentialsChanged` fire, `shouldObserveCredentials`, `advanceIdentityBaseline` — not by number. Same hazard, same rule, as Task 7a's banner.
 
 **Files:**
 - Modify: `internal/cookies/refresh.go` — `prevTwitchIdentity` field beside `prevYouTubeIdentity` (`:459`); `OnCredentialsChanged`'s doc (`:525-539`); the status block's Twitch identity sample and baseline advance; the fire below the YouTube one (`:1312-1315`)
@@ -2889,7 +2891,7 @@ Spec R1's wiring end. `twitchChatDowngradeCallback` (`stream_processor_twitch.go
 - Modify: `internal/worker/stream_processor.go` — one field on `StreamProcessor` (`:76-97`) and a setter beside `SetWakeScheduler` (`:139-141`)
 - Modify: `internal/worker/stream_processor_twitch.go` — a resolver beside `notifierSend` (`:195-200`), `twitchChatDowngradeCallback`'s signature and body (`:217-221`), and its call site (`:502`)
 - Modify: `internal/worker/worker.go` — `SetOnTwitchAuthLoss` forwarding to the stream processor
-- Test: `internal/worker/stream_processor_twitch_credentials_test.go` (append) and `internal/worker/twitch_auth_loss_vocabulary_test.go` (create)
+- Test: `internal/worker/stream_processor_twitch_credentials_test.go` (append, AND fix the three pre-existing calls to `twitchChatDowngradeCallback` at `:327`, `:356` and `:386` — Step 4 changes its arity, so all three must gain the new argument or the package does not compile) and `internal/worker/twitch_auth_loss_vocabulary_test.go` (create)
 
 **Interfaces:**
 - Consumes: `notifySend` and `sendTwitchChatDowngrade` (`stream_processor_twitch.go:88-90`, `:178-184`); `twitch.AuthDowngrade*` constants (`chat.go:38-54`); `cookies.RefreshService.NoteTwitchAuthLoss(reason string)` (Task 2) — only through the injected func
@@ -3210,11 +3212,14 @@ and update the construction site (`:502`):
 
 - [ ] **Step 5: Run the tests and confirm they pass**
 
-Two pre-existing tests call the changed constructor and must gain the new second argument, `func() func(string) { return nil }`:
-`TestTwitchChatDowngradeCallbackDeliversWhatTheDownloaderReports` (`stream_processor_twitch_credentials_test.go:347`) and `TestTwitchChatDowngradeCallbackResolvesTheSenderPerFire` (`:383`). Add the argument; change nothing else about them — they pin the notification half and must keep doing so unchanged.
+**THREE pre-existing call sites must gain the new second argument or the package does not compile.** Step 4 changed `twitchChatDowngradeCallback` from three parameters to four; `stream_processor_twitch_credentials_test.go` calls it at `:327`, `:356` and `:386`. Pass `func() func(string) { return nil }` as the second argument at each, and change nothing else about these tests — they pin the notification half and must keep doing so unchanged:
+
+- `:327`, inside `TestTwitchChatDowngradeWithoutANotifierIsSilent` (`:321`) — `twitchChatDowngradeCallback(sp.notifierSend, downgradeJob(), "TestChan")`. This one is easy to miss: it is not named "…Callback…", it drives the production `sp.notifierSend` resolver rather than a hand-written one, and it is the only test covering the no-notifier install.
+- `:356`, inside `TestTwitchChatDowngradeCallbackDeliversWhatTheDownloaderReports` (`:347`).
+- `:386`, inside `TestTwitchChatDowngradeCallbackResolvesTheSenderPerFire` (`:383`).
 
 Run: `go test ./internal/worker/ -run 'TestTwitchChatDowngrade|TestStreamProcessorTwitchAuthLoss|TestTwitchAuthLossVocabulary' -v`
-Expected: PASS, including the four pre-existing `TestTwitchChatDowngrade*` tests.
+Expected: PASS. The regex matches the six pre-existing `TestTwitchChatDowngrade*` tests (`:183`, `:245`, `:292`, `:321`, `:347`, `:383`) plus the five added in Step 1 — eleven in all.
 
 Run: `go test ./internal/worker/ -count=1`
 Expected: `ok  github.com/vampiricwulf/Moombox/internal/worker`.
@@ -3275,7 +3280,7 @@ EOF
 - Test: `cmd/moombox/monitor_callbacks_twitch_reauth_test.go` (create)
 
 **Interfaces:**
-- Consumes: `(*cookies.RefreshService).NoteTwitchAuthLoss(reason string)` (Task 2); `(*worker.DownloadWorker).SetOnTwitchAuthLoss(fn func(reason string))` (Task 6); `(*worker.DownloadWorker).ReauthenticateTwitchChats() int` (Task 5); `resumeCookieParkedJobs(db, log, platform, currentIdentity string) int` (`monitor_callbacks.go:81-106`)
+- Consumes: `RefreshService.OnCredentialsChanged func(platform, identity string)` **firing for `"twitch"` (Task 3)** — the whole reason Step 4 exists; without Task 3 the closure Step 4 rewrites is never entered for Twitch and the broadcast is dead code. Also `(*cookies.RefreshService).NoteTwitchAuthLoss(reason string)` (Task 2); `(*worker.DownloadWorker).SetOnTwitchAuthLoss(fn func(reason string))` (Task 6); `(*worker.DownloadWorker).ReauthenticateTwitchChats() int` (Task 5); `resumeCookieParkedJobs(db, log, platform, currentIdentity string) int` (`monitor_callbacks.go:81-106`)
 - Produces: `func reauthenticateTwitchChats(platform string, broadcast func() int) int` — no later task consumes it; it exists so the platform gate is drivable
 
 - [ ] **Step 1: Write the failing tests**
@@ -3956,10 +3961,10 @@ In `cmd/moombox/services.go`, beside the other `autoCookieSvc` injections (after
 	// funcs, not out of necessity: it is already assigned by the time this
 	// closure is built. §15 constructs and assigns cookieRefresh at
 	// services.go:711-713, autoCookieSvc is built at :751, and this wiring runs
-	// after both. The nil guard below is therefore belt and braces against a
-	// future reordering rather than a live hazard — CheckNow on a nil
-	// *RefreshService would panic inside the periodic goroutine, which is
-	// recovered but kills that timer for the life of the process.
+	// after both. The nil guard is therefore belt and braces against a future
+	// reordering rather than a live hazard — CheckNow on a nil *RefreshService
+	// would panic inside the periodic goroutine, which is recovered but kills
+	// that timer for the life of the process.
 	autoCookieSvc.OnPassCompleted = func() {
 		if s.cookieRefresh == nil {
 			return
@@ -3967,6 +3972,8 @@ In `cmd/moombox/services.go`, beside the other `autoCookieSvc` injections (after
 		recheckAfterCookieWrite(context.Background(), s.cookieRefresh.CheckNow, log, "the periodic cookie refresh")
 	}
 ```
+
+That is the whole of Step 12 — one block, guarded. Do not drop the nil check as "belt and braces": belt and braces is why it is cheap, not why it is optional.
 
 - [ ] **Step 13: Run the tests**
 
@@ -4032,6 +4039,10 @@ Spec R6. **Read `.superpowers/sdd/2026-08-25-cookie-subsystem-remediation/progre
 
 Do not take both. Do not take neither.
 
+**This task runs after Tasks 0, 2, 6 and 7** (branch A extends Task 2's vocabulary and Task 6's `reasons` slice, and anchors to Task 7's `SetOnTwitchAuthLoss` block), so **every line number below was verified at pristine `main` and most of these files have since been edited.** Re-derive by SYMBOL — the `AuthDowngrade*` const block, `Service`'s struct, `GetHLSMasterPlaylist`, the `twitchLoss*` const block, `twitchAuthLossMessage`'s `default` arm, `TestTwitchAuthLossReasonIsTheVocabularyOnly`'s `known` slice, `twitch_auth_loss_vocabulary_test.go`'s `reasons` slice, `dlWorker.SetOnTwitchAuthLoss` — not by number. Same rule as Tasks 3 and 7a.
+
+**Neither branch edits a doc.** Task 9 is the sole doc-editing task in this arc and it carries both variants of every HLS-side sentence, selecting by the same Task 0 report this task reads. Branch B's whole deliverable is the ledger entry that tells Task 9 which variant to take.
+
 ---
 
 #### Branch A — the playback token states whether it was honoured
@@ -4041,6 +4052,8 @@ Do not take both. Do not take neither.
 - Modify: `internal/twitch/service.go:11-21` — one field on `Service`; `:62-71` — `GetHLSMasterPlaylist`
 - Create: `internal/twitch/playback_token.go` — `PlaybackTokenSession`
 - Modify: `internal/cookies/refresh.go` — a fifth vocabulary constant and a fifth arm in `twitchAuthLossMessage`
+- Modify: `internal/cookies/refresh_twitch_mark_test.go` (Task 2) — extend `TestTwitchAuthLossReasonIsTheVocabularyOnly`'s `known` slice
+- Modify: `internal/worker/twitch_auth_loss_vocabulary_test.go` (Task 6) — extend the `reasons` slice
 - Modify: `cmd/moombox/services.go` — wire `OnAnonymousPlayback` beside `SetOnTwitchAuthLoss`
 - Test: `internal/twitch/playback_token_test.go` (create)
 
@@ -4410,36 +4423,49 @@ EOF
 
 #### Branch B — the reply cannot tell, so record the finding and stop
 
-No production code changes. Three sentences currently promise, or leave open, a follow-up that the measurement has now ruled out; each is replaced with what was measured.
+**No code changes, and NO DOC CHANGES.** An earlier draft had this branch edit three spec files; it does not, because Task 9 edits the same three sentences and the two would collide — once as a duplicated paragraph in `data-and-storage.md`, once as two near-identical "since Arc 10 it is a check plus a MARK" sentences in `SPEC.md`. **Task 9 is the sole doc-editing task in this arc** and carries both variants of every HLS-side sentence. Branch B's entire deliverable is the ledger entry that tells Task 9 which variant to take, and that is not a demotion: the measurement IS the deliverable, and a finding recorded in one place cannot drift from itself.
 
 **Files:**
-- Modify: `docs/spec/platform-services.md:529` (the paragraph after the four-reason table)
-- Modify: `SPEC.md:670` (the `RefreshService` paragraph in § Cookies)
-- Modify: `docs/spec/data-and-storage.md:857` (the `AuthStatus` paragraph)
+- Modify: `.superpowers/sdd/2026-08-25-cookie-subsystem-remediation/progress-arc10.md` (append)
 
-- [ ] **B Step 1: Replace the "recorded follow-up" sentence**
+- [ ] **B Step 1: Write the ruling into the ledger**
 
-In `docs/spec/platform-services.md`, the paragraph beginning **"A job with chat recording off gets no signal at all."** currently ends:
+Under the existing `## Task 0 report — playback token shape` heading created by Task 0 Step 4, append:
 
-> The site that would cover the rest is `GetHLSMasterPlaylist`, which already holds the token — a recorded follow-up, not built.
+```markdown
+### Arc 10 Task 8 ruling: BRANCH B — no HLS-side detector
 
-Replace that final clause with:
+The playback access token cannot report whether it was honoured. Measured live
+on <DATE> (see the KEYS lines above): <one sentence naming what was actually
+seen — "the two replies are indistinguishable by name, type and boolean", or
+the differing keys and why none of them is a statement about the session>.
 
-> The site that would cover the rest is `GetHLSMasterPlaylist`, which already holds the token — and it CANNOT: measured live on {DATE}, the playback access token's `Value` document is byte-shaped identically whether the request carried an `auth-token` or none, so the reply states nothing about whether the credential was honoured. The only observable signal remains downstream and probabilistic — stitched-ad `#EXT-X-DATERANGE` markers on the MEDIA playlist during the capture (`collectAdDateRanges`, `internal/engine/manifest.go`). Chat-disabled jobs therefore stay blind by measurement, not by omission; do not re-open this without a new measurement.
+Consequences, and the ONLY place they are recorded:
 
-Substitute the probe's date. If the probe found differing keys that are not about the session (an expiry, a nonce, a device id), name them in that sentence instead of "byte-shaped identically" — the record must say what was seen.
+- No `PlaybackTokenSession`, no `playbackTokenReportsAnonymous`, no
+  `Service.OnAnonymousPlayback`, no fifth reason token. The chat handshake's
+  four routes stay the whole detector.
+- A job with chat recording OFF has no credential detector at all. The only
+  observable signal on that side is downstream and probabilistic: stitched-ad
+  `#EXT-X-DATERANGE` markers on the MEDIA playlist during the capture
+  (`collectAdDateRanges`, `internal/engine/manifest.go`).
+- **Task 9 takes the "branch B" variant** of its three HLS-side sentences
+  (Step 1(c), Step 5, and the `AuthStatus` paragraph's closing clause). Do not
+  edit any spec file from this task.
 
-- [ ] **B Step 2: Pin the same fact in `SPEC.md`**
+Do not re-open without a NEW measurement; this one is dated above.
+```
 
-In `SPEC.md` § Cookies, the `RefreshService` paragraph ends **"The Twitch side is a check with no rotation."** Append:
+Substitute the date and the one-sentence finding. Nothing read from the token document goes in — the KEYS lines Task 0 already wrote are the record, and they carry names, types and booleans only.
 
-> Since Arc 10 it is a check plus a MARK: a chat auth downgrade writes `TwitchAuthenticated=false` with a fixed-vocabulary reason through `NoteTwitchAuthLoss`, and the mark outlives an `oauth2/validate` 200 until the credential pair changes. There is no HLS-side detector — the playback access token was measured and says nothing about whether the credential was honoured.
+- [ ] **B Step 2: Confirm nothing else changed**
 
-- [ ] **B Step 3: State the two writers**
+```bash
+git status --short
+```
+Expected: exactly one modified file, the ledger. If a `docs/spec/` or `SPEC.md` path appears, an earlier draft's instructions were followed — revert them and let Task 9 do it.
 
-Apply the `data-and-storage.md` edits from Task 9 Step 2 (the two-writers rule), which are required on both branches.
-
-- [ ] **B Step 4: Run the gates**
+- [ ] **B Step 3: Run the gates**
 
 ```bash
 go build ./...
@@ -4448,20 +4474,24 @@ GOOS=linux go build ./...
 gofmt -l internal/ cmd/
 go test -count=1 ./...
 ```
-Expected: unchanged from Task 7 — build and vet clean, `gofmt -l` prints nothing, 27 packages ok / 0 fail.
+Expected: byte-identical to Task 7a's run — build and vet clean, `gofmt -l` prints nothing, 27 packages ok / 0 fail. Nothing in this branch touches Go.
 
-- [ ] **B Step 5: Commit**
+- [ ] **B Step 4: Commit**
 
 ```bash
-git add docs/spec/platform-services.md SPEC.md docs/spec/data-and-storage.md
+git add .superpowers/sdd/2026-08-25-cookie-subsystem-remediation/progress-arc10.md
 git commit -m "$(cat <<'EOF'
-docs(spec): the Twitch playback token cannot report whether it was honoured
+docs(sdd): the Twitch playback token cannot report whether it was honoured
 
 Arc 10 R6, branch B. The live probe compared the playback access token's
 Value document with and without an auth-token and found nothing in it that
-states which session it was issued to, so the HLS-side detector the docs left
-open as "a recorded follow-up" is not buildable and is now recorded as
-measured-and-ruled-out rather than pending.
+states which session it was issued to, so the HLS-side detector R6 made
+conditional is not buildable.
+
+The finding lands in the ledger and nowhere else. Task 9 owns every spec
+sentence in this arc and carries both variants of the three HLS-side ones;
+writing them here as well would have duplicated a paragraph in
+data-and-storage.md and left two near-identical claims in SPEC.md.
 
 The only observable signal on that side remains downstream and
 probabilistic: stitched-ad DATERANGE markers on the media playlist during the
@@ -4479,6 +4509,10 @@ EOF
 
 Spec §5 names five documents. Every edit below quotes the CURRENT sentence and gives the replacement; open each file and confirm the quoted text before editing, because a sentence that has already drifted means the surrounding paragraph needs re-reading, not a blind replace.
 
+**This is the SOLE doc-editing task in the arc.** No other task edits a file under `docs/spec/` or `SPEC.md` — Task 8 branch B was rewritten to record its finding in the ledger precisely so these sentences have one author. That matters most for the three HLS-side ones, which have TWO variants each: what is true if Task 8 took branch A, and what is true if it took branch B. Both are written out below.
+
+**Before editing anything, read `.superpowers/sdd/2026-08-25-cookie-subsystem-remediation/progress-arc10.md`** — Task 0's `FINDING:` line and, if branch B was taken, Task 8's `### Arc 10 Task 8 ruling` entry. That decides which variant of Step 1(c), Step 2(d)'s closing clause and Step 5 you write. If the ledger has no Task 8 ruling entry and `internal/twitch/playback_token.go` exists, branch A was taken; if neither, Task 8 has not run and this task is premature.
+
 **Files:**
 - Modify: `docs/spec/platform-services.md` (three sentences, `:514`, `:527`, `:529`)
 - Modify: `docs/spec/data-and-storage.md` (five sites, `:733`, `:736`, `:748`, `:835`, `:857`)
@@ -4486,8 +4520,10 @@ Spec §5 names five documents. Every edit below quotes the CURRENT sentence and 
 - Modify: `docs/spec/operations.md` (two table rows and one sentence, `:472`, `:473`, `:475`)
 - Modify: `SPEC.md` (two clauses in one paragraph, `:668-670`)
 
+Three of these edits have two variants — `platform-services.md` Step 1(c), `SPEC.md` Step 5's caller sentence, and (for context only) the `AuthStatus` paragraph, which is branch-neutral. The file COUNT and the file LIST are the same on both branches.
+
 **Interfaces:**
-- Consumes: everything Tasks 1-8 built
+- Consumes: everything Tasks 1-8 built, plus `.superpowers/sdd/2026-08-25-cookie-subsystem-remediation/progress-arc10.md` — Task 0's `FINDING:` line and Task 8 branch B's ruling entry, which select the variants
 - Produces: nothing — this is the last task
 
 - [ ] **Step 1: `docs/spec/platform-services.md`**
@@ -4516,7 +4552,11 @@ with:
 
 > **A job with chat recording off is covered by the playback token.** `OnAuthDowngrade` is wired only when `liveDownloadChat` is true (`internal/worker/stream_processor_twitch.go`), so the CHAT detector sees only jobs that capture chat. The other detector is `Service.GetHLSMasterPlaylist`, which decodes the playback access token's `Value` (a JSON document — `PlaybackTokenSession`, `internal/twitch/playback_token.go`) and marks the platform with `playback-token-anonymous` when credentials were sent and Twitch answered with a token issued to nobody. It refuses to guess in both directions: a cookieless install is never reported (it is anonymous by design), and an UNREADABLE document — a renamed key, a non-JSON body — is inconclusive rather than anonymous, because folding a Twitch field rename into "the credential is dead" would alarm every install on the day of the change.
 
-**On Task 8 branch B**, this paragraph is edited by Task 8 branch B Step 1 instead. Do not edit it twice.
+**On Task 8 branch B**, replace the same paragraph with:
+
+> **A job with chat recording off gets no signal at all, and that is now a measured fact.** `OnAuthDowngrade` is wired only when `liveDownloadChat` is true (`internal/worker/stream_processor_twitch.go`), so the degradation is detected only where chat is being captured. The site that would cover the rest is `GetHLSMasterPlaylist`, which already holds the token — and it CANNOT: measured live on {DATE}, the playback access token's `Value` document says nothing about which session it was issued to ({one clause naming what the probe saw}), so an anonymous token and an honoured one are indistinguishable to the caller. The only observable signal there remains downstream and probabilistic — stitched-ad `#EXT-X-DATERANGE` markers on the MEDIA playlist during the capture (`collectAdDateRanges`, `internal/engine/manifest.go`). Chat-disabled jobs stay blind by measurement, not by omission; do not re-open this without a new measurement.
+
+Take the date and the parenthetical clause verbatim from the ledger's Task 8 ruling — the record must say what was seen, not "nothing useful".
 
 - [ ] **Step 2: `docs/spec/data-and-storage.md`**
 
@@ -4536,7 +4576,9 @@ Replace with:
 
 > `OnCredentialsChanged` is separate and not a weaker `OnAuthRecovered`: a job parked because the signed-in account lacks a membership parked while auth was HEALTHY, so swapping accounts produces no auth transition to ride. Since Arc 10 it fires for BOTH platforms, against per-platform baselines (`prevYouTubeIdentity` / `prevTwitchIdentity`), and the two mean different things: a YouTube fire is "the signed-in ACCOUNT may have changed", a Twitch fire is "the credential PAIR changed". The Twitch fire has a second subscriber — `cmd/moombox` broadcasts it to every live Twitch IRC chat downloader through `DownloadWorker.ReauthenticateTwitchChats`, which is the only way a capture already in flight learns that repaired cookies are on disk. `shouldObserveCredentials` and `advanceIdentityBaseline` (both pure, both platform-agnostic) govern both
 
-**(d)** After the `AuthStatus` paragraph (`:857`), add a new paragraph — **this is the sole-writer replacement spec §4 requires:**
+**(d)** After the `AuthStatus` paragraph (`:857`), add a new paragraph — **this is the sole-writer replacement spec §4 requires.** It is added HERE and nowhere else: Task 8 branch B no longer touches this file, so there is no second author and no risk of adding it twice.
+
+The paragraph is branch-neutral and is written the same way whichever branch Task 8 took: it describes the WRITE PATH, and that path is identical whether one producer calls it or two. Which producers exist is stated in Step 5 and Step 1(c), where the two variants live.
 
 > **`rs.status` has TWO writers, both under `rs.mu`, and the mark wins.** `refresh`'s status block was the only one until Arc 10; `RefreshService.NoteTwitchAuthLoss(reason)` is the second. It writes the Twitch triple — `TwitchAuthenticated=false`, `TwitchVerification=RefreshFailed`, `TwitchError` = a sentence from a fixed `switch` of string literals — and records a `twitchAuthMark` carrying the reason and the `CookieJar.TwitchIdentity()` it was taken under. `refresh`'s block then CONSULTS that mark: while it stands, one `twEffective` value drives the status, the previous-auth baseline, `shouldFireRecovery`, the `OnAuthRecovered` transition and the identity baseline, so validate's 200 cannot flip any of them. It has to work this way — `oauth2/validate` answers 200 for a valid `auth-token` whether or not a usable `login` sits beside it, so two of the four chat-downgrade routes would otherwise be erased within one tick with nothing repaired. The mark clears on a **changed fingerprint alone**, with no authenticated gate: a swap to a REVOKED token must report the 401, not the stale reason from the pair it replaced. Recovery rides the existing `shouldFireRecovery` dedupe and advances the same two baselines, so one loss raises one alarm. The reason never leaves the vocabulary: `twitchAuthLossMessage`'s arms are all string literals, so the set of strings `TwitchError` can hold is fixed at compile time, which is what makes it safe on the two per-request surfaces that render it.
 
@@ -4606,7 +4648,17 @@ Replace the final sentence, **"The Twitch side is a check with no rotation."**, 
 
 > The Twitch side is a check with no rotation — plus, since Arc 10, a MARK. Anything that finds Twitch credentials refused where they are actually used calls `NoteTwitchAuthLoss(reason)`, which writes the Twitch triple under the same mutex, fires `OnRecoveryNeeded("twitch")` through the ordinary dedupe, and sticks against a `oauth2/validate` 200 until the credential pair's fingerprint changes (`CookieJar.TwitchIdentity`). Today's callers are the IRC chat handshake's four downgrade routes. A credential change also fires `OnCredentialsChanged("twitch")`, which re-authenticates every live chat session in place rather than waiting for the next job.
 
-**On Task 8 branch A**, extend the caller sentence to: *"Today's callers are the IRC chat handshake's four downgrade routes and `GetHLSMasterPlaylist`, which reads whether the playback access token was issued to a signed-in session — the one detector a job with chat capture off still gets."*
+That replacement carries a placeholder sentence — **"Today's callers are the IRC chat handshake's four downgrade routes."** — which is the one clause with two variants. Write it per the branch Task 8 took, and write the rest of the paragraph exactly as given above either way.
+
+**On Task 8 branch A**, that sentence reads:
+
+> Today's callers are the IRC chat handshake's four downgrade routes and `GetHLSMasterPlaylist`, which reads whether the playback access token was issued to a signed-in session — the one detector a job with chat capture off still gets.
+
+**On Task 8 branch B**, it reads:
+
+> Today's only caller is the IRC chat handshake, through its four downgrade routes, so a job with chat recording off has no credential detector: the playback access token was measured and says nothing about whether it was honoured (see `platform-services.md` § Anonymous Fallback and the Downgrade Report).
+
+Either way this is the ONLY edit to that sentence. Task 8 branch B no longer appends anything to this paragraph, so there is no second "since Arc 10 it is a check plus a MARK" claim to reconcile.
 
 - [ ] **Step 6: Verify no citation went stale**
 
@@ -4683,10 +4735,10 @@ Run against the spec with fresh eyes after the plan was written. Issues found we
 | **R3** — the mark is sticky against a validate 200 | Task 2 (`twMarked` / `twEffective` in the status block; `TestValidate200DoesNotClearAStandingTwitchMark`) |
 | **R4** — a credential-pair change clears it; `TwitchIdentity`; `OnCredentialsChanged("twitch")`; every reload site pinned | Task 1 (the fingerprint), Task 2 (the clear), Task 3 (the fire + the reload-site table + `TestCheckNowObservesATwitchCredentialChange`), **Task 7a** (the four sites that reached no pass at all) |
 | **R5** — active chat sessions reconnect immediately; latches reset; no budget spent; a second refusal re-marks; a credentialed `001` logs at Info | Task 4 (`Reauthenticate`, the three latches, the accepted-login Info line), Task 5 (the registry), Task 7 (the broadcast), **Task 7a** ("immediately" is only true once every writer reaches a pass) |
-| **R6** — one live probe first; build the HLS mark only if the reply states honoured-vs-anonymous, otherwise record and stop | Task 0 (the probe), Task 8 (both branches written in full) |
+| **R6** — one live probe first; build the HLS mark only if the reply states honoured-vs-anonymous, otherwise record and stop | Task 0 (the probe), Task 8 (branch A builds it; branch B records the finding in the ledger and stops), Task 9 (both variants of the three sentences either branch makes true) |
 | **§3 non-goals** — no job-row indicator, no new UI state or REST key, no pilot change, no keepalive, no entitlement probe, no YouTube chat change | Global Constraints; no task touches `livenessRecoveryArmed`, `CookieStatus`, `TwitchAuthStatusPayload`'s keys, or `internal/chat` |
 | **§4 invariants** — no credential in any log/notification/payload/error; `AuthStatus` writes under `rs.mu`; the sole-writer doc sentence changes with the code; `OnAuthDowngrade` still non-blocking; inline recover on every goroutine; anonymous logger stays anonymous; `UpdateJobFields` | Global Constraints; Task 2 (locked writes, literal-only sentences); Task 7 (the goroutine + recover that keeps `OnAuthDowngrade` non-blocking); Task 9 Step 2(d) (the sole-writer replacement) |
-| **§5 docs** — `platform-services.md`, `data-and-storage.md`, `user-interfaces.md`, `operations.md`, `SPEC.md` | Task 9 (all five, with the current sentence quoted — including the two sentences Task 7a falsifies), plus Task 8 branch B for the one paragraph it owns |
+| **§5 docs** — `platform-services.md`, `data-and-storage.md`, `user-interfaces.md`, `operations.md`, `SPEC.md` | Task 9 ALONE, with the current sentence quoted for each — including the two sentences Task 7a falsifies and both variants of the three the Task 8 branch decides. No other task edits a spec file; Task 8 branch B records its finding in the ledger instead, so no sentence has two authors |
 
 No spec requirement is unassigned.
 
@@ -4722,6 +4774,30 @@ Three, all minor; the plan uses the code.
 - **`docs/spec/platform-services.md`'s "A job with chat recording off" paragraph is at `:529`, not `:530`** (`:530` is blank). Corrected in Task 8 branch B's Files list and Task 9 Step 1(c) — both of which are by-number edits, so the drift mattered.
 - **`Start`'s reconnect loop returns on `err == nil`, so `chat_irc.go`'s `RECONNECT` handler does NOT do what its comment claims.** The comment at `chat_irc.go:322-327` says *"Return nil so the outer loop does a clean reconnect without incrementing the error counter"*, but `chat.go`'s loop reads `if err == nil || ctx.Err() != nil || !cd.IsRunning() { return nil }` — a `nil` return ends `Start` entirely, so a Twitch-initiated `RECONNECT` silently ends chat capture for the job unless a connectivity outage later relaunches it. **This is a pre-existing latent bug, out of Arc 10's scope, and the plan deliberately does not fix it** (a `continue` there would need its own budget decision and its own test). It is recorded here because Task 4 edits that exact loop and an executor will read the stale comment: do not "fix" it in passing, and do not model `Reauthenticate` on it — that is precisely why Task 4 uses `reauthPending` rather than a `nil` return. **Carry this to the Arc 12 planning list.**
 
+### 3a. What the pre-flight conflict scan changed
+
+A pairwise Produces/Consumes and per-task self-consistency scan
+(`.superpowers/sdd/2026-08-25-cookie-subsystem-remediation/arc10-preflight-scan.md`) found ten
+items. Two were compile- or artifact-breaking and are worth carrying here rather than only in
+the scan:
+
+- **Task 6 would not have compiled.** `stream_processor_twitch_credentials_test.go` calls
+  `twitchChatDowngradeCallback` at THREE sites (`:327`, `:356`, `:386`), not the two the step
+  named. The missed one, inside `TestTwitchChatDowngradeWithoutANotifierIsSilent`, is the only
+  test covering the no-notifier install and does not carry "Callback" in its name. Step 5 now
+  lists all three with their line numbers and says why that one is easy to miss.
+- **Task 8 branch B and Task 9 would have edited the same three sentences.** Branch B pulled
+  Task 9's `data-and-storage.md` paragraph forward into its own commit, and appended to a
+  `SPEC.md` sentence Task 9 replaces — a duplicated paragraph and two near-identical "since Arc
+  10" claims. Resolved by ruling Task 9 the SOLE doc-editing task: branch B now records its
+  finding in the ledger, and Task 9 carries both variants of every HLS-side sentence, selecting
+  by the same Task 0 report.
+
+The other eight were declaration defects rather than behaviour defects — an undercounted test
+count, an undercounted Files block, an incomplete dependency line, two inaccurate Interfaces
+manifests, a duplicated code block with no strike-through, and the "re-derive by symbol" caution
+being attached to one task when three need it. All are fixed in place.
+
 ### 4. Placeholder scan
 
 No "TBD", no "implement later", no "add appropriate error handling", no "similar to Task N", no "write tests for the above". Every code step carries the actual code. Task 8's two branches are both written in full, with the branch condition stated as a check against a named artefact (Task 0's ledger entry) rather than as a decision deferred to the executor's judgement.
@@ -4748,7 +4824,7 @@ Checked across tasks:
 
 ### 6. Ordering and parallelism
 
-Tasks 1 → 2 → 3 are strictly sequential and all edit `internal/cookies/refresh.go`. Tasks 4 → 5 → 6 → 7 → 7a are strictly sequential. Task 0 is independent and should run FIRST (its result gates Task 8, and it needs an operator with a live channel, which may take a day). Task 8 needs Tasks 0 and 2. Task 9 needs everything, Task 7a included — two of its sentences describe Task 7a's behaviour.
+Tasks 1 → 2 → 3 are strictly sequential and all edit `internal/cookies/refresh.go`. Tasks 4 → 5 → 6 → 7 → 7a are strictly sequential. Task 0 is independent and should run FIRST (its result gates Task 8, and it needs an operator with a live channel, which may take a day). **Task 8 needs Tasks 0, 2, 6 and 7** — not just 0 and 2, as an earlier draft said: branch A's Step 5 extends a test file Task 6 creates, and its Step 6 anchors to a block Task 7 lands. Task 9 needs everything, Task 7a and Task 0's report included — two of its sentences describe Task 7a's behaviour, and three of them have two variants selected by the report.
 
 Task 7a comes after Task 7 rather than before it because both edit `cmd/moombox/services.go` within twenty lines of each other, and because 7a's helper is only worth reviewing once the mark and the broadcast it feeds exist. Its line-number citations were taken before Task 7 ran and it says so: re-derive by symbol.
 
