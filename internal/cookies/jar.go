@@ -909,6 +909,57 @@ func (j *CookieJar) GetTwitchCredentials() (token, login string) {
 	return j.twitch["auth-token"].value, j.twitch["login"].value
 }
 
+// TwitchIdentity returns a stable, non-reversible fingerprint of WHICH Twitch
+// credential pair the jar currently holds — "" only when it holds neither
+// half.
+//
+// The counterpart of YouTubeIdentity, and deliberately NOT its rule.
+// YouTubeIdentity requires BOTH halves and returns "" if either is missing,
+// because its question is "which Google ACCOUNT is this" and a SAPISID without
+// LOGIN_INFO cannot answer it. The question HERE is "is this the same
+// credential PAIR the chat downgrade was observed under", and an auth-token
+// with no login beside it is not an unanswerable state — it is one of the four
+// routes a job with credentials goes anonymous by (twitch.AuthDowngradeNo-
+// LoginCookie). Folding it to "" would make the operator's fix, adding the
+// login row, compare equal to the broken state it replaced: the auth mark
+// would never clear and the live chat session would never re-authenticate. So
+// "" means "no Twitch credentials at all" and nothing else.
+//
+// A changed fingerprint is a HINT, not proof, in the same direction
+// YouTubeIdentity chose: Twitch rotates auth-token on its own schedule, so a
+// same-account rotation reads as a change. That direction is cheap — one
+// re-check and one IRC reconnect, both of which the credentials will pass. The
+// opposite error, missing a real credential change, strands a capture in
+// anonymous chat for the rest of the job.
+//
+// Hashed rather than returned raw because this value is compared in code paths
+// near logging and is held on a RefreshService field, while both inputs are
+// among the highest-value secrets the app holds: one is a bearer token, the
+// other names the signed-in account. Callers must treat it as an opaque
+// equality token — never as a credential, and never as something to display.
+func (j *CookieJar) TwitchIdentity() string {
+	if j == nil {
+		return ""
+	}
+	// ONE RLock covering both reads, for the reason GetTwitchCredentials
+	// documents at length: Load swaps the whole map under Lock, so two
+	// separate locks could pair a token from the pre-Reload jar with a login
+	// from the post-Reload one and fingerprint a pair that never existed.
+	j.mu.RLock()
+	token := j.twitch["auth-token"].value
+	login := j.twitch["login"].value
+	j.mu.RUnlock()
+
+	if token == "" && login == "" {
+		return ""
+	}
+	// NUL separator: neither cookie may contain one (rowBreakingChars covers
+	// tab, CR, LF and NUL), so no pair of distinct (token, login) inputs can
+	// concatenate to the same string.
+	sum := sha256.Sum256([]byte(token + "\x00" + login))
+	return hex.EncodeToString(sum[:])
+}
+
 // IsEmpty returns true when NEITHER platform's jar holds a cookie. A file that
 // configured only one platform is not an empty jar.
 func (j *CookieJar) IsEmpty() bool {
