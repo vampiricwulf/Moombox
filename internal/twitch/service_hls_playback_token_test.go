@@ -151,7 +151,7 @@ func hlsJar(t *testing.T, path string, rows ...string) *cookies.CookieJar {
 	return jar
 }
 
-// TestGetHLSMasterPlaylistReportsTheAnonymousVerdict drives the whole method.
+// TestPlaybackTokenHLSVerdictIsReported drives the whole method.
 //
 // The mutations it closes, neither of which any predicate test can see because
 // neither is in the predicate:
@@ -167,7 +167,7 @@ func hlsJar(t *testing.T, path string, rows ...string) *cookies.CookieJar {
 // The last two cases are guards the predicate owns, re-asserted here through
 // the real method: a cookieless install gets an anonymous token BY DESIGN and
 // must not be reported, and an unreadable document is not a verdict.
-func TestGetHLSMasterPlaylistReportsTheAnonymousVerdict(t *testing.T) {
+func TestPlaybackTokenHLSVerdictIsReported(t *testing.T) {
 	const fixtureToken = "test-token-aaaa"
 	for _, tc := range []struct {
 		name       string
@@ -213,7 +213,7 @@ func TestGetHLSMasterPlaylistReportsTheAnonymousVerdict(t *testing.T) {
 			svc := NewService(jar, log)
 			variants, anonymousPlayback, err := svc.GetHLSMasterPlaylist(context.Background(), "somechannel")
 			if err != nil {
-				t.Fatalf("GetHLSMasterPlaylist: %v", err)
+				t.Fatalf("GetHLSMasterPlaylist failed (error type %T; its text is not printed because a transport error embeds the Usher URL, which carries the token)", err)
 			}
 			if len(variants) != 1 {
 				t.Fatalf("variants = %d, want 1 — the stub's playlist did not reach the parser", len(variants))
@@ -239,7 +239,7 @@ func TestGetHLSMasterPlaylistReportsTheAnonymousVerdict(t *testing.T) {
 	}
 }
 
-// TestGetHLSMasterPlaylistReadsTheAuthTokenOnce is the read-once discipline,
+// TestPlaybackTokenHLSReadsTheAuthTokenOnce is the read-once discipline,
 // and it is the only test that can see it.
 //
 // GetHLSMasterPlaylist reads s.Auth.GetAuthToken() into a local and hands the
@@ -259,7 +259,7 @@ func TestGetHLSMasterPlaylistReportsTheAnonymousVerdict(t *testing.T) {
 //     chat-off job has says nothing.
 //
 // MO closes on either half.
-func TestGetHLSMasterPlaylistReadsTheAuthTokenOnce(t *testing.T) {
+func TestPlaybackTokenHLSReadsTheAuthTokenOnce(t *testing.T) {
 	const fixtureToken = "test-token-aaaa"
 	for _, tc := range []struct {
 		name       string
@@ -296,7 +296,7 @@ func TestGetHLSMasterPlaylistReadsTheAuthTokenOnce(t *testing.T) {
 			svc := NewService(jar, &hlsWarnRecorder{})
 			_, anonymousPlayback, err := svc.GetHLSMasterPlaylist(context.Background(), "somechannel")
 			if err != nil {
-				t.Fatalf("GetHLSMasterPlaylist: %v", err)
+				t.Fatalf("GetHLSMasterPlaylist failed (error type %T; its text is not printed because a transport error embeds the Usher URL, which carries the token)", err)
 			}
 			if anonymousPlayback != tc.wantReport {
 				t.Errorf("anonymousPlayback = %v, want %v — the auth token was read twice, "+
