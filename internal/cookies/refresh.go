@@ -1205,8 +1205,10 @@ func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
 		// The SENTENCE, not the caller's `reason`. This function's own doc
 		// says the switch is the leak barrier rather than the caller's
 		// discipline, and logging the raw argument would quietly make that
-		// false — TestTwitchAuthLossReasonIsTheVocabularyOnly deliberately
-		// passes a credential-shaped string through this exact call.
+		// false. TestTwitchAuthLossWarnCarriesTheMappedSentenceOnly watches
+		// this exact line through a recording logger with a credential-shaped
+		// reason; TestTwitchAuthLossReasonIsTheVocabularyOnly pins the switch
+		// itself.
 		rs.logger.Warn("twitch credentials were refused where they were used, triggering recovery",
 			"reason", twitchAuthLossMessage(reason))
 		rs.OnRecoveryNeeded("twitch")
