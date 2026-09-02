@@ -358,3 +358,53 @@ func TestImportFailurePathsCarryNoValue(t *testing.T) {
 		scan(t, err, log, s)
 	})
 }
+
+// TestImportClearsAReloginFlagRaisedByTheSetter closes the loop R6 describes:
+// the prompt path raises it, a successful import clears it. Task 1 asserted the
+// clear against a direct write to the map because the setter did not exist yet;
+// this drives the real pair.
+//
+// The mutation: FlagManualRelogin writing a platform key the clear does not
+// read (or vice versa) — the prompt would then be unclearable by the one
+// gesture that answers it.
+func TestImportClearsAReloginFlagRaisedByTheSetter(t *testing.T) {
+	s, _, _ := importService(t, "", true)
+	s.FlagManualRelogin("youtube")
+	if !s.ReloginStatus()["youtube"] {
+		t.Fatal("FlagManualRelogin did not raise the YouTube flag")
+	}
+
+	if _, err := s.ImportCookies(context.Background(), netscapeHeader+fakeYouTubeRows); err != nil {
+		t.Fatalf("ImportCookies: %v", err)
+	}
+	if s.ReloginStatus()["youtube"] {
+		t.Error("a successful import left the re-login prompt raised — the operator did the thing " +
+			"the prompt asked for and is still being nagged about it")
+	}
+}
+
+// TestFlagManualReloginTouchesOnlyTheNamedPlatform. The map is written under
+// s.mu by three other paths and read by both UIs; a setter that wrote both keys
+// would raise an alarm about a platform nothing concluded anything about, and
+// one that wrote an arbitrary key would teach the frontend a platform it cannot
+// render.
+//
+// The mutation: replacing the switch with `s.needsRelogin[platform] = true`.
+func TestFlagManualReloginTouchesOnlyTheNamedPlatform(t *testing.T) {
+	s, _, _ := importService(t, "", true)
+	s.FlagManualRelogin("twitch")
+
+	relogin := s.ReloginStatus()
+	if !relogin["twitch"] {
+		t.Error("the Twitch flag was not raised")
+	}
+	if relogin["youtube"] {
+		t.Error("flagging Twitch raised YouTube too")
+	}
+
+	s.FlagManualRelogin("mastodon")
+	if len(s.ReloginStatus()) != 2 {
+		t.Errorf("an unrecognised platform was added to the map: %v — the wire shape is two keys and "+
+			"the frontend iterates it", s.ReloginStatus())
+	}
+}

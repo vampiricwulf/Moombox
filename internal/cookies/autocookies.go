@@ -937,6 +937,38 @@ func (s *AutoCookieService) refreshBrowser(policy browserGatePolicy) *DetectedBr
 	return s.resolvedBrowser()
 }
 
+// FlagManualRelogin marks a platform as needing manual re-login.
+//
+// Exported because its callers are in cmd/moombox: handleRecoveryNeeded raises
+// it at BOTH of its exits — the disabled branch, which is the container's
+// documented configuration and never runs a pass at all, and the failed-recovery
+// branch downstream of the enabled one. On either of those installs it is the
+// only way the prompt is ever raised: RefreshCookiesDetailed's verify-failed
+// arm, the other producer, needs a pass that got as far as checking, which
+// wants either a browser or a mounted profile.
+//
+// It was deleted in Arc 8 Task 12a for having zero production callers, having
+// been written for an ingest path that did not exist yet. It exists again
+// because that path does (Arc 11), and it must not outlive that caller: an
+// exported setter on a security-sensitive service with nothing calling it reads
+// to the next reader as a wired feature.
+//
+// Process-local, like every other write to this map. Cleared per platform by
+// FinishSetupDetailed, by RefreshCookiesDetailed's accepted arm and by
+// ImportCookies — the gesture this flag is asking the operator to perform.
+func (s *AutoCookieService) FlagManualRelogin(platform string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// A switch rather than a bare map write: the map's two keys are the wire
+	// shape both UIs iterate, and an unrecognised platform must not widen it.
+	switch platform {
+	case "youtube":
+		s.needsRelogin["youtube"] = true
+	case "twitch":
+		s.needsRelogin["twitch"] = true
+	}
+}
+
 // StartSetup launches a browser for the user to log in.
 func (s *AutoCookieService) StartSetup(platform string) error {
 	s.mu.Lock()
