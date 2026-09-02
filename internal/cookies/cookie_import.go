@@ -1,6 +1,12 @@
 package cookies
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -131,4 +137,158 @@ func stripEmptyValuedRows(netscape string) string {
 		kept = append(kept, line)
 	}
 	return strings.Join(kept, "\n")
+}
+
+// ImportResult reports what ONE operator-supplied cookie import concluded, per
+// platform.
+//
+// Field for field this is SetupResult's shape, and deliberately so: an import
+// is an acquisition with a per-platform verdict, exactly like a wizard finish,
+// and cookieImportOutcome renders the same key set cookieSetupOutcome does so
+// the dashboard reuses the copy helpers rather than inventing a fourth phrasing
+// of the same three states. It is a distinct TYPE because SetupResult's doc
+// says what one INTERACTIVE SETUP concluded, and an import is not a setup —
+// there is no browser, no slot and no cancel.
+//
+// The two facts per platform can disagree, which is the whole reason both are
+// here: see credentialAccepted for why an inconclusive check still accepts a
+// credential the operator just supplied.
+type ImportResult struct {
+	// What the auth check CONCLUDED, in the three-way vocabulary a refresh pass
+	// uses. RefreshUnknown is the zero value on purpose, so any exit that
+	// returns without checking cannot accidentally assert health or failure.
+	YouTube RefreshVerdict
+	Twitch  RefreshVerdict
+
+	YouTubeAccepted bool
+	TwitchAccepted  bool
+
+	// Wrote reports that this import REPLACED cookies.txt, and it is true on
+	// one error path as well as on success — the jar reload after a successful
+	// write can fail, and that exit returns an error over a file that has
+	// already been replaced. Its caller is the route's deferred re-check, which
+	// must fire on exactly that case: it is where a re-check is worth most,
+	// because refresh's own jar.Reload repairs the stale in-memory jar the
+	// error left behind. Same contract, same caller, as SetupResult.Wrote.
+	Wrote bool
+}
+
+// ImportCookies merges an operator-supplied Netscape cookie file into
+// cookies.txt, reloads the jar and verifies what it just installed.
+//
+// THE FIFTH WRITER of cookies.txt, and it inherits Arc 2's catalogue whole: the
+// read goes through the readCookieFile seam and distinguishes "does not exist"
+// from every other error, the merge goes through mergeCookieFiles, the write
+// goes through writeCookieFile, and no empty-valued row is ever produced (see
+// prepareCookieImport).
+//
+// NOT gated on the `stopped` latch, unlike StartSetup and
+// RefreshCookiesDetailed. Both of those refusals are about launching or
+// steering a browser PROCESS; this launches nothing, and refusing an import
+// during a drain would throw away credentials the operator supplied by hand,
+// for the sake of a shutdown that is about to read the file back on the next
+// start anyway.
+//
+// The caller runs the auth re-check. Every gesture that can write cookies.txt
+// must end in one (Arc 10 R4) and this one's caller lives in
+// internal/web/routes, which — like the two setup-wizard finishes — runs it
+// itself rather than through the OnPassCompleted seam. Firing that seam here
+// would double every external site; see its doc comment.
+func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) (ImportResult, error) {
+	if s.cookiePath == "" {
+		// Unreachable in production — cmd/moombox always constructs the service
+		// with cookies.cookie_file, which config defaults to ./cookies.txt —
+		// but writing to "" would otherwise produce a temp file in the process
+		// working directory and a rename onto nothing.
+		return ImportResult{}, errors.New("no cookie file is configured — set cookies.cookie_file")
+	}
+
+	var existing string
+	data, readErr := readCookieFile(s.cookiePath)
+	switch {
+	case readErr == nil:
+		existing = string(data)
+	case errors.Is(readErr, fs.ErrNotExist):
+		// No cookies.txt yet — first acquisition. Nothing to merge, nothing to
+		// protect.
+	default:
+		// Abort BEFORE anything is written. A transient read failure is NOT
+		// "no existing file": the unreadable file may hold working credentials
+		// for a platform this paste never mentions, and proceeding as if it
+		// were absent would replace it with the paste alone.
+		//
+		// Wrapped so the route can tell this apart from every other import
+		// failure — the operator must be told to fix the permission or the
+		// mount, and NEVER to replace the file Moombox just went out of its way
+		// not to destroy.
+		mergeErr := fmt.Errorf("%w — refusing to merge or overwrite an existing cookies.txt that could not be read (%w)",
+			ErrCookieFileUnreadable, readErr)
+		s.setError(mergeErr.Error())
+		s.logger.Error("cookie import: aborting rather than overwrite cookies.txt after a read failure",
+			"path", s.cookiePath, "err", readErr)
+		return ImportResult{}, mergeErr
+	}
+
+	// No setError on this exit, deliberately, and it is the same rule that
+	// keeps FinishSetupDetailed's two guard clauses from setting: a rejected
+	// paste is not a state of the INSTALL. Nothing ran, nothing was written,
+	// and the caller renders the refusal synchronously in the dialog that
+	// produced it — while lastError renders in Settings as a standing "your
+	// recordings will fail" that no later success clears.
+	merged, err := prepareCookieImport(existing, netscape)
+	if err != nil {
+		return ImportResult{}, err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
+		s.setError("could not create the directory for cookies.txt: " + err.Error())
+		return ImportResult{}, err
+	}
+	if err := writeCookieFile(s.cookiePath, []byte(merged), 0o600); err != nil {
+		// The hint names the ONE deployment mistake that produces this, and is
+		// kept SHORT because it goes to a status line both dashboards render —
+		// the same split FinishSetupDetailed's failed write already makes
+		// against refresh.go's log-bound paragraph.
+		wrErr := fmt.Errorf("%w (%w) — if this is Docker, mount the data directory rather than cookies.txt itself",
+			ErrCookieFileUnwritable, err)
+		s.setError(wrErr.Error())
+		return ImportResult{}, wrErr
+	}
+
+	// Wrote is set from here down: the file on disk has been replaced, so every
+	// exit past this point leaves a credential pair the running process may not
+	// have compared yet.
+	result := ImportResult{Wrote: true}
+
+	// Load(path), not Reload(): Reload re-reads the jar's OWN filePath and is a
+	// silent no-op on a jar that was never loaded from one, which would leave
+	// the process serving the old credentials while the file on disk is
+	// correct. Load is what the other two merge-writers use.
+	if err := s.jar.Load(s.cookiePath); err != nil {
+		s.setError("the imported cookies were written but could not be loaded: " + err.Error())
+		return result, err
+	}
+
+	yt, tw := s.checkPlatformAuth(ctx)
+	result.YouTube = verdictOf(yt)
+	result.Twitch = verdictOf(tw)
+	result.YouTubeAccepted = credentialAccepted(yt)
+	result.TwitchAccepted = credentialAccepted(tw)
+
+	// Clear the re-login flag for every platform this import ACCEPTED, not just
+	// the ones it verified — the operator has just done the thing the flag asks
+	// for, and leaving it raised because the confirming request hit a rate
+	// limit would nag them about work already done. Process-local; the next
+	// conclusive check re-raises it. Same rule, same wording, as
+	// FinishSetupDetailed's clear.
+	s.mu.Lock()
+	if result.YouTubeAccepted {
+		s.needsRelogin["youtube"] = false
+	}
+	if result.TwitchAccepted {
+		s.needsRelogin["twitch"] = false
+	}
+	s.mu.Unlock()
+
+	return result, nil
 }

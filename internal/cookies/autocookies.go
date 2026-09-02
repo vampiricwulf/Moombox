@@ -1280,26 +1280,8 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 	// audit reports/cookies.md #21) lives in checkPlatformAuth now.
 	ytCheck, twCheck := s.checkPlatformAuth(ctx)
 
-	// What the CALLER is told, and it is deliberately not the verification
-	// result. A sign-in the user just completed is accepted when the site could
-	// not answer: a 429, a captive portal or a DNS blip is not evidence against
-	// a login that happened thirty seconds ago, and refusing it would send the
-	// user back through a wizard that was working. False failure is the worse
-	// direction there.
-	//
-	// It is NOT accepted when nothing was ever asked. A jar that cannot produce
-	// a cookie header or a SAPISIDHASH made no request, so there is no answer
-	// to extend the benefit of the doubt to — and the caller-facing value is
-	// what setup.js turns into a green "YouTube cookies configured" badge and
-	// an entry in active_platforms. Because FinishSetup merges the pre-existing
-	// cookies.txt before checking, a leftover Google remnant with no SAPISID
-	// would otherwise light that badge up for a user who only signed in to
-	// Twitch. attempted is what separates the two; see platformAuth.
-	accepted := func(p platformAuth) bool {
-		return p.hasCookies && (p.state == verifyOK || (p.state == verifyUnknown && p.attempted))
-	}
-	ytAuth := accepted(ytCheck)
-	twAuth := accepted(twCheck)
+	ytAuth := credentialAccepted(ytCheck)
+	twAuth := credentialAccepted(twCheck)
 
 	// What gets WRITTEN DOWN, which is a different claim and must be the
 	// stricter one. PersistPlatforms unions into cfg.Cookies.Platforms, a set
