@@ -319,6 +319,25 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// chat-off) — per-part chat rolling below is live-IRC only. Direct
 	// concrete assertion per audit reports/worker.md Finding 59.
 	irc, _ := twitchChatDl.(*twitch.ChatDownloader)
+
+	// Register the live IRC downloader so a Twitch credential change can reach
+	// it MID-JOB (Arc 10 R5). Until now this object was reachable only through
+	// this goroutine's call stack.
+	//
+	// Deferred here rather than at any of the Stop / MarkStreamEnded sites
+	// below: this defer covers EVERY exit — finish, error, user cancel,
+	// shutdown, connectivity finalize and panic — so there is no exit path
+	// that has to remember to unregister, which is exactly how a registry
+	// keyed to long-running jobs leaks. Same shape as the OnJobUpdate and
+	// OnStateChange unsubscribes above.
+	//
+	// Only the IRC downloader. The VOD chat downloader re-reads its bearer
+	// token per GQL page, so it needs no signal.
+	if irc != nil {
+		unregisterChat := o.twitchChats.add(irc)
+		defer unregisterChat()
+	}
+
 	chatPathFor := func(stagingDir string) string { return filepath.Join(stagingDir, "chat.json") }
 
 	// startChat launches (or relaunches, after an outage killed the IRC

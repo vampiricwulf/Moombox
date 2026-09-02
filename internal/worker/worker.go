@@ -167,11 +167,15 @@ type DownloadWorker struct {
 	queue        *JobQueue
 	scheduler    *Scheduler
 	orchestrator *DownloadOrchestrator
-	streamProc   *StreamProcessor
-	notifier     *notifications.Manager
-	logger       logger
-	wg           sync.WaitGroup // tracks in-flight processJob goroutines
-	notifyJob    chan struct{}  // signal to re-check for new jobs (non-blocking send)
+	// twitchChats is the same registry the orchestrator holds. Kept here so
+	// cmd/moombox has an exported path to it without reaching through the
+	// orchestrator, which is otherwise entirely internal to this package.
+	twitchChats *twitchChatRegistry
+	streamProc  *StreamProcessor
+	notifier    *notifications.Manager
+	logger      logger
+	wg          sync.WaitGroup // tracks in-flight processJob goroutines
+	notifyJob   chan struct{}  // signal to re-check for new jobs (non-blocking send)
 
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
 	// be attempted. Returns true if THE NAMED PLATFORM ended up authenticated.
@@ -266,6 +270,14 @@ func NewDownloadWorker(
 	// promptly instead of on the heartbeat.
 	sp.SetWakeScheduler(sched.Wake)
 
+	// ONE registry, two holders. ExecuteTwitch registers into the
+	// orchestrator's; cmd/moombox broadcasts through the worker's. Two
+	// registries would compile, pass every registry unit test, and leave the
+	// broadcast reaching an always-empty map.
+	twitchChats := newTwitchChatRegistry()
+	orchestrator := NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn)
+	orchestrator.twitchChats = twitchChats
+
 	return &DownloadWorker{
 		db:           db,
 		yt:           yt,
@@ -273,7 +285,8 @@ func NewDownloadWorker(
 		cfg:          cfg,
 		queue:        queue,
 		scheduler:    sched,
-		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn),
+		orchestrator: orchestrator,
+		twitchChats:  twitchChats,
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,
@@ -1165,6 +1178,25 @@ func (w *DownloadWorker) SetConfigStore(store *config.Store) {
 // SetParallelDownloads updates the max parallel downloads at runtime.
 func (w *DownloadWorker) SetParallelDownloads(n int) {
 	w.queue.SetMaxParallel(n)
+}
+
+// ReauthenticateTwitchChats tells every live Twitch IRC chat downloader to
+// re-read its credentials and reconnect, and returns how many were told.
+//
+// Called by cmd/moombox from RefreshService.OnCredentialsChanged("twitch") —
+// the only signal a capture that is already running has that repaired cookies
+// are on disk. Returns a COUNT and nothing else: no channel, no job, no
+// account. "Told" is not "authenticated": a downloader with no live session
+// only has its latches cleared.
+//
+// Nil-safe on both the receiver and the registry, so a partially constructed
+// worker degrades to "nothing to tell" rather than panicking at the moment an
+// operator fixes their credentials.
+func (w *DownloadWorker) ReauthenticateTwitchChats() int {
+	if w == nil {
+		return 0
+	}
+	return w.twitchChats.reauthenticateAll()
 }
 
 // ResumeJob resumes a cancelled/errored YouTube job from its saved state.
