@@ -90,6 +90,16 @@ type StreamProcessor struct {
 	// at call sites.
 	wakeScheduler func()
 
+	// onTwitchAuthLoss reports a Twitch chat downgrade to whatever owns the
+	// PLATFORM's credential status — cookies.RefreshService.NoteTwitchAuthLoss
+	// in production, wired by cmd/moombox. nil is a valid install and the
+	// per-job notification still goes out.
+	//
+	// A func rather than the service, so internal/worker does not import
+	// internal/cookies. Same inversion, and the same reason, as
+	// DownloadWorker.CurrentCredentialIdentity.
+	onTwitchAuthLoss func(reason string)
+
 	twitchHints *twitchHintCache // populated by OnStreamFound; consumed by processTwitchLive
 
 	mu          sync.Mutex
@@ -138,6 +148,12 @@ func (sp *StreamProcessor) SetIsOnline(fn func() bool) {
 // processor. Called by NewDownloadWorker during construction.
 func (sp *StreamProcessor) SetWakeScheduler(fn func()) {
 	sp.wakeScheduler = fn
+}
+
+// SetOnTwitchAuthLoss wires the platform-mark seam. Called during startup,
+// long before any job goroutine exists.
+func (sp *StreamProcessor) SetOnTwitchAuthLoss(fn func(reason string)) {
+	sp.onTwitchAuthLoss = fn
 }
 
 // releaseArchiveSlot wakes the scheduler after a slot-release flip when the

@@ -1180,6 +1180,19 @@ func (w *DownloadWorker) SetParallelDownloads(n int) {
 	w.queue.SetMaxParallel(n)
 }
 
+// SetOnTwitchAuthLoss wires the Twitch platform-mark seam through to the
+// stream processor, which is where the chat downgrade is observed.
+//
+// cmd/moombox holds both the refresh service and the worker; the worker holds
+// the stream processor. This is the same one-hop forwarding SetConfigStore
+// does, and it exists so cmd/moombox never has to know that the stream
+// processor is where the callback lands.
+func (w *DownloadWorker) SetOnTwitchAuthLoss(fn func(reason string)) {
+	if w.streamProc != nil {
+		w.streamProc.SetOnTwitchAuthLoss(fn)
+	}
+}
+
 // ReauthenticateTwitchChats tells every live Twitch IRC chat downloader to
 // re-read its credentials and reconnect, and returns how many were told.
 //

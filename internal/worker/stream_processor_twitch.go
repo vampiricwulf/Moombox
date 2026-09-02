@@ -199,24 +199,55 @@ func (sp *StreamProcessor) notifierSend() notifySend {
 	return sp.notifier.Send
 }
 
+// twitchAuthLossReporter resolves the platform-mark seam, or nil when none is
+// wired.
+//
+// Read at CALL time rather than captured, for the reason notifierSend states
+// and one sharper: a downgrade report can arrive hours into a capture, so a
+// value captured when the downloader was built could be a nil from before
+// startup finished wiring.
+func (sp *StreamProcessor) twitchAuthLossReporter() func(reason string) {
+	return sp.onTwitchAuthLoss
+}
+
 // twitchChatDowngradeCallback builds the OnAuthDowngrade callback for one live
-// chat downloader.
+// chat downloader. It does TWO things with ONE report, and the split is the
+// point: the notification names the JOB, the mark names the PLATFORM.
 //
-// resolve is called at FIRE time and yields the send seam, or nil for the
-// no-notifier install. Injecting the LOOKUP rather than the sender is what makes
-// this closure the same object in production and under test — and the closure is
-// the one place a reason could be dropped, rewritten, or replaced by a constant
-// on its way from the downloader to the payload, which is a defect no test that
-// calls sendTwitchChatDowngrade directly can see. The production lookup is
-// StreamProcessor.notifierSend, whose nil arm is driven by its own test.
+// Neither replaces the other. Without the notice an operator is not told which
+// capture is degraded, or which channel's subscriber-only messages are being
+// lost. Without the mark the platform stays green — validate answers 200 for
+// two of the four routes — so nothing attempts recovery and the next capture
+// starts anonymous too.
 //
-// The downloader guarantees at most one call per job, so there is no dedup here
-// — and dedup ACROSS jobs is deliberately absent: a second job on the same
-// channel an hour later with the same dead cookies must notify again, because
-// by then the operator may believe they fixed it.
-func twitchChatDowngradeCallback(resolve func() notifySend, job *database.Job, channel string) func(reason string) {
+// BOTH resolvers are called at FIRE time and both may yield nil. Injecting the
+// LOOKUP rather than the sender is what makes this closure the same object in
+// production and under test, and it is the one place a reason could be
+// dropped, rewritten, or replaced by a constant on its way from the downloader
+// to either consumer — a defect no test that calls sendTwitchChatDowngrade
+// directly can see. The production lookups are StreamProcessor.notifierSend
+// and StreamProcessor.twitchAuthLossReporter.
+//
+// Order: the mark first. Both are cheap and neither can fail, but the mark is
+// what a UI reads on the next request and what fires the recovery attempt,
+// and sendTwitchChatDowngrade's target list can be long.
+//
+// The downloader guarantees at most one call per CREDENTIAL PAIR (Arc 10:
+// Reauthenticate resets its latches when the cookie file changes), so there is
+// no dedup here — and dedup ACROSS jobs is deliberately absent: a second job on
+// the same channel an hour later with the same dead cookies must notify again,
+// because by then the operator may believe they fixed it.
+func twitchChatDowngradeCallback(
+	resolveSend func() notifySend,
+	resolveMark func() func(reason string),
+	job *database.Job,
+	channel string,
+) func(reason string) {
 	return func(reason string) {
-		sendTwitchChatDowngrade(resolve(), job, channel, reason)
+		if mark := resolveMark(); mark != nil {
+			mark(reason)
+		}
+		sendTwitchChatDowngrade(resolveSend(), job, channel, reason)
 	}
 }
 
@@ -499,8 +530,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				// operator is already looking. Fires only when this job HAD
 				// credentials — a cookieless install captures chat anonymously
 				// by design and must never be notified about it.
-				OnAuthDowngrade: twitchChatDowngradeCallback(sp.notifierSend, job, chatChannel),
-				EmoteResolver:   sp.tw.Emotes,
+				OnAuthDowngrade: twitchChatDowngradeCallback(
+					sp.notifierSend, sp.twitchAuthLossReporter, job, chatChannel),
+				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
 
 			sp.db.UpdateJobFields(job.ID, map[string]any{
