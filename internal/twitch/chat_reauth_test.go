@@ -121,6 +121,37 @@ func (h *holdingIRCServer) nextSession(t *testing.T) []string {
 	}
 }
 
+// nextSessionWhileRunning is nextSession for the tests that drive a real Start,
+// and it watches Start as well as the fixture.
+//
+// A Start that has given up produces no further session, so waiting on the
+// fixture alone reports the generic ten-second timeout above — the fixture
+// complaining that nothing arrived — instead of the reason nothing did. A
+// non-blocking poll of done before the wait does not fix that: Start unwinds
+// its session, its loop and its deferred flush AFTER the last reconnect the
+// test asked for, so the poll almost always loses the race. Selecting on both
+// is the only shape that reports the real failure.
+//
+// n is how many sessions have already been consumed, so the message says where
+// it stopped. The value is put back on done, which is buffered, so the
+// t.Cleanup that waits for Start still completes instead of adding a second,
+// spurious failure on top of the real one.
+func (h *holdingIRCServer) nextSessionWhileRunning(t *testing.T, done chan error, n int) []string {
+	t.Helper()
+	select {
+	case lines := <-h.sessions:
+		return lines
+	case err := <-done:
+		done <- err
+		t.Fatalf("Start returned after %d session(s) (%v) — it gave up reconnecting instead of "+
+			"going straight back in, so a reconnect WE asked for was charged to the budget", n, err)
+		return nil
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for an IRC session to reach its scripted state")
+		return nil
+	}
+}
+
 // acceptedLoginRecorder counts the Info line an accepted authenticated login
 // writes. It records the MESSAGE only, never the args, for the same reason
 // recordingLogger does: neither the token nor the login may reach a log line,
@@ -139,12 +170,19 @@ func (l *acceptedLoginRecorder) Info(msg string, args ...any) {
 	l.mu.Unlock()
 }
 
-func (l *acceptedLoginRecorder) countInfo(substr string) int {
+// countInfo counts the Info lines whose message is EXACTLY want.
+//
+// Exact rather than a substring, and the plan's Global Constraints say why in
+// terms ("substring checks are no guard"). Both messages counted here are fixed
+// literals that the field gate and Task 7's plan text quote verbatim as the
+// thing an operator greps for, so a drift — "…accepted, probably" — breaks a
+// documented instruction, and a Contains check walks straight past it.
+func (l *acceptedLoginRecorder) countInfo(want string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	n := 0
 	for _, m := range l.infos {
-		if strings.Contains(m, substr) {
+		if m == want {
 			n++
 		}
 	}
@@ -154,7 +192,7 @@ func (l *acceptedLoginRecorder) countInfo(substr string) int {
 // acceptedLogins counts only the accepted-login line, so the several other
 // Info lines Start writes per reconnect cannot be mistaken for it.
 func (l *acceptedLoginRecorder) acceptedLogins() int {
-	return l.countInfo("authenticated login accepted")
+	return l.countInfo("twitch chat: authenticated login accepted")
 }
 
 // backoffReconnects counts the BACKOFF path's own Info line — the one written
@@ -178,8 +216,9 @@ func (l *acceptedLoginRecorder) backoffReconnects() int {
 func TestReauthenticateClearsTheRefusalLatchAndRepresentsCredentials(t *testing.T) {
 	rep := startIRCReplier(t, []string{loginFailedNotice}, []string{loginFailedNotice})
 	var reports downgradeRecorder
+	logger := &acceptedLoginRecorder{}
 	cd := newDowngradeTestChatDownloader(t,
-		staticCredentials("test-token-aaaa", "archiveraccount"), &recordingLogger{}, reports.record)
+		staticCredentials("test-token-aaaa", "archiveraccount"), logger, reports.record)
 
 	runLiveIRCSession(t, cd)
 	firstPass, firstNick := handshakeLines(t, rep.nextSession(t))
@@ -199,6 +238,19 @@ func TestReauthenticateClearsTheRefusalLatchAndRepresentsCredentials(t *testing.
 		t.Errorf("second handshake = (%q, %q), want the authenticated pair — the refusal latch survived Reauthenticate", secondPass, secondNick)
 	}
 	reports.assertReportedExactly(t, AuthDowngradeLoginRefused, AuthDowngradeLoginRefused)
+
+	// Both sessions were REFUSED. The accepted-login line is the operator's only
+	// positive confirmation that a repaired credential was taken, and the field
+	// gate tells them to grep for it — so a false positive on a refusal is its
+	// worst possible failure, and the twelve-welcomed-sessions count elsewhere
+	// in this file is one-sided without this.
+	//
+	// The mutation: hoisting that Info line out of the `if ircIsWelcome(line)`
+	// arm, where it fires on the first inbound line of ANY credentialed session
+	// — the "Login authentication failed" NOTICE included.
+	if got := logger.acceptedLogins(); got != 0 {
+		t.Errorf("accepted-login lines = %d across two REFUSED sessions, want none", got)
+	}
 }
 
 // TestReauthenticateReReportsAMissingLoginCookie is the latch the design's
@@ -292,14 +344,14 @@ func TestReauthenticateDoesNotLatchTheFallbackOnItsOwnCancel(t *testing.T) {
 		}
 	})
 
-	first := h.nextSession(t)
+	first := h.nextSessionWhileRunning(t, done, 0)
 	if pass, nick := handshakeLines(t, first); pass != "PASS oauth:test-token-aaaa" || nick != "NICK archiveraccount" {
 		t.Fatalf("first handshake = (%q, %q), want the authenticated pair", pass, nick)
 	}
 
 	cd.Reauthenticate()
 
-	second := h.nextSession(t)
+	second := h.nextSessionWhileRunning(t, done, 1)
 	if pass, nick := handshakeLines(t, second); pass != "PASS oauth:test-token-aaaa" || nick != "NICK archiveraccount" {
 		t.Errorf("second handshake = (%q, %q), want the authenticated pair — our own cancel was read as a refusal", pass, nick)
 	}
@@ -307,6 +359,90 @@ func TestReauthenticateDoesNotLatchTheFallbackOnItsOwnCancel(t *testing.T) {
 		t.Error("the anonymous fallback latched on a session WE cancelled")
 	}
 	reports.assertReportedExactly(t)
+}
+
+// TestReauthenticateSurvivesAVerdictThatLandsAfterTheArm is review finding 1,
+// Sequence A: the outgoing session's handshake verdict is decided BEFORE
+// Reauthenticate arms reauthPending, but lands AFTER Reauthenticate has cleared
+// the three latches — so authRefused is set again on the new credential pair,
+// sessionCredentials returns an empty pair, and the reconnect the operator's
+// repair asked for goes out ANONYMOUS and stays that way for the job. There is
+// no second chance: Task 3 fires OnCredentialsChanged only when the fingerprint
+// MOVES, and it has not moved since.
+//
+// Determinism comes from a barrier rather than a sleep. Start's reauth branch
+// flushes before it re-clears, and flush takes flushMu unconditionally (the
+// emptiness test is inside flushLocked), so a test holding flushMu parks the
+// branch at exactly the instant Sequence A's verdict lands: after the arm,
+// before the re-clear. The lock is taken BEFORE Reauthenticate, so the branch
+// cannot slip past it.
+//
+// The verdict is delivered by hand because the interleaving that produces it —
+// the handshake defer's guard reading reauthPending microseconds before
+// Reauthenticate arms it — has no synchronisation point a test can hook.
+// noteHandshakeOutcome is the real production call the real defer makes, with
+// the arguments a refused credentialed session produces.
+//
+// The mutation: drop the three Stores from Start's reauth branch. Session two
+// comes back as the justinfan pair. (Its sibling half — moving the resets back
+// outside Reauthenticate's critical section, which closes Sequence B — is a
+// lock-ordering invariant with no behavioural witness; see the report.)
+func TestReauthenticateSurvivesAVerdictThatLandsAfterTheArm(t *testing.T) {
+	h := startHoldingIRCServer(t, []string{pingLine})
+	var reports downgradeRecorder
+	cd := newDowngradeTestChatDownloader(t,
+		staticCredentials("test-token-aaaa", "archiveraccount"), &recordingLogger{}, reports.record)
+
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- context.Canceled
+			}
+		}()
+		done <- cd.Start(context.Background())
+	}()
+	t.Cleanup(func() {
+		cd.Stop()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("Start did not return after Stop")
+		}
+	})
+
+	if pass, nick := handshakeLines(t, h.nextSessionWhileRunning(t, done, 0)); pass != "PASS oauth:test-token-aaaa" || nick != "NICK archiveraccount" {
+		t.Fatalf("first handshake = (%q, %q), want the authenticated pair", pass, nick)
+	}
+
+	cd.flushMu.Lock()
+	cd.Reauthenticate()
+	cd.noteHandshakeOutcome(false, true, true)
+	latched := cd.authRefused.Load()
+	cd.flushMu.Unlock()
+
+	// Nothing below means anything unless the injected verdict really did
+	// re-latch the fallback after the reset.
+	if !latched {
+		t.Fatal("the fixture is wrong: the verdict injected after the reset did not latch the fallback")
+	}
+
+	second := h.nextSessionWhileRunning(t, done, 1)
+	if pass, nick := handshakeLines(t, second); pass != "PASS oauth:test-token-aaaa" || nick != "NICK archiveraccount" {
+		t.Errorf("second handshake = (%q, %q), want the authenticated pair — the dying session's "+
+			"verdict landed after the reset and demoted the reconnect it asked for", pass, nick)
+	}
+	if cd.authRefused.Load() {
+		t.Error("the anonymous fallback is still latched after the reconnect Reauthenticate asked for")
+	}
+
+	// Exactly the injected one. The report that fired between the reset and the
+	// re-clear is the residual the review priced and declined to suppress: at
+	// the verdict the code cannot know a reset is coming, and holding cd.mu
+	// across noteHandshakeOutcome's Warn to fix it is the worse trade. It is a
+	// stale report on the new pair, not a stale HANDSHAKE, and it belongs to
+	// the sticky mark in Tasks 6/7 rather than to this file.
+	reports.assertReportedExactly(t, AuthDowngradeLoginRefused)
 }
 
 // TestReauthenticateSpendsNoReconnectBudget.
@@ -353,15 +489,10 @@ func TestReauthenticateSpendsNoReconnectBudget(t *testing.T) {
 	// budget, so a budget-charging implementation gives up before the last.
 	const forcedReconnects = 11
 	for i := 0; i <= forcedReconnects; i++ {
-		lines := h.nextSession(t)
+		lines := h.nextSessionWhileRunning(t, done, i)
 		pass, nick := handshakeLines(t, lines)
 		if pass != "PASS oauth:test-token-aaaa" || nick != "NICK archiveraccount" {
 			t.Fatalf("session %d handshake = (%q, %q), want the authenticated pair", i, pass, nick)
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("Start returned after %d sessions (%v) — the reconnect budget was charged for reconnects we asked for", i+1, err)
-		default:
 		}
 		if i < forcedReconnects {
 			cd.Reauthenticate()
@@ -377,6 +508,14 @@ func TestReauthenticateSpendsNoReconnectBudget(t *testing.T) {
 	// only the ABSENCE of a downgrade report, and absence is not evidence.
 	if got := logger.acceptedLogins(); got != forcedReconnects+1 {
 		t.Errorf("accepted-login lines = %d across %d welcomed sessions, want one each", got, forcedReconnects+1)
+	}
+
+	// Nothing in this test may ever reach the backoff path. It is the other
+	// half of "spends no budget": reconnectAttempts never leaves zero, which is
+	// also why the stability reset this branch now carries is a no-op here and
+	// has to be argued rather than asserted (see the report).
+	if got := logger.backoffReconnects(); got != 0 {
+		t.Errorf("backoff reconnects = %d across %d credential-driven reconnects, want none", got, forcedReconnects)
 	}
 }
 
@@ -422,8 +561,8 @@ func TestReauthenticateSkipsTheBackoffAfterAGenuineError(t *testing.T) {
 		}
 	})
 
-	_ = h.nextSession(t) // the dropped one: reconnectAttempts becomes 1
-	_ = h.nextSession(t) // reached through the backoff path, and it logged
+	_ = h.nextSessionWhileRunning(t, done, 0) // the dropped one: reconnectAttempts becomes 1
+	_ = h.nextSessionWhileRunning(t, done, 1) // reached through the backoff path, and it logged
 
 	if got := logger.backoffReconnects(); got != 1 {
 		t.Fatalf("backoff reconnects before the credential change = %d, want exactly one — the "+
@@ -432,7 +571,7 @@ func TestReauthenticateSkipsTheBackoffAfterAGenuineError(t *testing.T) {
 
 	cd.Reauthenticate()
 
-	third := h.nextSession(t)
+	third := h.nextSessionWhileRunning(t, done, 2)
 	if pass, nick := handshakeLines(t, third); pass != "PASS oauth:test-token-aaaa" || nick != "NICK archiveraccount" {
 		t.Errorf("third handshake = (%q, %q), want the authenticated pair", pass, nick)
 	}

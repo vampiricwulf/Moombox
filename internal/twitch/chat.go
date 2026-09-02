@@ -162,8 +162,8 @@ type ChatDownloader struct {
 	}
 
 	// sessionCancel aborts the in-flight IRC session's I/O (set by
-	// runIRCSession for its lifetime, guarded by mu). Stop/MarkStreamEnded
-	// fire it so a session parked in a quiet-channel read (up to
+	// runIRCSession for its lifetime, guarded by mu). Stop, MarkStreamEnded and
+	// Reauthenticate fire it so a session parked in a quiet-channel read (up to
 	// ircReadDeadline) reacts immediately instead of minutes later.
 	sessionCancel context.CancelFunc
 
@@ -364,11 +364,13 @@ func (cd *ChatDownloader) reportAuthDowngrade(reason string) {
 // list say so fires the auth-loss alarm on installs whose login cookie may
 // never have meant anything. See twitchAuthCookieNames for that trace.
 //
-// ONCE PER DOWNLOADER, not per session. The condition is a property of the
-// cookie file, so a job that reconnects hourly for three days would otherwise
-// repeat this line hourly for three days and bury the rest of its log. The
-// cost if the cookies are repaired mid-job: nothing is said when the next
-// reconnect starts authenticating properly, which is a silence about GOOD news.
+// ONCE PER CREDENTIAL PAIR, not per session (Reauthenticate resets the latch).
+// The condition is a property of the cookie file, so a job that reconnects
+// hourly for three days would otherwise repeat this line hourly for three days
+// and bury the rest of its log. Repaired cookies are not a silence any more:
+// the credential change resets this latch, so a file that is STILL missing its
+// login row says so again, and one that is not says so positively through the
+// accepted-login line at the 001 (see runIRCSession).
 //
 // ONE line for both inputs, because the remedy is one thing — re-export the
 // cookies — and an operator who hand-wrote either of them re-exports out of
@@ -452,8 +454,8 @@ func (cd *ChatDownloader) noteMissingLogin(token, login string) {
 //
 // Both Warns are followed by reportAuthDowngrade, which carries the same fact
 // out of the log to whoever owns this downloader. That report is latched ONCE
-// PER DOWNLOADER across this site and noteMissingLogin together, so it is not
-// the one-shot above by another name — see reportAuthDowngrade.
+// PER CREDENTIAL PAIR across this site and noteMissingLogin together, so it is
+// not the one-shot above by another name — see reportAuthDowngrade.
 func (cd *ChatDownloader) noteHandshakeOutcome(welcomed, heardFromServer, sawLoginFailure bool) {
 	// Order matters: a drop must leave the latch untouched, so the Swap is
 	// reached only once both exits above have been ruled out.
@@ -712,6 +714,40 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			// memory until the next session's flusher tick, which is a second,
 			// undocumented behaviour for no saving.
 			cd.flush()
+
+			// Again, and here rather than only in Reauthenticate: the defer
+			// that judged the session we just cancelled reads reauthPending
+			// OUTSIDE any lock, so a verdict whose guard slipped in a moment
+			// before the arm can have set these three AFTER Reauthenticate
+			// cleared them — and the reconnect we are about to make would then
+			// present the anonymous pair, which is the whole failure this
+			// mechanism exists to end. Deferred functions all complete before
+			// runIRCSession returns, so this point dominates every exit path of
+			// the session it interrupted; it is the only one that does.
+			//
+			// After the flush rather than before it, so the re-clear is the
+			// last thing between the outgoing session and the next handshake.
+			// The report that already fired in that window is not recoverable
+			// here and is not meant to be: at the verdict the code cannot know
+			// a reset is coming, and the sticky platform mark is where a stale
+			// one is reconciled.
+			cd.authRefused.Store(false)
+			cd.downgradeReported.Store(false)
+			cd.warnedNoLogin.Store(false)
+
+			// A session WE ended after it had been healthy for a long time is
+			// still a healthy session, so it must clear the counter exactly as
+			// any other exit would. Without this, a job carrying failures from
+			// earlier network trouble keeps them across a credential repair and
+			// sits that much closer to abandoning chat for the rest of the job
+			// — a repair making things worse. Same threshold, same line, same
+			// fact as the ordinary path below.
+			if sessionUptime >= reconnectResetUptime && reconnectAttempts > 0 {
+				cd.logger.Info("IRC session was stable before disconnect; resetting reconnect counter",
+					"channel", cd.channelLogin, "uptime", sessionUptime)
+				reconnectAttempts = 0
+			}
+
 			cd.logger.Info("twitch chat: reconnecting with the refreshed credentials", "channel", cd.channelLogin)
 			immediate = true
 			continue
@@ -818,8 +854,13 @@ func (cd *ChatDownloader) interruptSession() {
 // latch: noteMissingLogin returns on its Swap BEFORE it reaches
 // reportAuthDowngrade, so leaving it set means a repaired cookie file that is
 // still missing its login row reports NOTHING the second time — precisely the
-// silence this whole mechanism exists to end. All three are reset before the
-// session is dropped, so the next handshake is judged on its own merits.
+// silence this whole mechanism exists to end.
+//
+// All three are reset TWICE: once here, under cd.mu, and once in Start's reauth
+// branch just before the next session opens. That is not belt-and-braces, it is
+// two different orderings — see the critical section below for the first and
+// the branch itself for the second. Between them the next handshake is judged
+// on its own merits whatever the dying session did on its way out.
 //
 // The drop goes through the existing sessionCancel, so a session parked in a
 // six-minute read reacts at once rather than minutes later.
@@ -834,14 +875,25 @@ func (cd *ChatDownloader) interruptSession() {
 // the next Start — the orchestrator relaunches chat after a connectivity gap —
 // presents credentials. Safe from any goroutine, and it does not block.
 func (cd *ChatDownloader) Reauthenticate() {
+	// ONE critical section, and the three resets belong inside it. It holds
+	// interruptSession's inlined body — the read of sessionCancel and the arm
+	// must not be separated, because between them a session could start or end
+	// — and the resets are in it for a second, sharper reason: runIRCSession
+	// clears sessionCancel under this same lock AFTER its handshake defer has
+	// judged the outgoing session. Reset outside the lock and that verdict can
+	// land on the NEW pair, re-latching authRefused so sessionCredentials
+	// returns an empty pair and the reconnect we are about to ask for goes out
+	// ANONYMOUS. Inside the lock, either we arm before the defer reads
+	// reauthPending (the verdict is skipped) or we are ordered after the clear
+	// and our resets dominate the verdict. There is no third order.
+	//
+	// Nothing here does I/O, so the hold is O(1): the cancel is called after
+	// the unlock, which is also the one thing in this function that could
+	// deadlock if it were not.
+	cd.mu.Lock()
 	cd.authRefused.Store(false)
 	cd.downgradeReported.Store(false)
 	cd.warnedNoLogin.Store(false)
-
-	// interruptSession's body is inlined rather than called, because the
-	// decision and the read must be ONE critical section: between a separate
-	// read and a separate arm, a session could start or end.
-	cd.mu.Lock()
 	cancel := cd.sessionCancel
 	if cancel != nil {
 		cd.reauthPending.Store(true)
