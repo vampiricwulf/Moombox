@@ -37,7 +37,7 @@ Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN
 | `internal/cookies/errors.go` | 0 | Four new sentinels beside `ErrCookieFileUnreadable`: the three refusals and `ErrCookieFileUnwritable`. Sentinels live here, all of them, and nothing else does. |
 | `internal/cookies/cookie_import.go` (new) | 0, 1 | The whole ingest: `prepareCookieImport` (pure) in the first half, `ImportResult` + `AutoCookieService.ImportCookies` (I/O) in the second. One file because the two change together and neither has another consumer. |
 | `internal/cookies/autocookies_profile.go` | 1 | `credentialAccepted` — the acceptance predicate lifted out of `FinishSetupDetailed`'s closure so the import and the wizard cannot drift apart. |
-| `internal/cookies/autocookies.go` | 2 | `FlagManualRelogin`, restored beside its neighbours. |
+| `internal/cookies/autocookies.go` | 1, 2 | Task 1 swaps `FinishSetupDetailed`'s `accepted` closure for a call to `credentialAccepted`; Task 2 restores `FlagManualRelogin` beside its neighbours. Disjoint regions of one file — `:1298-1302` and just above `StartSetup` at `:941`. |
 | `internal/web/routes/cookies.go` | 1 | `maxCookieImportBytes`, `readCookieImportBody`, `cookieImportOutcome`, and the `POST /api/cookies/import` handler on the `heavy` sub-router. |
 | `cmd/moombox/monitor_callbacks.go` | 2 | The caller: a recovery that could not run raises the re-login prompt; the notification copy names the dashboard import. |
 | `web/public/index.html` | 3 | The paste textarea, the file picker, the button and the inline result, inside the existing cookies panel. |
@@ -58,7 +58,7 @@ Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN
 | 4 | The doc sentences that change with the code | `README.md`, `docker/entrypoint.sh`, `SPEC.md`, three `docs/spec/*.md`, the Arc 10 plan | sonnet |
 | 5 | The live-gate decision and the field gate | `docs/superpowers/plans/2026-08-29-cookie-remediation-field-test-plan.md` | sonnet |
 
-Tasks 0 → 1 → 2 → 3 are strictly ordered (each Consumes the previous). Task 4 depends on 0-3. Task 5 depends on 1 and 4.
+**The real edges, rather than a straight line.** 1 Consumes 0 (`prepareCookieImport` and the four sentinels). 2 Consumes 1 (`ImportCookies`, for the clear-side test it appends to Task 1's test file). 3 Consumes 1 (the route and `cookieImportOutcome`'s key set) and **nothing from 2** — its re-login routing reads the pre-existing `autoCookieReloginRequired` field, not anything Task 2 adds — so 2 and 3 share no interface and touch no file in common; either order works. 4 Consumes 0-3, as prose. 5 Consumes 1 and 3 (the endpoint and the panel are what its field gate exercises); it is written last because it describes them, not because 4 produces anything it reads.
 
 Task 1 is opus because it is the security surface: an authenticated endpoint that accepts credential bytes, writes the highest-value secret in the app, and must not leak a byte of it back. Everything else has its code written out here.
 
@@ -1306,13 +1306,13 @@ func postImport(t *testing.T, r chi.Router, contentType, body string) *httptest.
 	return rec
 }
 
-// TestImportRouteWritesAndAnswersWithTheVerdict — the happy path, asserted on
+// TestCookieImportRouteWritesAndAnswersWithTheVerdict — the happy path, asserted on
 // the FILE (the sibling platform survived) and on the wire (the verdict).
 //
 // The mutation: answering before calling ImportCookies, or rendering
 // refreshSvc.GetStatus() instead of the result — the response would then carry
 // the PRE-import snapshot, and a bad export would be reported as fine.
-func TestImportRouteWritesAndAnswersWithTheVerdict(t *testing.T) {
+func TestCookieImportRouteWritesAndAnswersWithTheVerdict(t *testing.T) {
 	r, path, _, _ := importRouter(t, importHeader+importTwitch, nil)
 
 	rec := postImport(t, r, "text/plain", importPaste())
@@ -1341,14 +1341,14 @@ func TestImportRouteWritesAndAnswersWithTheVerdict(t *testing.T) {
 	}
 }
 
-// TestImportOutcomeSpeaksTheSetupOutcomeVocabulary. The two payloads answer the
+// TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary. The two payloads answer the
 // same question about the same three states, and the dashboard renders both
 // through cookieSetupAcceptedToast / cookieSetupRejectedMessage. A key added to
 // one and not the other is the junction defect this file keeps finding: the
 // import's UI silently reads `undefined` and hedges about a working session.
 //
 // The mutation: renaming or adding a key in either renderer.
-func TestImportOutcomeSpeaksTheSetupOutcomeVocabulary(t *testing.T) {
+func TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary(t *testing.T) {
 	keys := func(m map[string]any) []string {
 		out := make([]string, 0, len(m))
 		for k := range m {
@@ -1365,12 +1365,12 @@ func TestImportOutcomeSpeaksTheSetupOutcomeVocabulary(t *testing.T) {
 	}
 }
 
-// TestImportRouteRefusesTheThreeShapesWithTheirOwnMessage.
+// TestCookieImportRouteRefusesTheThreeShapesWithTheirOwnMessage.
 //
 // The mutation: collapsing the three sentinels into the default arm. Every bad
 // paste then answers "cookie import failed" with a 500, which names nothing the
 // operator can act on and reads as a server fault rather than a bad export.
-func TestImportRouteRefusesTheThreeShapesWithTheirOwnMessage(t *testing.T) {
+func TestCookieImportRouteRefusesTheThreeShapesWithTheirOwnMessage(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		body string
@@ -1403,14 +1403,14 @@ func TestImportRouteRefusesTheThreeShapesWithTheirOwnMessage(t *testing.T) {
 	}
 }
 
-// TestImportRouteRefusesTheWrongRequestShapes. Each of these is a distinct
+// TestCookieImportRouteRefusesTheWrongRequestShapes. Each of these is a distinct
 // operator mistake with a distinct answer, and each has its own mutant: drop
 // the cap and a 50 MB paste is merged into memory and onto disk; drop the
 // content-type switch and a JSON body posted by a well-meaning client is read
 // as cookie text and rejected with the wrong sentence; drop the empty-body
 // check and a mis-click reports "that cookie file has no cookie rows" about a
 // file the operator never sent.
-func TestImportRouteRefusesTheWrongRequestShapes(t *testing.T) {
+func TestCookieImportRouteRefusesTheWrongRequestShapes(t *testing.T) {
 	t.Run("over the cap, pasted", func(t *testing.T) {
 		r, _, _, _ := importRouter(t, "", nil)
 		oversize := importPaste() + strings.Repeat("# padding\n", 60000)
@@ -1468,12 +1468,12 @@ func TestImportRouteRefusesTheWrongRequestShapes(t *testing.T) {
 	})
 }
 
-// TestImportRouteAcceptsAMultipartUpload — the file picker's shape. The panel
+// TestCookieImportRouteAcceptsAMultipartUpload — the file picker's shape. The panel
 // has two controls and this is the one a phone uses; without it the file input
 // posts a body the handler answers 415 to.
 //
 // The mutation: deleting the multipart arm, or reading the wrong part name.
-func TestImportRouteAcceptsAMultipartUpload(t *testing.T) {
+func TestCookieImportRouteAcceptsAMultipartUpload(t *testing.T) {
 	r, path, _, _ := importRouter(t, importHeader+importTwitch, nil)
 
 	var buf bytes.Buffer
@@ -1503,13 +1503,13 @@ func TestImportRouteAcceptsAMultipartUpload(t *testing.T) {
 	}
 }
 
-// TestImportRouteIsOnTheHeavyLimiter. The endpoint validates, merges, writes and
+// TestCookieImportRouteIsOnTheHeavyLimiter. The endpoint validates, merges, writes and
 // then makes up to four live auth round-trips; unlimited it is a free
 // amplifier against two upstreams and a rewrite of the credential file per
 // request.
 //
 // The mutation: registering the route on `r` instead of `heavy`.
-func TestImportRouteIsOnTheHeavyLimiter(t *testing.T) {
+func TestCookieImportRouteIsOnTheHeavyLimiter(t *testing.T) {
 	rl := web.NewRateLimiterCtx(context.Background(), 1, time.Minute)
 	t.Cleanup(rl.Close)
 	r, _, _, _ := importRouter(t, "", rl)
@@ -1523,13 +1523,13 @@ func TestImportRouteIsOnTheHeavyLimiter(t *testing.T) {
 	}
 }
 
-// TestImportRouteHasNoGET is the third controller ruling, at the wire. The
+// TestCookieImportRouteHasNoGET is the third controller ruling, at the wire. The
 // endpoint accepts credential bytes and never serves them; that asymmetry is
 // the whole of what keeps it from being an exfiltration path.
 //
 // The mutation: adding a GET handler for this path — "so the panel can show
 // what is currently loaded" is exactly how it would arrive.
-func TestImportRouteHasNoGET(t *testing.T) {
+func TestCookieImportRouteHasNoGET(t *testing.T) {
 	r, _, _, _ := importRouter(t, importHeader+importYouTube+importYouTubeTwo, nil)
 
 	rec := httptest.NewRecorder()
@@ -1563,7 +1563,7 @@ func importRouterOverADirectory(t *testing.T) (chi.Router, *recordingLogger) {
 	return r, log
 }
 
-// TestImportRouteLeaksNoValueAnywhere is the security rule, executed: drive
+// TestCookieImportRouteLeaksNoValueAnywhere is the security rule, executed: drive
 // every answer this endpoint can give with a body full of distinctive fake
 // values, and scan the response AND every log line for each of them.
 //
@@ -1582,7 +1582,7 @@ func importRouterOverADirectory(t *testing.T) (chi.Router, *recordingLogger) {
 //
 // The mutation: any handler or sentinel that grows a %s of the submitted text —
 // the shape a "helpful" diagnostic naming the offending row would take.
-func TestImportRouteLeaksNoValueAnywhere(t *testing.T) {
+func TestCookieImportRouteLeaksNoValueAnywhere(t *testing.T) {
 	secrets := []string{"fake-sapisid-aaaa", "fake-logininfo-aaaa", "fake-authtoken-aaaa", "fake-ysc-aaaa"}
 	scan := func(t *testing.T, rec *httptest.ResponseRecorder, log *recordingLogger) {
 		t.Helper()
@@ -1636,7 +1636,7 @@ import (
 	"testing"
 )
 
-// TestImportHandlerEndsInADetachedFlushedRecheck.
+// TestCookieImportHandlerEndsInADetachedFlushedRecheck.
 //
 // Arc 10 R4: refresh's status block is the ONLY place the Twitch credential
 // fingerprint is compared, the auth mark cleared and OnCredentialsChanged
@@ -1676,7 +1676,7 @@ import (
 //     answered for, and a fetch with a timeout aborts an import that succeeded.
 //   - drop the `!result.Wrote` guard: a rejected paste spends a full in-process
 //     re-check, two validate round-trips, on a file nobody touched.
-func TestImportHandlerEndsInADetachedFlushedRecheck(t *testing.T) {
+func TestCookieImportHandlerEndsInADetachedFlushedRecheck(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "cookies.go", nil, 0)
 	if err != nil {
@@ -1790,7 +1790,7 @@ func TestImportHandlerEndsInADetachedFlushedRecheck(t *testing.T) {
 
 - [ ] **Step 8: Run both route tests to verify they fail**
 
-Run: `go test -count=1 -run 'TestImport' ./internal/web/routes/`
+Run: `go test -count=1 -run '^TestCookieImport' ./internal/web/routes/`
 Expected: FAIL to compile — `undefined: cookieImportOutcome`. Nothing in the package runs, so `routeHandlerLit`'s own fatal ("no POST handler is registered for /api/cookies/import") is not reported here; that is what you would see if the package compiled with the route still unregistered.
 
 - [ ] **Step 9: Write the route**
@@ -1903,7 +1903,7 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 // phrasing of "saved, but we could not check them" is how the copy drifts
 // apart. See cookieSetupOutcome for what each key means and why `authenticated`
 // and `*Verification` can disagree. Pinned by
-// TestImportOutcomeSpeaksTheSetupOutcomeVocabulary.
+// TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary.
 //
 // Deliberately NOT carrying a cookieStatus block. That comes from
 // RefreshService.GetStatus, whose pass has not run yet at the moment this is
@@ -1946,7 +1946,7 @@ Immediately after the `/api/cookies/auto-refresh` handler (`:420`), the handler 
 	// There is NO GET, and there must never be one, however natural it feels
 	// beside an upload control. That single asymmetry — accepts credential
 	// bytes, never serves them — is what keeps this from being an exfiltration
-	// path. Pinned by TestImportRouteHasNoGET.
+	// path. Pinned by TestCookieImportRouteHasNoGET.
 	heavy.Post("/api/cookies/import", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
 			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
@@ -2032,8 +2032,10 @@ Immediately after the `/api/cookies/auto-refresh` handler (`:420`), the handler 
 
 - [ ] **Step 10: Run the route tests to verify they pass**
 
-Run: `go test -count=1 -run 'TestImport' ./internal/web/routes/`
-Expected: PASS — 9 tests including subtests. Nine rather than eight: the filter also matches `TestImportHandlerEndsInADetachedFlushedRecheck` from Step 7.
+Run: `go test -count=1 -run '^TestCookieImport' ./internal/web/routes/`
+Expected: PASS — exactly the 9 new tests, subtests included (the 8 in `cookies_import_test.go` plus `TestCookieImportHandlerEndsInADetachedFlushedRecheck` from Step 7).
+
+ANCHORED, and prefixed `TestCookieImport` for that reason — do not "simplify" it to `-run 'TestImport'`. This package already holds twelve tests of the ARCHIVE import (`internal/web/routes/import_routes_test.go`, `POST /api/import`, an unrelated feature), every one of which a bare `TestImport` also matches: the run reports 21 top-level tests, nothing about the count tells you whether all nine of yours ran, and a new test of either feature moves a number the plan cannot predict. `^TestCookieImport` matches these nine and nothing else in the tree.
 
 - [ ] **Step 11: Run the full gates**
 
@@ -2112,7 +2114,7 @@ So the raise goes in BOTH exits of `handleRecoveryNeeded` — the disabled branc
 **Files:**
 - Modify: `internal/cookies/autocookies.go` — restore `FlagManualRelogin` immediately above `StartSetup` (`:941`), i.e. straight after `refreshBrowser` ends at `:938`, which is where it sat before the deletion (`:830` is inside `ReloginStatus` today; find it by symbol, not by number)
 - Modify: `cmd/moombox/monitor_callbacks.go:485-495` (`cookieReplacementGuidance` and its doc), `:750-790` (the `!autoEnabled` branch of `handleRecoveryNeeded` — the raise, and its stale "leads with the cookie FILE" comment), `:593-601` (the generic error branch), `:715-717` (the Ineffective notification's inline guidance)
-- Test: `cmd/moombox/monitor_callbacks_relogin_test.go` (create); `internal/cookies/autocookies_relogin_status_test.go:130-155` (swap the direct-write fixture for the setter, rewrite the note); `internal/web/routes/cookies_relogin_status_test.go:27-50` (restore the value assertions the deletion removed, rewrite the note)
+- Test: `cmd/moombox/monitor_callbacks_relogin_test.go` (create); `internal/cookies/cookie_import_service_test.go` (Task 1's file — append the clear-side pair, `TestImportClearsAReloginFlagRaisedByTheSetter` and `TestFlagManualReloginTouchesOnlyTheNamedPlatform`, which need the setter and so could not exist until now); `internal/cookies/autocookies_relogin_status_test.go:130-155` (swap the direct-write fixture for the setter, rewrite the note); `internal/web/routes/cookies_relogin_status_test.go:27-50` (restore the value assertions the deletion removed, rewrite the note)
 - Read (do not modify): `git show c9cdf5c^:internal/cookies/autocookies.go` for the deleted body; `cmd/moombox/monitor_callbacks_recovery_test.go:25-68` for `recoveryTestState` / `stubRefresh`
 
 **Interfaces:**
@@ -2699,7 +2701,7 @@ func settingsPanelVMWithUtils(t *testing.T) *goja.Runtime {
 // FormData is stubbed as a recorder rather than skipped. The multipart branch is
 // the one a phone uses, and "the file picker posts something" is the whole claim
 // worth making about it from here; the server side of the same branch is pinned
-// by TestImportRouteAcceptsAMultipartUpload.
+// by TestCookieImportRouteAcceptsAMultipartUpload.
 const importPanelProbe = `
 globalThis.__startImportPanel = function (opts) {
   const els = {};
@@ -3460,7 +3462,7 @@ In `docs/superpowers/plans/2026-08-29-arc10-twitch-credential-lifecycle.md`, the
 
 NEW (and note what it corrects: `recheckAfterCookieWrite` lives in `cmd/moombox` and is unreachable from `internal/web/routes`, so the import took the routes-package shape the Web wizard finish already uses):
 
-> | `POST /api/cookies/import` (Arc 11) | `internal/web/routes/cookies.go` — deferred `refreshSvc.CheckNow(recheckCtx)`, gated on `ImportResult.Wrote`, flushed first, on a detached 45 s context | yes | `TestImportHandlerEndsInADetachedFlushedRecheck` (AST, `cookies_import_callsite_test.go`). NOT `recheckAfterCookieWrite`, as this row previously anticipated: that helper lives in `cmd/moombox` and this package cannot see it. The import took the Web wizard finish's shape instead — same junction, same detach, same flush, no logger. |
+> | `POST /api/cookies/import` (Arc 11) | `internal/web/routes/cookies.go` — deferred `refreshSvc.CheckNow(recheckCtx)`, gated on `ImportResult.Wrote`, flushed first, on a detached 45 s context | yes | `TestCookieImportHandlerEndsInADetachedFlushedRecheck` (AST, `cookies_import_callsite_test.go`). NOT `recheckAfterCookieWrite`, as this row previously anticipated: that helper lives in `cmd/moombox` and this package cannot see it. The import took the Web wizard finish's shape instead — same junction, same detach, same flush, no logger. |
 
 - [ ] **Step 8: Verify every claim the docs now make**
 
@@ -3565,16 +3567,16 @@ Run against the spec with fresh eyes after the plan was complete.
 
 | Spec requirement | Task | Where |
 |---|---|---|
-| R1 — one endpoint, paste and/or multipart, size-capped, auth + CSRF + `heavy`, any authenticated client | 1 | `readCookieImportBody` (two shapes, 512 KiB), `heavy.Post`, `TestImportRouteIsOnTheHeavyLimiter`, `TestImportRouteRefusesTheWrongRequestShapes`. Session auth is chain-level (`cmd/moombox/services.go:1132` — `s.r.Use(webServer.AuthMiddleware)`) and CSRF is chain-level (`internal/web/server.go:112`); both apply to every `/api/` route by construction, the handler adds no exemption, and there is no per-route test because there is no per-route code to break. `AuthMiddleware` waives auth for loopback and private clients and for password-less installs (`internal/web/server.go:143-158`), so "any authenticated client" means "any client this chain already admits" — exactly the exposure of every other mutating route, which is the comparison the ruling makes, and not the wizard's separate loopback gate. |
-| R2 — validate before touching disk, three refusals, value-free | 0 | `prepareCookieImport`'s switch + `netscapeCookiesHoldACredential`; `TestPrepareCookieImportRefusesTheThreeShapes`, `TestPrepareCookieImportRefusalsNameNoValue`, `TestImportRouteRefusesTheThreeShapesWithTheirOwnMessage` (which also asserts the file is untouched). |
+| R1 — one endpoint, paste and/or multipart, size-capped, auth + CSRF + `heavy`, any authenticated client | 1 | `readCookieImportBody` (two shapes, 512 KiB), `heavy.Post`, `TestCookieImportRouteIsOnTheHeavyLimiter`, `TestCookieImportRouteRefusesTheWrongRequestShapes`. Session auth is chain-level (`cmd/moombox/services.go:1132` — `s.r.Use(webServer.AuthMiddleware)`) and CSRF is chain-level (`internal/web/server.go:112`); both apply to every `/api/` route by construction, the handler adds no exemption, and there is no per-route test because there is no per-route code to break. `AuthMiddleware` waives auth for loopback and private clients and for password-less installs (`internal/web/server.go:143-158`), so "any authenticated client" means "any client this chain already admits" — exactly the exposure of every other mutating route, which is the comparison the ruling makes, and not the wizard's separate loopback gate. |
+| R2 — validate before touching disk, three refusals, value-free | 0 | `prepareCookieImport`'s switch + `netscapeCookiesHoldACredential`; `TestPrepareCookieImportRefusesTheThreeShapes`, `TestPrepareCookieImportRefusalsNameNoValue`, `TestCookieImportRouteRefusesTheThreeShapesWithTheirOwnMessage` (which also asserts the file is untouched). |
 | R3 — `readCookieFile` seam, `ErrCookieFileUnreadable` abort, merge not replace, `writeFileAtomic`, never an empty row, then reload | 0, 1 | `ImportCookies`; `TestImportCookiesAbortsOnAnUnreadableExistingFile`, `TestPrepareCookieImportMergesRatherThanReplaces`, `TestPrepareCookieImportNeverWritesAnEmptyValuedRow`, `TestImportCookiesMergesOntoDiskAndReloadsTheJar`. |
-| R4 — the write ends in `CheckNow`, detached + flushed; the three-state verdict on the wire | 1 | The handler's deferred re-check; `TestImportHandlerEndsInADetachedFlushedRecheck`, `TestImportOutcomeSpeaksTheSetupOutcomeVocabulary`, `TestImportRouteWritesAndAnswersWithTheVerdict`. |
-| R5 — no GET, ever; no download affordance | 1, 3 | Only `heavy.Post` is registered; `TestImportRouteHasNoGET`. The panel markup in Task 3 has no download control and the README says so. |
+| R4 — the write ends in `CheckNow`, detached + flushed; the three-state verdict on the wire | 1 | The handler's deferred re-check; `TestCookieImportHandlerEndsInADetachedFlushedRecheck`, `TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary`, `TestCookieImportRouteWritesAndAnswersWithTheVerdict`. |
+| R5 — no GET, ever; no download affordance | 1, 3 | Only `heavy.Post` is registered; `TestCookieImportRouteHasNoGET`. The panel markup in Task 3 has no download control and the README says so. |
 | R6 — `FlagManualRelogin` returns with its caller; the prompt names the import; a successful import clears it | 2 | Raised at BOTH exits of `handleRecoveryNeeded`, which is what makes it reach the cohort R6 names: `TestDisabledRecoveryRaisesTheReloginPrompt` (`auto_enabled = false`, the container's documented shape, where `runCookieRecovery` is never called) and `TestRecoveryThatCouldNotRunRaisesTheReloginPrompt` (flag on, nothing to run). Excluded where it would be unearned: `TestUnreadableCookieFileDoesNotRaiseTheReloginPrompt`. Not raised on success: `TestSuccessfulRecoveryRaisesNoReloginPrompt`. Copy: `TestAuthFailureGuidanceNamesTheDashboardImport`. Cleared: `TestImportClearsAReloginFlagRaisedByTheSetter`. |
 | R7 — textarea + file picker + inline verdict; the re-login prompt links to it; TUI parity optional | 3, 4 | The panel and `reloginPromptTarget`; five goja tests. **TUI parity is SKIPPED**, and Task 4's `user-interfaces.md` edit says so by naming only the two Web surfaces — the TUI has no text-entry affordance for a multi-kilobyte paste and a terminal paste of a credential file into a bubbletea textarea is a worse experience than the file copy the TUI user already has. |
 | R8 — README, container guidance, `operations.md`, `user-interfaces.md`, `data-and-storage.md`, `SPEC.md` | 4 | Exact old → new pairs, plus the Arc 10 reload-site row and two stale claims corrected. |
-| §4 invariants — atomic write, merge semantics, empty-row trap, name+domain keying, the unreadable-file error and what renders it, the bind-mount trap, no value anywhere, inline recover, anonymous logger | 0, 1 | All covered above except: the bind-mount trap is `ErrCookieFileUnwritable` + `TestImportCookiesNamesTheBindMountOnAFailedWrite`; "no value anywhere" is `TestImportRouteLeaksNoValueAnywhere` (four wire answers, over a recording logger) plus `TestImportFailurePathsCarryNoValue` (the three seam-only failure paths, over the error, `lastError` and the log); no goroutine is added, so the recover rule is satisfied vacuously and the plan says so in Global Constraints; the logger stays the anonymous interface (`recordingLogger` implements the four methods without naming one). |
-| §5 tests — every listed case | 0, 1, 2 | All present. The one the spec words as "the write is followed by exactly one `CheckNow` (the Arc 10 gate-shape test extends to this site)" is met DIFFERENTLY and deliberately: Arc 10's `TestNotePassCompletedIsGatedOnRanAtEverySite` pins call sites of `notePassCompleted` INSIDE `internal/cookies`, and this writer's caller is outside that package — extending it here would be wrong (it would demand a seam whose doc says it exists for exactly two in-package callers and that firing it elsewhere doubles every external site). The routes-package equivalent is `TestImportHandlerEndsInADetachedFlushedRecheck`, which asserts the same four properties by AST. Named as a deviation, not a gap. |
+| §4 invariants — atomic write, merge semantics, empty-row trap, name+domain keying, the unreadable-file error and what renders it, the bind-mount trap, no value anywhere, inline recover, anonymous logger | 0, 1 | All covered above except: the bind-mount trap is `ErrCookieFileUnwritable` + `TestImportCookiesNamesTheBindMountOnAFailedWrite`; "no value anywhere" is `TestCookieImportRouteLeaksNoValueAnywhere` (four wire answers, over a recording logger) plus `TestImportFailurePathsCarryNoValue` (the three seam-only failure paths, over the error, `lastError` and the log); no goroutine is added, so the recover rule is satisfied vacuously and the plan says so in Global Constraints; the logger stays the anonymous interface (`recordingLogger` implements the four methods without naming one). |
+| §5 tests — every listed case | 0, 1, 2 | All present. The one the spec words as "the write is followed by exactly one `CheckNow` (the Arc 10 gate-shape test extends to this site)" is met DIFFERENTLY and deliberately: Arc 10's `TestNotePassCompletedIsGatedOnRanAtEverySite` pins call sites of `notePassCompleted` INSIDE `internal/cookies`, and this writer's caller is outside that package — extending it here would be wrong (it would demand a seam whose doc says it exists for exactly two in-package callers and that firing it elsewhere doubles every external site). The routes-package equivalent is `TestCookieImportHandlerEndsInADetachedFlushedRecheck`, which asserts the same four properties by AST. Named as a deviation, not a gap. |
 
 **Residual, named rather than hidden (leak scans):** the route's scan drives four answers — accepted, signed-out, not-Netscape and the unreadable-file abort; the unwritable-file and reload-failure answers are driven in `internal/cookies`, where the write seam lives, and scanned there over the error, `lastError` and the log. All three OS-error answers carry a PATH by design and the scans assert only that no VALUE rides along with it. Nothing scans the reload-failure answer at the wire; its route arm interpolates nothing at all, so it is value-free by construction rather than by test.
 
@@ -3585,7 +3587,7 @@ Run against the spec with fresh eyes after the plan was complete.
 **3. Type consistency.**
 
 - `prepareCookieImport(existing, incoming string) (string, error)` — defined Task 0, called Task 1. Same name, same order, both times.
-- `ImportResult{YouTube, Twitch RefreshVerdict; YouTubeAccepted, TwitchAccepted, Wrote bool}` — defined Task 1, read by `cookieImportOutcome` (Task 1) and by the panel's `data.authenticated` / `data.twitchAuthenticated` / `data.youtubeVerification` / `data.twitchVerification` (Task 3) through the wire keys `cookieImportOutcome` emits, which `TestImportOutcomeSpeaksTheSetupOutcomeVocabulary` pins equal to `cookieSetupOutcome`'s. The JS reads exactly those four keys and no fifth.
+- `ImportResult{YouTube, Twitch RefreshVerdict; YouTubeAccepted, TwitchAccepted, Wrote bool}` — defined Task 1, read by `cookieImportOutcome` (Task 1) and by the panel's `data.authenticated` / `data.twitchAuthenticated` / `data.youtubeVerification` / `data.twitchVerification` (Task 3) through the wire keys `cookieImportOutcome` emits, which `TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary` pins equal to `cookieSetupOutcome`'s. The JS reads exactly those four keys and no fifth.
 - `credentialAccepted(p platformAuth) bool` — one definition (Task 1, `autocookies_profile.go`), two callers (`FinishSetupDetailed`, `ImportCookies`).
 - `FlagManualRelogin(platform string)` — defined Task 2, called by `runCookieRecovery` (Task 2) and by three tests (Tasks 1's file gains one in Task 2, plus the two routes tests).
 - `reloginPromptTarget(status, hostname)` takes both arguments at its definition (Task 3, `utils.js`), at its call site (`answerReloginPrompt`, which passes `window.location.hostname`) and in the test table's `jsCall`. It returns the strings `"wizard"` / `"import"`; the caller compares against `"wizard"` and the table expects both. One spelling each.
