@@ -1,9 +1,11 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -462,6 +464,44 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		}
 
 		result, err := autoCookieSvc.FinishSetupDetailed(req.Context())
+
+		// The dashboard twin of the TUI wizard's re-check: a completed wizard
+		// has just rewritten cookies.txt, and refresh's status block is the only
+		// place the credential fingerprint is compared, the Twitch auth mark
+		// cleared and OnCredentialsChanged fired. Bare, with no log line, for
+		// the reason given at the auto-refresh handler above — this package has
+		// no operational logger.
+		//
+		// DETACHED from req.Context(), which is the one thing this call does
+		// differently from its two neighbours, and deliberately. A client that
+		// closes the page mid-pass cancels both auth checks, and
+		// shouldObserveCredentials bails on a check error — so the Twitch
+		// fan-out never runs, no live chat session is told, and the identity
+		// baseline is not advanced either, which leaves the whole thing waiting
+		// on the 30-minute ticker. That is precisely what R5 rules out, on the
+		// most deliberate credential change there is. The neighbours are exempt
+		// for reasons that do not apply here: /api/cookies/check writes nothing,
+		// and /api/cookies/refresh has the same exposure but predates this.
+		//
+		// 45 s is a backstop above the pass's own worst case, not a budget it
+		// is expected to spend: the shared HTTP client caps every request at
+		// 30 s and each auth check wraps its own 15 s context on top, so a live
+		// pass finishes well inside this. It exists so a wedged round-trip
+		// cannot hold a detached context open indefinitely.
+		//
+		// Deferred, so the gate is evaluated independently of the error switch
+		// below — the jar reload after a successful write returns an error over
+		// a file that has already been replaced — and so the re-check runs after
+		// jsonResponse rather than in front of the frontend's 60 s abort.
+		defer func() {
+			if refreshSvc == nil || !result.Wrote {
+				return
+			}
+			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			refreshSvc.CheckNow(recheckCtx)
+		}()
+
 		if err != nil {
 			// Ahead of the switch. Both browser-read failures used to fall to
 			// its default arm, whose "failed to finish setup" this file's own
@@ -503,15 +543,6 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				jsonError(rw, "failed to finish setup", http.StatusInternalServerError)
 			}
 			return
-		}
-		// The dashboard twin of the TUI wizard's re-check, and the same shape
-		// as the auto-refresh handler's at the top of this file: a completed
-		// wizard has just rewritten cookies.txt, and refresh's status block is
-		// the only place the credential fingerprint is compared and the Twitch
-		// auth mark cleared. Bare, with no log line, for the reason stated
-		// there — the routes package has no operational logger.
-		if refreshSvc != nil {
-			refreshSvc.CheckNow(req.Context())
 		}
 		jsonResponse(rw, cookieSetupOutcome(result))
 	})

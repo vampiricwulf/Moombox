@@ -128,9 +128,19 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 // the only line that explains it. Nothing here retries or waits — the guard's
 // contract is that a second caller does nothing.
 //
-// checkNow is RefreshService.CheckNow as a method value, taken as a func so a
-// process with no refresh service degrades to "nothing to re-check". gesture
-// names what just wrote, and args are the caller's own structured fields.
+// checkNow is the re-check as a func — runState.checkNowFn in production —
+// taken as a func rather than as a *RefreshService so the polarity, the Info
+// line and the context forwarding can all be driven by a fake.
+//
+// The nil guard here covers a caller that passes NO FUNC. It does NOT cover a
+// nil *cookies.RefreshService: a bound method value taken off a nil pointer is
+// itself non-nil, so `svc.CheckNow` would step straight over this and panic
+// later inside refresh. checkNowFn is what collapses that case to nil, which is
+// why every production site goes through it rather than reaching for the method
+// value directly.
+//
+// gesture names what just wrote, and args are the caller's own structured
+// fields.
 func recheckAfterCookieWrite(ctx context.Context, checkNow func(context.Context) bool, log interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -145,6 +155,32 @@ func recheckAfterCookieWrite(ctx context.Context, checkNow func(context.Context)
 	}
 	log.Info("auth re-check after "+gesture+" was skipped, a cookie refresh was already in flight — status may lag until the next refresh", args...)
 	return false
+}
+
+// checkNowFn returns the in-process auth re-check as a func, or nil when this
+// process has no refresh service to run one.
+//
+// One line of guard, in one place, because the alternative is not "no guard" —
+// it is the guard that LOOKS present and is not. Every site used to pass
+// s.cookieRefresh.CheckNow, and a method value taken off a nil *RefreshService
+// is non-nil, so recheckAfterCookieWrite's nil check was stepped over and the
+// dereference landed inside refresh at rs.mu.Lock(). Returning the nil func
+// instead makes that check mean what it says at all five sites, and lets
+// runCookieRecovery be driven from a zero-value runState.
+//
+// A func rather than the concrete pointer so the helper keeps the seam its own
+// tests are built on — polarity, the skipped line and context forwarding are
+// all asserted with a fake CheckNow, and none of that survives a parameter that
+// can only be a live RefreshService.
+//
+// Nil is not reachable in production at any of the five sites: initServices
+// constructs and assigns cookieRefresh in §15, before the auto-cookie wiring,
+// the worker callbacks and runTUI all of which follow it.
+func (s *runState) checkNowFn() func(context.Context) bool {
+	if s.cookieRefresh == nil {
+		return nil
+	}
+	return s.cookieRefresh.CheckNow
 }
 
 // reauthenticateTwitchChats broadcasts a credential change to every live
@@ -481,6 +517,42 @@ const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a br
 // see that branch.
 func (s *runState) runCookieRecovery(ctx context.Context, platform string, refresh cookieRefresher, notify authFailureNotifier) {
 	result, err := refresh(ctx)
+
+	// The re-check, on EVERY exit below rather than only the successful one.
+	//
+	// It used to sit inside the RefreshOK arm, on the reasoning that a
+	// successful refresh is the one whose result the UI needs. That was half
+	// the truth twice over. A pass that ran and produced a conclusively DEAD
+	// pair still rewrote cookies.txt — a browser that hands back a
+	// new-but-refused credential moves the fingerprint exactly as a working one
+	// does — so the Twitch auth mark taken under the OLD pair would stand until
+	// the ticker, naming a login problem the file no longer has. And a pass
+	// that ran and then ERRORED is the same story: three of the four
+	// refreshAborted() exits in refreshCookiesDetailed happen AFTER the write,
+	// including the one where cookies.txt was replaced and only the jar reload
+	// failed — the case where a re-check is worth most, because refresh's own
+	// jar.Reload repairs the stale in-memory jar this pass left behind. Both
+	// services share one *CookieJar.
+	//
+	// Deferred rather than copied into each exit: the gate has to be evaluated
+	// independently of the error return, and there are three returns below plus
+	// the switch. A defer also puts it after the notifications, so a 30-second
+	// re-check cannot delay the line that tells the operator what happened.
+	//
+	// Gated on Ran, which is an OVER-approximation and deliberately so. Ran is
+	// false at all seven refreshDeclined() exits — setup in progress, a refresh
+	// already in flight, nothing configured, the service stopped — where
+	// nothing was written and there is nothing to re-read. It is true at one
+	// abort that also wrote nothing (the S9 read failure). Getting that one
+	// wrong costs a single validate pass; getting the declines wrong would
+	// print a staleness warning about a file nobody touched, and getting the
+	// post-write aborts wrong costs half an hour.
+	defer func() {
+		if result.Ran {
+			recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "recovery", "platform", platform)
+		}
+	}()
+
 	if err != nil {
 		// Narrowed IN FRONT of the generic branch below, which must stay
 		// generic — it also carries write/reload/restore failures that make
@@ -522,28 +594,6 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 				cookieReplacementGuidance, platform, s.cookieFilePath()),
 			notifications.TypeError)
 		return
-	}
-
-	// The re-check, hoisted out of the RefreshOK arm so it covers every verdict
-	// a pass that RAN can reach.
-	//
-	// It used to sit only under RefreshOK, on the reasoning that a successful
-	// refresh is the one whose result the UI needs. That was half the truth.
-	// A pass that ran and FAILED still rewrote cookies.txt — a browser that
-	// produced a new-but-dead pair moves the credential fingerprint just as a
-	// working one does — so without this the Twitch auth mark taken under the
-	// OLD pair stands until the ticker, telling the operator to fix a login row
-	// on a file that no longer has that problem.
-	//
-	// Gated on Ran, not on the verdict: a DECLINED pass (setup in progress, a
-	// refresh already in flight, nothing configured, the service stopped) wrote
-	// nothing at all, so there is nothing to re-read and the Info line below
-	// would describe a staleness that does not exist.
-	//
-	// Placed after the err != nil block above, which returns: an errored pass
-	// includes the S9 abort, which deliberately did not write.
-	if result.Ran {
-		recheckAfterCookieWrite(context.Background(), s.cookieRefresh.CheckNow, s.log, "recovery", "platform", platform)
 	}
 
 	switch result.Verdict(platform) {
