@@ -140,12 +140,15 @@ Docker-specific behavior:
   the values YouTube rotates back, and it does so with a temp file plus a
   rename. A rename cannot replace a single-file bind mount, so the
   write-back fails with only a warning in the log and the session quietly
-  ages out. When the session does die, the fix is to overwrite
-  `./data/cookies.txt` with a fresh export — the interactive browser login
-  in Settings needs a headed browser and a person at it, so it is not an
-  option here. Export from a private window and close that window
-  afterwards: continuing to browse in the source profile rotates the
-  session and invalidates the export.
+  ages out. When the session does die, open Settings → Cookies
+  in the dashboard and paste (or upload) a fresh Netscape export: Moombox
+  merges it into `cookies.txt`, reloads it immediately and tells you whether
+  it authenticates. Overwriting `./data/cookies.txt` on the host works too and
+  takes effect within 30 minutes, or right away if you press "Refresh
+  cookies". The interactive browser login in Settings needs a headed browser
+  and a person at it, so it is not an option here. Export from a private
+  window and close that window afterwards: continuing to browse in the
+  source profile rotates the session and invalidates the export.
 - Alternatively, mount a **Firefox profile directory** into the `./data`
   volume as `./data/browser-profile`. Moombox reads `cookies.sqlite` out
   of it directly — no browser process involved, and nothing is written
@@ -597,6 +600,24 @@ Two honest limits, so you know what this does and does not buy you:
 - A profile still in use by a live browser session will have its exported
   cookies invalidated by that session's own activity. Dedicate a profile to
   Moombox rather than sharing your daily driver.
+
+### Paste or upload (any host, no browser, no volume access)
+
+The dashboard's Settings → Cookies panel takes a Netscape `cookies.txt`
+directly: paste the text, or choose the file. Moombox **merges** it into
+whatever `cookies.txt` already holds — a YouTube-only export leaves your Twitch
+session alone, and vice versa — reloads it into the running process, and answers
+with what a live check concluded, so a bad export is reported while you are
+still looking at it rather than at the next members-only stream.
+
+This is the re-authentication path for a container, and for any instance you
+reach over the network or from a phone: it needs no browser on the host and no
+access to the data volume. Jobs parked in `COOKIES?` resume on their own once
+the credentials check out.
+
+Export from a **private window** and close it afterwards: continuing to browse
+in the source profile rotates the session and invalidates the export. Moombox
+never serves cookies back — there is no download, by design.
 
 ### Manual
 

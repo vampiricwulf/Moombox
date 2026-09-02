@@ -632,3 +632,47 @@ export function cookieRecheckToast(activePlatforms, cookieStatus, twitchAuthStat
     variant: failed ? "danger" : unestablished ? "warning" : "success",
   };
 }
+
+/**
+ * Where the header's "Re-login" warning should take the operator.
+ *
+ * Two remedies exist and only one of them works from everywhere. The
+ * interactive browser login opens a REAL headed browser ON THE HOST; the import
+ * needs no browser and works from wherever the dashboard is being read.
+ *
+ * TWO conditions, and the first outranks the second:
+ *
+ * 1. The viewer has to be AT the host, or a window opening there is no remedy —
+ *    they would click, see nothing, and have no way to learn that a browser is
+ *    waiting on a screen they cannot see. Nothing on the server stops them:
+ *    /api/setup/complete (the FIRST-RUN wizard) is loopback-gated, but the
+ *    cookie setup trio is not, so this predicate is the only thing between a
+ *    remote click and a browser window on someone else's screen. It is the same
+ *    shape as the server's IsLoopbackRequest deliberately, so the two read
+ *    "local" the same way.
+ * 2. The host has to HAVE a browser. /api/cookies/auto-status answers that, and
+ *    the container case is its empty answer.
+ *
+ * Everything else goes to the import panel, including an unreadable status. The
+ * asymmetry is deliberate: that panel holds BOTH controls, so a local operator
+ * who lands there loses one click, while a remote or container operator sent to
+ * the wizard loses the only route they have.
+ *
+ * @param {{availableBrowsers?: Array}|null|undefined} status - GET /api/cookies/auto-status
+ * @param {string} hostname - location.hostname of the page making the request
+ * @returns {"wizard"|"import"}
+ */
+export function reloginPromptTarget(status, hostname) {
+  // A strict SUBSET of what the server's isLoopback accepts
+  // (internal/web/middleware.go: net.ParseIP(ip).IsLoopback() plus the literal
+  // "localhost", so all of 127.0.0.0/8 and every spelling of ::1). The four
+  // below are the ones a browser actually puts in location.hostname; anything
+  // else a local viewer might have typed — 127.0.0.2, 127.1, foo.localhost —
+  // misses, and a miss errs toward "import", which costs that viewer one click
+  // in a panel that holds both controls. Widen it only in that direction.
+  const atTheHost = hostname === "localhost" || hostname === "127.0.0.1" ||
+    hostname === "::1" || hostname === "[::1]";
+  if (!atTheHost) return "import";
+  const available = status && Array.isArray(status.availableBrowsers) ? status.availableBrowsers.length : 0;
+  return available > 0 ? "wizard" : "import";
+}

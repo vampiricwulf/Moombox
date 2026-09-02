@@ -414,6 +414,11 @@ export class SettingsController {
       });
     }
 
+    const cookieImportBtn = document.getElementById("btn-cookie-import");
+    if (cookieImportBtn) {
+      cookieImportBtn.addEventListener("click", () => this.importCookies());
+    }
+
     // Per-platform setup buttons
     const setupYtBtn = document.getElementById("btn-auto-cookie-setup-yt");
     if (setupYtBtn) {
@@ -2686,5 +2691,108 @@ export class SettingsController {
     if (countdownEl) countdownEl.textContent = "";
     const timeoutResultEl = document.getElementById("auto-cookie-result");
     if (timeoutResultEl) timeoutResultEl.innerHTML = "";
+  }
+
+  // POST /api/cookies/import — the browser-free re-authentication path.
+  //
+  // Two controls, one request. The textarea wins when it has content: a paste
+  // is an explicit act, and a stale file left in the picker from a previous
+  // attempt must not silently override what the operator just typed.
+  //
+  // The multipart branch sets NO Content-Type header, deliberately — the
+  // browser must add its own multipart boundary, and an explicit header
+  // overwrites it with one that has none, which makes the body unparseable at
+  // the server for a reason nothing in the response can explain.
+  async importCookies() {
+    const resultEl = document.getElementById("cookie-import-result");
+    const btn = document.getElementById("btn-cookie-import");
+    const textEl = document.getElementById("cookie-import-text");
+    const fileEl = document.getElementById("cookie-import-file");
+    const pasted = (textEl && textEl.value || "").trim();
+    const chosen = fileEl && fileEl.files && fileEl.files.length > 0 ? fileEl.files[0] : null;
+
+    if (resultEl) {
+      resultEl.textContent = "";
+      resultEl.style.color = "";
+    }
+    if (!pasted && !chosen) {
+      if (resultEl) {
+        resultEl.textContent = "Paste the contents of a cookies.txt, or choose a file to upload.";
+        resultEl.style.color = "var(--sl-color-warning-600)";
+      }
+      return;
+    }
+    if (btn) { btn.loading = true; btn.disabled = true; }
+
+    try {
+      let init;
+      if (pasted) {
+        init = { method: "POST", headers: { "Content-Type": "text/plain" }, body: pasted };
+      } else {
+        const form = new FormData();
+        form.append("cookies", chosen);
+        init = { method: "POST", body: form };
+      }
+      const response = await fetch("/api/cookies/import", init);
+      // The endpoint's refusals are its whole diagnostic value — a signed-out
+      // export, a JSON file, an unreadable cookies.txt, a single-file bind
+      // mount. Rendering "HTTP 422" would throw every one of them away.
+      if (!response.ok) throw new Error(await serverErrorMessage(response));
+      const data = await response.json();
+
+      const ytOk = data.authenticated;
+      const twOk = data.twitchAuthenticated;
+      if (ytOk || twOk) {
+        // Accepted is not verified — the same three states the setup wizard
+        // reports, rendered through the same helper, because a fourth phrasing
+        // of "saved, but we could not check them" is how the copy drifts.
+        if (ytOk) {
+          const toast = cookieSetupAcceptedToast("YouTube", data.youtubeVerification);
+          this.app.showToast(toast.message, toast.variant);
+        }
+        if (twOk) {
+          const toast = cookieSetupAcceptedToast("Twitch", data.twitchVerification);
+          this.app.showToast(toast.message, toast.variant);
+        }
+        // Clear the credentials out of the DOM the moment they are no longer
+        // needed. They are already on the server; leaving them in a textarea
+        // keeps a live session in the page for as long as it stays open.
+        if (textEl) textEl.value = "";
+        if (fileEl) fileEl.value = "";
+        this.app.loadStatus();
+      } else if (resultEl) {
+        // Speaks from the verification fields, not from data.error: that never
+        // exists on a 200.
+        resultEl.textContent = cookieSetupRejectedMessage(
+          ytOk === false && data.youtubeVerification !== "failed"
+            ? data.youtubeVerification
+            : data.twitchVerification,
+        );
+        resultEl.style.color = "var(--sl-color-danger-600)";
+      }
+    } catch (e) {
+      if (resultEl) {
+        resultEl.textContent = e.message;
+        resultEl.style.color = "var(--sl-color-danger-600)";
+      }
+    } finally {
+      if (btn) { btn.loading = false; btn.disabled = false; }
+    }
+  }
+
+  // Open Settings on the cookies panel with the paste box focused. The route
+  // the header's "Re-login" warning takes on an install where no browser can
+  // run — see reloginPromptTarget.
+  //
+  // The tab click plus a deferred nav click is the pattern the empty-state CTA
+  // already uses (web/public/app.js): the settings nav is an sl-menu and
+  // nothing carries data-section, so the menu item is clicked by value once the
+  // panel exists.
+  openCookieImport() {
+    document.querySelector('sl-tab[panel="settings"]')?.click();
+    setTimeout(() => {
+      document.querySelector('#settings-nav sl-menu-item[value="cookies"]')?.click();
+      document.getElementById("cookie-import-text")?.focus();
+    }, 100);
   }
 }

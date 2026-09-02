@@ -24,31 +24,19 @@ func reloginMapFromResponse(t *testing.T, body map[string]any) map[string]any {
 	return relogin
 }
 
-// WHAT THESE TWO TESTS CAN AND CANNOT SAY, since Arc 8 Task 12a narrowed it.
+// WHAT THESE TWO TESTS SAY, restored in Arc 11.
 //
-// They used to raise a platform's flag with AutoCookieService.FlagManualRelogin
-// and assert the raised value came back on the wire. That method was exported,
-// documented, and called by NOTHING in production — it was written for the
-// re-auth ingest path, which is unbuilt — so it was deleted as dead surface on
-// a security-sensitive service, and these three tests were its only callers.
+// They raise a platform's flag with AutoCookieService.FlagManualRelogin and
+// assert the raised value comes back on the wire. That method was deleted in
+// Arc 8 Task 12a — exported, documented and called by nothing but these tests,
+// because the ingest path it was written for did not exist — and for one arc
+// these tests could only say that the KEY was present and matched whatever the
+// service reported, which a handler that had swapped the service call for the
+// nil-service fallback literal would also satisfy on a fresh service.
 //
-// From outside internal/cookies there is now no way to put a `true` in that
-// map: every writer is a conclusion RefreshCookiesDetailed reaches after a real
-// browser or profile pass, which the routes package has no fixture for (see the
-// Stop() note on the auto-refresh test below for why even reaching the success
-// branch takes a trick).
-//
-// So what survives here is: the key is PRESENT, and its value is exactly what
-// the service reports. That still kills the mutant that matters — deleting the
-// `response["autoCookieReloginRequired"] = …` line makes the key absent and
-// reloginMapFromResponse fatal. What it no longer kills is a handler that
-// replaced the service call with the nil-service fallback literal, because on a
-// freshly constructed service the two are identical. That value's plumbing is
-// pinned instead by TestStatusRouteWiresGetAutoCookieReloginNeededOntoTheWire
-// below, which supplies its own non-default map.
-//
-// If the ingest path re-adds a writer, raise a flag here again and put the
-// value assertions back.
+// Arc 11 built the ingest path and restored the setter with its production
+// caller, so both halves are pinned again: the key is present, and a RAISED
+// value survives the handler unmangled.
 
 // TestRecheckRouteCarriesReloginStatus drives H5's switched /recheck caller
 // through the real HTTP handler and confirms the response still carries the
@@ -60,6 +48,7 @@ func TestRecheckRouteCarriesReloginStatus(t *testing.T) {
 	refreshSvc := cookies.NewRefreshService(cookies.NewCookieJar(), 0, nopRouteLogger{})
 	autoSvc := cookies.NewAutoCookieService(t.TempDir(), filepath.Join(t.TempDir(), "cookies.txt"),
 		cookies.NewCookieJar(), nopRouteLogger{})
+	autoSvc.FlagManualRelogin("youtube")
 
 	r := chi.NewRouter()
 	CookieRoutes(r, refreshSvc, autoSvc, nil, nil)
@@ -75,6 +64,11 @@ func TestRecheckRouteCarriesReloginStatus(t *testing.T) {
 		t.Fatalf("recheck body is not JSON: %q", rec.Body.String())
 	}
 	assertReloginMatchesService(t, reloginMapFromResponse(t, body), autoSvc)
+	if wire := reloginMapFromResponse(t, body); wire["youtube"] != true {
+		t.Errorf("autoCookieReloginRequired[youtube] = %v, want the raised true — a handler that "+
+			"answered with the nil-service fallback literal would look identical on a fresh service",
+			wire["youtube"])
+	}
 }
 
 // assertReloginMatchesService checks a wire map against what the service
@@ -107,6 +101,7 @@ func TestAutoRefreshRouteCarriesReloginStatus(t *testing.T) {
 	refreshSvc := cookies.NewRefreshService(cookies.NewCookieJar(), 0, nopRouteLogger{})
 	autoSvc := cookies.NewAutoCookieService(t.TempDir(), filepath.Join(t.TempDir(), "cookies.txt"),
 		cookies.NewCookieJar(), nopRouteLogger{})
+	autoSvc.FlagManualRelogin("youtube")
 	autoSvc.Stop()
 
 	r := chi.NewRouter()
@@ -124,6 +119,11 @@ func TestAutoRefreshRouteCarriesReloginStatus(t *testing.T) {
 		t.Fatalf("auto-refresh body is not JSON: %q", rec.Body.String())
 	}
 	assertReloginMatchesService(t, reloginMapFromResponse(t, body), autoSvc)
+	if wire := reloginMapFromResponse(t, body); wire["youtube"] != true {
+		t.Errorf("autoCookieReloginRequired[youtube] = %v, want the raised true — a handler that "+
+			"answered with the nil-service fallback literal would look identical on a fresh service",
+			wire["youtube"])
+	}
 }
 
 // TestStatusRouteWiresGetAutoCookieReloginNeededOntoTheWire proves ONLY that

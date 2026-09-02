@@ -86,6 +86,15 @@ cookie_file = "/data/cookies.txt"
 # whatever cookies.txt already holds. On a phone or tablet use the
 # Settings button: shift+click needs a keyboard.
 #
+# NO PROFILE, OR THE PROFILE ITSELF IS STALE? Paste it instead. The
+# dashboard's Settings -> Cookies panel accepts a Netscape cookies.txt
+# by paste or upload: it MERGES into the file above (a YouTube-only
+# export leaves Twitch alone), reloads it immediately and reports
+# whether it authenticates. No browser, no shell, no access to the
+# data volume -- which makes it the re-auth path for this image, and
+# the only one that works from a phone. Export from a private window
+# and close it: browsing on in the source profile invalidates it.
+#
 # The in-process refresh that keeps the imported YouTube session alive
 # between imports runs regardless; it needs only cookie_file above.
 #

@@ -484,15 +484,21 @@ type cookieRefresher func(context.Context) (cookies.RefreshResult, error)
 
 // cookieReplacementGuidance is the tail shared by the failure notifications.
 //
-// It leads with the cookie FILE rather than the Settings wizard on purpose:
-// the wizard drives a local headed browser and its endpoints are
-// loopback-gated, so it is unreachable from a container and from a remote
-// dashboard — which is exactly where this notification is most likely to be
-// read. %s is the path to the configured cookie file.
-const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a browser signed in to the account " +
-	"and overwrite the file at %s. (Export from a private window and close it: browsing on in the source profile " +
-	"rotates the session and invalidates the export.) The interactive browser login in Settings is an alternative " +
-	"only on the machine hosting Moombox."
+// It leads with the DASHBOARD IMPORT on purpose, and the ordering has changed
+// once: it used to lead with the cookie file on the volume, because the only
+// other remedy it named was the interactive browser login, which opens a headed
+// browser ON THE HOST and so is no use to a container (the image ships none) or
+// to anyone reading the dashboard from another machine — exactly where this
+// notification is most likely to be read. The
+// import (Arc 11) is reachable from anywhere the dashboard is, needs no browser
+// and no volume access, and is therefore the first thing to say. The file
+// remains named because it still works and is the faster path for anyone with a
+// shell. %s is the path to the configured cookie file.
+const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a browser signed in to the account, " +
+	"then paste or upload it in Settings -> Cookies on the dashboard — no shell or volume access needed. " +
+	"You can also overwrite the file at %s directly. (Export from a private window and close it: browsing on " +
+	"in the source profile rotates the session and invalidates the export.) The interactive browser login in " +
+	"Settings is an alternative only on the machine hosting Moombox."
 
 // runCookieRecovery performs one auto-cookie recovery pass on behalf of
 // `platform` and reports what it concluded ABOUT THAT PLATFORM.
@@ -591,6 +597,30 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 			return
 		}
 		s.log.Error("auto-cookie recovery failed", "platform", platform, "err", err)
+		// The recovery was fired by a CONCLUSIVE signed-out verdict and the
+		// automatic remedy for it failed, so a human has to sign in again. On an
+		// install with the browser path ON but no browser and no profile, this is
+		// the only line that ever says so: RefreshCookiesDetailed's own
+		// verify-failed arm — the other producer of this flag — needs a pass that
+		// got as far as checking, and there the pass returns ErrNoBrowserFound
+		// before it verifies anything. (With a mounted profile it DOES get that
+		// far and raises the flag itself; with the flag off, the disabled branch
+		// above raises it.)
+		//
+		// Deliberately BELOW the ErrCookieFileUnreadable arm above, which
+		// returns before reaching this. That abort read nothing, wrote nothing
+		// and checked nothing; the credentials may be perfectly good, and
+		// telling the operator to sign in again over a permissions or mount
+		// problem is the unearned cause that arm's own message exists to avoid.
+		//
+		// An over-approximation for the rest — a locked cookie DB lands here too
+		// — and deliberately so: the flag is process-local and the next
+		// successful refresh, setup or import clears it, so a spurious raise
+		// costs one badge, while a missing raise costs a container operator any
+		// indication at all that the session is dead.
+		if s.autoCookieSvc != nil {
+			s.autoCookieSvc.FlagManualRelogin(platform)
+		}
 		// Previously log-only: the operator learned cookies were dead
 		// only when a recording actually failed. 30-min per-platform
 		// cooldown via notifyAuthFailure.
@@ -713,7 +743,7 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 		// future third platform (TestRecoveryUnrecognisedPlatformDoesNotAssertFailure),
 		// and the wording holds for it because it asserts nothing.
 		notify(platform, "Cookie Auto-Refresh Ineffective",
-			fmt.Sprintf("Automatic cookie refresh ran and did not restore %s authentication, but could not establish why — the check either could not reach the service or could not be made at all, so nothing has been concluded about the cookies (the log at debug level says which). If they have in fact expired, replace %s with a fresh Netscape export from a browser signed in to the account; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
+			fmt.Sprintf("Automatic cookie refresh ran and did not restore %s authentication, but could not establish why — the check either could not reach the service or could not be made at all, so nothing has been concluded about the cookies (the log at debug level says which). If they have in fact expired, paste or upload a fresh Netscape export in Settings -> Cookies on the dashboard, or replace %s directly; the interactive browser login in Settings is an alternative only on the machine hosting Moombox.", platform, s.cookieFilePath()),
 			notifications.TypeWarning)
 	}
 }
@@ -778,10 +808,21 @@ func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refre
 		// operator can still trigger a refresh by hand — a flat "nothing will
 		// attempt to restore it" would be a shade stronger than the code.
 		//
-		// Guidance leads with the cookie FILE for the reason spelled out at
-		// cookieReplacementGuidance: this is the notification most likely to
-		// be read somewhere the loopback-gated Settings wizard cannot be
-		// reached at all.
+		// Automatic refresh is off, so nothing here will attempt a repair, and
+		// shouldFireRecovery has already concluded this platform is not
+		// authenticated. That is exactly "a human has to sign in again", and on
+		// this install — the container's documented shape — nothing else ever
+		// says so: runCookieRecovery is not called on this path at all, and
+		// RefreshCookiesDetailed's verify-failed arm needs a pass that got as far
+		// as checking.
+		if s.autoCookieSvc != nil {
+			s.autoCookieSvc.FlagManualRelogin(platform)
+		}
+		// Guidance leads with the DASHBOARD IMPORT — see
+		// cookieReplacementGuidance, whose ordering changed with Arc 11. This is
+		// the notification most likely to be read somewhere the host's own
+		// browser cannot be reached, and the import is the remedy that works
+		// from there.
 		notify(platform, "Cookie Re-Authentication Required",
 			fmt.Sprintf("Moombox is not authenticated to %s, and automatic cookie refresh is turned off — nothing will "+
 				"attempt to restore it on its own, so recordings that need an account will fail until the cookies are "+
@@ -791,8 +832,8 @@ func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refre
 	}
 	// The pass itself, and the per-platform branch it takes, live in
 	// runCookieRecovery — see cookieReplacementGuidance there for why the
-	// notification copy leads with the cookie FILE rather than the Settings
-	// wizard.
+	// notification copy leads with the dashboard import rather than the host's
+	// own browser.
 	s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
 	go func() {
 		defer func() {

@@ -595,6 +595,31 @@ type platformAuth struct {
 
 func (p platformAuth) ok() bool { return p.state == verifyOK }
 
+// credentialAccepted is what the CALLER is told about one platform, and it is
+// deliberately not the verification result.
+//
+// A sign-in the user just completed is accepted when the site could not answer:
+// a 429, a captive portal or a DNS blip is not evidence against a login that
+// happened thirty seconds ago, and refusing it would send the user back through
+// a wizard that was working. False failure is the worse direction there.
+//
+// It is NOT accepted when nothing was ever asked. A jar that cannot produce a
+// cookie header or a SAPISIDHASH made no request, so there is no answer to
+// extend the benefit of the doubt to — and this value is what setup.js turns
+// into a green "YouTube cookies configured" badge and an entry in
+// active_platforms. Because both producers MERGE the pre-existing cookies.txt
+// before checking, a leftover Google remnant with no SAPISID would otherwise
+// light that badge up for a user who only signed in to Twitch. `attempted` is
+// what separates the two; see platformAuth.
+//
+// TWO producers now — FinishSetupDetailed and ImportCookies — which is why this
+// is a function rather than the closure it was: the wizard and the import
+// answer the same question about the same states, and two copies of a
+// three-clause predicate is how they come to disagree about the middle one.
+func credentialAccepted(p platformAuth) bool {
+	return p.hasCookies && (p.state == verifyOK || (p.state == verifyUnknown && p.attempted))
+}
+
 // checkPlatformAuth verifies both platforms against the CURRENT jar contents.
 //
 // The bool projection (`state == verifyOK`) is exactly what RefreshCookies

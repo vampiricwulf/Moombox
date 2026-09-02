@@ -189,6 +189,47 @@ var (
 	// defeats the entire point of the abort.
 	ErrCookieFileUnreadable = errors.New("existing cookies.txt could not be read")
 
+	// --- operator-supplied cookie import (POST /api/cookies/import) ---
+	//
+	// Three refusals rather than one, grouped by the same rule as the six
+	// profile-import errors above: the operator's next move differs for each,
+	// so collapsing them strips the only useful part of the message. Each says
+	// what is wrong with the TEXT and never quotes any part of it — a cookie
+	// NAME in a diagnostic is fine and useful, a value never is, and these
+	// three are the only strings this endpoint composes about the submitted
+	// bytes.
+
+	// ErrImportNotNetscape is returned when NOTHING in the submitted text
+	// parses as a cookie row: a JSON export from a browser extension, an HTML
+	// error page, or some other format entirely. Distinct from ErrImportNoRows
+	// because the remedy is "export it again, differently" rather than "sign in
+	// first".
+	ErrImportNotNetscape = errors.New("that is not a Netscape cookie file — no line in it is a tab-separated cookie row. " +
+		"A JSON export from a cookie extension is the usual cause; re-export in Netscape (cookies.txt) format")
+
+	// ErrImportNoRows is returned when the text IS a cookie file and carries no
+	// data rows at all — the header and comments alone, which is what an export
+	// from a browser holding nothing for the site produces.
+	ErrImportNoRows = errors.New("that cookie file has no cookie rows — it holds only comments")
+
+	// ErrImportNoCredential is returned when rows parsed and not one of them is
+	// a YouTube or Twitch login cookie.
+	//
+	// THE common user error, and the only one that looks like success: an
+	// export taken from a signed-out window is entirely well-formed and carries
+	// YSC and VISITOR_INFO1_LIVE. Without this refusal it would be merged,
+	// written, and discovered at the next members-only stream.
+	ErrImportNoCredential = errors.New("that cookie file holds no YouTube or Twitch login cookie — " +
+		"sign in to the site first, then export again from the window that is signed in")
+
+	// ErrCookieFileUnwritable is returned when the merged file could not be
+	// written. It exists so the import endpoint can name the ONE deployment
+	// mistake that actually produces it — writeFileAtomic ends in a rename, and
+	// a rename cannot replace a single-file bind mount — instead of answering a
+	// bare 500. Wrapped ONLY on the import path; the other writers keep
+	// returning the raw write error to their existing callers.
+	ErrCookieFileUnwritable = errors.New("cookies.txt could not be written")
+
 	// ErrAuthCheckNotAttempted marks an auth check that failed BEFORE any
 	// request left the process — the jar holds something, but not enough to
 	// build a request out of (no cookie header, no SAPISIDHASH). It is still

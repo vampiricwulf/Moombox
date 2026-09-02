@@ -133,14 +133,11 @@ func TestReloginStatusMatchesGetStatusNeedsManualRelogin(t *testing.T) {
 	stubDetectors(t, nil, []DetectedBrowser{})
 
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
-	// Written directly, under the lock the map's real writers hold. It used to
-	// go through FlagManualRelogin, which was deleted in Arc 8 Task 12a as
-	// exported surface with zero production callers — and a fixture is exactly
-	// the wrong reason to keep a public method alive on a security-sensitive
-	// service, because the next reader takes it for a wired feature.
-	s.mu.Lock()
-	s.needsRelogin["youtube"] = true
-	s.mu.Unlock()
+	// Through the setter again. It was a direct write for one arc, while
+	// FlagManualRelogin was deleted as exported surface with zero production
+	// callers; Arc 11 restored it WITH its caller (runCookieRecovery's failed
+	// recovery), so the fixture can be the real writer once more.
+	s.FlagManualRelogin("youtube")
 
 	relogin := s.ReloginStatus()
 	full := s.GetStatus()
@@ -150,7 +147,7 @@ func TestReloginStatusMatchesGetStatusNeedsManualRelogin(t *testing.T) {
 		t.Errorf("ReloginStatus() = %v, GetStatus().NeedsManualRelogin = %v — must agree", relogin, full.NeedsManualRelogin)
 	}
 	if !relogin["youtube"] {
-		t.Error("fixture is broken — the direct write to needsRelogin[\"youtube\"] should have set it")
+		t.Error("fixture is broken — FlagManualRelogin(\"youtube\") should have set it")
 	}
 }
 

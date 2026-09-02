@@ -1,10 +1,14 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -239,6 +243,108 @@ func writeBrowserReadError(rw http.ResponseWriter, err error) bool {
 	return true
 }
 
+// maxCookieImportBytes caps POST /api/cookies/import.
+//
+// A Netscape export of a signed-in YouTube + Twitch profile is a few kilobytes;
+// 512 KiB is three orders of magnitude of headroom and still inside the
+// chain-wide 1 MiB MaxBodySize (internal/web/server.go), so THIS is the limit
+// that fires and its message is the one the operator reads. MaxBytesReader
+// wrappers NEST rather than override — an inner SMALLER limit errors first,
+// which is the direction that makes this cap real; the import endpoint's 500 MB
+// reader is exempted from MaxBodySize for the opposite reason.
+const maxCookieImportBytes = 512 << 10
+
+// readCookieImportBody pulls the Netscape text out of either accepted request
+// shape, answers the client itself on every refusal, and reports whether it
+// did. Nothing is written when it returns false.
+//
+// TWO shapes because the panel has two controls, and they are the two a browser
+// can send without ceremony: the textarea POSTs its text/plain contents, the
+// file picker POSTs a multipart form with the file in a `cookies` part. Every
+// other content type is refused rather than guessed at — a JSON body from a
+// well-meaning client would otherwise be read as cookie text and rejected with
+// a sentence about Netscape format, which describes the wrong mistake.
+//
+// The empty-body check is here rather than in prepareCookieImport because an
+// empty request is a REQUEST-shape problem: "that cookie file has no cookie
+// rows" is a claim about a file, and the operator sent none.
+func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bool) {
+	req.Body = http.MaxBytesReader(rw, req.Body, maxCookieImportBytes)
+
+	var raw []byte
+	var err error
+	switch contentType := req.Header.Get("Content-Type"); {
+	case strings.HasPrefix(contentType, "multipart/form-data"):
+		// Parsed explicitly so an oversize upload surfaces as the cap error
+		// below rather than as "no cookies part" — FormFile would swallow the
+		// MaxBytesError into a generic parse failure and answer the wrong
+		// sentence.
+		if perr := req.ParseMultipartForm(maxCookieImportBytes); perr != nil {
+			err = perr
+			break
+		}
+		file, _, ferr := req.FormFile("cookies")
+		if ferr != nil {
+			jsonError(rw, "the upload has no `cookies` file part", http.StatusBadRequest)
+			return "", false
+		}
+		defer file.Close()
+		raw, err = io.ReadAll(file)
+	case contentType == "",
+		strings.HasPrefix(contentType, "text/plain"),
+		strings.HasPrefix(contentType, "application/octet-stream"):
+		raw, err = io.ReadAll(req.Body)
+	default:
+		jsonError(rw, "send the cookie file as text/plain, or as a multipart upload in a `cookies` part",
+			http.StatusUnsupportedMediaType)
+		return "", false
+	}
+
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonError(rw, fmt.Sprintf("that cookie file is larger than the %d KiB this endpoint accepts",
+				maxCookieImportBytes/1024), http.StatusRequestEntityTooLarge)
+			return "", false
+		}
+		jsonError(rw, "could not read the request body", http.StatusBadRequest)
+		return "", false
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		jsonError(rw, "no cookie data was supplied", http.StatusBadRequest)
+		return "", false
+	}
+	return string(raw), true
+}
+
+// cookieImportOutcome renders one operator-supplied cookie import onto the
+// wire.
+//
+// The KEY SET IS cookieSetupOutcome's, exactly, and that is the point rather
+// than a coincidence: the two answer the same question about the same three
+// states, the dashboard already has copy for it (cookieSetupAcceptedToast /
+// cookieSetupRejectedMessage in web/public/modules/utils.js), and a fourth
+// phrasing of "saved, but we could not check them" is how the copy drifts
+// apart. See cookieSetupOutcome for what each key means and why `authenticated`
+// and `*Verification` can disagree. Pinned by
+// TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary.
+//
+// Deliberately NOT carrying a cookieStatus block. That comes from
+// RefreshService.GetStatus, whose pass has not run yet at the moment this is
+// rendered — the re-check is detached and fires after the response — so it
+// would be the PRE-import snapshot: a status block contradicting the verdict
+// beside it, which is precisely the junction defect the two payload projections
+// above exist to prevent.
+func cookieImportOutcome(result cookies.ImportResult) map[string]any {
+	return map[string]any{
+		"success":             true,
+		"authenticated":       result.YouTubeAccepted,
+		"twitchAuthenticated": result.TwitchAccepted,
+		"youtubeVerification": result.YouTube.String(),
+		"twitchVerification":  result.Twitch.String(),
+	}
+}
+
 // CookieRoutes registers cookie-related API routes. The optional rate
 // limiter wraps the headless-browser endpoints (/auto-refresh and the
 // auto-setup start/finish/cancel trio) so a buggy or hostile client
@@ -412,6 +518,110 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// relogin map, and GetStatus's browser/registry detection scan would
 		// otherwise run on every manual refresh click for a field this never
 		// uses.
+		response["autoCookieReloginRequired"] = autoCookieSvc.ReloginStatus()
+		if getActivePlatforms != nil {
+			response["activePlatforms"] = getActivePlatforms()
+		}
+		jsonResponse(rw, response)
+	})
+
+	// POST /api/cookies/import — the browser-free re-authentication path.
+	//
+	// The transport half of a mechanism that was otherwise complete: replacing
+	// the bytes of cookies.txt already reaches jar.Reload, the guide check,
+	// OnAuthRecovered and the parked-job resume. What was missing is a way to
+	// deliver those bytes without shell or filesystem access to the volume,
+	// which is every container deployment and every remote dashboard.
+	//
+	// ANY AUTHENTICATED CLIENT, not loopback-gated, by owner ruling. The setup
+	// wizard's loopback gate protects an UNCLAIMED instance from being claimed
+	// by a stranger; this endpoint exists only behind an authenticated session
+	// on an already-claimed one, and a loopback-gated ingest would be useless
+	// in precisely the deployment it is built for — the operator reaches the
+	// dashboard over the LAN or a tunnel, never from inside the container. The
+	// capability it grants an attacker who already holds a session and a CSRF
+	// token is to install cookies they already possess, which is strictly
+	// smaller than the session they already have.
+	//
+	// There is NO GET, and there must never be one, however natural it feels
+	// beside an upload control. That single asymmetry — accepts credential
+	// bytes, never serves them — is what keeps this from being an exfiltration
+	// path. Pinned by TestCookieImportRouteHasNoGET.
+	heavy.Post("/api/cookies/import", func(rw http.ResponseWriter, req *http.Request) {
+		if autoCookieSvc == nil {
+			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		netscape, ok := readCookieImportBody(rw, req)
+		if !ok {
+			return
+		}
+
+		result, err := autoCookieSvc.ImportCookies(req.Context(), netscape)
+
+		// The same deferred, detached, flushed re-check the setup-wizard finish
+		// runs, and for the same reasons — see that handler for the full
+		// derivation. In short: refresh's status block is the only place the
+		// credential fingerprint is compared and the Twitch auth mark cleared;
+		// a request-scoped context would let a closed tab cancel the comparison
+		// its own import caused; and the Flush is what stops the client waiting
+		// out a re-check it has already been answered for.
+		//
+		// Deferred rather than placed after the response so it covers the
+		// jar-reload error exit too — the one error path that runs over a file
+		// already replaced, and the one where a re-check is worth most, because
+		// refresh's own jar.Reload repairs the stale in-memory jar.
+		defer func() {
+			if refreshSvc == nil || !result.Wrote {
+				return
+			}
+			if f, ok := rw.(http.Flusher); ok {
+				f.Flush()
+			}
+			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			refreshSvc.CheckNow(recheckCtx)
+		}()
+
+		if err != nil {
+			switch {
+			// The three refusals, verbatim. Each names the operator's next move
+			// and none of them quotes the submitted text; flattening them to a
+			// 500 would answer a bad export with a server fault.
+			case errors.Is(err, cookies.ErrImportNotNetscape),
+				errors.Is(err, cookies.ErrImportNoRows),
+				errors.Is(err, cookies.ErrImportNoCredential):
+				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+			// S9's abort: Moombox could not read the existing cookies.txt and
+			// deliberately did not write. Verbatim, for the reason the sentinel's
+			// doc gives — the fix is the permission or the mount, and this is the
+			// one message that must never read as "replace your cookies", over a
+			// file the endpoint just refused to touch.
+			case errors.Is(err, cookies.ErrCookieFileUnreadable):
+				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+			// A CONDITION the operator changes and then retries — the same shape
+			// as the locked cookie DB and the blocked ladder, and 409 for the
+			// same reason. The message names the single-file bind mount, which
+			// is what actually produces it in a container.
+			case errors.Is(err, cookies.ErrCookieFileUnwritable):
+				jsonError(rw, err.Error(), http.StatusConflict)
+			// The write LANDED and this process could not load it. Saying "the
+			// import failed" would be false about the file on disk, and would
+			// send an operator to repeat an import that already worked.
+			case result.Wrote:
+				jsonError(rw, "the cookies were imported and written, but this process could not load "+
+					"them — the auth re-check that follows re-reads the file", http.StatusInternalServerError)
+			default:
+				jsonError(rw, "cookie import failed", http.StatusInternalServerError)
+			}
+			return
+		}
+
+		response := cookieImportOutcome(result)
+		// ReloginStatus, not GetStatus: this reads nothing but the relogin map,
+		// which ImportCookies has just updated, and GetStatus's browser/registry
+		// detection scan would otherwise run for a field this never uses.
 		response["autoCookieReloginRequired"] = autoCookieSvc.ReloginStatus()
 		if getActivePlatforms != nil {
 			response["activePlatforms"] = getActivePlatforms()

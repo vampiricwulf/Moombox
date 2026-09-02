@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, parkedCookiePlatforms } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, parkedCookiePlatforms, reloginPromptTarget } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
@@ -478,9 +478,7 @@ class MoomboxApp {
       warningsEl.addEventListener("click", (e) => {
         const warning = e.target.closest(".status-warning");
         if (!warning) return;
-        const action = warning.dataset.action;
-        if (action === "yt-relogin") this.settings.startAutoCookieSetup("youtube");
-        else if (action === "tw-relogin") this.settings.startAutoCookieSetup("twitch");
+        this.answerReloginPrompt(warning.dataset.action);
       });
     }
 
@@ -488,9 +486,7 @@ class MoomboxApp {
     const warningsIconEl = document.getElementById("status-warnings-icon");
     if (warningsIconEl) {
       warningsIconEl.addEventListener("click", () => {
-        const action = warningsIconEl.dataset.action;
-        if (action === "yt-relogin") this.settings.startAutoCookieSetup("youtube");
-        else if (action === "tw-relogin") this.settings.startAutoCookieSetup("twitch");
+        this.answerReloginPrompt(warningsIconEl.dataset.action);
       });
     }
 
@@ -4903,6 +4899,35 @@ class MoomboxApp {
         job.hasSegments = old.hasSegments;
       }
     }
+  }
+
+  // Both re-login warnings land here. The remedy differs by WHO IS ASKING and
+  // then by the install: the interactive browser login opens a window on the
+  // host and its endpoints are loopback-gated, while the import works from
+  // wherever the dashboard is being read. reloginPromptTarget decides; a status
+  // that cannot be read falls back to the import panel, which holds both
+  // controls.
+  //
+  // The auto-status fetch is on the CLICK rather than kept fresh in the
+  // background: this is a rare, deliberate gesture, and one round trip on it
+  // costs nothing while a cached answer could be a browser installed or removed
+  // ago.
+  async answerReloginPrompt(action) {
+    if (action !== "yt-relogin" && action !== "tw-relogin") return;
+    const platform = action === "tw-relogin" ? "twitch" : "youtube";
+    let status = null;
+    try {
+      const response = await fetch("/api/cookies/auto-status");
+      if (response.ok) status = await response.json();
+    } catch {
+      // Leave status null — reloginPromptTarget answers "import", which is the
+      // safe direction.
+    }
+    if (reloginPromptTarget(status, window.location.hostname) === "wizard") {
+      this.settings.startAutoCookieSetup(platform);
+      return;
+    }
+    this.settings.openCookieImport();
   }
 }
 
