@@ -105,6 +105,145 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 	return resumed
 }
 
+// reauthenticateTwitchChats broadcasts a credential change to every live
+// Twitch chat session and reports how many were told.
+//
+// Split out of the OnCredentialsChanged closure for the same reason
+// sweepShouldResume was split out of it: the closure needs a whole runState to
+// build, and the decision inside it — WHICH platform gets a broadcast — is
+// worth driving directly.
+//
+// The gate is an equality test, not "anything but youtube". A third platform
+// added later must not silently inherit Twitch's reconnect behaviour, and
+// dropping the gate entirely would let a YouTube cookie rotation tear down
+// every live Twitch chat session on its own cadence.
+//
+// broadcast is DownloadWorker.ReauthenticateTwitchChats in production, taken
+// as a func so a nil worker degrades to "nothing to tell". It returns a COUNT
+// and nothing else: the caller logs a number, never a channel or an account.
+func reauthenticateTwitchChats(platform string, broadcast func() int) int {
+	if platform != "twitch" || broadcast == nil {
+		return 0
+	}
+	return broadcast()
+}
+
+// wireCredentialRepairCallbacks installs the two RefreshService callbacks that
+// fire when a platform's credentials become usable again.
+//
+// TWO EDGES, and neither implies the other:
+//
+//   - OnAuthRecovered — validate went not-authenticated to authenticated. A
+//     transient Twitch-side refusal, or an operator restoring the EXACT pair
+//     they had before, recovers auth with the credential fingerprint
+//     unchanged, so shouldObserveCredentials returns false and the other
+//     callback never fires.
+//   - OnCredentialsChanged — the fingerprint moved. A same-account rotation,
+//     or a swap to an account that does not validate, moves it with no auth
+//     transition at all.
+//
+// A live Twitch chat session that went anonymous on a refusal has to hear
+// about BOTH, or a transient failure strands it in anonymous capture for the
+// rest of the job (Arc 10 R5, "immediately"). Everything else about the two
+// stays as it was: the recovery sweep passes no identity and so holds back
+// membership parks, the credential sweep passes one and so can move them.
+//
+// broadcast is DownloadWorker.ReauthenticateTwitchChats in production, taken
+// as a func so this method can be driven directly — wireMonitorCallbacks
+// cannot be.
+func (s *runState) wireCredentialRepairCallbacks(broadcast func() int) {
+	// reauth is the half both edges share. reauthenticateTwitchChats filters
+	// the platform and is nil-safe, so this is safe to call from either.
+	//
+	// LIVE SESSIONS FIRST, before the sweep below. A job the sweep resumes
+	// starts a fresh downloader that reads the new credentials anyway; a job
+	// already CAPTURING has no other way to learn about them, and that capture
+	// is the one the operator is watching right now.
+	//
+	// Only the COUNT is logged. On the OnCredentialsChanged edge an identity is
+	// in scope, and it is an opaque equality token (see
+	// CookieJar.TwitchIdentity) that must never reach a log line.
+	reauth := func(platform string) {
+		if n := reauthenticateTwitchChats(platform, broadcast); n > 0 {
+			s.log.Info("twitch credentials usable again — re-authenticating live chat sessions",
+				"platform", platform, "sessions", n)
+		}
+	}
+
+	// When a platform transitions from not-authenticated to authenticated,
+	// sweep the jobs parked in StatusCookies on that platform back to Upcoming
+	// so they get re-probed without manual intervention. Closes audit
+	// decision #23 (worker.md Q3).
+	//
+	// "the jobs", not "every job": sweepShouldResume holds back the
+	// membership-parked ones, whose session was already authenticated when
+	// they failed and which this transition therefore cannot fix.
+	s.cookieRefresh.OnAuthRecovered = func(platform string) {
+		reauth(platform)
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
+		if resumed > 0 {
+			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// Event "auth" pairs with the worker's "Authentication Required"
+			// emit — an empty Event would bypass every target's allowlist
+			// (unfilterable) since the filter only applies when Event != "".
+			s.notifyMgr.Send("Authentication Recovered",
+				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
+				notifications.TypeInfo,
+				[]notifications.Field{
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+				},
+				notifications.SendOptions{Event: "auth"},
+			)
+		}
+	}
+
+	// Whenever the signed-in account is (re-)observed, re-evaluate the parked
+	// jobs against it. For a membership park this is the only thing that can
+	// help — such a job parked while auth was perfectly healthy, so it is
+	// invisible to OnAuthRecovered above — and it resumes only if the account
+	// is genuinely a different one from the one that refused it.
+	//
+	// Dead-cookie parks are eligible here as well. In the common case
+	// OnAuthRecovered already took them (a swap that also restores auth fires
+	// both), and resumeCookieParkedJobs is idempotent, so whichever runs
+	// second simply finds nothing left. Being permissive costs nothing and
+	// covers the swap-while-healthy case for them too.
+	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
+		reauth(platform)
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
+		if resumed > 0 {
+			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// States no cause, for the same reason the "Cookie Auto-Refresh
+			// Ineffective" notification above states none. This fires on the
+			// first authenticated observation of EVERY process, not only on a
+			// real account change: an operator who fixed their cookies while
+			// Moombox was stopped gets their jobs resumed here, and telling
+			// them "a different account was supplied" would be flatly false.
+			// A notification is more visible than a log line, so it should
+			// assert less than the log line, not more — report what happened
+			// (jobs resumed) and leave the cause to the log.
+			//
+			// "the saved credentials", not "the signed-in account": since Arc
+			// 10 this fires for Twitch too, whose credential is a bearer token
+			// and a login name rather than a Google account, and the old
+			// wording would have been simply wrong there.
+			//
+			// Same "auth" event as the recovery notification above, for the
+			// same reason: an empty Event bypasses every target's allowlist.
+			s.notifyMgr.Send("Parked Jobs Re-evaluated",
+				fmt.Sprintf("Resumed %d job(s) parked on %s credentials after re-checking the saved credentials", resumed, platform),
+				notifications.TypeInfo,
+				[]notifications.Field{
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+				},
+				notifications.SendOptions{Event: "auth"},
+			)
+		}
+	}
+}
+
 // channelHealthReporter is the slice of a monitor's surface needed to
 // cross-confirm a channel's reachability across sibling monitors.
 type channelHealthReporter interface {
@@ -637,71 +776,12 @@ func (s *runState) wireMonitorCallbacks() {
 		s.handleRecoveryNeeded(platform, autoEnabled, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
 	}
 
-	// When a platform transitions from not-authenticated to authenticated,
-	// sweep the jobs parked in StatusCookies on that platform back to Upcoming
-	// so they get re-probed without manual intervention. Closes audit
-	// decision #23 (worker.md Q3).
-	//
-	// "the jobs", not "every job": sweepShouldResume holds back the
-	// membership-parked ones, whose session was already authenticated when
-	// they failed and which this transition therefore cannot fix.
-	s.cookieRefresh.OnAuthRecovered = func(platform string) {
-		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
-		if resumed > 0 {
-			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
-			// Event "auth" pairs with the worker's "Authentication Required"
-			// emit — an empty Event would bypass every target's allowlist
-			// (unfilterable) since the filter only applies when Event != "".
-			s.notifyMgr.Send("Authentication Recovered",
-				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
-				notifications.TypeInfo,
-				[]notifications.Field{
-					{Name: "Platform", Value: platform, Inline: true},
-					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
-				},
-				notifications.SendOptions{Event: "auth"},
-			)
-		}
-	}
-
-	// Whenever the signed-in account is (re-)observed, re-evaluate the parked
-	// jobs against it. For a membership park this is the only thing that can
-	// help — such a job parked while auth was perfectly healthy, so it is
-	// invisible to OnAuthRecovered above — and it resumes only if the account
-	// is genuinely a different one from the one that refused it.
-	//
-	// Dead-cookie parks are eligible here as well. In the common case
-	// OnAuthRecovered already took them (a swap that also restores auth fires
-	// both), and resumeCookieParkedJobs is idempotent, so whichever runs
-	// second simply finds nothing left. Being permissive costs nothing and
-	// covers the swap-while-healthy case for them too.
-	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
-		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
-		if resumed > 0 {
-			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
-			// States no cause, for the same reason the "Cookie Auto-Refresh
-			// Ineffective" notification above states none. This fires on the
-			// first authenticated observation of EVERY process, not only on a
-			// real account change: an operator who fixed their cookies while
-			// Moombox was stopped gets their jobs resumed here, and telling
-			// them "a different account was supplied" would be flatly false.
-			// A notification is more visible than a log line, so it should
-			// assert less than the log line, not more — report what happened
-			// (jobs resumed) and leave the cause to the log.
-			//
-			// Same "auth" event as the recovery notification above, for the
-			// same reason: an empty Event bypasses every target's allowlist.
-			s.notifyMgr.Send("Parked Jobs Re-evaluated",
-				fmt.Sprintf("Resumed %d job(s) parked on %s credentials after re-checking the signed-in account", resumed, platform),
-				notifications.TypeInfo,
-				[]notifications.Field{
-					{Name: "Platform", Value: platform, Inline: true},
-					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
-				},
-				notifications.SendOptions{Event: "auth"},
-			)
-		}
-	}
+	// Both credential-repair edges, wired together because they mean the same
+	// thing to a live chat session and different things to everything else.
+	// The broadcast is injected rather than read off s.dlWorker inside, so a
+	// test can count it; the method value is safe on a nil worker
+	// (ReauthenticateTwitchChats is nil-receiver-guarded — Task 5).
+	s.wireCredentialRepairCallbacks(s.dlWorker.ReauthenticateTwitchChats)
 
 	// ProbeVideo callback for monitors (metadata check before job creation).
 	// Uses the caller-supplied ctx so monitor shutdown cancels in-flight

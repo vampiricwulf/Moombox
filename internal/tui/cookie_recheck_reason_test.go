@@ -75,22 +75,46 @@ func TestRecheckFeedbackNamesWhyACheckCouldNotConclude(t *testing.T) {
 		}
 	})
 
-	t.Run("a conclusive verdict renders the shared sentence and nothing else", func(t *testing.T) {
-		// The reason is supplied ANYWAY. The renderer gates on the verdict
-		// rather than trusting the caller to have blanked it, because a reason
-		// beside "OK" or "not authenticated" reads as a cause for a conclusion
-		// that has none.
-		for _, verdict := range []cookies.RefreshVerdict{cookies.RefreshOK, cookies.RefreshFailed} {
-			got := recheckFeedback(t, 200, true, false, cookieRecheckResultMsg{
-				YouTube:       verdict,
-				YouTubeReason: ytReason,
-			})
-			want := cookies.RecheckReport(
-				cookies.RecheckedPlatform{Label: "YouTube", Verdict: verdict},
-			)
-			if got != want {
-				t.Errorf("verdict %v: feedback = %q, want the shared sentence alone %q", verdict, got, want)
-			}
+	t.Run("an OK verdict renders the shared sentence and nothing else", func(t *testing.T) {
+		// Unchanged intent. An authenticated check has no cause to give, and
+		// verdictFromCheck cannot produce OK beside a non-empty reason — so
+		// this row is a pin on the PRODUCER's invariant, exercised through the
+		// renderer, and it must keep passing after the gate widened.
+		got := recheckFeedback(t, 200, true, false, cookieRecheckResultMsg{
+			YouTube:       cookies.RefreshOK,
+			YouTubeReason: "",
+		})
+		want := cookies.RecheckReport(
+			cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshOK},
+		)
+		if got != want {
+			t.Errorf("feedback = %q, want the shared sentence alone %q", got, want)
+		}
+	})
+
+	t.Run("a conclusive REFUSAL names its reason", func(t *testing.T) {
+		// Arc 10 reversed this row. The mark writes RefreshFailed with one of
+		// four fixed sentences, and it is the only thing that says WHICH route
+		// broke — "the cookie file has a Twitch auth-token but no login cookie
+		// beside it" versus "Twitch refused the saved login" are different
+		// remedies. Withholding it left the operator with "not authenticated"
+		// and no next step.
+		//
+		// THE MUTATION: narrowing the gate back to
+		// `verdict == cookies.RefreshUnknown && reason != ""` in
+		// cookieRecheckFeedback (app_update.go). This subtest then fails on the
+		// Contains check below — the sentence comes back as the bare
+		// RecheckReport with no parenthetical.
+		const twReasonMark = "The cookie file has a Twitch auth-token but no login cookie beside it."
+		got := recheckFeedback(t, 200, false, true, cookieRecheckResultMsg{
+			Twitch:       cookies.RefreshFailed,
+			TwitchReason: twReasonMark,
+		})
+		if !strings.Contains(got, twReasonMark) {
+			t.Errorf("feedback = %q, want it to name %q — a conclusive refusal that knows WHY must say so", got, twReasonMark)
+		}
+		if !strings.Contains(got, "Twitch") {
+			t.Errorf("feedback = %q, want the platform label kept beside the reason", got)
 		}
 	})
 

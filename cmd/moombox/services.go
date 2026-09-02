@@ -867,13 +867,42 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// moment the job was refused.
 	dlWorker.CurrentCredentialIdentity = func(platform string) string {
 		if platform != "youtube" {
-			// Only YouTube produces a membership park, and only YouTube has a
-			// stable account fingerprint — see cookies.RefreshService's
-			// prevYouTubeIdentity.
+			// Only YouTube produces a membership park, which is the only thing
+			// this fingerprint is recorded FOR. Twitch has a fingerprint since
+			// Arc 10 (CookieJar.TwitchIdentity), but it identifies a credential
+			// PAIR rather than an account, and no Twitch failure parks a job on
+			// an account question — so there is nothing here for it to record.
 			return ""
 		}
 		return s.jar.YouTubeIdentity()
 	}
+
+	// Arc 10 R1: a Twitch chat auth downgrade marks the PLATFORM, beside the
+	// per-job notification the worker already sends.
+	//
+	// ON ITS OWN GOROUTINE, with the inline recover every goroutine in this
+	// project carries. The caller is internal/twitch's IRC session goroutine
+	// with its read loop parked behind this call (OnAuthDowngrade's contract
+	// says it must not block), and NoteTwitchAuthLoss can reach
+	// handleRecoveryNeeded's auto_enabled=false arm, which sends the
+	// "Cookie Re-Authentication Required" webhook SYNCHRONOUSLY. A chat read
+	// loop must not be held open behind an HTTP POST to Discord.
+	//
+	// Fire-and-forget is correct rather than convenient: the mark is
+	// idempotent — writing the same reason twice is the same status — and the
+	// downloader latches its report once per job anyway, so there is nothing
+	// to sequence and nothing to wait for. The reason is a fixed vocabulary
+	// token; nothing read from the jar or the wire passes through here.
+	dlWorker.SetOnTwitchAuthLoss(func(reason string) {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("panic marking twitch auth loss", "panic", fmt.Sprint(r))
+				}
+			}()
+			s.cookieRefresh.NoteTwitchAuthLoss(reason)
+		}()
+	})
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func(platform string) bool {

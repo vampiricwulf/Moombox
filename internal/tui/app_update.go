@@ -788,14 +788,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // string for the identical gesture, and both copies are pinned against that
 // function — so nothing here may reword it. The reason, when there is one, is
 // APPENDED after it: a suffix cannot change the sentence a mutation test
-// compares, and a check that concluded produces no suffix at all, so the
-// pinned string is what an operator with working cookies still sees.
+// compares, and a healthy check produces no suffix at all, so the pinned
+// string is what an operator with working cookies still sees.
 //
-// A reason is rendered only for a platform that is ACTIVE and whose verdict is
-// RefreshUnknown. The verdict gate is here rather than at the wiring because
-// "could not establish" is the only state a reason explains: attaching one to
-// "OK" or "not authenticated" would read as a cause for a conclusion that has
-// none.
+// A reason is rendered for any ACTIVE platform that has one, whatever the
+// verdict. Until Arc 10 the gate was RefreshUnknown as well, because every
+// producer left the field empty on a conclusive verdict — but
+// NoteTwitchAuthLoss writes RefreshFailed WITH a fixed sentence naming which
+// chat-downgrade route broke, and that sentence is the only thing separating a
+// missing login cookie from a refused one. An OK verdict still carries
+// nothing: see the gate itself for why that is a property of the producer
+// rather than a promise from the caller.
 //
 // LastError is a THIRD part, and it is ungated by any verdict on purpose. It
 // belongs to the auto-cookie service, not to the check this line reports, and
@@ -832,7 +835,23 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 			// "Could not establish" asks for nothing and must not alarm.
 			stated = max(stated, severityWarning)
 		}
-		if verdict == cookies.RefreshUnknown && reason != "" {
+		// Gated on the STRING, not on the verdict, since Arc 10.
+		//
+		// It was gated on RefreshUnknown because every producer at the time
+		// left the reason empty on a conclusive verdict — a cause attached to
+		// "OK" or "not authenticated" reads as an explanation for a conclusion
+		// that has none. NoteTwitchAuthLoss is the first producer that writes
+		// RefreshFailed WITH a reason, and it is precisely the reason the
+		// operator needs: which of the four chat-downgrade routes broke. Under
+		// the old gate they pressed R C and read "Twitch not authenticated"
+		// with no way to tell a missing login cookie from a refused one.
+		//
+		// RefreshOK still carries nothing, and by construction rather than by
+		// trust: verdictFromCheck returns OK only when the error is nil, and
+		// the reason string IS that error. Testing the string rather than the
+		// verdict is what makes that a property of the data instead of a
+		// promise from the caller.
+		if reason != "" {
 			reasons = append(reasons, label+": "+reason)
 		}
 	}
