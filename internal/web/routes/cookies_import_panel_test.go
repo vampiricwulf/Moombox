@@ -310,6 +310,8 @@ func TestReloginPromptTargetsTheImportUnlessTheWizardCanActuallyHelp(t *testing.
 		{"a tunnelled client of a host that has a browser", withBrowser, "moombox.example.ts.net", "import"},
 		{"a hostname that merely contains localhost", withBrowser, "localhost.evil.example", "import"},
 		{"a hostname that merely contains 127.0.0.1", withBrowser, "127.0.0.1.evil.example", "import"},
+		{"a hostname that merely contains ::1", withBrowser, "::1.evil.example", "import"},
+		{"a hostname that merely contains [::1]", withBrowser, "[::1].evil.example", "import"},
 		{"the status could not be read, at the host", nil, "localhost", "import"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
