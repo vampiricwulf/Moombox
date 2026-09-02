@@ -2,7 +2,9 @@
 
 **Status:** owner-ruled 2026-08-29 (Q9 REVISED: "build it for this release, but we don't need to test it
 ourselves with a linux box, a user can submit a bug report if it's broken"); the ruling's exact text is
-`a1-linux-file-map.md`; to be committed to `docs/superpowers/specs/` after the Arc 11 merge.
+`docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md:2015`. Drafted 2026-09-02 from the Explore
+file map (`a1-linux-file-map.md`, gitignored beside the remediation ledger); committed on branch
+`cookie-a1-linux-reap` after the Arc 11 merge.
 **Scope:** `internal/cookies` (`job_linux.go`, one new tag-free file, the seams in `autocookies.go`),
 the spec docs that say the reap is Windows-only. No UI. No config. The liveness pilot stays disarmed.
 
