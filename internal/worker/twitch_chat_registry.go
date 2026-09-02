@@ -2,7 +2,7 @@ package worker
 
 import "sync"
 
-// twitchChatReauthenticator is the slice of *twitch.ChatDownloader the
+// twitchChatReauthenticator is the part of *twitch.ChatDownloader the
 // registry needs.
 //
 // An interface rather than the concrete type, so the registry's own

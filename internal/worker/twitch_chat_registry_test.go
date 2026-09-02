@@ -1,10 +1,15 @@
 package worker
 
 import (
+	"context"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
 // Arc 10 R5, worker half. Nothing here touches a credential: the registry's
@@ -55,9 +60,11 @@ func TestRegistryBroadcastsToEveryLiveDownloader(t *testing.T) {
 
 // TestRemovedDownloaderIsNotReauthenticated.
 //
-// The mutation: a remove closure that deletes the wrong key. A finished job's
-// downloader would keep being told to reconnect, and Reauthenticate on a
-// stopped downloader clears latches a resumed job then inherits.
+// The mutation: a remove closure that deletes the wrong key. The map would then
+// pin a finished job's downloader — its dedup set, pending message buffer and
+// cached emote data — for the life of the process, and this daemon runs 24/7.
+// Not a latch problem: stream_processor_twitch.go builds a FRESH downloader per
+// job execution, so no later job can inherit a stale one's state.
 func TestRemovedDownloaderIsNotReauthenticated(t *testing.T) {
 	reg := newTwitchChatRegistry()
 	stays, goes := &fakeChat{}, &fakeChat{}
@@ -167,12 +174,23 @@ func TestBroadcastDoesNotHoldTheRegistryLock(t *testing.T) {
 // partially initialised process without one; a nil deref at the moment an
 // operator repairs their cookies is the worst possible time for one.
 //
-// The mutation: dropping either nil guard.
+// Two mutations, one per half of add's guard, each caught by its own block
+// below: dropping `r == nil` (or reauthenticateAll's) panics on the nil
+// receiver; dropping `|| cd == nil` stores the nil and panics later, inside the
+// broadcast loop.
 func TestNilRegistryIsInert(t *testing.T) {
 	var reg *twitchChatRegistry
 	reg.add(&fakeChat{})() // add returns a no-op remove; calling it must not panic
 	if got := reg.reauthenticateAll(); got != 0 {
 		t.Errorf("a nil registry broadcast to %d downloaders", got)
+	}
+
+	// The other half of add's guard: an unregistered nil must not be broadcast
+	// to. Deleting `|| cd == nil` panics in reauthenticateAll and nowhere else.
+	live := newTwitchChatRegistry()
+	live.add(nil)
+	if got := live.reauthenticateAll(); got != 0 {
+		t.Errorf("a nil downloader was registered and broadcast to (%d told)", got)
 	}
 }
 
@@ -243,5 +261,69 @@ func TestOrchestratorAndWorkerShareOneRegistry(t *testing.T) {
 	}
 	if n := f.calls.Load(); n != 1 {
 		t.Errorf("the registered downloader was told %d times, want 1", n)
+	}
+}
+
+// registryLen reports how many downloaders the registry currently holds. Only
+// the tests need this number; production asks the registry to act, never to
+// describe itself.
+func registryLen(r *twitchChatRegistry) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.entries)
+}
+
+// TestExecuteTwitchRegistersTheLiveChatDownloaderForItsWholeRun is the only
+// thing that can see the registration site. Deleting the `if irc != nil` block,
+// inverting it, or dropping `defer unregisterChat()` are each invisible to
+// every other test in this file and to the whole package — the registry would
+// stay empty (or leak) forever while every unit test stayed green.
+//
+// The probe is a synchronous OnJobUpdate subscriber on the Muxing flip, which
+// ExecuteTwitch performs after registration and before any defer runs — no
+// polling, no timing. A pre-cancelled ctx walks the function end to end without
+// touching the network: the notifier is nil, the thumbnail URL is empty, a nil
+// FetchVariantsFn skips the quality monitor, the download loop never runs, and
+// startChat's goroutine dials an already-dead context.
+func TestExecuteTwitchRegistersTheLiveChatDownloaderForItsWholeRun(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	o := w.orchestrator
+
+	job := &database.Job{
+		ID: "tw_reg", VideoID: "reg", URL: "https://twitch.tv/x",
+		Platform: "twitch", Status: database.StatusDownloading,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	var duringRun atomic.Int64
+	duringRun.Store(-1)
+	unsub := db.OnJobUpdate(func(j *database.Job) {
+		if j.ID == job.ID && j.Status == database.StatusMuxing {
+			duringRun.Store(int64(registryLen(o.twitchChats)))
+		}
+	})
+	defer unsub()
+
+	// The real concrete type ExecuteTwitch asserts on. The dead ctx means Start
+	// never dials. No credential: the options carry no Credentials getter, so
+	// the downloader is anonymous by construction.
+	cd := twitch.NewChatDownloader(twitch.ChatDownloaderOptions{
+		ChannelLogin: "somechannel",
+		OutputPath:   filepath.Join(t.TempDir(), "chat.json"),
+	}, &discardLogger{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: t.TempDir(), Logger: &discardLogger{}}
+	_ = o.ExecuteTwitch(ctx, jobCtx, &TwitchVariantInfo{URL: "http://127.0.0.1:1/x.m3u8", Name: "720p"}, false, cd)
+
+	if got := duringRun.Load(); got != 1 {
+		t.Errorf("the live chat downloader was registered on %d entries while ExecuteTwitch ran, want 1", got)
+	}
+	if got := registryLen(o.twitchChats); got != 0 {
+		t.Errorf("the registry still holds %d entries after ExecuteTwitch returned, want 0", got)
 	}
 }
