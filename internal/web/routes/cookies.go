@@ -504,6 +504,15 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			return
 		}
+		// The dashboard twin of the TUI wizard's re-check, and the same shape
+		// as the auto-refresh handler's at the top of this file: a completed
+		// wizard has just rewritten cookies.txt, and refresh's status block is
+		// the only place the credential fingerprint is compared and the Twitch
+		// auth mark cleared. Bare, with no log line, for the reason stated
+		// there — the routes package has no operational logger.
+		if refreshSvc != nil {
+			refreshSvc.CheckNow(req.Context())
+		}
 		jsonResponse(rw, cookieSetupOutcome(result))
 	})
 

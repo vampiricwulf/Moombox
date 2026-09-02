@@ -105,6 +105,48 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 	return resumed
 }
 
+// recheckAfterCookieWrite runs the in-process auth re-check that MUST follow
+// any pass which may have rewritten cookies.txt, and reports whether a pass
+// actually ran.
+//
+// Why every such gesture has to end here: refresh's status block is the only
+// place the Twitch credential fingerprint is compared, the auth mark cleared
+// and OnCredentialsChanged fired (Arc 10 R4), and that block runs only inside
+// a refresh pass. A repaired cookie file that reaches no pass is invisible
+// until the 30-minute ticker — which is precisely what "immediately apply the
+// updated cookie" rules out. The full enumeration of sites, and which of them
+// were missing this call before Arc 10, is in the plan's Task 3 table.
+//
+// CheckNow rather than something lighter: every caller has just waited on a
+// headless browser or a whole setup wizard, so two validate round-trips are
+// not the cost that matters, and a second entry point into the status block
+// would be a second mechanism containing the first.
+//
+// The skipped case is Info, not the service's own Debug, and that split
+// predates Arc 10: the caller has just rewritten the file, the in-flight pass
+// read the OLD one, so the badge stays stale until the next tick and this is
+// the only line that explains it. Nothing here retries or waits — the guard's
+// contract is that a second caller does nothing.
+//
+// checkNow is RefreshService.CheckNow as a method value, taken as a func so a
+// process with no refresh service degrades to "nothing to re-check". gesture
+// names what just wrote, and args are the caller's own structured fields.
+func recheckAfterCookieWrite(ctx context.Context, checkNow func(context.Context) bool, log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, gesture string, args ...any) bool {
+	if checkNow == nil {
+		return false
+	}
+	if checkNow(ctx) {
+		return true
+	}
+	log.Info("auth re-check after "+gesture+" was skipped, a cookie refresh was already in flight — status may lag until the next refresh", args...)
+	return false
+}
+
 // reauthenticateTwitchChats broadcasts a credential change to every live
 // Twitch chat session and reports how many were told.
 //
@@ -475,29 +517,31 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 		return
 	}
 
+	// The re-check, hoisted out of the RefreshOK arm so it covers every verdict
+	// a pass that RAN can reach.
+	//
+	// It used to sit only under RefreshOK, on the reasoning that a successful
+	// refresh is the one whose result the UI needs. That was half the truth.
+	// A pass that ran and FAILED still rewrote cookies.txt — a browser that
+	// produced a new-but-dead pair moves the credential fingerprint just as a
+	// working one does — so without this the Twitch auth mark taken under the
+	// OLD pair stands until the ticker, telling the operator to fix a login row
+	// on a file that no longer has that problem.
+	//
+	// Gated on Ran, not on the verdict: a DECLINED pass (setup in progress, a
+	// refresh already in flight, nothing configured, the service stopped) wrote
+	// nothing at all, so there is nothing to re-read and the Info line below
+	// would describe a staleness that does not exist.
+	//
+	// Placed after the err != nil block above, which returns: an errored pass
+	// includes the S9 abort, which deliberately did not write.
+	if result.Ran {
+		recheckAfterCookieWrite(context.Background(), s.cookieRefresh.CheckNow, s.log, "recovery", "platform", platform)
+	}
+
 	switch result.Verdict(platform) {
 	case cookies.RefreshOK:
 		s.log.Info("auto-cookie recovery succeeded", "platform", platform)
-		// Re-check auth status immediately so the UI updates.
-		//
-		// CheckNow now single-flights with the periodic refresh, and this is the
-		// one caller where a skip is worth a line at Info rather than the
-		// service's own Debug. Recovery is TRIGGERED from inside a refresh pass
-		// (OnRecoveryNeeded fires mid-pass and this runs on the goroutine
-		// handleRecoveryNeeded spawns), so a recovery that finishes quickly —
-		// the browser-free profile import, which needs no browser launch — can
-		// still land while its own trigger pass is finishing, e.g. inside the
-		// ticker path's fallback probe. The pass in flight read the cookie file
-		// BEFORE this recovery rewrote it, so its status is pre-recovery, and
-		// the badge then stays stale until the next tick a full interval away.
-		//
-		// Nothing here retries or waits: the guard's contract is that a second
-		// caller does nothing, and a queued retry would be a second mechanism to
-		// contain the first. The line is what makes the stale badge explicable.
-		if !s.cookieRefresh.CheckNow(context.Background()) {
-			s.log.Info("auth re-check after recovery was skipped, a cookie refresh was already in flight — status may lag until the next refresh",
-				"platform", platform)
-		}
 
 	case cookies.RefreshFailed:
 		// The case that was silently swallowed whenever the sibling platform

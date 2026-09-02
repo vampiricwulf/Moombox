@@ -853,6 +853,25 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return stats.ActiveCount > 0
 	}
 
+	// The periodic timer is the only credential-writing path with no caller
+	// outside internal/cookies, so it gets the only injected re-check seam.
+	// Everything else calls recheckAfterCookieWrite directly.
+	//
+	// Reads s.cookieRefresh at FIRE time by convention with the other injected
+	// funcs, not out of necessity: it is already assigned by the time this
+	// closure is built. §15 constructs and assigns cookieRefresh at
+	// services.go:711-713, autoCookieSvc is built at :751, and this wiring runs
+	// after both. The nil guard is therefore belt and braces against a future
+	// reordering rather than a live hazard — CheckNow on a nil *RefreshService
+	// would panic inside the periodic goroutine, which is recovered but kills
+	// that timer for the life of the process.
+	autoCookieSvc.OnPassCompleted = func() {
+		if s.cookieRefresh == nil {
+			return
+		}
+		recheckAfterCookieWrite(context.Background(), s.cookieRefresh.CheckNow, log, "the periodic cookie refresh")
+	}
+
 	// Mirror the cookies.dpapi_fallback config flag onto the service.
 	// Read once at startup — toggling at runtime would require a
 	// restart, which is consistent with how other AutoCookieService
@@ -939,6 +958,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 			log.Warn(report.msg,
 				slog.String("platform", platform),
 				slog.String("note", report.note))
+		}
+		// Arc 10 R4/R5. This is the browser refresh a FAILING JOB triggers, and
+		// it was the one credential-writing gesture with no re-check: the job
+		// that asked gets its answer from `result`, but every OTHER live Twitch
+		// job's chat session learned nothing until the 30-minute ticker
+		// compared the fingerprint. That is the case the owner's "immediately
+		// apply the updated cookie" is about.
+		//
+		// Background, not refreshCtx: that context is cancelled by the defer
+		// two lines down as soon as this closure returns, and the re-check must
+		// not be racing its own caller's teardown.
+		if result.Ran {
+			recheckAfterCookieWrite(context.Background(), s.cookieRefresh.CheckNow, log, "the job-triggered cookie refresh", "platform", platform)
 		}
 		return report.ok
 	}

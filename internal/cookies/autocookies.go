@@ -360,6 +360,27 @@ type AutoCookieService struct {
 	// false. Audit reports/cookies.md #23.
 	HasActiveJobs func() bool
 
+	// OnPassCompleted is called after a PERIODIC refresh tick that actually ran
+	// a pass, so whoever owns the in-process auth check can re-read the file
+	// this pass may have rewritten.
+	//
+	// Injected rather than called directly for the reason FallbackLiveness and
+	// HasActiveJobs are: this package must not reach into RefreshService's
+	// lifecycle, and cmd/moombox holds both. It exists ONLY for the periodic
+	// timer — every other credential-writing gesture has a caller outside this
+	// package that calls CheckNow itself (see the plan's Task 3 table), and
+	// firing this from RefreshCookiesDetailed as well would double every one of
+	// those.
+	//
+	// Called on the periodic goroutine with no lock held, and it MAY run a full
+	// in-process re-check (RefreshService.CheckNow — two validate round-trips,
+	// up to their timeouts). That is deliberate rather than tolerated: the
+	// ticker coalesces missed ticks, so a slow hook costs cadence, never
+	// correctness, and the alternative — spawning a goroutine here — would put
+	// an unbounded number of re-checks behind a browser pass that is already
+	// single-flighted. What the hook must NOT do is block forever.
+	OnPassCompleted func()
+
 	// DpapiFallback enables the Windows-only DPAPI cookie-extraction
 	// path as a fallback when the CDP refresh launch fails. Off by
 	// default — the fallback reads the user's REAL Chromium-family
@@ -2747,6 +2768,17 @@ func (s *AutoCookieService) periodicRefreshHasSource() bool {
 	return err == nil
 }
 
+// notePassCompleted fires OnPassCompleted if one is wired.
+//
+// A named method rather than an inline nil check so the decision has a seam a
+// test can drive: the tick that calls it needs a browser profile, a browser
+// and a network, so the branch is otherwise unreachable offline.
+func (s *AutoCookieService) notePassCompleted() {
+	if s.OnPassCompleted != nil {
+		s.OnPassCompleted()
+	}
+}
+
 // profileImportStartupDelay is how long the browserless startup import waits
 // before running. RefreshCookies verifies the imported cookies over the
 // network, and firing that the instant the process comes up — before DNS,
@@ -2895,8 +2927,21 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 				}
 				s.logger.Debug("periodic auto-cookie refresh triggered")
 				refreshCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
-				ok, err := s.refreshCookies(refreshCtx, gateExempt)
+				// Detailed, not the bool wrapper: only the full result carries
+				// Ran, and Ran is what decides whether anything was written.
+				result, err := s.refreshCookiesDetailed(refreshCtx, gateExempt)
 				cancel()
+				ok := result.AnyVerified()
+				// Gated on Ran, NOT on success. A pass that ran and failed still
+				// rewrote cookies.txt — a browser refresh that produced a
+				// new-but-dead pair moves the credential fingerprint exactly as a
+				// working one does — so firing on success only would leave the
+				// Twitch auth mark keyed to a pair that is no longer on disk. A
+				// DECLINED pass (seven refreshDeclined() exits) wrote nothing, so
+				// there is nothing to re-read.
+				if result.Ran {
+					s.notePassCompleted()
+				}
 				if err != nil {
 					s.logger.Warn("periodic auto-cookie refresh failed", "err", err)
 				} else if ok {

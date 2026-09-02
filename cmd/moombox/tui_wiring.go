@@ -432,9 +432,7 @@ func (s *runState) runTUI() {
 		// bar behind until the next tick. R F's own feedback is built from
 		// `result`, not from GetStatus, so what the operator is told about the
 		// refresh itself is unaffected — this line explains only the badge.
-		if !s.cookieRefresh.CheckNow(context.Background()) {
-			s.log.Info("auth re-check after browser refresh was skipped, a cookie refresh was already in flight — status may lag until the next refresh")
-		}
+		recheckAfterCookieWrite(context.Background(), s.cookieRefresh.CheckNow, s.log, "browser refresh")
 		return result, nil
 	}
 
@@ -488,6 +486,12 @@ func (s *runState) runTUI() {
 				s.log.Error("Failed to finish auto-cookie setup", slog.String("error", err.Error()))
 				return result, err
 			}
+			// A completed wizard has just written cookies.txt from the browser
+			// the operator signed in to — the most deliberate credential change
+			// there is, and until Arc 10 the one that told the running process
+			// nothing. Same context as the finish itself is deliberately NOT
+			// used: finishCtx is cancelled by the defer above.
+			recheckAfterCookieWrite(context.Background(), s.cookieRefresh.CheckNow, s.log, "the setup wizard")
 			return result, nil
 		},
 		func() {
