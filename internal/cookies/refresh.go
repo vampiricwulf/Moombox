@@ -327,10 +327,10 @@ func verdictFromCheck(authenticated bool, err error) RefreshVerdict {
 // These mirror internal/twitch's AuthDowngrade* constants BY VALUE and cannot
 // import them: internal/twitch imports THIS package (twitch/auth.go,
 // twitch/service.go), so the dependency only runs one way. The pin against
-// drift is ADDED BY TASK 6 of the Arc 10 plan, in internal/worker, which
-// imports both (TestTwitchAuthLossVocabularyCoversEveryDowngradeReason). Until
-// that task lands there is no such test in the tree, and a value that drifts
-// apart from its twitch-side twin is caught by nothing.
+// drift lives in internal/worker, which imports both
+// (TestTwitchAuthLossVocabularyCoversEveryDowngradeReason). Every member added
+// here needs its twitch-side twin added to that test's slice in the same
+// change, or a value that drifts apart from its twin is caught by nothing.
 //
 // Opaque tokens, never sentences and never format strings: there is no verb
 // here to interpolate a token, a login or a wire line into.
@@ -339,6 +339,11 @@ const (
 	twitchLossLoginUnacknowledged = "login-never-acknowledged"
 	twitchLossNoLoginCookie       = "no-login-cookie"
 	twitchLossUnusableLoginCookie = "unusable-login-cookie"
+	// The one member that does NOT come from the chat handshake: the playback
+	// access token Twitch minted for a capture was minted for nobody although
+	// credentials were sent (Arc 10 R6). It is the only route a job with chat
+	// capture switched off can produce.
+	twitchLossPlaybackTokenAnonymous = "playback-token-anonymous"
 )
 
 // twitchAuthLossMessage renders the operator sentence for one downgrade route.
@@ -366,6 +371,8 @@ func twitchAuthLossMessage(reason string) string {
 		return "The cookie file has a Twitch auth-token but no login cookie beside it."
 	case twitchLossUnusableLoginCookie:
 		return "The Twitch login cookie is not a name that can be sent to chat."
+	case twitchLossPlaybackTokenAnonymous:
+		return "Twitch issued an anonymous playback token although saved credentials were sent."
 	default:
 		return "The saved Twitch login could not be used."
 	}

@@ -94,11 +94,17 @@ type notifySend func(title, description string, ntype notifications.Notification
 //
 // The mapping lives at THIS end on purpose. internal/twitch reports a state; the
 // operator-facing wording, and the remedy attached to it, belong beside the
-// other things this process tells an operator to do. The four inputs are a
-// closed vocabulary, so the default arm exists only for a future value added
+// other things this process tells an operator to do. The inputs are a closed
+// vocabulary, so the default arm exists only for a future value added
 // upstream without a matching arm here — it must still describe the degradation
 // rather than say nothing, because a notification that names no problem is
 // worse than the log line it was meant to escape.
+//
+// It covers the WHOLE vocabulary, including the playback-token route that no
+// caller can reach today: nothing sends a chat notice for it (the HLS side
+// marks the platform and logs, it does not notify), and the arm exists so that
+// a later caller which does cannot land on the generic sentence. A partial
+// mirror is the drift this arc was written to stop.
 func twitchChatDowngradeReason(reason string) string {
 	switch reason {
 	case twitch.AuthDowngradeLoginRefused:
@@ -109,6 +115,8 @@ func twitchChatDowngradeReason(reason string) string {
 		return "The cookie file has a Twitch auth-token but no login cookie beside it."
 	case twitch.AuthDowngradeUnusableLoginCookie:
 		return "The Twitch login cookie is not a name that can be sent to chat."
+	case twitch.AuthDowngradePlaybackTokenAnonymous:
+		return "Twitch issued an anonymous playback token although saved credentials were sent."
 	default:
 		return "The saved Twitch login could not be used."
 	}
@@ -208,6 +216,42 @@ func (sp *StreamProcessor) notifierSend() notifySend {
 // startup finished wiring.
 func (sp *StreamProcessor) twitchAuthLossReporter() func(reason string) {
 	return sp.onTwitchAuthLoss
+}
+
+// noteAnonymousPlayback marks the PLATFORM when Service.GetHLSMasterPlaylist
+// reported that this install's Twitch credentials were sent and Twitch minted
+// the playback token for nobody anyway (Arc 10 R6).
+//
+// This is the HLS half of the same seam the chat downgrade uses, and the
+// reason it exists is the job that has chat capture switched OFF: every other
+// detector in this arc runs on the IRC handshake, so without this one a dead
+// Twitch credential on such a job is invisible until an archive comes back
+// with ad-break gaps in it.
+//
+// A mark and no notification, deliberately. The chat route notifies because it
+// can name the job whose chat is degraded; here the whole statement is about
+// the credential, which is what the platform mark already says — and
+// GetHLSMasterPlaylist has already written the Warn line that names the
+// channel. A second Discord embed per capture start would be noise.
+//
+// Extracted from processTwitchLive rather than written inline there because
+// processTwitchLive is unreachable offline (it needs a live GQL reply and a
+// real Usher playlist); inline, the reason constant could be swapped for
+// another member of the vocabulary, or the guard dropped so every capture
+// marks, and no test could see it.
+//
+// The resolver is read at FIRE time for the reason twitchAuthLossReporter
+// documents. The call is synchronous and must stay cheap: it runs on the job
+// goroutine that is starting the capture, and cmd/moombox's SetOnTwitchAuthLoss
+// wiring is what makes it non-blocking — that closure spawns its own goroutine,
+// exactly as the chat route relies on.
+func (sp *StreamProcessor) noteAnonymousPlayback(anonymousPlayback bool) {
+	if !anonymousPlayback {
+		return
+	}
+	if mark := sp.twitchAuthLossReporter(); mark != nil {
+		mark(twitch.AuthDowngradePlaybackTokenAnonymous)
+	}
 }
 
 // twitchChatDowngradeCallback builds the OnAuthDowngrade callback for one live
@@ -471,7 +515,11 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}
 
 	// Get HLS variants
-	variants, err := sp.tw.GetHLSMasterPlaylist(ctx, login)
+	variants, anonymousPlayback, err := sp.tw.GetHLSMasterPlaylist(ctx, login)
+	// BEFORE the error check: the playback token already answered the
+	// credential question, and a capture that then fails to start is exactly
+	// when an operator needs to be told which of the two problems they have.
+	sp.noteAnonymousPlayback(anonymousPlayback)
 	if err != nil {
 		return nil, fmt.Errorf("twitch HLS: %w", err)
 	}

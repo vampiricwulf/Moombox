@@ -15,7 +15,7 @@ import (
 // runs one way. This package imports BOTH, so it is the only place the two
 // vocabularies can be compared.
 //
-// The mutation this catches is the realistic one: a fifth AuthDowngrade* route
+// The mutation this catches is the realistic one: a NEW AuthDowngrade* route
 // added upstream with no arm in twitchAuthLossMessage, or a token whose value
 // is edited on one side. Either lands the operator on the generic
 // "the saved Twitch login could not be used", which names no remedy.
@@ -29,6 +29,7 @@ func TestTwitchAuthLossVocabularyCoversEveryDowngradeReason(t *testing.T) {
 		twitch.AuthDowngradeLoginUnacknowledged,
 		twitch.AuthDowngradeNoLoginCookie,
 		twitch.AuthDowngradeUnusableLoginCookie,
+		twitch.AuthDowngradePlaybackTokenAnonymous,
 	}
 
 	// The sentence an unrecognised token renders, discovered rather than

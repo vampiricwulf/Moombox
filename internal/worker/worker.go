@@ -640,7 +640,14 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				return w.tw.GetStreamInfo(innerCtx, login)
 			}
 			variant.FetchVariantsFn = func(innerCtx context.Context) ([]twitch.TwitchHLSVariant, error) {
-				return w.tw.GetHLSMasterPlaylist(innerCtx, login)
+				// The anonymous-playback verdict is discarded HERE and only
+				// here: this closure re-fetches variants on every mid-stream
+				// format change, and the platform mark was already taken at
+				// capture start by processTwitchLive's call. Marking again per
+				// probe would say nothing new and would re-fire recovery
+				// dedupe bookkeeping on a loop.
+				variants, _, err := w.tw.GetHLSMasterPlaylist(innerCtx, login)
+				return variants, err
 			}
 		}
 		// Determine which Twitch chat downloader to use

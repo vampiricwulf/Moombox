@@ -284,22 +284,34 @@ func TestTwitchChatDowngradeNoticeCarriesNoCredential(t *testing.T) {
 	}
 }
 
-// TestTwitchChatDowngradeReasonsAreDistinct: four states, four sentences.
+// TestTwitchChatDowngradeReasonsAreDistinct: one state, one sentence, for
+// every member of the vocabulary.
 //
 // Collapsing them to one generic line passes every other test in this file, and
 // costs the operator the only part of the notice that says WHICH remedy applies
 // — a refused login is a dead cookie, an unusable one is a hand-edited file.
+//
+// The playback-token route is in the list although nothing sends a chat notice
+// for it today (the HLS side marks the platform and logs, it does not notify).
+// That is what makes the mirror's coverage of the WHOLE vocabulary a
+// requirement rather than a comment: a later caller that does route it here
+// must not land on the generic sentence.
 func TestTwitchChatDowngradeReasonsAreDistinct(t *testing.T) {
 	seen := map[string]string{}
+	generic := twitchChatDowngradeReason("a-reason-added-upstream-without-a-case-here")
 	for _, reason := range []string{
 		twitch.AuthDowngradeLoginRefused,
 		twitch.AuthDowngradeLoginUnacknowledged,
 		twitch.AuthDowngradeNoLoginCookie,
 		twitch.AuthDowngradeUnusableLoginCookie,
+		twitch.AuthDowngradePlaybackTokenAnonymous,
 	} {
 		sentence := twitchChatDowngradeReason(reason)
 		if sentence == "" {
 			t.Errorf("reason %q renders no sentence", reason)
+		}
+		if sentence == generic {
+			t.Errorf("reason %q renders the generic fallback — it has no arm of its own", reason)
 		}
 		if prev, dup := seen[sentence]; dup {
 			t.Errorf("reasons %q and %q render the same sentence %q", prev, reason, sentence)

@@ -22,9 +22,12 @@ const (
 	ircReadDeadline = 6 * time.Minute
 )
 
-// The fixed vocabulary of ChatDownloaderOptions.OnAuthDowngrade's reason: one
-// value per route from "this job HAD Twitch credentials" to "this job's chat is
-// being captured anonymously".
+// The fixed vocabulary of Twitch auth-downgrade reasons: one value per route
+// from "this install HAD Twitch credentials" to "Twitch would not honour them".
+// The first four are ChatDownloaderOptions.OnAuthDowngrade's reason — the
+// routes from held credentials to a chat session captured anonymously. The
+// fifth (Arc 10 R6) is the playback-token route and is never passed to
+// OnAuthDowngrade; it shares this block because it shares the vocabulary.
 //
 // Opaque tokens for the consumer to switch on, deliberately not sentences — the
 // consumer renders the operator-facing wording, and the same fact has to reach
@@ -52,6 +55,16 @@ const (
 	// hand-edited cookies.txt carrying a display name with a space in it lands
 	// here. Same silence as the case above, from a different input.
 	AuthDowngradeUnusableLoginCookie = "unusable-login-cookie"
+	// AuthDowngradePlaybackTokenAnonymous: the jar held credentials and Twitch
+	// nonetheless issued an ANONYMOUS playback access token, so this capture
+	// is served stitched ads and would be refused subscriber-only content.
+	//
+	// Reported by Service.GetHLSMasterPlaylist, NOT by the chat downloader —
+	// it lives in this block because it is a member of the same vocabulary and
+	// splitting the vocabulary across two files is how two of them drift. It
+	// is also the ONLY member a job with chat capture switched off can ever
+	// produce: every other route runs on the IRC path.
+	AuthDowngradePlaybackTokenAnonymous = "playback-token-anonymous"
 )
 
 // errReauthRequested ends an IRC session that Reauthenticate cancelled.
