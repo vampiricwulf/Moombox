@@ -322,6 +322,74 @@ func verdictFromCheck(authenticated bool, err error) RefreshVerdict {
 	}
 }
 
+// The fixed vocabulary of NoteTwitchAuthLoss's reason.
+//
+// These mirror internal/twitch's AuthDowngrade* constants BY VALUE and cannot
+// import them: internal/twitch imports THIS package (twitch/auth.go,
+// twitch/service.go), so the dependency only runs one way. The pin against
+// drift lives in internal/worker, which imports both — see
+// TestTwitchAuthLossVocabularyCoversEveryDowngradeReason.
+//
+// Opaque tokens, never sentences and never format strings: there is no verb
+// here to interpolate a token, a login or a wire line into.
+const (
+	twitchLossLoginRefused        = "login-refused"
+	twitchLossLoginUnacknowledged = "login-never-acknowledged"
+	twitchLossNoLoginCookie       = "no-login-cookie"
+	twitchLossUnusableLoginCookie = "unusable-login-cookie"
+)
+
+// twitchAuthLossMessage renders the operator sentence for one downgrade route.
+//
+// THE SWITCH IS THE LEAK BARRIER, not a convenience. NoteTwitchAuthLoss's
+// caller lives in internal/worker and hands over a token it received from
+// internal/twitch; AuthStatus.TwitchError then reaches two per-request
+// operator surfaces (routes.TwitchAuthStatusPayload's `twitchError` and the
+// TUI's R C result line). Because every arm below returns a string LITERAL,
+// the SET of strings that field can hold is fixed at compile time and no
+// input — not a future upstream token, not a value read off the wire — can
+// widen it. Returning the reason, or interpolating it, would move that
+// guarantee from the type system to the caller's discipline.
+//
+// The default arm exists for a token added upstream without an arm here. It
+// must still say a credential is broken: a status line that names no problem
+// is worse than the log line it was meant to escape.
+func twitchAuthLossMessage(reason string) string {
+	switch reason {
+	case twitchLossLoginRefused:
+		return "Twitch refused the saved login."
+	case twitchLossLoginUnacknowledged:
+		return "Twitch never acknowledged the saved login."
+	case twitchLossNoLoginCookie:
+		return "The cookie file has a Twitch auth-token but no login cookie beside it."
+	case twitchLossUnusableLoginCookie:
+		return "The Twitch login cookie is not a name that can be sent to chat."
+	default:
+		return "The saved Twitch login could not be used."
+	}
+}
+
+// twitchAuthMark is a Twitch credential failure observed somewhere OTHER than
+// the periodic oauth2/validate check, held until the credential pair changes.
+//
+// It exists because validate CANNOT SEE two of the four ways a Twitch capture
+// goes anonymous. An auth-token with no `login` beside it, and one with a
+// `login` that cannot be sent as an IRC nickname, both leave the TOKEN valid —
+// so validate answers 200, the platform reads green forever, and every
+// subscriber-only message and badge is dropped for the whole job. A mark that
+// validate could overwrite would therefore be no mark at all: it would be
+// erased within one 30-minute tick with nothing fixed.
+//
+// The zero value is "no mark". `identity` is CookieJar.TwitchIdentity() as of
+// the moment the mark was taken, and it is the ONLY thing that clears the mark
+// — see refresh's status block. `reason` is a member of the vocabulary above
+// and never anything read from the jar or the wire.
+type twitchAuthMark struct {
+	set      bool
+	reason   string
+	identity string
+}
+
 // authStatusChanged reports whether anything a SURFACE renders differs between
 // two consecutive checks. It is the OnAuthChange gate.
 //
@@ -440,6 +508,12 @@ type RefreshService struct {
 	// list while a sibling platform is present. See shouldFireRecovery.
 	ytEverConcluded bool
 	twEverConcluded bool
+
+	// twitchMark holds a Twitch credential failure that oauth2/validate cannot
+	// see, and it is why rs.status has TWO writers rather than one. Written
+	// under mu by NoteTwitchAuthLoss; consulted and cleared under mu by
+	// refresh's status block. See twitchAuthMark.
+	twitchMark twitchAuthMark
 
 	// prevYouTubeIdentity is the jar's YouTubeIdentity() as of the last
 	// conclusive AND authenticated check — the baseline shouldObserveCredentials
@@ -1004,6 +1078,103 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 	return rs.checkTwitchAuth(ctx)
 }
 
+// NoteTwitchAuthLoss records that Twitch credentials this install HOLDS were
+// refused, or could not be used, by something other than the periodic
+// oauth2/validate check — today the IRC chat handshake.
+//
+// THIS IS THE SECOND WRITER OF rs.status, and the only one that is not
+// refresh's status block. Both write under rs.mu, and the rule between them is
+// stated once, here, and enforced there: while a mark stands it WINS for
+// TwitchAuthenticated, TwitchVerification and TwitchError, and only a changed
+// credential fingerprint clears it. The sole-writer property that used to hold
+// is gone on purpose; nothing else about the locking discipline changed.
+//
+// reason must be a member of the fixed vocabulary (twitchLossLoginRefused and
+// friends). Nothing derived from a cookie value, a login, or a wire line may
+// be passed here — and twitchAuthLossMessage refuses to render anything else
+// anyway, which is what keeps AuthStatus.TwitchError's contents a compile-time
+// set rather than a caller's promise.
+//
+// Recovery uses the SAME dedupe a validate-found loss gets. shouldFireRecovery
+// is evaluated against this platform's own two pieces of baseline state and
+// they are then advanced exactly as refresh advances them, so one loss raises
+// one alarm however many times this is called for it, and a loss that follows
+// a genuine repair raises a new one.
+//
+// nowAuth=false and checkErr=nil are not assumptions: a downgrade IS the
+// conclusive negative. Something tried to use these credentials against Twitch
+// and Twitch would not take them, which is a stronger statement than the
+// endpoint check makes.
+//
+// Callers reach this from ChatDownloader's OnAuthDowngrade, which runs on the
+// IRC session goroutine with the read loop parked behind it. This function
+// makes no network call and holds no lock across a callback — but the
+// callbacks it invokes may block (handleRecoveryNeeded's auto_enabled=false
+// arm sends a webhook synchronously), so cmd/moombox's wiring calls it on its
+// own goroutine. See the SetOnTwitchAuthLoss wiring in cmd/moombox/services.go.
+func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
+	var (
+		changed      bool
+		fireRecovery bool
+		statusCopy   AuthStatus
+	)
+	// Scoped into a func literal so the unlock is DEFERRED, for the reason
+	// refresh's own status block documents: rs.mu is a plain non-reentrant
+	// RWMutex, and a panic unwinding with the write lock held would park the
+	// goroutine holding it and block every later GetStatus forever.
+	func() {
+		rs.mu.Lock()
+		defer rs.mu.Unlock()
+
+		prev := rs.status
+		rs.twitchMark = twitchAuthMark{
+			set:    true,
+			reason: reason,
+			// Sampled under the same lock as the write, so the mark can never
+			// be keyed to a pair that was already replaced by the time it
+			// landed.
+			identity: rs.jar.TwitchIdentity(),
+		}
+		rs.status.TwitchAuthenticated = false
+		rs.status.TwitchVerification = RefreshFailed
+		rs.status.TwitchError = twitchAuthLossMessage(reason)
+		changed = authStatusChanged(prev, rs.status)
+		statusCopy = rs.status
+
+		// The dedupe, decided under the lock and advanced under it, so two
+		// concurrent downgrades on one dead pair cannot both witness the
+		// transition.
+		fireRecovery = rs.OnRecoveryNeeded != nil &&
+			shouldFireRecovery(rs.twEverConcluded, rs.prevTwitchAuth, false, nil, rs.jar.HasAnyTwitchAuthCookie())
+		rs.prevTwitchAuth = false
+		rs.twEverConcluded = true
+		// hasCheckedOnce is deliberately NOT touched. It is service-wide and
+		// means "a refresh pass has completed"; a chat downgrade is not one,
+		// and setting it here would let a Twitch handshake decide whether
+		// YouTube's first OnAuthRecovered transition is allowed to fire.
+	}()
+
+	// Both callbacks reach out into cmd/moombox and must not run under this
+	// service's mutex, following refresh's convention exactly.
+	if changed && rs.OnAuthChange != nil {
+		rs.OnAuthChange(statusCopy)
+	}
+	if fireRecovery {
+		// Stamp the shared dedupe map for the same reason the tier-1 fire does:
+		// a liveness verdict landing in the same window must not fire recovery
+		// for a problem this one is already working on.
+		rs.noteRecoveryDecided("twitch", time.Now())
+		// The SENTENCE, not the caller's `reason`. This function's own doc
+		// says the switch is the leak barrier rather than the caller's
+		// discipline, and logging the raw argument would quietly make that
+		// false — TestTwitchAuthLossReasonIsTheVocabularyOnly deliberately
+		// passes a credential-shaped string through this exact call.
+		rs.logger.Warn("twitch credentials were refused where they were used, triggering recovery",
+			"reason", twitchAuthLossMessage(reason))
+		rs.OnRecoveryNeeded("twitch")
+	}
+}
+
 // doRefresh is the TICKER refresh, and the only path allowed to pay for the
 // FallbackLiveness probe. Both of the other entry points run synchronously on
 // a goroutine somebody is waiting on — CheckNow on an HTTP handler, Start's
@@ -1144,6 +1315,8 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		hasChecked                 bool
 		hasYTCookies, hasTWCookies bool
 		ytIdentity, prevYTIdentity string
+		twIdentity                 string
+		twEffective                bool
 		changed                    bool
 		statusCopy                 AuthStatus
 	)
@@ -1187,9 +1360,51 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		ytIdentity = rs.jar.YouTubeIdentity()
 		prevYTIdentity = rs.prevYouTubeIdentity
 
+		twIdentity = rs.jar.TwitchIdentity()
+
+		// THE MARK, and the rule that makes rs.status's two writers coherent.
+		//
+		// A downgrade observed outside this check (NoteTwitchAuthLoss) stands
+		// until the credential PAIR changes, and while it stands it wins over
+		// validate for every Twitch conclusion drawn below. It has to: validate
+		// answers 200 for a valid auth-token whether or not a usable `login`
+		// sits beside it, so without this a no-login-cookie downgrade would be
+		// erased on the next tick with nothing repaired.
+		//
+		// Clearing is keyed on the FINGERPRINT ALONE, with no authenticated
+		// gate. Gating it on nowAuth would leave a stale mark in front of an
+		// operator whose broken pair was replaced by a REVOKED one: they would
+		// be told to add a login row while the real answer is a 401. Clearing
+		// here and letting validate write the truth is both simpler and
+		// honest — which is what "the mark clears and validate decides the
+		// status again" says.
+		twMarked := false
+		if rs.twitchMark.set {
+			if rs.twitchMark.identity != twIdentity {
+				rs.twitchMark = twitchAuthMark{}
+			} else {
+				twMarked = true
+			}
+		}
+		// twEffective is the Twitch auth answer everything below this line
+		// uses — the status, the previous-auth baseline, the recovery gate, the
+		// recovered transition and (Task 3) the identity baseline. ONE value
+		// rather than a mark check at each site: five sites each deciding for
+		// themselves is five chances for one to disagree, and the site that
+		// would disagree first is OnAuthRecovered, which would announce a
+		// recovery that never happened and resume every parked Twitch job into
+		// the same failure.
+		twEffective = twAuth && !twMarked
+		twVerification := verdictFromCheck(twAuth, twErr)
+		twStatusErr := twErrStr
+		if twMarked {
+			twVerification = RefreshFailed
+			twStatusErr = twitchAuthLossMessage(rs.twitchMark.reason)
+		}
+
 		rs.status = AuthStatus{
 			YouTubeAuthenticated: ytAuth,
-			TwitchAuthenticated:  twAuth,
+			TwitchAuthenticated:  twEffective,
 			// Now "YouTube auth is configured" rather than "the cookie set is
 			// complete", which is what the label this drives has always claimed.
 			// A half-cleared jar consequently renders as configured-but-unverified
@@ -1205,9 +1420,9 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			// verdictFromCheck: err means "this check learned nothing", never
 			// "the credentials are dead".
 			YouTubeVerification: verdictFromCheck(ytAuth, ytErr),
-			TwitchVerification:  verdictFromCheck(twAuth, twErr),
+			TwitchVerification:  twVerification,
 			YouTubeError:        ytErrStr,
-			TwitchError:         twErrStr,
+			TwitchError:         twStatusErr,
 		}
 
 		// Update previous auth state tracking.
@@ -1228,7 +1443,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		// cannot consume the edge. See advanceIdentityBaseline.
 		rs.prevYouTubeIdentity = advanceIdentityBaseline(rs.prevYouTubeIdentity, ytIdentity, ytAuth, ytErr)
 		if twErr == nil {
-			rs.prevTwitchAuth = twAuth
+			rs.prevTwitchAuth = twEffective
 			rs.twEverConcluded = true
 		}
 		rs.hasCheckedOnce = true
@@ -1282,7 +1497,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			rs.logger.Warn("youtube auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("youtube")
 		}
-		if shouldFireRecovery(twConcluded, prevTW, twAuth, twErr, hasTWCookies) {
+		if shouldFireRecovery(twConcluded, prevTW, twEffective, twErr, hasTWCookies) {
 			rs.noteRecoveryDecided("twitch", time.Now())
 			rs.logger.Warn("twitch auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("twitch")
@@ -1296,7 +1511,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			rs.logger.Info("youtube auth recovered")
 			rs.OnAuthRecovered("youtube")
 		}
-		if !prevTW && twAuth && twErr == nil {
+		if !prevTW && twEffective && twErr == nil {
 			rs.logger.Info("twitch auth recovered")
 			rs.OnAuthRecovered("twitch")
 		}
