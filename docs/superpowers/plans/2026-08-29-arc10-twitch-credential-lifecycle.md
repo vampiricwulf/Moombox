@@ -43,7 +43,7 @@ Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN
 | 4 | `ChatDownloader.Reauthenticate()` | opus |
 | 5 | `twitchChatRegistry` and the ExecuteTwitch registration | opus |
 | 6 | The worker seam: a downgrade marks the platform | sonnet |
-| 7 | `cmd/moombox` wiring: mark, broadcast, adapted sweep, and the two reason renderers | opus |
+| 7 | `cmd/moombox` wiring: mark, both repair edges, adapted sweep, and the two reason renderers | opus |
 | 7a | Every credential write reaches the fingerprint comparison | opus |
 | 8 | The HLS side, per Task 0's report (branch A builds; branch B records — neither edits a doc) | opus |
 | 9 | The doc sentences that change with the code | sonnet |
@@ -3281,13 +3281,24 @@ The mark writes `RefreshFailed` **with** a non-empty reason. It is the first pro
 
 **1. The mark seam runs on its own goroutine.** `NoteTwitchAuthLoss`'s caller chain starts on `internal/twitch`'s IRC session goroutine, with the read loop parked behind it (`ChatDownloaderOptions.OnAuthDowngrade`'s contract, `chat.go:181-189`: *"must not block"*). The mark can reach `handleRecoveryNeeded`'s `auto_enabled=false` arm (`monitor_callbacks.go:503-544`), which sends the "Cookie Re-Authentication Required" webhook **synchronously**. Spec §4 requires the mark be delivered asynchronously by its consumer; this is that consumer. Fire-and-forget is correct: the mark is idempotent, and the downloader already latches its report once per job, so there is nothing to sequence and nothing to wait for.
 
-**2. The credential-change subscriber gains the broadcast and is ADAPTED, not filtered.** `resumeCookieParkedJobs` already gates on `job.Platform`, and every Twitch `COOKIES?` job carries `ParkReasonAuth` (`parkReasonForError`, `worker.go:895-902`, returns `ParkReasonMembership` only for `ErrNotAMember`, which is YouTube-only), so a Twitch fire resumes exactly the Twitch jobs it should. What is wrong for Twitch is the notification's sentence — *"after re-checking the signed-in account"* — which describes a Google account, not a bearer token.
+**2. The credential-change subscriber gains the broadcast and is ADAPTED, not filtered.** `resumeCookieParkedJobs` already gates on `job.Platform`, and every Twitch `COOKIES?` job carries `ParkReasonAuth` (`parkReasonForError`, `worker.go:895-902`, returns `ParkReasonMembership` only for `ErrNotAMember`, which is YouTube-only), so a Twitch fire resumes exactly the Twitch jobs it should. What is wrong for Twitch is the notification's sentence — *"after re-checking the signed-in account"* — which describes a Google account, not a bearer token. Task 7 owns that sentence and Step 4 replaces it; Task 9 adapts `operations.md`'s row to match.
+
+**2a. THERE ARE TWO REPAIR EDGES, and the broadcast must ride both.** Found by the Task 3 review. `refresh` fires `OnCredentialsChanged("twitch", …)` when the credential FINGERPRINT moves, and `OnAuthRecovered("twitch")` when validate goes not-authenticated → authenticated. Those are different events and one does not imply the other:
+
+- A transient Twitch-side refusal (a 401 during an outage, a token that starts validating again) recovers auth with the fingerprint **unchanged** — `shouldObserveCredentials` returns false, so `OnCredentialsChanged` never fires. Same for an operator who restores the exact previous pair after a bad edit.
+- A same-account rotation, or a swap to an account that does not validate, moves the fingerprint with no auth transition.
+
+A chat session that went anonymous on a refusal and is repaired by the first kind would, with `OnCredentialsChanged` alone, stay anonymous **until the job ends** — R5's "immediately" not covered. So both closures call the same `reauthenticateTwitchChats`, which already filters on platform and is nil-safe.
+
+**Covering both costs nothing, and the double fire is bounded.** The broadcast is idempotent in the way that matters: `Reauthenticate` resets three already-reset latches and cancels a session. A repair that fires BOTH edges in one pass (a swap that also restores auth) runs the broadcast twice, microseconds apart on the same goroutine, and the worst case is that the second cancel lands on the session the first one just started — one extra reconnect, which by Task 4's design spends no reconnect budget and no backoff. That is a smaller cost than a dedupe mechanism to prevent it, and the plan does not build one.
+
+**The broadcast must never park its caller**, and does not. Both closures can run on an HTTP handler goroutine — `POST /api/cookies/recheck` (`routes/cookies.go:262`) and the dashboard browser refresh (`:399`) both call `CheckNow` synchronously, and `refresh` invokes these callbacks inline. `reauthenticateAll` snapshots under the registry lock and calls outside it (Task 5), and `Reauthenticate` writes three atomics, takes `cd.mu` briefly and cancels a context (Task 4). No I/O, no wait.
 
 **3. Task 8 branch A, if taken, wires `twService.OnAnonymousPlayback` here too.** That line is written in Task 8, not here.
 
 **Files:**
 - Modify: `cmd/moombox/services.go` — the mark seam, beside `dlWorker.CurrentCredentialIdentity` (`:866-877`)
-- Modify: `cmd/moombox/monitor_callbacks.go` — a small helper near `sweepShouldResume` (`:66-76`), and the `OnCredentialsChanged` closure (`:678-706`)
+- Modify: `cmd/moombox/monitor_callbacks.go` — a small helper near `sweepShouldResume` (`:66-76`), and BOTH credential-repair closures, extracted out of `wireMonitorCallbacks` into one testable method: `OnAuthRecovered` (`:648-665`) and `OnCredentialsChanged` (`:678-706`)
 - Modify: `internal/tui/app_update.go:834` — one condition in `cookieRecheckFeedback`
 - Modify: `web/public/modules/utils.js:527-546` — one condition in `cookieIndicatorState`, plus the doc comment above it (`:515-521`) that states the old rule
 - Test: `cmd/moombox/monitor_callbacks_twitch_reauth_test.go` (create)
@@ -3295,7 +3306,7 @@ The mark writes `RefreshFailed` **with** a non-empty reason. It is the first pro
 - Test: `internal/web/routes/cookies_indicator_test.go` (amend the subtest that pins the OLD rule — see Step 4b)
 
 **Interfaces:**
-- Consumes: `RefreshService.OnCredentialsChanged func(platform, identity string)` **firing for `"twitch"` (Task 3)** — the whole reason Step 4 exists; without Task 3 the closure Step 4 rewrites is never entered for Twitch and the broadcast is dead code. Also `(*cookies.RefreshService).NoteTwitchAuthLoss(reason string)` (Task 2); `(*worker.DownloadWorker).SetOnTwitchAuthLoss(fn func(reason string))` (Task 6); `(*worker.DownloadWorker).ReauthenticateTwitchChats() int` (Task 5); `resumeCookieParkedJobs(db, log, platform, currentIdentity string) int` (`monitor_callbacks.go:81-106`)
+- Consumes: `RefreshService.OnAuthRecovered func(platform string)` (pre-existing, `refresh.go:520-523`; fires on a not-authenticated → authenticated transition, which for Twitch since Task 2 means `twEffective`, so a standing mark cannot produce a phantom recovery) — the SECOND repair edge, and the only one a transient refusal produces. Also `RefreshService.OnCredentialsChanged func(platform, identity string)` **firing for `"twitch"` (Task 3)** — the whole reason Step 4 exists; without Task 3 the closure Step 4 rewrites is never entered for Twitch and the broadcast is dead code. Also `(*cookies.RefreshService).NoteTwitchAuthLoss(reason string)` (Task 2); `(*worker.DownloadWorker).SetOnTwitchAuthLoss(fn func(reason string))` (Task 6); `(*worker.DownloadWorker).ReauthenticateTwitchChats() int` (Task 5); `resumeCookieParkedJobs(db, log, platform, currentIdentity string) int` (`monitor_callbacks.go:81-106`)
 - Consumes (Steps 4a/4b): `cookieRecheckResultMsg{YouTube, Twitch cookies.RefreshVerdict; YouTubeReason, TwitchReason, LastError string}` (`internal/tui/app_actions.go:28-48` produces it from `OnRecheckCookies`, unchanged by this task) and `routes.TwitchAuthStatusPayload`'s `twitchError` / `CookieStatusPayload`'s `youtubeError` keys (`internal/web/routes/cookies.go`, unchanged by this task)
 - Produces: `func reauthenticateTwitchChats(platform string, broadcast func() int) int` — no later task consumes it; it exists so the platform gate is drivable. Steps 4a/4b produce no new symbol: both are one-condition widenings of existing functions.
 
@@ -3359,12 +3370,99 @@ func TestUnknownPlatformDoesNotBroadcast(t *testing.T) {
 		t.Errorf("an unknown platform broadcast to %d sessions with %d calls, want 0 and 0", got, calls)
 	}
 }
+
+// repairCallbackState builds the minimum runState wireCredentialRepairCallbacks
+// needs, and returns it with a counter the broadcast increments.
+//
+// A real RefreshService over an empty jar (no network is reached — nothing
+// calls a check) and a real empty database, following
+// monitor_callbacks_recovery_test.go's fixture. The empty DB is load-bearing:
+// resumeCookieParkedJobs finds no jobs, so `resumed` stays 0, so notifyMgr is
+// never touched and may stay nil.
+func repairCallbackState(t *testing.T) (*runState, *int) {
+	t.Helper()
+	log, err := logger.New(filepath.Join(t.TempDir(), "repair.log"), "error", 4096, 1)
+	if err != nil {
+		t.Fatalf("logger.New: %v", err)
+	}
+	log.SuppressStdout()
+	t.Cleanup(log.Close)
+
+	db, err := database.Open(filepath.Join(t.TempDir(), "repair.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	s := &runState{
+		log:           log,
+		db:            db,
+		cookieRefresh: cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, log),
+	}
+	calls := 0
+	s.wireCredentialRepairCallbacks(func() int { calls++; return 1 })
+	return s, &calls
+}
+
+// TestBothRepairEdgesBroadcastForTwitch is the Task 3 review's finding 1.
+//
+// OnAuthRecovered is a repair edge OnCredentialsChanged does not cover: a
+// transient Twitch refusal, or an operator restoring the exact pair they had
+// before, brings validate back to authenticated with the credential
+// fingerprint UNCHANGED, so shouldObserveCredentials returns false and
+// OnCredentialsChanged never fires. Wired to that callback alone, a chat
+// session that went anonymous on the refusal stays anonymous until the job
+// ends — R5's "immediately" simply not covered for that path.
+//
+// THE MUTATION: dropping `reauth(platform)` from the OnAuthRecovered closure
+// (which is how the plan's first draft had it). The first subtest then reports
+// 0 broadcasts. Dropping it from OnCredentialsChanged fails the second.
+func TestBothRepairEdgesBroadcastForTwitch(t *testing.T) {
+	t.Run("auth recovered", func(t *testing.T) {
+		s, calls := repairCallbackState(t)
+		s.cookieRefresh.OnAuthRecovered("twitch")
+		if *calls != 1 {
+			t.Errorf("OnAuthRecovered(\"twitch\") broadcast %d times, want 1 — a transient refusal that heals produces no OnCredentialsChanged, so this is the only edge covering it", *calls)
+		}
+	})
+
+	t.Run("credentials changed", func(t *testing.T) {
+		s, calls := repairCallbackState(t)
+		s.cookieRefresh.OnCredentialsChanged("twitch", "an-opaque-identity-token")
+		if *calls != 1 {
+			t.Errorf("OnCredentialsChanged(\"twitch\") broadcast %d times, want 1", *calls)
+		}
+	})
+}
+
+// TestAYouTubeRepairDoesNotBroadcast: the platform gate, driven through the
+// REGISTERED callbacks rather than through the helper.
+//
+// A YouTube cookie rotation is routine and fires both edges on its own
+// cadence. Broadcasting there would drop and re-establish every live Twitch
+// IRC session for a credential that has nothing to do with them — on a
+// marathon stream, repeatedly.
+//
+// THE MUTATION: calling `broadcast()` from `reauth` without the platform
+// filter, or filtering on `platform != "youtube"`.
+func TestAYouTubeRepairDoesNotBroadcast(t *testing.T) {
+	s, calls := repairCallbackState(t)
+
+	s.cookieRefresh.OnAuthRecovered("youtube")
+	s.cookieRefresh.OnCredentialsChanged("youtube", "an-opaque-identity-token")
+
+	if *calls != 0 {
+		t.Errorf("a YouTube repair broadcast to Twitch chat sessions %d times, want 0", *calls)
+	}
+}
 ```
+
+That file's imports are `"context"` and `"testing"` plus, for the fixture, `"path/filepath"`, `"time"`, `"github.com/vampiricwulf/Moombox/internal/cookies"`, `"github.com/vampiricwulf/Moombox/internal/database"` and `"github.com/vampiricwulf/Moombox/internal/logger"`.
 
 - [ ] **Step 2: Run the tests and confirm they fail**
 
-Run: `go test ./cmd/moombox/ -run 'TestOnlyATwitchCredentialChange|TestBroadcastWithNoWorker|TestUnknownPlatformDoesNot' -v`
-Expected: compile failure — `undefined: reauthenticateTwitchChats`.
+Run: `go test ./cmd/moombox/ -run 'TestOnlyATwitchCredentialChange|TestBroadcastWithNoWorker|TestUnknownPlatformDoesNot|TestBothRepairEdges|TestAYouTubeRepair' -v`
+Expected: compile failure — `undefined: reauthenticateTwitchChats`, `s.wireCredentialRepairCallbacks undefined`.
 
 - [ ] **Step 3: Add the helper**
 
@@ -3395,23 +3493,107 @@ func reauthenticateTwitchChats(platform string, broadcast func() int) int {
 }
 ```
 
-- [ ] **Step 4: Wire the broadcast into `OnCredentialsChanged` and adapt the notice**
+- [ ] **Step 4: Wire the broadcast into BOTH repair edges, and adapt the notice**
 
-In `cmd/moombox/monitor_callbacks.go`, replace the body of the `s.cookieRefresh.OnCredentialsChanged` closure (`:678` onwards) with:
+In `cmd/moombox/monitor_callbacks.go`, lift the two credential-repair closures out of `wireMonitorCallbacks` (`OnAuthRecovered` at `:648-665`, `OnCredentialsChanged` at `:678-706`) into one method beside them. The lift is what makes the wiring testable: `wireMonitorCallbacks` takes no arguments and touches the monitors, the DB, the notifier and half of `runState`, so nothing can drive it in a test — and "the hook is registered" is exactly the property this task must not get wrong twice.
+
+Replace both closures with a single call in `wireMonitorCallbacks`, where the first of them stood:
 
 ```go
-	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
-		// LIVE SESSIONS FIRST. A job the sweep below resumes starts a fresh
-		// downloader that reads the new credentials anyway; a job already
-		// CAPTURING has no other way to learn about them, and that capture is
-		// the one the operator is watching right now.
-		//
-		// Only the count is logged. identity is an opaque equality token (see
-		// CookieJar.TwitchIdentity) and must never reach a log line.
-		if n := reauthenticateTwitchChats(platform, s.dlWorker.ReauthenticateTwitchChats); n > 0 {
-			s.log.Info("twitch credentials changed — re-authenticating live chat sessions", "sessions", n)
-		}
+	// Both credential-repair edges, wired together because they mean the same
+	// thing to a live chat session and different things to everything else.
+	// The broadcast is injected rather than read off s.dlWorker inside, so a
+	// test can count it; the method value is safe on a nil worker
+	// (ReauthenticateTwitchChats is nil-receiver-guarded - Task 5).
+	s.wireCredentialRepairCallbacks(s.dlWorker.ReauthenticateTwitchChats)
+```
 
+and add the method after `resumeCookieParkedJobs`:
+
+```go
+// wireCredentialRepairCallbacks installs the two RefreshService callbacks that
+// fire when a platform's credentials become usable again.
+//
+// TWO EDGES, and neither implies the other:
+//
+//   - OnAuthRecovered - validate went not-authenticated to authenticated. A
+//     transient Twitch-side refusal, or an operator restoring the EXACT pair
+//     they had before, recovers auth with the credential fingerprint
+//     unchanged, so shouldObserveCredentials returns false and the other
+//     callback never fires.
+//   - OnCredentialsChanged - the fingerprint moved. A same-account rotation,
+//     or a swap to an account that does not validate, moves it with no auth
+//     transition at all.
+//
+// A live Twitch chat session that went anonymous on a refusal has to hear
+// about BOTH, or a transient failure strands it in anonymous capture for the
+// rest of the job (Arc 10 R5, "immediately"). Everything else about the two
+// stays as it was: the recovery sweep passes no identity and so holds back
+// membership parks, the credential sweep passes one and so can move them.
+//
+// broadcast is DownloadWorker.ReauthenticateTwitchChats in production, taken
+// as a func so this method can be driven directly - wireMonitorCallbacks
+// cannot be.
+func (s *runState) wireCredentialRepairCallbacks(broadcast func() int) {
+	// reauth is the half both edges share. reauthenticateTwitchChats filters
+	// the platform and is nil-safe, so this is safe to call from either.
+	//
+	// LIVE SESSIONS FIRST, before the sweep below. A job the sweep resumes
+	// starts a fresh downloader that reads the new credentials anyway; a job
+	// already CAPTURING has no other way to learn about them, and that capture
+	// is the one the operator is watching right now.
+	//
+	// Only the COUNT is logged. On the OnCredentialsChanged edge an identity is
+	// in scope, and it is an opaque equality token (see
+	// CookieJar.TwitchIdentity) that must never reach a log line.
+	reauth := func(platform string) {
+		if n := reauthenticateTwitchChats(platform, broadcast); n > 0 {
+			s.log.Info("twitch credentials usable again — re-authenticating live chat sessions",
+				"platform", platform, "sessions", n)
+		}
+	}
+
+	// When a platform transitions from not-authenticated to authenticated,
+	// sweep the jobs parked in StatusCookies on that platform back to Upcoming
+	// so they get re-probed without manual intervention. Closes audit
+	// decision #23 (worker.md Q3).
+	//
+	// "the jobs", not "every job": sweepShouldResume holds back the
+	// membership-parked ones, whose session was already authenticated when
+	// they failed and which this transition therefore cannot fix.
+	s.cookieRefresh.OnAuthRecovered = func(platform string) {
+		reauth(platform)
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
+		if resumed > 0 {
+			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// Event "auth" pairs with the worker's "Authentication Required"
+			// emit — an empty Event would bypass every target's allowlist
+			// (unfilterable) since the filter only applies when Event != "".
+			s.notifyMgr.Send("Authentication Recovered",
+				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
+				notifications.TypeInfo,
+				[]notifications.Field{
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+				},
+				notifications.SendOptions{Event: "auth"},
+			)
+		}
+	}
+
+	// Whenever the signed-in account is (re-)observed, re-evaluate the parked
+	// jobs against it. For a membership park this is the only thing that can
+	// help — such a job parked while auth was perfectly healthy, so it is
+	// invisible to OnAuthRecovered above — and it resumes only if the account
+	// is genuinely a different one from the one that refused it.
+	//
+	// Dead-cookie parks are eligible here as well. In the common case
+	// OnAuthRecovered already took them (a swap that also restores auth fires
+	// both), and resumeCookieParkedJobs is idempotent, so whichever runs
+	// second simply finds nothing left. Being permissive costs nothing and
+	// covers the swap-while-healthy case for them too.
+	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
+		reauth(platform)
 		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
 		if resumed > 0 {
 			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
@@ -3439,9 +3621,14 @@ In `cmd/moombox/monitor_callbacks.go`, replace the body of the `s.cookieRefresh.
 					{Name: "Platform", Value: platform, Inline: true},
 					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
 				},
+				notifications.SendOptions{Event: "auth"},
+			)
+		}
+	}
+}
 ```
 
-(The closing `notifications.SendOptions{...}` and the two closing braces below are unchanged. Keep every other line of the existing closure byte-identical apart from the two edits above; `s.dlWorker.ReauthenticateTwitchChats` is a method value and is safe to take even when `s.dlWorker` is nil, because that method is nil-receiver-guarded — Task 5.)
+Both closure bodies below `reauth(platform)` are the EXISTING code, moved verbatim except for the one notification sentence the comment marks. Do not rewrite them while relocating: a diff showing anything else changed inside those two blocks is a mistake.
 
 - [ ] **Step 4a: TUI — the `R C` result line renders a reason whatever the verdict**
 
@@ -3670,8 +3857,8 @@ While here, correct the neighbouring comment that Task 1 falsified. `CurrentCred
 
 - [ ] **Step 6: Run the tests and confirm they pass**
 
-Run: `go test ./cmd/moombox/ -run 'TestOnlyATwitchCredentialChange|TestBroadcastWithNoWorker|TestUnknownPlatformDoesNot' -v`
-Expected: PASS for all three.
+Run: `go test ./cmd/moombox/ -run 'TestOnlyATwitchCredentialChange|TestBroadcastWithNoWorker|TestUnknownPlatformDoesNot|TestBothRepairEdges|TestAYouTubeRepair' -v`
+Expected: PASS for all five (`TestBothRepairEdgesBroadcastForTwitch` has two subtests).
 
 Run: `go test ./cmd/moombox/ -count=1`
 Expected: `ok  github.com/vampiricwulf/Moombox/cmd/moombox`. If a test asserts the old "after re-checking the signed-in account" wording, update it to the new sentence — that is the intended change, not a regression.
@@ -3712,11 +3899,20 @@ The mark runs on its own goroutine with the inline recover: its caller is the
 IRC session goroutine with the read loop parked behind it, and the mark can
 reach the auto_enabled=false arm, which posts a webhook synchronously.
 
-OnCredentialsChanged("twitch") broadcasts to every live chat session BEFORE
-the parked-job sweep — a resumed job builds a fresh downloader anyway, while
-a running capture has no other way to learn. The gate is an equality test so
-a third platform cannot inherit it. Only the count is logged; the identity is
-an opaque equality token.
+BOTH repair edges broadcast to every live chat session, before the parked-job
+sweep — a resumed job builds a fresh downloader anyway, while a running
+capture has no other way to learn. Two edges because neither implies the
+other: OnCredentialsChanged fires when the credential FINGERPRINT moves, and
+OnAuthRecovered when validate goes not-authenticated to authenticated, which a
+transient refusal does with the fingerprint unchanged. Wired to the first
+alone, a chat session that went anonymous on a transient refusal stayed
+anonymous until the job ended.
+
+The two closures moved into wireCredentialRepairCallbacks so the registration
+itself is testable — wireMonitorCallbacks takes no arguments and touches half
+of runState, so nothing could drive it. Their bodies are unchanged apart from
+the one notification sentence. The gate is an equality test so a third
+platform cannot inherit it; only the count is logged, never the identity.
 
 The existing sweep is adapted, not filtered: sweepShouldResume already gates
 on job.Platform and every Twitch COOKIES? job carries ParkReasonAuth, so the
@@ -4734,7 +4930,7 @@ Spec §5 names five documents. Every edit below quotes the CURRENT sentence and 
 - Modify: `docs/spec/platform-services.md` (three sentences, `:514`, `:527`, `:529`)
 - Modify: `docs/spec/data-and-storage.md` (five sites, `:733`, `:736`, `:748`, `:835`, `:857`)
 - Modify: `docs/spec/user-interfaces.md` (four sites, `:395`, `:672`, `:693`, `:851`)
-- Modify: `docs/spec/operations.md` (two table rows and one sentence, `:472`, `:473`, `:475`)
+- Modify: `docs/spec/operations.md` (three table rows and one sentence, `:471`, `:472`, `:473`, `:475`)
 - Modify: `SPEC.md` (two clauses in one paragraph, `:668-670`)
 
 Three of these edits have two variants — `platform-services.md` Step 1(c), `SPEC.md` Step 5's caller sentence, and (for context only) the `AuthStatus` paragraph, which is branch-neutral. The file COUNT and the file LIST are the same on both branches.
@@ -4840,6 +5036,14 @@ Replace with:
 Note the row's LABEL changes with it — "Inconclusive-check reason" is no longer what the row is about.
 
 - [ ] **Step 4: `docs/spec/operations.md`**
+
+**(a0)** Replace the **Authentication Recovered** row (`:471`), whose "What it asserts" column currently reads:
+
+> N jobs parked on this platform's cookies were resumed
+
+with:
+
+> N jobs parked on this platform's cookies were resumed. Since Arc 10 this edge does one more thing on Twitch and says nothing about it: `OnAuthRecovered` also re-authenticates every live Twitch chat session, because a transient refusal heals with the credential fingerprint UNCHANGED and so fires no `OnCredentialsChanged`. The notification still reports only the jobs — the chat reconnect is a log line (`twitch credentials usable again`), not an operator decision
 
 **(a)** Replace the **Parked Jobs Re-evaluated** row (`:472`), whose "What it asserts" column currently reads:
 
@@ -4960,6 +5164,7 @@ These are not tasks. They are the claims this suite structurally cannot make, li
 
 1. **The registration site.** `ExecuteTwitch`'s `o.twitchChats.add(irc)` + `defer` is covered by compilation and by the registry's own tests. Reaching it needs a real Twitch download. The first live capture is the gate; the `Reauthenticate` Info line names the channel.
 2. **The end-to-end repair.** Start a Twitch capture with an `auth-token` and no `login` row; confirm the platform badge goes not-authenticated AND that the missing-login sentence itself renders on BOTH per-request surfaces — the TUI's `R C` result line and the dashboard badge's tooltip (Task 7 Steps 4a/4b; before them a marked platform showed the verdict with no reason on either); add the `login` row; press `R C`; confirm one "re-authenticating live chat sessions" Info line with `sessions=1`, followed by one "twitch chat: authenticated login accepted" line for that channel (Task 4 Step 5 adds it; before Arc 10 nothing logged an accepted `001`).
+2a. **The transient-refusal edge (Task 7's second hook).** With a capture running and chat authenticated, make validate fail transiently WITHOUT changing `cookies.txt` — block `id.twitch.tv` at the firewall for one 30-minute cycle, or point `twitchValidateURL` at a 401 — then restore it. Confirm the log carries `twitch credentials usable again — re-authenticating live chat sessions` with `platform=twitch` on the recovering pass, and an accepted-login line after it. This is the path `OnCredentialsChanged` cannot see: the fingerprint never moved.
 3. **Validate stickiness over a real tick.** The same setup left running for one 30-minute cycle: the badge must NOT return to green on its own.
 4. **Task 8 branch A only:** a capture on a genuinely expired `auth-token` with chat capture OFF, confirming the `playback-token-anonymous` mark.
 5. **Recovery interaction.** With `auto_enabled = true`, confirm a chat downgrade produces exactly one browser recovery attempt, not one per refusal.
@@ -4979,7 +5184,7 @@ Run against the spec with fresh eyes after the plan was written. Issues found we
 | **R2** — the mark feeds automatic recovery through `shouldFireRecovery`'s dedupe; the per-job notice survives | Task 2 (`fireRecovery` + `noteRecoveryDecided`), Task 6 (both consumers of one report), Task 7 (the async delivery) |
 | **R3** — the mark is sticky against a validate 200 | Task 2 (`twMarked` / `twEffective` in the status block; `TestValidate200DoesNotClearAStandingTwitchMark`) |
 | **R4** — a credential-pair change clears it; `TwitchIdentity`; `OnCredentialsChanged("twitch")`; every reload site pinned | Task 1 (the fingerprint), Task 2 (the clear), Task 3 (the fire + the reload-site table + `TestCheckNowObservesATwitchCredentialChange`), **Task 7a** (the four sites that reached no pass at all) |
-| **R5** — active chat sessions reconnect immediately; latches reset; no budget spent; a second refusal re-marks; a credentialed `001` logs at Info | Task 4 (`Reauthenticate`, the three latches, the accepted-login Info line), Task 5 (the registry), Task 7 (the broadcast), **Task 7a** ("immediately" is only true once every writer reaches a pass) |
+| **R5** — active chat sessions reconnect immediately; latches reset; no budget spent; a second refusal re-marks; a credentialed `001` logs at Info | Task 4 (`Reauthenticate`, the three latches, the accepted-login Info line), Task 5 (the registry), Task 7 (the broadcast, on **both** repair edges — `OnCredentialsChanged` AND `OnAuthRecovered`, since a transient refusal heals with the fingerprint unchanged and fires only the second; found by the Task 3 review), **Task 7a** ("immediately" is only true once every writer reaches a pass) |
 | **R6** — one live probe first; build the HLS mark only if the reply states honoured-vs-anonymous, otherwise record and stop | Task 0 (the probe), Task 8 (branch A builds it; branch B records the finding in the ledger and stops), Task 9 (both variants of the three sentences either branch makes true) |
 | **§3 non-goals** — no job-row indicator, no new UI state or REST key, no pilot change, no keepalive, no entitlement probe, no YouTube chat change | Global Constraints; no task touches `livenessRecoveryArmed`, `CookieStatus`, `TwitchAuthStatusPayload`'s keys, or `internal/chat` |
 | **§4 invariants** — no credential in any log/notification/payload/error; `AuthStatus` writes under `rs.mu`; the sole-writer doc sentence changes with the code; `OnAuthDowngrade` still non-blocking; inline recover on every goroutine; anonymous logger stays anonymous; `UpdateJobFields` | Global Constraints; Task 2 (locked writes, literal-only sentences); Task 7 (the goroutine + recover that keeps `OnAuthDowngrade` non-blocking); Task 9 Step 2(d) (the sole-writer replacement) |
