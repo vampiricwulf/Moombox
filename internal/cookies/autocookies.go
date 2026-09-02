@@ -3075,9 +3075,55 @@ var killProcessTree = func(proc *os.Process) {
 	if isWindows() {
 		exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", proc.Pid)).Run()
 	} else {
-		proc.Kill()
+		killProcessTreeUnix(proc)
 	}
 }
+
+// killProcessTreeUnix is the non-Windows arm, split out of the closure above so
+// a test on ANY platform can execute it: isWindows() reads runtime.GOOS through
+// a plain function rather than a seam, so on the Windows machine this project
+// is developed on the else branch is otherwise unreachable. The one-line wiring
+// above is reviewed by eye — the same coverage posture startChromiumSetup
+// states in prose for its own trackedSetupJob call.
+//
+// ON LINUX THE TREE IS THE GROUP. configureCmdSysProcAttr sets Setpgid on every
+// browser this package launches, so the child leads a group whose id is its own
+// pid, and one kill(-pgid) reaches the browser the launcher handed off to.
+// proc.Kill() alone never did: it kills the launcher, which on the Firefox
+// family exited ~170 ms after start.
+//
+// IT GOES THROUGH pgroupJob, NOT STRAIGHT TO THE HOOK, so it inherits adopt's
+// and killGroup's refusals: the pid must be in the table right now and lead its
+// own group, and the group must still have members. killSetupProcess reaches
+// here with a REAPED pid whenever no job could vouch for the browser, and
+// proc.Kill() was safe there — Go refuses it on a process that has already
+// been waited on (os.ErrProcessDone). A bare kill(-pid) has no such memory; it
+// fires at whatever group the kernel has since given that number to.
+//
+// Everywhere the refusals apply — darwin and the fallback build, where the
+// table hook is unbound and answers errNoProcessTable; a Linux /proc that
+// cannot be read; a pid that is gone or sits in someone else's group — the
+// direct kill below is exactly today's behaviour. The pid <= 0 guard is
+// adopt's; see killProcessGroup's doc for the three checks on kill(-0, …).
+func killProcessTreeUnix(proc *os.Process) {
+	if proc == nil {
+		return
+	}
+	group := &pgroupJob{}
+	if err := group.adopt(proc.Pid); err == nil {
+		if err := group.killGroup(); err == nil {
+			return
+		}
+	}
+	killOneProcess(proc)
+}
+
+// killOneProcess is (*os.Process).Kill behind a package variable, for the same
+// reason killProcessTree itself is one: the fallback above has to be
+// exercisable without a real process, and a fabricated PID must never reach a
+// real signal on the machine running the tests. Nothing in production
+// reassigns it.
+var killOneProcess = func(proc *os.Process) error { return proc.Kill() }
 
 // killSetupProcess terminates the setup browser, waiting briefly for one that
 // has been decided on but not yet launched.

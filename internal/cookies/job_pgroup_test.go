@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -342,5 +343,146 @@ func TestPGroupJobForgetsWithoutKilling(t *testing.T) {
 	}
 	if len(*killed) != 0 {
 		t.Fatalf("forget() signalled %v; closing a Linux job must kill nothing", *killed)
+	}
+}
+
+// captureOneProcessKills swaps the single-process fallback for a recorder. The
+// package's rule is that a fabricated PID must never reach a real signal on the
+// machine running the tests; killProcessTree has been a variable for that
+// reason since it was written, and its fallback needs the same treatment.
+func captureOneProcessKills(t *testing.T) *[]int {
+	t.Helper()
+	prev := killOneProcess
+	killed := []int{}
+	killOneProcess = func(p *os.Process) error {
+		if p != nil {
+			killed = append(killed, p.Pid)
+		}
+		return nil
+	}
+	t.Cleanup(func() { killOneProcess = prev })
+	return &killed
+}
+
+// TestKillProcessTreeUnixKillsTheGroupNotJustTheLauncher is the reason the
+// group exists at all. proc.Kill() kills the process Moombox spawned — which on
+// the Firefox family is a launcher that handed off and exited ~170 ms after
+// start (Arc 0's measurement). On Linux the tree IS the group, so one
+// kill(-pgid) reaches the browser the launcher left behind.
+//
+// Mutation: put killOneProcess(proc) back as the primary and the recorder shows
+// a single PID, which is the bug: the browser survives every cancel, every
+// Stop, and every refresh timeout.
+func TestKillProcessTreeUnixKillsTheGroupNotJustTheLauncher(t *testing.T) {
+	groups := captureGroupKills(t)
+	single := captureOneProcessKills(t)
+	fakeProcessTable(t, map[int]int{
+		setupGroupPid: setupGroupPid, // the leader, still alive
+		setupChildPid: setupGroupPid, // what it handed off to
+	})
+
+	killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
+
+	if len(*groups) != 1 || (*groups)[0] != setupGroupPid {
+		t.Fatalf("group kills = %v, want exactly [%d]", *groups, setupGroupPid)
+	}
+	if len(*single) != 0 {
+		t.Fatalf("it also killed %v directly; the group kill already covers the leader", *single)
+	}
+}
+
+// TestKillProcessTreeUnixFallsBackWhereThereAreNoProcessGroups keeps darwin and
+// every other non-Linux, non-Windows target on exactly today's behaviour: the
+// table hook is unbound there, it answers errNoProcessTable, adopt refuses,
+// and the direct kill is all there ever was. A Linux /proc that cannot be read
+// takes the same arm.
+//
+// Mutation: drop the fallback and a darwin build stops killing browsers
+// entirely.
+func TestKillProcessTreeUnixFallsBackWhereThereAreNoProcessGroups(t *testing.T) {
+	groups := captureGroupKills(t)
+	single := captureOneProcessKills(t)
+	unreadableProcessTable(t)
+
+	killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
+
+	if len(*groups) != 0 {
+		t.Fatalf("group kills = %v; nothing may be signalled through a table that cannot be read", *groups)
+	}
+	if len(*single) != 1 || (*single)[0] != setupGroupPid {
+		t.Fatalf("fallback kills = %v, want exactly [%d]", *single, setupGroupPid)
+	}
+}
+
+// TestKillProcessTreeUnixWillNotSignalAGroupThePidNoLongerLeads is why the arm
+// goes through adopt rather than handing the pid to the hook. killSetupProcess
+// reaches here with a REAPED pid whenever no job could vouch for the browser
+// (a failed assign), and proc.Kill() was safe there — Go refuses it on a
+// process that has been waited on. A bare kill(-pid) has no such memory: it
+// fires at whatever group the kernel has since given that number to. So the
+// arm signals only a pid that is in the table right now and leads its own
+// group, and otherwise falls back to the direct kill, which is harmless on a
+// reaped process.
+//
+// Mutations, one per subtest: replace adopt with a bare killProcessGroup(pid)
+// and the first case signals a number the table does not contain; drop the
+// `pgid != pid` refusal in adopt and the second case signals a stranger's
+// group — or, for a child that inherited Moombox's group, Moombox's own.
+func TestKillProcessTreeUnixWillNotSignalAGroupThePidNoLongerLeads(t *testing.T) {
+	t.Run("pid is not in the table", func(t *testing.T) {
+		groups := captureGroupKills(t)
+		single := captureOneProcessKills(t)
+		fakeProcessTable(t, map[int]int{strangerPid: strangerGroup})
+
+		killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
+
+		if len(*groups) != 0 {
+			t.Fatalf("group kills = %v for a pid the table does not contain", *groups)
+		}
+		if len(*single) != 1 || (*single)[0] != setupGroupPid {
+			t.Fatalf("fallback kills = %v, want exactly [%d]", *single, setupGroupPid)
+		}
+	})
+
+	t.Run("pid sits in someone else's group", func(t *testing.T) {
+		groups := captureGroupKills(t)
+		single := captureOneProcessKills(t)
+		fakeProcessTable(t, map[int]int{setupGroupPid: strangerGroup, strangerGroup: strangerGroup})
+
+		killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
+
+		if len(*groups) != 0 {
+			t.Fatalf("group kills = %v; the pid does not lead that group and it is not ours to signal", *groups)
+		}
+		if len(*single) != 1 || (*single)[0] != setupGroupPid {
+			t.Fatalf("fallback kills = %v, want exactly [%d]", *single, setupGroupPid)
+		}
+	})
+}
+
+// TestKillProcessTreeUnixRefusesANonPositivePid is the pid <= 0 guard as seen
+// from this arm. A zero-valued os.Process is not hypothetical: the refresh
+// slot is claimed with `&exec.Cmd{}` whose Process is nil until the launcher
+// publishes one, and a future caller reaching this with a zero pid must fall
+// back rather than signal. The refusal is adopt's; this pins that the arm
+// cannot route around it. The table deliberately contains a 0 → 0 row so
+// that a dropped guard would "succeed" and the recorder would show it.
+//
+// Mutation: drop adopt's `pid <= 0` check — the group is adopted as 0,
+// killGroup refuses it silently, and the fallback never runs, so the second
+// assertion fails; kill(-0, SIGKILL) is Moombox's own process group.
+func TestKillProcessTreeUnixRefusesANonPositivePid(t *testing.T) {
+	groups := captureGroupKills(t)
+	single := captureOneProcessKills(t)
+	fakeProcessTable(t, map[int]int{0: 0})
+
+	killProcessTreeUnix(&os.Process{Pid: 0})
+	killProcessTreeUnix(nil)
+
+	if len(*groups) != 0 {
+		t.Fatalf("group kills = %v; a non-positive pid must never reach the hook", *groups)
+	}
+	if len(*single) != 1 || (*single)[0] != 0 {
+		t.Fatalf("fallback kills = %v, want exactly [0] (and nothing for the nil process)", *single)
 	}
 }
