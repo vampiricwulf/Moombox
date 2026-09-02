@@ -1153,10 +1153,10 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 // makes no network call and holds no lock across a callback — but the
 // callbacks it invokes may block (handleRecoveryNeeded's auto_enabled=false
 // arm sends a webhook synchronously), so cmd/moombox's wiring must call it on
-// its own goroutine. That wiring — SetOnTwitchAuthLoss in cmd/moombox — is
-// ADDED BY TASK 7 of the Arc 10 plan; until it lands nothing in the tree calls
-// this method outside its tests, and the goroutine obligation is an
-// instruction to that task rather than a description of the tree.
+// its own goroutine. That wiring is twitchAuthLossHook in
+// cmd/moombox/services.go, plugged into DownloadWorker.SetOnTwitchAuthLoss:
+// it spawns the recover-guarded goroutine before calling here, so the
+// obligation is met in the tree, not merely stated.
 func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
 	var (
 		changed      bool
