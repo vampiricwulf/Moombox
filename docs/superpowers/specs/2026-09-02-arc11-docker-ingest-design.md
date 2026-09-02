@@ -29,10 +29,10 @@ Netscape format, has no parseable rows, or carries no recognised auth-cookie NAM
 **R3 — Merge, never replace.** Read the existing file through the `readCookieFile` seam (distinguish
 "does not exist" from every other read error; abort on the latter with `ErrCookieFileUnreadable`);
 merge through `mergeCookieFiles` (name+domain keyed; a YouTube-only paste leaves Twitch rows intact and
-vice versa); write through `writeFileAtomic`; never write an empty-valued row; then `jar.Reload()`.
+vice versa); write through `writeFileAtomic`; never write an empty-valued row; then reload the jar — `jar.Load(path)` in the code, not `Reload()`: `Reload` re-reads the jar's own `filePath` and is a silent no-op on a jar never loaded from one (spec corrected to the code at arc-close).
 
 **R4 — The write ends in a re-check, like every other credential write.** After the reload the handler
-runs `RefreshService.CheckNow` (the `recheckAfterCookieWrite` shape from Arc 10, detached context with
+runs `RefreshService.CheckNow` (the Web wizard-finish shape from Arc 10 — `recheckAfterCookieWrite` itself is a `cmd/moombox` helper the routes package cannot import; spec corrected to the code at arc-close — detached context with
 a timeout, flushed response) so the fingerprint comparison runs: a changed Twitch pair clears the mark
 and reconnects live chat; the YouTube identity change drives the existing membership-park sweep. This
 is row 16 of the reload-site table. The response carries the existing three-state verdict shape that

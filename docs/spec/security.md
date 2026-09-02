@@ -158,6 +158,8 @@ Moombox uses Origin/Referer header validation rather than CSRF tokens. This deci
 2. Browsers reliably send the `Origin` header on cross-origin POST/PUT/DELETE requests.
 3. The only clients that legitimately omit `Origin` are same-process clients (TUI), which authenticate via the internal token.
 
+That equivalence holds for `localhost` and `lan` installs, where `isAllowedOrigin` (`internal/web/middleware.go`) admits only loopback, `localhost` and — for `lan` — private-IP origins. Under `external` / `public` it returns true for **every** parseable origin, so on those installs `CSRFMiddleware` enforces only that an `Origin`/`Referer` is PRESENT: a cross-site form post passes the origin check (verified at Arc 11's arc-close — `public`, a valid session, `Origin: https://evil.example` → 200 through the real chain). For a client outside `AuthMiddleware`'s loopback/private-IP waiver, what then stops the post from riding a victim's session is the `moombox_session` cookie's `SameSite=Lax` (`SetSessionCookie`, `internal/web/auth.go`) — a browser omits it on a cross-site POST — and the 401 that follows. For a loopback or private-IP client of a `public`/`external` install, which `AuthMiddleware` waives before it reads any policy and which `ipAllowedByNetworkAccess` admits under those two policies, nothing further stands between a cross-site form post and a mutating handler. Pre-existing, and shared by every mutating route; it is why `internal/web/routes/cookies_import_chain_test.go` drives its invalid-origin refusal on a `lan` fixture — on the fixtures that exercise auth, that arm is unreachable.
+
 ### Exemptions
 
 Three categories of requests are exempt from CSRF validation:
