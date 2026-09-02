@@ -383,6 +383,47 @@ func TestImportClearsAReloginFlagRaisedByTheSetter(t *testing.T) {
 	}
 }
 
+// TestImportRejectionLeavesAStandingReloginFlagAlone closes the gap the Task 2
+// review found (Finding 1): cookie_import.go's clear runs only past the write,
+// gated on YouTubeAccepted/TwitchAccepted — a REJECTED paste (the 422 path:
+// not Netscape, no rows, or no credential) returns from prepareCookieImport's
+// error before that code ever runs, so nothing raised by FlagManualRelogin
+// should move. That claim had no test of its own.
+//
+// The mutation this closes: an unconditional needsRelogin clear moved ahead of
+// the Accepted gate — for instance to the top of ImportCookies, before the
+// paste is even validated — which would also fire on this rejected paste and
+// silently retract a prompt the operator has not actually answered.
+func TestImportRejectionLeavesAStandingReloginFlagAlone(t *testing.T) {
+	s, path, _ := importService(t, netscapeHeader+fakeTwitchRows, true)
+	s.FlagManualRelogin("youtube")
+	if !s.ReloginStatus()["youtube"] {
+		t.Fatal("FlagManualRelogin did not raise the YouTube flag")
+	}
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+
+	if _, err := s.ImportCookies(context.Background(), netscapeHeader+fakeSignedOutRows); !errors.Is(err, ErrImportNoCredential) {
+		t.Fatalf("error = %v, want ErrImportNoCredential", err)
+	}
+
+	if !s.ReloginStatus()["youtube"] {
+		t.Error("a rejected import cleared the YouTube re-login flag — nothing was written, so nothing " +
+			"the operator did resolves it")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Error("cookies.txt changed on a rejected import — the refusal happens before any write")
+	}
+}
+
 // TestFlagManualReloginTouchesOnlyTheNamedPlatform. The map is written under
 // s.mu by three other paths and read by both UIs; a setter that wrote both keys
 // would raise an alarm about a platform nothing concluded anything about, and
