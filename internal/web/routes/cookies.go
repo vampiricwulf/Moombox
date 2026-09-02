@@ -130,9 +130,13 @@ func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
 // sentence naming no host, no header and no bytes, pinned by
 // TestUnreadableGuideErrorCarriesNoBody. internal/twitch's ValidateToken, which
 // did echo up to 1 MB of body until Arc 8 Task 9 clamped it, is NOT on this
-// path at all: AuthStatus.TwitchError comes only from refresh.go's own
-// checkTwitchAuth. Anything added to either producer must keep that rule, or
-// this projection puts an intermediary's HTML on the dashboard.
+// path at all. AuthStatus.TwitchError has exactly TWO producers, both in
+// refresh.go and both inside that rule: its own checkTwitchAuth, and — since
+// Arc 10 — RefreshService.NoteTwitchAuthLoss, whose reason renders through
+// twitchAuthLossMessage, a switch whose every arm returns a string LITERAL, so
+// the set of sentences it can produce is closed at compile time and no caller
+// can widen it. Anything added to any producer must keep that rule, or this
+// projection puts an intermediary's HTML on the dashboard.
 //
 // `verification` (and, for Twitch, `found`) are ADDITIVE, by the precedent
 // `renewed` set and `ran`/`verdict` and the setup's two verification fields

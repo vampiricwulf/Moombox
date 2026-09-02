@@ -327,8 +327,10 @@ func verdictFromCheck(authenticated bool, err error) RefreshVerdict {
 // These mirror internal/twitch's AuthDowngrade* constants BY VALUE and cannot
 // import them: internal/twitch imports THIS package (twitch/auth.go,
 // twitch/service.go), so the dependency only runs one way. The pin against
-// drift lives in internal/worker, which imports both — see
-// TestTwitchAuthLossVocabularyCoversEveryDowngradeReason.
+// drift is ADDED BY TASK 6 of the Arc 10 plan, in internal/worker, which
+// imports both (TestTwitchAuthLossVocabularyCoversEveryDowngradeReason). Until
+// that task lands there is no such test in the tree, and a value that drifts
+// apart from its twitch-side twin is caught by nothing.
 //
 // Opaque tokens, never sentences and never format strings: there is no verb
 // here to interpolate a token, a login or a wire line into.
@@ -384,6 +386,15 @@ func twitchAuthLossMessage(reason string) string {
 // the moment the mark was taken, and it is the ONLY thing that clears the mark
 // — see refresh's status block. `reason` is a member of the vocabulary above
 // and never anything read from the jar or the wire.
+//
+// A mark taken on a jar holding NO Twitch credentials writes a failed verdict
+// and a reason for a platform nobody configured. That is inert rather than
+// wrong, and deliberately left so: every surface takes its not-configured arm
+// first (cookieBadgeFor returns CookieStatusNone on !hasCookies,
+// cmd/moombox/tui_wiring.go; the web indicator branches on !found before it
+// reads the verdict), so neither field is rendered. Suppressing the write
+// would buy nothing and would add a second rule to a type whose whole value is
+// having one.
 type twitchAuthMark struct {
 	set      bool
 	reason   string
@@ -1134,8 +1145,11 @@ func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
 // IRC session goroutine with the read loop parked behind it. This function
 // makes no network call and holds no lock across a callback — but the
 // callbacks it invokes may block (handleRecoveryNeeded's auto_enabled=false
-// arm sends a webhook synchronously), so cmd/moombox's wiring calls it on its
-// own goroutine. See the SetOnTwitchAuthLoss wiring in cmd/moombox/services.go.
+// arm sends a webhook synchronously), so cmd/moombox's wiring must call it on
+// its own goroutine. That wiring — SetOnTwitchAuthLoss in cmd/moombox — is
+// ADDED BY TASK 7 of the Arc 10 plan; until it lands nothing in the tree calls
+// this method outside its tests, and the goroutine obligation is an
+// instruction to that task rather than a description of the tree.
 func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
 	var (
 		changed      bool
@@ -1485,7 +1499,12 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		// exactly that pair compares equal and fires nothing. Reaching it
 		// requires the downgrade to land before any pass ever observed the
 		// marked pair, which every credential write ending in a re-check
-		// closes.
+		// closes — Task 7a's job. If that task slips, the line to revisit is
+		// this one, and the choice is encoded white-box in
+		// TestAStandingTwitchMarkFiresNoCredentialChange's
+		// `rs.prevTwitchIdentity != ""` assertion
+		// (refresh_twitch_identity_test.go), which is what a revisit has to
+		// move first.
 		rs.prevTwitchIdentity = advanceIdentityBaseline(rs.prevTwitchIdentity, twIdentity, twEffective, twErr)
 		rs.hasCheckedOnce = true
 

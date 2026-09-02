@@ -14,9 +14,10 @@ import (
 // These reuse writeTwitchPair and twitchMarkFixture from
 // refresh_twitch_mark_test.go — same package, same fixtures, one definition.
 
-// credentialFires records every OnCredentialsChanged call as "platform" and,
-// separately, whether the identity handed over was non-empty. The IDENTITY
-// ITSELF is never compared against a literal here and never printed: it is an
+// credentialFires records every OnCredentialsChanged call in two parallel
+// slices: the platform, and the identity string handed over beside it. The
+// IDENTITY ITSELF is only ever tested for emptiness or compared against
+// another recorded fire — never against a literal, and never printed: it is an
 // opaque equality token, and a test that hardcoded a digest would also be
 // pinning the hash input, which is jar_twitch_identity_test.go's job.
 type credentialFires struct {

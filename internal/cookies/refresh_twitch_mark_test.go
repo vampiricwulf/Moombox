@@ -2,10 +2,12 @@ package cookies
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -51,6 +53,35 @@ func writeTwitchPair(t *testing.T, path, token, login string) {
 	}
 }
 
+// markWarnRecorder records Warn lines WITH their args, flattened into one
+// string per call.
+//
+// Deliberately not warnRecordingLogger (refresh_lifecycle_test.go), which
+// keeps `msg` and drops the args: NoteTwitchAuthLoss's Warn message is a
+// constant, so the only thing a leak could ride out on is the "reason" VALUE
+// beside it. A msg-only recorder cannot tell the mapped sentence from the
+// caller's raw token, which is exactly why a Warn logging the raw argument
+// passed the whole suite in the first round.
+type markWarnRecorder struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *markWarnRecorder) Debug(msg string, args ...any) {}
+func (l *markWarnRecorder) Info(msg string, args ...any)  {}
+func (l *markWarnRecorder) Error(msg string, args ...any) {}
+func (l *markWarnRecorder) Warn(msg string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprint(append([]any{msg}, args...)...))
+}
+
+func (l *markWarnRecorder) warnLines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
 // TestValidate200DoesNotClearAStandingTwitchMark is R3, and the whole point of
 // the arc.
 //
@@ -58,8 +89,26 @@ func writeTwitchPair(t *testing.T, path, token, login string) {
 // block writes verdictFromCheck(twAuth=true, nil) = RefreshOK straight over the
 // mark. Under it the operator sees green within one tick while the capture is
 // still dropping every subscriber-only message.
+//
+// The OnAuthRecovered assertion pins the HIGHEST-STAKES of the five sites the
+// single twEffective value feeds, and it needs its own mutation: `!prevTW &&
+// twAuth` at the recovered-transition site (refresh's tail). The status
+// assertions above it all survive that one, because the status literal is a
+// different read of the same value — and under it Moombox announces a Twitch
+// recovery that never happened and resumes every parked Twitch job straight
+// back into the failure they parked on.
 func TestValidate200DoesNotClearAStandingTwitchMark(t *testing.T) {
 	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusOK)
+	var recovered []string
+	rs.OnAuthRecovered = func(platform string) { recovered = append(recovered, platform) }
+
+	// A healthy first pass. It arms OnAuthRecovered at all (the transition is
+	// gated on hasCheckedOnce) and it leaves the baseline "authenticated", so
+	// the mark below is a witnessed fall rather than the startup case.
+	rs.doRefresh(context.Background())
+	if len(recovered) != 0 {
+		t.Fatalf("the fixture is wrong: OnAuthRecovered fired %v on the first pass", recovered)
+	}
 
 	rs.NoteTwitchAuthLoss(twitchLossNoLoginCookie)
 	rs.doRefresh(context.Background())
@@ -73,6 +122,9 @@ func TestValidate200DoesNotClearAStandingTwitchMark(t *testing.T) {
 	}
 	if want := twitchAuthLossMessage(twitchLossNoLoginCookie); got.TwitchError != want {
 		t.Errorf("TwitchError = %q, want %q — the mark owns the reason while it stands", got.TwitchError, want)
+	}
+	if len(recovered) != 0 {
+		t.Errorf("OnAuthRecovered fired %v while the mark stood — every parked Twitch job would resume into the same anonymous chat", recovered)
 	}
 }
 
@@ -133,11 +185,15 @@ func TestAChangeToDeadCredentialsClearsTheMarkAndReportsTheTruth(t *testing.T) {
 
 // TestTwitchMarkFiresRecoveryOncePerLoss is R2.
 //
-// Two mutations: dropping `rs.prevTwitchAuth = false` after the fire (every
+// Three mutations. Dropping `rs.prevTwitchAuth = false` after the fire (every
 // later downgrade on the same dead pair fires again, and with auto_enabled off
-// that is a TypeError notification per refusal), and dropping the
+// that is a TypeError notification per refusal). Dropping the
 // shouldFireRecovery gate entirely (recovery fires for a platform nobody
-// configured).
+// configured). And `rs.prevTwitchAuth = twAuth` at refresh's Twitch baseline
+// advance, which the doRefresh BETWEEN the two marks below exists for: under
+// it a routine tick re-arms the baseline to validate's 200, so the very next
+// downgrade on the same unrepaired pair reads as a fresh witnessed fall and
+// alarms again — an alarm every half hour, forever, for one loss.
 func TestTwitchMarkFiresRecoveryOncePerLoss(t *testing.T) {
 	rs, path := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusOK)
 	var fired []string
@@ -151,6 +207,11 @@ func TestTwitchMarkFiresRecoveryOncePerLoss(t *testing.T) {
 	}
 
 	rs.NoteTwitchAuthLoss(twitchLossNoLoginCookie)
+	// A periodic tick lands while the mark stands, and validate answers 200
+	// for this pair because it cannot see the missing login row. Nothing was
+	// repaired, so this pass must leave the baseline exactly where the mark
+	// put it.
+	rs.doRefresh(context.Background())
 	rs.NoteTwitchAuthLoss(twitchLossLoginRefused)
 	if len(fired) != 1 || fired[0] != "twitch" {
 		t.Fatalf("recovery fired %v, want exactly one [twitch] for one loss", fired)
@@ -160,8 +221,43 @@ func TestTwitchMarkFiresRecoveryOncePerLoss(t *testing.T) {
 	writeTwitchPair(t, path, "test-token-bbbb", "archiveraccount")
 	rs.doRefresh(context.Background())
 	rs.NoteTwitchAuthLoss(twitchLossLoginRefused)
-	if len(fired) != 2 {
-		t.Errorf("recovery fired %v, want a second fire after the credentials were repaired and lost again", fired)
+	if len(fired) != 2 || fired[1] != "twitch" {
+		t.Errorf("recovery fired %v, want a second [twitch] after the credentials were repaired and lost again", fired)
+	}
+}
+
+// TestATwitchMarkBeforeAnyPassIsThatPlatformsFirstConclusion is R2's startup
+// half, and it is the one shouldFireRecovery cannot get right on its own.
+//
+// A downgrade can land before the first refresh pass ever concludes — the IRC
+// handshake happens the moment a job starts, and the service's opening check
+// may still be in flight. That mark IS Twitch's first conclusive answer, so it
+// must both fire once and count as the platform's conclusion; the pass that
+// follows is then a "subsequent" check with an unchanged, still-false baseline
+// and has nothing new to report.
+//
+// The mutation: dropping `rs.twEverConcluded = true` from the mark. The mark
+// still fires (startup case, cookies present), but the platform stays
+// "never concluded", so the next pass takes the startup branch too and alarms
+// a second time for the same loss. Nothing in the first round touched that
+// line: the other recovery tests all run a healthy pass FIRST, which sets the
+// flag by the other route and hides it.
+func TestATwitchMarkBeforeAnyPassIsThatPlatformsFirstConclusion(t *testing.T) {
+	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusUnauthorized)
+	var fired []string
+	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+
+	rs.NoteTwitchAuthLoss(twitchLossNoLoginCookie)
+	if len(fired) != 1 || fired[0] != "twitch" {
+		t.Fatalf("recovery fired %v for a downgrade that beat the first pass, want exactly one [twitch]", fired)
+	}
+
+	// The first pass now lands and reaches its own conclusive negative — a 401
+	// this time, so the answer is genuinely dead credentials and not the mark
+	// speaking. Same loss, no second alarm.
+	rs.doRefresh(context.Background())
+	if len(fired) != 1 {
+		t.Errorf("recovery fired %v, want one — the mark was this platform's first conclusion and the pass that follows it is not a second loss", fired)
 	}
 }
 
@@ -285,22 +381,84 @@ func TestTwitchMarkLeavesYouTubeAlone(t *testing.T) {
 // the REASON must therefore fire no push; the per-request surfaces read the
 // string fresh anyway.
 //
-// The mutation: calling OnAuthChange unconditionally from NoteTwitchAuthLoss.
-// Not merely noisy — it repaints two dashboards for an event neither displays.
+// Two mutations. Calling OnAuthChange unconditionally from
+// NoteTwitchAuthLoss — not merely noisy, it repaints two dashboards for an
+// event neither displays. And `statusCopy = prev` instead of the post-mark
+// status: the count is unchanged, so a push-counting test passes while every
+// subscriber is handed the status the mark just replaced. That is worse than
+// no push at all — the dashboard repaints itself green on the strength of the
+// event that says it went red.
 func TestTwitchMarkFiresAuthChangeOnAVerdictTransitionOnly(t *testing.T) {
 	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "archiveraccount", http.StatusOK)
 	var pushes int
-	rs.OnAuthChange = func(AuthStatus) { pushes++ }
+	var pushed AuthStatus
+	rs.OnAuthChange = func(s AuthStatus) { pushes++; pushed = s }
 
 	rs.doRefresh(context.Background()) // twitch reads authenticated
+	before := rs.GetStatus()
 	pushes = 0
 
 	rs.NoteTwitchAuthLoss(twitchLossLoginRefused)
 	if pushes != 1 {
 		t.Fatalf("OnAuthChange fired %d times for the authenticated -> marked transition, want 1", pushes)
 	}
+
+	// The PAYLOAD, not just the count. Every subscriber renders this value and
+	// none of them re-reads GetStatus first.
+	if pushed.TwitchAuthenticated {
+		t.Error("the pushed status says Twitch is authenticated — subscribers were handed the pre-mark status")
+	}
+	if pushed.TwitchVerification != RefreshFailed {
+		t.Errorf("pushed TwitchVerification = %v, want RefreshFailed", pushed.TwitchVerification)
+	}
+	if want := twitchAuthLossMessage(twitchLossLoginRefused); pushed.TwitchError != want {
+		t.Errorf("pushed TwitchError = %q, want %q", pushed.TwitchError, want)
+	}
+	if pushed.HasTwitchCookies != before.HasTwitchCookies {
+		t.Errorf("pushed HasTwitchCookies = %v, want %v — a downgrade does not unconfigure the platform", pushed.HasTwitchCookies, before.HasTwitchCookies)
+	}
+
 	rs.NoteTwitchAuthLoss(twitchLossNoLoginCookie)
 	if pushes != 1 {
 		t.Errorf("OnAuthChange fired %d times total; a reason-only change must fire no push (authStatusChanged excludes the strings)", pushes)
+	}
+}
+
+// TestTwitchAuthLossWarnCarriesTheMappedSentenceOnly closes the hole the
+// comment above that Warn line used to claim was already closed.
+//
+// TestTwitchAuthLossReasonIsTheVocabularyOnly drives the STATUS field and its
+// fixture logger is nopLogger, so the log line was observed by nothing: a Warn
+// that printed the caller's raw argument passed all eight tests. The status
+// field is not the only place a reason escapes to — the log file is read by
+// the same operator and travels in the same bug report.
+//
+// The mutation: `"reason", reason` in place of
+// `"reason", twitchAuthLossMessage(reason)`.
+func TestTwitchAuthLossWarnCarriesTheMappedSentenceOnly(t *testing.T) {
+	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "archiveraccount", http.StatusOK)
+	rec := &markWarnRecorder{}
+	// Assigned rather than threaded through twitchMarkFixture: `logger` is
+	// this package's own unexported field, the fixture is shared by nine
+	// tests, and swapping it here changes nothing for any of them.
+	rs.logger = rec
+	rs.OnRecoveryNeeded = func(string) {}
+
+	// Off-vocabulary AND credential-shaped, which is the only input that can
+	// separate the two implementations: for a KNOWN reason the mapped sentence
+	// and the raw token differ, but neither of them is a secret, so a leaky
+	// Warn would look identical to a correct one.
+	leaky := "auth-token=test-token-aaaa; login=archiveraccount"
+	rs.NoteTwitchAuthLoss(leaky)
+
+	lines := rec.warnLines()
+	if len(lines) != 1 {
+		t.Fatalf("Warn lines = %d, want exactly 1 for one recovery fire", len(lines))
+	}
+	if !strings.Contains(lines[0], twitchAuthLossMessage(leaky)) {
+		t.Error("the Warn line does not carry the mapped sentence")
+	}
+	if strings.Contains(lines[0], leaky) || strings.Contains(lines[0], "test-token-aaaa") {
+		t.Error("the Warn line carried the caller's raw reason — the switch is the barrier for AuthStatus.TwitchError only, and this line goes to the same operator")
 	}
 }
