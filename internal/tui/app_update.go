@@ -851,7 +851,7 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 		//     "no SAPISIDHASH could be generated" rendered as a bare "not
 		//     authenticated" — the one shape in the tree where re-exporting
 		//     cookies is exactly the remedy and nothing said so.
-		//   - NoteTwitchAuthLoss, since Arc 10, whose four fixed sentences are
+		//   - NoteTwitchAuthLoss, since Arc 10, whose five fixed sentences are
 		//     the only thing telling the operator WHICH chat-downgrade route
 		//     broke. Under the old gate they pressed R C and read "Twitch not
 		//     authenticated" with no way to tell a missing login cookie from a

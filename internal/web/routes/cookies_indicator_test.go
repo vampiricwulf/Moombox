@@ -390,7 +390,7 @@ func TestParkedJobOutranksTheCheckOnTheDashboardBadge(t *testing.T) {
 // reason, and TWO producers do: verdictFromCheck maps ErrAuthCheckNotAttempted
 // to RefreshFailed with the error still recorded (pinned one package over by
 // TestUnsignableJarIsReportedAsAFailureNotAnUnknown), and NoteTwitchAuthLoss
-// writes `failed` WITH one of four fixed sentences. The old rule dropped both
+// writes `failed` WITH one of five fixed sentences. The old rule dropped both
 // — the first silently, since Arc 8. An `ok` verdict still shows nothing, and
 // by construction rather than by trust: the server derives that verdict from
 // the same error the string carries. The last row is the additive contract: an
@@ -430,7 +430,7 @@ func TestIndicatorTitleNamesWhyACheckCouldNotConclude(t *testing.T) {
 		// Arc 10 reversed this row. The paragraph it replaces asserted that
 		// no producer writes a reason beside a conclusive verdict; the
 		// unsignable-jar sentinel already did, and NoteTwitchAuthLoss makes
-		// two. Its four sentences are the only thing that says which
+		// two. Its five sentences are the only thing that says which
 		// chat-downgrade route broke, which is why the Twitch mark is the
 		// fixture here — but the gate is the same one the sentinel needed.
 		//

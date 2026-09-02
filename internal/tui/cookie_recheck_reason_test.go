@@ -102,7 +102,7 @@ func TestRecheckFeedbackNamesWhyACheckCouldNotConclude(t *testing.T) {
 		// cause to give", which was already false: verdictFromCheck maps the
 		// unsignable-jar sentinel to RefreshFailed with the error recorded, so
 		// the old gate had been swallowing that cause since Arc 8. The mark is
-		// the second such producer, and its four fixed sentences are the only
+		// the second such producer, and its five fixed sentences are the only
 		// thing that says WHICH route broke — "the cookie file has a Twitch
 		// auth-token but no login cookie beside it" versus "Twitch refused the
 		// saved login" are different remedies. Withholding either left the

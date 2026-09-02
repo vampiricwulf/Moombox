@@ -109,7 +109,7 @@ func TestTwitchAuthLossHookForwardsTheReasonOnce(t *testing.T) {
 	select {
 	case reason := <-got:
 		if reason != twitch.AuthDowngradeUnusableLoginCookie {
-			t.Errorf("the mark was called with %q, want %q — the four reasons render four different "+
+			t.Errorf("the mark was called with %q, want %q — the five reasons render five different "+
 				"sentences and a forwarded constant would collapse them to one",
 				reason, twitch.AuthDowngradeUnusableLoginCookie)
 		}
