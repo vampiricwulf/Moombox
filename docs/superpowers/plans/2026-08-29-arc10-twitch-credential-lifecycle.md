@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **EXECUTION STATUS (arc-close, 2026-09-01): IMPLEMENTED.** Every task 0-9 and 7a landed on branch `cookie-arc10-twitch-credential-lifecycle` @ `13a60eb` (29 commits over `main` @ `51832fb`). Read § "Final state" at the END of this file before reading any task: it records what each task delivered, the superseded `OnAnonymousPlayback` lines, the residuals, the field gates and the coordinator-directed deviation. Line numbers cited there are at `13a60eb` (this pointer shifts everything below it by two lines).
+> **EXECUTION STATUS: MERGED to `main` as `05813d6` (2026-09-02, `--no-ff`, branch deleted, post-merge gates 27/0).** Every task 0-9 and 7a landed on branch `cookie-arc10-twitch-credential-lifecycle` (30 commits over `main` @ `51832fb`; the six arc-close edits landed as `1f0b2d9` + `e07aaf6`). Read § "Final state" at the END of this file before reading any task: it records what each task delivered, the superseded `OnAnonymousPlayback` lines, the residuals, the field gates and the coordinator-directed deviation. Line numbers cited there are at `13a60eb` (this pointer shifts everything below it by two lines).
 
 **Goal:** Make every Twitch chat auth downgrade mark the platform as needing re-authorization, keep that mark stuck against the `oauth2/validate` 200 that cannot see it, clear it only when the credential pair actually changes, and make a live chat capture pick up repaired credentials the moment they land.
 
