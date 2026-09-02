@@ -105,6 +105,230 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 	return resumed
 }
 
+// recheckAfterCookieWrite runs the in-process auth re-check that MUST follow
+// any pass which may have rewritten cookies.txt, and reports whether a pass
+// actually ran.
+//
+// Why every such gesture has to end here: refresh's status block is the only
+// place the Twitch credential fingerprint is compared, the auth mark cleared
+// and OnCredentialsChanged fired (Arc 10 R4), and that block runs only inside
+// a refresh pass. A repaired cookie file that reaches no pass is invisible
+// until the 30-minute ticker — which is precisely what "immediately apply the
+// updated cookie" rules out. The full enumeration of sites, and which of them
+// were missing this call before Arc 10, is in the plan's Task 3 table.
+//
+// CheckNow rather than something lighter: every caller has just waited on a
+// headless browser or a whole setup wizard, so two validate round-trips are
+// not the cost that matters, and a second entry point into the status block
+// would be a second mechanism containing the first.
+//
+// The skipped case is Info, not the service's own Debug, and that split
+// predates Arc 10: the caller has just rewritten the file, the in-flight pass
+// read the OLD one, so the badge stays stale until the next tick and this is
+// the only line that explains it. Nothing here retries or waits — the guard's
+// contract is that a second caller does nothing.
+//
+// checkNow is the re-check as a func — runState.checkNowFn in production —
+// taken as a func rather than as a *RefreshService so the polarity, the Info
+// line and the context forwarding can all be driven by a fake.
+//
+// The nil guard here covers a caller that passes NO FUNC. It does NOT cover a
+// nil *cookies.RefreshService: a bound method value taken off a nil pointer is
+// itself non-nil, so `svc.CheckNow` would step straight over this and panic
+// later inside refresh. checkNowFn is what collapses that case to nil, which is
+// why every production site goes through it rather than reaching for the method
+// value directly.
+//
+// gesture names what just wrote, and args are the caller's own structured
+// fields.
+func recheckAfterCookieWrite(ctx context.Context, checkNow func(context.Context) bool, log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, gesture string, args ...any) bool {
+	if checkNow == nil {
+		return false
+	}
+	if checkNow(ctx) {
+		return true
+	}
+	log.Info("auth re-check after "+gesture+" was skipped, a cookie refresh was already in flight — status may lag until the next refresh", args...)
+	return false
+}
+
+// checkNowFn returns the in-process auth re-check as a func, or nil when this
+// process has no refresh service to run one.
+//
+// One line of guard, in one place, because the alternative is not "no guard" —
+// it is the guard that LOOKS present and is not. Every site used to pass
+// s.cookieRefresh.CheckNow, and a method value taken off a nil *RefreshService
+// is non-nil, so recheckAfterCookieWrite's nil check was stepped over and the
+// dereference landed inside refresh at rs.mu.Lock(). Returning the nil func
+// instead makes that check mean what it says at all five sites, and lets
+// runCookieRecovery be driven from a zero-value runState.
+//
+// A func rather than the concrete pointer so the helper keeps the seam its own
+// tests are built on — polarity, the skipped line and context forwarding are
+// all asserted with a fake CheckNow, and none of that survives a parameter that
+// can only be a live RefreshService.
+//
+// Nil is not reachable in production at any of the five sites: initServices
+// constructs and assigns cookieRefresh in §15, before the auto-cookie wiring,
+// the worker callbacks and runTUI all of which follow it.
+func (s *runState) checkNowFn() func(context.Context) bool {
+	if s.cookieRefresh == nil {
+		return nil
+	}
+	return s.cookieRefresh.CheckNow
+}
+
+// reauthenticateTwitchChats broadcasts a credential change to every live
+// Twitch chat session and reports how many were told.
+//
+// Split out of the OnCredentialsChanged closure for the same reason
+// sweepShouldResume was split out of it: the closure needs a whole runState to
+// build, and the decision inside it — WHICH platform gets a broadcast — is
+// worth driving directly.
+//
+// The gate is an equality test, not "anything but youtube". A third platform
+// added later must not silently inherit Twitch's reconnect behaviour, and
+// dropping the gate entirely would let a YouTube cookie rotation tear down
+// every live Twitch chat session on its own cadence.
+//
+// broadcast is DownloadWorker.ReauthenticateTwitchChats in production, taken
+// as a func so a nil worker degrades to "nothing to tell". It returns a COUNT
+// and nothing else: the caller logs a number, never a channel or an account.
+func reauthenticateTwitchChats(platform string, broadcast func() int) int {
+	if platform != "twitch" || broadcast == nil {
+		return 0
+	}
+	return broadcast()
+}
+
+// wireCredentialRepairCallbacks installs the two RefreshService callbacks that
+// fire when a platform's credentials become usable again.
+//
+// TWO EDGES, and neither implies the other:
+//
+//   - OnAuthRecovered — validate went not-authenticated to authenticated. A
+//     transient Twitch-side refusal, or an operator restoring the EXACT pair
+//     they had before, recovers auth with the credential fingerprint
+//     unchanged, so shouldObserveCredentials returns false and the other
+//     callback never fires.
+//   - OnCredentialsChanged — the fingerprint moved. A same-account rotation,
+//     or a swap to an account that does not validate, moves it with no auth
+//     transition at all.
+//
+// A live Twitch chat session that went anonymous on a refusal has to hear
+// about BOTH, or a transient failure strands it in anonymous capture for the
+// rest of the job (Arc 10 R5, "immediately"). Everything else about the two
+// stays as it was: the recovery sweep passes no identity and so holds back
+// membership parks, the credential sweep passes one and so can move them.
+//
+// broadcast is DownloadWorker.ReauthenticateTwitchChats in production, taken
+// as a func so this method can be driven directly — wireMonitorCallbacks
+// cannot be.
+func (s *runState) wireCredentialRepairCallbacks(broadcast func() int) {
+	// reauth is the half both edges share. reauthenticateTwitchChats filters
+	// the platform and is nil-safe, so this is safe to call from either.
+	//
+	// Called before the sweep below, but the ORDER IS NOT LOAD-BEARING and no
+	// test pins it: the sweep does UpdateJobFields calls and an asynchronous
+	// notification, neither of which can meaningfully delay a broadcast
+	// measured in microseconds. The broadcast is simply first because there is
+	// no reason to make a running capture wait — a job the sweep resumes
+	// starts a fresh downloader that reads the new credentials anyway, while a
+	// job already CAPTURING has no other way to learn about them.
+	//
+	// Only the COUNT is logged. On the OnCredentialsChanged edge an identity is
+	// in scope, and it is an opaque equality token (see
+	// CookieJar.TwitchIdentity) that must never reach a log line.
+	reauth := func(platform string) {
+		if n := reauthenticateTwitchChats(platform, broadcast); n > 0 {
+			s.log.Info("twitch credentials usable again — re-authenticating live chat sessions",
+				"platform", platform, "sessions", n)
+		}
+	}
+
+	// When a platform transitions from not-authenticated to authenticated,
+	// sweep the jobs parked in StatusCookies on that platform back to Upcoming
+	// so they get re-probed without manual intervention. Closes audit
+	// decision #23 (worker.md Q3).
+	//
+	// "the jobs", not "every job": sweepShouldResume holds back the
+	// membership-parked ones, whose session was already authenticated when
+	// they failed and which this transition therefore cannot fix.
+	s.cookieRefresh.OnAuthRecovered = func(platform string) {
+		reauth(platform)
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
+		if resumed > 0 {
+			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// Event "auth" pairs with the worker's "Authentication Required"
+			// emit — an empty Event would bypass every target's allowlist
+			// (unfilterable) since the filter only applies when Event != "".
+			s.notifyMgr.Send("Authentication Recovered",
+				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
+				notifications.TypeInfo,
+				[]notifications.Field{
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+				},
+				notifications.SendOptions{Event: "auth"},
+			)
+		}
+	}
+
+	// Whenever a platform's saved credentials are (re-)observed, re-evaluate
+	// the parked jobs against them. The identity is a Google account on
+	// YouTube and a bearer-token pair on Twitch (see the notification sentence
+	// below, which was worded for the same reason), and only YouTube can park
+	// a job on an account question. For a membership park this is the only
+	// thing that can help — such a job parked while auth was perfectly
+	// healthy, so it is invisible to OnAuthRecovered above — and it resumes
+	// only if the account is genuinely a different one from the one that
+	// refused it.
+	//
+	// Dead-cookie parks are eligible here as well. In the common case
+	// OnAuthRecovered already took them (a swap that also restores auth fires
+	// both), and resumeCookieParkedJobs is idempotent, so whichever runs
+	// second simply finds nothing left. Being permissive costs nothing and
+	// covers the swap-while-healthy case for them too.
+	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
+		reauth(platform)
+		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
+		if resumed > 0 {
+			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// States no cause, for the same reason the "Cookie Auto-Refresh
+			// Ineffective" notification above states none. This fires on the
+			// first authenticated observation of EVERY process, not only on a
+			// real account change: an operator who fixed their cookies while
+			// Moombox was stopped gets their jobs resumed here, and telling
+			// them "a different account was supplied" would be flatly false.
+			// A notification is more visible than a log line, so it should
+			// assert less than the log line, not more — report what happened
+			// (jobs resumed) and leave the cause to the log.
+			//
+			// "the saved credentials", not "the signed-in account": since Arc
+			// 10 this fires for Twitch too, whose credential is a bearer token
+			// and a login name rather than a Google account, and the old
+			// wording would have been simply wrong there.
+			//
+			// Same "auth" event as the recovery notification above, for the
+			// same reason: an empty Event bypasses every target's allowlist.
+			s.notifyMgr.Send("Parked Jobs Re-evaluated",
+				fmt.Sprintf("Resumed %d job(s) parked on %s credentials after re-checking the saved credentials", resumed, platform),
+				notifications.TypeInfo,
+				[]notifications.Field{
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+				},
+				notifications.SendOptions{Event: "auth"},
+			)
+		}
+	}
+}
+
 // channelHealthReporter is the slice of a monitor's surface needed to
 // cross-confirm a channel's reachability across sibling monitors.
 type channelHealthReporter interface {
@@ -293,6 +517,47 @@ const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a br
 // see that branch.
 func (s *runState) runCookieRecovery(ctx context.Context, platform string, refresh cookieRefresher, notify authFailureNotifier) {
 	result, err := refresh(ctx)
+
+	// The re-check, on EVERY exit below rather than only the successful one.
+	//
+	// It used to sit inside the RefreshOK arm, on the reasoning that a
+	// successful refresh is the one whose result the UI needs. That was half
+	// the truth twice over. A pass that ran and produced a conclusively DEAD
+	// pair still rewrote cookies.txt — a browser that hands back a
+	// new-but-refused credential moves the fingerprint exactly as a working one
+	// does — so the Twitch auth mark taken under the OLD pair would stand until
+	// the ticker, naming a login problem the file no longer has. And a pass
+	// that ran and then ERRORED is the same story: three of the EIGHT
+	// refreshAborted() exits in refreshCookiesDetailed happen AFTER the write
+	// — the jar reload that failed over a cookies.txt just replaced, and the
+	// two rollback exits, which fail over a file the import had already
+	// rewritten. That first one is where a re-check is worth most, because
+	// refresh's own jar.Reload repairs the stale in-memory jar the abort left
+	// behind. Both services share one *CookieJar.
+	//
+	// Deferred rather than copied into each exit: the gate has to be evaluated
+	// independently of the error return, and there are three returns below plus
+	// the switch. A defer also puts it after the notifications, so a 30-second
+	// re-check cannot delay the line that tells the operator what happened.
+	//
+	// Gated on Ran, which is an OVER-approximation and deliberately so. Ran is
+	// false at all seven refreshDeclined() exits — setup in progress, a refresh
+	// already in flight, nothing configured, the service stopped — where
+	// nothing was written and there is nothing to re-read. It is true at the
+	// FIVE aborts that failed before the write as well as at the three that
+	// failed after it: an empty profile import, a browser refresh that errored,
+	// a failed MkdirAll, the S9 read abort, and the write itself failing. Each
+	// of those five costs one wasted validate pass on a rare error path.
+	// Getting the declines wrong would instead print a staleness warning about
+	// a file nobody touched, on every ordinary tick; getting the three
+	// post-write aborts wrong costs half an hour of a stale mark. Ran buys the
+	// second and third at the price of the first.
+	defer func() {
+		if result.Ran {
+			recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "recovery", "platform", platform)
+		}
+	}()
+
 	if err != nil {
 		// Narrowed IN FRONT of the generic branch below, which must stay
 		// generic — it also carries write/reload/restore failures that make
@@ -339,26 +604,6 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	switch result.Verdict(platform) {
 	case cookies.RefreshOK:
 		s.log.Info("auto-cookie recovery succeeded", "platform", platform)
-		// Re-check auth status immediately so the UI updates.
-		//
-		// CheckNow now single-flights with the periodic refresh, and this is the
-		// one caller where a skip is worth a line at Info rather than the
-		// service's own Debug. Recovery is TRIGGERED from inside a refresh pass
-		// (OnRecoveryNeeded fires mid-pass and this runs on the goroutine
-		// handleRecoveryNeeded spawns), so a recovery that finishes quickly —
-		// the browser-free profile import, which needs no browser launch — can
-		// still land while its own trigger pass is finishing, e.g. inside the
-		// ticker path's fallback probe. The pass in flight read the cookie file
-		// BEFORE this recovery rewrote it, so its status is pre-recovery, and
-		// the badge then stays stale until the next tick a full interval away.
-		//
-		// Nothing here retries or waits: the guard's contract is that a second
-		// caller does nothing, and a queued retry would be a second mechanism to
-		// contain the first. The line is what makes the stale badge explicable.
-		if !s.cookieRefresh.CheckNow(context.Background()) {
-			s.log.Info("auth re-check after recovery was skipped, a cookie refresh was already in flight — status may lag until the next refresh",
-				"platform", platform)
-		}
 
 	case cookies.RefreshFailed:
 		// The case that was silently swallowed whenever the sibling platform
@@ -454,10 +699,11 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 		//     LOGIN_INFO, so a jar holding it with the whole SAPISID family
 		//     gone is "configured" and still cannot sign a request.
 		//
-		// Deliberately NOT offered: "it stopped before verifying". Every
-		// refreshAborted() in autocookies.go (:918, :988, :995, :1041, :1046,
-		// :1101, :1113) is returned with a non-nil error, so an aborted pass
-		// takes the err != nil branch above and cannot reach this line. Nor
+		// Deliberately NOT offered: "it stopped before verifying". All EIGHT
+		// refreshAborted() returns in refreshCookiesDetailed carry a non-nil
+		// error — stated as a count rather than a line list, which had drifted
+		// by hundreds of lines and by one exit — so an aborted pass takes the
+		// err != nil branch above and cannot reach this line. Nor
 		// "it declined to run" — the branch above takes every declined pass.
 		// Both would be causes this code cannot have.
 		//
@@ -637,71 +883,12 @@ func (s *runState) wireMonitorCallbacks() {
 		s.handleRecoveryNeeded(platform, autoEnabled, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
 	}
 
-	// When a platform transitions from not-authenticated to authenticated,
-	// sweep the jobs parked in StatusCookies on that platform back to Upcoming
-	// so they get re-probed without manual intervention. Closes audit
-	// decision #23 (worker.md Q3).
-	//
-	// "the jobs", not "every job": sweepShouldResume holds back the
-	// membership-parked ones, whose session was already authenticated when
-	// they failed and which this transition therefore cannot fix.
-	s.cookieRefresh.OnAuthRecovered = func(platform string) {
-		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
-		if resumed > 0 {
-			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
-			// Event "auth" pairs with the worker's "Authentication Required"
-			// emit — an empty Event would bypass every target's allowlist
-			// (unfilterable) since the filter only applies when Event != "".
-			s.notifyMgr.Send("Authentication Recovered",
-				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
-				notifications.TypeInfo,
-				[]notifications.Field{
-					{Name: "Platform", Value: platform, Inline: true},
-					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
-				},
-				notifications.SendOptions{Event: "auth"},
-			)
-		}
-	}
-
-	// Whenever the signed-in account is (re-)observed, re-evaluate the parked
-	// jobs against it. For a membership park this is the only thing that can
-	// help — such a job parked while auth was perfectly healthy, so it is
-	// invisible to OnAuthRecovered above — and it resumes only if the account
-	// is genuinely a different one from the one that refused it.
-	//
-	// Dead-cookie parks are eligible here as well. In the common case
-	// OnAuthRecovered already took them (a swap that also restores auth fires
-	// both), and resumeCookieParkedJobs is idempotent, so whichever runs
-	// second simply finds nothing left. Being permissive costs nothing and
-	// covers the swap-while-healthy case for them too.
-	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
-		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
-		if resumed > 0 {
-			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
-			// States no cause, for the same reason the "Cookie Auto-Refresh
-			// Ineffective" notification above states none. This fires on the
-			// first authenticated observation of EVERY process, not only on a
-			// real account change: an operator who fixed their cookies while
-			// Moombox was stopped gets their jobs resumed here, and telling
-			// them "a different account was supplied" would be flatly false.
-			// A notification is more visible than a log line, so it should
-			// assert less than the log line, not more — report what happened
-			// (jobs resumed) and leave the cause to the log.
-			//
-			// Same "auth" event as the recovery notification above, for the
-			// same reason: an empty Event bypasses every target's allowlist.
-			s.notifyMgr.Send("Parked Jobs Re-evaluated",
-				fmt.Sprintf("Resumed %d job(s) parked on %s credentials after re-checking the signed-in account", resumed, platform),
-				notifications.TypeInfo,
-				[]notifications.Field{
-					{Name: "Platform", Value: platform, Inline: true},
-					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
-				},
-				notifications.SendOptions{Event: "auth"},
-			)
-		}
-	}
+	// Both credential-repair edges, wired together because they mean the same
+	// thing to a live chat session and different things to everything else.
+	// The broadcast is injected rather than read off s.dlWorker inside, so a
+	// test can count it; the method value is safe on a nil worker
+	// (ReauthenticateTwitchChats is nil-receiver-guarded — Task 5).
+	s.wireCredentialRepairCallbacks(s.dlWorker.ReauthenticateTwitchChats)
 
 	// ProbeVideo callback for monitors (metadata check before job creation).
 	// Uses the caller-supplied ctx so monitor shutdown cancels in-flight

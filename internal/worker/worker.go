@@ -167,11 +167,15 @@ type DownloadWorker struct {
 	queue        *JobQueue
 	scheduler    *Scheduler
 	orchestrator *DownloadOrchestrator
-	streamProc   *StreamProcessor
-	notifier     *notifications.Manager
-	logger       logger
-	wg           sync.WaitGroup // tracks in-flight processJob goroutines
-	notifyJob    chan struct{}  // signal to re-check for new jobs (non-blocking send)
+	// twitchChats is the same registry the orchestrator holds. Kept here so
+	// cmd/moombox has an exported path to it without reaching through the
+	// orchestrator, which is otherwise entirely internal to this package.
+	twitchChats *twitchChatRegistry
+	streamProc  *StreamProcessor
+	notifier    *notifications.Manager
+	logger      logger
+	wg          sync.WaitGroup // tracks in-flight processJob goroutines
+	notifyJob   chan struct{}  // signal to re-check for new jobs (non-blocking send)
 
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
 	// be attempted. Returns true if THE NAMED PLATFORM ended up authenticated.
@@ -266,6 +270,14 @@ func NewDownloadWorker(
 	// promptly instead of on the heartbeat.
 	sp.SetWakeScheduler(sched.Wake)
 
+	// ONE registry, two holders. ExecuteTwitch registers into the
+	// orchestrator's; cmd/moombox broadcasts through the worker's. Two
+	// registries would compile, pass every registry unit test, and leave the
+	// broadcast reaching an always-empty map.
+	twitchChats := newTwitchChatRegistry()
+	orchestrator := NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn)
+	orchestrator.twitchChats = twitchChats
+
 	return &DownloadWorker{
 		db:           db,
 		yt:           yt,
@@ -273,7 +285,8 @@ func NewDownloadWorker(
 		cfg:          cfg,
 		queue:        queue,
 		scheduler:    sched,
-		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn),
+		orchestrator: orchestrator,
+		twitchChats:  twitchChats,
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,
@@ -627,7 +640,27 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				return w.tw.GetStreamInfo(innerCtx, login)
 			}
 			variant.FetchVariantsFn = func(innerCtx context.Context) ([]twitch.TwitchHLSVariant, error) {
-				return w.tw.GetHLSMasterPlaylist(innerCtx, login)
+				// The anonymous-playback verdict is discarded HERE and only
+				// here. ONE VERDICT PER CAPTURE is the design (Arc 10 R6):
+				// processTwitchLive takes the mark at capture start and this
+				// closure does not take it again.
+				//
+				// Not because repeats are expensive — they are not. A repeat
+				// NoteTwitchAuthLoss with the same reason computes
+				// changed == false and shouldFireRecovery declines, so it is
+				// an idempotent status write. The reason is that this closure
+				// is not a detector worth building the story on: it backs
+				// refreshBestVariant, so it runs on EVERY (re)start of a
+				// downloader — post-outage resume, gap recovery, quality
+				// change, init change — and the quality probe, which means it
+				// re-mints the playback token many times on one capture and
+				// may also never run at all on a clean stream.
+				//
+				// What that costs, stated plainly because nothing else says
+				// it: a credential that dies MID-CAPTURE on a chat-off job is
+				// not marked until the next capture start.
+				variants, _, err := w.tw.GetHLSMasterPlaylist(innerCtx, login)
+				return variants, err
 			}
 		}
 		// Determine which Twitch chat downloader to use
@@ -1165,6 +1198,38 @@ func (w *DownloadWorker) SetConfigStore(store *config.Store) {
 // SetParallelDownloads updates the max parallel downloads at runtime.
 func (w *DownloadWorker) SetParallelDownloads(n int) {
 	w.queue.SetMaxParallel(n)
+}
+
+// SetOnTwitchAuthLoss wires the Twitch platform-mark seam through to the
+// stream processor, which is where the chat downgrade is observed.
+//
+// cmd/moombox holds both the refresh service and the worker; the worker holds
+// the stream processor. This is the same one-hop forwarding SetConfigStore
+// does, and it exists so cmd/moombox never has to know that the stream
+// processor is where the callback lands.
+func (w *DownloadWorker) SetOnTwitchAuthLoss(fn func(reason string)) {
+	if w.streamProc != nil {
+		w.streamProc.SetOnTwitchAuthLoss(fn)
+	}
+}
+
+// ReauthenticateTwitchChats tells every live Twitch IRC chat downloader to
+// re-read its credentials and reconnect, and returns how many were told.
+//
+// Called by cmd/moombox from RefreshService.OnCredentialsChanged("twitch") —
+// the only signal a capture that is already running has that repaired cookies
+// are on disk. Returns a COUNT and nothing else: no channel, no job, no
+// account. "Told" is not "authenticated": a downloader with no live session
+// only has its latches cleared.
+//
+// Nil-safe on both the receiver and the registry, so a partially constructed
+// worker degrades to "nothing to tell" rather than panicking at the moment an
+// operator fixes their credentials.
+func (w *DownloadWorker) ReauthenticateTwitchChats() int {
+	if w == nil {
+		return 0
+	}
+	return w.twitchChats.reauthenticateAll()
 }
 
 // ResumeJob resumes a cancelled/errored YouTube job from its saved state.

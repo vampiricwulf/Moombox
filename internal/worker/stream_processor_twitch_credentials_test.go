@@ -284,22 +284,34 @@ func TestTwitchChatDowngradeNoticeCarriesNoCredential(t *testing.T) {
 	}
 }
 
-// TestTwitchChatDowngradeReasonsAreDistinct: four states, four sentences.
+// TestTwitchChatDowngradeReasonsAreDistinct: one state, one sentence, for
+// every member of the vocabulary.
 //
 // Collapsing them to one generic line passes every other test in this file, and
 // costs the operator the only part of the notice that says WHICH remedy applies
 // — a refused login is a dead cookie, an unusable one is a hand-edited file.
+//
+// The playback-token route is in the list although nothing sends a chat notice
+// for it today (the HLS side marks the platform and logs, it does not notify).
+// That is what makes the mirror's coverage of the WHOLE vocabulary a
+// requirement rather than a comment: a later caller that does route it here
+// must not land on the generic sentence.
 func TestTwitchChatDowngradeReasonsAreDistinct(t *testing.T) {
 	seen := map[string]string{}
+	generic := twitchChatDowngradeReason("a-reason-added-upstream-without-a-case-here")
 	for _, reason := range []string{
 		twitch.AuthDowngradeLoginRefused,
 		twitch.AuthDowngradeLoginUnacknowledged,
 		twitch.AuthDowngradeNoLoginCookie,
 		twitch.AuthDowngradeUnusableLoginCookie,
+		twitch.AuthDowngradePlaybackTokenAnonymous,
 	} {
 		sentence := twitchChatDowngradeReason(reason)
 		if sentence == "" {
 			t.Errorf("reason %q renders no sentence", reason)
+		}
+		if sentence == generic {
+			t.Errorf("reason %q renders the generic fallback — it has no arm of its own", reason)
 		}
 		if prev, dup := seen[sentence]; dup {
 			t.Errorf("reasons %q and %q render the same sentence %q", prev, reason, sentence)
@@ -324,7 +336,8 @@ func TestTwitchChatDowngradeWithoutANotifierIsSilent(t *testing.T) {
 	if send := sp.notifierSend(); send != nil {
 		t.Error("notifierSend returned a sender for a processor with no manager")
 	}
-	callback := twitchChatDowngradeCallback(sp.notifierSend, downgradeJob(), "TestChan")
+	callback := twitchChatDowngradeCallback(
+		sp.notifierSend, func() func(string) { return nil }, downgradeJob(), "TestChan")
 	if callback == nil {
 		t.Fatal("callback is nil — the downloader would report to nothing")
 	}
@@ -354,7 +367,9 @@ func TestTwitchChatDowngradeCallbackDeliversWhatTheDownloaderReports(t *testing.
 		t.Run(reason, func(t *testing.T) {
 			rec := &recordingNotifier{}
 			callback := twitchChatDowngradeCallback(
-				func() notifySend { return rec.send }, downgradeJob(), "TestChan")
+				func() notifySend { return rec.send },
+				func() func(string) { return nil },
+				downgradeJob(), "TestChan")
 
 			callback(reason)
 
@@ -384,7 +399,9 @@ func TestTwitchChatDowngradeCallbackResolvesTheSenderPerFire(t *testing.T) {
 	rec := &recordingNotifier{}
 	var send notifySend // nothing wired yet, exactly as at worker construction
 	callback := twitchChatDowngradeCallback(
-		func() notifySend { return send }, downgradeJob(), "TestChan")
+		func() notifySend { return send },
+		func() func(string) { return nil },
+		downgradeJob(), "TestChan")
 
 	callback(twitch.AuthDowngradeLoginRefused)
 	if len(rec.sent) != 0 {
@@ -406,3 +423,113 @@ func (nopWorkerLogger) Debug(string, ...any) {}
 func (nopWorkerLogger) Info(string, ...any)  {}
 func (nopWorkerLogger) Warn(string, ...any)  {}
 func (nopWorkerLogger) Error(string, ...any) {}
+
+// TestTwitchChatDowngradeCallbackMarksThePlatformAndNotifiesTheJob is Arc 10
+// R1's wiring claim: ONE report, TWO consumers.
+//
+// The notification names the job ("Twitch chat is anonymous for X") and the
+// mark names the platform. A change that replaced one with the other would
+// pass any "something happened" assertion and lose half the behaviour: without
+// the notice the operator is not told which capture is degraded; without the
+// mark the platform stays green and no recovery is attempted.
+//
+// The mutation: dropping either call from the callback.
+func TestTwitchChatDowngradeCallbackMarksThePlatformAndNotifiesTheJob(t *testing.T) {
+	rec := &recordingNotifier{}
+	var marked []string
+
+	cb := twitchChatDowngradeCallback(
+		func() notifySend { return rec.send },
+		func() func(string) { return func(reason string) { marked = append(marked, reason) } },
+		downgradeJob(), "TestChan")
+	cb(twitch.AuthDowngradeNoLoginCookie)
+
+	if len(marked) != 1 || marked[0] != twitch.AuthDowngradeNoLoginCookie {
+		t.Errorf("the platform mark received %v, want exactly [%s]", marked, twitch.AuthDowngradeNoLoginCookie)
+	}
+	if len(rec.sent) != 1 {
+		t.Fatalf("the notifier received %d notices, want exactly 1", len(rec.sent))
+	}
+	if rec.sent[0].title != "Twitch chat is anonymous for TestChan" {
+		t.Errorf("the job notice no longer names the channel: %q", rec.sent[0].title)
+	}
+	// The mark carries the vocabulary token and nothing else — the same
+	// no-credential property assertNoCredentialInReports pins on the notice
+	// side, restated for the new consumer.
+	if strings.ContainsAny(marked[0], " ;=") {
+		t.Errorf("the mark received %q, which is not a bare vocabulary token", marked[0])
+	}
+}
+
+// TestTwitchChatDowngradeCallbackResolvesTheMarkPerFire.
+//
+// The resolver is called at FIRE time, not captured at construction. A report
+// can arrive hours into a capture, and the seam is wired during startup — a
+// captured nil would silence the mark for the life of the process on any
+// ordering where the downloader is built first.
+//
+// The mutation: `mark := resolveMark()` hoisted out of the returned closure.
+func TestTwitchChatDowngradeCallbackResolvesTheMarkPerFire(t *testing.T) {
+	rec := &recordingNotifier{}
+	var marked []string
+	var live func(string)
+
+	cb := twitchChatDowngradeCallback(
+		func() notifySend { return rec.send },
+		func() func(string) { return live },
+		downgradeJob(), "TestChan")
+
+	cb(twitch.AuthDowngradeLoginRefused) // nothing wired yet: must not panic
+	if len(marked) != 0 {
+		t.Fatalf("marks = %v before anything was wired", marked)
+	}
+
+	live = func(reason string) { marked = append(marked, reason) }
+	cb(twitch.AuthDowngradeLoginRefused)
+
+	if len(marked) != 1 {
+		t.Errorf("marks = %v, want one after the seam was wired — the resolver was captured, not called per fire", marked)
+	}
+}
+
+// TestTwitchChatDowngradeCallbackWithNoMarkStillNotifies. An install with no
+// refresh service wired is not an error, and the per-job notice is exactly the
+// signal it still needs.
+//
+// The mutation: `if mark == nil { return }` placed before the send.
+func TestTwitchChatDowngradeCallbackWithNoMarkStillNotifies(t *testing.T) {
+	rec := &recordingNotifier{}
+
+	cb := twitchChatDowngradeCallback(
+		func() notifySend { return rec.send },
+		func() func(string) { return nil },
+		downgradeJob(), "TestChan")
+	cb(twitch.AuthDowngradeUnusableLoginCookie)
+
+	if len(rec.sent) != 1 {
+		t.Errorf("the notifier received %d notices with no mark wired, want 1", len(rec.sent))
+	}
+}
+
+// TestStreamProcessorTwitchAuthLossResolverIsNilSafeAndLive pins the
+// production resolver, which is what the callback above is handed.
+//
+// The mutation: returning a non-nil zero func, or capturing sp.onTwitchAuthLoss
+// at construction.
+func TestStreamProcessorTwitchAuthLossResolverIsNilSafeAndLive(t *testing.T) {
+	sp := &StreamProcessor{}
+	if fn := sp.twitchAuthLossReporter(); fn != nil {
+		t.Error("an unwired stream processor returned a non-nil auth-loss reporter")
+	}
+
+	var got []string
+	sp.SetOnTwitchAuthLoss(func(reason string) { got = append(got, reason) })
+	fn := sp.twitchAuthLossReporter()
+	if fn == nil {
+		t.Fatal("a wired stream processor returned a nil auth-loss reporter")
+	}
+	fn(twitch.AuthDowngradeLoginRefused)
+	if len(got) != 1 || got[0] != twitch.AuthDowngradeLoginRefused {
+		t.Errorf("the reporter delivered %v, want [%s]", got, twitch.AuthDowngradeLoginRefused)
+	}
+}

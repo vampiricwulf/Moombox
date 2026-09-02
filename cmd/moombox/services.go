@@ -127,6 +127,102 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 	}
 }
 
+// twitchAuthLossHook wraps the platform-mark call in the goroutine its caller
+// requires, and returns the function wired into DownloadWorker.SetOnTwitchAuthLoss.
+//
+// Extracted from the wiring below for the reason reauthenticateTwitchChats and
+// wireCredentialRepairCallbacks were: the decision inside it — that the mark is
+// delivered ASYNCHRONOUSLY — is the one this whole seam turns on, and inside
+// initServices nothing can drive it. `go build` proves only that the join
+// compiles.
+//
+// WHY THE GOROUTINE. Everything upstream of here is inline: ChatDownloader
+// calls OnAuthDowngrade on the IRC session goroutine with the read loop parked
+// behind it (chat.go states the contract), and the worker's downgrade callback
+// forwards it inline. Everything downstream is inline too —
+// NoteTwitchAuthLoss takes the refresh service's write lock, contended with
+// every GetStatus a dashboard or status bar makes, and then fires OnAuthChange
+// and OnRecoveryNeeded from inside its own call. The OnRecoveryNeeded
+// subscriber does a config-store read and then, on the auto_enabled=false arm,
+// a Warn, a cooldown-map lock and a fan-out over every notification target.
+// None of that is bounded by anything the chat path controls, and a chat read
+// loop parked behind it drops every message for the duration.
+//
+// It is NOT that a webhook is posted synchronously — notifications.Manager.Send
+// hands each target to its own semaphore-bounded goroutine and returns, and
+// handleRecoveryNeeded's auto_enabled=true arm spawns its own goroutine for the
+// browser pass. The reason is the unbounded synchronous chain above, plus a
+// contract at chat.go that is unconditional.
+//
+// Fire-and-forget is correct rather than convenient: the mark is idempotent —
+// writing the same reason twice is the same status — and the downloader
+// latches its report once per job anyway, so there is nothing to sequence and
+// nothing to wait for. The reason is a fixed vocabulary token; nothing read
+// from the jar or the wire passes through here.
+//
+// mark is (*cookies.RefreshService).NoteTwitchAuthLoss in production, taken as
+// a func so the delivery contract can be driven without a refresh service.
+func twitchAuthLossHook(mark func(reason string), log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) func(reason string) {
+	return func(reason string) {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("panic marking twitch auth loss", "panic", fmt.Sprint(r))
+				}
+			}()
+			mark(reason)
+		}()
+	}
+}
+
+// postRefreshRecheckHook wraps the post-pass auth re-check in its own recover,
+// and returns the function wired into AutoCookieService.OnPassCompleted.
+//
+// Extracted for the reason twitchAuthLossHook was: the decision inside it — that
+// a panic here costs ONE TICK and not the timer — cannot be driven from inside
+// initServices, and `go build` proves only that the join compiles.
+//
+// WHY ITS OWN RECOVER, when the caller is already a goroutine that has one. The
+// periodic goroutine's recover sits OUTSIDE its `for` loop
+// (AutoCookieService.StartPeriodicRefresh), so it does not resume the loop — it
+// ends it. Anything that panics on the way through this hook therefore stops
+// the 30-minute browser refresh for the life of the process. Before Arc 10 the
+// only thing on that goroutine was refreshCookiesDetailed; this hook adds the
+// whole of RefreshService.refresh — jar.Reload, two HTTP round-trips,
+// updateCookieFile, and the OnAuthChange / OnRecoveryNeeded /
+// OnCredentialsChanged fan-out, the last of which reaches the worker's Twitch
+// chat registry and every live chat session in it. That is a far wider panic
+// surface than the loop was written against.
+//
+// The precedent is refresh.go's own Start, which wraps its synchronous first
+// pass in exactly this shape and explains why wrapping the CALL is right where
+// spawning a goroutine would not be: there is nothing to run concurrently here,
+// only something to survive.
+//
+// recheck is the caller's whole body rather than a CheckNow func, so the guard
+// covers everything the hook does — the accessor lookup and the logging
+// included, not just the pass.
+func postRefreshRecheckHook(recheck func(), log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) func() {
+	return func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("panic in the post-refresh cookie re-check", "panic", fmt.Sprint(r))
+			}
+		}()
+		recheck()
+	}
+}
+
 // livenessFromProbe collapses ProbeAccountLiveness's (verdict, error) pair
 // into the (loggedIn, conclusive) pair RefreshService.FallbackLiveness
 // expects. Written as a function taking the probe's two results so it can be
@@ -853,6 +949,25 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return stats.ActiveCount > 0
 	}
 
+	// The two credential-writing paths with no caller outside internal/cookies
+	// — the periodic timer and the boot profile seed — share this one injected
+	// re-check seam. Everything else calls recheckAfterCookieWrite directly.
+	//
+	// The gesture names the CLASS rather than which of the two fired, because
+	// the seam carries no argument and the timestamp already separates them: the
+	// seed lands ~15 s after start, the tick on its 30-minute cadence.
+	//
+	// s.checkNowFn is read at FIRE time by convention with the other injected
+	// funcs here, and it is what makes the helper's nil guard real: a bare
+	// method value off a nil *RefreshService is non-nil and would panic inside
+	// refresh. Nil is not reachable anyway — §15 assigns cookieRefresh before
+	// autoCookieSvc is built — but see postRefreshRecheckHook for what a panic
+	// on this goroutine actually costs, which is why the wrapper is not
+	// optional.
+	autoCookieSvc.OnPassCompleted = postRefreshRecheckHook(func() {
+		recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "an automatic cookie refresh")
+	}, log)
+
 	// Mirror the cookies.dpapi_fallback config flag onto the service.
 	// Read once at startup — toggling at runtime would require a
 	// restart, which is consistent with how other AutoCookieService
@@ -867,13 +982,27 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// moment the job was refused.
 	dlWorker.CurrentCredentialIdentity = func(platform string) string {
 		if platform != "youtube" {
-			// Only YouTube produces a membership park, and only YouTube has a
-			// stable account fingerprint — see cookies.RefreshService's
-			// prevYouTubeIdentity.
+			// Only YouTube produces a membership park, which is the only thing
+			// this fingerprint is recorded FOR. Twitch has a fingerprint since
+			// Arc 10 (CookieJar.TwitchIdentity), but it identifies a credential
+			// PAIR rather than an account, and no Twitch failure parks a job on
+			// an account question — so there is nothing here for it to record.
 			return ""
 		}
 		return s.jar.YouTubeIdentity()
 	}
+
+	// Arc 10 R1: a Twitch chat auth downgrade marks the PLATFORM, beside the
+	// per-job notification the worker already sends.
+	//
+	// ON ITS OWN GOROUTINE, with the inline recover every goroutine in this
+	// project carries — see twitchAuthLossHook for why the asynchrony is the
+	// load-bearing part and what would be waiting behind it otherwise. The
+	// mark itself is read off s.cookieRefresh at FIRE time rather than
+	// captured, by convention with the other injected funcs here.
+	dlWorker.SetOnTwitchAuthLoss(twitchAuthLossHook(func(reason string) {
+		s.cookieRefresh.NoteTwitchAuthLoss(reason)
+	}, log))
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func(platform string) bool {
@@ -900,6 +1029,35 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// re-probed into a guaranteed-identical failure, spending its retry
 		// budget on a request that could not succeed.
 		result, err := autoCookieSvc.RefreshCookiesDetailed(refreshCtx)
+
+		// Arc 10 R4/R5. This is the browser refresh a FAILING JOB triggers, and
+		// it was the one credential-writing gesture with no re-check at all: the
+		// job that asked gets its answer from `result`, but every OTHER live
+		// Twitch job's chat session learned nothing until the 30-minute ticker
+		// compared the fingerprint. That is the case the owner's "immediately
+		// apply the updated cookie" is about.
+		//
+		// Deferred, so the Ran gate is evaluated independently of the error
+		// return below. A pass that wrote cookies.txt and then aborted — the
+		// jar-reload failure inside refreshCookiesDetailed is the common shape —
+		// moved the credential fingerprint just as a clean one did, and returning
+		// on err first would have skipped exactly that case. It also puts the
+		// re-check after the two Warn lines, so a 30-second pass cannot delay
+		// what the operator is told.
+		//
+		// context.Background rather than refreshCtx, which is still alive here:
+		// uniformity with the other four sites. Two of them have no caller
+		// context to reach for at all; the two that do — runCookieRecovery's
+		// ctx and the Web wizard finish handler's req.Context() — hold a budget
+		// that belongs to their own gesture, not to a fingerprint comparison that must not be
+		// cancelled by its caller's teardown. The re-check has to outlive
+		// nothing.
+		defer func() {
+			if result.Ran {
+				recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "the job-triggered cookie refresh", "platform", platform)
+			}
+		}()
+
 		if err != nil {
 			log.Warn("auto cookie refresh error",
 				slog.String("platform", platform), slog.String("error", err.Error()))

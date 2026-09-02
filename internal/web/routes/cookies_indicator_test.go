@@ -385,11 +385,16 @@ func TestParkedJobOutranksTheCheckOnTheDashboardBadge(t *testing.T) {
 // and none of them named the thing to fix. 12a put them on the wire; this is
 // the Web reading them.
 //
-// GATED ON THE VERDICT, not on the field being present. A reason attached to
-// "ok" or "not authenticated" would read as a cause for a conclusion that has
-// none — the producers leave the field empty there, and the renderer does not
-// trust that. The last row is the additive contract: an older binary sends no
-// such key and the sentence is exactly today's.
+// GATED ON THE FIELD BEING PRESENT since Arc 10, not on the verdict. It was
+// the other way round on the belief that a conclusive verdict never carries a
+// reason, and TWO producers do: verdictFromCheck maps ErrAuthCheckNotAttempted
+// to RefreshFailed with the error still recorded (pinned one package over by
+// TestUnsignableJarIsReportedAsAFailureNotAnUnknown), and NoteTwitchAuthLoss
+// writes `failed` WITH one of five fixed sentences. The old rule dropped both
+// — the first silently, since Arc 8. An `ok` verdict still shows nothing, and
+// by construction rather than by trust: the server derives that verdict from
+// the same error the string carries. The last row is the additive contract: an
+// older binary sends no such key and the sentence is exactly today's.
 func TestIndicatorTitleNamesWhyACheckCouldNotConclude(t *testing.T) {
 	vm := utilsVM(t)
 
@@ -421,14 +426,42 @@ func TestIndicatorTitleNamesWhyACheckCouldNotConclude(t *testing.T) {
 		}
 	})
 
-	t.Run("a conclusive verdict carries no cause", func(t *testing.T) {
-		_, title := indicatorState(t, vm, "youtube", map[string]any{
+	t.Run("a conclusive REFUSAL names its cause", func(t *testing.T) {
+		// Arc 10 reversed this row. The paragraph it replaces asserted that
+		// no producer writes a reason beside a conclusive verdict; the
+		// unsignable-jar sentinel already did, and NoteTwitchAuthLoss makes
+		// two. Its five sentences are the only thing that says which
+		// chat-downgrade route broke, which is why the Twitch mark is the
+		// fixture here — but the gate is the same one the sentinel needed.
+		//
+		// THE MUTATION: restoring the reason to the `unknown` arm only in
+		// cookieIndicatorState (utils.js). This subtest then fails on the
+		// Contains check — the title comes back as the bare "Not
+		// authenticated".
+		const markReason = "The cookie file has a Twitch auth-token but no login cookie beside it."
+		_, title := indicatorState(t, vm, "twitch", map[string]any{
 			"found": true, "authenticated": false, "verification": "failed",
-			"youtubeError": reason,
+			"twitchError": markReason,
 		}, false)
-		if strings.Contains(title, reason) {
-			t.Errorf("title = %q attaches a cause to a conclusion that has none. \"Not "+
-				"authenticated\" is what the site said; there is nothing left to explain", title)
+		if !strings.Contains(title, "Not authenticated") {
+			t.Errorf("title = %q, want the conclusive sentence kept intact — the cause is appended to it, never woven into it", title)
+		}
+		if !strings.Contains(title, markReason) {
+			t.Errorf("title = %q, want it to name %q. Without it every dead-credential state renders identically and none says what to fix", title, markReason)
+		}
+	})
+
+	t.Run("an OK verdict carries no cause", func(t *testing.T) {
+		// The invariant the widened gate now leans on, pinned at the renderer:
+		// an authenticated badge must never sprout a parenthetical, and the
+		// server cannot produce one (verdictFromCheck returns ok only for a
+		// nil error, and the reason string is that error).
+		_, title := indicatorState(t, vm, "youtube", map[string]any{
+			"found": true, "authenticated": true, "verification": "ok",
+			"youtubeError": "",
+		}, false)
+		if strings.Contains(title, "(") {
+			t.Errorf("title = %q — an authenticated badge must carry no parenthetical", title)
 		}
 	})
 

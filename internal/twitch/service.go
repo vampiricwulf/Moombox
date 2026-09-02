@@ -59,15 +59,50 @@ func (s *Service) GetVodComments(ctx context.Context, vodID string, contentOffse
 	return s.API.GetVodComments(ctx, vodID, contentOffsetSeconds, s.Auth.GetAuthToken())
 }
 
-// GetHLSMasterPlaylist fetches and parses the HLS master playlist for a live channel.
-func (s *Service) GetHLSMasterPlaylist(ctx context.Context, channelLogin string) ([]TwitchHLSVariant, error) {
-	token, err := s.API.GetStreamAccessToken(ctx, channelLogin, s.Auth.GetAuthToken())
+// GetHLSMasterPlaylist fetches and parses the HLS master playlist for a live
+// channel, and reports whether Twitch IGNORED the credentials it was sent.
+//
+// anonymousPlayback is Arc 10 R6: the jar held a Twitch auth-token, the GQL
+// call carried it, and the playback access token came back minted for nobody.
+// It is the only dead-credential detector a job with chat capture switched off
+// ever gets — every other route runs on the IRC handshake — and the caller
+// routes it to the same platform mark the chat downgrade uses. See
+// playbackTokenReportsAnonymous for the three conditions behind it.
+//
+// It is returned rather than delivered through a hook on Service so it reaches
+// the caller that knows WHICH capture is starting, and so the mid-stream
+// quality re-probe (worker's FetchVariantsFn, which calls this method again on
+// every format change) can discard it instead of re-marking the platform on a
+// loop.
+//
+// The verdict is returned even when the playlist fetch that follows FAILS: the
+// credential is dead either way, and a capture that also fails to start is
+// exactly when the operator most needs to know which of the two it is.
+func (s *Service) GetHLSMasterPlaylist(ctx context.Context, channelLogin string) (variants []TwitchHLSVariant, anonymousPlayback bool, err error) {
+	// Read ONCE and reuse: the same value must decide the request and the
+	// verdict below, or a jar reload between two reads could report a
+	// cookieless install as one whose credentials failed.
+	authToken := s.Auth.GetAuthToken()
+	token, err := s.API.GetStreamAccessToken(ctx, channelLogin, authToken)
 	if err != nil {
-		return nil, fmt.Errorf("get access token: %w", err)
+		return nil, false, fmt.Errorf("get access token: %w", err)
+	}
+
+	// The dead-credential check, and the only one a chat-disabled job gets.
+	// The decision itself is playbackTokenReportsAnonymous, which is where the
+	// three conditions and their reasons live — and where they are testable.
+	if playbackTokenReportsAnonymous(authToken, token.Value) {
+		anonymousPlayback = true
+		// Names the channel and the consequence. Nothing from the token
+		// document reaches this line.
+		s.logger.Warn("twitch issued an ANONYMOUS playback token although credentials were sent; "+
+			"this capture will be served stitched ads and cannot fetch subscriber-only content",
+			"channel", channelLogin)
 	}
 
 	url := BuildUsherLiveURL(channelLogin, token)
-	return FetchHLSMasterPlaylist(ctx, url)
+	variants, err = FetchHLSMasterPlaylist(ctx, url)
+	return variants, anonymousPlayback, err
 }
 
 // GetVodHLSPlaylist fetches and parses the HLS master playlist for a VOD.

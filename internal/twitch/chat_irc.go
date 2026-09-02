@@ -196,7 +196,12 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	sawLoginFailure := false
 	if authenticated {
 		defer func() {
-			if ctx.Err() != nil || !cd.IsRunning() {
+			// reauthPending: WE cancelled this session to present new
+			// credentials, so its missing 001 is not Twitch's verdict on the
+			// login. Without it, a Reauthenticate landing between the CAP ACK
+			// and the 001 would latch the anonymous fallback and demote the
+			// very session it was trying to upgrade.
+			if ctx.Err() != nil || !cd.IsRunning() || cd.reauthPending.Load() {
 				return
 			}
 			cd.noteHandshakeOutcome(welcomed, heardFromServer, sawLoginFailure)
@@ -271,6 +276,14 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			// Our own cancel. End the session now rather than spinning
+			// chatMaxConsecutiveErrs failed reads against a context we
+			// cancelled; Start's loop reads reauthPending and reconnects at
+			// once. The error value itself is never compared against — see
+			// errReauthRequested.
+			if cd.reauthPending.Load() {
+				return errReauthRequested
+			}
 			consecutiveErrors++
 			if consecutiveErrors >= chatMaxConsecutiveErrs {
 				// Return error to trigger reconnect
@@ -302,6 +315,18 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			if authenticated && !welcomed {
 				if ircIsWelcome(line) {
 					welcomed = true
+					// The one positive signal on this path. Twitch has accepted
+					// the account login, so this session captures subscriber-only
+					// messages and badges — the thing every downgrade in this
+					// file is about NOT having.
+					//
+					// Info, and once per session rather than once per
+					// downloader: a reconnect that re-authenticates after a
+					// credential repair is exactly the event an operator is
+					// looking for, and a per-downloader latch would hide it.
+					// Names the channel and nothing else — the account name is
+					// in the 001 line's parameters and must not be echoed.
+					cd.logger.Info("twitch chat: authenticated login accepted", "channel", cd.channelLogin)
 				} else if ircIsLoginFailureNotice(line) {
 					sawLoginFailure = true
 				}

@@ -24,8 +24,9 @@ type sentNotification struct {
 
 // recoveryTestState builds the smallest runState runCookieRecovery touches:
 // a logger (file-backed and silenced so the suite stays readable) and a
-// RefreshService for the success branch's UI re-check. The jar is empty, so
-// that re-check short-circuits before any network call.
+// RefreshService for the post-pass auth re-check, which is deferred above the
+// verdict switch and therefore runs on EVERY exit, not just the successful one.
+// The jar is empty, so that re-check short-circuits before any network call.
 func recoveryTestState(t *testing.T) (*runState, *[]sentNotification) {
 	t.Helper()
 	log, err := logger.New(filepath.Join(t.TempDir(), "recovery.log"), "error", 4096, 1)
@@ -615,5 +616,91 @@ func TestRecoveryUnrecognisedPlatformDoesNotAssertFailure(t *testing.T) {
 			t.Errorf("platform %q: title = %q, want the non-committal one — a platform key we do "+
 				"not recognise tells us nothing about it", platform, got.title)
 		}
+	}
+}
+
+// countRecoveryPasses runs one recovery and reports how many in-process auth
+// passes the deferred re-check actually started.
+//
+// Counted through OnAuthChange, which is the only pass-level observable this
+// package can reach: refresh's own refreshPassHook is unexported and has no
+// setter, by design. The count is exact for ONE pass over the empty jar this
+// harness builds — the first pass moves both verdicts from the zero value
+// (RefreshUnknown) to failed, so authStatusChanged is true and the callback
+// fires; a second pass over the same jar would change nothing and fire nothing.
+// Every case below therefore builds its own state and runs exactly one
+// recovery, and the assertion is 1-or-0 rather than a running total.
+func countRecoveryPasses(t *testing.T, platform string, refresh cookieRefresher) int {
+	t.Helper()
+	s, sent := recoveryTestState(t)
+	passes := 0
+	s.cookieRefresh.OnAuthChange = func(cookies.AuthStatus) { passes++ }
+	s.runCookieRecovery(context.Background(), platform, refresh, recoveryNotifier(sent))
+	return passes
+}
+
+// TestRecoveryRechecksExactlyWhenThePassRan is the assertion the Arc 10 brief
+// said could not be written, and the review proved otherwise: this suite drives
+// runCookieRecovery directly, over a real RefreshService, so the gate above the
+// verdict switch is reachable from here.
+//
+// Three mutations, each caught by a different row:
+//
+//   - Delete the gate (`if result.Ran` -> `if true`) — the reviewer's own M4,
+//     which SURVIVED the original commit. Caught by "declined".
+//   - Delete the re-check entirely. Caught by "ran and concluded".
+//   - Put the re-check back below the `err != nil` returns, i.e. undo the
+//     defer. Caught by "ran, wrote, then aborted" — the refreshAborted() shape,
+//     where cookies.txt was replaced and only the jar reload failed, and the
+//     credential fingerprint has moved even though the caller sees an error.
+func TestRecoveryRechecksExactlyWhenThePassRan(t *testing.T) {
+	boom := errors.New("cookies.txt was written but the jar could not be reloaded")
+
+	cases := []struct {
+		name    string
+		refresh cookieRefresher
+		want    int
+		why     string
+	}{
+		{
+			name:    "ran and concluded",
+			refresh: stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed),
+			want:    1,
+			why: "a pass that ran rewrote cookies.txt, and refresh's status block is the only place " +
+				"the Twitch credential fingerprint is compared and the auth mark cleared",
+		},
+		{
+			name:    "declined",
+			refresh: stubRefreshResult(cookies.RefreshResult{}),
+			want:    0,
+			why: "a declined pass wrote nothing at all, so there is nothing to re-read and the " +
+				"skipped-line warning would describe a staleness that does not exist",
+		},
+		{
+			name: "ran, wrote, then aborted",
+			refresh: func(context.Context) (cookies.RefreshResult, error) {
+				return cookies.RefreshResult{Ran: true}, boom
+			},
+			want: 1,
+			why: "three of the eight refreshAborted() exits happen AFTER the write — the fingerprint " +
+				"moved and the caller still sees an error, which is exactly the path a re-check " +
+				"placed below the error return would miss",
+		},
+		{
+			name: "declined and errored",
+			refresh: func(context.Context) (cookies.RefreshResult, error) {
+				return cookies.RefreshResult{}, boom
+			},
+			want: 0,
+			why:  "an error is not a licence to re-check: this pass never got far enough to write",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := countRecoveryPasses(t, "twitch", tc.refresh); got != tc.want {
+				t.Errorf("the recovery started %d auth re-check pass(es), want %d — %s", got, tc.want, tc.why)
+			}
+		})
 	}
 }

@@ -75,22 +75,54 @@ func TestRecheckFeedbackNamesWhyACheckCouldNotConclude(t *testing.T) {
 		}
 	})
 
-	t.Run("a conclusive verdict renders the shared sentence and nothing else", func(t *testing.T) {
-		// The reason is supplied ANYWAY. The renderer gates on the verdict
-		// rather than trusting the caller to have blanked it, because a reason
-		// beside "OK" or "not authenticated" reads as a cause for a conclusion
-		// that has none.
-		for _, verdict := range []cookies.RefreshVerdict{cookies.RefreshOK, cookies.RefreshFailed} {
-			got := recheckFeedback(t, 200, true, false, cookieRecheckResultMsg{
-				YouTube:       verdict,
-				YouTubeReason: ytReason,
-			})
-			want := cookies.RecheckReport(
-				cookies.RecheckedPlatform{Label: "YouTube", Verdict: verdict},
-			)
-			if got != want {
-				t.Errorf("verdict %v: feedback = %q, want the shared sentence alone %q", verdict, got, want)
-			}
+	t.Run("an OK verdict renders the shared sentence and nothing else", func(t *testing.T) {
+		// Unchanged intent, and a RENDERER pin only: the message is built by
+		// hand here, so nothing about the producer is exercised — it asserts
+		// that an empty reason adds no parenthetical, which is what keeps the
+		// widening additive for every install whose cookies are fine.
+		//
+		// The producer half — that verdictFromCheck cannot return OK beside a
+		// non-empty reason, because OK requires a nil error and the reason
+		// string IS that error — is what makes this row sufficient rather than
+		// a hole. It is a property of internal/cookies and is pinned there.
+		got := recheckFeedback(t, 200, true, false, cookieRecheckResultMsg{
+			YouTube:       cookies.RefreshOK,
+			YouTubeReason: "",
+		})
+		want := cookies.RecheckReport(
+			cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshOK},
+		)
+		if got != want {
+			t.Errorf("feedback = %q, want the shared sentence alone %q", got, want)
+		}
+	})
+
+	t.Run("a conclusive REFUSAL names its reason", func(t *testing.T) {
+		// Arc 10 reversed this row. It rested on "a conclusive verdict has no
+		// cause to give", which was already false: verdictFromCheck maps the
+		// unsignable-jar sentinel to RefreshFailed with the error recorded, so
+		// the old gate had been swallowing that cause since Arc 8. The mark is
+		// the second such producer, and its five fixed sentences are the only
+		// thing that says WHICH route broke — "the cookie file has a Twitch
+		// auth-token but no login cookie beside it" versus "Twitch refused the
+		// saved login" are different remedies. Withholding either left the
+		// operator with "not authenticated" and no next step.
+		//
+		// THE MUTATION: narrowing the gate back to
+		// `verdict == cookies.RefreshUnknown && reason != ""` in
+		// cookieRecheckFeedback (app_update.go). This subtest then fails on the
+		// Contains check below — the sentence comes back as the bare
+		// RecheckReport with no parenthetical.
+		const twReasonMark = "The cookie file has a Twitch auth-token but no login cookie beside it."
+		got := recheckFeedback(t, 200, false, true, cookieRecheckResultMsg{
+			Twitch:       cookies.RefreshFailed,
+			TwitchReason: twReasonMark,
+		})
+		if !strings.Contains(got, twReasonMark) {
+			t.Errorf("feedback = %q, want it to name %q — a conclusive refusal that knows WHY must say so", got, twReasonMark)
+		}
+		if !strings.Contains(got, "Twitch") {
+			t.Errorf("feedback = %q, want the platform label kept beside the reason", got)
 		}
 	})
 

@@ -94,11 +94,17 @@ type notifySend func(title, description string, ntype notifications.Notification
 //
 // The mapping lives at THIS end on purpose. internal/twitch reports a state; the
 // operator-facing wording, and the remedy attached to it, belong beside the
-// other things this process tells an operator to do. The four inputs are a
-// closed vocabulary, so the default arm exists only for a future value added
+// other things this process tells an operator to do. The inputs are a closed
+// vocabulary, so the default arm exists only for a future value added
 // upstream without a matching arm here — it must still describe the degradation
 // rather than say nothing, because a notification that names no problem is
 // worse than the log line it was meant to escape.
+//
+// It covers the WHOLE vocabulary, including the playback-token route that no
+// caller can reach today, so that a later caller cannot land on the generic
+// sentence — a partial mirror is the drift this arc was written to stop. That
+// arm's sentence is correct in isolation; the payload built AROUND it is not.
+// See twitchChatDowngradeNotice's SCOPE note before wiring anything to it.
 func twitchChatDowngradeReason(reason string) string {
 	switch reason {
 	case twitch.AuthDowngradeLoginRefused:
@@ -109,6 +115,8 @@ func twitchChatDowngradeReason(reason string) string {
 		return "The cookie file has a Twitch auth-token but no login cookie beside it."
 	case twitch.AuthDowngradeUnusableLoginCookie:
 		return "The Twitch login cookie is not a name that can be sent to chat."
+	case twitch.AuthDowngradePlaybackTokenAnonymous:
+		return "Twitch issued an anonymous playback token although saved credentials were sent."
 	default:
 		return "The saved Twitch login could not be used."
 	}
@@ -140,6 +148,21 @@ func twitchChatDowngradeReason(reason string) string {
 // A notice that said "chat only" would therefore be read as "no rush", and the
 // cost of that misreading lands silently: an archive with holes in it, hours
 // later, with nothing above Info in the log to explain them.
+//
+// SCOPE: the four IRC chat-handshake routes ONLY. The vocabulary has a fifth
+// member — twitch.AuthDowngradePlaybackTokenAnonymous — and this payload is
+// wrong for it in THREE places, not one: the title says "chat"; the first
+// clause says chat is still being recorded, when that route's whole reason to
+// exist is the job with chat capture OFF; and the tail says THIS download is
+// unaffected, which is the exact inverse of what that route reports — the
+// token this capture is being served under is the anonymous one.
+//
+// Nothing routes it here today: the HLS side marks the platform and logs, it
+// does not notify. A caller that wants a notice for it needs its OWN renderer.
+// Do not widen this one, and do not add the fifth reason to
+// TestTwitchChatDowngradeNoticeCarriesNoCredential's list expecting the shared
+// tail to hold — it asserts "NEXT capture will start anonymous", which is
+// false for that route.
 func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
 	title, description string, fields []notifications.Field, opts notifications.SendOptions,
 ) {
@@ -199,24 +222,91 @@ func (sp *StreamProcessor) notifierSend() notifySend {
 	return sp.notifier.Send
 }
 
+// twitchAuthLossReporter resolves the platform-mark seam, or nil when none is
+// wired.
+//
+// Read at CALL time rather than captured, for the reason notifierSend states
+// and one sharper: a downgrade report can arrive hours into a capture, so a
+// value captured when the downloader was built could be a nil from before
+// startup finished wiring.
+func (sp *StreamProcessor) twitchAuthLossReporter() func(reason string) {
+	return sp.onTwitchAuthLoss
+}
+
+// noteAnonymousPlayback marks the PLATFORM when Service.GetHLSMasterPlaylist
+// reported that this install's Twitch credentials were sent and Twitch minted
+// the playback token for nobody anyway (Arc 10 R6).
+//
+// This is the HLS half of the same seam the chat downgrade uses, and the
+// reason it exists is the job that has chat capture switched OFF: every other
+// detector in this arc runs on the IRC handshake, so without this one a dead
+// Twitch credential on such a job is invisible until an archive comes back
+// with ad-break gaps in it.
+//
+// A mark and no notification, deliberately. The chat route notifies because it
+// can name the job whose chat is degraded; here the whole statement is about
+// the credential, which is what the platform mark already says — and
+// GetHLSMasterPlaylist has already written the Warn line that names the
+// channel. A second Discord embed per capture start would be noise.
+//
+// Extracted from processTwitchLive rather than written inline there because
+// processTwitchLive is unreachable offline (it needs a live GQL reply and a
+// real Usher playlist); inline, the reason constant could be swapped for
+// another member of the vocabulary, or the guard dropped so every capture
+// marks, and no test could see it.
+//
+// The resolver is read at FIRE time for the reason twitchAuthLossReporter
+// documents. The call is synchronous and must stay cheap: it runs on the job
+// goroutine that is starting the capture, and cmd/moombox's SetOnTwitchAuthLoss
+// wiring is what makes it non-blocking — that closure spawns its own goroutine,
+// exactly as the chat route relies on.
+func (sp *StreamProcessor) noteAnonymousPlayback(anonymousPlayback bool) {
+	if !anonymousPlayback {
+		return
+	}
+	if mark := sp.twitchAuthLossReporter(); mark != nil {
+		mark(twitch.AuthDowngradePlaybackTokenAnonymous)
+	}
+}
+
 // twitchChatDowngradeCallback builds the OnAuthDowngrade callback for one live
-// chat downloader.
+// chat downloader. It does TWO things with ONE report, and the split is the
+// point: the notification names the JOB, the mark names the PLATFORM.
 //
-// resolve is called at FIRE time and yields the send seam, or nil for the
-// no-notifier install. Injecting the LOOKUP rather than the sender is what makes
-// this closure the same object in production and under test — and the closure is
-// the one place a reason could be dropped, rewritten, or replaced by a constant
-// on its way from the downloader to the payload, which is a defect no test that
-// calls sendTwitchChatDowngrade directly can see. The production lookup is
-// StreamProcessor.notifierSend, whose nil arm is driven by its own test.
+// Neither replaces the other. Without the notice an operator is not told which
+// capture is degraded, or which channel's subscriber-only messages are being
+// lost. Without the mark the platform stays green — validate answers 200 for
+// two of the four routes — so nothing attempts recovery and the next capture
+// starts anonymous too.
 //
-// The downloader guarantees at most one call per job, so there is no dedup here
-// — and dedup ACROSS jobs is deliberately absent: a second job on the same
-// channel an hour later with the same dead cookies must notify again, because
-// by then the operator may believe they fixed it.
-func twitchChatDowngradeCallback(resolve func() notifySend, job *database.Job, channel string) func(reason string) {
+// BOTH resolvers are called at FIRE time and both may yield nil. Injecting the
+// LOOKUP rather than the sender is what makes this closure the same object in
+// production and under test, and it is the one place a reason could be
+// dropped, rewritten, or replaced by a constant on its way from the downloader
+// to either consumer — a defect no test that calls sendTwitchChatDowngrade
+// directly can see. The production lookups are StreamProcessor.notifierSend
+// and StreamProcessor.twitchAuthLossReporter.
+//
+// Order: the mark first. Both are cheap and neither can fail, but the mark is
+// what a UI reads on the next request and what fires the recovery attempt,
+// and sendTwitchChatDowngrade's target list can be long.
+//
+// The downloader guarantees at most one call per CREDENTIAL PAIR (Arc 10:
+// Reauthenticate resets its latches when the cookie file changes), so there is
+// no dedup here — and dedup ACROSS jobs is deliberately absent: a second job on
+// the same channel an hour later with the same dead cookies must notify again,
+// because by then the operator may believe they fixed it.
+func twitchChatDowngradeCallback(
+	resolveSend func() notifySend,
+	resolveMark func() func(reason string),
+	job *database.Job,
+	channel string,
+) func(reason string) {
 	return func(reason string) {
-		sendTwitchChatDowngrade(resolve(), job, channel, reason)
+		if mark := resolveMark(); mark != nil {
+			mark(reason)
+		}
+		sendTwitchChatDowngrade(resolveSend(), job, channel, reason)
 	}
 }
 
@@ -440,7 +530,11 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}
 
 	// Get HLS variants
-	variants, err := sp.tw.GetHLSMasterPlaylist(ctx, login)
+	variants, anonymousPlayback, err := sp.tw.GetHLSMasterPlaylist(ctx, login)
+	// BEFORE the error check: the playback token already answered the
+	// credential question, and a capture that then fails to start is exactly
+	// when an operator needs to be told which of the two problems they have.
+	sp.noteAnonymousPlayback(anonymousPlayback)
 	if err != nil {
 		return nil, fmt.Errorf("twitch HLS: %w", err)
 	}
@@ -499,8 +593,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				// operator is already looking. Fires only when this job HAD
 				// credentials — a cookieless install captures chat anonymously
 				// by design and must never be notified about it.
-				OnAuthDowngrade: twitchChatDowngradeCallback(sp.notifierSend, job, chatChannel),
-				EmoteResolver:   sp.tw.Emotes,
+				OnAuthDowngrade: twitchChatDowngradeCallback(
+					sp.notifierSend, sp.twitchAuthLossReporter, job, chatChannel),
+				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
 
 			sp.db.UpdateJobFields(job.ID, map[string]any{

@@ -360,6 +360,38 @@ type AutoCookieService struct {
 	// false. Audit reports/cookies.md #23.
 	HasActiveJobs func() bool
 
+	// OnPassCompleted is called after an AUTOMATIC refresh pass that actually
+	// ran, so whoever owns the in-process auth check can re-read the file this
+	// pass may have rewritten.
+	//
+	// Injected rather than called directly for the reason FallbackLiveness and
+	// HasActiveJobs are: this package must not reach into RefreshService's
+	// lifecycle, and cmd/moombox holds both.
+	//
+	// It exists for EXACTLY TWO callers, the two credential writers with no
+	// caller outside this package: StartPeriodicRefresh's tick and
+	// StartProfileSeed's boot import. Every other credential-writing gesture —
+	// the recovery, the worker's auth-failure refresh, R F, both setup wizards —
+	// has a caller in cmd/moombox or internal/web/routes that runs the re-check
+	// itself, so firing this from refreshCookiesDetailed instead would double
+	// every one of them. The pair is pinned by
+	// TestNotePassCompletedHasExactlyItsTwoWritingCallers.
+	//
+	// Called on whichever of those two goroutines fired it, with no lock held
+	// and after that pass's own log lines, and it MAY run a full in-process
+	// re-check (RefreshService.CheckNow — two validate round-trips, up to their
+	// timeouts). That is deliberate rather than tolerated: the ticker coalesces
+	// missed ticks and the seed runs once, so a slow hook costs cadence, never
+	// correctness, and the alternative — spawning a goroutine here — would put
+	// an unbounded number of re-checks behind a browser pass that is already
+	// single-flighted. What the hook must NOT do is block forever.
+	//
+	// It must also not PANIC out: the periodic goroutine's recover sits outside
+	// its for loop, so an escaping panic ends the 30-minute timer for the life
+	// of the process rather than costing one tick. cmd/moombox wraps the body
+	// it injects here in its own recover for exactly that reason.
+	OnPassCompleted func()
+
 	// DpapiFallback enables the Windows-only DPAPI cookie-extraction
 	// path as a fallback when the CDP refresh launch fails. Off by
 	// default — the fallback reads the user's REAL Chromium-family
@@ -1029,6 +1061,26 @@ type SetupResult struct {
 
 	YouTubeAccepted bool
 	TwitchAccepted  bool
+
+	// Wrote reports that this finish REPLACED cookies.txt, and it is true on
+	// one error path as well as on success.
+	//
+	// It is the setup path's counterpart to RefreshResult.Ran, and it exists
+	// for the same caller: whoever has to decide whether the credential
+	// fingerprint may have moved and an auth re-check is therefore owed
+	// (Arc 10 R4/R5). Every other exit from FinishSetupDetailed leaves the file
+	// exactly as it was — no setup in progress, a cancelled one, an unreadable
+	// browser profile, the S9 abort that refuses to overwrite a cookies.txt it
+	// could not read, a failed MkdirAll, a failed write — but the reload after
+	// a SUCCESSFUL write can still fail, and that exit returns an error over a
+	// file that has already been replaced. A caller that gates its re-check on
+	// `err == nil` misses precisely that case, which is the one where the jar
+	// in memory is stale and a re-check would repair it.
+	//
+	// Deliberately not on the wire: cookieSetupOutcome builds its payload key
+	// by key, and this is an internal signal about the file, not a verdict
+	// about a platform.
+	Wrote bool
 }
 
 // FinishSetup extracts cookies from the running browser and saves them, and
@@ -1204,7 +1256,12 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 		return SetupResult{}, err
 	}
 
-	// Reload jar and verify
+	// Reload jar and verify.
+	//
+	// Wrote is set from here down: writeFileAtomic above has replaced
+	// cookies.txt, so every exit past this point — this error one included —
+	// leaves a file whose credential pair may differ from the one the running
+	// process last compared. See SetupResult.Wrote.
 	if err := s.jar.Load(s.cookiePath); err != nil {
 		// Sets, for the reason spelled out at the MkdirAll exit above. This one
 		// is the worst of the three to leave silent: the cookies were extracted
@@ -1213,7 +1270,7 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 		// idea whether to run it again.
 		s.setError("cookies.txt was written but could not be loaded: " + err.Error())
 		s.cleanup()
-		return SetupResult{}, err
+		return SetupResult{Wrote: true}, err
 	}
 
 	// Presence + real API verification, through the same pairing the refresh
@@ -1351,6 +1408,7 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 		Twitch:          verdictOf(twCheck),
 		YouTubeAccepted: ytAuth,
 		TwitchAccepted:  twAuth,
+		Wrote:           true,
 	}, nil
 }
 
@@ -1737,11 +1795,20 @@ func verdictOf(p platformAuth) RefreshVerdict {
 // RefreshCookies performs a headless browser visit to refresh cookies and
 // reports whether ANY platform ended up authenticated.
 //
-// Kept as a thin wrapper over RefreshCookiesDetailed for the callers whose
-// question really is whole-service ("can we do authenticated work at all?"):
-// the startup seed, the periodic tick, the Settings "refresh now" button and
-// the TUI's equivalent. Callers acting ON BEHALF of one platform must use
-// RefreshCookiesDetailed instead — see RefreshResult.
+// Kept as a thin wrapper over RefreshCookiesDetailed for callers whose question
+// really is whole-service ("can we do authenticated work at all?"). It once had
+// four: the startup seed, the periodic tick, the Settings "refresh now" button
+// and the TUI's equivalent. All four have since moved to the detailed form, for
+// two different reasons — the manual pair need to tell "this pass renewed the
+// credentials" from "the old ones still work", and the two AUTOMATIC ones need
+// Ran, which this projection discards, to decide whether anything was written
+// and an auth re-check is owed (see OnPassCompleted). Nothing in production
+// calls this today; the projection is kept because it is the honest answer to
+// the whole-service question and the tests that ask it are the ones pinning
+// that it does not drift.
+//
+// Callers acting ON BEHALF of one platform must use RefreshCookiesDetailed
+// instead — see RefreshResult.
 func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	return s.refreshCookies(ctx, gateApplies)
 }
@@ -2747,6 +2814,17 @@ func (s *AutoCookieService) periodicRefreshHasSource() bool {
 	return err == nil
 }
 
+// notePassCompleted fires OnPassCompleted if one is wired.
+//
+// A named method rather than an inline nil check so the decision has a seam a
+// test can drive: the tick that calls it needs a browser profile, a browser
+// and a network, so the branch is otherwise unreachable offline.
+func (s *AutoCookieService) notePassCompleted() {
+	if s.OnPassCompleted != nil {
+		s.OnPassCompleted()
+	}
+}
+
 // profileImportStartupDelay is how long the browserless startup import waits
 // before running. RefreshCookies verifies the imported cookies over the
 // network, and firing that the instant the process comes up — before DNS,
@@ -2814,8 +2892,14 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 		// anyway — decideStartupSeed runs this only when resolvedBrowser() is
 		// nil, and the gate's only power is to turn a non-nil browser into nil
 		// — so gateExempt would buy nothing and would blur what it means.
-		ok, err := s.RefreshCookies(seedCtx)
+		//
+		// Detailed rather than the RefreshCookies wrapper, which returns
+		// AnyVerified() and DISCARDS Ran. ok below is that same bool, so the
+		// three log arms are unchanged; Ran is the extra fact, and it is the
+		// one that decides whether anything was written.
+		result, err := s.refreshCookiesDetailed(seedCtx, gateApplies)
 		cancel()
+		ok := result.AnyVerified()
 		switch {
 		case err != nil:
 			s.logger.Warn("startup browser-profile cookie import failed", "err", err)
@@ -2823,6 +2907,23 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 			s.logger.Info("startup browser-profile cookie import succeeded")
 		default:
 			s.logger.Warn("startup browser-profile cookie import did not authenticate any platform")
+		}
+		// The second site of the seam, and the one Arc 10 missed. This is the
+		// container install's ONLY credential writer — nothing here will ever
+		// run a browser — and at boot it lands 15 s after the refresh service
+		// took its first status over an empty jar. Without this the seed repairs
+		// the credentials, a Twitch job that already went anonymous has marked
+		// the platform, and nothing compares the fingerprint, clears that mark
+		// or reconnects the live chat session until the 30-minute ticker.
+		//
+		// Gated on Ran and not on ok, for the reason the tick is: a pass that
+		// ran and produced a dead pair moved the fingerprint exactly as a
+		// working one did. Below the log chain, also for the tick's reason —
+		// the hook may run a full in-process re-check, and the operator should
+		// not read the import's verdict half a minute after the re-check's
+		// output.
+		if result.Ran {
+			s.notePassCompleted()
 		}
 	}()
 }
@@ -2895,8 +2996,11 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 				}
 				s.logger.Debug("periodic auto-cookie refresh triggered")
 				refreshCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
-				ok, err := s.refreshCookies(refreshCtx, gateExempt)
+				// Detailed, not the bool wrapper: only the full result carries
+				// Ran, and Ran is what decides whether anything was written.
+				result, err := s.refreshCookiesDetailed(refreshCtx, gateExempt)
 				cancel()
+				ok := result.AnyVerified()
 				if err != nil {
 					s.logger.Warn("periodic auto-cookie refresh failed", "err", err)
 				} else if ok {
@@ -2907,6 +3011,23 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 					// not. Repeating "succeeded" here would contradict the
 					// second case and put the false claim back a line later.
 					s.logger.Debug("periodic auto-cookie refresh tick finished with authenticated cookies on disk")
+				}
+				// AFTER the verdict above, not before it. The hook may run a
+				// full in-process re-check — two validate round-trips, ~30 s at
+				// the client timeout — and everything RefreshService.refresh
+				// logs on the way lands in between. Firing it first buried this
+				// tick's own "failed"/"finished" line half a minute down the log,
+				// underneath output about a different pass.
+				//
+				// Gated on Ran, NOT on success. A pass that ran and failed still
+				// rewrote cookies.txt — a browser refresh that produced a
+				// new-but-dead pair moves the credential fingerprint exactly as a
+				// working one does — so firing on success only would leave the
+				// Twitch auth mark keyed to a pair that is no longer on disk. A
+				// DECLINED pass (seven refreshDeclined() exits) wrote nothing, so
+				// there is nothing to re-read.
+				if result.Ran {
+					s.notePassCompleted()
 				}
 			}
 		}

@@ -514,10 +514,19 @@ export function parkedCookiePlatforms(jobs) {
  * from the status payload; see parkedCookiePlatforms.
  *
  * The reason line is `youtubeError` / `twitchError` off the same payload, and
- * it is appended ONLY to the inconclusive arm. That is the one verdict a reason
- * explains: a conclusive "ok" or "failed" has no cause to give, and the
- * producers leave the field empty there. An older binary sends no such key at
- * all and the title degrades to exactly today's sentence.
+ * it is appended to whichever arm has one. Until Arc 10 that was the
+ * inconclusive arm alone, on the belief that a conclusive verdict never
+ * carries a reason. TWO producers do. The server maps its
+ * "auth check could not be attempted" sentinel — a jar that is configured and
+ * can never be signed — to `failed` while still recording the error, so the
+ * old rule silently dropped the one cause whose remedy is exactly "re-export
+ * your cookies"; and since Arc 10 `NoteTwitchAuthLoss` writes `failed` with a
+ * fixed sentence naming which of the four Twitch chat-downgrade routes broke,
+ * which is the only thing distinguishing "no login cookie" from "Twitch
+ * refused the login". An `ok` verdict still shows nothing, by construction:
+ * the server derives that verdict from the same error the string carries, so
+ * `ok` and a non-empty reason cannot co-occur. An older binary sends no such
+ * key at all and both titles degrade to exactly today's sentence.
  */
 export function cookieIndicatorState(platform, status, reloginRequired, parked) {
   const meta = COOKIE_INDICATOR_PLATFORMS[platform];
@@ -536,15 +545,15 @@ export function cookieIndicatorState(platform, status, reloginRequired, parked) 
   if (!status?.found) {
     return meta.absent;
   }
+  const reason = status?.[meta.errorKey];
+  const cause = reason ? ` (${reason})` : "";
   if (status?.verification === "unknown") {
-    const reason = status?.[meta.errorKey];
     return {
       className: "indicator-warn",
-      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work`
-        + (reason ? ` (${reason})` : ""),
+      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work${cause}`,
     };
   }
-  return { className: "indicator-error", title: `${meta.name}: Not authenticated` };
+  return { className: "indicator-error", title: `${meta.name}: Not authenticated${cause}` };
 }
 
 /**

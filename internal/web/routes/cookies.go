@@ -1,9 +1,11 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -130,9 +132,13 @@ func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
 // sentence naming no host, no header and no bytes, pinned by
 // TestUnreadableGuideErrorCarriesNoBody. internal/twitch's ValidateToken, which
 // did echo up to 1 MB of body until Arc 8 Task 9 clamped it, is NOT on this
-// path at all: AuthStatus.TwitchError comes only from refresh.go's own
-// checkTwitchAuth. Anything added to either producer must keep that rule, or
-// this projection puts an intermediary's HTML on the dashboard.
+// path at all. AuthStatus.TwitchError has exactly TWO producers, both in
+// refresh.go and both inside that rule: its own checkTwitchAuth, and — since
+// Arc 10 — RefreshService.NoteTwitchAuthLoss, whose reason renders through
+// twitchAuthLossMessage, a switch whose every arm returns a string LITERAL, so
+// the set of sentences it can produce is closed at compile time and no caller
+// can widen it. Anything added to any producer must keep that rule, or this
+// projection puts an intermediary's HTML on the dashboard.
 //
 // `verification` (and, for Twitch, `found`) are ADDITIVE, by the precedent
 // `renewed` set and `ran`/`verdict` and the setup's two verification fields
@@ -458,6 +464,63 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		}
 
 		result, err := autoCookieSvc.FinishSetupDetailed(req.Context())
+
+		// The dashboard twin of the TUI wizard's re-check: a completed wizard
+		// has just rewritten cookies.txt, and refresh's status block is the only
+		// place the credential fingerprint is compared, the Twitch auth mark
+		// cleared and OnCredentialsChanged fired. Bare, with no log line, for
+		// the reason given at the auto-refresh handler above — this package has
+		// no operational logger.
+		//
+		// DETACHED from req.Context(), which is the one thing this call does
+		// differently from its two neighbours, and deliberately. A client that
+		// closes the page mid-pass cancels both auth checks, and
+		// shouldObserveCredentials bails on a check error — so the Twitch
+		// fan-out never runs, no live chat session is told, and the identity
+		// baseline is not advanced either, which leaves the whole thing waiting
+		// on the 30-minute ticker. That is precisely what R5 rules out, on the
+		// most deliberate credential change there is. The neighbours are exempt
+		// for reasons that do not apply here: /api/cookies/check writes nothing,
+		// and /api/cookies/refresh has the same exposure but predates this.
+		//
+		// 45 s is a backstop above the pass's own worst case, not a budget it
+		// is expected to spend: the shared HTTP client caps every request at
+		// 30 s and each auth check wraps its own 15 s context on top, so a live
+		// pass finishes well inside this. It exists so a wedged round-trip
+		// cannot hold a detached context open indefinitely — and, since the
+		// handler does not return until the deferred pass does, so it cannot
+		// hold the connection open indefinitely either.
+		//
+		// Deferred, so the gate is evaluated independently of the error switch
+		// below: the jar reload after a successful write returns an error over a
+		// file that has already been replaced, and that is the one error exit
+		// this re-check must not skip.
+		//
+		// The Flush is what makes "the client is not waiting on this" true. The
+		// defer alone does not: jsonResponse and jsonError both write into
+		// net/http's bufio writer and neither flushes, the handler does not
+		// return until this defer completes, and Server.WriteTimeout is 0 — so
+		// without it a browser on the setup dialog's 60 s AbortController waits
+		// for FinishSetupDetailed PLUS up to 45 s of re-check and can abort a
+		// setup that in fact succeeded. Flushing here commits the response
+		// first; the gzip wrapper implements Flusher, and /api/update/apply
+		// already relies on the same thing before it restarts the process.
+		//
+		// Inside the defer rather than after jsonResponse so it covers the
+		// jar-reload error exit too, which answers through jsonError and is
+		// precisely the error path that reaches the re-check.
+		defer func() {
+			if refreshSvc == nil || !result.Wrote {
+				return
+			}
+			if f, ok := rw.(http.Flusher); ok {
+				f.Flush()
+			}
+			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			refreshSvc.CheckNow(recheckCtx)
+		}()
+
 		if err != nil {
 			// Ahead of the switch. Both browser-read failures used to fall to
 			// its default arm, whose "failed to finish setup" this file's own

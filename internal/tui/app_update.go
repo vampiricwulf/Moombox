@@ -788,14 +788,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // string for the identical gesture, and both copies are pinned against that
 // function — so nothing here may reword it. The reason, when there is one, is
 // APPENDED after it: a suffix cannot change the sentence a mutation test
-// compares, and a check that concluded produces no suffix at all, so the
-// pinned string is what an operator with working cookies still sees.
+// compares, and a healthy check produces no suffix at all, so the pinned
+// string is what an operator with working cookies still sees.
 //
-// A reason is rendered only for a platform that is ACTIVE and whose verdict is
-// RefreshUnknown. The verdict gate is here rather than at the wiring because
-// "could not establish" is the only state a reason explains: attaching one to
-// "OK" or "not authenticated" would read as a cause for a conclusion that has
-// none.
+// A reason is rendered for any ACTIVE platform that has one, whatever the
+// verdict. Until Arc 10 the gate was RefreshUnknown as well, and that was
+// already swallowing one: verdictFromCheck maps ErrAuthCheckNotAttempted to
+// RefreshFailed while the error string still rides along, so a jar that is
+// configured and can never be signed rendered as a bare "not authenticated"
+// with its cause dropped. NoteTwitchAuthLoss adds the second, and its four
+// sentences are the only thing separating a missing login cookie from a
+// refused one. An OK verdict still carries nothing: see the gate itself for
+// why that is a property of the producer rather than a promise from the
+// caller.
 //
 // LastError is a THIRD part, and it is ungated by any verdict on purpose. It
 // belongs to the auto-cookie service, not to the check this line reports, and
@@ -832,7 +837,32 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 			// "Could not establish" asks for nothing and must not alarm.
 			stated = max(stated, severityWarning)
 		}
-		if verdict == cookies.RefreshUnknown && reason != "" {
+		// Gated on the STRING, not on the verdict, since Arc 10.
+		//
+		// It was gated on RefreshUnknown on the belief that a conclusive
+		// verdict never carries a reason. That was never quite true and is
+		// now plainly false — TWO producers write RefreshFailed WITH one:
+		//
+		//   - The unsignable-jar sentinel. verdictFromCheck maps
+		//     ErrAuthCheckNotAttempted to RefreshFailed (deliberately: a jar
+		//     that is configured and can never be signed is a permanent,
+		//     actionable failure, not uncertainty), while doRefresh still
+		//     records the error as the reason. The old gate dropped it, so
+		//     "no SAPISIDHASH could be generated" rendered as a bare "not
+		//     authenticated" — the one shape in the tree where re-exporting
+		//     cookies is exactly the remedy and nothing said so.
+		//   - NoteTwitchAuthLoss, since Arc 10, whose five fixed sentences are
+		//     the only thing telling the operator WHICH chat-downgrade route
+		//     broke. Under the old gate they pressed R C and read "Twitch not
+		//     authenticated" with no way to tell a missing login cookie from a
+		//     refused one.
+		//
+		// RefreshOK still carries nothing, and by construction rather than by
+		// trust: verdictFromCheck returns OK only when the error is nil, and
+		// the reason string IS that error. Testing the string rather than the
+		// verdict is what makes that a property of the data instead of a
+		// promise from the caller.
+		if reason != "" {
 			reasons = append(reasons, label+": "+reason)
 		}
 	}

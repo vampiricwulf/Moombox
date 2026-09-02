@@ -423,19 +423,26 @@ func (s *runState) runTUI() {
 		// last two — reporting success for a refresh that did nothing, and
 		// reporting a verification failure for a pass that never looked.
 		result, err := s.autoCookieSvc.RefreshCookiesDetailed(refreshCtx)
-		if err != nil {
-			return result, err
-		}
+
 		// Same shape as the auto-cookie recovery path in monitor_callbacks.go:
 		// the browser pass has just rewritten cookies.txt, and a refresh already
 		// in flight read the OLD file, so a skipped re-check leaves the status
 		// bar behind until the next tick. R F's own feedback is built from
 		// `result`, not from GetStatus, so what the operator is told about the
-		// refresh itself is unaffected — this line explains only the badge.
-		if !s.cookieRefresh.CheckNow(context.Background()) {
-			s.log.Info("auth re-check after browser refresh was skipped, a cookie refresh was already in flight — status may lag until the next refresh")
-		}
-		return result, nil
+		// refresh itself is unaffected — the helper's line explains only the
+		// badge.
+		//
+		// Deferred, so the Ran gate is evaluated independently of the error
+		// return below: three of the eight refreshAborted() exits happen after
+		// cookies.txt was rewritten, and returning on err first skipped exactly
+		// the passes whose write nobody had compared.
+		defer func() {
+			if result.Ran {
+				recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "browser refresh")
+			}
+		}()
+
+		return result, err
 	}
 
 	app.OnHashPassword = func(password string) string {
@@ -484,6 +491,33 @@ func (s *runState) runTUI() {
 			finishCtx, finishCancel := context.WithTimeout(s.ctx, 60*time.Second)
 			defer finishCancel()
 			result, err := s.autoCookieSvc.FinishSetupDetailed(finishCtx)
+
+			// A completed wizard has just written cookies.txt from the browser
+			// the operator signed in to — the most deliberate credential change
+			// there is, and until Arc 10 the one that told the running process
+			// nothing.
+			//
+			// Gated on Wrote, the setup path's counterpart to
+			// RefreshResult.Ran, and deferred so that gate is evaluated
+			// independently of the error return: the jar reload after a
+			// successful write can fail, and that exit hands back an error over
+			// a cookies.txt that has already been replaced.
+			//
+			// context.Background rather than finishCtx, and NOT because finishCtx
+			// is gone: defers run LIFO, so this one runs to completion before
+			// finishCancel above fires, and finishCtx is alive throughout it.
+			// The reason is that its 60 s budget is the WIZARD's — priced
+			// against the server-side setup grace window, as the comment on the
+			// timeout says — and the re-check is not the wizard's work to spend
+			// it on. Same as the other four sites: none of them wants a
+			// fingerprint comparison cancelled by its caller's teardown, and
+			// the re-check has to outlive nothing.
+			defer func() {
+				if result.Wrote {
+					recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "the setup wizard")
+				}
+			}()
+
 			if err != nil {
 				s.log.Error("Failed to finish auto-cookie setup", slog.String("error", err.Error()))
 				return result, err

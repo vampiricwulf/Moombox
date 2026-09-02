@@ -63,7 +63,12 @@ type DownloadOrchestrator struct {
 	potProvider  *bgutils.PotProvider
 	notifier     *notifications.Manager
 	conn         Connectivity
-	logger       logger
+	// twitchChats is the live Twitch IRC chat downloaders, shared with the
+	// DownloadWorker that owns this orchestrator (NewDownloadWorker assigns
+	// ONE registry to both). ExecuteTwitch registers into it; cmd/moombox
+	// broadcasts through the worker's accessor. nil is inert.
+	twitchChats *twitchChatRegistry
+	logger      logger
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.

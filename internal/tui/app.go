@@ -196,12 +196,17 @@ type (
 	// a claim the check did not make and sends the user off to re-export
 	// perfectly good cookies.
 	//
-	// The two Reason strings are the WHY behind an inconclusive verdict, and
-	// they exist because the verdict alone cannot carry it: "could not
-	// establish" is the same sentence for a rate limit, a captive portal and an
-	// intercepting proxy, and only one of those is worth waiting out. Empty
-	// whenever the check concluded — a conclusive answer has no reason to give
-	// — and empty from any wiring that does not supply one.
+	// The two Reason strings are the WHY behind a verdict the verdict alone
+	// cannot carry: "could not establish" is the same sentence for a rate
+	// limit, a captive portal and an intercepting proxy, and only one of those
+	// is worth waiting out. Empty whenever nothing was recorded, and empty
+	// from any wiring that does not supply one — but NOT implied by a
+	// conclusive verdict. A conclusive REFUSAL may carry one and two producers
+	// do: the unsignable-jar sentinel (verdictFromCheck maps
+	// ErrAuthCheckNotAttempted to RefreshFailed with the error recorded) and,
+	// since Arc 10, the Twitch chat-downgrade mark. Only RefreshOK is empty by
+	// construction — it requires a nil error, and the reason string is that
+	// error.
 	//
 	// They are cookies.AuthStatus's YouTubeError / TwitchError, which had no
 	// reader anywhere in the tree until Arc 8 Task 12a. Every string that can
