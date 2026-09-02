@@ -181,21 +181,29 @@ func TestPrepareCookieImportKeysByNameAndDomain(t *testing.T) {
 	}
 }
 
-// TestPrepareCookieImportNeverWritesAnEmptyValuedRow covers BOTH filters, and
-// the two are separate mutants.
+// TestPrepareCookieImportNeverWritesAnEmptyValuedRow covers THREE filters, and
+// each is a separate mutant.
 //
-//   - incoming: dropping the pre-merge filter lets an empty-valued SAPISID in a
-//     paste win by name+domain over a working one on disk. The row then reads
-//     as 6 fields to CookieJar.Load, which skips it: the credential is gone
-//     from the jar and unprunable from the file.
-//   - existing: dropping the post-merge filter carries a row an older writer
-//     already left there straight back out, so the import cannot repair the
-//     file it just rewrote. The fixture's stale row is HSID, a name the paste
-//     does NOT carry, and that choice is the whole test: mergeCookieFiles keys a
-//     7-field row by name+domain whatever its value, so an empty row the paste
-//     shares a key with is REPLACED during the merge and the output filter is
-//     never asked about it. Only a row that survives the merge catches this
-//     mutant.
+//   - incoming (empty VALUE): dropping the pre-merge filter lets an
+//     empty-valued SAPISID in a paste win by name+domain over a working one on
+//     disk. The row then reads as 6 fields to CookieJar.Load, which skips it:
+//     the credential is gone from the jar and unprunable from the file.
+//   - existing (empty VALUE): dropping the post-merge filter carries a row an
+//     older writer already left there straight back out, so the import cannot
+//     repair the file it just rewrote. The fixture's stale row is HSID, a
+//     name the paste does NOT carry, and that choice is the whole test:
+//     mergeCookieFiles keys a 7-field row by name+domain whatever its value,
+//     so an empty row the paste shares a key with is REPLACED during the
+//     merge and the output filter is never asked about it. Only a row that
+//     survives the merge catches this mutant.
+//   - incoming (empty NAME): dropping the fields[5] == "" half of
+//     cleanNetscapeRows' drop condition lets a 7-field row with NO cookie
+//     name but a real value through as "kept". CookieJar.loadFrom would
+//     reject it too (empty name is skipped there), but mergeCookieFiles has
+//     no such guard — it keys by name+domain and "" is a perfectly good map
+//     key — so the row is carried straight into cookies.txt with its value
+//     intact. No existing fixture drove this shape: every other row here has
+//     either a real name or a real value, never a real value with no name.
 func TestPrepareCookieImportNeverWritesAnEmptyValuedRow(t *testing.T) {
 	t.Run("an empty-valued paste row cannot evict a working one", func(t *testing.T) {
 		existing := netscapeHeader + fakeYouTubeRows
@@ -231,6 +239,22 @@ func TestPrepareCookieImportNeverWritesAnEmptyValuedRow(t *testing.T) {
 			if isNetscapeDataRow(line) && netscapeRowValue(line) == "" {
 				t.Errorf("the output still carries an empty-valued row: %q", line)
 			}
+		}
+	})
+
+	t.Run("a paste row with no cookie name is dropped and never reaches the output", func(t *testing.T) {
+		// 7 fields, a real domain, a real value — and an EMPTY name (field 6).
+		// netscapeRowValue is non-empty, so only the fields[5] == "" half of
+		// cleanNetscapeRows' drop condition catches this row; nothing else
+		// here does.
+		fresh := fakeYouTubeRows +
+			".youtube.com\tTRUE\t/\tTRUE\t2000000000\t\tfake-noname-value-aaaa\n"
+		out, err := prepareCookieImport("", netscapeHeader+fresh)
+		if err != nil {
+			t.Fatalf("prepareCookieImport: %v", err)
+		}
+		if strings.Contains(out, "fake-noname-value-aaaa") {
+			t.Errorf("the output carries a row with no cookie name: %q", out)
 		}
 	})
 }
