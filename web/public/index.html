@@ -1082,6 +1082,41 @@
                                 </p>
                             </div>
                             <sl-divider></sl-divider>
+                            <h4>Paste or upload a cookies.txt</h4>
+                            <p class="settings-help" style="margin-top: 0;">
+                                Export cookies in Netscape format from a browser signed in to the
+                                account, then paste the text or choose the file. Moombox MERGES what
+                                you give it into the existing cookies.txt, so a YouTube-only export
+                                leaves your Twitch session alone. This is the browser-free way to
+                                re-authenticate: it needs no shell and no access to the data volume,
+                                which makes it the path for Docker and for any dashboard you reach
+                                over the network. Export from a private window and close it —
+                                browsing on in the source profile rotates the session and
+                                invalidates the export.
+                            </p>
+                            <sl-textarea
+                                id="cookie-import-text"
+                                rows="4"
+                                resize="vertical"
+                                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;…"
+                                help-text="Paste the contents of cookies.txt. Leave empty to upload a file instead."
+                            ></sl-textarea>
+                            <input
+                                type="file"
+                                id="cookie-import-file"
+                                accept=".txt,text/plain"
+                                style="margin-top: 0.5em"
+                            />
+                            <div style="margin-top: 0.5em">
+                                <sl-button id="btn-cookie-import" variant="primary" size="small">
+                                    Import cookies
+                                </sl-button>
+                            </div>
+                            <div
+                                id="cookie-import-result"
+                                style="margin-top: 0.4em; font-size: var(--sl-font-size-small)"
+                            ></div>
+                            <sl-divider></sl-divider>
                             <sl-switch id="cfg-cookies-dpapi-fallback">
                                 DPAPI fallback (Windows only)
                                 <span slot="help-text">
