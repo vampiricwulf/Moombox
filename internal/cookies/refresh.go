@@ -532,6 +532,22 @@ type RefreshService struct {
 	// there is nothing on that side for the signal to unlock.
 	prevYouTubeIdentity string
 
+	// prevTwitchIdentity is the jar's TwitchIdentity() as of the last
+	// conclusive AND authenticated Twitch check — the baseline
+	// shouldObserveCredentials compares against, exactly as
+	// prevYouTubeIdentity is for YouTube. See advanceIdentityBaseline for why
+	// an unauthenticated check must not move it.
+	//
+	// The reason the YouTube field's comment above gave for NOT having this —
+	// "Twitch's auth-token rotates on Twitch's schedule, so it is not a stable
+	// account discriminator, and no Twitch failure produces a membership park"
+	// — was correct about ACCOUNTS and is not what this answers. Arc 10 asks
+	// "is this the same credential PAIR the chat downgrade was observed
+	// under", and a rotation that changes the token is a genuine YES to that:
+	// the new pair has not been proven broken, so clearing the mark and
+	// reconnecting chat once is the right outcome, not a false positive.
+	prevTwitchIdentity string
+
 	// lastLivenessObserved records the last CONCLUSIVE external liveness
 	// observation per platform, in BOTH directions. Consulted by exactly one
 	// thing — the FallbackLiveness skip — which asks "has anything told us
@@ -608,8 +624,16 @@ type RefreshService struct {
 	// not-authenticated → authenticated transition to ride. Without this
 	// signal such a job has no automatic resume trigger at all.
 	//
-	// Fires for "youtube" only — see prevYouTubeIdentity for why Twitch has
-	// no usable identity signal and nothing that would need one.
+	// Fires for BOTH platforms, and the two mean different things to their
+	// subscribers. A YouTube fire is "the signed-in ACCOUNT may have changed",
+	// which is what unsticks a membership park. A Twitch fire is "the
+	// credential PAIR changed", which clears the Twitch auth mark and is the
+	// only signal a live IRC chat session has that repaired cookies are on
+	// disk — see CookieJar.TwitchIdentity and NoteTwitchAuthLoss.
+	//
+	// Both are governed by the same two pure functions,
+	// shouldObserveCredentials and advanceIdentityBaseline, against
+	// per-platform baselines.
 	OnCredentialsChanged func(platform, identity string)
 
 	// FallbackLiveness is a channel-independent YouTube liveness probe,
@@ -1315,7 +1339,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		hasChecked                 bool
 		hasYTCookies, hasTWCookies bool
 		ytIdentity, prevYTIdentity string
-		twIdentity                 string
+		twIdentity, prevTWIdentity string
 		twEffective                bool
 		changed                    bool
 		statusCopy                 AuthStatus
@@ -1361,6 +1385,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		prevYTIdentity = rs.prevYouTubeIdentity
 
 		twIdentity = rs.jar.TwitchIdentity()
+		prevTWIdentity = rs.prevTwitchIdentity
 
 		// THE MARK, and the rule that makes rs.status's two writers coherent.
 		//
@@ -1446,6 +1471,22 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			rs.prevTwitchAuth = twEffective
 			rs.twEverConcluded = true
 		}
+		// Same rule as YouTube's, and deliberately outside the `twErr == nil`
+		// block above for the same reason: the baseline advances only on a
+		// check that also AUTHENTICATED, so a stale intermediate export cannot
+		// consume the edge the properly re-exported one needs.
+		//
+		// twEffective, not twAuth — a marked platform has not authenticated,
+		// whatever validate says, so a marked pass is not an observation of a
+		// working pair and must not become the baseline one is compared
+		// against. This is the fifth consumer of the single value the mark
+		// block computes, and the one residual it accepts is narrow: holding
+		// the baseline at the PRE-mark pair means a repair that reverts to
+		// exactly that pair compares equal and fires nothing. Reaching it
+		// requires the downgrade to land before any pass ever observed the
+		// marked pair, which every credential write ending in a re-check
+		// closes.
+		rs.prevTwitchIdentity = advanceIdentityBaseline(rs.prevTwitchIdentity, twIdentity, twEffective, twErr)
 		rs.hasCheckedOnce = true
 
 		changed = authStatusChanged(prevStatus, rs.status)
@@ -1527,6 +1568,23 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 	if rs.OnCredentialsChanged != nil && shouldObserveCredentials(prevYTIdentity, ytIdentity, ytAuth, ytErr) {
 		rs.logger.Info("youtube account identity observed — re-evaluating parked jobs")
 		rs.OnCredentialsChanged("youtube", ytIdentity)
+	}
+
+	// The Twitch counterpart, and the one with a second subscriber: besides
+	// the parked-job sweep, cmd/moombox broadcasts this to every live Twitch
+	// chat downloader so a repaired cookie file reaches a capture that is
+	// already running. See DownloadWorker.ReauthenticateTwitchChats.
+	//
+	// twEffective, not twAuth, for the reason the baseline advance above
+	// gives: while a mark stands the pair has NOT been observed working, and
+	// announcing that it has would reconnect every live IRC session straight
+	// back into the downgrade that took the mark.
+	//
+	// The identity is an opaque equality token and is handed to the callback,
+	// never to the log line.
+	if rs.OnCredentialsChanged != nil && shouldObserveCredentials(prevTWIdentity, twIdentity, twEffective, twErr) {
+		rs.logger.Info("twitch credential pair observed — re-evaluating parked jobs and live chat sessions")
+		rs.OnCredentialsChanged("twitch", twIdentity)
 	}
 
 	// Tier 2: the channel-independent liveness probe, for the installs the
