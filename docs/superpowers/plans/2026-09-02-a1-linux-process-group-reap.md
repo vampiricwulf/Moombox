@@ -19,7 +19,7 @@ Every task's requirements implicitly include this section.
 **From the spec's §4 (invariants) and §3 (non-goals):**
 
 - A failed process-table read **never releases the slot and never kills**. It answers `known = false` ("cannot say"), which the reap already reads as "still running".
-- `killProcessGroup` is **never** called with `pgid <= 0`. `kill(-0, …)` signals the caller's own process group — Moombox and everything it launched, and in Docker the container. Three independent checks enforce this and a test pins each.
+- `killProcessGroup` is **never** called with `pgid <= 0`. `kill(-0, …)` signals the caller's own process group — Moombox and everything it launched, and in Docker the container. Three checks enforce this: `pgroupJob.adopt` refuses `pid <= 0` before a group can exist, `pgroupJob.killGroup` refuses an unadopted group, and `sigkillProcessGroup` refuses at the syscall. The first two are pinned by tests that run on Windows; the third lives in `job_linux.go`, which no test on this machine executes, and is reviewed by eye.
 - **No goroutine is added.** Every existing `recover()` posture is untouched; there is no reaper goroutine and one must never be added (`reapAbandonedSetupLocked`'s doc says why).
 - **Tests mutate the claim for every assertion.** Each test in this plan names the mutation that must break it. The Windows-only test files (`autocookies_setup_reap_windows_test.go`, `autocookies_setup_job_windows_test.go`) are **not** the home of any new logic test.
 - **No change to the Windows path.** `job_windows.go` and `job_other.go` are not edited by any task in this plan.
@@ -33,7 +33,7 @@ Every task's requirements implicitly include this section.
 - Every goroutine carries an inline `defer func() { if r := recover(); r != nil { … } }()`. This plan adds none.
 - The logger is the anonymous interface repeated inline — `Debug/Info/Warn/Error(msg string, args ...any)` — never extracted to a named interface (CLAUDE.md).
 - **Never read or print any cookie file or value.** No test in this plan opens `cookies.txt`, `cookies.sqlite`, or a browser profile; no log line added here carries a cookie name or value.
-- Package-variable seams follow the existing convention: nothing in production reassigns them; only tests do, and every swap is restored with `t.Cleanup`.
+- Package-variable seams follow the existing convention: tests swap them and restore every swap with `t.Cleanup`. ONE production site reassigns the three new ones — `job_linux.go`'s `init()` (Task 5), which is the platform binding and runs before any test — and every doc comment on those variables names that site rather than claiming nothing in production does.
 
 **Gates — run all of these at the end of every task, before the commit:**
 
@@ -75,7 +75,7 @@ These were settled by reading the tree at `ecb484f`. Do not re-litigate them mid
 
 **3. Closing a Linux job kills nothing; the kill is asked for out loud.** This is R4, and the code gives it a second, decisive reason the spec draft does not state. `trackedSetupJob` (`autocookies.go:3272`) closes a job whose `assign` FAILED, deliberately and correctly: on Windows that job holds nothing, so the close is free. If a Linux `close()` killed, that same line would SIGKILL the process group containing the browser the user is signed into, because a bookkeeping call went wrong. A Windows Job Object is a kernel HANDLE — it cannot name a process that is not in it. A process group is an INTEGER the kernel recycles. The two cannot share one "closing kills" rule, so Linux gets an explicit `killTrackedProcesses(job)` at the three sites that need it and nothing at the site that must not have it.
 
-**4. The group kill lands at the `killProcessTree` seam (`autocookies.go:3071`).** That one closure is reached from five call sites — `killSetupProcess` (`:3138`), `killRefreshProcess` (`:3170`), `refreshChromium`'s teardown defer (`autocookies_chromium.go:266`), `closeFirefoxGracefully` (`autocookies_firefox.go:161`) and `runWithTimeout`'s timeout arm (`autocookies_firefox.go:972`) — and on Linux **the tree IS the group**, because `Setpgid` makes the launched child its own group leader. One edit fixes all five, versus five edits that could drift. Its non-Windows arm today is `proc.Kill()`, which kills the launcher — the process that on the Firefox family exited ~170 ms after start and is not the browser.
+**4. The group kill lands at the `killProcessTree` seam (`autocookies.go:3071`).** That one closure is reached from five call sites — `killSetupProcess` (`:3138`), `killRefreshProcess` (`:3170`), `refreshChromium`'s teardown defer (`autocookies_chromium.go:266`), `closeFirefoxGracefully` (`autocookies_firefox.go:161`) and `runWithTimeout`'s timeout arm (`autocookies_firefox.go:972`) — and on Linux **the tree IS the group**, because `Setpgid` makes the launched child its own group leader. One edit fixes all five, versus five edits that could drift. Its non-Windows arm today is `proc.Kill()`, which kills the launcher — the process that on the Firefox family exited ~170 ms after start and is not the browser. The new arm goes THROUGH `pgroupJob` (`adopt`, then `killGroup`) rather than handing the pid to `killProcessGroup` directly, so it inherits the same refusals: it signals only a group the pid currently leads and that currently has members, and falls back to the direct kill — today's behaviour exactly — when the table cannot be read, the pid is gone, or the pid sits in someone else's group. That matters because `proc.Kill()` has a protection a bare `kill(-pid)` lacks: Go refuses it on a process that has already been waited on (`os.ErrProcessDone`), and `killSetupProcess` reaches this arm with a reaped pid whenever no job could vouch for the browser — a blind `kill(-pid)` there could land on whatever group the kernel has since given that number to.
 
 **5. Where Windows relies on close-to-kill and Linux must ask.** One row per site. "Linux arm" describes the tree after Task 5.
 
@@ -92,9 +92,11 @@ These were settled by reading the tree at `ecb484f`. Do not re-litigate them mid
 | `refreshChromium` teardown `autocookies_chromium.go:246`/`:266` | deferred `killProcessTree(cmd.Process)` runs BEFORE the deferred `job.close()` (defers run LIFO) | the `killProcessTree` defer already kills the group; the close needs nothing | `TestKillProcessTreeUnixKillsTheGroupNotJustTheLauncher` |
 | Both launchers' `cmd.Start()` failure close (`autocookies_firefox.go:83`, `autocookies_chromium.go:77`) | closes an empty job | nothing to do: `assign` was never called, `pgid` is 0, `close()` forgets 0 | `TestPGroupJobCannotAnswerWithoutAGroup` |
 
-**6. What else changes on Linux, stated now rather than discovered in review.** Giving `activeProcesses()` a real count on Linux also arms `drainJob` there. Until now every Linux launch returned on lap zero with "no tracked processes to wait for"; after Task 5 `runWithTimeout` genuinely waits for the browser group to empty, up to `processTimeout`. That is the Arc 0 fix arriving on Linux and it is desirable — but it makes a Linux headless refresh take as long as the browser takes instead of returning instantly, and it lets `browserLaunchActed` report a real verdict there. Task 5 edits the drain paragraphs that say otherwise. This is a change the spec draft does not mention; see Self-Review.
+**6. What else changes on Linux, stated now rather than discovered in review.** Giving `activeProcesses()` a real count on Linux also arms `drainJob` there. Until now every Linux launch returned on lap zero with "no tracked processes to wait for"; after Task 5 `runWithTimeout` genuinely waits for the browser group to empty, up to `processTimeout`. That is the Arc 0 fix arriving on Linux and it is desirable. Say precisely what changes, because the Windows picture does not transfer: Mozilla's launcher process is a Windows feature (`operations.md`'s "launcher-handoff premise is UNMEASURED" paragraph), so on Linux the direct child of `runWithTimeout` is normally the browser itself, and `cmd.Wait()` already waits for it today — a Linux refresh has never returned instantly. What the count adds is a wait for whatever OUTLIVES the direct child: a wrapper's handoff (a snap or a shell shim), a content process still shutting down. Where nothing does, the drain still lands on lap zero exactly as before. It also lets `errBrowserDrainTimeout` reach `browserLaunchActed` there, which it never could while the count was a stub — the verdict itself is the screenshot's on every platform and is unchanged. Task 5 edits the drain paragraphs that say otherwise. This is a change the spec draft does not mention; see Self-Review.
 
-**7. Named residual: pgid recycling.** A Job Object handle cannot name a process that is not in the job. A pgid can: the kernel recycles pids, so a group id we adopted could, after every member has exited, name an unrelated group whose leader happens to have that pid. `pgroupJob.killGroup` narrows the window as far as it can be narrowed — it refuses to signal when the table cannot be read, and refuses when the group is already empty, so a kill only ever fires at a group that currently has members — but it cannot close it. Task 5 writes this into `operations.md` as a residual rather than leaving it for a field report to discover.
+**7. Named residual: pgid recycling.** A Job Object handle cannot name a process that is not in the job. A pgid can: the kernel recycles pids, so a group id we adopted could, after every member has exited, name an unrelated group whose leader happens to have that pid. `pgroupJob.killGroup` narrows the window as far as it can be narrowed — it refuses to signal when the table cannot be read, and refuses when the group is already empty, so a kill only ever fires at a group that currently has members — but it cannot close it. `killProcessTreeUnix` goes through the same refusals (decision 4), so this is ONE window, not two. Task 5 writes it into `operations.md` as a residual rather than leaving it for a field report to discover.
+
+**8. A zombie is not a member.** A task that has exited but not been reaped keeps its `/proc/<pid>/stat` entry, state `Z`, with its `pgrp` field intact, so a naive count would keep it in the group. `parseProcStatPGID` reports `Z` (and `X`, dead) as unparsed. Two reasons. The direct child is a zombie between its exit and the `cmd.Wait()` that reaps it, and the smoke test counts inside that window. And in a container where Moombox is PID 1 — a bare `docker run` without `--init`; `docker-compose.yml:10` sets `init: true`, so the compose path is covered — an orphaned grandchild of a killed browser is reparented to Moombox, which reaps only the children it started, and that zombie would hold the count above zero for the life of the process: the reap would never fire after the one crash it exists for. A Windows Job Object's `ActiveProcesses` does not count terminated processes either.
 
 ---
 
@@ -144,10 +146,10 @@ import (
 // may reach a real process on the machine running the tests. Every test that
 // could signal one installs captureGroupKills first.
 const (
-	setupGroupPid  = 424247
-	setupChildPid  = 424249
-	strangerPid    = 424251
-	strangerGroup  = 424253
+	setupGroupPid = 424247
+	setupChildPid = 424249
+	strangerPid   = 424251
+	strangerGroup = 424253
 )
 
 // fakeProcessTable binds the package's process-table hook to a fixed pid→pgid
@@ -202,7 +204,10 @@ func captureGroupKills(t *testing.T) *[]int {
 // answers 0, so every Firefox content process is silently missing from the
 // table and an abandoned setup reads as empty. Second mutation: read
 // fields[1] instead of fields[2] — every row returns the PPID, which for a
-// browser started by Moombox is Moombox's own pid.
+// browser started by Moombox is Moombox's own pid. Third mutation: drop the
+// state check and the zombie row parses as a member — a browser's orphaned
+// child, reparented to a PID-1 Moombox that never reaps it, then holds the
+// count above zero for the life of the process (decision 8).
 func TestParseProcStatPGIDReadsFieldFiveAfterTheLastParen(t *testing.T) {
 	cases := []struct {
 		name string
@@ -229,6 +234,11 @@ func TestParseProcStatPGIDReadsFieldFiveAfterTheLastParen(t *testing.T) {
 			"comm with both a space and a paren",
 			"4312 (Isolated Web Co (x)) S 4242 4242 4242 0 -1 4194560 50 0 0 0 0 0 0 0 20 0 9 0 150 0 0",
 			4242, true,
+		},
+		{
+			"zombie keeps its group id but is not a live member",
+			"4314 (Web Content) Z 4242 4242 4242 0 -1 4194560 0 0 0 0 1 0 0 0 20 0 1 0 140 0 0",
+			0, false,
 		},
 		{"kernel thread in group zero", "2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 1 0 0", 0, false},
 		{"truncated after the comm", "4242 (firefox) S 1", 0, false},
@@ -278,22 +288,25 @@ var errNoProcessTable = errors.New("no process table reader on this platform")
 // listProcessGroups returns pid → process-group id for every process the
 // caller can see, or an error when the table cannot be read at all.
 //
-// A package variable for two reasons. job_linux.go binds it to a /proc walk,
-// which is how the decision logic in this file stays free of build tags; and a
-// test on any platform binds it to a fixed map, which is how every branch below
-// is exercised on the Windows machine this project is developed on, with no
-// Linux box and no launched browser. Same seam convention as setupBrowserGone,
-// killProcessTree and writeCookieFile — nothing in production reassigns it.
+// A package variable for two reasons. job_linux.go's init binds it to a /proc
+// walk — the ONE production site that reassigns it — which is how the decision
+// logic in this file stays free of build tags; and a test on any platform binds
+// it to a fixed map, which is how every branch below is exercised on the
+// Windows machine this project is developed on, with no Linux box and no
+// launched browser. Same seam convention as setupBrowserGone, killProcessTree
+// and writeCookieFile otherwise: tests swap it and restore it with t.Cleanup.
 var listProcessGroups = func() (map[int]int, error) { return nil, errNoProcessTable }
 
-// killProcessGroup delivers SIGKILL to every member of pgid. job_linux.go binds
-// it to syscall.Kill(-pgid, SIGKILL); tests bind it to a recorder.
+// killProcessGroup delivers SIGKILL to every member of pgid. job_linux.go's
+// init binds it to syscall.Kill(-pgid, SIGKILL); tests bind it to a recorder.
 //
 // IT IS NEVER CALLED WITH pgid <= 0. kill(-0, …) signals the CALLER'S OWN
 // process group — Moombox and everything it has launched, and in a container
-// where Moombox leads its group, the container. Both callers check first
-// (pgroupJob.killGroup and killProcessTreeUnix), the Linux binding checks a
-// third time, and a test pins each check.
+// where Moombox leads its group, the container. Its one caller is
+// pgroupJob.killGroup, which refuses an unadopted group; adopt refuses
+// pid <= 0 before a group can exist (killProcessTreeUnix reaches this through
+// both); and the Linux binding checks a third time at the syscall. Tests on
+// Windows pin the first two; the third is in a file no test here executes.
 var killProcessGroup = func(int) error { return errNoProcessTable }
 
 // parseProcStatPGID pulls the process-group id — field 5, `pgrp` — out of one
@@ -310,6 +323,15 @@ var killProcessGroup = func(int) error { return errNoProcessTable }
 // A pgrp of 0 (kernel threads) is reported as unparsed rather than as a group.
 // It is not a group any browser of ours can be in, and admitting it would put a
 // zero key into a table that killGroup's guards would then have to re-check.
+//
+// A ZOMBIE IS NOT A MEMBER. A task that has exited but not been reaped keeps
+// its stat line, state Z, with pgrp intact. It holds no window and no profile
+// lock, and in a container where Moombox is PID 1 with no init (a bare
+// `docker run`; compose sets `init: true`) an orphaned grandchild of a killed
+// browser is reparented to Moombox, which reaps only the children it started —
+// counted, that zombie would hold the group above zero for the life of the
+// process and the reap would never fire after the one crash it exists for.
+// A Windows Job Object's ActiveProcesses does not count the terminated either.
 func parseProcStatPGID(stat string) (int, bool) {
 	end := strings.LastIndexByte(stat, ')')
 	if end < 0 {
@@ -318,6 +340,9 @@ func parseProcStatPGID(stat string) (int, bool) {
 	fields := strings.Fields(stat[end+1:])
 	if len(fields) < 3 {
 		return 0, false
+	}
+	if fields[0] == "Z" || fields[0] == "X" {
+		return 0, false // exited, not yet reaped (or dead): not a live member
 	}
 	pgid, err := strconv.Atoi(fields[2])
 	if err != nil || pgid <= 0 {
@@ -334,7 +359,7 @@ var _ = fmt.Sprintf
 - [ ] **Step 4: Run the parser test and watch it pass**
 
 Run: `go test -count=1 -run TestParseProcStatPGID ./internal/cookies/`
-Expected: PASS, all nine subtests.
+Expected: PASS, all ten subtests.
 
 - [ ] **Step 5: Write the failing tests for `pgroupJob`**
 
@@ -740,10 +765,10 @@ EOF
 - Modify: `internal/cookies/job_pgroup_test.go` (append)
 
 **Interfaces:**
-- Consumes: `killProcessGroup` (Task 1).
+- Consumes: `pgroupJob` (`adopt`, `killGroup`) and, through it, `listProcessGroups`/`killProcessGroup` (Task 1).
 - Produces: `func killProcessTreeUnix(proc *os.Process)`; `var killOneProcess func(proc *os.Process) error`; test helper `captureOneProcessKills(t *testing.T) *[]int`.
 
-Behaviour is unchanged on every platform until Task 5: `killProcessGroup` is still the unbound stub, it answers `errNoProcessTable`, and the fallback is today's `proc.Kill()` exactly.
+Behaviour is unchanged on every platform until Task 5: `listProcessGroups` is still the unbound stub, so `adopt` refuses every pid and the fallback is today's `proc.Kill()` exactly.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -780,6 +805,10 @@ func captureOneProcessKills(t *testing.T) *[]int {
 func TestKillProcessTreeUnixKillsTheGroupNotJustTheLauncher(t *testing.T) {
 	groups := captureGroupKills(t)
 	single := captureOneProcessKills(t)
+	fakeProcessTable(t, map[int]int{
+		setupGroupPid: setupGroupPid, // the leader, still alive
+		setupChildPid: setupGroupPid, // what it handed off to
+	})
 
 	killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
 
@@ -793,35 +822,88 @@ func TestKillProcessTreeUnixKillsTheGroupNotJustTheLauncher(t *testing.T) {
 
 // TestKillProcessTreeUnixFallsBackWhereThereAreNoProcessGroups keeps darwin and
 // every other non-Linux, non-Windows target on exactly today's behaviour: the
-// hook is unbound there, it answers errNoProcessTable, and the direct kill is
-// all there ever was.
+// table hook is unbound there, it answers errNoProcessTable, adopt refuses,
+// and the direct kill is all there ever was. A Linux /proc that cannot be read
+// takes the same arm.
 //
 // Mutation: drop the fallback and a darwin build stops killing browsers
 // entirely.
 func TestKillProcessTreeUnixFallsBackWhereThereAreNoProcessGroups(t *testing.T) {
+	groups := captureGroupKills(t)
 	single := captureOneProcessKills(t)
-	prev := killProcessGroup
-	killProcessGroup = func(int) error { return errNoProcessTable }
-	t.Cleanup(func() { killProcessGroup = prev })
+	unreadableProcessTable(t)
 
 	killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
 
+	if len(*groups) != 0 {
+		t.Fatalf("group kills = %v; nothing may be signalled through a table that cannot be read", *groups)
+	}
 	if len(*single) != 1 || (*single)[0] != setupGroupPid {
 		t.Fatalf("fallback kills = %v, want exactly [%d]", *single, setupGroupPid)
 	}
 }
 
-// TestKillProcessTreeUnixRefusesANonPositivePid is the second of the three
-// guards on kill(-0). A zero-valued os.Process is not hypothetical: the refresh
+// TestKillProcessTreeUnixWillNotSignalAGroupThePidNoLongerLeads is why the arm
+// goes through adopt rather than handing the pid to the hook. killSetupProcess
+// reaches here with a REAPED pid whenever no job could vouch for the browser
+// (a failed assign), and proc.Kill() was safe there — Go refuses it on a
+// process that has been waited on. A bare kill(-pid) has no such memory: it
+// fires at whatever group the kernel has since given that number to. So the
+// arm signals only a pid that is in the table right now and leads its own
+// group, and otherwise falls back to the direct kill, which is harmless on a
+// reaped process.
+//
+// Mutations, one per subtest: replace adopt with a bare killProcessGroup(pid)
+// and the first case signals a number the table does not contain; drop the
+// `pgid != pid` refusal in adopt and the second case signals a stranger's
+// group — or, for a child that inherited Moombox's group, Moombox's own.
+func TestKillProcessTreeUnixWillNotSignalAGroupThePidNoLongerLeads(t *testing.T) {
+	t.Run("pid is not in the table", func(t *testing.T) {
+		groups := captureGroupKills(t)
+		single := captureOneProcessKills(t)
+		fakeProcessTable(t, map[int]int{strangerPid: strangerGroup})
+
+		killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
+
+		if len(*groups) != 0 {
+			t.Fatalf("group kills = %v for a pid the table does not contain", *groups)
+		}
+		if len(*single) != 1 || (*single)[0] != setupGroupPid {
+			t.Fatalf("fallback kills = %v, want exactly [%d]", *single, setupGroupPid)
+		}
+	})
+
+	t.Run("pid sits in someone else's group", func(t *testing.T) {
+		groups := captureGroupKills(t)
+		single := captureOneProcessKills(t)
+		fakeProcessTable(t, map[int]int{setupGroupPid: strangerGroup, strangerGroup: strangerGroup})
+
+		killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
+
+		if len(*groups) != 0 {
+			t.Fatalf("group kills = %v; the pid does not lead that group and it is not ours to signal", *groups)
+		}
+		if len(*single) != 1 || (*single)[0] != setupGroupPid {
+			t.Fatalf("fallback kills = %v, want exactly [%d]", *single, setupGroupPid)
+		}
+	})
+}
+
+// TestKillProcessTreeUnixRefusesANonPositivePid is the pid <= 0 guard as seen
+// from this arm. A zero-valued os.Process is not hypothetical: the refresh
 // slot is claimed with `&exec.Cmd{}` whose Process is nil until the launcher
 // publishes one, and a future caller reaching this with a zero pid must fall
-// back rather than signal.
+// back rather than signal. The refusal is adopt's; this pins that the arm
+// cannot route around it. The table deliberately contains a 0 → 0 row so
+// that a dropped guard would "succeed" and the recorder would show it.
 //
-// Mutation: drop `proc.Pid > 0` and the group recorder shows 0 — which is
-// kill(-0, SIGKILL), Moombox's own process group.
+// Mutation: drop adopt's `pid <= 0` check — the group is adopted as 0,
+// killGroup refuses it silently, and the fallback never runs, so the second
+// assertion fails; kill(-0, SIGKILL) is Moombox's own process group.
 func TestKillProcessTreeUnixRefusesANonPositivePid(t *testing.T) {
 	groups := captureGroupKills(t)
 	single := captureOneProcessKills(t)
+	fakeProcessTable(t, map[int]int{0: 0})
 
 	killProcessTreeUnix(&os.Process{Pid: 0})
 	killProcessTreeUnix(nil)
@@ -869,17 +951,26 @@ var killProcessTree = func(proc *os.Process) {
 // proc.Kill() alone never did: it kills the launcher, which on the Firefox
 // family exited ~170 ms after start.
 //
-// Everywhere else killProcessGroup is the unbound stub, it answers
-// errNoProcessTable, and the direct kill below is exactly today's behaviour.
+// IT GOES THROUGH pgroupJob, NOT STRAIGHT TO THE HOOK, so it inherits adopt's
+// and killGroup's refusals: the pid must be in the table right now and lead its
+// own group, and the group must still have members. killSetupProcess reaches
+// here with a REAPED pid whenever no job could vouch for the browser, and
+// proc.Kill() was safe there — Go refuses it on a process that has already
+// been waited on (os.ErrProcessDone). A bare kill(-pid) has no such memory; it
+// fires at whatever group the kernel has since given that number to.
 //
-// The pid guard is the second of the three checks on kill(-0, …), which would
-// signal Moombox's own process group. See killProcessGroup's doc.
+// Everywhere the refusals apply — darwin and the fallback build, where the
+// table hook is unbound and answers errNoProcessTable; a Linux /proc that
+// cannot be read; a pid that is gone or sits in someone else's group — the
+// direct kill below is exactly today's behaviour. The pid <= 0 guard is
+// adopt's; see killProcessGroup's doc for the three checks on kill(-0, …).
 func killProcessTreeUnix(proc *os.Process) {
 	if proc == nil {
 		return
 	}
-	if proc.Pid > 0 {
-		if err := killProcessGroup(proc.Pid); err == nil {
+	group := &pgroupJob{}
+	if err := group.adopt(proc.Pid); err == nil {
+		if err := group.killGroup(); err == nil {
 			return
 		}
 	}
@@ -897,7 +988,7 @@ var killOneProcess = func(proc *os.Process) error { return proc.Kill() }
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `go test -count=1 ./internal/cookies/`
-Expected: PASS, including the three new tests and the existing `captureKills`-based reap tests (which swap `killProcessTree` itself and so never reach the new arm).
+Expected: PASS, including the four new tests (six cases) and the existing `captureKills`-based reap tests (which swap `killProcessTree` itself and so never reach the new arm).
 
 - [ ] **Step 5: Run every gate, then commit**
 
@@ -912,8 +1003,12 @@ runWithTimeout's timeout arm — and its non-Windows arm killed the process
 Moombox spawned. On the Firefox family that process exited 170 ms after start;
 the browser it handed off to was never touched.
 
-On Linux the tree is the group. Inert until job_linux.go binds the hook: the
-stub answers an error and the direct kill is today's behaviour exactly.
+On Linux the tree is the group. The arm goes through pgroupJob's adopt and
+killGroup rather than straight to the hook, so it signals only a group the pid
+still leads — proc.Kill() refuses a reaped process; a bare kill(-pid) would
+not, and killSetupProcess reaches this arm with a reaped pid whenever no job
+could vouch for the browser. Inert until job_linux.go binds the table: adopt
+refuses every pid and the direct kill is today's behaviour exactly.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN
@@ -927,8 +1022,8 @@ EOF
 
 **Files:**
 - Modify: `internal/cookies/job_pgroup.go` (append the `killTrackedProcesses` seam)
-- Modify: `internal/cookies/autocookies.go:3229-3237` (`cleanupLocked`), `:3305-3313` (`adoptSetupJobLocked`)
-- Modify: `internal/cookies/autocookies_firefox.go:915-920` (`runWithTimeout`'s teardown defer) — new `closeLaunchJob`
+- Modify: `internal/cookies/autocookies.go:3229-3237` (`cleanupLocked`), `:3305-3313` (`adoptSetupJobLocked`) — line numbers as of `390adb6`; Task 2 inserts ~45 lines above both, so find them by symbol
+- Modify: `internal/cookies/autocookies_firefox.go:915-920` (`runWithTimeout`'s teardown defer) — new `closeLaunchJob`; and the three `drainJob` doc lines that name `job.close()` as the kill (`:753`, `:775-776`, `:786`)
 - Create: `internal/cookies/autocookies_setup_reap_pgroup_test.go`
 
 **Interfaces:**
@@ -1105,7 +1200,8 @@ Append:
 // away.
 //
 // It returns an error so the three callers can say, in their own logger, that a
-// browser may still be running. Nothing in production reassigns it.
+// browser may still be running. job_linux.go's init is the one production site
+// that binds it; tests swap it and restore it with t.Cleanup.
 var killTrackedProcesses = func(*processJob) error { return nil }
 ```
 
@@ -1185,6 +1281,24 @@ func closeLaunchJob(job *processJob, logger interface {
 }
 ```
 
+Then the three lines in `drainJob`'s doc comment that name `job.close()` as the thing that kills on the way out — true on Windows, and after this step the deferred teardown is `closeLaunchJob`, which kills and THEN closes, while on Linux the close alone never kills. Edit each:
+
+`autocookies_firefox.go:753` — `// deferred job.close() is about to kill it.` becomes `// deferred closeLaunchJob is about to kill it.`
+
+`:775-776` — replace
+```go
+// Returning at that moment runs the caller's deferred job.close(), whose
+// KILL_ON_JOB_CLOSE kills the real browser mid-page-load — measured, and the
+```
+with
+```go
+// Returning at that moment runs the caller's deferred closeLaunchJob, whose
+// kill (KILL_ON_JOB_CLOSE on Windows, the group kill on Linux) lands on the
+// real browser mid-page-load — measured on Windows, and the
+```
+
+`:786` — `//     the caller's job.close() kills them;` becomes `//     the caller's closeLaunchJob kills them;`
+
 - [ ] **Step 5: Run the tests and watch them pass**
 
 Run: `go test -count=1 ./internal/cookies/`
@@ -1249,12 +1363,12 @@ Append to `internal/cookies/autocookies_setup_reap_pgroup_test.go`:
 // today's bug.
 func TestBrowserGoneFromAProcessGroup(t *testing.T) {
 	cases := []struct {
-		name      string
-		table     map[int]int
+		name       string
+		table      map[int]int
 		unreadable bool
-		job       *pgroupJob
-		wantGone  bool
-		wantKnown bool
+		job        *pgroupJob
+		wantGone   bool
+		wantKnown  bool
 	}{
 		{
 			name:      "no group adopted — nothing can say",
@@ -1399,10 +1513,10 @@ EOF
 **Files:**
 - Modify: `internal/cookies/job_linux.go` (whole file)
 - Create: `internal/cookies/job_linux_smoke_test.go`
-- Modify: `internal/cookies/autocookies.go` (`:219`, the `setupBrowserGone` doc at `:596-638`, `cleanupLocked`'s doc at `:3213-3226`)
-- Modify: `internal/cookies/autocookies_firefox.go` (`:60`, `:74-76`, `:232`, the `drainJob` comment at `:857-868`)
+- Modify: `internal/cookies/autocookies.go` (`:219`, the `setupBrowserGone` doc at `:596-638`, `AbandonSetup`'s doc at `:1495-1502`, `killSetupProcess`'s doc at `:3118-3121`, `cleanupLocked`'s doc at `:3213-3226` — line numbers as of `390adb6`, before Tasks 2-4 shift them; find by symbol)
+- Modify: `internal/cookies/autocookies_firefox.go` (`:60`, `:74-76`, `:232`, `refreshLooksImplausiblyFast`'s doc at `:376-380`, the `drainJob` comment at `:857-868`)
 - Modify: `internal/cookies/autocookies_chromium.go` (`:65`, `:234`)
-- Modify: `docs/spec/operations.md:124`, `:126`, `:128`, `:134`
+- Modify: `docs/spec/operations.md:122`, `:124`, `:126`, `:128`, `:130`, `:134`
 - Modify: `SPEC.md:680`
 
 **Interfaces:**
@@ -1523,11 +1637,16 @@ func (j *processJob) queryable() bool { return j != nil && j.group.queryable() }
 // child — the group is what covers what the launcher handed off to.
 //
 // Two consequences worth stating rather than discovering. A browser that calls
-// setsid() leaves the group and becomes invisible to both the count and the
-// kill; that is unmeasured here and it degrades to the pre-A1 behaviour rather
-// than to a wrong answer. And the browser is no longer in Moombox's foreground
-// process group, so a terminal Ctrl-C no longer reaches it — which is the
-// desirable direction for a window the operator is typing a password into.
+// setsid() (or setpgid) LEAVES the group and becomes invisible to both the
+// count and the kill — and that is a WRONG answer, not a missing one: the group
+// then reads as empty, the reap releases the slot when the grace runs out with
+// the browser still on screen (no kill — killGroup finds no members), and the
+// user's next finish answers ErrNoSetupInProgress. Which Linux packagings do
+// this (a snap or flatpak wrapper is the suspect, not the browser binary) is
+// unmeasured; a field report is the gate. And the browser is no longer in
+// Moombox's foreground process group, so a terminal Ctrl-C no longer reaches
+// it — which is the desirable direction for a window the operator is typing a
+// password into.
 func configureCmdSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 }
@@ -1628,7 +1747,6 @@ func TestLivePgroupSeesAndKillsARealGroup(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Skipf("could not start /bin/sh: %v", err)
 	}
-	defer func() { _ = cmd.Wait() }()
 
 	job, err := newProcessJob()
 	if err != nil {
@@ -1653,6 +1771,12 @@ func TestLivePgroupSeesAndKillsARealGroup(t *testing.T) {
 	if err := killTrackedProcesses(job); err != nil {
 		t.Fatalf("killTrackedProcesses: %v", err)
 	}
+	// Reap the direct child BEFORE counting. Until it is waited on it is a
+	// zombie whose stat line still carries the pgrp; the parser skips state Z
+	// (decision 8), so this is belt and braces — but a smoke test that leaned
+	// on that would be pinning the wrong thing. A deferred Wait here would
+	// leave the zombie in place for the whole loop below.
+	_ = cmd.Wait()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -1673,7 +1797,7 @@ func TestLivePgroupSeesAndKillsARealGroup(t *testing.T) {
 
 - [ ] **Step 4: Flip the code comments that just stopped being true**
 
-Six edits, all comments, no behaviour:
+Nine edits, all comments, no behaviour:
 
 1. `autocookies.go:219` — the field comment:
 ```go
@@ -1685,23 +1809,25 @@ Six edits, all comments, no behaviour:
 //   - Linux and Docker — answerable since the process-group reap landed.
 //     configureCmdSysProcAttr sets Setpgid, so every browser leads its own
 //     group; queryable() is true once that group was adopted, and
-//     activeProcesses counts its members from /proc. Two cases still answer
-//     "no idea", both of them honestly: a container whose /proc cannot be
-//     walked, and a browser that called setsid() and left the group. NOT
-//     FIELD-VERIFIED — built and unit-tested against a fake process table, with
-//     a user's bug report as the gate.
+//     activeProcesses counts its members from /proc. One case still answers
+//     "no idea", honestly: a container whose /proc cannot be walked. One
+//     answers WRONGLY: a browser that called setsid() and left the group
+//     reads as gone, and the reap releases the slot with it still on screen
+//     (no kill — the group it would signal is empty). Which packagings do
+//     that is unmeasured. NOT FIELD-VERIFIED — built and unit-tested against
+//     a fake process table, with a user's bug report as the gate.
 //   - darwin and every other target — no primitive at all (job_other.go is
 //     still a no-op stub), so nothing is answerable and the reap never fires.
 //     The client-side cancel (the unload beacon, Skip, Escape, the TUI
 //     countdown) is what clears an abandoned setup there.
 ```
-Also change the summary line that follows it — "Two answerable cases and one that is not" — to "Three answerable targets and one that is not", and keep the rest of the paragraph as written.
+Also change the summary line that follows it — "Two answerable cases and one that is not" — to "Three answerable targets and one that is not", and its "on Windows wherever newProcessJob or its assign failed" to "on Windows and Linux wherever newProcessJob or its assign failed"; keep the rest of the paragraph as written.
 
 3. `autocookies.go` — `cleanupLocked`'s doc paragraph beginning "It kills NOTHING anywhere else":
 ```go
 // IT KILLS ON LINUX TOO NOW, but by a different route: the close only forgets a
-// process-group id there, so the killTrackedProcesses call above is what reaches
-// the browser. Same consequence, same requirement on callers. On darwin and the
+// process-group id there, so the killTrackedProcesses call in the body below is
+// what reaches the browser. Same consequence, same requirement on callers. On darwin and the
 // fallback build job_other.go is still a no-op stub, nothing is tracked and
 // nothing is killed; a browser left behind there keeps running (pdeathsig ties
 // it to Moombox's death, not to this call).
@@ -1726,15 +1852,59 @@ and `autocookies_firefox.go:232` with `(Job Object in runWithTimeout)` as its ta
 				// It is the norm on darwin and the fallback build, where
 				// processJob is still a no-op stub returning 0 from
 				// activeProcesses unconditionally, so every launch there lands
-				// here on lap zero having drained nothing. Linux no longer
-				// belongs on that list: its process group gives a real count,
-				// so a refresh there now waits for the browser instead of
-				// returning on lap zero. Claiming a finish would assert
-				// something a stub platform cannot observe, the same
-				// distinction the !rendered branch in refreshFirefox holds.
+				// here on lap zero having drained nothing. Linux is different
+				// in kind: its process group gives a real count, so landing
+				// here means the group really was empty when the direct child
+				// was reaped — the usual case there, since without a launcher
+				// the direct child IS the browser — and anything that had
+				// outlived it would have been waited for. Claiming a finish
+				// would still assert something a stub platform cannot observe,
+				// the same distinction the !rendered branch in refreshFirefox
+				// holds.
 ```
 
-- [ ] **Step 5: Rewrite the four `docs/spec/operations.md` sentences**
+7. `autocookies.go` — `AbandonSetup`'s doc (`:1474-1512`). The second bullet of its `known` split and the paragraph after it are both false once Linux can answer. Replace the bullet beginning `//   - not known — no job, or a platform with no Job Object primitive at all` (four lines, through `releasing kills nothing. Release.`) with:
+```go
+//   - not known — no job (a failed assign on either platform), a Linux group
+//     whose /proc cannot be read, or a platform with no primitive at all
+//     (darwin and the fallback build). The reap can never fire there, so this
+//     is the only thing that releases the slot; and with nothing able to reach
+//     the browser, releasing kills nothing — on Linux the group kill inside
+//     cleanupLocked refuses a group it cannot see. Release.
+```
+and the paragraph `// Which is to say plainly: this call is redundant on Windows and load-bearing` … `deleting the check would restore the kill.` with:
+```go
+// Which is to say plainly: this call is redundant wherever a group or a Job
+// Object was adopted — Windows, and Linux since the process-group reap — and
+// load-bearing where nothing was: darwin, the fallback build, and any Linux
+// launch whose group could not be adopted. The declining arm is not dead code
+// on either platform — deleting the check would restore the kill on both.
+```
+
+8. `autocookies.go` — `killSetupProcess`'s doc, its closing paragraph (`:3118-3121`). Replace the three lines from `// no job can vouch for the browser — a failed assign, and every non-Windows` through `// there it is the only thing that can work.` with:
+```go
+// no job can vouch for the browser — a failed assign on either platform, and
+// darwin and the fallback build, where queryable() is always false — the kill
+// still runs, because there it is the only thing that can work. On Linux that
+// kill goes through killProcessTreeUnix, which signals a group only when the
+// pid still leads one; a reaped pid falls back to proc.Kill, which Go refuses
+// on a process it has already waited on.
+```
+
+9. `autocookies_firefox.go:376-378` — `refreshLooksImplausiblyFast`'s doc. Replace `// On Linux there is no Job Object, so drainJob returns on lap zero (see its` … `// here.` (the first two and a half lines of that paragraph) with:
+```go
+// On darwin and the fallback build there is no count at all, so drainJob
+// returns on lap zero (see its doc comment) and a launch that genuinely worked
+// can still read as fast here. Linux has a count since the process-group reap,
+// but no timing has been recorded there, so the threshold is a Windows number.
+```
+keeping the sentence that follows (`The Debug message at the call site …`) as written.
+
+- [ ] **Step 5: Rewrite the six `docs/spec/operations.md` sentences**
+
+`:122` — the section's opening paragraph says "both depend on a primitive only Windows has". Replace that paragraph's first two sentences with:
+
+> The interactive cookie setup and the headless refresh both launch a real browser, and both depend on a liveness primitive: a Job Object on Windows, a process group on Linux, nothing on darwin or the fallback build. What each platform can and cannot OBSERVE is stated here because the differences are recorded residuals, not oversights.
 
 `:124` — extend the first sentence of the reap paragraph so the primitive is named per platform. Change its opening to:
 
@@ -1742,15 +1912,19 @@ and `autocookies_firefox.go:232` with `(Job Object in runWithTimeout)` as its ta
 
 `:126` — replace the whole "Off Windows nothing can say" paragraph with:
 
-> **Windows counts a Job Object; Linux counts a process group; nothing else can say.** `processJob.queryable()` is `j != nil && j.handle != 0` in `job_windows.go` and `j != nil && j.group.queryable()` — that is, a process group was adopted — in `job_linux.go`. `configureCmdSysProcAttr` sets `Setpgid` on Linux, so every browser this package launches leads a group whose id is its own pid; `activeProcesses` counts that group's members by walking `/proc`, and `assign` REFUSES a process that did not lead its own group, because recording one that inherited Moombox's group would later point the kill at Moombox itself — in Docker, at the container. `job_other.go` is still unconditionally `false`: darwin and the fallback build have no primitive, `realSetupBrowserGone` always answers "not known" there, and a browser left open by an abandoned setup is not reaped. Two Linux cases answer "not known" too, both honestly: a container whose `/proc` cannot be walked (a failed read is an error, never a zero — an empty table would read as "the group is empty", which is the answer that releases the slot), and a browser that calls `setsid()` and leaves the group. **The Linux reap is BUILT, NOT FIELD-VERIFIED.** Its decisions are unit-tested against a fake process table (`internal/cookies/job_pgroup_test.go`, which is why they live in a file with no build tag); nothing here has been run against a real Linux desktop or container, and a user's bug report is the gate. One named residual comes with it: a Job Object handle cannot name a process that is not in the job, but a pgid can, because the kernel recycles pids — `pgroupJob.killGroup` refuses to signal a group it cannot see or that has no members left, which narrows the window as far as it can be narrowed without closing it.
+> **Windows counts a Job Object; Linux counts a process group; nothing else can say.** `processJob.queryable()` is `j != nil && j.handle != 0` in `job_windows.go` and `j != nil && j.group.queryable()` — that is, a process group was adopted — in `job_linux.go`. `configureCmdSysProcAttr` sets `Setpgid` on Linux, so every browser this package launches leads a group whose id is its own pid; `activeProcesses` counts that group's members by walking `/proc`, and `assign` REFUSES a process that did not lead its own group, because recording one that inherited Moombox's group would later point the kill at Moombox itself — in Docker, at the container. `job_other.go` is still unconditionally `false`: darwin and the fallback build have no primitive, `realSetupBrowserGone` always answers "not known" there, and a browser left open by an abandoned setup is not reaped. One Linux case answers "not known" too, honestly: a container whose `/proc` cannot be walked (a failed read is an error, never a zero — an empty table would read as "the group is empty", which is the answer that releases the slot). One answers WRONGLY: a browser that calls `setsid()` leaves the group, the count then reads the group as empty, and the reap releases the slot when the grace runs out with the browser still on screen — no kill, because the group it would signal has no members, but the operator's next finish answers `ErrNoSetupInProgress`. Which Linux packagings do that (a snap or flatpak wrapper is the suspect, not the browser binary) is unmeasured. A zombie is not a member: the `/proc` parser skips state `Z`, because a container where Moombox is PID 1 without an init (`docker-compose.yml` sets `init: true`; a bare `docker run` does not) never reaps an orphaned grandchild, and counted it would hold the group open for the life of the process. **The Linux reap is BUILT, NOT FIELD-VERIFIED.** Its decisions are unit-tested against a fake process table (`internal/cookies/job_pgroup_test.go`, which is why they live in a file with no build tag); nothing here has been run against a real Linux desktop or container, and a user's bug report is the gate. One named residual comes with it: a Job Object handle cannot name a process that is not in the job, but a pgid can, because the kernel recycles pids — `pgroupJob.killGroup` refuses to signal a group it cannot see or that has no members left, which narrows the window as far as it can be narrowed without closing it.
 
 `:128` — append to the `AbandonSetup` paragraph, after "…because nothing was tracking the browser anyway.":
 
-> Since the process-group reap landed, Linux takes the SAME declining arm as Windows wherever a group was adopted: the reap owns that slot. The release arm is now scoped to the cases where nothing could be adopted — an unreadable `/proc`, a browser that left its group, darwin and the fallback build — and it is still the only release there. The rule did not change; the set of platforms on each side of it did.
+> Since the process-group reap landed, Linux takes the SAME declining arm as Windows wherever a group was adopted: the reap owns that slot. The release arm is now scoped to the cases where nothing can answer — a failed assign or an unreadable `/proc` on Linux, darwin and the fallback build — and it is still the only release there; the `cleanupLocked` it runs asks for a group kill on Linux, and that kill refuses a group it cannot see, so releasing still kills nothing. (A browser that left its group is the OTHER arm's problem: it reads as gone — see above.) The rule did not change; the set of platforms on each side of it did.
+
+`:130` — the "launcher-handoff premise is UNMEASURED" paragraph says "that platform drains nothing either way", which stops being true here. Replace its third sentence (`Nothing depends on it being true — that platform drains nothing either way — but it should not be repeated as a fact.`) with:
+
+> Nothing depends on it being true — the process group counts and kills whatever is in it whether or not a handoff happened, and where nothing outlives the direct child the drain lands on lap zero exactly as before — but it should not be repeated as a fact.
 
 `:134` — in the drain paragraph, replace the closing "LibreWolf and Zen remain unverified, as does every non-Windows target." with:
 
-> LibreWolf and Zen remain unverified. So does every non-Windows target — but the reason changed on Linux: it now HAS a count (the process group), so `drainJob` genuinely waits there instead of returning on lap zero, and a Linux headless refresh takes as long as the browser takes rather than returning instantly. That is the Arc 0 fix arriving on Linux, and it is unobserved: no timing has been recorded on any Linux box.
+> LibreWolf and Zen remain unverified. So does every non-Windows target — but the reason changed on Linux: it now HAS a count (the process group), so `drainJob` waits there for anything that outlives the direct child — a wrapper's handoff, a straggling content process — up to the budget, where before it returned on lap zero regardless. Without a launcher the direct child is the browser itself and `cmd.Wait()` already waited for it, so where nothing outlives it the timing is unchanged. That is the Arc 0 fix arriving on Linux, and it is unobserved: no timing has been recorded on any Linux box.
 
 - [ ] **Step 6: Update `SPEC.md:680`**
 
@@ -1801,8 +1975,8 @@ EOF
 ## Task 6: The ledgers stop calling it unfixed
 
 **Files:**
-- Modify: `docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md:1880` (the named-residual block), `:1996` (the Arc 3 bullet), and the Deferred entry whose ruling this plan discharged
-- Modify: `docs/superpowers/plans/2026-08-29-cookie-remediation-field-test-plan.md:302` (the Part 7 row)
+- Modify: `docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md:1876` (the Arc 3 completion paragraph's "load-bearing on Linux/Docker"), `:1878-1880` (the named-residual block), `:1980` (the Arc 3 doc-dependency bullet's "not reaped on Linux or in Docker" — the owner's own phrase at `:2015`), `:1996` (the Arc 3 bullet), and the Deferred entry whose ruling this plan discharged
+- Modify: `docs/superpowers/plans/2026-08-29-cookie-remediation-field-test-plan.md:172` (Part 4 row 14, the Docker deployment row) and `:302` (the Part 7 row)
 
 **Interfaces:**
 - Consumes: the shipped behaviour from Task 5.
@@ -1826,6 +2000,12 @@ In the "What the docs must now state" list, replace the Arc 3 bullet's final cla
 **A1 IS fixed on Linux/Docker as of the process-group arc** (`Setpgid` at launch, `/proc` for the count, an explicit group kill where Windows closes a handle) — **built, not field-verified**, with a user's bug report as the gate; darwin and the fallback build keep the residual. The docs say so at `operations.md` §Browser Cookie Acquisition.
 ```
 
+- [ ] **Step 2b: The two Arc 3 history lines**
+
+`:1876` — in the Arc 3 completion paragraph, `It is redundant on Windows (the reap owns it) and load-bearing on Linux/Docker (the only release there).` becomes `It was redundant on Windows (the reap owns it) and load-bearing on Linux/Docker (the only release there) until the process-group arc gave Linux a reap of its own — see the closed residual below.`
+
+`:1980` — in the Arc 3 doc-dependency bullet, `so **a browser left by an abandoned setup is not reaped on Linux or in Docker** (both Windows families do reap)` becomes `so **a browser left by an abandoned setup was not reaped on Linux or in Docker** until the process-group arc (both Windows families reaped from the start)`.
+
 - [ ] **Step 3: Discharge the Deferred entry**
 
 In §Deferred, the bullet beginning `**A1 on Linux/Docker (the Job-Object reap)**` — append to its ruling text:
@@ -1842,13 +2022,17 @@ Replace the A1 row in Part 7 with a Part 7 row that says what is and is not on t
 | A1 (abandoned setup wedges acquisition) on Linux / Docker | **Built, not field-verified.** The reap fires on Linux and in Docker via a process group (`Setpgid` at launch, `/proc` for the count, an explicit group kill where Windows closes a Job Object handle); the decisions are unit-tested against a fake process table on Windows. By owner ruling there is NO Linux live gate here — a user's bug report is the gate. Still unreaped on darwin and the fallback build, where `abandon` remains the only release | plan §Arc 3 residual (closed); `a1-linux-process-group-reap-design.md` |
 ```
 
+- [ ] **Step 4b: Flip the field-test plan's Docker deployment row at `:172`**
+
+Part 4 row 14 ("First real Docker deployment") carries the old claim in two columns. In the "Pass looks like" column replace `The `abandon` beacon is the ONLY release for an abandoned setup there (A1 not fixed on Linux - plan §Arc 3 named residual)` with `An abandoned setup there is reaped by the process group ~60 s after the browser is gone (A1 built on Linux, not field-verified — Part 7 row); the `abandon` beacon still releases where no group could be adopted`. In the "Fail looks like" column replace `setup wedged with no way out but restart (expected on Linux, but confirm the beacon releases on tab close)` with `setup wedged with no way out but restart (NOT expected any more — a wedge that outlives the grace is exactly the field report the owner's ruling names)`.
+
 - [ ] **Step 5: Confirm nothing else in the tree still calls it unfixed**
 
 Run:
 ```bash
-grep -rn "not fixed on Linux\|NOT fixed on Linux\|no Job Object primitive\|Off Windows nothing can say" docs/ SPEC.md internal/
+grep -rn "not fixed on Linux\|NOT fixed on Linux\|no Job Object primitive\|Off Windows nothing can say\|not reaped on Linux\|load-bearing on Linux\|every non-Windows target\|drains nothing either way\|there is no Job Object, so" docs/ SPEC.md internal/
 ```
-Expected: no hits. Any hit is a sentence Task 5 or this task missed — fix it in this commit.
+Expected hits, and only these: the owner's ruling at `2026-08-25-cookie-subsystem-remediation.md:2015` (it QUOTES the sentences it ordered edited — leave it); `internal/cookies/job_other.go` (still the stub it says it is — leave it); and this plan and its spec under `docs/superpowers/`, which describe the change. Any other hit is a sentence Task 5 or this task missed — fix it in this commit, and if it is a code comment say so in the commit body.
 
 - [ ] **Step 6: Run every gate, then commit**
 
@@ -1860,10 +2044,11 @@ git add docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md \
 git commit -m "$(cat <<'EOF'
 docs(plans): A1 on Linux/Docker is built — the ledgers say built, not fixed-and-proven
 
-The named residual in the remediation plan, its Arc 3 doc-dependency bullet, its
-Deferred entry, and the field-test plan's Part 7 row all said A1 was unfixed off
-Windows. It is built now. All four say "built, not field-verified" and name the
-gate the owner set: a user's bug report, not a Linux box of ours.
+The named residual in the remediation plan, its two Arc 3 bullets and the Arc 3
+completion line, its Deferred entry, and the field-test plan's Part 4 Docker row
+and Part 7 row all said A1 was unfixed off Windows. It is built now. Each says
+"built, not field-verified" and names the gate the owner set: a user's bug
+report, not a Linux box of ours.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN
@@ -1884,11 +2069,11 @@ EOF
 | **R3** — the process table is a seam and the decision logic is tag-free | Task 1 (`job_pgroup.go`, `listProcessGroups`, `killProcessGroup`, all tests on Windows), Task 4 (`browserGoneFrom`, so the reap's own predicate runs over a `pgroupJob` on Windows too) |
 | **R4** — closing kills nothing; every close-to-kill site kills explicitly | Task 2 (`killProcessTree`'s five call sites in one edit), Task 3 (`cleanupLocked`, `adoptSetupJobLocked`, `runWithTimeout`'s teardown; `trackedSetupJob` pinned as the site that must not), decision 5's table |
 | **R5** — the same rules verbatim: 60 s grace, `reapAbandonedSetupLocked` unchanged, `AbandonSetup` takes the declining arm on Linux | No task touches `setupAbandonGrace` (`autocookies.go:117`), `reapAbandonedSetupLocked`, `setupRetainedLocked` or `AbandonSetup`'s body; the branch flips by itself once `queryable()` answers. Task 5 Step 5 writes the consequence into `operations.md:128` |
-| **R6** — a real count arms the drain on Linux (`drainJob` waits for the group; `browserLaunchActed` reports a real verdict); the timing change is stated in the docs | Decision 6; Task 3 (`runWithTimeout` teardown); Task 5 Step 4 (`drainJob`'s comment) and Step 5 (`operations.md:134`) |
-| **R7** — what stays unmeasured is said plainly; no Linux live gate; the field-test row flips | Task 5 Step 5 (`operations.md:126` names setsid, unreadable `/proc`, the pgid-recycling residual and "built, not field-verified"), Task 5 Step 3 (the smoke test's doc says it is not a CI gate), Task 6 Step 4 (the field-test row) |
+| **R6** — a real count arms the drain on Linux (`drainJob` waits for whatever outlives the direct child; `errBrowserDrainTimeout` can reach `browserLaunchActed`); the timing change is stated in the docs precisely — a Linux refresh never returned instantly, because without a launcher the direct child is the browser | Decision 6; Task 3 (`runWithTimeout` teardown); Task 5 Step 4 (`drainJob`'s comment) and Step 5 (`operations.md:130`, `:134`) |
+| **R7** — what stays unmeasured is said plainly; no Linux live gate; the field-test row flips | Task 5 Step 5 (`operations.md:126` names an unreadable `/proc` as "cannot say", setsid as a WRONG answer — gone, premature release, no kill — zombies as non-members, the pgid-recycling residual as one window, and "built, not field-verified"), Task 5 Step 3 (the smoke test's doc says it is not a CI gate), Task 6 Steps 4 and 4b (the field-test rows) |
 | Non-goals — no Windows change, no `job_other.go` change, no reaper goroutine, no sidecar/launcher work | Global Constraints; decision 1; no task lists those files |
 | §4 invariants | Global Constraints, and one test each: failed read never releases or kills (`TestPGroupJobReportsAFailedTableReadAsAnError`, `TestPGroupJobNeverKillsWhatItCannotSee/table unreadable`, `TestBrowserGoneFromAProcessGroup/process table unreadable`); `pgid <= 0` (`TestPGroupJobNeverKillsWhatItCannotSee/no group adopted`, `TestKillProcessTreeUnixRefusesANonPositivePid`, `sigkillProcessGroup`'s own guard); no goroutine added (none in any task) |
-| §5 docs | `operations.md:124`/`:126`/`:128` and `SPEC.md:680` in Task 5; the plan's `:1880`/`:1996` and the field-test `:302` in Task 6. `operations.md:134` added — see below |
+| §5 docs | `operations.md:122`/`:124`/`:126`/`:128`/`:130`/`:134` and `SPEC.md:680` in Task 5; the remediation plan's `:1876`/`:1880`/`:1980`/`:1996` and the field-test `:172`/`:302` in Task 6. The code comments that make the same claim (`AbandonSetup`'s and `killSetupProcess`'s docs, `refreshLooksImplausiblyFast`'s, `drainJob`'s three `job.close()` lines) are Task 5 Step 4 items 7-9 and Task 3 Step 4 |
 
 ### 2. Placeholder scan
 
@@ -1910,4 +2095,10 @@ Four places. The R's still bind; the plan follows the code's shape and says so h
 
 4. **R2 has a side effect the draft does not mention: `drainJob` arms on Linux.** Giving `activeProcesses()` a real count there means `runWithTimeout` starts genuinely waiting for the browser group to empty, where every Linux launch previously returned on lap zero with "nothing was waited on". This is the Arc 0 fix arriving on Linux and it is desirable, but it changes Linux refresh timing and lets `browserLaunchActed` report a real verdict there. The plan states it up front (decision 6) and edits the two paragraphs that assert the old behaviour (`drainJob`'s comment, `operations.md:134`) — the latter is a fifth doc sentence the draft's §5 does not list.
 
-One further judgement the draft leaves open, recorded rather than hidden: a pgid is recyclable where a Job Object handle is not, so a group kill can in principle name a stranger's group. `killGroup` refuses to signal a group it cannot see or that has no members, which is the most that can be done, and `operations.md` carries it as a named residual (decision 7).
+5. **R7's setsid case is a wrong answer, not a missing one** (found in the plan review, 2026-09-02). The draft grouped a browser that calls `setsid` with an unreadable `/proc` as things that answer "cannot say". They do not behave alike: an unreadable table is an error and `known` is false; a browser that left its group leaves an EMPTY group behind, which is `known` true, `gone` true — the reap releases the slot with the browser on screen, and kills nothing because the group it would signal has no members. The plan says so in every place it names the case, and R7 was reconciled to match.
+
+6. **The `killProcessTree` arm goes through `pgroupJob`, not straight to the hook** (plan review, 2026-09-02). Read literally, R4's "the seam's non-Windows arm kills `-pgid`" discards a protection today's `proc.Kill()` has — Go refuses to signal a process it has already waited on — on the one path that reaches the seam with a reaped pid: `killSetupProcess` when no job could vouch for the browser. Routing the arm through `adopt` and `killGroup` keeps every refusal in one place and makes decision 7's "one window" true. R4 and R7 were reconciled.
+
+7. **Zombies are not members** (plan review, 2026-09-02). Decision 8; the draft did not consider a PID-1 Moombox that never reaps an orphaned grandchild, nor the smoke test's own window between the SIGKILL and the `Wait`.
+
+One further judgement the draft leaves open, recorded rather than hidden: a pgid is recyclable where a Job Object handle is not, so a group kill can in principle name a stranger's group. `killGroup` refuses to signal a group it cannot see or that has no members, `killProcessTreeUnix` goes through the same refusals, and that is the most that can be done; `operations.md` carries it as a named residual (decision 7).
