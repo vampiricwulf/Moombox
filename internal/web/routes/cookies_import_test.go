@@ -396,6 +396,103 @@ func TestCookieImportRouteLeaksNoValueAnywhere(t *testing.T) {
 		})
 	}
 
+	// THE REQUEST-SHAPE REFUSALS, which the table above cannot reach: they are
+	// answered inside readCookieImportBody, before ImportCookies is ever called,
+	// and 413 is the one that matters most. io.ReadAll returns the bytes it read
+	// ALONG WITH the error, so at the moment the cap fires `raw` holds up to
+	// 512 KiB of submitted credential bytes — a single %s of it in that message
+	// is a 629 KB response body carrying the operator's live session, and that
+	// mutant was run and survived the whole package before these cases existed.
+	//
+	// THE MUTATION: any request-shape refusal that grows a %s of the submitted
+	// text — `jsonError(rw, "…: "+string(raw), …)` at the 413 or the 400 arm, the
+	// shape a "helpful" diagnostic quoting what was sent would take.
+	//
+	// Each also asserts cookies.txt is byte-identical afterwards. Nothing is
+	// written on any of these paths by construction (the handler returns before
+	// the service is touched), and that is exactly why it is worth pinning: it
+	// is a claim no assertion currently holds.
+	//
+	// lastError is NOT scanned here, and deliberately: the service is never
+	// entered on these three paths, so the field cannot move and an assertion on
+	// it would be a decoy that can never fail. Its three reachable writers are
+	// scanned where they live, in TestImportFailurePathsCarryNoValue.
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		body        string
+		want        int
+	}{
+		{"over the cap", "text/plain", importPaste() + strings.Repeat("# padding\n", 60000), http.StatusRequestEntityTooLarge},
+		{"an unsupported content type", "application/json", `{"cookies":"` + importYouTube + `"}`, http.StatusUnsupportedMediaType},
+		{"an empty body", "text/plain", "   \n\n", http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, path, log, _ := importRouter(t, importHeader+importTwitch, nil)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read seed: %v", err)
+			}
+
+			rec := postImport(t, r, tc.contentType, tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status %d, want %d — this case is scanning the wrong answer: %s",
+					rec.Code, tc.want, rec.Body.String())
+			}
+			scan(t, rec, log)
+
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if string(after) != string(before) {
+				t.Error("a request refused on its SHAPE still rewrote cookies.txt")
+			}
+		})
+	}
+
+	// The multipart cap reaches its answer through ParseMultipartForm rather
+	// than io.ReadAll, so it is a different code path holding a different copy
+	// of the submitted bytes, and it is the shape a phone uses.
+	t.Run("over the cap, uploaded", func(t *testing.T) {
+		r, path, log, _ := importRouter(t, importHeader+importTwitch, nil)
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read seed: %v", err)
+		}
+
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		part, err := w.CreateFormFile("cookies", "cookies.txt")
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		if _, err := part.Write([]byte(importPaste() + strings.Repeat("# padding\n", 60000))); err != nil {
+			t.Fatalf("write part: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("close multipart: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/cookies/import", &buf)
+		req.Header.Set("Content-Type", w.FormDataContentType())
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status %d, want 413: %s", rec.Code, rec.Body.String())
+		}
+		scan(t, rec, log)
+
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if string(after) != string(before) {
+			t.Error("an oversize UPLOAD still rewrote cookies.txt")
+		}
+	})
+
 	t.Run("the unreadable-file abort", func(t *testing.T) {
 		r, log := importRouterOverADirectory(t)
 		rec := postImport(t, r, "text/plain", importPaste())
