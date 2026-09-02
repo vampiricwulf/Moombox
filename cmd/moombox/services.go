@@ -1048,8 +1048,8 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// context.Background rather than refreshCtx, which is still alive here:
 		// uniformity with the other four sites. Two of them have no caller
 		// context to reach for at all; the two that do — runCookieRecovery's
-		// ctx and the wizard's finishCtx — hold a budget that belongs to their
-		// own gesture, not to a fingerprint comparison that must not be
+		// ctx and the Web wizard finish handler's req.Context() — hold a budget
+		// that belongs to their own gesture, not to a fingerprint comparison that must not be
 		// cancelled by its caller's teardown. The re-check has to outlive
 		// nothing.
 		defer func() {
