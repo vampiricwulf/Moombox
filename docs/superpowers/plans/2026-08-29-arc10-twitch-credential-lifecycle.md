@@ -43,7 +43,7 @@ Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN
 | 4 | `ChatDownloader.Reauthenticate()` | opus |
 | 5 | `twitchChatRegistry` and the ExecuteTwitch registration | opus |
 | 6 | The worker seam: a downgrade marks the platform | sonnet |
-| 7 | `cmd/moombox` wiring: mark, broadcast, adapted sweep | opus |
+| 7 | `cmd/moombox` wiring: mark, broadcast, adapted sweep, and the two reason renderers | opus |
 | 7a | Every credential write reaches the fingerprint comparison | opus |
 | 8 | The HLS side, per Task 0's report (branch A builds; branch B records — neither edits a doc) | opus |
 | 9 | The doc sentences that change with the code | sonnet |
@@ -3266,7 +3266,18 @@ EOF
 
 ### Task 7: `cmd/moombox` wiring — the mark, the broadcast, and the adapted sweep
 
-`cmd/moombox` is the only package that holds the refresh service, the worker and the jar at once, so both ends of the arc close here. Three edits.
+`cmd/moombox` is the only package that holds the refresh service, the worker and the jar at once, so both ends of the arc close here. Four edits — the fourth was found by the Task 2 review and belongs to nobody else.
+
+**0. THE MARK'S REASON REACHES NO OPERATOR TODAY.** Spec R1 says "every existing surface reuses this ... the per-request reason rendering (`R C`, `POST /api/cookies/recheck`, `/api/status`)". It does not, and the reason is a gate neither Task 2 nor Task 3 touches: **both** per-request renderers append the reason string only on an INCONCLUSIVE verdict —
+
+- TUI, `internal/tui/app_update.go:834` in `cookieRecheckFeedback`: `if verdict == cookies.RefreshUnknown && reason != ""`
+- Web, `web/public/modules/utils.js:533` in `cookieIndicatorState`: `if (status?.verification === "unknown")`, with the reason appended inside that arm only
+
+The mark writes `RefreshFailed` **with** a non-empty reason. It is the first producer in the codebase to do that, so under Tasks 2-3 alone an operator pressing `R C` sees `Cookies: Twitch not authenticated` and nothing else — no hint which of the four routes broke, which is the whole point of having four. The gates were right when they were written (every earlier producer really did leave the field empty on a conclusive verdict, and both comments say so); they are wrong now. Steps 4a and 4b widen both to "render it when it is there", which is also the simpler rule.
+
+**`RefreshOK` is unaffected in practice and needs no special case**: `verdictFromCheck` returns `RefreshOK` only when `err == nil`, and the error string is that same error — so an OK verdict's reason is always `""` and the widened gate never fires for it. That is a property of the producer, not a promise from the caller, which is why the new gate tests the STRING rather than trusting the verdict.
+
+**The push-driven bars are deliberately NOT touched.** `authStatusChanged` still excludes the two strings, so no `OnAuthChange`-driven surface may render them — the TUI status bar and the header badge's push path stay exactly as they are. That exclusion was re-ruled during this arc as DOCUMENT, not widen: the reason rides the per-request surfaces only. Task 9 states it.
 
 **1. The mark seam runs on its own goroutine.** `NoteTwitchAuthLoss`'s caller chain starts on `internal/twitch`'s IRC session goroutine, with the read loop parked behind it (`ChatDownloaderOptions.OnAuthDowngrade`'s contract, `chat.go:181-189`: *"must not block"*). The mark can reach `handleRecoveryNeeded`'s `auto_enabled=false` arm (`monitor_callbacks.go:503-544`), which sends the "Cookie Re-Authentication Required" webhook **synchronously**. Spec §4 requires the mark be delivered asynchronously by its consumer; this is that consumer. Fire-and-forget is correct: the mark is idempotent, and the downloader already latches its report once per job, so there is nothing to sequence and nothing to wait for.
 
@@ -3277,11 +3288,16 @@ EOF
 **Files:**
 - Modify: `cmd/moombox/services.go` — the mark seam, beside `dlWorker.CurrentCredentialIdentity` (`:866-877`)
 - Modify: `cmd/moombox/monitor_callbacks.go` — a small helper near `sweepShouldResume` (`:66-76`), and the `OnCredentialsChanged` closure (`:678-706`)
+- Modify: `internal/tui/app_update.go:834` — one condition in `cookieRecheckFeedback`
+- Modify: `web/public/modules/utils.js:527-546` — one condition in `cookieIndicatorState`, plus the doc comment above it (`:515-521`) that states the old rule
 - Test: `cmd/moombox/monitor_callbacks_twitch_reauth_test.go` (create)
+- Test: `internal/tui/cookie_recheck_reason_test.go` (amend the subtest that pins the OLD rule — see Step 4a)
+- Test: `internal/web/routes/cookies_indicator_test.go` (amend the subtest that pins the OLD rule — see Step 4b)
 
 **Interfaces:**
 - Consumes: `RefreshService.OnCredentialsChanged func(platform, identity string)` **firing for `"twitch"` (Task 3)** — the whole reason Step 4 exists; without Task 3 the closure Step 4 rewrites is never entered for Twitch and the broadcast is dead code. Also `(*cookies.RefreshService).NoteTwitchAuthLoss(reason string)` (Task 2); `(*worker.DownloadWorker).SetOnTwitchAuthLoss(fn func(reason string))` (Task 6); `(*worker.DownloadWorker).ReauthenticateTwitchChats() int` (Task 5); `resumeCookieParkedJobs(db, log, platform, currentIdentity string) int` (`monitor_callbacks.go:81-106`)
-- Produces: `func reauthenticateTwitchChats(platform string, broadcast func() int) int` — no later task consumes it; it exists so the platform gate is drivable
+- Consumes (Steps 4a/4b): `cookieRecheckResultMsg{YouTube, Twitch cookies.RefreshVerdict; YouTubeReason, TwitchReason, LastError string}` (`internal/tui/app_actions.go:28-48` produces it from `OnRecheckCookies`, unchanged by this task) and `routes.TwitchAuthStatusPayload`'s `twitchError` / `CookieStatusPayload`'s `youtubeError` keys (`internal/web/routes/cookies.go`, unchanged by this task)
+- Produces: `func reauthenticateTwitchChats(platform string, broadcast func() int) int` — no later task consumes it; it exists so the platform gate is drivable. Steps 4a/4b produce no new symbol: both are one-condition widenings of existing functions.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3427,6 +3443,183 @@ In `cmd/moombox/monitor_callbacks.go`, replace the body of the `s.cookieRefresh.
 
 (The closing `notifications.SendOptions{...}` and the two closing braces below are unchanged. Keep every other line of the existing closure byte-identical apart from the two edits above; `s.dlWorker.ReauthenticateTwitchChats` is a method value and is safe to take even when `s.dlWorker` is nil, because that method is nil-receiver-guarded — Task 5.)
 
+- [ ] **Step 4a: TUI — the `R C` result line renders a reason whatever the verdict**
+
+`internal/tui/app_update.go`, in `cookieRecheckFeedback`'s `consider` closure (`:834`). Current condition:
+
+```go
+		if verdict == cookies.RefreshUnknown && reason != "" {
+			reasons = append(reasons, label+": "+reason)
+		}
+```
+
+Replace with:
+
+```go
+		// Gated on the STRING, not on the verdict, since Arc 10.
+		//
+		// It was gated on RefreshUnknown because every producer at the time
+		// left the reason empty on a conclusive verdict — a cause attached to
+		// "OK" or "not authenticated" reads as an explanation for a conclusion
+		// that has none. NoteTwitchAuthLoss is the first producer that writes
+		// RefreshFailed WITH a reason, and it is precisely the reason the
+		// operator needs: which of the four chat-downgrade routes broke. Under
+		// the old gate they pressed R C and read "Twitch not authenticated"
+		// with no way to tell a missing login cookie from a refused one.
+		//
+		// RefreshOK still carries nothing, and by construction rather than by
+		// trust: verdictFromCheck returns OK only when the error is nil, and
+		// the reason string IS that error. Testing the string rather than the
+		// verdict is what makes that a property of the data instead of a
+		// promise from the caller.
+		if reason != "" {
+			reasons = append(reasons, label+": "+reason)
+		}
+```
+
+The producer needs no change: `recheckCookiesCmd` (`internal/tui/app_actions.go:28-48`) already carries both reason strings off `OnRecheckCookies` into `cookieRecheckResultMsg`, and `tui_wiring.go` already fills them from `GetStatus()`. Only the render gate was narrow.
+
+**One existing subtest pins the OLD rule and must be rewritten, not deleted.** `internal/tui/cookie_recheck_reason_test.go`, subtest `"a conclusive verdict renders the shared sentence and nothing else"` (`:78-95`), loops `RefreshOK` and `RefreshFailed` with a reason supplied and asserts the sentence alone. Split it:
+
+```go
+	t.Run("an OK verdict renders the shared sentence and nothing else", func(t *testing.T) {
+		// Unchanged intent. An authenticated check has no cause to give, and
+		// verdictFromCheck cannot produce OK beside a non-empty reason — so
+		// this row is a pin on the PRODUCER's invariant, exercised through the
+		// renderer, and it must keep passing after the gate widened.
+		got := recheckFeedback(t, 200, true, false, cookieRecheckResultMsg{
+			YouTube:       cookies.RefreshOK,
+			YouTubeReason: "",
+		})
+		want := cookies.RecheckReport(
+			cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshOK},
+		)
+		if got != want {
+			t.Errorf("feedback = %q, want the shared sentence alone %q", got, want)
+		}
+	})
+
+	t.Run("a conclusive REFUSAL names its reason", func(t *testing.T) {
+		// Arc 10 reversed this row. The mark writes RefreshFailed with one of
+		// four fixed sentences, and it is the only thing that says WHICH route
+		// broke — "the cookie file has a Twitch auth-token but no login cookie
+		// beside it" versus "Twitch refused the saved login" are different
+		// remedies. Withholding it left the operator with "not authenticated"
+		// and no next step.
+		//
+		// THE MUTATION: narrowing the gate back to
+		// `verdict == cookies.RefreshUnknown && reason != ""` in
+		// cookieRecheckFeedback (app_update.go). This subtest then fails on the
+		// Contains check below — the sentence comes back as the bare
+		// RecheckReport with no parenthetical.
+		const twReasonMark = "The cookie file has a Twitch auth-token but no login cookie beside it."
+		got := recheckFeedback(t, 200, false, true, cookieRecheckResultMsg{
+			Twitch:       cookies.RefreshFailed,
+			TwitchReason: twReasonMark,
+		})
+		if !strings.Contains(got, twReasonMark) {
+			t.Errorf("feedback = %q, want it to name %q — a conclusive refusal that knows WHY must say so", got, twReasonMark)
+		}
+		if !strings.Contains(got, "Twitch") {
+			t.Errorf("feedback = %q, want the platform label kept beside the reason", got)
+		}
+	})
+```
+
+(Add `"strings"` to that file's imports if it is not already there.) Every other subtest in the file is untouched: the inconclusive rows still pass under the widened gate, and the `"no reason supplied leaves the sentence byte-identical"` row is exactly the guard that keeps the widening additive.
+
+- [ ] **Step 4b: Web — the cookie indicator renders a reason whatever the verdict**
+
+`web/public/modules/utils.js`, in `cookieIndicatorState` (`:527-546`). The reason is currently appended inside the `unknown` arm only, and the final arm returns a bare sentence:
+
+```js
+  if (status?.verification === "unknown") {
+    const reason = status?.[meta.errorKey];
+    return {
+      className: "indicator-warn",
+      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work`
+        + (reason ? ` (${reason})` : ""),
+    };
+  }
+  return { className: "indicator-error", title: `${meta.name}: Not authenticated` };
+```
+
+Replace both arms with:
+
+```js
+  const reason = status?.[meta.errorKey];
+  const cause = reason ? ` (${reason})` : "";
+  if (status?.verification === "unknown") {
+    return {
+      className: "indicator-warn",
+      title: `${meta.name}: Cookies saved — Moombox could not establish whether they work${cause}`,
+    };
+  }
+  return { className: "indicator-error", title: `${meta.name}: Not authenticated${cause}` };
+```
+
+and correct the doc comment above the function (`:515-521`), which states the rule being changed:
+
+```js
+ * The reason line is `youtubeError` / `twitchError` off the same payload, and
+ * it is appended to whichever arm has one. Until Arc 10 that was the
+ * inconclusive arm alone, because every producer left the field empty on a
+ * conclusive verdict — but `NoteTwitchAuthLoss` writes `failed` WITH a fixed
+ * sentence naming which of the four Twitch chat-downgrade routes broke, and
+ * that sentence is the only thing distinguishing "no login cookie" from
+ * "Twitch refused the login". An `ok` verdict still shows nothing, by
+ * construction: the server derives the verdict from the same error the string
+ * carries, so `ok` and a non-empty reason cannot co-occur. An older binary
+ * sends no such key at all and both titles degrade to exactly today's
+ * sentence.
+```
+
+**`go build` is required for this to reach a browser** — `web/public/` is `go:embed`-ed (`web/embed.go`), so an un-rebuilt binary serves the old module and the change is invisible.
+
+**There IS a JS test harness and this is testable — no field check needed.** `internal/web/routes/cookies_indicator_test.go` runs the shipped `utils.js` in goja (`utilsVM`, `cookies_setup_utilsvm_test.go:48`) and calls `cookieIndicatorState` through `indicatorState(t, vm, platform, status, relogin, parked...)`. One existing subtest pins the OLD rule: `TestIndicatorTitleNamesWhyACheckCouldNotConclude`'s `"a conclusive verdict carries no cause"` (`:423-433`). Replace that subtest with:
+
+```go
+	t.Run("a conclusive REFUSAL names its cause", func(t *testing.T) {
+		// Arc 10 reversed this row, and the paragraph it replaces explained
+		// why the old rule was right at the time: no producer wrote a reason
+		// beside a conclusive verdict. NoteTwitchAuthLoss does, and its four
+		// sentences are the only thing that says which chat-downgrade route
+		// broke.
+		//
+		// THE MUTATION: restoring the reason to the `unknown` arm only in
+		// cookieIndicatorState (utils.js). This subtest then fails on the
+		// Contains check — the title comes back as the bare "Not
+		// authenticated".
+		const markReason = "The cookie file has a Twitch auth-token but no login cookie beside it."
+		_, title := indicatorState(t, vm, "twitch", map[string]any{
+			"found": true, "authenticated": false, "verification": "failed",
+			"twitchError": markReason,
+		}, false)
+		if !strings.Contains(title, "Not authenticated") {
+			t.Errorf("title = %q, want the conclusive sentence kept intact — the cause is appended to it, never woven into it", title)
+		}
+		if !strings.Contains(title, markReason) {
+			t.Errorf("title = %q, want it to name %q. Without it every dead-credential state renders identically and none says what to fix", title, markReason)
+		}
+	})
+
+	t.Run("an OK verdict carries no cause", func(t *testing.T) {
+		// The invariant the widened gate now leans on, pinned at the renderer:
+		// an authenticated badge must never sprout a parenthetical, and the
+		// server cannot produce one (verdictFromCheck returns ok only for a
+		// nil error, and the reason string is that error).
+		_, title := indicatorState(t, vm, "youtube", map[string]any{
+			"found": true, "authenticated": true, "verification": "ok",
+			"youtubeError": "",
+		}, false)
+		if strings.Contains(title, "(") {
+			t.Errorf("title = %q — an authenticated badge must carry no parenthetical", title)
+		}
+	})
+```
+
+The `"an older binary sends no reason"` subtest below it is the additive guard and stays exactly as written: with no key the `cause` string is empty and both titles are byte-identical to today's.
+
 - [ ] **Step 5: Wire the mark seam**
 
 In `cmd/moombox/services.go`, immediately after the `dlWorker.CurrentCredentialIdentity` block (`:877`):
@@ -3483,6 +3676,17 @@ Expected: PASS for all three.
 Run: `go test ./cmd/moombox/ -count=1`
 Expected: `ok  github.com/vampiricwulf/Moombox/cmd/moombox`. If a test asserts the old "after re-checking the signed-in account" wording, update it to the new sentence — that is the intended change, not a regression.
 
+Then the two renderer packages, which Steps 4a and 4b changed:
+
+Run: `go test ./internal/tui/ -run TestRecheckFeedback -v -count=1`
+Expected: PASS, including the two subtests that replaced `"a conclusive verdict renders the shared sentence and nothing else"`.
+
+Run: `go test ./internal/web/routes/ -run TestIndicatorTitle -v -count=1`
+Expected: PASS, including the two subtests that replaced `"a conclusive verdict carries no cause"`.
+
+Run: `go test ./internal/tui/ ./internal/web/routes/ -count=1`
+Expected: both `ok`. A failure in `internal/web/routes` that is NOT one of the two named subtests means another test pins the old rule too — find it, and change it only if it is asserting the gate rather than the wording around it.
+
 - [ ] **Step 7: Run the gates**
 
 ```bash
@@ -3497,9 +3701,9 @@ Expected: build and vet clean, `gofmt -l` prints nothing, 27 packages ok / 0 fai
 - [ ] **Step 8: Commit**
 
 ```bash
-git add cmd/moombox/services.go cmd/moombox/monitor_callbacks.go cmd/moombox/monitor_callbacks_twitch_reauth_test.go
+git add cmd/moombox/services.go cmd/moombox/monitor_callbacks.go cmd/moombox/monitor_callbacks_twitch_reauth_test.go internal/tui/app_update.go internal/tui/cookie_recheck_reason_test.go web/public/modules/utils.js internal/web/routes/cookies_indicator_test.go
 git commit -m "$(cat <<'EOF'
-feat(cmd): a Twitch downgrade reaches the platform status, and a repair reaches live chat
+feat(cmd): a Twitch downgrade reaches the platform status, the operator, and live chat
 
 Arc 10's two ends close here, in the only package that holds the refresh
 service, the worker and the jar at once.
@@ -3518,6 +3722,19 @@ The existing sweep is adapted, not filtered: sweepShouldResume already gates
 on job.Platform and every Twitch COOKIES? job carries ParkReasonAuth, so the
 only wrong thing was the notice saying "the signed-in account" about a bearer
 token.
+
+And both per-request reason renderers now show a reason whenever there is
+one. They gated on RefreshUnknown because no producer had ever written a
+reason beside a conclusive verdict; the mark writes RefreshFailed with one of
+four fixed sentences, and that sentence is the only thing distinguishing "no
+login cookie" from "Twitch refused the login". Without this the operator
+pressed R C and read "not authenticated" with no next step. An OK verdict
+still shows nothing — verdictFromCheck derives it from the same error the
+string carries, so the two cannot co-occur — which is why the new gate tests
+the string rather than trusting the verdict.
+
+The push-driven bars are untouched: authStatusChanged still excludes the two
+strings, so no OnAuthChange-driven surface renders them.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN
@@ -4509,14 +4726,14 @@ EOF
 
 Spec §5 names five documents. Every edit below quotes the CURRENT sentence and gives the replacement; open each file and confirm the quoted text before editing, because a sentence that has already drifted means the surrounding paragraph needs re-reading, not a blind replace.
 
-**This is the SOLE doc-editing task in the arc.** No other task edits a file under `docs/spec/` or `SPEC.md` — Task 8 branch B was rewritten to record its finding in the ledger precisely so these sentences have one author. That matters most for the three HLS-side ones, which have TWO variants each: what is true if Task 8 took branch A, and what is true if it took branch B. Both are written out below.
+**This is the SOLE doc-editing task in the arc.** (Task 7 Steps 4a/4b edit one JS doc COMMENT beside the code they change, which is a code comment, not a spec file.) No other task edits a file under `docs/spec/` or `SPEC.md` — Task 8 branch B was rewritten to record its finding in the ledger precisely so these sentences have one author. That matters most for the three HLS-side ones, which have TWO variants each: what is true if Task 8 took branch A, and what is true if it took branch B. Both are written out below.
 
 **Before editing anything, read `.superpowers/sdd/2026-08-25-cookie-subsystem-remediation/progress-arc10.md`** — Task 0's `FINDING:` line and, if branch B was taken, Task 8's `### Arc 10 Task 8 ruling` entry. That decides which variant of Step 1(c), Step 2(d)'s closing clause and Step 5 you write. If the ledger has no Task 8 ruling entry and `internal/twitch/playback_token.go` exists, branch A was taken; if neither, Task 8 has not run and this task is premature.
 
 **Files:**
 - Modify: `docs/spec/platform-services.md` (three sentences, `:514`, `:527`, `:529`)
 - Modify: `docs/spec/data-and-storage.md` (five sites, `:733`, `:736`, `:748`, `:835`, `:857`)
-- Modify: `docs/spec/user-interfaces.md` (one sentence, `:395`)
+- Modify: `docs/spec/user-interfaces.md` (four sites, `:395`, `:672`, `:693`, `:851`)
 - Modify: `docs/spec/operations.md` (two table rows and one sentence, `:472`, `:473`, `:475`)
 - Modify: `SPEC.md` (two clauses in one paragraph, `:668-670`)
 
@@ -4593,6 +4810,34 @@ Replace with:
 > `cookies.AuthStatus` carries `YouTubeError` / `TwitchError` — why a check reached `Unknown`, or, for Twitch since Arc 10, which of the four chat-downgrade routes marked the platform (`NoteTwitchAuthLoss`, a fixed vocabulary of sentences) — and they have readers on the two **per-request** paths only
 
 The rest of that paragraph stands unchanged and is now load-bearing for a second reason: a Twitch mark that changes only the REASON fires no `OnAuthChange`, exactly as the contract requires, so the operator gets it on the next `R C` or the next status fetch.
+
+**Three more sentences in this file state the `RefreshUnknown` gating that Task 7 Steps 4a/4b removed.** All three were true when Arc 9 wrote them and all three are false the moment the mark exists.
+
+**(b)** The Web badge's arm 5 (`:672`) currently reads:
+
+> 5. `verification === "unknown"` → warning, `Cookies saved — Moombox could not establish whether they work`, with `(reason)` appended from `youtubeError` / `twitchError` when present. The reason is appended to **this arm only** — a conclusive `"ok"` or `"failed"` has no cause to give, and the producers leave the field empty there.
+
+Replace with:
+
+> 5. `verification === "unknown"` → warning, `Cookies saved — Moombox could not establish whether they work`, with `(reason)` appended from `youtubeError` / `twitchError` when present. Since Arc 10 the reason is appended to the **conclusive-refusal** arm too (`Not authenticated (…)`), because `NoteTwitchAuthLoss` writes `failed` beside one of four fixed sentences naming which Twitch chat-downgrade route broke — the only thing distinguishing a missing `login` cookie from a login Twitch refused. `"ok"` still shows nothing, by construction rather than by convention: `verdictFromCheck` returns OK only for a nil error and the reason string IS that error, so the two cannot co-occur. The gate is therefore on the STRING, not the verdict.
+
+**(c)** The `R C` line's description (`:693`) currently reads:
+
+> A reason is appended only for an *active* platform whose verdict is `RefreshUnknown`.
+
+Replace with:
+
+> A reason is appended for any *active* platform that has one, whatever its verdict — `RefreshUnknown` until Arc 10, and since then `RefreshFailed` as well, which is how the mark's four sentences reach the operator. An `RefreshOK` platform never has one to append.
+
+**(d)** The divergence table's "Inconclusive-check reason" row (`:851`) currently reads:
+
+> | Inconclusive-check reason | **Divergent, by contract.** The Web badge appends `youtubeError` / `twitchError` to its tooltip; the TUI status bar never does. The web has no cookie-status WebSocket event, so status and reason always arrive together in one `/api/status` fetch; the TUI bar is push-driven off `OnAuthChange`, whose gate excludes the two strings. The TUI surfaces the reason on the next `R C` instead. |
+
+Replace with:
+
+> | Check-reason rendering | **Divergent, by contract, and the divergence is PUSH vs PER-REQUEST rather than web vs TUI.** Both per-request surfaces render the reason whenever there is one — the Web badge's tooltip off `/api/status`, and the TUI's `R C` result line — for inconclusive AND conclusively-refused verdicts alike (Arc 10: the Twitch mark writes `failed` with a reason). Neither push-driven surface renders it: the TUI status bar is fed by `OnAuthChange`, whose `authStatusChanged` gate excludes the two strings, and the web has no cookie-status WebSocket event at all, so its badge is only ever painted from a fetch it asked for. The TUI bar surfaces the reason on the next `R C` instead. |
+
+Note the row's LABEL changes with it — "Inconclusive-check reason" is no longer what the row is about.
 
 - [ ] **Step 4: `docs/spec/operations.md`**
 
@@ -4714,7 +4959,7 @@ EOF
 These are not tasks. They are the claims this suite structurally cannot make, listed so the arc closes honestly.
 
 1. **The registration site.** `ExecuteTwitch`'s `o.twitchChats.add(irc)` + `defer` is covered by compilation and by the registry's own tests. Reaching it needs a real Twitch download. The first live capture is the gate; the `Reauthenticate` Info line names the channel.
-2. **The end-to-end repair.** Start a Twitch capture with an `auth-token` and no `login` row; confirm the platform badge goes not-authenticated with the missing-login sentence on `R C`; add the `login` row; press `R C`; confirm one "re-authenticating live chat sessions" Info line with `sessions=1`, followed by one "twitch chat: authenticated login accepted" line for that channel (Task 4 Step 5 adds it; before Arc 10 nothing logged an accepted `001`).
+2. **The end-to-end repair.** Start a Twitch capture with an `auth-token` and no `login` row; confirm the platform badge goes not-authenticated AND that the missing-login sentence itself renders on BOTH per-request surfaces — the TUI's `R C` result line and the dashboard badge's tooltip (Task 7 Steps 4a/4b; before them a marked platform showed the verdict with no reason on either); add the `login` row; press `R C`; confirm one "re-authenticating live chat sessions" Info line with `sessions=1`, followed by one "twitch chat: authenticated login accepted" line for that channel (Task 4 Step 5 adds it; before Arc 10 nothing logged an accepted `001`).
 3. **Validate stickiness over a real tick.** The same setup left running for one 30-minute cycle: the badge must NOT return to green on its own.
 4. **Task 8 branch A only:** a capture on a genuinely expired `auth-token` with chat capture OFF, confirming the `playback-token-anonymous` mark.
 5. **Recovery interaction.** With `auto_enabled = true`, confirm a chat downgrade produces exactly one browser recovery attempt, not one per refusal.
@@ -4730,7 +4975,7 @@ Run against the spec with fresh eyes after the plan was written. Issues found we
 
 | Spec requirement | Task |
 |---|---|
-| **R1** — every downgrade marks Twitch (`TwitchAuthenticated=false`, `TwitchVerification=RefreshFailed`, `TwitchError` = the route's operator sentence, no new payload key, no schema change) | Task 2 (the write + the vocabulary), Task 6 (the four chat routes reach it), Task 8 branch A (the fifth route), Task 7 (the wiring) |
+| **R1** — every downgrade marks Twitch (`TwitchAuthenticated=false`, `TwitchVerification=RefreshFailed`, `TwitchError` = the route's operator sentence, no new payload key, no schema change) **and every existing surface reuses it, including the per-request reason rendering** | Task 2 (the write + the vocabulary), Task 6 (the four chat routes reach it), Task 8 branch A (the fifth route), Task 7 (the wiring, **and Steps 4a/4b — the two per-request renderers, which gated the reason on `RefreshUnknown` and so showed nothing for a marked platform; found by the Task 2 review, previously unowned**) |
 | **R2** — the mark feeds automatic recovery through `shouldFireRecovery`'s dedupe; the per-job notice survives | Task 2 (`fireRecovery` + `noteRecoveryDecided`), Task 6 (both consumers of one report), Task 7 (the async delivery) |
 | **R3** — the mark is sticky against a validate 200 | Task 2 (`twMarked` / `twEffective` in the status block; `TestValidate200DoesNotClearAStandingTwitchMark`) |
 | **R4** — a credential-pair change clears it; `TwitchIdentity`; `OnCredentialsChanged("twitch")`; every reload site pinned | Task 1 (the fingerprint), Task 2 (the clear), Task 3 (the fire + the reload-site table + `TestCheckNowObservesATwitchCredentialChange`), **Task 7a** (the four sites that reached no pass at all) |
