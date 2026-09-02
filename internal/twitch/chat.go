@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -53,6 +54,16 @@ const (
 	AuthDowngradeUnusableLoginCookie = "unusable-login-cookie"
 )
 
+// errReauthRequested ends an IRC session that Reauthenticate cancelled.
+//
+// It exists to END THE READ LOOP on the first failed read rather than spin
+// through chatMaxConsecutiveErrs of them against a context we cancelled. It is
+// never compared against and never reaches a log line: Start's loop decides on
+// reauthPending and `continue`s before the Warn that would print it, and the
+// Info line beside that `continue` is what says what happened. Its text is
+// therefore for a reader of the code, not for an operator.
+var errReauthRequested = errors.New("IRC session cancelled to present refreshed credentials")
+
 // ChatDownloader connects to Twitch IRC and records live chat messages.
 type ChatDownloader struct {
 	mu sync.Mutex
@@ -89,19 +100,37 @@ type ChatDownloader struct {
 	// noteHandshakeOutcome.
 	authRefused atomic.Bool
 	// warnedNoLogin latches noteMissingLogin's single Warn for the life of this
-	// downloader. A SEPARATE flag from authRefused on purpose: that one also
-	// makes sessionCredentials return an empty pair, and this condition must
-	// change nothing about what goes on the wire.
+	// downloader's CURRENT CREDENTIAL PAIR — Reauthenticate resets it, because
+	// it also gates this site's reportAuthDowngrade and a repaired file that is
+	// still missing its login row has to be reported again.
+	//
+	// A SEPARATE flag from authRefused on purpose: that one also makes
+	// sessionCredentials return an empty pair, and this condition must change
+	// nothing about what goes on the wire.
 	warnedNoLogin atomic.Bool
 	// onAuthDowngrade reports to the OWNER of this downloader that a job which
 	// HAD Twitch credentials is now capturing chat anonymously. nil-safe, and
-	// fired at most once per downloader — see reportAuthDowngrade.
+	// fired at most once per credential pair (Reauthenticate resets the latch)
+	// — see reportAuthDowngrade.
 	onAuthDowngrade func(reason string)
 	// downgradeReported latches onAuthDowngrade across ALL of its trigger
 	// sites. A third flag, not a reuse of either above: warnedNoLogin is
 	// per-site (the fallback's own Warns never touch it) and authRefused is a
 	// behaviour switch rather than a report. See reportAuthDowngrade.
 	downgradeReported atomic.Bool
+	// reauthPending marks the window between Reauthenticate() cancelling a
+	// session and Start's loop consuming that fact. Three sites read it, one
+	// consumes it: runIRCSession's read-error branch ends the session at once
+	// instead of burning chatMaxConsecutiveErrs failed reads against a context
+	// we cancelled; its handshake-outcome defer refuses to read our own cancel
+	// as Twitch refusing the login; and Start's loop Swaps it to false and
+	// reconnects immediately, charging nothing to the reconnect budget.
+	//
+	// It is armed ONLY when there is a live session to interrupt. A flag left
+	// standing on an idle downloader would suppress the handshake verdict of
+	// some LATER session, turning a genuine refusal into an unbounded retry
+	// loop on credentials Twitch will not take.
+	reauthPending atomic.Bool
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.
@@ -178,11 +207,16 @@ type ChatDownloaderOptions struct {
 	// pair cannot be torn by a concurrent cookie reload; nil, or either half
 	// empty, means anonymous. See ChatDownloader.credentials.
 	Credentials func() (token, login string)
-	// OnAuthDowngrade is called AT MOST ONCE per downloader, when a job that
-	// had Twitch credentials is capturing chat anonymously anyway. reason is
-	// one of the AuthDowngrade* constants and never contains a credential, so
-	// it is safe to put in front of an operator verbatim. Optional — nil is
-	// the ordinary case (tests, and any caller with nowhere to route it).
+	// OnAuthDowngrade is called AT MOST ONCE per CREDENTIAL PAIR — once per
+	// downloader until Arc 10, and still once per downloader for any job whose
+	// cookies never change. Reauthenticate resets the latch, so a repaired
+	// credential that fails again reports again, by design.
+	//
+	// It fires when a job that had Twitch credentials is capturing chat
+	// anonymously anyway. reason is one of the AuthDowngrade* constants and
+	// never contains a credential, so it is safe to put in front of an operator
+	// verbatim. Optional — nil is the ordinary case (tests, and any caller with
+	// nowhere to route it).
 	//
 	// Called on the IRC session goroutine, so it must not block: the read loop
 	// is waiting behind it.
@@ -265,12 +299,14 @@ func (cd *ChatDownloader) sessionCredentials() (token, login string) {
 // reportAuthDowngrade tells this downloader's owner, at most once, that a job
 // which HAD Twitch credentials is capturing chat anonymously.
 //
-// ONE report per downloader across every trigger site, not one per site. All of
-// them mean the same thing to an operator — subscriber-only messages and badges
-// are being lost for this job — and the consumer turns the report into a
-// notification, so a job that reported "no login cookie", had its cookies
-// re-imported mid-stream, and was then REFUSED would notify twice about one
-// broken capture. The log keeps every line; the report is one.
+// ONE report per CREDENTIAL PAIR across every trigger site (Reauthenticate
+// resets the latch — see there for why all three latches move together), not
+// one per site. All of them mean the same thing to an operator —
+// subscriber-only messages and badges are being lost for this job — and the
+// consumer turns the report into a notification, so a job that reported "no
+// login cookie", had its cookies re-imported mid-stream, and was then REFUSED
+// would notify twice about one broken capture. The log keeps every line; the
+// report is one.
 //
 // The latch is a THIRD flag rather than a reuse of the two that already exist,
 // and both refusals are load-bearing. authRefused is not a report flag:
@@ -404,11 +440,13 @@ func (cd *ChatDownloader) noteMissingLogin(token, login string) {
 // succeed. That is the pre-fallback outcome, for that one hypothetical case
 // only, traded against a real and reachable path.
 //
-// ONE-SHOT per job: once anonymous, the job stays anonymous. Flapping between
-// the two would re-pay the rejected handshake on every reconnect, which is the
-// cost this exists to bound. Cost if wrong: a cookie repaired mid-job does not
-// re-authenticate chat until the next job — exactly the behaviour that shipped
-// before the nickname existed, so a floor rather than a regression.
+// ONE-SHOT per CREDENTIAL PAIR: once anonymous, the job stays anonymous for as
+// long as the cookie file holds the pair Twitch refused. Flapping would re-pay
+// the rejected handshake on every reconnect, which is the cost this exists to
+// bound — so the latch is cleared by exactly one thing, Reauthenticate, which
+// fires when the credential pair on disk actually changes. A cookie repaired
+// mid-job therefore DOES re-authenticate chat, in place, without waiting for
+// the next job; a second refusal on the new pair latches again here.
 //
 // Neither the token nor the login is named in the log line.
 //
@@ -622,13 +660,19 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		reconnectResetUptime = 5 * time.Minute
 	)
 	reconnectAttempts := 0
+	// immediate suppresses the backoff for a reconnect WE asked for. Separate
+	// from reconnectAttempts because the two answer different questions: how
+	// many times the network has failed us, and whether to wait before the
+	// next attempt. A credential the operator has just repaired must reach the
+	// wire now, not after thirty seconds.
+	immediate := false
 
 	for reconnectAttempts <= maxReconnects {
 		if ctx.Err() != nil || !cd.IsRunning() {
 			return nil
 		}
 
-		if reconnectAttempts > 0 {
+		if reconnectAttempts > 0 && !immediate {
 			// Exponential backoff: 1000 * 2^attempts, capped at 30s (matches TypeScript)
 			shift := min(reconnectAttempts, 15) // cap shift to prevent overflow
 			delayMs := min(1000*(1<<shift), 30000)
@@ -642,10 +686,36 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			case <-time.After(delay):
 			}
 		}
+		immediate = false
 
 		sessionStart := time.Now()
 		err := cd.runIRCSession(ctx)
 		sessionUptime := time.Since(sessionStart)
+
+		// A Reauthenticate() cancelled this session on purpose. Swap rather
+		// than Load, and on EVERY exit path rather than only the expected one:
+		// the flag's job is done once the session it interrupted has unwound,
+		// and a cancel that raced a real socket failure must not leave it
+		// standing into a later session where it would suppress a genuine
+		// refusal.
+		//
+		// Straight back in: no backoff, and nothing charged to the reconnect
+		// budget. That budget bounds retries against a network that will not
+		// stay up; this drop was ours, and eleven credential repairs during one
+		// marathon stream must not be able to exhaust it and abandon chat for
+		// the rest of the job.
+		if cd.reauthPending.Swap(false) && ctx.Err() == nil && cd.IsRunning() {
+			// Flush first, exactly as the backoff path above does. The owner
+			// priced this reconnect as "one flush plus one reconnect per
+			// session per credential change", and that is the cost the docs
+			// quote; skipping it would leave the tail of this session's chat in
+			// memory until the next session's flusher tick, which is a second,
+			// undocumented behaviour for no saving.
+			cd.flush()
+			cd.logger.Info("twitch chat: reconnecting with the refreshed credentials", "channel", cd.channelLogin)
+			immediate = true
+			continue
+		}
 
 		if err == nil || ctx.Err() != nil || !cd.IsRunning() {
 			return nil
@@ -727,6 +797,60 @@ func (cd *ChatDownloader) interruptSession() {
 	cd.mu.Lock()
 	cancel := cd.sessionCancel
 	cd.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// Reauthenticate tells a running downloader to drop its IRC session and open a
+// new one with whatever credentials the cookie jar holds NOW.
+//
+// The problem it solves. Credentials are re-read per session, but nothing ends
+// a healthy session, and after a refusal authRefused latches for the life of
+// the downloader — so an operator who repairs cookies.txt four hours into a
+// twelve-hour capture keeps capturing anonymously until the job ends, losing
+// every subscriber-only message and badge in between. This is the only thing
+// that can undo that.
+//
+// IT RESETS THREE LATCHES, not two. authRefused is the behaviour switch that
+// makes sessionCredentials return an empty pair. downgradeReported is the
+// one-report-per-downloader latch. And warnedNoLogin is not merely a log
+// latch: noteMissingLogin returns on its Swap BEFORE it reaches
+// reportAuthDowngrade, so leaving it set means a repaired cookie file that is
+// still missing its login row reports NOTHING the second time — precisely the
+// silence this whole mechanism exists to end. All three are reset before the
+// session is dropped, so the next handshake is judged on its own merits.
+//
+// The drop goes through the existing sessionCancel, so a session parked in a
+// six-minute read reacts at once rather than minutes later.
+//
+// reauthPending is armed inside the same critical section that reads
+// sessionCancel, and only when a session exists. Arming it for an idle
+// downloader would leave it standing until some later session ended, and that
+// session's handshake-outcome defer would then read a genuine refusal as our
+// own cancel.
+//
+// Safe on a downloader that is not running: the latches are still cleared, so
+// the next Start — the orchestrator relaunches chat after a connectivity gap —
+// presents credentials. Safe from any goroutine, and it does not block.
+func (cd *ChatDownloader) Reauthenticate() {
+	cd.authRefused.Store(false)
+	cd.downgradeReported.Store(false)
+	cd.warnedNoLogin.Store(false)
+
+	// interruptSession's body is inlined rather than called, because the
+	// decision and the read must be ONE critical section: between a separate
+	// read and a separate arm, a session could start or end.
+	cd.mu.Lock()
+	cancel := cd.sessionCancel
+	if cancel != nil {
+		cd.reauthPending.Store(true)
+	}
+	cd.mu.Unlock()
+
+	// Names no credential, and there is nothing here to name one with.
+	cd.logger.Info("twitch chat: re-authenticating with the current credentials",
+		"channel", cd.channelLogin, "hadLiveSession", cancel != nil)
 	if cancel != nil {
 		cancel()
 	}
