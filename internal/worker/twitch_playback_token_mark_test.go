@@ -11,11 +11,19 @@ import (
 // variant list — "did Twitch honour the credentials this install sent?" — and
 // noteAnonymousPlayback is everything processTwitchLive does with the answer.
 //
-// processTwitchLive itself is unreachable offline: it needs a live GQL reply
-// and a real Usher playlist, and neither has a seam. So the decision it makes
-// with that bool lives in a named method, and these drive that method.
+// processTwitchLive itself is unreachable offline — sp.tw is a concrete
+// *twitch.Service, so there is nothing to substitute at that call site. So the
+// decision it makes with that bool lives in a named method, and these drive
+// that method. (The method it calls, Service.GetHLSMasterPlaylist, IS covered
+// offline: internal/twitch/service_hls_playback_token_test.go swaps the
+// package-level twitchHTTPClient.)
+//
+// Every test name here carries "PlaybackToken" on purpose: it is the -run
+// filter this arc's briefs use, and the three tests were once named
+// TestNoteAnonymousPlayback*, which that filter silently skipped — turning two
+// mutation runs into false greens. Keep the prefix.
 
-// TestNoteAnonymousPlaybackMarksOnlyWhenTwitchIgnoredTheCredentials.
+// TestPlaybackTokenMarkFiresOnlyWhenTwitchIgnoredTheCredentials.
 //
 // Two mutations, both silent and both fatal in opposite directions:
 //
@@ -28,7 +36,7 @@ import (
 //     the platform is marked, so a bare "something was marked" assertion still
 //     passes, and the operator is told their login was refused by a chat
 //     handshake that never ran.
-func TestNoteAnonymousPlaybackMarksOnlyWhenTwitchIgnoredTheCredentials(t *testing.T) {
+func TestPlaybackTokenMarkFiresOnlyWhenTwitchIgnoredTheCredentials(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		anonymousPlayback bool
@@ -56,7 +64,7 @@ func TestNoteAnonymousPlaybackMarksOnlyWhenTwitchIgnoredTheCredentials(t *testin
 	}
 }
 
-// TestNoteAnonymousPlaybackWithNoSeamWiredIsInert. Every install that has no
+// TestPlaybackTokenMarkWithNoSeamWiredIsInert. Every install that has no
 // refresh service wired — every test in this package included — reaches this
 // method on the ordinary capture path.
 //
@@ -64,13 +72,13 @@ func TestNoteAnonymousPlaybackMarksOnlyWhenTwitchIgnoredTheCredentials(t *testin
 // panics on the job goroutine and takes the capture down instead of starting
 // it. A degradation report must never be able to cost more than the
 // degradation.
-func TestNoteAnonymousPlaybackWithNoSeamWiredIsInert(t *testing.T) {
+func TestPlaybackTokenMarkWithNoSeamWiredIsInert(t *testing.T) {
 	sp := &StreamProcessor{}
 	sp.noteAnonymousPlayback(true)
 	sp.noteAnonymousPlayback(false)
 }
 
-// TestNoteAnonymousPlaybackReachesTheOperatorSentence drives the whole route
+// TestPlaybackTokenMarkReachesTheOperatorSentence drives the whole route
 // this task added — worker method → the platform mark → AuthStatus — through
 // the REAL RefreshService rather than a recording stub.
 //
@@ -84,7 +92,7 @@ func TestNoteAnonymousPlaybackWithNoSeamWiredIsInert(t *testing.T) {
 //
 // No network: NoteTwitchAuthLoss makes no request, and on an EMPTY jar
 // shouldFireRecovery declines, so no callback fires either.
-func TestNoteAnonymousPlaybackReachesTheOperatorSentence(t *testing.T) {
+func TestPlaybackTokenMarkReachesTheOperatorSentence(t *testing.T) {
 	rs := cookies.NewRefreshService(cookies.NewCookieJar(), 0, nopWorkerLogger{})
 	sp := &StreamProcessor{}
 	sp.SetOnTwitchAuthLoss(rs.NoteTwitchAuthLoss)

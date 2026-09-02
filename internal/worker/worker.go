@@ -641,11 +641,24 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			}
 			variant.FetchVariantsFn = func(innerCtx context.Context) ([]twitch.TwitchHLSVariant, error) {
 				// The anonymous-playback verdict is discarded HERE and only
-				// here: this closure re-fetches variants on every mid-stream
-				// format change, and the platform mark was already taken at
-				// capture start by processTwitchLive's call. Marking again per
-				// probe would say nothing new and would re-fire recovery
-				// dedupe bookkeeping on a loop.
+				// here. ONE VERDICT PER CAPTURE is the design (Arc 10 R6):
+				// processTwitchLive takes the mark at capture start and this
+				// closure does not take it again.
+				//
+				// Not because repeats are expensive — they are not. A repeat
+				// NoteTwitchAuthLoss with the same reason computes
+				// changed == false and shouldFireRecovery declines, so it is
+				// an idempotent status write. The reason is that this closure
+				// is not a detector worth building the story on: it backs
+				// refreshBestVariant, so it runs on EVERY (re)start of a
+				// downloader — post-outage resume, gap recovery, quality
+				// change, init change — and the quality probe, which means it
+				// re-mints the playback token many times on one capture and
+				// may also never run at all on a clean stream.
+				//
+				// What that costs, stated plainly because nothing else says
+				// it: a credential that dies MID-CAPTURE on a chat-off job is
+				// not marked until the next capture start.
 				variants, _, err := w.tw.GetHLSMasterPlaylist(innerCtx, login)
 				return variants, err
 			}

@@ -90,10 +90,16 @@ type StreamProcessor struct {
 	// at call sites.
 	wakeScheduler func()
 
-	// onTwitchAuthLoss reports a Twitch chat downgrade to whatever owns the
+	// onTwitchAuthLoss reports a Twitch auth downgrade to whatever owns the
 	// PLATFORM's credential status — cookies.RefreshService.NoteTwitchAuthLoss
 	// in production, wired by cmd/moombox. nil is a valid install and the
 	// per-job notification still goes out.
+	//
+	// BOTH routes come through here: the four IRC chat-handshake reasons, via
+	// twitchChatDowngradeCallback, and the HLS playback-token reason, via
+	// noteAnonymousPlayback. The second is the only one a job with chat
+	// capture switched off can produce, and it sends no notification — the
+	// mark and GetHLSMasterPlaylist's Warn are the whole report.
 	//
 	// A func rather than the service, so internal/worker does not import
 	// internal/cookies. Same inversion, and the same reason, as

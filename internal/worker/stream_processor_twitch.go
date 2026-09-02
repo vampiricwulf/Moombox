@@ -101,10 +101,10 @@ type notifySend func(title, description string, ntype notifications.Notification
 // worse than the log line it was meant to escape.
 //
 // It covers the WHOLE vocabulary, including the playback-token route that no
-// caller can reach today: nothing sends a chat notice for it (the HLS side
-// marks the platform and logs, it does not notify), and the arm exists so that
-// a later caller which does cannot land on the generic sentence. A partial
-// mirror is the drift this arc was written to stop.
+// caller can reach today, so that a later caller cannot land on the generic
+// sentence — a partial mirror is the drift this arc was written to stop. That
+// arm's sentence is correct in isolation; the payload built AROUND it is not.
+// See twitchChatDowngradeNotice's SCOPE note before wiring anything to it.
 func twitchChatDowngradeReason(reason string) string {
 	switch reason {
 	case twitch.AuthDowngradeLoginRefused:
@@ -148,6 +148,21 @@ func twitchChatDowngradeReason(reason string) string {
 // A notice that said "chat only" would therefore be read as "no rush", and the
 // cost of that misreading lands silently: an archive with holes in it, hours
 // later, with nothing above Info in the log to explain them.
+//
+// SCOPE: the four IRC chat-handshake routes ONLY. The vocabulary has a fifth
+// member — twitch.AuthDowngradePlaybackTokenAnonymous — and this payload is
+// wrong for it in THREE places, not one: the title says "chat"; the first
+// clause says chat is still being recorded, when that route's whole reason to
+// exist is the job with chat capture OFF; and the tail says THIS download is
+// unaffected, which is the exact inverse of what that route reports — the
+// token this capture is being served under is the anonymous one.
+//
+// Nothing routes it here today: the HLS side marks the platform and logs, it
+// does not notify. A caller that wants a notice for it needs its OWN renderer.
+// Do not widen this one, and do not add the fifth reason to
+// TestTwitchChatDowngradeNoticeCarriesNoCredential's list expecting the shared
+// tail to hold — it asserts "NEXT capture will start anonymous", which is
+// false for that route.
 func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
 	title, description string, fields []notifications.Field, opts notifications.SendOptions,
 ) {
