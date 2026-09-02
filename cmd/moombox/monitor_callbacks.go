@@ -527,12 +527,13 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	// new-but-refused credential moves the fingerprint exactly as a working one
 	// does — so the Twitch auth mark taken under the OLD pair would stand until
 	// the ticker, naming a login problem the file no longer has. And a pass
-	// that ran and then ERRORED is the same story: three of the four
-	// refreshAborted() exits in refreshCookiesDetailed happen AFTER the write,
-	// including the one where cookies.txt was replaced and only the jar reload
-	// failed — the case where a re-check is worth most, because refresh's own
-	// jar.Reload repairs the stale in-memory jar this pass left behind. Both
-	// services share one *CookieJar.
+	// that ran and then ERRORED is the same story: three of the EIGHT
+	// refreshAborted() exits in refreshCookiesDetailed happen AFTER the write
+	// — the jar reload that failed over a cookies.txt just replaced, and the
+	// two rollback exits, which fail over a file the import had already
+	// rewritten. That first one is where a re-check is worth most, because
+	// refresh's own jar.Reload repairs the stale in-memory jar the abort left
+	// behind. Both services share one *CookieJar.
 	//
 	// Deferred rather than copied into each exit: the gate has to be evaluated
 	// independently of the error return, and there are three returns below plus
@@ -542,11 +543,15 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	// Gated on Ran, which is an OVER-approximation and deliberately so. Ran is
 	// false at all seven refreshDeclined() exits — setup in progress, a refresh
 	// already in flight, nothing configured, the service stopped — where
-	// nothing was written and there is nothing to re-read. It is true at one
-	// abort that also wrote nothing (the S9 read failure). Getting that one
-	// wrong costs a single validate pass; getting the declines wrong would
-	// print a staleness warning about a file nobody touched, and getting the
-	// post-write aborts wrong costs half an hour.
+	// nothing was written and there is nothing to re-read. It is true at the
+	// FIVE aborts that failed before the write as well as at the three that
+	// failed after it: an empty profile import, a browser refresh that errored,
+	// a failed MkdirAll, the S9 read abort, and the write itself failing. Each
+	// of those five costs one wasted validate pass on a rare error path.
+	// Getting the declines wrong would instead print a staleness warning about
+	// a file nobody touched, on every ordinary tick; getting the three
+	// post-write aborts wrong costs half an hour of a stale mark. Ran buys the
+	// second and third at the price of the first.
 	defer func() {
 		if result.Ran {
 			recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "recovery", "platform", platform)
@@ -694,10 +699,11 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 		//     LOGIN_INFO, so a jar holding it with the whole SAPISID family
 		//     gone is "configured" and still cannot sign a request.
 		//
-		// Deliberately NOT offered: "it stopped before verifying". Every
-		// refreshAborted() in autocookies.go (:918, :988, :995, :1041, :1046,
-		// :1101, :1113) is returned with a non-nil error, so an aborted pass
-		// takes the err != nil branch above and cannot reach this line. Nor
+		// Deliberately NOT offered: "it stopped before verifying". All EIGHT
+		// refreshAborted() returns in refreshCookiesDetailed carry a non-nil
+		// error — stated as a count rather than a line list, which had drifted
+		// by hundreds of lines and by one exit — so an aborted pass takes the
+		// err != nil branch above and cannot reach this line. Nor
 		// "it declined to run" — the branch above takes every declined pass.
 		// Both would be causes this code cannot have.
 		//

@@ -433,7 +433,7 @@ func (s *runState) runTUI() {
 		// badge.
 		//
 		// Deferred, so the Ran gate is evaluated independently of the error
-		// return below: three of the four refreshAborted() exits happen after
+		// return below: three of the eight refreshAborted() exits happen after
 		// cookies.txt was rewritten, and returning on err first skipped exactly
 		// the passes whose write nobody had compared.
 		defer func() {
@@ -503,9 +503,15 @@ func (s *runState) runTUI() {
 			// successful write can fail, and that exit hands back an error over
 			// a cookies.txt that has already been replaced.
 			//
-			// context.Background rather than finishCtx, which the defer above
-			// cancels the moment this closure returns — including before a
-			// deferred re-check would have finished.
+			// context.Background rather than finishCtx, and NOT because finishCtx
+			// is gone: defers run LIFO, so this one runs to completion before
+			// finishCancel above fires, and finishCtx is alive throughout it.
+			// The reason is that its 60 s budget is the WIZARD's — priced
+			// against the server-side setup grace window, as the comment on the
+			// timeout says — and the re-check is not the wizard's work to spend
+			// it on. Same as the other four sites: none of them wants a
+			// fingerprint comparison cancelled by its caller's teardown, and
+			// the re-check has to outlive nothing.
 			defer func() {
 				if result.Wrote {
 					recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "the setup wizard")

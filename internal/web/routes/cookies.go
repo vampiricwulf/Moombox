@@ -487,15 +487,34 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// is expected to spend: the shared HTTP client caps every request at
 		// 30 s and each auth check wraps its own 15 s context on top, so a live
 		// pass finishes well inside this. It exists so a wedged round-trip
-		// cannot hold a detached context open indefinitely.
+		// cannot hold a detached context open indefinitely — and, since the
+		// handler does not return until the deferred pass does, so it cannot
+		// hold the connection open indefinitely either.
 		//
 		// Deferred, so the gate is evaluated independently of the error switch
-		// below — the jar reload after a successful write returns an error over
-		// a file that has already been replaced — and so the re-check runs after
-		// jsonResponse rather than in front of the frontend's 60 s abort.
+		// below: the jar reload after a successful write returns an error over a
+		// file that has already been replaced, and that is the one error exit
+		// this re-check must not skip.
+		//
+		// The Flush is what makes "the client is not waiting on this" true. The
+		// defer alone does not: jsonResponse and jsonError both write into
+		// net/http's bufio writer and neither flushes, the handler does not
+		// return until this defer completes, and Server.WriteTimeout is 0 — so
+		// without it a browser on the setup dialog's 60 s AbortController waits
+		// for FinishSetupDetailed PLUS up to 45 s of re-check and can abort a
+		// setup that in fact succeeded. Flushing here commits the response
+		// first; the gzip wrapper implements Flusher, and /api/update/apply
+		// already relies on the same thing before it restarts the process.
+		//
+		// Inside the defer rather than after jsonResponse so it covers the
+		// jar-reload error exit too, which answers through jsonError and is
+		// precisely the error path that reaches the re-check.
 		defer func() {
 			if refreshSvc == nil || !result.Wrote {
 				return
+			}
+			if f, ok := rw.(http.Flusher); ok {
+				f.Flush()
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()

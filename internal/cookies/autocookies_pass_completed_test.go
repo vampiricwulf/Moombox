@@ -3,6 +3,7 @@ package cookies
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -104,30 +105,58 @@ func TestNotePassCompletedHasExactlyItsTwoWritingCallers(t *testing.T) {
 // those spends a full in-process re-check, two validate round-trips, on a file
 // nobody touched, then logs a staleness warning that describes nothing.
 //
-// The mutation: `if result.Ran` → `if true` at either site, or hoisting the
-// call out of the if entirely.
+// The mutations: `if result.Ran` → `if true` at either site; hoisting the call
+// out of the if entirely; and — the one the first version of this test let
+// through — moving it into the `else`, which inverts the invariant exactly and
+// still reports an enclosing `if` whose condition is `result.Ran`.
 func TestNotePassCompletedIsGatedOnRanAtEverySite(t *testing.T) {
 	sites := gatedCallsOf(t, "notePassCompleted")
 	if len(sites) == 0 {
 		t.Fatal("no call to notePassCompleted was found at all")
 	}
-	for fn, cond := range sites {
+	for site, cond := range sites {
 		if cond != "Ran" {
-			t.Errorf("%s calls notePassCompleted under %q, want it gated on the pass result's Ran "+
-				"field. A pass that declined wrote nothing, so there is nothing to re-read", fn, cond)
+			t.Errorf("%s calls notePassCompleted %s, want it inside `if result.Ran {`. A pass that "+
+				"declined wrote nothing, so there is nothing to re-read — and a pass that RAN is the "+
+				"only one whose write has to reach the fingerprint comparison", site, cond)
 		}
 	}
 }
 
-// gatedCallsOf maps each function that calls `callee` to the field name its
-// nearest enclosing `if` tests, or "" when the call is not inside one, or when
-// the condition is anything other than a bare field selector.
+// The sentinels gatedCallsOf reports in place of a condition name. Each is a
+// distinct failure so the message names the fix instead of leaving a reader to
+// guess: a call with no gate, a gate that is not a field test, and a call under
+// the WRONG BRANCH of a correct-looking gate are three different mistakes that
+// all used to read as `under ""`.
+const (
+	gateNone         = "with no enclosing if at all"
+	gateUnrecognised = "under an if whose condition is not a bare field selector (e.g. `if true`, or a compound condition)"
+	gateElse         = "in the ELSE branch of its if — the invariant inverted: it fires on exactly the passes that wrote nothing"
+)
+
+// gatedCallsOf maps each call site of `callee` — keyed by enclosing function
+// and source position, so two calls in one function cannot mask each other — to
+// the field name its nearest enclosing `if` tests, or to one of the sentinels
+// above.
 //
 // Parsed rather than grepped for the reason callersOf is: the claim is about
-// the STRUCTURE around a call, which no substring search can express. Only a
-// bare selector condition is recognised — `if result.Ran {` — so `if true`, an
-// inverted gate, a hoisted call and a gate on some other field all come back as
-// something that is not "Ran".
+// the STRUCTURE around a call, which no substring search can express.
+//
+// WHAT IS RECOGNISED as a gate: the call sits inside the BODY of an `if` whose
+// condition is a bare field selector, and the reported name is that field.
+// `if result.Ran { s.notePassCompleted() }` reports "Ran".
+//
+// WHAT IS NOT, each with its own sentinel: no enclosing `if`; a condition that
+// is not a bare selector, which covers `if true`, `if !result.Ran`, and
+// `if result.Ran && x`; and a call reached through the `else` rather than the
+// body. That last one is why the branch check exists — the first version of
+// this helper walked to the nearest IfStmt and read its condition without
+// asking WHICH SIDE the call was on, so `if result.Ran { … } else { call }`,
+// the precise inversion of the invariant, reported "Ran" and passed.
+//
+// `else if` behaves correctly by construction: the nearest enclosing IfStmt of
+// a call in an `else if` body is that inner `if`, and the check compares
+// against the inner one's Body.
 func gatedCallsOf(t *testing.T, callee string) map[string]string {
 	t.Helper()
 
@@ -167,23 +196,37 @@ func gatedCallsOf(t *testing.T, callee string) map[string]string {
 				if !ok || sel.Sel.Name != callee {
 					return true
 				}
-				cond := ""
-				for i := len(stack) - 1; i >= 0; i-- {
-					ifStmt, ok := stack[i].(*ast.IfStmt)
-					if !ok {
-						continue
-					}
-					if condSel, ok := ifStmt.Cond.(*ast.SelectorExpr); ok {
-						cond = condSel.Sel.Name
-					}
-					break
-				}
-				out[fn.Name.Name] = cond
+				site := fmt.Sprintf("%s (%s)", fn.Name.Name, fset.Position(call.Pos()))
+				out[site] = gateOf(stack)
 				return true
 			})
 		}
 	}
 	return out
+}
+
+// gateOf reads the gate around the call at the top of `stack`, which holds
+// every ancestor node from the enclosing function body down to the call.
+func gateOf(stack []ast.Node) string {
+	for i := len(stack) - 1; i >= 0; i-- {
+		ifStmt, ok := stack[i].(*ast.IfStmt)
+		if !ok {
+			continue
+		}
+		// WHICH SIDE. stack[i+1] is the ancestor one level inside the if, so it
+		// is the if's Body block for a call in the body and its Else for one in
+		// the else. Comparing the pointers is what makes the inverted gate
+		// visible; reading Cond alone cannot see it.
+		if i+1 >= len(stack) || stack[i+1] != ast.Node(ifStmt.Body) {
+			return gateElse
+		}
+		condSel, ok := ifStmt.Cond.(*ast.SelectorExpr)
+		if !ok {
+			return gateUnrecognised
+		}
+		return condSel.Sel.Name
+	}
+	return gateNone
 }
 
 // TestSetupResultWroteReportsWhetherTheFileWasReplaced pins the setup path's

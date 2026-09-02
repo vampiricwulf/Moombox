@@ -682,7 +682,7 @@ func TestRecoveryRechecksExactlyWhenThePassRan(t *testing.T) {
 				return cookies.RefreshResult{Ran: true}, boom
 			},
 			want: 1,
-			why: "three of the four refreshAborted() exits happen AFTER the write — the fingerprint " +
+			why: "three of the eight refreshAborted() exits happen AFTER the write — the fingerprint " +
 				"moved and the caller still sees an error, which is exactly the path a re-check " +
 				"placed below the error return would miss",
 		},
