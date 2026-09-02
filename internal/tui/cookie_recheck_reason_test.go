@@ -76,10 +76,15 @@ func TestRecheckFeedbackNamesWhyACheckCouldNotConclude(t *testing.T) {
 	})
 
 	t.Run("an OK verdict renders the shared sentence and nothing else", func(t *testing.T) {
-		// Unchanged intent. An authenticated check has no cause to give, and
-		// verdictFromCheck cannot produce OK beside a non-empty reason — so
-		// this row is a pin on the PRODUCER's invariant, exercised through the
-		// renderer, and it must keep passing after the gate widened.
+		// Unchanged intent, and a RENDERER pin only: the message is built by
+		// hand here, so nothing about the producer is exercised — it asserts
+		// that an empty reason adds no parenthetical, which is what keeps the
+		// widening additive for every install whose cookies are fine.
+		//
+		// The producer half — that verdictFromCheck cannot return OK beside a
+		// non-empty reason, because OK requires a nil error and the reason
+		// string IS that error — is what makes this row sufficient rather than
+		// a hole. It is a property of internal/cookies and is pinned there.
 		got := recheckFeedback(t, 200, true, false, cookieRecheckResultMsg{
 			YouTube:       cookies.RefreshOK,
 			YouTubeReason: "",
@@ -93,12 +98,15 @@ func TestRecheckFeedbackNamesWhyACheckCouldNotConclude(t *testing.T) {
 	})
 
 	t.Run("a conclusive REFUSAL names its reason", func(t *testing.T) {
-		// Arc 10 reversed this row. The mark writes RefreshFailed with one of
-		// four fixed sentences, and it is the only thing that says WHICH route
-		// broke — "the cookie file has a Twitch auth-token but no login cookie
-		// beside it" versus "Twitch refused the saved login" are different
-		// remedies. Withholding it left the operator with "not authenticated"
-		// and no next step.
+		// Arc 10 reversed this row. It rested on "a conclusive verdict has no
+		// cause to give", which was already false: verdictFromCheck maps the
+		// unsignable-jar sentinel to RefreshFailed with the error recorded, so
+		// the old gate had been swallowing that cause since Arc 8. The mark is
+		// the second such producer, and its four fixed sentences are the only
+		// thing that says WHICH route broke — "the cookie file has a Twitch
+		// auth-token but no login cookie beside it" versus "Twitch refused the
+		// saved login" are different remedies. Withholding either left the
+		// operator with "not authenticated" and no next step.
 		//
 		// THE MUTATION: narrowing the gate back to
 		// `verdict == cookies.RefreshUnknown && reason != ""` in

@@ -515,15 +515,18 @@ export function parkedCookiePlatforms(jobs) {
  *
  * The reason line is `youtubeError` / `twitchError` off the same payload, and
  * it is appended to whichever arm has one. Until Arc 10 that was the
- * inconclusive arm alone, because every producer left the field empty on a
- * conclusive verdict — but `NoteTwitchAuthLoss` writes `failed` WITH a fixed
- * sentence naming which of the four Twitch chat-downgrade routes broke, and
- * that sentence is the only thing distinguishing "no login cookie" from
- * "Twitch refused the login". An `ok` verdict still shows nothing, by
- * construction: the server derives the verdict from the same error the string
- * carries, so `ok` and a non-empty reason cannot co-occur. An older binary
- * sends no such key at all and both titles degrade to exactly today's
- * sentence.
+ * inconclusive arm alone, on the belief that a conclusive verdict never
+ * carries a reason. TWO producers do. The server maps its
+ * "auth check could not be attempted" sentinel — a jar that is configured and
+ * can never be signed — to `failed` while still recording the error, so the
+ * old rule silently dropped the one cause whose remedy is exactly "re-export
+ * your cookies"; and since Arc 10 `NoteTwitchAuthLoss` writes `failed` with a
+ * fixed sentence naming which of the four Twitch chat-downgrade routes broke,
+ * which is the only thing distinguishing "no login cookie" from "Twitch
+ * refused the login". An `ok` verdict still shows nothing, by construction:
+ * the server derives that verdict from the same error the string carries, so
+ * `ok` and a non-empty reason cannot co-occur. An older binary sends no such
+ * key at all and both titles degrade to exactly today's sentence.
  */
 export function cookieIndicatorState(platform, status, reloginRequired, parked) {
   const meta = COOKIE_INDICATOR_PLATFORMS[platform];

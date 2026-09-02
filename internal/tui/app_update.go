@@ -792,13 +792,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // string is what an operator with working cookies still sees.
 //
 // A reason is rendered for any ACTIVE platform that has one, whatever the
-// verdict. Until Arc 10 the gate was RefreshUnknown as well, because every
-// producer left the field empty on a conclusive verdict — but
-// NoteTwitchAuthLoss writes RefreshFailed WITH a fixed sentence naming which
-// chat-downgrade route broke, and that sentence is the only thing separating a
-// missing login cookie from a refused one. An OK verdict still carries
-// nothing: see the gate itself for why that is a property of the producer
-// rather than a promise from the caller.
+// verdict. Until Arc 10 the gate was RefreshUnknown as well, and that was
+// already swallowing one: verdictFromCheck maps ErrAuthCheckNotAttempted to
+// RefreshFailed while the error string still rides along, so a jar that is
+// configured and can never be signed rendered as a bare "not authenticated"
+// with its cause dropped. NoteTwitchAuthLoss adds the second, and its four
+// sentences are the only thing separating a missing login cookie from a
+// refused one. An OK verdict still carries nothing: see the gate itself for
+// why that is a property of the producer rather than a promise from the
+// caller.
 //
 // LastError is a THIRD part, and it is ungated by any verdict on purpose. It
 // belongs to the auto-cookie service, not to the check this line reports, and
@@ -837,14 +839,23 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 		}
 		// Gated on the STRING, not on the verdict, since Arc 10.
 		//
-		// It was gated on RefreshUnknown because every producer at the time
-		// left the reason empty on a conclusive verdict — a cause attached to
-		// "OK" or "not authenticated" reads as an explanation for a conclusion
-		// that has none. NoteTwitchAuthLoss is the first producer that writes
-		// RefreshFailed WITH a reason, and it is precisely the reason the
-		// operator needs: which of the four chat-downgrade routes broke. Under
-		// the old gate they pressed R C and read "Twitch not authenticated"
-		// with no way to tell a missing login cookie from a refused one.
+		// It was gated on RefreshUnknown on the belief that a conclusive
+		// verdict never carries a reason. That was never quite true and is
+		// now plainly false — TWO producers write RefreshFailed WITH one:
+		//
+		//   - The unsignable-jar sentinel. verdictFromCheck maps
+		//     ErrAuthCheckNotAttempted to RefreshFailed (deliberately: a jar
+		//     that is configured and can never be signed is a permanent,
+		//     actionable failure, not uncertainty), while doRefresh still
+		//     records the error as the reason. The old gate dropped it, so
+		//     "no SAPISIDHASH could be generated" rendered as a bare "not
+		//     authenticated" — the one shape in the tree where re-exporting
+		//     cookies is exactly the remedy and nothing said so.
+		//   - NoteTwitchAuthLoss, since Arc 10, whose four fixed sentences are
+		//     the only thing telling the operator WHICH chat-downgrade route
+		//     broke. Under the old gate they pressed R C and read "Twitch not
+		//     authenticated" with no way to tell a missing login cookie from a
+		//     refused one.
 		//
 		// RefreshOK still carries nothing, and by construction rather than by
 		// trust: verdictFromCheck returns OK only when the error is nil, and

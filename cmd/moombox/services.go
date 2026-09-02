@@ -127,6 +127,59 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 	}
 }
 
+// twitchAuthLossHook wraps the platform-mark call in the goroutine its caller
+// requires, and returns the function wired into DownloadWorker.SetOnTwitchAuthLoss.
+//
+// Extracted from the wiring below for the reason reauthenticateTwitchChats and
+// wireCredentialRepairCallbacks were: the decision inside it — that the mark is
+// delivered ASYNCHRONOUSLY — is the one this whole seam turns on, and inside
+// initServices nothing can drive it. `go build` proves only that the join
+// compiles.
+//
+// WHY THE GOROUTINE. Everything upstream of here is inline: ChatDownloader
+// calls OnAuthDowngrade on the IRC session goroutine with the read loop parked
+// behind it (chat.go states the contract), and the worker's downgrade callback
+// forwards it inline. Everything downstream is inline too —
+// NoteTwitchAuthLoss takes the refresh service's write lock, contended with
+// every GetStatus a dashboard or status bar makes, and then fires OnAuthChange
+// and OnRecoveryNeeded from inside its own call. The OnRecoveryNeeded
+// subscriber does a config-store read and then, on the auto_enabled=false arm,
+// a Warn, a cooldown-map lock and a fan-out over every notification target.
+// None of that is bounded by anything the chat path controls, and a chat read
+// loop parked behind it drops every message for the duration.
+//
+// It is NOT that a webhook is posted synchronously — notifications.Manager.Send
+// hands each target to its own semaphore-bounded goroutine and returns, and
+// handleRecoveryNeeded's auto_enabled=true arm spawns its own goroutine for the
+// browser pass. The reason is the unbounded synchronous chain above, plus a
+// contract at chat.go that is unconditional.
+//
+// Fire-and-forget is correct rather than convenient: the mark is idempotent —
+// writing the same reason twice is the same status — and the downloader
+// latches its report once per job anyway, so there is nothing to sequence and
+// nothing to wait for. The reason is a fixed vocabulary token; nothing read
+// from the jar or the wire passes through here.
+//
+// mark is (*cookies.RefreshService).NoteTwitchAuthLoss in production, taken as
+// a func so the delivery contract can be driven without a refresh service.
+func twitchAuthLossHook(mark func(reason string), log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) func(reason string) {
+	return func(reason string) {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("panic marking twitch auth loss", "panic", fmt.Sprint(r))
+				}
+			}()
+			mark(reason)
+		}()
+	}
+}
+
 // livenessFromProbe collapses ProbeAccountLiveness's (verdict, error) pair
 // into the (loggedIn, conclusive) pair RefreshService.FallbackLiveness
 // expects. Written as a function taking the probe's two results so it can be
@@ -900,28 +953,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// per-job notification the worker already sends.
 	//
 	// ON ITS OWN GOROUTINE, with the inline recover every goroutine in this
-	// project carries. The caller is internal/twitch's IRC session goroutine
-	// with its read loop parked behind this call (OnAuthDowngrade's contract
-	// says it must not block), and NoteTwitchAuthLoss can reach
-	// handleRecoveryNeeded's auto_enabled=false arm, which sends the
-	// "Cookie Re-Authentication Required" webhook SYNCHRONOUSLY. A chat read
-	// loop must not be held open behind an HTTP POST to Discord.
-	//
-	// Fire-and-forget is correct rather than convenient: the mark is
-	// idempotent — writing the same reason twice is the same status — and the
-	// downloader latches its report once per job anyway, so there is nothing
-	// to sequence and nothing to wait for. The reason is a fixed vocabulary
-	// token; nothing read from the jar or the wire passes through here.
-	dlWorker.SetOnTwitchAuthLoss(func(reason string) {
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error("panic marking twitch auth loss", "panic", fmt.Sprint(r))
-				}
-			}()
-			s.cookieRefresh.NoteTwitchAuthLoss(reason)
-		}()
-	})
+	// project carries — see twitchAuthLossHook for why the asynchrony is the
+	// load-bearing part and what would be waiting behind it otherwise. The
+	// mark itself is read off s.cookieRefresh at FIRE time rather than
+	// captured, by convention with the other injected funcs here.
+	dlWorker.SetOnTwitchAuthLoss(twitchAuthLossHook(func(reason string) {
+		s.cookieRefresh.NoteTwitchAuthLoss(reason)
+	}, log))
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func(platform string) bool {

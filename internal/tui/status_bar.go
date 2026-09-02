@@ -504,11 +504,14 @@ func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
 //
 // THE REASON IS DELIBERATELY ABSENT HERE, and it is the one place in the tree
 // where that is a decision rather than an omission. AuthStatus carries
-// YouTubeError / TwitchError — WHY a check reached CookieStatusUnknown — and
-// Arc 8 Task 12a gave them readers on the two PER-REQUEST paths: the REST
-// payload (CookieStatusPayload) and the R C result line. This panel is not one
-// of those. It is fed by pushes from RefreshService.OnAuthChange, and
-// authStatusChanged (internal/cookies/refresh.go:324-327) deliberately
+// YouTubeError / TwitchError — WHY a check landed where it did, which since
+// Arc 10 covers a conclusive REFUSAL as well as an inconclusive check (the
+// unsignable-jar sentinel, and the Twitch chat-downgrade mark) — and Arc 8
+// Task 12a gave them readers on the two PER-REQUEST paths: the REST payload
+// (CookieStatusPayload) and the R C result line. This panel is not one of
+// those. It is fed by pushes from RefreshService.OnAuthChange, and
+// authStatusChanged (internal/cookies/refresh.go, and it is the function name
+// that is the reference here — the line has moved twice) deliberately
 // excludes the two reason strings from its change-detection gate — so a
 // reason-only change produces no push, and a reason rendered here would sit
 // unchanged beside a verdict that is still correct. Widening that gate is the

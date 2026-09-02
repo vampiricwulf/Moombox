@@ -197,10 +197,13 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int) {
 	// reauth is the half both edges share. reauthenticateTwitchChats filters
 	// the platform and is nil-safe, so this is safe to call from either.
 	//
-	// LIVE SESSIONS FIRST, before the sweep below. A job the sweep resumes
-	// starts a fresh downloader that reads the new credentials anyway; a job
-	// already CAPTURING has no other way to learn about them, and that capture
-	// is the one the operator is watching right now.
+	// Called before the sweep below, but the ORDER IS NOT LOAD-BEARING and no
+	// test pins it: the sweep does UpdateJobFields calls and an asynchronous
+	// notification, neither of which can meaningfully delay a broadcast
+	// measured in microseconds. The broadcast is simply first because there is
+	// no reason to make a running capture wait — a job the sweep resumes
+	// starts a fresh downloader that reads the new credentials anyway, while a
+	// job already CAPTURING has no other way to learn about them.
 	//
 	// Only the COUNT is logged. On the OnCredentialsChanged edge an identity is
 	// in scope, and it is an opaque equality token (see
@@ -240,11 +243,15 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int) {
 		}
 	}
 
-	// Whenever the signed-in account is (re-)observed, re-evaluate the parked
-	// jobs against it. For a membership park this is the only thing that can
-	// help — such a job parked while auth was perfectly healthy, so it is
-	// invisible to OnAuthRecovered above — and it resumes only if the account
-	// is genuinely a different one from the one that refused it.
+	// Whenever a platform's saved credentials are (re-)observed, re-evaluate
+	// the parked jobs against them. The identity is a Google account on
+	// YouTube and a bearer-token pair on Twitch (see the notification sentence
+	// below, which was worded for the same reason), and only YouTube can park
+	// a job on an account question. For a membership park this is the only
+	// thing that can help — such a job parked while auth was perfectly
+	// healthy, so it is invisible to OnAuthRecovered above — and it resumes
+	// only if the account is genuinely a different one from the one that
+	// refused it.
 	//
 	// Dead-cookie parks are eligible here as well. In the common case
 	// OnAuthRecovered already took them (a swap that also restores auth fires

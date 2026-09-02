@@ -386,14 +386,15 @@ func TestParkedJobOutranksTheCheckOnTheDashboardBadge(t *testing.T) {
 // the Web reading them.
 //
 // GATED ON THE FIELD BEING PRESENT since Arc 10, not on the verdict. It was
-// the other way round because every producer left the field empty on a
-// conclusive verdict; NoteTwitchAuthLoss writes `failed` WITH one of four
-// fixed sentences, and that sentence is the only thing distinguishing "no
-// login cookie" from "Twitch refused the login". An `ok` verdict still shows
-// nothing, and by construction rather than by trust — the server derives the
-// verdict from the same error the string carries. The last row is the additive
-// contract: an older binary sends no such key and the sentence is exactly
-// today's.
+// the other way round on the belief that a conclusive verdict never carries a
+// reason, and TWO producers do: verdictFromCheck maps ErrAuthCheckNotAttempted
+// to RefreshFailed with the error still recorded (pinned one package over by
+// TestUnsignableJarIsReportedAsAFailureNotAnUnknown), and NoteTwitchAuthLoss
+// writes `failed` WITH one of four fixed sentences. The old rule dropped both
+// — the first silently, since Arc 8. An `ok` verdict still shows nothing, and
+// by construction rather than by trust: the server derives that verdict from
+// the same error the string carries. The last row is the additive contract: an
+// older binary sends no such key and the sentence is exactly today's.
 func TestIndicatorTitleNamesWhyACheckCouldNotConclude(t *testing.T) {
 	vm := utilsVM(t)
 
@@ -426,11 +427,12 @@ func TestIndicatorTitleNamesWhyACheckCouldNotConclude(t *testing.T) {
 	})
 
 	t.Run("a conclusive REFUSAL names its cause", func(t *testing.T) {
-		// Arc 10 reversed this row, and the paragraph it replaces explained
-		// why the old rule was right at the time: no producer wrote a reason
-		// beside a conclusive verdict. NoteTwitchAuthLoss does, and its four
-		// sentences are the only thing that says which chat-downgrade route
-		// broke.
+		// Arc 10 reversed this row. The paragraph it replaces asserted that
+		// no producer writes a reason beside a conclusive verdict; the
+		// unsignable-jar sentinel already did, and NoteTwitchAuthLoss makes
+		// two. Its four sentences are the only thing that says which
+		// chat-downgrade route broke, which is why the Twitch mark is the
+		// fixture here — but the gate is the same one the sentinel needed.
 		//
 		// THE MUTATION: restoring the reason to the `unknown` arm only in
 		// cookieIndicatorState (utils.js). This subtest then fails on the
