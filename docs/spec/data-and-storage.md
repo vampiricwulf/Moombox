@@ -681,7 +681,7 @@ On startup, if `network.password_hash` contains a plaintext password (detected b
 
 ## Cookies (internal/cookies/)
 
-ONE `cookies.txt` on disk, three pieces above it. `CookieJar` (`internal/cookies/jar.go`) parses the file and answers typed questions about it. `RefreshService` (`internal/cookies/refresh.go`) validates the credentials in-process and rotates YouTube's session cookies out of `Set-Cookie` headers. `AutoCookieService` (`internal/cookies/autocookies.go` and its `autocookies_*.go` siblings) acquires credentials — through a browser, or browser-free out of a browser profile.
+ONE `cookies.txt` on disk, three pieces above it. `CookieJar` (`internal/cookies/jar.go`) parses the file and answers typed questions about it. `RefreshService` (`internal/cookies/refresh.go`) validates the credentials in-process and rotates YouTube's session cookies out of `Set-Cookie` headers. `AutoCookieService` (`internal/cookies/autocookies.go` and its `autocookies_*.go` siblings) acquires credentials three ways — through a browser, browser-free out of a browser profile, or from the operator's own file pasted or uploaded through `POST /api/cookies/import` (`AutoCookieService.ImportCookies`, `internal/cookies/cookie_import.go`).
 
 ### Cookie Jar
 
