@@ -159,7 +159,12 @@ func runImportPanel(t *testing.T, opts map[string]any) importPanelRun {
 // and answers 405, so the panel would report a transport error for every
 // import); reading `data.success` instead of the per-platform fields (an
 // import Moombox could not verify would be toasted as "cookies configured",
-// which is the exact claim cookieSetupAcceptedToast exists to refuse).
+// which is the exact claim cookieSetupAcceptedToast exists to refuse); sending
+// the paste with any Content-Type but text/plain (readCookieImportBody's
+// switch answers 415 to anything else, so a mistaken application/json would
+// 415 every paste while every OTHER assertion here — url, method, toasts —
+// stayed green, because the fixture records the header but nothing had read
+// it back).
 func TestImportPanelPostsThePasteAndReportsTheVerdict(t *testing.T) {
 	run := runImportPanel(t, map[string]any{
 		"ok":   true,
@@ -175,6 +180,11 @@ func TestImportPanelPostsThePasteAndReportsTheVerdict(t *testing.T) {
 	}
 	if run.sent["method"] != "POST" {
 		t.Errorf("method = %v, want POST", run.sent["method"])
+	}
+	if run.sent["contentType"] != "text/plain" {
+		t.Errorf("Content-Type = %v, want text/plain — the server's readCookieImportBody switches "+
+			"on this header, and anything but text/plain, empty or application/octet-stream 415s "+
+			"every paste", run.sent["contentType"])
 	}
 	if len(run.toasts) != 1 {
 		t.Fatalf("toasts = %v, want exactly one (YouTube accepted, Twitch not)", run.toasts)

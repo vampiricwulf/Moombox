@@ -157,3 +157,124 @@ func TestCookieImportHandlerEndsInADetachedFlushedRecheck(t *testing.T) {
 			"with a reason, rather than one that slips in.)")
 	}
 }
+
+// TestCookieImportRouteAnswersAnUnwritableFileWith409 guards the one status
+// code no fixture in this package can reach through the wire.
+//
+// writeCookieFile — the seam that would let a test provoke ErrCookieFileUnwritable
+// through a real POST — is an unexported internal/cookies package variable
+// (autocookies.go), so it cannot be stubbed from here. A filesystem fixture
+// cannot stand in for it either: ImportCookies calls os.MkdirAll(filepath.Dir(
+// path), 0o755) immediately before the write, so a cookie path whose parent
+// directory does not yet exist is not refused — MkdirAll creates it and the
+// write that follows succeeds, landing on the 200 path instead of 409 (verified
+// against this repository's os package: os.ReadFile on such a path reports
+// fs.ErrNotExist, so readCookieFile treats it as "no existing file" rather than
+// aborting, and the subsequent os.CreateTemp in the now-real directory has
+// nothing left to fail on). Structure is what is left, the same technique and
+// the same reason as TestBrowserReadHandlersConsultTheSharedWriter above.
+//
+// THE MUTANT THIS EXISTS FOR: change this one arm's status from
+// http.StatusConflict to anything else (500, most plausibly, since an
+// unwritable file looks like a server fault rather than an operator-fixable
+// condition). Every other CookieImport test stays green — none of them can
+// make ErrCookieFileUnwritable happen — so the wire would silently start
+// telling a Docker operator with a read-only bind mount to file a bug report
+// instead of remounting the volume, and the bind-mount hint in the message
+// would never reach the dashboard that renders 409s as a retryable condition.
+func TestCookieImportRouteAnswersAnUnwritableFileWith409(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "cookies.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse cookies.go: %v", err)
+	}
+	handler := routeHandlerLit(t, file, "/api/cookies/import")
+	errBlock := errorBlockOf(t, handler, "/api/cookies/import")
+
+	caseClause := unwritableCaseClause(errBlock)
+	if caseClause == nil {
+		t.Fatal("the import handler's error switch has no `case errors.Is(err, cookies." +
+			"ErrCookieFileUnwritable):` arm any more — this test cannot say what status a failed " +
+			"write answers with")
+	}
+	if !caseAnswersWithStatus(caseClause, "StatusConflict") {
+		t.Error("the ErrCookieFileUnwritable arm does not answer with http.StatusConflict (409) — " +
+			"a Docker operator whose cookies.txt bind mount is read-only would be told this is a " +
+			"server fault (or some other code) rather than a condition their own remount fixes, and " +
+			"the message's bind-mount hint would land on the wrong status for every dashboard that " +
+			"branches on it")
+	}
+}
+
+// unwritableCaseClause finds the `case errors.Is(err, cookies.ErrCookieFileUnwritable):`
+// arm of the bare switch inside the handler's `if err != nil` block.
+func unwritableCaseClause(block *ast.BlockStmt) *ast.CaseClause {
+	var found *ast.CaseClause
+	ast.Inspect(block, func(n ast.Node) bool {
+		if found != nil {
+			return false
+		}
+		cc, ok := n.(*ast.CaseClause)
+		if !ok {
+			return true
+		}
+		for _, expr := range cc.List {
+			call, ok := expr.(*ast.CallExpr)
+			if !ok || len(call.Args) != 2 {
+				continue
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Is" {
+				continue
+			}
+			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "errors" {
+				continue
+			}
+			arg, ok := call.Args[1].(*ast.SelectorExpr)
+			if !ok || arg.Sel.Name != "ErrCookieFileUnwritable" {
+				continue
+			}
+			found = cc
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// caseAnswersWithStatus reports whether the case clause's body calls
+// jsonError(rw, <anything>, http.<statusName>) — the third argument is the
+// status code and must be that exact selector, not merely a call to jsonError
+// at all (which would pass a mutation that changed only the status).
+func caseAnswersWithStatus(cc *ast.CaseClause, statusName string) bool {
+	found := false
+	for _, stmt := range cc.Body {
+		ast.Inspect(stmt, func(n ast.Node) bool {
+			if found {
+				return false
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			fn, ok := call.Fun.(*ast.Ident)
+			if !ok || fn.Name != "jsonError" || len(call.Args) != 3 {
+				return true
+			}
+			sel, ok := call.Args[2].(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || pkg.Name != "http" || sel.Sel.Name != statusName {
+				return true
+			}
+			found = true
+			return false
+		})
+		if found {
+			break
+		}
+	}
+	return found
+}
