@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,7 +17,7 @@ import (
 // has, long before the setting existed. So the pass reports what it actually
 // did, and this is the assertion that it does.
 //
-// FOUR ROWS, and the empty one is the point of the design. Mechanism is
+// FIVE ROWS, and the empty one is the point of the design. Mechanism is
 // stamped where the path is CHOSEN (the importedFromProfile decision), so a
 // pass that declined above that decision reports "" rather than guessing — and
 // "" is what the surfaces fall back to the mode for. A field that guessed would
@@ -34,8 +35,19 @@ import (
 // synthetic WAL profile, same gatedBrowser at a path that does not exist, so
 // nothing here can execute a browser however the branch goes.
 //
+// The fifth row is the abort exits, and it is the one an earlier pass at this
+// test missed entirely (arc review F-2): eight of the eighteen returns are
+// ABORTS — real work was attempted and stopped on an error — and none of the
+// four rows above drives one, so a defer that stamped only nil-error returns
+// (`if retErr == nil { out.Mechanism = mechanism }`) passed the whole package.
+// That is not a cosmetic gap: app_update.go's error arm renders
+// `mechanismLabel + " failed: " + err` off this exact field, so an abort on a
+// browserless host would silently revert to "Browser cookie refresh failed"
+// under that mutant, on the surface F2 exists to fix.
+//
 // Mutations: delete the defer that stamps it; initialise mechanism to a
-// non-empty value; swap the two constants at the decision.
+// non-empty value; swap the two constants at the decision; stamp only when
+// retErr == nil.
 func TestRefreshResultCarriesTheMechanismThatRan(t *testing.T) {
 	newService := func(t *testing.T, mode string, jar *CookieJar) *AutoCookieService {
 		t.Helper()
@@ -138,6 +150,44 @@ func TestRefreshResultCarriesTheMechanismThatRan(t *testing.T) {
 		}
 		if result.Mechanism != RefreshMechanismBrowser {
 			t.Errorf("Mechanism = %q, want %q", result.Mechanism, RefreshMechanismBrowser)
+		}
+	})
+
+	t.Run("an abort on the browser path still reports the browser", func(t *testing.T) {
+		// The abort is the launch guard's own refusal
+		// (validateBrowserProfileDirForLaunch), driven through the FULL pass
+		// rather than by calling refreshFirefox directly the way
+		// TestLaunchGuardHoldsEveryLaunchSiteInEveryMode does. It needs a
+		// REAL directory — the earlier "browser profile not found" decline
+		// would otherwise fire first and this row would never reach the
+		// decision at all — that ALSO matches a dangerous substring:
+		// existingDangerousProfileDir is exactly that fixture. With a
+		// detected browser and BrowserLaunchAllowed left at its default,
+		// importedFromProfile stays false, so refreshFirefox's very first
+		// line — `if s.profileDirErr != nil { return "", false,
+		// s.profileDirErr }` — returns the guard's own error before any
+		// exec.Command is built. No browser is launched either way.
+		//
+		// This is the fifth row's whole point: an ABORT is still a CHOSEN
+		// path (the decision ran before the branch could fail), and
+		// app_update.go's error arm (`mechanismLabel + " failed: " + …`)
+		// reads Mechanism for exactly this exit.
+		dir := existingDangerousProfileDir(t)
+		s := NewAutoCookieService(dir, filepath.Join(t.TempDir(), "cookies.txt"),
+			jarWithAuth(t), nopAutoCookieLogger{})
+		s.detectBrowser = func() *DetectedBrowser { return gatedBrowser() }
+		s.AcquisitionMode = func() string { return AcquisitionAuto }
+
+		result, err := s.RefreshCookiesDetailed(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "refusing to launch") {
+			t.Fatalf("premise broken: want the launch guard's own refusal, got %v", err)
+		}
+		if !result.Ran {
+			t.Fatal("premise broken: an abort must still report Ran = true (refreshAborted, not refreshDeclined)")
+		}
+		if result.Mechanism != RefreshMechanismBrowser {
+			t.Errorf("Mechanism = %q, want %q — an abort on the browser path must still name the "+
+				"mechanism that was chosen before it failed", result.Mechanism, RefreshMechanismBrowser)
 		}
 	})
 }

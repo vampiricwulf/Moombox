@@ -700,17 +700,17 @@ The verdict clause is `cookies.RecheckReport`, shared with the Web toast. A reas
 
 `not authenticated` is **red** on both `R C` and `R F`. Red is the actionable end — the remedy is to re-export credentials — and yellow is reserved for "we could not check", which asks for nothing. A mixed line, one platform refused and the other unreachable, is red: the conclusive half is the half to act on, which is the same precedence the badge and the dashboard toast apply.
 
-**`R F` — Force Cookie Refresh.** Wired unconditionally; do not put an `auto_enabled` gate back, in either shape. A nil `OnForceRefreshCookies` does not make the chord inert, it *deletes* it — `dispatchAction`, `buildMenuItems` and the help overlay all test the field — so on an install with the flag off, an operator told their cookies were dead had no key to press and no entry naming one. It is a three-rung ladder; the rungs are chosen inside `RefreshCookiesDetailed` (see `data-and-storage.md §Auto-Cookie Service`) and the TUI only renders the outcome:
+**`R F` — Force Cookie Refresh.** Wired unconditionally; do not put an `auto_enabled` gate back, in either shape. A nil `OnForceRefreshCookies` does not make the chord inert, it *deletes* it — `dispatchAction`, `buildMenuItems` and the help overlay all test the field — so on an install with the flag off, an operator told their cookies were dead had no key to press and no entry naming one. It is a three-rung ladder; the rungs are chosen inside `RefreshCookiesDetailed` (see `data-and-storage.md §Auto-Cookie Service`) and the TUI only renders the outcome. Four of the five lines below open with `<mechanism label>` rather than a fixed subject: `internal/tui/app_update.go`'s `cookieForceRefreshResultMsg` arm computes it once as `cookieRefreshMechanismLabel(msg.Result.Mechanism, mode)` (`internal/tui/app_actions.go`), which resolves to `Browser cookie refresh` or `Browser-profile cookie import` depending on which source the pass actually used (H2 R9) — never on which mode was merely configured:
 
 | Outcome | Line |
 |---------|------|
 | `cookies.IsNoBrowserProfile(err)` (rung 3) | `No browser profile found, running R C instead...` — then it dispatches `R C`'s own command, so the sentence leads a real refresh and is replaced by that refresh's report a moment later |
-| any other error | `Browser cookie refresh failed: <err>` |
-| `!Ran` | `Browser cookie refresh declined to run (<RefreshDeclinedCauses>) — nothing was learned about these cookies` |
-| `Overall() == RefreshFailed` | `Browser cookie refresh ran and auth verification failed` |
-| `Overall() == RefreshUnknown` | `Browser cookie refresh ran but could not establish whether these cookies work` |
+| any other error | `<mechanism label> failed: <err>` |
+| `!Ran` | `<mechanism label> declined to run (<RefreshDeclinedCauses>) — nothing was learned about these cookies` |
+| `Overall() == RefreshFailed` | `<mechanism label> ran and auth verification failed` |
+| `Overall() == RefreshUnknown` | `<mechanism label> ran but could not establish whether these cookies work` |
 | `!Renewed` | `Cookies still work, but this pass could not confirm the browser refreshed them` |
-| otherwise | `Browser cookie refresh successful` |
+| otherwise | `<mechanism label> successful` |
 
 The rung-3 sentence and its Web twin (`No browser profile found, running a normal cookie refresh instead...`) **diverge by design**: each surface names its own affordance for the in-process refresh, and a dashboard user has no `R C` to press. Both are pinned exactly, and their difference asserted, by `TestRungThreeSentencesDivergeByDesign`.
 

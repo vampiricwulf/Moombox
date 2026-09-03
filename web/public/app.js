@@ -821,6 +821,9 @@ class MoomboxApp {
       // before choosing; both fall back to the configured mode, which is the
       // same answer the pre-flight toast above already gave. See
       // cookieRefreshMechanismLabel in ./modules/utils.js.
+      // Computed once rather than per arm below: the 404/424 rung-3 branch
+      // does not use it (it names its own affordance instead), and one call
+      // here is cheaper than one at each of the arms that can drift.
       const mechanismLabel = cookieRefreshMechanismLabel(
         data.mechanism,
         this.config?.cookies?.acquisition,
