@@ -231,12 +231,43 @@ func TestCookieLoginRefusesToReopenOverAVisibleWizard(t *testing.T) {
 // breaks, and only after someone used the chord first.
 func TestOpenClearsTheCookieOnlyFlag(t *testing.T) {
 	m := NewSetupWizardModel()
-	m.OpenCookieLogin("youtube")
-	m.closeCookieLogin()
+	m.OpenCookieLogin("youtube") // leaves cookieOnly = true; do NOT close it first
 
 	m.Open()
 
 	if m.cookieOnly {
 		t.Error("Open() inherited cookieOnly from an earlier cookie-login overlay")
+	}
+}
+
+// TestOpenCookieLoginNeverCallsOpen pins that OpenCookieLogin builds its own
+// state directly rather than delegating to Open() and overwriting its fields
+// afterward. That shape would pass every other test in this file, because
+// OpenCookieLogin's own subsequent lines re-set every field the other tests
+// assert on — masking the leak. What would NOT be masked is Open()'s
+// OnCheckFFmpeg shell-out (OpenCookieLogin never checks FFmpeg) and the config
+// values Open() wipes (OpenCookieLogin never touches m.values).
+//
+// MUTANT: make OpenCookieLogin call m.Open() as its first statement, leaving
+// the rest of its body in place to overwrite cookieOnly/mode/simpleStage/
+// cookieFocus/etc. over top. Every other test in this file still passes.
+func TestOpenCookieLoginNeverCallsOpen(t *testing.T) {
+	m := NewSetupWizardModel()
+	ffmpegChecks := 0
+	m.OnCheckFFmpeg = func() (bool, string) {
+		ffmpegChecks++
+		return true, "v1.0"
+	}
+	m.values["existing"] = "seeded"
+
+	m.OpenCookieLogin("twitch")
+
+	if ffmpegChecks != 0 {
+		t.Errorf("OnCheckFFmpeg called %d times, want 0 — OpenCookieLogin ran Open()'s FFmpeg "+
+			"shell-out", ffmpegChecks)
+	}
+	if m.values["existing"] != "seeded" {
+		t.Errorf(`values["existing"] = %q, want "seeded" — OpenCookieLogin wiped the config values `+
+			`that Open() clears`, m.values["existing"])
 	}
 }
