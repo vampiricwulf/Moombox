@@ -6,16 +6,30 @@ import (
 	"testing"
 )
 
+// trackedKillCall is what captureTrackedKills records for one
+// killTrackedProcesses call: the job it was asked about, AND whether that job
+// was still queryable() at the moment of the call.
+//
+// The second field is the whole fix. A recorder that keeps only the pointer
+// cannot tell "asked, then closed" from "closed, then asked" — job.close() on
+// Windows zeroes the handle in place, so the SAME pointer reads queryable()
+// true before the close and false after it. Capturing queryable() AT CALL TIME
+// is what makes a close-before-ask reorder observable.
+type trackedKillCall struct {
+	job       *processJob
+	queryable bool
+}
+
 // captureTrackedKills swaps the "finish off what the job still tracks" hook for
 // a recorder. On Windows the real hook is a no-op — close() there is
 // KILL_ON_JOB_CLOSE — so these tests are about WHO ASKS, which is the half that
 // has to be right before job_linux.go binds anything to it.
-func captureTrackedKills(t *testing.T) *[]*processJob {
+func captureTrackedKills(t *testing.T) *[]trackedKillCall {
 	t.Helper()
 	prev := killTrackedProcesses
-	asked := []*processJob{}
+	asked := []trackedKillCall{}
 	killTrackedProcesses = func(j *processJob) error {
-		asked = append(asked, j)
+		asked = append(asked, trackedKillCall{job: j, queryable: j.queryable()})
 		return nil
 	}
 	t.Cleanup(func() { killTrackedProcesses = prev })
@@ -34,15 +48,26 @@ func captureTrackedKills(t *testing.T) *[]*processJob {
 func TestCleanupAsksForTheKillBeforeItDropsTheJob(t *testing.T) {
 	asked := captureTrackedKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
-	job := &processJob{}
+	// A real job, not a bare &processJob{}: a zero-value job's queryable() is
+	// already false, so it cannot tell a correct "ask before close" from a
+	// mutated "close before ask" apart. A real handle starts queryable() true
+	// and only close() can turn that false.
+	job, err := newProcessJob()
+	if err != nil {
+		t.Fatalf("newProcessJob: %v", err)
+	}
+	t.Cleanup(job.close)
 	s.mu.Lock()
 	s.setupJob = job
 	s.mu.Unlock()
 
 	s.cleanup()
 
-	if len(*asked) != 1 || (*asked)[0] != job {
+	if len(*asked) != 1 || (*asked)[0].job != job {
 		t.Fatalf("cleanup asked to kill %v, want exactly the job it was about to drop", *asked)
+	}
+	if !(*asked)[0].queryable {
+		t.Fatal("cleanup asked for the kill AFTER the job was already closed")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -61,7 +86,14 @@ func TestCleanupAsksForTheKillBeforeItDropsTheJob(t *testing.T) {
 func TestAdoptClosingAStaleJobAsksForTheKill(t *testing.T) {
 	asked := captureTrackedKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
-	stale := &processJob{}
+	// Real, for the same reason as TestCleanupAsksForTheKillBeforeItDropsTheJob:
+	// only a live handle can distinguish "asked before close" from "asked
+	// after". fresh is never closed or asked about, so it stays a bare value.
+	stale, err := newProcessJob()
+	if err != nil {
+		t.Fatalf("newProcessJob: %v", err)
+	}
+	t.Cleanup(stale.close)
 	fresh := &processJob{}
 	s.mu.Lock()
 	s.setupJob = stale
@@ -69,8 +101,11 @@ func TestAdoptClosingAStaleJobAsksForTheKill(t *testing.T) {
 	got := s.setupJob
 	s.mu.Unlock()
 
-	if len(*asked) != 1 || (*asked)[0] != stale {
+	if len(*asked) != 1 || (*asked)[0].job != stale {
 		t.Fatalf("adopt asked to kill %v, want exactly the stale job", *asked)
+	}
+	if !(*asked)[0].queryable {
+		t.Fatal("adopt asked for the kill AFTER the job was already closed")
 	}
 	if got != fresh {
 		t.Fatal("adopt did not install the new job")
@@ -125,10 +160,115 @@ func TestCloseLaunchJobAsksForTheKill(t *testing.T) {
 		t.Fatalf("a nil job asked to kill %v", *asked)
 	}
 
-	job := &processJob{}
+	// Real, for the same reason as the two tests above: a bare &processJob{}
+	// reads queryable() == false whether or not the reorder mutant is present,
+	// which would make this assertion vacuous.
+	job, err := newProcessJob()
+	if err != nil {
+		t.Fatalf("newProcessJob: %v", err)
+	}
+	t.Cleanup(job.close)
 	closeLaunchJob(job, nopLogger{})
-	if len(*asked) != 1 || (*asked)[0] != job {
+	if len(*asked) != 1 || (*asked)[0].job != job {
 		t.Fatalf("closeLaunchJob asked to kill %v, want exactly the job", *asked)
+	}
+	if !(*asked)[0].queryable {
+		t.Fatal("closeLaunchJob asked for the kill AFTER the job was already closed")
+	}
+}
+
+// TestAskThenCloseStillClosesWhenTheKillErrors is Finding 4 from the Task 3
+// review: a killTrackedProcesses failure is logged, never a reason to skip
+// the close. On Linux the close is job_linux.go's forget() — the only way
+// the failed group ever stops being tracked — so a site that returns early
+// on a kill error would leave a group Moombox believes it can still act on,
+// forever.
+//
+// One subtest per ask site, table-driven per the brief's suggestion. Each
+// makes killTrackedProcesses fail, runs the site, then checks the SAME two
+// things: the real job is no longer queryable() (the close still ran) and a
+// Warn was logged (the error was not swallowed).
+//
+// Mutant: make any site return/skip job.close() when the kill errors, and its
+// case fails — the job stays queryable() and/or no Warn appears.
+func TestAskThenCloseStillClosesWhenTheKillErrors(t *testing.T) {
+	killErr := errors.New("kill refused")
+
+	cases := []struct {
+		name string
+		run  func(t *testing.T) (job *processJob, warned bool)
+	}{
+		{
+			name: "cleanupLocked",
+			run: func(t *testing.T) (*processJob, bool) {
+				prev := killTrackedProcesses
+				killTrackedProcesses = func(*processJob) error { return killErr }
+				t.Cleanup(func() { killTrackedProcesses = prev })
+
+				logger := &capturingLogger{}
+				s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), logger)
+				job, err := newProcessJob()
+				if err != nil {
+					t.Fatalf("newProcessJob: %v", err)
+				}
+				s.mu.Lock()
+				s.setupJob = job
+				s.mu.Unlock()
+
+				s.cleanup()
+				return job, logger.contains("could not kill the setup browser's process group")
+			},
+		},
+		{
+			name: "adoptSetupJobLocked",
+			run: func(t *testing.T) (*processJob, bool) {
+				prev := killTrackedProcesses
+				killTrackedProcesses = func(*processJob) error { return killErr }
+				t.Cleanup(func() { killTrackedProcesses = prev })
+
+				logger := &capturingLogger{}
+				s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), logger)
+				stale, err := newProcessJob()
+				if err != nil {
+					t.Fatalf("newProcessJob: %v", err)
+				}
+				fresh := &processJob{}
+				s.mu.Lock()
+				s.setupJob = stale
+				s.adoptSetupJobLocked(fresh)
+				s.mu.Unlock()
+
+				return stale, logger.contains("could not kill the stale setup browser's process group")
+			},
+		},
+		{
+			name: "closeLaunchJob",
+			run: func(t *testing.T) (*processJob, bool) {
+				prev := killTrackedProcesses
+				killTrackedProcesses = func(*processJob) error { return killErr }
+				t.Cleanup(func() { killTrackedProcesses = prev })
+
+				logger := &capturingLogger{}
+				job, err := newProcessJob()
+				if err != nil {
+					t.Fatalf("newProcessJob: %v", err)
+				}
+				closeLaunchJob(job, logger)
+				return job, logger.contains("could not kill the refresh browser's process group")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job, warned := tc.run(t)
+			if job.queryable() {
+				t.Fatal("the close was skipped after the kill errored; the job is still queryable")
+			}
+			if !warned {
+				t.Fatal("no Warn was logged for the failed kill")
+			}
+		})
 	}
 }
 
