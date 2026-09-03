@@ -113,6 +113,30 @@ func (m *StatusBarModel) SetActivePlatforms(yt, tw bool) {
 	m.twActive = tw
 }
 
+// ReloginPlatform names the platform this bar is currently asking the operator
+// to sign back in to, or "" when neither is.
+//
+// Gated on the ACTIVE flags, so it answers about the platforms the bar actually
+// renders: a Relogin verdict for a platform with no configured monitors is not
+// being shown to anyone, and preselecting it would answer an alarm never raised.
+// YouTube wins when both are flagged — the overlay signs in to one platform at
+// a time, the operator can pick the other row, and more of the pipeline depends
+// on YouTube's credentials.
+//
+// Two readers, deliberately ONE predicate: the R L chord preselects this
+// platform, and renderCookieStatus decides on it whether to name the chord at
+// all. A second copy would let the badge advertise a remedy the chord then
+// opens elsewhere.
+func (m *StatusBarModel) ReloginPlatform() string {
+	if m.ytActive && m.ytCookie == CookieStatusRelogin {
+		return "youtube"
+	}
+	if m.twActive && m.twCookie == CookieStatusRelogin {
+		return "twitch"
+	}
+	return ""
+}
+
 // SetJobs updates the jobs reference for COOKIES? detection (B1).
 func (m *StatusBarModel) SetJobs(jobs []*database.Job) {
 	m.jobs = jobs
@@ -606,6 +630,21 @@ func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 				parts = append(parts, DimStyle.Render("TW"))
 			}
 		}
+	}
+
+	// The chord that ANSWERS the alert, named once for the bar and only where
+	// there is room. A badge that says "Re-login" and stops has named a problem
+	// and no remedy; the dashboard's warning is clickable, and R L is this
+	// surface's click.
+	//
+	// tierFull only: it is the widest thing this function can add and the least
+	// urgent — the alert is the information, and the remedy is also in the menu
+	// and in help — so it is given up first, which is what keeps metricTiers
+	// narrowing monotonically for fitTiers' scan. ReloginPlatform is the same
+	// predicate R L preselects on, so the badge cannot advertise a remedy that
+	// then opens on the other platform.
+	if t == tierFull && m.ReloginPlatform() != "" {
+		parts = append(parts, DimStyle.Render("(")+statusBarKeyStyle.Render("R L")+DimStyle.Render(")"))
 	}
 
 	if len(parts) == 0 {

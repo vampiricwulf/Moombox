@@ -56,7 +56,7 @@ Both UIs must expose the same options. Quick mode is a subset of advanced — en
 
 ## Existing Patterns
 
-- **Auto-cookie flow**: `OnStartAutoCookie(platform)` → browser spawns → `OnFinishAutoCookie()` extracts cookies and returns `(ytOk, twOk)`. Both UIs use the same callbacks.
+- **Auto-cookie flow**: `OnStartAutoCookie(platform)` → browser spawns → `OnFinishAutoCookie()` extracts cookies and returns `(cookies.SetupResult, error)` — accepted and verified are separate facts per platform; `OnCancelAutoCookie()` releases the setup slot. Both UIs use the same callbacks. In the TUI the cookie step is also reachable after first run via `R L` (`SetupWizardModel.OpenCookieLogin`, cookie-only mode: Esc and the third row close instead of advancing).
 - **Channel editor**: Shared between quick and advanced. Supports add/edit/delete with platform-specific fields (A/Enter/D/Tab keys in TUI).
 - **FFmpeg installer**: Web-only elevated install flow (choco/winget with script review dialog). TUI relies on PATH detection.
 - **Restart**: Both UIs trigger restart after setup. Web polls `GET /api/setup/status` every 2s for reconnection (up to 2 minutes).

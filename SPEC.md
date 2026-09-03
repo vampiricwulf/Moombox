@@ -16,7 +16,7 @@ Moombox is a standalone Go reimplementation. It is not a yt-dlp wrapper — it r
 
 What Moombox is not: it is not a general-purpose video downloader (it handles YouTube and Twitch only), not a hosted/multi-user service (single-operator deployment), and not designed for massive scale (it is a 24/7 appliance, not a batch processing system). macOS is not supported (deferred); Windows x64 and Linux x64/arm64 are the supported platforms.
 
-Deployment is a single binary plus FFmpeg on PATH. First-run triggers a setup wizard (web-based) that walks through FFmpeg installation, cookie configuration, channel setup, and optional password. Self-updates check GitHub Releases daily, verify Ed25519 signatures, apply a three-step binary swap, and restart via exit code 42. The launcher/supervisor pattern ensures clean restarts without process chain buildup.
+Deployment is a single binary plus FFmpeg on PATH. First-run triggers a setup wizard (in both the web dashboard and the TUI) that walks through FFmpeg installation, cookie configuration, channel setup, and optional password. Self-updates check GitHub Releases daily, verify Ed25519 signatures, apply a three-step binary swap, and restart via exit code 42. The launcher/supervisor pattern ensures clean restarts without process chain buildup.
 
 The application listens on port 774 by default. Configuration lives in `config.toml` searched in: current directory, `./config/`, `~/.config/moombox/`. The database is SQLite in WAL mode. Output files go to a configurable directory with per-channel subdirectories.
 

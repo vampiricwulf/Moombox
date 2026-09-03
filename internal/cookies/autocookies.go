@@ -2255,7 +2255,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// Roll back, per platform, an import that made that platform worse.
 	//
 	// A mounted profile can be STALE, and mergeCookieFiles lets the imported
-	// value win by name+domain — so a dead Twitch token in the profile
+	// value win by name+domain+path — so a dead Twitch token in the profile
 	// overwrites a working one on disk. Judging the import as a WHOLE hides
 	// exactly that: a healthy YouTube result masks the Twitch loss, the
 	// refresh reports success, and the working credential is gone. The

@@ -75,7 +75,7 @@ func (m *SomeOverlay) View() string       { if !m.visible { return "" }; ... }
 **Critical: `UpdateComponents(msg tea.Msg) tea.Cmd`** — Overlays with interactive sub-components (textinput, table, viewport, spinner) implement this method. App calls it from `routeComponentMsg()` to delegate focus, key handling, and ticks to embedded Charm components.
 
 ### Chord System
-Single source of truth: `buildMenuItems()` in `app.go` returns `[]ActionMenuItem`:
+Single source of truth: `buildMenuItems()` in `app_actions.go` returns `[]ActionMenuItem`:
 ```go
 type ActionMenuItem struct {
     Chord        string                   // e.g. "A A", "R C", "F"

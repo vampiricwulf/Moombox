@@ -232,3 +232,101 @@ func TestStatusBarZeroWidth(t *testing.T) {
 		}
 	}
 }
+
+// TestInactiveYouTubeReloginNamesNoChord pins ReloginPlatform's ytActive gate
+// (status_bar.go:131) directly, beside the badge where the difference is
+// visible: TestCookieLoginChordPreselectsThePlatformTheBadgeIsAlarmingAbout
+// cannot see this mutant because an inactive-but-flagged YouTube yields
+// cookieFocus 0 whether ReloginPlatform says "" or "youtube" — but a bar that
+// shows no YouTube alert must not carry (R L) regardless. The mirror row does
+// the same check for an inactive-but-flagged Twitch.
+//
+// MUTANT: drop `m.ytActive &&` from ReloginPlatform (status_bar.go:131). Both
+// assertions in the YouTube row fail.
+func TestInactiveYouTubeReloginNamesNoChord(t *testing.T) {
+	m := NewStatusBarModel()
+	m.SetActivePlatforms(false, true)
+	m.SetCookieStatus(CookieStatusRelogin, CookieStatusOK)
+	if got := m.ReloginPlatform(); got != "" {
+		t.Errorf("ReloginPlatform() = %q for an inactive platform, want \"\"", got)
+	}
+	if full := stripANSI(m.renderCookieStatus(tierFull)); strings.Contains(full, "R L") {
+		t.Errorf("the bar names a remedy for an alarm it does not show: %q", full)
+	}
+
+	// The mirror row: an inactive-but-flagged Twitch.
+	mtw := NewStatusBarModel()
+	mtw.SetActivePlatforms(true, false)
+	mtw.SetCookieStatus(CookieStatusOK, CookieStatusRelogin)
+	if got := mtw.ReloginPlatform(); got != "" {
+		t.Errorf("ReloginPlatform() = %q for an inactive platform, want \"\"", got)
+	}
+	if full := stripANSI(mtw.renderCookieStatus(tierFull)); strings.Contains(full, "R L") {
+		t.Errorf("the bar names a remedy for an alarm it does not show: %q", full)
+	}
+}
+
+// TestReloginBadgeNamesTheChordThatAnswersIt pins R2: a bar that says
+// "YT: Re-login" and stops has named a problem and no remedy. The dashboard's
+// equivalent warning is clickable; R L is the TUI's click, and the badge is
+// where an operator is looking when they need it.
+//
+// MUTANTS, one per assertion:
+//   - drop the append → the widest bar names no remedy at all;
+//   - append per platform instead of once → the both-flagged row reads
+//     "YT: Re-login (R L) TW: Re-login (R L)", spending scarce width twice;
+//   - append at tierCompact or below → the compact assertion fails (the hint
+//     outlived the first squeeze); append at a LOWER tier but not tierFull →
+//     that rung is wider than the one above it, which the ladder sweep at the
+//     end catches. TestStatusBarTiersNarrowMonotonically cannot: its
+//     busyStatusBar fixture is OK/OK and never renders the hint;
+//   - gate on something other than ReloginPlatform (a bare `!= CookieStatusOK`,
+//     say) → the healthy row advertises a login nobody needs.
+func TestReloginBadgeNamesTheChordThatAnswersIt(t *testing.T) {
+	flagged := func(yt, tw CookieStatus) *StatusBarModel {
+		m := NewStatusBarModel()
+		m.SetActivePlatforms(true, true)
+		m.SetCookieStatus(yt, tw)
+		return m
+	}
+
+	full := stripANSI(flagged(CookieStatusRelogin, CookieStatusOK).renderCookieStatus(tierFull))
+	if !strings.Contains(full, "R L") {
+		t.Errorf("the re-login badge names no chord at tierFull: %q", full)
+	}
+
+	both := stripANSI(flagged(CookieStatusRelogin, CookieStatusRelogin).renderCookieStatus(tierFull))
+	if got := strings.Count(both, "R L"); got != 1 {
+		t.Errorf("the chord is named %d times with both platforms flagged, want 1: %q", got, both)
+	}
+
+	compact := stripANSI(flagged(CookieStatusRelogin, CookieStatusOK).renderCookieStatus(tierCompact))
+	if strings.Contains(compact, "R L") {
+		t.Errorf("the hint survived past tierFull, which breaks the monotonic ladder: %q", compact)
+	}
+
+	healthy := stripANSI(flagged(CookieStatusOK, CookieStatusOK).renderCookieStatus(tierFull))
+	if strings.Contains(healthy, "R L") {
+		t.Errorf("a healthy bar advertises a cookie login: %q", healthy)
+	}
+
+	// The alert itself must still outlive the hint — the hint is the part that
+	// is allowed to go, not the badge.
+	tight := stripANSI(flagged(CookieStatusRelogin, CookieStatusOK).renderCookieStatus(tierTight))
+	if !strings.Contains(tight, "YT") {
+		t.Errorf("the re-login alert was dropped along with its hint: %q", tight)
+	}
+
+	// The ladder, swept on a FLAGGED bar. TestStatusBarTiersNarrowMonotonically
+	// runs on busyStatusBar(), which is OK/OK, so this is the only place the
+	// hint is inside the monotonicity check that fitTiers' scan relies on.
+	ladder := flagged(CookieStatusRelogin, CookieStatusRelogin)
+	ladder.SetWidth(200)
+	tiers := ladder.metricTiers()
+	for i := 1; i < len(tiers); i++ {
+		if prev, cur := lipgloss.Width(tiers[i-1]), lipgloss.Width(tiers[i]); cur > prev {
+			t.Errorf("metrics tier %d (%d cols) is wider than tier %d (%d cols) with the re-login "+
+				"hint in play — the hint has landed on a rung below the one it is dropped from", i, cur, i-1, prev)
+		}
+	}
+}
