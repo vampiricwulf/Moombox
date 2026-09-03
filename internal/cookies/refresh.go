@@ -44,7 +44,9 @@ const (
 	authCheckTimeout       = 15 * time.Second
 
 	// livenessRefireWindow bounds how often ONE platform's logged-out
-	// liveness verdict may clear the dedupe and reach OnRecoveryNeeded.
+	// liveness verdict may clear the dedupe and reach OnRecoveryNeeded — true
+	// of the FIRST re-alarm only; see the back-off below for every one after
+	// it.
 	//
 	// The membership probe runs once per configured channel per feed cycle,
 	// with a 500ms stagger between channels, so a dead session produces N
@@ -91,7 +93,9 @@ const (
 	//
 	// INERT UNTIL ARMING: recordLiveness computes the schedule and
 	// ObserveLiveness logs the answer, but livenessRecoveryArmed is false, so
-	// nothing is called. That is the point of landing it now — the schedule is
+	// OnRecoveryNeeded is never called — the state itself still moves on
+	// every observation, which is what makes the pilot's wouldFireRecovery
+	// field meaningful. That is the point of landing it now — the schedule is
 	// mutation-tested here and arming stays a one-constant change.
 	livenessRefireFactor = 2
 	livenessRefireCap    = 24 * time.Hour
@@ -1127,7 +1131,7 @@ func (rs *RefreshService) livenessRefireWindowFor(platform string) time.Duration
 // The FIRST call sets the base rather than doubling it, and that is what puts
 // the first re-alarm 30 minutes after the first alarm — the owner's "30 min,
 // then double". Doubling on the first call would put it at an hour and lose
-// the responsive window entirely. Callers hold rs.mu.
+// the responsive window entirely. Callers hold rs.mu for writing.
 func (rs *RefreshService) escalateLivenessRefire(platform string) {
 	if rs.livenessRefireBackoff == nil {
 		rs.livenessRefireBackoff = make(map[string]time.Duration)
@@ -1154,7 +1158,7 @@ func (rs *RefreshService) escalateLivenessRefire(platform string) {
 // A tier-1 recovery does NOT reach here: noteRecoveryDecided stamps the dedupe
 // and nothing else, by the one-directional rule it has always followed. On an
 // install with channels the membership probe delivers a conclusive LoggedIn
-// within one feed cycle of auth returning. Callers hold rs.mu.
+// within one feed cycle of auth returning. Callers hold rs.mu for writing.
 func (rs *RefreshService) resetLivenessRefire(platform string) {
 	delete(rs.livenessRefireBackoff, platform)
 }
@@ -1170,15 +1174,23 @@ func (rs *RefreshService) resetLivenessRefire(platform string) {
 // nothing new to say. That is the one distinction the pilot has to be able to
 // make about its own signal.
 //
-// Deliberately touches NEITHER of the other two maps:
+// Deliberately touches NONE of the other three maps:
 //
 //   - not lastLivenessObserved, because recording an observation would make
 //     the next cycle's freshness check skip the probe — silencing the signal
 //     for as long as it keeps failing, which is backwards.
 //   - not lastRecoveryDecided, because that window belongs to real signed-out
 //     verdicts and consuming it here would swallow the next one.
+//   - not livenessRefireBackoff, because "inconclusive" is not the reset
+//     condition — only a conclusive signed-in verdict is (recordLiveness).
+//     Resetting the back-off here would let an install stuck behind a
+//     captive portal, proxy or rate limit — inconclusive on EVERY cycle —
+//     clear its own escalation every cycle too, so an armed tier 2 would page
+//     every base window forever: exactly the failure mode the schedule exists
+//     to prevent, reintroduced through the one door silence is supposed to
+//     leave shut.
 //
-// TestFallbackInconclusiveMovesNothing pins both.
+// TestFallbackInconclusiveMovesNothing pins all three.
 //
 // `notable` follows the same rule ObserveLiveness uses: notable on a change of
 // what is known, or on the first thing known about the platform in this
