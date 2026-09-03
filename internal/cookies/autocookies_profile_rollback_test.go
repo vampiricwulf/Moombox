@@ -48,7 +48,7 @@ const youtubeOnlyCookieFile = "# Netscape HTTP Cookie File\n" +
 // reviewer constructed: a container with a healthy cookies.txt (YouTube AND
 // Twitch working) and a mounted profile whose Twitch auth-token is dead.
 //
-// mergeCookieFiles lets the imported value win by name+domain, so without a
+// mergeCookieFiles lets the imported value win by name+domain+path, so without a
 // per-platform rollback the good Twitch token is overwritten, ytAuth=true
 // suppresses any total-failure rollback, and RefreshCookies reports success
 // while Twitch is now broken AND the working credential is gone from disk.

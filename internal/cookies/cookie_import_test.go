@@ -129,7 +129,7 @@ func TestPrepareCookieImportMergesRatherThanReplaces(t *testing.T) {
 			t.Errorf("twitch auth-token = %q, want the untouched existing row", got)
 		}
 		if got := jar.GetCookieFor(PlatformYouTube, "SAPISID"); got != "fake-sapisid-bbbb" {
-			t.Errorf("youtube SAPISID = %q, want the pasted value — the new row must win by name+domain", got)
+			t.Errorf("youtube SAPISID = %q, want the pasted value — the new row must win by name+domain+path", got)
 		}
 	})
 
@@ -185,14 +185,14 @@ func TestPrepareCookieImportKeysByNameAndDomain(t *testing.T) {
 // each is a separate mutant.
 //
 //   - incoming (empty VALUE): dropping the pre-merge filter lets an
-//     empty-valued SAPISID in a paste win by name+domain over a working one on
+//     empty-valued SAPISID in a paste win by name+domain+path over a working one on
 //     disk. The row then reads as 6 fields to CookieJar.Load, which skips it:
 //     the credential is gone from the jar and unprunable from the file.
 //   - existing (empty VALUE): dropping the post-merge filter carries a row an
 //     older writer already left there straight back out, so the import cannot
 //     repair the file it just rewrote. The fixture's stale row is HSID, a
 //     name the paste does NOT carry, and that choice is the whole test:
-//     mergeCookieFiles keys a 7-field row by name+domain whatever its value,
+//     mergeCookieFiles keys a 7-field row by name+domain+path whatever its value,
 //     so an empty row the paste shares a key with is REPLACED during the
 //     merge and the output filter is never asked about it. Only a row that
 //     survives the merge catches this mutant.
@@ -200,7 +200,7 @@ func TestPrepareCookieImportKeysByNameAndDomain(t *testing.T) {
 //     cleanNetscapeRows' drop condition lets a 7-field row with NO cookie
 //     name but a real value through as "kept". CookieJar.loadFrom would
 //     reject it too (empty name is skipped there), but mergeCookieFiles has
-//     no such guard — it keys by name+domain and "" is a perfectly good map
+//     no such guard — it keys by name+domain+path and "" is a perfectly good map
 //     key — so the row is carried straight into cookies.txt with its value
 //     intact. No existing fixture drove this shape: every other row here has
 //     either a real name or a real value, never a real value with no name.
@@ -225,7 +225,7 @@ func TestPrepareCookieImportNeverWritesAnEmptyValuedRow(t *testing.T) {
 		existing := netscapeHeader + fakeTwitchRows +
 			".youtube.com\tTRUE\t/\tTRUE\t2000000000\tHSID\t\n"
 		// HSID, because fakeYouTubeRows carries SAPISID and LOGIN_INFO and
-		// nothing else: a stale row the paste would replace by name+domain never
+		// nothing else: a stale row the paste would replace by name+domain+path never
 		// reaches the output filter, and this subtest would stay green with that
 		// filter deleted.
 		if !strings.Contains(existing, "\tHSID\t\n") {

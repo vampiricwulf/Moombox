@@ -138,11 +138,26 @@ func deduplicateAndFormat(cookies []extractedCookie) []string {
 }
 
 // mergeCookieFiles merges existing and new Netscape cookie strings.
-// New cookies take priority over existing ones with the same name+domain.
+// New cookies take priority over existing ones with the same name+domain+path.
 func mergeCookieFiles(existing, newCookies string) string {
+	// RFC 6265 §5.3: a cookie's identity is name + domain + PATH. The key
+	// carried only the first two, so two rows differing solely in path
+	// collided on one map entry and the later-parsed line silently replaced
+	// the earlier one — a row lost from cookies.txt on every write, through
+	// all three writers (FinishSetup, the browser refresh, ImportCookies).
+	//
+	// Secure and HttpOnly stay OUT deliberately: they are attributes OF a
+	// cookie, not part of its identity, and keying on them would let a row
+	// that merely flipped Secure accumulate beside its own replacement.
+	//
+	// This does NOT make the jar path-aware — CookieJar keys by name within a
+	// platform and keeps last-wins for equal domains (jar.go). Two paths still
+	// load as one entry, the same one the old key kept; what changes is that
+	// the file stops losing the other row.
 	type cookieKey struct {
 		name   string
 		domain string
+		path   string
 	}
 
 	// Parse a Netscape cookie file into ordered keys and a map
@@ -162,8 +177,9 @@ func mergeCookieFiles(existing, newCookies string) string {
 				continue
 			}
 			domain := fields[0]
+			path := fields[2]
 			name := fields[5]
-			k := cookieKey{name: name, domain: domain}
+			k := cookieKey{name: name, domain: domain, path: path}
 			if _, exists := m[k]; !exists {
 				keys = append(keys, k)
 			}

@@ -688,7 +688,7 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 //
 //   - REGRESSION: it verified before the import and does not after. This is
 //     the case that silently destroys a working credential, because
-//     mergeCookieFiles lets the imported value win by name+domain and a
+//     mergeCookieFiles lets the imported value win by name+domain+path and a
 //     sibling platform verifying can mask the loss entirely.
 //   - INCONCLUSIVE: the post-import check could not reach the network for a
 //     platform that had credentials. We have learned nothing, so committing a

@@ -228,7 +228,7 @@ func TestDeduplicateAndFormatSubdomainFlag(t *testing.T) {
 }
 
 // TestMergeCookieFilesPrefersNew verifies that cookies in the "new" file
-// overwrite existing ones with the same name+domain (finding #54).
+// overwrite existing ones with the same name+domain+path (finding #54).
 func TestMergeCookieFilesPrefersNew(t *testing.T) {
 	existing := `# Netscape HTTP Cookie File
 .youtube.com	TRUE	/	TRUE	0	SAPISID	old_value
@@ -318,4 +318,73 @@ func TestMergeCookieFilesSkipsCommentsAndBlanks(t *testing.T) {
 	if !strings.Contains(merged, "LOGIN_INFO\tx") {
 		t.Errorf("expected LOGIN_INFO row preserved, got:\n%s", merged)
 	}
+}
+
+// TestMergeCookieFilesKeepsRowsThatDifferOnlyInPath pins RFC 6265 §5.3 cookie
+// identity — name + domain + PATH — at the one function that rewrites
+// cookies.txt for all three credential writers (FinishSetup, the browser
+// refresh, ImportCookies). The key carried only name+domain, so two rows
+// differing solely in path collided on one map entry and the later-parsed line
+// silently replaced the earlier: a row left the file on every merge, with
+// nothing logged. THE MUTANT is exactly the old key — delete `path` from
+// cookieKey (or stop filling it from fields[2]) and subtest 1 loses a row.
+//
+// Subtests 2 and 3 are the PREMISE, and without them the first proves nothing:
+// a key that also carried the value — or the whole line — would keep both rows
+// in subtest 1 while destroying the merge's actual job, which is letting a
+// freshly-extracted row replace the stale one it supersedes.
+func TestMergeCookieFilesKeepsRowsThatDifferOnlyInPath(t *testing.T) {
+	// Far-future expiry (2100-01-01) throughout: merge prunes rows whose
+	// expiry is in the past, so a small epoch offset would delete the fixture
+	// before the key was ever consulted.
+	t.Run("two paths in one file both survive", func(t *testing.T) {
+		existing := "# Netscape HTTP Cookie File\n" +
+			".youtube.com\tTRUE\t/\tTRUE\t4102444800\tSAPISID\troot_scope\n" +
+			".youtube.com\tTRUE\t/live\tTRUE\t4102444800\tSAPISID\tlive_scope\n"
+
+		merged := mergeCookieFiles(existing, "")
+
+		if !strings.Contains(merged, "root_scope") {
+			t.Errorf("the / row was dropped — a same-name row on a different path evicted it, "+
+				"which is the collision the path in the key exists to prevent:\n%s", merged)
+		}
+		if !strings.Contains(merged, "live_scope") {
+			t.Errorf("the /live row was dropped:\n%s", merged)
+		}
+		if got := strings.Count(merged, "SAPISID"); got != 2 {
+			t.Errorf("merged holds %d SAPISID rows, want 2 (one per path):\n%s", got, merged)
+		}
+	})
+
+	t.Run("a new row on a new path is added, not substituted", func(t *testing.T) {
+		existing := ".youtube.com\tTRUE\t/\tTRUE\t4102444800\tSAPISID\troot_scope\n"
+		newer := ".youtube.com\tTRUE\t/live\tTRUE\t4102444800\tSAPISID\tlive_scope\n"
+
+		merged := mergeCookieFiles(existing, newer)
+
+		if !strings.Contains(merged, "root_scope") {
+			t.Errorf("a refresh that produced a differently-scoped row deleted the existing one:\n%s", merged)
+		}
+		if !strings.Contains(merged, "live_scope") {
+			t.Errorf("the new row is missing:\n%s", merged)
+		}
+	})
+
+	t.Run("same path still collapses and the newer row wins", func(t *testing.T) {
+		existing := ".youtube.com\tTRUE\t/\tTRUE\t4102444800\tSAPISID\told_value\n"
+		newer := ".youtube.com\tTRUE\t/\tTRUE\t4102444800\tSAPISID\tnew_value\n"
+
+		merged := mergeCookieFiles(existing, newer)
+
+		if strings.Contains(merged, "old_value") {
+			t.Errorf("the superseded row survived — the key has stopped identifying a cookie and "+
+				"cookies.txt now accumulates every value it has ever held:\n%s", merged)
+		}
+		if !strings.Contains(merged, "new_value") {
+			t.Errorf("the new value is missing:\n%s", merged)
+		}
+		if got := strings.Count(merged, "SAPISID"); got != 1 {
+			t.Errorf("merged holds %d SAPISID rows for one identity, want 1:\n%s", got, merged)
+		}
+	})
 }

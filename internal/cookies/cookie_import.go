@@ -21,7 +21,7 @@ import (
 // MERGE, NEVER REPLACE (spec R3). A YouTube-only paste must leave every Twitch
 // row exactly as it was: blind replacement would destroy the sibling platform's
 // credentials silently, and the operator's next Twitch capture would fail for
-// an unrelated-looking reason. mergeCookieFiles is the merge — name+domain
+// an unrelated-looking reason. mergeCookieFiles is the merge — name+domain+path
 // keyed, verified tab-safe, and already the merge every other writer uses.
 //
 // The empty-value filter runs TWICE and both runs are load-bearing. See
@@ -126,7 +126,7 @@ func netscapeRowValue(line string) string {
 // Run on the OUTPUT, so an import repairs rows an older writer already left
 // behind. cleanNetscapeRows runs the same rule on the INPUT, and that one is
 // the guard that matters most: without it an empty-valued row in a paste wins
-// by name+domain over a working credential on disk.
+// by name+domain+path over a working credential on disk.
 func stripEmptyValuedRows(netscape string) string {
 	lines := strings.Split(netscape, "\n")
 	kept := make([]string, 0, len(lines))
