@@ -62,7 +62,7 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 		url,
 	)
-	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG; Windows: no-op (Job Object below)
+	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG + Setpgid (the group the reap counts); Windows: no-op (Job Object below)
 
 	// Create a Job Object before launching so the browser dies if Moombox
 	// crashes before cleanup runs. Closed by cleanup() during
@@ -231,7 +231,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		"--window-size=1280,720",
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 	)
-	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG; Windows: no-op (Job Object below)
+	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG + Setpgid (the group the reap counts); Windows: no-op (Job Object below)
 
 	// Job Object so an orphaned headless Chromium dies with Moombox if we
 	// crash before the defer below runs. Headless leaks are invisible —

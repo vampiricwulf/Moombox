@@ -677,7 +677,7 @@ Netscape-format cookie file (`cookies.txt`). The `CookieJar` parses it into TWO 
 
 **The two-tier cookie liveness pilot is OFF.** `livenessRecoveryArmed` is `false`, so tier 2 observes, dedupes and logs but sends no notification and triggers no recovery. Arming it is a deliberate, separate change.
 
-**Deep-dive:** [docs/spec/data-and-storage.md](docs/spec/data-and-storage.md) § Cookies for the jar, the refresh service and every acquisition path; [docs/spec/operations.md](docs/spec/operations.md) § Browser Cookie Acquisition for the platform differences (the Job-Object reap, `AbandonSetup`, the drain) and § Credential Notifications for what an operator is actually told.
+**Deep-dive:** [docs/spec/data-and-storage.md](docs/spec/data-and-storage.md) § Cookies for the jar, the refresh service and every acquisition path; [docs/spec/operations.md](docs/spec/operations.md) § Browser Cookie Acquisition for the platform differences (the reap — a Job Object on Windows, a process group on Linux, nothing on darwin — `AbandonSetup`, the drain) and § Credential Notifications for what an operator is actually told.
 
 ### File Output
 

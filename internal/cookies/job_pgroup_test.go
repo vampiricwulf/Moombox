@@ -261,6 +261,29 @@ func TestPGroupJobAdoptsOnlyAProcessThatLeadsItsOwnGroup(t *testing.T) {
 	})
 }
 
+// TestPGroupJobSecondAdoptReplacesTheGroup pins adopt's last-wins behaviour: a
+// second adopt call on the same job overwrites the first, rather than being
+// refused or merged. Nothing in production relies on this — killProcessTreeUnix
+// builds a fresh *pgroupJob per call, and processJob.assign adopts once — but
+// the type itself has no guard against a second call, and this is the
+// assertion that would catch it silently changing.
+//
+// Mutation: make the second adopt a no-op (skip the assignment when a group is
+// already tracked) and the job is left holding group 100 instead of 200.
+func TestPGroupJobSecondAdoptReplacesTheGroup(t *testing.T) {
+	fakeProcessTable(t, map[int]int{100: 100, 200: 200})
+	job := &pgroupJob{}
+	if err := job.adopt(100); err != nil {
+		t.Fatalf("first adopt: %v", err)
+	}
+	if err := job.adopt(200); err != nil {
+		t.Fatalf("second adopt: %v", err)
+	}
+	if job.pgid != 200 {
+		t.Fatalf("pgid = %d, want 200 (last adopt wins)", job.pgid)
+	}
+}
+
 // TestPGroupJobNeverKillsWhatItCannotSee covers all three refusals in killGroup.
 // Each is an invariant, not a nicety.
 //
@@ -426,8 +449,12 @@ func TestKillProcessTreeUnixFallsBackWhereThereAreNoProcessGroups(t *testing.T) 
 //
 // Mutations, one per subtest: replace adopt with a bare killProcessGroup(pid)
 // and the first case signals a number the table does not contain; drop the
-// `pgid != pid` refusal in adopt and the second case signals a stranger's
-// group — or, for a child that inherited Moombox's group, Moombox's own.
+// `pgid != pid` refusal in adopt and the second case does NOT signal a
+// stranger's group — adopt still records the INPUT pid, not the table's
+// looked-up value, so killGroup's own empty-group refusal (activeProcesses
+// finds no member whose pgid equals that pid) blocks the signal. The observed
+// failure is nothing killed, an orphaned browser left running, not a wrong
+// group getting SIGKILLed.
 func TestKillProcessTreeUnixWillNotSignalAGroupThePidNoLongerLeads(t *testing.T) {
 	t.Run("pid is not in the table", func(t *testing.T) {
 		groups := captureGroupKills(t)

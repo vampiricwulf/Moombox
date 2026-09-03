@@ -216,7 +216,7 @@ type AutoCookieService struct {
 	jar           *CookieJar
 	setupProcess  *os.Process
 	setupClaimed  bool        // StartSetup slot claim — held from the gate check until the browser process is registered (or the attempt fails)
-	setupJob      *processJob // Windows Job Object for setup browser; nil on non-Windows
+	setupJob      *processJob // Windows: a Job Object. Linux: the browser's process group. nil elsewhere
 	refreshCmd    *exec.Cmd   // tracks in-flight headless refresh browser
 	setupBrowser  *DetectedBrowser
 	browserExited bool
@@ -618,19 +618,26 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 //     creates and stores a job of its own. That was the last Windows path where
 //     the reap could not fire, and it was the common one: knownBrowsers lists
 //     the Firefox family ahead of every Chromium entry.
-//   - Linux, and every non-Windows target — there is no Job Object PRIMITIVE
-//     at all (job_linux.go / job_other.go are no-op stubs), so nothing is
-//     answerable on ANY path, Chromium included, and the reap never fires.
-//     GIVING FIREFOX A JOB DID NOT CHANGE THAT. Docker and native Linux keep
-//     the abandoned-setup wedge until something other than a Job Object owns
-//     the liveness question there. Recorded as a known residual, not an
-//     oversight.
+//   - Linux and Docker — answerable since the process-group reap landed.
+//     configureCmdSysProcAttr sets Setpgid, so every browser leads its own
+//     group; queryable() is true once that group was adopted, and
+//     activeProcesses counts its members from /proc. One case still answers
+//     "no idea", honestly: a container whose /proc cannot be walked. One
+//     answers WRONGLY: a browser that called setsid() and left the group
+//     reads as gone, and the reap releases the slot with it still on screen
+//     (no kill — the group it would signal is empty). Which packagings do
+//     that is unmeasured. NOT FIELD-VERIFIED — built and unit-tested against
+//     a fake process table, with a user's bug report as the gate.
+//   - darwin and every other target — no primitive at all (job_other.go is
+//     still a no-op stub), so nothing is answerable and the reap never fires.
+//     The client-side cancel (the unload beacon, Skip, Escape, the TUI
+//     countdown) is what clears an abandoned setup there.
 //
-// Two answerable cases and one that is not. Wherever it is not — and on Windows
-// wherever newProcessJob or its assign failed — the client-side cancel (the
-// unload beacon, Skip, Escape, and the TUI countdown) is what clears an
-// abandoned setup; the gap is specifically "no client survived to say
-// anything".
+// Three answerable targets and one that is not. Wherever it is not — and on
+// Windows and Linux wherever newProcessJob or its assign failed — the
+// client-side cancel (the unload beacon, Skip, Escape, and the TUI countdown)
+// is what clears an abandoned setup; the gap is specifically "no client
+// survived to say anything".
 //
 // A package variable so tests can supply the answer a real Job Object gives on
 // a machine where no browser may be launched — the same seam convention as
@@ -1513,14 +1520,18 @@ func (s *AutoCookieService) CancelSetup() error {
 //     being gone) and cannot fire while a login is in progress. Releasing here
 //     would mean cleanupLocked, which closes that handle, which is
 //     KILL_ON_JOB_CLOSE on a live browser. Do nothing.
-//   - not known — no job, or a platform with no Job Object primitive at all
-//     (every non-Windows target). The reap can NEVER fire there, so this is the
-//     only thing that releases the slot; and with nothing tracking the browser,
-//     releasing kills nothing. Release.
+//   - not known — no job (a failed assign on either platform), a Linux group
+//     whose /proc cannot be read, or a platform with no primitive at all
+//     (darwin and the fallback build). The reap can never fire there, so this
+//     is the only thing that releases the slot; and with nothing able to reach
+//     the browser, releasing kills nothing — on Linux the group kill inside
+//     cleanupLocked refuses a group it cannot see. Release.
 //
-// Which is to say plainly: this call is redundant on Windows and load-bearing
-// on Linux and in Docker. It is not dead code on Windows — it is the arm that
-// deliberately declines, and deleting the check would restore the kill.
+// Which is to say plainly: this call is redundant wherever a group or a Job
+// Object was adopted — Windows, and Linux since the process-group reap — and
+// load-bearing where nothing was: darwin, the fallback build, and any Linux
+// launch whose group could not be adopted. The declining arm is not dead code
+// on either platform — deleting the check would restore the kill on both.
 //
 // Two things it deliberately does NOT do. It does not raise `cancelled`,
 // because it is not an abort: a StartSetup still preparing a launch is left to
@@ -3183,9 +3194,12 @@ var killOneProcess = func(proc *os.Process) error { return proc.Kill() }
 // reaped PID for exactly this reason.
 //
 // It does NOT make killing-by-PID safe in general, and does not try to. Where
-// no job can vouch for the browser — a failed assign, and every non-Windows
-// target, where queryable() is always false — the kill still runs, because
-// there it is the only thing that can work.
+// no job can vouch for the browser — a failed assign on either platform, and
+// darwin and the fallback build, where queryable() is always false — the kill
+// still runs, because there it is the only thing that can work. On Linux that
+// kill goes through killProcessTreeUnix, which signals a group only when the
+// pid still leads one; a reaped pid falls back to proc.Kill, which Go refuses
+// on a process it has already waited on.
 func (s *AutoCookieService) killSetupProcess() {
 	deadline := time.Now().Add(launchWindowKillBudget)
 	for {
@@ -3287,10 +3301,12 @@ func (s *AutoCookieService) cleanup() {
 // attempt's job, and closing that one kills a browser the user is actively
 // using.
 //
-// It kills NOTHING anywhere else: job_linux.go and job_other.go are no-op
-// stubs, so on Linux and in Docker this only drops per-attempt state and a
-// browser left behind keeps running (pdeathsig ties it to Moombox's death, not
-// to this call). Do not read the sentence above as cross-platform.
+// IT KILLS ON LINUX TOO NOW, but by a different route: the close only forgets a
+// process-group id there, so the killTrackedProcesses call in the body below is
+// what reaches the browser. Same consequence, same requirement on callers. On darwin and the
+// fallback build job_other.go is still a no-op stub, nothing is tracked and
+// nothing is killed; a browser left behind there keeps running (pdeathsig ties
+// it to Moombox's death, not to this call).
 //
 // Caller must hold s.mu.
 func (s *AutoCookieService) cleanupLocked() {

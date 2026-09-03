@@ -57,7 +57,7 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 	}
 
 	cmd := exec.Command(browser.Path, "--new-instance", "--profile", s.profileDir, url)
-	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG; Windows: no-op (Job Object below)
+	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG + Setpgid (the group the reap counts); Windows: no-op (Job Object below)
 
 	// A Job Object, created before the launch, for the two reasons the Chromium
 	// path has one — the browser dies with a crashed Moombox, and cleanupLocked
@@ -70,9 +70,10 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 	// abandoned-setup reap never fired on the default path for anyone whose
 	// browser is Firefox-family.
 	//
-	// WINDOWS ONLY. newProcessJob is a no-op stub on Linux and on the fallback
-	// build, so this changes nothing there and the reap stays dead on those
-	// platforms — see setupBrowserGone's third case.
+	// WINDOWS AND LINUX. newProcessJob is a Job Object on Windows and a process
+	// group on Linux, and the reap fires on both. It is still a no-op stub on
+	// darwin and the fallback build, where the reap stays dead — see
+	// setupBrowserGone's fourth case.
 	job, jobErr := newProcessJob()
 	if jobErr != nil {
 		s.logger.Warn("failed to create job object for firefox setup", "err", jobErr)
@@ -229,7 +230,7 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 
 		s.logger.Info("launching Firefox for cookie refresh", "platform", platform, "url", url)
 		cmd := exec.Command(browser.Path, "--new-instance", "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
-		configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG; Windows: no-op (Job Object in runWithTimeout)
+		configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG + Setpgid (the group the reap counts); Windows: no-op (Job Object in runWithTimeout)
 		s.mu.Lock()
 		s.refreshCmd = cmd
 		s.mu.Unlock()
@@ -373,9 +374,11 @@ const minPlausibleBrowserRefresh = 1 * time.Second
 // on top of a fact would just be noise. This function only has something to
 // say about the launches the fact already credited.
 //
-// On Linux there is no Job Object, so drainJob returns on lap zero (see its
-// doc comment) and a launch that genuinely worked can still read as fast
-// here. The Debug message at the call site is worded as an observation, not
+// On darwin and the fallback build there is no count at all, so drainJob
+// returns on lap zero (see its doc comment) and a launch that genuinely worked
+// can still read as fast here. Linux has a count since the process-group reap,
+// but no timing has been recorded there, so the threshold is a Windows number.
+// The Debug message at the call site is worded as an observation, not
 // a conclusion, so that routine case does not read as an assertion of
 // failure.
 func refreshLooksImplausiblyFast(elapsed time.Duration, acted bool) bool {
@@ -861,11 +864,16 @@ func drainJob(ctx context.Context, job *processJob, startedAt time.Time, budget 
 				// browser finished", and the only one this observation
 				// supports.
 				//
-				// It is also the norm on two platforms rather than an edge:
-				// the Linux and darwin processJob stubs return 0 from
-				// activeProcesses unconditionally, so every launch there
-				// lands here on lap zero having drained nothing. Claiming a
-				// finish would assert something the platform cannot observe,
+				// It is the norm on darwin and the fallback build, where
+				// processJob is still a no-op stub returning 0 from
+				// activeProcesses unconditionally, so every launch there lands
+				// here on lap zero having drained nothing. Linux is different
+				// in kind: its process group gives a real count, so landing
+				// here means the group really was empty when the direct child
+				// was reaped — the usual case there, since without a launcher
+				// the direct child IS the browser — and anything that had
+				// outlived it would have been waited for. Claiming a finish
+				// would still assert something a stub platform cannot observe,
 				// the same distinction the !rendered branch in refreshFirefox
 				// holds.
 				logger.Debug("no tracked processes to wait for; the browser was not waited on",

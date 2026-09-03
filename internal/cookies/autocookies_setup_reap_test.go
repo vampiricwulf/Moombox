@@ -611,16 +611,18 @@ func TestAbandonLeavesTheBrowserAloneWhereTheReapCanJudgeIt(t *testing.T) {
 // TestAbandonReleasesTheSlotWhereTheReapNeverFires is the other arm, and the
 // reason the beacon still exists at all.
 //
-// Where setupBrowserGone cannot answer — no Job Object, or a platform with no
-// Job Object primitive, which is every non-Windows target — the reap can NEVER
-// release the slot, so this beacon is the only thing that does. Releasing is
-// also safe exactly there: with nothing tracking the browser, clearing the slot
-// closes no handle and kills nothing.
+// Where setupBrowserGone cannot answer — no job, a platform with no primitive
+// at all (darwin, the fallback build), or a Linux group that could not be
+// adopted or whose /proc cannot be read — the reap can NEVER release the
+// slot, so this beacon is the only thing that does. Releasing is also safe
+// exactly there: with nothing tracking the browser, clearing the slot closes
+// no handle and kills nothing.
 //
-// So the call is redundant on Windows and load-bearing on Linux and in Docker.
-// Both halves are asserted, here and above, because deleting either one is a
-// live regression: drop the deferral and the kill comes back, drop this and
-// Linux wedges until restart.
+// So the call is redundant wherever a group or a Job Object was adopted —
+// Windows, and Linux since the process-group reap — and load-bearing wherever
+// nothing was. Both halves are asserted, here and above, because deleting
+// either one is a live regression: drop the deferral and the kill comes back,
+// drop this and an unanswerable platform wedges until restart.
 func TestAbandonReleasesTheSlotWhereTheReapNeverFires(t *testing.T) {
 	killed := captureKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})

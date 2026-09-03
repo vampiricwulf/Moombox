@@ -112,6 +112,12 @@ type pgroupJob struct {
 // why this returns an ERROR rather than silently recording nothing —
 // trackedSetupJob's answer to an assign it cannot trust is already to drop the
 // job and log why.
+//
+// A second adopt on the same job REPLACES the tracked group; last adopt wins,
+// with no merge and no refusal. Production never calls it twice on one job —
+// killProcessTreeUnix builds a fresh *pgroupJob per call, and
+// processJob.assign adopts once — so nothing here relies on the replacement,
+// but the type itself has no guard against it.
 func (j *pgroupJob) adopt(pid int) error {
 	if j == nil {
 		return errors.New("no job to adopt a process group into")
