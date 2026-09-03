@@ -241,6 +241,44 @@ func livenessFromProbe(verdict youtube.SessionAuthState, err error) (loggedIn, c
 	return verdict == youtube.SessionAuthLoggedIn, true
 }
 
+// twitchLivenessProbeTimeout bounds the tier-2 Twitch probe.
+//
+// doRefresh hands the ticker's context straight through, unbounded, and
+// internal/twitch's gqlRequest retries transient failures three times with a
+// 1s/2s/4s backoff on top of a 30-second per-attempt client timeout — up to
+// roughly two minutes of ticker goroutine for a probe that is ALLOWED to learn
+// nothing. 20 seconds bounds it to about one attempt plus the first retry's
+// wait, and matches the number the YouTube twin's tests use for a tier-2
+// probe. An answer this does not get in 20 seconds is one the next tick can
+// have.
+const twitchLivenessProbeTimeout = 20 * time.Second
+
+// pickTwitchProbeChannel returns the login the tier-2 Twitch probe should ask
+// about, or "" when this install has no Twitch channel to ask about.
+//
+// The predicate is TwitchMonitor.getTwitchChannels' (internal/monitor/
+// twitch.go), copied rather than shared because that method is unexported and
+// hangs off the monitor: an enabled channel whose `Platform` field is exactly
+// "twitch". The RAW field, deliberately, for parity with getTwitchChannels —
+// not because GetPlatform() would behave differently here: it maps an empty
+// platform to "youtube", which is skipped by != "twitch" exactly as "" is.
+//
+// FIRST match, in slice order, so the target is stable across ticks: the
+// verdict is session-level and does not depend on which channel is used, but a
+// wandering target in the log reads as a defect.
+func pickTwitchProbeChannel(cfg *config.MoomboxConfig) string {
+	for _, ch := range cfg.Channels {
+		if ch.Enabled != nil && !*ch.Enabled {
+			continue
+		}
+		if ch.Platform != "twitch" {
+			continue
+		}
+		return ch.ID
+	}
+	return ""
+}
+
 // cookiePlatformDetector is the jar surface detectCookiePlatforms needs — the
 // LOOSE "was this install ever configured for this platform" predicates, not
 // the STRICT "is the complete working set present right now" pair. Naming
@@ -835,6 +873,43 @@ func (s *runState) initServices(logLevelOverride string) error {
 			log.Debug("tier-2 liveness probe did not answer", "verdict", verdict, "err", err)
 		}
 		return loggedIn, conclusive
+	}
+
+	// The Twitch twin, injected for the same reason plus one more:
+	// internal/twitch imports internal/cookies (service.go, auth.go), so the
+	// call cannot be made from the refresh service in either direction. This
+	// file imports both. It exists because oauth2/validate returns 200 for a
+	// token that is valid but no longer entitled to authenticated playback,
+	// while the playback access token says which session it was minted for.
+	//
+	// The config is read on EVERY call, never captured here: an operator who
+	// adds their first Twitch channel gets a working probe on the next tick
+	// with no restart, and one who removes the last gets an inconclusive probe
+	// rather than a request against a stale login.
+	//
+	// The three answers collapse to two, and the collapse is the point: no
+	// configured channel, a transport failure, a rate limit and a 401/403 that
+	// may be an edge block are all "we learned nothing" and must report
+	// conclusive=false so the refresh service moves no state. The reason is
+	// logged here, at the one place that still holds it, at Debug because it
+	// recurs every cycle for as long as the obstruction lasts — the
+	// once-per-change Info line belongs to the refresh service, which owns the
+	// dedupe. ProbeSessionLiveness synthesises its error, so nothing written
+	// here can carry a response body, an Authorization header or a token.
+	cookieRefresh.TwitchFallbackLiveness = func(ctx context.Context) (bool, bool) {
+		var login string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			login = pickTwitchProbeChannel(c)
+		})
+
+		probeCtx, cancel := context.WithTimeout(ctx, twitchLivenessProbeTimeout)
+		defer cancel()
+
+		signedIn, conclusive, err := twService.ProbeSessionLiveness(probeCtx, login)
+		if !conclusive {
+			log.Debug("tier-2 twitch liveness probe did not answer", "channel", login, "err", err)
+		}
+		return signedIn, conclusive
 	}
 
 	// =========================================================================

@@ -671,6 +671,29 @@ type RefreshService struct {
 	// rate limit, a transport failure) and MUST NOT move any state. Only a
 	// conclusive answer is passed on to ObserveLiveness.
 	FallbackLiveness func(ctx context.Context) (loggedIn, conclusive bool)
+
+	// TwitchFallbackLiveness is the Twitch twin of FallbackLiveness, injected
+	// for the same structural reason and one more: internal/twitch imports
+	// THIS package (service.go, auth.go), so the direct call is an import cycle
+	// in the other direction. cmd/moombox builds the closure.
+	//
+	// It exists because checkTwitchAuth cannot answer the question it looks
+	// like it answers: oauth2/validate returns 200 for a token that is valid
+	// but no longer entitled to authenticated playback, so an install with no
+	// capture running reads a dead session as healthy until a stream goes live.
+	// The playback access token DOES say which session it was minted for — see
+	// internal/twitch.Service.ProbeSessionLiveness and PlaybackTokenSession.
+	//
+	// Called at the tail of a PERIODIC refresh under the same three conditions
+	// the YouTube twin uses, plus one: the jar must hold a Twitch auth-token
+	// RIGHT NOW (HasTwitchAuthCookies, not the broad HasAnyTwitchAuthCookie).
+	// Without the bearer token the request gets an anonymous playback token by
+	// design, so the probe would decline anyway.
+	//
+	// conclusive == false means the probe learned nothing — no configured
+	// channel, a rate limit, a transport failure, a 401/403 that may be an edge
+	// block — and MUST NOT move any state.
+	TwitchFallbackLiveness func(ctx context.Context) (loggedIn, conclusive bool)
 }
 
 // livenessRecord is what the liveness signal last told this process about one
@@ -927,14 +950,15 @@ func (rs *RefreshService) CheckNow(ctx context.Context) bool {
 // — fires OnRecoveryNeeded for a signed-out one.
 //
 // Callers must filter their own inconclusive results out: reaching this method
-// means "YouTube told us", not "we asked". A consent wall, a rate limit, an
+// means "the platform told us", not "we asked". A consent wall, a rate limit, an
 // off-host redirect and a never-configured jar are all silence, and passing
 // any of them in as loggedIn=false would report working credentials as dead.
 //
-// Two producers exist today, both YouTube: the per-channel membership probe
-// (which runs once per configured channel per feed cycle) and the
-// channel-independent FallbackLiveness probe. The first is why the dedupe is
-// not optional — one dead session must raise one alarm, not one per channel.
+// Three producers exist today: YouTube's per-channel membership probe (which
+// runs once per configured channel per feed cycle), YouTube's
+// channel-independent FallbackLiveness probe, and Twitch's
+// TwitchFallbackLiveness probe. The first is why the dedupe is not optional —
+// one dead session must raise one alarm, not one per channel.
 func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 	due, notable := rs.recordLiveness(platform, loggedIn, time.Now())
 
@@ -972,8 +996,8 @@ func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 	}
 	if fn := rs.OnRecoveryNeeded; fn != nil {
 		// States what this method was told, and stops there. ObserveLiveness
-		// has two producers — the per-channel membership probe and the
-		// channel-independent fallback — and cannot tell which sent this
+		// has three producers — the per-channel membership probe and the two
+		// channel-independent fallbacks — and cannot tell which sent this
 		// verdict. This is the line that will page an operator the day the
 		// gate flips, so it must not name a mechanism it cannot know.
 		rs.logger.Warn("a liveness observation reports this platform is signed out, triggering recovery", "platform", platform)
@@ -1361,6 +1385,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		ytConcluded, twConcluded   bool
 		hasChecked                 bool
 		hasYTCookies, hasTWCookies bool
+		hasTwitchToken             bool
 		ytIdentity, prevYTIdentity string
 		twIdentity, prevTWIdentity string
 		twEffective                bool
@@ -1400,6 +1425,13 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		// that were silent forever.
 		hasYTCookies = rs.jar.HasAnyYouTubeAuthCookie()
 		hasTWCookies = rs.jar.HasAnyTwitchAuthCookie()
+
+		// The NARROW predicate, and deliberately not hasTWCookies. The tier-2
+		// Twitch probe sends the bearer token as the credential; without it
+		// Twitch mints an anonymous playback token by design and the probe
+		// declines. Sampled here so the gate and every other snapshot this
+		// pass reasons about describe the same reload.
+		hasTwitchToken = rs.jar.HasTwitchAuthCookies()
 
 		// Sampled under the same lock as the rest of this check's snapshots, and
 		// AFTER the jar.Reload() at the top of doRefresh, so it reflects whatever
@@ -1666,6 +1698,40 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 				logAt = rs.logger.Info
 			}
 			logAt("liveness fallback probe learned nothing about this session", "platform", "youtube")
+		}
+	}
+
+	// Tier 2, Twitch. The same shape as the block above, and the same pilot
+	// gate withholds the same last step. What differs is the jar condition:
+	// this probe SENDS the auth-token, so an install without one is not
+	// "unreported", it is unprobeable — and asking anyway would get an
+	// anonymous playback token by design and read as a dead session.
+	//
+	// Runs inline on the ticker goroutine, which carries Start's inline
+	// recover. Nothing is spawned.
+	if allowFallback && rs.TwitchFallbackLiveness != nil && hasTwitchToken &&
+		!rs.livenessObservedRecently("twitch", time.Now()) {
+		// Only a conclusive answer moves anything. `false, false` is no
+		// configured channel, a rate limit, a transport failure, or a 401/403
+		// that may be an edge block — never a dead session.
+		if loggedIn, conclusive := rs.TwitchFallbackLiveness(ctx); conclusive {
+			rs.ObserveLiveness("twitch", loggedIn)
+		} else {
+			// Deduped through the same record a verdict uses, so an install
+			// that can never answer — no Twitch channel configured, a
+			// permanently refused request — says so once per process instead
+			// of once per cycle. No second configured-platform gate is needed
+			// the way the YouTube arm needs one: hasTwitchToken above already
+			// established that there is a session to report on.
+			//
+			// The reason is not here because the (loggedIn, conclusive) pair
+			// cannot carry one; cmd/moombox's closure logs the probe's own
+			// error at Debug, where it has it.
+			logAt := rs.logger.Debug
+			if rs.recordInconclusiveLiveness("twitch") {
+				logAt = rs.logger.Info
+			}
+			logAt("liveness fallback probe learned nothing about this session", "platform", "twitch")
 		}
 	}
 
