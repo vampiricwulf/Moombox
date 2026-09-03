@@ -721,7 +721,7 @@ Expected: compile failure — `undefined: AcquisitionAuto`, `s.AcquisitionMode u
 
 - [ ] **Step 3: Add the constants, the field and the resolver**
 
-In `internal/cookies/autocookies.go`, immediately after `dangerousProfilePathSubstrings`'s var block (before `validateBrowserProfileDir`):
+In `internal/cookies/autocookies.go`, immediately after `dangerousProfilePathSubstrings`'s var block (before `validateBrowserProfileDir` — as built: renamed `validateBrowserProfileDirForLaunch` in Task 4):
 
 ```go
 // The two values of cookies.acquisition, which decide how a REFRESH pass
@@ -2167,7 +2167,7 @@ EOF
 
 ```bash
 grep -n "acquisition" internal/config/types.go internal/cookies/autocookies.go cmd/moombox/services.go internal/tui/settings.go web/public/modules/settings.js web/public/modules/utils.js
-grep -rn "validateBrowserProfileDir\b" internal/ cmd/ docs/    # must return NOTHING (Task 4 renamed dpapi.go:12 and the periodic test's comment too)
+grep -rn "validateBrowserProfileDir\b" internal/ cmd/ docs/spec/ SPEC.md README.md .claude/    # must return NOTHING (Task 4 renamed dpapi.go:12 and the periodic test's comment too; docs/superpowers/ is out of scope by ruling — its remaining hits are this plan's own rename steps and the "X is now Y" sentences)
 grep -rn "validateBrowserProfileDirForLaunch" internal/ docs/
 grep -rn "AcquisitionBrowser\|\"browser\" *[,)]" internal/config internal/cookies/autocookies*.go internal/tui/settings.go   # no third value anywhere
 ```
@@ -2290,3 +2290,46 @@ No `TBD`, no "similar to Task N", no conditional left to the executor. The two c
 3. **`decideStartupSeed` and the periodic tick both infer the import path from the host** (`autocookies_profile.go:876`, `autocookies.go:3000`). The audit's G4 names the first; the second is the same defect at the other automatic caller, and without it `"profile"` + `auto_enabled = true` would re-read a real profile over a live `cookies.txt` on a schedule. Task 4 corrects both and pins both.
 4. **`TestRungThreeAgreesAcrossBothSurfaces` fails on any sentinel the handler branches on that its map does not list** — Task 4 adds the row and a direct 422 test, since that test cannot see a deleted case.
 5. **`app.js` cannot run in goja** (module-level `document.addEventListener`); the sentence lives in `utils.js`, the codebase's established seam for exactly this.
+
+---
+
+## Final state (arc-close review, 2026-09-03)
+
+Branch `cookie-arc12c-acquisition-mode` from `main` @ `383ed7d`, reviewed whole at `8558f5f` (34 files, +4014/−60, seven tasks, two `--no-ff` sub-branch merge-backs). The arc-close review is `.superpowers/sdd/2026-09-02-arc12c-acquisition-mode/arc12c-arc-close-review.md`; the ledger beside it (`progress.md`) holds every ruling below.
+
+### What shipped, by commit
+
+| Task | Commit(s) | Shipped |
+|---|---|---|
+| 1 — config | `9dc5182` | `CookiesConfig.Acquisition` (`internal/config/types.go`), default `"auto"` (`Defaults()`), the `validateOrNormalize` switch — `""` silent, unknown → `fail()` + replaced (`internal/config/config.go`); `migrateOldFormat` untouched; three tests |
+| 2 — REST | `4364afd` | `validateConfigUpdates` accepts `""`/`auto`/`profile` only, `applyConfigUpdates` trims and lower-cases (`internal/web/routes/config_routes.go`); two tests |
+| 3 — service | `7fac42e` | `AcquisitionAuto`/`AcquisitionProfile`, `AutoCookieService.AcquisitionMode` (nil = `auto`), `resolvedAcquisition`, the `importedFromProfile` decision (`internal/cookies/autocookies.go`), the `cmd/moombox/services.go` wiring, `data-and-storage.md`'s field row, four-ways sentence, composition paragraph and `R F` ladder line; five tests |
+| 4 — G3 | `78590d2` + fix `c74492d` | `validateBrowserProfileDir` → `validateBrowserProfileDirForLaunch`; `readOnlyProfileDirErr`; `ErrProfileDirNotOptedIn` (the seventh sentinel: 422, excluded from rung 3); `importProfileCookies` and `decideStartupSeed` consult the read-only verdict; the seed's browser short-circuit and the periodic tick's browser-free test both treat `"profile"` as an import; the `dpapi.go` comment; `security.md` § Browser Profile Directory Guard, `operations.md`, `user-interfaces.md`; eight tests — the launch-guard test asserts the guard's OWN error after the review deleted a guard and watched `err != nil` pass |
+| 5 — web | `834f92b` + fix `0542702`, merged `547769b` (`--no-ff`) | `cfg-cookies-acquisition` (two options + help), `populateConfigForm`/`saveConfig`, `cookieRefreshPreflightToast` (`web/public/modules/utils.js`), `autoCookieRefresh`'s toast; five goja tests, two rewritten to RUN `saveConfig`/`populateConfigForm` after the review found unanchored substring checks |
+| 6 — TUI | `1fdcdf2`, merged `1d45a5b` (`--no-ff`) | the `acquisition` `fieldCycle` row, `loadValues`/`applyValues`, `cookieAcquisitionMode`, `cookieRefreshFeedback`, `R F`'s pre-flight line (`internal/tui/settings.go`, `app_actions.go`); six tests including the cross-surface pin |
+| 7 — docs | `8558f5f` | `SPEC.md` § Cookies, README ("Four options" + the profile recipe), the remediation plan's G3/G4 bullet → BUILT, the design doc's guard citation, the `moombox-settings` skill's three `jobs.go` → `config_routes.go` paths |
+
+Mutations: Task 1 7/7, Task 2 7/7, Task 3 5/6 (the survivor ruled equivalent — see residuals), Task 4 9/11 then 11/11 after the fix, Task 5 5/7 then 7/7 after the fix, Task 6 9/9; the arc-close ran fourteen of its own across the four packages and the goja panel tests, 14/14 caught. The merge-gate suite at `547769b`: 27 ok / 0 FAIL / 4 no-test.
+
+### Rulings that changed the plan as written
+
+- **Two values, not three (ruling 2026-09-02, before Task 1).** The audit's `"browser"` was dropped: at every site the decision is `profile`-vs-rest, so `"browser"` and `"auto"` could not be told apart, and a value that behaves like another is a trap. Pinned on every surface — `TestCookiesAcquisitionNormalises/browser_is_not_a_value`, `TestAcquisitionModeValidation/the_dropped_third_value`, `TestAcquisitionModeSelectsTheRefreshPath/the_dropped_third_value_falls_back_to_auto`, `TestAcquisitionSelectIsInTheShippedPanel`, `TestAcquisitionRowIsACycleWithTwoOptions`. A later semantics can add it additively.
+- **The guard rename's old-name citations (Task 4 review F4, ruled 2026-09-03).** Task 7's gate is scoped to `internal/ cmd/ docs/spec/ SPEC.md README.md .claude/` (empty at HEAD). The ten `validateBrowserProfileDir` hits under `docs/superpowers/` — this plan's own rename steps, the "X is now Y" sentences here and in the remediation plan's G3/G4 bullet, and the design doc's R3 — are the record of the rename, not rot, and stay as written; the one stale location cite (Task 3 Step 3, "before `validateBrowserProfileDir`") carries an as-built note instead, and the gate text in Task 7 Step 1 says so.
+- **Sub-branch parallelism (ruling 2026-09-03 09:34).** Tasks 5 and 6 depended only on Task 3 and touched disjoint files, so they were built in `.worktrees/` sub-branches in parallel with Task 4 and merged back `--no-ff` (`1d45a5b`, `547769b`). Each implementer ran single packages; the ONE full suite ran at the merge gate. Task 6's cross-surface pin skipped on its own branch (Task 5's `utils.js` was not there yet) and RUNS at HEAD — verified at the arc-close by rewording the dashboard's profile sentence and watching it fail.
+- **A doc sentence ahead of its mechanism (Task 3 review, ruled no fix round).** `data-and-storage.md`'s "the timer's import stays behind `automaticImportGuard`" was false at `7fac42e` (752 unguarded imports in the reviewer's probe) and true at `78590d2`; plan ordering, confirmed by Task 4's review (550 without the tick clause, 0 with) and by the arc-close (806 / 0).
+
+### Residuals, each with its home
+
+| Residual | Home |
+|---|---|
+| `"browser"` is deliberately absent, and the docs say why | `internal/config/types.go` (the field's doc), `internal/cookies/autocookies.go` (the constants' doc), `docs/spec/data-and-storage.md` (field row + composition paragraph), `SPEC.md` § Cookies, the remediation plan's G3/G4 bullet |
+| `dpapi_fallback` untouched: `internal/cookies/autocookies_dpapi.go` has no hunk, `dpapi/dpapi.go` changed one comment word; the DPAPI fallback lives in the browser branch, which `"profile"` never takes | this section; the design doc § 3 |
+| `NewAutoCookieService` logs `auto-cookie profile dir rejected at construction ... refusing to launch a headless session against it` at ERROR on every boot whose `browser_profile_dir` is a real profile — in `"profile"` mode too, because `AcquisitionMode` is wired after construction (`cmd/moombox/services.go`). The verdict is correct (launches DO refuse the directory) and the read is unaffected, but the line reads as a rejected config to the operator the README recipe just told to configure exactly this | housekeeping candidate: reword/downgrade the constructor line ("launch guard armed for this directory") or defer it to the first launch-site refusal; the field-test plan's Part 4 row 23 names the line so it is not read as a failure |
+| The post-flight sentences still say `Browser cookie refresh ...` after a `"profile"` import (`internal/tui/app_update.go`'s `cookieForceRefreshResultMsg` arms, `web/public/app.js`'s `autoCookieRefresh` result toasts). Pre-existing — every browser-free import has always rendered them — so not a regression; R4 asked for the PRE-flight line to name the mechanism, and it does | housekeeping candidate: both renderers have the mode at hand (`a.cookieAcquisitionMode()`, `this.config?.cookies?.acquisition`); field-test plan Part 4 row 23 |
+| `TestReadOnlyImportIsGatedOnTheOptIn`'s `/profile` row asserts only "not the opt-in sentinel, and some error", so it is a decoy under a mutant that returns the cached launch verdict; the claim is pinned by `TestRealProfileTreeReadsOnlyOnTheOptIn/profile reads it read-only and verifies`, which that mutant fails (Task 4 review F2, ruled cosmetic) | this section |
+| `resolvedAcquisition` returning a normalised-but-uncanonicalised value is unobservable: every consumer compares against `AcquisitionProfile` only (Task 3 review, ruled not required) | this section |
+| No dedicated wiring test for `AcquisitionMode` in `cmd/moombox` (precedented by `ConfiguredBrowserOverride`); the wiring is what the field smoke rows exercise | field-test plan Part 5 rows 28-30 |
+| Every Arc 12c test reads a synthetic `t.TempDir()` profile and the guard tests use a path that does not exist; nobody has watched the read-only import run against a real Firefox profile (open or closed), or the periodic tick stand down on a real timer in `"profile"` mode | field-test plan Part 4 row 23 |
+| `decideStartupSeed` surfaces the read-only refusal as its `autoImportNotConfigured` verdict (a Debug "not applicable" line), never as the sentinel's sentence; only the manual refresh renders `ErrProfileDirNotOptedIn` (422) | `docs/spec/security.md` § Browser Profile Directory Guard (parenthetical added at the arc-close) |
+| Global Constraints above cite `refresh.go:748` for `livenessRecoveryArmed`; at `8558f5f` the constant is `internal/cookies/refresh.go:771` (it moved with A1-on-Linux and Arc 12b) and is still `false` | this section |
+| The field-test plan's Part 7 row listed G3/G4 as "Deferred, owner decisions" | corrected at the arc-close (`2026-08-29-cookie-remediation-field-test-plan.md` Part 7) |
