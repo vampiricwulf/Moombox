@@ -22,9 +22,9 @@ Completion saves config and triggers restart (exit code 42).
 |-----------|------|
 | TUI wizard | `internal/tui/setup_wizard.go` |
 | Web wizard | `web/public/modules/setup.js` |
-| API endpoint | `internal/web/routes/jobs.go` → `SetupRoutes()` |
-| API validation | `internal/web/routes/jobs.go` → `validateConfigUpdates()` |
-| API application | `internal/web/routes/jobs.go` → `applyConfigUpdates()` |
+| API endpoint | `internal/web/routes/setup_routes.go` → `SetupRoutes()` |
+| API validation | `internal/web/routes/config_routes.go` → `validateConfigUpdates()` |
+| API application | `internal/web/routes/config_routes.go` → `applyConfigUpdates()` |
 
 ## Checklist for Adding a Setup Step
 
@@ -45,7 +45,7 @@ Completion saves config and triggers restart (exit code 42).
 - Include in payload sent to `POST /api/setup/complete`
 
 ### 4. API Handling
-`POST /api/setup/complete` in `internal/web/routes/jobs.go`:
+`POST /api/setup/complete` in `internal/web/routes/setup_routes.go`:
 - Validation: reuses `validateConfigUpdates()`
 - Application: reuses `applyConfigUpdates()`
 - Special handling for password hashing, directory creation, yt-dlp plugin install

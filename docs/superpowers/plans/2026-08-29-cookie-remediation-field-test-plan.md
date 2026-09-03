@@ -1,10 +1,13 @@
 # Cookie Remediation - Field-Test Plan (before arming, before the version bump)
 
-Written 2026-08-29 against the working tree at `ed89fd2` (branch `cookie-arc9-docs-tests`, one
-commit past `main` @ `8389009`). `origin/main` is at `613ae12`; nothing since has been pushed.
-Every claim below cites the plan (`docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md`)
-or a ledger in `.superpowers/sdd/2026-08-25-cookie-subsystem-remediation/`. Where they disagree,
-the ledger won (plan §EXECUTION STATUS).
+Written 2026-08-29 against `ed89fd2` (Arc 9 in flight) and kept current through every later
+merge; last reconciled at the final whole-plan review on `main` @ `a674caf` (2026-09-03), which
+closed the remediation chain. `origin/main` is at `613ae12`; nothing since has been pushed.
+Citations of the form "plan §..." refer to the umbrella plan
+`docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md`, which that review DELETED by
+owner ruling (git history is the archive - read it at `a674caf`); the ledgers under
+`.superpowers/sdd/` are gitignored. Where a plan and a ledger disagreed, the ledger won. Every
+arc's own plan under `docs/superpowers/plans/` stays and carries a `## Final state` section.
 
 Two rules for every step in this document:
 
@@ -19,10 +22,9 @@ Two rules for every step in this document:
 
 ## Part 1 - What "arming" is
 
-**Arming is one line.** `const livenessRecoveryArmed = false` at `internal/cookies/refresh.go:606`
-(the decision comment is `:559-605`). Line numbers in this document are at commit `ed89fd2`; the
-working tree currently carries UNCOMMITTED edits to `refresh.go` (+185 lines, Arc 9 Task 2's doc
-reconciliation in flight) that move the constant to `:632` - always re-derive with
+**Arming is one line.** `const livenessRecoveryArmed = false` in `internal/cookies/refresh.go`
+(`:810` at `a674caf`; the decision comment sits directly above it). Line numbers in this document
+drift with every commit - always re-derive with
 `grep -n "livenessRecoveryArmed = false" internal/cookies/refresh.go`. Arming means changing `false` to `true`, rebuilding, and
 running that binary. It is a source constant, not a config flag: it cannot be toggled at runtime,
 `-ldflags` cannot reach it, and the only way back is another build (progress-arc1.md, Task 6
@@ -78,11 +80,17 @@ notification on `auto_enabled = false`, a browser launch on `auto_enabled = true
    at arming, confirm the schedule landed (`grep -n livenessRefireCap internal/cookies/refresh.go`)
    and remember `monitor_callbacks.go`'s `withAuthFailureCooldown` (30 min) is the only OTHER
    coalescing window in play.
-3. **The flip (not testing).** `false` -> `true` at `refresh.go:606`, its own commit
-   ("Flipping this to true is a deliberate, separate change" - refresh.go:604-605). Before you
-   flip, re-read `refresh.go:559-605` and the two comments corrected at `cc51b81` (plan §Staged
-   rollout item 3) - they are the decision documents and some of their justifications expire the
-   moment the constant is true.
+3. **The flip (not testing).** `false` -> `true` at the constant, its own commit
+   ("Flipping this to true is a deliberate, separate change" - the constant's doc comment). Before you
+   flip, re-read the decision comment above the constant and the two comments corrected at `cc51b81`
+   (plan §Staged rollout item 3) - they are the decision documents and some of their justifications
+   expire the moment the constant is true. **The arming commit also owes the second half of ARMING
+   row 12** (`progress-arc8.md`; `2026-09-03-housekeeping-h2.md` § Final state): with the constant
+   true, one chat-marked Twitch loss must reach `OnRecoveryNeeded` ONCE, not twice. The stamp
+   `NoteTwitchAuthLoss` writes through `noteRecoveryDecided("twitch", ...)` and the tier-2 suppression
+   it produces are already asserted disarmed by `TestTwitchMarkStampsTheSharedRecoveryDedupe`
+   (`internal/cookies/refresh_twitch_mark_test.go`), which also pins that the stamp does NOT escalate
+   the back-off; the double-FIRE assertion is the one test the flip must add.
 4. **An armed re-run (testing).** A5 must be re-run ARMED (Part 3) - the disarmed run passes for
    the wrong mechanism. Then the armed build soaks again with the same reading rules as Part 2,
    now watching for the Warn line and the notifications.
@@ -126,7 +134,7 @@ long; Run B a day is enough to see the tier-1 shape stays silent with the browse
 | 4 | `grep "learned nothing" moombox.log` | Absent, or one Info line once and then a normal `loggedIn=true` line later. | The "learned nothing" line is the ONLY liveness line for days = "all Unknown". Item 5b: F1's authenticated-side body shape was inferred, never measured; this is the first thing to measure (log the cookie NAMES `processYouTubeSetCookies` updates on one authenticated cycle - never values). Re-open the page choice (plan §Staged rollout). |
 | 5 | `grep "triggering recovery" moombox.log` | Absent (healthy). | Present without a real outage: tier-1 false positive; A3-class diagnosis. |
 | 6 | Check Discord daily | Nothing from Moombox about cookies. (With jobs parked in `COOKIES?`, the first healthy check of a process may send an info "parked jobs re-evaluated" notice - that is correct resume behaviour, not an alarm; plan §A4 caveat.) | Any "Cookie Re-Authentication Required" / "Cookie Auto-Refresh Failed" while cookies work. |
-| 7 | Twitch | Nothing to watch at tier 2 - Twitch has NO tier-2 signal (item 2). Its only early warning is `expiredTwitchAuth` on the startup line. | - |
+| 7 | Twitch | Since Arc 12b Twitch HAS a tier-2 producer: `TwitchFallbackLiveness`, the playback-access-token probe, on the periodic path only - Part 4 gate 22 is its reading rule. The startup line's `expiredTwitchAuth`, `twitchAuthHorizon` and `twitchLoginExpiry` (H2 R2) are the early warnings. | As gate 22: `loggedIn=false` for Twitch while Twitch downloads and authenticated chat still work is a false verdict - stop, do not arm. |
 | 8 | Item 11(a) - if you click Refresh / `R C` during the soak | Count passes from the LOG, never from clicks. A click landing during a ticker pass runs no pass; at `DEBUG` you will see `cookie refresh skipped, another pass is already in flight` (`refresh.go:1044`). After `R F` or a recovery, an Info `auth re-check after ... was skipped` line is expected, not a fault. A ticker tick landing during a manual pass is dropped for one interval. | - (nothing here is a failure) |
 | 9 | Item 11(b) - only if you reset `config.toml` but kept the data dir | `cookies.meta.json`'s verified `Platforms` seeds the platform list first (`services.go:378-385`, source is logged). If the sidecar still records a platform the jar no longer holds, the first conclusive check fires "auth lost" for it. | Do NOT read that one line as a false verdict; it is the same witnessed-transition behaviour a persisted config produces on every restart. |
 | 10 | Item 11(c) - reasons | `youtubeError`/`twitchError` render on `GET /api/cookies/status`, the web badge title (inconclusive arm only) and the `R C` line. The push-driven TUI status bar renders NO reason, by design. | A reason string reading stale on the always-on TUI bar (it should never be there at all). |
@@ -168,7 +176,7 @@ looks like.
 | 4 | Credentialed Twitch IRC reconnect surviving a real network outage (plan §Arc 5 gate 2; §Arc 8 gate 2; progress-arc5.md fix round 2) | The drop-vs-refusal discriminator: a dropped socket is not a refused login, so a reconnect after an outage stays credentialed instead of latching anonymous | A real Twitch capture with credentials and chat on; pull the network cable / disable the adapter for 1-2 minutes; restore | Chat resumes after reconnect WITH badges; no `continuing anonymously` Warn; the job is not abandoned | Chat resumes without badges (latched anonymous), or the reconnect budget burns and chat is abandoned |
 | 5 | Real end-to-end YouTube archive spanning a cookie rotation on members-only content (plan §Arc 5 gate 3 = Task 8's own gate; progress-arc5.md "Layer 3") | Every long-lived consumer (chat, DASH segments) now reads the jar at use time; the wire only changes for a rotated jar, so the archive must run past at least one ~30-minute `RefreshService` pass | Real install; archive a members-only (or age-gated) live stream longer than 30 minutes | The archive completes with no 401/403 stall after the 30-minute mark; log shows the periodic refresh pass during the capture; chat capture continues past it | Segment or chat 401/403 after a refresh pass; chat ending at the rotation |
 | 6 | Real end-to-end Twitch live archive (progress-arc5.md "Layer 3") | The two-jar split did not break the Twitch downloader path (Layer 1 static + Layer 2 live gates narrowed the risk; only this closes it) | Real install; archive any Twitch live stream to completion, chat on | Finished job, muxed output, chat file present | Playback-token failure, or a playlist that never authenticates |
-| 7 | Twitch keepalive observation (plan §Arc 5 "Twitch keepalive"; §Deferred; research-twitch-keepalive.md §"What I could NOT establish" item 1) | Whether the browser pass's `twitch.tv` navigation renews `auth-token`. No in-process path exists; if the nav does not renew, the answer is the unbuilt ingest endpoint | Real install with `auto_enabled = true` and Twitch cookies. Note the startup line's `twitchAuthHorizon` (beside `expiredTwitchAuth`). Run `R F` (rung 1) and read `twitchAuthHorizon` again on the `cookie refresh succeeded` line - H2 R2 put the horizon on exactly those two lines (`CookieJar.HorizonLogFields`; `data-and-storage.md` §Cookie Jar), same key, same ISO-8601 UTC, a TIMESTAMP never a value. The second line exists only when the pass lands on the SUCCESS arm: a pass that reports `cookies still verify, but this pass could not confirm the browser refreshed the profile` logs no horizon, so run it again, or read the boot line after a restart | Horizon moves forward after the browser pass -> the keepalive already ships. Unchanged -> it does not; the Deferred entry's answer is the ingest path | Either result closes the gate; "failed" is only a browser pass that reports `could not confirm` (nothing to compare) |
+| 7 | Twitch keepalive observation (plan §Arc 5 "Twitch keepalive"; §Deferred; research-twitch-keepalive.md §"What I could NOT establish" item 1) | Whether the browser pass's `twitch.tv` navigation renews `auth-token`. No in-process path exists; if the nav does not renew, the answer is the ingest endpoint Arc 11 built (`POST /api/cookies/import`, row 21) | Real install with `auto_enabled = true` and Twitch cookies. Note the startup line's `twitchAuthHorizon` (beside `expiredTwitchAuth`). Run `R F` (rung 1) and read `twitchAuthHorizon` again on the `cookie refresh succeeded` line - H2 R2 put the horizon on exactly those two lines (`CookieJar.HorizonLogFields`; `data-and-storage.md` §Cookie Jar), same key, same ISO-8601 UTC, a TIMESTAMP never a value. The second line exists only when the pass lands on the SUCCESS arm: a pass that reports `cookies still verify, but this pass could not confirm the browser refreshed the profile` logs no horizon, so run it again, or read the boot line after a restart | Horizon moves forward after the browser pass -> the keepalive already ships. Unchanged -> it does not; re-authenticate through the ingest path (row 21) when it expires | Either result closes the gate; "failed" is only a browser pass that reports `could not confirm` (nothing to compare) |
 | 8 | S8 - Chromium `Cookies` DB WAL staleness (plan §Arc 8 S8 + gate 5; `internal/cookies/dpapi/dpapi_windows.go:143-182`) | Whether the DPAPI fallback's `mode=ro` read of a LIVE Chromium cookie DB sees committed `-wal` frames or a stale checkpoint | A signed-in Chromium-family browser RUNNING (Chrome/Edge/Brave...) on the machine, receiving Set-Cookie (browse a site). The exact check, quoted from the source: "query journal_mode and a row count/timestamp twice, a few seconds apart, while the signed-in browser is known to still be receiving Set-Cookie responses, and confirm the numbers move." Read only `PRAGMA journal_mode` and `SELECT COUNT(*)` / a max timestamp column - never a value | `journal_mode` is not `wal`, OR the count/timestamp moves between the two reads | The numbers do not move while the browser is demonstrably writing: the read is stale, and the fix is a snapshot mirroring `snapshotFirefoxCookieDB` (copy `Cookies` + `Cookies-wal`), per the same comment |
 | 9 | Fresh-profile `--screenshot` mystery (progress.md §FIELD GATE RUN; plan §Follow-ups 7(a)) | Why `--screenshot` produces no file on a freshly-created profile (both Waterfox and Firefox, no Job Object involved; only clue `RenderCompositorSWGL failed mapping default framebuffer`). Production's `browserRendered` keys off the screenshot and discriminated correctly on real setup-created profiles | Optional investigation. Run `MOOMBOX_LIVE_BROWSER_REFRESH=1 go test -count=1 -v -timeout 180s -run TestLiveFirefoxRefreshWritesTheProfile ./internal/cookies/` and read the logged screenshot line; then try a fresh profile with a display/GPU pref variation | A reproducible cause; or a decision to leave it (the gate counts `moz_cookies` rows instead and passes) | Not a release blocker. It matters only if `R F` on YOUR real profile starts reporting `could not confirm` every pass - then the screenshot signal has broken in production too |
 | 10 | LibreWolf / Zen drain gate (progress.md §FIELD GATE CLOSED "STILL UNVERIFIED"; plan §Follow-ups 7(b)) | The Firefox-family drain (wait for the Job Object to empty, not the launcher) works on the two family members never tested | Only if you have LibreWolf or Zen installed: `$env:MOOMBOX_LIVE_BROWSER_REFRESH="1"; $env:MOOMBOX_LIVE_BROWSER_PATH="<path to librewolf.exe or zen.exe>"; go test -count=1 -v -timeout 180s -run TestLiveFirefoxRefreshWritesTheProfile ./internal/cookies/` | Both subtests PASS: `killed at launcher exit` writes 0 rows, `drained launch` writes YouTube rows. Elapsed time is an observation, not a threshold (2-14 s are all clean; `autocookies_refresh_live_test.go:92-115`) | `errBrowserDrainTimeout` - a process left alive in the job; that browser would burn 30 s and report failure on every refresh |
@@ -236,29 +244,27 @@ is `go:embed`-ed - rebuild after any frontend change.
 
 ## Part 6 - Before the version bump
 
-**State to know first.** `origin/main` is at **`613ae12`** and nothing since has been pushed:
-115 commits on this tree, ten `--no-ff` merges (Arcs 0, 1, follow-ups, F1, 2, 3, 4+7, 6, 5, 8).
-The working tree is on `cookie-arc9-docs-tests` @ `ed89fd2` (Arc 9 Task 1: Chromium helper
-tests), one commit past `main` @ `8389009`. Arc 9 (docs, `.gitattributes` `*.html`, the two CRLF
-JS files) is not finished (progress-arc9.md), and at the time of writing `git status` shows
-uncommitted edits to `internal/cookies/refresh.go` and two of its tests (Arc 9 Task 2 in flight).
-Build the soak binary from `main` @ `8389009`, or from this branch only after that task has
-committed and its gates are green - never from a half-edited tree. Decide whether the release
-waits for Arc 9's spec rewrite; the plan's own sequence is arm -> Arc 9 -> final whole-plan review.
+**State to know first.** `origin/main` is at **`613ae12`** (= `v2.8.5`) and nothing since has been
+pushed: 281 commits on `main` through `a674caf`, twenty-three `--no-ff` merges (Arcs 0, 1, the
+Arc 0/1 follow-ups, F1, 2, 3, 4+7, 6, 5, 8, 9, the `mux-wait-chat-idle` worktree, Arc 10, Arc 11,
+A1-on-Linux, Arc 12a, 12b, 12c with its two sub-branch merge-backs, housekeeping H1 and H2), then
+`RELEASE_NOTES.md` (`a674caf`) and the final whole-plan review's one commit on top. Every arc branch
+and worktree is deleted; `git status` is clean. Build the soak binary from `main` - there is no
+other tree - and read `RELEASE_NOTES.md` before the bump.
 
-**Gates - every one from ONE run, 27 packages / 0 failures** (plan §Arc 5 standing rules; progress-arc9 §Standing constraints):
+**Gates - every one from ONE run, 28 packages / 0 failures** (`internal/docs`, the citation-rot checker, joined the suite at H1) (plan §Arc 5 standing rules; progress-arc9 §Standing constraints):
 
 ```powershell
 go build ./...
 go vet ./...
 $env:GOOS="linux"; go build ./...; Remove-Item Env:GOOS
 gofmt -l internal/ cmd/          # must print nothing (repo-wide since Arc 8 T5)
-go test -count=1 ./... 2>&1 | Tee-Object gates.txt   # count 'ok' lines: 27; FAIL: 0
+go test -count=1 ./... 2>&1 | Tee-Object gates.txt   # count 'ok' lines: 28; FAIL: 0
 ```
 
 Do not run two `go test ./...` at once - concurrent runs starve `TestPotProvider_BypassCache` past
 its 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real build disproves
-(~18 phantom batches on this plan).
+(~18 phantom batches on this plan). Run every `go test` with `$env:GOTMPDIR = "D:/Git/Moombox/.superpowers/gotmp"` (gitignored): since 2026-09-03 Windows Defender quarantines the `internal/cookies` test binary when it is built under `%TEMP%\go-build*` (`Trojan:Win32/Bearfoos.B!ml`, an ML heuristic); a Defender exclusion is your call.
 
 **Live gates** (each skips unless its variable is set; none prints a cookie value):
 
@@ -270,30 +276,29 @@ its 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real b
 | `MOOMBOX_LIVE_BROWSER_REFRESH=1` (+ optional `MOOMBOX_LIVE_BROWSER_PATH=<exe>`) | `go test -count=1 -v -timeout 180s -run TestLiveFirefoxRefreshWritesTheProfile ./internal/cookies/` | An installed Firefox-family browser, network, ~10 s. Launches a REAL browser against a throwaway profile; `killed at launcher exit` must write 0 rows, `drained launch` must write YouTube rows. `BROWSER_PATH` steers to a specific exe because `DetectBrowser` ranks Waterfox above Firefox (`autocookies_refresh_live_test.go:117-135`). Last PASS 2026-08-27 on Waterfox and Firefox |
 | optional: `MOOMBOX_LIVE_BG_TEST=1`, `MOOMBOX_LIVE_CIPHER_TEST=1` | `./internal/bgutils/sidecar/...`, `./internal/cipher/` | Not touched by this plan, but Arc 8 T5 pinned the WEB client version across Go and the sidecar; the memory rule is to run the sidecar/cipher gates when client code moves. Both need the embed blobs |
 
-**Open owner questions the ledgers recorded - answer or consciously defer before release:**
+**Owner questions the ledgers recorded - all ANSWERED (Q1-Q13, 2026-08-29, `progress-arc9.md`
+§ OWNER ANSWERS) and every answer BUILT; nothing here is left to decide before release:**
 
-1. **T10 job-row "chat: anonymous" indicator** (progress-arc8.md Task 10 concern 3; plan §Deferred) -
-   a v19->v20 column for one Twitch-only bool plus a render in both UIs. The notification already
-   covers the operator need; the downloader is shaped for it (`OnAuthDowngrade` fires once with a
-   stable token). Yes / no / later.
-2. **The `mux-wait-chat-idle` worktree** (`.worktrees/mux-wait-chat-idle`, branch at `376ff90`,
-   one commit off `5850ec2`: "release the chat-open resume signal on joint chat+segment idleness").
-   It is outside the cookie plan and no cookie-arc review read it. Decide: merge it into this
-   release (it needs a rebase across nine merges and its own gate run), or hold it. The ledgers
-   only mention the worktree in passing (progress-arc47.md:229); I found no recorded ruling on it.
-3. **F3 release-note copy** (progress-arc3.md Task 3 residuals; §Plan edits "Deferred and
-   recorded, not lost") - the behaviour change that finishing or cancelling a Firefox setup now
-   closes the browser it opened, and the TUI countdown going 60 s -> 300 s. Belongs in
-   `RELEASE_NOTES.md`; nobody else will write it.
-4. Two smaller deferred decisions the plan lists under §Deferred: the Twitch `login` diagnostic
-   split (no advance warning before an expiring `login` is pruned) and the "capture started
-   anonymous despite credentials" check (Part 7). Both are follow-ups, not blockers.
+1. **T10 job-row "chat: anonymous" indicator** - ruled NO ("a symptom of a larger issue") and
+   replaced by Arc 10: a downgrade on any of the four chat routes, or an anonymous playback token,
+   marks Twitch not-authenticated with its reason on the existing surfaces, and a credential change
+   reconnects every live chat session (`2026-08-29-arc10-twitch-credential-lifecycle.md` § Final
+   state; Part 4 rows 15-20).
+2. **The `mux-wait-chat-idle` worktree** - ruled "merge it into this release"; rebased, reviewed,
+   merged `8437c86`; worktree and branch deleted.
+3. **F3 release-note copy** - both lines are in `RELEASE_NOTES.md` (Improvements: the Firefox
+   window closes on finish/cancel; the TUI countdown 60 s -> 300 s), which also states the arming
+   state plainly.
+4. **The Twitch `login` diagnostic split** - ruled Q7: not split; `twitchLoginExpiry` on the two log
+   lines and ONE Warn when the refresh prunes an expired `login` while the `auth-token` survives
+   (H2 R2; Part 5 rows 17 and 33). **The "capture started anonymous despite credentials" check** -
+   ruled Q6: folded into Arc 10 and BUILT (Part 7, first row; Part 4 row 18).
 
 **Then the release checklist from `CLAUDE.md` §Release Process:**
 
-1. `RELEASE_NOTES.md` from `git log --oneline v2.8.5..HEAD` (the previous tag is v2.8.5 at
-   `613ae12`), grouped Features / Improvements / Bug Fixes / Internal, no heading. Include the F3
-   copy above and, if you armed, say so plainly.
+1. `RELEASE_NOTES.md` is written (`a674caf`: 49 bullets in the four groups, no heading, the F3
+   copy included, the arming state stated as DISARMED). Review it; if you arm before the bump,
+   change its arming sentences first.
 2. Bump `version = "2.8.5"` in `cmd/moombox/main.go:26`.
 3. Commit both together: `chore: bump version to x.y.z - <short summary>`. Never re-tag; bump
    instead (memory: no tag replacement). Before committing, check that every non-Go text file you
@@ -301,9 +306,10 @@ its 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real b
    progress-arc6.md close).
 4. `git tag vx.y.z`, then `git push && git push origin vx.y.z`. CI reads `RELEASE_NOTES.md`.
 
-The untracked plan document itself (`docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md`)
-is the source of truth for the whole remediation and is NOT in git. Never `git stash -u` or
-`git clean` in this repo (progress-arc1.md Task 1b). Decide whether to commit it (and this file).
+Both plan documents were tracked (`b5b6d07`). The umbrella plan
+(`docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md`) was deleted at the final
+whole-plan review by owner ruling - git history is its archive - and this file stays until you have
+run it. Never `git stash -u` or `git clean` in this repo (progress-arc1.md Task 1b).
 
 ---
 
@@ -311,15 +317,15 @@ is the source of truth for the whole remediation and is NOT in git. Never `git s
 
 | Item | Status | Source |
 |---|---|---|
-| Docker re-auth ingest endpoint (`POST /api/cookies/import`, paste/upload) | **Built, Arc 11 - no longer belongs on this list.** The endpoint merges a pasted or uploaded Netscape file into `cookies.txt`, reloads and verifies; `FlagManualRelogin` was re-added with its caller (Arc 11 Task 2), closing the reason it was deleted in Arc 8. What remains open is the field gate, not the feature - see Part 4 row 21 | `docker-ingest-brief.md`; Arc 11 ledger; Part 4 row 21 |
-| "Capture started anonymous despite credentials in the jar" check | **Recommended follow-up, not built.** With chat capture disabled, a dead Twitch token is invisible at every level; the site is `Service.GetHLSMasterPlaylist` and the premise (does the playback-token reply say the token was honoured?) is unverified | plan §Deferred; progress-arc8.md Task 10 finding 2 |
-| A1 (abandoned setup wedges acquisition) on Linux / Docker | **Built, not field-verified.** The reap fires on Linux and in Docker via a process group (`Setpgid` at launch, `/proc` for the count, an explicit group kill where Windows closes a Job Object handle); the decisions are unit-tested against a fake process table on Windows. By owner ruling there is NO Linux live gate here — a user's bug report is the gate. Still unreaped on darwin and the fallback build, where `abandon` remains the only release | plan §Arc 3 residual (closed); `a1-linux-process-group-reap-design.md` |
-| Widening the `authStatusChanged` gate (`refresh.go:324-327`) so a push-driven surface could render `youtubeError`/`twitchError` | **Documented, not widened.** No push surface renders the reason strings; per-request paths do | plan §Arc 8 carry-over (i); progress-arc9.md ruling |
-| An in-process Twitch keepalive | **Does not exist, by research conclusion.** yt-dlp never writes `auth-token` back; chatterino7 only detects expiry; the only issuer is `passport.twitch.tv/login`. Whether the browser pass renews it is Part 4 gate 7 | `research-twitch-keepalive.md`; plan §Deferred |
-| Twitch tier-2 liveness / channel entitlement probe | **Built, Arc 12b - no longer belongs on this list.** `TwitchFallbackLiveness` over the playback-access-token probe, on the periodic path only; the pilot stays disarmed. What remains open is the field gate, not the feature - see Part 4 row 22 | plan §Deferred "Twitch liveness"; `2026-09-02-arc12b-twitch-entitlement-probe.md` |
-| The two Arc 2 evaluation items (cross-writer lost update; browser path no-rollback overwrite) | **Ruled NO** in Arc 8 (11(h)); not open | plan §Deferred |
-| G3/G4 explicit acquisition mode | **Built, Arc 12c - no longer belongs on this list.** `cookies.acquisition` (`auto` \| `profile`) and the launch-guard / read-only-import split; both UIs carry the control. What remains open is the field gate, not the feature - see Part 4 row 23 and Part 5 rows 28-30 | `2026-09-02-arc12c-acquisition-mode.md` §Final state; plan §Deferred |
-| V9 TUI cookie-setup entry point, T3 within-platform convergence | **Done, Arc 12a** (`R L`; `mergeCookieFiles` keyed by name+domain+path) - not on this list either | plan §Deferred |
-| A2 (the narrowed regression-branch rollback), DPAPI two-pass per-platform profile selection | Owner-ruled, neither part of any Arc 12 plan - each ruling is recorded against its own bullet | plan §Deferred |
+| Docker re-auth ingest endpoint (`POST /api/cookies/import`, paste/upload) | **Built, Arc 11 - no longer belongs on this list.** The endpoint merges a pasted or uploaded Netscape file into `cookies.txt`, reloads and verifies; `FlagManualRelogin` was re-added with its caller (Arc 11 Task 2), closing the reason it was deleted in Arc 8. What remains open is the field gate, not the feature - see Part 4 row 21 | `operations.md` § Docker Image; `2026-09-02-arc11-docker-ingest.md` § Final state; Part 4 row 21 |
+| "Capture started anonymous despite credentials in the jar" check | **Built, Arc 10 (Q6 folded it in) - no longer belongs on this list.** `GetHLSMasterPlaylist` returns whether the playback token's `user_id` was `null` (`playbackTokenReportsAnonymous`, `internal/twitch/playback_token.go`); `StreamProcessor.noteAnonymousPlayback` (`internal/worker/stream_processor_twitch.go`) marks Twitch `playback-token-anonymous` through the same seam as the chat routes, once per capture START, with no notification. What remains open is the field gate, not the feature - Part 4 row 18 (a REAL expiry may surface as `ErrTwitchAuthExpired` first; the dead-token arm is inferred) | `2026-08-29-arc10-twitch-credential-lifecycle.md` § Final state; `platform-services.md` § IRC Chat (Live) |
+| A1 (abandoned setup wedges acquisition) on Linux / Docker | **Built, not field-verified.** The reap fires on Linux and in Docker via a process group (`Setpgid` at launch, `/proc` for the count, an explicit group kill where Windows closes a Job Object handle); the decisions are unit-tested against a fake process table on Windows. By owner ruling there is NO Linux live gate here — a user's bug report is the gate. Still unreaped on darwin and the fallback build, where `abandon` remains the only release | `operations.md` § Browser Cookie Acquisition (Platform Differences); `2026-09-02-a1-linux-process-group-reap.md` § Final state |
+| Widening the `authStatusChanged` gate so a push-driven surface could render `youtubeError`/`twitchError` | **Documented, not widened - and now PINNED** (H2 R4: the two "alone" rows of `TestAuthStatusChangedGateCoversEverySurfaceInput`, `internal/cookies/refresh_threestate_test.go`). No push surface renders the reason strings; per-request paths do | `data-and-storage.md` § Refresh Service ("`authStatusChanged` is a CONTRACT"); `user-interfaces.md` § Status Bar |
+| An in-process Twitch keepalive | **Does not exist, by research conclusion.** yt-dlp never writes `auth-token` back; chatterino7 only detects expiry; the only issuer is `passport.twitch.tv/login`. Whether the browser pass renews it is Part 4 gate 7 | `platform-services.md` § Twitch Authentication (the research conclusion is stated there); Part 4 gate 7 |
+| Twitch tier-2 liveness / channel entitlement probe | **Built, Arc 12b - no longer belongs on this list.** `TwitchFallbackLiveness` over the playback-access-token probe, on the periodic path only; the pilot stays disarmed. What remains open is the field gate, not the feature - see Part 4 row 22 | `data-and-storage.md` § Refresh Service; `2026-09-02-arc12b-twitch-entitlement-probe.md` § Final state |
+| The two Arc 2 evaluation items | (1) Cross-writer lost update: **ruled NO** in Arc 8 (11(h)) - five writers of one file, no shared lock; the window is seconds wide on the import path only and loses at most a rotation the next pass repairs; re-open only with a profile or a field report. (2) The browser path's no-rollback overwrite: **BUILT** as the narrowed A2 (H2 R3, Q13 revised) - the regression arm only | `data-and-storage.md` § Auto-Cookie Service (both) |
+| G3/G4 explicit acquisition mode | **Built, Arc 12c - no longer belongs on this list.** `cookies.acquisition` (`auto` \| `profile`) and the launch-guard / read-only-import split; both UIs carry the control. What remains open is the field gate, not the feature - see Part 4 row 23 and Part 5 rows 28-30 | `2026-09-02-arc12c-acquisition-mode.md` § Final state; `data-and-storage.md` § Auto-Cookie Service |
+| V9 TUI cookie-setup entry point, T3 within-platform convergence | **Done, Arc 12a** (`R L`; `mergeCookieFiles` keyed by name+domain+path) - not on this list either | `user-interfaces.md` § What the TUI renders (`R L`); `data-and-storage.md` § Auto-Cookie Service (the merge key); `2026-09-02-arc12a-tui-cookie-login-and-merge-key.md` § Final state |
+| A2 (the narrowed regression-branch rollback); DPAPI two-pass per-platform profile selection | A2: **Built, H2 R3** - `platformsToRestoreAfterBrowserRefresh` (`internal/cookies/autocookies_profile.go`) restores a platform that verified before the browser pass and is conclusively rejected after; an inconclusive check never restores on that path ("rejected as written" still stands). DPAPI two-pass: **ruled NEVER** (Q10 revised, 2026-08-29) - one profile is the design; the fallback's one-profile rule and its log line are the documented behaviour | `data-and-storage.md` § Auto-Cookie Service (both sentences) |
 | Periodic browser-free import from an unchanging profile in Docker | **Rejected** by your ruling - the trigger is manual (`R F` / Settings button) | progress-arc6.md "OWNER ANSWER" |
-| Arc 9 docs (`SPEC.md`, `docs/spec/*`, `.gitattributes` `*.html`, CRLF `segments.js`/`trimmer.js`) | In progress on `cookie-arc9-docs-tests`; Task 1 landed (`ed89fd2`) | progress-arc9.md |
+| Arc 9 docs (`SPEC.md`, `docs/spec/*`, `.gitattributes` `*.html`, CRLF `segments.js`/`trimmer.js`) | **Done, merged `dd5dd18`** (2026-08-29); since H1 the `internal/docs` citation-rot checker guards the six spec docs on every `go test` | progress-arc9.md; `2026-09-03-housekeeping-h1.md` § Final state |
