@@ -167,13 +167,21 @@ const (
 	AcquisitionProfile = "profile"
 )
 
-// validateBrowserProfileDir refuses configured profile directories that
-// sit inside any user-installed browser's real profile tree. Empty
-// input is allowed — it just leaves the service inert, since every entry
-// point that needs a profile dir returns ErrProfileNotFound without one.
-// Otherwise the path is resolved to absolute, lowercased, and checked
-// against the dangerous-substring list above. Audit reports/cookies.md #26.
-func validateBrowserProfileDir(profileDir string) error {
+// validateBrowserProfileDirForLaunch refuses configured profile directories
+// that sit inside any user-installed browser's real profile tree, for the
+// purpose of LAUNCHING a browser against them. Empty input is allowed — it just
+// leaves the service inert, since every entry point that needs a profile dir
+// returns ErrProfileNotFound without one. Otherwise the path is resolved to
+// absolute, lowercased, and checked against the dangerous-substring list above.
+// Audit reports/cookies.md #26.
+//
+// The name carries the scope because the scope was the defect (audit G3). The
+// cached verdict also fast-failed the two READ-ONLY sites, which launch
+// nothing: the import copies cookies.sqlite and its -wal sidecar into a 0700
+// temp dir and opens the COPY mode=ro, the line dpapi/dpapi.go already draws.
+// Those two now consult readOnlyProfileDirErr instead. This function stays on
+// every subprocess site, in every mode, unconditionally.
+func validateBrowserProfileDirForLaunch(profileDir string) error {
 	if profileDir == "" {
 		return nil
 	}
@@ -480,6 +488,11 @@ type AutoCookieService struct {
 	// tree). Computed once at construction so all subprocess-launching
 	// entry points can fast-fail with the same message instead of each
 	// re-running the check. Audit reports/cookies.md #26.
+	//
+	// The four subprocess sites read this field DIRECTLY, in every mode. The
+	// two read-only sites go through readOnlyProfileDirErr instead, which
+	// consults cookies.acquisition and rewords the refusal — a sentence about
+	// refusing to launch is a claim a path that launches nothing cannot make.
 	profileDirErr error
 
 	// detectBrowser is the browser-detection seam used by resolvedBrowser.
@@ -529,7 +542,10 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	// dangerous case hits the entry-point fast-fail — to preserve the
 	// current "constructor never errors" contract.
 	// Audit reports/cookies.md #26.
-	profileDirErr := validateBrowserProfileDir(profileDir)
+	//
+	// The read-only sites reuse the same verdict through readOnlyProfileDirErr
+	// rather than a second scan — one computed answer, two ways of consulting it.
+	profileDirErr := validateBrowserProfileDirForLaunch(profileDir)
 	if profileDirErr != nil && logger != nil {
 		logger.Error("auto-cookie profile dir rejected at construction", "err", profileDirErr)
 	}
@@ -998,6 +1014,34 @@ func (s *AutoCookieService) resolvedAcquisition() string {
 	return AcquisitionAuto
 }
 
+// readOnlyProfileDirErr is the launch guard's verdict as a READ-ONLY caller
+// must see it: honoured by default, lifted by the operator's explicit opt-in,
+// and worded for a path that launches nothing. Two changes from reading
+// profileDirErr directly, and both are the point of audit G3.
+//
+// First, cookies.acquisition = "profile" is consent. The read copies
+// cookies.sqlite and its -wal sidecar into a 0700 temp dir and opens the COPY
+// mode=ro, so nothing writes into the user's profile; the residual concern is
+// exfiltration through cookies.txt, which is a decision for the operator to
+// make once, in a setting, exactly as dpapi_fallback is. Second, the sentence:
+// the cached error says "refusing to launch a headless session against it",
+// which on this path describes an event that never happens.
+//
+// Consulted per call rather than cached, so a mode changed at runtime reaches
+// the next R F.
+func (s *AutoCookieService) readOnlyProfileDirErr() error {
+	if s.profileDirErr == nil {
+		return nil
+	}
+	if s.resolvedAcquisition() == AcquisitionProfile {
+		return nil
+	}
+	return fmt.Errorf("browser profile dir %q sits inside a real installed browser's profile tree, "+
+		"so nothing was launched and nothing was read — set cookies.acquisition = %q to allow a "+
+		"read-only import from it (audit cookies.md #26): %w",
+		s.profileDir, AcquisitionProfile, ErrProfileDirNotOptedIn)
+}
+
 // refreshBrowser is resolvedBrowser as a REFRESH PASS sees it: the configured
 // or detected browser, or nil when cookies.auto_enabled has switched headless
 // browser runs off and this pass is one the flag speaks for.
@@ -1006,7 +1050,7 @@ func (s *AutoCookieService) resolvedAcquisition() string {
 // two other callers — StartSetup, which is acquisition and must never be gated
 // (see BrowserLaunchAllowed), and decideStartupSeed, which uses it to ask "is
 // this a browserless host?", a question about the machine rather than about a
-// setting.
+// setting — asked only when cookies.acquisition has not already answered it.
 func (s *AutoCookieService) refreshBrowser(policy browserGatePolicy) *DetectedBrowser {
 	if s.browserLaunchBlocked(policy) {
 		return nil
@@ -2972,7 +3016,7 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 		return
 	}
 
-	s.logger.Info("no browser and no cookies to lose — seeding cookies from the configured browser profile",
+	s.logger.Info("browser-free import path and no cookies to lose — seeding cookies from the configured browser profile",
 		"profile_dir", s.profileDir, "cookie_file", s.cookiePath,
 		"delay", profileImportStartupDelay.String())
 
@@ -2995,10 +3039,12 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 		}
 		seedCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
 		// RefreshCookies, i.e. gateApplies: this is not the timer, so it has no
-		// claim on the exemption. The two policies are provably identical here
-		// anyway — decideStartupSeed runs this only when resolvedBrowser() is
-		// nil, and the gate's only power is to turn a non-nil browser into nil
-		// — so gateExempt would buy nothing and would blur what it means.
+		// claim on the exemption. The two policies remain provably identical
+		// here — decideStartupSeed reaches this point only when the pass will
+		// take the import branch (no browser resolvable, or acquisition =
+		// "profile" forcing it), and the gate's only power is to turn a non-nil
+		// browser into nil — so gateExempt would buy nothing and would blur
+		// what it means.
 		//
 		// Detailed rather than the RefreshCookies wrapper, which returns
 		// AnyVerified() and DISCARDS Ran. ok below is that same bool, so the
@@ -3085,12 +3131,17 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 				// pass is an import, and an import over an existing cookie file
 				// is the thing the owner ruled out: nothing between two ticks
 				// changes a mounted profile, so it re-reads identical bytes over
-				// credentials that may be working.
+				// credentials that may be working. — browserless because no
+				// browser resolves, or because cookies.acquisition = "profile"
+				// makes the pass an import regardless of the host. The second is
+				// the desktop case, where the profile IS the operator's real one
+				// and a scheduled re-read over live credentials is precisely what
+				// this rule refuses.
 				//
 				// gateExempt to match the pass this tick would actually run —
 				// asking with a different policy could answer "browser" here
 				// and "no browser" three lines down.
-				if s.refreshBrowser(gateExempt) == nil {
+				if s.refreshBrowser(gateExempt) == nil || s.resolvedAcquisition() == AcquisitionProfile {
 					if v := s.automaticImportGuard(); v != autoImportOK {
 						s.logger.Debug("periodic auto-cookie refresh skipped — a browser-free import "+
 							"may only run when there is nothing to lose", "reason", v.String())

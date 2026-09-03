@@ -577,7 +577,7 @@ The two cookie blocks come from `routes`' own projections rather than being rebu
 | Method | Path | Rate limit | Notes |
 |--------|------|:----------:|-------|
 | `POST` | `/api/cookies/recheck` | — | The in-process Go refresh + check (`RefreshService.CheckNow`, then `GetStatus`). Always 200. |
-| `POST` | `/api/cookies/auto-refresh` | shared API | `AutoCookieService.RefreshCookiesDetailed` — headless browser when the gate allows one, otherwise an immediate browser-profile import. Discriminated error codes below. |
+| `POST` | `/api/cookies/auto-refresh` | shared API | `AutoCookieService.RefreshCookiesDetailed` — headless browser when the gate allows one and `cookies.acquisition` is `auto`, otherwise an immediate browser-profile import. Discriminated error codes below. |
 | `POST` | `/api/cookies/import` | shared API | Ingest an operator-supplied Netscape cookie file: `text/plain` body or multipart `cookies` part, 512 KiB cap. Merges into `cookies.txt`, reloads the jar, verifies, and returns `cookieSetupOutcome`'s exact key set. 400 empty/no part, 413 over the cap, 415 wrong content type, 422 for the three refusals and for an unreadable existing file, 409 for a failed write. **No GET.** |
 | `POST` | `/api/cookies/auto-setup/start` | shared API | Begin interactive setup. Body `{ platform }`, defaulting to `"youtube"` on an absent or unparseable body. Returns `{ success: true }`. |
 | `POST` | `/api/cookies/auto-setup/finish` | shared API | `FinishSetupDetailed` — extract, merge, write, then verify. |
@@ -638,7 +638,7 @@ Its error arms are discriminated so the frontend can both branch and show someth
 | `ErrBrowserReadUnanswered` | 502 | `{ error, cause: "browser-read-unanswered" }` |
 | `ErrNoBrowserFound` | 424 | Message **verbatim**, not a static "no supported browser installed": two states reach this sentinel on a refresh — no browser is installed, or one is and `auto_enabled` has switched headless runs off — and only the first can support that sentence. |
 | `ErrProfileNotFound` | 404 | `browser profile not found — run setup first` |
-| `ErrProfileDirUnreadable`, `ErrProfileNotADirectory`, `ErrCookieDBNotFound`, `ErrNoCookiesInProfile`, `ErrCookieDBUnreadable`, `ErrCookieFileUnreadable` | 422 | Message verbatim — these carry the only actionable detail the operator has, and there is no browser UI in a container. |
+| `ErrProfileDirUnreadable`, `ErrProfileNotADirectory`, `ErrProfileDirNotOptedIn`, `ErrCookieDBNotFound`, `ErrNoCookiesInProfile`, `ErrCookieDBUnreadable`, `ErrCookieFileUnreadable` | 422 | Message verbatim — these carry the only actionable detail the operator has, and there is no browser UI in a container. |
 | `ErrCookieDBLocked` | 409 | Message verbatim |
 | anything else | 500 | `cookie refresh failed` |
 

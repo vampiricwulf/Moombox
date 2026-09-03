@@ -53,7 +53,7 @@ func TestShouldSkipPeriodicRefresh(t *testing.T) {
 	}
 }
 
-// --- validateBrowserProfileDir (audit cookies.md #26) ---
+// --- validateBrowserProfileDirForLaunch (audit cookies.md #26) ---
 
 // TestValidateBrowserProfileDirAccepts covers the legitimate cases:
 // empty input is the "auto-cookies not configured" signal and must
@@ -72,8 +72,8 @@ func TestValidateBrowserProfileDirAccepts(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateBrowserProfileDir(tc.path); err != nil {
-				t.Errorf("validateBrowserProfileDir(%q) = %v, want nil", tc.path, err)
+			if err := validateBrowserProfileDirForLaunch(tc.path); err != nil {
+				t.Errorf("validateBrowserProfileDirForLaunch(%q) = %v, want nil", tc.path, err)
 			}
 		})
 	}
@@ -108,9 +108,9 @@ func TestValidateBrowserProfileDirRefuses(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateBrowserProfileDir(tc.path)
+			err := validateBrowserProfileDirForLaunch(tc.path)
 			if err == nil {
-				t.Errorf("validateBrowserProfileDir(%q) = nil, want error", tc.path)
+				t.Errorf("validateBrowserProfileDirForLaunch(%q) = nil, want error", tc.path)
 			}
 		})
 	}

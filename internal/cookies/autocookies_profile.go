@@ -500,8 +500,8 @@ func classifyCookieDBError(err error) error {
 // "import failed" would be useless in a container where there is no UI to
 // poke at.
 func (s *AutoCookieService) importProfileCookies() (string, error) {
-	if s.profileDirErr != nil {
-		return "", s.profileDirErr
+	if err := s.readOnlyProfileDirErr(); err != nil {
+		return "", err
 	}
 	if s.profileDir == "" {
 		return "", fmt.Errorf("no browser_profile_dir configured: %w", ErrProfileNotFound)
@@ -861,19 +861,28 @@ func (s *AutoCookieService) automaticImportGuard() autoImportVerdict {
 // decideStartupSeed reports whether the service should run one import
 // immediately at boot instead of waiting for a manual trigger.
 //
-// It fires only in the browserless case. On a desktop with a browser installed
-// the normal refresh path already owns the profile, and an unsolicited startup
-// pass there would just launch a browser nobody asked for.
+// It fires only when the pass it would trigger is an import: a browserless
+// host, or cookies.acquisition = "profile" on any host. On a desktop with a
+// browser installed and the default mode the normal refresh path owns the
+// profile, and an unsolicited startup pass there would just launch a browser
+// nobody asked for.
 //
 // Everything after that is automaticImportGuard, which is what lets this run
 // without consulting cookies.auto_enabled at all: a boot is when a mounted
 // profile most plausibly changed, and an install with nothing on disk cannot be
 // harmed by reading it.
 func (s *AutoCookieService) decideStartupSeed() autoImportVerdict {
-	if s.profileDirErr != nil || s.profileDir == "" {
+	if err := s.readOnlyProfileDirErr(); err != nil || s.profileDir == "" {
 		return autoImportNotConfigured
 	}
-	if s.resolvedBrowser() != nil {
+	// The browser short-circuit is about the HOST, not about a setting — a
+	// desktop's normal refresh path already owns the profile, and an
+	// unsolicited startup pass there would launch a browser nobody asked for.
+	// cookies.acquisition = "profile" is the operator saying that path is not
+	// the one they want, so the question stops applying: the refresh this seed
+	// would trigger imports rather than launches, and there is no browser to
+	// spare from an unrequested run.
+	if s.resolvedAcquisition() != AcquisitionProfile && s.resolvedBrowser() != nil {
 		return autoImportBrowserPresent
 	}
 	if !firefoxCookieDBExists(s.profileDir) {

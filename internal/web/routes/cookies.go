@@ -473,8 +473,14 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// wrap ErrProfileNotFound, which routed it to the 404 above and so
 			// into the dashboard's fallback — losing the permissions sentence
 			// on the deployment that had no other way to find out.
+			// ErrProfileDirNotOptedIn joins them for the same reason: the
+			// profile is there, the pass reached a decision about it, and the
+			// message names the one setting that changes the answer. Flattening
+			// it would leave a Windows desktop operator with "cookie refresh
+			// failed" and no way to learn that cookies.acquisition exists.
 			case errors.Is(err, cookies.ErrProfileDirUnreadable),
 				errors.Is(err, cookies.ErrProfileNotADirectory),
+				errors.Is(err, cookies.ErrProfileDirNotOptedIn),
 				errors.Is(err, cookies.ErrCookieDBNotFound),
 				errors.Is(err, cookies.ErrNoCookiesInProfile):
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
