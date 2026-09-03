@@ -331,10 +331,14 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 // leaving it to the loop: this downloader will not poll again, and the
 // worker's joint-idle gate (buildMayResume, internal/worker/interruption.go)
 // must stop counting it as resume evidence the moment the orchestrator
-// marks the stream ended -- not whenever the loop happens to wake up. The
-// field is assigned directly under the lock this function already holds,
+// marks the stream ended, not whenever the loop happens to wake up. The
+// field is assigned directly under the lock this function already holds --
 // exactly as Stop() does: setLiveContinuationOpen takes mu itself and would
-// deadlock here.
+// deadlock here. The only ordering requirement is that the assignment lands
+// before Unlock(): liveContinuationOpen has no reader that bypasses cd.mu,
+// so its position relative to cancelCtx() within the locked section carries
+// no independent significance -- it is written first here purely to match
+// Stop()'s layout.
 func (cd *ChatDownloader) MarkStreamEnded() {
 	cd.mu.Lock()
 	cd.streamEnded = true

@@ -184,6 +184,36 @@ func TestLatePollResultDoesNotReopenAfterMarkStreamEnded(t *testing.T) {
 	}
 }
 
+// TestLatePollResultDoesNotReopenAfterStop pins the other half of the same
+// guard: noteLivePollResult's doc comment claims protection against a late
+// poll landing after Stop() (which sets cancelFlag, not streamEnded), but
+// until this test existed nothing exercised that branch -- a mutant
+// dropping the `!cd.cancelFlag` conjunct survived the whole package.
+//
+// Stop() also sets running = false in the same locked section as
+// cancelFlag = true, so a bare "call Stop(), then poll" cannot tell the two
+// conjuncts apart: cd.running alone already blocks the reopen, mutant or
+// not. running is restored to true right after the real Stop() call to
+// isolate cancelFlag specifically -- the same isolation the sibling test
+// gets for free, since MarkStreamEnded never touches running.
+func TestLatePollResultDoesNotReopenAfterStop(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true)
+
+	cd.Stop()
+	cd.mu.Lock()
+	cd.running = true // isolate cancelFlag: Stop() itself also clears running
+	cd.mu.Unlock()
+	cd.noteLivePollResult(true) // the in-flight poll's result arrives late
+
+	if cd.LiveContinuationOpen() {
+		t.Error("a poll result that lands after Stop() must not re-open the resume signal")
+	}
+}
+
 // TestStartResetsLiveContinuationOpenOnFreshRun is the I5(a) coverage for
 // "verify Start() also resets the signal appropriately on a fresh run": a
 // *ChatDownloader whose signal was left open by an EARLIER run (or set
