@@ -632,6 +632,21 @@ func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 		}
 	}
 
+	// The chord that ANSWERS the alert, named once for the bar and only where
+	// there is room. A badge that says "Re-login" and stops has named a problem
+	// and no remedy; the dashboard's warning is clickable, and R L is this
+	// surface's click.
+	//
+	// tierFull only: it is the widest thing this function can add and the least
+	// urgent — the alert is the information, and the remedy is also in the menu
+	// and in help — so it is given up first, which is what keeps metricTiers
+	// narrowing monotonically for fitTiers' scan. ReloginPlatform is the same
+	// predicate R L preselects on, so the badge cannot advertise a remedy that
+	// then opens on the other platform.
+	if t == tierFull && m.ReloginPlatform() != "" {
+		parts = append(parts, DimStyle.Render("(")+statusBarKeyStyle.Render("R L")+DimStyle.Render(")"))
+	}
+
 	if len(parts) == 0 {
 		return ""
 	}
