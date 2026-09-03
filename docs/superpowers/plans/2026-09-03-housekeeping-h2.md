@@ -4,7 +4,7 @@
 
 **Goal:** Land the eight cookie-side housekeeping items (R1-R8) the owner ruled during the Q1-Q13 sweep and the Arc 10/12a reviews carried, each with the doc absence-claims it flips, on branch `cookie-housekeeping-h2` cut from `main` after Arc 12c merges.
 
-**Architecture:** Six independent tasks over three packages. `internal/cookies` gets a per-platform back-off behind the still-disarmed liveness pilot (R1), a contract pin and a dedupe assertion on `refresh.go` (R4, R6), horizon/expiry fields on two log lines plus one prune Warn (R2), and a browser-path rollback that takes the regression arm only (R3). `internal/tui` folds the feedback triple into one struct and renders the wizard's accepted verdict inside the overlay (R5, R8). `cmd/moombox` gains an AST test pinning the deferred re-check sites (R7). Nothing arms the pilot; no REST or Web change; no new goroutine.
+**Architecture:** Seven tasks over five packages. `internal/cookies` gets a per-platform back-off behind the still-disarmed liveness pilot (R1), a contract pin and a dedupe assertion on `refresh.go` (R4, R6), horizon/expiry fields on two log lines plus one prune Warn (R2), and a browser-path rollback that takes the regression arm only (R3). `internal/tui` folds the feedback triple into one struct and renders the wizard's accepted verdict inside the overlay (R5, R8). `cmd/moombox` gains an AST test pinning the deferred re-check sites (R7). Nothing arms the pilot; no new goroutine; no REST or Web change except Task 7's ruled exception (one additive payload key, one exported JS helper, and the toast subjects that read them).
 
 **Tech Stack:** Go 1.26, `log/slog` (`cmd/moombox` only), `go/ast` + `go/parser` for the call-site test, `charmbracelet/lipgloss` for one new style. No new dependencies.
 
@@ -55,8 +55,9 @@ Every task's requirements implicitly include this section.
 | 4 | R3 browser-path rollback | `autocookies.go`, `autocookies_profile.go`, `data-and-storage.md`, remediation plan | The only write-path behaviour change |
 | 5 | R5 feedback fold + R8 wizard verdict | `internal/tui` (7 files + 7 test files) | One package, one review |
 | 6 | R7 AST call-site test | `cmd/moombox` (test only) | Test only |
+| 7 | R9 boot line + post-flight mechanism | `autocookies.go`, `cmd/moombox/services.go`, `internal/tui` (2 files), `internal/web/routes` (1 file), `web/public` (2 files), 3 spec docs, 2 plan docs | The only task that crosses the REST/web line (ruled exception, 2026-09-03), and the only one that must follow Task 5 |
 
-Tasks 3 and 4 both touch `autocookies.go`. Run in order; do not parallelise.
+Tasks 3, 4 and 7 all touch `autocookies.go` (3 and 7 touch `cmd/moombox/services.go` as well), and Task 7 reads `a.feedback.msg`, which is Task 5's shape. Run in order; do not parallelise 3, 4 or 7 with each other, and run 7 after 5.
 
 ---
 
@@ -2426,6 +2427,1386 @@ the error return — three of the eight refreshAborted() exits happen after
 cookies.txt was rewritten. The fifth is OnPassCompleted, pinned by its
 own shape (the closure goes through postRefreshRecheckHook). Hoisting one
 out of its defer was invisible to every behavioural test.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN"
+```
+
+---
+
+### Task 7: R9 — the boot line and the post-flight sentences name the mechanism that ran
+
+Arc 12c arc-close findings F1 and F2, homed here by controller ruling (2026-09-03). F1 moves ONE log
+sentence out of a constructor that cannot know the acquisition mode into a method the wiring site
+calls once it can. F2 puts the mechanism a refresh pass actually used onto `RefreshResult`, onto the
+wire, and into ONE subject-producer per surface, pinned across the two by exact equality the way
+Arc 12c pinned the pre-flight pair.
+
+**This task is the H2 spec's ruled exception to "No REST/web change."** It adds exactly one additive
+key to `cookieRefreshOutcome`, one exported function to `web/public/modules/utils.js`, and rewrites
+the toast subjects in `web/public/app.js`. No route, no status code, no config key, no schema, no
+new goroutine.
+
+**Order.** Run AFTER Task 5: the tests below read `a.feedback.msg`, which is Task 5's fold. It also
+touches `internal/cookies/autocookies.go` and `cmd/moombox/services.go`, so it must not run beside
+Tasks 3 or 4.
+
+**Files:**
+- Modify: `internal/cookies/autocookies.go` — the constructor's verdict line (grep `profileDirErr := validateBrowserProfileDirForLaunch`); a new `LogProfileDirVerdict` after `readOnlyProfileDirErr` (`:1032-1043`); two new constants and one field on `RefreshResult` (grep `type RefreshResult struct`); `refreshCookiesDetailed`'s signature and the `importedFromProfile` decision (grep `importedFromProfile := browser == nil`)
+- Modify: `cmd/moombox/services.go` — one call after the `AcquisitionMode` closure (grep `autoCookieSvc.AcquisitionMode = func`)
+- Modify: `internal/web/routes/cookies.go` — `cookieRefreshOutcome` (`:55`) and its doc
+- Modify: `internal/tui/app_actions.go` — a new `cookieRefreshMechanismLabel` after `cookieRefreshFeedback` (`:77-82`), plus the `internal/cookies` import
+- Modify: `internal/tui/app_update.go` — the `noProfileFallback` resolution and the post-flight arms (`:387-435`): five arms re-subjected, rung 3 and `!Renewed` untouched
+- Modify: `web/public/modules/utils.js` — a new export after `cookieRefreshPreflightToast` (`:654-658`)
+- Modify: `web/public/app.js` — the import list (`:10`), one `const` after `:817`, the five result arms (`:847-871`), the transport arm (`:906`) and the catch (`:909`)
+- Modify: `internal/web/routes/cookies_test.go` — one row in `TestAppJSReadsTheFieldsTheHandlerEmits` (`:388-400`)
+- Modify: `internal/web/routes/cookies_shiftclick_test.go` — the premise assertion at `:194`
+- Modify: `docs/spec/data-and-storage.md:897`, `docs/spec/user-interfaces.md:622-629`, `docs/spec/security.md:461`
+- Modify: `docs/superpowers/plans/2026-09-02-arc12c-acquisition-mode.md:2327` and `:2328`;
+  `docs/superpowers/plans/2026-08-29-cookie-remediation-field-test-plan.md:181` (row 23's reading rule)
+- Test: create `internal/cookies/autocookies_profiledir_verdict_test.go`,
+  `internal/cookies/autocookies_mechanism_test.go`,
+  `cmd/moombox/profiledir_verdict_callsite_test.go`,
+  `internal/tui/cookie_postflight_mechanism_test.go`;
+  add one case to `internal/web/routes/cookies_test.go`
+
+**Interfaces:**
+- Consumes: Task 5's `appFeedback` fold — every TUI assertion below reads `app.feedback.msg`, never
+  `app.feedbackMsg`. Nothing else.
+- Produces: `func (s *AutoCookieService) LogProfileDirVerdict()` (exported — `cmd/moombox` calls it);
+  `const RefreshMechanismBrowser = "browser"`; `const RefreshMechanismProfileImport = "profile-import"`;
+  field `RefreshResult.Mechanism string`; payload key `"mechanism"` on `cookieRefreshOutcome`;
+  `func cookieRefreshMechanismLabel(mechanism, mode string) string` (`internal/tui`, unexported);
+  `export function cookieRefreshMechanismLabel(mechanism, acquisition)` (`web/public/modules/utils.js`).
+  `refreshCookiesDetailed`'s results become NAMED (`out RefreshResult, retErr error`); its signature
+  is otherwise unchanged and `RefreshCookiesDetailed`'s is untouched.
+
+**Lock preconditions, stated:**
+- `LogProfileDirVerdict` — NO lock taken, and it must NOT be called with `s.mu` held: it calls
+  `resolvedAcquisition()`, which reaches the config store's RWMutex through `AcquisitionMode`. Same
+  rule as the four launch sites and `readOnlyProfileDirErr`. Reads `profileDirErr`, `profileDir`,
+  `logger`, `AcquisitionMode` — all written once, before the service reaches any goroutine.
+- `refreshCookiesDetailed`'s new `defer` — touches the named result and nothing else. It is
+  registered BEFORE the function's first `s.mu.Lock()`, so it runs LAST, after every path has
+  released the mutex. It takes no lock and must not.
+- `cookieRefreshMechanismLabel` (Go) — pure. `a.cookieAcquisitionMode()` takes the config store's
+  read lock and is called from the Bubble Tea update goroutine, exactly as the pre-flight sentence
+  already does at `app_actions.go:239`.
+
+**Named values, for the record:** wire key `mechanism`; Go field `RefreshResult.Mechanism`; values
+`"browser"` / `"profile-import"` / `""`. The TUI gets NO new message field — `cookieForceRefreshResultMsg`
+already carries `Result` whole (`internal/tui/app.go:238-254`), and `msg.Result.Mechanism` is the read.
+
+- [ ] **Step 1: Write the failing F1 tests**
+
+Create `internal/cookies/autocookies_profiledir_verdict_test.go`:
+
+```go
+package cookies
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// levelTaggedLogger records the LEVEL with the message and the args, which is
+// what these three tests are about: the same verdict has to arrive at two
+// different levels depending on the acquisition mode, and a logger that keeps
+// only the text cannot tell the fix from the defect.
+//
+// Its own type rather than capturingLogger next door: that one folds Error into
+// msgs without a level-specific slice, so "logged at ERROR" is not assertable
+// through it.
+type levelTaggedLogger struct {
+	lines []loggedLine
+}
+
+type loggedLine struct {
+	level string
+	msg   string
+	args  []any
+}
+
+func (l *levelTaggedLogger) record(level, msg string, args ...any) {
+	l.lines = append(l.lines, loggedLine{level: level, msg: msg, args: args})
+}
+
+func (l *levelTaggedLogger) Debug(msg string, args ...any) { l.record("debug", msg, args...) }
+func (l *levelTaggedLogger) Info(msg string, args ...any)  { l.record("info", msg, args...) }
+func (l *levelTaggedLogger) Warn(msg string, args ...any)  { l.record("warn", msg, args...) }
+func (l *levelTaggedLogger) Error(msg string, args ...any) { l.record("error", msg, args...) }
+
+// at returns every line logged at one level, rendered as message plus args, so
+// an assertion about the CONTENT reads the whole line and not just its heading.
+// The guard's refusal travels as an error ARG, not in the message, so a helper
+// that returned msg alone could not see it.
+func (l *levelTaggedLogger) at(level string) []string {
+	var out []string
+	for _, ln := range l.lines {
+		if ln.level != level {
+			continue
+		}
+		out = append(out, ln.msg+" "+fmt.Sprint(ln.args...))
+	}
+	return out
+}
+
+// TestProfileDirVerdictIsSilentAtConstruction is F1's first half.
+//
+// NewAutoCookieService cannot know the acquisition mode: cmd/moombox builds the
+// service and only then wires AcquisitionMode, so an ERROR chosen in the
+// constructor is chosen blind — and on the configuration the README recipe
+// prescribes (cookies.acquisition = "profile" pointed at a REAL profile) it was
+// wrong on every boot. The verdict is still computed here; the sentence is not
+// said here.
+//
+// Zero lines AT ANY LEVEL, not "no error line": a Warn or an Info emitted from
+// the constructor would be the same defect at a quieter volume, and the mode is
+// no more knowable for it.
+//
+// Mutation: put the `if profileDirErr != nil && logger != nil { logger.Error(...) }`
+// block back in NewAutoCookieService.
+func TestProfileDirVerdictIsSilentAtConstruction(t *testing.T) {
+	log := &levelTaggedLogger{}
+	s := NewAutoCookieService(dangerousProfileDir,
+		filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), log)
+
+	if s.profileDirErr == nil {
+		t.Fatal("premise broken: the fixture is not a refused profile dir, so nothing would be logged anyway")
+	}
+	if len(log.lines) != 0 {
+		t.Errorf("the constructor logged %d line(s) about a verdict it cannot level correctly: %v",
+			len(log.lines), log.lines)
+	}
+}
+
+// TestProfileDirVerdictLevelFollowsTheMode is F1's second half: the same
+// verdict, two levels, chosen where the mode is finally knowable.
+//
+// Under "auto" a refused directory means a browser refresh the operator expects
+// will silently not happen — ERROR, wording unchanged, because "refusing to
+// launch a headless session against it" is the cue. Under "profile" nothing was
+// going to launch, the read-only import runs regardless, and an ERROR names a
+// failure that did not occur — one INFO that says both halves instead.
+//
+// Each half asserts the level AND the content, because either alone passes a
+// mutant: a right-level line saying the wrong thing, or the right sentence at
+// the wrong level. The auto half also pins today's line VERBATIM — message
+// and both args — because the arc-close asked only for the profile case to
+// change, and a Contains on the refusal wording would pass a reworded heading.
+func TestProfileDirVerdictLevelFollowsTheMode(t *testing.T) {
+	t.Run("auto", func(t *testing.T) {
+		log := &levelTaggedLogger{}
+		s := NewAutoCookieService(dangerousProfileDir,
+			filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), log)
+		s.AcquisitionMode = func() string { return AcquisitionAuto }
+
+		s.LogProfileDirVerdict()
+
+		errs := log.at("error")
+		if len(errs) != 1 {
+			t.Fatalf("want exactly one ERROR line under auto, got %d: %v", len(errs), errs)
+		}
+		if !strings.Contains(errs[0], "refusing to launch") {
+			t.Errorf("the auto line dropped the guard's own refusal wording, which is the operator's "+
+				"cue that a launch they expect will not happen: %q", errs[0])
+		}
+		if got := len(log.at("info")); got != 0 {
+			t.Errorf("auto also logged %d INFO line(s); the verdict is said once, at one level", got)
+		}
+		// Today's line, byte for byte: the message, the "err" key and the
+		// guard's own error value. The Contains above is the operator's cue;
+		// this is the claim that nothing under auto changed at all.
+		for _, ln := range log.lines {
+			if ln.level != "error" {
+				continue
+			}
+			if ln.msg != "auto-cookie profile dir rejected at construction" || len(ln.args) != 2 ||
+				ln.args[0] != "err" || ln.args[1] != any(s.profileDirErr) {
+				t.Errorf("the auto line is not today's line verbatim: msg=%q args=%v", ln.msg, ln.args)
+			}
+		}
+	})
+
+	t.Run("profile", func(t *testing.T) {
+		log := &levelTaggedLogger{}
+		s := NewAutoCookieService(dangerousProfileDir,
+			filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), log)
+		s.AcquisitionMode = func() string { return AcquisitionProfile }
+
+		s.LogProfileDirVerdict()
+
+		if got := log.at("error"); len(got) != 0 {
+			t.Errorf("the README-prescribed configuration still logs at ERROR on every boot: %v", got)
+		}
+		if got := log.at("warn"); len(got) != 0 {
+			t.Errorf("the profile line was downgraded to WARN rather than stated as the normal case: %v", got)
+		}
+		infos := log.at("info")
+		if len(infos) != 1 {
+			t.Fatalf("want exactly one INFO line under profile, got %d: %v", len(infos), infos)
+		}
+		if strings.Contains(infos[0], "refusing to launch") {
+			t.Errorf("the profile line claims a refused launch, on a path that launches nothing: %q", infos[0])
+		}
+		for _, want := range []string{"no headless browser will be launched", "read-only import"} {
+			if !strings.Contains(infos[0], want) {
+				t.Errorf("the profile line does not say %q, so it does not tell the operator which "+
+					"mechanism actually runs: %q", want, infos[0])
+			}
+		}
+	})
+}
+
+// TestProfileDirVerdictSaysNothingForAnAcceptableDir is the premise for both
+// tests above: the line is about a REFUSED directory, and an ordinary install
+// — which is nearly every install — must see nothing at all.
+//
+// Mutation: drop the `s.profileDirErr == nil` guard from LogProfileDirVerdict.
+func TestProfileDirVerdictSaysNothingForAnAcceptableDir(t *testing.T) {
+	for _, mode := range []string{AcquisitionAuto, AcquisitionProfile} {
+		t.Run(mode, func(t *testing.T) {
+			log := &levelTaggedLogger{}
+			s := NewAutoCookieService(t.TempDir(),
+				filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), log)
+			s.AcquisitionMode = func() string { return mode }
+			if s.profileDirErr != nil {
+				t.Fatalf("premise broken: a plain temp dir was refused: %v", s.profileDirErr)
+			}
+
+			s.LogProfileDirVerdict()
+
+			if len(log.lines) != 0 {
+				t.Errorf("an ordinary profile dir produced %d boot line(s): %v", len(log.lines), log.lines)
+			}
+		})
+	}
+}
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 -run 'TestProfileDirVerdict' ./internal/cookies/`
+Expected: FAIL to COMPILE — `s.LogProfileDirVerdict undefined`.
+
+- [ ] **Step 3: Move the verdict's sentence out of the constructor and add the method**
+
+In `internal/cookies/autocookies.go`, replace the four lines
+
+```go
+	profileDirErr := validateBrowserProfileDirForLaunch(profileDir)
+	if profileDirErr != nil && logger != nil {
+		logger.Error("auto-cookie profile dir rejected at construction", "err", profileDirErr)
+	}
+```
+
+with (keeping the whole comment block above them exactly as it is, and appending this paragraph to
+its tail):
+
+```go
+	//
+	// Computed here, SAID somewhere else. cmd/moombox builds the service and
+	// only afterwards wires AcquisitionMode, so at this point the mode is not
+	// knowable and any level chosen here is chosen blind — which is how an
+	// install following the README's `cookies.acquisition = "profile"` recipe
+	// logged a red "profile dir rejected ... refusing to launch" on every boot,
+	// for the directory it is SUPPOSED to point at (Arc 12c arc-close F1). The
+	// verdict and every reader of it are unchanged; only the sentence moved, to
+	// LogProfileDirVerdict, which the wiring site calls once the mode is there.
+	profileDirErr := validateBrowserProfileDirForLaunch(profileDir)
+```
+
+Then, immediately after `readOnlyProfileDirErr`'s closing brace:
+
+```go
+// LogProfileDirVerdict says ONCE what the launch guard decided about the
+// configured browser profile directory, at the level the acquisition mode
+// earns. Silent when the directory is fine, which is nearly every install.
+//
+// A method rather than a line in NewAutoCookieService because the constructor
+// runs BEFORE AcquisitionMode is wired (cmd/moombox/services.go builds the
+// service, then assigns the callbacks), so it cannot tell the two
+// configurations apart and logged the same red line for both.
+//
+// Under "auto" that line is right, and its wording is kept verbatim: a browser
+// refresh will be refused this directory, so an operator has a launch they
+// believe is happening and is not, and ERROR is the level that gets read.
+//
+// Under "profile" nothing was going to launch anyway. The refusal describes an
+// event that never occurs, and the pass that DOES run — the read-only import,
+// which copies cookies.sqlite and its -wal into a 0700 temp dir and opens the
+// COPY mode=ro — is not affected by the guard at all. So that mode gets one
+// INFO saying both halves out loud, because an operator who followed the README
+// recipe is owed an acknowledgement rather than a rejection.
+//
+// The verdict itself is untouched: validateBrowserProfileDirForLaunch is still
+// called exactly once, at construction, and the four subprocess sites still
+// read s.profileDirErr directly, in every mode (see the field's comment and
+// TestLaunchGuardHoldsEveryLaunchSiteInEveryMode). This changes a sentence, not
+// a decision.
+//
+// NO LOCK, and it must not be called with s.mu held: resolvedAcquisition
+// reaches the config store's own read lock through AcquisitionMode, which is
+// the same rule the launch sites and readOnlyProfileDirErr already follow.
+// Everything it reads — profileDirErr, profileDir, logger, AcquisitionMode —
+// is written once, before the service is handed to any goroutine. Called once,
+// from the wiring sequence.
+func (s *AutoCookieService) LogProfileDirVerdict() {
+	if s.profileDirErr == nil || s.logger == nil {
+		return
+	}
+	if s.resolvedAcquisition() == AcquisitionProfile {
+		s.logger.Info("browser profile dir sits inside a real installed browser's profile tree — "+
+			"no headless browser will be launched against it; cookies.acquisition is \"profile\", "+
+			"so the read-only import is what runs",
+			"profile_dir", s.profileDir)
+		return
+	}
+	s.logger.Error("auto-cookie profile dir rejected at construction", "err", s.profileDirErr)
+}
+```
+
+- [ ] **Step 4: Call it from the one site that knows the mode**
+
+In `cmd/moombox/services.go`, immediately after the `autoCookieSvc.AcquisitionMode = func() string { … }`
+closure and immediately before `s.autoCookieSvc = autoCookieSvc`:
+
+```go
+	// The launch guard's verdict, said once, at the level the mode earns.
+	//
+	// HERE and not in the constructor, and the ORDER is the whole point: the
+	// service is built at the top of this block with no AcquisitionMode, so a
+	// line logged there cannot tell "auto" — where a refused directory means a
+	// browser refresh the operator expects will not happen, ERROR — from
+	// "profile", where nothing was going to launch and the read-only import
+	// runs regardless, INFO. Hoisting this call above the closure above puts
+	// the red line back on every profile-mode boot, which is Arc 12c
+	// arc-close F1; TestProfileDirVerdictIsLoggedAfterTheModeIsWired fails if
+	// it moves. Silent unless the directory is actually refused.
+	autoCookieSvc.LogProfileDirVerdict()
+```
+
+- [ ] **Step 5: Write the failing call-site test**
+
+Create `cmd/moombox/profiledir_verdict_callsite_test.go`:
+
+```go
+package main
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"testing"
+)
+
+// TestProfileDirVerdictIsLoggedAfterTheModeIsWired pins the ORDER, which is the
+// only thing that makes the fix a fix.
+//
+// LogProfileDirVerdict picks its level from resolvedAcquisition, which reads
+// AcquisitionMode; a nil callback resolves to "auto". So calling it before the
+// AcquisitionMode closure is assigned reproduces Arc 12c arc-close F1 exactly —
+// an ERROR on every boot of the README's profile-mode recipe — while every
+// behavioural test in internal/cookies stays green, because they wire the
+// callback themselves. Nothing but the call ORDER in this file can catch it,
+// and this package cannot drive initServices.
+//
+// Structural for the same reason internal/web/routes'
+// cookies_import_callsite_test.go is: the seam is a statement's position, and
+// there is no seam to inject.
+//
+// THE THREE MUTANTS:
+//   - hoist the call above the AcquisitionMode assignment: the index check fails.
+//   - delete the call: the "not found" fatal fires.
+//   - move the call into some other function: initServices' body no longer
+//     contains it, and the same fatal fires.
+func TestProfileDirVerdictIsLoggedAfterTheModeIsWired(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "services.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse services.go: %v", err)
+	}
+
+	var body *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "initServices" && fn.Body != nil {
+			body = fn.Body
+		}
+	}
+	if body == nil {
+		t.Fatal("services.go has no initServices with a body — re-anchor this test rather than deleting it")
+	}
+
+	assignIdx, callIdx := -1, -1
+	for i, stmt := range body.List {
+		switch s := stmt.(type) {
+		case *ast.AssignStmt:
+			if len(s.Lhs) == 1 && selectorIs(s.Lhs[0], "autoCookieSvc", "AcquisitionMode") {
+				assignIdx = i
+			}
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if ok && selectorIs(call.Fun, "autoCookieSvc", "LogProfileDirVerdict") {
+				callIdx = i
+			}
+		}
+	}
+
+	if assignIdx < 0 {
+		t.Fatal("initServices no longer assigns autoCookieSvc.AcquisitionMode at its top level — " +
+			"the ordering this test exists for cannot be checked")
+	}
+	if callIdx < 0 {
+		t.Fatal("initServices never calls autoCookieSvc.LogProfileDirVerdict, so the launch guard's " +
+			"verdict is never reported at all: a refused browser_profile_dir now boots silently in " +
+			"both modes")
+	}
+	if callIdx < assignIdx {
+		t.Errorf("LogProfileDirVerdict is called at statement %d, before AcquisitionMode is wired at "+
+			"%d — resolvedAcquisition reads nil as \"auto\", so a cookies.acquisition = \"profile\" "+
+			"install logs the launch refusal at ERROR on every boot (Arc 12c arc-close F1)",
+			callIdx, assignIdx)
+	}
+}
+
+// selectorIs reports whether e is exactly `recv.sel`.
+func selectorIs(e ast.Expr, recv, sel string) bool {
+	s, ok := e.(*ast.SelectorExpr)
+	if !ok || s.Sel.Name != sel {
+		return false
+	}
+	id, ok := s.X.(*ast.Ident)
+	return ok && id.Name == recv
+}
+```
+
+- [ ] **Step 6: Run the F1 half**
+
+```bash
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 -run 'TestProfileDirVerdict' ./internal/cookies/ -v
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 -run 'TestProfileDirVerdictIsLoggedAfterTheModeIsWired' ./cmd/moombox/ -v
+```
+Expected: PASS — three tests, five subtests (`…IsSilentAtConstruction`, `…LevelFollowsTheMode/auto`,
+`…/profile`, `…SaysNothingForAnAcceptableDir/auto`, `…/profile`) plus the call-site test.
+
+- [ ] **Step 7: Write the failing mechanism test**
+
+Create `internal/cookies/autocookies_mechanism_test.go`:
+
+```go
+package cookies
+
+import (
+	"context"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
+
+// TestRefreshResultCarriesTheMechanismThatRan is F2 at the source.
+//
+// Every post-flight sentence on both surfaces opened with "Browser cookie
+// refresh ..." after a pass that launched nothing, because the only thing
+// either surface had to go on was cookies.acquisition — and the mode is not the
+// answer. A host with no browser installed imports in "auto" mode and always
+// has, long before the setting existed. So the pass reports what it actually
+// did, and this is the assertion that it does.
+//
+// FOUR ROWS, and the empty one is the point of the design. Mechanism is
+// stamped where the path is CHOSEN (the importedFromProfile decision), so a
+// pass that declined above that decision reports "" rather than guessing — and
+// "" is what the surfaces fall back to the mode for. A field that guessed would
+// be worse than the mode alone, because it would look authoritative.
+//
+// The second row is the boundary, and it is where a first draft of this test
+// was wrong: the browser branch's empty-jar gate (`len(refreshPlatforms()) ==
+// 0`) is a decline that sits BELOW the decision, so it carries "browser" — the
+// branch was chosen and then declined, and the mode fallback would have said
+// the same. The decline that is genuinely above the decision, and cheap to
+// drive, is the single-flight slot: refreshCmd non-nil means "already
+// refreshing", and the pass returns before it looks at anything.
+//
+// The fixture is TestAcquisitionModeSelectsTheRefreshPath's, deliberately: same
+// synthetic WAL profile, same gatedBrowser at a path that does not exist, so
+// nothing here can execute a browser however the branch goes.
+//
+// Mutations: delete the defer that stamps it; initialise mechanism to a
+// non-empty value; swap the two constants at the decision.
+func TestRefreshResultCarriesTheMechanismThatRan(t *testing.T) {
+	newService := func(t *testing.T, mode string, jar *CookieJar) *AutoCookieService {
+		t.Helper()
+		s := NewAutoCookieService(
+			writeWALCookieProfile(t, youtubeAuthRows()),
+			filepath.Join(t.TempDir(), "cookies.txt"),
+			jar, nopAutoCookieLogger{})
+		s.detectBrowser = func() *DetectedBrowser { return gatedBrowser() }
+		s.AcquisitionMode = func() string { return mode }
+		s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+		s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+		return s
+	}
+
+	t.Run("a pass that declined above the decision reports no mechanism", func(t *testing.T) {
+		// The single-flight slot is held (the same sentinel refreshFirefox
+		// claims), so the pass declines at the "already refreshing" gate —
+		// above the launch-vs-import decision, in EVERY mode. Profile mode
+		// here, so a stamp that leaked would be the import's, which is not
+		// what the mode fallback says for auto. Nothing was chosen, so nothing
+		// is claimed.
+		s := newService(t, AcquisitionProfile, NewCookieJar())
+		s.mu.Lock()
+		s.refreshCmd = &exec.Cmd{}
+		s.mu.Unlock()
+		result, err := s.RefreshCookiesDetailed(context.Background())
+		if err != nil {
+			t.Fatalf("this row must not error: %v", err)
+		}
+		if result.Ran {
+			t.Fatal("premise broken: the in-flight gate no longer declines, so this row is not testing a decline")
+		}
+		if result.Mechanism != "" {
+			t.Errorf("Mechanism = %q for a pass that never chose a path, want \"\" — a guessed "+
+				"mechanism reads as authoritative and is exactly the claim F2 is about", result.Mechanism)
+		}
+	})
+
+	t.Run("a browser-path decline on an empty jar reports the browser", func(t *testing.T) {
+		// auto + a browser + an empty jar: the browser branch is CHOSEN, and
+		// then its refreshPlatforms() gate declines. That gate is below the
+		// decision, so the stamp has already happened — and "browser" is the
+		// truth of it. The mode fallback says the same for this row, which is
+		// why nothing observable turns on it; what this pins is WHERE the
+		// stamp sits, so a later reader does not "fix" the row above by
+		// moving the stamp into the branches.
+		s := newService(t, AcquisitionAuto, NewCookieJar())
+		result, err := s.RefreshCookiesDetailed(context.Background())
+		if err != nil {
+			t.Fatalf("this row must not error: %v", err)
+		}
+		if result.Ran {
+			t.Fatal("premise broken: the empty-jar gate no longer declines")
+		}
+		if result.Mechanism != RefreshMechanismBrowser {
+			t.Errorf("Mechanism = %q, want %q — the browser path was chosen before it declined",
+				result.Mechanism, RefreshMechanismBrowser)
+		}
+	})
+
+	t.Run("the import path names itself", func(t *testing.T) {
+		s := newService(t, AcquisitionProfile, NewCookieJar())
+		result, err := s.RefreshCookiesDetailed(context.Background())
+		if err != nil {
+			t.Fatalf("this row must not error: %v", err)
+		}
+		if !result.Ran {
+			t.Fatal("premise broken: profile mode no longer takes the import path")
+		}
+		if result.Mechanism != RefreshMechanismProfileImport {
+			t.Errorf("Mechanism = %q, want %q — this pass launched nothing and every sentence "+
+				"about it still said \"Browser cookie refresh\"", result.Mechanism, RefreshMechanismProfileImport)
+		}
+		// The reason both surfaces keep their browser wording on the !Renewed
+		// arm: renewed := importedFromProfile || browserActed, and browserActed
+		// starts true and is cleared only inside the browser branch, so an
+		// import that reaches a verdict always renewed — held shut by two
+		// guards, each sufficient alone. This pins the PROPERTY: dropping
+		// `importedFromProfile ||` alone survives it (verified), because the
+		// initialiser still holds; only a change that lets an import reach a
+		// verdict with Renewed false fails it, and that is the change that
+		// would start telling a profile-mode operator their BROWSER could not
+		// be confirmed.
+		if !result.Renewed {
+			t.Error("an import that ran reported Renewed = false, which makes the browser-worded " +
+				"\"could not confirm the browser refreshed them\" arm reachable for a pass that " +
+				"launched no browser")
+		}
+	})
+
+	t.Run("the browser path names itself", func(t *testing.T) {
+		// A jar with YouTube auth puts a platform in refreshPlatforms(), so the
+		// pass gets past the gate that declined the first row and takes the
+		// launch branch — which cannot execute anything, and does not need to:
+		// the stamp happens at the decision, above every launch.
+		s := newService(t, AcquisitionAuto, jarWithAuth(t))
+		result, _ := s.RefreshCookiesDetailed(context.Background())
+		if !result.Ran {
+			t.Fatal("premise broken: the browser branch declined, so no mechanism was ever chosen")
+		}
+		if result.Mechanism != RefreshMechanismBrowser {
+			t.Errorf("Mechanism = %q, want %q", result.Mechanism, RefreshMechanismBrowser)
+		}
+	})
+}
+```
+
+- [ ] **Step 8: Run to verify it fails**
+
+Run: `GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 -run TestRefreshResultCarriesTheMechanismThatRan ./internal/cookies/`
+Expected: FAIL to COMPILE — `result.Mechanism undefined`, `undefined: RefreshMechanismProfileImport`.
+
+- [ ] **Step 9: Add the two constants, the field, and the one stamp**
+
+In `internal/cookies/autocookies.go`, immediately ABOVE `type RefreshResult struct`:
+
+```go
+// The two values of RefreshResult.Mechanism: which cookie source a refresh pass
+// actually used. Exported because internal/web/routes puts them on the wire and
+// internal/tui renders them, and because a literal repeated across three
+// packages and one JavaScript file is how a vocabulary drifts.
+//
+// Deliberately NOT the cookies.acquisition values, and not spelled like them.
+// Those name what the operator ASKED for; these name what happened, and the two
+// differ on every host where no browser resolves — a container in "auto" mode
+// imports, and did so years before the setting existed.
+const (
+	RefreshMechanismBrowser       = "browser"
+	RefreshMechanismProfileImport = "profile-import"
+)
+```
+
+Immediately after `TwitchStored  bool` inside the struct:
+
+```go
+
+	// Mechanism is which cookie source this pass actually used —
+	// RefreshMechanismBrowser or RefreshMechanismProfileImport — or "" when it
+	// stopped before choosing one. Every exit above the importedFromProfile
+	// decision is "": stopped service, setup in flight, refresh in flight, and
+	// the three no-source errors (no browser and no profile; launches disabled
+	// and no profile; profile not found). The one decline BELOW it — the
+	// browser branch's empty-jar gate — carries "browser": the path was chosen
+	// before it declined.
+	//
+	// WORDING ONLY, exactly the rule YouTubeStored / TwitchStored carry above.
+	// Nothing may branch a decision on it: whether the credentials work is what
+	// the verdicts are for, and whether this pass produced them is Renewed.
+	// What it answers is the question every post-flight sentence was getting
+	// wrong — "Browser cookie refresh successful" after an import that launched
+	// nothing (Arc 12c arc-close F2).
+	//
+	// "" is not a fourth state to render. Both surfaces fall back to
+	// cookies.acquisition for the sentence's subject when it is empty, which is
+	// also what an OLDER binary's payload degrades to, since it carries no
+	// `mechanism` key at all — the same additive rule `ran` and `verdict` set.
+	Mechanism string
+```
+
+Change `refreshCookiesDetailed`'s signature to named results and register the stamp as its first
+statement (the `RefreshCookiesDetailed` wrapper above it is UNCHANGED):
+
+```go
+func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy browserGatePolicy) (out RefreshResult, retErr error) {
+	// ONE stamp for eighteen returns.
+	//
+	// Mechanism has to be true of every exit — eight aborts, seven declines
+	// and three verdicts — and threading it through each return literal is
+	// exactly how the nineteenth one gets added without it. The named result
+	// plus this defer make the stamp structural instead: a return site added
+	// later carries it whether or not its author knew the field existed.
+	//
+	// It starts empty and is set only where the path is actually chosen, at the
+	// importedFromProfile decision below, so a pass that declined above that
+	// point reports "" — the honest answer, and the one both surfaces know how
+	// to fall back from. The one decline below that point — the browser
+	// branch's empty-jar gate — carries "browser", because the branch WAS
+	// chosen.
+	//
+	// NO LOCK: the closure touches the named result and nothing else, and it is
+	// registered before the first s.mu.Lock() so it runs LAST, after every path
+	// has already released the mutex.
+	mechanism := ""
+	defer func() { out.Mechanism = mechanism }()
+
+	s.mu.Lock()
+```
+
+and, immediately after the `importedFromProfile` decision block:
+
+```go
+	importedFromProfile := browser == nil
+	if s.resolvedAcquisition() == AcquisitionProfile {
+		importedFromProfile = true
+	}
+	// The one place the mechanism is known. Everything above this line declined
+	// without choosing; everything below it ran the branch named here, and the
+	// defer at the top carries the answer out of whichever exit is taken.
+	if importedFromProfile {
+		mechanism = RefreshMechanismProfileImport
+	} else {
+		mechanism = RefreshMechanismBrowser
+	}
+```
+
+- [ ] **Step 10: Run the cookies package**
+
+```bash
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 -run 'TestRefreshResultCarriesTheMechanismThatRan|TestProfileDirVerdict|TestAcquisitionMode|TestLaunchGuard|TestReadOnly|TestStartupSeed|TestPeriodicTick' ./internal/cookies/ -v
+```
+Expected: PASS. (The 12c acquisition and launch-guard tests are run alongside because Step 9 edited
+the function they all drive.) Then the whole package once: `go test -count=1 ./internal/cookies/`.
+
+- [ ] **Step 11: Put the mechanism on the wire**
+
+In `internal/web/routes/cookies.go`, add a fourth bullet to `cookieRefreshOutcome`'s doc list
+(after the `ran` bullet) and the key to the map:
+
+```go
+//   - mechanism — WHICH cookie source ran: "browser", "profile-import", or ""
+//     when the pass declined before it chose one. Wording only: it exists so a
+//     post-flight toast stops saying "Browser cookie refresh ..." after an
+//     import that launched nothing, and nothing may branch a decision on it.
+//     Additive like `ran` and `verdict` before it — an older frontend ignores it, and a newer
+//     frontend against an older binary reads undefined and falls back to
+//     cookies.acquisition, which is what it already used for the pre-flight
+//     toast.
+```
+
+```go
+func cookieRefreshOutcome(result cookies.RefreshResult) map[string]any {
+	return map[string]any{
+		"success":   result.AnyVerified(),
+		"renewed":   result.Renewed,
+		"verdict":   result.Overall().String(),
+		"ran":       result.Ran,
+		"mechanism": result.Mechanism,
+	}
+}
+```
+
+Append to `internal/web/routes/cookies_test.go`:
+
+```go
+// TestCookieRefreshOutcomeCarriesTheMechanism pins the additive key the two
+// post-flight surfaces read.
+//
+// The empty row is the one with teeth. A pass that declined before choosing a
+// path has no mechanism, and the payload has to say so rather than default to
+// "browser": the dashboard treats empty and absent identically and falls back
+// to cookies.acquisition, and a payload that asserted "browser" there would
+// override that fallback with a guess.
+func TestCookieRefreshOutcomeCarriesTheMechanism(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"a browser pass", cookies.RefreshMechanismBrowser, "browser"},
+		{"a profile import", cookies.RefreshMechanismProfileImport, "profile-import"},
+		{"a pass that declined before choosing", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cookieRefreshOutcome(cookies.RefreshResult{Ran: true, Mechanism: tc.in})
+			if got["mechanism"] != tc.want {
+				t.Errorf("mechanism = %v, want %q — the dashboard's toast subject comes from this key",
+					got["mechanism"], tc.want)
+			}
+		})
+	}
+}
+```
+
+and one row in `TestAppJSReadsTheFieldsTheHandlerEmits`'s table, with the sentence that explains why
+its expression is a read rather than a comparison:
+
+```go
+	for _, tc := range []struct{ key, expr string }{
+		{"ran", "data.ran === false"},
+		{"verdict", `data.verdict === "failed"`},
+		// Read, not compared: app.js hands this to cookieRefreshMechanismLabel
+		// rather than branching on it, and the label owns the fallback for an
+		// absent or empty value. What must not drift is the NAME.
+		{"mechanism", "data.mechanism"},
+	} {
+```
+
+- [ ] **Step 12: One subject-producer per surface, and the cross-surface pin**
+
+In `internal/tui/app_actions.go`, add `"github.com/vampiricwulf/Moombox/internal/cookies"` to the
+import block (after `internal/constants`, before `internal/database`), and after
+`cookieRefreshFeedback`:
+
+```go
+// cookieRefreshMechanismLabel is the SUBJECT of every post-flight sentence R F
+// renders: the mechanism that actually ran.
+//
+// cookieRefreshFeedback above names what WILL run, from the mode, because
+// before the pass that is all there is. Afterwards the pass knows better —
+// RefreshResult.Mechanism is what it chose — and the two disagree wherever the
+// HOST decides rather than the setting: a machine with no browser installed
+// imports in "auto" mode and always has. That is why every post-flight sentence
+// said "Browser cookie refresh ..." after an import (Arc 12c arc-close F2), and
+// why this reads the RESULT first.
+//
+// The mode is the fallback, not the source. An empty Mechanism means the pass
+// declined before choosing — a setup in flight, nothing worth refreshing — and
+// the mode is then the best answer available AND the one the pre-flight
+// sentence already gave, so the two lines agree rather than contradict.
+//
+// The dashboard's twin is cookieRefreshMechanismLabel in
+// web/public/modules/utils.js;
+// TestRefreshPostflightMechanismAgreesAcrossSurfaces pins the two by exact
+// equality over every combination, the way
+// TestRefreshPreflightSentenceAgreesAcrossSurfaces pins the pre-flight pair.
+// Like that pair these name no per-surface affordance, so they do not diverge;
+// unlike the rung-3 pair, which does and must.
+func cookieRefreshMechanismLabel(mechanism, mode string) string {
+	switch mechanism {
+	case cookies.RefreshMechanismProfileImport:
+		return "Browser-profile cookie import"
+	case cookies.RefreshMechanismBrowser:
+		return "Browser cookie refresh"
+	}
+	if mode == cookies.AcquisitionProfile {
+		return "Browser-profile cookie import"
+	}
+	return "Browser cookie refresh"
+}
+```
+
+In `web/public/modules/utils.js`, after `cookieRefreshPreflightToast`:
+
+```js
+/**
+ * cookieRefreshMechanismLabel is the SUBJECT of every post-flight toast the
+ * manual refresh renders: the mechanism that actually ran.
+ *
+ * cookieRefreshPreflightToast above names what WILL run, from the mode, because
+ * before the pass that is all there is. Afterwards the server knows better —
+ * `mechanism` on the /api/cookies/auto-refresh payload is the path the pass
+ * chose — and the two disagree wherever the HOST decides rather than the
+ * setting: a machine with no browser installed imports in "auto" mode and
+ * always has. Every result toast said "Browser cookie refresh ..." after such
+ * an import, which is why this reads the payload first.
+ *
+ * The mode is the fallback, not the source, and it covers two cases with one
+ * rule: a pass that declined before choosing sends an empty `mechanism`, and an
+ * OLDER binary sends no such key at all. Both land here, and both get the
+ * sentence the pre-flight toast already used.
+ *
+ * The TUI's twin is cookieRefreshMechanismLabel in internal/tui/app_actions.go;
+ * the two are pinned to identical output by exact equality
+ * (TestRefreshPostflightMechanismAgreesAcrossSurfaces).
+ */
+export function cookieRefreshMechanismLabel(mechanism, acquisition) {
+  if (mechanism === "profile-import") return "Browser-profile cookie import";
+  if (mechanism === "browser") return "Browser cookie refresh";
+  return acquisition === "profile"
+    ? "Browser-profile cookie import"
+    : "Browser cookie refresh";
+}
+```
+
+Create `internal/tui/cookie_postflight_mechanism_test.go`:
+
+```go
+package tui
+
+import (
+	"testing"
+
+	"github.com/dop251/goja"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
+)
+
+// TestRefreshPostflightMechanismAgreesAcrossSurfaces is the cross-UI pin for
+// the post-flight subject, built exactly like
+// TestRefreshPreflightSentenceAgreesAcrossSurfaces next door: literal sentences
+// first so the test is self-checking, then the SHIPPED utils.js run through
+// goja and compared to the Go renderer by exact equality — never Contains,
+// because "Browser cookie refresh" is a substring of nothing here but a drift
+// that kept one string a prefix of the other must still fail.
+//
+// The grid is every mechanism against every mode, including the values neither
+// side should ever see. That is what pins the PRECEDENCE: a renderer that read
+// the mode first would agree with its twin on twelve of the sixteen rows.
+//
+// The mechanism values arrive as the Go CONSTANTS, so a rename that changes
+// their VALUE is caught here too — the JS compares literals, so a changed
+// constant falls through its two arms to the mode fallback and the two answers
+// part company on the rows where the mode disagrees.
+func TestRefreshPostflightMechanismAgreesAcrossSurfaces(t *testing.T) {
+	const (
+		browserLabel = "Browser cookie refresh"
+		importLabel  = "Browser-profile cookie import"
+	)
+	for _, tc := range []struct{ mechanism, mode, want string }{
+		{cookies.RefreshMechanismBrowser, "auto", browserLabel},
+		{cookies.RefreshMechanismBrowser, "profile", browserLabel},
+		{cookies.RefreshMechanismProfileImport, "auto", importLabel},
+		{cookies.RefreshMechanismProfileImport, "profile", importLabel},
+		{"", "auto", browserLabel},
+		{"", "profile", importLabel},
+		{"", "", browserLabel},
+	} {
+		if got := cookieRefreshMechanismLabel(tc.mechanism, tc.mode); got != tc.want {
+			t.Errorf("cookieRefreshMechanismLabel(%q, %q) = %q, want %q",
+				tc.mechanism, tc.mode, got, tc.want)
+		}
+	}
+	// The RESULT outranks the mode, and these two rows are the only place that
+	// is visible: a renderer that consulted the mode first answers the import
+	// label for the first and the browser label for the second.
+	if got := cookieRefreshMechanismLabel(cookies.RefreshMechanismBrowser, "profile"); got != browserLabel {
+		t.Errorf("a browser pass in profile mode is labelled %q — the mode was consulted ahead of "+
+			"what the pass actually did", got)
+	}
+	if got := cookieRefreshMechanismLabel(cookies.RefreshMechanismProfileImport, "auto"); got != importLabel {
+		t.Errorf("an import in auto mode is labelled %q — this is the host-decided case that made "+
+			"every post-flight sentence wrong before the mode setting existed", got)
+	}
+
+	vm := utilsModuleVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("cookieRefreshMechanismLabel"))
+	if !ok {
+		t.Fatal("utils.js does not export cookieRefreshMechanismLabel — the dashboard's post-flight " +
+			"toasts have no shared subject and the two surfaces cannot be held together")
+	}
+	for _, mechanism := range []string{
+		cookies.RefreshMechanismBrowser, cookies.RefreshMechanismProfileImport, "", "headless",
+	} {
+		for _, mode := range []string{"auto", "profile", "", "browser"} {
+			v, err := fn(goja.Undefined(), vm.ToValue(mechanism), vm.ToValue(mode))
+			if err != nil {
+				t.Fatalf("mechanism %q mode %q: %v", mechanism, mode, err)
+			}
+			if web, tui := v.String(), cookieRefreshMechanismLabel(mechanism, mode); web != tui {
+				t.Errorf("mechanism %q mode %q: the dashboard says %q and the TUI says %q — one "+
+					"pass, two names for what ran", mechanism, mode, web, tui)
+			}
+		}
+	}
+	// An ABSENT argument, which is what an older binary's payload produces on
+	// the dashboard (`data.mechanism` is undefined, not ""). It must land on
+	// the mode fallback rather than on some third answer.
+	undef, err := fn(goja.Undefined(), goja.Undefined(), vm.ToValue("profile"))
+	if err != nil {
+		t.Fatalf("undefined mechanism: %v", err)
+	}
+	if got := undef.String(); got != importLabel {
+		t.Errorf("an older binary's payload (no mechanism key) is labelled %q in profile mode, want "+
+			"%q — the fallback is the whole reason the key can be additive", got, importLabel)
+	}
+}
+
+// TestPostFlightSentencesNameTheMechanismThatRan is the TUI half, through the
+// real Update loop, because the sentence is assembled at the arm and not in the
+// label function.
+//
+// Three rows, three different ways the subject is reached: the result says
+// "import", the result says "browser", and the result says nothing so the mode
+// answers. The browser rows are asserted BYTE-IDENTICALLY to what shipped
+// before, because feedbackColor classifies by substring and
+// TestFeedbackColorWarningMessages pins two of these strings verbatim — this
+// change re-subjects the import case and must leave the browser case alone.
+func TestPostFlightSentencesNameTheMechanismThatRan(t *testing.T) {
+	appIn := func(t *testing.T, mode string) *App {
+		t.Helper()
+		a := NewApp()
+		cfg := config.Defaults()
+		cfg.Cookies.Acquisition = mode
+		a.configStore = config.NewStore(cfg, "")
+		return a
+	}
+
+	t.Run("an import that succeeded", func(t *testing.T) {
+		a := appIn(t, "profile")
+		a.Update(cookieForceRefreshResultMsg{Result: cookies.RefreshResult{
+			Ran: true, Renewed: true, YouTube: cookies.RefreshOK,
+			Mechanism: cookies.RefreshMechanismProfileImport,
+		}})
+		if want := "Browser-profile cookie import successful"; a.feedback.msg != want {
+			t.Errorf("feedback = %q, want %q — the pass launched no browser", a.feedback.msg, want)
+		}
+	})
+
+	t.Run("a browser pass that succeeded keeps its shipped wording", func(t *testing.T) {
+		a := appIn(t, "auto")
+		a.Update(cookieForceRefreshResultMsg{Result: cookies.RefreshResult{
+			Ran: true, Renewed: true, YouTube: cookies.RefreshOK,
+			Mechanism: cookies.RefreshMechanismBrowser,
+		}})
+		if want := "Browser cookie refresh successful"; a.feedback.msg != want {
+			t.Errorf("feedback = %q, want %q — the browser wording is unchanged by this task", a.feedback.msg, want)
+		}
+	})
+
+	t.Run("a decline in profile mode falls back to the mode", func(t *testing.T) {
+		// refreshDeclined() is the zero RefreshResult: Ran false, Mechanism "".
+		// The pass never chose, so the sentence's subject comes from the same
+		// setting the pre-flight line used a moment earlier — the two lines
+		// have to agree or the operator watched one gesture describe itself
+		// twice, differently.
+		a := appIn(t, "profile")
+		a.Update(cookieForceRefreshResultMsg{Result: cookies.RefreshResult{}})
+		want := "Browser-profile cookie import declined to run (" + cookies.RefreshDeclinedCauses +
+			") — nothing was learned about these cookies"
+		if a.feedback.msg != want {
+			t.Errorf("feedback = %q, want %q", a.feedback.msg, want)
+		}
+	})
+
+	t.Run("a host-decided import in auto mode", func(t *testing.T) {
+		// THE ROW THAT MAKES THE PRECEDENCE OBSERVABLE, and the case that made
+		// every post-flight sentence wrong years before cookies.acquisition
+		// existed: no browser on the host, so the pass imports while the mode
+		// still says "auto". A renderer that consulted the mode would say
+		// "Browser cookie refresh successful" here, and did.
+		a := appIn(t, "auto")
+		a.Update(cookieForceRefreshResultMsg{Result: cookies.RefreshResult{
+			Ran: true, Renewed: true, YouTube: cookies.RefreshOK,
+			Mechanism: cookies.RefreshMechanismProfileImport,
+		}})
+		if want := "Browser-profile cookie import successful"; a.feedback.msg != want {
+			t.Errorf("feedback = %q, want %q — the mode was consulted ahead of what the pass did",
+				a.feedback.msg, want)
+		}
+	})
+
+	t.Run("a browser pass that verified but could not confirm keeps its arm", func(t *testing.T) {
+		// The one arm that names the browser and is NOT re-subjected: an import
+		// forces Renewed true (renewed := importedFromProfile || browserActed),
+		// so it is unreachable for one — pinned in internal/cookies by
+		// TestRefreshResultCarriesTheMechanismThatRan's Renewed assertion.
+		a := appIn(t, "auto")
+		a.Update(cookieForceRefreshResultMsg{Result: cookies.RefreshResult{
+			Ran: true, Renewed: false, YouTube: cookies.RefreshOK,
+			Mechanism: cookies.RefreshMechanismBrowser,
+		}})
+		if want := "Cookies still work, but this pass could not confirm the browser refreshed them"; a.feedback.msg != want {
+			t.Errorf("feedback = %q, want %q", a.feedback.msg, want)
+		}
+	})
+}
+```
+
+- [ ] **Step 13: Use the label in the TUI arms**
+
+In `internal/tui/app_update.go`, insert between the `noProfileFallback` resolution and the `switch`:
+
+```go
+		// The SUBJECT of every arm below, from what the pass ACTUALLY did —
+		// msg.Result.Mechanism — with the configured mode as the fallback for a
+		// pass that declined before choosing. See cookieRefreshMechanismLabel.
+		// Computed once rather than per arm: the rung-3 arm below does not use
+		// it, and one config-store read on that path is cheaper than five call
+		// sites that can drift.
+		mechanismLabel := cookieRefreshMechanismLabel(msg.Result.Mechanism, a.cookieAcquisitionMode())
+		switch {
+```
+
+and re-subject the five arms that name a mechanism (the rung-3 arm and the `!Renewed` arm are
+UNCHANGED — see their comments):
+
+```go
+		case msg.Err != nil:
+			a.setFeedback(mechanismLabel + " failed: " + msg.Err.Error())
+		case !msg.Result.Ran:
+			// Causes from the shared constant, not restated: this line, the
+			// worker's log note and the Web toast are three renderings of one
+			// exhaustive list, and they had already drifted apart once.
+			a.setFeedback(mechanismLabel + " declined to run (" + cookies.RefreshDeclinedCauses +
+				") — nothing was learned about these cookies")
+		case msg.Result.Overall() == cookies.RefreshFailed:
+			a.setFeedback(mechanismLabel + " ran and auth verification failed")
+		case msg.Result.Overall() == cookies.RefreshUnknown:
+			a.setFeedback(mechanismLabel + " ran but could not establish whether these cookies work")
+		case !msg.Result.Renewed:
+			// NOT re-subjected, and not an oversight: renewed is
+			// `importedFromProfile || browserActed`, so an import that reaches
+			// a verdict always renewed and this arm is unreachable for one.
+			// TestRefreshResultCarriesTheMechanismThatRan pins that upstream.
+			a.setFeedback("Cookies still work, but this pass could not confirm the browser refreshed them")
+		default:
+			a.setFeedback(mechanismLabel + " successful")
+		}
+```
+
+- [ ] **Step 14: Use the label in the dashboard toasts**
+
+`web/public/app.js:10` — add `cookieRefreshMechanismLabel` to the `./modules/utils.js` import list,
+after `cookieRefreshPreflightToast`.
+
+Immediately after the `const data = await response.json().catch(...)` that follows
+`fetch("/api/cookies/auto-refresh", { method: "POST" })` — the same statement opens six other
+handlers in `app.js`; this is the one inside `autoCookieRefresh`:
+
+```js
+      // The SUBJECT of every result toast below, from what the pass actually
+      // did rather than from what the mode asked for. `data.mechanism` is
+      // undefined against an older binary and empty when the pass declined
+      // before choosing; both fall back to the configured mode, which is the
+      // same answer the pre-flight toast above already gave. See
+      // cookieRefreshMechanismLabel in ./modules/utils.js.
+      const mechanismLabel = cookieRefreshMechanismLabel(
+        data.mechanism,
+        this.config?.cookies?.acquisition,
+      );
+```
+
+Re-subject the five result arms. Only the subject changes; every predicate, every variant and the
+declined-cause clause stay byte-identical (`TestAppJSMatchesTheDeclinedCauses` pins that clause
+against `cookies.RefreshDeclinedCauses`, and it must stay on one line):
+
+```js
+        let refreshMsg, refreshVariant;
+        if (!data.success && data.ran === false) {
+          // The cause list is one exhaustive set rendered in three places (see
+          // cookies.RefreshDeclinedCauses). This copy cannot import it, so
+          // TestAppJSMatchesTheDeclinedCauses pins the two against each other —
+          // keep the phrase below byte-identical to the constant.
+          refreshMsg = `${mechanismLabel} declined to run — a setup or another refresh is already in flight, or no platform has cookies worth refreshing. Nothing was learned about these cookies.`;
+          refreshVariant = "neutral";
+        } else if (!data.success && data.verdict === "failed") {
+          refreshMsg = `${mechanismLabel} completed — auth verification failed`;
+          refreshVariant = "danger";
+        } else if (!data.success) {
+          refreshMsg = `${mechanismLabel} ran but could not establish whether these cookies work — nothing has been concluded about them`;
+          refreshVariant = "warning";
+        } else if (data.renewed === false) {
+          // NOT re-subjected — the Go twin's comment explains why: an import
+          // always renews, so this arm is unreachable for one.
+          refreshMsg =
+            "Cookies still work — but this pass could not confirm the browser refreshed them, so the last-refresh time is unchanged";
+          refreshVariant = "warning";
+        } else {
+          refreshMsg = `${mechanismLabel} successful`;
+          refreshVariant = "success";
+        }
+```
+
+The transport arm (the `else` that follows the 404/424 fallback) becomes:
+
+```js
+        this.showToast(data.error || `${mechanismLabel} failed`, "danger");
+```
+
+and the `catch`, which cannot see `data` at all, uses the mode alone — the one input it has:
+
+```js
+    } catch (e) {
+      this.showToast(
+        `${cookieRefreshMechanismLabel("", this.config?.cookies?.acquisition)} failed: ${e.message}`,
+        "danger",
+      );
+    } finally {
+```
+
+Then update the premise assertion in `internal/web/routes/cookies_shiftclick_test.go` (the
+`"Browser cookie refresh failed"` literal), which is now composed:
+
+```go
+	// The premise: without a failure arm left, "it falls back" would be
+	// trivially true and would say nothing about which failures it covers. The
+	// subject is now composed from the mechanism that ran (H2 R9), so the
+	// literal to look for is the template, not the old sentence — and matching
+	// the template also asserts that this arm did not keep a hardcoded
+	// "Browser cookie refresh" after an import.
+	if !strings.Contains(code, "`${mechanismLabel} failed`") {
+		t.Error("autoCookieRefresh no longer reports any failure at all, so the fallback assertions " +
+			"above cannot distinguish a targeted fallback from one that swallows everything")
+	}
+```
+
+and append the pin that closes the JS half of F2, in the same file (the goja harness in
+`internal/tui` executes the shared HELPER; nothing executes `app.js`'s arms, so this reads them):
+
+```go
+// TestAutoCookieRefreshToastsNameTheMechanismThatRan is the dashboard half of
+// Arc 12c arc-close F2.
+//
+// The subject of a result toast is not testable through goja — app.js is a
+// class method on a live DOM, not a module function — so it is read out of the
+// shipped script, bracketed to this one handler the way the rung-3 assertions
+// above are. What can be asserted is exactly the defect: a subject that is a
+// LITERAL cannot have come from the pass, so an import renders "Browser cookie
+// refresh ..." forever.
+//
+// The two assertions catch different mutants. Dropping mechanismLabel from one
+// arm leaves the count short; hardcoding the old sentence back into one arm
+// leaves the count short AND trips the literal check, which is the one that
+// names the defect in its failure message.
+func TestAutoCookieRefreshToastsNameTheMechanismThatRan(t *testing.T) {
+	code := jsCode(jsBlock(t, readEmbeddedModule(t, "public/app.js"), "async autoCookieRefresh() {"))
+
+	if !strings.Contains(code, "cookieRefreshMechanismLabel(") {
+		t.Fatal("autoCookieRefresh never calls cookieRefreshMechanismLabel, so its toasts cannot " +
+			"name the mechanism that ran and every profile import reads as a browser refresh")
+	}
+	// Five interpolated subjects: declined, verdict-failed, inconclusive,
+	// successful, and the transport failure. The renewed === false arm has none
+	// by design (an import always renews, so it is unreachable for one) and the
+	// catch calls the helper directly, both covered above.
+	if n := strings.Count(code, "${mechanismLabel}"); n < 5 {
+		t.Errorf("only %d toast subject(s) are composed from the mechanism, want at least 5 — an arm "+
+			"still names a mechanism the pass may not have used", n)
+	}
+	for _, literal := range []string{`"Browser cookie refresh`, "`Browser cookie refresh"} {
+		if strings.Contains(code, literal) {
+			t.Errorf("autoCookieRefresh still hardcodes %s...` as a toast subject — that is the "+
+				"sentence a profile import rendered (Arc 12c arc-close F2)", literal)
+		}
+	}
+}
+```
+
+- [ ] **Step 15: Run the three packages**
+
+```bash
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 ./internal/cookies/
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 ./internal/web/routes/
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 ./internal/tui/
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 ./cmd/moombox/
+```
+Expected: `ok` on all four. `TestRefreshPreflightSentenceAgreesAcrossSurfaces` must still PASS and must
+still not SKIP — Step 12 adds a second export to `utils.js` and a broken edit there would take the
+whole module down, and that test is the canary.
+
+- [ ] **Step 16: Mutations to run**
+
+Every row: make the edit, watch the NAMED test fail, revert, confirm the file is identical.
+
+| # | File | Mutation | Test that must fail |
+|---|---|---|---|
+| 1 | `autocookies.go` | put the `if profileDirErr != nil && logger != nil { logger.Error(...) }` block back in `NewAutoCookieService` | `TestProfileDirVerdictIsSilentAtConstruction` (and both halves of `…LevelFollowsTheMode`, which then see two lines) *(verified at `1559a36`)* |
+| 2 | `autocookies.go` | `LogProfileDirVerdict` drops the `resolvedAcquisition()` branch and always logs Error | `TestProfileDirVerdictLevelFollowsTheMode/profile` (an ERROR line, and no INFO line) *(verified)* |
+| 3 | `autocookies.go` | `LogProfileDirVerdict` always logs the Info arm | `TestProfileDirVerdictLevelFollowsTheMode/auto` (zero ERROR lines) *(verified)* |
+| 4 | `autocookies.go` | drop the `s.profileDirErr == nil` guard | `TestProfileDirVerdictSaysNothingForAnAcceptableDir` (both rows) *(verified)* |
+| 5 | `autocookies.go` | the profile Info line reuses the guard's error as its text (`"err", s.profileDirErr`) | `…LevelFollowsTheMode/profile` — the "refusing to launch" check, which is the claim a path that launches nothing cannot make; caught only because `at()` renders the ARGS, not the heading alone *(verified)* |
+| 6 | `services.go` | hoist `autoCookieSvc.LogProfileDirVerdict()` above the `AcquisitionMode` closure | `TestProfileDirVerdictIsLoggedAfterTheModeIsWired` (index check) — **this mutant IS F1**, so it is the row that matters most *(verified)* |
+| 7 | `services.go` | delete the call | same test, the "never calls" fatal *(verified)* |
+| 8 | `autocookies.go` | delete `defer func() { out.Mechanism = mechanism }()` | `TestRefreshResultCarriesTheMechanismThatRan` rows 2, 3 and 4 *(verified)* |
+| 9 | `autocookies.go` | `mechanism := RefreshMechanismBrowser` (a non-empty initialiser) | `…CarriesTheMechanismThatRan` row 1 — the in-flight decline would claim a path it never chose *(verified)* |
+| 10 | `autocookies.go` | swap the two constants at the decision | `…CarriesTheMechanismThatRan` rows 2, 3 and 4 *(verified)* |
+| 11 | `autocookies.go` | `browserActed := false` AND `renewed := browserActed` — both guards, because the `!Renewed` arm is held shut by each on its own | `…CarriesTheMechanismThatRan` row 3's `Renewed` assertion *(verified)*. **Dropping `importedFromProfile \|\|` alone SURVIVES** *(verified)*: `browserActed` starts true and only the browser branch clears it, so the import still renews — which is what the code's own comment above `renewed :=` says the `\|\|` is for (visibility at the point of use, not behaviour). The assertion pins the property, not the line |
+| 12 | `routes/cookies.go` | drop `"mechanism"` from `cookieRefreshOutcome` | `TestCookieRefreshOutcomeCarriesTheMechanism` (all three rows — a missing key reads back `nil`, which equals none of the wants) and `TestAppJSReadsTheFieldsTheHandlerEmits` (its `payload[key]` fatal) *(verified)* |
+| 13 | `app_actions.go` | the Go label reads the mode ONLY (`mechanism` never consulted) | `TestRefreshPostflightMechanismAgreesAcrossSurfaces` — two literal rows, both precedence assertions, four goja grid rows — and `…NameTheMechanismThatRan/a_host-decided_import_in_auto_mode` *(verified)*. The partial mutant (mode `profile` checked FIRST, then the mechanism) is caught by one literal row, the first precedence assertion and the `("browser","profile")` goja row *(verified)* |
+| 14 | `utils.js` | delete the `"profile-import"` arm from the JS label | the goja grid, rows `("profile-import","auto")`, `("profile-import","")` and `("profile-import","browser")` *(verified)* |
+| 15 | `utils.js` | the JS label drops the mode fallback and always returns the browser label | the goja grid rows `("","profile")` and `("headless","profile")`, and the undefined-mechanism assertion *(verified)* |
+| 16 | `app_update.go` | the default arm hardcodes `"Browser cookie refresh successful"` | `TestPostFlightSentencesNameTheMechanismThatRan/an_import_that_succeeded` (and `…/a_host-decided_import_in_auto_mode`) *(verified)* |
+| 17 | `app_update.go` | `mechanismLabel` is built from `a.cookieAcquisitionMode()` alone, ignoring `msg.Result.Mechanism` | `…NameTheMechanismThatRan/a_host-decided_import_in_auto_mode` *(verified)* |
+| 18 | `app_update.go` | the declined arm keeps its old literal subject | `…NameTheMechanismThatRan/a_decline_in_profile_mode_falls_back_to_the_mode` *(verified)* |
+| 19 | `app.js` | the success arm hardcodes `"Browser cookie refresh successful"` | `TestAutoCookieRefreshToastsNameTheMechanismThatRan` (the literal check names the defect; the count check also drops) *(verified)* |
+| 20 | `app.js` | delete `mechanismLabel` from the declined arm only | `TestAutoCookieRefreshToastsNameTheMechanismThatRan` (count < 5) *(verified)* |
+| 21 | `autocookies.go` | the auto arm rewords its message, or swaps the `"err"` arg for `"profile_dir"` | `…LevelFollowsTheMode/auto` — the verbatim check (message and both args), which is the claim that today's line is unchanged under `auto` *(verified, both shapes)* |
+
+Two rows are deliberately absent and are recorded rather than hidden. The `!Renewed` arms on both
+surfaces are UNCHANGED by this task, so there is no mutation of them to run; what protects them is
+row 11, which fails the moment that arm becomes reachable for an import. And `cookieRefreshReportFor`
+(`cmd/moombox/services.go:54`) is untouched: its wording, "automatic cookie refresh", is already true
+of both mechanisms.
+
+- [ ] **Step 17: Flip the three doc sentences**
+
+`docs/spec/data-and-storage.md:897` — append to the end of the `cookies.acquisition` ladder paragraph
+(after "…so they do not diverge."):
+
+```
+Afterwards the mechanism is no longer a guess: `RefreshResult.Mechanism` records which source the pass actually used (`"browser"`, `"profile-import"`, or empty when it declined before choosing), rides the wire as `mechanism` on `cookieRefreshOutcome`, and feeds ONE subject-producer per surface — `cookieRefreshMechanismLabel` in `internal/tui/app_actions.go` and in `web/public/modules/utils.js`, pinned by exact equality in `TestRefreshPostflightMechanismAgreesAcrossSurfaces`. The RESULT outranks the mode there, and the mode is only the fallback, because the two disagree wherever the host decides rather than the setting: a machine with no browser installed imports in `"auto"` mode and always has, which is why every post-flight sentence used to open `Browser cookie refresh ...` after a pass that launched nothing. Only the SUBJECT is shared; each surface keeps its own predicates. The `renewed === false` arm keeps its browser wording on both, and is allowed to: `renewed := importedFromProfile || browserActed`, so an import that reaches a verdict always renewed and that arm is unreachable for one.
+```
+
+`docs/spec/user-interfaces.md:622` — the lead sentence and one table row. Old lead:
+
+```
+**`POST /api/cookies/auto-refresh`** on success adds the four `cookieRefreshOutcome` keys to the same status block. Three of them are independent facts and none can be derived from another:
+```
+
+New:
+
+```
+**`POST /api/cookies/auto-refresh`** on success adds the five `cookieRefreshOutcome` keys to the same status block. Three of them are independent facts and none can be derived from another:
+```
+
+and, after the `ran` row:
+
+```
+| `mechanism` | WHICH cookie source ran: `"browser"`, `"profile-import"`, or `""` when the pass declined before it chose one. **Wording only** — the toast's subject, so an import stops rendering as a browser refresh. Additive: an older frontend ignores it, and a newer frontend against an older binary reads `undefined` and falls back to `cookies.acquisition`, the same value it used for the pre-flight toast. |
+```
+
+and, in the paragraph after the table (`:631`), old
+`The refresh's own outcome comes from the four keys above and is unaffected.` → new
+`The refresh's own outcome comes from the five keys above and is unaffected.`
+
+`docs/spec/security.md:461` — insert into the launch-boundary paragraph immediately after the
+sentence "Nothing lifts it." and before "`dangerousProfilePathSubstrings` is Windows-only …":
+
+```
+The verdict is REPORTED separately from where it is computed, and at the level the acquisition mode earns: `AutoCookieService.LogProfileDirVerdict`, called once from `cmd/moombox/services.go` after `AcquisitionMode` is wired, logs the refusal at ERROR under `"auto"` (a browser refresh the operator expects will silently not happen) and one INFO under `"profile"` (nothing was going to launch, and the read-only import below runs regardless). The constructor cannot make that choice — it runs before the callback exists — which is why it now computes the verdict silently.
+```
+
+- [ ] **Step 18: Close the two Arc 12c residual rows and correct field-test row 23**
+
+`docs/superpowers/plans/2026-09-02-arc12c-acquisition-mode.md:2327` — append to that row's second
+cell:
+
+```
+ ***(HOMED — H2 Task 7: the constructor computes silently and `AutoCookieService.LogProfileDirVerdict()` says it once from the wiring site, ERROR under `auto` with the wording unchanged, one INFO under `profile`. The call ORDER is pinned by an AST test in `cmd/moombox`, because hoisting it above the `AcquisitionMode` closure reproduces this finding exactly while every behavioural test stays green.)***
+```
+
+`:2328` — append to that row's second cell:
+
+```
+ ***(HOMED — H2 Task 7: not from the mode, which is wrong whenever the HOST decides — `RefreshResult.Mechanism` records what the pass actually ran, rides the wire as `mechanism`, and feeds one `cookieRefreshMechanismLabel` per surface, pinned by exact equality. The mode is the fallback for a pass that declined before choosing, and for an older binary's payload.)***
+```
+
+`docs/superpowers/plans/2026-08-29-cookie-remediation-field-test-plan.md:181` — row 23's **Reading
+rules** sentence is now false in both halves. Inside that cell (the fifth column, before its
+closing ` | `), replace exactly this (old):
+
+```
+Reading rules: every boot with this directory configured logs `auto-cookie profile dir rejected at construction ... refusing to launch a headless session` at ERROR - that is the launch guard's verdict (launches DO refuse the directory), not a refusal of the read, and the import in (a) still runs; and the post-flight line still says `Browser cookie refresh ...` after an import (pre-existing wording; both are residuals in the plan's final-state section)
+```
+
+with (new):
+
+```
+Reading rules: with this directory configured, `"profile"` mode logs ONE INFO at boot naming the directory and saying no headless browser will be launched against it and that the read-only import is what runs (`AutoCookieService.LogProfileDirVerdict`); `"auto"` logs the same verdict at ERROR, which is correct there — a browser refresh WOULD be refused. An ERROR on a `"profile"` boot is a regression of H2 R9, not the expected line. The post-flight sentence in (a) must open `Browser-profile cookie import ...` on both surfaces, not `Browser cookie refresh ...`
+```
+
+- [ ] **Step 19: Verify line endings, run the gates, commit**
+
+```bash
+for f in internal/cookies/autocookies.go internal/cookies/autocookies_profiledir_verdict_test.go \
+         internal/cookies/autocookies_mechanism_test.go cmd/moombox/services.go \
+         cmd/moombox/profiledir_verdict_callsite_test.go internal/web/routes/cookies.go \
+         internal/web/routes/cookies_test.go internal/web/routes/cookies_shiftclick_test.go \
+         internal/tui/app_actions.go internal/tui/app_update.go \
+         internal/tui/cookie_postflight_mechanism_test.go \
+         web/public/modules/utils.js web/public/app.js \
+         docs/spec/data-and-storage.md docs/spec/user-interfaces.md docs/spec/security.md \
+         docs/superpowers/plans/2026-09-02-arc12c-acquisition-mode.md \
+         docs/superpowers/plans/2026-08-29-cookie-remediation-field-test-plan.md; do
+  printf '%s: ' "$f"; perl -0777 -ne 'print tr/\r//' "$f"; echo
+done
+```
+Expected `0` each. Then the full gate block from Global Constraints. (`web/public` is `go:embed`ed,
+and `go test` recompiles the `web` package when an embedded file changes — the build cache keys the
+asset contents — so the goja and source-reading tests see the edited `utils.js` and `app.js` with no
+separate build step; verified at `1559a36`. The `go build ./...` in the gate block is the build
+gate, not an asset refresh.)
+
+```bash
+git add internal/cookies/autocookies.go internal/cookies/autocookies_profiledir_verdict_test.go \
+        internal/cookies/autocookies_mechanism_test.go cmd/moombox/services.go \
+        cmd/moombox/profiledir_verdict_callsite_test.go internal/web/routes/cookies.go \
+        internal/web/routes/cookies_test.go internal/web/routes/cookies_shiftclick_test.go \
+        internal/tui/app_actions.go internal/tui/app_update.go \
+        internal/tui/cookie_postflight_mechanism_test.go \
+        web/public/modules/utils.js web/public/app.js docs/spec/ docs/superpowers/plans/
+git commit -m "fix(cookies): the boot line and the post-flight sentences name the mechanism that ran
+
+Arc 12c arc-close F1 and F2. NewAutoCookieService cannot know the
+acquisition mode - the callback is wired after it returns - so it now
+computes the launch guard's verdict silently and LogProfileDirVerdict
+says it once from the wiring site: ERROR under auto, wording unchanged,
+one INFO under profile naming the read-only import that actually runs.
+
+RefreshResult carries the mechanism it chose, stamped once at the
+launch-vs-import decision and out through every return by a named
+result, onto the wire as an additive mechanism key, and into one
+subject-producer per surface pinned across the two by exact equality.
+The mode is only the fallback: a host with no browser imports in auto
+mode too, which is why every post-flight sentence said browser.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01N7hSoKxnW7sCfiCQXtMSyN"

@@ -102,8 +102,105 @@ test mirroring `TestSetupCookieFinishFeedback`: the accepted text is reachable t
 `setupWiz.View()` while `IsVisible()`, rendered with a `SuccessStyle` (lipgloss v2 emits ANSI in
 tests, so the style assertion has teeth).
 
+## R9 — The profile-mode boot and post-flight lines say what happened (12c arc-close F1, F2)
+
+Two operator-facing lines describe a mechanism that did not run when `cookies.acquisition = "profile"`.
+Neither is a decision; both are sentences, and both are wrong in the configuration the README recipe
+prescribes. **This is the item that crosses the Non-goals' "No REST/web change" line, by controller
+ruling (2026-09-03): the Arc 12c arc-close homed F2 in H2, and F2's second surface is the dashboard.
+The exception is exactly one additive payload key, one exported JS helper and the toast that reads
+them — no route, no status code, no config key, no schema.**
+
+**F1 — the boot line.** `NewAutoCookieService` (`internal/cookies/autocookies.go:548-551`) computes
+`validateBrowserProfileDirForLaunch`'s verdict and, when it is non-nil, logs
+`auto-cookie profile dir rejected at construction` at **ERROR**, on every boot whose
+`cookies.browser_profile_dir` is a real browser profile tree — in `profile` mode too. The constructor
+cannot do better: `AcquisitionMode` is wired at `cmd/moombox/services.go:970`, AFTER construction at
+`:922`, so the level is chosen before the mode is knowable. The verdict is right and does not move —
+the launch guard refuses that directory in every mode, which is the whole of `security.md`'s launch
+boundary — so what changes is only WHERE the sentence is said and at what level. The constructor
+computes silently; one new method, `AutoCookieService.LogProfileDirVerdict()`, says it once, called
+from the wiring site immediately after the `AcquisitionMode` closure and before
+`s.autoCookieSvc = autoCookieSvc`. Under `auto` it is the existing ERROR — message and `err` argument
+verbatim, because "refusing to launch a headless session against it" is exactly the operator's cue
+that a refresh they expect to happen will not. Under `profile` it is one INFO stating both halves:
+no headless browser will be launched against this directory, and the read-only import is what runs.
+**Unchanged:** `validateBrowserProfileDirForLaunch`'s single call site, `profileDirErr`'s semantics,
+and the four subprocess sites' direct `s.profileDirErr` reads in every mode — every arc since 12c
+pins those (`autocookies_launchguard_test.go`), and `readOnlyProfileDirErr` keeps its own wording.
+**Lock preconditions:** `LogProfileDirVerdict` takes NO lock and MUST NOT be called with `s.mu` held;
+it calls `resolvedAcquisition()`, which reaches the config store's own RWMutex through the injected
+callback — the same rule the four launch sites and `readOnlyProfileDirErr` already follow. It reads
+`profileDirErr`, `profileDir`, `logger` and `AcquisitionMode`, each written once before the service
+is handed to any goroutine.
+
+**F2 — the post-flight sentences.** `internal/tui/app_update.go:420-434` and `web/public/app.js:847-909`
+both open with `Browser cookie refresh …` after a pass that launched nothing. Pre-existing — every
+browser-free import has rendered it since the import path landed, long before `cookies.acquisition`
+existed — because both surfaces had only the MODE to go on, and the mode is not the answer: a host
+with no browser installed imports in `auto` mode too. So the fix is at the source. `RefreshResult`
+gains `Mechanism`, one of `RefreshMechanismBrowser` (`"browser"`) or `RefreshMechanismProfileImport`
+(`"profile-import"`), stamped at the one place the path is chosen — the `importedFromProfile`
+decision (`autocookies.go:2092-2095`) — and empty on every exit that stops above it. It reaches
+every one of `refreshCookiesDetailed`'s eighteen returns (eight aborts, seven declines, three
+verdicts) through a named result and a single `defer`, not through eighteen edited return literals,
+so the nineteenth return site carries it too. One decline sits BELOW the decision — the browser
+branch's empty-jar gate, `len(s.refreshPlatforms()) == 0` (`:2137`) — and carries `"browser"`: that
+branch was chosen and then declined, which is what the sentence should say, and it is the sentence
+the mode fallback produces for it anyway (the gate is reachable only in `auto` with a browser).
+It is **wording only**, the same rule `YouTubeStored` / `TwitchStored` carry: nothing branches a
+decision on it. On the wire it is one additive key, `mechanism`, on `cookieRefreshOutcome`
+(`internal/web/routes/cookies.go:55`) — additive exactly as `ran` and `verdict` were, so an older
+frontend ignores it and a newer frontend against an older binary reads `undefined`.
+
+Then ONE producer per surface names the sentence's subject from it:
+`cookieRefreshMechanismLabel(mechanism, mode)` in `internal/tui/app_actions.go` beside
+`cookieRefreshFeedback`, and `cookieRefreshMechanismLabel(mechanism, acquisition)` in
+`web/public/modules/utils.js` beside `cookieRefreshPreflightToast`. Result first, mode as the
+fallback: an empty mechanism means the pass declined before choosing, and the mode is then the best
+answer available and the one the PRE-flight sentence already gave, so the two lines agree instead of
+contradicting each other. `TestRefreshPostflightMechanismAgreesAcrossSurfaces` pins the two by exact
+equality over every mechanism × mode combination, driven through the goja harness `utilsModuleVM`
+already built for `TestRefreshPreflightSentenceAgreesAcrossSurfaces`
+(`internal/tui/settings_acquisition_test.go:107-170`).
+
+**What deliberately does NOT move, and why.** The per-arm PREDICATES stay per surface and unchanged
+("…declined to run (…) — nothing was learned about these cookies" against "…declined to run — …
+Nothing was learned about these cookies.", "…ran and auth verification failed" against
+"…completed — auth verification failed"). Only the SUBJECT is shared. Unifying the predicates would
+break pins that exist for other reasons — `TestAppJSReadsTheFieldsTheHandlerEmits` needs
+`data.ran === false` and `data.verdict === "failed"` to stay in `app.js` itself, so the arms cannot
+move into a shared helper; and pulling the TUI's wording toward the dashboard's would break
+`TestCookieForceRefreshFeedback`'s case-sensitive `wantSaid` substrings
+(`internal/tui/cookie_refresh_feedback_test.go`: `"nothing was learned"` against the dashboard's
+`Nothing was learned about these cookies.`) and stale the two rows `TestFeedbackColorWarningMessages`
+(`internal/tui/app_layout_test.go:100-102`) pins as "real strings emitted by the TUI today" — and
+none of that is what F2 is about. Rung 3 is untouched and out of scope on its own account: it names
+an affordance, not a mechanism, and `TestRungThreeSentencesDivergeByDesign` pins that pair APART.
+The `!Renewed` arm on both surfaces keeps its browser wording because an import can never reach it:
+`renewed := importedFromProfile || browserActed` (`autocookies.go:2455`) forces `Renewed` true on
+every import, and `browserActed` starts true and is cleared only inside the browser branch (`:2110`),
+so each guard holds the arm shut on its own — dropping either alone changes nothing (verified by
+mutation), and the mechanism test pins the property by driving a real import to a `Ran` result. `cookieRefreshReportFor`'s worker log (`cmd/moombox/services.go:54`) needs
+nothing: it already says "automatic cookie refresh", which is true of both mechanisms.
+
+Docs: `data-and-storage.md:897` (the pre-flight paragraph gains its post-flight half),
+`user-interfaces.md:622-629` ("the four `cookieRefreshOutcome` keys" → five, with the row),
+`security.md:461` (the launch-boundary paragraph gains the level-per-mode clause), and the Arc 12c
+plan's final-state rows `:2327` / `:2328` plus field-test row 23's reading rule, which currently
+tells the tester to expect both wrong lines.
+
+## R9 invariants
+
+`profileDirErr` is still computed exactly once, in the constructor, and still read directly by all
+four subprocess sites in both modes. `Mechanism` never gates a branch. No new goroutine, no lock, no
+config key, no route, no status code, no database column. The anonymous logger, in place.
+
+
+---
+
 ## Non-goals
-No arming. No `AuthCookieHorizonFor` caller sweep. No change to `shouldFireRecovery`. No REST/web change.
+No arming. No `AuthCookieHorizonFor` caller sweep. No change to `shouldFireRecovery`. No REST/web change — R9 is the ruled exception (2026-09-03): one additive `cookieRefreshOutcome` key and one `utils.js` export; no route, no status code.
 
 ## Invariants
 `livenessRecoveryArmed` stays false; `main.go:276-278` untouched; no cookie value/token in any log
