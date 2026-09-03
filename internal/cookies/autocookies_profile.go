@@ -681,6 +681,22 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 	return yt, tw
 }
 
+// regressedAfterWrite is the REGRESSION arm, shared by both rollback policies
+// so the two cannot drift.
+//
+// "It verified before the write and is conclusively rejected after it" — the
+// case that silently destroys a working credential, because mergeCookieFiles
+// lets the newly written value win by name+domain+path and a sibling platform
+// verifying can mask the loss entirely.
+//
+// Conclusive on BOTH sides on purpose: before.ok() is verifyOK and nothing
+// else, so a platform already inconclusive has nothing established to have
+// lost; after.state == verifyFailed is a rejection rather than a non-answer,
+// so a network failure cannot make this fire.
+func regressedAfterWrite(before, after platformAuth) bool {
+	return before.ok() && after.state == verifyFailed
+}
+
 // platformsToRestore decides which platforms an import must give back.
 //
 // Two independent reasons, both scoped to a single platform so an import that
@@ -708,14 +724,49 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 // complete. A jar with no credential at all is still {false, verifyFailed} and
 // still restores nothing, which is what keeps seeding a fresh container from
 // being treated as a loss.
+//
+// This is the IMPORT policy. The browser path has its own —
+// platformsToRestoreAfterBrowserRefresh — which takes the regression arm and
+// not the inconclusive one. Both share regressedAfterWrite.
 func platformsToRestore(pre, post map[string]platformAuth) map[string]bool {
 	restore := map[string]bool{}
 	for platform, before := range pre {
 		after := post[platform]
 		switch {
-		case before.ok() && after.state == verifyFailed:
+		case regressedAfterWrite(before, after):
 			restore[platform] = true
 		case before.hasCookies && after.state == verifyUnknown:
+			restore[platform] = true
+		}
+	}
+	return restore
+}
+
+// platformsToRestoreAfterBrowserRefresh is the BROWSER path's rollback policy:
+// the regression arm, and only the regression arm.
+//
+// The import policy's second arm — "had credentials before, could not be
+// checked after" — is deliberately excluded here, and that exclusion is the
+// whole content of this function. That arm reasons about a mounted profile of
+// unknown age: it may be days stale, so committing a set nobody could evaluate
+// over one that may be fine is a bet with no upside. A browser refresh has
+// just re-fetched from the live site; its values cannot be older than what was
+// on disk, so a check that then could not reach the network is evidence about
+// the NETWORK — and restoring on it would discard a genuinely fresher set on
+// every DNS blip, on the path a desktop install runs every thirty minutes.
+//
+// What the browser path DOES need is the first arm, which is the half the old
+// scoping comment got wrong. "Cannot be staler than what was on disk" is true
+// of the values' AGE and says nothing about whether they authenticate: a
+// profile the desktop browser signed out of hands back rows that win the merge
+// and do not work.
+//
+// TestBrowserRefreshRestoresARegressedPlatform and
+// TestBrowserRefreshKeepsFreshCookiesWhenTheCheckIsInconclusive are the halves.
+func platformsToRestoreAfterBrowserRefresh(pre, post map[string]platformAuth) map[string]bool {
+	restore := map[string]bool{}
+	for platform, before := range pre {
+		if regressedAfterWrite(before, post[platform]) {
 			restore[platform] = true
 		}
 	}

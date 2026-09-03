@@ -2281,15 +2281,22 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		return refreshAborted(), mergeErr
 	}
 
-	// Verify BEFORE overwriting, on the import path only. Rolling back a
-	// regression is impossible without knowing what worked beforehand, and
-	// "the file had cookies" is not the same as "those cookies worked".
+	// Verify BEFORE overwriting, on BOTH paths. Rolling back a regression is
+	// impossible without knowing what worked beforehand, and "the file had
+	// cookies" is not the same as "those cookies worked".
+	//
+	// The browser path was excluded until A2's narrowed form (ruling Q13).
+	// What the two paths DO with this snapshot still differs — see the policy
+	// selection below — but the snapshot itself is the same question.
+	//
 	// Skipped when there is nothing to protect, so the common container case
-	// (no cookies.txt yet) costs no extra round trips.
+	// (no cookies.txt yet) costs no extra round trips. On the browser path the
+	// cost is two verification round trips per pass on an install that already
+	// has credentials: the price of not silently destroying them.
 	pre := map[string]platformAuth{}
-	if importedFromProfile && previousCookies != "" {
+	if previousCookies != "" {
 		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
-			s.logger.Warn("could not load existing cookies before import — rollback protection is off", "err", loadErr)
+			s.logger.Warn("could not load existing cookies before the refresh — rollback protection is off", "err", loadErr)
 		}
 		preYT, preTW := s.checkPlatformAuth(ctx)
 		pre["youtube"], pre["twitch"] = preYT, preTW
@@ -2372,25 +2379,42 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// refresh reports success, and the working credential is gone. The
 	// startup one-shot would then repeat it on every restart.
 	//
-	// Only the import path does this. The browser path writes cookies it just
-	// re-fetched from the live site, which cannot be staler than what was on
-	// disk.
+	// BOTH paths do this now, under DIFFERENT policies (ruling Q13, A2's
+	// narrowed form). The import path takes both arms — a regression and an
+	// inconclusive check on a platform that had credentials. The browser path
+	// takes the regression arm ONLY: it has just re-fetched from the live
+	// site, so a check that could not reach the network afterwards is evidence
+	// about the network, and restoring on it would discard a fresher set on
+	// every blip. See platformsToRestoreAfterBrowserRefresh for the full
+	// argument.
+	//
+	// This comment used to say the browser path needed no rollback at all,
+	// because its cookies "cannot be staler than what was on disk". True of
+	// their AGE; silent on whether they authenticate — a profile the browser
+	// signed out of hands back rows that win the merge and do not work.
 	//
 	// importCheck is kept under its own name because the rollback branch below
 	// REPLACES postYT/postTW with a re-verification of what was restored. The
-	// question "why did we reject the import" can only be answered by the check
-	// that rejected it, and after the re-verify that check is no longer in
-	// scope. See rollbackWasInconclusive.
+	// question "why did we reject the new cookies" can only be answered by the
+	// check that rejected them. See rollbackWasInconclusive.
 	importCheck := map[string]platformAuth{"youtube": postYT, "twitch": postTW}
+	restorePolicy := platformsToRestoreAfterBrowserRefresh
+	if importedFromProfile {
+		restorePolicy = platformsToRestore
+	}
 	var restoredPlatforms []string
-	if restore := platformsToRestore(pre, importCheck); len(restore) > 0 {
+	if restore := restorePolicy(pre, importCheck); len(restore) > 0 {
 		for _, platform := range []string{"youtube", "twitch"} {
 			if restore[platform] {
 				restoredPlatforms = append(restoredPlatforms, platform)
 			}
 		}
-		s.logger.Warn("imported profile cookies did not hold up — restoring the previous credentials for those platforms",
-			"platforms", strings.Join(restoredPlatforms, ","), "profile_dir", s.profileDir)
+		source := "the browser refresh"
+		if importedFromProfile {
+			source = "the imported profile cookies"
+		}
+		s.logger.Warn("the newly written cookies did not hold up — restoring the previous credentials for those platforms",
+			"source", source, "platforms", strings.Join(restoredPlatforms, ","), "profile_dir", s.profileDir)
 
 		restored := restorePlatformRows(netscapeCookies, previousCookies, restore)
 
@@ -2410,9 +2434,9 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 				", and Moombox could not restore the previous cookies (" + restoreErr.Error() +
 				") — cookies.txt still holds the rejected imported credentials"
 			s.setError(errMsg)
-			s.logger.Error("could not restore pre-import cookies.txt",
+			s.logger.Error("could not restore the previous cookies.txt",
 				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return refreshAborted(), fmt.Errorf("restore pre-import cookies: %w", restoreErr)
+			return refreshAborted(), fmt.Errorf("restore previous cookies: %w", restoreErr)
 		}
 		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
 			// The FILE is correct here; the running process is not. Saying
@@ -2766,8 +2790,12 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
 			" — " + rollbackHedge + ", so the imported profile was not accepted"
 	case len(restoredPlatforms) > 0:
+		rejected := "the refreshed browser cookies"
+		if importedFromProfile {
+			rejected = "the mounted browser profile"
+		}
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
-			" — the mounted browser profile did not verify"
+			" — " + rejected + " did not verify"
 	case inconclusive && inconclusiveAgree:
 		// Single hedge, one sentence — the shape every existing test and
 		// every single-platform (the overwhelmingly common) inconclusive

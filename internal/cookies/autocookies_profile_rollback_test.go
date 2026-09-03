@@ -626,3 +626,112 @@ func TestCorruptDBFailsFastWithoutRetrying(t *testing.T) {
 		t.Errorf("corrupt DB took %v — the retry loop should not retry a permanent error", elapsed)
 	}
 }
+
+// TestBrowserRefreshRestoresARegressedPlatform is A2's narrowed form (Q13
+// revised): the browser path now rolls back too, for the regression arm only.
+//
+// A twin of TestRefreshCookiesRestoresOnlyTheRegressedPlatform above, driven
+// through the BROWSER path — a Firefox that cannot launch, so refreshFirefox
+// swallows the failure and reads the profile, the only way to reach this
+// branch without a real browser. YouTube alone, because refreshFirefox sleeps
+// firefoxLaunchSpacing (5 s) BETWEEN platform launches.
+//
+// The premise is that a browser refresh CAN regress a platform, and it is not
+// exotic: a profile the desktop browser signed out of, or one an extension
+// cleared, hands back rows that win the merge by name+domain+path and do not
+// work — the credential that worked is gone from disk under a refresh that
+// reported success. The scoping comment this replaces asserted the opposite
+// ("cannot be staler than what was on disk"), which is true of the values' AGE
+// and says nothing about whether they authenticate.
+//
+// Mutation: skip the restore on the browser path entirely.
+func TestBrowserRefreshRestoresARegressedPlatform(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(youtubeOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser {
+		return &DetectedBrowser{Type: "firefox", Path: "moombox-no-such-browser", Name: "Firefox"}
+	}
+	// Answers off the jar's live value: yes before the write, no after it — a
+	// genuine regression rather than a flat failure.
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
+		return s.jar.GetSapisid() == "previous-sapisid", nil
+	}
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+	if err := s.jar.Load(cookiePath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+
+	data, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "previous-sapisid") {
+		t.Errorf("the working YouTube credential was clobbered by a browser refresh that regressed it:\n%s", got)
+	}
+	if strings.Contains(got, "sapisid-from-profile") {
+		t.Errorf("the regressed browser-refresh value survived the rollback:\n%s", got)
+	}
+	if s.jar.GetSapisid() != "previous-sapisid" {
+		t.Errorf("jar holds %q after rollback, want the restored value", s.jar.GetSapisid())
+	}
+}
+
+// TestBrowserRefreshKeepsFreshCookiesWhenTheCheckIsInconclusive is the OTHER
+// half of the narrowing, and the reason this is not simply "call
+// platformsToRestore on both paths".
+//
+// The inconclusive arm exists for a mounted profile of unknown age. A browser
+// refresh has just re-fetched from the live site, so a check that then could
+// not reach the network says something about the NETWORK — restoring there
+// discards a fresher set on every DNS blip, on the path a desktop install runs
+// every thirty minutes. Its import-path twin
+// (TestRefreshCookiesDoesNotCommitOnInconclusiveVerification) asserts the
+// opposite outcome for the opposite reason; both must hold.
+//
+// Mutation: have the browser path call platformsToRestore (both arms).
+func TestBrowserRefreshKeepsFreshCookiesWhenTheCheckIsInconclusive(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(youtubeOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser {
+		return &DetectedBrowser{Type: "firefox", Path: "moombox-no-such-browser", Name: "Firefox"}
+	}
+	// Conclusive before the write, unreachable after it.
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
+		if s.jar.GetSapisid() == "previous-sapisid" {
+			return true, nil
+		}
+		return false, errors.New("dial tcp: i/o timeout")
+	}
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+	if err := s.jar.Load(cookiePath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+
+	data, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, "sapisid-from-profile") {
+		t.Errorf("a browser refresh's freshly fetched cookies were rolled back over an unreachable "+
+			"network — the inconclusive arm must not apply to the browser path:\n%s", got)
+	}
+}
