@@ -47,8 +47,9 @@ func TestShouldKeepWaiting(t *testing.T) {
 
 // TestDrainJobReturnsImmediatelyWithoutAJob covers the two ways there is
 // nothing to drain: newProcessJob failed (runWithTimeout carries on with a
-// nil job) and a job with no handle — which is also what every non-Windows
-// build looks like, since their activeProcesses always reports zero. Both
+// nil job) and a job with no handle — which is also what darwin and the
+// fallback build look like, since their activeProcesses always reports zero,
+// and what a Linux job whose group was never adopted looks like. Both
 // must return nil instantly rather than erroring or burning the budget.
 func TestDrainJobReturnsImmediatelyWithoutAJob(t *testing.T) {
 	for _, tc := range []struct {
@@ -115,8 +116,9 @@ func countContaining(lines []string, sub string) int {
 // fix with a platform behind it.
 //
 // The drain exits as soon as the job reports zero active processes, and used
-// to log "browser finished; job drained" when it did. On Linux and darwin the
-// processJob stubs return zero unconditionally — there is no Job Object — so
+// to log "browser finished; job drained" when it did. On darwin and the
+// fallback build the processJob stub returns zero unconditionally — there is
+// no primitive — and Linux did the same until the process-group arc, so
 // that line fired on lap ZERO of every single launch, announcing a completion
 // nobody had observed and nothing had waited for. It is the one place in the
 // drain that broke the "could not confirm is not confirmed" line the rest of

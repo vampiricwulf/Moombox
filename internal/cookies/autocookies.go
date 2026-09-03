@@ -1678,10 +1678,12 @@ type RefreshResult struct {
 	// pressed it.
 	//
 	// False on every declined and aborted pass, which renewed nothing by
-	// definition. On Linux it is false nearly always: there is no Job Object
-	// to drain, so a launch cannot be confirmed to have acted. It therefore
-	// means "not confirmed", never "the browser failed" — see the wording
-	// note on browserLaunchActed.
+	// definition. It is not a platform statement: the Firefox verdict is
+	// browserLaunchActed's screenshot check everywhere, and the drain only adds
+	// errBrowserDrainTimeout where a count exists (a Job Object on Windows, a
+	// process group on Linux since the process-group arc; darwin and the
+	// fallback build have none). It therefore means "not confirmed", never
+	// "the browser failed" — see the wording note on browserLaunchActed.
 	Renewed bool
 
 	// YouTubeStored / TwitchStored report whether Moombox held ANY auth

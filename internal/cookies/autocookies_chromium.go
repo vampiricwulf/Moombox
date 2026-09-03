@@ -64,8 +64,10 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	)
 	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG + Setpgid (the group the reap counts); Windows: no-op (Job Object below)
 
-	// Create a Job Object before launching so the browser dies if Moombox
-	// crashes before cleanup runs. Closed by cleanup() during
+	// Create the job before launching. On Windows it is a Job Object and the
+	// browser dies if Moombox crashes before cleanup runs (KILL_ON_JOB_CLOSE);
+	// on Linux it is the process group cleanupLocked kills, and a crash is
+	// Pdeathsig's job for the direct child only. Closed by cleanup() during
 	// FinishSetup/CancelSetup. Mirrors the Firefox refresh path.
 	job, jobErr := newProcessJob()
 	if jobErr != nil {
@@ -233,10 +235,12 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	)
 	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG + Setpgid (the group the reap counts); Windows: no-op (Job Object below)
 
-	// Job Object so an orphaned headless Chromium dies with Moombox if we
-	// crash before the defer below runs. Headless leaks are invisible —
-	// without this, a crashed refresh leaves a zombie chrome.exe holding
-	// the profile lock, breaking the next refresh attempt silently.
+	// A job so an orphaned headless Chromium dies with Moombox if we crash
+	// before the defer below runs — on Windows through KILL_ON_JOB_CLOSE; on
+	// Linux the job is the process group the defers below kill, and a crash
+	// reaches only the direct child through Pdeathsig. Headless leaks are
+	// invisible — without this, a crashed refresh leaves a zombie chrome.exe
+	// holding the profile lock, breaking the next refresh attempt silently.
 	job, jobErr := newProcessJob()
 	if jobErr != nil {
 		s.logger.Warn("failed to create job object for chromium refresh", "err", jobErr)

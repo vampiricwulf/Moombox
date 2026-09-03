@@ -104,7 +104,12 @@ func (j *processJob) queryable() bool { return j != nil && j.group.queryable() }
 // Pdeathsig stays for the reason it arrived: a crashed Moombox would otherwise
 // orphan a headless refresh browser that holds the profile lock and silently
 // breaks every later refresh. It is best-effort and covers only the DIRECT
-// child — the group is what covers what the launcher handed off to.
+// child. A CRASH SIGNALS NOTHING ELSE: the group is counted and killed only by
+// a running Moombox (cleanupLocked, killProcessTreeUnix, closeLaunchJob), so
+// where a wrapper handed off, what it handed off to outlives a Moombox crash —
+// the one thing a Windows Job Object's KILL_ON_JOB_CLOSE covers that this does
+// not. Named in docs/spec/operations.md as a residual; unmeasured, like the
+// handoff itself.
 //
 // Two consequences worth stating rather than discovering. A browser that calls
 // setsid() (or setpgid) LEAVES the group and becomes invisible to both the

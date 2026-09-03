@@ -59,9 +59,10 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 	cmd := exec.Command(browser.Path, "--new-instance", "--profile", s.profileDir, url)
 	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG + Setpgid (the group the reap counts); Windows: no-op (Job Object below)
 
-	// A Job Object, created before the launch, for the two reasons the Chromium
-	// path has one — the browser dies with a crashed Moombox, and cleanupLocked
-	// can finish off one the user left behind — plus a third that is specific to
+	// A job, created before the launch, for the two reasons the Chromium path
+	// has one — the browser dies with a crashed Moombox (on Windows; on Linux
+	// that is Pdeathsig's job for the direct child), and cleanupLocked can
+	// finish off one the user left behind — plus a third that is specific to
 	// this family and is why the omission mattered: the Firefox launcher hands
 	// off to the real browser and EXITS IN ~170ms, so cmd.Wait() returning says
 	// nothing about whether a browser is still on screen. The job is the only
@@ -261,9 +262,10 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 			// screenshot had appeared by the time the launch returned.
 			//
 			// The message says exactly that and no more. What the browser
-			// actually did is not observable from here: with no Job Object to
-			// drain (Linux, or a job we failed to create) a detached browser
-			// may render moments after this stat, and profile_written can come
+			// actually did is not observable from here: with no count to drain
+			// (darwin and the fallback build; a job we failed to create or
+			// assign; a Linux group that could not be adopted) a detached
+			// browser may render moments after this stat, and profile_written can come
 			// back true off a flush that landed in between. Asserting "it never
 			// rendered" or "the profile was not refreshed" would be the same
 			// kind of unearned claim this whole change exists to remove — one
@@ -802,7 +804,9 @@ func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
 // having written a cookies.sqlite with ZERO rows, on both. The earlier
 // Waterfox figure — 3.082s over 59 polls against a copy of a real profile —
 // still holds. LibreWolf and Zen remain UNVERIFIED, as does every non-Windows
-// platform (where there is no job to drain at all).
+// platform: darwin and the fallback build have no job to drain at all, and
+// Linux has had a process group to drain since the process-group arc with no
+// timing recorded there.
 //
 // Those elapsed times and poll counts are observations of these machines, NOT
 // a healthy band: a clean pass on different hardware on 2026-08-26 drained in
@@ -939,8 +943,11 @@ func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, o
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 }) error {
-	// Create a Job Object so all child processes (including reparented ones)
-	// are killed when we close the job handle.
+	// Create a job — a Job Object on Windows, a process group on Linux — so
+	// every child process (reparented ones included) is finished off by the
+	// deferred closeLaunchJob on the way out: on Windows the close itself is
+	// the kill, on Linux closeLaunchJob asks for it first because a close
+	// there only forgets the group.
 	job, jobErr := newProcessJob()
 	if jobErr != nil {
 		logger.Warn("failed to create job object", "err", jobErr)
@@ -997,8 +1004,9 @@ func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, o
 		return drainErr
 	case <-time.After(timeout):
 		logger.Warn("process timed out, killing", "pid", cmd.Process.Pid, "timeout", timeout)
-		// Closing the job handle kills all processes in the job.
-		// Also try direct kill as a belt-and-suspenders approach.
+		// The deferred closeLaunchJob finishes off the job on the way out
+		// (KILL_ON_JOB_CLOSE on Windows, the group kill on Linux). Also kill
+		// the tree directly as a belt-and-suspenders approach.
 		killProcessTree(cmd.Process)
 		// Wait briefly for reap, but don't block forever if kill failed
 		select {

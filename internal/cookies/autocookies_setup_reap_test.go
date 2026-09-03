@@ -418,17 +418,18 @@ func TestReapWillNotCloseAJobThatStillHasLiveProcesses(t *testing.T) {
 // TestReapWillNotFireWhenNothingCanSayTheBrowserIsGone is the same rule for the
 // case where there is no evidence at all rather than evidence of life.
 //
-// `known == false` is what the probe returns with no Job Object (a launch where
-// newProcessJob or its assign failed, on either family) and on the platforms
-// whose processJob cannot count — which is every non-Windows one.
+// `known == false` is what the probe returns with no job (a launch where
+// newProcessJob or its assign failed, on either family), on the platforms
+// whose processJob cannot count — darwin and the fallback build — and on
+// Linux where the group could not be adopted or /proc cannot be read.
 // drainJob draws the identical line on the same syscall: a zero from something
 // that cannot count means "nothing was waited on", not "the browser finished".
 //
 // Refusing to reap there costs the wedge staying put on those paths, which is
-// exactly the pre-existing behaviour — and on Linux and in Docker it is still
-// EVERY path, since no processJob there can count. Reaping on no evidence would
-// instead destroy live setups 60 seconds in. The first is a gap; the second is
-// a regression.
+// exactly the pre-existing behaviour — and it was EVERY Linux and Docker path
+// until the process-group arc gave job_linux.go a real count. Reaping on no
+// evidence would instead destroy live setups 60 seconds in. The first is a
+// gap; the second is a regression.
 func TestReapWillNotFireWhenNothingCanSayTheBrowserIsGone(t *testing.T) {
 	captureKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
