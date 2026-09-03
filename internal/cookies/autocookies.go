@@ -2625,16 +2625,20 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 				"verified", strings.Join(verified, " + "))
 		default:
 			// The horizons ride THIS line and not the per-launch
-			// "<browser> <platform> refresh completed" lines: this is the only
-			// completion point downstream of the write and the jar reload, so
-			// a horizon logged inside refreshFirefox would describe the
-			// credentials the pass started with — which the startup line
-			// already reported. One site covers both browser families
-			// (refreshChromium has no Info completion line of its own) and the
-			// import path. Read against the boot line's identical three
-			// fields, this is the settling observation for whether the
-			// periodic twitch.tv navigation renews auth-token. Timestamps
-			// only; see HorizonLogFields.
+			// "<browser> <platform> refresh completed" lines: this SUCCESS arm
+			// is the completion point that carries them, so a horizon logged
+			// inside refreshFirefox would describe the credentials the pass
+			// started with — which the startup line already reported. The
+			// other two arms above are downstream of the same writeCookieFile
+			// and s.jar.Load but carry no horizon at all: "cookie refresh
+			// verified one platform and lost another" and "cookies still
+			// verify, but this pass could not confirm the browser refreshed
+			// the profile" — a refresh landing on either logs none. One site
+			// covers both browser families (refreshChromium has no Info
+			// completion line of its own) and the import path. Read against
+			// the boot line's identical three fields, this is the settling
+			// observation for whether the periodic twitch.tv navigation
+			// renews auth-token. Timestamps only; see HorizonLogFields.
 			refreshFields := append([]any{"verified", strings.Join(verified, " + ")}, s.jar.HorizonLogFields()...)
 			s.logger.Info("cookie refresh succeeded", refreshFields...)
 		}
