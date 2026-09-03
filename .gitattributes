@@ -6,8 +6,10 @@
 # fights the Git filter on every save and produces noisy diffs.
 *.go text eol=lf
 
-# JS/TS, JSON, and config we control are LF too — same reasoning.
+# Web assets, JS/TS, JSON, and config we control are LF too — same reasoning.
 *.html text eol=lf
+*.css text eol=lf
+*.svg text eol=lf
 *.js text eol=lf
 *.mjs text eol=lf
 *.ts text eol=lf
