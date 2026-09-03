@@ -2341,7 +2341,15 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	fetchedNoCredential := fetchedRows > 0 && !netscapeCookiesHoldACredential(netscapeCookies)
 
 	if previousCookies != "" {
+		fetchedCookies := netscapeCookies
 		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
+		// ONE line, for the one prune outcome that leaves a credential pair
+		// half alive with nothing else in the process able to see it. See
+		// twitchLoginPrunedFromMerge; it names no value and no account.
+		if twitchLoginPrunedFromMerge(previousCookies, fetchedCookies, netscapeCookies) {
+			s.logger.Warn("the Twitch login row expired and was pruned while the auth-token survived — " +
+				"chat will capture anonymously (no subscriber-only messages, no badges) until a new login row arrives")
+		}
 	}
 	if err := writeCookieFile(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
 		return refreshAborted(), err
@@ -2616,7 +2624,19 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 			s.logger.Warn("cookies still verify, but this pass could not confirm the browser refreshed the profile",
 				"verified", strings.Join(verified, " + "))
 		default:
-			s.logger.Info("cookie refresh succeeded", "verified", strings.Join(verified, " + "))
+			// The horizons ride THIS line and not the per-launch
+			// "<browser> <platform> refresh completed" lines: this is the only
+			// completion point downstream of the write and the jar reload, so
+			// a horizon logged inside refreshFirefox would describe the
+			// credentials the pass started with — which the startup line
+			// already reported. One site covers both browser families
+			// (refreshChromium has no Info completion line of its own) and the
+			// import path. Read against the boot line's identical three
+			// fields, this is the settling observation for whether the
+			// periodic twitch.tv navigation renews auth-token. Timestamps
+			// only; see HorizonLogFields.
+			refreshFields := append([]any{"verified", strings.Join(verified, " + ")}, s.jar.HorizonLogFields()...)
+			s.logger.Info("cookie refresh succeeded", refreshFields...)
 		}
 		return result, nil
 	}

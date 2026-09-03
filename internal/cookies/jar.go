@@ -628,6 +628,67 @@ func (j *CookieJar) AuthCookieHorizonFor(p Platform) int64 {
 	return soonest
 }
 
+// AuthHorizonString renders a unix expiry as an ISO-8601 (RFC 3339) UTC
+// timestamp, or "none" when there is no expiry to render.
+//
+// Zero is not a timestamp here, for the reason AuthCookieHorizonFor's own doc
+// gives: it means "no auth cookie in this jar has an expiry to run out", the
+// honest answer for a jar of session cookies and for an empty jar alike.
+// Formatting it prints 1970-01-01.
+//
+// UTC on purpose: these strings are read out of a log file, often from a
+// container whose local time is not the operator's, and compared with each
+// other across a restart.
+func AuthHorizonString(unix int64) string {
+	if unix <= 0 {
+		return "none"
+	}
+	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
+}
+
+// TwitchLoginExpiry returns the expiry on Twitch's `login` row, or 0 when the
+// row is absent or session-scoped.
+//
+// Its own accessor because `login` is deliberately OUTSIDE
+// twitchAuthCookieNames and stays outside it (owner ruling Q7: that set is not
+// split). The list drives an ALARM — HasAnyTwitchAuthCookie feeds
+// shouldFireRecovery — so a file holding `login` with no auth-token would fire
+// "twitch auth lost" on the first check of every start.
+//
+// What this is for is the gap that comment names: an expiring `login` has no
+// advance warning anywhere, mergeCookieFiles prunes it on expiry while the
+// auth-token survives, and chat then captures anonymously with every predicate
+// here still reading the platform as configured. It reaches exactly two log
+// lines (HorizonLogFields) and nothing else — no UI, no state, no alarm.
+func (j *CookieJar) TwitchLoginExpiry() int64 {
+	if j == nil {
+		return 0
+	}
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.twitch["login"].expiry
+}
+
+// HorizonLogFields is the ONE producer of the three credential-lifetime fields
+// the startup line and the refresh-completion line both carry, as alternating
+// key/value pairs.
+//
+// One producer rather than two spellings, because the two lines are meant to be
+// READ AGAINST EACH OTHER — the settling observation for "does the periodic
+// twitch.tv navigation renew auth-token" is exactly "compare the boot horizon
+// with the post-refresh horizon" — and two field lists is how the keys drift
+// apart and the comparison stops being possible.
+//
+// TIMESTAMPS ONLY (TestHorizonLogFieldsCarryTimestampsAndNothingElse). Nothing
+// here may carry a cookie value: one is a credential, one names the account.
+func (j *CookieJar) HorizonLogFields() []any {
+	return []any{
+		"youtubeAuthHorizon", AuthHorizonString(j.AuthCookieHorizonFor(PlatformYouTube)),
+		"twitchAuthHorizon", AuthHorizonString(j.AuthCookieHorizonFor(PlatformTwitch)),
+		"twitchLoginExpiry", AuthHorizonString(j.TwitchLoginExpiry()),
+	}
+}
+
 // twitchAuthCookieNames is the Twitch counterpart to youtubeAuthCookieNames.
 //
 // twilight-user earns its place because auth-token can disappear while it
