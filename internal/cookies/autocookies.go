@@ -2258,15 +2258,15 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		// No cookies.txt yet — nothing to merge or protect via rollback.
 	default:
 		// This has to abort BEFORE previousCookies is used for anything:
-		// it gates both the merge below and, on the import path, whether
-		// the pre-import verification that makes rollback possible even
-		// runs at all (`importedFromProfile && previousCookies != ""`
-		// further down). Silently treating a transient read failure as
-		// "no existing file" would leave previousCookies empty, which
-		// both disables that rollback AND lets the write below replace
-		// cookies.txt with only the newly-fetched cookies — losing
-		// whatever the other platform had. Abort instead: don't merge,
-		// don't write, don't touch the rollback gate.
+		// it gates both the merge below and, on BOTH paths, whether the
+		// pre-write verification that makes rollback possible even runs
+		// at all (`previousCookies != ""` further down). Silently
+		// treating a transient read failure as "no existing file" would
+		// leave previousCookies empty, which both disables that rollback
+		// AND lets the write below replace cookies.txt with only the
+		// newly-fetched cookies — losing whatever the other platform
+		// had. Abort instead: don't merge, don't write, don't touch the
+		// rollback gate.
 		//
 		// Wraps ErrCookieFileUnreadable so callers can tell this apart from
 		// every other refresh failure — see the sentinel's doc comment for
@@ -2370,12 +2370,12 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// Verify auth via API callbacks (matches TypeScript refreshCookies behavior)
 	postYT, postTW := s.checkPlatformAuth(ctx)
 
-	// Roll back, per platform, an import that made that platform worse.
+	// Roll back, per platform, a write that made that platform worse.
 	//
-	// A mounted profile can be STALE, and mergeCookieFiles lets the imported
-	// value win by name+domain+path — so a dead Twitch token in the profile
-	// overwrites a working one on disk. Judging the import as a WHOLE hides
-	// exactly that: a healthy YouTube result masks the Twitch loss, the
+	// A mounted profile can be STALE, and mergeCookieFiles lets the newly
+	// written value win by name+domain+path — so a dead Twitch token in the
+	// profile overwrites a working one on disk. Judging the write as a WHOLE
+	// hides exactly that: a healthy YouTube result masks the Twitch loss, the
 	// refresh reports success, and the working credential is gone. The
 	// startup one-shot would then repeat it on every restart.
 	//
@@ -2432,7 +2432,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		if restoreErr := writeCookieFile(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
 			errMsg := "the browser profile did not verify for " + strings.Join(restoredPlatforms, " + ") +
 				", and Moombox could not restore the previous cookies (" + restoreErr.Error() +
-				") — cookies.txt still holds the rejected imported credentials"
+				") — cookies.txt still holds the rejected new credentials"
 			s.setError(errMsg)
 			s.logger.Error("could not restore the previous cookies.txt",
 				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
@@ -2446,7 +2446,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 				" after the browser profile did not verify, but reloading them failed (" + loadErr.Error() +
 				") — this process is still using the rejected credentials until the next refresh"
 			s.setError(errMsg)
-			s.logger.Error("could not reload cookie jar after restoring pre-import cookies.txt",
+			s.logger.Error("could not reload cookie jar after restoring the previous cookies.txt",
 				"err", loadErr, "platforms", strings.Join(restoredPlatforms, ","))
 			return refreshAborted(), fmt.Errorf("reload cookie jar after restore: %w", loadErr)
 		}

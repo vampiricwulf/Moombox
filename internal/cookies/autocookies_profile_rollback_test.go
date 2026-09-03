@@ -645,6 +645,20 @@ func TestCorruptDBFailsFastWithoutRetrying(t *testing.T) {
 // and says nothing about whether they authenticate.
 //
 // Mutation: skip the restore on the browser path entirely.
+//
+// VerifyYouTubeAuth answers true only on its FIRST call (the pre-write check)
+// and false on every call after — including the RE-verification that runs on
+// the restored file. A stub tied to the jar's live value instead would answer
+// true again once "previous-sapisid" is back on disk, RefreshCookies would
+// take the success branch (restore-then-reverify-OK, exactly what
+// TestRollbackDoesNotLeaveMisleadingStatus pins), and LastError would stay
+// nil — the outcome switch that builds the operator-facing string this test
+// pins below is unreachable whenever the restored credential re-verifies OK.
+// Answering false throughout models the credential having gone bad a moment
+// after the pre-check (a global sign-out mid-refresh, say): still a genuine
+// regression — the restore still happens and the file assertions below still
+// hold — but the restored value is ALSO currently broken, which is what it
+// takes to reach "kept the previous cookies for X — Y did not verify" at all.
 func TestBrowserRefreshRestoresARegressedPlatform(t *testing.T) {
 	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
 	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
@@ -656,10 +670,10 @@ func TestBrowserRefreshRestoresARegressedPlatform(t *testing.T) {
 	s.detectBrowser = func() *DetectedBrowser {
 		return &DetectedBrowser{Type: "firefox", Path: "moombox-no-such-browser", Name: "Firefox"}
 	}
-	// Answers off the jar's live value: yes before the write, no after it — a
-	// genuine regression rather than a flat failure.
+	verifyCalls := 0
 	s.VerifyYouTubeAuth = func(context.Context) (bool, error) {
-		return s.jar.GetSapisid() == "previous-sapisid", nil
+		verifyCalls++
+		return verifyCalls == 1, nil
 	}
 	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
 	if err := s.jar.Load(cookiePath); err != nil {
@@ -683,6 +697,22 @@ func TestBrowserRefreshRestoresARegressedPlatform(t *testing.T) {
 	}
 	if s.jar.GetSapisid() != "previous-sapisid" {
 		t.Errorf("jar holds %q after rollback, want the restored value", s.jar.GetSapisid())
+	}
+
+	// Pinned by exact equality, the same way the import arm's sibling
+	// sentence is pinned three times over in
+	// autocookies_relogin_status_test.go: this string reaches
+	// GetStatus().LastError, i.e. the operator, and until this assertion
+	// nothing in the package caught it reverting to the import wording
+	// ("the mounted browser profile did not verify") on a path that never
+	// mounted one.
+	status := s.GetStatus()
+	if status.LastError == nil {
+		t.Fatal("a rolled-back browser refresh must leave an explanation")
+	}
+	const wantErr = "kept the previous cookies for youtube — the refreshed browser cookies did not verify"
+	if *status.LastError != wantErr {
+		t.Errorf("LastError = %q, want %q", *status.LastError, wantErr)
 	}
 }
 
@@ -733,5 +763,95 @@ func TestBrowserRefreshKeepsFreshCookiesWhenTheCheckIsInconclusive(t *testing.T)
 	if got := string(data); !strings.Contains(got, "sapisid-from-profile") {
 		t.Errorf("a browser refresh's freshly fetched cookies were rolled back over an unreachable "+
 			"network — the inconclusive arm must not apply to the browser path:\n%s", got)
+	}
+}
+
+// TestPlatformsToRestoreAfterBrowserRefreshIgnoresAPlatformAbsentFromPre pins
+// mutant 8 from the arc-close review at the unit level: the loop ranges over
+// `pre`, not `post`, on purpose. A platform present in `post` as verifyFailed
+// but absent from `pre` — the shape of every platform on a fresh install,
+// where the file did not exist yet and the pre-write snapshot was never taken
+// — must never be restored.
+//
+// The stakes are not academic: a twin that iterated `post` instead (or that
+// restored on absence rather than on regressedAfterWrite) would make
+// restore = {youtube: true} here, and restorePlatformRows would then discard
+// every YouTube row this pass just fetched — on the very first refresh a
+// fresh install ever runs. TestBrowserRefreshWithNoPreviousCookiesKeepsTheFetchedRows
+// below is the same claim through the whole RefreshCookies call; this is the
+// same claim with nothing else in the way.
+func TestPlatformsToRestoreAfterBrowserRefreshIgnoresAPlatformAbsentFromPre(t *testing.T) {
+	pre := map[string]platformAuth{}
+	post := map[string]platformAuth{
+		"youtube": {hasCookies: true, state: verifyFailed, attempted: true},
+	}
+	if restore := platformsToRestoreAfterBrowserRefresh(pre, post); len(restore) != 0 {
+		t.Errorf("a platform absent from pre must never be restored, got %v", restore)
+	}
+}
+
+// TestBrowserRefreshWithNoPreviousCookiesKeepsTheFetchedRows is
+// TestPlatformsToRestoreAfterBrowserRefreshIgnoresAPlatformAbsentFromPre's
+// twin through the whole RefreshCookies call, closing the gap the arc-close
+// review's probe found: no test anywhere in the package reached the browser
+// path's restore decision with an empty `pre` snapshot.
+//
+// A literally-empty jar cannot reach that decision at all: refreshPlatforms()
+// (autocookies.go:615-624) gates the ENTIRE pass on the jar already holding
+// something worth re-fetching, so a truly untouched fresh install declines
+// before the browser is even asked to launch — that path needs no test here,
+// it is refreshDeclined() every time. What DOES reach the restore decision
+// with an empty pre is the jar holding a credential while cookies.txt itself
+// does not exist — the shape of an operator deleting the file externally
+// while the process keeps running, or the first pass after a jar was
+// populated in-memory before any write ever landed on disk. This test seeds
+// the jar from a THROWAWAY file, never from cookiePath, so
+// `previousCookies == ""` stays true and `pre` stays empty exactly as it
+// would in that situation.
+//
+// Same Firefox-cannot-launch fixture as the two tests above (so
+// refreshFirefox swallows the launch failure and reads the mounted profile).
+//
+// Mutation: the browser twin restoring a platform ABSENT from `pre` (mutant 8
+// above) leaves nothing in cookies.txt but the header, since
+// restorePlatformRows has an empty previousCookies to restore FROM.
+func TestBrowserRefreshWithNoPreviousCookiesKeepsTheFetchedRows(t *testing.T) {
+	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+
+	s := NewAutoCookieService(profileDir, cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	s.detectBrowser = func() *DetectedBrowser {
+		return &DetectedBrowser{Type: "firefox", Path: "moombox-no-such-browser", Name: "Firefox"}
+	}
+	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
+
+	// Seed the JAR only — never cookiePath — so refreshPlatforms() sees a
+	// platform worth refreshing while cookies.txt still does not exist.
+	seedPath := filepath.Join(t.TempDir(), "seed.txt")
+	if err := os.WriteFile(seedPath, []byte(youtubeOnlyCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.jar.Load(seedPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, statErr := os.Stat(cookiePath); !os.IsNotExist(statErr) {
+		t.Fatalf("fixture is broken — cookies.txt must not exist yet, stat err = %v", statErr)
+	}
+
+	if _, err := s.RefreshCookies(context.Background()); err != nil {
+		t.Fatalf("RefreshCookies: %v", err)
+	}
+
+	data, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatalf("a browser refresh with nothing to roll back to must still have written cookies.txt: %v", err)
+	}
+	if !strings.Contains(string(data), "sapisid-from-profile") {
+		t.Errorf("the fetched YouTube credential was dropped when there was no previous cookies.txt to roll back to:\n%s", data)
+	}
+	if status := s.GetStatus(); status.LastError != nil {
+		t.Errorf("a refresh with nothing to restore must not report a rollback, got LastError = %q", *status.LastError)
 	}
 }

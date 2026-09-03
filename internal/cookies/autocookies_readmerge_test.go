@@ -115,10 +115,10 @@ func TestFinishSetupProceedsWhenNoExistingCookieFile(t *testing.T) {
 // never even runs — it is gated on previousCookies != "".
 //
 // verifyCalls does NOT witness the rollback pre-check specifically — that
-// gate (importedFromProfile && previousCookies != "") is skipped in the OLD,
-// buggy code too, for the same fixture: a transient read failure was already
-// treated as "file absent" there, so previousCookies is "" on both the
-// fixed and unfixed paths, and the pre-check never distinguishes them. What
+// gate (previousCookies != "") is skipped in the OLD, buggy code too, for the
+// same fixture: a transient read failure was already treated as "file
+// absent" there, so previousCookies is "" on both the fixed and unfixed
+// paths, and the pre-check never distinguishes them. What
 // does distinguish them is the UNCONDITIONAL post-write verification further
 // down ("Verify auth via API callbacks"): the unfixed code reaches the write
 // and then that check, calling both verify callbacks once each (confirmed
