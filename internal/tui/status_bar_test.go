@@ -233,6 +233,39 @@ func TestStatusBarZeroWidth(t *testing.T) {
 	}
 }
 
+// TestInactiveYouTubeReloginNamesNoChord pins ReloginPlatform's ytActive gate
+// (status_bar.go:131) directly, beside the badge where the difference is
+// visible: TestCookieLoginChordPreselectsThePlatformTheBadgeIsAlarmingAbout
+// cannot see this mutant because an inactive-but-flagged YouTube yields
+// cookieFocus 0 whether ReloginPlatform says "" or "youtube" — but a bar that
+// shows no YouTube alert must not carry (R L) regardless. The mirror row does
+// the same check for an inactive-but-flagged Twitch.
+//
+// MUTANT: drop `m.ytActive &&` from ReloginPlatform (status_bar.go:131). Both
+// assertions in the YouTube row fail.
+func TestInactiveYouTubeReloginNamesNoChord(t *testing.T) {
+	m := NewStatusBarModel()
+	m.SetActivePlatforms(false, true)
+	m.SetCookieStatus(CookieStatusRelogin, CookieStatusOK)
+	if got := m.ReloginPlatform(); got != "" {
+		t.Errorf("ReloginPlatform() = %q for an inactive platform, want \"\"", got)
+	}
+	if full := stripANSI(m.renderCookieStatus(tierFull)); strings.Contains(full, "R L") {
+		t.Errorf("the bar names a remedy for an alarm it does not show: %q", full)
+	}
+
+	// The mirror row: an inactive-but-flagged Twitch.
+	mtw := NewStatusBarModel()
+	mtw.SetActivePlatforms(true, false)
+	mtw.SetCookieStatus(CookieStatusOK, CookieStatusRelogin)
+	if got := mtw.ReloginPlatform(); got != "" {
+		t.Errorf("ReloginPlatform() = %q for an inactive platform, want \"\"", got)
+	}
+	if full := stripANSI(mtw.renderCookieStatus(tierFull)); strings.Contains(full, "R L") {
+		t.Errorf("the bar names a remedy for an alarm it does not show: %q", full)
+	}
+}
+
 // TestReloginBadgeNamesTheChordThatAnswersIt pins R2: a bar that says
 // "YT: Re-login" and stops has named a problem and no remedy. The dashboard's
 // equivalent warning is clickable; R L is the TUI's click, and the badge is

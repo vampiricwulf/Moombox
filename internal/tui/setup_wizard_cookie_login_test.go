@@ -240,6 +240,37 @@ func TestOpenClearsTheCookieOnlyFlag(t *testing.T) {
 	}
 }
 
+// TestOpenCookieLoginForgetsAStrandedTickChain pins that OpenCookieLogin
+// resets cookieTickActive. The tick chain is armed at the App level
+// (app_keys.go's armCookieTick, on every keypress while cookieActive) and
+// only cleared by UpdateComponents on the next tick landing — but
+// UpdateComponents returns at `!m.visible` before it reaches the tick branch,
+// so closing the overlay while a chain is in flight (Esc to cancel inline,
+// then Esc again to close before the next tick lands) strands the flag true.
+// Without OpenCookieLogin's own reset, the next login's armCookieTick call
+// finds a stale "chain already in flight" and refuses to arm a countdown.
+//
+// MUTANT: delete `m.cookieTickActive = false` from OpenCookieLogin
+// (setup_wizard.go:472). The targeted set stays green; only a second login's
+// countdown attempt sees the strand.
+func TestOpenCookieLoginForgetsAStrandedTickChain(t *testing.T) {
+	m := NewSetupWizardModel()
+	m.OnStartAutoCookie = func(string) error { return nil }
+	m.OnCancelAutoCookie = func() {}
+	m.OpenCookieLogin("youtube")
+	m.HandleKey(keyEnter)
+	if m.armCookieTick() == nil {
+		t.Fatal("premise lost: the first arm was refused")
+	}
+	m.HandleKey(keyEsc) // cancel inline; the chain is still in flight
+	m.HandleKey(keyEsc) // close before the next tick lands
+	m.OpenCookieLogin("youtube")
+	m.HandleKey(keyEnter)
+	if m.armCookieTick() == nil {
+		t.Error("the second login's countdown was refused — a tick chain stranded by the previous overlay was never forgotten")
+	}
+}
+
 // TestOpenCookieLoginNeverCallsOpen pins that OpenCookieLogin builds its own
 // state directly rather than delegating to Open() and overwriting its fields
 // afterward. That shape would pass every other test in this file, because

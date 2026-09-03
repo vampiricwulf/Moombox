@@ -151,6 +151,32 @@ func TestCookieLoginChordPreselectsThePlatformTheBadgeIsAlarmingAbout(t *testing
 	}
 }
 
+// TestReloginBadgeNamesTheChordTheMenuRegisters pins the tie between the
+// badge's hand-typed chord text (status_bar.go:647, the literal "R L") and
+// buildMenuItems' registration (app_actions.go:556, Chord: "R L") — nothing
+// else compares them, so a re-lettering of one would leave the badge naming a
+// chord the menu no longer offers, or vice versa.
+//
+// MUTANTS: the badge literal -> "R X" (caught here); the menu's Chord -> "R X"
+// (caught here AND by the dispatch tests, since the case is still "R L").
+func TestReloginBadgeNamesTheChordTheMenuRegisters(t *testing.T) {
+	app := wiredCookieLoginApp()
+	chord := ""
+	for _, it := range app.buildMenuItems() {
+		if it.Label == "Cookie Login" {
+			chord = it.Chord
+		}
+	}
+	if chord == "" {
+		t.Fatal("premise lost: no Cookie Login item registered")
+	}
+	app.statusBar.SetActivePlatforms(true, true)
+	app.statusBar.SetCookieStatus(CookieStatusRelogin, CookieStatusOK)
+	if full := stripANSI(app.statusBar.renderCookieStatus(tierFull)); !strings.Contains(full, chord) {
+		t.Errorf("the badge %q does not name the registered chord %q", full, chord)
+	}
+}
+
 // TestCookieLoginChordRefusesWithoutTheService pins the DEFENSIVE branch: a
 // direct dispatch with no interactive-setup callback opens nothing and says
 // so. From the keyboard this branch is unreachable — processSecondKey resolves
