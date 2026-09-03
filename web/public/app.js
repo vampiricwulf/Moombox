@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, parkedCookiePlatforms, reloginPromptTarget } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, parkedCookiePlatforms, reloginPromptTarget } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
@@ -810,7 +810,7 @@ class MoomboxApp {
   async autoCookieRefresh() {
     const btn = document.getElementById("btn-refresh-cookies");
     if (btn) btn.classList.add("checking");
-    this.showToast("Running browser cookie refresh...", "primary");
+    this.showToast(cookieRefreshPreflightToast(this.config?.cookies?.acquisition), "primary");
 
     try {
       const response = await fetch("/api/cookies/auto-refresh", { method: "POST" });

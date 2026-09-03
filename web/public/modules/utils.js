@@ -634,6 +634,30 @@ export function cookieRecheckToast(activePlatforms, cookieStatus, twitchAuthStat
 }
 
 /**
+ * cookieRefreshPreflightToast is the sentence the dashboard shows BEFORE a
+ * manual browser-cookie refresh runs (shift+click on the header, or the
+ * Settings page's "Refresh cookies from browser profile" button).
+ *
+ * The default sentence is a claim only one of the two acquisition modes can
+ * support. Under "profile" the server never launches anything — saying
+ * "browser" would describe a mechanism the operator switched off, the same
+ * unearned cause as telling a gated operator to install a browser they already
+ * have. The server still decides; this only names what it will decide.
+ *
+ * Lives here rather than in app.js so it can be executed in Go tests. The
+ * TUI's twin is cookieRefreshFeedback in internal/tui/app_actions.go, and the
+ * two are pinned to the same sentences by exact equality
+ * (TestRefreshPreflightSentenceAgreesAcrossSurfaces); unlike the rung-3 pair
+ * they name no per-surface affordance, so they do not diverge. An absent mode
+ * (an older binary that has no cookies.acquisition) reads as auto.
+ */
+export function cookieRefreshPreflightToast(acquisition) {
+  return acquisition === "profile"
+    ? "Importing cookies from the browser profile..."
+    : "Running browser cookie refresh...";
+}
+
+/**
  * Where the header's "Re-login" warning should take the operator.
  *
  * Two remedies exist and only one of them works from everywhere. The
