@@ -160,11 +160,28 @@ const gqlMaxRetries = 3
 
 // gqlBaseRetryDelay is the first-retry wait. Doubles each subsequent
 // retry up to gqlMaxRetryDelay. Audit reports/twitch.md #11.
-const gqlBaseRetryDelay = 1 * time.Second
+//
+// A var, not a const, for exactly one reader: api_gql_log_hygiene_test.go
+// shrinks it to a millisecond so the retried arms can be driven to
+// exhaustion. Production never assigns it.
+var gqlBaseRetryDelay = 1 * time.Second
 
 // gqlMaxRetryDelay caps the exponential backoff so a long Retry-After
 // or repeated 429s can't pin a monitor cycle for minutes.
 const gqlMaxRetryDelay = 30 * time.Second
+
+// gqlBodySize renders a GQL response body as its SIZE, never its bytes.
+//
+// Every gqlRequest error used to interpolate string(respData). An
+// intermediary's error page can echo the request headers -- including
+// Authorization: OAuth <token> -- and those errors reach both the retry log
+// line and every caller that logs a failure, which Moombox fans out over the
+// WebSocket to the dashboard and the TUI. The size is what an operator
+// actually needs from a body they must not see: it separates "empty 503" from
+// "an HTML error page" without carrying either.
+func gqlBodySize(respData []byte) string {
+	return fmt.Sprintf("%d-byte body", len(respData))
+}
 
 // gqlRequest sends a GQL request and returns the raw JSON response.
 // opName is used only to annotate error messages so log correlation is
@@ -184,6 +201,12 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 	}
 
 	var lastErr error
+	// lastStatus is what the retry line reports instead of the previous
+	// error: 0 for a transport-level failure, otherwise the HTTP status that
+	// caused the retry. The error itself is deliberately NOT logged -- a
+	// transport error wraps whatever the proxy said, and that is the same
+	// class of untrusted upstream text gqlBodySize exists to keep out.
+	lastStatus := 0
 	skipBackoff := false
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
 		if attempt > 0 && !skipBackoff {
@@ -194,7 +217,7 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 			// so the two delays don't stack).
 			delay := min(gqlBaseRetryDelay<<(attempt-1), gqlMaxRetryDelay)
 			if a.logger != nil {
-				a.logger.Debug("twitch gql retry", "op", opLabel(opName), "attempt", attempt, "delay", delay.String(), "prev_err", lastErr)
+				a.logger.Debug("twitch gql retry", "op", opLabel(opName), "attempt", attempt, "delay", delay.String(), "prev_status", lastStatus)
 			}
 			select {
 			case <-ctx.Done():
@@ -208,6 +231,7 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 		if doErr != nil {
 			// Transport-level error — retry unless ctx is done.
 			lastErr = fmt.Errorf("gql request (%s): %w", opLabel(opName), doErr)
+			lastStatus = 0
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -230,13 +254,15 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 				// stack the exponential backoff on top of it.
 				skipBackoff = true
 			}
-			lastErr = fmt.Errorf("gql rate limited (429) (%s): %s", opLabel(opName), string(respData))
+			lastErr = fmt.Errorf("gql rate limited (429) (%s): %s", opLabel(opName), gqlBodySize(respData))
+			lastStatus = statusCode
 			continue
 		}
 
 		// 5xx: retry. Other server-side failures often clear within seconds.
 		if statusCode >= 500 && statusCode < 600 {
-			lastErr = fmt.Errorf("gql http %d (%s): %s", statusCode, opLabel(opName), string(respData))
+			lastErr = fmt.Errorf("gql http %d (%s): %s", statusCode, opLabel(opName), gqlBodySize(respData))
+			lastStatus = statusCode
 			continue
 		}
 
@@ -249,15 +275,15 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 			// (e.g. mature-gated streams) and treating that as "re-auth
 			// needed" would loop the user through a login flow pointlessly.
 			if authToken != "" {
-				return nil, fmt.Errorf("gql auth failure (%d) (%s): %s: %w", statusCode, opLabel(opName), string(respData), ErrTwitchAuthExpired)
+				return nil, fmt.Errorf("gql auth failure (%d) (%s): %s: %w", statusCode, opLabel(opName), gqlBodySize(respData), ErrTwitchAuthExpired)
 			}
-			return nil, fmt.Errorf("gql auth failure (%d) (%s): %s", statusCode, opLabel(opName), string(respData))
+			return nil, fmt.Errorf("gql auth failure (%d) (%s): %s", statusCode, opLabel(opName), gqlBodySize(respData))
 		}
 
 		// Other 4xx: caller-facing failure (bad query, missing field, …);
 		// retrying won't help.
 		if statusCode >= 400 && statusCode < 500 {
-			return nil, fmt.Errorf("gql http %d (%s): %s", statusCode, opLabel(opName), string(respData))
+			return nil, fmt.Errorf("gql http %d (%s): %s", statusCode, opLabel(opName), gqlBodySize(respData))
 		}
 
 		// 200 path: continue with response-body validation below.
