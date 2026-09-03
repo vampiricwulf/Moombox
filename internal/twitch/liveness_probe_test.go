@@ -193,7 +193,11 @@ func TestProbeSessionLivenessAuthRefusalIsInconclusive(t *testing.T) {
 // stream to both UIs — so an intermediary's page echoing the Authorization
 // header lands on two screens. Same hazard validateErrorDetail clamps for.
 //
-// MUTATION CLOSED: `return false, false, err` on either error arm.
+// MUTATION CLOSED: `return false, false, err` on either error arm — and,
+// since a refused request must never be read as a verdict, flipping
+// `conclusive` (or `signedIn`) to true on either arm as well. The pair is
+// asserted here, not just the error text, or that second mutant survives
+// having discarded them with `_, _, err :=`.
 func TestProbeSessionLivenessErrorsCarryNoResponseBody(t *testing.T) {
 	// A body shaped like the things that must never escape: a bearer header,
 	// a token document, and the fixture credential itself.
@@ -204,9 +208,12 @@ func TestProbeSessionLivenessErrorsCarryNoResponseBody(t *testing.T) {
 			installProbeStub(t, status, leakyBody)
 			svc := probeService(t, row(".twitch.tv", "auth-token", probeFixtureToken))
 
-			_, _, err := svc.ProbeSessionLiveness(context.Background(), "somechannel")
+			signedIn, conclusive, err := svc.ProbeSessionLiveness(context.Background(), "somechannel")
 			if err == nil {
 				t.Fatal("want an error from a refused request")
+			}
+			if signedIn || conclusive {
+				t.Errorf("got (signedIn=%v, conclusive=%v), want (false, false) — a refused request is not a verdict", signedIn, conclusive)
 			}
 			for _, secret := range []string{probeFixtureToken, "Authorization", "OAuth", "user_id", "12345678"} {
 				if strings.Contains(err.Error(), secret) {
