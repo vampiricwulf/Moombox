@@ -528,6 +528,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 			// CHECKS Twitch, and an expired Twitch auth-token downgrades chat
 			// capture to anonymous instead of failing, so it is invisible
 			// everywhere else.
+			//
 			// And the three credential LIFETIMES beside the counts: the
 			// soonest auth-cookie expiry per platform and the Twitch `login`
 			// row's own, ISO-8601 UTC or "none". The counts say what has

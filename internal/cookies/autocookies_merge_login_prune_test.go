@@ -81,13 +81,32 @@ func TestTwitchLoginPrunedFromMerge(t *testing.T) {
 // TestRefreshWarnsWhenTheExpiredTwitchLoginIsPruned drives the predicate
 // through the real refresh so the Warn is wired, not merely writable. The
 // import path (detectBrowser nil) reaches the shared merge site with no
-// browser. Asserted: the LINE, once, carrying no value.
+// browser. Asserted: the Warn LINE, once, carrying no value; and the
+// "cookie refresh succeeded" line, which this same call also produces,
+// carrying all three horizon keys — pinning the completion-line claim that
+// review found unpinned (brief mutation row 8).
 //
-// Mutation: delete the `if twitchLoginPrunedFromMerge(...)` block.
+// The auth-token's expiry is a DATED future timestamp (not the session-scoped
+// 0 the fixture used before this fix) so twitchAuthHorizon renders as a real
+// RFC3339 stamp instead of "none" — otherwise the two possible renderings
+// ("none" from an empty jar and "none" from a Unix-seconds mutant misreading
+// a zero) would be indistinguishable. twitchLoginExpiry is asserted as
+// "none" for a different reason: the login row this fixture starts with is
+// expired and gets pruned by the very merge this call runs, so a "none" here
+// is only correct if the field was read from the POST-write, POST-jar.Load
+// state — which is the whole argument for choosing this site over
+// autocookies_firefox.go's per-launch line.
+//
+// Mutations: delete the `if twitchLoginPrunedFromMerge(...)` block (kills the
+// Warn count below); drop `s.jar.HorizonLogFields()...` from the
+// "cookie refresh succeeded" line (kills the three-key assertion below);
+// emit the horizon as Unix seconds instead of through AuthHorizonString
+// (kills the twitchAuthHorizon value assertion below).
 func TestRefreshWarnsWhenTheExpiredTwitchLoginIsPruned(t *testing.T) {
+	const twitchTokenExpiry = 1789000000 // dated; see doc comment above
 	past := time.Now().Add(-24 * time.Hour).Unix()
 	previous := "# Netscape HTTP Cookie File\n" +
-		"#HttpOnly_.twitch.tv\tTRUE\t/\tTRUE\t0\tauth-token\t" + goodTwitchToken + "\n" +
+		"#HttpOnly_.twitch.tv\tTRUE\t/\tTRUE\t" + itoa(twitchTokenExpiry) + "\tauth-token\t" + goodTwitchToken + "\n" +
 		".twitch.tv\tTRUE\t/\tFALSE\t" + itoa(past) + "\tlogin\tarchiveraccount\n"
 
 	profileDir := writeWALCookieProfile(t, youtubeAuthRows())
@@ -117,5 +136,34 @@ func TestRefreshWarnsWhenTheExpiredTwitchLoginIsPruned(t *testing.T) {
 	}
 	if strings.Contains(all, "archiveraccount") || strings.Contains(all, goodTwitchToken) {
 		t.Errorf("the prune report carries a cookie value:\n%s", all)
+	}
+
+	// The refresh-completion line. argRecordingLogger.record joins msg+" "+
+	// fmt.Sprint(args...), and fmt.Sprint puts no separator between adjacent
+	// STRING operands — every arg here is a string — so the rendered line is
+	// one unbroken concatenation of key immediately followed by value
+	// (e.g. "...twitchAuthHorizon2026-09-10T00:26:40Z..."). Selecting the
+	// line by prefix, rather than substring-searching `all`, keeps this from
+	// matching the unrelated Warn line above.
+	const successMarker = "cookie refresh succeeded"
+	var successLine string
+	for _, line := range strings.Split(all, "\n") {
+		if strings.HasPrefix(line, successMarker) {
+			successLine = line
+		}
+	}
+	if successLine == "" {
+		t.Fatalf("no %q line was logged:\n%s", successMarker, all)
+	}
+	for _, key := range []string{"youtubeAuthHorizon", "twitchAuthHorizon", "twitchLoginExpiry"} {
+		if !strings.Contains(successLine, key) {
+			t.Errorf("the %q line is missing the %q key:\n%s", successMarker, key, successLine)
+		}
+	}
+	if want := "twitchAuthHorizon" + AuthHorizonString(twitchTokenExpiry); !strings.Contains(successLine, want) {
+		t.Errorf("the %q line does not carry %q (the fixture's dated auth-token expiry):\n%s", successMarker, want, successLine)
+	}
+	if want := "twitchLoginExpiry" + "none"; !strings.Contains(successLine, want) {
+		t.Errorf("the %q line does not carry %q — the login row this call just pruned should read as gone, not stale:\n%s", successMarker, want, successLine)
 	}
 }
