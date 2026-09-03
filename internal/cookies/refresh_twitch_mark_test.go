@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Arc 10 R1-R3. Every credential in this file is synthetic and none is logged.
@@ -422,6 +423,49 @@ func TestTwitchMarkFiresAuthChangeOnAVerdictTransitionOnly(t *testing.T) {
 	rs.NoteTwitchAuthLoss(twitchLossNoLoginCookie)
 	if pushes != 1 {
 		t.Errorf("OnAuthChange fired %d times total; a reason-only change must fire no push (authStatusChanged excludes the strings)", pushes)
+	}
+}
+
+// TestTwitchMarkStampsTheSharedRecoveryDedupe is ARMING checklist row 12, the
+// half assertable while the pilot is DISARMED.
+//
+// NoteTwitchAuthLoss's fire path calls noteRecoveryDecided("twitch", …). That
+// stamp looks inert today — livenessRecoveryArmed is false — and was therefore
+// asserted by nothing. It is not inert: recordLiveness consults the same map,
+// so the stamp is what stops an ARMED tier 2 firing a second recovery for a
+// loss the chat mark already raised. Only the double-FIRE needs arming.
+//
+// Two assertions, and the second is the one that matters. "The map has an
+// entry" is satisfied by any write; "a signed-out verdict one second later is
+// refused" only by a stamp the tier-2 dedupe actually reads.
+//
+// Mutation: delete `rs.noteRecoveryDecided("twitch", time.Now())` from
+// NoteTwitchAuthLoss. Both fail. Under it, arming pages the operator twice for
+// one chat downgrade — once from the mark, once from the next probe.
+func TestTwitchMarkStampsTheSharedRecoveryDedupe(t *testing.T) {
+	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusOK)
+	rs.OnRecoveryNeeded = func(string) {}
+
+	// A healthy first pass, so the mark below is a WITNESSED fall and its fire
+	// path is reached at all. It must stamp nothing itself.
+	rs.doRefresh(context.Background())
+	rs.mu.RLock()
+	_, stampedByThePass := rs.lastRecoveryDecided["twitch"]
+	rs.mu.RUnlock()
+	if stampedByThePass {
+		t.Fatal("premise broken: a healthy pass stamped the recovery dedupe for twitch")
+	}
+
+	rs.NoteTwitchAuthLoss(twitchLossLoginRefused)
+
+	rs.mu.RLock()
+	stamp, ok := rs.lastRecoveryDecided["twitch"]
+	rs.mu.RUnlock()
+	if !ok {
+		t.Fatal("the Twitch mark fired recovery without stamping lastRecoveryDecided — once the pilot is armed, the next membership-probe verdict raises a second alarm for the same loss")
+	}
+	if due, _ := rs.recordLiveness("twitch", false, stamp.Add(time.Second)); due {
+		t.Error("a tier-2 signed-out verdict one second after the mark still warranted recovery — the mark's stamp is not reaching the dedupe recordLiveness reads")
 	}
 }
 
