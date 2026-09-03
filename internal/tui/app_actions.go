@@ -10,6 +10,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -81,16 +82,52 @@ func cookieRefreshFeedback(mode string) string {
 	return "Running browser cookie refresh..."
 }
 
+// cookieRefreshMechanismLabel is the SUBJECT of every post-flight sentence R F
+// renders: the mechanism that actually ran.
+//
+// cookieRefreshFeedback above names what WILL run, from the mode, because
+// before the pass that is all there is. Afterwards the pass knows better —
+// RefreshResult.Mechanism is what it chose — and the two disagree wherever the
+// HOST decides rather than the setting: a machine with no browser installed
+// imports in "auto" mode and always has. That is why every post-flight sentence
+// said "Browser cookie refresh ..." after an import (Arc 12c arc-close F2), and
+// why this reads the RESULT first.
+//
+// The mode is the fallback, not the source. An empty Mechanism means the pass
+// declined before choosing — a setup in flight, nothing worth refreshing — and
+// the mode is then the best answer available AND the one the pre-flight
+// sentence already gave, so the two lines agree rather than contradict.
+//
+// The dashboard's twin is cookieRefreshMechanismLabel in
+// web/public/modules/utils.js;
+// TestRefreshPostflightMechanismAgreesAcrossSurfaces pins the two by exact
+// equality over every combination, the way
+// TestRefreshPreflightSentenceAgreesAcrossSurfaces pins the pre-flight pair.
+// Like that pair these name no per-surface affordance, so they do not diverge;
+// unlike the rung-3 pair, which does and must.
+func cookieRefreshMechanismLabel(mechanism, mode string) string {
+	switch mechanism {
+	case cookies.RefreshMechanismProfileImport:
+		return "Browser-profile cookie import"
+	case cookies.RefreshMechanismBrowser:
+		return "Browser cookie refresh"
+	}
+	if mode == cookies.AcquisitionProfile {
+		return "Browser-profile cookie import"
+	}
+	return "Browser cookie refresh"
+}
+
 // dispatchAction executes a chord action. For job-specific actions, job comes from
 // the selected task (keyboard chords) or from the menu's job picker (menu flow).
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
 	switch chord {
 	case "A A":
-		a.feedbackMsg = ""
+		a.clearFeedback()
 		a.addVideo.SetSize(a.width, a.height)
 		a.addVideo.Open()
 	case "A Z":
-		a.feedbackMsg = ""
+		a.clearFeedback()
 		a.importDlg.SetSize(a.width, a.height)
 		startDir := filepath.Join(".", "import")
 		if cwd, err := os.Getwd(); err == nil {

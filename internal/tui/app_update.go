@@ -52,9 +52,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		// Feedback message timeout
-		if !a.feedbackTimer.IsZero() && time.Now().After(a.feedbackTimer) {
-			a.feedbackMsg = ""
-			a.feedbackTimer = time.Time{}
+		if !a.feedback.until.IsZero() && time.Now().After(a.feedback.until) {
+			a.clearFeedback()
 		}
 		// (Terminal title is event-driven — updated by the job-lifecycle
 		// handlers on status change, not polled here every second.)
@@ -388,6 +387,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cookies.IsNoBrowserProfile(msg.Err) {
 			noProfileFallback = a.recheckCookiesCmd()
 		}
+		// The SUBJECT of every arm below, from what the pass ACTUALLY did —
+		// msg.Result.Mechanism — with the configured mode as the fallback for a
+		// pass that declined before choosing. See cookieRefreshMechanismLabel.
+		// Computed once rather than per arm: the rung-3 arm below does not use
+		// it, and one config-store read on that path is cheaper than five call
+		// sites that can drift.
+		mechanismLabel := cookieRefreshMechanismLabel(msg.Result.Mechanism, a.cookieAcquisitionMode())
 		switch {
 		case noProfileFallback != nil:
 			// THE BOTTOM RUNG OF R F, and it must not be a message on its own.
@@ -417,21 +423,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setFeedback("No browser profile found, running R C instead...")
 			return a, noProfileFallback
 		case msg.Err != nil:
-			a.setFeedback("Browser cookie refresh failed: " + msg.Err.Error())
+			a.setFeedback(mechanismLabel + " failed: " + msg.Err.Error())
 		case !msg.Result.Ran:
 			// Causes from the shared constant, not restated: this line, the
 			// worker's log note and the Web toast are three renderings of one
 			// exhaustive list, and they had already drifted apart once.
-			a.setFeedback("Browser cookie refresh declined to run (" + cookies.RefreshDeclinedCauses +
+			a.setFeedback(mechanismLabel + " declined to run (" + cookies.RefreshDeclinedCauses +
 				") — nothing was learned about these cookies")
 		case msg.Result.Overall() == cookies.RefreshFailed:
-			a.setFeedback("Browser cookie refresh ran and auth verification failed")
+			a.setFeedback(mechanismLabel + " ran and auth verification failed")
 		case msg.Result.Overall() == cookies.RefreshUnknown:
-			a.setFeedback("Browser cookie refresh ran but could not establish whether these cookies work")
+			a.setFeedback(mechanismLabel + " ran but could not establish whether these cookies work")
 		case !msg.Result.Renewed:
+			// NOT re-subjected, and not an oversight: renewed is
+			// `importedFromProfile || browserActed`, so an import that reaches
+			// a verdict always renewed and this arm is unreachable for one.
+			// TestRefreshResultCarriesTheMechanismThatRan pins that upstream.
 			a.setFeedback("Cookies still work, but this pass could not confirm the browser refreshed them")
 		default:
-			a.setFeedback("Browser cookie refresh successful")
+			a.setFeedback(mechanismLabel + " successful")
 		}
 		return a, nil
 
@@ -717,11 +727,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Wording follows the R F chord's three-way split above: only a
 		// conclusive verdict says "failed", and everything that did not find
 		// out stops at "could not establish".
+		// Each arm writes the PAIR, so the wizard can never show a verdict and
+		// its opposite at once.
 		switch {
 		case msg.Err != "":
-			a.setupWiz.errorMsg = msg.Err
+			a.setupWiz.errorMsg, a.setupWiz.successMsg = msg.Err, ""
 		case !msg.Result.YouTubeAccepted && !msg.Result.TwitchAccepted:
-			a.setupWiz.errorMsg = setupCookieRejectedMessage(msg.Platform, msg.Result)
+			a.setupWiz.errorMsg, a.setupWiz.successMsg = setupCookieRejectedMessage(msg.Platform, msg.Result), ""
 		default:
 			var parts []string
 			if msg.Result.YouTubeAccepted {
@@ -730,7 +742,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Result.TwitchAccepted {
 				parts = append(parts, setupCookieAcceptedMessage("Twitch", msg.Result.Twitch))
 			}
-			a.setFeedback(strings.Join(parts, "; "))
+			verdict := strings.Join(parts, "; ")
+			// BOTH surfaces, and that is the decision rather than an oversight.
+			// The wizard's own line is what the operator reads while the
+			// overlay stands — app_layout.go draws nothing else — and the 3 s
+			// feedback line is what they read if they close it immediately.
+			// Holding the message until the overlay closes would need a
+			// pending-feedback field and a close hook to drain it: a mechanism
+			// built to contain a mechanism, for a line that costs nothing to
+			// set twice.
+			a.setupWiz.errorMsg, a.setupWiz.successMsg = "", verdict
+			a.setFeedback(verdict)
 		}
 		return a, nil
 
@@ -934,18 +956,26 @@ func (a *App) setFeedback(msg string) {
 // site reads `a.setFeedbackWithSeverity(a.cookieRecheckFeedback(msg))` and the
 // message and the fact about it cannot be assembled apart.
 func (a *App) setFeedbackWithSeverity(msg string, stated feedbackSeverity) {
-	a.feedbackMsg = msg
-	a.feedbackSev = stated
-	a.feedbackTimer = time.Now().Add(3 * time.Second)
+	a.feedback = appFeedback{msg: msg, sev: stated, until: time.Now().Add(3 * time.Second)}
 }
 
 func (a *App) setFeedbackWithDuration(msg string, d time.Duration) {
-	a.feedbackMsg = msg
-	// Reset, never left alone: every one of these is a chord message whose
-	// severity the scan reads correctly, and inheriting the previous line's
-	// stated fact would colour it by something that is no longer on screen.
-	a.feedbackSev = severityUnstated
-	a.feedbackTimer = time.Now().Add(d)
+	// severityUnstated by construction rather than by an explicit reset: every
+	// one of these is a chord message whose severity the scan reads correctly,
+	// and the whole value is replaced, so the previous line's stated fact
+	// cannot survive into this one.
+	a.feedback = appFeedback{msg: msg, until: time.Now().Add(d)}
+}
+
+// clearFeedback takes the transient line down now.
+//
+// The whole value, including the severity: a line that is not on screen has no
+// severity, and leaving one behind was the "harmless by convention" half of
+// the invariant the struct exists to make structural. Rendering is unchanged —
+// viewMain reads msg alone, and the tick's expiry branch is simply not reached
+// once until is zero.
+func (a *App) clearFeedback() {
+	a.feedback = appFeedback{}
 }
 
 // displayColumns is the set of database column names whose changes require

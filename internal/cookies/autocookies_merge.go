@@ -226,6 +226,51 @@ func mergeCookieFiles(existing, newCookies string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// twitchCredentialsIn reads a Netscape cookie text's Twitch credential pair
+// through a throwaway jar.
+//
+// A probe jar rather than a second row scanner, as netscapeCookiesHoldACredential
+// already does it: Load knows which rows are twitch.tv rows, which are
+// essential, and how a `#HttpOnly_` prefix parses, and a private
+// reimplementation would disagree the first time one of those moved.
+//
+// Load deliberately ignores expiry, so a row that is PRESENT reads as present
+// whatever its date — which makes the before/after comparison in
+// twitchLoginPrunedFromMerge mean "the prune removed it".
+func twitchCredentialsIn(netscape string) (token, login string) {
+	probe := NewCookieJar()
+	probe.loadFrom([]byte(netscape), "")
+	return probe.GetTwitchCredentials()
+}
+
+// twitchLoginPrunedFromMerge reports the one merge outcome worth an
+// operator-visible line (Q7): the expiry prune dropped Twitch's `login` while
+// an `auth-token` survived.
+//
+// That is a degradation this tree can NAME. ircHandshakeLines throws away a
+// missing login and renders the full anonymous pair, so chat is captured with
+// no subscriber-only messages and no badges — WITHOUT a refusal, so the IRC
+// path's own once-per-downloader Warn never fires. Every predicate in jar.go
+// still reads the platform as configured, because `login` is outside
+// twitchAuthCookieNames and stays outside it.
+//
+// Deliberately silent on the neighbours: a file that never held a `login` is a
+// hand-written cookies.txt, and a prune taking the auth-token too is a total
+// credential loss RefreshCookiesDetailed already reports — saying "chat went
+// anonymous" about that points at the smaller of two problems.
+//
+// The `login` may arrive from either input (an import can supply a fresh one),
+// so both are consulted going in.
+func twitchLoginPrunedFromMerge(previous, fetched, merged string) bool {
+	_, prevLogin := twitchCredentialsIn(previous)
+	_, fetchedLogin := twitchCredentialsIn(fetched)
+	if prevLogin == "" && fetchedLogin == "" {
+		return false
+	}
+	mergedToken, mergedLogin := twitchCredentialsIn(merged)
+	return mergedLogin == "" && mergedToken != ""
+}
+
 // rowExpired reports whether a Netscape cookie row's expiry (5th field) is a
 // positive unix timestamp in the past. Session cookies (expiry 0) and rows
 // whose expiry field doesn't parse are never treated as expired — the safe

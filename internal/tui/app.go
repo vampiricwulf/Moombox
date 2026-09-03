@@ -352,21 +352,23 @@ type App struct {
 	// Action menu (command palette)
 	actionMenu *ActionMenuModel
 
-	// Feedback message (auto-clears after 3s)
-	feedbackMsg string
-	// feedbackSev is what the composer of feedbackMsg KNEW about its severity,
-	// where it knew anything. severityUnstated — the zero value — means it did
-	// not, and feedbackColor falls back to scanning the text.
+	// feedback is the transient status line (auto-clears after 3 s) together
+	// with everything known about it.
 	//
-	// Only ever read while feedbackMsg != "" (see View), and every write of a
-	// non-empty feedbackMsg goes through setFeedback, setFeedbackWithDuration
-	// or setFeedbackWithSeverity, each of which writes this field in the same
-	// statement pair. So a severity can never be read against a message other
-	// than the one it was stated for; the sites that only CLEAR feedbackMsg
-	// leave this behind harmlessly, and the next setter overwrites it.
-	// TestStatedSeverityDoesNotLeakToTheNextMessage pins that.
-	feedbackSev   feedbackSeverity
-	feedbackTimer time.Time
+	// ONE struct because the invariant is "a message never outlives the
+	// severity it was stated for", which three fields could only maintain by
+	// convention: every setter wrote all three in the same statement pair and
+	// every clear-only site left the severity behind, harmlessly but on trust.
+	// Written as a whole value there is nowhere to put a message without a
+	// severity, and clearing is `appFeedback{}`.
+	//
+	// Behaviour is unchanged by the fold: the severity is still only read
+	// while msg != "" (viewMain), and feedbackColor still falls back to
+	// scanning the text when sev is severityUnstated — the zero value a
+	// composer that knew nothing about its own line leaves in place.
+	// TestStatedSeverityDoesNotLeakToTheNextMessage pins the invariant this
+	// makes structural.
+	feedback appFeedback
 
 	// Log batching buffer (250ms flush cycle like TypeScript)
 	logBuffer []string
@@ -543,6 +545,24 @@ type App struct {
 	// FFmpeg check overlay
 	ffmpegCheck *FFmpegCheckModel
 	showFFmpeg  bool // flag to show FFmpeg check on startup
+}
+
+// appFeedback is the App's transient status line: what it says, what its
+// composer knew about how alarming it is, and when it stops being shown.
+//
+// The dialogs' own feedbackMsg fields (FilesDialogModel, ClientTokensDialogModel)
+// are unrelated — a different line with a different lifecycle, keyed to a
+// confirm chord rather than a timer.
+type appFeedback struct {
+	msg string
+	// sev is what the COMPOSER knew, where it knew anything. severityUnstated
+	// — the zero value — means it did not, and feedbackColor falls back to
+	// scanning the text. See feedbackSeverity for why the inference is not
+	// good enough on the one line that carries a stated fact.
+	sev feedbackSeverity
+	// until is when the line stops being shown. The zero value means "nothing
+	// scheduled", which is what an empty struct reads as.
+	until time.Time
 }
 
 // NewApp creates a new TUI application.

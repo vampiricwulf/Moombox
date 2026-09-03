@@ -115,6 +115,187 @@ func TestRecordLivenessSeparatesPlatforms(t *testing.T) {
 	}
 }
 
+// TestRecordLivenessRefireWindowDoublesAfterEachAlarm is the FACTOR.
+//
+// TestRecordLivenessRefiresAfterTheWindow above is the BASE case and is
+// unchanged: the first re-alarm lands one livenessRefireWindow after the first
+// alarm. This picks up where that stops. "30 min, then double" means the
+// doubling begins AFTER the first re-alarm, so a session dead for 90 minutes
+// has produced three alarms, not four.
+//
+// Mutation: drop `next *= livenessRefireFactor` from escalateLivenessRefire.
+// Every re-alarm then lands on the flat window and an armed tier 2 pages an
+// operator 48 times a day, forever, for one loss.
+func TestRecordLivenessRefireWindowDoublesAfterEachAlarm(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	t0 := time.Now()
+
+	if due, _ := rs.recordLiveness("youtube", false, t0); !due {
+		t.Fatal("premise broken: the first logged-out verdict must warrant recovery")
+	}
+	if due, _ := rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow)); !due {
+		t.Fatal("premise broken: the first re-alarm must land one base window later")
+	}
+
+	second := t0.Add(livenessRefireWindow)
+	if due, _ := rs.recordLiveness("youtube", false, second.Add(livenessRefireWindow)); due {
+		t.Error("a verdict one BASE window after the first re-alarm warranted recovery — the window did not double")
+	}
+	if due, _ := rs.recordLiveness("youtube", false, second.Add(2*livenessRefireWindow)); !due {
+		t.Error("a verdict two base windows after the first re-alarm did not warrant recovery — the doubled window is wrong or the schedule latched")
+	}
+}
+
+// TestRecordLivenessRefireWindowStopsAtTheCap is the CAP. Uncapped doubling
+// reaches a fortnight in eleven alarms, and a session that recovered two weeks
+// ago is still suppressed.
+//
+// Mutation: delete the `if next > livenessRefireCap` clamp — the window after
+// the sixth alarm is then 32 h.
+func TestRecordLivenessRefireWindowStopsAtTheCap(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	now := time.Now()
+
+	// A full DAY between alarms is longer than every window on the way up, so
+	// each one fires and each one escalates: 30m, 1h, 2h, 4h, 8h, 16h, 24h,
+	// 24h — the eighth alarm lands on the cap too, since 24h*2=48h is clamped
+	// on the same pass and 32h is never stored.
+	for i := range 8 {
+		if due, _ := rs.recordLiveness("youtube", false, now.Add(time.Duration(i)*24*time.Hour)); !due {
+			t.Fatalf("alarm %d did not fire although a full day had passed — the schedule is not advancing", i)
+		}
+	}
+
+	rs.mu.RLock()
+	got := rs.livenessRefireBackoff["youtube"]
+	rs.mu.RUnlock()
+	if got != livenessRefireCap {
+		t.Errorf("the back-off settled at %v, want the %v cap", got, livenessRefireCap)
+	}
+
+	// The cap is a real window, not just a stored number.
+	last := now.Add(7 * 24 * time.Hour)
+	if due, _ := rs.recordLiveness("youtube", false, last.Add(livenessRefireCap-time.Minute)); due {
+		t.Error("a verdict inside the capped window warranted recovery")
+	}
+	if due, _ := rs.recordLiveness("youtube", false, last.Add(livenessRefireCap)); !due {
+		t.Error("a verdict a full cap later did not warrant recovery — the schedule latched at the cap")
+	}
+}
+
+// TestRecordLivenessRefireResetsWhenAuthReturns is the RESET. A session that
+// died, escalated for a day, was repaired and died again is a NEW loss;
+// reporting it on the old schedule holds the alarm for up to 24 hours.
+//
+// The reset touches the ESCALATION only — lastRecoveryDecided is left standing
+// (see recordLiveness), so this also states that boundary. The final verdict of
+// the first half is therefore placed exactly one BASE window after the second
+// alarm's stamp: the base schedule fires there and the escalated one (2x base)
+// does not, which is the only interval that tells the two apart.
+//
+// Mutation: drop resetLivenessRefire from the loggedIn branch.
+//
+// The second half pins the boundary the first half only implies: dead (fires,
+// stamps) -> healthy a moment later (resets) -> dead again well INSIDE the
+// base window, which must stay suppressed. If the reset also cleared
+// lastRecoveryDecided, that map would hold no entry for the platform and the
+// verdict would find nothing to suppress it against — firing 2 seconds after
+// the alarm it was supposed to still be deduped against. The direct map read
+// closes the gap a "due" check alone leaves: it pins that the SURVIVING stamp
+// is the untouched one, not merely that some stamp exists.
+//
+// Mutant M-A: resetLivenessRefire also does
+// delete(rs.lastRecoveryDecided, platform).
+func TestRecordLivenessRefireResetsWhenAuthReturns(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	t0 := time.Now()
+
+	if due, _ := rs.recordLiveness("youtube", false, t0); !due {
+		t.Fatal("premise broken: the first logged-out verdict must warrant recovery")
+	}
+	// Stamps at t0+base and escalates the window to 2x base.
+	if due, _ := rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow)); !due {
+		t.Fatal("premise broken: the first re-alarm must land one base window later")
+	}
+
+	// Auth comes back a minute later. Silent, and it moves no stamp — only the
+	// escalation.
+	if due, _ := rs.recordLiveness("youtube", true, t0.Add(livenessRefireWindow+time.Minute)); due {
+		t.Fatal("a logged-in observation warranted recovery")
+	}
+
+	// One BASE window after the last stamp. On the base schedule that fires;
+	// on the escalated one it is still half a window short.
+	secondAlarm := t0.Add(2 * livenessRefireWindow)
+	if due, _ := rs.recordLiveness("youtube", false, secondAlarm); !due {
+		t.Error("the re-alarm after a repair still wanted the escalated window — a fresh loss must be reported on the base schedule")
+	}
+
+	// Second half: dead (stamps secondAlarm, above) -> healthy a second later
+	// (resets the escalation only) -> dead again 2 seconds after the alarm,
+	// well inside even the base window.
+	if due, _ := rs.recordLiveness("youtube", true, secondAlarm.Add(time.Second)); due {
+		t.Fatal("a logged-in observation warranted recovery")
+	}
+	if due, _ := rs.recordLiveness("youtube", false, secondAlarm.Add(2*time.Second)); due {
+		t.Error("a verdict 2 seconds after the last alarm warranted recovery — the reset must have cleared lastRecoveryDecided along with the escalation")
+	}
+
+	rs.mu.RLock()
+	stamp, ok := rs.lastRecoveryDecided["youtube"]
+	rs.mu.RUnlock()
+	if !ok || !stamp.Equal(secondAlarm) {
+		t.Errorf("lastRecoveryDecided[\"youtube\"] = %v (present=%v), want the untouched %v — the reset clears the escalation only", stamp, ok, secondAlarm)
+	}
+}
+
+// TestRecordLivenessRefireBackoffIsPerPlatform: the schedule is keyed like the
+// three maps beside it. TestRecordLivenessSeparatesPlatforms pins the same
+// property for the dedupe STAMP; this pins it for the WINDOW, which a single
+// shared time.Duration would collapse.
+//
+// Mutation: make livenessRefireBackoff a plain time.Duration field.
+func TestRecordLivenessRefireBackoffIsPerPlatform(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	now := time.Now()
+
+	for i := range 6 {
+		rs.recordLiveness("youtube", false, now.Add(time.Duration(i)*24*time.Hour))
+	}
+
+	last := now.Add(5 * 24 * time.Hour)
+	if due, _ := rs.recordLiveness("twitch", false, last); !due {
+		t.Fatal("twitch's first logged-out verdict did not warrant recovery")
+	}
+	if due, _ := rs.recordLiveness("twitch", false, last.Add(livenessRefireWindow)); !due {
+		t.Error("twitch's re-alarm waited on YouTube's escalated window — the back-off is not per platform")
+	}
+}
+
+// TestLivenessRefireScheduleIsTheRuledNumbers pins the three constants to the
+// owner's numbers (2026-08-29): 30 min, then double, capped at 24 h.
+//
+// The four schedule tests above use the constants SYMBOLICALLY — each one
+// passes just as well for a 15-minute base or a 20-hour cap — so this is the
+// only thing in the file that fails when a number drifts. It is deliberately a
+// literal pin and nothing more: the SHAPE of the schedule is the other four
+// tests' job, and restating it here with numbers would be a second copy of the
+// same arithmetic to keep in step.
+//
+// Mutations: livenessRefireWindow = 15 * time.Minute; livenessRefireFactor = 3;
+// livenessRefireCap = 20 * time.Hour. Each fails exactly one line below.
+func TestLivenessRefireScheduleIsTheRuledNumbers(t *testing.T) {
+	if livenessRefireWindow != 30*time.Minute {
+		t.Errorf("livenessRefireWindow = %v, want 30m — the owner's base", livenessRefireWindow)
+	}
+	if livenessRefireFactor != 2 {
+		t.Errorf("livenessRefireFactor = %d, want 2 — \"then double\"", livenessRefireFactor)
+	}
+	if livenessRefireCap != 24*time.Hour {
+		t.Errorf("livenessRefireCap = %v, want 24h — \"capped near a day\"", livenessRefireCap)
+	}
+}
+
 // TestLivenessRecoveryPilotIsDisarmed is the guard on the staged rollout.
 //
 // One logged-out verdict reaching OnRecoveryNeeded notifies the operator on
@@ -241,17 +422,37 @@ func TestFallbackRunsWhenNothingHasObserved(t *testing.T) {
 // wall, a rate limit or a transport failure. It is silence, and silence must
 // neither record an observation (which would suppress the next cycle's probe)
 // nor consume the dedupe (which would swallow the next real logged-out
-// verdict).
+// verdict) nor reset the back-off (which is not the reset condition — only a
+// conclusive signed-in verdict is).
 //
-// `called` is asserted alongside the two negatives on purpose: both of them
-// also hold if the probe never ran, so without it this test passes with the
-// entire fallback block deleted.
+// `called` is asserted alongside the negatives on purpose: they also hold if
+// the probe never ran, so without it this test passes with the entire
+// fallback block deleted.
+//
+// The arrange stamp lands two `livenessFreshWindow`s in the past rather than
+// at `time.Now()`: recordLiveness always writes lastLivenessObserved, so a
+// FRESH stamp would make the freshness gate skip the fallback entirely and
+// `called` would stay 0. Far enough in the past, the escalation it produces
+// survives to be checked, and the probe still runs.
+//
+// The back-off check reads the map's second return value, not just its
+// value: after exactly ONE fired alarm the escalated entry equals
+// livenessRefireWindow, the same number a MISSING entry falls back to
+// (livenessRefireWindowFor), so a value comparison alone cannot tell
+// "escalated to the base" from "reset to nothing" apart. Presence can.
+//
+// Mutation: recordInconclusiveLiveness calls rs.resetLivenessRefire(platform).
 func TestFallbackInconclusiveMovesNothing(t *testing.T) {
 	healthyRefreshSeams(t)
 
 	called := 0
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	rs.FallbackLiveness = func(context.Context) (bool, bool) { called++; return false, false }
+
+	stale := time.Now().Add(-2 * livenessFreshWindow)
+	if due, _ := rs.recordLiveness("youtube", false, stale); !due {
+		t.Fatal("premise broken: the first logged-out verdict must warrant recovery, and must escalate the back-off")
+	}
 
 	rs.doRefresh(context.Background())
 
@@ -261,6 +462,21 @@ func TestFallbackInconclusiveMovesNothing(t *testing.T) {
 	if rs.livenessObservedRecently("youtube", time.Now()) {
 		t.Error("an inconclusive fallback recorded an observation — it would suppress the next cycle's probe")
 	}
+
+	// Read the back-off BEFORE the dedupe-consumption check below: that check
+	// drives a real dead verdict through recordLiveness on purpose, and a real
+	// dead verdict legitimately escalates. Reading here isolates what the
+	// inconclusive PROBE alone did.
+	rs.mu.RLock()
+	backoff, ok := rs.livenessRefireBackoff["youtube"]
+	rs.mu.RUnlock()
+	if !ok {
+		t.Error("an inconclusive fallback reset the back-off — the escalated entry disappeared")
+	}
+	if backoff != livenessRefireWindow {
+		t.Errorf("the back-off entry read %v after an inconclusive fallback, want the escalated %v unchanged", backoff, livenessRefireWindow)
+	}
+
 	if due, _ := rs.recordLiveness("youtube", false, time.Now()); !due {
 		t.Error("an inconclusive fallback consumed the dedupe — a real logged-out verdict would be swallowed")
 	}

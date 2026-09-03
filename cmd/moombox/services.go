@@ -329,6 +329,32 @@ func detectCookiePlatforms(meta *cookies.CookieMeta, jar cookiePlatformDetector)
 	return detected, "cookie-names"
 }
 
+// cookiesLoadedFields builds the field list for the startup "Cookies loaded"
+// line. Its own function because initServices cannot be driven from a test and
+// this is the ONE place an operator sees what their cookie file actually
+// contains at boot — see TestCookiesLoadedFieldsCarryTheHorizons.
+//
+// The first four are the predicates and counts that were always here. The last
+// three are the credential lifetimes (Q5, Q7), produced by
+// CookieJar.HorizonLogFields so this line and the "cookie refresh succeeded"
+// line carry byte-identical keys and formatting and can be read against each
+// other across a restart or a refresh.
+//
+// The list deliberately MIXES slog.Attr values with bare key/value pairs. Both
+// sinks handle it — slog.Logger.Log and internal/logger's formatLogLine each
+// detect slog.Attr and fall through to pairs — and the alternative is a second
+// spelling of the horizon keys here, which is how the two lines drift apart.
+//
+// Never a cookie value. Counts, booleans and timestamps only.
+func cookiesLoadedFields(jar *cookies.CookieJar, now int64) []any {
+	return append([]any{
+		slog.Bool("completeAuthSet", jar.HasYouTubeAuthCookies()),
+		slog.Bool("anyAuthCookie", jar.HasAnyYouTubeAuthCookie()),
+		slog.Int("expiredYouTubeAuth", jar.ExpiredAuthCookiesFor(cookies.PlatformYouTube, now)),
+		slog.Int("expiredTwitchAuth", jar.ExpiredAuthCookiesFor(cookies.PlatformTwitch, now)),
+	}, jar.HorizonLogFields()...)
+}
+
 // initServices runs the 16 numbered construction sections from the original
 // run() — config load, logger, updater, database, connectivity, cookies,
 // platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
@@ -502,12 +528,16 @@ func (s *runState) initServices(logLevelOverride string) error {
 			// CHECKS Twitch, and an expired Twitch auth-token downgrades chat
 			// capture to anonymous instead of failing, so it is invisible
 			// everywhere else.
-			now := time.Now().Unix()
-			log.Info("Cookies loaded",
-				slog.Bool("completeAuthSet", jar.HasYouTubeAuthCookies()),
-				slog.Bool("anyAuthCookie", jar.HasAnyYouTubeAuthCookie()),
-				slog.Int("expiredYouTubeAuth", jar.ExpiredAuthCookiesFor(cookies.PlatformYouTube, now)),
-				slog.Int("expiredTwitchAuth", jar.ExpiredAuthCookiesFor(cookies.PlatformTwitch, now)))
+			//
+			// And the three credential LIFETIMES beside the counts: the
+			// soonest auth-cookie expiry per platform and the Twitch `login`
+			// row's own, ISO-8601 UTC or "none". The counts say what has
+			// already lapsed; the horizons say when the next thing will, which
+			// is the half a file refreshed yesterday needs. Read against the
+			// identical fields on "cookie refresh succeeded" they are also the
+			// settling observation for whether a browser refresh renews the
+			// Twitch token. See CookieJar.HorizonLogFields.
+			log.Info("Cookies loaded", cookiesLoadedFields(jar, time.Now().Unix())...)
 			// Auto-detect platforms from cookie file when not already set.
 			// detectCookiePlatforms prefers the sidecar's verified Platforms
 			// over guessing from cookie names; see its doc comment.
@@ -974,6 +1004,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 		})
 		return mode
 	}
+	// The launch guard's verdict, said once, at the level the mode earns.
+	//
+	// HERE and not in the constructor, and the ORDER is the whole point: the
+	// service is built at the top of this block with no AcquisitionMode, so a
+	// line logged there cannot tell "auto" — where a refused directory means a
+	// browser refresh the operator expects will not happen, ERROR — from
+	// "profile", where nothing was going to launch and the read-only import
+	// runs regardless, INFO. Hoisting this call above the closure above puts
+	// the red line back on every profile-mode boot, which is Arc 12c
+	// arc-close F1; TestProfileDirVerdictIsLoggedAfterTheModeIsWired fails if
+	// it moves. Silent unless the directory is actually refused.
+	autoCookieSvc.LogProfileDirVerdict()
 	s.autoCookieSvc = autoCookieSvc
 
 	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain

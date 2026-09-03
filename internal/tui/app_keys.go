@@ -352,7 +352,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// would let the next keypress fire the destructive action
 			// against the cursor job without its own confirmation.
 			a.chord = chordState{}
-			a.feedbackMsg = ""
+			a.clearFeedback()
 			return a, nil // consume the Esc, don't propagate
 		}
 		// Clear an active task-list search (box closed, query applied). The
@@ -363,7 +363,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Also clear any active chord prefix on Esc
 		if a.chord.prefix != "" {
 			a.chord = chordState{}
-			a.feedbackMsg = ""
+			a.clearFeedback()
 			return a, nil
 		}
 		return a, nil

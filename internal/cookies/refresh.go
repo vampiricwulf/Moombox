@@ -44,7 +44,9 @@ const (
 	authCheckTimeout       = 15 * time.Second
 
 	// livenessRefireWindow bounds how often ONE platform's logged-out
-	// liveness verdict may clear the dedupe and reach OnRecoveryNeeded.
+	// liveness verdict may clear the dedupe and reach OnRecoveryNeeded — true
+	// of the FIRST re-alarm only; see the back-off below for every one after
+	// it.
 	//
 	// The membership probe runs once per configured channel per feed cycle,
 	// with a 500ms stagger between channels, so a dead session produces N
@@ -75,6 +77,28 @@ const (
 	// match that cooldown so the two coalescing windows do not drift apart —
 	// not because either implies the other.
 	livenessRefireWindow = 30 * time.Minute
+
+	// livenessRefireFactor and livenessRefireCap turn livenessRefireWindow
+	// above into a per-platform back-off, decided by the owner 2026-08-29:
+	// alarm, re-alarm 30 minutes later, then double — 1 h, 2 h, 4 h — capped
+	// near a day, and start over when auth returns.
+	//
+	// WHY A SCHEDULE. Tier 1 notifies once per process for a session already
+	// dead at startup: shouldFireRecovery's witnessed-transition arm needs
+	// prevAuth to have been true, and the first conclusive negative clears it.
+	// An armed tier 2 has the opposite problem — it re-fires for as long as
+	// the session stays dead, so a flat window is 48 notifications a day for
+	// one loss. The back-off keeps the first hour responsive and then gets out
+	// of the way.
+	//
+	// INERT UNTIL ARMING: recordLiveness computes the schedule and
+	// ObserveLiveness logs the answer, but livenessRecoveryArmed is false, so
+	// OnRecoveryNeeded is never called — the state itself still moves on
+	// every observation, which is what makes the pilot's wouldFireRecovery
+	// field meaningful. That is the point of landing it now — the schedule is
+	// mutation-tested here and arming stays a one-constant change.
+	livenessRefireFactor = 2
+	livenessRefireCap    = 24 * time.Hour
 
 	// livenessFreshWindow bounds how old the last conclusive liveness
 	// observation may be before a periodic refresh pays for the
@@ -609,6 +633,21 @@ type RefreshService struct {
 	// time", whatever the change is between.
 	lastLivenessKnown map[string]livenessRecord
 
+	// livenessRefireBackoff is the interval that must pass before this
+	// platform's next signed-out verdict may clear the dedupe again — the
+	// schedule livenessRefireFactor / livenessRefireCap describe.
+	//
+	// A FOURTH map beside the other three rather than a field on
+	// livenessRecord (a uint8 enum with no room in it) and rather than a
+	// scalar, which would let a YouTube session dead all day delay Twitch's
+	// FIRST alarm by 24 hours
+	// (TestRecordLivenessRefireBackoffIsPerPlatform). A missing entry reads as
+	// the base window, so the zero value is the right answer.
+	//
+	// Written by escalateLivenessRefire and resetLivenessRefire, read by
+	// livenessRefireWindowFor; all three take rs.mu from their caller.
+	livenessRefireBackoff map[string]time.Duration
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -802,12 +841,13 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 		interval = defaultRefreshInterval
 	}
 	return &RefreshService{
-		jar:                  jar,
-		refreshInterval:      interval,
-		logger:               logger,
-		lastLivenessObserved: make(map[string]time.Time),
-		lastRecoveryDecided:  make(map[string]time.Time),
-		lastLivenessKnown:    make(map[string]livenessRecord),
+		jar:                   jar,
+		refreshInterval:       interval,
+		logger:                logger,
+		lastLivenessObserved:  make(map[string]time.Time),
+		lastRecoveryDecided:   make(map[string]time.Time),
+		lastLivenessKnown:     make(map[string]livenessRecord),
+		livenessRefireBackoff: make(map[string]time.Duration),
 	}
 }
 
@@ -1050,16 +1090,77 @@ func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now tim
 		// Positive evidence is silent, and must not touch lastRecoveryDecided:
 		// stamping it here would let a healthy verdict swallow a dead one
 		// arriving a moment later from another channel in the same cycle.
+		//
+		// It DOES clear the back-off. "Auth came back" is the reset condition
+		// the owner named, and a session that dies again after a repair is a
+		// new loss to report on the base schedule rather than yesterday's
+		// escalated one. See resetLivenessRefire for why this is the
+		// escalation only and not the stamp.
+		rs.resetLivenessRefire(platform)
 		return false, notable
 	}
-	if last, ok := rs.lastRecoveryDecided[platform]; ok && now.Sub(last) < livenessRefireWindow {
+	if last, ok := rs.lastRecoveryDecided[platform]; ok && now.Sub(last) < rs.livenessRefireWindowFor(platform) {
 		return false, notable
 	}
 	if rs.lastRecoveryDecided == nil {
 		rs.lastRecoveryDecided = make(map[string]time.Time)
 	}
 	rs.lastRecoveryDecided[platform] = now
+	// After the window CHECK above (its position relative to the stamp is
+	// immaterial), so this verdict was judged against the window in force when
+	// it arrived. Escalating before the check would judge every alarm against
+	// the window meant for the one after it — and a SUPPRESSED verdict would
+	// grow the window too, so the base re-alarm would never land at all.
+	rs.escalateLivenessRefire(platform)
 	return true, notable
+}
+
+// livenessRefireWindowFor returns how long must pass since this platform's last
+// cleared dedupe before another signed-out verdict may clear it again: the base
+// until something has fired, the escalated window after. Callers hold rs.mu.
+func (rs *RefreshService) livenessRefireWindowFor(platform string) time.Duration {
+	if w := rs.livenessRefireBackoff[platform]; w > 0 {
+		return w
+	}
+	return livenessRefireWindow
+}
+
+// escalateLivenessRefire advances one platform's back-off after a verdict that
+// cleared the dedupe.
+//
+// The FIRST call sets the base rather than doubling it, and that is what puts
+// the first re-alarm 30 minutes after the first alarm — the owner's "30 min,
+// then double". Doubling on the first call would put it at an hour and lose
+// the responsive window entirely. Callers hold rs.mu for writing.
+func (rs *RefreshService) escalateLivenessRefire(platform string) {
+	if rs.livenessRefireBackoff == nil {
+		rs.livenessRefireBackoff = make(map[string]time.Duration)
+	}
+	next := rs.livenessRefireBackoff[platform]
+	if next == 0 {
+		next = livenessRefireWindow
+	} else {
+		next *= livenessRefireFactor
+	}
+	if next > livenessRefireCap {
+		next = livenessRefireCap
+	}
+	rs.livenessRefireBackoff[platform] = next
+}
+
+// resetLivenessRefire puts one platform back on the base schedule.
+//
+// One caller — recordLiveness's conclusive-LoggedIn branch — and it clears the
+// ESCALATION only. Clearing lastRecoveryDecided here would let a healthy
+// verdict from one channel swallow a dead verdict from the next in the same
+// cycle, which is the whole reason those are two maps.
+//
+// A tier-1 recovery does NOT reach here: noteRecoveryDecided stamps the dedupe
+// and nothing else, by the one-directional rule it has always followed. On an
+// install with channels the membership probe delivers a conclusive LoggedIn
+// within one feed cycle of auth returning. Callers hold rs.mu for writing.
+func (rs *RefreshService) resetLivenessRefire(platform string) {
+	delete(rs.livenessRefireBackoff, platform)
 }
 
 // recordInconclusiveLiveness folds a fallback probe that learned NOTHING into
@@ -1073,15 +1174,23 @@ func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now tim
 // nothing new to say. That is the one distinction the pilot has to be able to
 // make about its own signal.
 //
-// Deliberately touches NEITHER of the other two maps:
+// Deliberately touches NONE of the other three maps:
 //
 //   - not lastLivenessObserved, because recording an observation would make
 //     the next cycle's freshness check skip the probe — silencing the signal
 //     for as long as it keeps failing, which is backwards.
 //   - not lastRecoveryDecided, because that window belongs to real signed-out
 //     verdicts and consuming it here would swallow the next one.
+//   - not livenessRefireBackoff, because "inconclusive" is not the reset
+//     condition — only a conclusive signed-in verdict is (recordLiveness).
+//     Resetting the back-off here would let an install stuck behind a
+//     captive portal, proxy or rate limit — inconclusive on EVERY cycle —
+//     clear its own escalation every cycle too, so an armed tier 2 would page
+//     every base window forever: exactly the failure mode the schedule exists
+//     to prevent, reintroduced through the one door silence is supposed to
+//     leave shut.
 //
-// TestFallbackInconclusiveMovesNothing pins both.
+// TestFallbackInconclusiveMovesNothing pins all three.
 //
 // `notable` follows the same rule ObserveLiveness uses: notable on a change of
 // what is known, or on the first thing known about the platform in this
@@ -1112,6 +1221,10 @@ func (rs *RefreshService) recordInconclusiveLiveness(platform string) (notable b
 // branch started splitting on RefreshResult.Ran a decline reports nothing. So
 // what this stamp saves is the redundant goroutine and its 2-minute timeout,
 // not an operator-visible mistake; livenessRefireWindow has the accounting.
+//
+// It stamps and does NOT escalate. The back-off counts TIER-2 alarms; a tier-1
+// fire consumes one tier-2 window without growing the next, which is the
+// conservative direction — the platform stays on the shorter schedule.
 func (rs *RefreshService) noteRecoveryDecided(platform string, now time.Time) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()

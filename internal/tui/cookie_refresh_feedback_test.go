@@ -97,7 +97,7 @@ func TestCookieForceRefreshFeedback(t *testing.T) {
 			if _, cmd := app.Update(tc.msg); cmd != nil {
 				t.Errorf("the feedback branch should not schedule work, got %T", cmd)
 			}
-			got := app.feedbackMsg
+			got := app.feedback.msg
 			if got == "" {
 				t.Fatal("no feedback was set — the operator pressed a key and got nothing")
 			}
@@ -143,8 +143,8 @@ func TestCookieForceRefreshFeedbackColour(t *testing.T) {
 			// The pair View uses, not the message alone: R F states no severity
 			// today, but reading only half of what the renderer reads would let
 			// a future stated severity change the colour with this test green.
-			if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != want[tc.want] {
-				t.Errorf("feedbackColor(%q) = %v, want %s", app.feedbackMsg, got, tc.want)
+			if got := feedbackColor(app.feedback.msg, app.feedback.sev); got != want[tc.want] {
+				t.Errorf("feedbackColor(%q) = %v, want %s", app.feedback.msg, got, tc.want)
 			}
 		})
 	}

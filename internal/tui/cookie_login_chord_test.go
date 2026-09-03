@@ -197,10 +197,10 @@ func TestCookieLoginChordRefusesWithoutTheService(t *testing.T) {
 	if app.setupWiz.IsVisible() {
 		t.Error("R L opened a login overlay with no auto-cookie service behind it")
 	}
-	if app.feedbackMsg == "" {
+	if app.feedback.msg == "" {
 		t.Fatal("R L refused silently — a direct caller cannot tell that from a no-op")
 	}
-	if !strings.Contains(strings.ToLower(app.feedbackMsg), "cookie login") {
-		t.Errorf("the refusal does not name what was refused: %q", app.feedbackMsg)
+	if !strings.Contains(strings.ToLower(app.feedback.msg), "cookie login") {
+		t.Errorf("the refusal does not name what was refused: %q", app.feedback.msg)
 	}
 }

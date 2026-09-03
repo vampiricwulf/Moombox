@@ -450,6 +450,15 @@ func TestRecheckReportOnlySaysFailedWhenItIs(t *testing.T) {
 // a field that moved on every tick and would have made the gate fire
 // unconditionally. Arc 9 deleted the field (nothing read it), so the row went
 // with it; the exclusion it pinned no longer has anything to exclude.
+//
+// The two "alone" rows close the gap the rest leave: every other row that
+// moves an Authenticated boolean also moves that platform's verdict, so a gate
+// with either boolean comparison DELETED still passes this table — the verdict
+// comparison covers for it. They are synthetic on purpose. The gate is a pure
+// function over six fields and its contract is that each of the six is a
+// surface input in its own right; whether today's producers can move one
+// without the other is a fact about the producers, and the day one of them can
+// is not the day to discover the comparison was never pinned.
 func TestAuthStatusChangedGateCoversEverySurfaceInput(t *testing.T) {
 	base := AuthStatus{
 		YouTubeAuthenticated: false,
@@ -494,6 +503,16 @@ func TestAuthStatusChangedGateCoversEverySurfaceInput(t *testing.T) {
 		{
 			"youtube cookies disappeared",
 			with(func(s *AuthStatus) { s.HasYouTubeCookies = false }),
+			true,
+		},
+		{
+			"youtube authenticated flipped and nothing else did",
+			with(func(s *AuthStatus) { s.YouTubeAuthenticated = true }),
+			true,
+		},
+		{
+			"twitch authenticated flipped and nothing else did",
+			with(func(s *AuthStatus) { s.TwitchAuthenticated = true }),
 			true,
 		},
 		{

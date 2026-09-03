@@ -193,6 +193,18 @@ type SetupWizardModel struct {
 	modeChoice int // 0=Quick, 1=Advanced on mode selection screen
 	values     map[string]string
 	errorMsg   string
+	// successMsg is the ACCEPTED verdict of a cookie step, rendered where
+	// errorMsg is.
+	//
+	// It exists because the App's transient feedback line is invisible while
+	// this overlay stands — app_layout.go returns the wizard's whole view — so
+	// the operator who signed in and pressed Enter saw the platform row's tick
+	// and nothing else, not even the "saved, but could not establish" hedge
+	// that is the point of the four-arm split in app_update.go.
+	//
+	// Never set at the same time as errorMsg: the finish arm writes the pair
+	// in one statement, and HandleKey clears both on the next keypress.
+	successMsg string
 
 	// Advanced setup huh form
 	advancedForm     *huh.Form
@@ -282,6 +294,7 @@ func (m *SetupWizardModel) Open() {
 	m.modeChoice = 0
 	m.values = make(map[string]string)
 	m.errorMsg = ""
+	m.successMsg = ""
 	m.advancedForm = nil
 	m.advancedFormDone = false
 	m.advancedInitCmd = nil
@@ -457,6 +470,7 @@ func (m *SetupWizardModel) OpenCookieLogin(platform string) {
 	m.mode = setupModeSimple
 	m.simpleStage = setupSimpleCookies
 	m.errorMsg = ""
+	m.successMsg = ""
 	m.saving = false
 	m.cookieFocus = 0
 	if platform == "twitch" {
@@ -636,8 +650,14 @@ func (m *SetupWizardModel) HandleKey(key string) string {
 		return ""
 	}
 
+	// The next keypress takes both verdicts down. A stale "cookies configured"
+	// under a step the operator has moved on from is the same mistake a stale
+	// error would be.
 	if m.errorMsg != "" {
 		m.errorMsg = ""
+	}
+	if m.successMsg != "" {
+		m.successMsg = ""
 	}
 
 	switch m.mode {
@@ -1546,10 +1566,14 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 		}
 	}
 
-	// Error
+	// Verdict — at most one of the two is ever set (see successMsg).
 	if m.errorMsg != "" {
 		lines = append(lines, "")
 		lines = append(lines, ErrorStyle.Render(m.errorMsg))
+	}
+	if m.successMsg != "" {
+		lines = append(lines, "")
+		lines = append(lines, SuccessStyle.Render(m.successMsg))
 	}
 
 	// Navigation
@@ -1826,6 +1850,10 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 	if m.errorMsg != "" {
 		lines = append(lines, "")
 		lines = append(lines, ErrorStyle.Render(m.errorMsg))
+	}
+	if m.successMsg != "" {
+		lines = append(lines, "")
+		lines = append(lines, SuccessStyle.Render(m.successMsg))
 	}
 
 	lines = append(lines, "")

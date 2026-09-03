@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
@@ -99,11 +100,11 @@ func TestSetupCookieFinishFeedback(t *testing.T) {
 				t.Errorf("the finish branch should not schedule work, got %T", cmd)
 			}
 
-			got := app.feedbackMsg
+			got := app.feedback.msg
 			if tc.wantErrBox {
 				got = app.setupWiz.errorMsg
-				if app.feedbackMsg != "" {
-					t.Errorf("a rejected finish also set the transient feedback line: %q", app.feedbackMsg)
+				if app.feedback.msg != "" {
+					t.Errorf("a rejected finish also set the transient feedback line: %q", app.feedback.msg)
 				}
 			} else if app.setupWiz.errorMsg != "" {
 				t.Errorf("an accepted finish set the wizard's error line: %q", app.setupWiz.errorMsg)
@@ -142,9 +143,9 @@ func TestSetupCookieUncheckedOutcomeIsNotRed(t *testing.T) {
 		YouTube: cookies.RefreshUnknown, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
 	}})
 
-	if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != ColorYellow {
+	if got := feedbackColor(app.feedback.msg, app.feedback.sev); got != ColorYellow {
 		t.Errorf("an accepted-but-unverified sign-in renders %v, want %v (yellow): %q",
-			got, ColorYellow, app.feedbackMsg)
+			got, ColorYellow, app.feedback.msg)
 	}
 
 	// The premise: a verified sign-in still reads as an unqualified success.
@@ -152,7 +153,189 @@ func TestSetupCookieUncheckedOutcomeIsNotRed(t *testing.T) {
 	app.Update(setupCookieFinishMsg{Platform: "youtube", Result: cookies.SetupResult{
 		YouTube: cookies.RefreshOK, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
 	}})
-	if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != ColorGreen {
-		t.Errorf("a confirmed sign-in renders %v, want %v (green): %q", got, ColorGreen, app.feedbackMsg)
+	if got := feedbackColor(app.feedback.msg, app.feedback.sev); got != ColorGreen {
+		t.Errorf("a confirmed sign-in renders %v, want %v (green): %q", got, ColorGreen, app.feedback.msg)
+	}
+}
+
+// TestSetupCookieAcceptedVerdictRendersInsideTheOverlay is the 12a arc-close
+// finding F4.
+//
+// The accepted arm reported through the App's transient feedback line, which
+// app_layout.go never draws while the setup wizard is visible — the overlay
+// takes the whole view. So an operator who signed in and pressed Enter saw the
+// green tick on the platform row and nothing else: not which platforms were
+// accepted, and not the "saved, but could not establish" hedge that is the
+// point of the four-arm split beside it.
+//
+// The verdict now renders INSIDE the wizard, where errorMsg already does. It
+// ALSO still reaches the feedback line, deliberately: the alternative is
+// holding it in new state until the overlay closes and draining it from a
+// close hook — a mechanism built to contain a mechanism. Together they cost
+// nothing: the wizard's line is read while the overlay stands, the feedback
+// line if it is closed at once.
+//
+// goja-free: NewApp() plus one Update, like TestSetupCookieFinishFeedback.
+//
+// Mutations: drop the successMsg write from the accepted arm; render
+// successMsg with ErrorStyle.
+func TestSetupCookieAcceptedVerdictRendersInsideTheOverlay(t *testing.T) {
+	app := NewApp()
+	app.setupWiz.OpenCookieLogin("youtube")
+	app.setupWiz.SetSize(100, 30)
+
+	app.Update(setupCookieFinishMsg{Platform: "youtube", Result: cookies.SetupResult{
+		YouTube: cookies.RefreshOK, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
+	}})
+
+	if !app.setupWiz.IsVisible() {
+		t.Fatal("premise broken: the finish arm closed the overlay, so there is nothing to render into")
+	}
+
+	view := app.setupWiz.View()
+	if !strings.Contains(view, "YouTube cookies configured") {
+		t.Errorf("the accepted verdict is not reachable through the overlay the operator is looking at:\n%s", view)
+	}
+	if !strings.Contains(view, SuccessStyle.Render("YouTube cookies configured")) {
+		t.Error("the accepted verdict is not rendered with SuccessStyle — a confirmed sign-in must not read as an error")
+	}
+	if !strings.Contains(app.feedback.msg, "YouTube cookies configured") {
+		t.Errorf("the App feedback line no longer carries the verdict: %q", app.feedback.msg)
+	}
+
+	// The hedged verdict travels the same way — the arm the ✓ alone cannot express.
+	hedged := NewApp()
+	hedged.setupWiz.OpenCookieLogin("youtube")
+	hedged.setupWiz.SetSize(100, 30)
+	hedged.Update(setupCookieFinishMsg{Platform: "youtube", Result: cookies.SetupResult{
+		YouTube: cookies.RefreshUnknown, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
+	}})
+	if v := hedged.setupWiz.View(); !strings.Contains(v, "could not establish") {
+		t.Errorf("the accepted-but-unverified hedge does not reach the overlay:\n%s", v)
+	}
+
+	// A rejected finish still uses the error line and sets no success line.
+	rejected := NewApp()
+	rejected.setupWiz.OpenCookieLogin("youtube")
+	rejected.setupWiz.SetSize(100, 30)
+	rejected.Update(setupCookieFinishMsg{Platform: "youtube", Err: "cookies.txt could not be read"})
+	if rejected.setupWiz.successMsg != "" {
+		t.Errorf("a failed finish set the wizard's success line: %q", rejected.setupWiz.successMsg)
+	}
+}
+
+// TestSetupCookieAcceptedVerdictClearsOnNavigation is the review's mutant-6
+// finding (task-5-review.md): the report's "accepted residual" ruling on
+// dropping HandleKey's successMsg clear only considered a second PRODUCER
+// writing a stale twin. It missed the CONSUMER being revisited: Quick Setup
+// -> accept a sign-in -> navigate cookieFocus to "Skip/Next" -> Channels
+// stage -> Esc back to Cookies -- all without ever calling Open() or
+// OpenCookieLogin() again, which are the only other places successMsg is
+// reset.
+//
+// Under the real code, HandleKey's unconditional top-of-function clear takes
+// successMsg down on the very first keypress after acceptance (the first
+// Down arrow), so the round trip never resurfaces it. Drop that clear and
+// the stale "YouTube cookies configured" verdict is still on screen when the
+// operator lands back on the Cookies step, with no new sign-in having
+// happened.
+//
+// Mutation: drop `m.successMsg = ""` from HandleKey. FAILS.
+func TestSetupCookieAcceptedVerdictClearsOnNavigation(t *testing.T) {
+	app := NewApp()
+	app.setupWiz.SetSize(100, 30)
+	app.setupWiz.Open()
+
+	// Quick Setup: modeChoice defaults to 0.
+	app.setupWiz.HandleKey(keyEnter)
+	if app.setupWiz.mode != setupModeSimple || app.setupWiz.simpleStage != setupSimpleCookies {
+		t.Fatal("premise broken: Enter on mode-select did not land on Quick Setup's Cookies step")
+	}
+
+	app.Update(setupCookieFinishMsg{Platform: "youtube", Result: cookies.SetupResult{
+		YouTube: cookies.RefreshOK, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
+	}})
+	if !strings.Contains(app.setupWiz.View(), "YouTube cookies configured") {
+		t.Fatal("premise broken: the accepted verdict never reached the overlay")
+	}
+
+	// Navigate cookieFocus down to "Skip / Next" (index 2) and select it.
+	app.setupWiz.HandleKey(keyDown)
+	app.setupWiz.HandleKey(keyDown)
+	if app.setupWiz.cookieFocus != 2 {
+		t.Fatalf("premise broken: cookieFocus = %d, want 2 (Skip/Next)", app.setupWiz.cookieFocus)
+	}
+	app.setupWiz.HandleKey(keyEnter)
+	if app.setupWiz.simpleStage != setupSimpleChannels {
+		t.Fatal("premise broken: Skip/Next did not advance to the Channels stage")
+	}
+
+	// Esc from the Channels list returns to the Cookies stage.
+	app.setupWiz.HandleKey(keyEsc)
+	if app.setupWiz.simpleStage != setupSimpleCookies {
+		t.Fatal("premise broken: Esc from Channels did not return to the Cookies stage")
+	}
+
+	if view := app.setupWiz.View(); strings.Contains(view, "YouTube cookies configured") {
+		t.Errorf("a stale accepted verdict resurfaced on the Cookies step after navigating "+
+			"away and back, with no new sign-in:\n%s", view)
+	}
+}
+
+// TestSetupCookieAcceptedVerdictRendersInAdvancedCookiesToo closes the
+// coverage gap task-5-review.md found: TestSetupCookieAcceptedVerdictRendersInsideTheOverlay
+// only reaches viewSimpleCookies (via OpenCookieLogin). viewAdvancedCookies
+// renders the identical successMsg block, and nothing exercised it.
+//
+// Mutation: render successMsg in viewSimpleCookies only (drop the
+// viewAdvancedCookies block). FAILS.
+func TestSetupCookieAcceptedVerdictRendersInAdvancedCookiesToo(t *testing.T) {
+	app := NewApp()
+	app.setupWiz.SetSize(100, 30)
+	app.setupWiz.visible = true
+	app.setupWiz.mode = setupModeAdvanced
+	app.setupWiz.advancedFormDone = true
+	app.setupWiz.advancedCookieDone = false
+
+	app.Update(setupCookieFinishMsg{Platform: "youtube", Result: cookies.SetupResult{
+		YouTube: cookies.RefreshOK, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
+	}})
+
+	view := app.setupWiz.View()
+	if !strings.Contains(view, SuccessStyle.Render("YouTube cookies configured")) {
+		t.Errorf("the advanced cookie view does not render the accepted verdict with "+
+			"SuccessStyle:\n%s", view)
+	}
+}
+
+// TestSetupCookieVerdictOutlivesFeedbackLineExpiry pins R8's "setting both
+// costs nothing" decision (task-5-review.md): the wizard's successMsg and
+// the App's 3s feedback line are two independent surfaces, set together but
+// cleared independently. Nothing pinned that the App line's clock expiring
+// leaves the still-open wizard's verdict alone.
+//
+// Mutation: make clearFeedback also clear a.setupWiz.successMsg. FAILS.
+func TestSetupCookieVerdictOutlivesFeedbackLineExpiry(t *testing.T) {
+	app := NewApp()
+	app.setupWiz.OpenCookieLogin("youtube")
+	app.setupWiz.SetSize(100, 30)
+
+	app.Update(setupCookieFinishMsg{Platform: "youtube", Result: cookies.SetupResult{
+		YouTube: cookies.RefreshOK, Twitch: cookies.RefreshFailed, YouTubeAccepted: true,
+	}})
+	if app.feedback.msg == "" || app.setupWiz.successMsg == "" {
+		t.Fatal("premise broken: acceptance did not set both surfaces")
+	}
+
+	// Expire the App feedback line the way the tick handler checks it.
+	app.feedback.until = time.Now().Add(-time.Second)
+	app.Update(tickMsg{})
+
+	if app.feedback.msg != "" {
+		t.Errorf("the App feedback line did not expire: %q", app.feedback.msg)
+	}
+	if !strings.Contains(app.setupWiz.View(), "YouTube cookies configured") {
+		t.Errorf("the wizard's verdict was cleared along with the expired App feedback "+
+			"line:\n%s", app.setupWiz.View())
 	}
 }

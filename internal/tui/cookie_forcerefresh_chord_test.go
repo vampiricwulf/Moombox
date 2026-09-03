@@ -123,8 +123,8 @@ func TestForceRefreshFallsBackToTheRecheck(t *testing.T) {
 				Err: fmt.Errorf("refresh pass gave up: %w", sentinel),
 			})
 
-			if app.feedbackMsg != "No browser profile found, running R C instead..." {
-				t.Errorf("R F feedback = %q, want the fallback sentence", app.feedbackMsg)
+			if app.feedback.msg != "No browser profile found, running R C instead..." {
+				t.Errorf("R F feedback = %q, want the fallback sentence", app.feedback.msg)
 			}
 			if cmd == nil {
 				t.Fatal("R F announced a fallback and returned no command — the sentence is the whole " +
@@ -175,14 +175,14 @@ func TestForceRefreshFallsBackToTheRecheck(t *testing.T) {
 			}); cmd != nil {
 				cmd()
 			}
-			if strings.Contains(app.feedbackMsg, "running R C instead") {
-				t.Errorf("R F fell back for a diagnosable profile failure: %q", app.feedbackMsg)
+			if strings.Contains(app.feedback.msg, "running R C instead") {
+				t.Errorf("R F fell back for a diagnosable profile failure: %q", app.feedback.msg)
 			}
-			if !strings.Contains(app.feedbackMsg, "failed") {
-				t.Errorf("a profile-import failure no longer reports a failure: %q", app.feedbackMsg)
+			if !strings.Contains(app.feedback.msg, "failed") {
+				t.Errorf("a profile-import failure no longer reports a failure: %q", app.feedback.msg)
 			}
-			if !strings.Contains(app.feedbackMsg, detail) {
-				t.Errorf("the server's own guidance did not reach the operator: %q", app.feedbackMsg)
+			if !strings.Contains(app.feedback.msg, detail) {
+				t.Errorf("the server's own guidance did not reach the operator: %q", app.feedback.msg)
 			}
 		})
 	}
@@ -194,8 +194,8 @@ func TestForceRefreshFallsBackToTheRecheck(t *testing.T) {
 		app := NewApp()
 		app.OnRecheckCookies = nil
 		app.Update(cookieForceRefreshResultMsg{Err: cookies.ErrProfileNotFound})
-		if strings.Contains(app.feedbackMsg, "running R C instead") {
-			t.Errorf("R F promised to run R C with no recheck callback wired: %q", app.feedbackMsg)
+		if strings.Contains(app.feedback.msg, "running R C instead") {
+			t.Errorf("R F promised to run R C with no recheck callback wired: %q", app.feedback.msg)
 		}
 	})
 }
@@ -233,9 +233,9 @@ func TestRungThreeSentencesDivergeByDesign(t *testing.T) {
 	app.Update(cookieForceRefreshResultMsg{
 		Err: fmt.Errorf("refresh pass gave up: %w", cookies.ErrProfileNotFound),
 	})
-	if app.feedbackMsg != rungThreeTUI {
+	if app.feedback.msg != rungThreeTUI {
 		t.Errorf("R F rung 3 renders %q, want %q — this is the owner's wording and is not to be "+
-			"paraphrased or \"improved\"", app.feedbackMsg, rungThreeTUI)
+			"paraphrased or \"improved\"", app.feedback.msg, rungThreeTUI)
 	}
 
 	// The Web sentence, read out of the shipped script. Located by its own
@@ -258,7 +258,7 @@ func TestRungThreeSentencesDivergeByDesign(t *testing.T) {
 			"string twice and say nothing about either surface naming its own affordance")
 	}
 	const shared = "No browser profile found, running "
-	for _, s := range []struct{ what, got string }{{"the TUI", app.feedbackMsg}, {"the dashboard", web}} {
+	for _, s := range []struct{ what, got string }{{"the TUI", app.feedback.msg}, {"the dashboard", web}} {
 		if !strings.HasPrefix(s.got, shared) {
 			t.Errorf("%s no longer opens with %q, so the two messages have stopped being one event "+
 				"worded twice: %q", s.what, shared, s.got)
@@ -273,9 +273,9 @@ func TestRungThreeSentencesDivergeByDesign(t *testing.T) {
 	// search for "R C" is satisfied by "browse-R C-ookie", which a mutation run
 	// on this file proved.
 	chord := regexp.MustCompile(`(^|[^A-Za-z])R C([^A-Za-z]|$)`)
-	if !chord.MatchString(app.feedbackMsg) {
+	if !chord.MatchString(app.feedback.msg) {
 		t.Errorf("the TUI's rung 3 does not name the R C chord, which is the one thing a TUI "+
-			"operator can press here: %q", app.feedbackMsg)
+			"operator can press here: %q", app.feedback.msg)
 	}
 	if chord.MatchString(web) {
 		t.Errorf("the dashboard's rung 3 names the R C chord. There are no chords on that surface — "+
@@ -284,9 +284,9 @@ func TestRungThreeSentencesDivergeByDesign(t *testing.T) {
 	if !strings.Contains(web, "normal cookie refresh") {
 		t.Errorf("the dashboard's rung 3 no longer names the affordance a dashboard user has: %q", web)
 	}
-	if strings.Contains(app.feedbackMsg, "normal cookie refresh") {
+	if strings.Contains(app.feedback.msg, "normal cookie refresh") {
 		t.Errorf("the TUI's rung 3 describes the mechanism instead of naming the chord: %q",
-			app.feedbackMsg)
+			app.feedback.msg)
 	}
 }
 

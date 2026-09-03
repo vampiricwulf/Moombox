@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, parkedCookiePlatforms, reloginPromptTarget } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
@@ -815,6 +815,19 @@ class MoomboxApp {
     try {
       const response = await fetch("/api/cookies/auto-refresh", { method: "POST" });
       const data = await response.json().catch(() => ({ error: response.statusText }));
+      // The SUBJECT of every result toast below, from what the pass actually
+      // did rather than from what the mode asked for. `data.mechanism` is
+      // undefined against an older binary and empty when the pass declined
+      // before choosing; both fall back to the configured mode, which is the
+      // same answer the pre-flight toast above already gave. See
+      // cookieRefreshMechanismLabel in ./modules/utils.js.
+      // Computed once rather than per arm below: the 404/424 rung-3 branch
+      // does not use it (it names its own affordance instead), and one call
+      // here is cheaper than one at each of the arms that can drift.
+      const mechanismLabel = cookieRefreshMechanismLabel(
+        data.mechanism,
+        this.config?.cookies?.acquisition,
+      );
       if (response.ok && !data.error) {
         if (data.cookieStatus) this.cookieStatus = data.cookieStatus;
         if (data.twitchAuthStatus) this.twitchAuthStatus = data.twitchAuthStatus;
@@ -850,22 +863,22 @@ class MoomboxApp {
           // cookies.RefreshDeclinedCauses). This copy cannot import it, so
           // TestAppJSMatchesTheDeclinedCauses pins the two against each other —
           // keep the phrase below byte-identical to the constant.
-          refreshMsg =
-            "Browser cookie refresh declined to run — a setup or another refresh is already in flight, or no platform has cookies worth refreshing. Nothing was learned about these cookies.";
+          refreshMsg = `${mechanismLabel} declined to run — a setup or another refresh is already in flight, or no platform has cookies worth refreshing. Nothing was learned about these cookies.`;
           refreshVariant = "neutral";
         } else if (!data.success && data.verdict === "failed") {
-          refreshMsg = "Browser cookie refresh completed — auth verification failed";
+          refreshMsg = `${mechanismLabel} completed — auth verification failed`;
           refreshVariant = "danger";
         } else if (!data.success) {
-          refreshMsg =
-            "Browser cookie refresh ran but could not establish whether these cookies work — nothing has been concluded about them";
+          refreshMsg = `${mechanismLabel} ran but could not establish whether these cookies work — nothing has been concluded about them`;
           refreshVariant = "warning";
         } else if (data.renewed === false) {
+          // NOT re-subjected — the Go twin's comment explains why: an import
+          // always renews, so this arm is unreachable for one.
           refreshMsg =
             "Cookies still work — but this pass could not confirm the browser refreshed them, so the last-refresh time is unchanged";
           refreshVariant = "warning";
         } else {
-          refreshMsg = "Browser cookie refresh successful";
+          refreshMsg = `${mechanismLabel} successful`;
           refreshVariant = "success";
         }
         this.showToast(refreshMsg, refreshVariant);
@@ -903,10 +916,13 @@ class MoomboxApp {
         await this.recheckCookies();
         return;
       } else {
-        this.showToast(data.error || "Browser cookie refresh failed", "danger");
+        this.showToast(data.error || `${mechanismLabel} failed`, "danger");
       }
     } catch (e) {
-      this.showToast("Browser cookie refresh failed: " + e.message, "danger");
+      this.showToast(
+        `${cookieRefreshMechanismLabel("", this.config?.cookies?.acquisition)} failed: ${e.message}`,
+        "danger",
+      );
     } finally {
       if (btn) btn.classList.remove("checking");
     }

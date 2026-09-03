@@ -190,8 +190,12 @@ func TestAutoCookieRefreshFallsBackToTheRecheck(t *testing.T) {
 			"user has no chord to press", rungThree)
 	}
 	// The premise: without a failure arm left, "it falls back" would be
-	// trivially true and would say nothing about which failures it covers.
-	if !strings.Contains(code, "Browser cookie refresh failed") {
+	// trivially true and would say nothing about which failures it covers. The
+	// subject is now composed from the mechanism that ran (H2 R9), so the
+	// literal to look for is the template, not the old sentence — and matching
+	// the template also asserts that this arm did not keep a hardcoded
+	// "Browser cookie refresh" after an import.
+	if !strings.Contains(code, "`${mechanismLabel} failed`") {
 		t.Error("autoCookieRefresh no longer reports any failure at all, so the fallback assertions " +
 			"above cannot distinguish a targeted fallback from one that swallows everything")
 	}
@@ -527,5 +531,42 @@ func TestNoBrowserFoundCopyHoldsForBothStatesItCoversNow(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAutoCookieRefreshToastsNameTheMechanismThatRan is the dashboard half of
+// Arc 12c arc-close F2.
+//
+// The subject of a result toast is not testable through goja — app.js is a
+// class method on a live DOM, not a module function — so it is read out of the
+// shipped script, bracketed to this one handler the way the rung-3 assertions
+// above are. What can be asserted is exactly the defect: a subject that is a
+// LITERAL cannot have come from the pass, so an import renders "Browser cookie
+// refresh ..." forever.
+//
+// The two assertions catch different mutants. Dropping mechanismLabel from one
+// arm leaves the count short; hardcoding the old sentence back into one arm
+// leaves the count short AND trips the literal check, which is the one that
+// names the defect in its failure message.
+func TestAutoCookieRefreshToastsNameTheMechanismThatRan(t *testing.T) {
+	code := jsCode(jsBlock(t, readEmbeddedModule(t, "public/app.js"), "async autoCookieRefresh() {"))
+
+	if !strings.Contains(code, "cookieRefreshMechanismLabel(") {
+		t.Fatal("autoCookieRefresh never calls cookieRefreshMechanismLabel, so its toasts cannot " +
+			"name the mechanism that ran and every profile import reads as a browser refresh")
+	}
+	// Five interpolated subjects: declined, verdict-failed, inconclusive,
+	// successful, and the transport failure. The renewed === false arm has none
+	// by design (an import always renews, so it is unreachable for one) and the
+	// catch calls the helper directly, both covered above.
+	if n := strings.Count(code, "${mechanismLabel}"); n < 5 {
+		t.Errorf("only %d toast subject(s) are composed from the mechanism, want at least 5 — an arm "+
+			"still names a mechanism the pass may not have used", n)
+	}
+	for _, literal := range []string{`"Browser cookie refresh`, "`Browser cookie refresh"} {
+		if strings.Contains(code, literal) {
+			t.Errorf("autoCookieRefresh still hardcodes %s...` as a toast subject — that is the "+
+				"sentence a profile import rendered (Arc 12c arc-close F2)", literal)
+		}
 	}
 }

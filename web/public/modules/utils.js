@@ -658,6 +658,35 @@ export function cookieRefreshPreflightToast(acquisition) {
 }
 
 /**
+ * cookieRefreshMechanismLabel is the SUBJECT of every post-flight toast the
+ * manual refresh renders: the mechanism that actually ran.
+ *
+ * cookieRefreshPreflightToast above names what WILL run, from the mode, because
+ * before the pass that is all there is. Afterwards the server knows better —
+ * `mechanism` on the /api/cookies/auto-refresh payload is the path the pass
+ * chose — and the two disagree wherever the HOST decides rather than the
+ * setting: a machine with no browser installed imports in "auto" mode and
+ * always has. Every result toast said "Browser cookie refresh ..." after such
+ * an import, which is why this reads the payload first.
+ *
+ * The mode is the fallback, not the source, and it covers two cases with one
+ * rule: a pass that declined before choosing sends an empty `mechanism`, and an
+ * OLDER binary sends no such key at all. Both land here, and both get the
+ * sentence the pre-flight toast already used.
+ *
+ * The TUI's twin is cookieRefreshMechanismLabel in internal/tui/app_actions.go;
+ * the two are pinned to identical output by exact equality
+ * (TestRefreshPostflightMechanismAgreesAcrossSurfaces).
+ */
+export function cookieRefreshMechanismLabel(mechanism, acquisition) {
+  if (mechanism === "profile-import") return "Browser-profile cookie import";
+  if (mechanism === "browser") return "Browser cookie refresh";
+  return acquisition === "profile"
+    ? "Browser-profile cookie import"
+    : "Browser cookie refresh";
+}
+
+/**
  * Where the header's "Re-login" warning should take the operator.
  *
  * Two remedies exist and only one of them works from everywhere. The

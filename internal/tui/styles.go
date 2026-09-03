@@ -62,6 +62,7 @@ var (
 	HeaderStyle    = lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
 	SeparatorStyle = lipgloss.NewStyle().Foreground(ColorGray)
 	ErrorStyle     = lipgloss.NewStyle().Foreground(ColorError)
+	SuccessStyle   = lipgloss.NewStyle().Foreground(ColorGreen)
 	SelectedStyle  = lipgloss.NewStyle().Bold(true)
 
 	// Yellow highlight styles — pre-allocated to avoid per-frame
