@@ -47,7 +47,9 @@ func TestLiveContinuationOpenReplayNeverOpens(t *testing.T) {
 // — the "full-ceiling stalls" the coordinator's report described. Every
 // exit that means "this downloader will never poll again" must close the
 // signal: ErrAuthRequired, the consecutive-error budget exhausting (both
-// inside handleFetchError), and Stop(). This is NOT an "ended" inference —
+// inside handleFetchError), Stop(), and MarkStreamEnded(); a poll result
+// that lands after any of them does not re-open it. For the first three
+// this is NOT an "ended" inference —
 // closed means "no information", by design, the same directional contract
 // LiveContinuationOpen's doc comment already states for a downloader that
 // never started.
@@ -139,6 +141,46 @@ func TestHandleEndOfStreamClosesSignalOnDefiniteUnrecoveredEnd(t *testing.T) {
 	}
 	if cd.LiveContinuationOpen() {
 		t.Error("handleEndOfStream must close the resume signal on a definitive, unrecovered end")
+	}
+}
+
+// TestMarkStreamEndedClosesLiveContinuationOpen is the fifth permanent-exit
+// test. MarkStreamEnded is the orchestrator's own end verdict
+// (orchestrator.go's `if !isVod` branch), and until it closed the signal the
+// worker's joint-idle gate (buildMayResume, internal/worker/interruption.go)
+// kept counting a downloader the orchestrator had already retired as live
+// resume evidence -- for as long as the chat loop took to notice, which on a
+// sleeping poll is the whole poll interval.
+func TestMarkStreamEndedClosesLiveContinuationOpen(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true) // a healthy in-progress live poll
+
+	cd.MarkStreamEnded()
+
+	if cd.LiveContinuationOpen() {
+		t.Error("MarkStreamEnded() must close the resume signal -- the orchestrator has declared the stream over, and this downloader will not poll again")
+	}
+}
+
+// TestLatePollResultDoesNotReopenAfterMarkStreamEnded closes the window the
+// fifth exit test cannot see: a fetch that completed just before
+// MarkStreamEnded() reaches noteLivePollResult after it, and used to latch
+// the signal open on a downloader the loop is about to abandon.
+func TestLatePollResultDoesNotReopenAfterMarkStreamEnded(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true)
+
+	cd.MarkStreamEnded()
+	cd.noteLivePollResult(true) // the in-flight poll's result arrives late
+
+	if cd.LiveContinuationOpen() {
+		t.Error("a poll result that lands after MarkStreamEnded() must not re-open the resume signal")
 	}
 }
 
