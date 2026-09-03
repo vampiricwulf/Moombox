@@ -75,13 +75,15 @@ func TestDrainJobReturnsImmediatelyWithoutAJob(t *testing.T) {
 // methods so it satisfies the AutoCookieService logger field as well as the
 // narrower one drainJob takes — one capturing logger for the package.
 //
-// msgs is every message regardless of level; infos and debugs are the same
-// messages split out, for the tests whose subject IS the level — a line the
-// operator sees by default versus one they have to go looking for.
+// msgs is every message regardless of level; infos, debugs and warns are the
+// same messages split out, for the tests whose subject IS the level — a line
+// the operator sees by default versus one they have to go looking for, or (for
+// warns) a line that must not survive being quietly downgraded to Debug.
 type capturingLogger struct {
 	msgs   []string
 	infos  []string
 	debugs []string
+	warns  []string
 }
 
 func (l *capturingLogger) Debug(msg string, args ...any) {
@@ -93,12 +95,26 @@ func (l *capturingLogger) Info(msg string, args ...any) {
 	l.msgs = append(l.msgs, msg)
 	l.infos = append(l.infos, msg)
 }
-func (l *capturingLogger) Warn(msg string, args ...any)  { l.msgs = append(l.msgs, msg) }
+
+func (l *capturingLogger) Warn(msg string, args ...any) {
+	l.msgs = append(l.msgs, msg)
+	l.warns = append(l.warns, msg)
+}
 func (l *capturingLogger) Error(msg string, args ...any) { l.msgs = append(l.msgs, msg) }
 
-// contains reports whether any recorded message contains sub.
+// contains reports whether any recorded message contains sub, AT ANY LEVEL.
+// Do not use this for an assertion whose subject is the level itself — a
+// Warn silently downgraded to Debug still satisfies it. Use containsAtWarn
+// for that.
 func (l *capturingLogger) contains(sub string) bool {
 	return countContaining(l.msgs, sub) > 0
+}
+
+// containsAtWarn reports whether any message logged at Warn contains sub. The
+// level-aware counterpart to contains, for assertions whose subject is
+// specifically the Warn level.
+func (l *capturingLogger) containsAtWarn(sub string) bool {
+	return countContaining(l.warns, sub) > 0
 }
 
 // countContaining reports how many of `lines` contain sub.

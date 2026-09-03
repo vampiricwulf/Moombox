@@ -513,3 +513,63 @@ func TestKillProcessTreeUnixRefusesANonPositivePid(t *testing.T) {
 		t.Fatalf("fallback kills = %v, want exactly [0] (and nothing for the nil process)", *single)
 	}
 }
+
+// TestKillProcessTreeUnixFallsBackWhenTheGroupSignalItselfFails pins the one
+// branch of killGroup's error return the rest of this file never reaches:
+// captureGroupKills always answers nil, so every test above that drives
+// killGroup to a non-nil error does it through a REFUSAL — an unreadable
+// table (activeProcesses' own error) or, upstream of killGroup entirely, an
+// adopt that never happened. None of them exercise killProcessGroup, the
+// syscall hook itself, answering an error for a group that WAS live and WAS
+// signalled — e.g. kill(-pgid) returning EPERM.
+//
+// killProcessTreeUnix's contract, read off the code as written, draws no line
+// between those two shapes of error:
+//
+//	if err := group.adopt(proc.Pid); err == nil {
+//	    if err := group.killGroup(); err == nil {
+//	        return
+//	    }
+//	}
+//	killOneProcess(proc)
+//
+// Once adopt has succeeded, ANY non-nil error out of killGroup — refusal or a
+// signal that was actually attempted and failed — falls through to the same
+// fallback. Task 2's brief only narrates the refusal shapes ("a Linux /proc
+// that cannot be read; a pid that is gone or sits in someone else's group");
+// it does not separately name "the signal was sent and the kernel said no".
+// The code does not distinguish them either, so the ruling this test pins is:
+// on any killGroup error, fall back — not "only on a refusal".
+//
+// Mutation: replace `if err := group.killGroup(); err == nil { return }`
+// with `_ = group.killGroup(); return` (the exact mutant the review found
+// surviving) — the fallback never runs, and the second assertion below fails
+// with fallback kills == [] instead of [setupGroupPid].
+func TestKillProcessTreeUnixFallsBackWhenTheGroupSignalItselfFails(t *testing.T) {
+	prevKillGroup := killProcessGroup
+	attempts := []int{}
+	sendErr := errors.New("kill(-pgid): operation not permitted")
+	killProcessGroup = func(pgid int) error {
+		attempts = append(attempts, pgid)
+		return sendErr
+	}
+	t.Cleanup(func() { killProcessGroup = prevKillGroup })
+
+	single := captureOneProcessKills(t)
+	fakeProcessTable(t, map[int]int{
+		setupGroupPid: setupGroupPid, // adopt succeeds, and the group is non-empty:
+		// killGroup does not refuse — it ATTEMPTS the signal, and that
+		// attempt is what fails here.
+	})
+
+	killProcessTreeUnix(&os.Process{Pid: setupGroupPid})
+
+	if len(attempts) != 1 || attempts[0] != setupGroupPid {
+		t.Fatalf("group kill attempts = %v, want exactly one at [%d]; no retry, no second group kill",
+			attempts, setupGroupPid)
+	}
+	if len(*single) != 1 || (*single)[0] != setupGroupPid {
+		t.Fatalf("fallback kills = %v, want exactly [%d] once the signal itself failed",
+			*single, setupGroupPid)
+	}
+}

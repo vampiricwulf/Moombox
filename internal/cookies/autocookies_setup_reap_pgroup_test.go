@@ -189,8 +189,16 @@ func TestCloseLaunchJobAsksForTheKill(t *testing.T) {
 // things: the real job is no longer queryable() (the close still ran) and a
 // Warn was logged (the error was not swallowed).
 //
+// The Warn check goes through containsAtWarn, not contains: a bare
+// logger.contains() reads the merged, level-blind msgs slice, so a site that
+// quietly downgraded its kill-error line to Debug would still satisfy it.
+// containsAtWarn reads capturingLogger's warns slice instead, which only Warn
+// populates.
+//
 // Mutant: make any site return/skip job.close() when the kill errors, and its
-// case fails — the job stays queryable() and/or no Warn appears.
+// case fails — the job stays queryable() and/or no Warn appears. Mutant:
+// downgrade any one site's kill-error log from Warn to Debug, and that site's
+// case fails — the line is still in msgs, but containsAtWarn only reads warns.
 func TestAskThenCloseStillClosesWhenTheKillErrors(t *testing.T) {
 	killErr := errors.New("kill refused")
 
@@ -216,7 +224,7 @@ func TestAskThenCloseStillClosesWhenTheKillErrors(t *testing.T) {
 				s.mu.Unlock()
 
 				s.cleanup()
-				return job, logger.contains("could not kill the setup browser's process group")
+				return job, logger.containsAtWarn("could not kill the setup browser's process group")
 			},
 		},
 		{
@@ -238,7 +246,7 @@ func TestAskThenCloseStillClosesWhenTheKillErrors(t *testing.T) {
 				s.adoptSetupJobLocked(fresh)
 				s.mu.Unlock()
 
-				return stale, logger.contains("could not kill the stale setup browser's process group")
+				return stale, logger.containsAtWarn("could not kill the stale setup browser's process group")
 			},
 		},
 		{
@@ -254,7 +262,7 @@ func TestAskThenCloseStillClosesWhenTheKillErrors(t *testing.T) {
 					t.Fatalf("newProcessJob: %v", err)
 				}
 				closeLaunchJob(job, logger)
-				return job, logger.contains("could not kill the refresh browser's process group")
+				return job, logger.containsAtWarn("could not kill the refresh browser's process group")
 			},
 		},
 	}
