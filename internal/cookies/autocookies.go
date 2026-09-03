@@ -643,12 +643,33 @@ var setupBrowserGone = realSetupBrowserGone
 // only so a test that has stubbed the seam can put the genuine probe back for
 // one case; nothing else should call it directly.
 func realSetupBrowserGone(job *processJob) (gone, known bool) {
-	// queryable, not `job != nil`. activeProcesses answers 0 for three
-	// different situations and only one of them is "the job is empty": a nil
-	// job (a launch where newProcessJob failed, or where the assign failed and
-	// the launcher dropped the untrackable job rather than let it lie), an
-	// already-closed handle, and a platform whose processJob cannot count at
-	// all. The type knows which it is; this does not.
+	return browserGoneFrom(job)
+}
+
+// browserGoneFrom is realSetupBrowserGone's body, written against the two
+// methods it actually uses rather than against *processJob.
+//
+// The split buys exactly one thing, and it is the thing the owner's ruling
+// asked for. The Linux processJob forwards both methods to a pgroupJob, so a
+// test on Windows can hand THIS function a pgroupJob backed by a fake process
+// table and execute the real pairing — including the branch that matters most,
+// a table that cannot be read answering "cannot say" rather than "gone". No
+// Linux box, no browser, and no second copy of the rule to drift.
+//
+// queryable, not `job != nil`. activeProcesses answers 0 for three different
+// situations and only one of them is "the job is empty": a nil job (a launch
+// where newProcessJob failed, or where the assign failed and the launcher
+// dropped the untrackable job rather than let it lie), an already-closed handle
+// or a forgotten group, and a platform whose processJob cannot count at all.
+// The type knows which it is; this does not.
+//
+// Passing a nil *processJob through the interface parameter still answers
+// (false, false): all three platform implementations nil-check their receiver,
+// which is the same property that makes queryable() the right question.
+func browserGoneFrom(job interface {
+	queryable() bool
+	activeProcesses() (int, error)
+}) (gone, known bool) {
 	if !job.queryable() {
 		return false, false
 	}

@@ -131,3 +131,84 @@ func TestCloseLaunchJobAsksForTheKill(t *testing.T) {
 		t.Fatalf("closeLaunchJob asked to kill %v, want exactly the job", *asked)
 	}
 }
+
+// TestBrowserGoneFromAProcessGroup runs the reap's actual predicate over the
+// actual Linux liveness type, on Windows, with a fake process table. This is
+// what "unit-tested with a fake process table, no Linux box" means: the four
+// answers below are the four the reap can receive, and three of them are new
+// on Linux.
+//
+// Mutations, one per case: return (true, true) for an unadopted group and every
+// launch that could not be tracked is reaped immediately; return (false, true)
+// for the unreadable table and a hardened container reaps a setup whose browser
+// is on screen; return `active >= 0` and a live browser reads as gone; return
+// known=false for the empty group and the reap never fires at all, which is
+// today's bug.
+func TestBrowserGoneFromAProcessGroup(t *testing.T) {
+	cases := []struct {
+		name       string
+		table      map[int]int
+		unreadable bool
+		job        *pgroupJob
+		wantGone   bool
+		wantKnown  bool
+	}{
+		{
+			name:      "no group adopted — nothing can say",
+			table:     map[int]int{setupGroupPid: setupGroupPid},
+			job:       &pgroupJob{},
+			wantGone:  false,
+			wantKnown: false,
+		},
+		{
+			name:       "process table unreadable — nothing can say",
+			unreadable: true,
+			job:        &pgroupJob{pgid: setupGroupPid},
+			wantGone:   false,
+			wantKnown:  false,
+		},
+		{
+			name:      "the browser outlived its launcher",
+			table:     map[int]int{setupChildPid: setupGroupPid, strangerPid: strangerGroup},
+			job:       &pgroupJob{pgid: setupGroupPid},
+			wantGone:  false,
+			wantKnown: true,
+		},
+		{
+			name:      "the group is empty — gone, and we can say so",
+			table:     map[int]int{strangerPid: strangerGroup},
+			job:       &pgroupJob{pgid: setupGroupPid},
+			wantGone:  true,
+			wantKnown: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unreadable {
+				unreadableProcessTable(t)
+			} else {
+				fakeProcessTable(t, tc.table)
+			}
+			gone, known := browserGoneFrom(tc.job)
+			if gone != tc.wantGone || known != tc.wantKnown {
+				t.Fatalf("browserGoneFrom = (gone %v, known %v), want (%v, %v)",
+					gone, known, tc.wantGone, tc.wantKnown)
+			}
+		})
+	}
+}
+
+// TestBrowserGoneFromANilJobStillAnswers keeps the typed-nil path honest. Every
+// platform's processJob nil-checks its receiver, which is why the question asked
+// is queryable() and not `job != nil` — and why handing this function a nil
+// *processJob through an interface parameter is safe rather than a panic.
+//
+// Mutation: change queryable() on any platform to dereference before checking
+// and this panics, which is the failure the interface hides if nobody looks.
+func TestBrowserGoneFromANilJobStillAnswers(t *testing.T) {
+	gone, known := browserGoneFrom((*processJob)(nil))
+	if gone || known {
+		t.Fatalf("a nil job answered (gone %v, known %v), want (false, false)", gone, known)
+	}
+}
