@@ -464,6 +464,14 @@ func TestTwitchMarkStampsTheSharedRecoveryDedupe(t *testing.T) {
 	if !ok {
 		t.Fatal("the Twitch mark fired recovery without stamping lastRecoveryDecided — once the pilot is armed, the next membership-probe verdict raises a second alarm for the same loss")
 	}
+
+	rs.mu.RLock()
+	_, escalated := rs.livenessRefireBackoff["twitch"]
+	rs.mu.RUnlock()
+	if escalated {
+		t.Error("the tier-1 fire escalated the tier-2 back-off — noteRecoveryDecided must stamp lastRecoveryDecided without touching livenessRefireBackoff; the back-off counts TIER-2 alarms only, and a tier-1 fire is supposed to consume one tier-2 window without growing the next")
+	}
+
 	if due, _ := rs.recordLiveness("twitch", false, stamp.Add(time.Second)); due {
 		t.Error("a tier-2 signed-out verdict one second after the mark still warranted recovery — the mark's stamp is not reaching the dedupe recordLiveness reads")
 	}
