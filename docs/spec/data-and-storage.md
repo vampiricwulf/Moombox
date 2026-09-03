@@ -881,7 +881,7 @@ Three maps, deliberately separate (`internal/cookies/refresh.go`):
 | `SetExpectedPlatforms` seeding (`cmd/moombox/main.go:276-278`) | — | yes |
 | `R F` / Web shift+click / the Settings-page twin | best-available ladder | **no** — the flag only picks the rung, and never causes a decline |
 | `R C` / `POST /api/cookies/recheck` | in-process | never |
-| `StartSetup` (interactive login) | browser | never — acquisition, and an explicit gesture |
+| `StartSetup` (interactive login — the TUI's `R L` and first-run wizard, the dashboard's `Re-login` click and `/auto-setup/*`) | browser | never — acquisition, and an explicit gesture |
 
 **The periodic timer is `gateExempt`.** `browserGatePolicy` (`internal/cookies/autocookies.go`) has two values: `gateApplies` (the zero value, so anything that forgets to say gets the safe answer) for every caller acting on a live operator intention, and `gateExempt` for `StartPeriodicRefresh`'s goroutine and nothing else. `main.go` starts that loop only when the flag was true at boot, so the flag has already been consulted; re-asking it per tick would leave an operator who switched it off without restarting with the timer still running *and* silently switched to browser-free imports of a profile nothing changes between ticks. Flipping the flag off at runtime therefore leaves the timer launching browsers until restart, **by ruling** — the restart-required label both UIs carry is the honest cover. Do not "fix" it.
 
