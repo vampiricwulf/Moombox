@@ -958,6 +958,22 @@ func (s *runState) initServices(logLevelOverride string) error {
 		})
 		return path, btype
 	}
+	// cookies.acquisition, read LIVE. The callback shape mirrors
+	// ConfiguredBrowserOverride above and BrowserLaunchAllowed before it: the
+	// cookies package cannot import config, and a value snapshotted here would
+	// make the setting restart-required with nothing in either UI saying so.
+	//
+	// It composes with BrowserLaunchAllowed rather than replacing it. That flag
+	// still answers "may this pass launch a browser at all"; this one answers
+	// "should it, given one is available". "profile" with auto_enabled = false
+	// imports, exactly as "auto" does with the flag off.
+	autoCookieSvc.AcquisitionMode = func() string {
+		var mode string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			mode = c.Cookies.Acquisition
+		})
+		return mode
+	}
 	s.autoCookieSvc = autoCookieSvc
 
 	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain

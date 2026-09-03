@@ -153,6 +153,20 @@ var dangerousProfilePathSubstrings = []string{
 	`\librewolf\profiles`,
 }
 
+// The two values of cookies.acquisition, which decide how a REFRESH pass
+// acquires credentials. Exported because cmd/moombox names them, and because a
+// literal repeated across four packages is how an enum drifts.
+//
+// Two, by ruling (2026-09-02). The audit proposed a third, "browser", meaning
+// "launch when a browser resolves" — which is what "auto" already means, so at
+// every site the decision was profile-vs-rest and the two values could not be
+// told apart. A value that behaves like another is a trap; it was dropped, and
+// a later semantics can add it additively.
+const (
+	AcquisitionAuto    = "auto"
+	AcquisitionProfile = "profile"
+)
+
 // validateBrowserProfileDir refuses configured profile directories that
 // sit inside any user-installed browser's real profile tree. Empty
 // input is allowed — it just leaves the service inert, since every entry
@@ -443,6 +457,23 @@ type AutoCookieService struct {
 	// ConfiguredBrowserPath/Type empty in the status response, which the
 	// UI treats as "auto-detect selected".
 	ConfiguredBrowserOverride func() (path, browserType string)
+
+	// AcquisitionMode returns cookies.acquisition from the ACTIVE config. It is
+	// the injected form of that setting for the same reason BrowserLaunchAllowed
+	// is the injected form of cookies.auto_enabled: internal/cookies has no
+	// dependency on internal/config, and keeping it that way is why this is a
+	// predicate rather than a string copied in at construction — the operator
+	// can change the mode while the process runs and the next R F has to see it.
+	//
+	// Consulted at refreshCookiesDetailed's launch-vs-import decision, and at
+	// the three sites that used to INFER that decision from the host: the two
+	// READ-ONLY profile sites (which stop consulting the launch guard when this
+	// answers "profile" — audit G3), decideStartupSeed's browser short-circuit,
+	// and the periodic tick's browser-free test. resolvedBrowser is untouched,
+	// and so is StartSetup — the interactive login is acquisition, not a refresh.
+	//
+	// nil = "auto", so every existing caller and test keeps today's behaviour.
+	AcquisitionMode func() string
 
 	// profileDirErr captures any validation failure on the configured
 	// profile directory (e.g. it points at a real browser's profile
@@ -947,6 +978,24 @@ const (
 // before.
 func (s *AutoCookieService) browserLaunchBlocked(policy browserGatePolicy) bool {
 	return policy == gateApplies && s.BrowserLaunchAllowed != nil && !s.BrowserLaunchAllowed()
+}
+
+// resolvedAcquisition is cookies.acquisition as this package uses it: always
+// one of the two constants, never anything else.
+//
+// The normalisation is not redundant with config.validateOrNormalize. This
+// package is reachable from tests and from a service built by struct literal
+// that never went through config at all, and an unhandled third value would
+// mean an undefined refresh path rather than a loud failure. Same rule as
+// browserLaunchBlocked's nil predicate: the safe answer, always.
+func (s *AutoCookieService) resolvedAcquisition() string {
+	if s.AcquisitionMode == nil {
+		return AcquisitionAuto
+	}
+	if strings.ToLower(strings.TrimSpace(s.AcquisitionMode())) == AcquisitionProfile {
+		return AcquisitionProfile
+	}
+	return AcquisitionAuto
 }
 
 // refreshBrowser is resolvedBrowser as a REFRESH PASS sees it: the configured
@@ -1989,7 +2038,17 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// The disabled case is the same shape and lands here for the same reason:
 	// an operator who hand-updates their browser profile presses R F to have it
 	// read, and launching nothing is precisely what they want.
+	//
+	// THE THIRD WAY IN is cookies.acquisition = "profile", and it is the only
+	// one that does not depend on the host. A Windows desktop with Firefox
+	// installed resolves a browser on every pass, so before this the read-only
+	// import was unreachable there — the operator could not ask to have their
+	// REAL signed-in profile read instead of a managed one driven headlessly.
+	// "auto" leaves the rule exactly as it was.
 	importedFromProfile := browser == nil
+	if s.resolvedAcquisition() == AcquisitionProfile {
+		importedFromProfile = true
+	}
 
 	var netscapeCookies string
 	var err error
