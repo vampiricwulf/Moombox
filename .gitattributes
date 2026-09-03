@@ -20,6 +20,12 @@
 *.md text eol=lf
 *.sh text eol=lf
 
+# The citation checker's allowlist (internal/docs) is read by a test that trims
+# each line, so CRLF would still parse; this pin is hygiene against git's
+# "will become CRLF" warning on a fresh Windows checkout. Path-specific on
+# purpose: a blanket *.txt would renormalise unrelated files.
+internal/docs/citation_allowlist.txt text eol=lf
+
 # Docker files are consumed on Linux — keep LF on Windows checkouts too.
 Dockerfile text eol=lf
 .dockerignore text eol=lf

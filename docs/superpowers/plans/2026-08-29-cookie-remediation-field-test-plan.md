@@ -218,6 +218,7 @@ is `go:embed`-ed - rebuild after any frontend change.
 | 25 | 4+7 | Web Refresh (plain click) vs TUI `R C` on the same state | Toast vs feedback line | Same sentence per platform ("YouTube OK", "Twitch not authenticated", "... - could not establish") - pinned by exact equality |
 | 26 | 6 | Docker (or any browserless host): `auto_enabled = false`, update the mounted profile, `R F` / Settings button | Log; `cookies.txt` | Import with no browser, regardless of the flag and of what `cookies.txt` held; `docker/entrypoint.sh:69-93` explains it in the seeded config |
 | 27 | 8 | Fresh `config.toml` with an existing data dir | Log | The platform-detection line names its source (sidecar `cookies.meta.json` first, loose cookie-name predicates second; `services.go:378-385`) |
+| 28 | H1 | The next Twitch GQL failure on a real install — a 5xx/429 during a Twitch incident, or a 401/403 on a dead `auth-token` (gate 18's setup produces one); nothing to force | Log at `DEBUG`; the job's error text | Every `gql …` error ends in `<n>-byte body` (a count — `gql auth failure (401) (StreamPlaybackAccessToken): <n>-byte body`), never a fragment of the upstream body; every `twitch gql retry` line carries exactly `op`/`attempt`/`delay`/`prev_status` and no `prev_err`; a 5xx still keeps the job waiting (`classifyProbeErr` reads `http 5` out of the unchanged prefix). Failed looks like: any `{"error"` or HTML fragment inside a `gql …` error or a retry line, or a `prev_err=` key on one (`internal/twitch/api.go` `gqlRequest`, H1 R3) |
 
 ---
 
