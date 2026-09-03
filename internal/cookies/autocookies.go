@@ -3274,6 +3274,14 @@ func (s *AutoCookieService) cleanup() {
 // Caller must hold s.mu.
 func (s *AutoCookieService) cleanupLocked() {
 	if s.setupJob != nil {
+		// BEFORE the close, and before the field is nilled. On Windows the
+		// close is itself the kill and this is a no-op; on Linux the close
+		// forgets a number, so this is the only thing that reaches the browser.
+		// See killTrackedProcesses.
+		if err := killTrackedProcesses(s.setupJob); err != nil && s.logger != nil {
+			s.logger.Warn("could not kill the setup browser's process group; it may still be running",
+				"err", err)
+		}
 		s.setupJob.close()
 		s.setupJob = nil
 	}
@@ -3352,6 +3360,9 @@ func (s *AutoCookieService) adoptSetupJobLocked(job *processJob) {
 	if s.setupJob != nil {
 		if s.logger != nil {
 			s.logger.Warn("closing a setup Job Object left behind by an earlier attempt")
+		}
+		if err := killTrackedProcesses(s.setupJob); err != nil && s.logger != nil {
+			s.logger.Warn("could not kill the stale setup browser's process group", "err", err)
 		}
 		s.setupJob.close()
 	}

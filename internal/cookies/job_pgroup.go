@@ -203,3 +203,25 @@ func (j *pgroupJob) forget() {
 		j.pgid = 0
 	}
 }
+
+// killTrackedProcesses finishes off whatever a job is still tracking, for the
+// platforms where CLOSING the job does not do it.
+//
+// The default is a no-op, and that default is CORRECT on Windows: close() there
+// is KILL_ON_JOB_CLOSE, so by the time anyone could ask, the kill has already
+// happened. job_linux.go binds it, because a process group is a NUMBER, not a
+// kernel reference — closing a Linux job forgets an integer and kills nothing,
+// so every site that on Windows relied on the close has to ask out loud.
+//
+// THE SITE THAT DOES NOT ASK MATTERS AS MUCH AS THE THREE THAT DO.
+// trackedSetupJob closes a job whose assign FAILED and must not kill: on
+// Windows that job holds nothing, but on Linux the group is the browser the
+// launcher just put on screen, and killing it there would close the window the
+// user is signing into because a bookkeeping call went wrong. That asymmetry is
+// the whole reason close() forgets rather than kills — do not "simplify" it
+// away.
+//
+// It returns an error so the three callers can say, in their own logger, that a
+// browser may still be running. job_linux.go's init is the one production site
+// that binds it; tests swap it and restore it with t.Cleanup.
+var killTrackedProcesses = func(*processJob) error { return nil }

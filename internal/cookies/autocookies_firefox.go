@@ -750,7 +750,7 @@ func cleanFirefoxLockFiles(profileDir string) {
 // errBrowserDrainTimeout is returned by runWithTimeout when the launcher
 // process was reaped but the Job Object still held live processes once the
 // launch budget ran out — the browser was still working, or hung, and the
-// deferred job.close() is about to kill it.
+// deferred closeLaunchJob is about to kill it.
 //
 // It is deliberately DISTINCT from a nil return. Returning nil would report a
 // hung browser as a refresh that merely took the whole budget: the exact
@@ -772,8 +772,9 @@ func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
 // This is the whole point of the Firefox fix. cmd.Wait() returning tells us
 // only that the LAUNCHER exited: Firefox (and Waterfox / LibreWolf / Zen)
 // hand off to a separate browser process and the launcher exits in ~170ms.
-// Returning at that moment runs the caller's deferred job.close(), whose
-// KILL_ON_JOB_CLOSE kills the real browser mid-page-load — measured, and the
+// Returning at that moment runs the caller's deferred closeLaunchJob, whose
+// kill (KILL_ON_JOB_CLOSE on Windows, the group kill on Linux) lands on the
+// real browser mid-page-load — measured on Windows, and the
 // reason every Firefox-family cookie refresh silently did nothing.
 //
 // The budget is shared with the launch (startedAt is stamped before
@@ -783,7 +784,7 @@ func shouldKeepWaiting(active int, elapsed, budget time.Duration) bool {
 // Three ways out:
 //   - the job empties → nil, the browser finished on its own;
 //   - the budget expires with processes alive → errBrowserDrainTimeout, and
-//     the caller's job.close() kills them;
+//     the caller's closeLaunchJob kills them;
 //   - the query fails → nil, degrading to the pre-drain behaviour. That is
 //     bad but known; spinning on a failing syscall for the whole budget is
 //     worse.
@@ -888,6 +889,32 @@ func drainJob(ctx context.Context, job *processJob, startedAt time.Time, budget 
 	}
 }
 
+// closeLaunchJob is runWithTimeout's teardown: finish off whatever the job
+// still tracks, then release it.
+//
+// Named rather than inlined so it can be tested without launching a process.
+// Two of runWithTimeout's exits arrive here with a browser still alive — the
+// drain timing out with processes left in the job, and the caller's context
+// being cancelled — and on Windows the close is what kills them. On Linux the
+// close forgets a process-group id, so the kill has to be asked for first; the
+// order matters, because a job that has already forgotten its group has nothing
+// left to name.
+func closeLaunchJob(job *processJob, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+}) {
+	if job == nil {
+		return
+	}
+	logger.Debug("closing job object (killing all tracked processes)")
+	if err := killTrackedProcesses(job); err != nil {
+		logger.Warn("could not kill the refresh browser's process group; it may still be running",
+			"err", err)
+	}
+	job.close()
+}
+
 // runWithTimeout starts cmd inside a Job Object, waits for the launched
 // process AND for the job to empty, and kills the tree on the way out.
 //
@@ -912,12 +939,7 @@ func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, o
 	} else if job != nil {
 		logger.Debug("created job object for process tracking")
 	}
-	defer func() {
-		if job != nil {
-			logger.Debug("closing job object (killing all tracked processes)")
-			job.close()
-		}
-	}()
+	defer closeLaunchJob(job, logger)
 
 	// Stamped before Start so the launch and the drain share ONE budget
 	// rather than the drain quietly starting a second one.
