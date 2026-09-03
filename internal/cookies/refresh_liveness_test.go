@@ -115,6 +115,155 @@ func TestRecordLivenessSeparatesPlatforms(t *testing.T) {
 	}
 }
 
+// TestRecordLivenessRefireWindowDoublesAfterEachAlarm is the FACTOR.
+//
+// TestRecordLivenessRefiresAfterTheWindow above is the BASE case and is
+// unchanged: the first re-alarm lands one livenessRefireWindow after the first
+// alarm. This picks up where that stops. "30 min, then double" means the
+// doubling begins AFTER the first re-alarm, so a session dead for 90 minutes
+// has produced three alarms, not four.
+//
+// Mutation: drop `next *= livenessRefireFactor` from escalateLivenessRefire.
+// Every re-alarm then lands on the flat window and an armed tier 2 pages an
+// operator 48 times a day, forever, for one loss.
+func TestRecordLivenessRefireWindowDoublesAfterEachAlarm(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	t0 := time.Now()
+
+	if due, _ := rs.recordLiveness("youtube", false, t0); !due {
+		t.Fatal("premise broken: the first logged-out verdict must warrant recovery")
+	}
+	if due, _ := rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow)); !due {
+		t.Fatal("premise broken: the first re-alarm must land one base window later")
+	}
+
+	second := t0.Add(livenessRefireWindow)
+	if due, _ := rs.recordLiveness("youtube", false, second.Add(livenessRefireWindow)); due {
+		t.Error("a verdict one BASE window after the first re-alarm warranted recovery — the window did not double")
+	}
+	if due, _ := rs.recordLiveness("youtube", false, second.Add(2*livenessRefireWindow)); !due {
+		t.Error("a verdict two base windows after the first re-alarm did not warrant recovery — the doubled window is wrong or the schedule latched")
+	}
+}
+
+// TestRecordLivenessRefireWindowStopsAtTheCap is the CAP. Uncapped doubling
+// reaches a fortnight in eleven alarms, and a session that recovered two weeks
+// ago is still suppressed.
+//
+// Mutation: delete the `if next > livenessRefireCap` clamp — the window after
+// the sixth alarm is then 32 h.
+func TestRecordLivenessRefireWindowStopsAtTheCap(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	now := time.Now()
+
+	// A full DAY between alarms is longer than every window on the way up, so
+	// each one fires and each one escalates: 30m, 1h, 2h, 4h, 8h, 16h, 24h.
+	for i := range 8 {
+		if due, _ := rs.recordLiveness("youtube", false, now.Add(time.Duration(i)*24*time.Hour)); !due {
+			t.Fatalf("alarm %d did not fire although a full day had passed — the schedule is not advancing", i)
+		}
+	}
+
+	rs.mu.RLock()
+	got := rs.livenessRefireBackoff["youtube"]
+	rs.mu.RUnlock()
+	if got != livenessRefireCap {
+		t.Errorf("the back-off settled at %v, want the %v cap", got, livenessRefireCap)
+	}
+
+	// The cap is a real window, not just a stored number.
+	last := now.Add(7 * 24 * time.Hour)
+	if due, _ := rs.recordLiveness("youtube", false, last.Add(livenessRefireCap-time.Minute)); due {
+		t.Error("a verdict inside the capped window warranted recovery")
+	}
+	if due, _ := rs.recordLiveness("youtube", false, last.Add(livenessRefireCap)); !due {
+		t.Error("a verdict a full cap later did not warrant recovery — the schedule latched at the cap")
+	}
+}
+
+// TestRecordLivenessRefireResetsWhenAuthReturns is the RESET. A session that
+// died, escalated for a day, was repaired and died again is a NEW loss;
+// reporting it on the old schedule holds the alarm for up to 24 hours.
+//
+// The reset touches the ESCALATION only — lastRecoveryDecided is left standing
+// (see recordLiveness), so this also states that boundary. The final verdict is
+// therefore placed exactly one BASE window after the second alarm's stamp: the
+// base schedule fires there and the escalated one (2x base) does not, which is
+// the only interval that tells the two apart.
+//
+// Mutation: drop resetLivenessRefire from the loggedIn branch.
+func TestRecordLivenessRefireResetsWhenAuthReturns(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	t0 := time.Now()
+
+	if due, _ := rs.recordLiveness("youtube", false, t0); !due {
+		t.Fatal("premise broken: the first logged-out verdict must warrant recovery")
+	}
+	// Stamps at t0+base and escalates the window to 2x base.
+	if due, _ := rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow)); !due {
+		t.Fatal("premise broken: the first re-alarm must land one base window later")
+	}
+
+	// Auth comes back a minute later. Silent, and it moves no stamp — only the
+	// escalation.
+	if due, _ := rs.recordLiveness("youtube", true, t0.Add(livenessRefireWindow+time.Minute)); due {
+		t.Fatal("a logged-in observation warranted recovery")
+	}
+
+	// One BASE window after the last stamp. On the base schedule that fires;
+	// on the escalated one it is still half a window short.
+	if due, _ := rs.recordLiveness("youtube", false, t0.Add(2*livenessRefireWindow)); !due {
+		t.Error("the re-alarm after a repair still wanted the escalated window — a fresh loss must be reported on the base schedule")
+	}
+}
+
+// TestRecordLivenessRefireBackoffIsPerPlatform: the schedule is keyed like the
+// three maps beside it. TestRecordLivenessSeparatesPlatforms pins the same
+// property for the dedupe STAMP; this pins it for the WINDOW, which a single
+// shared time.Duration would collapse.
+//
+// Mutation: make livenessRefireBackoff a plain time.Duration field.
+func TestRecordLivenessRefireBackoffIsPerPlatform(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	now := time.Now()
+
+	for i := range 6 {
+		rs.recordLiveness("youtube", false, now.Add(time.Duration(i)*24*time.Hour))
+	}
+
+	last := now.Add(5 * 24 * time.Hour)
+	if due, _ := rs.recordLiveness("twitch", false, last); !due {
+		t.Fatal("twitch's first logged-out verdict did not warrant recovery")
+	}
+	if due, _ := rs.recordLiveness("twitch", false, last.Add(livenessRefireWindow)); !due {
+		t.Error("twitch's re-alarm waited on YouTube's escalated window — the back-off is not per platform")
+	}
+}
+
+// TestLivenessRefireScheduleIsTheRuledNumbers pins the three constants to the
+// owner's numbers (2026-08-29): 30 min, then double, capped at 24 h.
+//
+// The four schedule tests above use the constants SYMBOLICALLY — each one
+// passes just as well for a 15-minute base or a 20-hour cap — so this is the
+// only thing in the file that fails when a number drifts. It is deliberately a
+// literal pin and nothing more: the SHAPE of the schedule is the other four
+// tests' job, and restating it here with numbers would be a second copy of the
+// same arithmetic to keep in step.
+//
+// Mutations: livenessRefireWindow = 15 * time.Minute; livenessRefireFactor = 3;
+// livenessRefireCap = 20 * time.Hour. Each fails exactly one line below.
+func TestLivenessRefireScheduleIsTheRuledNumbers(t *testing.T) {
+	if livenessRefireWindow != 30*time.Minute {
+		t.Errorf("livenessRefireWindow = %v, want 30m — the owner's base", livenessRefireWindow)
+	}
+	if livenessRefireFactor != 2 {
+		t.Errorf("livenessRefireFactor = %d, want 2 — \"then double\"", livenessRefireFactor)
+	}
+	if livenessRefireCap != 24*time.Hour {
+		t.Errorf("livenessRefireCap = %v, want 24h — \"capped near a day\"", livenessRefireCap)
+	}
+}
+
 // TestLivenessRecoveryPilotIsDisarmed is the guard on the staged rollout.
 //
 // One logged-out verdict reaching OnRecoveryNeeded notifies the operator on
