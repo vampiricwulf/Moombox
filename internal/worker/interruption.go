@@ -61,6 +61,30 @@ func segmentProgressResetsStallCounters(p engine.DownloadProgress, lastBytes *at
 	return true
 }
 
+// noteSegmentProgress is runLiveStreamDownload's onSegmentProgress body,
+// extracted whole so the live loop's only write to the shared
+// last-new-segment clock is reachable from a test: nothing in this package
+// calls runLiveStreamDownload, so in the closure these two lines were
+// unreachable to every test in the tree.
+//
+// On genuine new bytes for this stream (segmentProgressResetsStallCounters
+// decides, and owns the echo suppression) it stamps lastSegTime -- the ONE
+// clock shared by the verify branch's streamSegmentTimeout and the chat
+// gate's joint-idle release, "one clock, no drift" -- and zeroes the
+// still-live re-verification counter. Returns whether it counted as
+// progress; production discards it, tests assert on it. StoreNow() rather
+// than an injected now: this runs on every progress callback of every live
+// download, and an unconditional time.Now() in the caller would buy nothing
+// but a parameter.
+func noteSegmentProgress(p engine.DownloadProgress, lastBytes *atomic.Int64, lastSegTime *atomicTimeValue, consecutiveLiveChecks *atomic.Int32) bool {
+	if !segmentProgressResetsStallCounters(p, lastBytes) {
+		return false
+	}
+	lastSegTime.StoreNow()
+	consecutiveLiveChecks.Store(0)
+	return true
+}
+
 // interruptionSignalStaleAfter bounds trust in a signature the observation
 // sites stopped re-confirming. The cadences actually feeding observe(),
 // fastest to slowest:
