@@ -227,6 +227,34 @@ type CookiesConfig struct {
 	// user's actual signed-in cookies, so it's an opt-in privacy
 	// surface that the user has to consciously enable. DECISIONS #6.
 	DpapiFallback bool `toml:"dpapi_fallback,omitempty" json:"dpapi_fallback,omitempty"`
+
+	// Acquisition selects HOW a cookie REFRESH acquires credentials.
+	//
+	//   "auto"    — the default, and exactly the behaviour that shipped before
+	//               this field existed: a resolvable browser takes the headless
+	//               launch path, a host with none imports the profile read-only.
+	//   "profile" — never launch a browser for a REFRESH. Read
+	//               browser_profile_dir read-only even on a desktop that has a
+	//               browser installed. The only route to browserless import
+	//               from a real signed-in profile on Windows, and the opt-in
+	//               that lifts the launch-path profile-dir guard on the two
+	//               read-only sites (audit G3).
+	//
+	// Two values by ruling (2026-09-02). The audit's "browser" was
+	// observationally identical to "auto" at every site and was dropped: a
+	// value that behaves like another is a trap. A later semantics can add it.
+	//
+	// Absent or empty means "auto", and there is NO migration: Load decodes the
+	// file over Defaults(), so a config written before this key already carries
+	// it. An unrecognised value is reported by Validate, replaced by Normalize.
+	//
+	// COMPOSES with AutoEnabled rather than replacing it — that flag still
+	// decides whether a pass may launch at all, and whether the periodic timer
+	// exists; under "profile" that timer and the automatic recovery attempt
+	// import instead of launching, and the timer's import stays behind
+	// automaticImportGuard. Read LIVE through AutoCookieService.AcquisitionMode,
+	// so this is NOT restart-required.
+	Acquisition string `toml:"acquisition" json:"acquisition"`
 }
 
 // DiskConfig holds disk space monitoring settings.

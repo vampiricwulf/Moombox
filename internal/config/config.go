@@ -82,6 +82,7 @@ func Defaults() *MoomboxConfig {
 			BrowserProfileDir: "./browser-profile",
 			Platforms:         []string{},
 			RefreshInterval:   FlexDuration{Value: 360}, // 6 hours in minutes
+			Acquisition:       "auto",
 		},
 		Disk: DiskConfig{
 			WarnPercent:     90,
@@ -686,6 +687,30 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		fail("cookies.refresh_interval %v out of range 10..10080 minutes", cfg.Cookies.RefreshInterval.Value)
 		if !reportOnly {
 			cfg.Cookies.RefreshInterval = defaults.Cookies.RefreshInterval
+		}
+	}
+
+	// cookies.acquisition: two values, and anything else is the default.
+	// Same shape as network.network_access above — fail() records the issue
+	// for Validate's callers (Save refuses to write, PUT /api/config surfaces
+	// a field error) and the !reportOnly arm replaces the value so a
+	// hand-edited config.toml cannot hand AutoCookieService a mode no branch
+	// handles.
+	//
+	// The empty string gets its own silent arm. It is not an operator mistake:
+	// it is what a struct built without Defaults() carries, and what a UI that
+	// omits the field sends. Reporting it would make Save refuse a config the
+	// operator never typed.
+	switch cfg.Cookies.Acquisition {
+	case "auto", "profile":
+	case "":
+		if !reportOnly {
+			cfg.Cookies.Acquisition = defaults.Cookies.Acquisition
+		}
+	default:
+		fail("cookies.acquisition %q must be one of auto|profile", cfg.Cookies.Acquisition)
+		if !reportOnly {
+			cfg.Cookies.Acquisition = defaults.Cookies.Acquisition
 		}
 	}
 
