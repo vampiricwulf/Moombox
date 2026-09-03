@@ -214,6 +214,14 @@ type SetupWizardModel struct {
 	cookieTickGen    int
 	cookieTickActive bool
 
+	// cookieOnly makes this wizard a cookie-login overlay rather than the
+	// first-run flow: the same step, the same callbacks, the same countdown,
+	// but no stages around it. It changes only the two ways OUT — Esc and the
+	// third list row close the overlay instead of walking to the channel
+	// editor, whose Tab would rewrite config.toml on a configured install.
+	// See OpenCookieLogin.
+	cookieOnly bool
+
 	// Channel sub-editor (shared by simple and advanced)
 	channels          []config.ChannelConfig
 	channelIndex      int
@@ -278,6 +286,7 @@ func (m *SetupWizardModel) Open() {
 	m.advancedFormDone = false
 	m.advancedInitCmd = nil
 	m.simpleStage = setupSimpleCookies
+	m.cookieOnly = false
 	m.cookieFocus = 0
 	m.cookieActive = false
 	m.cookieFinishing = false
@@ -418,6 +427,69 @@ func (m *SetupWizardModel) armCookieTick() tea.Cmd {
 	m.cookieTickGen++
 	m.cookieTickActive = true
 	return cookieCountdownTick(m.cookieTickGen)
+}
+
+// OpenCookieLogin opens the wizard at its cookie step alone — the R L chord's
+// entrance, for an install that is already set up.
+//
+// It deliberately does NOT go through Open(). Open() is the FIRST-RUN entrance:
+// it drops to setupModeSelect, clears the config values and channel list the
+// wizard is about to collect, and runs OnCheckFFmpeg — none of which a cookie
+// login on a configured install has any business doing. What this sets instead
+// is exactly the cookie flow's own state, so the operator lands on the same
+// state machine the first-run wizard drives: the same OnStartAutoCookie /
+// OnFinishAutoCookie / OnCancelAutoCookie, the same cookieSetupCountdownSeconds
+// countdown, the same three-state verdict. No second implementation to drift.
+//
+// platform PRESELECTS the focused row ("twitch" → Twitch, anything else →
+// YouTube) and starts nothing, so an unrecognised value costs one keystroke and
+// can never open a browser at the wrong site.
+//
+// A no-op while the wizard is already visible: a chord must not throw away a
+// first-run setup in progress, and a second overlay over the first would reset
+// a countdown that has a real browser window behind it.
+func (m *SetupWizardModel) OpenCookieLogin(platform string) {
+	if m.visible {
+		return
+	}
+	m.visible = true
+	m.cookieOnly = true
+	m.mode = setupModeSimple
+	m.simpleStage = setupSimpleCookies
+	m.errorMsg = ""
+	m.saving = false
+	m.cookieFocus = 0
+	if platform == "twitch" {
+		m.cookieFocus = 1
+	}
+	m.cookieActive = false
+	m.cookieFinishing = false
+	m.cookiePlatform = ""
+	m.cookieYTDone = false
+	m.cookieTWDone = false
+	m.cookieCountdown = 0
+	m.cookieTimedOut = false
+	m.cookieTickActive = false // any in-flight chain is stale-gen'd by the next arm
+}
+
+// closeCookieLogin ends a cookie-login overlay, cancelling an in-flight setup
+// first. The cancel is not decoration: AutoCookieService holds the acquisition
+// slot until someone cancels, finishes, or the server-side reap notices the
+// browser is gone, so leaving with a browser open would meet the next R L —
+// and the next periodic refresh — with ErrSetupInProgress for the whole grace
+// window. Every way OUT funnels through here rather than calling Close()
+// directly, so a later exit added beside one of them inherits the release
+// instead of forgetting it.
+func (m *SetupWizardModel) closeCookieLogin() {
+	if m.cookieActive && m.OnCancelAutoCookie != nil {
+		m.OnCancelAutoCookie()
+	}
+	m.cookieActive = false
+	m.cookieFinishing = false
+	m.cookiePlatform = ""
+	m.cookieTimedOut = false
+	m.cookieOnly = false
+	m.Close()
 }
 
 // UpdateComponents routes tea.Msg to the embedded textinput, huh form, or spinner and syncs.
@@ -672,6 +744,10 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 
 	switch key {
 	case keyEsc:
+		if m.cookieOnly {
+			m.closeCookieLogin()
+			return ""
+		}
 		m.mode = setupModeSelect
 	case keyUp:
 		if m.cookieFocus > 0 {
@@ -707,7 +783,11 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 					m.spinner = newSpinner()
 				}
 			}
-		case 2: // Skip / Next
+		case 2: // Skip / Next — "Close" in the cookie-login overlay
+			if m.cookieOnly {
+				m.closeCookieLogin()
+				return ""
+			}
 			m.simpleStage = setupSimpleChannels
 			m.channelIndex = 0
 			m.channelMode = "list"
@@ -1380,18 +1460,23 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 
 	var lines []string
 
-	// Header
-	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
-	stepRendered := DimStyle.Render("Step 1/2")
-	titlePad := max(contentW-runewidth.StringWidth("Quick Setup")-runewidth.StringWidth("Step 1/2"), 1)
-	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
+	// Header. The cookie-login overlay is ONE step and leads nowhere, so it
+	// carries neither the "Step 1/2" counter nor the step dots; both would be
+	// promising a second screen that does not exist here.
+	if m.cookieOnly {
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Cookie Login"))
+	} else {
+		titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
+		stepRendered := DimStyle.Render("Step 1/2")
+		titlePad := max(contentW-runewidth.StringWidth("Quick Setup")-runewidth.StringWidth("Step 1/2"), 1)
+		lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
 
-	// Step indicator
-	step1 := lipgloss.NewStyle().Foreground(ColorCyan).Render("[>] 1")
-	step2 := lipgloss.NewStyle().Foreground(ColorGray).Render("[ ] 2")
-	lines = append(lines, step1+DimStyle.Render(" - ")+step2)
+		step1 := lipgloss.NewStyle().Foreground(ColorCyan).Render("[>] 1")
+		step2 := lipgloss.NewStyle().Foreground(ColorGray).Render("[ ] 2")
+		lines = append(lines, step1+DimStyle.Render(" - ")+step2)
 
-	lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Cookie Setup"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Cookie Setup"))
+	}
 	lines = append(lines, DimStyle.Render("Log in to platforms to enable cookie-based access"))
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 
@@ -1434,6 +1519,10 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 			{"Twitch", m.cookieTWDone},
 			{"Skip / Next", false},
 		}
+		if m.cookieOnly {
+			// Not "Skip / Next": there is nothing after this step to skip to.
+			options[2].label = "Close"
+		}
 
 		for i, opt := range options {
 			prefix := "  "
@@ -1466,9 +1555,13 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	// Navigation
 	lines = append(lines, "")
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
-	hintLeft := DimStyle.Render("Esc: Back")
+	escLabel := "Esc: Back"
+	if m.cookieOnly {
+		escLabel = "Esc: Close"
+	}
+	hintLeft := DimStyle.Render(escLabel)
 	hintRight := DimStyle.Render("Enter: Select")
-	gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("Enter: Select"))
+	gap := max(1, contentW-runewidth.StringWidth(escLabel)-runewidth.StringWidth("Enter: Select"))
 	lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
 
 	content := strings.Join(lines, "\n")
