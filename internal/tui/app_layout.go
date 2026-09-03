@@ -148,10 +148,10 @@ func (a *App) View() tea.View {
 	content := lipgloss.JoinVertical(lipgloss.Left, mainParts...)
 
 	// Feedback / confirmation messages
-	if a.feedbackMsg != "" {
-		msgColor := feedbackColor(a.feedbackMsg, a.feedbackSev)
+	if a.feedback.msg != "" {
+		msgColor := feedbackColor(a.feedback.msg, a.feedback.sev)
 		content = addOverlayMessage(content, a.width,
-			lipgloss.NewStyle().Foreground(msgColor).Render(a.feedbackMsg),
+			lipgloss.NewStyle().Foreground(msgColor).Render(a.feedback.msg),
 		)
 	}
 
@@ -230,7 +230,7 @@ func addOverlayMessage(content string, width int, msg string) string {
 // opposed to what a scan of the finished sentence can guess.
 //
 // THE SCAN IS DOWNSTREAM OF TWO LOSSY STEPS and that is why this type exists.
-// feedbackColor reads a.feedbackMsg, which is the line AFTER fitFeedback has
+// feedbackColor reads a.feedback.msg, which is the line AFTER fitFeedback has
 // clamped it to the terminal width — so at 40 columns
 //
 //	"Cookies: YouTube OK | Last cookie error: the browser profile held no…"

@@ -193,7 +193,7 @@ func recheckColor(t *testing.T, width int, msg cookieRecheckResultMsg) (string, 
 	app.width = width
 	app.statusBar.SetActivePlatforms(true, false)
 	app.Update(msg)
-	return app.feedbackMsg, feedbackColor(app.feedbackMsg, app.feedbackSev)
+	return app.feedback.msg, feedbackColor(app.feedback.msg, app.feedback.sev)
 }
 
 // TestLastCookieErrorNeverLowersSeverity is the property that makes appending
@@ -327,16 +327,18 @@ func TestRecheckWithNoPlatformsIsAnAdvisory(t *testing.T) {
 	app.width = 200
 	app.statusBar.SetActivePlatforms(false, false)
 	app.Update(cookieRecheckResultMsg{})
-	if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != ColorYellow {
+	if got := feedbackColor(app.feedback.msg, app.feedback.sev); got != ColorYellow {
 		t.Errorf("%q rendered %v, want ColorYellow — it is an advisory about an unconfigured "+
-			"install, and it was yellow before any severity was stated", app.feedbackMsg, got)
+			"install, and it was yellow before any severity was stated", app.feedback.msg, got)
 	}
 }
 
 // TestStatedSeverityDoesNotLeakToTheNextMessage pins the field invariant
 // feedbackSev's doc comment claims.
 //
-// The severity lives beside the message rather than on it, so a setter that
+// The severity lives in the same struct as the message, so a setter cannot
+// write one without the other — this is what says the two setters still
+// replace the whole value rather than patching a field, so a setter that
 // wrote the message and left the severity alone would colour the NEXT line by a
 // fact about the previous one — a green "Saved" rendered red because an R C
 // three seconds earlier found dead credentials. setFeedback and
@@ -346,7 +348,7 @@ func TestStatedSeverityDoesNotLeakToTheNextMessage(t *testing.T) {
 	app.width = 200
 	app.statusBar.SetActivePlatforms(true, false)
 	app.Update(cookieRecheckResultMsg{YouTube: cookies.RefreshFailed})
-	if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != ColorRed {
+	if got := feedbackColor(app.feedback.msg, app.feedback.sev); got != ColorRed {
 		t.Fatalf("premise lost: the conclusive recheck no longer renders red (%v)", got)
 	}
 
@@ -360,9 +362,9 @@ func TestStatedSeverityDoesNotLeakToTheNextMessage(t *testing.T) {
 		t.Run(set.name, func(t *testing.T) {
 			app.Update(cookieRecheckResultMsg{YouTube: cookies.RefreshFailed})
 			set.call()
-			if got := feedbackColor(app.feedbackMsg, app.feedbackSev); got != ColorGreen {
+			if got := feedbackColor(app.feedback.msg, app.feedback.sev); got != ColorGreen {
 				t.Errorf("%q rendered %v after a stated-severity line — the fact outlived the "+
-					"message it was stated for", app.feedbackMsg, got)
+					"message it was stated for", app.feedback.msg, got)
 			}
 		})
 	}

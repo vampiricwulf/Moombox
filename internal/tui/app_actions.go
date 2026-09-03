@@ -86,11 +86,11 @@ func cookieRefreshFeedback(mode string) string {
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
 	switch chord {
 	case "A A":
-		a.feedbackMsg = ""
+		a.clearFeedback()
 		a.addVideo.SetSize(a.width, a.height)
 		a.addVideo.Open()
 	case "A Z":
-		a.feedbackMsg = ""
+		a.clearFeedback()
 		a.importDlg.SetSize(a.width, a.height)
 		startDir := filepath.Join(".", "import")
 		if cwd, err := os.Getwd(); err == nil {

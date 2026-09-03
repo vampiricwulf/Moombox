@@ -29,7 +29,7 @@ func recheckFeedback(t *testing.T, width int, ytActive, twActive bool, msg cooki
 	app.width = width
 	app.statusBar.SetActivePlatforms(ytActive, twActive)
 	app.Update(msg)
-	return app.feedbackMsg
+	return app.feedback.msg
 }
 
 func TestRecheckFeedbackNamesWhyACheckCouldNotConclude(t *testing.T) {

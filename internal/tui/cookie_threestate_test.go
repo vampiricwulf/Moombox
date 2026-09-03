@@ -370,9 +370,9 @@ func TestRecheckFeedbackIsTheSharedSentence(t *testing.T) {
 			app.statusBar.SetActivePlatforms(tc.ytActive, tc.twActive)
 			app.Update(cookieRecheckResultMsg{YouTube: yt, Twitch: tw})
 
-			if app.feedbackMsg != tc.want {
+			if app.feedback.msg != tc.want {
 				t.Errorf("R C feedback = %q, want %q — the TUI and the Web dashboard answer the "+
-					"same gesture and must render the same sentence", app.feedbackMsg, tc.want)
+					"same gesture and must render the same sentence", app.feedback.msg, tc.want)
 			}
 		})
 	}
