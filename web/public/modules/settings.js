@@ -694,6 +694,11 @@ export class SettingsController {
     if (dpapiFallbackSwitch) {
       dpapiFallbackSwitch.checked = !!config.cookies?.dpapi_fallback;
     }
+    // Acquisition mode. setInputValue rather than a direct .value write so an
+    // absent key leaves the select's own default rather than blanking it — a
+    // blank select would save as "", which config.Normalize then turns back
+    // into "auto" behind the operator.
+    this.app.setInputValue("cfg-cookies-acquisition", config.cookies?.acquisition || "auto");
 
     // Track dirty state
     this._dirty = false;
@@ -848,6 +853,9 @@ export class SettingsController {
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     const dpapiFallback = dpapiFallbackSwitch ? dpapiFallbackSwitch.checked : false;
 
+    const acquisitionEl = document.getElementById("cfg-cookies-acquisition");
+    const acquisition = acquisitionEl?.value || "auto";
+
     // Build payload with only form-managed sections (don't include channels
     // to avoid overwriting concurrent changes from TUI).
     const network = {
@@ -915,6 +923,7 @@ export class SettingsController {
         cookie_file: cookieFile,
         active_platforms: activePlatforms,
         auto_enabled: autoEnabled,
+        acquisition,
         browser_profile_dir: autoCookiesProfileDir,
         dpapi_fallback: dpapiFallback,
         // refresh_interval / browser_path / browser_type resolved below

@@ -992,6 +992,23 @@
 
                             <sl-divider></sl-divider>
                             <h4>Automatic Cookie Login</h4>
+                            <sl-select
+                                id="cfg-cookies-acquisition"
+                                label="How refreshes get cookies"
+                                value="auto"
+                                style="margin-bottom: 0.75em;"
+                            >
+                                <sl-option value="auto">Automatic — launch a browser when one is available, otherwise read the profile</sl-option>
+                                <sl-option value="profile">Browser profile only — never launch; read the profile directory below</sl-option>
+                            </sl-select>
+                            <p class="settings-help" style="margin-top: -0.4em;">
+                                "Browser profile only" is the setting for a desktop where you want Moombox to
+                                read your real signed-in browser profile instead of driving a managed one in the
+                                background. It reads a snapshot copy and never writes into your profile — but the
+                                cookies it finds are exported to cookies.txt, so it is opt-in. It also allows a
+                                profile directory that belongs to an installed browser, which Automatic refuses.
+                                Takes effect immediately; no restart.
+                            </p>
                             <sl-switch id="cfg-auto-cookies-enabled">
                                 Enable the headless-browser refresh timer
                                 <span slot="help-text"
