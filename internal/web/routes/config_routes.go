@@ -355,6 +355,17 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["cookies.refresh_interval"] = "refresh_interval must be at least 10"
 			}
 		}
+		// acquisition: mirrors config.validateOrNormalize's enum exactly, so a
+		// value the API accepts is never one Normalize then rewrites behind
+		// the operator's back. Empty is the "leave it at the default" case and
+		// is not an error — applyConfigUpdates treats it the same way.
+		if v, ok := ck["acquisition"].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "", "auto", "profile":
+			default:
+				errs["cookies.acquisition"] = "acquisition must be auto or profile"
+			}
+		}
 	}
 
 	// Channels — audit R-4: PUT /config accepts a channels[] replace, but
@@ -600,6 +611,16 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 		if v, ok := ck["dpapi_fallback"].(bool); ok {
 			cfg.Cookies.DpapiFallback = v
+		}
+		// Trimmed and lower-cased for the same reason browser_path is trimmed:
+		// the TUI's and the dashboard's controls both feed strings, and a
+		// value that differs from the enum only in case or whitespace would
+		// pass validation above and then be silently replaced by Normalize.
+		// An empty string is left to config.Normalize, which fills in the
+		// default — assigning "" here and letting it through is what makes a
+		// UI that omits the control harmless.
+		if v, ok := ck["acquisition"].(string); ok {
+			cfg.Cookies.Acquisition = strings.ToLower(strings.TrimSpace(v))
 		}
 	}
 
