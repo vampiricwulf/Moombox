@@ -786,3 +786,64 @@ func TestConfigUpdatesTrustedProxies(t *testing.T) {
 		t.Errorf("apply empty: got %v, want cleared", cfg.Network.TrustedProxies)
 	}
 }
+
+// TestAcquisitionModeValidation is the API half of cookies.acquisition's
+// contract, and it exists because applyConfigUpdates assigns the value
+// straight through — validateConfigUpdates is the ONLY thing standing between
+// a typo in a PUT body and a config the cookie service has to normalise behind
+// the operator's back.
+//
+// The accept rows are the junction guard. Without them a validator that
+// rejected every value would pass the reject rows and lock the setting out of
+// both UIs.
+func TestAcquisitionModeValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   any
+		wantErr bool
+	}{
+		{"auto", "auto", false},
+		{"profile", "profile", false},
+		{"empty means leave it at the default", "", false},
+		{"unknown word", "headless", true},
+		{"a near miss", "profiles", true},
+		{"the dropped third value", "browser", true},
+		{"wrong type is ignored, not rejected", 3.0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := validateConfigUpdates(map[string]any{
+				"cookies": map[string]any{"acquisition": tc.value},
+			})
+			got := errs["cookies.acquisition"] != ""
+			if got != tc.wantErr {
+				t.Errorf("rejected = %v, want %v (errs: %v)", got, tc.wantErr, errs)
+			}
+		})
+	}
+}
+
+// TestAcquisitionModeApplied pins the second half. A field that validates and
+// never persists is the checklist's first named mistake, and it is invisible
+// from the UI: the save reports success and the setting silently reverts on the
+// next load.
+func TestAcquisitionModeApplied(t *testing.T) {
+	cfg := config.Defaults()
+	applyConfigUpdates(cfg, map[string]any{
+		"cookies": map[string]any{"acquisition": "  PROFILE  "},
+	})
+	if cfg.Cookies.Acquisition != "profile" {
+		t.Errorf("acquisition = %q, want %q — the value is trimmed and lower-cased on the way in "+
+			"so a pasted or capitalised mode does not become an unrecognised one",
+			cfg.Cookies.Acquisition, "profile")
+	}
+
+	// Omitting the key must leave the stored value alone, the same way every
+	// other optional cookie field behaves. A save from a UI that has not
+	// rendered this control yet must not reset the operator's choice.
+	kept := config.Defaults()
+	kept.Cookies.Acquisition = "profile"
+	applyConfigUpdates(kept, map[string]any{"cookies": map[string]any{}})
+	if kept.Cookies.Acquisition != "profile" {
+		t.Errorf("an update with no acquisition key reset it to %q", kept.Cookies.Acquisition)
+	}
+}

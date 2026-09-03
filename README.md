@@ -533,7 +533,7 @@ The yt-dlp plugin can be installed from the web dashboard's Settings > Integrati
 
 ## Cookie Setup
 
-Cookies are needed for member-only content (YouTube) and authenticated access (Twitch). Three options:
+Cookies are needed for member-only content (YouTube) and authenticated access (Twitch). Four options:
 
 ### Automatic (recommended on a desktop)
 
@@ -548,6 +548,29 @@ browser_profile_dir = "./browser-profile"
 ```
 
 `auto_enabled` governs exactly two things: a slow second refresh that re-opens that profile in a headless browser on a timer, and one automatic browser attempt when authentication fails (with it off, Moombox notifies you instead). Everything else runs either way — the in-process refresh that keeps the YouTube session alive is gated only on `cookie_file`, and so is the manual re-import described below. Changing the flag takes effect on restart.
+
+#### Reading your real browser profile instead
+
+If you would rather Moombox read the browser profile you actually sign in with
+than drive a managed one of its own in the background, set:
+
+```toml
+[cookies]
+acquisition = "profile"
+browser_profile_dir = "C:/Users/you/AppData/Roaming/Mozilla/Firefox/Profiles/xxxxx.default-release"
+```
+
+`acquisition` has two values — `auto` (the default: launch a browser when one is
+available, otherwise read the profile directory) and `profile` (never launch;
+read the profile directory read-only). `profile` is the only mode that will
+point at a real browser's profile directory: `auto` refuses those paths, because
+a config that could aim a headless browser at your signed-in profile could also
+export it. The read itself launches nothing and never writes into your profile
+— it copies `cookies.sqlite` and its `-wal` sidecar to a temporary directory
+and reads the copy — but the cookies it finds are written to `cookies.txt`,
+which is why it is opt-in. If a refresh reports that `cookies.sqlite` is locked,
+close the browser and press the button again. The setting takes effect
+immediately; no restart.
 
 ### Browser profile import (headless hosts and Docker)
 

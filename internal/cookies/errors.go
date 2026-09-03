@@ -78,7 +78,7 @@ var (
 
 	// --- browser-free profile import (Docker / headless hosts) ---
 	//
-	// These five describe the realistic ways reading a MOUNTED browser
+	// These six describe the realistic ways reading a MOUNTED browser
 	// profile fails. They are deliberately distinct: the operator action
 	// differs for each (fix the permissions, fix the mount, point at the
 	// right dir, stop Firefox, re-export the profile), so collapsing them
@@ -86,12 +86,14 @@ var (
 	// the message.
 	//
 	// None of them is the manual-refresh ladder's bottom rung, and that is the
-	// property to preserve when adding a sixth. Rung 3 means there is NO
-	// profile, so R F and the dashboard's shift+click fall through to the
-	// in-process refresh and say so (see IsNoBrowserProfile). Every error here
-	// means the profile IS there and is wrong in a specific way, from a pass
-	// that RAN — so falling back would replace the one actionable sentence the
-	// operator has with a recheck that cannot fix any of them.
+	// property to preserve when adding to them — the seventh, ErrProfileDirNotOptedIn,
+	// is a config refusal rather than a read failure and keeps it for the same
+	// reason. Rung 3 means there is NO profile, so R F and the dashboard's
+	// shift+click fall through to the in-process refresh and say so (see
+	// IsNoBrowserProfile). Every error here means the profile IS there and is
+	// wrong in a specific way, from a pass that RAN — so falling back would
+	// replace the one actionable sentence the operator has with a recheck that
+	// cannot fix any of them.
 
 	// ErrProfileDirUnreadable is returned when the configured profile
 	// directory exists but could not be examined at all: EACCES from a uid
@@ -136,6 +138,23 @@ var (
 	// copied without its -wal sidecar (the copy opens fine and returns
 	// nothing) and of a profile snapshotted out from under a live Firefox.
 	ErrNoCookiesInProfile = errors.New("no YouTube/Twitch cookies found in browser profile")
+
+	// ErrProfileDirNotOptedIn is returned by the two READ-ONLY profile sites
+	// when the configured browser_profile_dir sits inside a real installed
+	// browser's profile tree and cookies.acquisition is not "profile".
+	//
+	// The seventh member of the block above, and it keeps that block's rule:
+	// the profile IS there and is wrong in a specific, diagnosable way with a
+	// one-line remedy the message names. Deliberately NOT on rung 3 — falling
+	// through to a plain recheck would drop the only sentence that tells the
+	// operator which setting to change.
+	//
+	// A CONFIG refusal, not a read failure: nothing was launched and nothing
+	// was read. The guard's threat model is exfiltration of the operator's
+	// daily-driver session through the cookies.txt export — the same surface
+	// dpapi_fallback treats as opt-in — so the relaxation is tied to an explicit
+	// setting rather than granted because a read happens to be safe. Audit G3.
+	ErrProfileDirNotOptedIn = errors.New("reading this browser profile needs cookies.acquisition = \"profile\"")
 
 	// --- the two ways a Chromium cookie read fails without being a verdict ---
 	//
@@ -270,13 +289,14 @@ var (
 //
 // Deliberately EXCLUDES every profile-import failure — ErrProfileDirUnreadable,
 // ErrProfileNotADirectory, ErrCookieDBNotFound, ErrCookieDBLocked,
-// ErrCookieDBUnreadable, ErrNoCookiesInProfile. Those mean the profile IS there
-// and is wrong in a specific, diagnosable way; each is returned from a pass that
-// RAN, and each carries the only guidance the operator has (fix the
-// permissions, fix the mount, point at the right directory, stop Firefox,
-// re-export). Folding them into a fallback would replace real diagnosis with a
-// recheck that cannot fix any of them — the exact collapse the block comment
-// above those six forbids.
+// ErrCookieDBUnreadable, ErrNoCookiesInProfile — and ErrProfileDirNotOptedIn,
+// the config refusal beside them. Those mean the profile IS there and is wrong
+// in a specific, diagnosable way; each is returned from a pass that RAN, and
+// each carries the only guidance the operator has (fix the permissions, fix
+// the mount, point at the right directory, stop Firefox, re-export). Folding
+// them into a fallback would replace real diagnosis with a recheck that cannot
+// fix any of them — the exact collapse the block comment above those seven
+// forbids.
 func IsNoBrowserProfile(err error) bool {
 	return errors.Is(err, ErrProfileNotFound) || errors.Is(err, ErrNoBrowserFound)
 }

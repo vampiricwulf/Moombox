@@ -1030,3 +1030,124 @@ func TestValidateTrustedProxies(t *testing.T) {
 		}
 	}
 }
+
+// TestCookiesAcquisitionNormalises is cookies.acquisition's whole contract in
+// one table: the two legal values survive, the empty string a hand-edited TOML
+// can produce normalises silently, and anything else is BOTH reported by
+// Validate and replaced by Normalize.
+//
+// The two halves are asserted together because they are one rule read twice:
+// validateOrNormalize's reportOnly=true arm feeds PUT /api/config's error
+// surface and Save's refusal, and its reportOnly=false arm is what stops a
+// hand-edited config.toml from handing the cookie service a mode it does not
+// understand. A test that only ran one arm would pass on an implementation
+// that reports without normalising, which is the config file that boots into
+// an undefined acquisition mode.
+func TestCookiesAcquisitionNormalises(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+		why     string
+	}{
+		{"auto", "auto", "auto", false, "the default must survive a round trip"},
+		{"profile", "profile", "profile", false, "the browserless-import opt-in is legal"},
+		{
+			"empty is the absent case", "", "auto", false,
+			"a config written before this field decodes to the zero value; there is nothing " +
+				"for the operator to fix, so Validate must stay quiet and Normalize must fill it in",
+		},
+		{
+			"unknown", "headless", "auto", true,
+			"an unrecognised mode must be reported AND replaced — reporting alone leaves the " +
+				"cookie service reading a value no branch handles",
+		},
+		{
+			"browser is not a value", "browser", "auto", true,
+			"the audit's third value was ruled out (2026-09-02): it behaved exactly like auto, " +
+				"and a value that behaves like another is a trap — it must be reported, not accepted",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reported := Defaults()
+			reported.Cookies.Acquisition = tc.in
+			errs := Validate(reported)
+			var mentioned bool
+			for _, err := range errs {
+				if strings.Contains(err.Error(), "cookies.acquisition") {
+					mentioned = true
+				}
+			}
+			if mentioned != tc.wantErr {
+				t.Errorf("Validate mentioned cookies.acquisition = %v, want %v — %s (errs: %v)",
+					mentioned, tc.wantErr, tc.why, errs)
+			}
+			if reported.Cookies.Acquisition != tc.in {
+				t.Errorf("Validate mutated the config: acquisition = %q, want %q left alone",
+					reported.Cookies.Acquisition, tc.in)
+			}
+
+			normalised := Defaults()
+			normalised.Cookies.Acquisition = tc.in
+			Normalize(normalised)
+			if normalised.Cookies.Acquisition != tc.want {
+				t.Errorf("Normalize left acquisition = %q, want %q — %s",
+					normalised.Cookies.Acquisition, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// TestCookiesAcquisitionNeedsNoMigration pins the reason migrateOldFormat is
+// untouched by this field: Load starts from Defaults() and decodes over it, so
+// a config.toml written before the key existed comes back as "auto" without a
+// migration rule. If this ever fails, the fix is in loadFromFile's construction
+// order, NOT a new migration clause.
+func TestCookiesAcquisitionNeedsNoMigration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	const legacy = `
+[cookies]
+cookie_file = "./cookies.txt"
+auto_enabled = true
+browser_profile_dir = "./browser-profile"
+`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cookies.Acquisition != "auto" {
+		t.Errorf("a config with no acquisition key loaded as %q, want \"auto\"", cfg.Cookies.Acquisition)
+	}
+	// The neighbours must be untouched — a migration that "helpfully" rewrote
+	// them would be the destructive kind this file forbids.
+	if !cfg.Cookies.AutoEnabled {
+		t.Error("loading a legacy cookies section cleared auto_enabled")
+	}
+}
+
+// TestCookiesAcquisitionRoundTripsThroughSave proves Save accepts and re-reads
+// the non-default mode. Save runs Validate and REFUSES a failing config, so a
+// mode the validator does not know would make every subsequent settings save
+// fail — losing every other edit in the same save, which is the failure mode
+// the TUI's trusted_proxies gate exists to prevent.
+func TestCookiesAcquisitionRoundTripsThroughSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	cfg := Defaults()
+	cfg.Cookies.Acquisition = "profile"
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save refused a legal acquisition mode: %v", err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Cookies.Acquisition != "profile" {
+		t.Errorf("acquisition round-tripped as %q, want \"profile\"", reloaded.Cookies.Acquisition)
+	}
+}

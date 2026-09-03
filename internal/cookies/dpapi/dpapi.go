@@ -9,7 +9,7 @@
 //
 // SECURITY: Reading from the user's REAL Chrome profile path is
 // explicitly safe because this code does NOT launch any process. The
-// validateBrowserProfileDir check in the autocookies package (audit
+// validateBrowserProfileDirForLaunch check in the autocookies package (audit
 // cookies.md #26) refuses real Chrome paths for the LAUNCH path because
 // that would let Moombox open the user's signed-in session against
 // their will. The DPAPI path is read-only and therefore safe — no new

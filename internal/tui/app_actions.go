@@ -47,6 +47,40 @@ func (a *App) recheckCookiesCmd() tea.Cmd {
 	})
 }
 
+// cookieAcquisitionMode reads cookies.acquisition from the LIVE store, the same
+// way AutoCookieService.AcquisitionMode does in cmd/moombox. A value snapshotted
+// at construction would leave R F's sentence describing a mode the operator
+// changed twenty minutes ago. Empty (no store, or a config built without
+// Defaults) is "auto", which is what the service resolves it to anyway.
+func (a *App) cookieAcquisitionMode() string {
+	if a.configStore == nil {
+		return "auto"
+	}
+	var mode string
+	a.configStore.Read(func(c *config.MoomboxConfig) {
+		mode = c.Cookies.Acquisition
+	})
+	return mode
+}
+
+// cookieRefreshFeedback is R F's pre-flight line, and it exists as a function
+// so the two sentences can be tested without an event loop.
+//
+// The default sentence is a claim only one of the two acquisition modes can
+// support. Under "profile" the pass launches nothing, so naming the browser
+// sends the operator looking for a process that will never start — the same
+// unearned cause as telling a gated operator to install a browser they already
+// have. The dashboard's twin is cookieRefreshPreflightToast in
+// web/public/modules/utils.js; TestRefreshPreflightSentenceAgreesAcrossSurfaces
+// pins the two by exact equality. Unlike the ladder's rung-3 pair these do NOT
+// diverge by surface, because neither names an affordance.
+func cookieRefreshFeedback(mode string) string {
+	if mode == "profile" {
+		return "Importing cookies from the browser profile..."
+	}
+	return "Running browser cookie refresh..."
+}
+
 // dispatchAction executes a chord action. For job-specific actions, job comes from
 // the selected task (keyboard chords) or from the menu's job picker (menu flow).
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
@@ -202,7 +236,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "R F":
 		if a.OnForceRefreshCookies != nil {
-			a.setFeedback("Running browser cookie refresh...")
+			a.setFeedback(cookieRefreshFeedback(a.cookieAcquisitionMode()))
 			refreshFn := a.OnForceRefreshCookies
 			return a, safeCmd(func() tea.Msg {
 				result, err := refreshFn()

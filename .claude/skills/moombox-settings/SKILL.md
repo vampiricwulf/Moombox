@@ -27,10 +27,10 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 `internal/config/config.go` → `validate()` — Add bounds checking, enum validation, or path sanitization. Replace invalid values with defaults. Called on both load and save.
 
 ### 4. API Validation
-`internal/web/routes/jobs.go` → `validateConfigUpdates()` — Validate the field from API input. Returns `map[string]string` of field→error mappings (e.g., `"network.port": "must be 1-65535"`). Must match constraints from step 3.
+`internal/web/routes/config_routes.go` → `validateConfigUpdates()` — Validate the field from API input. Returns `map[string]string` of field→error mappings (e.g., `"network.port": "must be 1-65535"`). Must match constraints from step 3.
 
 ### 5. API Application
-`internal/web/routes/jobs.go` → `applyConfigUpdates()` — Apply the field from the snake_case update map to the config struct. Only explicitly allowlisted fields are applied.
+`internal/web/routes/config_routes.go` → `applyConfigUpdates()` — Apply the field from the snake_case update map to the config struct. Only explicitly allowlisted fields are applied.
 - FlexDuration fields: accept both `float64` and `string`, call `config.ParseFlexDuration()`
 - Pointer optionals: handle nil vs zero (can set to `&value` or `nil`)
 
@@ -55,7 +55,7 @@ Only 4 settings currently support hot-reload (most require restart):
 - `OnHideFinishedAgeChanged` → re-broadcasts job list
 - `OnChannelChange` → `kickMonitors` to re-evaluate channels
 
-To add: wire callback in `ConfigRoutesCallbacks` struct (`internal/web/routes/jobs.go`) and connect in `cmd/moombox/main.go`.
+To add: wire callback in `ConfigRoutesCallbacks` struct (`internal/web/routes/config_routes.go`) and connect in `cmd/moombox/main.go`.
 
 ### 9. Config Migration (if renaming/moving)
 `internal/config/config.go` → `migrateOldFormat()` — Non-destructive: only applies when new section doesn't exist. Converts legacy field to current location.

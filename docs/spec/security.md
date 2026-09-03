@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document defines the security architecture of Moombox's HTTP server, authentication system, authorization model, and binary update verification. It covers the middleware stack, CSRF protection, session management, IP-based access control, client-IP resolution behind trusted reverse proxies, the passwordless-external-access policy, rate limiting, Content Security Policy, TLS configuration, Ed25519 update signing, and panic recovery requirements. Every security-relevant decision and its rationale is documented here so that an AI or developer can understand and maintain the security posture without guessing.
+This document defines the security architecture of Moombox's HTTP server, authentication system, authorization model, and binary update verification. It covers the middleware stack, CSRF protection, session management, IP-based access control, client-IP resolution behind trusted reverse proxies, the passwordless-external-access policy, rate limiting, Content Security Policy, TLS configuration, Ed25519 update signing, the browser-profile-directory guard and its read-only boundary, and panic recovery requirements. Every security-relevant decision and its rationale is documented here so that an AI or developer can understand and maintain the security posture without guessing.
 
 ## Rules and Constraints
 
@@ -453,6 +453,16 @@ All rate limiters use a 60-second sliding window. The limit constants live in `c
 | API general | 20 | 60s | Broad rate limit on API endpoints |
 
 **Source:** `internal/web/rate_limiter.go`, limit constants in `cmd/moombox/main.go`, instantiation and `ClientIP` wiring in `cmd/moombox/services.go` and `internal/web/routes/import_routes.go`.
+
+---
+
+## Browser Profile Directory Guard
+
+`cookies.browser_profile_dir` is operator-supplied and reaches two very different kinds of code, so it has two verdicts.
+
+**The launch boundary.** `validateBrowserProfileDirForLaunch` (`internal/cookies/autocookies.go`) refuses a directory inside a real installed browser's profile tree. Its threat is a hostile config — or a compromised `PUT /api/config` write — pointing the auto-cookie service at the operator's daily-driver profile and driving a headless browser against it, which would exfiltrate the live session through the `cookies.txt` export. The verdict is computed once, in `NewAutoCookieService`, and is consulted at all four subprocess-launching sites unconditionally and in every acquisition mode. Nothing lifts it. `dangerousProfilePathSubstrings` is Windows-only by construction and is deliberately not widened with forward-slash variants: doing so would newly refuse Linux desktop users already pointing at a real profile, and the launch guard is the only place such variants would ever belong.
+
+**The read boundary.** The browser-free import launches nothing. `snapshotFirefoxCookieDB` copies `cookies.sqlite` together with its `-wal` sidecar into a `0700` temp directory and opens the COPY `mode=ro`, so SQLite never writes into the user's profile — not even the WAL-index recovery a read-write open performs. That is the same line `internal/cookies/dpapi/dpapi.go` already draws. The residual risk on this path is therefore not corruption but **exfiltration**: imported cookies land in `cookies.txt`, so a config write alone would start harvesting the operator's signed-in session. So the relaxation is an explicit opt-in, `cookies.acquisition = "profile"`, exactly as `cookies.dpapi_fallback` is for the DPAPI read — and not a blanket "reads are safe" exemption. With the default mode the two read-only sites (`importProfileCookies`, `decideStartupSeed`) refuse with `ErrProfileDirNotOptedIn`, whose message names the setting rather than claiming a launch was refused. (`importProfileCookies` returns that error, so the manual refresh answers 422 with the sentence; `decideStartupSeed` stands down on it as its `autoImportNotConfigured` verdict — a Debug line — so the boot path never renders it.)
 
 ---
 
