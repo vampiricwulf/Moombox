@@ -259,9 +259,9 @@ const twitchLivenessProbeTimeout = 20 * time.Second
 // The predicate is TwitchMonitor.getTwitchChannels' (internal/monitor/
 // twitch.go), copied rather than shared because that method is unexported and
 // hangs off the monitor: an enabled channel whose `Platform` field is exactly
-// "twitch". The RAW field, deliberately — ChannelConfig.GetPlatform() defaults
-// an empty platform to "youtube", so reading through it would let a YouTube
-// channel with no explicit platform be sent to Twitch GQL.
+// "twitch". The RAW field, deliberately, for parity with getTwitchChannels —
+// not because GetPlatform() would behave differently here: it maps an empty
+// platform to "youtube", which is skipped by != "twitch" exactly as "" is.
 //
 // FIRST match, in slice order, so the target is stable across ticks: the
 // verdict is session-level and does not depend on which channel is used, but a

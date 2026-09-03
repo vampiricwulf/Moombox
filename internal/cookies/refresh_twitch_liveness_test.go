@@ -196,6 +196,21 @@ func TestTwitchInconclusiveFallbackIsReportedOncePerRun(t *testing.T) {
 	if got := countContaining(log.debugs, line); got != 2 {
 		t.Errorf("%d debug-level repeats, want 2 — the repeats must still be recorded, just not at Info: %q", got, log.debugs)
 	}
+
+	// MUTATION CLOSED: typing "youtube" into the recordInconclusiveLiveness
+	// call. The dedupe counts above pass under either platform key — this is
+	// the only assertion in the file that reads which key was actually
+	// touched.
+	rs.mu.RLock()
+	_, youtubeTouched := rs.lastLivenessKnown["youtube"]
+	twitchRecord, twitchTouched := rs.lastLivenessKnown["twitch"]
+	rs.mu.RUnlock()
+	if youtubeTouched {
+		t.Error("an inconclusive Twitch probe wrote YouTube's liveness record — the platform key is wrong, and YouTube's next learned-nothing line would land at Debug")
+	}
+	if !twitchTouched || twitchRecord != livenessInconclusive {
+		t.Errorf("the Twitch inconclusive record is %v (present=%v), want livenessInconclusive under the twitch key", twitchRecord, twitchTouched)
+	}
 }
 
 // TestTwitchFallbackIsPeriodicOnly: CheckNow runs synchronously on an HTTP

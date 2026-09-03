@@ -15,8 +15,10 @@ func ptrBool(b bool) *bool { return &b }
 // copied from TwitchMonitor.getTwitchChannels (internal/monitor/twitch.go) so
 // the probe can only ever ask about a channel the monitor would actually poll.
 //
-// MUTATION CLOSED (platform): using GetPlatform(), which defaults an empty
-// platform to "youtube" and would send a YouTube channel's ID to Twitch GQL.
+// NOT mutation-closed (platform): GetPlatform() vs the raw field is
+// unobservable for != "twitch" — GetPlatform() maps an empty platform to
+// "youtube", which is skipped exactly as "" is, so no fixture here can tell
+// the two apart. The raw field is used for parity with getTwitchChannels.
 // MUTATION CLOSED (enabled): dropping the disabled skip — a channel the
 // operator turned off would still generate traffic every tick.
 // MUTATION CLOSED (order): returning the last match, or any match.
