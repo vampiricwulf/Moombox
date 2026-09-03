@@ -47,7 +47,9 @@ func TestLiveContinuationOpenReplayNeverOpens(t *testing.T) {
 // — the "full-ceiling stalls" the coordinator's report described. Every
 // exit that means "this downloader will never poll again" must close the
 // signal: ErrAuthRequired, the consecutive-error budget exhausting (both
-// inside handleFetchError), and Stop(). This is NOT an "ended" inference —
+// inside handleFetchError), Stop(), and MarkStreamEnded(); a poll result
+// that lands after any of them does not re-open it. For the first three
+// this is NOT an "ended" inference —
 // closed means "no information", by design, the same directional contract
 // LiveContinuationOpen's doc comment already states for a downloader that
 // never started.
@@ -139,6 +141,101 @@ func TestHandleEndOfStreamClosesSignalOnDefiniteUnrecoveredEnd(t *testing.T) {
 	}
 	if cd.LiveContinuationOpen() {
 		t.Error("handleEndOfStream must close the resume signal on a definitive, unrecovered end")
+	}
+}
+
+// TestMarkStreamEndedClosesLiveContinuationOpen is the fifth permanent-exit
+// test. MarkStreamEnded is the orchestrator's own end verdict
+// (orchestrator.go's `if !isVod` branch), and until it closed the signal the
+// worker's joint-idle gate (buildMayResume, internal/worker/interruption.go)
+// kept counting a downloader the orchestrator had already retired as live
+// resume evidence -- for as long as the chat loop took to notice, which on a
+// sleeping poll is the whole poll interval.
+func TestMarkStreamEndedClosesLiveContinuationOpen(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true) // a healthy in-progress live poll
+
+	cd.MarkStreamEnded()
+
+	if cd.LiveContinuationOpen() {
+		t.Error("MarkStreamEnded() must close the resume signal -- the orchestrator has declared the stream over, and this downloader will not poll again")
+	}
+}
+
+// TestLatePollResultDoesNotReopenAfterMarkStreamEnded closes the window the
+// fifth exit test cannot see: a fetch that completed just before
+// MarkStreamEnded() reaches noteLivePollResult after it, and used to latch
+// the signal open on a downloader the loop is about to abandon.
+func TestLatePollResultDoesNotReopenAfterMarkStreamEnded(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true)
+
+	cd.MarkStreamEnded()
+	cd.noteLivePollResult(true) // the in-flight poll's result arrives late
+
+	if cd.LiveContinuationOpen() {
+		t.Error("a poll result that lands after MarkStreamEnded() must not re-open the resume signal")
+	}
+}
+
+// TestLatePollResultDoesNotReopenAfterStop pins the other half of the same
+// guard: noteLivePollResult's doc comment claims protection against a late
+// poll landing after Stop() (which sets cancelFlag, not streamEnded), but
+// until this test existed nothing exercised that branch -- a mutant
+// dropping the `!cd.cancelFlag` conjunct survived the whole package.
+//
+// Stop() also sets running = false in the same locked section as
+// cancelFlag = true, so a bare "call Stop(), then poll" cannot tell the two
+// conjuncts apart: cd.running alone already blocks the reopen, mutant or
+// not. running is restored to true right after the real Stop() call to
+// isolate cancelFlag specifically -- the same isolation the sibling test
+// gets for free, since MarkStreamEnded never touches running.
+func TestLatePollResultDoesNotReopenAfterStop(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+	cd.setLiveContinuationOpen(true)
+
+	cd.Stop()
+	cd.mu.Lock()
+	cd.running = true // isolate cancelFlag: Stop() itself also clears running
+	cd.mu.Unlock()
+	cd.noteLivePollResult(true) // the in-flight poll's result arrives late
+
+	if cd.LiveContinuationOpen() {
+		t.Error("a poll result that lands after Stop() must not re-open the resume signal")
+	}
+}
+
+// TestLatePollResultDoesNotReopenWhenNotRunning pins the third and last
+// conjunct of noteLivePollResult's guard (cd.running && !cd.cancelFlag &&
+// !cd.streamEnded): dropping `cd.running &&` left the whole package green,
+// because the two sibling tests each isolate a DIFFERENT conjunct by
+// driving a real exit function (Stop() sets cancelFlag, MarkStreamEnded
+// sets streamEnded) while running stays true throughout. This test isolates
+// running instead: no exit function is called at all, so cancelFlag and
+// streamEnded are left at their zero-value false, and running is set false
+// directly under cd.mu to stand in for a downloader that never started (or
+// has already stopped being tracked as running) -- the one state neither
+// sibling test can reach, since Stop() and MarkStreamEnded either clear
+// running themselves or never touch it while it's already true.
+func TestLatePollResultDoesNotReopenWhenNotRunning(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = false // isolate running: cancelFlag and streamEnded stay false (zero value)
+	cd.mu.Unlock()
+
+	cd.noteLivePollResult(true) // a poll result arriving while not running
+
+	if cd.LiveContinuationOpen() {
+		t.Error("a poll result must not open the resume signal while the downloader is not running")
 	}
 }
 

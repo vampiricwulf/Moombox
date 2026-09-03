@@ -6,8 +6,10 @@
 # fights the Git filter on every save and produces noisy diffs.
 *.go text eol=lf
 
-# JS/TS, JSON, and config we control are LF too — same reasoning.
+# Web assets, JS/TS, JSON, and config we control are LF too — same reasoning.
 *.html text eol=lf
+*.css text eol=lf
+*.svg text eol=lf
 *.js text eol=lf
 *.mjs text eol=lf
 *.ts text eol=lf
@@ -17,6 +19,12 @@
 *.yaml text eol=lf
 *.md text eol=lf
 *.sh text eol=lf
+
+# The citation checker's allowlist (internal/docs) is read by a test that trims
+# each line, so CRLF would still parse; this pin is hygiene against git's
+# "will become CRLF" warning on a fresh Windows checkout. Path-specific on
+# purpose: a blanket *.txt would renormalise unrelated files.
+internal/docs/citation_allowlist.txt text eol=lf
 
 # Docker files are consumed on Linux — keep LF on Windows checkouts too.
 Dockerfile text eol=lf

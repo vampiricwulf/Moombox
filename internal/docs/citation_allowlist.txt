@@ -1,0 +1,15 @@
+# Allowlist for the spec-citation checks in citations_test.go.
+#
+# One entry per line; blank lines and lines starting with # are ignored.
+#
+#   <doc>.md|<path>            skip the existence check for that citation
+#   <doc>.md|<symbol>|<path>   skip the symbol check for that pair
+#
+# An entry asserts the CHECKER is wrong about a citation that is right --
+# prose shaped like a citation, a TOML key that looks like an identifier, a
+# path that is deliberately illustrative. Doc rot does not belong here: fix
+# the doc. Every entry carries its reason on the line immediately above it,
+# and parseAllowlist REJECTS one that does not: an unexplained suppression is
+# indistinguishable from the rot it hides.
+#
+# Empty today: every citation in docs/spec resolves.

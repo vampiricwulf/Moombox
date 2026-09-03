@@ -821,8 +821,8 @@ func extractAttestationChallenge(html string) (challenge, reason string) {
 	return canonical, atnOK
 }
 
-// validateChallengeOrigin enforces that a page-sourced challenge points its
-// interpreter at a Google host. A challenge carrying inline
+// The origin rule canonicalizeChallenge enforces: a page-sourced challenge
+// must point its interpreter at a Google host. A challenge carrying inline
 // interpreterJavascript instead is REFUSED rather than honoured: bgutils-js
 // treats the two fields as interchangeable, but inline script from HTML we
 // scraped would be executed with no origin to check at all. Such a challenge

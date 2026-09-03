@@ -558,6 +558,53 @@ func TestSegmentProgressResetsStallCounters(t *testing.T) {
 	})
 }
 
+// TestNoteSegmentProgress covers the live loop's ONLY write to the shared
+// last-new-segment clock. Before the extraction it lived inside
+// runLiveStreamDownload's onSegmentProgress closure, which nothing in this
+// package calls -- so deleting either half of the reset left every test
+// green while the verify branch's 10-minute streamSegmentTimeout and the
+// chat gate's joint-idle release silently lost their evidence.
+func TestNoteSegmentProgress(t *testing.T) {
+	t.Run("genuine new bytes stamp the clock and zero the counter", func(t *testing.T) {
+		var lastBytes atomic.Int64
+		var clock atomicTimeValue
+		var checks atomic.Int32
+		checks.Store(7)
+
+		before := time.Now()
+		if !noteSegmentProgress(engine.DownloadProgress{Bytes: 1024}, &lastBytes, &clock, &checks) {
+			t.Fatal("a fresh stream's first Bytes>0 report is progress")
+		}
+		after := time.Now()
+
+		got := clock.Load()
+		if got.Before(before) || got.After(after) {
+			t.Errorf("segment clock = %v, want a stamp inside [%v, %v] -- this is the loop's only write to it", got, before, after)
+		}
+		if checks.Load() != 0 {
+			t.Errorf("consecutiveLiveChecks = %d, want 0 after genuine progress", checks.Load())
+		}
+	})
+
+	t.Run("a same-cumulative-Bytes echo touches neither", func(t *testing.T) {
+		var lastBytes atomic.Int64
+		lastBytes.Store(5_000_000)
+		var clock atomicTimeValue
+		var checks atomic.Int32
+		checks.Store(7)
+
+		if noteSegmentProgress(engine.DownloadProgress{Bytes: 5_000_000}, &lastBytes, &clock, &checks) {
+			t.Fatal("a byte-identical echo from a re-run cancelled downloader is not progress")
+		}
+		if !clock.Load().IsZero() {
+			t.Error("an echo must not stamp the shared segment clock -- that is the I3 livelock")
+		}
+		if checks.Load() != 7 {
+			t.Errorf("consecutiveLiveChecks = %d, want 7 (untouched by an echo)", checks.Load())
+		}
+	})
+}
+
 // TestShouldWaitForResume is the table-driven test for the C2 fix's
 // decision function: a failed live-refresh should wait-and-retry instead
 // of ending the recording immediately, but only when the stall is enabled

@@ -206,9 +206,19 @@ type CookiesConfig struct {
 	// the same identifier list used by DetectBrowser.
 	BrowserType string `toml:"browser_type,omitempty" json:"browser_type,omitempty"`
 
-	// Platforms is the auto-detected platform list — populated at
-	// startup from cookie file inspection (HasYouTubeAuthCookies /
-	// HasTwitchAuthCookies). Treat as read-only-from-config.
+	// Platforms is the platform list SEEDED on first run by
+	// detectCookiePlatforms (cmd/moombox/services.go), and only when BOTH
+	// this list and ActivePlatforms are empty. The sidecar's recorded
+	// meta.Platforms wins outright when it has one — a real verification
+	// result, never unioned with a guess; only in its absence does the
+	// seed fall back to the LOOSE HasAnyYouTubeAuthCookie /
+	// HasAnyTwitchAuthCookie predicates, not the strict
+	// HasYouTubeAuthCookies / HasTwitchAuthCookies pair, because a jar
+	// holding SAPISID with LOGIN_INFO already cleared is a CONFIGURED
+	// platform with broken credentials, not an unconfigured one. Nothing
+	// automatic ever prunes it — the automatic writers only add — and the
+	// sole removal path is an operator replacing the list through
+	// PUT /api/config. Treat as read-only-from-config.
 	Platforms []string `toml:"platforms,omitempty" json:"platforms,omitempty"`
 
 	// ActivePlatforms is the user's explicit override. Takes precedence

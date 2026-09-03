@@ -1079,8 +1079,9 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 	// may carry twitch.ErrTwitchAuthExpired) satisfies cookiesStatusError and
 	// ErrNonActionable at the same time. That is unreachable today only
 	// because classifyProbeErr's default routes "gql auth failure (401)" to
-	// the network class — a string heuristic over a Twitch response body, not
-	// an invariant worth relying on for a resurrection hazard.
+	// the network class — a string heuristic over the error's status-bearing
+	// PREFIX (gqlRequest reports only a byte count, never the response body),
+	// not an invariant worth relying on for a resurrection hazard.
 	if errors.Is(err, ErrNonActionable) {
 		w.logger.Warn("skipping automatic cookie refresh — this failure was already classified terminal, and recovery would re-queue the job and reset its retry budget",
 			"jobID", job.ID,

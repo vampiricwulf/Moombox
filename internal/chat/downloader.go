@@ -326,9 +326,23 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 // This exits the polling loop promptly, writes the final chat file,
 // and clears resume state (successful completion).
 // Distinct from Stop() which is for cancellation/shutdown.
+//
+// A PERMANENT exit, so it closes liveContinuationOpen here rather than
+// leaving it to the loop: this downloader will not poll again, and the
+// worker's joint-idle gate (buildMayResume, internal/worker/interruption.go)
+// must stop counting it as resume evidence the moment the orchestrator
+// marks the stream ended, not whenever the loop happens to wake up. The
+// field is assigned directly under the lock this function already holds --
+// exactly as Stop() does: setLiveContinuationOpen takes mu itself and would
+// deadlock here. The only ordering requirement is that the assignment lands
+// before Unlock(): liveContinuationOpen has no reader that bypasses cd.mu,
+// so its position relative to cancelCtx() within the locked section carries
+// no independent significance -- it is written first here purely to match
+// Stop()'s layout.
 func (cd *ChatDownloader) MarkStreamEnded() {
 	cd.mu.Lock()
 	cd.streamEnded = true
+	cd.liveContinuationOpen = false
 	if cd.cancelCtx != nil {
 		cd.cancelCtx() // Wake up any sleeping poll
 	}
@@ -389,12 +403,13 @@ func (cd *ChatDownloader) shouldStop() bool {
 // means NOTHING (streamers disable chat independently, and a downloader
 // that never started, or has permanently stopped, has no information).
 // A TRANSIENT fetch error does not change it — only a definitive
-// end-of-stream (handleEndOfStream) or a PERMANENT loop exit closes it:
-// ErrAuthRequired, the consecutive-error budget exhausting (both I5 fix,
-// handleFetchError), or Stop() (I5 fix) — a downloader that has stopped
-// polling for good carries no information any more, and closed is what
-// "no information" means here, by design, not an inference that the
-// broadcast ended.
+// end-of-stream (handleEndOfStream), the orchestrator's own end verdict
+// (MarkStreamEnded), or a PERMANENT loop exit closes it: ErrAuthRequired,
+// the consecutive-error budget exhausting (both I5 fix, handleFetchError),
+// or Stop() (I5 fix) — a downloader that has stopped polling for good
+// carries no information any more, and closed is what "no information"
+// means here, by design, not an inference that the broadcast ended. A poll
+// result that lands after any of them does not re-open it.
 func (cd *ChatDownloader) LiveContinuationOpen() bool {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
@@ -446,14 +461,20 @@ func (cd *ChatDownloader) SetLiveContinuationOpenForTesting(open bool) {
 }
 
 // noteLivePollResult is the runChatLoop hook: a successful LIVE poll with a
-// continuation opens the signal; replay polls never do.
+// continuation opens the signal; replay polls never do. A poll whose result
+// lands AFTER a permanent exit (Stop, MarkStreamEnded, or the loop's own
+// cancel flag) does not re-open it: the exit closed the signal on purpose,
+// the loop is about to leave on shouldStop(), and nothing on its way out
+// would close the signal again.
 func (cd *ChatDownloader) noteLivePollResult(hasContinuation bool) {
-	if cd.opts.IsReplay {
+	if cd.opts.IsReplay || !hasContinuation {
 		return
 	}
-	if hasContinuation {
-		cd.setLiveContinuationOpen(true)
+	cd.mu.Lock()
+	if cd.running && !cd.cancelFlag && !cd.streamEnded {
+		cd.liveContinuationOpen = true
 	}
+	cd.mu.Unlock()
 }
 
 // wasCancelledOrShutdown returns true if the download was stopped by user

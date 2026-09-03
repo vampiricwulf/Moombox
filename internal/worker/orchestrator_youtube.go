@@ -164,10 +164,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// downloader instance is attached for that stream so a genuinely fresh
 	// downloader's first real report still counts.
 	onSegmentProgress := func(p engine.DownloadProgress, lastBytes *atomic.Int64) {
-		if segmentProgressResetsStallCounters(p, lastBytes) {
-			lastSegTime.StoreNow()
-			consecutiveLiveChecks.Store(0)
-		}
+		noteSegmentProgress(p, lastBytes, lastSegTime, &consecutiveLiveChecks)
 	}
 
 	var lastVideoBytes, lastAudioBytes atomic.Int64

@@ -786,7 +786,7 @@ When `[bgutils] use_sidecar = false` in config OR the sidecar fails to start OR 
    - Result: `DescrambledChallenge` containing `Program`, `GlobalName`, `InterpreterScript`/`InterpreterURL`, `InterpreterHash`.
 
 2. **Create BotGuard VM** (`botguard.go`):
-   - Creates a new Goja runtime with the real-class DOM shim from `internal/goja/dom-real.js`, TextEncoder/TextDecoder, timers.
+   - Creates a new Goja runtime with the real-class DOM shim from `internal/goja/js/dom-real.js`, TextEncoder/TextDecoder, timers.
    - Fetches the interpreter JavaScript from `InterpreterURL` (or uses inline `InterpreterScript`).
    - Executes the interpreter in the VM. The interpreter registers a function on `globalThis[globalName]`.
    - Timeout: 10 seconds for BotGuard load.
@@ -904,7 +904,7 @@ The value rides on `WatchPageResult.AttestationChallenge` → `VideoInfo.Attesta
 
 The sidecar **executes** the interpreter body it fetches (`new Function(js)()`), and watch-page HTML embeds attacker-authored video metadata verbatim — JSON escaping leaves braces, parens and single quotes intact, so a crafted description can present itself as a `ytAtN` challenge, and on a real page the description precedes the genuine blob (verified 2026-08-15: description at byte ~740k, real call at ~802k). Before this gate, that reached `new Function()` with an attacker-chosen host.
 
-Two independent checks now enforce the same rule — `validateChallengeOrigin` in `internal/youtube/watch_page.go` (so a hostile challenge never leaves the Go process) and `assertGoogleHost` in `bgutil-sidecar/src/server.js` (so the sidecar never trusts its caller):
+Two independent checks now enforce the same rule — `canonicalizeChallenge` in `internal/youtube/watch_page.go` (so a hostile challenge never leaves the Go process) and `assertGoogleHost` in `bgutil-sidecar/src/server.js` (so the sidecar never trusts its caller):
 
 - The interpreter URL must be `https:` on one of **eight exact hosts**: `www.google.com`, `google.com`, `www.gstatic.com`, `ssl.gstatic.com`, `gstatic.com`, `s.ytimg.com`, `www.youtube.com`, `youtube.com`. No suffix matching and no patterns — an adversarial review defeated both weaker forms. Suffix-matching `.googleapis.com` re-admitted `storage.googleapis.com` and `firebasestorage.googleapis.com`, which serve anyone's uploaded bucket objects (and `sites`/`script`/`drive.google.com`, which host third-party content); a `^google\.[a-z]{2,3}(\.[a-z]{2})?$` "regional Google" pattern matched *shape rather than ownership*, admitting live third-party domains such as `google.com.se` and `google.co.nl`. Both reached code execution end-to-end. Regional Google domains are consequently unsupported; the interpreter is served from a global host.
 - The URL must be a **static script**: no query, no fragment, and an encoded path matching `^/[A-Za-z0-9._~/-]+\.[Jj][Ss]$`. An allowlisted host is *not* the same as Google-authored bytes — `www.google.com` serves JSONP endpoints (`/complete/search?client=firefox&jsonp=…`) that reflect an attacker-supplied callback at HTTP 200, which reached RCE through a genuinely allowlisted host with no redirect involved. Reflection requires a query to reflect, so demanding the static shape removes the class. Percent-encoding is excluded from the alphabet because Go decodes `%3F` into `url.Path` while JS's `URL` keeps it encoded: the two gates would otherwise disagree about what the path is, with safety resting on Google returning 404 for the crafted form.
