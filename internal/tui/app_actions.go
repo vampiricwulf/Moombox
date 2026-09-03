@@ -209,6 +209,23 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return cookieForceRefreshResultMsg{Result: result, Err: err}
 			})
 		}
+	case "R L":
+		// Defensive, and unreachable from the keyboard: with no callback the
+		// chord is not registered (buildMenuItems below), so processSecondKey
+		// reports "Invalid Chord: R L" before this case is consulted. The guard
+		// keeps a direct caller from opening an overlay whose every Enter
+		// dead-ends. StartSetup's own refusals — service stopped, a setup or
+		// refresh already running, no supported browser — arrive on the
+		// operator's Enter and are rendered inline by the wizard, which is
+		// where the web panel puts them too.
+		if a.setupWiz.OnStartAutoCookie == nil {
+			a.setFeedback("Cookie login is unavailable — no auto-cookie service is configured")
+			return a, nil
+		}
+		a.setupWiz.SetSize(a.width, a.height)
+		// Preselect whatever the status bar is alarming about, so answering a
+		// "TW: Re-login" badge does not open on YouTube.
+		a.setupWiz.OpenCookieLogin(a.statusBar.ReloginPlatform())
 	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
@@ -530,6 +547,13 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	}
 	if a.OnForceRefreshCookies != nil {
 		items = append(items, ActionMenuItem{Chord: "R F", Label: "Force Cookie Refresh", HintLabel: "Force Refresh", Category: "Request"})
+	}
+	// R L: open the setup wizard's cookie step alone, so an interactive login
+	// is reachable after first run. Gated on the callback for the same reason
+	// R F is, and cmd/moombox binds it unconditionally: StartSetup is
+	// acquisition and is never gated on cookies.auto_enabled.
+	if a.setupWiz.OnStartAutoCookie != nil {
+		items = append(items, ActionMenuItem{Chord: "R L", Label: "Cookie Login", HintLabel: "Login", Category: "Request"})
 	}
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})
