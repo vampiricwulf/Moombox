@@ -39,8 +39,18 @@ func existingDangerousProfileDir(t *testing.T) string {
 // headlessly and exfiltrating the session through cookies.txt; that threat does
 // not change with the acquisition mode, so neither does the guard. All four
 // subprocess entry points, both modes — and nothing launches, because each one
-// fast-fails on the cached verdict before it reaches an exec.
+// fast-fails on the cached verdict before it reaches an exec. Each assertion
+// checks that the returned error IS the guard's own verdict, not merely that
+// some error came back: a site that was bypassed can still fail downstream
+// (e.g. a missing cookies.sqlite once it reaches the real profile tree), and
+// that failure is not a refusal — asserting only err != nil cannot tell the
+// two apart.
 func TestLaunchGuardHoldsEveryLaunchSiteInEveryMode(t *testing.T) {
+	want := validateBrowserProfileDirForLaunch(dangerousProfileDir)
+	if want == nil {
+		t.Fatal("fixture is not a dangerous profile dir — the test would prove nothing")
+	}
+
 	for _, mode := range []string{AcquisitionAuto, AcquisitionProfile} {
 		t.Run(mode, func(t *testing.T) {
 			s := NewAutoCookieService(dangerousProfileDir,
@@ -48,18 +58,18 @@ func TestLaunchGuardHoldsEveryLaunchSiteInEveryMode(t *testing.T) {
 			s.AcquisitionMode = func() string { return mode }
 			b := gatedBrowser()
 
-			if err := s.startFirefoxSetup(b, "https://example.invalid"); err == nil {
-				t.Error("startFirefoxSetup accepted a real browser profile tree — the guard left a launch site")
+			if err := s.startFirefoxSetup(b, "https://example.invalid"); err == nil || err.Error() != want.Error() {
+				t.Errorf("startFirefoxSetup: got %v, want the launch guard's own refusal %q — a different error means the guard left the site", err, want)
 			}
-			if _, _, err := s.refreshFirefox(context.Background(), b); err == nil {
-				t.Error("refreshFirefox accepted a real browser profile tree — the guard left a launch site")
+			if _, _, err := s.refreshFirefox(context.Background(), b); err == nil || err.Error() != want.Error() {
+				t.Errorf("refreshFirefox: got %v, want the launch guard's own refusal %q — a different error means the guard left the site", err, want)
 			}
 			chromium := &DetectedBrowser{Type: "chrome", Path: "moombox-no-such-browser", Name: "Chrome"}
-			if err := s.startChromiumSetup(chromium, "https://example.invalid"); err == nil {
-				t.Error("startChromiumSetup accepted a real browser profile tree — the guard left a launch site")
+			if err := s.startChromiumSetup(chromium, "https://example.invalid"); err == nil || err.Error() != want.Error() {
+				t.Errorf("startChromiumSetup: got %v, want the launch guard's own refusal %q — a different error means the guard left the site", err, want)
 			}
-			if _, _, err := s.refreshChromium(context.Background(), chromium); err == nil {
-				t.Error("refreshChromium accepted a real browser profile tree — the guard left a launch site")
+			if _, _, err := s.refreshChromium(context.Background(), chromium); err == nil || err.Error() != want.Error() {
+				t.Errorf("refreshChromium: got %v, want the launch guard's own refusal %q — a different error means the guard left the site", err, want)
 			}
 		})
 	}

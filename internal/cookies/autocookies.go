@@ -3131,7 +3131,7 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 				// pass is an import, and an import over an existing cookie file
 				// is the thing the owner ruled out: nothing between two ticks
 				// changes a mounted profile, so it re-reads identical bytes over
-				// credentials that may be working. — browserless because no
+				// credentials that may be working — browserless because no
 				// browser resolves, or because cookies.acquisition = "profile"
 				// makes the pass an import regardless of the host. The second is
 				// the desktop case, where the profile IS the operator's real one
