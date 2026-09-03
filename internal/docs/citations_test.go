@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -27,6 +28,24 @@ var specDocs = []string{
 // citationPrefixes are the repo-relative roots a path citation may start
 // with. A backticked token starting with anything else is prose.
 var citationPrefixes = []string{"internal/", "cmd/", "web/", "tools/", "docs/", "bgutil-sidecar/", ".github/"}
+
+// buildArtifacts are cited paths that are gitignored BUILD OUTPUTS rather than
+// tracked sources: the per-platform Node blobs `go run ./tools/fetch-node`
+// downloads and the tarball `bgutil-sidecar/build.mjs` produces. They are the
+// exact contents of internal/bgutils/embed/.gitignore. operations.md documents
+// them as a build PREREQUISITE, and a fresh clone has none of them, so
+// requiring them on disk would report that prerequisite as doc rot on every
+// clean checkout. The set is written out rather than asked of `git
+// check-ignore` on purpose: this test starts no subprocess. A citation listed
+// here is still checked -- the tracked directory that holds it must exist --
+// and a .gz cited anywhere else is checked the ordinary way.
+var buildArtifacts = map[string]bool{
+	"internal/bgutils/embed/node-windows-amd64.gz": true,
+	"internal/bgutils/embed/node-linux-amd64.gz":   true,
+	"internal/bgutils/embed/node-linux-arm64.gz":   true,
+	"internal/bgutils/embed/node.exe.gz":           true,
+	"internal/bgutils/embed/sidecar.tar.gz":        true,
+}
 
 var (
 	// fileExtRe recognises the last segment of a FILE citation.
@@ -140,17 +159,35 @@ func hasCitationPrefix(tok string) bool {
 	return false
 }
 
-// parseAllowlist turns the allowlist file into a key set.
-func parseAllowlist(s string) map[string]bool {
+// parseAllowlist turns the allowlist file into a key set, plus the 1-indexed
+// line numbers of entries that carry no reason. The file's header promises
+// "Every entry carries its reason on the line above it", so the parser
+// enforces it rather than leaving it a convention a reader has to trust: an
+// entry must be immediately preceded by a `#` line. A blank line is not a
+// reason, and neither is another entry. An unexplained suppression is
+// indistinguishable from hidden rot, which is the one thing this file exists
+// to prevent.
+func parseAllowlist(s string) (map[string]bool, []int) {
 	out := map[string]bool{}
-	for _, line := range strings.Split(s, "\n") {
+	var reasonless []int
+	reasonAbove := false
+	for i, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			reasonAbove = false
 			continue
 		}
+		if strings.HasPrefix(line, "#") {
+			reasonAbove = true
+			continue
+		}
+		if !reasonAbove {
+			reasonless = append(reasonless, i+1)
+		}
 		out[line] = true
+		reasonAbove = false
 	}
-	return out
+	return out, reasonless
 }
 
 func loadAllowlist(t *testing.T) map[string]bool {
@@ -159,13 +196,44 @@ func loadAllowlist(t *testing.T) map[string]bool {
 	if err != nil {
 		t.Fatalf("read citation_allowlist.txt: %v", err)
 	}
-	return parseAllowlist(string(b))
+	allow, reasonless := parseAllowlist(string(b))
+	for _, lineNo := range reasonless {
+		t.Errorf("citation_allowlist.txt:%d suppresses a citation with no `#` reason line above it -- the file's header promises one, and an unexplained suppression is indistinguishable from the rot it hides", lineNo)
+	}
+	return allow
 }
 
 func TestCitationAllowlistParsing(t *testing.T) {
-	got := parseAllowlist("# a comment\n\narchitecture.md|internal/x/y.go\n  operations.md|Foo|cmd/moombox/z.go  \n")
+	got, reasonless := parseAllowlist("# a comment\n\n# reason\narchitecture.md|internal/x/y.go\n# reason\n  operations.md|Foo|cmd/moombox/z.go  \n")
 	if len(got) != 2 || !got["architecture.md|internal/x/y.go"] || !got["operations.md|Foo|cmd/moombox/z.go"] {
 		t.Errorf("comments and blank lines must be dropped and entries trimmed; got %v", got)
+	}
+	if len(reasonless) != 0 {
+		t.Errorf("reasoned entries must not be reported; got lines %v", reasonless)
+	}
+	// A blank line above an entry is not a reason (line 4), and neither is
+	// another entry (line 5). Both must be named by their line number.
+	if _, reasonless = parseAllowlist("# reason\na.md|internal/x/y.go\n\nb.md|internal/x/z.go\nc.md|internal/x/w.go\n"); len(reasonless) != 2 || reasonless[0] != 4 || reasonless[1] != 5 {
+		t.Errorf("an entry with no `#` reason line above it must be reported by line number; got %v", reasonless)
+	}
+}
+
+// TestCommentOnlySymbolDoesNotResolve pins the comment-exclusion rule the plan
+// review set: a symbol surviving only in a `//` comment of the cited file does
+// NOT satisfy a citation -- that is exactly the rot found at
+// platform-services.md:907. Both rots that exercised the rule are now fixed,
+// so without this nothing in the suite would notice it being relaxed.
+func TestCommentOnlySymbolDoesNotResolve(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "fixture.go")
+	if err := os.WriteFile(abs, []byte("package p\n\n// onlyInAComment was renamed away.\nfunc realDecl() { _ = \"inALiteral\" }\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ff := parseGoFile(t, abs)
+	if ff.resolves("onlyInAComment") {
+		t.Error("a symbol mentioned only in a // comment must NOT resolve")
+	}
+	if !ff.resolves("realDecl") || !ff.resolves("inALiteral") {
+		t.Error("a declaration and a string-literal mention must both resolve")
 	}
 }
 
@@ -267,10 +335,19 @@ func parseGoFile(t *testing.T, abs string) *fileFacts {
 // TestSpecDocCitationsResolve is checks (a), (a') and (b): every path, every
 // directory and every symbol the six docs cite still exists. It names each
 // failure by doc:line so the fix is a one-line edit, not a hunt.
+//
+// It also counts what it reached and fails below a floor. Without that, one
+// token is enough to make this -- the largest of the three walks -- pass green
+// while asserting nothing: emptying citationPrefixes recognises no citation at
+// all, and dropping `go` from fileExtRe silently drops every .go path and
+// every symbol pair. Both mutations survived a review battery that killed
+// eleven others. The other two walks already carry this guard (the §-reference
+// floor and nonTestGoFiles' file-count floor).
 func TestSpecDocCitationsResolve(t *testing.T) {
 	root := repoRoot(t)
 	allow := loadAllowlist(t)
 	factsCache := map[string]*fileFacts{}
+	files, dirs, pairs := 0, 0, 0
 
 	for _, doc := range specDocs {
 		lines := docLines(t, root, doc)
@@ -285,7 +362,18 @@ func TestSpecDocCitationsResolve(t *testing.T) {
 
 				// (a) file citation
 				if fileExtRe.MatchString(p) {
+					files++
 					if allow[doc+"|"+p] {
+						continue
+					}
+					if buildArtifacts[p] {
+						// A gitignored build output: absent in a fresh clone,
+						// so only the tracked directory that HOLDS it is
+						// required to exist. Nothing here can be a .go file,
+						// so there is no symbol pair to check.
+						if st, err := os.Stat(filepath.Join(root, filepath.FromSlash(path.Dir(p)))); err != nil || !st.IsDir() {
+							t.Errorf("%s:%d cites `%s`, a build artifact whose directory does not exist", doc, lineNo, tok)
+						}
 						continue
 					}
 					if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err != nil {
@@ -303,6 +391,7 @@ func TestSpecDocCitationsResolve(t *testing.T) {
 					if !connectorRe.MatchString(line[prev.end:sp.start]) {
 						continue
 					}
+					pairs++
 					sym := symbolName(prev.text)
 					if allow[doc+"|"+sym+"|"+p] {
 						continue
@@ -324,6 +413,7 @@ func TestSpecDocCitationsResolve(t *testing.T) {
 				if strings.Contains(dir, ".") {
 					continue // pkg.Type.Method and friends -- not a path
 				}
+				dirs++
 				if allow[doc+"|"+p] {
 					continue
 				}
@@ -333,6 +423,22 @@ func TestSpecDocCitationsResolve(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	// The floors sit just under the counts measured when they were written --
+	// 317 file citations, 59 directories, 160 symbol pairs -- with room for
+	// ordinary doc editing above them. They are a vacuity guard, not a target:
+	// a drop of this size means the scan stopped recognising a whole SHAPE of
+	// citation, not that a paragraph was deleted. Raise them if the docs grow;
+	// never lower one to make a run go green.
+	if files < 250 {
+		t.Errorf("only %d file citations were checked -- the scan is broken (there were 317 when this floor was written)", files)
+	}
+	if dirs < 40 {
+		t.Errorf("only %d directory citations were checked -- the scan is broken (there were 59 when this floor was written)", dirs)
+	}
+	if pairs < 120 {
+		t.Errorf("only %d symbol/path pairs were checked -- the scan is broken (there were 160 when this floor was written)", pairs)
 	}
 }
 

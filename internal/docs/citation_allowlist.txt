@@ -8,6 +8,8 @@
 # An entry asserts the CHECKER is wrong about a citation that is right --
 # prose shaped like a citation, a TOML key that looks like an identifier, a
 # path that is deliberately illustrative. Doc rot does not belong here: fix
-# the doc. Every entry carries its reason on the line above it.
+# the doc. Every entry carries its reason on the line immediately above it,
+# and parseAllowlist REJECTS one that does not: an unexplained suppression is
+# indistinguishable from the rot it hides.
 #
 # Empty today: every citation in docs/spec resolves.
