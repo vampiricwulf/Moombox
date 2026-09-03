@@ -167,8 +167,10 @@ func TestAFirefoxSetupWithAFailedAssignStoresNoJob(t *testing.T) {
 // THE LAST THREE ROWS ARE WHY THIS IS A TABLE. Skipping is only correct where
 // something else will do the killing, so the guard has to be narrow: a live
 // launcher must still be killed, and so must a reaped one whose job cannot
-// vouch for anything — which includes every non-Windows target, where
-// queryable() is always false and this guard therefore never engages.
+// vouch for anything — darwin and the fallback build, where queryable() is
+// always false, and any Linux launch whose group could not be adopted. This
+// guard engages on Linux too wherever a group WAS adopted, the same as
+// Windows, since the process-group reap landed.
 //
 // Mutation-checked: widening the guard to `s.browserExited` alone fails row 2;
 // dropping the guard entirely fails row 1.

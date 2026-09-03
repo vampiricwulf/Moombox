@@ -418,17 +418,18 @@ func TestReapWillNotCloseAJobThatStillHasLiveProcesses(t *testing.T) {
 // TestReapWillNotFireWhenNothingCanSayTheBrowserIsGone is the same rule for the
 // case where there is no evidence at all rather than evidence of life.
 //
-// `known == false` is what the probe returns with no Job Object (a launch where
-// newProcessJob or its assign failed, on either family) and on the platforms
-// whose processJob cannot count — which is every non-Windows one.
+// `known == false` is what the probe returns with no job (a launch where
+// newProcessJob or its assign failed, on either family), on the platforms
+// whose processJob cannot count — darwin and the fallback build — and on
+// Linux where the group could not be adopted or /proc cannot be read.
 // drainJob draws the identical line on the same syscall: a zero from something
 // that cannot count means "nothing was waited on", not "the browser finished".
 //
 // Refusing to reap there costs the wedge staying put on those paths, which is
-// exactly the pre-existing behaviour — and on Linux and in Docker it is still
-// EVERY path, since no processJob there can count. Reaping on no evidence would
-// instead destroy live setups 60 seconds in. The first is a gap; the second is
-// a regression.
+// exactly the pre-existing behaviour — and it was EVERY Linux and Docker path
+// until the process-group arc gave job_linux.go a real count. Reaping on no
+// evidence would instead destroy live setups 60 seconds in. The first is a
+// gap; the second is a regression.
 func TestReapWillNotFireWhenNothingCanSayTheBrowserIsGone(t *testing.T) {
 	captureKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
@@ -611,16 +612,18 @@ func TestAbandonLeavesTheBrowserAloneWhereTheReapCanJudgeIt(t *testing.T) {
 // TestAbandonReleasesTheSlotWhereTheReapNeverFires is the other arm, and the
 // reason the beacon still exists at all.
 //
-// Where setupBrowserGone cannot answer — no Job Object, or a platform with no
-// Job Object primitive, which is every non-Windows target — the reap can NEVER
-// release the slot, so this beacon is the only thing that does. Releasing is
-// also safe exactly there: with nothing tracking the browser, clearing the slot
-// closes no handle and kills nothing.
+// Where setupBrowserGone cannot answer — no job, a platform with no primitive
+// at all (darwin, the fallback build), or a Linux group that could not be
+// adopted or whose /proc cannot be read — the reap can NEVER release the
+// slot, so this beacon is the only thing that does. Releasing is also safe
+// exactly there: with nothing tracking the browser, clearing the slot closes
+// no handle and kills nothing.
 //
-// So the call is redundant on Windows and load-bearing on Linux and in Docker.
-// Both halves are asserted, here and above, because deleting either one is a
-// live regression: drop the deferral and the kill comes back, drop this and
-// Linux wedges until restart.
+// So the call is redundant wherever a group or a Job Object was adopted —
+// Windows, and Linux since the process-group reap — and load-bearing wherever
+// nothing was. Both halves are asserted, here and above, because deleting
+// either one is a live regression: drop the deferral and the kill comes back,
+// drop this and an unanswerable platform wedges until restart.
 func TestAbandonReleasesTheSlotWhereTheReapNeverFires(t *testing.T) {
 	killed := captureKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})

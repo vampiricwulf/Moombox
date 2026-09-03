@@ -47,8 +47,9 @@ func TestShouldKeepWaiting(t *testing.T) {
 
 // TestDrainJobReturnsImmediatelyWithoutAJob covers the two ways there is
 // nothing to drain: newProcessJob failed (runWithTimeout carries on with a
-// nil job) and a job with no handle — which is also what every non-Windows
-// build looks like, since their activeProcesses always reports zero. Both
+// nil job) and a job with no handle — which is also what darwin and the
+// fallback build look like, since their activeProcesses always reports zero,
+// and what a Linux job whose group was never adopted looks like. Both
 // must return nil instantly rather than erroring or burning the budget.
 func TestDrainJobReturnsImmediatelyWithoutAJob(t *testing.T) {
 	for _, tc := range []struct {
@@ -74,13 +75,15 @@ func TestDrainJobReturnsImmediatelyWithoutAJob(t *testing.T) {
 // methods so it satisfies the AutoCookieService logger field as well as the
 // narrower one drainJob takes — one capturing logger for the package.
 //
-// msgs is every message regardless of level; infos and debugs are the same
-// messages split out, for the tests whose subject IS the level — a line the
-// operator sees by default versus one they have to go looking for.
+// msgs is every message regardless of level; infos, debugs and warns are the
+// same messages split out, for the tests whose subject IS the level — a line
+// the operator sees by default versus one they have to go looking for, or (for
+// warns) a line that must not survive being quietly downgraded to Debug.
 type capturingLogger struct {
 	msgs   []string
 	infos  []string
 	debugs []string
+	warns  []string
 }
 
 func (l *capturingLogger) Debug(msg string, args ...any) {
@@ -92,12 +95,26 @@ func (l *capturingLogger) Info(msg string, args ...any) {
 	l.msgs = append(l.msgs, msg)
 	l.infos = append(l.infos, msg)
 }
-func (l *capturingLogger) Warn(msg string, args ...any)  { l.msgs = append(l.msgs, msg) }
+
+func (l *capturingLogger) Warn(msg string, args ...any) {
+	l.msgs = append(l.msgs, msg)
+	l.warns = append(l.warns, msg)
+}
 func (l *capturingLogger) Error(msg string, args ...any) { l.msgs = append(l.msgs, msg) }
 
-// contains reports whether any recorded message contains sub.
+// contains reports whether any recorded message contains sub, AT ANY LEVEL.
+// Do not use this for an assertion whose subject is the level itself — a
+// Warn silently downgraded to Debug still satisfies it. Use containsAtWarn
+// for that.
 func (l *capturingLogger) contains(sub string) bool {
 	return countContaining(l.msgs, sub) > 0
+}
+
+// containsAtWarn reports whether any message logged at Warn contains sub. The
+// level-aware counterpart to contains, for assertions whose subject is
+// specifically the Warn level.
+func (l *capturingLogger) containsAtWarn(sub string) bool {
+	return countContaining(l.warns, sub) > 0
 }
 
 // countContaining reports how many of `lines` contain sub.
@@ -115,8 +132,9 @@ func countContaining(lines []string, sub string) int {
 // fix with a platform behind it.
 //
 // The drain exits as soon as the job reports zero active processes, and used
-// to log "browser finished; job drained" when it did. On Linux and darwin the
-// processJob stubs return zero unconditionally — there is no Job Object — so
+// to log "browser finished; job drained" when it did. On darwin and the
+// fallback build the processJob stub returns zero unconditionally — there is
+// no primitive — and Linux did the same until the process-group arc, so
 // that line fired on lap ZERO of every single launch, announcing a completion
 // nobody had observed and nothing had waited for. It is the one place in the
 // drain that broke the "could not confirm is not confirmed" line the rest of
