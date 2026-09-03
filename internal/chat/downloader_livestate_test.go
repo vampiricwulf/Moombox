@@ -214,6 +214,31 @@ func TestLatePollResultDoesNotReopenAfterStop(t *testing.T) {
 	}
 }
 
+// TestLatePollResultDoesNotReopenWhenNotRunning pins the third and last
+// conjunct of noteLivePollResult's guard (cd.running && !cd.cancelFlag &&
+// !cd.streamEnded): dropping `cd.running &&` left the whole package green,
+// because the two sibling tests each isolate a DIFFERENT conjunct by
+// driving a real exit function (Stop() sets cancelFlag, MarkStreamEnded
+// sets streamEnded) while running stays true throughout. This test isolates
+// running instead: no exit function is called at all, so cancelFlag and
+// streamEnded are left at their zero-value false, and running is set false
+// directly under cd.mu to stand in for a downloader that never started (or
+// has already stopped being tracked as running) -- the one state neither
+// sibling test can reach, since Stop() and MarkStreamEnded either clear
+// running themselves or never touch it while it's already true.
+func TestLatePollResultDoesNotReopenWhenNotRunning(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json", IsLiveOrUpcoming: true})
+	cd.mu.Lock()
+	cd.running = false // isolate running: cancelFlag and streamEnded stay false (zero value)
+	cd.mu.Unlock()
+
+	cd.noteLivePollResult(true) // a poll result arriving while not running
+
+	if cd.LiveContinuationOpen() {
+		t.Error("a poll result must not open the resume signal while the downloader is not running")
+	}
+}
+
 // TestStartResetsLiveContinuationOpenOnFreshRun is the I5(a) coverage for
 // "verify Start() also resets the signal appropriately on a fresh run": a
 // *ChatDownloader whose signal was left open by an EARLIER run (or set
