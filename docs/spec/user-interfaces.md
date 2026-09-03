@@ -619,7 +619,7 @@ The reason strings answer the half `verification` cannot carry. Without them the
 | `autoCookieReloginRequired` | `ReloginStatus()`, or `{youtube:false, twitch:false}` when no auto-cookie service is wired — both platforms always present, so the frontend needs no missing-key fallback |
 | `activePlatforms` | present when the callback is wired |
 
-**`POST /api/cookies/auto-refresh`** on success adds the four `cookieRefreshOutcome` keys to the same status block. Three of them are independent facts and none can be derived from another:
+**`POST /api/cookies/auto-refresh`** on success adds the five `cookieRefreshOutcome` keys to the same status block. Three of them are independent facts and none can be derived from another:
 
 | Key | Question it answers |
 |-----|---------------------|
@@ -627,8 +627,9 @@ The reason strings answer the half `verification` cannot carry. Without them the
 | `renewed` | Did **this** pass produce the credentials it verified? False means "could not confirm", never "the browser failed" — a working `cookies.txt` outlives a browser refresh that did nothing, because the independent 30-minute refresh keeps the session alive. |
 | `verdict` | What the pass **concluded**: `"ok"`, `"failed"` or `"unknown"`. |
 | `ran` | Did the pass do any work at all? This splits the two very different events inside `"unknown"`. |
+| `mechanism` | WHICH cookie source ran: `"browser"`, `"profile-import"`, or `""` when the pass declined before it chose one. **Wording only** — the toast's subject, so an import stops rendering as a browser refresh. Additive: an older frontend ignores it, and a newer frontend against an older binary reads `undefined` and falls back to `cookies.acquisition`, the same value it used for the pre-flight toast. |
 
-plus `cookieStatus`, `twitchAuthStatus`, `autoCookieReloginRequired` and `activePlatforms`. The status block is re-read after the browser pass, and it can lag: a refresh already in flight read the cookie file *before* this pass rewrote it. The refresh's own outcome comes from the four keys above and is unaffected.
+plus `cookieStatus`, `twitchAuthStatus`, `autoCookieReloginRequired` and `activePlatforms`. The status block is re-read after the browser pass, and it can lag: a refresh already in flight read the cookie file *before* this pass rewrote it. The refresh's own outcome comes from the five keys above and is unaffected.
 
 Its error arms are discriminated so the frontend can both branch and show something actionable:
 

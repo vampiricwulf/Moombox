@@ -545,10 +545,16 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	//
 	// The read-only sites reuse the same verdict through readOnlyProfileDirErr
 	// rather than a second scan — one computed answer, two ways of consulting it.
+	//
+	// Computed here, SAID somewhere else. cmd/moombox builds the service and
+	// only afterwards wires AcquisitionMode, so at this point the mode is not
+	// knowable and any level chosen here is chosen blind — which is how an
+	// install following the README's `cookies.acquisition = "profile"` recipe
+	// logged a red "profile dir rejected ... refusing to launch" on every boot,
+	// for the directory it is SUPPOSED to point at (Arc 12c arc-close F1). The
+	// verdict and every reader of it are unchanged; only the sentence moved, to
+	// LogProfileDirVerdict, which the wiring site calls once the mode is there.
 	profileDirErr := validateBrowserProfileDirForLaunch(profileDir)
-	if profileDirErr != nil && logger != nil {
-		logger.Error("auto-cookie profile dir rejected at construction", "err", profileDirErr)
-	}
 	s := &AutoCookieService{
 		profileDir:           profileDir,
 		cookiePath:           cookiePath,
@@ -1040,6 +1046,52 @@ func (s *AutoCookieService) readOnlyProfileDirErr() error {
 		"so nothing was launched and nothing was read — set cookies.acquisition = %q to allow a "+
 		"read-only import from it (audit cookies.md #26): %w",
 		s.profileDir, AcquisitionProfile, ErrProfileDirNotOptedIn)
+}
+
+// LogProfileDirVerdict says ONCE what the launch guard decided about the
+// configured browser profile directory, at the level the acquisition mode
+// earns. Silent when the directory is fine, which is nearly every install.
+//
+// A method rather than a line in NewAutoCookieService because the constructor
+// runs BEFORE AcquisitionMode is wired (cmd/moombox/services.go builds the
+// service, then assigns the callbacks), so it cannot tell the two
+// configurations apart and logged the same red line for both.
+//
+// Under "auto" that line is right, and its wording is kept verbatim: a browser
+// refresh will be refused this directory, so an operator has a launch they
+// believe is happening and is not, and ERROR is the level that gets read.
+//
+// Under "profile" nothing was going to launch anyway. The refusal describes an
+// event that never occurs, and the pass that DOES run — the read-only import,
+// which copies cookies.sqlite and its -wal into a 0700 temp dir and opens the
+// COPY mode=ro — is not affected by the guard at all. So that mode gets one
+// INFO saying both halves out loud, because an operator who followed the README
+// recipe is owed an acknowledgement rather than a rejection.
+//
+// The verdict itself is untouched: validateBrowserProfileDirForLaunch is still
+// called exactly once, at construction, and the four subprocess sites still
+// read s.profileDirErr directly, in every mode (see the field's comment and
+// TestLaunchGuardHoldsEveryLaunchSiteInEveryMode). This changes a sentence, not
+// a decision.
+//
+// NO LOCK, and it must not be called with s.mu held: resolvedAcquisition
+// reaches the config store's own read lock through AcquisitionMode, which is
+// the same rule the launch sites and readOnlyProfileDirErr already follow.
+// Everything it reads — profileDirErr, profileDir, logger, AcquisitionMode —
+// is written once, before the service is handed to any goroutine. Called once,
+// from the wiring sequence.
+func (s *AutoCookieService) LogProfileDirVerdict() {
+	if s.profileDirErr == nil || s.logger == nil {
+		return
+	}
+	if s.resolvedAcquisition() == AcquisitionProfile {
+		s.logger.Info("browser profile dir sits inside a real installed browser's profile tree — "+
+			"no headless browser will be launched against it; cookies.acquisition is \"profile\", "+
+			"so the read-only import is what runs",
+			"profile_dir", s.profileDir)
+		return
+	}
+	s.logger.Error("auto-cookie profile dir rejected at construction", "err", s.profileDirErr)
 }
 
 // refreshBrowser is resolvedBrowser as a REFRESH PASS sees it: the configured
@@ -1739,6 +1791,20 @@ func RecheckReport(platforms ...RecheckedPlatform) string {
 	return "Cookies: " + strings.Join(parts, ", ")
 }
 
+// The two values of RefreshResult.Mechanism: which cookie source a refresh pass
+// actually used. Exported because internal/web/routes puts them on the wire and
+// internal/tui renders them, and because a literal repeated across three
+// packages and one JavaScript file is how a vocabulary drifts.
+//
+// Deliberately NOT the cookies.acquisition values, and not spelled like them.
+// Those name what the operator ASKED for; these name what happened, and the two
+// differ on every host where no browser resolves — a container in "auto" mode
+// imports, and did so years before the setting existed.
+const (
+	RefreshMechanismBrowser       = "browser"
+	RefreshMechanismProfileImport = "profile-import"
+)
+
 // RefreshResult reports a refresh pass PER PLATFORM.
 //
 // The whole-service bool that RefreshCookies still returns cannot answer the
@@ -1800,6 +1866,28 @@ type RefreshResult struct {
 	// RefreshUnknown verdict, which asserts nothing either way.
 	YouTubeStored bool
 	TwitchStored  bool
+
+	// Mechanism is which cookie source this pass actually used —
+	// RefreshMechanismBrowser or RefreshMechanismProfileImport — or "" when it
+	// stopped before choosing one. Every exit above the importedFromProfile
+	// decision is "": stopped service, setup in flight, refresh in flight, and
+	// the three no-source errors (no browser and no profile; launches disabled
+	// and no profile; profile not found). The one decline BELOW it — the
+	// browser branch's empty-jar gate — carries "browser": the path was chosen
+	// before it declined.
+	//
+	// WORDING ONLY, exactly the rule YouTubeStored / TwitchStored carry above.
+	// Nothing may branch a decision on it: whether the credentials work is what
+	// the verdicts are for, and whether this pass produced them is Renewed.
+	// What it answers is the question every post-flight sentence was getting
+	// wrong — "Browser cookie refresh successful" after an import that launched
+	// nothing (Arc 12c arc-close F2).
+	//
+	// "" is not a fourth state to render. Both surfaces fall back to
+	// cookies.acquisition for the sentence's subject when it is empty, which is
+	// also what an OLDER binary's payload degrades to, since it carries no
+	// `mechanism` key at all — the same additive rule `ran` and `verdict` set.
+	Mechanism string
 }
 
 // Verdict returns the verdict for a platform key ("youtube" / "twitch"),
@@ -1992,7 +2080,28 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 	return s.refreshCookiesDetailed(ctx, gateApplies)
 }
 
-func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy browserGatePolicy) (RefreshResult, error) {
+func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy browserGatePolicy) (out RefreshResult, retErr error) {
+	// ONE stamp for eighteen returns.
+	//
+	// Mechanism has to be true of every exit — eight aborts, seven declines
+	// and three verdicts — and threading it through each return literal is
+	// exactly how the nineteenth one gets added without it. The named result
+	// plus this defer make the stamp structural instead: a return site added
+	// later carries it whether or not its author knew the field existed.
+	//
+	// It starts empty and is set only where the path is actually chosen, at the
+	// importedFromProfile decision below, so a pass that declined above that
+	// point reports "" — the honest answer, and the one both surfaces know how
+	// to fall back from. The one decline below that point — the browser
+	// branch's empty-jar gate — carries "browser", because the branch WAS
+	// chosen.
+	//
+	// NO LOCK: the closure touches the named result and nothing else, and it is
+	// registered before the first s.mu.Lock() so it runs LAST, after every path
+	// has already released the mutex.
+	mechanism := ""
+	defer func() { out.Mechanism = mechanism }()
+
 	s.mu.Lock()
 	// A stopped service must not launch a browser. Declined rather than
 	// errored, matching the two gates below it: nothing was examined, so the
@@ -2092,6 +2201,14 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	importedFromProfile := browser == nil
 	if s.resolvedAcquisition() == AcquisitionProfile {
 		importedFromProfile = true
+	}
+	// The one place the mechanism is known. Everything above this line declined
+	// without choosing; everything below it ran the branch named here, and the
+	// defer at the top carries the answer out of whichever exit is taken.
+	if importedFromProfile {
+		mechanism = RefreshMechanismProfileImport
+	} else {
+		mechanism = RefreshMechanismBrowser
 	}
 
 	var netscapeCookies string

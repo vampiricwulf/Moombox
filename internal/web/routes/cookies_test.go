@@ -359,6 +359,30 @@ func TestCookieRefreshOutcomeKeepsRenewedIndependent(t *testing.T) {
 	}
 }
 
+// TestCookieRefreshOutcomeCarriesTheMechanism pins the additive key the two
+// post-flight surfaces read.
+//
+// The empty row is the one with teeth. A pass that declined before choosing a
+// path has no mechanism, and the payload has to say so rather than default to
+// "browser": the dashboard treats empty and absent identically and falls back
+// to cookies.acquisition, and a payload that asserted "browser" there would
+// override that fallback with a guess.
+func TestCookieRefreshOutcomeCarriesTheMechanism(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"a browser pass", cookies.RefreshMechanismBrowser, "browser"},
+		{"a profile import", cookies.RefreshMechanismProfileImport, "profile-import"},
+		{"a pass that declined before choosing", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cookieRefreshOutcome(cookies.RefreshResult{Ran: true, Mechanism: tc.in})
+			if got["mechanism"] != tc.want {
+				t.Errorf("mechanism = %v, want %q — the dashboard's toast subject comes from this key",
+					got["mechanism"], tc.want)
+			}
+		})
+	}
+}
+
 // TestAppJSReadsTheFieldsTheHandlerEmits pins the one seam nothing else can
 // see: the Web toast's branch conditions are JavaScript, and no JS harness
 // exists in-tree.
@@ -389,6 +413,10 @@ func TestAppJSReadsTheFieldsTheHandlerEmits(t *testing.T) {
 	for _, tc := range []struct{ key, expr string }{
 		{"ran", "data.ran === false"},
 		{"verdict", `data.verdict === "failed"`},
+		// Read, not compared: app.js hands this to cookieRefreshMechanismLabel
+		// rather than branching on it, and the label owns the fallback for an
+		// absent or empty value. What must not drift is the NAME.
+		{"mechanism", "data.mechanism"},
 	} {
 		if _, ok := payload[tc.key]; !ok {
 			t.Fatalf("cookieRefreshOutcome no longer emits %q, but app.js still reads data.%s — "+

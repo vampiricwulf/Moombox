@@ -43,6 +43,14 @@ import (
 //     during either returns a pass that never looked at anything — and that
 //     was being reported as "auth verification failed", in the same payload
 //     whose cookieStatus said the session was authenticated.
+//   - mechanism — WHICH cookie source ran: "browser", "profile-import", or ""
+//     when the pass declined before it chose one. Wording only: it exists so a
+//     post-flight toast stops saying "Browser cookie refresh ..." after an
+//     import that launched nothing, and nothing may branch a decision on it.
+//     Additive like `ran` and `verdict` before it — an older frontend ignores it, and a newer
+//     frontend against an older binary reads undefined and falls back to
+//     cookies.acquisition, which is what it already used for the pre-flight
+//     toast.
 //
 // The three-way wording of a non-success — declined / ran-but-inconclusive /
 // conclusively failed — follows cookieRefreshReportFor in
@@ -54,10 +62,11 @@ import (
 // the assertion downstream of the junction rather than at the pass itself.
 func cookieRefreshOutcome(result cookies.RefreshResult) map[string]any {
 	return map[string]any{
-		"success": result.AnyVerified(),
-		"renewed": result.Renewed,
-		"verdict": result.Overall().String(),
-		"ran":     result.Ran,
+		"success":   result.AnyVerified(),
+		"renewed":   result.Renewed,
+		"verdict":   result.Overall().String(),
+		"ran":       result.Ran,
+		"mechanism": result.Mechanism,
 	}
 }
 

@@ -387,6 +387,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cookies.IsNoBrowserProfile(msg.Err) {
 			noProfileFallback = a.recheckCookiesCmd()
 		}
+		// The SUBJECT of every arm below, from what the pass ACTUALLY did —
+		// msg.Result.Mechanism — with the configured mode as the fallback for a
+		// pass that declined before choosing. See cookieRefreshMechanismLabel.
+		// Computed once rather than per arm: the rung-3 arm below does not use
+		// it, and one config-store read on that path is cheaper than five call
+		// sites that can drift.
+		mechanismLabel := cookieRefreshMechanismLabel(msg.Result.Mechanism, a.cookieAcquisitionMode())
 		switch {
 		case noProfileFallback != nil:
 			// THE BOTTOM RUNG OF R F, and it must not be a message on its own.
@@ -416,21 +423,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setFeedback("No browser profile found, running R C instead...")
 			return a, noProfileFallback
 		case msg.Err != nil:
-			a.setFeedback("Browser cookie refresh failed: " + msg.Err.Error())
+			a.setFeedback(mechanismLabel + " failed: " + msg.Err.Error())
 		case !msg.Result.Ran:
 			// Causes from the shared constant, not restated: this line, the
 			// worker's log note and the Web toast are three renderings of one
 			// exhaustive list, and they had already drifted apart once.
-			a.setFeedback("Browser cookie refresh declined to run (" + cookies.RefreshDeclinedCauses +
+			a.setFeedback(mechanismLabel + " declined to run (" + cookies.RefreshDeclinedCauses +
 				") — nothing was learned about these cookies")
 		case msg.Result.Overall() == cookies.RefreshFailed:
-			a.setFeedback("Browser cookie refresh ran and auth verification failed")
+			a.setFeedback(mechanismLabel + " ran and auth verification failed")
 		case msg.Result.Overall() == cookies.RefreshUnknown:
-			a.setFeedback("Browser cookie refresh ran but could not establish whether these cookies work")
+			a.setFeedback(mechanismLabel + " ran but could not establish whether these cookies work")
 		case !msg.Result.Renewed:
+			// NOT re-subjected, and not an oversight: renewed is
+			// `importedFromProfile || browserActed`, so an import that reaches
+			// a verdict always renewed and this arm is unreachable for one.
+			// TestRefreshResultCarriesTheMechanismThatRan pins that upstream.
 			a.setFeedback("Cookies still work, but this pass could not confirm the browser refreshed them")
 		default:
-			a.setFeedback("Browser cookie refresh successful")
+			a.setFeedback(mechanismLabel + " successful")
 		}
 		return a, nil
 

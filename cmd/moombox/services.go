@@ -1004,6 +1004,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 		})
 		return mode
 	}
+	// The launch guard's verdict, said once, at the level the mode earns.
+	//
+	// HERE and not in the constructor, and the ORDER is the whole point: the
+	// service is built at the top of this block with no AcquisitionMode, so a
+	// line logged there cannot tell "auto" — where a refused directory means a
+	// browser refresh the operator expects will not happen, ERROR — from
+	// "profile", where nothing was going to launch and the read-only import
+	// runs regardless, INFO. Hoisting this call above the closure above puts
+	// the red line back on every profile-mode boot, which is Arc 12c
+	// arc-close F1; TestProfileDirVerdictIsLoggedAfterTheModeIsWired fails if
+	// it moves. Silent unless the directory is actually refused.
+	autoCookieSvc.LogProfileDirVerdict()
 	s.autoCookieSvc = autoCookieSvc
 
 	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
