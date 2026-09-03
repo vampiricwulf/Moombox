@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, `BurntSushi/toml`, chi/v5 REST, vanilla-JS dashboard embedded via `go:embed` (Shoelace v2.16), Bubble Tea TUI, `dop251/goja` for executing the shipped JS modules inside Go tests.
 
-**Spec:** `.superpowers/sdd/2026-08-25-cookie-subsystem-remediation/arc12c-design-draft.md` (R1–R5, non-goals, invariants; committed later as `docs/superpowers/specs/2026-09-02-arc12c-acquisition-mode-design.md`). **Ruling 2026-09-02:** TWO values, `"auto"` and `"profile"`. The audit's third value `"browser"` is not added — it was observationally identical to `"auto"` at every site, and a value that behaves like another is a trap; a later semantics can add it additively.
+**Spec:** `docs/superpowers/specs/2026-09-02-arc12c-acquisition-mode-design.md` (R1–R5, non-goals, invariants; committed later as `docs/superpowers/specs/2026-09-02-arc12c-acquisition-mode-design.md`). **Ruling 2026-09-02:** TWO values, `"auto"` and `"profile"`. The audit's third value `"browser"` is not added — it was observationally identical to `"auto"` at every site, and a value that behaves like another is a trap; a later semantics can add it additively.
 
 **Anchors** were verified at `d6e0404` and are identical at `main`'s `16afaa6` for every file this plan cites; `internal/cookies/autocookies.go` and `autocookies_firefox.go` are mid-edit on `cookie-a1-linux-reap` (+11 / +42 lines uncommitted), so re-verify `refreshFirefox`/`startFirefoxSetup` line numbers after that arc merges. Every anchor below is also named by symbol.
 
