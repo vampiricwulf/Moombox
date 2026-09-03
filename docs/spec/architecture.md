@@ -198,7 +198,6 @@ internal/web       (21 files, ~6,600)  -- chi router, WebSocket hub, auth, middl
 internal/tui       (33 files, ~13,100) -- 2-over-1 panel layout, overlays, chord system
 internal/goja       (4 files, ~800)    -- JS runtime shims (minimal DOM, TextEncoder, timers)
 internal/disk       (2 files, ~60)     -- Disk space queries: kernel32 on Windows, statfs on Linux
-internal/errors     (1 file,  ~230)    -- Typed error hierarchy, sentinel codes
 internal/constants  (1 file,  ~400)    -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils     (14 files, ~1,150)  -- HTTP helpers, formatters, YouTube URL parsing
 ```
@@ -216,7 +215,6 @@ Dependencies flow strictly downward. Lower-level packages never import higher-le
 - `internal/monitor` imports: `database`, `config`, `twitch`
 - `internal/engine` imports: nothing from internal (standalone download/mux logic)
 - `internal/database` imports: nothing from internal
-- `internal/errors` imports: nothing from internal
 - `internal/utils` imports: nothing from internal
 - `internal/constants` imports: nothing from internal
 
@@ -915,4 +913,3 @@ Callback fields:
 - `internal/monitor/feed.go` -- YouTube RSS feed monitor
 - `internal/monitor/decapi.go` -- DECAPI latest-video monitor
 - `internal/monitor/twitch.go` -- Twitch GQL stream monitor
-- `internal/errors/errors.go` -- Complete error type hierarchy
