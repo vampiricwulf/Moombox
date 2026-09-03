@@ -15,7 +15,7 @@ docs) is the shape of the plan.
 (`internal/cookies/autocookies.go:1958`): a host with any detectable browser always takes the launch
 path; a Windows desktop user who wants browserless import from their real signed-in profile has no
 way to ask for it. `auto_enabled` (`BrowserLaunchAllowed`, `:437`) gates only the launch. And the
-launch-path security guard `validateBrowserProfileDir` (`:162`) — whose purpose is to stop a config
+launch-path security guard `validateBrowserProfileDirForLaunch` (`:176`) — whose purpose is to stop a config
 from driving the user's real browser headlessly — also fast-fails the two READ-ONLY paths
 (`importProfileCookies`, `autocookies_profile.go:502`; the startup seed decision,
 `autocookies_profile.go:872`), although the read-only path copies `cookies.sqlite` + `-wal` into a
