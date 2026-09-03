@@ -58,6 +58,14 @@ func (l *renderingLogger) countLinesContaining(sub string) int {
 	return n
 }
 
+// allLines joins every captured line with a newline, for a single fragment
+// scan across the whole log rather than one marker-Contains check per line.
+func (l *renderingLogger) allLines() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
+}
+
 // gqlLeakMarker stands in for what actually rides in an intermediary's error
 // page: an echo of the request's Authorization header. A synthetic literal,
 // so it is safe to search for -- and no assertion below prints it.
@@ -65,6 +73,26 @@ const gqlLeakMarker = "OAuth-echoed-credential-marker"
 
 // gqlLeakBody is the stub's answer for every arm. 42 bytes.
 const gqlLeakBody = `{"error":"` + gqlLeakMarker + `"}`
+
+// assertNoBodyFragment fails if ANY 8-byte window of gqlLeakBody appears
+// anywhere in text. A whole-marker strings.Contains(text, gqlLeakMarker)
+// check can be defeated by a mutant that leaks only a body PREFIX shorter
+// than the marker (e.g. gqlBodySize rendering the first 32 of the marker's
+// 42 bytes and then the byte count) -- the marker never appears whole, so
+// that check passes while a fragment of the upstream body still reached the
+// caller. Scanning every 8-byte window closes that gap regardless of where
+// in the body the leak starts or how much of it survives. Like every other
+// assertion in this file, it never prints what it found -- only that it did.
+func assertNoBodyFragment(t *testing.T, where, text string) {
+	t.Helper()
+	const window = 8
+	for i := 0; i+window <= len(gqlLeakBody); i++ {
+		if strings.Contains(text, gqlLeakBody[i:i+window]) {
+			t.Errorf("%s carries a fragment of the response body; not printed here on purpose", where)
+			return
+		}
+	}
+}
 
 // TestGQLRetriedArmsNeverLogOrReturnBody drives the two RETRIED arms -- 429
 // without a Retry-After header, and 5xx -- to exhaustion with the backoff
@@ -101,12 +129,10 @@ func TestGQLRetriedArmsNeverLogOrReturnBody(t *testing.T) {
 				t.Fatalf("%d retry Debug lines, want %d -- without them this test is vacuous", n, gqlMaxRetries)
 			}
 
-			// The log: no body, no rendering of the previous error at all
-			// (not even its sanitised form), and the status the retry
-			// followed.
-			if n := log.countLinesContaining(gqlLeakMarker); n != 0 {
-				t.Errorf("%d log line(s) carry the response body; the line itself is not printed here on purpose", n)
-			}
+			// The log: no body (not even a fragment of it), no rendering
+			// of the previous error at all (not even its sanitised
+			// form), and the status the retry followed.
+			assertNoBodyFragment(t, "a retry log line", log.allLines())
 			last := errors.Unwrap(err) // the exhausted wrap's %w: the final lastErr
 			if last == nil {
 				t.Fatal("the exhausted-retries error must wrap the last attempt's error")
@@ -118,12 +144,10 @@ func TestGQLRetriedArmsNeverLogOrReturnBody(t *testing.T) {
 				t.Errorf("%d retry line(s) report prev_status=%d, want every one of the %d", n, tc.status, gqlMaxRetries)
 			}
 
-			// The returned error: the SIZE instead of the bytes, prefix
-			// intact -- worker.classifyProbeErr reads the status out of
-			// "gql http <code> (" positionally.
-			if strings.Contains(err.Error(), gqlLeakMarker) {
-				t.Error("the returned error still interpolates the response body; not printed here on purpose")
-			}
+			// The returned error: the SIZE instead of the bytes (not even
+			// a fragment of them), prefix intact -- worker.classifyProbeErr
+			// reads the status out of "gql http <code> (" positionally.
+			assertNoBodyFragment(t, "the returned error", err.Error())
 			want := tc.prefix + fmt.Sprintf("%d-byte body", len(gqlLeakBody))
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("the returned error must contain %q -- the prefix verbatim and the body SIZE, not its bytes", want)
@@ -165,16 +189,12 @@ func TestGQLUnretriedArmsCarryByteCountNotBody(t *testing.T) {
 			if errors.Is(err, ErrTwitchAuthExpired) != tc.sentinel {
 				t.Errorf("errors.Is(err, ErrTwitchAuthExpired) = %v, want %v", !tc.sentinel, tc.sentinel)
 			}
-			if strings.Contains(err.Error(), gqlLeakMarker) {
-				t.Error("the returned error still interpolates the response body; not printed here on purpose")
-			}
+			assertNoBodyFragment(t, "the returned error", err.Error())
 			want := tc.prefix + fmt.Sprintf("%d-byte body", len(gqlLeakBody))
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("the returned error must contain %q -- the prefix verbatim and the body SIZE, not its bytes", want)
 			}
-			if n := log.countLinesContaining(gqlLeakMarker); n != 0 {
-				t.Errorf("%d log line(s) carry the response body; not printed here on purpose", n)
-			}
+			assertNoBodyFragment(t, "a log line", log.allLines())
 		})
 	}
 }

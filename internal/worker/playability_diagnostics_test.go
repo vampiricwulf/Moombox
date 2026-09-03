@@ -188,7 +188,9 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 			//
 			// Unreachable today only because classifyProbeErr's default routes
 			// "gql auth failure (401)" to the network class, which is a string
-			// heuristic over a Twitch response body, not an invariant.
+			// heuristic over the error's status-bearing PREFIX (gqlRequest
+			// reports only a byte count, never the response body), not an
+			// invariant.
 			name: "terminal non-actionable error never resurrects the job",
 			err: fmt.Errorf("max probe errors: %w (%w)",
 				fmt.Errorf("gql auth failure (401): %w", twitch.ErrTwitchAuthExpired),
