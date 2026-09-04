@@ -660,33 +660,35 @@ export class PlayerController {
     if (this.playerJob.chatFilename || (this.playerJob.segments || []).some((s) => s.chatFile)) {
       try {
         this.playerChatData = await this._fetchChatData(jobId, selectionId);
-        if (!this.playerChatData) return;
-        // Chat-to-video timing correction (see chat-timeline.js for the
-        // semantics per platform). Multi-part YouTube jobs use the same
-        // rule: the video begins at the actual stream start regardless of
-        // when Moombox started downloading.
-        const chatBiasMs = computeChatBiasMs({
-          platform: this.playerChatData.platform,
-          chatStreamStartTime: this.playerChatData.streamStartTime,
-          jobStreamStartTime: this.playerJob.streamStartTime,
-        });
-        this.playerChatMessages = (this.playerChatData.messages || [])
-          .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
-          .sort((a, b) => a.offsetMs - b.offsetMs);
+        if (this._selectionSeq !== selectionId) return; // Selection changed during fetch
+        if (this.playerChatData) {
+          // Chat-to-video timing correction (see chat-timeline.js for the
+          // semantics per platform). Multi-part YouTube jobs use the same
+          // rule: the video begins at the actual stream start regardless of
+          // when Moombox started downloading.
+          const chatBiasMs = computeChatBiasMs({
+            platform: this.playerChatData.platform,
+            chatStreamStartTime: this.playerChatData.streamStartTime,
+            jobStreamStartTime: this.playerJob.streamStartTime,
+          });
+          this.playerChatMessages = (this.playerChatData.messages || [])
+            .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
+            .sort((a, b) => a.offsetMs - b.offsetMs);
 
-        // Build 3rd-party emote lookup map for Twitch chat
-        // Priority (Chatterino order): FFZ > BTTV > 7TV — add lowest first so higher overwrites
-        if (this.playerChatData.emotes) {
-          const { bttv, ffz, seventv } = this.playerChatData.emotes;
-          for (const e of seventv || []) this.twitchEmoteMap.set(e.code, e.url);
-          for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
-          for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
+          // Build 3rd-party emote lookup map for Twitch chat
+          // Priority (Chatterino order): FFZ > BTTV > 7TV — add lowest first so higher overwrites
+          if (this.playerChatData.emotes) {
+            const { bttv, ffz, seventv } = this.playerChatData.emotes;
+            for (const e of seventv || []) this.twitchEmoteMap.set(e.code, e.url);
+            for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
+            for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
+          }
+
+          // Release the raw array now that playerChatMessages holds the
+          // normalized/biased copy — halves peak memory for large chat
+          // files. filterChat and everything else read playerChatMessages.
+          this.playerChatData.messages = null;
         }
-
-        // Release the raw array now that playerChatMessages holds the
-        // normalized/biased copy — halves peak memory for large chat
-        // files. filterChat and everything else read playerChatMessages.
-        this.playerChatData.messages = null;
       } catch (e) {
         console.error("Failed to load chat:", e);
         this.app.showToast("Failed to load chat replay", "warning");
