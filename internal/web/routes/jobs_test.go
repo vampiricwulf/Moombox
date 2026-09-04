@@ -1113,3 +1113,102 @@ func TestSegmentChatRefusesPathOutsideOutputDir(t *testing.T) {
 		t.Errorf("path outside output dir: want 403, got %d", rec.Code)
 	}
 }
+
+// The 304 path must never open or read the file (R15 — the plan defect: a
+// 50-100 MB read + json.Valid scan ran on every conditional GET before
+// ServeContent even looked at If-Modified-Since). Prove the short-circuit
+// by corrupting the file's CONTENT after the first GET while preserving its
+// recorded mtime: the old code would read it and answer 422; the fixed
+// handler must still answer 304 because it never opens the file when
+// notModifiedSince is true.
+func TestJobChat304DoesNotReadTheFile(t *testing.T) {
+	f := newJobsFixture(t)
+	chatPath := filepath.Join(f.outputDir, "chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.addJob(t, "yt_chat304ro", func(j *database.Job) { j.ChatFilename = "chat.json" })
+
+	first := doRequest(t, f.router, "GET", "/api/jobs/yt_chat304ro/chat", nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first GET: want 200, got %d", first.Code)
+	}
+	lm := first.Header().Get("Last-Modified")
+	if lm == "" {
+		t.Fatal("first GET has no Last-Modified")
+	}
+	fi, err := os.Stat(chatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime := fi.ModTime()
+
+	// Overwrite with invalid JSON but restore the recorded mtime — a
+	// content-reading handler would flip this to 422.
+	if err := os.WriteFile(chatPath, []byte(`not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(chatPath, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/jobs/yt_chat304ro/chat", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("If-Modified-Since", lm)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("conditional GET after corrupting the file at the same mtime: want 304 (short-circuit before read), got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
+	}
+}
+
+// Same short-circuit proof as TestJobChat304DoesNotReadTheFile, for the
+// per-part chat route.
+func TestSegmentChat304DoesNotReadTheFile(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_chat304ro", func(j *database.Job) { j.Platform = "twitch" })
+	chatPath := filepath.Join(f.outputDir, "p1.chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_chat304ro", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4",
+		FilePath: filepath.Join(f.outputDir, "p1.mp4"), ChatFile: chatPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := doRequest(t, f.router, "GET", "/api/jobs/tw_chat304ro/segments/0/chat", nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first GET: want 200, got %d", first.Code)
+	}
+	lm := first.Header().Get("Last-Modified")
+	if lm == "" {
+		t.Fatal("first GET has no Last-Modified")
+	}
+	fi, err := os.Stat(chatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime := fi.ModTime()
+
+	if err := os.WriteFile(chatPath, []byte(`not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(chatPath, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/jobs/tw_chat304ro/segments/0/chat", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("If-Modified-Since", lm)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("conditional GET after corrupting the file at the same mtime: want 304 (short-circuit before read), got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
+	}
+}

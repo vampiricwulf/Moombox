@@ -509,7 +509,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/jobs/{id}/watch-state` | Get mutable player state (watched, resumePosition, chatOffset). Uncached — like `/api/jobs/{id}` itself (`Cache-Control: no-cache, must-revalidate`, `jobs.go:239-244`), not immutably cached; only the media/thumbnail file routes use long-lived caching. |
+| `GET` | `/api/jobs/{id}/watch-state` | Get mutable player state (watched, resumePosition, chatOffset). Uncached — like `/api/jobs/{id}` itself (`Cache-Control: no-cache, must-revalidate`, `jobs.go:246`), not immutably cached; only the media/thumbnail file routes use long-lived caching. |
 | `PUT` | `/api/jobs/{id}/resume-position` | Save playback resume position (lightweight, no WebSocket broadcast). |
 | `POST` | `/api/jobs/{id}/resume-position` | Same as PUT — sendBeacon fallback (beacon only sends POST). |
 | `POST` | `/api/jobs/{id}/watched` | Mark job as watched, clears resume position. Returns updated job. |
