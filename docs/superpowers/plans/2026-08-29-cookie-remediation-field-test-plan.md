@@ -40,7 +40,7 @@ another build (progress-arc1.md, Task 6 review: "accidental arming impossible").
   discovery on) and the channel-independent `/feed/subscriptions` fallback probe (only when no
   tier-2 observation landed in the last ~25 minutes; first one ~30 min after boot, and `R C` /
   `POST /api/cookies/recheck` deliberately never run it - plan §Staged rollout item 1). **This is
-  what the constant gates.** Both feed `ObserveLiveness` (`refresh.go:796`).
+  what the constant gates.** Both feed `ObserveLiveness` (`ObserveLiveness` in `refresh.go`).
 
 **Disarmed (until 2026-09-03):** a tier-2 verdict wrote one log line and did nothing else:
 `liveness observation platform=youtube loggedIn=<bool> wouldFireRecovery=<bool> armed=false`.
@@ -52,7 +52,7 @@ rule below that expects `armed=false` was written for that build; on today's bui
 then the back-off), logs
 `a liveness observation reports this platform is signed out, triggering recovery` at Warn and calls
 `OnRecoveryNeeded` (`ObserveLiveness`, `internal/cookies/refresh.go`). From there `handleRecoveryNeeded` in
-`cmd/moombox/monitor_callbacks.go` splits on `cookies.auto_enabled` (refresh.go:562-594 decision
+`cmd/moombox/monitor_callbacks.go` splits on `cookies.auto_enabled` (`refresh.go`, the `livenessRecoveryArmed` decision
 comment; plan §EXECUTION STATUS "settled meaning"):
 
 | `auto_enabled` | What fires |
@@ -143,7 +143,7 @@ long; Run B a day is enough to see the tier-1 shape stays silent with the browse
 | 7 | Twitch | Since Arc 12b Twitch HAS a tier-2 producer: `TwitchFallbackLiveness`, the playback-access-token probe, on the periodic path only - Part 4 gate 22 is its reading rule. The startup line's `expiredTwitchAuth`, `twitchAuthHorizon` and `twitchLoginExpiry` (H2 R2) are the early warnings. | As gate 22: `loggedIn=false` for Twitch while Twitch downloads and authenticated chat still work is a false verdict - stop, and since the flip it has also fired recovery; rebuild disarmed before diagnosing. |
 | 8 | Item 11(a) - if you click Refresh / `R C` during the soak | Count passes from the LOG, never from clicks. A click landing during a ticker pass runs no pass; at `DEBUG` you will see `cookie refresh skipped, another pass is already in flight` (`refresh.go:1044`). After `R F` or a recovery, an Info `auth re-check after ... was skipped` line is expected, not a fault. A ticker tick landing during a manual pass is dropped for one interval. | - (nothing here is a failure) |
 | 9 | Item 11(b) - only if you reset `config.toml` but kept the data dir | `cookies.meta.json`'s verified `Platforms` seeds the platform list first (`services.go:378-385`, source is logged). If the sidecar still records a platform the jar no longer holds, the first conclusive check fires "auth lost" for it. | Do NOT read that one line as a false verdict; it is the same witnessed-transition behaviour a persisted config produces on every restart. |
-| 10 | Item 11(c) - reasons | `youtubeError`/`twitchError` render on `GET /api/cookies/status`, the web badge title (inconclusive arm only) and the `R C` line. The push-driven TUI status bar renders NO reason, by design. | A reason string reading stale on the always-on TUI bar (it should never be there at all). |
+| 10 | Item 11(c) - reasons | `youtubeError`/`twitchError` render in `GET /api/status` (`cookieStatus` / `twitchAuthStatus`), the web badge title (inconclusive arm only) and the `R C` line. The push-driven TUI status bar renders NO reason, by design. | A reason string reading stale on the always-on TUI bar (it should never be there at all). |
 | 11 | End of Run A: is the browser profile still signed in? | `browser-profile/cookies.sqlite` mtime advances on each periodic browser pass; `R F` reports "renewed"; no "could not confirm" every pass. | The profile stops being written and the log still says success - the Arc 0 defect shape. |
 
 Retest caveat that applies to every step: `lastAuthFailNotify` suppresses a repeat notification for
@@ -224,7 +224,7 @@ is `go:embed`-ed - rebuild after any frontend change.
 | 10 | 4+7 | Conclusive failure on the throwaway (garbage/renamed auth rows), `R C` | Same four surfaces | Web: red `indicator-error` "YouTube: Not authenticated"; toast "YouTube not authenticated". TUI: red `YT`; `R C` line red (progress-arc8.md T12b: red in `R C` as in `R F`) |
 | 11 | 4+7 / 8 | A job parked in `COOKIES?` (e.g. the throwaway with dead cookies and a members-only URL) | Web header badge; TUI status bar | Badge goes RED for that job's platform ("A download stopped for want of usable credentials"; `utils.js:527-531`) and outranks a green check; clears when the job is resumed, retried or deleted (`job_update` / `jobs_update` / `job_deleted`). TUI red `YT`/`TW` likewise |
 | 12 | 8 | After a failed browser refresh (e.g. bogus custom browser path) | Web Settings cookies panel; TUI `R C` | Web: a "Last cookie error: ..." line (`#auto-cookie-last-error`, hidden when empty). TUI: `R C` line ends `| Last cookie error: ...` and is at least yellow |
-| 13 | 8 | `curl -s http://localhost:774/api/cookies/status` (authenticated session) | JSON | Keys `found`, `authenticated`, `verification` (`ok`/`unknown`/`failed`), `youtubeError`; Twitch half has `twitchError`. Reasons empty on a conclusive check. The TUI STATUS BAR shows no reason text (by design) |
+| 13 | 8 | `curl -sk https://localhost:774/api/status` (loopback skips auth; plain HTTP redirects to HTTPS) — read `cookieStatus` and `twitchAuthStatus` | JSON | Keys `found`, `authenticated`, `verification` (`ok`/`unknown`/`failed`), `youtubeError`; Twitch half has `twitchError`. Reasons empty on a conclusive check. The TUI STATUS BAR shows no reason text (by design) |
 | 14 | 8 | Shrink the terminal to ~40 columns with a recorded cookie failure, `R C` | TUI feedback line | The truncated line is still yellow/red - never green (the clamp used to run before the colour; `app_update.go:809-815`) |
 | 15 | 5 | Twitch live capture with `auth-token` + `login` rows present, chat on | Captured chat; log | Badges present; no `continuing anonymously` / `no usable login cookie` Warn. Before Arc 5 the nick was always `justinfan` |
 | 16 | 8 | Same capture with the `login` row renamed on the throwaway | Log; Discord | One Warn `auth-token present but no usable login cookie`; one "Twitch chat is anonymous for <channel>" warning notification with the next-capture sentence; the running download unaffected |
