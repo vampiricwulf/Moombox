@@ -19,7 +19,7 @@ test("computeChatBiasMs: twitch offsets are already video-relative → 0", () =>
   assert.equal(computeChatBiasMs({
     platform: "twitch",
     chatStreamStartTime: "2026-06-11T10:00:00Z",   // Twitch startedAt
-    jobStreamStartTime: "2026-06-11T10:00:00Z",
+    jobStreamStartTime: "2026-06-11T10:12:00Z",    // differs — pins the platform branch, not a same-epoch shortcut
   }), 0);
 });
 
@@ -43,6 +43,11 @@ const msgs = (...offsets) => offsets.map((o, i) => ({ id: String(i), offsetMs: o
 test("partitionChatByVideo: pre-show, in-video and post-end counts", () => {
   const p = partitionChatByVideo(msgs(-90000, -5000, 0, 1000, 5000, 61000, 65000), 60000);
   assert.deepEqual(p, { preCount: 2, firstLiveIndex: 2, postCount: 2, firstPostIndex: 5 });
+});
+
+test("partitionChatByVideo: a message exactly at totalDurationMs is still in-video", () => {
+  const p = partitionChatByVideo(msgs(0, 30000, 60000, 60001), 60000);
+  assert.deepEqual(p, { preCount: 0, firstLiveIndex: 0, postCount: 1, firstPostIndex: 3 });
 });
 
 test("partitionChatByVideo: no negatives, unknown duration", () => {
