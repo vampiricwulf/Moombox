@@ -58,6 +58,42 @@ export function partitionChatByVideo(messages, totalDurationMs) {
 }
 
 /**
+ * The chat sidebar's header text. Counts describe the messages actually
+ * loaded — never a file header's own messageCount, which can disagree with
+ * what was parsed — and an empty region contributes no clause at all.
+ * @param {number} total
+ * @param {number} preCount
+ * @param {number} postCount
+ * @returns {string}
+ */
+export function formatChatHeader(total, preCount, postCount) {
+  let text = `${total} messages`;
+  if (preCount > 0) text += ` · ${preCount} pre-show`;
+  if (postCount > 0) text += ` · ${postCount} after end`;
+  return text;
+}
+
+/**
+ * Divider text for the row at `index`, or null when no region starts there.
+ * Both regions can begin on the SAME row (a chat whose entire live section
+ * falls past the recording); the waiting-room label wins there — it explains
+ * that row's own position.
+ * @param {ReturnType<typeof partitionChatByVideo>|null} parts
+ * @param {number} index
+ * @returns {string|null}
+ */
+export function dividerLabelFor(parts, index) {
+  if (!parts) return null;
+  if (parts.preCount > 0 && index === parts.firstLiveIndex) {
+    return `Waiting room — ${parts.preCount} messages before the stream`;
+  }
+  if (parts.firstPostIndex >= 0 && index === parts.firstPostIndex) {
+    return `Recording ended — ${parts.postCount} messages after it`;
+  }
+  return null;
+}
+
+/**
  * Merge per-part chat files onto the global timeline: each part's offsets are
  * part-relative, so add the part's start offset. Header fields come from the
  * first part that has them.

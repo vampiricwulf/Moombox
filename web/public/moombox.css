@@ -1665,8 +1665,9 @@ sl-progress-bar {
 }
 
 /* Messages after the recording ran out. Not "future" — they are readable and
-   reachable, just marked as outside the video. neutral-700 (not 600) keeps
-   4.5:1 against both striped backgrounds in the light AND dark themes. */
+   reachable, just marked as outside the video. neutral-700, not 600: 600 is
+   comfortable in the light theme (~7:1 on a striped row) but only ~4.3:1 on a
+   dark-theme one, so it fails 4.5:1 in exactly one of the two. */
 .chat-msg.post {
     opacity: 1;
     color: var(--sl-color-neutral-700);
@@ -1685,6 +1686,19 @@ sl-progress-bar {
     background: var(--sl-color-neutral-200);
     border-top: 1px solid var(--sl-color-neutral-300);
     border-bottom: 1px solid var(--sl-color-neutral-300);
+}
+
+/* A divider row is `.future` until playback reaches it — and .future's opacity
+   fades the pseudo-element with the row, dropping the label to ~1.9:1 in the
+   state it spends most of its life in. Dim the row's CONTENT instead: every
+   direct child built by _buildChatMessageEl is a span (time, superchat,
+   author, content), so the label keeps its full contrast either way. */
+.chat-msg.divider-before.future {
+    opacity: 1;
+}
+
+.chat-msg.divider-before.future > span {
+    opacity: 0.35;
 }
 
 .chat-msg-time {

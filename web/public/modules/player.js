@@ -9,6 +9,8 @@ import {
   mergePartChats,
   indexAfter,
   partitionChatByVideo,
+  formatChatHeader,
+  dividerLabelFor,
 } from "./chat-timeline.js";
 import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 
@@ -45,7 +47,7 @@ export class PlayerController {
      * Where the chat sits relative to the recording: waiting-room messages
      * before it, messages after it ran out. Recomputed whenever the messages
      * or the known video duration change; null until a chat is loaded.
-     * @type {{preCount: number, firstLiveIndex: number, postCount: number, firstPostIndex: number}|null}
+     * @type {ReturnType<typeof partitionChatByVideo>|null}
      */
     this._chatParts = null;
     this.nicoEnabled = true;
@@ -613,8 +615,13 @@ export class PlayerController {
 
     // The recording is over: its tail is "after it", not "future". Guarded on
     // its own rather than folded into the watched-detection branch below —
-    // re-watching a finished video must still promote the tail.
-    if (!advanced) this._markPostEnd();
+    // re-watching a finished video must still promote the tail. Following
+    // along means following along to the end, so the sidebar is carried to
+    // the "Recording ended" divider the promotion just made reachable.
+    if (!advanced) {
+      this._markPostEnd();
+      if (this.playerAutoScroll && !this.playerScrollLock) this.syncSidebarToTime();
+    }
 
     // Watched detection fallback — video played to natural end
     // Only trigger when no more segments to advance to (advanced === false or non-segmented)
@@ -986,7 +993,7 @@ export class PlayerController {
     // of the region, so the children[i] === playerChatMessages[i] alignment
     // that filterChat / resetSidebarToTime / updateSidebarActiveState rely on
     // survives (a real divider element would shift every index after it).
-    const dividerLabel = this._dividerLabelFor(index);
+    const dividerLabel = dividerLabelFor(this._chatParts, index);
     if (dividerLabel) {
       div.classList.add("divider-before");
       div.dataset.divider = dividerLabel;
@@ -1042,12 +1049,19 @@ export class PlayerController {
    * else the loaded media's own duration, else the job's metadata length.
    * 0 = not known yet (single-file job before `loadedmetadata`), which means
    * "no post-end region" until it is.
+   *
+   * A segmented job returns the sum and NOTHING ELSE — `video.duration` there
+   * is one PART, and falling through to it when the parts carry no durations
+   * would put a "Recording ended" divider in the middle of the video and fire
+   * _markPostEnd at every part boundary. 0 (unknown) is the honest answer.
    * @returns {number}
    */
   _videoDurationMs() {
+    if (this._seg.active) return this._seg.totalDuration * 1000;
     const video = document.getElementById("player-video");
-    if (this._seg.active && this._seg.totalDuration > 0) return this._seg.totalDuration * 1000;
-    if (video && Number.isFinite(video.duration) && video.duration > 0) return video.duration * 1000;
+    if (video && Number.isFinite(video.duration) && video.duration > 0) {
+      return video.duration * 1000;
+    }
     const len = this.playerJob?.lengthSeconds;
     return len > 0 ? len * 1000 : 0;
   }
@@ -1058,37 +1072,15 @@ export class PlayerController {
     this._updateSidebarHeader();
   }
 
-  /**
-   * The sidebar header. Sole writer of #player-sidebar-msg-count, and every
-   * count comes from the messages actually loaded — never from a chat file's
-   * own header, which can disagree with what was parsed.
-   */
+  /** Sole writer of #player-sidebar-msg-count. Text from formatChatHeader. */
   _updateSidebarHeader() {
-    const n = this.playerChatMessages.length;
-    const p = this._chatParts || { preCount: 0, postCount: 0 };
-    let text = `${n} messages`;
-    if (p.preCount > 0) text += ` · ${p.preCount} pre-show`;
-    if (p.postCount > 0) text += ` · ${p.postCount} after end`;
-    document.getElementById("player-sidebar-msg-count").textContent = text;
-  }
-
-  /**
-   * Divider text for the row at `index`, or null. Both regions can start on
-   * the SAME row (a chat whose entire live section falls past the recording);
-   * the waiting-room label wins there — it explains that row's own position.
-   * @param {number} index
-   * @returns {string|null}
-   */
-  _dividerLabelFor(index) {
     const p = this._chatParts;
-    if (!p) return null;
-    if (p.preCount > 0 && index === p.firstLiveIndex) {
-      return `Waiting room — ${p.preCount} messages before the stream`;
-    }
-    if (p.firstPostIndex >= 0 && index === p.firstPostIndex) {
-      return `Recording ended — ${p.postCount} messages after it`;
-    }
-    return null;
+    const text = formatChatHeader(
+      this.playerChatMessages.length,
+      p ? p.preCount : 0,
+      p ? p.postCount : 0,
+    );
+    document.getElementById("player-sidebar-msg-count").textContent = text;
   }
 
   /**
@@ -1097,7 +1089,9 @@ export class PlayerController {
    * that exist, and the completion callback runs it again over the full list.
    */
   _applyDividers() {
-    const children = document.getElementById("player-sidebar-messages").children;
+    const container = document.getElementById("player-sidebar-messages");
+    if (!container) return;
+    const children = container.children;
     for (const el of children) {
       if (el.classList.contains("divider-before")) {
         el.classList.remove("divider-before");
@@ -1108,7 +1102,7 @@ export class PlayerController {
     if (!p) return;
     for (const index of [p.firstLiveIndex, p.firstPostIndex]) {
       if (index < 0 || !children[index]) continue;
-      const label = this._dividerLabelFor(index);
+      const label = dividerLabelFor(p, index);
       if (!label) continue;
       children[index].classList.add("divider-before");
       children[index].dataset.divider = label;
@@ -1116,13 +1110,16 @@ export class PlayerController {
   }
 
   /**
-   * Has playback reached the end of the recording? The 250 ms slack covers a
-   * media file that stops a hair short of its reported duration.
-   * @param {number} [currentMs] global playback time, if already known
+   * Has playback reached the end of the recording? Measured in EFFECTIVE ms —
+   * the policy is "effectiveMs >= totalDuration", and the sidebar's regions
+   * are read through the same offset-adjusted clock as its active state. The
+   * 250 ms slack covers a media file that stops a hair short of its duration.
+   * @param {number} [effectiveMs] offset-adjusted playback time, if known
+   * @returns {boolean}
    */
-  _atRecordingEnd(currentMs = this.getGlobalTimeMs()) {
+  _atRecordingEnd(effectiveMs = this.getGlobalTimeMs() + this.playerCustomOffsetMs) {
     const durationMs = this._videoDurationMs();
-    return durationMs > 0 && currentMs + 250 >= durationMs;
+    return durationMs > 0 && effectiveMs + 250 >= durationMs;
   }
 
   /**
@@ -1132,7 +1129,9 @@ export class PlayerController {
   _markPostEnd() {
     const p = this._chatParts;
     if (!p || p.firstPostIndex < 0) return;
-    const children = document.getElementById("player-sidebar-messages").children;
+    const container = document.getElementById("player-sidebar-messages");
+    if (!container) return;
+    const children = container.children;
     for (let i = p.firstPostIndex; i < children.length; i++) {
       children[i].classList.remove("future");
       children[i].classList.add("post");
@@ -1161,7 +1160,7 @@ export class PlayerController {
     // Promote the after-the-recording tail. `ended` covers the normal case,
     // but a media file that stops short of its duration never fires it, and a
     // seek to the last second only ever produces this one tick.
-    if (this._atRecordingEnd(currentMs)) this._markPostEnd();
+    if (this._atRecordingEnd(currentMs + this.playerCustomOffsetMs)) this._markPostEnd();
   }
 
   updateSidebarActiveState(currentMs) {
@@ -1253,8 +1252,12 @@ export class PlayerController {
     // Seeking back off the end returns the post-end rows to "future". The loop
     // above only reaches the ones that were also active, and _markPostEnd
     // strips `.future`, so re-adding it here is what makes them dim again.
+    // The condition is the exact inverse of the promotion trigger — comparing
+    // indices instead would miss firstPostIndex === 0 (a chat that is entirely
+    // post-end) and would disagree with a `timeupdate` that lands before the
+    // `seeked` this is running for.
     const p = this._chatParts;
-    if (p && p.firstPostIndex >= 0 && newActiveIndex < p.firstPostIndex) {
+    if (p && p.firstPostIndex >= 0 && !this._atRecordingEnd(effectiveMs)) {
       for (let i = p.firstPostIndex; i < children.length; i++) {
         children[i].classList.remove("post");
         children[i].classList.add("future");
