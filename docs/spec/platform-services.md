@@ -540,7 +540,7 @@ The IRC parser handles two message types:
 - Tag fields extracted: `id`, `tmi-sent-ts` (epoch ms), `bits`, `display-name`, `login`, `user-id`, `badges`, `color`, `emotes`.
 - If `bits > 0`, message type is `"bits"`, otherwise `"chat"`.
 - Emote tags parsed from format `id:start-end,start-end/id:start-end` into `TwitchEmoteRef` structs with start/end as rune indices (not byte indices), matching Twitch's character offset convention.
-- `OffsetMs` computed as `tmiSentTs - baseMs` where baseMs is the recording start time (or stream start time as fallback).
+- `OffsetMs` computed as `tmiSentTs - baseMs` (signed; negative before the recording base) where baseMs is the recording start time (or stream start time as fallback).
 
 **USERNOTICE** (subs, raids, memberships):
 - Tag fields extracted: same as PRIVMSG plus `msg-id`, `system-msg`, `msg-param-sub-plan`, `msg-param-recipient-display-name`, `msg-param-viewerCount`.

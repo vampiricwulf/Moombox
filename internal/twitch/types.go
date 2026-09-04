@@ -52,8 +52,9 @@ type TwitchVodInfo struct {
 
 // TwitchChatMessage represents a single Twitch chat message.
 type TwitchChatMessage struct {
-	ID                string           `json:"id"`
-	TimestampMs       int64            `json:"timestampMs"`
+	ID          string `json:"id"`
+	TimestampMs int64  `json:"timestampMs"`
+	// OffsetMs is the SIGNED ms offset from the part's recording start (negative = before recording began).
 	OffsetMs          int64            `json:"offsetMs"`
 	AuthorName        string           `json:"authorName"`
 	AuthorID          string           `json:"authorId"`

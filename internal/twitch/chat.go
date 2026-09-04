@@ -808,7 +808,11 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 		baseMs = cd.streamStartMs
 	}
 	if baseMs > 0 {
-		msg.OffsetMs = max(msg.TimestampMs-baseMs, 0)
+		// Signed on purpose: a message that arrived before this part's
+		// recording base was sent BEFORE the video starts. The player renders
+		// negative offsets as pre-show chat ("-1:30"); clamping to 0 used to
+		// pile them onto 0:00 (review 2026-09-03, N-F2).
+		msg.OffsetMs = msg.TimestampMs - baseMs
 	}
 
 	cd.messages = append(cd.messages, *msg)
