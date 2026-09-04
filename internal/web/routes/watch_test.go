@@ -332,6 +332,20 @@ func TestResumePositionPut404OnUnknown(t *testing.T) {
 	}
 }
 
+func TestResumePositionPost404OnUnknown(t *testing.T) {
+	// The sendBeacon fallback twin of TestResumePositionPut404OnUnknown —
+	// same unknown-job behaviour required on the POST path a browser
+	// tab-close beacon actually uses.
+	f := newWatchFixture(t)
+	body, _ := json.Marshal(map[string]float64{"position": 12.5})
+	req := httptest.NewRequest("POST", "/api/jobs/no-such/resume-position", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown job: want 404, got %d", rec.Code)
+	}
+}
+
 func TestChatOffsetPutAndDelete404OnUnknown(t *testing.T) {
 	f := newWatchFixture(t)
 	body, _ := json.Marshal(map[string]any{"chatOffset": -1.5})
