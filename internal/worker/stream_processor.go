@@ -286,10 +286,14 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 
 	case youtube.StreamVOD, youtube.StreamPostLive:
 		sp.logger.Info("stream is VOD, downloading directly", "videoID", job.VideoID)
-		sp.db.UpdateJobFields(job.ID, map[string]any{
-			"status": database.StatusDownloading,
-			"is_vod": true,
-		})
+		vodUpdates := vodStatusUpdates(job, info)
+		sp.db.UpdateJobFields(job.ID, vodUpdates)
+		// Sync local job object — jobCtx.Job is this same pointer, and a
+		// refreshed stream_start_time (F-D) must not go stale on it the way
+		// updateJobMetadata already guards against for its own fields.
+		if v, ok := vodUpdates["stream_start_time"].(string); ok {
+			job.StreamStartTime = v
+		}
 		return &StreamProcessResult{
 			VideoInfo:      info,
 			ShouldDownload: true,
@@ -421,6 +425,21 @@ func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.
 	// band — a 10-min blind window meant catching an unscheduled start up
 	// to ~10 min late, losing that much video on DVR-off streams.
 	return probeIntervalNear
+}
+
+// vodStatusUpdates builds the row update for a stream classified VOD or
+// post-live. A job created Upcoming still carries the SCHEDULED start; for a
+// finished stream YouTube's ScheduledStartTime is the actual start the replay
+// chat offsets count from, so it is refreshed here (review 2026-09-03, T-F4).
+func vodStatusUpdates(job *database.Job, info *youtube.VideoInfo) map[string]any {
+	updates := map[string]any{
+		"status": database.StatusDownloading,
+		"is_vod": true,
+	}
+	if info != nil && info.ScheduledStartTime != "" && info.ScheduledStartTime != job.StreamStartTime {
+		updates["stream_start_time"] = info.ScheduledStartTime
+	}
+	return updates
 }
 
 // updateJobMetadata updates job metadata from video info.

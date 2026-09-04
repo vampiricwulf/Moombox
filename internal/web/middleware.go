@@ -93,7 +93,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 				"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
 				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
 				"font-src 'self' https://cdn.jsdelivr.net; "+
-				"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.jsdelivr.net https://fonts.gstatic.com; "+
+				"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net https://fonts.gstatic.com; "+
 				"connect-src 'self' ws: wss: https://cdn.jsdelivr.net data:; "+
 				"frame-src https://www.youtube-nocookie.com https://player.twitch.tv; "+
 				"object-src 'none'; "+

@@ -3,7 +3,10 @@ package chat
 // ChatMessage represents a single chat message.
 //
 // OffsetMs is the signed millisecond offset relative to stream start. Negative
-// values are legitimate for pre-stream "waiting room" chat. HasOffset
+// values are legitimate for pre-stream "waiting room" chat. For replay
+// messages, YouTube reports videoOffsetTimeMsec = 0 for anything sent before
+// the stream started; parseAction recovers the real negative offset from
+// TimestampText in that case (parseNegativeTimestampText, N-F2). HasOffset
 // distinguishes "offset actually 0ms" from "offset unknown"; callers should
 // check HasOffset before treating OffsetMs as authoritative. Older chat files
 // written before HasOffset was introduced deserialize with HasOffset=false,
@@ -81,6 +84,10 @@ type ChatResumeState struct {
 	Timestamp    int64    `json:"timestamp"`
 	VideoID      string   `json:"videoId"`
 	RecentIDs    []string `json:"recentIds"`
+	// StreamStartMs is the epoch (ms) every offsetMs in the chat file was
+	// computed against. A resumed or adopted run keeps it even when its own
+	// options carry a newer start time — one file, one epoch.
+	StreamStartMs int64 `json:"streamStartMs,omitempty"`
 }
 
 // Superchat tier color mapping (YouTube's internal ARGB color codes).

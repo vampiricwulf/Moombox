@@ -1,3 +1,5 @@
+import { safePlay } from "./utils.js";
+
 /**
  * Multi-segment playback helper — shared between Player and Trimmer.
  *
@@ -85,7 +87,7 @@ export class SegmentPlayer {
     if (!this.active) return false;
     if (this.segIdx + 1 < this.segments.length) {
       this.loadSegment(this.segIdx + 1, video);
-      video.play();
+      safePlay(video);
       return true;
     }
     return false;
@@ -125,7 +127,7 @@ export class SegmentPlayer {
           video.addEventListener("loadeddata", () => {
             this._seekAbort = null;
             video.currentTime = globalSeconds - seg.startOffset;
-            if (wasPlaying) video.play();
+            if (wasPlaying) safePlay(video);
           }, { once: true, signal: this._seekAbort.signal });
         } else {
           video.currentTime = globalSeconds - seg.startOffset;

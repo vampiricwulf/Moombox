@@ -62,6 +62,17 @@ export function formatRelativeTime(isoDate) {
 }
 
 /**
+ * play() returns a promise that rejects on autoplay refusal or when the source
+ * changes before playback starts (AbortError on rapid cross-segment seeks).
+ * Nothing needs to react — the user gets the native controls either way — so
+ * the rejection is swallowed instead of surfacing as console noise.
+ */
+export function safePlay(media) {
+  const p = media && media.play ? media.play() : undefined;
+  if (p && typeof p.catch === "function") p.catch(() => {});
+}
+
+/**
  * Check if a keyboard event originates from inside an input-like element.
  * Uses composedPath() to traverse shadow DOM boundaries (Shoelace components
  * render native <input> elements inside their shadow roots).
@@ -70,8 +81,16 @@ export function isTypingInInput(e) {
   for (const el of e.composedPath()) {
     if (!(el instanceof HTMLElement)) continue;
     const tag = el.tagName;
+    // An sl-select only "types" while its listbox is open (keyboard-navigating
+    // options); closed, it is just a focused control and shortcuts should work.
+    // Defensive rather than load-bearing: Shoelace's combobox already stops
+    // propagation for every key but Tab while its listbox is open, so those
+    // keystrokes do not reach a document-level shortcut handler anyway. The
+    // branch states the intent and survives a Shoelace change that stops doing
+    // that; it is not what prevents a key from acting twice today.
+    if (tag === "SL-SELECT") return el.open === true;
     if (tag === "INPUT" || tag === "TEXTAREA" ||
-        tag === "SL-INPUT" || tag === "SL-TEXTAREA" || tag === "SL-SELECT") return true;
+        tag === "SL-INPUT" || tag === "SL-TEXTAREA") return true;
     if (el.contentEditable === "true") return true;
   }
   return false;

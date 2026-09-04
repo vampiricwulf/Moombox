@@ -1,13 +1,52 @@
 /**
  * Player Controller — Video player + chat replay
  */
-import { formatMsToTime, formatTimestamp, isTypingInInput } from "./utils.js";
+import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
+import {
+  normalizeOffsetMs,
+  computeChatBiasMs,
+  mergePartChats,
+  indexAfter,
+  partitionChatByVideo,
+  formatChatHeader,
+  dividerLabelFor,
+} from "./chat-timeline.js";
+import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 
 const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
 
+// Niconico overlay engine tuning. All times are MEDIA milliseconds, so the
+// overlay freezes with the video and scales with playbackRate for free.
+const NICO_DURATION_MS = 4000;      // niconico's traverse time (owner decision D4)
+const NICO_MAX_LATENESS_MS = 2000;  // a message not placed within 2 s of its time is dropped and counted
+const NICO_LANE_GAP_MS = 150;       // spacing buffer between consecutive occupants of a lane
+const NICO_MAX_PER_TICK = 20;       // DOM work cap for NEW messages per timeupdate tick
+const NICO_SEED_MAX_FALLBACK = 30;  // seed cap when the row count is unknown
+
+// WALL-CLOCK milliseconds (not media time): how long the stage box must hold
+// still before a changed geometry is committed. A window drag or an animated
+// fullscreen transition is a continuous stream of REAL changes, and committing
+// each one would clear the stage every frame.
+const NICO_GEO_SETTLE_MS = 120;
+
 function announcementColorClass(color) {
   return ANNOUNCEMENT_COLORS.has(color) ? color : "primary";
+}
+
+/**
+ * Hand the keyboard to the player surface after a job has been selected: off
+ * the picker (where every shortcut is swallowed) and onto the video wrapper,
+ * so Space/arrows/F/M/C/S work without the user clicking the video first. Both
+ * ways into a selection — the picker's own `sl-change` and "Open in Player" on
+ * the job details — call this, so they behave identically. The wrapper lives
+ * inside #player-viewport, which is only revealed once the job data is in, so
+ * this must run AFTER onPlayerJobSelect resolves: a hidden element cannot take
+ * focus.
+ */
+export function focusPlayerSurface() {
+  document.getElementById("player-job-select")?.blur();
+  document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
 }
 
 export class PlayerController {
@@ -19,10 +58,42 @@ export class PlayerController {
     this.playerAutoScroll = true;
     this.playerScrollLock = false;
     this.playerActiveChatIndex = 0;
+    /**
+     * Where the chat sits relative to the recording: waiting-room messages
+     * before it, messages after it ran out. Recomputed whenever the messages
+     * or the known video duration change; null until a chat is loaded.
+     * @type {ReturnType<typeof partitionChatByVideo>|null}
+     */
+    this._chatParts = null;
     this.nicoEnabled = true;
-    this.nicoLaneCount = 15;
-    this.nicoLaneAvail = [];
-    this.nicoLastSpawnMs = null;
+    /** @type {LaneAllocator} the row count is re-derived by _updateNicoGeometry */
+    this._lanes = new LaneAllocator(15);
+    /**
+     * The COMMITTED overlay stage: the video's rendered rect and the row grid
+     * measured from it. Undefined until _updateNicoGeometry has seen a visible
+     * overlay. During a resize the overlay's own box is already ahead of this
+     * (see _updateNicoGeometry). `version` is bumped on every commit; it is
+     * reserved for stale-geometry checks — nothing reads it yet.
+     * @type {{width: number, height: number, laneHeight: number, rows: number, version: number}|undefined}
+     */
+    this._nicoGeo = undefined;
+    /** @type {ReturnType<typeof setTimeout>|null} pending geometry commit (NICO_GEO_SETTLE_MS) */
+    this._nicoGeoSettle = null;
+    /** Index of the next message to consider; -1 = not anchored yet */
+    this.nicoCursor = -1;
+    /**
+     * Entries that found no lane yet, in offset order. Each caches the built,
+     * detached element and its measurements so a retry costs no DOM work.
+     * @type {Array<{msg: object, el: HTMLElement, w: number, h: number}>}
+     */
+    this._nicoPending = [];
+    /** Effective time of the last reset; only newer messages count as drops */
+    this._nicoAnchorMs = -Infinity;
+    /** @type {Set<Animation>} every in-flight overlay animation */
+    this._nicoAnims = new Set();
+    this.nicoDropped = 0;
+    this._nicoDroppedShown = 0;
+    this._nicoDropPillTimer = null;
     this.playerCustomOffsetMs = 0;
     this.playerInitialized = false;
     /** @type {Map<string, string>} code → URL for 3rd-party Twitch emotes */
@@ -32,6 +103,14 @@ export class PlayerController {
     this._seg = new SegmentPlayer();
     /** Monotonic counter to detect stale responses from rapid job switching */
     this._selectionSeq = 0;
+    /**
+     * Job-list rebuild bookkeeping (see loadPlayerJobList): `_rebuildToken` is
+     * the generation — only the newest call writes — and `_rebuildsActive`
+     * counts the rebuilds currently mutating the option list, which is what
+     * tells a synthetic `sl-change` from a real user pick.
+     */
+    this._rebuildToken = 0;
+    this._rebuildsActive = 0;
 
     // Watch state tracking
     this._watchSaveInterval = null;
@@ -57,10 +136,21 @@ export class PlayerController {
     const syncBtn = document.getElementById("player-sync-btn");
 
     // Job selection
-    jobSelect.addEventListener("sl-change", () => {
+    jobSelect.addEventListener("sl-change", async () => {
+      if (this._rebuildsActive > 0) return;
       const val = jobSelect.value;
       if (val) {
-        this.onPlayerJobSelect(val);
+        // Await the load, then hand the keyboard over (see
+        // focusPlayerSurface). In a `finally`: a load that throws must not
+        // leave focus parked on the select, where every shortcut is swallowed
+        // and the user cannot tell why.
+        try {
+          await this.onPlayerJobSelect(val);
+        } catch (e) {
+          console.error("player: job select failed", e?.message ?? e);
+        } finally {
+          focusPlayerSurface();
+        }
       } else {
         this.clearPlayer();
       }
@@ -78,6 +168,14 @@ export class PlayerController {
       sidebarToggle.checked = savedSidebar === "true";
       document.getElementById("player-sidebar").style.display = sidebarToggle.checked ? "" : "none";
     }
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+    if (savedNico === null && reduceMotion) {
+      // Flying text is exactly what this preference asks to avoid. Default the
+      // overlay off; the checkbox still lets the user opt in.
+      nicoToggle.checked = false;
+      this.nicoEnabled = false;
+      document.getElementById("player-nico-overlay").style.display = "none";
+    }
 
     // Nico toggle
     nicoToggle.addEventListener("sl-change", () => {
@@ -85,8 +183,26 @@ export class PlayerController {
       localStorage.setItem("player-nico-toggle", nicoToggle.checked);
       const overlay = document.getElementById("player-nico-overlay");
       overlay.style.display = this.nicoEnabled ? "" : "none";
-      if (!this.nicoEnabled) {
+      if (this.nicoEnabled) {
+        // Un-anchor BEFORE measuring. `seeked`, the offset input/reset and
+        // `visibilitychange` all re-seed the cursor whether or not the overlay
+        // is on, so any seed sitting here was made while nothing was ticking.
+        // Keeping it would make the first enabled tick walk the whole gap and
+        // count every message newer than that stale anchor as dropped (and the
+        // re-measure below cannot save us: an unchanged stage returns early).
+        // The next tick lazily re-anchors at the current time.
+        this.nicoCursor = -1;
+        // Measure now that the overlay is visible — geometry updates are refused
+        // while it is display:none, so without this the first tick after the
+        // toggle would run on stale (or missing) geometry. Immediate: the user
+        // just asked for the overlay, so it must not wait out a settle window.
+        this._updateNicoGeometry({ immediate: true });
+      } else {
         this.clearNicoOverlay();
+        // Un-anchor: no ticks run while the overlay is off, so the next enabled
+        // tick must re-seed at the current time instead of grinding through
+        // (and counting as dropped) every message that passed meanwhile.
+        this.nicoCursor = -1;
       }
     });
 
@@ -105,33 +221,98 @@ export class PlayerController {
     // Video timeupdate
     video.addEventListener("timeupdate", () => this.onPlayerTimeUpdate());
 
+    // Video seeking — un-anchor the overlay BEFORE the seek's own timeupdate.
+    // The HTML seek algorithm queues `timeupdate` and only THEN `seeked`, so
+    // one tick runs in between with `currentTime` already at the target but
+    // `nicoCursor` still parked at the old position: the loop walks every
+    // message in the gap, finds each one more than NICO_MAX_LATENESS_MS late
+    // and — being newer than the anchor — counts it, i.e. a bogus
+    // "+N not shown" on every forward seek longer than 2 s. The load algorithm
+    // fires its own `timeupdate` too, so cross-segment part loads had the same
+    // pill. Un-anchored the intervening tick does nothing; `seeked` below
+    // re-anchors at the target.
+    video.addEventListener("seeking", () => {
+      this.clearNicoOverlay();
+      this.nicoCursor = -1;
+    });
+
     // Video seeked — reset both systems
     video.addEventListener("seeked", () => {
       const currentMs = this.getGlobalTimeMs();
       this.resetSidebarToTime(currentMs);
-      this.clearNicoOverlay();
-      this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
+      this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
     });
 
-    // Pause/play nico animations
+    // Pause/play nico animations. The overlay clock is media time, so the
+    // animations simply follow the video — the cursor is NEVER advanced here
+    // (doing so skipped every message that was due while paused).
     video.addEventListener("pause", () => {
-      document.querySelectorAll(".nico-message").forEach((el) => {
-        if (el._nicoAnim) el._nicoAnim.pause();
-      });
+      if (video.ended) return; // end-of-media pause: let in-flight text finish
+      for (const a of this._nicoAnims) a.pause();
     });
 
     video.addEventListener("play", () => {
-      // Skip stale messages accumulated during pause — advance the nico cursor
-      // to the current time so only new messages appear after unpausing
-      const currentMs = this.getGlobalTimeMs();
-      this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
-      document.querySelectorAll(".nico-message").forEach((el) => {
-        if (el._nicoAnim) el._nicoAnim.play();
-      });
+      for (const a of this._nicoAnims) a.play();
+    });
+
+    video.addEventListener("ratechange", () => {
+      const rate = video.playbackRate || 1;
+      for (const a of this._nicoAnims) a.playbackRate = rate;
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      // Hidden documents never dispatch animation finish events, so spawned
+      // messages would pile up until the tab is shown. Clear and re-anchor.
+      if (document.hidden) {
+        this.clearNicoOverlay();
+      } else if (this.playerChatMessages.length) {
+        this._reanchorNicoAt(this.getGlobalTimeMs() + this.playerCustomOffsetMs);
+      }
     });
 
     // Multi-segment: auto-advance to next segment when current one ends
     video.addEventListener("ended", () => this.onSegmentEnded());
+
+    // Never freeze the overlay at end of media — let in-flight text fly out.
+    video.addEventListener("ended", () => {
+      for (const a of this._nicoAnims) a.play();
+    });
+
+    // Overlay geometry — the stage is the video's RENDERED rect, so re-measure
+    // whenever the intrinsic size (`loadedmetadata`, `resize`), the fullscreen
+    // state or the wrapper's own box changes.
+    video.addEventListener("loadedmetadata", () => this._updateNicoGeometry());
+    video.addEventListener("resize", () => this._updateNicoGeometry());
+
+    // A single-file job only learns its real length here, so the post-end
+    // region (and its divider) can only be final once metadata is in. Kept
+    // separate from the geometry listener above: different concern, and the
+    // re-stamp is skipped when the partition did not actually move. The empty
+    // guard is also what keeps a job switch honest: onPlayerJobSelect empties
+    // the array before assigning the new source, so this listener is a no-op
+    // until the new chat has been built rather than partitioning the previous
+    // job's messages against the new video's duration.
+    video.addEventListener("loadedmetadata", () => {
+      if (!this.playerChatMessages.length) return;
+      const before = this._chatParts ? this._chatParts.firstPostIndex : -1;
+      this._computeChatParts();
+      if (this._chatParts.firstPostIndex !== before) this._applyDividers();
+    });
+
+    document.addEventListener("fullscreenchange", () => this._updateNicoGeometry());
+    const wrapper = document.getElementById("player-video-wrapper");
+    if (wrapper && "ResizeObserver" in window) {
+      // One measurement per frame: a window drag fires a callback storm, and
+      // each measurement forces a layout flush (the probe). Note that during a
+      // drag every frame IS a real change, so R11's same-size skip does nothing
+      // here — what keeps the stage from being cleared per frame is the settle
+      // timer in _updateNicoGeometry, which commits once the box holds still.
+      let pending = 0;
+      new ResizeObserver(() => {
+        cancelAnimationFrame(pending);
+        pending = requestAnimationFrame(() => this._updateNicoGeometry());
+      }).observe(wrapper);
+    }
 
     // Surface video load errors to user (e.g. segment 404s)
     video.addEventListener("error", () => {
@@ -141,13 +322,19 @@ export class PlayerController {
       }
     });
 
-    // Sidebar scroll locking
-    sidebarMessages.addEventListener("mouseenter", () => {
-      this.playerScrollLock = true;
+    // Sidebar scroll locking. Pointer events over mouse events: a touch tap
+    // synthesizes mouseenter but rarely a matching mouseleave, so on touch
+    // devices the lock would stick after the first tap and autoscroll would
+    // never resume. Touch pointers are ignored entirely — a scroll-lock on
+    // hover has no equivalent gesture on touch, so autoscroll there only
+    // stops on an actual user scroll (the "scroll" listener below), which is
+    // the mobile-expected behavior.
+    sidebarMessages.addEventListener("pointerenter", (e) => {
+      if (e.pointerType !== "touch") this.playerScrollLock = true;
     });
 
-    sidebarMessages.addEventListener("mouseleave", () => {
-      if (this.playerAutoScroll) {
+    sidebarMessages.addEventListener("pointerleave", (e) => {
+      if (e.pointerType !== "touch" && this.playerAutoScroll) {
         this.playerScrollLock = false;
       }
     });
@@ -189,15 +376,11 @@ export class PlayerController {
         // Re-sync chat to current time with new offset
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
-        this.clearNicoOverlay();
-        this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
+        this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
-        const resetBtn = document.getElementById("player-chat-offset-reset");
-        if (resetBtn) {
-          resetBtn.style.display = this.playerCustomOffsetMs !== 0 ? "" : "none";
-        }
+        this._syncOffsetResetButton();
       });
 
       const persistOffset = () => {
@@ -224,12 +407,10 @@ export class PlayerController {
       });
 
       document.getElementById("player-chat-offset-reset")?.addEventListener("click", () => {
-        offsetInput.value = "";
-        this.playerCustomOffsetMs = 0;
+        this._applyOffsetUI(0);
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
-        this.clearNicoOverlay();
-        this.nicoLastSpawnMs = currentMs;
+        this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
@@ -237,13 +418,25 @@ export class PlayerController {
         if (this.playerJob) {
           fetch(`/api/jobs/${this.playerJob.id}/chat-offset`, { method: "DELETE" }).catch(() => {});
         }
-        const resetBtn = document.getElementById("player-chat-offset-reset");
-        if (resetBtn) resetBtn.style.display = "none";
       });
     }
 
     // Keyboard controls for player
     this.setupKeyboardControls();
+  }
+
+  /** Apply a persisted/cleared offset to state, input text and the reset button. */
+  _applyOffsetUI(seconds) {
+    const s = Number.isFinite(seconds) ? seconds : 0;
+    this.playerCustomOffsetMs = Math.round(s * 1000);
+    const input = document.getElementById("player-chat-offset");
+    if (input) input.value = s === 0 ? "" : String(s);
+    this._syncOffsetResetButton();
+  }
+
+  _syncOffsetResetButton() {
+    const btn = document.getElementById("player-chat-offset-reset");
+    if (btn) btn.style.display = this.playerCustomOffsetMs !== 0 ? "" : "none";
   }
 
   setupKeyboardControls() {
@@ -261,12 +454,20 @@ export class PlayerController {
       // Skip when typing in inputs (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
 
+      // Let a focused control handle its own Space (activate/toggle) instead
+      // of the player also toggling playback on the same keypress.
+      const target = e.composedPath()[0];
+      const tTag = target instanceof HTMLElement ? target.tagName : "";
+      if (e.key === " " && /^(BUTTON|SL-BUTTON|SL-ICON-BUTTON|SL-CHECKBOX|SL-SWITCH)$/.test(tTag)) return;
+      // Caps Lock (or Shift) must not silently disable the letter shortcuts.
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
       const video = document.getElementById("player-video");
       if (!video || !video.src) return;
 
-      switch (e.key) {
+      switch (key) {
         case " ":
-          if (video.paused) video.play(); else video.pause();
+          if (video.paused) safePlay(video); else video.pause();
           e.preventDefault();
           break;
         case "ArrowLeft": {
@@ -284,7 +485,8 @@ export class PlayerController {
           const delta = e.shiftKey ? 30 : 5;
           if (this._seg.active) {
             const globalSec = this.getGlobalTimeMs() / 1000 + delta;
-            this.seekToGlobalTime(Math.min(this._seg.totalDuration, globalSec));
+            const maxSec = this._seg.totalDuration > 0 ? this._seg.totalDuration : Infinity;
+            this.seekToGlobalTime(Math.min(maxSec, globalSec));
           } else {
             video.currentTime += delta;
           }
@@ -411,10 +613,14 @@ export class PlayerController {
     this.playerAutoScroll = true;
     this.playerScrollLock = false;
     this.playerActiveChatIndex = 0;
-    this.nicoLastSpawnMs = null;
-    this.playerCustomOffsetMs = 0;
-    const offsetInput = document.getElementById("player-chat-offset");
-    if (offsetInput) offsetInput.value = "";
+    this._chatParts = null;
+    this._updateSidebarHeader();
+    this.nicoCursor = -1;
+    // A geometry commit armed by the last resize has nothing left to commit.
+    clearTimeout(this._nicoGeoSettle);
+    this._nicoGeoSettle = null;
+    this._resetNicoDropCount();
+    this._applyOffsetUI(0);
     const chatSearch = document.getElementById("chat-search");
     if (chatSearch && chatSearch.value) chatSearch.value = "";
 
@@ -458,6 +664,16 @@ export class PlayerController {
     const video = document.getElementById("player-video");
     const advanced = this._seg.onSegmentEnded(video);
 
+    // The recording is over: its tail is "after it", not "future". Guarded on
+    // its own rather than folded into the watched-detection branch below —
+    // re-watching a finished video must still promote the tail. Following
+    // along means following along to the end, so the sidebar is carried to
+    // the "Recording ended" divider the promotion just made reachable.
+    if (!advanced) {
+      this._markPostEnd();
+      if (this.playerAutoScroll && !this.playerScrollLock) this.syncSidebarToTime();
+    }
+
     // Watched detection fallback — video played to natural end
     // Only trigger when no more segments to advance to (advanced === false or non-segmented)
     if (!advanced && this.playerJob && !this._watchedTriggered) {
@@ -493,36 +709,54 @@ export class PlayerController {
 
     this._seg.segOffsets.forEach((seg, i) => {
       const pct = ((seg.durationSeconds || 0) / this._seg.totalDuration) * 100;
-      const block = document.createElement("div");
+      const block = document.createElement("button");
+      block.type = "button";
       block.className = "segment-indicator-block";
       block.style.width = `${pct}%`;
       block.style.background = colors[i % colors.length];
-      block.title = `Segment ${i}: ${seg.quality} (${Math.round(seg.durationSeconds || 0)}s)`;
-      block.textContent = seg.quality || `Seg ${i}`;
+      // One numbering (1-based) and one label across title, accessible name and
+      // visible text: a screen reader and the eye must name the same block.
+      const label = seg.quality || `Seg ${i + 1}`;
+      block.title = `Segment ${i + 1}: ${label} (${Math.round(seg.durationSeconds || 0)}s)`;
+      block.setAttribute("aria-label", `Seek to segment ${i + 1}, ${label}`);
+      block.textContent = label;
       block.addEventListener("click", () => {
         this.seekToGlobalTime(seg.startOffset);
       });
       indicator.appendChild(block);
     });
 
-    // Insert after video element
-    const videoWrapper = document.getElementById("player-video-wrapper");
-    if (videoWrapper) {
-      videoWrapper.parentNode.insertBefore(indicator, videoWrapper.nextSibling);
-    }
+    document.getElementById("player-video-column")?.appendChild(indicator);
   }
 
+  /**
+   * Rebuild the video picker from the live and archived job lists.
+   *
+   * Two calls overlapping is normal — a WebSocket job update lands while a
+   * manual refresh is still in flight — and each one awaits three times. A
+   * generation token makes the NEWEST call the only one that writes: every
+   * await is followed by a bail, so a superseded rebuild leaves the option list
+   * and the selection alone instead of restoring a value its own stale list
+   * happened to contain. `_rebuildsActive` is a separate counter on purpose: it
+   * says how many rebuilds are inside the option-mutation window, which is what
+   * the `sl-change` listener needs in order to tell a synthetic event from a
+   * user pick, and a superseded rebuild must not clear that while a newer one
+   * is still mutating.
+   */
   async loadPlayerJobList() {
     const select = document.getElementById("player-job-select");
     const currentValue = select.value;
+    const token = ++this._rebuildToken;
 
     try {
       const [jobsRes, archivedRes] = await Promise.all([
         fetch("/api/jobs"),
         fetch("/api/jobs/archived"),
       ]);
+      if (token !== this._rebuildToken) return;
       const jobs = jobsRes.ok ? await jobsRes.json() : [];
       const archived = archivedRes.ok ? await archivedRes.json() : [];
+      if (token !== this._rebuildToken) return;
       if (!jobsRes.ok && !archivedRes.ok) {
         this.app.showToast("Failed to load video list", "warning");
       }
@@ -531,39 +765,37 @@ export class PlayerController {
         .filter((j) => j.status === "Finished" && j.filename)
         .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 
-      // If a video is actively playing, only update the selection state
-      // without rebuilding options (removing options triggers sl-change which
-      // can interrupt playback via clearPlayer).
-      const isPlaying = this.playerJob && document.getElementById("player-video")?.src;
-      if (isPlaying) {
-        // Ensure current job still exists; if not, clear the player
-        // and fall through to rebuild options (clearPlayer is idempotent
-        // so any sl-change from option removal is harmless).
-        if (currentValue && !all.some((j) => j.id === currentValue)) {
-          this.clearPlayer();
-        } else {
-          return;
-        }
+      // The currently loaded job disappeared (deleted, or its id changed via
+      // re-import) — clear the player instead of leaving a dangling selection.
+      if (currentValue && !all.some((j) => j.id === currentValue)) {
+        this.clearPlayer();
       }
 
-      // Remove existing options
-      select.querySelectorAll("sl-option").forEach((o) => o.remove());
+      // Rebuild the option list even while a video is playing: removing/adding
+      // sl-options does not itself emit sl-change in Shoelace 2.16 (verified —
+      // only user-driven paths emit it), so this never interrupts playback.
+      // Guard against any synthetic sl-change firing mid-rebuild anyway.
+      this._rebuildsActive++;
+      try {
+        select.querySelectorAll("sl-option").forEach((o) => o.remove());
 
-      all.forEach((job) => {
-        const opt = document.createElement("sl-option");
-        opt.value = job.id;
-        const noChat = !job.chatFilename ? " (no chat)" : "";
-        opt.textContent = `${job.title} — ${job.channelName}${noChat}`;
-        select.appendChild(opt);
-      });
+        all.forEach((job) => {
+          const opt = document.createElement("sl-option");
+          opt.value = job.id;
+          const noChat = !job.chatFilename ? " (no chat)" : "";
+          opt.textContent = `${job.title} — ${job.channelName}${noChat}`;
+          select.appendChild(opt);
+        });
 
-      // Wait for Shoelace to register new options before restoring selection
-      if (select.updateComplete) {
-        await select.updateComplete.catch(() => {});
-      }
+        // Wait for Shoelace to register new options before restoring selection
+        if (select.updateComplete) await select.updateComplete.catch(() => {});
+        // A newer rebuild started while we waited: it owns the option list from
+        // here on, so restoring OUR remembered value would fight it.
+        if (token !== this._rebuildToken) return;
 
-      if (currentValue && all.some((j) => j.id === currentValue)) {
-        select.value = currentValue;
+        if (currentValue && all.some((j) => j.id === currentValue)) select.value = currentValue;
+      } finally {
+        this._rebuildsActive--;
       }
 
       // Show/hide empty state
@@ -592,7 +824,11 @@ export class PlayerController {
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
       if (!res.ok || this._selectionSeq !== selectionId) return;
-      this.playerJob = await res.json();
+      const job = await res.json();
+      // The body of an OLDER selection can resolve after a newer one completed —
+      // re-check before anything observable (playerJob, video.src) is touched.
+      if (this._selectionSeq !== selectionId) return;
+      this.playerJob = job;
     } catch (e) {
       console.error("Failed to fetch job:", e);
       return;
@@ -613,6 +849,28 @@ export class PlayerController {
 
     // Remove resume overlay if present from previous job
     this._dismissResumeDialog();
+
+    // Drop the previous job's chat and overlay state BEFORE the new source is
+    // assigned and before any await below. Two reasons:
+    // - the new video's `loadedmetadata` would otherwise partition the PREVIOUS
+    //   job's messages against the new duration (a ~100 ms flash of wrong
+    //   dividers); with the array already empty that listener no-ops until
+    //   buildSidebarChat has run;
+    // - a `seeked` inside the fetch window (a restored resume position) would
+    //   re-anchor over the old job's flying text on top of the new picture.
+    this.playerChatMessages = [];
+    this.playerChatData = null;
+    this._chatParts = null;
+    this.twitchEmoteMap = new Map();
+    this.playerActiveChatIndex = 0;
+    // Rows and header are one state: dropping the array alone would leave the
+    // previous job's messages on screen under the previous job's count for the
+    // whole fetch window. buildSidebarChat rebuilds both once the chat is in.
+    document.getElementById("player-sidebar-messages").replaceChildren();
+    this._updateSidebarHeader();
+    this.clearNicoOverlay();
+    this.nicoCursor = -1;
+    this._resetNicoDropCount();
 
     // Multi-segment or single-file video source
     if (this.playerJob.segments && this.playerJob.segments.length > 0) {
@@ -644,49 +902,24 @@ export class PlayerController {
       this._startWatchTracking(jobId);
     }
 
-    // Load chat if available
-    this.playerChatMessages = [];
-    this.playerChatData = null;
-    this.twitchEmoteMap = new Map();
-    this.playerActiveChatIndex = 0;
-    this.nicoLastSpawnMs = null;
-
-    if (this.playerJob.chatFilename) {
+    // Load chat if available (the state it replaces was cleared above, before
+    // the source swap).
+    if (this.playerJob.chatFilename || (this.playerJob.segments || []).some((s) => s.chatFile)) {
       try {
-        const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
+        this.playerChatData = await this._fetchChatData(jobId, selectionId);
         if (this._selectionSeq !== selectionId) return; // Selection changed during fetch
-        if (chatRes.ok) {
-          this.playerChatData = await chatRes.json();
-          if (this._selectionSeq !== selectionId) return; // Selection changed during parse
-          // Compute chat-to-video timing correction. Chat offsets are relative to
-          // streamStartTime in the chat file, but video playback starts from the
-          // first captured content. If the stream started late (actual > scheduled),
-          // chat offsets will be inflated and need correction.
-          let chatBiasMs = 0;
-          const chatStartMs = this.playerChatData.streamStartTime
-            ? Date.parse(this.playerChatData.streamStartTime)
-            : 0;
-          if (chatStartMs > 0) {
-            if (this.playerJob.segments && this.playerJob.segments.length > 0) {
-              // Multi-segment: use first segment's capture time as video epoch
-              const firstSegStart = this.playerJob.segments[0].unixStart;
-              if (firstSegStart > 0) {
-                chatBiasMs = firstSegStart * 1000 - chatStartMs;
-              }
-            } else if (this.playerJob.streamStartTime) {
-              // Single-file: use job's stream start time (updated to actual on live)
-              const jobStartMs = Date.parse(this.playerJob.streamStartTime);
-              if (jobStartMs > 0 && jobStartMs !== chatStartMs) {
-                chatBiasMs = jobStartMs - chatStartMs;
-              }
-            }
-          }
-
+        if (this.playerChatData) {
+          // Chat-to-video timing correction (see chat-timeline.js for the
+          // semantics per platform). Multi-part YouTube jobs use the same
+          // rule: the video begins at the actual stream start regardless of
+          // when Moombox started downloading.
+          const chatBiasMs = computeChatBiasMs({
+            platform: this.playerChatData.platform,
+            chatStreamStartTime: this.playerChatData.streamStartTime,
+            jobStreamStartTime: this.playerJob.streamStartTime,
+          });
           this.playerChatMessages = (this.playerChatData.messages || [])
-            .map((m) => ({
-              ...m,
-              offsetMs: (m.offsetMs || 0) - chatBiasMs,
-            }))
+            .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
 
           // Build 3rd-party emote lookup map for Twitch chat
@@ -697,6 +930,11 @@ export class PlayerController {
             for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
             for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
           }
+
+          // Release the raw array now that playerChatMessages holds the
+          // normalized/biased copy — halves peak memory for large chat
+          // files. filterChat and everything else read playerChatMessages.
+          this.playerChatData.messages = null;
         }
       } catch (e) {
         console.error("Failed to load chat:", e);
@@ -719,25 +957,74 @@ export class PlayerController {
       chatSearch.value = "";
     }
 
-    // Build sidebar chat
-    this.buildSidebarChat();
-    this.clearNicoOverlay();
+    // Partition + header BEFORE the build: _buildChatMessageEl stamps the two
+    // divider rows as it creates them, so this._chatParts has to exist first.
+    // A single-file job whose duration is not known yet gets no post region
+    // here — the `loadedmetadata` listener recomputes and re-stamps.
+    this._computeChatParts();
 
-    // Update sidebar header
-    document.getElementById("player-sidebar-msg-count").textContent =
-      `${this.playerChatMessages.length} messages`;
+    // Build sidebar chat. The overlay was cleared and un-anchored before the
+    // source swap and nothing can have spawned since (the message array was
+    // empty for the whole fetch window), so there is nothing to clear here.
+    this.buildSidebarChat();
+
+    // Un-anchor again: a `seeked` inside the fetch window (the resume dialog
+    // seeks BEFORE the chat arrives) re-seeded the cursor on the then-EMPTY
+    // array, which leaves it at 0 with the anchor at the seek target. The
+    // messages that just landed are all newer than that anchor, so the first
+    // tick would walk the whole file up to `now` and count the gap as dropped.
+    // _updateNicoGeometry below cannot undo it — an unchanged stage returns
+    // early — so drop the seed here and let the next tick anchor lazily.
+    this.nicoCursor = -1;
 
     // Load saved custom chat offset (from watch-state response, already on playerJob)
-    const offsetInput = document.getElementById("player-chat-offset");
-    if (offsetInput) {
-      offsetInput.value = "";
-      this.playerCustomOffsetMs = 0;
-      const savedOffset = this.playerJob.chatOffset;
-      if (savedOffset && savedOffset !== 0) {
-        offsetInput.value = savedOffset;
-        this.playerCustomOffsetMs = savedOffset * 1000;
-      }
+    this._applyOffsetUI(this.playerJob.chatOffset || 0);
+
+    // Same rule as the nico toggle: the overlay's display was just decided, so
+    // measure it now it is visible — a job switch that reveals a previously
+    // hidden overlay (the last job had no chat) resizes nothing and may have
+    // already missed this video's `loadedmetadata`. Last, so the re-anchor it
+    // may trigger sees the restored chat offset; immediate, because the first
+    // tick of a freshly selected job must already have the right row count.
+    this._updateNicoGeometry({ immediate: true });
+  }
+
+  /**
+   * Load the chat for the selected job. A multi-part job whose parts carry
+   * their own chat files (Twitch live: offsets are part-relative) is merged
+   * onto the global timeline part by part; everything else uses the job-level
+   * file. Returns null when the selection changed underneath us or nothing
+   * was available.
+   */
+  async _fetchChatData(jobId, selectionId) {
+    const segments = this.playerJob.segments || [];
+    const withChat = segments.filter((s) => s.chatFile);
+    if (segments.length > 1 && withChat.length > 0 && this._seg.active) {
+      // Captured BEFORE the per-part fetch: a newer selection's reset()
+      // nulls this._seg.segOffsets mid-flight, and reading it after the
+      // await inside the closure would throw on the stale `.find()` call
+      // instead of falling through to the seq check below.
+      const segOffsets = this._seg.segOffsets;
+      const parts = await Promise.all(withChat.map(async (s) => {
+        try {
+          const r = await fetch(`/api/jobs/${jobId}/segments/${s.segmentIndex}/chat`);
+          if (!r.ok) return null;
+          const data = await r.json();
+          const off = segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
+          return { startOffsetSec: off ? off.startOffset : 0, data };
+        } catch {
+          return null;
+        }
+      }));
+      if (this._selectionSeq !== selectionId) return null;
+      const merged = mergePartChats(parts.filter(Boolean));
+      if (merged.messages.length > 0) return merged;
     }
+    const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
+    if (this._selectionSeq !== selectionId) return null;
+    if (!chatRes.ok) return null;
+    const data = await chatRes.json();
+    return this._selectionSeq !== selectionId ? null : data;
   }
 
   buildSidebarChat() {
@@ -772,8 +1059,15 @@ export class PlayerController {
         setTimeout(() => buildFrom(end), 0);
         return;
       }
-      // Build complete — a search typed while chunks were pending only hid
-      // the children that existed at the time; re-apply it over the full set.
+      // Build complete — reconcile the divider rows (the partition may have
+      // moved mid-build, e.g. `loadedmetadata` landing between two chunks)
+      // and, if playback already reached the end while the list was still
+      // materializing, promote the tail the late chunks built as `.future`.
+      this._applyDividers();
+      if (this._atRecordingEnd()) this._markPostEnd();
+
+      // A search typed while chunks were pending only hid the children that
+      // existed at the time; re-apply it over the full set.
       const search = document.getElementById("chat-search");
       if (search && search.value) {
         this.filterChat(search.value);
@@ -794,6 +1088,16 @@ export class PlayerController {
     const div = document.createElement("div");
     div.className = index < this.playerActiveChatIndex ? "chat-msg active" : "chat-msg future";
     div.dataset.offset = msg.offsetMs;
+
+    // Region boundary: the divider is ::before pseudo-content on the first row
+    // of the region, so the children[i] === playerChatMessages[i] alignment
+    // that filterChat / resetSidebarToTime / updateSidebarActiveState rely on
+    // survives (a real divider element would shift every index after it).
+    const dividerLabel = dividerLabelFor(this._chatParts, index);
+    if (dividerLabel) {
+      div.classList.add("divider-before");
+      div.dataset.divider = dividerLabel;
+    }
 
     if (msg.superchat) {
       div.classList.add("superchat");
@@ -840,6 +1144,100 @@ export class PlayerController {
     return div;
   }
 
+  /**
+   * Known length of the recording in ms: the segment sum for a multi-part job,
+   * else the loaded media's own duration, else the job's metadata length.
+   * 0 = not known yet (single-file job before `loadedmetadata`), which means
+   * "no post-end region" until it is.
+   *
+   * A segmented job returns the sum and NOTHING ELSE — `video.duration` there
+   * is one PART, and falling through to it when the parts carry no durations
+   * would put a "Recording ended" divider in the middle of the video and fire
+   * _markPostEnd at every part boundary. 0 (unknown) is the honest answer.
+   * @returns {number}
+   */
+  _videoDurationMs() {
+    if (this._seg.active) return this._seg.totalDuration * 1000;
+    const video = document.getElementById("player-video");
+    if (video && Number.isFinite(video.duration) && video.duration > 0) {
+      return video.duration * 1000;
+    }
+    const len = this.playerJob?.lengthSeconds;
+    return len > 0 ? len * 1000 : 0;
+  }
+
+  /** Re-derive the pre-show / post-end partition and refresh the header. */
+  _computeChatParts() {
+    this._chatParts = partitionChatByVideo(this.playerChatMessages, this._videoDurationMs());
+    this._updateSidebarHeader();
+  }
+
+  /** Sole writer of #player-sidebar-msg-count. Text from formatChatHeader. */
+  _updateSidebarHeader() {
+    const p = this._chatParts;
+    const text = formatChatHeader(
+      this.playerChatMessages.length,
+      p ? p.preCount : 0,
+      p ? p.postCount : 0,
+    );
+    document.getElementById("player-sidebar-msg-count").textContent = text;
+  }
+
+  /**
+   * Stamp/clear the divider classes on the boundary rows. Idempotent, and safe
+   * while the chunked build is still running — it only ever touches children
+   * that exist, and the completion callback runs it again over the full list.
+   */
+  _applyDividers() {
+    const container = document.getElementById("player-sidebar-messages");
+    if (!container) return;
+    const children = container.children;
+    for (const el of children) {
+      if (el.classList.contains("divider-before")) {
+        el.classList.remove("divider-before");
+        delete el.dataset.divider;
+      }
+    }
+    const p = this._chatParts;
+    if (!p) return;
+    for (const index of [p.firstLiveIndex, p.firstPostIndex]) {
+      if (index < 0 || !children[index]) continue;
+      const label = dividerLabelFor(p, index);
+      if (!label) continue;
+      children[index].classList.add("divider-before");
+      children[index].dataset.divider = label;
+    }
+  }
+
+  /**
+   * Has playback reached the end of the recording? Measured in EFFECTIVE ms —
+   * the policy is "effectiveMs >= totalDuration", and the sidebar's regions
+   * are read through the same offset-adjusted clock as its active state. The
+   * 250 ms slack covers a media file that stops a hair short of its duration.
+   * @param {number} [effectiveMs] offset-adjusted playback time, if known
+   * @returns {boolean}
+   */
+  _atRecordingEnd(effectiveMs = this.getGlobalTimeMs() + this.playerCustomOffsetMs) {
+    const durationMs = this._videoDurationMs();
+    return durationMs > 0 && effectiveMs + 250 >= durationMs;
+  }
+
+  /**
+   * After the recording ends, its tail is "after it", not "future": readable,
+   * labelled and reachable rather than dimmed like something still to come.
+   */
+  _markPostEnd() {
+    const p = this._chatParts;
+    if (!p || p.firstPostIndex < 0) return;
+    const container = document.getElementById("player-sidebar-messages");
+    if (!container) return;
+    const children = container.children;
+    for (let i = p.firstPostIndex; i < children.length; i++) {
+      children[i].classList.remove("future");
+      children[i].classList.add("post");
+    }
+  }
+
   onPlayerTimeUpdate() {
     const video = document.getElementById("player-video");
     if (!video || !this.playerChatMessages.length) return;
@@ -849,15 +1247,20 @@ export class PlayerController {
     // Update sidebar active state
     this.updateSidebarActiveState(currentMs);
 
-    // Spawn nico messages
+    // Spawn nico messages (the argument IS effective — offset-adjusted — time)
     if (this.nicoEnabled) {
-      this.spawnNicoMessages(currentMs);
+      this.spawnNicoMessages(currentMs + this.playerCustomOffsetMs);
     }
 
     // Auto-scroll sidebar
     if (this.playerAutoScroll && !this.playerScrollLock) {
       this.syncSidebarToTime();
     }
+
+    // Promote the after-the-recording tail. `ended` covers the normal case,
+    // but a media file that stops short of its duration never fires it, and a
+    // seek to the last second only ever produces this one tick.
+    if (this._atRecordingEnd(currentMs + this.playerCustomOffsetMs)) this._markPostEnd();
   }
 
   updateSidebarActiveState(currentMs) {
@@ -880,7 +1283,24 @@ export class PlayerController {
 
   syncSidebarToTime() {
     const container = document.getElementById("player-sidebar-messages");
-    if (!container || this.playerActiveChatIndex === 0) return;
+    if (!container) return;
+
+    // At the end of the recording, "current time" IS the end: scroll to the
+    // "Recording ended" divider so the tail — the part that has no playback
+    // position of its own — is what the sync button hands you. Checked before
+    // the active-index guard so a chat that is entirely post-end still syncs.
+    const video = document.getElementById("player-video");
+    const p = this._chatParts;
+    if (video?.ended && p && p.firstPostIndex >= 0 && container.children[p.firstPostIndex]) {
+      this._programmaticScroll = true;
+      container.scrollTop = Math.max(0, container.children[p.firstPostIndex].offsetTop - 8);
+      requestAnimationFrame(() => {
+        this._programmaticScroll = false;
+      });
+      return;
+    }
+
+    if (this.playerActiveChatIndex === 0) return;
 
     const targetChild = container.children[this.playerActiveChatIndex - 1];
     if (!targetChild) return;
@@ -920,6 +1340,7 @@ export class PlayerController {
     // Previously active but now should be future (seeked backwards)
     for (let i = newActiveIndex; i < this.playerActiveChatIndex && i < children.length; i++) {
       children[i].classList.remove("active");
+      children[i].classList.remove("post");
       children[i].classList.add("future");
     }
     // Previously future but now should be active (seeked forwards)
@@ -928,159 +1349,403 @@ export class PlayerController {
       children[i].classList.add("active");
     }
 
+    // Seeking back off the end returns the post-end rows to "future". The loop
+    // above only reaches the ones that were also active, and _markPostEnd
+    // strips `.future`, so re-adding it here is what makes them dim again.
+    // The condition is the exact inverse of the promotion trigger — comparing
+    // indices instead would miss firstPostIndex === 0 (a chat that is entirely
+    // post-end) and would disagree with a `timeupdate` that lands before the
+    // `seeked` this is running for.
+    const p = this._chatParts;
+    if (p && p.firstPostIndex >= 0 && !this._atRecordingEnd(effectiveMs)) {
+      for (let i = p.firstPostIndex; i < children.length; i++) {
+        children[i].classList.remove("post");
+        children[i].classList.add("future");
+      }
+    }
+
     this.playerActiveChatIndex = newActiveIndex;
   }
 
   // Niconico overlay engine
 
-  clearNicoOverlay() {
+  /**
+   * Size the overlay to the VIDEO'S RENDERED RECT (not the wrapper, which has
+   * letterbox bars around a video whose aspect ratio differs from its box) and
+   * derive the row count from a MEASURED line box, so the rows follow the
+   * container-query font instead of a hard-coded constant.
+   *
+   * Committing a changed geometry is destructive — in-flight keyframes were
+   * computed for the old stage width and pending entries cache measurements
+   * taken at the old font size, so the stage has to be cleared and re-anchored.
+   * Two things keep that rare:
+   * - a callback that measures the SAME width, height and row count returns
+   *   here and commits nothing (R11);
+   * - a callback that measures a real change only ARMS the commit, which fires
+   *   once the box has held still for NICO_GEO_SETTLE_MS (R23). Dragging a
+   *   window edge produces a different box on every frame — all of them real
+   *   changes — so without the timer the overlay would be cleared per frame and
+   *   stay blank for the whole drag.
+   *
+   * The overlay's own box follows every call, so the stage never lags the video
+   * during a drag. In that window the messages still fly on the previously
+   * committed width — a small horizontal offset, against a blank overlay for as
+   * long as the drag lasts. The window is the WHOLE gesture plus
+   * NICO_GEO_SETTLE_MS, not 120 ms in total, and the overlay text is sized in
+   * `cqh`, so applying the new box re-sizes in-flight and already-measured text
+   * immediately while the lane records still hold the widths measured at the old
+   * size: a transient overlap is possible until the commit wipes the stage
+   * (accepted trade, R23).
+   * @param {{immediate?: boolean}} [opts] `immediate` commits without waiting —
+   *   used where the overlay has just been made visible and the very next tick
+   *   must already use the right row count.
+   */
+  _updateNicoGeometry({ immediate = false } = {}) {
+    const video = document.getElementById("player-video");
     const overlay = document.getElementById("player-nico-overlay");
-    if (overlay) {
-      // Cancel running animations to free CPU/memory before detaching elements
-      overlay.querySelectorAll(".nico-message").forEach((el) => {
-        if (el._nicoAnim) { el._nicoAnim.cancel(); el._nicoAnim = null; }
-      });
-      overlay.innerHTML = "";
+    if (!video || !overlay) return;
+    // A hidden overlay (toggle off, player tab inactive) measures 0x0 and its
+    // container query resolves against nothing, so a measurement here would be
+    // garbage. Leave _nicoGeo untouched; the toggle-on handler re-measures once
+    // the overlay is visible again.
+    if (overlay.clientWidth === 0 || overlay.clientHeight === 0) return;
+
+    // Letterbox math: the <video> paints its content centred inside its box at
+    // the largest scale that fits, so a portrait video in a landscape box gets
+    // pillarbox bars (and vice versa). Before `loadedmetadata` the intrinsic
+    // size is unknown (0) and the element box is the best available stage.
+    const bw = video.clientWidth, bh = video.clientHeight;
+    let w = bw, h = bh, left = video.offsetLeft, top = video.offsetTop;
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (vw > 0 && vh > 0 && bw > 0 && bh > 0) {
+      const scale = Math.min(bw / vw, bh / vh);
+      w = Math.round(vw * scale);
+      h = Math.round(vh * scale);
+      left += Math.round((bw - w) / 2);
+      top += Math.round((bh - h) / 2);
     }
-    this.nicoLaneAvail = new Array(this.nicoLaneCount).fill(0);
-  }
+    // Never write a zero-sized box: the guard above would then refuse every
+    // later measurement, wedging the overlay shut. Keep the last good geometry
+    // and wait for the next resize instead.
+    if (w <= 0 || h <= 0) return;
+    Object.assign(overlay.style, { left: `${left}px`, top: `${top}px`, width: `${w}px`, height: `${h}px` });
 
-  spawnNicoMessages(currentMs) {
-    // On first call, set cursor to -5001 so messages within 5s before stream
-    // start (offsetMs >= -5000) deploy instantly. Older pre-stream messages
-    // are permanently skipped from the overlay (still visible in sidebar).
-    const messages = this.playerChatMessages;
-    if (!messages.length) return;
+    // Measure one real line box AFTER the box is applied — the font is sized in
+    // cqh, so the probe has to see the new overlay height.
+    const probe = document.createElement("div");
+    probe.className = "nico-message";
+    probe.style.visibility = "hidden";
+    probe.textContent = "Ag";
+    overlay.appendChild(probe);
+    const rowH = probe.offsetHeight || 24;
+    probe.remove();
 
-    // Use offset-adjusted time consistently for binary search, loop, and cursor
-    const effectiveMs = currentMs + this.playerCustomOffsetMs;
-
-    // First-spawn: deploy pre-stream messages within 5s of effective start.
-    // Use null sentinel so negative effectiveMs doesn't re-trigger every frame.
-    const firstSpawn = this.nicoLastSpawnMs === null;
-    if (firstSpawn) {
-      this.nicoLastSpawnMs = effectiveMs - 5001;
-    }
-
-    // Binary search for start of window (nicoLastSpawnMs, effectiveMs]
-    let lo = 0;
-    let hi = messages.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (messages[mid].offsetMs <= this.nicoLastSpawnMs) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-
-    const overlay = document.getElementById("player-nico-overlay");
-    if (!overlay) return;
-
-    const overlayWidth = overlay.clientWidth;
-    const overlayHeight = overlay.clientHeight;
-    if (!overlayWidth || !overlayHeight) return;
-
-    const laneHeight = overlayHeight / this.nicoLaneCount;
-    const now = performance.now();
-    const duration = 8000;
-
-    // Quick check: if all lanes are occupied, skip the entire loop to avoid
-    // creating/measuring/removing DOM elements for messages that can't be placed.
-    // This prevents layout thrashing during fast chat when all lanes are busy.
-    if (!firstSpawn && this.nicoLaneAvail.every(t => t > now)) {
-      this.nicoLastSpawnMs = effectiveMs;
+    const rows = Math.max(1, Math.floor(h / rowH));
+    const geo = this._nicoGeo;
+    if (geo && geo.width === w && geo.height === h && geo.rows === rows) {
+      // R11: nothing to commit. Also drop a commit armed earlier in the same
+      // gesture — a drag that returned to its starting size would otherwise
+      // install a stage that is no longer on screen.
+      clearTimeout(this._nicoGeoSettle);
+      this._nicoGeoSettle = null;
       return;
     }
 
-    let spawned = 0;
-    // No limit on first spawn so all offsetMs=0 pre-stream messages deploy at once
-    const maxPerFrame = firstSpawn ? Infinity : 10;
-    let lastProcessedMs = this.nicoLastSpawnMs;
+    clearTimeout(this._nicoGeoSettle);
+    this._nicoGeoSettle = null;
+    // The first-ever measurement has no stage to protect (nothing is flying and
+    // spawning is blocked until _nicoGeo exists), so it commits at once, as do
+    // the calls that follow making the overlay visible.
+    if (immediate || !geo) {
+      this._commitNicoGeometry(w, h, rows);
+      return;
+    }
+    this._nicoGeoSettle = setTimeout(() => this._commitNicoGeometry(w, h, rows), NICO_GEO_SETTLE_MS);
+  }
 
-    for (let i = lo; i < messages.length && messages[i].offsetMs <= effectiveMs; i++) {
-      if (spawned >= maxPerFrame) break;
+  /**
+   * Install a settled geometry — the destructive half of _updateNicoGeometry.
+   * Both guards are re-checked because this can run NICO_GEO_SETTLE_MS after the
+   * measurement: the overlay may have been hidden meanwhile (toggle off, tab
+   * switch), and the box may have been committed by another path.
+   * @param {number} w
+   * @param {number} h
+   * @param {number} rows
+   */
+  _commitNicoGeometry(w, h, rows) {
+    this._nicoGeoSettle = null;
+    const overlay = document.getElementById("player-nico-overlay");
+    if (!overlay || overlay.clientWidth === 0 || overlay.clientHeight === 0) return;
+    const geo = this._nicoGeo;
+    if (geo && geo.width === w && geo.height === h && geo.rows === rows) return;
 
-      const msg = messages[i];
-      // Create element off-screen to measure its actual height
-      const el = document.createElement("div");
-      el.className = "nico-message";
-      if (msg.messageType === "announcement") {
-        el.classList.add("announcement");
-        el.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
+    this._nicoGeo = { width: w, height: h, laneHeight: h / rows, rows, version: (geo?.version || 0) + 1 };
+    this._lanes.reset(rows);
+    // Exactly one clear on this path: _reanchorNicoAt clears before re-seeding
+    // (and clearNicoOverlay empties _nicoPending, so no cached w/h measured at
+    // the old font size outlives the change); _lanes.reset() inside it keeps the
+    // row count just set above.
+    if (this.playerChatMessages.length) {
+      // Re-anchor so the messages that should be on screen come back mid-flight
+      // at the new scale (rather than the overlay staying blank for a traverse).
+      this._reanchorNicoAt(this.getGlobalTimeMs() + this.playerCustomOffsetMs);
+    } else {
+      this.clearNicoOverlay();
+    }
+  }
+
+  clearNicoOverlay() {
+    for (const a of this._nicoAnims) a.cancel();
+    this._nicoAnims.clear();
+    const overlay = document.getElementById("player-nico-overlay");
+    if (overlay) overlay.replaceChildren();
+    this._lanes.reset();
+    // Pending entries hold DETACHED elements, so dropping the list is the discard.
+    this._nicoPending = [];
+  }
+
+  /**
+   * Clear the stage and re-anchor at `effectiveMs` — the ONLY way the cursor is
+   * re-seeded. `_resetNicoCursor` frees every lane, so it must never run while
+   * elements are still flying; pairing the two here makes that structural rather
+   * than a rule each call site has to remember.
+   * @param {number} effectiveMs
+   */
+  _reanchorNicoAt(effectiveMs) {
+    this.clearNicoOverlay();
+    this._resetNicoCursor(effectiveMs);
+  }
+
+  /**
+   * Anchor the overlay cursor at `effectiveMs`: the next tick considers only a
+   * short seed of "chat that was already flying" (newer than
+   * effectiveMs − NICO_MAX_LATENESS_MS, and at most two screens' worth of rows),
+   * never the whole pre-show backlog. Also drops any deferred messages and frees
+   * every lane — the caller has cleared the overlay.
+   */
+  _resetNicoCursor(effectiveMs) {
+    const rows = this._lanes.laneCount || NICO_SEED_MAX_FALLBACK / 2;
+    this.nicoCursor = seedCursorIndex(
+      this.playerChatMessages, effectiveMs, NICO_MAX_LATENESS_MS, 2 * rows, indexAfter,
+    );
+    this._nicoPending = [];
+    this._nicoAnchorMs = effectiveMs;
+    this._lanes.reset();
+  }
+
+  /** Zero the drop counter and hide the pill (job switch / player teardown). */
+  _resetNicoDropCount() {
+    this.nicoDropped = 0;
+    this._nicoDroppedShown = 0;
+    clearTimeout(this._nicoDropPillTimer);
+    this._nicoDropPillTimer = null;
+    const pill = document.getElementById("player-nico-dropped");
+    if (pill) pill.hidden = true;
+  }
+
+  /**
+   * Advance the overlay to `effectiveMs` (media time plus the user's chat offset).
+   * @param {number} effectiveMs
+   */
+  spawnNicoMessages(effectiveMs) {
+    const messages = this.playerChatMessages;
+    if (!messages.length || document.hidden) return;
+    const overlay = document.getElementById("player-nico-overlay");
+    const video = document.getElementById("player-video");
+    if (!overlay || !video) return;
+    // No decoded frame at the current position — a seek still in flight, or a
+    // source that has only just been assigned. There is nothing to sync to, and
+    // the `timeupdate` the seek/load algorithm queues before `seeked` lands
+    // here; placing against it would use a position the picture has not reached.
+    // `seeked`/`loadedmetadata` re-anchor once there is a frame.
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+    if (overlay.clientWidth === 0 || overlay.clientHeight === 0) {
+      // The player panel is hidden (another app tab is active) but `timeupdate`
+      // keeps firing. Un-anchor instead of returning: leaving the cursor parked
+      // would make every message in the gap arrive >NICO_MAX_LATENESS_MS late and
+      // newer than the anchor, i.e. a climbing bogus drop count and a dead
+      // overlay while it grinds through them. The next visible tick re-seeds.
+      // The clear is required — _resetNicoCursor frees the lanes, which must not
+      // happen under elements that are still flying.
+      this.clearNicoOverlay();
+      this.nicoCursor = -1;
+      return;
+    }
+    // Lazy anchor, AFTER the hidden-panel guard: with the two the other way
+    // round a hidden tick paid a seedCursorIndex + replaceChildren (~4 Hz) to
+    // build a cursor the guard then threw away again.
+    if (this.nicoCursor < 0) this._reanchorNicoAt(effectiveMs);
+    const geo = this._nicoGeo;
+    // Visible but not measured yet (a tick that beats `loadedmetadata`), or a
+    // zero-sized video. Distinct from hidden: there is nothing to place, but the
+    // cursor is still valid, so this must NOT clear or un-anchor.
+    if (!geo || !geo.width || !geo.height) return;
+    const stageW = geo.width;
+    const laneHeight = geo.laneHeight;
+    const ctx = {
+      stageW,
+      laneHeight,
+      rate: video.playbackRate || 1,
+      paused: video.paused && !video.ended,
+      overlay,
+    };
+
+    // 1. Deferred entries first (oldest first) — no head-of-line blocking: an
+    //    entry that still finds no lane stays pending, one that is now too late
+    //    is dropped (and counted when it is newer than the anchor), and the
+    //    ones behind it are still tried this tick. A retry is placed at the
+    //    CURRENT time (retry mode, see _placeEntry) and reuses the element and
+    //    measurements taken at first sight — no rebuild, no re-measure.
+    const stillPending = [];
+    for (const entry of this._nicoPending) {
+      if (effectiveMs - entry.msg.offsetMs > NICO_MAX_LATENESS_MS) {
+        this._countNicoDrop(entry.msg); // entry (and its detached element) is discarded
+        continue;
       }
-      this.appendChatContent(el, msg.message || [], msg.emotes);
-      if (!el.hasChildNodes()) continue;
-      // Nico emotes must load immediately — override the default lazy loading
-      // set by _createEmoteImg (which is appropriate for the sidebar's thousands
-      // of off-screen messages, but not for emotes animating across screen in 8s).
-      el.querySelectorAll(".chat-emoji").forEach(img => { img.loading = "eager"; });
-      el.style.top = "0";
-      el.style.left = `${overlayWidth}px`;
-      overlay.appendChild(el);
+      if (!this._placeEntry(entry, effectiveMs, ctx, true)) stillPending.push(entry);
+    }
+    this._nicoPending = stillPending;
 
-      // Measure actual dimensions (emotes can make height > laneHeight)
-      const msgWidth = el.offsetWidth;
-      const msgHeight = el.offsetHeight;
-      const lanesNeeded = Math.max(1, Math.ceil(msgHeight / laneHeight));
-
-      // Find a run of consecutive available lanes
-      let lane = -1;
-      for (let l = 0; l <= this.nicoLaneCount - lanesNeeded; l++) {
-        let allFree = true;
-        for (let k = 0; k < lanesNeeded; k++) {
-          if (this.nicoLaneAvail[l + k] > now) {
-            allFree = false;
-            break;
-          }
-        }
-        if (allFree) {
-          lane = l;
-          break;
-        }
+    // 2. New messages up to the per-tick cap; the cursor ALWAYS advances.
+    //    The cap bounds DOM WORK, not the walk: skipping a too-late message
+    //    builds nothing, so it must not consume a slot — otherwise a backlog
+    //    would drain at only NICO_MAX_PER_TICK per tick, leaving the overlay
+    //    dead for seconds. Skips are free, so any backlog clears in one tick.
+    let work = 0;
+    while (this.nicoCursor < messages.length && messages[this.nicoCursor].offsetMs <= effectiveMs) {
+      const msg = messages[this.nicoCursor];
+      if (effectiveMs - msg.offsetMs > NICO_MAX_LATENESS_MS) {
+        this.nicoCursor++;
+        this._countNicoDrop(msg);
+        continue;
       }
-      if (lane === -1) {
-        el.remove();
-        continue; // All lanes busy
-      }
-
-      // Position at the chosen lane
-      el.style.top = `${lane * laneHeight}px`;
-
-      const totalTravel = overlayWidth + msgWidth;
-
-      // Animate using Web Animations API
-      const anim = el.animate(
-        [
-          { transform: "translateX(0)" },
-          { transform: `translateX(-${totalTravel}px)` },
-        ],
-        { duration, fill: "forwards" },
-      );
-      el._nicoAnim = anim;
-
-      // If video is paused, pause animation immediately
-      const video = document.getElementById("player-video");
-      if (video && video.paused) {
-        anim.pause();
-      }
-
-      anim.onfinish = () => el.remove();
-
-      // Calculate when these lanes become available (when the message clears the right edge)
-      const clearTime = (msgWidth / totalTravel) * duration;
-      const availAt = now + clearTime + 200; // 200ms buffer
-      for (let k = 0; k < lanesNeeded; k++) {
-        this.nicoLaneAvail[lane + k] = availAt;
-      }
-
-      lastProcessedMs = msg.offsetMs;
-      spawned++;
+      if (work++ >= NICO_MAX_PER_TICK) break; // cursor stays put — retried next tick
+      this.nicoCursor++;
+      const entry = this._prepareNico(msg, ctx);
+      if (!entry) continue; // nothing renderable (system-only message)
+      if (!this._placeEntry(entry, effectiveMs, ctx, false)) this._nicoPending.push(entry);
     }
 
-    // Only advance the cursor to the last message we actually processed.
-    // If maxPerFrame was hit, un-spawned messages remain eligible for the next frame.
-    this.nicoLastSpawnMs = spawned > 0 ? lastProcessedMs : effectiveMs;
+    this._updateNicoDropPill();
+  }
+
+  /**
+   * Count a message the overlay could not show. Messages at or before the last
+   * anchor are seed-window skips, not drops — they are not reported.
+   */
+  _countNicoDrop(msg) {
+    if (msg.offsetMs > this._nicoAnchorMs) this.nicoDropped++;
+  }
+
+  /**
+   * Build and measure `msg` once. The element is parked off-stage at the right
+   * edge and appended, because offsetWidth/offsetHeight need layout. The entry
+   * is then handed to `_placeEntry`, which either flies it this tick or detaches
+   * it and hands it back for the caller to retry — so a deferred message is
+   * never rebuilt or re-measured.
+   * @param {object} msg
+   * @param {{stageW: number, overlay: HTMLElement}} ctx
+   * @returns {{msg: object, el: HTMLElement, w: number, h: number}|null} null when
+   *   the message has no renderable content.
+   */
+  _prepareNico(msg, { stageW, overlay }) {
+    const el = this._buildNicoEl(msg);
+    if (!el) return null;
+    el.style.left = `${stageW}px`;
+    el.style.top = "0";
+    overlay.appendChild(el);
+    return { msg, el, w: el.offsetWidth, h: el.offsetHeight };
+  }
+
+  /**
+   * Try to put a prepared entry on stage. Returns true when it is flying, false
+   * when every candidate lane is busy — the element is detached and the caller
+   * keeps the entry for a later tick.
+   *
+   * Two placement modes, because the allocator's clock only ever moves forward:
+   * - FIRST sight (`retry` false): allocate at the MESSAGE's own time and start
+   *   the animation mid-flight by its lateness, so late and seeded messages
+   *   appear where they would have been rather than bunching at the right edge.
+   * - RETRY (`retry` true): the entry was already rejected once, so its own time
+   *   is in the past and every lane's occupancy has only grown newer since —
+   *   re-asking at `msg.offsetMs` could never succeed and deferral would be a
+   *   no-op. A retry therefore allocates at the CURRENT time and spawns at the
+   *   right edge; the allocator's ordinary two-edge bound at placement time is
+   *   what keeps it collision-free.
+   * @param {{msg: object, el: HTMLElement, w: number, h: number}} entry
+   * @param {number} effectiveMs
+   * @param {{stageW: number, laneHeight: number, rate: number, paused: boolean, overlay: HTMLElement}} ctx
+   * @param {boolean} retry
+   * @returns {boolean}
+   */
+  _placeEntry(entry, effectiveMs, { stageW, laneHeight, rate, paused, overlay }, retry) {
+    const { msg, el, w, h } = entry;
+    const lanesNeeded = Math.max(1, Math.ceil(h / laneHeight));
+    const lane = this._lanes.allocate({
+      nowMs: retry ? effectiveMs : msg.offsetMs,
+      widthPx: w,
+      stageWidthPx: stageW,
+      durationMs: NICO_DURATION_MS,
+      lanesNeeded,
+      gapMs: NICO_LANE_GAP_MS,
+    });
+    if (lane === -1) {
+      el.remove(); // a no-op on a repeat retry — the element is already detached
+      return false;
+    }
+    if (!el.isConnected) {
+      // Re-attach the element rejected on an earlier tick (measurements reused).
+      el.style.left = `${stageW}px`;
+      overlay.appendChild(el);
+    }
+    el.style.top = `${lane * laneHeight}px`;
+    const anim = el.animate(
+      [{ transform: "translateX(0)" }, { transform: `translateX(-${stageW + w}px)` }],
+      { duration: NICO_DURATION_MS, fill: "forwards" },
+    );
+    anim.currentTime = retry
+      ? 0
+      : Math.min(Math.max(0, effectiveMs - msg.offsetMs), NICO_DURATION_MS - 1);
+    anim.playbackRate = rate;
+    if (paused) anim.pause();
+    anim.onfinish = () => {
+      this._nicoAnims.delete(anim);
+      el.remove();
+    };
+    this._nicoAnims.add(anim);
+    return true;
+  }
+
+  /**
+   * Build an overlay element for `msg`, or null when it has no renderable content.
+   * @param {object} msg
+   * @returns {HTMLElement|null}
+   */
+  _buildNicoEl(msg) {
+    const el = document.createElement("div");
+    el.className = "nico-message";
+    if (msg.messageType === "announcement") {
+      el.classList.add("announcement", `announcement-${announcementColorClass(msg.announcementColor)}`);
+    }
+    this.appendChatContent(el, msg.message || [], msg.emotes);
+    if (!el.hasChildNodes()) return null;
+    // Nico emotes must load immediately — override the default lazy loading set
+    // by _createEmoteImg (right for the sidebar's thousands of off-screen
+    // messages, wrong for emotes that cross the screen in a few seconds).
+    el.querySelectorAll(".chat-emoji").forEach((img) => { img.loading = "eager"; });
+    return el;
+  }
+
+  /** Show "+N not shown" for a few seconds whenever the drop counter grew. */
+  _updateNicoDropPill() {
+    const pill = document.getElementById("player-nico-dropped");
+    if (!pill) return;
+    if (this.nicoDropped === this._nicoDroppedShown) return;
+    this._nicoDroppedShown = this.nicoDropped;
+    pill.textContent = `+${this.nicoDropped} not shown`;
+    pill.hidden = false;
+    clearTimeout(this._nicoDropPillTimer);
+    this._nicoDropPillTimer = setTimeout(() => { pill.hidden = true; }, 3000);
   }
 
   /**
@@ -1184,6 +1849,8 @@ export class PlayerController {
     overlay.className = "resume-overlay";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-label", "Resume playback");
+    overlay.setAttribute("aria-modal", "true");
+    this._resumeReturnFocus = document.activeElement;
     overlay.innerHTML = `
       <div class="resume-overlay-content">
         <p>Resume where you left off?</p>
@@ -1207,12 +1874,13 @@ export class PlayerController {
     const dismiss = () => this._dismissResumeDialog();
 
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        dismiss();
-        // Start from beginning on Escape (same as clicking "Start from beginning")
-        document.getElementById("player-video").play();
-        this._startWatchTracking(jobId);
-      }
+      if (e.key !== "Escape") return;
+      if (document.querySelector("sl-dialog[open]") || isTypingInInput(e)) return;
+      e.preventDefault();
+      // Start from beginning on Escape (same as clicking "Start from beginning")
+      dismiss();
+      safePlay(document.getElementById("player-video"));
+      this._startWatchTracking(jobId);
     }, { signal: sig });
 
     overlay.querySelector("#resume-continue").addEventListener("click", () => {
@@ -1223,13 +1891,13 @@ export class PlayerController {
       } else {
         video.currentTime = resumeSeconds;
       }
-      video.play();
+      safePlay(video);
       this._startWatchTracking(jobId);
     }, { signal: sig });
 
     overlay.querySelector("#resume-start").addEventListener("click", () => {
       dismiss();
-      document.getElementById("player-video").play();
+      safePlay(document.getElementById("player-video"));
       this._startWatchTracking(jobId);
     }, { signal: sig });
 
@@ -1250,6 +1918,8 @@ export class PlayerController {
       this._resumeDialogAbort.abort();
       this._resumeDialogAbort = null;
     }
+    if (this._resumeReturnFocus?.isConnected) this._resumeReturnFocus.focus({ preventScroll: true });
+    this._resumeReturnFocus = null;
   }
 
 

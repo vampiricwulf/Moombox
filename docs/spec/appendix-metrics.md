@@ -81,7 +81,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 - **cmd/:** ~6,420 lines across 20 source files (moombox entry/launcher/adapters + sign tool), plus 15 test files
 - **internal/ packages:** ~96,200 lines across 258 source files in 26 packages
 - **Test code:** ~86,100 lines across 294 test files under `internal/`
-- **Frontend:** ~18,100 lines across 15 files (~717 KB) — `app.js`, `index.html`, `moombox.css`, `login.html`, `favicon.svg`, plus 10 ES modules under `web/public/modules/`
+- **Frontend:** ~19,300 lines across 17 files (~775 KB) — `app.js`, `index.html`, `moombox.css`, `login.html`, `favicon.svg`, plus 12 ES modules under `web/public/modules/` (`chat-timeline.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `nico-lanes.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `utils.js`)
 
 ## Entry Points
 

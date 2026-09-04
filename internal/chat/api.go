@@ -431,6 +431,13 @@ func (api *ChatAPI) parseAction(actionMap map[string]any) *ChatMessage {
 		msg.IsMembership = true
 	}
 	if hasReplayOffset {
+		if replayOffsetMs == 0 {
+			// Pre-stream replay messages arrive with offset 0; the relative
+			// time survives only in timestampText (review 2026-09-03, N-F2).
+			if neg, ok := parseNegativeTimestampText(msg.TimestampText); ok {
+				replayOffsetMs = neg
+			}
+		}
 		// Negative offsets are legitimate for pre-stream waiting-room chat.
 		msg.OffsetMs = replayOffsetMs
 		msg.HasOffset = true
@@ -461,6 +468,30 @@ func (api *ChatAPI) extractReplayOffset(replayAction map[string]any) (int64, boo
 		api.logDebug("chat: videoOffsetTimeMsec unexpected type", "type", fmt.Sprintf("%T", raw))
 	}
 	return 0, false
+}
+
+// parseNegativeTimestampText parses YouTube's relative replay timestamp text
+// for a PRE-STREAM message ("-1:23", "-1:02:03") into signed milliseconds.
+// YouTube zeroes videoOffsetTimeMsec for messages sent before the stream
+// started and keeps the real time only here. Returns (0, false) for anything
+// that is not a leading-minus M:SS / H:MM:SS.
+func parseNegativeTimestampText(s string) (int64, bool) {
+	if !strings.HasPrefix(s, "-") {
+		return 0, false
+	}
+	parts := strings.Split(s[1:], ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+	var total int64
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		total = total*60 + int64(n)
+	}
+	return -total * 1000, true
 }
 
 // selectRenderer picks the first recognised renderer type from the action

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -417,6 +418,30 @@ func TestJobVideoServesExistingFile(t *testing.T) {
 	}
 }
 
+// resolveOutputDir must prefer job.OutputDirectory over the config's
+// Paths.OutputDirectory at every site it serves — a flipped precedence
+// (M-B) still passes every other /video test because they never set
+// job.OutputDirectory, so the config dir and the job dir coincide.
+func TestJobVideoServesFromPerJobOutputDirectory(t *testing.T) {
+	f := newJobsFixture(t)
+	jobDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(jobDir, "real.mp4"), []byte("job dir bytes"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+	f.addJob(t, "yt_perjobdir", func(j *database.Job) {
+		j.Filename = "real.mp4"
+		j.OutputDirectory = jobDir
+	})
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_perjobdir/video", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("serve video from job.OutputDirectory: want 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "job dir bytes" {
+		t.Errorf("body: want %q (from job.OutputDirectory, not the config dir), got %q", "job dir bytes", rec.Body.String())
+	}
+}
+
 // --- GET /api/jobs/{id}/segments ---
 
 func TestJobSegments404WhenJobMissing(t *testing.T) {
@@ -434,6 +459,26 @@ func TestJobSegments404WhenNoSegments(t *testing.T) {
 	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_noseg/segments", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("no segments: want 404, got %d", rec.Code)
+	}
+}
+
+// A Finished job's segments list must still revalidate, not cache
+// immutably: part merge and incomplete-tail resume rewrite the rows
+// behind the same URL (D-6, same class as TestJobVideoIsRevalidatedNotImmutable).
+func TestJobSegmentsIsRevalidatedNotImmutable(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "yt_segfin", func(j *database.Job) { j.Status = database.StatusFinished })
+	if err := f.db.AddSegment(&database.Segment{JobID: "yt_segfin", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_segfin/segments", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	cc := rec.Header().Get("Cache-Control")
+	if strings.Contains(cc, "immutable") || !strings.Contains(cc, "no-cache") {
+		t.Errorf("Cache-Control = %q, want a revalidating policy", cc)
 	}
 }
 
@@ -477,6 +522,29 @@ func TestJobChatServesValidJSON(t *testing.T) {
 	}
 	if rec.Body.String() != string(chatBody) {
 		t.Errorf("body: want %q, got %q", chatBody, rec.Body.String())
+	}
+}
+
+// Same precedence proof as TestJobVideoServesFromPerJobOutputDirectory, for
+// the /chat site (serveChatJSON's caller resolves outputDir independently).
+func TestJobChatServesFromPerJobOutputDirectory(t *testing.T) {
+	f := newJobsFixture(t)
+	jobDir := t.TempDir()
+	chatBody := []byte(`{"messages":[{"text":"job dir chat"}]}`)
+	if err := os.WriteFile(filepath.Join(jobDir, "chat.json"), chatBody, 0o644); err != nil {
+		t.Fatalf("write chat: %v", err)
+	}
+	f.addJob(t, "yt_perjobdirchat", func(j *database.Job) {
+		j.ChatFilename = "chat.json"
+		j.OutputDirectory = jobDir
+	})
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_perjobdirchat/chat", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("serve chat from job.OutputDirectory: want 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != string(chatBody) {
+		t.Errorf("body: want %q (from job.OutputDirectory, not the config dir), got %q", chatBody, rec.Body.String())
 	}
 }
 
@@ -1003,5 +1071,303 @@ func TestRestartRoute_NotLoopbackGated(t *testing.T) {
 	case <-restarted:
 	case <-time.After(2 * time.Second):
 		t.Fatal("onRestart callback never fired")
+	}
+}
+
+// Media URLs are stable but their CONTENT changes (retry/reinit, incomplete-tail
+// resume, part merge). `immutable` let a browser keep serving the old file for
+// a year; Last-Modified revalidation costs one conditional request per play.
+func TestJobVideoIsRevalidatedNotImmutable(t *testing.T) {
+	f := newJobsFixture(t)
+	if err := os.WriteFile(filepath.Join(f.outputDir, "cc.mp4"), []byte("mp4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.addJob(t, "yt_cc", func(j *database.Job) { j.Filename = "cc.mp4" })
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_cc/video", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	cc := rec.Header().Get("Cache-Control")
+	if strings.Contains(cc, "immutable") || !strings.Contains(cc, "no-cache") {
+		t.Errorf("Cache-Control = %q, want a revalidating policy", cc)
+	}
+	if rec.Header().Get("Last-Modified") == "" {
+		t.Error("Last-Modified missing — the browser cannot revalidate")
+	}
+}
+
+// The chat file is 50–100 MB on a long VOD and was re-read and re-gzipped on
+// every selection. A conditional GET must get a body-less 304.
+func TestJobChatAnswers304WhenUnmodified(t *testing.T) {
+	f := newJobsFixture(t)
+	chatPath := filepath.Join(f.outputDir, "chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.addJob(t, "yt_chat304", func(j *database.Job) { j.ChatFilename = "chat.json" })
+
+	first := doRequest(t, f.router, "GET", "/api/jobs/yt_chat304/chat", nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first GET: want 200, got %d", first.Code)
+	}
+	lm := first.Header().Get("Last-Modified")
+	if lm == "" {
+		t.Fatal("first GET has no Last-Modified")
+	}
+	req := httptest.NewRequest("GET", "/api/jobs/yt_chat304/chat", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("If-Modified-Since", lm)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("conditional GET: want 304, got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
+	}
+}
+
+func TestSegmentChat404WhenPartHasNoChat(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_parts0", func(j *database.Job) { j.Platform = "twitch" })
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_parts0", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4",
+		FilePath: filepath.Join(f.outputDir, "p1.mp4")}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(t, f.router, "GET", "/api/jobs/tw_parts0/segments/0/chat", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("part without chat: want 404, got %d", rec.Code)
+	}
+}
+
+func TestSegmentChatServesPartFile(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_parts", func(j *database.Job) { j.Platform = "twitch" })
+	chatPath := filepath.Join(f.outputDir, "p2.chat.json")
+	body := []byte(`{"platform":"twitch","messages":[{"id":"a","offsetMs":5000}]}`)
+	if err := os.WriteFile(chatPath, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_parts", SegmentIndex: 1, Quality: "1080p", Filename: "p2.mp4",
+		FilePath: filepath.Join(f.outputDir, "p2.mp4"), ChatFile: chatPath}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(t, f.router, "GET", "/api/jobs/tw_parts/segments/1/chat", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != string(body) {
+		t.Errorf("body mismatch: %s", rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q", got)
+	}
+}
+
+func TestSegmentChatRefusesPathOutsideOutputDir(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_escape", func(j *database.Job) { j.Platform = "twitch" })
+	outside := filepath.Join(filepath.Dir(f.outputDir), "outside.chat.json")
+	if err := os.WriteFile(outside, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_escape", SegmentIndex: 0, Quality: "q", Filename: "x.mp4",
+		FilePath: filepath.Join(f.outputDir, "x.mp4"), ChatFile: outside}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(t, f.router, "GET", "/api/jobs/tw_escape/segments/0/chat", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("path outside output dir: want 403, got %d", rec.Code)
+	}
+}
+
+// The 304 path must never open or read the file (R15 — the plan defect: a
+// 50-100 MB read + json.Valid scan ran on every conditional GET before
+// ServeContent even looked at If-Modified-Since). Prove the short-circuit
+// by corrupting the file's CONTENT after the first GET while preserving its
+// recorded mtime: the old code would read it and answer 422; the fixed
+// handler must still answer 304 because it never opens the file when
+// notModifiedSince is true.
+func TestJobChat304DoesNotReadTheFile(t *testing.T) {
+	f := newJobsFixture(t)
+	chatPath := filepath.Join(f.outputDir, "chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.addJob(t, "yt_chat304ro", func(j *database.Job) { j.ChatFilename = "chat.json" })
+
+	first := doRequest(t, f.router, "GET", "/api/jobs/yt_chat304ro/chat", nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first GET: want 200, got %d", first.Code)
+	}
+	lm := first.Header().Get("Last-Modified")
+	if lm == "" {
+		t.Fatal("first GET has no Last-Modified")
+	}
+	fi, err := os.Stat(chatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime := fi.ModTime()
+
+	// Overwrite with invalid JSON but restore the recorded mtime — a
+	// content-reading handler would flip this to 422.
+	if err := os.WriteFile(chatPath, []byte(`not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(chatPath, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/jobs/yt_chat304ro/chat", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("If-Modified-Since", lm)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("conditional GET after corrupting the file at the same mtime: want 304 (short-circuit before read), got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
+	}
+}
+
+// Same short-circuit proof as TestJobChat304DoesNotReadTheFile, for the
+// per-part chat route.
+func TestSegmentChat304DoesNotReadTheFile(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_chat304ro", func(j *database.Job) { j.Platform = "twitch" })
+	chatPath := filepath.Join(f.outputDir, "p1.chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_chat304ro", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4",
+		FilePath: filepath.Join(f.outputDir, "p1.mp4"), ChatFile: chatPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := doRequest(t, f.router, "GET", "/api/jobs/tw_chat304ro/segments/0/chat", nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first GET: want 200, got %d", first.Code)
+	}
+	lm := first.Header().Get("Last-Modified")
+	if lm == "" {
+		t.Fatal("first GET has no Last-Modified")
+	}
+	fi, err := os.Stat(chatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime := fi.ModTime()
+
+	if err := os.WriteFile(chatPath, []byte(`not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(chatPath, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/jobs/tw_chat304ro/segments/0/chat", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("If-Modified-Since", lm)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("conditional GET after corrupting the file at the same mtime: want 304 (short-circuit before read), got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
+	}
+}
+
+// Locks in index-based selection for the segment chat route (a mutant that
+// always returns segments[0] regardless of the requested index would
+// survive the existing tests, which only ever seed one segment at a time).
+func TestSegmentChatSelectsByIndex(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_multi", func(j *database.Job) { j.Platform = "twitch" })
+	chatA := filepath.Join(f.outputDir, "p1.chat.json")
+	chatB := filepath.Join(f.outputDir, "p2.chat.json")
+	bodyA := []byte(`{"platform":"twitch","messages":[{"id":"a"}]}`)
+	bodyB := []byte(`{"platform":"twitch","messages":[{"id":"b"}]}`)
+	if err := os.WriteFile(chatA, bodyA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chatB, bodyB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_multi", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4",
+		FilePath: filepath.Join(f.outputDir, "p1.mp4"), ChatFile: chatA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_multi", SegmentIndex: 1, Quality: "1080p", Filename: "p2.mp4",
+		FilePath: filepath.Join(f.outputDir, "p2.mp4"), ChatFile: chatB}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec1 := doRequest(t, f.router, "GET", "/api/jobs/tw_multi/segments/1/chat", nil)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("segment 1: want 200, got %d", rec1.Code)
+	}
+	if rec1.Body.String() != string(bodyB) {
+		t.Errorf("segment 1 body = %s, want %s", rec1.Body.String(), bodyB)
+	}
+
+	rec2 := doRequest(t, f.router, "GET", "/api/jobs/tw_multi/segments/2/chat", nil)
+	if rec2.Code != http.StatusNotFound {
+		t.Errorf("segment 2 (does not exist): want 404, got %d", rec2.Code)
+	}
+}
+
+// Locks in the 422 JSON-error-body path for a corrupt part chat file.
+func TestSegmentChatInvalidJSONIs422(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_badjson", func(j *database.Job) { j.Platform = "twitch" })
+	chatPath := filepath.Join(f.outputDir, "p1.chat.json")
+	if err := os.WriteFile(chatPath, []byte(`not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_badjson", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4",
+		FilePath: filepath.Join(f.outputDir, "p1.mp4"), ChatFile: chatPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/tw_badjson/segments/0/chat", nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body["error"] == "" {
+		t.Errorf("want non-empty error field, got %v", body)
+	}
+}
+
+// Clone of TestJobVideoIsRevalidatedNotImmutable against a segment video —
+// locks in the R-ruling-3 dedup (resolveOutputDir) still producing the
+// Task-7 revalidating Cache-Control on the segment path.
+func TestSegmentVideoIsRevalidatedNotImmutable(t *testing.T) {
+	f := newJobsFixture(t)
+	segPath := filepath.Join(f.outputDir, "p1.mp4")
+	if err := os.WriteFile(segPath, []byte("mp4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.addJob(t, "tw_segvid", func(j *database.Job) { j.Platform = "twitch" })
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_segvid", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4",
+		FilePath: segPath}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(t, f.router, "GET", "/api/jobs/tw_segvid/segments/0/video", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	cc := rec.Header().Get("Cache-Control")
+	if strings.Contains(cc, "immutable") || !strings.Contains(cc, "no-cache") {
+		t.Errorf("Cache-Control = %q, want a revalidating policy", cc)
+	}
+	if rec.Header().Get("Last-Modified") == "" {
+		t.Error("Last-Modified missing — the browser cannot revalidate")
 	}
 }

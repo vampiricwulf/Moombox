@@ -1454,6 +1454,24 @@ sl-progress-bar {
     max-width: 400px;
 }
 
+/* These sl-select/sl-input `label`s give the control an accessible name
+   (Shoelace wires aria-labelledby to the label slot); the placeholder alone
+   left the accessible name empty. Hidden visually — the placeholder text
+   already conveys the same thing sighted users need. Same technique as
+   .visually-hidden, scoped to the label part instead of the whole control. */
+#player-job-select::part(form-control-label),
+#chat-search::part(form-control-label) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 #player-viewport {
     display: flex;
     flex: 1;
@@ -1461,8 +1479,17 @@ sl-progress-bar {
     min-height: 0;
 }
 
+#player-video-column {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
 #player-video-wrapper {
     flex: 1;
+    min-height: 0;
     position: relative;
     overflow: hidden;
     background-color: #000;
@@ -1480,9 +1507,15 @@ sl-progress-bar {
 
 #player-nico-overlay {
     position: absolute;
+    /* left/top/width/height are set by _updateNicoGeometry (the video's rendered
+       rect). `inset` is only the pre-measurement fallback: the overlay must have
+       a measurable box before the first _updateNicoGeometry call, which refuses
+       to measure a 0x0 (hidden) overlay. The inline left/top/width/height win
+       over right/bottom once it has run (over-constrained abspos). */
     inset: 0;
     pointer-events: none;
     overflow: hidden;
+    container-type: size;        /* lets .nico-message size its font from the overlay height */
 }
 
 .nico-message {
@@ -1490,23 +1523,36 @@ sl-progress-bar {
     white-space: nowrap;
     color: #fff;
     font-weight: bold;
-    font-size: 1.25rem;
-    text-shadow:
-        -1px -1px 0 #000,
-         1px -1px 0 #000,
-        -1px  1px 0 #000,
-         1px  1px 0 #000,
-         0 0 4px rgba(0, 0, 0, 0.6);
+    font-size: clamp(0.9rem, 4.5cqh, 2.4rem);   /* 10–28 rows across the clamp range at line-height 1.3; niconico ≈ 13 */
+    line-height: 1.3;
+    max-width: 150%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    paint-order: stroke fill;
+    -webkit-text-stroke: 0.075em rgba(0, 0, 0, 0.7);
+    text-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
     will-change: transform;
     pointer-events: none;
 }
 
 .nico-message .chat-emoji {
-    width: 1.4em;
-    height: 1.4em;
-    vertical-align: middle;
+    height: 1em;                 /* never taller than the line box → one lane per message */
+    width: auto;
+    vertical-align: -0.15em;
     display: inline-block;
-    filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.5));
+}
+
+/* "+N not shown" — messages the overlay could not place in time */
+.nico-dropped-pill {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: var(--sl-font-size-x-small);
+    padding: 2px 8px;
+    border-radius: var(--sl-border-radius-small);
+    pointer-events: none;
 }
 
 #player-sidebar {
@@ -1618,6 +1664,43 @@ sl-progress-bar {
     opacity: 1;
 }
 
+/* Messages after the recording ran out. Not "future" — they are readable and
+   reachable, just marked as outside the video. neutral-700, not 600: 600 is
+   comfortable in the light theme (~7:1 on a striped row) but only ~4.3:1 on a
+   dark-theme one, so it fails 4.5:1 in exactly one of the two. */
+.chat-msg.post {
+    opacity: 1;
+    color: var(--sl-color-neutral-700);
+}
+
+/* Region divider — pseudo-content on the first row of the region, so the
+   sidebar's children[i] === messages[i] alignment is not disturbed. The
+   negative inline margin cancels .chat-msg's padding so it spans the panel. */
+.chat-msg.divider-before::before {
+    content: attr(data-divider);
+    display: block;
+    margin: 6px calc(-1 * var(--sl-spacing-small)) 4px;
+    padding: 2px var(--sl-spacing-small);
+    font-size: var(--sl-font-size-x-small);
+    color: var(--sl-color-neutral-700);
+    background: var(--sl-color-neutral-200);
+    border-top: 1px solid var(--sl-color-neutral-300);
+    border-bottom: 1px solid var(--sl-color-neutral-300);
+}
+
+/* A divider row is `.future` until playback reaches it — and .future's opacity
+   fades the pseudo-element with the row, dropping the label to ~1.9:1 in the
+   state it spends most of its life in. Dim the row's CONTENT instead: every
+   direct child built by _buildChatMessageEl is a span (time, superchat,
+   author, content), so the label keeps its full contrast either way. */
+.chat-msg.divider-before.future {
+    opacity: 1;
+}
+
+.chat-msg.divider-before.future > span {
+    opacity: 0.35;
+}
+
 .chat-msg-time {
     color: var(--sl-color-neutral-500);
     font-family: var(--sl-font-mono);
@@ -1664,13 +1747,10 @@ sl-progress-bar {
 
 .nico-message.announcement {
     --nico-accent: var(--announcement-accent, #9147ff);
+    -webkit-text-stroke-color: var(--nico-accent);
     text-shadow:
-        -1px -1px 0 var(--nico-accent),
-         1px -1px 0 var(--nico-accent),
-        -1px  1px 0 var(--nico-accent),
-         1px  1px 0 var(--nico-accent),
-         0 0 6px var(--nico-accent),
-         0 0 10px var(--nico-accent);
+        0 0 6px var(--nico-accent),
+        0 0 10px var(--nico-accent);
 }
 
 .nico-message.announcement-primary { --announcement-accent: #9147ff; }
@@ -1706,7 +1786,7 @@ sl-progress-bar {
         flex-direction: column;
     }
 
-    #player-video-wrapper {
+    #player-video-column {
         flex: none; /* Don't grow — actual video dimensions determine height */
     }
 
@@ -2198,12 +2278,20 @@ sl-progress-bar {
     display: flex;
     align-items: center;
     justify-content: center;
+    border: 0;
+    font: inherit;
+    font-size: 11px;
     color: #fff;
     cursor: pointer;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     padding: 0 4px;
+}
+
+.segment-indicator-block:focus-visible {
+    outline: 2px solid var(--sl-color-primary-500);
+    outline-offset: -2px;
 }
 
 /* Client token rows (settings > network > security) */
@@ -2707,18 +2795,12 @@ html.sl-theme-light {
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
     }
-    /* Show nico messages as static stacked text instead of hiding them */
-    #player-nico-overlay {
-        display: flex !important;
-        flex-direction: column;
-        overflow: hidden;
-        pointer-events: none;
-    }
-    .nico-message {
-        position: static !important;
-        transform: none !important;
-        opacity: 0.7;
-    }
+    /* No nico rules here: the overlay is animated by the Web Animations API,
+       which this CSS cannot slow down, and the old static-stack fallback fought
+       the JS (display:flex !important defeated the toggle's display:none, and
+       position:static broke every lane placement). initPlayer defaults the
+       overlay OFF under this preference instead, and the checkbox still opts
+       back in. */
 }
 
 /* ===== Batch Selection ===== */

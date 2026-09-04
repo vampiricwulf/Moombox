@@ -3,7 +3,7 @@
  */
 import { SetupController } from "./modules/setup.js";
 import { ImportController } from "./modules/imports.js";
-import { PlayerController } from "./modules/player.js";
+import { PlayerController, focusPlayerSurface } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
@@ -377,6 +377,12 @@ class MoomboxApp {
             this.player.loadPlayerJobList();
           }
           this.player.attachKeyboardControls?.();
+          // Move focus off the sl-tab: sl-tab-group's own keydown handling
+          // treats a focused tab's arrow keys as tab navigation, which would
+          // otherwise steal ArrowLeft/Right from the player's seek shortcuts
+          // on the very keypress after clicking the Player tab. rAF: the tab
+          // itself only finishes taking focus after this synchronous handler.
+          requestAnimationFrame(() => document.getElementById("player-video-wrapper")?.focus({ preventScroll: true }));
         } else if (e.detail.name === "imports") {
           if (!this.imports.importInitialized) {
             this.imports.initImports();
@@ -3264,8 +3270,15 @@ class MoomboxApp {
     }
   }
 
+  /**
+   * Open the selected job in the Player tab. Returns a promise that resolves
+   * once the job is loaded and the keyboard has been handed over, so a caller
+   * can await the player being ready; it never rejects (a failed load is
+   * swallowed below, exactly as the fire-and-forget click path needs).
+   * @returns {Promise<void>}
+   */
   openInPlayer() {
-    if (!this.selectedJobId) return;
+    if (!this.selectedJobId) return Promise.resolve();
     const jobId = this.selectedJobId;
 
     // Close the details dialog
@@ -3286,10 +3299,14 @@ class MoomboxApp {
       this.player.initPlayer();
     }
 
-    this.player.loadPlayerJobList().then(() => {
+    return this.player.loadPlayerJobList().then(() => {
       const select = document.getElementById("player-job-select");
       select.value = jobId;
-      this.player.onPlayerJobSelect(jobId);
+      // Returned so the .catch below covers the selection as well, and so the
+      // caller can await the whole hand-off. The focus move is the same one
+      // the picker's own sl-change handler makes, in a `finally` for the same
+      // reason: a load that throws must not leave focus on the select.
+      return this.player.onPlayerJobSelect(jobId).finally(focusPlayerSurface);
     }).catch(() => {}).finally(() => {
       this._playerOpeningFromDetails = false;
     });
@@ -3742,10 +3759,16 @@ class MoomboxApp {
           }
           break;
         case "f": {
-          const panel = activePanel?.getAttribute("name");
-          const filterId = panel === "archived" ? "archived-filter" : "tasks-filter";
-          const filterInput = document.querySelector(`#${filterId} .unified-filter-input`);
-          if (filterInput) { filterInput.focus(); e.preventDefault(); }
+          // The player tab binds its own "f" (fullscreen); the tasks/archived
+          // filter focus would be a no-op there anyway (the filter input lives
+          // in a hidden sl-tab-panel), but skip it explicitly like "a" above
+          // so only one handler ever reacts to the keypress.
+          if (!isPlayerActive) {
+            const panel = activePanel?.getAttribute("name");
+            const filterId = panel === "archived" ? "archived-filter" : "tasks-filter";
+            const filterInput = document.querySelector(`#${filterId} .unified-filter-input`);
+            if (filterInput) { filterInput.focus(); e.preventDefault(); }
+          }
           break;
         }
       }

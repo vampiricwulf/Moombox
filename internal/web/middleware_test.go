@@ -1,6 +1,8 @@
 package web
 
 import (
+	"compress/gzip"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -301,6 +303,81 @@ func TestShouldSkipCompression(t *testing.T) {
 				t.Errorf("shouldSkipCompression(%q) = %v, expected %v", tt.path, result, tt.expected)
 			}
 		})
+	}
+}
+
+// A Range request against a chat route answers 206 with a Content-Range
+// describing the exact byte span of the underlying resource; chat routes
+// are NOT in shouldSkipCompression's /video exemption, so they are wrapped
+// by the gzip middleware like any other JSON response. Compressing a 206
+// would pair Content-Encoding: gzip with a Content-Range computed on the
+// identity encoding — a malformed response the client cannot decode against
+// the byte range it asked for (R16). The compression middleware must commit
+// a 206 response uncompressed regardless of size or Accept-Encoding.
+func TestCompressionMiddlewareNeverCompresses206(t *testing.T) {
+	body := strings.Repeat("range-body-byte-", 200) // > gzipMinSize (1024 bytes)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-3199/5000")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write([]byte(body))
+	})
+
+	req := httptest.NewRequest("GET", "/api/jobs/abc/chat", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	CompressionMiddleware(handler).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("want 206, got %d", rec.Code)
+	}
+	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("Content-Encoding = %q, want none on a 206", enc)
+	}
+	if rec.Body.String() != body {
+		t.Errorf("body mismatch: got %d bytes, want %d bytes", rec.Body.Len(), len(body))
+	}
+}
+
+// The 206 rule above is enforced inside WriteHeader, which every other status
+// passes through as well — so a guard that also matched 200 would silently
+// stop compressing every JSON response the dashboard loads, and nothing in
+// this package would notice. Pin the ordinary path: a response over
+// gzipMinSize whose client accepts gzip arrives gzipped, and decodes back to
+// exactly the bytes the handler wrote.
+func TestCompressionMiddlewareCompressesLargeOK(t *testing.T) {
+	body := strings.Repeat("compressible-json-byte-", 100) // 2300 bytes > gzipMinSize (1024)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(body))
+	})
+
+	req := httptest.NewRequest("GET", "/api/jobs", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	CompressionMiddleware(handler).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip on a %d-byte 200", enc, len(body))
+	}
+	if rec.Body.Len() >= len(body) {
+		t.Errorf("wire body is %d bytes, not smaller than the %d it encodes", rec.Body.Len(), len(body))
+	}
+	zr, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer zr.Close()
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("read gzip body: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("decoded body = %d bytes, want the original %d", len(got), len(body))
 	}
 }
 

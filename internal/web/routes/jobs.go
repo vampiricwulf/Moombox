@@ -2,9 +2,11 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -239,8 +241,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// Cache headers: always revalidate. Even Finished jobs mutate after
 		// completion (watched, resumePosition, chatOffset, trims), so an
 		// immutable year-long cache here served stale state to any consumer
-		// that didn't explicitly bypass the browser cache. Long-lived
-		// immutable caching belongs on the media/thumbnail file routes only.
+		// that didn't explicitly bypass the browser cache. The media and chat
+		// file routes revalidate as well (private, no-cache + Last-Modified);
+		// /api/jobs/{id}/thumbnail is the only long-lived cache left.
 		rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
 
 		var stagingBase string
@@ -266,18 +269,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		// Build file path from output directory + relative filename
-		var cfgOutputDir string
-		store.Read(func(c *config.MoomboxConfig) {
-			cfgOutputDir = c.Paths.OutputDirectory
-		})
-
-		outputDir := job.OutputDirectory
-		if outputDir == "" {
-			outputDir = cfgOutputDir
-		}
-		if outputDir == "" {
-			outputDir = "./output"
-		}
+		outputDir := resolveOutputDir(job, store)
 
 		filename := job.Filename
 		if filename == "" {
@@ -328,12 +320,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			rw.Header().Set("Content-Type", "application/octet-stream")
 		}
 
-		// Cache headers (match TS: immutable for finished, no-cache for others)
-		if job.Status == database.StatusFinished {
-			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		}
+		// Revalidate, never immutable: retry/reinit, incomplete-tail resume and
+		// part merges rewrite the file behind the same URL. ServeFile emits
+		// Last-Modified and honours If-Modified-Since / Range.
+		rw.Header().Set("Cache-Control", "private, no-cache")
 
 		http.ServeFile(rw, req, filePath)
 	})
@@ -360,17 +350,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// filenameBase+ext) — usually that's already an absolute path
 		// (outputDir is absolute on Windows), but we handle relative
 		// inputs by joining with outputDir.
-		var thumbCfgOutputDir string
-		store.Read(func(c *config.MoomboxConfig) {
-			thumbCfgOutputDir = c.Paths.OutputDirectory
-		})
-		outputDir := job.OutputDirectory
-		if outputDir == "" {
-			outputDir = thumbCfgOutputDir
-		}
-		if outputDir == "" {
-			outputDir = "./output"
-		}
+		outputDir := resolveOutputDir(job, store)
 
 		// ThumbnailFile is stored as filepath.Join(outputDir, basename+ext)
 		// at mux time. That can be either absolute (typical when
@@ -440,11 +420,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		if job.Status == database.StatusFinished {
-			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		}
+		// Revalidate, never immutable: part merge and incomplete-tail resume
+		// rewrite these rows behind the same URL even for a Finished job —
+		// same reasoning as /video (D-6).
+		rw.Header().Set("Cache-Control", "private, no-cache")
 		jsonResponse(rw, segments)
 	})
 
@@ -496,18 +475,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		// Path traversal guard: resolve symlinks before prefix check
-		var segCfgOutputDir string
-		store.Read(func(c *config.MoomboxConfig) {
-			segCfgOutputDir = c.Paths.OutputDirectory
-		})
-
-		outputDir := job.OutputDirectory
-		if outputDir == "" {
-			outputDir = segCfgOutputDir
-		}
-		if outputDir == "" {
-			outputDir = "./output"
-		}
+		outputDir := resolveOutputDir(job, store)
 		resolvedPath, ok := validatePathTraversal(filePath, outputDir)
 		if !ok {
 			jsonError(rw, "access denied", http.StatusForbidden)
@@ -521,12 +489,57 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		rw.Header().Set("Content-Type", "video/mp4")
-		if job.Status == database.StatusFinished {
-			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		}
+		// Revalidate, never immutable: retry/reinit, incomplete-tail resume and
+		// part merges rewrite the file behind the same URL. ServeFile emits
+		// Last-Modified and honours If-Modified-Since / Range.
+		rw.Header().Set("Cache-Control", "private, no-cache")
 		http.ServeFile(rw, req, filePath)
+	})
+
+	// GET /api/jobs/:id/segments/:index/chat — serves one part's chat file.
+	// Twitch live recordings roll the chat at every part boundary with offsets
+	// rebased to that part's recording start; the player fetches each part and
+	// shifts by the part's start offset on the global timeline (T-F1).
+	r.Get("/api/jobs/{id}/segments/{index}/chat", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		segIndex, err := strconv.Atoi(chi.URLParam(req, "index"))
+		if err != nil {
+			jsonError(rw, "invalid segment index", http.StatusBadRequest)
+			return
+		}
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+		segments, err := db.GetSegments(jobID)
+		if err != nil {
+			jsonError(rw, "failed to get segments", http.StatusInternalServerError)
+			return
+		}
+		var seg *database.Segment
+		for i := range segments {
+			if segments[i].SegmentIndex == segIndex {
+				seg = &segments[i]
+				break
+			}
+		}
+		if seg == nil || seg.ChatFile == "" {
+			jsonError(rw, "no chat for this segment", http.StatusNotFound)
+			return
+		}
+		outputDir := resolveOutputDir(job, store)
+		chatPath, err := filepath.Abs(seg.ChatFile)
+		if err != nil {
+			jsonError(rw, "invalid path", http.StatusBadRequest)
+			return
+		}
+		resolved, ok := validatePathTraversal(chatPath, outputDir)
+		if !ok {
+			jsonError(rw, "access denied", http.StatusForbidden)
+			return
+		}
+		serveChatJSON(rw, req, resolved)
 	})
 
 	// GET /api/jobs/:id/chat
@@ -544,18 +557,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		// Resolve chat file path relative to output directory
-		var chatCfgOutputDir string
-		store.Read(func(c *config.MoomboxConfig) {
-			chatCfgOutputDir = c.Paths.OutputDirectory
-		})
-
-		outputDir := job.OutputDirectory
-		if outputDir == "" {
-			outputDir = chatCfgOutputDir
-		}
-		if outputDir == "" {
-			outputDir = "./output"
-		}
+		outputDir := resolveOutputDir(job, store)
 
 		chatPath, err := filepath.Abs(filepath.Join(outputDir, job.ChatFilename))
 		if err != nil {
@@ -582,27 +584,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			jsonError(rw, "access denied", http.StatusForbidden)
 			return
 		}
-		chatPath = resolvedChat
 
-		// Check file existence before serving (match TS: 404 for missing file)
-		if _, err := os.Stat(chatPath); os.IsNotExist(err) {
-			jsonError(rw, "chat file not found", http.StatusNotFound)
-			return
-		}
-
-		// Read and validate JSON (match TS: 422 for corrupt/unreadable)
-		data, err := os.ReadFile(chatPath)
-		if err != nil {
-			jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
-			return
-		}
-		if !json.Valid(data) {
-			jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
-			return
-		}
-
-		rw.Header().Set("Content-Type", "application/json")
-		rw.Write(data)
+		serveChatJSON(rw, req, resolvedChat)
 	})
 
 	// GET /api/jobs/:id/trims
@@ -1331,6 +1314,93 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// resolveOutputDir resolves the effective output directory for a job's
+// files: job.OutputDirectory, else the configured Paths.OutputDirectory,
+// else "./output". Shared by every route that serves a file relative to
+// the output directory (video, thumbnail, segment video, chat, segment
+// chat) so the fallback ladder lives in exactly one place.
+func resolveOutputDir(job *database.Job, store *config.Store) string {
+	var cfgOutputDir string
+	store.Read(func(c *config.MoomboxConfig) {
+		cfgOutputDir = c.Paths.OutputDirectory
+	})
+	outputDir := job.OutputDirectory
+	if outputDir == "" {
+		outputDir = cfgOutputDir
+	}
+	if outputDir == "" {
+		outputDir = "./output"
+	}
+	return outputDir
+}
+
+// notModifiedSince mirrors net/http's unexported checkIfModifiedSince: it
+// reports whether the request's If-Modified-Since header already proves the
+// client holds the current version of a resource with the given modtime, so
+// a handler can short-circuit to a 304 before doing any file I/O.
+func notModifiedSince(req *http.Request, modtime time.Time) bool {
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return false
+	}
+	ims := req.Header.Get("If-Modified-Since")
+	if ims == "" || modtime.IsZero() || modtime.Equal(time.Unix(0, 0)) {
+		return false
+	}
+	t, err := http.ParseTime(ims)
+	if err != nil {
+		return false
+	}
+	return !modtime.Truncate(time.Second).After(t)
+}
+
+// serveChatJSON stats the chat file at path, short-circuits to a body-less
+// 304 when the request's If-Modified-Since already covers it (R15 — this
+// MUST happen before the file is opened or read: on a long VOD the chat
+// file is 50-100 MB, and the old code paid that read + json.Valid scan on
+// every conditional GET regardless of outcome), then reads, validates and
+// serves the file. Errors map to 404 when the file is missing and 422 when
+// it can't be opened, stat'd, fully read, or parsed as JSON — matching the
+// /chat behaviour the segment route was cloned from.
+func serveChatJSON(rw http.ResponseWriter, req *http.Request, path string) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			jsonError(rw, "chat file not found", http.StatusNotFound)
+			return
+		}
+		jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
+		return
+	}
+
+	if notModifiedSince(req, fi.ModTime()) {
+		rw.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
+		rw.Header().Set("Cache-Control", "private, no-cache")
+		rw.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
+		return
+	}
+	defer f.Close()
+
+	data := make([]byte, fi.Size())
+	if _, err := io.ReadFull(f, data); err != nil || !json.Valid(data) {
+		jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
+		return
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.Header().Set("Cache-Control", "private, no-cache")
+	// ServeContent adds Last-Modified and answers If-Modified-Since with a
+	// body-less 304 — kept as a fallback (e.g. HEAD, Range); the
+	// notModifiedSince short-circuit above already avoids the read for the
+	// common conditional-GET case.
+	http.ServeContent(rw, req, "chat.json", fi.ModTime(), bytes.NewReader(data))
 }
 
 // StatusRouteDeps holds dependencies for the status route.

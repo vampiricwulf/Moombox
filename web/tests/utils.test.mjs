@@ -8,6 +8,7 @@ import {
   formatBytes,
   formatDurationSeconds,
   formatMsToTime,
+  safePlay,
 } from "../public/modules/utils.js";
 
 test("formatTimestamp: zero and invalid inputs", () => {
@@ -73,4 +74,22 @@ test("formatMsToTime: invalid inputs return 0:00", () => {
   assert.equal(formatMsToTime(null), "0:00");
   assert.equal(formatMsToTime(NaN), "0:00");
   assert.equal(formatMsToTime(Infinity), "0:00");
+});
+
+test("safePlay swallows a rejected play() promise and tolerates a void return", async () => {
+  let rejections = 0;
+  const onUnhandled = () => { rejections++; };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    safePlay({ play: () => Promise.reject(new Error("AbortError")) });
+    safePlay({ play: () => undefined });
+    // phase-2-review.md §4 mutant MU6: the `media && media.play` guard is the
+    // documented tolerance, so pin it — a bare `media.play()` throws on both.
+    safePlay(null);
+    safePlay({});
+    await new Promise((r) => setImmediate(r));
+    assert.equal(rejections, 0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });
