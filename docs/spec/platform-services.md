@@ -1148,7 +1148,7 @@ Sidecar `.resume.json` file:
   "timestamp": 1709000000,
   "videoId": "dQw4w9WgXcQ",
   "recentIds": ["msg-1", "msg-2", ...],
-  "lastTimestampUsec": "1709000000000000"
+  "streamStartMs": 1709000000000
 }
 ```
 
