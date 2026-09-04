@@ -137,8 +137,7 @@ export class PlayerController {
     video.addEventListener("seeked", () => {
       const currentMs = this.getGlobalTimeMs();
       this.resetSidebarToTime(currentMs);
-      this.clearNicoOverlay();
-      this._resetNicoCursor(currentMs + this.playerCustomOffsetMs);
+      this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
     });
 
     // Pause/play nico animations. The overlay clock is media time, so the
@@ -164,7 +163,7 @@ export class PlayerController {
       if (document.hidden) {
         this.clearNicoOverlay();
       } else if (this.playerChatMessages.length) {
-        this._resetNicoCursor(this.getGlobalTimeMs() + this.playerCustomOffsetMs);
+        this._reanchorNicoAt(this.getGlobalTimeMs() + this.playerCustomOffsetMs);
       }
     });
 
@@ -232,8 +231,7 @@ export class PlayerController {
         // Re-sync chat to current time with new offset
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
-        this.clearNicoOverlay();
-        this._resetNicoCursor(currentMs + this.playerCustomOffsetMs);
+        this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
@@ -271,8 +269,7 @@ export class PlayerController {
         this.playerCustomOffsetMs = 0;
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
-        this.clearNicoOverlay();
-        this._resetNicoCursor(currentMs + this.playerCustomOffsetMs);
+        this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
@@ -1017,6 +1014,18 @@ export class PlayerController {
   }
 
   /**
+   * Clear the stage and re-anchor at `effectiveMs` — the ONLY way the cursor is
+   * re-seeded. `_resetNicoCursor` frees every lane, so it must never run while
+   * elements are still flying; pairing the two here makes that structural rather
+   * than a rule each call site has to remember.
+   * @param {number} effectiveMs
+   */
+  _reanchorNicoAt(effectiveMs) {
+    this.clearNicoOverlay();
+    this._resetNicoCursor(effectiveMs);
+  }
+
+  /**
    * Anchor the overlay cursor at `effectiveMs`: the next tick considers only a
    * short seed of "chat that was already flying" (newer than
    * effectiveMs − NICO_MAX_LATENESS_MS, and at most two screens' worth of rows),
@@ -1050,13 +1059,24 @@ export class PlayerController {
   spawnNicoMessages(effectiveMs) {
     const messages = this.playerChatMessages;
     if (!messages.length || document.hidden) return;
-    if (this.nicoCursor < 0) this._resetNicoCursor(effectiveMs);
+    if (this.nicoCursor < 0) this._reanchorNicoAt(effectiveMs);
     const overlay = document.getElementById("player-nico-overlay");
     const video = document.getElementById("player-video");
     if (!overlay || !video) return;
     const stageW = overlay.clientWidth;
     const stageH = overlay.clientHeight;
-    if (!stageW || !stageH) return;
+    if (!stageW || !stageH) {
+      // The player panel is hidden (another app tab is active) but `timeupdate`
+      // keeps firing. Un-anchor instead of returning: leaving the cursor parked
+      // would make every message in the gap arrive >NICO_MAX_LATENESS_MS late and
+      // newer than the anchor, i.e. a climbing bogus drop count and a dead
+      // overlay while it grinds through them. The next visible tick re-seeds.
+      // The clear is required — _resetNicoCursor frees the lanes, which must not
+      // happen under elements that are still flying.
+      this.clearNicoOverlay();
+      this.nicoCursor = -1;
+      return;
+    }
     const laneHeight = stageH / (this._lanes.laneCount || 1);
     const ctx = {
       stageW,
@@ -1083,14 +1103,20 @@ export class PlayerController {
     this._nicoPending = stillPending;
 
     // 2. New messages up to the per-tick cap; the cursor ALWAYS advances.
+    //    The cap bounds DOM WORK, not the walk: skipping a too-late message
+    //    builds nothing, so it must not consume a slot — otherwise a backlog
+    //    would drain at only NICO_MAX_PER_TICK per tick, leaving the overlay
+    //    dead for seconds. Skips are free, so any backlog clears in one tick.
     let work = 0;
     while (this.nicoCursor < messages.length && messages[this.nicoCursor].offsetMs <= effectiveMs) {
-      if (work++ >= NICO_MAX_PER_TICK) break;
-      const msg = messages[this.nicoCursor++];
+      const msg = messages[this.nicoCursor];
       if (effectiveMs - msg.offsetMs > NICO_MAX_LATENESS_MS) {
+        this.nicoCursor++;
         this._countNicoDrop(msg);
         continue;
       }
+      if (work++ >= NICO_MAX_PER_TICK) break; // cursor stays put — retried next tick
+      this.nicoCursor++;
       const entry = this._prepareNico(msg, ctx);
       if (!entry) continue; // nothing renderable (system-only message)
       if (!this._placeEntry(entry, effectiveMs, ctx, false)) this._nicoPending.push(entry);
@@ -1109,9 +1135,10 @@ export class PlayerController {
 
   /**
    * Build and measure `msg` once. The element is parked off-stage at the right
-   * edge and appended, because offsetWidth/offsetHeight need layout; the caller
-   * either places it this tick or detaches it and keeps the entry to retry, so
-   * a deferred message is never rebuilt or re-measured.
+   * edge and appended, because offsetWidth/offsetHeight need layout. The entry
+   * is then handed to `_placeEntry`, which either flies it this tick or detaches
+   * it and hands it back for the caller to retry — so a deferred message is
+   * never rebuilt or re-measured.
    * @param {object} msg
    * @param {{stageW: number, overlay: HTMLElement}} ctx
    * @returns {{msg: object, el: HTMLElement, w: number, h: number}|null} null when
