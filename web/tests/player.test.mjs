@@ -882,3 +882,33 @@ test("a deferred entry is retried with neither the lead's delay nor a head start
   assert.deepEqual(h.anims.slice(-3).map((a) => [a.delay, a.currentTime]), [[0, 0], [0, 0], [0, 0]]);
   assert.equal(h.player.nicoDropped, 0, "and none of them aged out");
 });
+
+// The lookahead consumes a message up to NICO_TICK_AHEAD_MS BEFORE it enters,
+// so "a retried entry is past its entry instant" is no longer something to read
+// off the code. `_placeEntry` clamps it instead of assuming it, and this test
+// drives that branch directly: the tick path cannot reach it, because a lane's
+// free time only ever grows, so a retry that succeeds at `effectiveMs` must have
+// been refused at an `entryMs` below it. What is asserted is the guarantee, not
+// the derivation — a retry waits off-stage for an entry instant that is ahead,
+// and still takes its lane at the CURRENT time (the conservative choice).
+test("a retried entry whose entry instant is still ahead waits for it too", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([msg(3000, "hi")]),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+  const overlay = h.overlay();
+  const ctx = { stageW: 1280, laneHeight: 24, rate: 1, paused: false, overlay };
+  const entry = h.player._prepareNico(h.player.playerChatMessages[0], ctx);
+
+  // Retried at 1800, 200 ms before the message enters (3000 − NICO_LEAD_MS).
+  assert.equal(h.player._placeEntry(entry, 1800, ctx, true), true);
+  const anim = h.anims.at(-1);
+  assert.equal(anim.delay, 200, "a retry does not enter early either");
+  assert.equal(anim.currentTime, 0, "and never gets a head start into the flight");
+  assert.equal(h.player._lanes.lanes[0].spawnAt, 1800,
+    "the lane is still taken at the CURRENT time, not at the entry instant");
+});

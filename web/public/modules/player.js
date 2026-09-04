@@ -1691,12 +1691,19 @@ export class PlayerController {
    *   time-invariant relation, so recording a spawn slightly in the future is
    *   safe; a later message whose entry precedes a lane's latest occupant is
    *   simply refused by `nowMs < freeAt` and deferred.
-   * - RETRY (`retry` true): the entry was already rejected once, so its own
-   *   entry time is in the past and every lane's occupancy has only grown newer
-   *   since — re-asking at it could never succeed and deferral would be a no-op.
-   *   A retry therefore allocates at the CURRENT time and spawns at the right
-   *   edge with no delay and no head start; the allocator's ordinary two-edge
-   *   bound at placement time is what keeps it collision-free (R21).
+   * - RETRY (`retry` true): the entry was already rejected once and every lane's
+   *   occupancy has only grown newer since, so re-asking at its own entry time
+   *   could never succeed and deferral would be a no-op. A retry therefore
+   *   allocates at the CURRENT time and gets no head start into the flight; the
+   *   allocator's ordinary two-edge bound at placement time is what keeps it
+   *   collision-free (R21). It still waits for its entry instant if that instant
+   *   is somehow ahead: the lookahead means first sight can happen up to
+   *   NICO_TICK_AHEAD_MS BEFORE the entry, so "a retry is past its entry" is no
+   *   longer something to read off the code, and `early` is clamped at 0 here
+   *   rather than assumed. (It is still true in practice — a lane's free time
+   *   only grows, so a retry that succeeds at `effectiveMs` was refused at an
+   *   `entryMs` below it — but the guarantee is now by construction, and the
+   *   clamp costs one comparison.)
    *
    * The wait is a WAAPI `delay` rather than a negative `currentTime` because
    * `play()` rewinds a negative current time to 0 — and `fill: "both"` keeps the
@@ -1712,7 +1719,9 @@ export class PlayerController {
     const { msg, el, w, h } = entry;
     const entryMs = msg.offsetMs - NICO_LEAD_MS;
     // Time still to run before it enters; negative = it entered that long ago.
-    const early = retry ? 0 : entryMs - effectiveMs;
+    // A retry never gets a head start (it spawns at the right edge), but it does
+    // still wait out an entry instant that has not arrived — see above.
+    const early = retry ? Math.max(0, entryMs - effectiveMs) : entryMs - effectiveMs;
     const lanesNeeded = Math.max(1, Math.ceil(h / laneHeight));
     const lane = this._lanes.allocate({
       nowMs: retry ? effectiveMs : entryMs,
