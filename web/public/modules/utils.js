@@ -155,7 +155,7 @@ export async function serverErrorMessage(response) {
  * carrying no verdict — warns and lets the save through.
  *
  * Letting it through is not unguarded, but it is not equivalent either, and the
- * difference is worth stating exactly. PATCH /api/config runs
+ * difference is worth stating exactly. PUT /api/config runs
  * ValidateBrowserPathQuick on browser_path and rejects the save with a field
  * error, so a path that is missing, relative, not a regular file, not
  * executable, or of an unknown browser type still cannot be stored. What the
