@@ -1461,8 +1461,17 @@ sl-progress-bar {
     min-height: 0;
 }
 
+#player-video-column {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
 #player-video-wrapper {
     flex: 1;
+    min-height: 0;
     position: relative;
     overflow: hidden;
     background-color: #000;
@@ -1745,7 +1754,7 @@ sl-progress-bar {
         flex-direction: column;
     }
 
-    #player-video-wrapper {
+    #player-video-column {
         flex: none; /* Don't grow — actual video dimensions determine height */
     }
 
@@ -2237,12 +2246,20 @@ sl-progress-bar {
     display: flex;
     align-items: center;
     justify-content: center;
+    border: 0;
+    font: inherit;
+    font-size: 11px;
     color: #fff;
     cursor: pointer;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     padding: 0 4px;
+}
+
+.segment-indicator-block:focus-visible {
+    outline: 2px solid var(--sl-color-primary-500);
+    outline-offset: -2px;
 }
 
 /* Client token rows (settings > network > security) */

@@ -621,11 +621,13 @@ export class PlayerController {
 
     this._seg.segOffsets.forEach((seg, i) => {
       const pct = ((seg.durationSeconds || 0) / this._seg.totalDuration) * 100;
-      const block = document.createElement("div");
+      const block = document.createElement("button");
+      block.type = "button";
       block.className = "segment-indicator-block";
       block.style.width = `${pct}%`;
       block.style.background = colors[i % colors.length];
       block.title = `Segment ${i}: ${seg.quality} (${Math.round(seg.durationSeconds || 0)}s)`;
+      block.setAttribute("aria-label", `Seek to segment ${i + 1}, ${seg.quality}`);
       block.textContent = seg.quality || `Seg ${i}`;
       block.addEventListener("click", () => {
         this.seekToGlobalTime(seg.startOffset);
@@ -633,11 +635,7 @@ export class PlayerController {
       indicator.appendChild(block);
     });
 
-    // Insert after video element
-    const videoWrapper = document.getElementById("player-video-wrapper");
-    if (videoWrapper) {
-      videoWrapper.parentNode.insertBefore(indicator, videoWrapper.nextSibling);
-    }
+    document.getElementById("player-video-column")?.appendChild(indicator);
   }
 
   async loadPlayerJobList() {
