@@ -42,7 +42,10 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			jsonError(rw, "invalid position value", http.StatusBadRequest)
 			return
 		}
-		db.UpdateResumePosition(jobID, body.Position)
+		if !db.UpdateResumePosition(jobID, body.Position) {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
 
@@ -60,7 +63,10 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			rw.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		db.UpdateResumePosition(jobID, body.Position)
+		if !db.UpdateResumePosition(jobID, body.Position) {
+			rw.WriteHeader(http.StatusNotFound)
+			return
+		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
 
@@ -146,14 +152,20 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			jsonError(rw, "invalid offset value", http.StatusBadRequest)
 			return
 		}
-		db.UpdateChatOffset(jobID, body.ChatOffset)
+		if !db.UpdateChatOffset(jobID, body.ChatOffset) {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
 
 	// DELETE /api/jobs/{id}/chat-offset — clear chat timing offset
 	r.Delete("/api/jobs/{id}/chat-offset", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		db.UpdateChatOffset(jobID, 0)
+		if !db.UpdateChatOffset(jobID, 0) {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
 }

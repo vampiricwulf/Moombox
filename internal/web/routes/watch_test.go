@@ -320,3 +320,30 @@ func TestChatOffsetDeleteClearsOffset(t *testing.T) {
 		t.Errorf("ChatOffset: want 0 after DELETE, got %v", got.ChatOffset)
 	}
 }
+
+func TestResumePositionPut404OnUnknown(t *testing.T) {
+	f := newWatchFixture(t)
+	body, _ := json.Marshal(map[string]any{"position": 12.5})
+	req := httptest.NewRequest("PUT", "/api/jobs/no-such/resume-position", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown job: want 404, got %d", rec.Code)
+	}
+}
+
+func TestChatOffsetPutAndDelete404OnUnknown(t *testing.T) {
+	f := newWatchFixture(t)
+	body, _ := json.Marshal(map[string]any{"chatOffset": -1.5})
+	for _, tc := range []struct {
+		method string
+		body   []byte
+	}{{"PUT", body}, {"DELETE", nil}} {
+		req := httptest.NewRequest(tc.method, "/api/jobs/no-such/chat-offset", bytes.NewReader(tc.body))
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s unknown job: want 404, got %d", tc.method, rec.Code)
+		}
+	}
+}

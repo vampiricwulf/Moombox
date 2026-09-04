@@ -449,36 +449,48 @@ var silentColumns = map[string]struct{}{
 // updateSingleColumnSilent sets a single column on jobs WITHOUT bumping
 // updated_at or notifying subscribers. Designed for high-frequency player
 // state saves (every ~10s). The column name must be present in silentColumns
-// so this helper can't be misused for subscribed fields.
-func (db *Database) updateSingleColumnSilent(jobID, column string, value any, opName string) {
+// so this helper can't be misused for subscribed fields. Returns true when a
+// row was actually updated, so callers can report "job not found" for an
+// unknown jobID instead of silently answering success (U-M9).
+func (db *Database) updateSingleColumnSilent(jobID, column string, value any, opName string) bool {
 	if _, ok := silentColumns[column]; !ok {
 		if db.logger != nil {
 			db.logger.Error(opName+": disallowed column", "column", column)
 		}
-		return
+		return false
 	}
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	_, err := db.db.ExecContext(db.getCtx(),
+	res, err := db.db.ExecContext(db.getCtx(),
 		"UPDATE jobs SET "+column+" = ? WHERE id = ?", value, jobID)
-	if err != nil && db.logger != nil {
-		db.logger.Error(opName+" failed", "jobID", jobID, "err", err)
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Error(opName+" failed", "jobID", jobID, "err", err)
+		}
+		return false
 	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return true // the driver cannot say; assume the row existed
+	}
+	return n > 0
 }
 
 // UpdateResumePosition saves the playback position without bumping updated_at
 // or triggering subscriber notifications. Designed for frequent periodic saves
-// during video playback (every ~10 seconds).
-func (db *Database) UpdateResumePosition(jobID string, seconds float64) {
-	db.updateSingleColumnSilent(jobID, "resume_position", seconds, "UpdateResumePosition")
+// during video playback (every ~10 seconds). Returns true when a row was
+// updated (false for an unknown jobID).
+func (db *Database) UpdateResumePosition(jobID string, seconds float64) bool {
+	return db.updateSingleColumnSilent(jobID, "resume_position", seconds, "UpdateResumePosition")
 }
 
 // UpdateChatOffset saves the chat timing offset without bumping updated_at
-// or triggering subscriber notifications.
-func (db *Database) UpdateChatOffset(jobID string, offset float64) {
-	db.updateSingleColumnSilent(jobID, "chat_offset", offset, "UpdateChatOffset")
+// or triggering subscriber notifications. Returns true when a row was
+// updated (false for an unknown jobID).
+func (db *Database) UpdateChatOffset(jobID string, offset float64) bool {
+	return db.updateSingleColumnSilent(jobID, "chat_offset", offset, "UpdateChatOffset")
 }
 
 // rowScanner is implemented by both *sql.Row and *sql.Rows, allowing a single
