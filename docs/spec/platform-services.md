@@ -1152,7 +1152,9 @@ Sidecar `.resume.json` file:
 }
 ```
 
-Resume state is saved after each disk flush. On restart, the downloader loads the continuation token and dedup set, skips the All Chat switch (continuation is already mid-stream), and resumes. The resume file is deleted on clean completion but preserved on cancellation.
+Resume state is saved after each disk flush. On restart, the downloader loads the continuation token and dedup set, skips the All Chat switch (continuation is already mid-stream), and resumes.
+
+**Completion rule (`Start` / `clearResume`, `internal/chat/downloader.go`):** the sidecar is deleted only on a GENUINE completion — the orchestrator's `MarkStreamEnded` verdict, or a replay/VOD run (`!IsLiveOrUpcoming`) whose loop finished — and only when no IO error fired during the run (`ioErrorOccurred`). Every other exit of a live/upcoming run KEEPS the sidecar and refreshes it (`saveResume`) on the way out: stale-continuation exhaustion (`recoverStaleContinuation` giving up after `maxStaleContinuationAttempts`), `handleFetchError`'s consecutive-error budget, and `ErrAuthRequired` all mean "this run stopped", not "the stream ended". Cancellation/shutdown is preserved as before. The rule exists because the sidecar is the only record telling the NEXT run that `chat.json` already holds history: a waiting-room chat that YouTube resets after inactivity used to lose its whole archive, because the next run found no sidecar, started at count 0, and full-wrote the file on its first message.
 
 ---
 

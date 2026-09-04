@@ -189,6 +189,25 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 // Start begins the chat download process.
 // If the downloader is already running (e.g., early chat handed to the orchestrator),
 // Start blocks until the existing run completes or ctx is cancelled.
+//
+// THE COMPLETION RULE. Start clears the resume sidecar only on a GENUINE
+// completion: the orchestrator marked the stream ended (MarkStreamEnded), or
+// this was a replay/VOD run (!IsLiveOrUpcoming) whose loop finished. Every
+// other exit of a live/upcoming run — stale-continuation exhaustion
+// (recoverStaleContinuation giving up after maxStaleContinuationAttempts),
+// handleFetchError's consecutive-error budget, ErrAuthRequired — is NOT the
+// stream ending: the broadcast is still coming and another run will follow.
+// Those exits KEEP the sidecar and refresh it (saveResume) on the way out, so
+// the continuation and count on disk match what this run reached. The
+// cancel/shutdown save in runChatLoop and the ioErrorOccurred guard (never
+// clear after a failed flush) are unchanged. Without this rule a
+// waiting-room chat that YouTube reset after inactivity lost its whole
+// archive: the next run found no sidecar, started at count 0, and its first
+// message took the full-write path over chat.json.
+//
+// THE ADOPTION RULE (the other half of the same guarantee). When there is no
+// usable sidecar but OutputFile already exists, Start adopts that file as
+// history — see adoptExistingChatFile.
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	if cd.running {
@@ -305,13 +324,28 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.updateChatFileHeader()
 	}
 
-	// Clear resume state on clean completion (not cancelled), but only if the
-	// final flush + header update succeeded — preserve the resume file when an
-	// IO error fired so the next run can recover (audit chat.md C8).
+	// Apply the completion rule (Start's doc comment): the sidecar survives
+	// every exit that is not a genuine completion.
 	cd.mu.Lock()
 	ioErr := cd.ioErrorOccurred
+	// Genuine completion: the orchestrator declared the stream over, or this
+	// was a replay/VOD run and its loop reached the end of the archive.
+	completed := cd.streamEnded || !cd.opts.IsLiveOrUpcoming
 	cd.mu.Unlock()
-	if !cd.wasCancelledOrShutdown(ctx) && !ioErr {
+	switch {
+	case cd.wasCancelledOrShutdown(ctx):
+		// Cancellation / shutdown — runChatLoop already saved on its way out.
+	case !completed:
+		// A live/upcoming run that left for some reason OTHER than the stream
+		// ending. The next run needs the sidecar to know chat.json already
+		// holds history; refresh it so the continuation and count are current.
+		if cd.flushedToDisk || len(cd.messages) > 0 {
+			cd.saveResume()
+		}
+	case !ioErr:
+		// Genuine completion AND the final flush + header update succeeded.
+		// A failed flush keeps the sidecar so the next run can recover
+		// (audit chat.md C8).
 		cd.clearResume()
 	}
 
@@ -976,6 +1010,13 @@ func (cd *ChatDownloader) saveResume() {
 	}
 }
 
+// clearResume deletes the resume sidecar. Call it ONLY on a genuine
+// completion — the orchestrator's MarkStreamEnded verdict, or a replay/VOD
+// run whose loop finished — and only when no IO error fired during this run.
+// Start owns that decision (see its doc comment's completion rule); the
+// sidecar is the only record that tells the NEXT run chat.json already holds
+// history, so clearing it after a merely-interrupted live/upcoming run makes
+// that run's first message overwrite the archive.
 func (cd *ChatDownloader) clearResume() {
 	_, resumeFile := cd.getOutputPaths()
 	store := utils.ResumeStore[ChatResumeState]{Path: resumeFile}
