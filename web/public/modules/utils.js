@@ -83,6 +83,11 @@ export function isTypingInInput(e) {
     const tag = el.tagName;
     // An sl-select only "types" while its listbox is open (keyboard-navigating
     // options); closed, it is just a focused control and shortcuts should work.
+    // Defensive rather than load-bearing: Shoelace's combobox already stops
+    // propagation for every key but Tab while its listbox is open, so those
+    // keystrokes do not reach a document-level shortcut handler anyway. The
+    // branch states the intent and survives a Shoelace change that stops doing
+    // that; it is not what prevents a key from acting twice today.
     if (tag === "SL-SELECT") return el.open === true;
     if (tag === "INPUT" || tag === "TEXTAREA" ||
         tag === "SL-INPUT" || tag === "SL-TEXTAREA") return true;

@@ -480,3 +480,66 @@ test("a seek's pre-`seeked` timeupdate counts nothing as dropped", { skip }, asy
   assert.equal(h.player.nicoDropped, 0, "an unloaded tick counts nothing");
   assert.equal(h.overlay().children.length, placed, "and places nothing");
 });
+
+// ── 11. Job-list rebuild generations (Tasks 20–22 review, R26) ──────────────
+
+test("a superseded job-list rebuild does not restore its stale selection", { skip }, async () => {
+  const j1 = finished("j1");
+  const j2 = finished("j2", { updatedAt: "2026-09-02T00:00:00Z" });
+  const h = harness.makePlayer({ jobs: [j1, j2], watchState: {} });
+  const select = h.select();
+
+  await h.player.loadPlayerJobList();
+  select.value = "j1";
+
+  // Rebuild A parks on the select's updateComplete, holding "j1" as the value
+  // it means to restore.
+  let sawRead, release, gated = true;
+  const read = new Promise((r) => { sawRead = r; });
+  const gate = new Promise((r) => { release = r; });
+  Object.defineProperty(select, "updateComplete", {
+    configurable: true,
+    get() { if (!gated) return Promise.resolve(); sawRead(); return gate; },
+  });
+  const stale = h.player.loadPlayerJobList();
+  await read;
+  await h.flush();
+
+  // While it waits the user picks another video and a newer rebuild — the one
+  // a WebSocket job update fires — runs to completion.
+  gated = false;
+  select.value = "j2";
+  await h.player.loadPlayerJobList();
+  assert.equal(select.value, "j2");
+
+  // A resumes last. Its remembered value is two generations old, so it must
+  // write nothing rather than pulling the picker off what is playing.
+  release();
+  await stale;
+  await h.flush();
+  assert.equal(select.value, "j2", "the superseded rebuild left the selection alone");
+  assert.equal(h.player._rebuildsActive, 0, "both rebuilds left the mutation window");
+});
+
+test("a job selection that throws is logged and hands focus back to the player", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: {} });
+  const select = h.select();
+  await h.player.loadPlayerJobList();
+  h.player.onPlayerJobSelect = () => Promise.reject(new Error("boom"));
+
+  const errors = [];
+  const realError = console.error;
+  console.error = (...a) => errors.push(a.map(String).join(" "));
+  try {
+    select.value = "j1";
+    select.dispatchEvent(new h.window.Event("sl-change"));
+    await h.flush();
+  } finally {
+    console.error = realError;
+  }
+
+  // Without the catch this is an unhandled rejection; without the finally the
+  // keyboard stays on the select, where every player shortcut is swallowed.
+  assert.match(errors.at(-1) ?? "", /job select failed boom/);
+  assert.notEqual(h.document.activeElement, select, "focus left the select");
+});

@@ -88,8 +88,14 @@ export class PlayerController {
     this._seg = new SegmentPlayer();
     /** Monotonic counter to detect stale responses from rapid job switching */
     this._selectionSeq = 0;
-    /** True while loadPlayerJobList is rebuilding sl-options — guards the sl-change listener against a synthetic event firing mid-rebuild */
-    this._rebuildingOptions = false;
+    /**
+     * Job-list rebuild bookkeeping (see loadPlayerJobList): `_rebuildToken` is
+     * the generation — only the newest call writes — and `_rebuildsActive`
+     * counts the rebuilds currently mutating the option list, which is what
+     * tells a synthetic `sl-change` from a real user pick.
+     */
+    this._rebuildToken = 0;
+    this._rebuildsActive = 0;
 
     // Watch state tracking
     this._watchSaveInterval = null;
@@ -116,17 +122,25 @@ export class PlayerController {
 
     // Job selection
     jobSelect.addEventListener("sl-change", async () => {
-      if (this._rebuildingOptions) return;
+      if (this._rebuildsActive > 0) return;
       const val = jobSelect.value;
       if (val) {
         // Await the load — the wrapper is inside #player-viewport, which
         // onPlayerJobSelect only reveals once the job data is in; a hidden
         // element can't take focus. Then move focus off the select so player
         // shortcuts (Space, arrows, F/M/C/S) work immediately, without the
-        // user having to click the video first.
-        await this.onPlayerJobSelect(val);
-        jobSelect.blur();
-        document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
+        // user having to click the video first. The focus move is in a
+        // `finally`: a load that throws must not leave the keyboard parked on
+        // the select, where every shortcut is swallowed and the user cannot
+        // tell why.
+        try {
+          await this.onPlayerJobSelect(val);
+        } catch (e) {
+          console.error("player: job select failed", e?.message ?? e);
+        } finally {
+          jobSelect.blur();
+          document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
+        }
       } else {
         this.clearPlayer();
       }
@@ -694,17 +708,34 @@ export class PlayerController {
     document.getElementById("player-video-column")?.appendChild(indicator);
   }
 
+  /**
+   * Rebuild the video picker from the live and archived job lists.
+   *
+   * Two calls overlapping is normal — a WebSocket job update lands while a
+   * manual refresh is still in flight — and each one awaits three times. A
+   * generation token makes the NEWEST call the only one that writes: every
+   * await is followed by a bail, so a superseded rebuild leaves the option list
+   * and the selection alone instead of restoring a value its own stale list
+   * happened to contain. `_rebuildsActive` is a separate counter on purpose: it
+   * says how many rebuilds are inside the option-mutation window, which is what
+   * the `sl-change` listener needs in order to tell a synthetic event from a
+   * user pick, and a superseded rebuild must not clear that while a newer one
+   * is still mutating.
+   */
   async loadPlayerJobList() {
     const select = document.getElementById("player-job-select");
     const currentValue = select.value;
+    const token = ++this._rebuildToken;
 
     try {
       const [jobsRes, archivedRes] = await Promise.all([
         fetch("/api/jobs"),
         fetch("/api/jobs/archived"),
       ]);
+      if (token !== this._rebuildToken) return;
       const jobs = jobsRes.ok ? await jobsRes.json() : [];
       const archived = archivedRes.ok ? await archivedRes.json() : [];
+      if (token !== this._rebuildToken) return;
       if (!jobsRes.ok && !archivedRes.ok) {
         this.app.showToast("Failed to load video list", "warning");
       }
@@ -723,7 +754,7 @@ export class PlayerController {
       // sl-options does not itself emit sl-change in Shoelace 2.16 (verified —
       // only user-driven paths emit it), so this never interrupts playback.
       // Guard against any synthetic sl-change firing mid-rebuild anyway.
-      this._rebuildingOptions = true;
+      this._rebuildsActive++;
       try {
         select.querySelectorAll("sl-option").forEach((o) => o.remove());
 
@@ -737,10 +768,13 @@ export class PlayerController {
 
         // Wait for Shoelace to register new options before restoring selection
         if (select.updateComplete) await select.updateComplete.catch(() => {});
+        // A newer rebuild started while we waited: it owns the option list from
+        // here on, so restoring OUR remembered value would fight it.
+        if (token !== this._rebuildToken) return;
 
         if (currentValue && all.some((j) => j.id === currentValue)) select.value = currentValue;
       } finally {
-        this._rebuildingOptions = false;
+        this._rebuildsActive--;
       }
 
       // Show/hide empty state
