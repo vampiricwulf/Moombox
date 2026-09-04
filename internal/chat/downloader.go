@@ -26,6 +26,12 @@ const (
 	// window further (audit chat.md R2 — was 30, tightened to 12).
 	maxStaleContinuationAttempts = 12
 	writeInterval                = 1 * time.Second // Flush batched messages to disk at most once per interval
+	// corruptChatSuffix names the copy adoptExistingChatFile moves an
+	// unparseable chat file to before the run starts writing a new one. One
+	// fixed name, not a timestamped series: the point is that the bytes
+	// survive for a human to look at, not that every failed parse accumulates
+	// its own artifact in staging.
+	corruptChatSuffix = ".corrupt"
 )
 
 // ChatDownloaderOptions configures a ChatDownloader.
@@ -307,8 +313,21 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		resuming = true
 	}
 
+	// No usable sidecar — adopt whatever chat file is already on disk as this
+	// job's history (the adoption rule; see adoptExistingChatFile).
+	adopted := 0
+	if !resuming {
+		adopted = cd.adoptExistingChatFile()
+	}
+
 	if cd.OnStart != nil {
-		cd.OnStart(cd.messageCount, resuming)
+		// Adopted history counts as resuming for the CALLER: the counts this
+		// run reports are cumulative, so a job row fed from them
+		// (total_chat_messages) never drops back towards zero. It does NOT
+		// count as resuming for runChatLoop below — an adopted file comes with
+		// a freshly-fetched continuation, which still defaults to Top Chat and
+		// so still needs the All Chat upgrade a sidecar resume skips.
+		cd.OnStart(cd.messageCount, resuming || adopted > 0)
 	}
 
 	// Run chat loop
@@ -919,25 +938,87 @@ func (cd *ChatDownloader) writeFullChatFile() {
 }
 
 // readExistingMessages attempts to read previously-flushed messages from the
-// chat file on disk. Returns nil on any error (caller should log a warning).
-func (cd *ChatDownloader) readExistingMessages(path string) []ChatMessage {
+// chat file on disk. The error is returned (rather than folded into a nil
+// slice) so adoptExistingChatFile can tell "no file" from "a file that does
+// not parse" — those two need opposite handling; callers that only care
+// whether anything came back can ignore it.
+func (cd *ChatDownloader) readExistingMessages(path string) ([]ChatMessage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var chatData ChatData
 	if err := json.Unmarshal(data, &chatData); err != nil {
-		return nil
+		return nil, err
 	}
-	return chatData.Messages
+	return chatData.Messages, nil
+}
+
+// adoptExistingChatFile is THE ADOPTION RULE: when Start finds no usable
+// resume sidecar but OutputFile already exists, that file is history from an
+// earlier run of this same job — most often an early-chat run that exited
+// when YouTube reset the waiting-room chat — and it must be appended to, not
+// replaced. Returns the number of messages adopted (0 = start fresh).
+//
+// Three cases:
+//   - The file is missing: 0, and the run starts fresh exactly as before.
+//   - It parses and holds messages: messageCount becomes the file's count, the
+//     dedup is seeded with its IDs so an overlapping poll cannot duplicate
+//     them, flushedToDisk is set and the in-memory buffer cleared — so the
+//     first flush takes the incremental-append path.
+//   - It does NOT parse: reportIOError (the caller sees the failure, and the
+//     latched ioErrorOccurred keeps this run's resume sidecar), and the
+//     unreadable bytes are moved aside to <OutputFile>.corrupt before the run
+//     writes anything. Overwriting them in place destroys the only copy of
+//     something a human could still salvage; refusing to write at all is worse
+//     again, because a multi-hour waiting room would then buffer its entire
+//     chat in memory and persist none of it. Moving the file keeps the bytes,
+//     keeps memory bounded, and is never silent.
+//
+// A file that parses but holds no messages is not adopted: there is no history
+// for a full write to lose.
+func (cd *ChatDownloader) adoptExistingChatFile() int {
+	outputFile, _ := cd.getOutputPaths()
+	if outputFile == "" {
+		return 0
+	}
+	existing, err := cd.readExistingMessages(outputFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0 // nothing on disk — fresh start
+		}
+		corruptPath := outputFile + corruptChatSuffix
+		cd.reportIOError(fmt.Errorf("existing chat file unreadable, preserving it as %s: %w", corruptPath, err))
+		if renameErr := os.Rename(outputFile, corruptPath); renameErr != nil {
+			cd.reportIOError(fmt.Errorf("preserve unreadable chat file: %w", renameErr))
+		}
+		return 0
+	}
+	if len(existing) == 0 {
+		return 0
+	}
+
+	cd.mu.Lock()
+	cd.messageCount = len(existing)
+	cd.messages = nil // already on disk
+	cd.flushedToDisk = true
+	adopted := cd.messageCount
+	cd.mu.Unlock()
+
+	for _, msg := range existing {
+		if msg.ID != "" {
+			cd.dedup.Add(msg.ID)
+		}
+	}
+	return adopted
 }
 
 // prependExistingMessages reads previously-flushed messages from disk and prepends
 // them to cd.messages. It also registers their IDs in seenIDs to prevent duplicates
 // on subsequent API responses that may overlap with the recovered messages.
 func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
-	existing := cd.readExistingMessages(outputFile)
-	if existing == nil {
+	existing, err := cd.readExistingMessages(outputFile)
+	if err != nil || existing == nil {
 		return
 	}
 	// Locked for the same reason as processBatch: MessageCount() reads

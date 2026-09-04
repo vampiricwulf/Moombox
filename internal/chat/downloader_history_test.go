@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // --- shared harness ------------------------------------------------------
@@ -181,5 +183,163 @@ func TestMarkStreamEndedClearsResumeSidecar(t *testing.T) {
 
 	if _, ok := readSidecar(t, out+".resume.json"); ok {
 		t.Error("MarkStreamEnded is a genuine completion — the resume sidecar must be cleared")
+	}
+}
+
+// --- Part B: a chat file with no sidecar is adopted as history -----------
+
+// TestStartAdoptsExistingChatFileWithoutSidecar is the other half of the
+// reported wipe. Part A stops the sidecar from being deleted, but every
+// install already in the field has a chat.json whose sidecar is long gone —
+// and a resume-less Start used to initialise messageCount = 0 and
+// flushedToDisk = false, so its very first flush took writeFullChatFile and
+// replaced the archive. Start must instead adopt what is already on disk:
+// count it, seed the dedup with its IDs, and append from there.
+func TestStartAdoptsExistingChatFileWithoutSidecar(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	seed := ChatData{
+		VideoID:      "vidAdopt",
+		VideoTitle:   "Waiting room",
+		DownloadedAt: time.Now().UTC().Format(time.RFC3339),
+		MessageCount: 3,
+		Messages:     []ChatMessage{makeTestMessage("m1"), makeTestMessage("m2"), makeTestMessage("m3")},
+	}
+	if err := utils.WriteChatFileAtomic(out, &seed); err != nil {
+		t.Fatalf("seed chat file: %v", err)
+	}
+	if _, ok := readSidecar(t, out+".resume.json"); ok {
+		t.Fatal("test setup: there must be NO resume sidecar")
+	}
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidAdopt",
+		VideoTitle:          "Waiting room",
+		OutputFile:          out,
+		InitialContinuation: "tok0",
+		ApiKey:              "k",
+		IsLiveOrUpcoming:    true,
+	})
+	cd.testRecoveryOverride = func(context.Context) bool { return false }
+	var startCount int
+	var startResuming bool
+	var startCalls int
+	cd.OnStart = func(messageCount int, resuming bool) {
+		startCalls++
+		startCount, startResuming = messageCount, resuming
+	}
+
+	// m2 is already in the file (an overlapping poll); m4 is genuinely new.
+	startWithScript(t, cd, chatResponseWithIDs([]string{"m2", "m4"}, ""))
+
+	if startCalls != 1 {
+		t.Fatalf("OnStart called %d times, want 1", startCalls)
+	}
+	if startCount != 3 || !startResuming {
+		t.Errorf("OnStart(%d, %v), want (3, true) — the adopted count must be reported as a resume so the job row never drops",
+			startCount, startResuming)
+	}
+
+	got := readChatFileHeader(t, out)
+	if len(got.Messages) != 4 {
+		ids := make([]string, len(got.Messages))
+		for i, m := range got.Messages {
+			ids[i] = m.ID
+		}
+		t.Fatalf("chat file holds %d message(s) %v, want the 3 adopted plus m4", len(got.Messages), ids)
+	}
+	for i, want := range []string{"m1", "m2", "m3", "m4"} {
+		if got.Messages[i].ID != want {
+			t.Errorf("message %d id = %q, want %q", i, got.Messages[i].ID, want)
+		}
+	}
+	if got.MessageCount != 4 {
+		t.Errorf("header messageCount = %d, want 4", got.MessageCount)
+	}
+}
+
+// TestStartWithoutSidecarOrFileStartsFresh pins the unchanged path: nothing
+// on disk means nothing to adopt, so the run starts at zero and its first
+// flush is the ordinary full write.
+func TestStartWithoutSidecarOrFileStartsFresh(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidFresh",
+		OutputFile:          out,
+		InitialContinuation: "tok0",
+		ApiKey:              "k",
+		IsLiveOrUpcoming:    true,
+	})
+	cd.testRecoveryOverride = func(context.Context) bool { return false }
+	var startCount int
+	var startResuming bool
+	cd.OnStart = func(messageCount int, resuming bool) { startCount, startResuming = messageCount, resuming }
+	var errs []error
+	cd.OnError = func(err error) { errs = append(errs, err) }
+
+	startWithScript(t, cd, chatResponseWithIDs([]string{"m1"}, ""))
+
+	if startCount != 0 || startResuming {
+		t.Errorf("OnStart(%d, %v), want (0, false)", startCount, startResuming)
+	}
+	if len(errs) != 0 {
+		t.Errorf("a fresh start must not report an IO error, got %v", errs)
+	}
+	got := readChatFileHeader(t, out)
+	if len(got.Messages) != 1 || got.MessageCount != 1 {
+		t.Fatalf("want a full write holding exactly 1 message, got %d message(s) / header count %d",
+			len(got.Messages), got.MessageCount)
+	}
+	// A full write stamps the whole header; the append path never would have
+	// created the file at all (its stat would have failed into reportIOError).
+	if got.VideoID != "vidFresh" {
+		t.Errorf("header videoId = %q, want %q — the first write must be a complete full write", got.VideoID, "vidFresh")
+	}
+}
+
+// TestUnparseableChatFileIsNotOverwritten covers the third case of the
+// adoption rule. A chat.json that does not parse cannot be adopted, but it
+// must not be destroyed either: the run reports the failure through OnError
+// (which also latches ioErrorOccurred, so the sidecar survives) and moves the
+// unreadable bytes aside to <chat.json>.corrupt before writing anything.
+//
+// Overwriting in place — the obvious alternative — throws away the only copy
+// of something a human could still salvage. Refusing to write at all is worse
+// again: a multi-hour waiting room would buffer its whole chat in memory and
+// persist nothing.
+func TestUnparseableChatFileIsNotOverwritten(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	garbage := []byte(`{"videoId":"vidGarbage","messages":[{"id":"m1"},{"id":"m2"` + "\n")
+	if err := os.WriteFile(out, garbage, 0o644); err != nil {
+		t.Fatalf("seed garbage: %v", err)
+	}
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidGarbage",
+		OutputFile:          out,
+		InitialContinuation: "tok0",
+		ApiKey:              "k",
+		IsLiveOrUpcoming:    true,
+	})
+	cd.testRecoveryOverride = func(context.Context) bool { return false }
+	var errs []error
+	cd.OnError = func(err error) { errs = append(errs, err) }
+
+	startWithScript(t, cd, chatResponseWithIDs([]string{"new1"}, ""))
+
+	if len(errs) == 0 {
+		t.Fatal("an unparseable chat file must be reported through OnError, not swallowed")
+	}
+
+	preserved, err := os.ReadFile(out + ".corrupt")
+	if err != nil {
+		t.Fatalf("the unreadable bytes must be preserved next to the file: %v", err)
+	}
+	if string(preserved) != string(garbage) {
+		t.Errorf("preserved copy = %q, want the original bytes %q", preserved, garbage)
+	}
+
+	got := readChatFileHeader(t, out)
+	if len(got.Messages) != 1 || got.Messages[0].ID != "new1" {
+		t.Errorf("the run must keep archiving after preserving the corrupt file, got %d message(s)", len(got.Messages))
 	}
 }
