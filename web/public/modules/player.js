@@ -269,13 +269,19 @@ export class PlayerController {
       }
     });
 
-    // Sidebar scroll locking
-    sidebarMessages.addEventListener("mouseenter", () => {
-      this.playerScrollLock = true;
+    // Sidebar scroll locking. Pointer events over mouse events: a touch tap
+    // synthesizes mouseenter but rarely a matching mouseleave, so on touch
+    // devices the lock would stick after the first tap and autoscroll would
+    // never resume. Touch pointers are ignored entirely — a scroll-lock on
+    // hover has no equivalent gesture on touch, so autoscroll there only
+    // stops on an actual user scroll (the "scroll" listener below), which is
+    // the mobile-expected behavior.
+    sidebarMessages.addEventListener("pointerenter", (e) => {
+      if (e.pointerType !== "touch") this.playerScrollLock = true;
     });
 
-    sidebarMessages.addEventListener("mouseleave", () => {
-      if (this.playerAutoScroll) {
+    sidebarMessages.addEventListener("pointerleave", (e) => {
+      if (e.pointerType !== "touch" && this.playerAutoScroll) {
         this.playerScrollLock = false;
       }
     });
