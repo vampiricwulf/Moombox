@@ -102,6 +102,27 @@ func funcDeclNamed(t *testing.T, file *ast.File, name string) *ast.FuncDecl {
 	return nil
 }
 
+// assignPos returns the position of the first assignment in n whose left-hand
+// side is the bare identifier name, or token.NoPos when there is none.
+func assignPos(n ast.Node, name string) token.Pos {
+	found := token.NoPos
+	ast.Inspect(n, func(node ast.Node) bool {
+		if found != token.NoPos {
+			return false
+		}
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) == 0 {
+			return true
+		}
+		if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name == name {
+			found = assign.Pos()
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // selectorCallPos returns the position of the first call to recv.method in n,
 // or token.NoPos when there is none.
 func selectorCallPos(n ast.Node, recv, method string) token.Pos {
@@ -187,11 +208,17 @@ func TestTryStartEarlyChatRunsThroughRunEarlyChat(t *testing.T) {
 }
 
 // TestWaitForLiveRestartsEarlyChatInOrder pins the consumer side: the retry
-// block is gated on earlyChatNeedsRestart (not the old `chatDl == nil`), and
-// the downloader being replaced is untracked BEFORE the new one is started.
+// block is gated on earlyChatNeedsRestart (not the old `chatDl == nil`), the
+// downloader being replaced is untracked BEFORE the new one is started, and
+// the restart-interval clock is re-armed AFTER it.
+//
 // Untracking afterwards would remove the wrong entry on any future refactor
 // that reuses the variable, and leaving it out entirely grows activeChats by
-// one finished downloader per restart.
+// one finished downloader per restart. Leaving out the clock re-arm is
+// quieter and worse: earlyChatMinRestartInterval would then be measured from
+// the FIRST start forever, so the throttle would hold exactly once and every
+// later probe would restart an instantly-dying run again — the whole point of
+// F3 gone, with no behavioural test in the tree able to see it.
 func TestWaitForLiveRestartsEarlyChatInOrder(t *testing.T) {
 	fset, file := parseYouTubeProcessor(t)
 	fn := funcDeclNamed(t, file, "waitForLive")
@@ -235,5 +262,14 @@ func TestWaitForLiveRestartsEarlyChatInOrder(t *testing.T) {
 	if untrack >= start {
 		t.Errorf("sp.untrackChat (line %d) must come BEFORE sp.tryStartEarlyChat (line %d) in the restart block",
 			fset.Position(untrack).Line, fset.Position(start).Line)
+	}
+
+	armed := assignPos(block.Body, "chatStartedAt")
+	if armed == token.NoPos {
+		t.Fatal("the restart block must re-arm chatStartedAt — without it earlyChatMinRestartInterval is measured from the first start forever and the throttle holds exactly once")
+	}
+	if armed <= start {
+		t.Errorf("chatStartedAt (line %d) must be re-armed AFTER sp.tryStartEarlyChat (line %d) — it times the run that was just started",
+			fset.Position(armed).Line, fset.Position(start).Line)
 	}
 }

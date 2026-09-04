@@ -200,10 +200,16 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 // completion: the orchestrator marked the stream ended (MarkStreamEnded), or
 // this was a replay/VOD run (!IsLiveOrUpcoming). The predicate is exactly
 // that — ANY exit of a replay run counts, not only a finished loop, so a
-// replay that dies on its 5-error budget clears too. Deliberate: it is the
-// pre-existing behaviour, and a replay's continuation restarts the archive
-// from the top anyway, so its sidecar carries nothing the next run needs.
-// Every
+// replay that dies on its 5-error budget clears too. That is the
+// pre-existing behaviour and it is right: a replay run that leaves its loop
+// has either reached the end of the archive or hit a permanent error, and
+// neither leaves a position worth resuming from. The one replay path that
+// DOES keep its sidecar is cancellation/shutdown, which the first arm of the
+// switch below handles before this rule is reached — and that is exactly the
+// path a resume needs, because a replay's sidecar continuation IS its
+// position in the archive (the resume block installs it over any fresh token;
+// see preferFresh), so keeping it is what stops a cancelled VOD chat
+// re-downloading from the top. Every
 // other exit of a live/upcoming run — stale-continuation exhaustion
 // (recoverStaleContinuation giving up after maxStaleContinuationAttempts),
 // handleFetchError's consecutive-error budget, ErrAuthRequired — is NOT the
