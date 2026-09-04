@@ -304,7 +304,7 @@ The `StreamProcessor` is the first stage of job processing. It determines what a
 
 **waitForLive() loop:**
 1. Updates job status to `Upcoming`
-2. If chat download is enabled, attempts to start an early chat downloader (`tryStartEarlyChat()`) to capture pre-stream chat messages
+2. If chat download is enabled, attempts to start an early chat downloader (`tryStartEarlyChat()`) to capture pre-stream chat messages. Each probe re-evaluates the decision through `earlyChatNeedsRestart(chatDl, finished)` (`internal/worker/stream_processor_youtube.go`), which restarts when there is no downloader OR when the current one's run has ENDED — YouTube resets a waiting-room chat after a period of inactivity, and the resulting downloader stays non-nil, so the old `chatDl == nil` gate left the waiting room uncaptured for the rest of the wait. `finished` comes from the downloader's `OnFinish` (wired in `tryStartEarlyChat`, fired only after the run's final flush), never from `IsRunning()`, which is also false between `NewChatDownloader` and the goroutine reaching `Start`. The replaced downloader is untracked before the new one starts, and the new run picks up the chat file through the chat downloader's completion + adoption rules (platform-services.md) rather than overwriting it
 3. Calculates probe interval based on time until scheduled start:
    - More than 1 hour away: 10-minute interval
    - 5 minutes to 1 hour: 5-minute interval
