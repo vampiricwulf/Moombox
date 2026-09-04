@@ -266,3 +266,86 @@ func TestImportSaysWhenRollbackProtectionIsOff(t *testing.T) {
 		t.Errorf("TwitchOutcome = %v, want %v", result.TwitchOutcome, ImportRejected)
 	}
 }
+
+// TestImportRollbackThatDoesNotLandIsNotReportedAsOne is Arc 9's rule at this
+// writer, and the reason both exits carry a sentinel: reaching either means
+// cookies.txt and the running jar disagree about which generation of
+// credentials is in force, and the two sentences below are the only place that
+// is said.
+//
+// Both are the SAME wrapped error value, returned AND recorded, so whoever
+// renders the failure renders the truth. Before this the exits returned a
+// terse "restore previous cookies: %w" and kept the sentence in lastError
+// alone — where the dialog that caused the import never looks — and the route,
+// finding nothing it recognised, fell through to its `result.Wrote` arm and
+// answered "the cookies were imported and written". False on both.
+//
+// The mutants: returning the bare cause without the sentinel (the route's
+// truthful arm never fires); recording the sentence in lastError but returning
+// something else (the dialog and Settings disagree about what happened).
+func TestImportRollbackThatDoesNotLandIsNotReportedAsOne(t *testing.T) {
+	t.Run("the restore write fails", func(t *testing.T) {
+		s, _ := importServiceWithLog(t, importRollbackSeed)
+		s.VerifyTwitchAuth = twitchLiveFromJar(s)
+
+		real := writeCookieFile
+		writes := 0
+		writeCookieFile = func(path string, data []byte, perm os.FileMode) error {
+			writes++
+			if writes == 1 {
+				return real(path, data, perm)
+			}
+			return errors.New("rename temp cookie file: device or resource busy")
+		}
+		t.Cleanup(func() { writeCookieFile = real })
+
+		result, err := s.ImportCookies(context.Background(), importRollbackPaste)
+		if !errors.Is(err, ErrImportRollbackIncomplete) {
+			t.Fatalf("error = %v, want it to wrap ErrImportRollbackIncomplete", err)
+		}
+		if !result.Wrote {
+			t.Error("Wrote is false although cookies.txt was replaced — the caller's re-check is gated on it")
+		}
+		if !strings.Contains(err.Error(), "still holds the rejected new credentials") {
+			t.Errorf("error = %q — it does not say what is on disk, which is the only actionable half", err)
+		}
+		if got := lastErrorSnapshot(s); got != err.Error() {
+			t.Errorf("lastError = %q but the caller was handed %q — Settings and the dialog that "+
+				"caused this would describe different events", got, err)
+		}
+	})
+
+	t.Run("the restore lands and the jar cannot read it back", func(t *testing.T) {
+		s, _ := importServiceWithLog(t, importRollbackSeed)
+		s.VerifyTwitchAuth = twitchLiveFromJar(s)
+
+		// A DIRECTORY where the restored file belongs: the write reports
+		// success and CookieJar.Load's own os.ReadFile then fails on that same
+		// path. The one exit where the FILE is correct and the process is not.
+		real := writeCookieFile
+		writes := 0
+		writeCookieFile = func(path string, data []byte, perm os.FileMode) error {
+			writes++
+			if writes == 1 {
+				return real(path, data, perm)
+			}
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			return os.Mkdir(path, 0o755)
+		}
+		t.Cleanup(func() { writeCookieFile = real })
+
+		_, err := s.ImportCookies(context.Background(), importRollbackPaste)
+		if !errors.Is(err, ErrImportRollbackIncomplete) {
+			t.Fatalf("error = %v, want it to wrap ErrImportRollbackIncomplete", err)
+		}
+		if !strings.Contains(err.Error(), "this process is still using the rejected credentials") {
+			t.Errorf("error = %q — the two exits are different states and this one says the process "+
+				"is stale, not that the file is wrong", err)
+		}
+		if got := lastErrorSnapshot(s); got != err.Error() {
+			t.Errorf("lastError = %q, want the same sentence the caller was handed (%q)", got, err)
+		}
+	})
+}

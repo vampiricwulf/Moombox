@@ -495,24 +495,32 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		// IS a state of the install: cookies.txt holds credentials that do not
 		// work. The per-platform outcomes stay ImportUnknown, which is what that
 		// zero value is for.
+		//
+		// The SAME message is returned and recorded, wrapped around
+		// ErrImportRollbackIncomplete. Returning a short "restore previous
+		// cookies: %w" instead left the only truthful sentence in lastError,
+		// where the dialog that caused this never looks — and the route then
+		// fell through to its `result.Wrote` arm and told the operator the
+		// cookies had been imported and written, which is false on both exits.
 		if restoreErr := writeCookieFile(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
-			errMsg := "the pasted cookies did not verify for " + strings.Join(restoredPlatforms, " + ") +
-				", and Moombox could not restore the previous cookies (" + restoreErr.Error() +
-				") — cookies.txt still holds the rejected new credentials"
-			s.setError(errMsg)
+			failure := fmt.Errorf("%w: the pasted cookies did not verify for %s, and Moombox could not "+
+				"restore the previous ones (%w) — cookies.txt still holds the rejected new credentials",
+				ErrImportRollbackIncomplete, strings.Join(restoredPlatforms, " + "), restoreErr)
+			s.setError(failure.Error())
 			s.logger.Error("could not restore the previous cookies.txt after a rejected import",
 				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return result, fmt.Errorf("restore previous cookies: %w", restoreErr)
+			return result, failure
 		}
 		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
 			// The FILE is correct here; the running process is not.
-			errMsg := "restored the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
-				" after the pasted ones did not verify, but reloading them failed (" + loadErr.Error() +
-				") — this process is still using the rejected credentials until the next refresh"
-			s.setError(errMsg)
+			failure := fmt.Errorf("%w: the previous cookies for %s were restored after the pasted ones "+
+				"did not verify, but reloading them failed (%w) — this process is still using the "+
+				"rejected credentials until the next refresh",
+				ErrImportRollbackIncomplete, strings.Join(restoredPlatforms, " + "), loadErr)
+			s.setError(failure.Error())
 			s.logger.Error("could not reload cookie jar after restoring the previous cookies.txt",
 				"err", loadErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return result, fmt.Errorf("reload cookie jar after restore: %w", loadErr)
+			return result, failure
 		}
 
 		// Re-verify the file we actually KEPT. Without this the result would

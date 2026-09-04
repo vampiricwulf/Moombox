@@ -30,6 +30,12 @@ const (
 	importYouTubeTwo = ".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tfake-logininfo-aaaa\n"
 	importTwitch     = ".twitch.tv\tTRUE\t/\tTRUE\t2000000000\tauth-token\tfake-authtoken-aaaa\n"
 	importSignedOut  = ".youtube.com\tTRUE\t/\tFALSE\t2000000000\tYSC\tfake-ysc-aaaa\n"
+	// Two generations of one Twitch credential. Same name+domain+path, so the
+	// merge lets the pasted one win — which is what makes a REGRESSION (rather
+	// than a flat failure) expressible from out here, with the verify stub
+	// answering from the FILE.
+	importTwitchLive = ".twitch.tv\tTRUE\t/\tTRUE\t2000000000\tauth-token\tfake-authtoken-live\n"
+	importTwitchDead = ".twitch.tv\tTRUE\t/\tTRUE\t2000000000\tauth-token\tfake-authtoken-dead\n"
 )
 
 func importPaste() string { return importHeader + importYouTube + importYouTubeTwo }
@@ -176,6 +182,61 @@ func TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary(t *testing.T) {
 	if strings.Join(extra, ",") != "twitchImport,youtubeImport" {
 		t.Errorf("the import-only keys are %v — cookieImportOnlyKeys and the renderer disagree about "+
 			"which keys the setup has no counterpart for", extra)
+	}
+}
+
+// TestCookieImportRouteAnswersAnIncompleteRollbackTruthfully.
+//
+// The state: the pasted Twitch rows were written, conclusively rejected, and
+// the restore that would have given the previous rows back could not be
+// written. `result.Wrote` is TRUE — cookies.txt really was replaced — so
+// before the ErrImportRollbackIncomplete arm existed this fell into the
+// `case result.Wrote` arm below it and answered "the cookies were imported and
+// written, but this process could not load them". Every clause of that is
+// wrong: the cookies were rejected, not imported; the load is not what failed;
+// and the deferred re-check it points at cannot repair a file that holds the
+// dead paste.
+//
+// Driven through the ONE seam this package has into the middle of an import:
+// the exported verify callbacks. The post-write check answers from the FILE
+// (so the rejection is a real regression) and, on its way to rejecting, takes
+// the cookie DIRECTORY away — writeFileAtomic opens its temp file there, so
+// the restore write that follows cannot start. No unexported seam, no stubbed
+// writer, and the failure happens exactly where a read-only volume would put
+// it.
+//
+// The mutant: delete the arm. The response reverts to the sentence above, with
+// the same 500, and nothing else in this package notices.
+func TestCookieImportRouteAnswersAnIncompleteRollbackTruthfully(t *testing.T) {
+	r, path, _, svc := importRouter(t, importHeader+importYouTube+importYouTubeTwo+importTwitchLive, nil)
+	svc.VerifyTwitchAuth = func(context.Context) (bool, error) {
+		data, readErr := os.ReadFile(path)
+		if readErr == nil && strings.Contains(string(data), "fake-authtoken-live") {
+			return true, nil
+		}
+		// The pasted credential is in force and it does not work. Make the
+		// rollback's write impossible before answering, which is the whole
+		// point of the fixture.
+		if err := os.RemoveAll(filepath.Dir(path)); err != nil {
+			t.Errorf("could not take the cookie directory away: %v", err)
+		}
+		return false, nil
+	}
+
+	rec := postImport(t, r, "text/plain", importHeader+importTwitchDead)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %q", rec.Body.String())
+	}
+	msg, _ := body["error"].(string)
+	if strings.Contains(msg, "imported and written") {
+		t.Errorf("the dialog says %q — the paste was rejected, and cookies.txt holds it anyway", msg)
+	}
+	if !strings.Contains(msg, "still holds the rejected new credentials") {
+		t.Errorf("the dialog says %q — it never tells the operator what is actually on disk", msg)
 	}
 }
 
@@ -397,7 +458,8 @@ func importRouterOverADirectory(t *testing.T) (chi.Router, *recordingLogger) {
 // The mutation: any handler or sentinel that grows a %s of the submitted text —
 // the shape a "helpful" diagnostic naming the offending row would take.
 func TestCookieImportRouteLeaksNoValueAnywhere(t *testing.T) {
-	secrets := []string{"fake-sapisid-aaaa", "fake-logininfo-aaaa", "fake-authtoken-aaaa", "fake-ysc-aaaa"}
+	secrets := []string{"fake-sapisid-aaaa", "fake-logininfo-aaaa", "fake-authtoken-aaaa", "fake-ysc-aaaa",
+		"fake-authtoken-live", "fake-authtoken-dead"}
 	scan := func(t *testing.T, rec *httptest.ResponseRecorder, log *recordingLogger) {
 		t.Helper()
 		haystack := rec.Body.String() + "\n" + fmt.Sprint(rec.Header()) + "\n" + log.all()

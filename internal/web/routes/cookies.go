@@ -646,6 +646,27 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// is what actually produces it in a container.
 			case errors.Is(err, cookies.ErrCookieFileUnwritable):
 				jsonError(rw, err.Error(), http.StatusConflict)
+			// The paste was REJECTED and the rollback did not finish. Verbatim,
+			// and AHEAD of the `result.Wrote` arm below, which is the arm both
+			// of these used to fall into: `Wrote` is true here (cookies.txt was
+			// replaced), so that arm answered "the cookies were imported and
+			// written" about a paste Moombox had just judged dead and tried to
+			// undo. False in both directions at once — the paste was not
+			// accepted, and the state left behind is not one a re-check
+			// repairs.
+			//
+			// The sentinel's own message is a summary; the wrapped sentence
+			// says which of the two states this is (the rejected paste is still
+			// on disk, or the file is right and this process is not), and that
+			// distinction is the whole of what the operator can act on. See
+			// cookies.ErrImportRollbackIncomplete.
+			//
+			// 500, not 409: unlike the unwritable-file arm above this is not a
+			// condition the operator changes and retries into success — the
+			// import already ran, was rejected, and left two things disagreeing
+			// about which credentials are in force.
+			case errors.Is(err, cookies.ErrImportRollbackIncomplete):
+				jsonError(rw, err.Error(), http.StatusInternalServerError)
 			// The write LANDED and this process could not load it. Saying "the
 			// import failed" would be false about the file on disk, and would
 			// send an operator to repeat an import that already worked.
