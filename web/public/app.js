@@ -377,6 +377,12 @@ class MoomboxApp {
             this.player.loadPlayerJobList();
           }
           this.player.attachKeyboardControls?.();
+          // Move focus off the sl-tab: sl-tab-group's own keydown handling
+          // treats a focused tab's arrow keys as tab navigation, which would
+          // otherwise steal ArrowLeft/Right from the player's seek shortcuts
+          // on the very keypress after clicking the Player tab. rAF: the tab
+          // itself only finishes taking focus after this synchronous handler.
+          requestAnimationFrame(() => document.getElementById("player-video-wrapper")?.focus({ preventScroll: true }));
         } else if (e.detail.name === "imports") {
           if (!this.imports.importInitialized) {
             this.imports.initImports();
@@ -3742,10 +3748,16 @@ class MoomboxApp {
           }
           break;
         case "f": {
-          const panel = activePanel?.getAttribute("name");
-          const filterId = panel === "archived" ? "archived-filter" : "tasks-filter";
-          const filterInput = document.querySelector(`#${filterId} .unified-filter-input`);
-          if (filterInput) { filterInput.focus(); e.preventDefault(); }
+          // The player tab binds its own "f" (fullscreen); the tasks/archived
+          // filter focus would be a no-op there anyway (the filter input lives
+          // in a hidden sl-tab-panel), but skip it explicitly like "a" above
+          // so only one handler ever reacts to the keypress.
+          if (!isPlayerActive) {
+            const panel = activePanel?.getAttribute("name");
+            const filterId = panel === "archived" ? "archived-filter" : "tasks-filter";
+            const filterInput = document.querySelector(`#${filterId} .unified-filter-input`);
+            if (filterInput) { filterInput.focus(); e.preventDefault(); }
+          }
           break;
         }
       }

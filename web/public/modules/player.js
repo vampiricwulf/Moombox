@@ -113,11 +113,18 @@ export class PlayerController {
     const syncBtn = document.getElementById("player-sync-btn");
 
     // Job selection
-    jobSelect.addEventListener("sl-change", () => {
+    jobSelect.addEventListener("sl-change", async () => {
       if (this._rebuildingOptions) return;
       const val = jobSelect.value;
       if (val) {
-        this.onPlayerJobSelect(val);
+        // Await the load — the wrapper is inside #player-viewport, which
+        // onPlayerJobSelect only reveals once the job data is in; a hidden
+        // element can't take focus. Then move focus off the select so player
+        // shortcuts (Space, arrows, F/M/C/S) work immediately, without the
+        // user having to click the video first.
+        await this.onPlayerJobSelect(val);
+        jobSelect.blur();
+        document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
       } else {
         this.clearPlayer();
       }
@@ -388,10 +395,18 @@ export class PlayerController {
       // Skip when typing in inputs (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
 
+      // Let a focused control handle its own Space (activate/toggle) instead
+      // of the player also toggling playback on the same keypress.
+      const target = e.composedPath()[0];
+      const tTag = target instanceof HTMLElement ? target.tagName : "";
+      if (e.key === " " && /^(BUTTON|SL-BUTTON|SL-ICON-BUTTON|SL-CHECKBOX|SL-SWITCH)$/.test(tTag)) return;
+      // Caps Lock (or Shift) must not silently disable the letter shortcuts.
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
       const video = document.getElementById("player-video");
       if (!video || !video.src) return;
 
-      switch (e.key) {
+      switch (key) {
         case " ":
           if (video.paused) safePlay(video); else video.pause();
           e.preventDefault();

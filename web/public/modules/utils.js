@@ -81,8 +81,11 @@ export function isTypingInInput(e) {
   for (const el of e.composedPath()) {
     if (!(el instanceof HTMLElement)) continue;
     const tag = el.tagName;
+    // An sl-select only "types" while its listbox is open (keyboard-navigating
+    // options); closed, it is just a focused control and shortcuts should work.
+    if (tag === "SL-SELECT") return el.open === true;
     if (tag === "INPUT" || tag === "TEXTAREA" ||
-        tag === "SL-INPUT" || tag === "SL-TEXTAREA" || tag === "SL-SELECT") return true;
+        tag === "SL-INPUT" || tag === "SL-TEXTAREA") return true;
     if (el.contentEditable === "true") return true;
   }
   return false;
