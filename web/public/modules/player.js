@@ -34,7 +34,11 @@ export class PlayerController {
     this._lanes = new LaneAllocator(15);
     /** Index of the next message to consider; -1 = not anchored yet */
     this.nicoCursor = -1;
-    /** @type {Array<object>} messages that found no lane yet, in offset order */
+    /**
+     * Entries that found no lane yet, in offset order. Each caches the built,
+     * detached element and its measurements so a retry costs no DOM work.
+     * @type {Array<{msg: object, el: HTMLElement, w: number, h: number}>}
+     */
     this._nicoPending = [];
     /** Effective time of the last reset; only newer messages count as drops */
     this._nicoAnchorMs = -Infinity;
@@ -1003,6 +1007,7 @@ export class PlayerController {
     const overlay = document.getElementById("player-nico-overlay");
     if (overlay) overlay.replaceChildren();
     this._lanes.reset();
+    // Pending entries hold DETACHED elements, so dropping the list is the discard.
     this._nicoPending = [];
   }
 
@@ -1056,17 +1061,19 @@ export class PlayerController {
       overlay,
     };
 
-    // 1. Deferred messages first (oldest first) — no head-of-line blocking: a
-    //    message that still finds no lane stays pending, one that is now too
-    //    late is dropped (and counted when it is newer than the anchor), and
-    //    the ones behind it are still tried this tick.
+    // 1. Deferred entries first (oldest first) — no head-of-line blocking: an
+    //    entry that still finds no lane stays pending, one that is now too late
+    //    is dropped (and counted when it is newer than the anchor), and the
+    //    ones behind it are still tried this tick. A retry is placed at the
+    //    CURRENT time (retry mode, see _placeEntry) and reuses the element and
+    //    measurements taken at first sight — no rebuild, no re-measure.
     const stillPending = [];
-    for (const msg of this._nicoPending) {
-      if (effectiveMs - msg.offsetMs > NICO_MAX_LATENESS_MS) {
-        this._countNicoDrop(msg);
+    for (const entry of this._nicoPending) {
+      if (effectiveMs - entry.msg.offsetMs > NICO_MAX_LATENESS_MS) {
+        this._countNicoDrop(entry.msg); // entry (and its detached element) is discarded
         continue;
       }
-      if (!this._placeNico(msg, effectiveMs, ctx)) stillPending.push(msg);
+      if (!this._placeEntry(entry, effectiveMs, ctx, true)) stillPending.push(entry);
     }
     this._nicoPending = stillPending;
 
@@ -1079,7 +1086,9 @@ export class PlayerController {
         this._countNicoDrop(msg);
         continue;
       }
-      if (!this._placeNico(msg, effectiveMs, ctx)) this._nicoPending.push(msg);
+      const entry = this._prepareNico(msg, ctx);
+      if (!entry) continue; // nothing renderable (system-only message)
+      if (!this._placeEntry(entry, effectiveMs, ctx, false)) this._nicoPending.push(entry);
     }
 
     this._updateNicoDropPill();
@@ -1094,27 +1103,50 @@ export class PlayerController {
   }
 
   /**
-   * Try to put `msg` on stage. Returns true when the message is on stage OR has
-   * nothing to show; false when every candidate lane is busy (caller defers it).
-   * The allocator is asked at the MESSAGE's own time and the animation starts
-   * mid-flight by its lateness, so late, deferred and seeded messages appear
-   * where they would have been rather than bunching at the right edge.
+   * Build and measure `msg` once. The element is parked off-stage at the right
+   * edge and appended, because offsetWidth/offsetHeight need layout; the caller
+   * either places it this tick or detaches it and keeps the entry to retry, so
+   * a deferred message is never rebuilt or re-measured.
    * @param {object} msg
-   * @param {number} effectiveMs
-   * @param {{stageW: number, laneHeight: number, rate: number, paused: boolean, overlay: HTMLElement}} ctx
-   * @returns {boolean}
+   * @param {{stageW: number, overlay: HTMLElement}} ctx
+   * @returns {{msg: object, el: HTMLElement, w: number, h: number}|null} null when
+   *   the message has no renderable content.
    */
-  _placeNico(msg, effectiveMs, { stageW, laneHeight, rate, paused, overlay }) {
+  _prepareNico(msg, { stageW, overlay }) {
     const el = this._buildNicoEl(msg);
-    if (!el) return true;
+    if (!el) return null;
     el.style.left = `${stageW}px`;
     el.style.top = "0";
     overlay.appendChild(el);
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
+    return { msg, el, w: el.offsetWidth, h: el.offsetHeight };
+  }
+
+  /**
+   * Try to put a prepared entry on stage. Returns true when it is flying, false
+   * when every candidate lane is busy — the element is detached and the caller
+   * keeps the entry for a later tick.
+   *
+   * Two placement modes, because the allocator's clock only ever moves forward:
+   * - FIRST sight (`retry` false): allocate at the MESSAGE's own time and start
+   *   the animation mid-flight by its lateness, so late and seeded messages
+   *   appear where they would have been rather than bunching at the right edge.
+   * - RETRY (`retry` true): the entry was already rejected once, so its own time
+   *   is in the past and every lane's occupancy has only grown newer since —
+   *   re-asking at `msg.offsetMs` could never succeed and deferral would be a
+   *   no-op. A retry therefore allocates at the CURRENT time and spawns at the
+   *   right edge; the allocator's ordinary two-edge bound at placement time is
+   *   what keeps it collision-free.
+   * @param {{msg: object, el: HTMLElement, w: number, h: number}} entry
+   * @param {number} effectiveMs
+   * @param {{stageW: number, laneHeight: number, rate: number, paused: boolean, overlay: HTMLElement}} ctx
+   * @param {boolean} retry
+   * @returns {boolean}
+   */
+  _placeEntry(entry, effectiveMs, { stageW, laneHeight, rate, paused, overlay }, retry) {
+    const { msg, el, w, h } = entry;
     const lanesNeeded = Math.max(1, Math.ceil(h / laneHeight));
     const lane = this._lanes.allocate({
-      nowMs: msg.offsetMs,
+      nowMs: retry ? effectiveMs : msg.offsetMs,
       widthPx: w,
       stageWidthPx: stageW,
       durationMs: NICO_DURATION_MS,
@@ -1122,15 +1154,22 @@ export class PlayerController {
       gapMs: NICO_LANE_GAP_MS,
     });
     if (lane === -1) {
-      el.remove();
+      el.remove(); // a no-op on a repeat retry — the element is already detached
       return false;
+    }
+    if (!el.isConnected) {
+      // Re-attach the element rejected on an earlier tick (measurements reused).
+      el.style.left = `${stageW}px`;
+      overlay.appendChild(el);
     }
     el.style.top = `${lane * laneHeight}px`;
     const anim = el.animate(
       [{ transform: "translateX(0)" }, { transform: `translateX(-${stageW + w}px)` }],
       { duration: NICO_DURATION_MS, fill: "forwards" },
     );
-    anim.currentTime = Math.min(Math.max(0, effectiveMs - msg.offsetMs), NICO_DURATION_MS - 1);
+    anim.currentTime = retry
+      ? 0
+      : Math.min(Math.max(0, effectiveMs - msg.offsetMs), NICO_DURATION_MS - 1);
     anim.playbackRate = rate;
     if (paused) anim.pause();
     anim.onfinish = () => {
