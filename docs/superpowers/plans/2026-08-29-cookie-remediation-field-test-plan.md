@@ -40,7 +40,7 @@ another build (progress-arc1.md, Task 6 review: "accidental arming impossible").
   discovery on) and the channel-independent `/feed/subscriptions` fallback probe (only when no
   tier-2 observation landed in the last ~25 minutes; first one ~30 min after boot, and `R C` /
   `POST /api/cookies/recheck` deliberately never run it - plan §Staged rollout item 1). **This is
-  what the constant gates.** Both feed `ObserveLiveness` (`ObserveLiveness` in `refresh.go`).
+  what the constant gates.** Both feed `ObserveLiveness` (`refresh.go`).
 
 **Disarmed (until 2026-09-03):** a tier-2 verdict wrote one log line and did nothing else:
 `liveness observation platform=youtube loggedIn=<bool> wouldFireRecovery=<bool> armed=false`.
