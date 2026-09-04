@@ -1716,6 +1716,8 @@ export class PlayerController {
     overlay.className = "resume-overlay";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-label", "Resume playback");
+    overlay.setAttribute("aria-modal", "true");
+    this._resumeReturnFocus = document.activeElement;
     overlay.innerHTML = `
       <div class="resume-overlay-content">
         <p>Resume where you left off?</p>
@@ -1739,12 +1741,13 @@ export class PlayerController {
     const dismiss = () => this._dismissResumeDialog();
 
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        dismiss();
-        // Start from beginning on Escape (same as clicking "Start from beginning")
-        safePlay(document.getElementById("player-video"));
-        this._startWatchTracking(jobId);
-      }
+      if (e.key !== "Escape") return;
+      if (document.querySelector("sl-dialog[open]") || isTypingInInput(e)) return;
+      e.preventDefault();
+      // Start from beginning on Escape (same as clicking "Start from beginning")
+      dismiss();
+      safePlay(document.getElementById("player-video"));
+      this._startWatchTracking(jobId);
     }, { signal: sig });
 
     overlay.querySelector("#resume-continue").addEventListener("click", () => {
@@ -1782,6 +1785,8 @@ export class PlayerController {
       this._resumeDialogAbort.abort();
       this._resumeDialogAbort = null;
     }
+    if (this._resumeReturnFocus?.isConnected) this._resumeReturnFocus.focus({ preventScroll: true });
+    this._resumeReturnFocus = null;
   }
 
 
