@@ -3,11 +3,20 @@
  * web/tests/chat-timeline.test.mjs.
  *
  * Offset semantics (verified against the Go producers, review 2026-09-03):
- * - YouTube chat.json: offsetMs counts from chat.streamStartTime (the start
- *   the downloader was created with — the SCHEDULED time for early chat).
- *   The video begins at the ACTUAL start (job.streamStartTime; DASH backfills
- *   from sequence 0), so bias = actual − scheduled. Negative offsets are
- *   waiting-room chat.
+ * - YouTube chat.json: offsetMs counts from chat.streamStartTime, which is
+ *   the FILE'S FIRST run's epoch — pinned across resumes/adoption (Go
+ *   ChatResumeState.streamStartMs; the header value is rendered by
+ *   epochRFC3339()), not whatever start time the run that is CURRENTLY
+ *   appending to it was created with. For a live/early-chat file that epoch
+ *   is typically the SCHEDULED start; the video begins at the ACTUAL start
+ *   (job.streamStartTime; DASH backfills from sequence 0), so bias = actual
+ *   − scheduled, and negative offsets are waiting-room chat. A replay/VOD
+ *   chat file's offsets are already VOD-relative (YouTube's own
+ *   videoOffsetTimeMsec, with pre-stream messages recovered from
+ *   timestampText), and the worker refreshes job.streamStartTime to that
+ *   same actual start once the job is classified VOD/post-live
+ *   (vodStatusUpdates, internal/worker/stream_processor.go) — so bias is 0
+ *   there too.
  * - Twitch chat.json (platform:"twitch"): live IRC offsets count from the
  *   part's recording start and VOD offsets from the VOD start — both already
  *   video-relative. Bias is 0. Multi-part files are shifted per part.

@@ -454,7 +454,10 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 | File | Purpose |
 |------|---------|
 | `app.js` | Main SPA: job list, unified filter, log viewer, status bar, WebSocket client, settings integration |
-| `modules/player.js` | Video player with niconico-style chat overlay, multi-segment seeking |
+| `modules/player.js` | Video player with per-job chat replay: niconico-style media-time scrolling overlay, chat sidebar with pre-show/post-end dividers, chat search, per-job chat offset, resume/watched tracking, per-part Twitch chat merge, multi-segment seeking |
+| `modules/segments.js` | `SegmentPlayer` — multi-segment playback helper shared by the player and the trimmer |
+| `modules/chat-timeline.js` | Pure chat/video timeline math: offset normalization, chat-to-video bias, pre-show/post-end partitioning, per-part chat merge |
+| `modules/nico-lanes.js` | `LaneAllocator` — niconico lane-collision math for the overlay's right-to-left scrolling |
 | `modules/setup.js` | First-run setup wizard + FFmpeg install flow |
 | `modules/settings.js` | Settings dialog: config editing, channel management, cookies, integrations |
 | `modules/trimmer.js` | Trim clip creation with timeline visualization |
@@ -468,6 +471,8 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 | `index.html` | SPA shell (loads Shoelace + modules) |
 
 **Mobile breakpoints:** 992px (tablet layout), 768px (phone layout), `hover: none` (touch interaction adjustments).
+
+**Frontend test harness:** `web/tests/` runs pure-JS suites (chat-timeline, nico-lanes, filter-parser, filter-engine, utils) plus one jsdom-backed suite (`player.test.mjs`) on Node's built-in test runner (`node --test web/tests/*.test.mjs`); jsdom is an optional dev dependency installed separately inside `web/tests/`. See `web/tests/README.md`.
 
 ### TUI
 

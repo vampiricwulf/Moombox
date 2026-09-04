@@ -1079,6 +1079,8 @@ type ChatData struct {
 }
 ```
 
+`StreamStartTime` is the epoch every message's `OffsetMs` is computed against. It is written with `time.RFC3339Nano` (`epochRFC3339`, `internal/chat/downloader.go`) so millisecond-precision offsets never lose up to 999ms of the header's own fractional second, and read back with `time.Parse(time.RFC3339, ...)`, which accepts the fractional-second suffix `RFC3339Nano` produces. Each `ChatMessage.OffsetMs` is SIGNED on both platforms — a message that arrived before the video's own start position is negative rather than clamped to 0 (YouTube pre-stream/waiting-room chat; Twitch messages timestamped before a part's recording base) — see `platform-services.md` for how each platform computes it.
+
 **Incremental append pattern:**
 
 To avoid O(file_size) rewrites as chat grows, the downloader uses an incremental append strategy after the first flush to disk:
