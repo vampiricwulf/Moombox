@@ -462,6 +462,26 @@ func TestJobSegments404WhenNoSegments(t *testing.T) {
 	}
 }
 
+// A Finished job's segments list must still revalidate, not cache
+// immutably: part merge and incomplete-tail resume rewrite the rows
+// behind the same URL (D-6, same class as TestJobVideoIsRevalidatedNotImmutable).
+func TestJobSegmentsIsRevalidatedNotImmutable(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "yt_segfin", func(j *database.Job) { j.Status = database.StatusFinished })
+	if err := f.db.AddSegment(&database.Segment{JobID: "yt_segfin", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_segfin/segments", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	cc := rec.Header().Get("Cache-Control")
+	if strings.Contains(cc, "immutable") || !strings.Contains(cc, "no-cache") {
+		t.Errorf("Cache-Control = %q, want a revalidating policy", cc)
+	}
+}
+
 // --- GET /api/jobs/{id}/chat ---
 
 func TestJobChat404WhenJobMissing(t *testing.T) {

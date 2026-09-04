@@ -286,7 +286,14 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 
 	case youtube.StreamVOD, youtube.StreamPostLive:
 		sp.logger.Info("stream is VOD, downloading directly", "videoID", job.VideoID)
-		sp.db.UpdateJobFields(job.ID, vodStatusUpdates(job, info))
+		vodUpdates := vodStatusUpdates(job, info)
+		sp.db.UpdateJobFields(job.ID, vodUpdates)
+		// Sync local job object — jobCtx.Job is this same pointer, and a
+		// refreshed stream_start_time (F-D) must not go stale on it the way
+		// updateJobMetadata already guards against for its own fields.
+		if v, ok := vodUpdates["stream_start_time"].(string); ok {
+			job.StreamStartTime = v
+		}
 		return &StreamProcessResult{
 			VideoInfo:      info,
 			ShouldDownload: true,

@@ -974,9 +974,13 @@ func (cd *ChatDownloader) incrementalAppend(outputFile string) bool {
 
 // epochRFC3339 renders the epoch offsets are computed against — the file's
 // epoch once one is adopted/resumed, else the options' start time.
+// RFC3339Nano (not RFC3339): offsets are millisecond-precision, and a
+// fractional-second StreamStartTime would otherwise put up to 999ms between
+// the header and the offsets it's supposed to describe. Prints identically
+// to RFC3339 when there's no fraction (F-E).
 func (cd *ChatDownloader) epochRFC3339() string {
 	if cd.streamStartMs > 0 {
-		return time.UnixMilli(cd.streamStartMs).UTC().Format(time.RFC3339)
+		return time.UnixMilli(cd.streamStartMs).UTC().Format(time.RFC3339Nano)
 	}
 	return cd.opts.StreamStartTime
 }

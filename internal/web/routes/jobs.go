@@ -419,11 +419,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		if job.Status == database.StatusFinished {
-			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		}
+		// Revalidate, never immutable: part merge and incomplete-tail resume
+		// rewrite these rows behind the same URL even for a Finished job —
+		// same reasoning as /video (D-6).
+		rw.Header().Set("Cache-Control", "private, no-cache")
 		jsonResponse(rw, segments)
 	})
 
@@ -1362,7 +1361,7 @@ func notModifiedSince(req *http.Request, modtime time.Time) bool {
 // every conditional GET regardless of outcome), then reads, validates and
 // serves the file. Errors map to 404 when the file is missing and 422 when
 // it can't be opened, stat'd, fully read, or parsed as JSON — matching the
-// pre-existing /chat and /segments/{index}/chat behaviour exactly.
+// /chat behaviour the segment route was cloned from.
 func serveChatJSON(rw http.ResponseWriter, req *http.Request, path string) {
 	fi, err := os.Stat(path)
 	if err != nil {
