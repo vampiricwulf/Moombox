@@ -1,0 +1,9 @@
+{
+  "name": "moombox-web-tests",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only harness deps for the Moombox frontend test suites (node --test web/tests/*.test.mjs). jsdom is needed ONLY by player.test.mjs; the pure suites run without it.",
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  }
+}

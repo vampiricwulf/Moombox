@@ -41,6 +41,9 @@ staging/
 output/
 browser-profile/
 
+# Frontend test harness deps (web/tests/package-lock.json IS committed)
+web/tests/node_modules/
+
 # Cache
 .cache/
 
