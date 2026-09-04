@@ -3,9 +3,18 @@
  */
 import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
-import { normalizeOffsetMs, computeChatBiasMs, mergePartChats } from "./chat-timeline.js";
+import { normalizeOffsetMs, computeChatBiasMs, mergePartChats, indexAfter } from "./chat-timeline.js";
+import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 
 const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
+
+// Niconico overlay engine tuning. All times are MEDIA milliseconds, so the
+// overlay freezes with the video and scales with playbackRate for free.
+const NICO_DURATION_MS = 4000;      // niconico's traverse time (owner decision D4)
+const NICO_MAX_LATENESS_MS = 2000;  // a message not placed within 2 s of its time is dropped and counted
+const NICO_LANE_GAP_MS = 150;       // spacing buffer between consecutive occupants of a lane
+const NICO_MAX_PER_TICK = 20;       // DOM work cap for NEW messages per timeupdate tick
+const NICO_SEED_MAX_FALLBACK = 30;  // seed cap when the row count is unknown
 
 function announcementColorClass(color) {
   return ANNOUNCEMENT_COLORS.has(color) ? color : "primary";
@@ -21,9 +30,19 @@ export class PlayerController {
     this.playerScrollLock = false;
     this.playerActiveChatIndex = 0;
     this.nicoEnabled = true;
-    this.nicoLaneCount = 15;
-    this.nicoLaneAvail = [];
-    this.nicoLastSpawnMs = null;
+    /** @type {LaneAllocator} rows are re-derived from geometry in a later task */
+    this._lanes = new LaneAllocator(15);
+    /** Index of the next message to consider; -1 = not anchored yet */
+    this.nicoCursor = -1;
+    /** @type {Array<object>} messages that found no lane yet, in offset order */
+    this._nicoPending = [];
+    /** Effective time of the last reset; only newer messages count as drops */
+    this._nicoAnchorMs = -Infinity;
+    /** @type {Set<Animation>} every in-flight overlay animation */
+    this._nicoAnims = new Set();
+    this.nicoDropped = 0;
+    this._nicoDroppedShown = 0;
+    this._nicoDropPillTimer = null;
     this.playerCustomOffsetMs = 0;
     this.playerInitialized = false;
     /** @type {Map<string, string>} code → URL for 3rd-party Twitch emotes */
@@ -88,6 +107,10 @@ export class PlayerController {
       overlay.style.display = this.nicoEnabled ? "" : "none";
       if (!this.nicoEnabled) {
         this.clearNicoOverlay();
+        // Un-anchor: no ticks run while the overlay is off, so the next enabled
+        // tick must re-seed at the current time instead of grinding through
+        // (and counting as dropped) every message that passed meanwhile.
+        this.nicoCursor = -1;
       }
     });
 
@@ -111,28 +134,43 @@ export class PlayerController {
       const currentMs = this.getGlobalTimeMs();
       this.resetSidebarToTime(currentMs);
       this.clearNicoOverlay();
-      this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
+      this._resetNicoCursor(currentMs + this.playerCustomOffsetMs);
     });
 
-    // Pause/play nico animations
+    // Pause/play nico animations. The overlay clock is media time, so the
+    // animations simply follow the video — the cursor is NEVER advanced here
+    // (doing so skipped every message that was due while paused).
     video.addEventListener("pause", () => {
-      document.querySelectorAll(".nico-message").forEach((el) => {
-        if (el._nicoAnim) el._nicoAnim.pause();
-      });
+      if (video.ended) return; // end-of-media pause: let in-flight text finish
+      for (const a of this._nicoAnims) a.pause();
     });
 
     video.addEventListener("play", () => {
-      // Skip stale messages accumulated during pause — advance the nico cursor
-      // to the current time so only new messages appear after unpausing
-      const currentMs = this.getGlobalTimeMs();
-      this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
-      document.querySelectorAll(".nico-message").forEach((el) => {
-        if (el._nicoAnim) el._nicoAnim.play();
-      });
+      for (const a of this._nicoAnims) a.play();
+    });
+
+    video.addEventListener("ratechange", () => {
+      const rate = video.playbackRate || 1;
+      for (const a of this._nicoAnims) a.playbackRate = rate;
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      // Hidden documents never dispatch animation finish events, so spawned
+      // messages would pile up until the tab is shown. Clear and re-anchor.
+      if (document.hidden) {
+        this.clearNicoOverlay();
+      } else if (this.playerChatMessages.length) {
+        this._resetNicoCursor(this.getGlobalTimeMs() + this.playerCustomOffsetMs);
+      }
     });
 
     // Multi-segment: auto-advance to next segment when current one ends
     video.addEventListener("ended", () => this.onSegmentEnded());
+
+    // Never freeze the overlay at end of media — let in-flight text fly out.
+    video.addEventListener("ended", () => {
+      for (const a of this._nicoAnims) a.play();
+    });
 
     // Surface video load errors to user (e.g. segment 404s)
     video.addEventListener("error", () => {
@@ -191,7 +229,7 @@ export class PlayerController {
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
         this.clearNicoOverlay();
-        this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
+        this._resetNicoCursor(currentMs + this.playerCustomOffsetMs);
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
@@ -230,7 +268,7 @@ export class PlayerController {
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
         this.clearNicoOverlay();
-        this.nicoLastSpawnMs = currentMs;
+        this._resetNicoCursor(currentMs + this.playerCustomOffsetMs);
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
@@ -413,7 +451,8 @@ export class PlayerController {
     this.playerAutoScroll = true;
     this.playerScrollLock = false;
     this.playerActiveChatIndex = 0;
-    this.nicoLastSpawnMs = null;
+    this.nicoCursor = -1;
+    this._resetNicoDropCount();
     this.playerCustomOffsetMs = 0;
     const offsetInput = document.getElementById("player-chat-offset");
     if (offsetInput) offsetInput.value = "";
@@ -655,7 +694,8 @@ export class PlayerController {
     this.playerChatData = null;
     this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
-    this.nicoLastSpawnMs = null;
+    this.nicoCursor = -1;
+    this._resetNicoDropCount();
 
     if (this.playerJob.chatFilename || (this.playerJob.segments || []).some((s) => s.chatFile)) {
       try {
@@ -873,9 +913,9 @@ export class PlayerController {
     // Update sidebar active state
     this.updateSidebarActiveState(currentMs);
 
-    // Spawn nico messages
+    // Spawn nico messages (the argument IS effective — offset-adjusted — time)
     if (this.nicoEnabled) {
-      this.spawnNicoMessages(currentMs);
+      this.spawnNicoMessages(currentMs + this.playerCustomOffsetMs);
     }
 
     // Auto-scroll sidebar
@@ -958,153 +998,179 @@ export class PlayerController {
   // Niconico overlay engine
 
   clearNicoOverlay() {
+    for (const a of this._nicoAnims) a.cancel();
+    this._nicoAnims.clear();
     const overlay = document.getElementById("player-nico-overlay");
-    if (overlay) {
-      // Cancel running animations to free CPU/memory before detaching elements
-      overlay.querySelectorAll(".nico-message").forEach((el) => {
-        if (el._nicoAnim) { el._nicoAnim.cancel(); el._nicoAnim = null; }
-      });
-      overlay.innerHTML = "";
-    }
-    this.nicoLaneAvail = new Array(this.nicoLaneCount).fill(0);
+    if (overlay) overlay.replaceChildren();
+    this._lanes.reset();
+    this._nicoPending = [];
   }
 
-  spawnNicoMessages(currentMs) {
-    // On first call, set cursor to -5001 so messages within 5s before stream
-    // start (offsetMs >= -5000) deploy instantly. Older pre-stream messages
-    // are permanently skipped from the overlay (still visible in sidebar).
+  /**
+   * Anchor the overlay cursor at `effectiveMs`: the next tick considers only a
+   * short seed of "chat that was already flying" (newer than
+   * effectiveMs − NICO_MAX_LATENESS_MS, and at most two screens' worth of rows),
+   * never the whole pre-show backlog. Also drops any deferred messages and frees
+   * every lane — the caller has cleared the overlay.
+   */
+  _resetNicoCursor(effectiveMs) {
+    const rows = this._lanes.laneCount || NICO_SEED_MAX_FALLBACK / 2;
+    this.nicoCursor = seedCursorIndex(
+      this.playerChatMessages, effectiveMs, NICO_MAX_LATENESS_MS, 2 * rows, indexAfter,
+    );
+    this._nicoPending = [];
+    this._nicoAnchorMs = effectiveMs;
+    this._lanes.reset();
+  }
+
+  /** Zero the drop counter and hide the pill (job switch / player teardown). */
+  _resetNicoDropCount() {
+    this.nicoDropped = 0;
+    this._nicoDroppedShown = 0;
+    clearTimeout(this._nicoDropPillTimer);
+    this._nicoDropPillTimer = null;
+    const pill = document.getElementById("player-nico-dropped");
+    if (pill) pill.hidden = true;
+  }
+
+  /**
+   * Advance the overlay to `effectiveMs` (media time plus the user's chat offset).
+   * @param {number} effectiveMs
+   */
+  spawnNicoMessages(effectiveMs) {
     const messages = this.playerChatMessages;
-    if (!messages.length) return;
-
-    // Use offset-adjusted time consistently for binary search, loop, and cursor
-    const effectiveMs = currentMs + this.playerCustomOffsetMs;
-
-    // First-spawn: deploy pre-stream messages within 5s of effective start.
-    // Use null sentinel so negative effectiveMs doesn't re-trigger every frame.
-    const firstSpawn = this.nicoLastSpawnMs === null;
-    if (firstSpawn) {
-      this.nicoLastSpawnMs = effectiveMs - 5001;
-    }
-
-    // Binary search for start of window (nicoLastSpawnMs, effectiveMs]
-    let lo = 0;
-    let hi = messages.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (messages[mid].offsetMs <= this.nicoLastSpawnMs) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-
+    if (!messages.length || document.hidden) return;
+    if (this.nicoCursor < 0) this._resetNicoCursor(effectiveMs);
     const overlay = document.getElementById("player-nico-overlay");
-    if (!overlay) return;
+    const video = document.getElementById("player-video");
+    if (!overlay || !video) return;
+    const stageW = overlay.clientWidth;
+    const stageH = overlay.clientHeight;
+    if (!stageW || !stageH) return;
+    const laneHeight = stageH / (this._lanes.laneCount || 1);
+    const ctx = {
+      stageW,
+      laneHeight,
+      rate: video.playbackRate || 1,
+      paused: video.paused && !video.ended,
+      overlay,
+    };
 
-    const overlayWidth = overlay.clientWidth;
-    const overlayHeight = overlay.clientHeight;
-    if (!overlayWidth || !overlayHeight) return;
+    // 1. Deferred messages first (oldest first) — no head-of-line blocking: a
+    //    message that still finds no lane stays pending, one that is now too
+    //    late is dropped (and counted when it is newer than the anchor), and
+    //    the ones behind it are still tried this tick.
+    const stillPending = [];
+    for (const msg of this._nicoPending) {
+      if (effectiveMs - msg.offsetMs > NICO_MAX_LATENESS_MS) {
+        this._countNicoDrop(msg);
+        continue;
+      }
+      if (!this._placeNico(msg, effectiveMs, ctx)) stillPending.push(msg);
+    }
+    this._nicoPending = stillPending;
 
-    const laneHeight = overlayHeight / this.nicoLaneCount;
-    const now = performance.now();
-    const duration = 8000;
-
-    // Quick check: if all lanes are occupied, skip the entire loop to avoid
-    // creating/measuring/removing DOM elements for messages that can't be placed.
-    // This prevents layout thrashing during fast chat when all lanes are busy.
-    if (!firstSpawn && this.nicoLaneAvail.every(t => t > now)) {
-      this.nicoLastSpawnMs = effectiveMs;
-      return;
+    // 2. New messages up to the per-tick cap; the cursor ALWAYS advances.
+    let work = 0;
+    while (this.nicoCursor < messages.length && messages[this.nicoCursor].offsetMs <= effectiveMs) {
+      if (work++ >= NICO_MAX_PER_TICK) break;
+      const msg = messages[this.nicoCursor++];
+      if (effectiveMs - msg.offsetMs > NICO_MAX_LATENESS_MS) {
+        this._countNicoDrop(msg);
+        continue;
+      }
+      if (!this._placeNico(msg, effectiveMs, ctx)) this._nicoPending.push(msg);
     }
 
-    let spawned = 0;
-    // No limit on first spawn so all offsetMs=0 pre-stream messages deploy at once
-    const maxPerFrame = firstSpawn ? Infinity : 10;
-    let lastProcessedMs = this.nicoLastSpawnMs;
+    this._updateNicoDropPill();
+  }
 
-    for (let i = lo; i < messages.length && messages[i].offsetMs <= effectiveMs; i++) {
-      if (spawned >= maxPerFrame) break;
+  /**
+   * Count a message the overlay could not show. Messages at or before the last
+   * anchor are seed-window skips, not drops — they are not reported.
+   */
+  _countNicoDrop(msg) {
+    if (msg.offsetMs > this._nicoAnchorMs) this.nicoDropped++;
+  }
 
-      const msg = messages[i];
-      // Create element off-screen to measure its actual height
-      const el = document.createElement("div");
-      el.className = "nico-message";
-      if (msg.messageType === "announcement") {
-        el.classList.add("announcement");
-        el.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
-      }
-      this.appendChatContent(el, msg.message || [], msg.emotes);
-      if (!el.hasChildNodes()) continue;
-      // Nico emotes must load immediately — override the default lazy loading
-      // set by _createEmoteImg (which is appropriate for the sidebar's thousands
-      // of off-screen messages, but not for emotes animating across screen in 8s).
-      el.querySelectorAll(".chat-emoji").forEach(img => { img.loading = "eager"; });
-      el.style.top = "0";
-      el.style.left = `${overlayWidth}px`;
-      overlay.appendChild(el);
-
-      // Measure actual dimensions (emotes can make height > laneHeight)
-      const msgWidth = el.offsetWidth;
-      const msgHeight = el.offsetHeight;
-      const lanesNeeded = Math.max(1, Math.ceil(msgHeight / laneHeight));
-
-      // Find a run of consecutive available lanes
-      let lane = -1;
-      for (let l = 0; l <= this.nicoLaneCount - lanesNeeded; l++) {
-        let allFree = true;
-        for (let k = 0; k < lanesNeeded; k++) {
-          if (this.nicoLaneAvail[l + k] > now) {
-            allFree = false;
-            break;
-          }
-        }
-        if (allFree) {
-          lane = l;
-          break;
-        }
-      }
-      if (lane === -1) {
-        el.remove();
-        continue; // All lanes busy
-      }
-
-      // Position at the chosen lane
-      el.style.top = `${lane * laneHeight}px`;
-
-      const totalTravel = overlayWidth + msgWidth;
-
-      // Animate using Web Animations API
-      const anim = el.animate(
-        [
-          { transform: "translateX(0)" },
-          { transform: `translateX(-${totalTravel}px)` },
-        ],
-        { duration, fill: "forwards" },
-      );
-      el._nicoAnim = anim;
-
-      // If video is paused, pause animation immediately
-      const video = document.getElementById("player-video");
-      if (video && video.paused) {
-        anim.pause();
-      }
-
-      anim.onfinish = () => el.remove();
-
-      // Calculate when these lanes become available (when the message clears the right edge)
-      const clearTime = (msgWidth / totalTravel) * duration;
-      const availAt = now + clearTime + 200; // 200ms buffer
-      for (let k = 0; k < lanesNeeded; k++) {
-        this.nicoLaneAvail[lane + k] = availAt;
-      }
-
-      lastProcessedMs = msg.offsetMs;
-      spawned++;
+  /**
+   * Try to put `msg` on stage. Returns true when the message is on stage OR has
+   * nothing to show; false when every candidate lane is busy (caller defers it).
+   * The allocator is asked at the MESSAGE's own time and the animation starts
+   * mid-flight by its lateness, so late, deferred and seeded messages appear
+   * where they would have been rather than bunching at the right edge.
+   * @param {object} msg
+   * @param {number} effectiveMs
+   * @param {{stageW: number, laneHeight: number, rate: number, paused: boolean, overlay: HTMLElement}} ctx
+   * @returns {boolean}
+   */
+  _placeNico(msg, effectiveMs, { stageW, laneHeight, rate, paused, overlay }) {
+    const el = this._buildNicoEl(msg);
+    if (!el) return true;
+    el.style.left = `${stageW}px`;
+    el.style.top = "0";
+    overlay.appendChild(el);
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const lanesNeeded = Math.max(1, Math.ceil(h / laneHeight));
+    const lane = this._lanes.allocate({
+      nowMs: msg.offsetMs,
+      widthPx: w,
+      stageWidthPx: stageW,
+      durationMs: NICO_DURATION_MS,
+      lanesNeeded,
+      gapMs: NICO_LANE_GAP_MS,
+    });
+    if (lane === -1) {
+      el.remove();
+      return false;
     }
+    el.style.top = `${lane * laneHeight}px`;
+    const anim = el.animate(
+      [{ transform: "translateX(0)" }, { transform: `translateX(-${stageW + w}px)` }],
+      { duration: NICO_DURATION_MS, fill: "forwards" },
+    );
+    anim.currentTime = Math.min(Math.max(0, effectiveMs - msg.offsetMs), NICO_DURATION_MS - 1);
+    anim.playbackRate = rate;
+    if (paused) anim.pause();
+    anim.onfinish = () => {
+      this._nicoAnims.delete(anim);
+      el.remove();
+    };
+    this._nicoAnims.add(anim);
+    return true;
+  }
 
-    // Only advance the cursor to the last message we actually processed.
-    // If maxPerFrame was hit, un-spawned messages remain eligible for the next frame.
-    this.nicoLastSpawnMs = spawned > 0 ? lastProcessedMs : effectiveMs;
+  /**
+   * Build an overlay element for `msg`, or null when it has no renderable content.
+   * @param {object} msg
+   * @returns {HTMLElement|null}
+   */
+  _buildNicoEl(msg) {
+    const el = document.createElement("div");
+    el.className = "nico-message";
+    if (msg.messageType === "announcement") {
+      el.classList.add("announcement", `announcement-${announcementColorClass(msg.announcementColor)}`);
+    }
+    this.appendChatContent(el, msg.message || [], msg.emotes);
+    if (!el.hasChildNodes()) return null;
+    // Nico emotes must load immediately — override the default lazy loading set
+    // by _createEmoteImg (right for the sidebar's thousands of off-screen
+    // messages, wrong for emotes that cross the screen in a few seconds).
+    el.querySelectorAll(".chat-emoji").forEach((img) => { img.loading = "eager"; });
+    return el;
+  }
+
+  /** Show "+N not shown" for a few seconds whenever the drop counter grew. */
+  _updateNicoDropPill() {
+    const pill = document.getElementById("player-nico-dropped");
+    if (!pill) return;
+    if (this.nicoDropped === this._nicoDroppedShown) return;
+    this._nicoDroppedShown = this.nicoDropped;
+    pill.textContent = `+${this.nicoDropped} not shown`;
+    pill.hidden = false;
+    clearTimeout(this._nicoDropPillTimer);
+    this._nicoDropPillTimer = setTimeout(() => { pill.hidden = true; }, 3000);
   }
 
   /**

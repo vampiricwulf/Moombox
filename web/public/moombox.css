@@ -1509,6 +1509,19 @@ sl-progress-bar {
     filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.5));
 }
 
+/* "+N not shown" — messages the overlay could not place in time */
+.nico-dropped-pill {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: var(--sl-font-size-x-small);
+    padding: 2px 8px;
+    border-radius: var(--sl-border-radius-small);
+    pointer-events: none;
+}
+
 #player-sidebar {
     width: 350px;
     flex-shrink: 0;
