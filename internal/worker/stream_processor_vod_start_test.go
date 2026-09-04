@@ -23,6 +23,19 @@ func TestVodStatusUpdatesRefreshesStaleStart(t *testing.T) {
 	}
 }
 
+// An empty job.StreamStartTime (both epochs unknown — stream_processor.go:266-268)
+// must still be FILLED from info.ScheduledStartTime, not skipped as
+// "already matching" — a condition that additionally required
+// job.StreamStartTime != "" would silently drop this fill (M-D).
+func TestVodStatusUpdatesFillsEmptyStart(t *testing.T) {
+	job := &database.Job{ID: "j", StreamStartTime: ""}
+	info := &youtube.VideoInfo{ScheduledStartTime: "2026-06-11T10:12:00Z"}
+	u := vodStatusUpdates(job, info)
+	if u["stream_start_time"] != "2026-06-11T10:12:00Z" {
+		t.Errorf("stream_start_time = %v, want the fill from ScheduledStartTime", u["stream_start_time"])
+	}
+}
+
 func TestVodStatusUpdatesLeavesMatchingOrUnknownStart(t *testing.T) {
 	same := vodStatusUpdates(&database.Job{StreamStartTime: "2026-06-11T10:12:00Z"},
 		&youtube.VideoInfo{ScheduledStartTime: "2026-06-11T10:12:00Z"})

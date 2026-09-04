@@ -418,6 +418,30 @@ func TestJobVideoServesExistingFile(t *testing.T) {
 	}
 }
 
+// resolveOutputDir must prefer job.OutputDirectory over the config's
+// Paths.OutputDirectory at every site it serves — a flipped precedence
+// (M-B) still passes every other /video test because they never set
+// job.OutputDirectory, so the config dir and the job dir coincide.
+func TestJobVideoServesFromPerJobOutputDirectory(t *testing.T) {
+	f := newJobsFixture(t)
+	jobDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(jobDir, "real.mp4"), []byte("job dir bytes"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+	f.addJob(t, "yt_perjobdir", func(j *database.Job) {
+		j.Filename = "real.mp4"
+		j.OutputDirectory = jobDir
+	})
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_perjobdir/video", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("serve video from job.OutputDirectory: want 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "job dir bytes" {
+		t.Errorf("body: want %q (from job.OutputDirectory, not the config dir), got %q", "job dir bytes", rec.Body.String())
+	}
+}
+
 // --- GET /api/jobs/{id}/segments ---
 
 func TestJobSegments404WhenJobMissing(t *testing.T) {
@@ -478,6 +502,29 @@ func TestJobChatServesValidJSON(t *testing.T) {
 	}
 	if rec.Body.String() != string(chatBody) {
 		t.Errorf("body: want %q, got %q", chatBody, rec.Body.String())
+	}
+}
+
+// Same precedence proof as TestJobVideoServesFromPerJobOutputDirectory, for
+// the /chat site (serveChatJSON's caller resolves outputDir independently).
+func TestJobChatServesFromPerJobOutputDirectory(t *testing.T) {
+	f := newJobsFixture(t)
+	jobDir := t.TempDir()
+	chatBody := []byte(`{"messages":[{"text":"job dir chat"}]}`)
+	if err := os.WriteFile(filepath.Join(jobDir, "chat.json"), chatBody, 0o644); err != nil {
+		t.Fatalf("write chat: %v", err)
+	}
+	f.addJob(t, "yt_perjobdirchat", func(j *database.Job) {
+		j.ChatFilename = "chat.json"
+		j.OutputDirectory = jobDir
+	})
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_perjobdirchat/chat", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("serve chat from job.OutputDirectory: want 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != string(chatBody) {
+		t.Errorf("body: want %q (from job.OutputDirectory, not the config dir), got %q", chatBody, rec.Body.String())
 	}
 }
 

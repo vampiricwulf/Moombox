@@ -53,6 +53,31 @@ func TestResumeKeepsFileEpochOverNewOptions(t *testing.T) {
 	if got.StreamStartTime != sched {
 		t.Errorf("header streamStartTime = %q, want the original %q", got.StreamStartTime, sched)
 	}
+
+	// Run 3: a saveResume regression that persists the OPTIONS epoch instead
+	// of cd.streamStartMs would be invisible after run 2 alone — run 2's
+	// in-memory offset is computed from cd.streamStartMs directly, not from
+	// what saveResume wrote. Only a THIRD restart, which loads run 2's
+	// sidecar, exposes it: it must still adopt the run-1 scheduled epoch, not
+	// run 2's actual-start options.
+	third := "2026-06-11T10:20:00Z"
+	cd3 := NewChatDownloader(ChatDownloaderOptions{
+		VideoID: "vidEpoch", OutputFile: out, InitialContinuation: "tok2", ApiKey: "k",
+		IsLiveOrUpcoming: true, StreamStartTime: third,
+	})
+	cd3.testRecoveryOverride = func(context.Context) bool { return false }
+	startWithScript(t, cd3, chatResponseWithIDs([]string{"m3"}, ""))
+
+	got3 := readChatFileHeader(t, out)
+	if len(got3.Messages) != 3 {
+		t.Fatalf("want 3 messages after run 3, got %d", len(got3.Messages))
+	}
+	if want := testMsgUsec/1000 - schedMs; got3.Messages[2].OffsetMs != want {
+		t.Errorf("run-3 offset = %d, want %d (still the run-1 file epoch, not run 2's persisted sidecar)", got3.Messages[2].OffsetMs, want)
+	}
+	if state3, ok := readSidecar(t, out+".resume.json"); !ok || state3.StreamStartMs != schedMs {
+		t.Errorf("sidecar after run 3 streamStartMs = %d (present %v), want %d (saveResume must persist cd.streamStartMs, not the run's own options epoch)", state3.StreamStartMs, ok, schedMs)
+	}
 }
 
 // Same protection for the sidecar-less path: an adopted file's header epoch

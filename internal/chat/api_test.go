@@ -392,6 +392,8 @@ func TestParseNegativeTimestampText(t *testing.T) {
 		{"-5", 0, false},   // no colon — not a relative time
 		{"-x:y", 0, false},
 		{"", 0, false},
+		{"-1:02:03:04", 0, false}, // 4 components — only M:SS / H:MM:SS are valid
+		{"-1:-5", 0, false},       // per-component n < 0 guard
 	}
 	for _, c := range cases {
 		got, ok := parseNegativeTimestampText(c.in)
