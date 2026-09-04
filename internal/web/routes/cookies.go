@@ -339,11 +339,18 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 // disagree. Pinned by TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary.
 //
 //   - youtubeImport / twitchImport — what the import DID to that platform's
-//     rows: "imported", "rolled-back", "rejected", "unchanged" (or "unknown" on
-//     an exit that concluded nothing). The setup has no counterpart because a
-//     wizard finish has no paste to give back — it extracts from a browser the
-//     user just signed into, and there is no second generation of rows to
-//     choose between.
+//     rows: "imported", "rolled-back", "rejected" or "unchanged". The setup has
+//     no counterpart because a wizard finish has no paste to give back — it
+//     extracts from a browser the user just signed into, and there is no second
+//     generation of rows to choose between.
+//
+//     FOUR values on the wire, not five. ImportOutcome's zero value renders
+//     "unknown", and no response carries it: every exit that leaves the
+//     outcomes unset returns an error, and the handler answers all of those
+//     with jsonError before reaching this projection. The zero value is a guard
+//     inside the package (see ImportOutcome), not a state the dashboard has to
+//     have copy for — and if a future exit ever returns one on a 200, that is
+//     the bug, not a fifth case to render.
 //
 //     This is the key the toast could not be written without. After a rollback
 //     `authenticated` is TRUE and the verification is "ok" — correctly, because

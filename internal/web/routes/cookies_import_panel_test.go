@@ -266,6 +266,39 @@ func TestImportPanelSaysWhenThePasteWasGivenBack(t *testing.T) {
 	}
 }
 
+// TestImportPanelDoesNotClaimAWorkingSessionAfterAFailedRestore is the other
+// half of the rolled-back arm, and the reason its toast is guarded on
+// `accepted` rather than on the outcome alone.
+//
+// A rollback re-verifies what it KEPT, and that check can come back
+// not-accepted: the previous rows verified before the write and are rejected
+// after it, which is what an expiring session mid-import looks like. The
+// outcome is still "rolled-back" — the rows really were given back — but
+// nothing authenticates any more. Toasting "Moombox kept the working ones it
+// already had" beside the inline "No login detected. Try again." answers one
+// gesture twice, contradicting itself, and the inline half is the true one.
+//
+// The mutation: firing the toast on `outcome === "rolled-back"` alone.
+func TestImportPanelDoesNotClaimAWorkingSessionAfterAFailedRestore(t *testing.T) {
+	run := runImportPanel(t, map[string]any{
+		"ok":   true,
+		"text": "# Netscape HTTP Cookie File\n",
+		"body": map[string]any{
+			"success": true, "authenticated": false, "twitchAuthenticated": false,
+			"youtubeVerification": "failed", "twitchVerification": "failed",
+			"youtubeImport": "rolled-back", "twitchImport": "unchanged",
+		},
+	})
+	if len(run.toasts) != 0 {
+		t.Fatalf("toasts = %v, want none — nothing authenticates, so no toast may say a working "+
+			"session was kept", run.toasts)
+	}
+	if !strings.Contains(run.result, "No login detected") {
+		t.Errorf("inline result = %q, want the rejection message: it is the only true answer here",
+			run.result)
+	}
+}
+
 // TestImportPanelShowsTheServersRefusalInline. The three refusals are the whole
 // diagnostic value of the endpoint; a panel that renders "HTTP 422" throws it
 // away.

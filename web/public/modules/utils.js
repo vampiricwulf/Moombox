@@ -241,6 +241,14 @@ export function cookieSetupAcceptedToast(platformLabel, verification) {
  * "no login detected" sends the user looking for the wrong thing. An empty
  * profile reports "failed" for both platforms and still gets the original line.
  */
+export function cookieSetupRejectedMessage(verification) {
+  if (verification === "unknown") {
+    return "Cookies were saved, but Moombox could not establish whether they authenticate — " +
+      "they cannot form a signed-in request. Try signing in again.";
+  }
+  return "No login detected. Try again.";
+}
+
 /**
  * Word the toast for a platform whose pasted rows were REJECTED and given back.
  *
@@ -255,20 +263,17 @@ export function cookieSetupAcceptedToast(platformLabel, verification) {
  * the paste is still working, which is the whole point of the rollback; what
  * failed is the credential they supplied, and the next move is to export it
  * again from a browser that is still signed in.
+ *
+ * Only for a platform whose RESTORED credentials then verified. When they did
+ * not, the import left nothing working and the inline rejection message is the
+ * whole answer — see importCookies in settings.js, which is where that guard
+ * lives, because only the caller knows what the sibling platform did.
  */
 export function cookieImportRolledBackToast(platformLabel) {
   return {
     message: `${platformLabel} cookies were not accepted — they did not authenticate, so Moombox kept the working ones it already had`,
     variant: "warning",
   };
-}
-
-export function cookieSetupRejectedMessage(verification) {
-  if (verification === "unknown") {
-    return "Cookies were saved, but Moombox could not establish whether they authenticate — " +
-      "they cannot form a signed-in request. Try signing in again.";
-  }
-  return "No login detected. Try again.";
 }
 
 /**

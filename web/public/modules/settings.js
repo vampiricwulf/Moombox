@@ -2761,14 +2761,27 @@ export class SettingsController {
       //
       // Branches POSITIVELY on the string, so an older binary that omits the
       // key reads undefined and falls through to exactly today's copy.
-      const rolledBack = (label, outcome) => {
+      //
+      // TOASTED ONLY WHEN THE RESTORED CREDENTIALS THEN VERIFIED. A rollback
+      // re-checks what it kept, and that check can come back not-accepted —
+      // the previous rows verified before the write and were rejected after
+      // it, which happens when the session expires mid-import. "Moombox kept
+      // the working ones it already had" beside the inline "No login detected.
+      // Try again." is two contradictory answers to one gesture, and the
+      // inline one is the true half: nothing is working for that platform. The
+      // suppression of the ACCEPTED toast still happens either way (the return
+      // value), because that toast must never describe a paste that was
+      // thrown out.
+      const rolledBack = (label, outcome, accepted) => {
         if (outcome !== "rolled-back") return false;
-        const toast = cookieImportRolledBackToast(label);
-        this.app.showToast(toast.message, toast.variant);
+        if (accepted) {
+          const toast = cookieImportRolledBackToast(label);
+          this.app.showToast(toast.message, toast.variant);
+        }
         return true;
       };
-      const ytRolledBack = rolledBack("YouTube", data.youtubeImport);
-      const twRolledBack = rolledBack("Twitch", data.twitchImport);
+      const ytRolledBack = rolledBack("YouTube", data.youtubeImport, ytOk);
+      const twRolledBack = rolledBack("Twitch", data.twitchImport, twOk);
       if (ytOk || twOk) {
         // Accepted is not verified — the same three states the setup wizard
         // reports, rendered through the same helper, because a fourth phrasing
