@@ -1,7 +1,7 @@
 /**
  * Trim Controller — interactive video-based trim UI
  */
-import { formatTimestamp, isTypingInInput } from "./utils.js";
+import { formatTimestamp, isTypingInInput, safePlay } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 
 /**
@@ -370,7 +370,7 @@ export class TrimController {
   _togglePlay() {
     const video = this._el.video;
     if (video.paused) {
-      video.play();
+      safePlay(video);
     } else {
       video.pause();
     }

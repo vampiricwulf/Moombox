@@ -10,7 +10,11 @@ let jsdomMissing = null;
 try {
   await import("jsdom");
 } catch (e) {
-  jsdomMissing = `jsdom not installed — run \`npm ci\` in web/tests (${e.code || e.message})`;
+  // ONLY an absent module is a skip. Any other import failure — a half-written
+  // install, a syntax error inside jsdom — must fail loudly instead of turning
+  // twelve DOM tests into a green "skipped" line nobody reads.
+  if (e.code !== "ERR_MODULE_NOT_FOUND") throw e;
+  jsdomMissing = `jsdom not installed — run \`npm ci\` in web/tests (${e.code})`;
 }
 // Imported only when jsdom is present, so a real fault in the helper is a
 // failure, not a silent skip.
@@ -272,6 +276,18 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   assert.equal(new Set(tops).size, 17, "every placed message got its own row");
   assert.deepEqual(tops.slice(0, 3), ["0px", "24px", "48px"]);
   assert.equal(h.player.nicoDropped, 0, "deferred is not dropped");
+
+  // The animation's finish callback is the overlay's only cleanup path: it has
+  // to drop the animation from _nicoAnims (which pause/play/ratechange all
+  // iterate) and take the element off the stage. Leaking either would grow both
+  // for the length of the video.
+  assert.equal(h.player._nicoAnims.size, 17);
+  const firstAnim = h.anims[0];
+  const firstEl = firstAnim.el;
+  firstAnim.finish();
+  assert.equal(h.player._nicoAnims.size, 16, "a finished animation leaves the set");
+  assert.equal(firstEl.isConnected, false, "and its element leaves the stage");
+  assert.equal(overlay.children.length, 16);
 
   // 2.1 s later the deferred three are past NICO_MAX_LATENESS_MS. They arrived
   // after the anchor, so they are real drops and are reported.
@@ -541,5 +557,162 @@ test("a job selection that throws is logged and hands focus back to the player",
   // Without the catch this is an unhandled rejection; without the finally the
   // keyboard stays on the select, where every player shortcut is swallowed.
   assert.match(errors.at(-1) ?? "", /job select failed boom/);
-  assert.notEqual(h.document.activeElement, select, "focus left the select");
+  assert.equal(h.document.activeElement, h.el("player-video-wrapper"),
+    "focus landed on the player surface, not merely somewhere off the select");
+});
+
+// ── 12. Overlay toggled off, then back on (final review, F1) ────────────────
+
+// `seeked`, the offset input/reset and `visibilitychange` re-seed the overlay
+// cursor whether or not the overlay is enabled, and no tick runs while it is
+// off. Toggling back on therefore used to start from a seed made a whole
+// playback gap ago: the first enabled tick walked every message since and
+// charged it to the drop pill (the review's probe: +873 "not shown").
+test("toggling the overlay back on re-seeds instead of charging the gap", { skip }, async () => {
+  // 15 msg/s for 80 s — the rate the review's probe used.
+  const messages = Array.from({ length: 80 * 15 },
+    (_, i) => msg(Math.round((i * 1000) / 15), `m${i}`, `u${i}`));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf(messages),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+  const nicoToggle = h.el("player-nico-toggle");
+
+  h.key("c");                                     // overlay OFF
+  assert.equal(nicoToggle.checked, false);
+  assert.equal(h.player.nicoCursor, -1, "toggling off un-anchors");
+
+  // A seek re-seeds even with the overlay off — this is the stale seed.
+  h.seek(10000);
+  assert.ok(h.player.nicoCursor > 0, "the seek seeded a cursor nothing will consume");
+
+  // A minute of playback with nothing on stage.
+  h.tick(70000);
+  assert.equal(h.overlay().children.length, 0, "nothing spawns while the overlay is off");
+
+  h.key("c");                                     // overlay ON
+  assert.equal(nicoToggle.checked, true);
+
+  h.tick(70250);
+  assert.equal(h.player.nicoDropped, 0, "the gap crossed while the overlay was off is not a drop");
+  assert.equal(h.el("player-nico-dropped").hidden, true, "no pill");
+  assert.ok(h.overlay().children.length > 0, "and the overlay resumes at the current time");
+});
+
+// ── 13. Job switch during a slow chat fetch (final review, F2 / R27) ────────
+
+// The resume dialog seeks BEFORE the new job's chat is fetched, so a `seeked`
+// lands while playerChatMessages is still empty: the re-anchor seeds cursor 0
+// with the anchor at the seek target. Once the chat arrives every message is
+// newer than that anchor, and the closing _updateNicoGeometry cannot rescue it
+// — the previous job committed the same stage, so it returns early (R11).
+test("a seek during a slow chat fetch does not make the arriving chat look dropped", { skip }, async () => {
+  // 15 msg/s across a 20 s window either side of the seek target (3600 s).
+  const messages = Array.from({ length: 20 * 15 },
+    (_, i) => msg(3590000 + Math.round((i * 1000) / 15), `m${i}`, `u${i}`));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" }), finished("j2", { chatFilename: "chat.json" })],
+    watchState: {},
+    chatById: { j1: chatOf([msg(0, "hi")]) },
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "true" },
+  });
+
+  // j1 first: it commits the stage geometry j2 will be measured against.
+  await h.selectJob("j1");
+  assert.equal(h.player._nicoGeo.rows, 17);
+  assert.equal(h.sidebar().children.length, 1);
+
+  // j2's chat headers arrive at once; its BODY resolves only when we say so.
+  const deferred = h.http.deferBody("GET /api/jobs/j2/chat");
+  const pending = h.player.onPlayerJobSelect("j2");
+  for (let i = 0; i < 6; i++) await h.flush();     // park on `await res.json()`
+
+  // The previous job's rows and count are gone for the whole fetch window
+  // (R27b) — a half-cleared sidebar would show j1's messages under j2's title.
+  assert.equal(h.sidebar().children.length, 0, "the previous job's rows are cleared");
+  assert.equal(h.el("player-sidebar-msg-count").textContent, "0 messages",
+    "and the header agrees with them");
+
+  // The resume dialog's seek, mid-fetch.
+  h.seek(3600000);
+  assert.equal(h.player.nicoCursor, 0, "seeded on the still-empty array");
+
+  deferred.resolve(chatOf(messages));
+  await pending;
+  await h.flush();
+
+  h.tick(3603250);
+  assert.equal(h.player.nicoDropped, 0, "the chat that arrived after the seek is not dropped");
+  assert.equal(h.el("player-nico-dropped").hidden, true, "no pill");
+});
+
+// ── 14. Per-part chat merge (final review, F7) ──────────────────────────────
+
+// A multi-part Twitch job stores one chat file per part, each with offsets
+// relative to ITS OWN part. The player fetches them all and shifts each by the
+// part's start offset; only a job without per-part files falls back to the
+// job-level /chat route.
+test("a multi-part job's chat comes from the per-part files, shifted onto the global timeline", { skip }, async () => {
+  const job = finished("j1", {
+    segments: [
+      { segmentIndex: 0, durationSeconds: 60, quality: "720p", chatFile: "p0.chat.json" },
+      { segmentIndex: 1, durationSeconds: 60, quality: "720p", chatFile: "p1.chat.json" },
+    ],
+  });
+  const h = harness.makePlayer({
+    jobs: [job],
+    watchState: {},
+    segmentChatById: {
+      "j1/0": chatOf([msg(5000, "a")]),
+      "j1/1": chatOf([msg(1000, "b")]),
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [5000, 61000],
+    "part 1's offsets are shifted by its 60 s start offset");
+  assert.equal(h.el("player-sidebar-msg-count").textContent, "2 messages");
+  assert.equal(h.sidebar().children.length, 2);
+  assert.equal(h.http.matching("/api/jobs/j1/segments/0/chat").length, 1);
+  assert.equal(h.http.matching("/api/jobs/j1/segments/1/chat").length, 1);
+  assert.equal(h.http.matching("/api/jobs/j1/chat").length, 0,
+    "the job-level chat route is not touched when the parts have their own");
+});
+
+// ── 15. Deferred placement retried at the current time (final review, F8) ───
+
+// R21: an entry that found no free lane is retried on a later tick at the
+// CURRENT time, not at its own (long past) timestamp — re-asking at the
+// message's own time could never succeed, because lane occupancy only ever
+// grows newer, and the entry would sit pending until it aged out as a drop.
+test("a deferred overlay message is placed on a later tick, at the right edge", { skip }, async () => {
+  const messages = Array.from({ length: 20 }, (_, i) => msg(1000, `m${i}`, `u${i}`));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf(messages),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+
+  h.tick(1000);
+  assert.equal(h.overlay().children.length, 17, "17 rows filled");
+  assert.equal(h.player._nicoPending.length, 3, "the overflow is deferred, not dropped");
+
+  // 800 ms later lane 0's leader has cleared the spawn edge (4000·200/1480 +
+  // 150 = 690 ms), so the three pending entries fit — at 1800, their own
+  // 1000 ms would still be refused by every lane.
+  h.tick(1800);
+  assert.equal(h.overlay().children.length, 20, "the deferred three are on stage");
+  assert.equal(h.player._nicoPending.length, 0);
+  assert.equal(h.player.nicoDropped, 0, "and none of them aged out");
+  assert.deepEqual(h.anims.slice(-3).map((a) => a.currentTime), [0, 0, 0],
+    "a retry spawns at the right edge rather than mid-flight");
 });

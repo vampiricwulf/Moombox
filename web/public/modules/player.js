@@ -34,6 +34,21 @@ function announcementColorClass(color) {
   return ANNOUNCEMENT_COLORS.has(color) ? color : "primary";
 }
 
+/**
+ * Hand the keyboard to the player surface after a job has been selected: off
+ * the picker (where every shortcut is swallowed) and onto the video wrapper,
+ * so Space/arrows/F/M/C/S work without the user clicking the video first. Both
+ * ways into a selection — the picker's own `sl-change` and "Open in Player" on
+ * the job details — call this, so they behave identically. The wrapper lives
+ * inside #player-viewport, which is only revealed once the job data is in, so
+ * this must run AFTER onPlayerJobSelect resolves: a hidden element cannot take
+ * focus.
+ */
+export function focusPlayerSurface() {
+  document.getElementById("player-job-select")?.blur();
+  document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
+}
+
 export class PlayerController {
   constructor(app) {
     this.app = app;
@@ -125,21 +140,16 @@ export class PlayerController {
       if (this._rebuildsActive > 0) return;
       const val = jobSelect.value;
       if (val) {
-        // Await the load — the wrapper is inside #player-viewport, which
-        // onPlayerJobSelect only reveals once the job data is in; a hidden
-        // element can't take focus. Then move focus off the select so player
-        // shortcuts (Space, arrows, F/M/C/S) work immediately, without the
-        // user having to click the video first. The focus move is in a
-        // `finally`: a load that throws must not leave the keyboard parked on
-        // the select, where every shortcut is swallowed and the user cannot
-        // tell why.
+        // Await the load, then hand the keyboard over (see
+        // focusPlayerSurface). In a `finally`: a load that throws must not
+        // leave focus parked on the select, where every shortcut is swallowed
+        // and the user cannot tell why.
         try {
           await this.onPlayerJobSelect(val);
         } catch (e) {
           console.error("player: job select failed", e?.message ?? e);
         } finally {
-          jobSelect.blur();
-          document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
+          focusPlayerSurface();
         }
       } else {
         this.clearPlayer();
@@ -174,6 +184,14 @@ export class PlayerController {
       const overlay = document.getElementById("player-nico-overlay");
       overlay.style.display = this.nicoEnabled ? "" : "none";
       if (this.nicoEnabled) {
+        // Un-anchor BEFORE measuring. `seeked`, the offset input/reset and
+        // `visibilitychange` all re-seed the cursor whether or not the overlay
+        // is on, so any seed sitting here was made while nothing was ticking.
+        // Keeping it would make the first enabled tick walk the whole gap and
+        // count every message newer than that stale anchor as dropped (and the
+        // re-measure below cannot save us: an unchanged stage returns early).
+        // The next tick lazily re-anchors at the current time.
+        this.nicoCursor = -1;
         // Measure now that the overlay is visible — geometry updates are refused
         // while it is display:none, so without this the first tick after the
         // toggle would run on stale (or missing) geometry. Immediate: the user
@@ -696,9 +714,12 @@ export class PlayerController {
       block.className = "segment-indicator-block";
       block.style.width = `${pct}%`;
       block.style.background = colors[i % colors.length];
-      block.title = `Segment ${i}: ${seg.quality} (${Math.round(seg.durationSeconds || 0)}s)`;
-      block.setAttribute("aria-label", `Seek to segment ${i + 1}, ${seg.quality}`);
-      block.textContent = seg.quality || `Seg ${i}`;
+      // One numbering (1-based) and one label across title, accessible name and
+      // visible text: a screen reader and the eye must name the same block.
+      const label = seg.quality || `Seg ${i + 1}`;
+      block.title = `Segment ${i + 1}: ${label} (${Math.round(seg.durationSeconds || 0)}s)`;
+      block.setAttribute("aria-label", `Seek to segment ${i + 1}, ${label}`);
+      block.textContent = label;
       block.addEventListener("click", () => {
         this.seekToGlobalTime(seg.startOffset);
       });
@@ -842,6 +863,11 @@ export class PlayerController {
     this._chatParts = null;
     this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
+    // Rows and header are one state: dropping the array alone would leave the
+    // previous job's messages on screen under the previous job's count for the
+    // whole fetch window. buildSidebarChat rebuilds both once the chat is in.
+    document.getElementById("player-sidebar-messages").replaceChildren();
+    this._updateSidebarHeader();
     this.clearNicoOverlay();
     this.nicoCursor = -1;
     this._resetNicoDropCount();
@@ -941,6 +967,15 @@ export class PlayerController {
     // source swap and nothing can have spawned since (the message array was
     // empty for the whole fetch window), so there is nothing to clear here.
     this.buildSidebarChat();
+
+    // Un-anchor again: a `seeked` inside the fetch window (the resume dialog
+    // seeks BEFORE the chat arrives) re-seeded the cursor on the then-EMPTY
+    // array, which leaves it at 0 with the anchor at the seek target. The
+    // messages that just landed are all newer than that anchor, so the first
+    // tick would walk the whole file up to `now` and count the gap as dropped.
+    // _updateNicoGeometry below cannot undo it — an unchanged stage returns
+    // early — so drop the seed here and let the next tick anchor lazily.
+    this.nicoCursor = -1;
 
     // Load saved custom chat offset (from watch-state response, already on playerJob)
     this._applyOffsetUI(this.playerJob.chatOffset || 0);

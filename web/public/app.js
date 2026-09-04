@@ -3,7 +3,7 @@
  */
 import { SetupController } from "./modules/setup.js";
 import { ImportController } from "./modules/imports.js";
-import { PlayerController } from "./modules/player.js";
+import { PlayerController, focusPlayerSurface } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
@@ -3295,7 +3295,11 @@ class MoomboxApp {
     this.player.loadPlayerJobList().then(() => {
       const select = document.getElementById("player-job-select");
       select.value = jobId;
-      this.player.onPlayerJobSelect(jobId);
+      // Returned so the .catch below covers the selection as well, and so the
+      // caller can await the whole hand-off. The focus move is the same one
+      // the picker's own sl-change handler makes, in a `finally` for the same
+      // reason: a load that throws must not leave focus on the select.
+      return this.player.onPlayerJobSelect(jobId).finally(focusPlayerSurface);
     }).catch(() => {}).finally(() => {
       this._playerOpeningFromDetails = false;
     });

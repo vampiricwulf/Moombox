@@ -255,6 +255,12 @@ const DEFAULT_GEOM = {
   rowH: 24,
   /** Width of one `.nico-message`, i.e. what the lane allocator is given. */
   msgW: 200,
+  /**
+   * Height of one `.nico-message`. Left undefined so it follows `rowH`: a test
+   * overrides it only to make a message TALLER than one row, which is how
+   * `_placeEntry` is driven into asking for more than one lane.
+   */
+  msgH: undefined,
   /** Height of one `.chat-msg` sidebar row; also drives its offsetTop. */
   chatRowH: 20,
   /** #player-sidebar-messages' clientHeight/width. */
@@ -277,11 +283,17 @@ const ZERO = { w: 0, h: 0, left: 0, top: 0 };
  * @param {object} [opts.chat]        GET /api/jobs/:id/chat fallback
  * @param {object} [opts.chatById]
  * @param {object} [opts.segmentChatById]  GET /api/jobs/:id/segments/:i/chat, keyed "id/i"
- * @param {object} [opts.geom]        layout overrides (see DEFAULT_GEOM)
+ * @param {object} [opts.geom]        layout overrides (see DEFAULT_GEOM; `msgH`
+ *                                    defaults to `rowH` when left unset)
  * @param {object} [opts.storage]     localStorage seed, applied BEFORE initPlayer
  * @param {boolean}[opts.reducedMotion] make the reduce-motion media query match
  */
 export function makePlayer(opts = {}) {
+  // One player is live at a time (one per test), so close the previous window
+  // here instead of holding every jsdom instance of the run open until
+  // teardownAll. Each makePlayer republishes its own globals, so nothing that
+  // is still running can be pointing at the window being closed.
+  closeOpenWindows();
   const geom = { ...DEFAULT_GEOM, ...(opts.geom || {}) };
   const dom = new JSDOM(`<!doctype html><html><body></body></html>`, {
     url: "http://localhost/",
@@ -352,9 +364,11 @@ export function makePlayer(opts = {}) {
   defineBacked(mp, "duration", NaN);   // NaN = metadata not in, like a real unloaded element
   // jsdom loads no media, so its readyState is permanently HAVE_NOTHING (0) —
   // which spawnNicoMessages reads as "no frame to sync to" and returns on.
-  // Default to HAVE_ENOUGH_DATA so a tick means what the tests mean by it; a
+  // Default to HAVE_CURRENT_DATA (2): exactly what that guard demands, so a
+  // mutant that tightens it to HAVE_ENOUGH_DATA fails the suite instead of
+  // passing under a default two levels more generous than the real minimum. A
   // test that wants the unloaded case sets `h.video.readyState = 0`.
-  defineBacked(mp, "readyState", 4);
+  defineBacked(mp, "readyState", 2);
   defineBacked(mp, "paused", true);
   defineBacked(mp, "ended", false);
   defineBacked(mp, "playbackRate", 1);
@@ -548,12 +562,16 @@ function installGlobals(window, { http, clock, rafQueue, nextRafId }) {
   window.cancelAnimationFrame = globalThis.cancelAnimationFrame;
 }
 
+function closeOpenWindows() {
+  for (const w of openWindows.splice(0)) {
+    try { w.close(); } catch { /* already closed */ }
+  }
+}
+
 /** Restore the timer globals and close every jsdom window the suite opened. */
 export function teardownAll() {
   for (const [name, fn] of Object.entries(REAL)) {
     if (fn !== undefined) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: fn });
   }
-  for (const w of openWindows.splice(0)) {
-    try { w.close(); } catch { /* already closed */ }
-  }
+  closeOpenWindows();
 }
