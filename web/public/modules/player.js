@@ -86,6 +86,8 @@ export class PlayerController {
     this._seg = new SegmentPlayer();
     /** Monotonic counter to detect stale responses from rapid job switching */
     this._selectionSeq = 0;
+    /** True while loadPlayerJobList is rebuilding sl-options — guards the sl-change listener against a synthetic event firing mid-rebuild */
+    this._rebuildingOptions = false;
 
     // Watch state tracking
     this._watchSaveInterval = null;
@@ -112,6 +114,7 @@ export class PlayerController {
 
     // Job selection
     jobSelect.addEventListener("sl-change", () => {
+      if (this._rebuildingOptions) return;
       const val = jobSelect.value;
       if (val) {
         this.onPlayerJobSelect(val);
@@ -663,39 +666,34 @@ export class PlayerController {
         .filter((j) => j.status === "Finished" && j.filename)
         .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 
-      // If a video is actively playing, only update the selection state
-      // without rebuilding options (removing options triggers sl-change which
-      // can interrupt playback via clearPlayer).
-      const isPlaying = this.playerJob && document.getElementById("player-video")?.src;
-      if (isPlaying) {
-        // Ensure current job still exists; if not, clear the player
-        // and fall through to rebuild options (clearPlayer is idempotent
-        // so any sl-change from option removal is harmless).
-        if (currentValue && !all.some((j) => j.id === currentValue)) {
-          this.clearPlayer();
-        } else {
-          return;
-        }
+      // The currently loaded job disappeared (deleted, or its id changed via
+      // re-import) — clear the player instead of leaving a dangling selection.
+      if (currentValue && !all.some((j) => j.id === currentValue)) {
+        this.clearPlayer();
       }
 
-      // Remove existing options
-      select.querySelectorAll("sl-option").forEach((o) => o.remove());
+      // Rebuild the option list even while a video is playing: removing/adding
+      // sl-options does not itself emit sl-change in Shoelace 2.16 (verified —
+      // only user-driven paths emit it), so this never interrupts playback.
+      // Guard against any synthetic sl-change firing mid-rebuild anyway.
+      this._rebuildingOptions = true;
+      try {
+        select.querySelectorAll("sl-option").forEach((o) => o.remove());
 
-      all.forEach((job) => {
-        const opt = document.createElement("sl-option");
-        opt.value = job.id;
-        const noChat = !job.chatFilename ? " (no chat)" : "";
-        opt.textContent = `${job.title} — ${job.channelName}${noChat}`;
-        select.appendChild(opt);
-      });
+        all.forEach((job) => {
+          const opt = document.createElement("sl-option");
+          opt.value = job.id;
+          const noChat = !job.chatFilename ? " (no chat)" : "";
+          opt.textContent = `${job.title} — ${job.channelName}${noChat}`;
+          select.appendChild(opt);
+        });
 
-      // Wait for Shoelace to register new options before restoring selection
-      if (select.updateComplete) {
-        await select.updateComplete.catch(() => {});
-      }
+        // Wait for Shoelace to register new options before restoring selection
+        if (select.updateComplete) await select.updateComplete.catch(() => {});
 
-      if (currentValue && all.some((j) => j.id === currentValue)) {
-        select.value = currentValue;
+        if (currentValue && all.some((j) => j.id === currentValue)) select.value = currentValue;
+      } finally {
+        this._rebuildingOptions = false;
       }
 
       // Show/hide empty state
