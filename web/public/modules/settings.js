@@ -3,6 +3,7 @@
  */
 import {
   browserPathValidationOutcome,
+  cookieImportRolledBackToast,
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
   cookieSetupProbe,
@@ -2751,15 +2752,32 @@ export class SettingsController {
 
       const ytOk = data.authenticated;
       const twOk = data.twitchAuthenticated;
+      // A platform whose pasted rows were rejected and given back. Reported
+      // FIRST and independently of the accepted branch below, because after a
+      // rollback every other field says success: the restored credentials are
+      // the ones that were verified, so `authenticated` is true and the
+      // verification reads "ok". Without this arm the operator is told
+      // "YouTube cookies configured" over a paste that was thrown out.
+      //
+      // Branches POSITIVELY on the string, so an older binary that omits the
+      // key reads undefined and falls through to exactly today's copy.
+      const rolledBack = (label, outcome) => {
+        if (outcome !== "rolled-back") return false;
+        const toast = cookieImportRolledBackToast(label);
+        this.app.showToast(toast.message, toast.variant);
+        return true;
+      };
+      const ytRolledBack = rolledBack("YouTube", data.youtubeImport);
+      const twRolledBack = rolledBack("Twitch", data.twitchImport);
       if (ytOk || twOk) {
         // Accepted is not verified — the same three states the setup wizard
         // reports, rendered through the same helper, because a fourth phrasing
         // of "saved, but we could not check them" is how the copy drifts.
-        if (ytOk) {
+        if (ytOk && !ytRolledBack) {
           const toast = cookieSetupAcceptedToast("YouTube", data.youtubeVerification);
           this.app.showToast(toast.message, toast.variant);
         }
-        if (twOk) {
+        if (twOk && !twRolledBack) {
           const toast = cookieSetupAcceptedToast("Twitch", data.twitchVerification);
           this.app.showToast(toast.message, toast.variant);
         }

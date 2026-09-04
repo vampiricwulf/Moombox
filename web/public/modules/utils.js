@@ -241,6 +241,28 @@ export function cookieSetupAcceptedToast(platformLabel, verification) {
  * "no login detected" sends the user looking for the wrong thing. An empty
  * profile reports "failed" for both platforms and still gets the original line.
  */
+/**
+ * Word the toast for a platform whose pasted rows were REJECTED and given back.
+ *
+ * The state every other field in the payload misreports. After a rollback the
+ * platform authenticates and its verification reads "ok" — truthfully, because
+ * the previous credentials are in force and they work — so
+ * cookieSetupAcceptedToast would say "YouTube cookies configured" in green over
+ * a paste Moombox threw out, and the operator would go away believing the
+ * import landed.
+ *
+ * Warning, not danger: nothing is broken. The session that was working before
+ * the paste is still working, which is the whole point of the rollback; what
+ * failed is the credential they supplied, and the next move is to export it
+ * again from a browser that is still signed in.
+ */
+export function cookieImportRolledBackToast(platformLabel) {
+  return {
+    message: `${platformLabel} cookies were not accepted — they did not authenticate, so Moombox kept the working ones it already had`,
+    variant: "warning",
+  };
+}
+
 export function cookieSetupRejectedMessage(verification) {
   if (verification === "unknown") {
     return "Cookies were saved, but Moombox could not establish whether they authenticate — " +

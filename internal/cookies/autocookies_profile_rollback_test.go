@@ -785,7 +785,7 @@ func TestPlatformsToRestoreAfterBrowserRefreshIgnoresAPlatformAbsentFromPre(t *t
 	post := map[string]platformAuth{
 		"youtube": {hasCookies: true, state: verifyFailed, attempted: true},
 	}
-	if restore := platformsToRestoreAfterBrowserRefresh(pre, post); len(restore) != 0 {
+	if restore := platformsToRestoreOnRegression(pre, post); len(restore) != 0 {
 		t.Errorf("a platform absent from pre must never be restored, got %v", restore)
 	}
 }

@@ -2410,13 +2410,15 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// (no cookies.txt yet) costs no extra round trips. On the browser path the
 	// cost is two verification round trips per pass on an install that already
 	// has credentials: the price of not silently destroying them.
+	//
+	// snapshotPlatformAuth is shared with ImportCookies, which is the same
+	// question about the same file. Its `protected` half is DISCARDED here on
+	// purpose: this path has always gone on to use a snapshot taken over a jar
+	// that could not be reloaded, and the extraction changes nothing about
+	// that. The import path, which has no such history, gates on it.
 	pre := map[string]platformAuth{}
 	if previousCookies != "" {
-		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
-			s.logger.Warn("could not load existing cookies before the refresh — rollback protection is off", "err", loadErr)
-		}
-		preYT, preTW := s.checkPlatformAuth(ctx)
-		pre["youtube"], pre["twitch"] = preYT, preTW
+		pre, _ = s.snapshotPlatformAuth(ctx, "refresh")
 	}
 
 	// What we believed we held going in, and what this pass actually brought
@@ -2502,7 +2504,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// takes the regression arm ONLY: it has just re-fetched from the live
 	// site, so a check that could not reach the network afterwards is evidence
 	// about the network, and restoring on it would discard a fresher set on
-	// every blip. See platformsToRestoreAfterBrowserRefresh for the full
+	// every blip. See platformsToRestoreOnRegression for the full
 	// argument.
 	//
 	// This comment used to say the browser path needed no rollback at all,
@@ -2515,7 +2517,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// question "why did we reject the new cookies" can only be answered by the
 	// check that rejected them. See rollbackWasInconclusive.
 	importCheck := map[string]platformAuth{"youtube": postYT, "twitch": postTW}
-	restorePolicy := platformsToRestoreAfterBrowserRefresh
+	restorePolicy := platformsToRestoreOnRegression
 	if importedFromProfile {
 		restorePolicy = platformsToRestore
 	}

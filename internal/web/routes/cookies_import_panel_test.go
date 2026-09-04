@@ -225,6 +225,47 @@ func TestImportPanelHedgesWhenTheCheckCouldNotConclude(t *testing.T) {
 	}
 }
 
+// TestImportPanelSaysWhenThePasteWasGivenBack is the UI half of the rollback:
+// the server verified the pasted rows, rejected them, restored the previous
+// ones and re-verified THOSE — so `authenticated` is true and the verification
+// reads "ok", truthfully, about credentials the operator did not paste.
+//
+// Every field the panel read before this change therefore says success. The
+// only thing that says otherwise is youtubeImport, and a panel that ignores it
+// toasts "YouTube cookies configured" in green over a paste that was thrown
+// out — the operator closes the dialog believing their re-authentication
+// landed, and finds out at the next members-only stream.
+//
+// The mutation: dropping the rolled-back arm, or keeping it and still firing
+// the accepted toast beside it (two contradictory toasts for one platform).
+func TestImportPanelSaysWhenThePasteWasGivenBack(t *testing.T) {
+	run := runImportPanel(t, map[string]any{
+		"ok":   true,
+		"text": "# Netscape HTTP Cookie File\n",
+		"body": map[string]any{
+			"success": true, "authenticated": true, "twitchAuthenticated": false,
+			"youtubeVerification": "ok", "twitchVerification": "failed",
+			"youtubeImport": "rolled-back", "twitchImport": "unchanged",
+		},
+	})
+	if len(run.toasts) != 1 {
+		t.Fatalf("toasts = %v, want exactly one — the rolled-back toast, and NOT the accepted one "+
+			"beside it", run.toasts)
+	}
+	msg, _ := run.toasts[0]["message"].(string)
+	if !strings.Contains(msg, "YouTube") || !strings.Contains(msg, "kept the working ones") {
+		t.Errorf("toast = %q, want the copy that says the paste was refused and the previous "+
+			"credentials kept", msg)
+	}
+	if strings.Contains(msg, "configured") {
+		t.Errorf("toast = %q — that is the accepted copy, over a paste that was rolled back", msg)
+	}
+	if v, _ := run.toasts[0]["variant"].(string); v != "warning" {
+		t.Errorf("variant = %q, want warning: nothing is broken — the session that worked before the "+
+			"paste is still working", v)
+	}
+}
+
 // TestImportPanelShowsTheServersRefusalInline. The three refusals are the whole
 // diagnostic value of the endpoint; a panel that renders "HTTP 422" throws it
 // away.

@@ -137,7 +137,16 @@ func TestCookieImportRouteWritesAndAnswersWithTheVerdict(t *testing.T) {
 // one and not the other is the junction defect this file keeps finding: the
 // import's UI silently reads `undefined` and hedges about a working session.
 //
-// The mutation: renaming or adding a key in either renderer.
+// A SUPERSET, not an equality, since the import gained a per-platform outcome
+// the setup has no counterpart for (a wizard finish has no paste to give back —
+// see cookieImportOutcome). The claim the equality was making is preserved
+// exactly: every setup key is still present under its own name, and the only
+// keys allowed to differ are the ones cookieImportOnlyKeys names, so a key
+// added to one renderer and forgotten in the other still fails here.
+//
+// The mutation: renaming a shared key in either renderer, or adding a key to
+// either without deciding — here, in cookieImportOnlyKeys — whether it is
+// shared.
 func TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary(t *testing.T) {
 	keys := func(m map[string]any) []string {
 		out := make([]string, 0, len(m))
@@ -147,11 +156,26 @@ func TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary(t *testing.T) {
 		sort.Strings(out)
 		return out
 	}
-	got := keys(cookieImportOutcome(cookies.ImportResult{}))
+	importKeys := cookieImportOutcome(cookies.ImportResult{})
+	shared := map[string]any{}
+	var extra []string
+	for k, v := range importKeys {
+		if cookieImportOnlyKeys[k] {
+			extra = append(extra, k)
+			continue
+		}
+		shared[k] = v
+	}
+	sort.Strings(extra)
+	got := keys(shared)
 	want := keys(cookieSetupOutcome(cookies.SetupResult{}))
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("cookieImportOutcome keys = %v, cookieSetupOutcome keys = %v — the two must stay "+
-			"identical so the dashboard's copy helpers read both", got, want)
+		t.Errorf("cookieImportOutcome's shared keys = %v, cookieSetupOutcome keys = %v — the two must "+
+			"stay identical so the dashboard's copy helpers read both", got, want)
+	}
+	if strings.Join(extra, ",") != "twitchImport,youtubeImport" {
+		t.Errorf("the import-only keys are %v — cookieImportOnlyKeys and the renderer disagree about "+
+			"which keys the setup has no counterpart for", extra)
 	}
 }
 

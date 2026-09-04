@@ -329,14 +329,30 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 // cookieImportOutcome renders one operator-supplied cookie import onto the
 // wire.
 //
-// The KEY SET IS cookieSetupOutcome's, exactly, and that is the point rather
-// than a coincidence: the two answer the same question about the same three
-// states, the dashboard already has copy for it (cookieSetupAcceptedToast /
-// cookieSetupRejectedMessage in web/public/modules/utils.js), and a fourth
-// phrasing of "saved, but we could not check them" is how the copy drifts
-// apart. See cookieSetupOutcome for what each key means and why `authenticated`
-// and `*Verification` can disagree. Pinned by
-// TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary.
+// The KEY SET IS cookieSetupOutcome's, PLUS the per-platform import outcome,
+// and the shared half is the point rather than a coincidence: the two answer
+// the same question about the same three states, the dashboard already has copy
+// for it (cookieSetupAcceptedToast / cookieSetupRejectedMessage in
+// web/public/modules/utils.js), and a fourth phrasing of "saved, but we could
+// not check them" is how the copy drifts apart. See cookieSetupOutcome for what
+// each shared key means and why `authenticated` and `*Verification` can
+// disagree. Pinned by TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary.
+//
+//   - youtubeImport / twitchImport — what the import DID to that platform's
+//     rows: "imported", "rolled-back", "rejected", "unchanged" (or "unknown" on
+//     an exit that concluded nothing). The setup has no counterpart because a
+//     wizard finish has no paste to give back — it extracts from a browser the
+//     user just signed into, and there is no second generation of rows to
+//     choose between.
+//
+//     This is the key the toast could not be written without. After a rollback
+//     `authenticated` is TRUE and the verification is "ok" — correctly, because
+//     the previous credentials are in force and they work — so every existing
+//     key says success while the operator's paste was thrown out. Additive, by
+//     the precedent `renewed` and `ran`/`verdict` set: an older frontend ignores
+//     it and behaves as it did, and the new frontend branches POSITIVELY on
+//     "rolled-back", so against an older binary it reads undefined and falls
+//     back to today's copy.
 //
 // Deliberately NOT carrying a cookieStatus block. That comes from
 // RefreshService.GetStatus, whose pass has not run yet at the moment this is
@@ -351,8 +367,17 @@ func cookieImportOutcome(result cookies.ImportResult) map[string]any {
 		"twitchAuthenticated": result.TwitchAccepted,
 		"youtubeVerification": result.YouTube.String(),
 		"twitchVerification":  result.Twitch.String(),
+		"youtubeImport":       result.YouTubeOutcome.String(),
+		"twitchImport":        result.TwitchOutcome.String(),
 	}
 }
+
+// cookieImportOnlyKeys are the keys cookieImportOutcome carries that
+// cookieSetupOutcome has no counterpart for. Written down rather than inferred
+// so that adding a third one is a deliberate edit here and not a silent
+// widening of the two payloads' shared vocabulary. See cookieImportOutcome for
+// why these two exist and the setup's equivalents do not.
+var cookieImportOnlyKeys = map[string]bool{"youtubeImport": true, "twitchImport": true}
 
 // CookieRoutes registers cookie-related API routes. The optional rate
 // limiter wraps the headless-browser endpoints (/auto-refresh and the
