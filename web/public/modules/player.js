@@ -311,10 +311,7 @@ export class PlayerController {
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
-        const resetBtn = document.getElementById("player-chat-offset-reset");
-        if (resetBtn) {
-          resetBtn.style.display = this.playerCustomOffsetMs !== 0 ? "" : "none";
-        }
+        this._syncOffsetResetButton();
       });
 
       const persistOffset = () => {
@@ -341,8 +338,7 @@ export class PlayerController {
       });
 
       document.getElementById("player-chat-offset-reset")?.addEventListener("click", () => {
-        offsetInput.value = "";
-        this.playerCustomOffsetMs = 0;
+        this._applyOffsetUI(0);
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
         this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
@@ -353,13 +349,25 @@ export class PlayerController {
         if (this.playerJob) {
           fetch(`/api/jobs/${this.playerJob.id}/chat-offset`, { method: "DELETE" }).catch(() => {});
         }
-        const resetBtn = document.getElementById("player-chat-offset-reset");
-        if (resetBtn) resetBtn.style.display = "none";
       });
     }
 
     // Keyboard controls for player
     this.setupKeyboardControls();
+  }
+
+  /** Apply a persisted/cleared offset to state, input text and the reset button. */
+  _applyOffsetUI(seconds) {
+    const s = Number.isFinite(seconds) ? seconds : 0;
+    this.playerCustomOffsetMs = Math.round(s * 1000);
+    const input = document.getElementById("player-chat-offset");
+    if (input) input.value = s === 0 ? "" : String(s);
+    this._syncOffsetResetButton();
+  }
+
+  _syncOffsetResetButton() {
+    const btn = document.getElementById("player-chat-offset-reset");
+    if (btn) btn.style.display = this.playerCustomOffsetMs !== 0 ? "" : "none";
   }
 
   setupKeyboardControls() {
@@ -535,9 +543,7 @@ export class PlayerController {
     clearTimeout(this._nicoGeoSettle);
     this._nicoGeoSettle = null;
     this._resetNicoDropCount();
-    this.playerCustomOffsetMs = 0;
-    const offsetInput = document.getElementById("player-chat-offset");
-    if (offsetInput) offsetInput.value = "";
+    this._applyOffsetUI(0);
     const chatSearch = document.getElementById("chat-search");
     if (chatSearch && chatSearch.value) chatSearch.value = "";
 
@@ -846,16 +852,7 @@ export class PlayerController {
     this.clearNicoOverlay();
 
     // Load saved custom chat offset (from watch-state response, already on playerJob)
-    const offsetInput = document.getElementById("player-chat-offset");
-    if (offsetInput) {
-      offsetInput.value = "";
-      this.playerCustomOffsetMs = 0;
-      const savedOffset = this.playerJob.chatOffset;
-      if (savedOffset && savedOffset !== 0) {
-        offsetInput.value = savedOffset;
-        this.playerCustomOffsetMs = savedOffset * 1000;
-      }
-    }
+    this._applyOffsetUI(this.playerJob.chatOffset || 0);
 
     // Same rule as the nico toggle: the overlay's display was just decided, so
     // measure it now it is visible — a job switch that reveals a previously
