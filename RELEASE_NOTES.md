@@ -23,6 +23,7 @@
 
 ## Bug Fixes
 
+- An upcoming stream's waiting-room chat no longer loses its saved history when YouTube resets the chat after inactivity: the early-chat run keeps its resume state unless the stream actually ended, a run that finds the chat file without its sidecar adopts it and appends instead of replacing it, and the wait-for-live loop restarts an early chat whose run has ended (at most every five minutes) instead of leaving the room uncaptured until Moombox restarts.
 - **The automatic browser-based cookie refresh could report success without refreshing anything.** It exited as soon as it launched a browser, before that browser had actually finished, so a "successful" refresh could have renewed nothing at all. It now waits for the real browser process and reports success or failure per platform.
 - Fixed several ways a cookie refresh or save could silently destroy working credentials: a blank `Set-Cookie` response, a partial write, or a transient read error could each wipe out a cookie file that was still valid instead of leaving it alone.
 - Closing the cookie-setup browser window (or its tab) no longer leaves cookie acquisition stuck. Moombox now checks whether the browser process itself exited, instead of the launcher process that spawned it.

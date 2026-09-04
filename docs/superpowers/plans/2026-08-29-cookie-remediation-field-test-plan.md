@@ -250,7 +250,8 @@ is `go:embed`-ed - rebuild after any frontend change.
 
 ## Part 6 - Before the version bump
 
-**State to know first.** `origin/main` is at **`613ae12`** (= `v2.8.5`) and nothing since has been
+**State to know first.** v2.8.6 was tagged and pushed on 2026-09-03 (the bump commit on top of `b8b1f0a`,
+which also merged the early-chat history fix). Before it, `origin/main` sat at `613ae12` (= `v2.8.5`) with nothing
 pushed: 281 commits on `main` through `a674caf`, twenty-three `--no-ff` merges (Arcs 0, 1, the
 Arc 0/1 follow-ups, F1, 2, 3, 4+7, 6, 5, 8, 9, the `mux-wait-chat-idle` worktree, Arc 10, Arc 11,
 A1-on-Linux, Arc 12a, 12b, 12c with its two sub-branch merge-backs, housekeeping H1 and H2), then
