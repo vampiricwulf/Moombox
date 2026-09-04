@@ -18,8 +18,17 @@ const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purp
 
 // Niconico overlay engine tuning. All times are MEDIA milliseconds, so the
 // overlay freezes with the video and scales with playbackRate for free.
+//
+// A message ENTERS at the right edge NICO_LEAD_MS before its timestamp, so at
+// its timestamp it is NICO_LEAD_MS / NICO_DURATION_MS = a quarter of the way
+// across — niconico's own model, and what makes messages slide in from the edge
+// instead of appearing mid-stage. `entryMs = msg.offsetMs − NICO_LEAD_MS` is the
+// clock the rest of the engine works in: consumption, the lateness bound, the
+// lane allocator and the seed all measure from it (R29).
 const NICO_DURATION_MS = 4000;      // niconico's traverse time (owner decision D4)
-const NICO_MAX_LATENESS_MS = 2000;  // a message not placed within 2 s of its time is dropped and counted
+const NICO_LEAD_MS = 1000;          // niconico: a comment starts moving 1 s before its timestamp (100 vpos)
+const NICO_TICK_AHEAD_MS = 300;     // consume up to one timeupdate interval early; the WAAPI delay holds the entry instant
+const NICO_MAX_LATENESS_MS = 2000;  // a message not placed within 2 s of ENTERING (1 s past its timestamp) is dropped and counted
 const NICO_LANE_GAP_MS = 150;       // spacing buffer between consecutive occupants of a lane
 const NICO_MAX_PER_TICK = 20;       // DOM work cap for NEW messages per timeupdate tick
 const NICO_SEED_MAX_FALLBACK = 30;  // seed cap when the row count is unknown
@@ -1518,15 +1527,18 @@ export class PlayerController {
 
   /**
    * Anchor the overlay cursor at `effectiveMs`: the next tick considers only a
-   * short seed of "chat that was already flying" (newer than
-   * effectiveMs − NICO_MAX_LATENESS_MS, and at most two screens' worth of rows),
-   * never the whole pre-show backlog. Also drops any deferred messages and frees
-   * every lane — the caller has cleared the overlay.
+   * short seed of "chat that was already flying" (it ENTERED within the last
+   * NICO_MAX_LATENESS_MS, and at most two screens' worth of rows), never the
+   * whole pre-show backlog. The horizon is handed to `seedCursorIndex` shifted
+   * by NICO_LEAD_MS — the seed works in message time while the engine works in
+   * entry time, and the shift is what keeps "entered within the last 2 s" and
+   * "the last 2×rows to have entered" meaning what they say. Also drops any
+   * deferred messages and frees every lane — the caller has cleared the overlay.
    */
   _resetNicoCursor(effectiveMs) {
     const rows = this._lanes.laneCount || NICO_SEED_MAX_FALLBACK / 2;
     this.nicoCursor = seedCursorIndex(
-      this.playerChatMessages, effectiveMs, NICO_MAX_LATENESS_MS, 2 * rows, indexAfter,
+      this.playerChatMessages, effectiveMs + NICO_LEAD_MS, NICO_MAX_LATENESS_MS, 2 * rows, indexAfter,
     );
     this._nicoPending = [];
     this._nicoAnchorMs = effectiveMs;
@@ -1598,7 +1610,7 @@ export class PlayerController {
     //    measurements taken at first sight — no rebuild, no re-measure.
     const stillPending = [];
     for (const entry of this._nicoPending) {
-      if (effectiveMs - entry.msg.offsetMs > NICO_MAX_LATENESS_MS) {
+      if (effectiveMs - (entry.msg.offsetMs - NICO_LEAD_MS) > NICO_MAX_LATENESS_MS) {
         this._countNicoDrop(entry.msg); // entry (and its detached element) is discarded
         continue;
       }
@@ -1611,10 +1623,16 @@ export class PlayerController {
     //    builds nothing, so it must not consume a slot — otherwise a backlog
     //    would drain at only NICO_MAX_PER_TICK per tick, leaving the overlay
     //    dead for seconds. Skips are free, so any backlog clears in one tick.
+    //    A message is taken as soon as it enters, plus NICO_TICK_AHEAD_MS: ticks
+    //    arrive at ~4 Hz and an entry instant almost never lands on one, so the
+    //    engine takes it up to a tick early and lets the animation's `delay`
+    //    hold the exact instant (see _placeEntry). Consuming late instead would
+    //    make the tick rate visible as a start already inside the stage.
     let work = 0;
-    while (this.nicoCursor < messages.length && messages[this.nicoCursor].offsetMs <= effectiveMs) {
+    while (this.nicoCursor < messages.length
+           && messages[this.nicoCursor].offsetMs - NICO_LEAD_MS <= effectiveMs + NICO_TICK_AHEAD_MS) {
       const msg = messages[this.nicoCursor];
-      if (effectiveMs - msg.offsetMs > NICO_MAX_LATENESS_MS) {
+      if (effectiveMs - (msg.offsetMs - NICO_LEAD_MS) > NICO_MAX_LATENESS_MS) {
         this.nicoCursor++;
         this._countNicoDrop(msg);
         continue;
@@ -1630,11 +1648,13 @@ export class PlayerController {
   }
 
   /**
-   * Count a message the overlay could not show. Messages at or before the last
-   * anchor are seed-window skips, not drops — they are not reported.
+   * Count a message the overlay could not show. A message that had already
+   * ENTERED at the last anchor is a seed-window skip, not a drop — the viewer
+   * landed in the middle of its flight — so the comparison is on entry time,
+   * not on the timestamp a whole NICO_LEAD_MS later.
    */
   _countNicoDrop(msg) {
-    if (msg.offsetMs > this._nicoAnchorMs) this.nicoDropped++;
+    if (msg.offsetMs - NICO_LEAD_MS > this._nicoAnchorMs) this.nicoDropped++;
   }
 
   /**
@@ -1663,15 +1683,25 @@ export class PlayerController {
    * keeps the entry for a later tick.
    *
    * Two placement modes, because the allocator's clock only ever moves forward:
-   * - FIRST sight (`retry` false): allocate at the MESSAGE's own time and start
-   *   the animation mid-flight by its lateness, so late and seeded messages
-   *   appear where they would have been rather than bunching at the right edge.
-   * - RETRY (`retry` true): the entry was already rejected once, so its own time
-   *   is in the past and every lane's occupancy has only grown newer since —
-   *   re-asking at `msg.offsetMs` could never succeed and deferral would be a
-   *   no-op. A retry therefore allocates at the CURRENT time and spawns at the
-   *   right edge; the allocator's ordinary two-edge bound at placement time is
-   *   what keeps it collision-free.
+   * - FIRST sight (`retry` false): allocate at the message's ENTRY time
+   *   (`offsetMs − NICO_LEAD_MS`) and let the animation's `delay` hold the exact
+   *   entry instant, so a message taken up to NICO_TICK_AHEAD_MS early waits
+   *   off-stage instead of jumping in, and a late or seeded one starts as far
+   *   into the flight as it is late. The allocator's two-edge rule is a
+   *   time-invariant relation, so recording a spawn slightly in the future is
+   *   safe; a later message whose entry precedes a lane's latest occupant is
+   *   simply refused by `nowMs < freeAt` and deferred.
+   * - RETRY (`retry` true): the entry was already rejected once, so its own
+   *   entry time is in the past and every lane's occupancy has only grown newer
+   *   since — re-asking at it could never succeed and deferral would be a no-op.
+   *   A retry therefore allocates at the CURRENT time and spawns at the right
+   *   edge with no delay and no head start; the allocator's ordinary two-edge
+   *   bound at placement time is what keeps it collision-free (R21).
+   *
+   * The wait is a WAAPI `delay` rather than a negative `currentTime` because
+   * `play()` rewinds a negative current time to 0 — and `fill: "both"` keeps the
+   * untransformed first keyframe applied for the whole delay (the element is
+   * already parked at `left = stageW`, so the fill is belt-and-braces).
    * @param {{msg: object, el: HTMLElement, w: number, h: number}} entry
    * @param {number} effectiveMs
    * @param {{stageW: number, laneHeight: number, rate: number, paused: boolean, overlay: HTMLElement}} ctx
@@ -1680,9 +1710,12 @@ export class PlayerController {
    */
   _placeEntry(entry, effectiveMs, { stageW, laneHeight, rate, paused, overlay }, retry) {
     const { msg, el, w, h } = entry;
+    const entryMs = msg.offsetMs - NICO_LEAD_MS;
+    // Time still to run before it enters; negative = it entered that long ago.
+    const early = retry ? 0 : entryMs - effectiveMs;
     const lanesNeeded = Math.max(1, Math.ceil(h / laneHeight));
     const lane = this._lanes.allocate({
-      nowMs: retry ? effectiveMs : msg.offsetMs,
+      nowMs: retry ? effectiveMs : entryMs,
       widthPx: w,
       stageWidthPx: stageW,
       durationMs: NICO_DURATION_MS,
@@ -1701,11 +1734,12 @@ export class PlayerController {
     el.style.top = `${lane * laneHeight}px`;
     const anim = el.animate(
       [{ transform: "translateX(0)" }, { transform: `translateX(-${stageW + w}px)` }],
-      { duration: NICO_DURATION_MS, fill: "forwards" },
+      { duration: NICO_DURATION_MS, delay: Math.max(0, early), fill: "both" },
     );
-    anim.currentTime = retry
-      ? 0
-      : Math.min(Math.max(0, effectiveMs - msg.offsetMs), NICO_DURATION_MS - 1);
+    // Never negative, so the `play()` on resume cannot rewind it (see above).
+    // No upper clamp is needed: the lateness bound above refuses anything more
+    // than NICO_MAX_LATENESS_MS into the flight, and a retry starts at 0.
+    anim.currentTime = Math.max(0, -early);
     anim.playbackRate = rate;
     if (paused) anim.pause();
     anim.onfinish = () => {

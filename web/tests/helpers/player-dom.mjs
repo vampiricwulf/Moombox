@@ -344,6 +344,13 @@ export function makePlayer(opts = {}) {
     value(keyframes, options) {
       const anim = {
         el: this, keyframes, options, state: "running",
+        /**
+         * The lead model's entry instant: the message waits off-stage for this
+         * many media ms before it starts moving. Read off `options` rather than
+         * copied, so it can never disagree with what the engine actually asked
+         * for.
+         */
+        get delay() { return this.options?.delay ?? 0; },
         currentTime: 0, playbackRate: 1, onfinish: null,
         pause() { this.state = "paused"; },
         play() { this.state = "running"; },
