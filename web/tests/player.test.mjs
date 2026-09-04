@@ -12,7 +12,7 @@ try {
 } catch (e) {
   // ONLY an absent module is a skip. Any other import failure — a half-written
   // install, a syntax error inside jsdom — must fail loudly instead of turning
-  // twelve DOM tests into a green "skipped" line nobody reads.
+  // every DOM test into a green "skipped" line nobody reads.
   if (e.code !== "ERR_MODULE_NOT_FOUND") throw e;
   jsdomMissing = `jsdom not installed — run \`npm ci\` in web/tests (${e.code})`;
 }
