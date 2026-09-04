@@ -250,7 +250,7 @@ is `go:embed`-ed - rebuild after any frontend change.
 
 ## Part 6 - Before the version bump
 
-**State to know first.** v2.8.6 was tagged and pushed on 2026-09-03 (the bump commit on top of `b8b1f0a`,
+**State to know first.** v2.8.6 was tagged on 2026-09-03 (the bump commit on top of `b8b1f0a`,
 which also merged the early-chat history fix). Before it, `origin/main` sat at `613ae12` (= `v2.8.5`) with nothing
 pushed: 281 commits on `main` through `a674caf`, twenty-three `--no-ff` merges (Arcs 0, 1, the
 Arc 0/1 follow-ups, F1, 2, 3, 4+7, 6, 5, 8, 9, the `mux-wait-chat-idle` worktree, Arc 10, Arc 11,
@@ -303,11 +303,11 @@ its 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real b
 
 **Then the release checklist from `CLAUDE.md` §Release Process:**
 
-1. `RELEASE_NOTES.md` is written (49 bullets in the four groups, no heading, the F3 copy included),
+1. `RELEASE_NOTES.md` is written (50 bullets in the four groups, no heading, the F3 copy included),
    and its arming sentences were rewritten by the arming commit: the state is stated as ARMED, with
    what fires on each `auto_enabled` arm, the back-off cadence, and that the only way back from a
    false verdict is a rebuild. Review it.
-2. Bump `version = "2.8.5"` in `cmd/moombox/main.go:26`.
+2. Bump `version` in `cmd/moombox/main.go:26` (done: `"2.8.5"` -> `"2.8.6"` in the bump commit).
 3. Commit both together: `chore: bump version to x.y.z - <short summary>`. Never re-tag; bump
    instead (memory: no tag replacement). Before committing, check that every non-Go text file you
    touched is LF (`.gitattributes` says `eol=lf`; a CRLF shebang breaks the container -

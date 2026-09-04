@@ -1,6 +1,6 @@
 # Appendix: Project Metrics
 
-> **Last verified:** 2026-08-29
+> **Last verified:** 2026-09-03
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >
@@ -19,13 +19,13 @@
 
 - **Go version:** 1.26
 - **Module path:** github.com/vampiricwulf/Moombox
-- **Current app version:** 2.8.5
+- **Current app version:** 2.8.6
 - **Database schema version:** 19
 - **Default port:** 774
 
 ## Test Baseline
 
-- **Packages:** 31 in `go list ./...`. `go test -count=1 ./...` reports **27 ok / 0 fail**; the other four have no test files (`cmd/sign`, `internal/bgutils/embed`, `tools/sidecar-sig-probe`, `web`).
+- **Packages:** 32 in `go list ./...`. `go test -count=1 ./...` reports **28 ok / 0 fail**; the other four have no test files (`cmd/sign`, `internal/bgutils/embed`, `tools/sidecar-sig-probe`, `web`).
 - **Browser detection table:** `knownBrowsers` (`internal/cookies/autocookies_detect.go`) has **10 entries** — four Gecko, six Chromium. The full table with type keys is in [data-and-storage.md](data-and-storage.md) § Cookies.
 
 ## Key Dependencies
