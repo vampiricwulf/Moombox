@@ -3,7 +3,7 @@
  */
 import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
-import { normalizeOffsetMs, computeChatBiasMs } from "./chat-timeline.js";
+import { normalizeOffsetMs, computeChatBiasMs, mergePartChats } from "./chat-timeline.js";
 
 const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
 
@@ -657,40 +657,36 @@ export class PlayerController {
     this.playerActiveChatIndex = 0;
     this.nicoLastSpawnMs = null;
 
-    if (this.playerJob.chatFilename) {
+    if (this.playerJob.chatFilename || (this.playerJob.segments || []).some((s) => s.chatFile)) {
       try {
-        const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
-        if (this._selectionSeq !== selectionId) return; // Selection changed during fetch
-        if (chatRes.ok) {
-          this.playerChatData = await chatRes.json();
-          if (this._selectionSeq !== selectionId) return; // Selection changed during parse
-          // Chat-to-video timing correction (see chat-timeline.js for the
-          // semantics per platform). Multi-part YouTube jobs use the same
-          // rule: the video begins at the actual stream start regardless of
-          // when Moombox started downloading.
-          const chatBiasMs = computeChatBiasMs({
-            platform: this.playerChatData.platform,
-            chatStreamStartTime: this.playerChatData.streamStartTime,
-            jobStreamStartTime: this.playerJob.streamStartTime,
-          });
-          this.playerChatMessages = (this.playerChatData.messages || [])
-            .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
-            .sort((a, b) => a.offsetMs - b.offsetMs);
+        this.playerChatData = await this._fetchChatData(jobId, selectionId);
+        if (!this.playerChatData) return;
+        // Chat-to-video timing correction (see chat-timeline.js for the
+        // semantics per platform). Multi-part YouTube jobs use the same
+        // rule: the video begins at the actual stream start regardless of
+        // when Moombox started downloading.
+        const chatBiasMs = computeChatBiasMs({
+          platform: this.playerChatData.platform,
+          chatStreamStartTime: this.playerChatData.streamStartTime,
+          jobStreamStartTime: this.playerJob.streamStartTime,
+        });
+        this.playerChatMessages = (this.playerChatData.messages || [])
+          .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
+          .sort((a, b) => a.offsetMs - b.offsetMs);
 
-          // Build 3rd-party emote lookup map for Twitch chat
-          // Priority (Chatterino order): FFZ > BTTV > 7TV — add lowest first so higher overwrites
-          if (this.playerChatData.emotes) {
-            const { bttv, ffz, seventv } = this.playerChatData.emotes;
-            for (const e of seventv || []) this.twitchEmoteMap.set(e.code, e.url);
-            for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
-            for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
-          }
-
-          // Release the raw array now that playerChatMessages holds the
-          // normalized/biased copy — halves peak memory for large chat
-          // files. filterChat and everything else read playerChatMessages.
-          this.playerChatData.messages = null;
+        // Build 3rd-party emote lookup map for Twitch chat
+        // Priority (Chatterino order): FFZ > BTTV > 7TV — add lowest first so higher overwrites
+        if (this.playerChatData.emotes) {
+          const { bttv, ffz, seventv } = this.playerChatData.emotes;
+          for (const e of seventv || []) this.twitchEmoteMap.set(e.code, e.url);
+          for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
+          for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
         }
+
+        // Release the raw array now that playerChatMessages holds the
+        // normalized/biased copy — halves peak memory for large chat
+        // files. filterChat and everything else read playerChatMessages.
+        this.playerChatData.messages = null;
       } catch (e) {
         console.error("Failed to load chat:", e);
         this.app.showToast("Failed to load chat replay", "warning");
@@ -731,6 +727,39 @@ export class PlayerController {
         this.playerCustomOffsetMs = savedOffset * 1000;
       }
     }
+  }
+
+  /**
+   * Load the chat for the selected job. A multi-part job whose parts carry
+   * their own chat files (Twitch live: offsets are part-relative) is merged
+   * onto the global timeline part by part; everything else uses the job-level
+   * file. Returns null when the selection changed underneath us or nothing
+   * was available.
+   */
+  async _fetchChatData(jobId, selectionId) {
+    const segments = this.playerJob.segments || [];
+    const withChat = segments.filter((s) => s.chatFile);
+    if (segments.length > 1 && withChat.length > 0 && this._seg.active) {
+      const parts = await Promise.all(withChat.map(async (s) => {
+        try {
+          const r = await fetch(`/api/jobs/${jobId}/segments/${s.segmentIndex}/chat`);
+          if (!r.ok) return null;
+          const data = await r.json();
+          const off = this._seg.segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
+          return { startOffsetSec: off ? off.startOffset : 0, data };
+        } catch {
+          return null;
+        }
+      }));
+      if (this._selectionSeq !== selectionId) return null;
+      const merged = mergePartChats(parts.filter(Boolean));
+      if (merged.messages.length > 0) return merged;
+    }
+    const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
+    if (this._selectionSeq !== selectionId) return null;
+    if (!chatRes.ok) return null;
+    const data = await chatRes.json();
+    return this._selectionSeq !== selectionId ? null : data;
   }
 
   buildSidebarChat() {
