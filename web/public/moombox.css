@@ -2723,18 +2723,12 @@ html.sl-theme-light {
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
     }
-    /* Show nico messages as static stacked text instead of hiding them */
-    #player-nico-overlay {
-        display: flex !important;
-        flex-direction: column;
-        overflow: hidden;
-        pointer-events: none;
-    }
-    .nico-message {
-        position: static !important;
-        transform: none !important;
-        opacity: 0.7;
-    }
+    /* No nico rules here: the overlay is animated by the Web Animations API,
+       which this CSS cannot slow down, and the old static-stack fallback fought
+       the JS (display:flex !important defeated the toggle's display:none, and
+       position:static broke every lane placement). initPlayer defaults the
+       overlay OFF under this preference instead, and the checkbox still opts
+       back in. */
 }
 
 /* ===== Batch Selection ===== */

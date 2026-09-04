@@ -109,6 +109,14 @@ export class PlayerController {
       sidebarToggle.checked = savedSidebar === "true";
       document.getElementById("player-sidebar").style.display = sidebarToggle.checked ? "" : "none";
     }
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+    if (savedNico === null && reduceMotion) {
+      // Flying text is exactly what this preference asks to avoid. Default the
+      // overlay off; the checkbox still lets the user opt in.
+      nicoToggle.checked = false;
+      this.nicoEnabled = false;
+      document.getElementById("player-nico-overlay").style.display = "none";
+    }
 
     // Nico toggle
     nicoToggle.addEventListener("sl-change", () => {
