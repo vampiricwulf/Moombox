@@ -1059,3 +1059,57 @@ func TestJobChatAnswers304WhenUnmodified(t *testing.T) {
 		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
 	}
 }
+
+func TestSegmentChat404WhenPartHasNoChat(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_parts0", func(j *database.Job) { j.Platform = "twitch" })
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_parts0", SegmentIndex: 0, Quality: "1080p", Filename: "p1.mp4",
+		FilePath: filepath.Join(f.outputDir, "p1.mp4")}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(t, f.router, "GET", "/api/jobs/tw_parts0/segments/0/chat", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("part without chat: want 404, got %d", rec.Code)
+	}
+}
+
+func TestSegmentChatServesPartFile(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_parts", func(j *database.Job) { j.Platform = "twitch" })
+	chatPath := filepath.Join(f.outputDir, "p2.chat.json")
+	body := []byte(`{"platform":"twitch","messages":[{"id":"a","offsetMs":5000}]}`)
+	if err := os.WriteFile(chatPath, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_parts", SegmentIndex: 1, Quality: "1080p", Filename: "p2.mp4",
+		FilePath: filepath.Join(f.outputDir, "p2.mp4"), ChatFile: chatPath}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(t, f.router, "GET", "/api/jobs/tw_parts/segments/1/chat", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != string(body) {
+		t.Errorf("body mismatch: %s", rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q", got)
+	}
+}
+
+func TestSegmentChatRefusesPathOutsideOutputDir(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "tw_escape", func(j *database.Job) { j.Platform = "twitch" })
+	outside := filepath.Join(filepath.Dir(f.outputDir), "outside.chat.json")
+	if err := os.WriteFile(outside, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddSegment(&database.Segment{JobID: "tw_escape", SegmentIndex: 0, Quality: "q", Filename: "x.mp4",
+		FilePath: filepath.Join(f.outputDir, "x.mp4"), ChatFile: outside}); err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(t, f.router, "GET", "/api/jobs/tw_escape/segments/0/chat", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("path outside output dir: want 403, got %d", rec.Code)
+	}
+}

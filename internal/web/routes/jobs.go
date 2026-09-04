@@ -528,6 +528,82 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		http.ServeFile(rw, req, filePath)
 	})
 
+	// GET /api/jobs/:id/segments/:index/chat — serves one part's chat file.
+	// Twitch live recordings roll the chat at every part boundary with offsets
+	// rebased to that part's recording start; the player fetches each part and
+	// shifts by the part's start offset on the global timeline (T-F1).
+	r.Get("/api/jobs/{id}/segments/{index}/chat", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		segIndex, err := strconv.Atoi(chi.URLParam(req, "index"))
+		if err != nil {
+			jsonError(rw, "invalid segment index", http.StatusBadRequest)
+			return
+		}
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+		segments, err := db.GetSegments(jobID)
+		if err != nil {
+			jsonError(rw, "failed to get segments", http.StatusInternalServerError)
+			return
+		}
+		var seg *database.Segment
+		for i := range segments {
+			if segments[i].SegmentIndex == segIndex {
+				seg = &segments[i]
+				break
+			}
+		}
+		if seg == nil || seg.ChatFile == "" {
+			jsonError(rw, "no chat for this segment", http.StatusNotFound)
+			return
+		}
+		var cfgOutputDir string
+		store.Read(func(c *config.MoomboxConfig) { cfgOutputDir = c.Paths.OutputDirectory })
+		outputDir := job.OutputDirectory
+		if outputDir == "" {
+			outputDir = cfgOutputDir
+		}
+		if outputDir == "" {
+			outputDir = "./output"
+		}
+		chatPath, err := filepath.Abs(seg.ChatFile)
+		if err != nil {
+			jsonError(rw, "invalid path", http.StatusBadRequest)
+			return
+		}
+		resolved, ok := validatePathTraversal(chatPath, outputDir)
+		if !ok {
+			jsonError(rw, "access denied", http.StatusForbidden)
+			return
+		}
+		f, err := os.Open(resolved)
+		if err != nil {
+			if os.IsNotExist(err) {
+				jsonError(rw, "chat file not found", http.StatusNotFound)
+				return
+			}
+			jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
+			return
+		}
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
+			jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
+			return
+		}
+		data, err := io.ReadAll(f)
+		if err != nil || !json.Valid(data) {
+			jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
+			return
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		rw.Header().Set("Cache-Control", "private, no-cache")
+		http.ServeContent(rw, req, "chat.json", fi.ModTime(), bytes.NewReader(data))
+	})
+
 	// GET /api/jobs/:id/chat
 	r.Get("/api/jobs/{id}/chat", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")

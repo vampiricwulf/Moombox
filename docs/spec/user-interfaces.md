@@ -495,6 +495,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `GET` | `/api/jobs/{id}/video` | Stream the job's output video file. Supports HTTP Range requests for seeking. `Cache-Control: private, no-cache` + `Last-Modified` — retry/reinit, incomplete-tail resume and part merges rewrite the file behind the same URL, so it revalidates rather than caching immutably. |
 | `GET` | `/api/jobs/{id}/segments` | List segments for a multi-segment recording. |
 | `GET` | `/api/jobs/{id}/segments/{index}/video` | Stream a specific segment's video file. Supports Range. `Cache-Control: private, no-cache` + `Last-Modified` (same revalidation rationale as `/video`). |
+| `GET` | `/api/jobs/{id}/segments/{index}/chat` | Get one part's chat file for a multi-segment (Twitch live) recording — the job-level `/chat` only ever covers part 1. Twitch rolls the chat at every part boundary with offsets rebased to that part's recording start; the player fetches each part and shifts by the part's start offset on the global timeline. Same 404/403/422 semantics as `/chat`, plus 404 when the segment has no `chatFile`. |
 | `GET` | `/api/jobs/{id}/chat` | Get the chat log file for a job. `Cache-Control: private, no-cache` + `Last-Modified`; answers `If-Modified-Since` with a body-less 304 so a re-selection of the same job doesn't re-read and re-gzip a 50-100 MB file. |
 | `GET` | `/api/jobs/{id}/trims` | List trim clips created from this job. |
 | `GET` | `/api/jobs/{id}/logs` | Get per-job log lines (worker-level logs specific to this job). |
