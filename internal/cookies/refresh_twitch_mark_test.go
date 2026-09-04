@@ -437,13 +437,16 @@ func TestTwitchMarkFiresAuthChangeOnAVerdictTransitionOnly(t *testing.T) {
 // the chat mark already raised. The double-FIRE half needed arming and is
 // TestTwitchMarkAndTierTwoFireRecoveryOnce, below.
 //
-// Two assertions, and the second is the one that matters. "The map has an
-// entry" is satisfied by any write; "a signed-out verdict one second later is
-// refused" only by a stamp the tier-2 dedupe actually reads.
+// Three assertions, and the last is the one that matters. "The map has an
+// entry" is satisfied by any write; "the back-off was not escalated" pins the
+// one-directional rule noteRecoveryDecided follows; "a signed-out verdict one
+// second later is refused" is satisfied only by a stamp the tier-2 dedupe
+// actually reads.
 //
 // Mutation: delete `rs.noteRecoveryDecided("twitch", time.Now())` from
-// NoteTwitchAuthLoss. Both fail. Under it, arming pages the operator twice for
-// one chat downgrade — once from the mark, once from the next probe.
+// NoteTwitchAuthLoss. The first and third fail. Under it the operator is paged
+// twice for one chat downgrade — once from the mark, once from the next
+// probe.
 func TestTwitchMarkStampsTheSharedRecoveryDedupe(t *testing.T) {
 	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusOK)
 	rs.OnRecoveryNeeded = func(string) {}
@@ -464,7 +467,7 @@ func TestTwitchMarkStampsTheSharedRecoveryDedupe(t *testing.T) {
 	stamp, ok := rs.lastRecoveryDecided["twitch"]
 	rs.mu.RUnlock()
 	if !ok {
-		t.Fatal("the Twitch mark fired recovery without stamping lastRecoveryDecided — once the pilot is armed, the next membership-probe verdict raises a second alarm for the same loss")
+		t.Fatal("the Twitch mark fired recovery without stamping lastRecoveryDecided — the next membership-probe verdict inside the window then raises a second alarm for the same loss")
 	}
 
 	rs.mu.RLock()
@@ -540,16 +543,22 @@ func TestTwitchMarkAndTierTwoFireRecoveryOnce(t *testing.T) {
 		t.Fatalf("a tier-2 signed-out verdict inside the window fired recovery again (%d total) — one loss must raise one alarm: %v", got, fired)
 	}
 
-	// One second short of the window: still nothing. Without this the assertion
+	// A minute short of the window: still nothing. Without this the assertion
 	// below is satisfied by a dedupe that never refuses anything.
-	rewindTwitchDedupe(t, rs, livenessRefireWindow-time.Second)
+	//
+	// A MINUTE, not a second. The stamp is rewound against the wall clock and
+	// read back against it a moment later, so the margin has to be wider than
+	// anything a loaded machine can put between the two calls; a one-second
+	// margin makes this step flaky rather than strict.
+	const margin = time.Minute
+	rewindTwitchDedupe(t, rs, livenessRefireWindow-margin)
 	rs.ObserveLiveness("twitch", false)
 	if got := twitchFires(); got != 1 {
-		t.Fatalf("the re-alarm landed %v early — recordLiveness must hold it for the full livenessRefireWindow (%v): %v", time.Second, livenessRefireWindow, fired)
+		t.Fatalf("the re-alarm landed %v early — recordLiveness must hold it for the full livenessRefireWindow (%v): %v", margin, livenessRefireWindow, fired)
 	}
 
 	// Past the window: the re-alarm, exactly once, and for twitch.
-	rewindTwitchDedupe(t, rs, livenessRefireWindow+time.Second)
+	rewindTwitchDedupe(t, rs, livenessRefireWindow+margin)
 	rs.ObserveLiveness("twitch", false)
 	if got := twitchFires(); got != 2 {
 		t.Fatalf("twitch recovery fires = %d once the back-off window passed, want 2 (the mark, then the re-alarm): %v", got, fired)

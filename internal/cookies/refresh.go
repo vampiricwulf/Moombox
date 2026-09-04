@@ -820,7 +820,11 @@ func livenessRecordOf(loggedIn bool) livenessRecord {
 //   - The tier-1 stamp. Both tier-1 fire paths — refresh's status block and
 //     NoteTwitchAuthLoss — call noteRecoveryDecided, which writes
 //     lastRecoveryDecided, the same map recordLiveness consults. So tier 2
-//     cannot fire a SECOND recovery for a loss tier 1 has already raised.
+//     cannot fire a second recovery for a loss tier 1 has already raised
+//     WITHIN THAT PLATFORM'S CURRENT WINDOW. That is one window's suppression,
+//     not a permanent one: a session still dead when the window expires
+//     re-alarms on the back-off above, which is the intended behaviour — a
+//     tier-1 fire consumes one tier-2 window without growing the next.
 //
 // THE WAY BACK IS ANOTHER BUILD. This is a source constant, not a config flag:
 // nothing toggles it at runtime and -ldflags cannot reach it. A false verdict
