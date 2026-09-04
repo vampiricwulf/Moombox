@@ -476,7 +476,7 @@ default-src 'self'
 script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net
 style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net
 font-src 'self' https://cdn.jsdelivr.net
-img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.jsdelivr.net https://fonts.gstatic.com
+img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net https://fonts.gstatic.com
 connect-src 'self' ws: wss: https://cdn.jsdelivr.net data:
 frame-src https://www.youtube-nocookie.com https://player.twitch.tv
 object-src 'none'
@@ -489,7 +489,7 @@ form-action 'self'
 - **`script-src 'unsafe-inline'`** — Required because Shoelace components and the SPA use inline scripts. Removing this would require a nonce or hash-based approach, which adds complexity for minimal benefit in a self-hosted application.
 - **`style-src 'unsafe-inline'`** — Required for Shoelace's shadow DOM styling and dynamically generated styles.
 - **`https://cdn.jsdelivr.net`** — Shoelace v2.16 is loaded from jsDelivr CDN (scripts, styles, fonts, icons).
-- **`img-src` domains** — YouTube thumbnails (`i.ytimg.com`, `yt3.ggpht.com`), Twitch images (`*.jtvnw.net`, `*.ttvnw.net`), Shoelace icons (`cdn.jsdelivr.net`), and Google fonts icon assets (`fonts.gstatic.com`). The `data:` scheme is needed for inline SVG and base64-encoded images.
+- **`img-src` domains** — YouTube thumbnails (`i.ytimg.com`, `yt3.ggpht.com`), Twitch images (`*.jtvnw.net`, `*.ttvnw.net`), Shoelace icons (`cdn.jsdelivr.net`), and Google fonts icon assets (`fonts.gstatic.com`). `cdn.betterttv.net`, `cdn.7tv.app`, and `cdn.frankerfacez.com` are admitted because the chat replay renders BTTV/7TV/FFZ emotes as `<img>` tags sourced from those CDNs. The `data:` scheme is needed for inline SVG and base64-encoded images.
 - **`connect-src ws: wss:`** — WebSocket connections for real-time job updates. The schemes are unrestricted because the server may be accessed on any host/port combination.
 - **`frame-src`** — Allows embedding YouTube (privacy-enhanced mode) and Twitch player iframes for stream preview.
 - **`object-src 'none'`** — Blocks all plugin content (Flash, Java, etc.).
