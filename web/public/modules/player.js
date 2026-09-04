@@ -1,7 +1,7 @@
 /**
  * Player Controller — Video player + chat replay
  */
-import { formatMsToTime, formatTimestamp, isTypingInInput } from "./utils.js";
+import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 import { normalizeOffsetMs, computeChatBiasMs } from "./chat-timeline.js";
 
@@ -267,7 +267,7 @@ export class PlayerController {
 
       switch (e.key) {
         case " ":
-          if (video.paused) video.play(); else video.pause();
+          if (video.paused) safePlay(video); else video.pause();
           e.preventDefault();
           break;
         case "ArrowLeft": {
@@ -285,7 +285,8 @@ export class PlayerController {
           const delta = e.shiftKey ? 30 : 5;
           if (this._seg.active) {
             const globalSec = this.getGlobalTimeMs() / 1000 + delta;
-            this.seekToGlobalTime(Math.min(this._seg.totalDuration, globalSec));
+            const maxSec = this._seg.totalDuration > 0 ? this._seg.totalDuration : Infinity;
+            this.seekToGlobalTime(Math.min(maxSec, globalSec));
           } else {
             video.currentTime += delta;
           }
@@ -593,7 +594,11 @@ export class PlayerController {
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
       if (!res.ok || this._selectionSeq !== selectionId) return;
-      this.playerJob = await res.json();
+      const job = await res.json();
+      // The body of an OLDER selection can resolve after a newer one completed —
+      // re-check before anything observable (playerJob, video.src) is touched.
+      if (this._selectionSeq !== selectionId) return;
+      this.playerJob = job;
     } catch (e) {
       console.error("Failed to fetch job:", e);
       return;
@@ -1198,7 +1203,7 @@ export class PlayerController {
       if (e.key === "Escape") {
         dismiss();
         // Start from beginning on Escape (same as clicking "Start from beginning")
-        document.getElementById("player-video").play();
+        safePlay(document.getElementById("player-video"));
         this._startWatchTracking(jobId);
       }
     }, { signal: sig });
@@ -1211,13 +1216,13 @@ export class PlayerController {
       } else {
         video.currentTime = resumeSeconds;
       }
-      video.play();
+      safePlay(video);
       this._startWatchTracking(jobId);
     }, { signal: sig });
 
     overlay.querySelector("#resume-start").addEventListener("click", () => {
       dismiss();
-      document.getElementById("player-video").play();
+      safePlay(document.getElementById("player-video"));
       this._startWatchTracking(jobId);
     }, { signal: sig });
 

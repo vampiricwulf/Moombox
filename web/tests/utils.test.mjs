@@ -8,6 +8,7 @@ import {
   formatBytes,
   formatDurationSeconds,
   formatMsToTime,
+  safePlay,
 } from "../public/modules/utils.js";
 
 test("formatTimestamp: zero and invalid inputs", () => {
@@ -73,4 +74,18 @@ test("formatMsToTime: invalid inputs return 0:00", () => {
   assert.equal(formatMsToTime(null), "0:00");
   assert.equal(formatMsToTime(NaN), "0:00");
   assert.equal(formatMsToTime(Infinity), "0:00");
+});
+
+test("safePlay swallows a rejected play() promise and tolerates a void return", async () => {
+  let rejections = 0;
+  const onUnhandled = () => { rejections++; };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    safePlay({ play: () => Promise.reject(new Error("AbortError")) });
+    safePlay({ play: () => undefined });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(rejections, 0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });

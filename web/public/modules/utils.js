@@ -62,6 +62,17 @@ export function formatRelativeTime(isoDate) {
 }
 
 /**
+ * play() returns a promise that rejects on autoplay refusal or when the source
+ * changes before playback starts (AbortError on rapid cross-segment seeks).
+ * Nothing needs to react — the user gets the native controls either way — so
+ * the rejection is swallowed instead of surfacing as console noise.
+ */
+export function safePlay(media) {
+  const p = media && media.play ? media.play() : undefined;
+  if (p && typeof p.catch === "function") p.catch(() => {});
+}
+
+/**
  * Check if a keyboard event originates from inside an input-like element.
  * Uses composedPath() to traverse shadow DOM boundaries (Shoelace components
  * render native <input> elements inside their shadow roots).
