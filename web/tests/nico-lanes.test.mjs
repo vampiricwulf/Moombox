@@ -44,6 +44,16 @@ test("lanesNeeded requires consecutive free lanes", () => {
   assert.equal(alloc(la, 0, 100, { lanesNeeded: 2 }), -1);
 });
 
+// T12-M3: a mutant that only records the FIRST of lanesNeeded lanes as
+// occupied would still return 0 here (both calls target a 2-lane
+// allocator) but would then wrongly free lane 1 for the follow-up 1-lane
+// request below.
+test("lanesNeeded occupies every requested lane, not just the first", () => {
+  const la = new LaneAllocator(2);
+  assert.equal(alloc(la, 0, 100, { lanesNeeded: 2 }), 0);
+  assert.equal(alloc(la, 0, 100), -1);   // both lanes are occupied
+});
+
 test("media time: the same nowMs never frees a lane (no wall clock inside)", () => {
   const la = new LaneAllocator(1);
   assert.equal(alloc(la, 5000, 300), 0);
@@ -84,4 +94,12 @@ test("seedCursorIndex: seedMax 0 behaves as 1", () => {
   // byTime = indexAfter(messages, 0) = 1
   // byCount = indexAfter(messages, 2000) - max(1, 0) = 5 - 1 = 4 (NOT 5 - 0 = 5)
   assert.equal(seedCursorIndex(messages, 2000, 2000, 0, indexAfter), 4);
+});
+
+// T12-M6: seedCursorIndex's own Math.max(byTime, byCount, 0) floor is part
+// of the injected-dependency contract — a broken/stubbed indexAfter that
+// returns negative indices must never produce a negative cursor.
+test("seedCursorIndex: floors at 0 even when indexAfter returns negative", () => {
+  const stubIndexAfter = () => -50;
+  assert.equal(seedCursorIndex([1, 2, 3], 1000, 500, 30, stubIndexAfter), 0);
 });
