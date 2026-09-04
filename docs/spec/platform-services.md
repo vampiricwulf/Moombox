@@ -1107,7 +1107,7 @@ Authentication: both the `Cookie` header and the SAPISIDHASH `Authorization` hea
 
 ### Message Types
 
-The chat API response contains `actions` array items. Replay responses wrap actions in `replayChatItemAction` with a `videoOffsetTimeMsec`. Each action contains an `addChatItemAction.item` which may contain:
+The chat API response contains `actions` array items. Replay responses wrap actions in `replayChatItemAction` with a `videoOffsetTimeMsec`. YouTube reports `videoOffsetTimeMsec = 0` for every message sent before the stream started; `parseAction` recovers the real signed offset from `timestampText` (e.g. `"-2:30"`) via `parseNegativeTimestampText` in that case, so pre-stream waiting-room chat is not piled onto 0:00. Each action contains an `addChatItemAction.item` which may contain:
 
 | Renderer | Description |
 |----------|-------------|

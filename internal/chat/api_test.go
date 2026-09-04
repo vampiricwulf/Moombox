@@ -378,3 +378,77 @@ func TestExtractReplayOffsetUnparseableString(t *testing.T) {
 		t.Error("unparseable string should return has=false")
 	}
 }
+
+func TestParseNegativeTimestampText(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"-0:05", -5_000, true},
+		{"-1:23", -83_000, true},
+		{"-1:02:03", -3_723_000, true},
+		{"0:05", 0, false}, // not negative — not our business
+		{"-5", 0, false},   // no colon — not a relative time
+		{"-x:y", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := parseNegativeTimestampText(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("parseNegativeTimestampText(%q) = (%d,%v), want (%d,%v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func replayAction(offset any, timestampText string) map[string]any {
+	renderer := map[string]any{
+		"id":            "pre1",
+		"timestampUsec": "1700000000000000",
+		"message":       map[string]any{"runs": []any{map[string]any{"text": "hi"}}},
+		"authorName":    map[string]any{"simpleText": "U"},
+	}
+	if timestampText != "" {
+		renderer["timestampText"] = map[string]any{"simpleText": timestampText}
+	}
+	return map[string]any{
+		"replayChatItemAction": map[string]any{
+			"videoOffsetTimeMsec": offset,
+			"actions": []any{map[string]any{
+				"addChatItemAction": map[string]any{
+					"item": map[string]any{"liveChatTextMessageRenderer": renderer},
+				},
+			}},
+		},
+	}
+}
+
+// YouTube reports videoOffsetTimeMsec = 0 for every message sent before the
+// stream started and keeps the real relative time only in timestampText
+// ("-2:30"). Recover it so waiting-room chat is not piled onto 0:00.
+func TestParseActionReplayZeroOffsetRecoversNegativeFromTimestampText(t *testing.T) {
+	api := NewChatAPI("k", "", nil)
+	msg := api.parseAction(replayAction("0", "-2:30"))
+	if msg == nil {
+		t.Fatal("parseAction returned nil")
+	}
+	if !msg.HasOffset || msg.OffsetMs != -150_000 {
+		t.Errorf("OffsetMs = %d (hasOffset %v), want -150000", msg.OffsetMs, msg.HasOffset)
+	}
+}
+
+func TestParseActionReplayZeroOffsetWithoutMinusStaysZero(t *testing.T) {
+	api := NewChatAPI("k", "", nil)
+	msg := api.parseAction(replayAction("0", "0:00"))
+	if msg == nil || !msg.HasOffset || msg.OffsetMs != 0 {
+		t.Fatalf("want offset 0 with hasOffset, got %+v", msg)
+	}
+}
+
+func TestParseActionReplayPositiveOffsetIgnoresTimestampText(t *testing.T) {
+	api := NewChatAPI("k", "", nil)
+	msg := api.parseAction(replayAction("12345", "-2:30"))
+	if msg == nil || msg.OffsetMs != 12345 {
+		t.Fatalf("a non-zero replay offset is authoritative; got %+v", msg)
+	}
+}
