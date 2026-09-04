@@ -251,8 +251,10 @@ test("player shortcuts fire only when nothing else owns the key", { skip }, asyn
 // ── 6. Overlay engine (Task 13) ─────────────────────────────────────────────
 
 test("the overlay fills its rows, defers the overflow, and only counts real drops", { skip }, async () => {
-  // 408 / 24 = 17 rows; 20 messages all land at the same instant.
-  const messages = Array.from({ length: 20 }, (_, i) => msg(1000, `m${i}`, `u${i}`));
+  // 408 / 24 = 17 rows; 20 messages all land at the same instant. They enter
+  // NICO_LEAD_MS earlier, at 1000, which is what every time below is measured
+  // against.
+  const messages = Array.from({ length: 20 }, (_, i) => msg(2000, `m${i}`, `u${i}`));
   const h = harness.makePlayer({
     jobs: [finished("j1", { chatFilename: "chat.json" })],
     watchState: {},
@@ -263,14 +265,15 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   const overlay = h.overlay();
   assert.equal(h.player._nicoGeo.rows, 17);
 
-  // Anchored before the batch, nothing is due yet.
-  h.tick(900);
+  // Anchored before the batch ENTERS (600 + NICO_TICK_AHEAD_MS is still short
+  // of the 1000 they enter at), so nothing is due yet.
+  h.tick(600);
   assert.equal(overlay.children.length, 0);
   assert.equal(h.player.nicoDropped, 0);
 
   // One row each, no two on the same row, and the 3 that found no lane are
   // deferred rather than dropped.
-  h.tick(1000);
+  h.tick(2000);
   const tops = [...overlay.children].map((c) => c.style.top);
   assert.equal(tops.length, 17, "at most one message per row");
   assert.equal(new Set(tops).size, 17, "every placed message got its own row");
@@ -289,8 +292,8 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   assert.equal(firstEl.isConnected, false, "and its element leaves the stage");
   assert.equal(overlay.children.length, 16);
 
-  // 2.1 s later the deferred three are past NICO_MAX_LATENESS_MS. They arrived
-  // after the anchor, so they are real drops and are reported.
+  // 2.1 s after they entered, the deferred three are past NICO_MAX_LATENESS_MS.
+  // They entered after the anchor, so they are real drops and are reported.
   h.tick(3100);
   assert.equal(h.player.nicoDropped, 3);
   const pill = h.el("player-nico-dropped");
@@ -298,8 +301,9 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   assert.equal(pill.textContent, "+3 not shown");
 
   // Seeking ONTO the batch re-anchors at its own instant, which makes those
-  // messages seed-window chat: losing them is not a drop and is not reported.
-  h.seek(1000);
+  // messages seed-window chat (they entered a second before the anchor): losing
+  // them is not a drop and is not reported.
+  h.seek(2000);
   assert.equal(overlay.children.length, 17, "the stage is rebuilt at the seek target");
   h.tick(3100);
   assert.equal(h.player.nicoDropped, 3, "seed-window losses are not counted");
@@ -706,13 +710,205 @@ test("a deferred overlay message is placed on a later tick, at the right edge", 
   assert.equal(h.overlay().children.length, 17, "17 rows filled");
   assert.equal(h.player._nicoPending.length, 3, "the overflow is deferred, not dropped");
 
-  // 800 ms later lane 0's leader has cleared the spawn edge (4000·200/1480 +
-  // 150 = 690 ms), so the three pending entries fit — at 1800, their own
-  // 1000 ms would still be refused by every lane.
+  // 800 ms later the lanes are free again: each leader was allocated at the
+  // batch's ENTRY time (0, a second before its 1000 ms timestamp) and cleared
+  // the spawn edge 690 ms after it (4000·200/1480 + 150), so the three pending
+  // entries fit — asking again at their own entry time would not.
   h.tick(1800);
   assert.equal(h.overlay().children.length, 20, "the deferred three are on stage");
   assert.equal(h.player._nicoPending.length, 0);
   assert.equal(h.player.nicoDropped, 0, "and none of them aged out");
   assert.deepEqual(h.anims.slice(-3).map((a) => a.currentTime), [0, 0, 0],
     "a retry spawns at the right edge rather than mid-flight");
+});
+
+// ── 16. Niconico lead time (R29) ────────────────────────────────────────────
+
+// A comment ENTERS at the right edge NICO_LEAD_MS (1 s) BEFORE its timestamp
+// and is a quarter of the way across when its timestamp arrives — niconico's
+// own model. `timeupdate` fires at ~4 Hz, so the entry instant almost never
+// falls on a tick: the cursor consumes up to NICO_TICK_AHEAD_MS (300 ms) early
+// and the Web Animations `delay` holds the message off-stage until its exact
+// entry time. Without it a message is first painted already inside the stage,
+// which is what the owner saw as a "pop".
+
+test("a message is consumed a tick early and the animation delay holds its entry instant", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([msg(5000, "hi")]),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+
+  // The message enters at 4000 (5000 − NICO_LEAD_MS). 3600 + NICO_TICK_AHEAD_MS
+  // is 3900, still short of it, so the cursor leaves it alone.
+  h.tick(3600);
+  assert.equal(h.overlay().children.length, 0, "not yet within one tick of the entry instant");
+  assert.equal(h.anims.length, 0);
+
+  // 3800 + 300 reaches it, so the element is built now and the DELAY — not the
+  // next tick, 250 ms later — decides when it starts moving.
+  h.tick(3800);
+  assert.equal(h.overlay().children.length, 1);
+  const anim = h.anims.at(-1);
+  assert.equal(anim.delay, 200, "held for the 200 ms still to run before it enters");
+  assert.equal(anim.currentTime, 0, "and not advanced into the flight");
+  assert.equal(anim.options.fill, "both", "the untransformed first keyframe holds through the delay");
+  assert.equal(anim.el.style.left, "1280px", "parked at the right edge for the whole delay");
+});
+
+test("a message first seen after it entered starts that far into its flight", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([msg(5000, "hi")]),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+
+  // Entry 4000, first tick 100 ms later: it should already be 100 ms across, so
+  // there is nothing left to wait for.
+  h.tick(4100);
+  assert.equal(h.overlay().children.length, 1);
+  const anim = h.anims.at(-1);
+  assert.equal(anim.delay, 0, "the entry instant is in the past — no wait");
+  assert.equal(anim.currentTime, 100, "started 100 ms into the traverse instead");
+});
+
+test("the lateness bound is measured from the entry instant, not the timestamp", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([msg(5000, "late"), msg(9000, "just in time")]),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+
+  // Anchor before both messages, so neither is a seed-window skip.
+  h.tick(1000);
+  assert.equal(h.overlay().children.length, 0);
+  assert.equal(h.player.nicoDropped, 0);
+
+  // 6100 is 2100 ms after the first message entered (4000) — past the bound.
+  h.tick(6100);
+  assert.equal(h.overlay().children.length, 0, "nothing placed");
+  assert.equal(h.player.nicoDropped, 1);
+  assert.equal(h.el("player-nico-dropped").textContent, "+1 not shown");
+
+  // 9900 is 1900 ms after the second entered (8000) — just inside it, so it
+  // flies from most of the way across rather than being dropped.
+  h.tick(9900);
+  assert.equal(h.overlay().children.length, 1);
+  const anim = h.anims.at(-1);
+  assert.equal(anim.delay, 0);
+  assert.equal(anim.currentTime, 1900);
+  assert.equal(h.player.nicoDropped, 1, "the bound is 2 s from the entry, 1 s from the timestamp");
+});
+
+// The seed and the drop counter both work in ENTRY time: a message that was
+// already flying when the seek landed is chat the viewer joined mid-flight, not
+// a message the overlay failed to show.
+test("a seek seeds and counts drops by entry time, not by timestamp", { skip }, async () => {
+  // One lane (a 24 px stage), and messages so wide that a lane stays busy for
+  // 4000·12800/14080 + 150 = 3786 ms — long enough that everything after the
+  // first is deferred and then ages out.
+  const messages = [msg(8500, "gone"), msg(9500, "in flight"), msg(10800, "entered before the seek"),
+                    msg(11500, "entered after the seek")];
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf(messages),
+    geom: { overlay: { w: 1280, h: 24 }, rowH: 24, msgW: 12800 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+  assert.equal(h.player._nicoGeo.rows, 1);
+  const video = h.video;
+
+  // Seek to 10 s, with `seeked` and its `timeupdate` fired apart so the seed
+  // itself can be read.
+  video.currentTime = 10;
+  video.dispatchEvent(new h.window.Event("seeked"));
+  assert.equal(h.player.nicoCursor, 1,
+    "the seed horizon moved with the lead: the 8500 message entered at 7500, more than "
+    + "NICO_MAX_LATENESS_MS before the anchor, so it is not even walked");
+  video.dispatchEvent(new h.window.Event("timeupdate"));
+
+  assert.equal(h.overlay().children.length, 1, "the message already in flight is put back mid-flight");
+  assert.equal(h.player._nicoPending.length, 1, "and the one behind it finds the single lane busy");
+  assert.equal(h.player.nicoDropped, 0);
+
+  // 10800 entered at 9800, i.e. BEFORE the anchor: losing it is a seed-window
+  // skip, exactly like a message the seek landed in the middle of.
+  h.tick(12200);
+  assert.equal(h.player.nicoDropped, 0, "a message already flying at the anchor is not a drop");
+
+  // 11500 entered at 10500, after the anchor, so it is a real loss.
+  h.tick(12800);
+  assert.equal(h.player.nicoDropped, 1);
+  assert.equal(h.el("player-nico-dropped").textContent, "+1 not shown");
+});
+
+// R21 is unchanged by the lead: a retried entry is placed at the CURRENT time
+// and spawns at the right edge, so it must carry no delay and no head start —
+// even when the batch it came from was consumed early and waited on one.
+test("a deferred entry is retried with neither the lead's delay nor a head start", { skip }, async () => {
+  const messages = Array.from({ length: 20 }, (_, i) => msg(2000, `m${i}`, `u${i}`));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf(messages),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+
+  // Consumed 200 ms before the batch enters (1000): 17 lanes fill, 3 defer.
+  h.tick(800);
+  assert.equal(h.overlay().children.length, 17);
+  assert.equal(h.player._nicoPending.length, 3);
+  assert.ok(h.anims.every((a) => a.delay === 200 && a.currentTime === 0),
+    "the whole batch waits off-stage for its entry instant");
+
+  // 1800: lane 0's leader spawned at 1000 and cleared the edge at 1690, so the
+  // three fit — at the right edge, now, not 800 ms into a flight they missed.
+  h.tick(1800);
+  assert.equal(h.overlay().children.length, 20, "the deferred three are on stage");
+  assert.equal(h.player._nicoPending.length, 0);
+  assert.deepEqual(h.anims.slice(-3).map((a) => [a.delay, a.currentTime]), [[0, 0], [0, 0], [0, 0]]);
+  assert.equal(h.player.nicoDropped, 0, "and none of them aged out");
+});
+
+// The lookahead consumes a message up to NICO_TICK_AHEAD_MS BEFORE it enters,
+// so "a retried entry is past its entry instant" is no longer something to read
+// off the code. `_placeEntry` clamps it instead of assuming it, and this test
+// drives that branch directly: the tick path cannot reach it, because a lane's
+// free time only ever grows, so a retry that succeeds at `effectiveMs` must have
+// been refused at an `entryMs` below it. What is asserted is the guarantee, not
+// the derivation — a retry waits off-stage for an entry instant that is ahead,
+// and still takes its lane at the CURRENT time (the conservative choice).
+test("a retried entry whose entry instant is still ahead waits for it too", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([msg(3000, "hi")]),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+  const overlay = h.overlay();
+  const ctx = { stageW: 1280, laneHeight: 24, rate: 1, paused: false, overlay };
+  const entry = h.player._prepareNico(h.player.playerChatMessages[0], ctx);
+
+  // Retried at 1800, 200 ms before the message enters (3000 − NICO_LEAD_MS).
+  assert.equal(h.player._placeEntry(entry, 1800, ctx, true), true);
+  const anim = h.anims.at(-1);
+  assert.equal(anim.delay, 200, "a retry does not enter early either");
+  assert.equal(anim.currentTime, 0, "and never gets a head start into the flight");
+  assert.equal(h.player._lanes.lanes[0].spawnAt, 1800,
+    "the lane is still taken at the CURRENT time, not at the entry instant");
 });
