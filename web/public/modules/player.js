@@ -3,6 +3,7 @@
  */
 import { formatMsToTime, formatTimestamp, isTypingInInput } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
+import { normalizeOffsetMs, computeChatBiasMs } from "./chat-timeline.js";
 
 const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
 
@@ -658,35 +659,17 @@ export class PlayerController {
         if (chatRes.ok) {
           this.playerChatData = await chatRes.json();
           if (this._selectionSeq !== selectionId) return; // Selection changed during parse
-          // Compute chat-to-video timing correction. Chat offsets are relative to
-          // streamStartTime in the chat file, but video playback starts from the
-          // first captured content. If the stream started late (actual > scheduled),
-          // chat offsets will be inflated and need correction.
-          let chatBiasMs = 0;
-          const chatStartMs = this.playerChatData.streamStartTime
-            ? Date.parse(this.playerChatData.streamStartTime)
-            : 0;
-          if (chatStartMs > 0) {
-            if (this.playerJob.segments && this.playerJob.segments.length > 0) {
-              // Multi-segment: use first segment's capture time as video epoch
-              const firstSegStart = this.playerJob.segments[0].unixStart;
-              if (firstSegStart > 0) {
-                chatBiasMs = firstSegStart * 1000 - chatStartMs;
-              }
-            } else if (this.playerJob.streamStartTime) {
-              // Single-file: use job's stream start time (updated to actual on live)
-              const jobStartMs = Date.parse(this.playerJob.streamStartTime);
-              if (jobStartMs > 0 && jobStartMs !== chatStartMs) {
-                chatBiasMs = jobStartMs - chatStartMs;
-              }
-            }
-          }
-
+          // Chat-to-video timing correction (see chat-timeline.js for the
+          // semantics per platform). Multi-part YouTube jobs use the same
+          // rule: the video begins at the actual stream start regardless of
+          // when Moombox started downloading.
+          const chatBiasMs = computeChatBiasMs({
+            platform: this.playerChatData.platform,
+            chatStreamStartTime: this.playerChatData.streamStartTime,
+            jobStreamStartTime: this.playerJob.streamStartTime,
+          });
           this.playerChatMessages = (this.playerChatData.messages || [])
-            .map((m) => ({
-              ...m,
-              offsetMs: (m.offsetMs || 0) - chatBiasMs,
-            }))
+            .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
 
           // Build 3rd-party emote lookup map for Twitch chat
@@ -697,6 +680,11 @@ export class PlayerController {
             for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
             for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
           }
+
+          // Release the raw array now that playerChatMessages holds the
+          // normalized/biased copy — halves peak memory for large chat
+          // files. filterChat and everything else read playerChatMessages.
+          this.playerChatData.messages = null;
         }
       } catch (e) {
         console.error("Failed to load chat:", e);
