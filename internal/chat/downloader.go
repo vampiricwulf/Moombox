@@ -333,6 +333,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			cd.continuation = state.Continuation
 		}
 		cd.messageCount = state.MessageCount
+		if state.StreamStartMs > 0 && state.StreamStartMs != cd.streamStartMs {
+			cd.logDebug("chat: keeping the file's epoch over the run's start time",
+				"videoID", cd.opts.VideoID, "fileEpochMs", state.StreamStartMs, "optsEpochMs", cd.streamStartMs)
+			cd.streamStartMs = state.StreamStartMs
+		}
 		cd.messages = nil // Start fresh — old messages already on disk
 		if len(state.RecentIDs) > 0 {
 			cd.dedup.Restore(state.RecentIDs)
@@ -967,6 +972,15 @@ func (cd *ChatDownloader) incrementalAppend(outputFile string) bool {
 	return false
 }
 
+// epochRFC3339 renders the epoch offsets are computed against — the file's
+// epoch once one is adopted/resumed, else the options' start time.
+func (cd *ChatDownloader) epochRFC3339() string {
+	if cd.streamStartMs > 0 {
+		return time.UnixMilli(cd.streamStartMs).UTC().Format(time.RFC3339)
+	}
+	return cd.opts.StreamStartTime
+}
+
 func (cd *ChatDownloader) writeFullChatFile() {
 	outputFile, _ := cd.getOutputPaths()
 
@@ -974,7 +988,7 @@ func (cd *ChatDownloader) writeFullChatFile() {
 		VideoID:         cd.opts.VideoID,
 		VideoTitle:      cd.opts.VideoTitle,
 		ChannelName:     cd.opts.ChannelName,
-		StreamStartTime: cd.opts.StreamStartTime,
+		StreamStartTime: cd.epochRFC3339(),
 		DownloadedAt:    time.Now().UTC().Format(time.RFC3339),
 		MessageCount:    cd.messageCount,
 		Messages:        cd.messages,
@@ -985,12 +999,12 @@ func (cd *ChatDownloader) writeFullChatFile() {
 	}
 }
 
-// readExistingMessages attempts to read previously-flushed messages from the
-// chat file on disk. The error is returned (rather than folded into a nil
-// slice) so adoptExistingChatFile can tell "no file" from "a file that does
-// not parse" — those two need opposite handling; callers that only care
-// whether anything came back can ignore it.
-func (cd *ChatDownloader) readExistingMessages(path string) ([]ChatMessage, error) {
+// readExistingChatData attempts to read the previously-flushed chat file on
+// disk in full (header included) — adoptExistingChatFile needs the header's
+// streamStartTime as well as the messages. The error is returned (rather
+// than folded into a nil result) so callers can tell "no file" from "a file
+// that does not parse" — those two need opposite handling.
+func (cd *ChatDownloader) readExistingChatData(path string) (*ChatData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -999,7 +1013,17 @@ func (cd *ChatDownloader) readExistingMessages(path string) ([]ChatMessage, erro
 	if err := json.Unmarshal(data, &chatData); err != nil {
 		return nil, err
 	}
-	return chatData.Messages, nil
+	return &chatData, nil
+}
+
+// readExistingMessages is a thin wrapper over readExistingChatData for
+// callers that only need the message slice.
+func (cd *ChatDownloader) readExistingMessages(path string) ([]ChatMessage, error) {
+	d, err := cd.readExistingChatData(path)
+	if err != nil {
+		return nil, err
+	}
+	return d.Messages, nil
 }
 
 // adoptExistingChatFile is THE ADOPTION RULE: when Start finds no usable
@@ -1040,7 +1064,7 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 	if outputFile == "" {
 		return 0
 	}
-	existing, err := cd.readExistingMessages(outputFile)
+	existingData, err := cd.readExistingChatData(outputFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0 // nothing on disk — fresh start
@@ -1052,8 +1076,18 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 		}
 		return 0
 	}
+	existing := existingData.Messages
 	if len(existing) == 0 {
 		return 0
+	}
+	// The adopted file's header is the epoch every one of its offsets was
+	// already computed against — take it over this run's own options so an
+	// appended message lands on the same clock as the ones already on disk.
+	if existingData.StreamStartTime != "" {
+		if t, perr := time.Parse(time.RFC3339, existingData.StreamStartTime); perr == nil && t.UnixMilli() != cd.streamStartMs {
+			cd.logDebug("chat: adopting the file's epoch", "videoID", cd.opts.VideoID, "fileEpoch", existingData.StreamStartTime)
+			cd.streamStartMs = t.UnixMilli()
+		}
 	}
 
 	cd.mu.Lock()
@@ -1133,11 +1167,12 @@ func (cd *ChatDownloader) saveResume() {
 	recentIDs := cd.dedup.Snapshot(dedupKeepSize)
 
 	state := ChatResumeState{
-		MessageCount: cd.messageCount,
-		Continuation: cd.continuation,
-		Timestamp:    time.Now().Unix(),
-		VideoID:      cd.opts.VideoID,
-		RecentIDs:    recentIDs,
+		MessageCount:  cd.messageCount,
+		Continuation:  cd.continuation,
+		Timestamp:     time.Now().Unix(),
+		VideoID:       cd.opts.VideoID,
+		RecentIDs:     recentIDs,
+		StreamStartMs: cd.streamStartMs,
 	}
 	cd.mu.Unlock()
 

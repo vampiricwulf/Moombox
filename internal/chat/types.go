@@ -84,6 +84,10 @@ type ChatResumeState struct {
 	Timestamp    int64    `json:"timestamp"`
 	VideoID      string   `json:"videoId"`
 	RecentIDs    []string `json:"recentIds"`
+	// StreamStartMs is the epoch (ms) every offsetMs in the chat file was
+	// computed against. A resumed or adopted run keeps it even when its own
+	// options carry a newer start time — one file, one epoch.
+	StreamStartMs int64 `json:"streamStartMs,omitempty"`
 }
 
 // Superchat tier color mapping (YouTube's internal ARGB color codes).
