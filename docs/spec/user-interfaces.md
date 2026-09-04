@@ -492,10 +492,10 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `GET` | `/api/jobs` | List all active (non-archived) jobs. |
 | `GET` | `/api/jobs/archived` | List archived jobs. |
 | `GET` | `/api/jobs/{id}` | Get a single job by ID. |
-| `GET` | `/api/jobs/{id}/video` | Stream the job's output video file. Supports HTTP Range requests for seeking. |
+| `GET` | `/api/jobs/{id}/video` | Stream the job's output video file. Supports HTTP Range requests for seeking. `Cache-Control: private, no-cache` + `Last-Modified` — retry/reinit, incomplete-tail resume and part merges rewrite the file behind the same URL, so it revalidates rather than caching immutably. |
 | `GET` | `/api/jobs/{id}/segments` | List segments for a multi-segment recording. |
-| `GET` | `/api/jobs/{id}/segments/{index}/video` | Stream a specific segment's video file. Supports Range. |
-| `GET` | `/api/jobs/{id}/chat` | Get the chat log file for a job. |
+| `GET` | `/api/jobs/{id}/segments/{index}/video` | Stream a specific segment's video file. Supports Range. `Cache-Control: private, no-cache` + `Last-Modified` (same revalidation rationale as `/video`). |
+| `GET` | `/api/jobs/{id}/chat` | Get the chat log file for a job. `Cache-Control: private, no-cache` + `Last-Modified`; answers `If-Modified-Since` with a body-less 304 so a re-selection of the same job doesn't re-read and re-gzip a 50-100 MB file. |
 | `GET` | `/api/jobs/{id}/trims` | List trim clips created from this job. |
 | `GET` | `/api/jobs/{id}/logs` | Get per-job log lines (worker-level logs specific to this job). |
 | `POST` | `/api/jobs` | Create a new job. Rate limited. Body contains URL, format preferences, timestamps. |
@@ -508,7 +508,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/jobs/{id}/watch-state` | Get mutable player state (watched, resumePosition, chatOffset). Uncached — separate from the immutably-cached job endpoint. |
+| `GET` | `/api/jobs/{id}/watch-state` | Get mutable player state (watched, resumePosition, chatOffset). Uncached — like `/api/jobs/{id}` itself (`Cache-Control: no-cache, must-revalidate`, `jobs.go:239-244`), not immutably cached; only the media/thumbnail file routes use long-lived caching. |
 | `PUT` | `/api/jobs/{id}/resume-position` | Save playback resume position (lightweight, no WebSocket broadcast). |
 | `POST` | `/api/jobs/{id}/resume-position` | Same as PUT — sendBeacon fallback (beacon only sends POST). |
 | `POST` | `/api/jobs/{id}/watched` | Mark job as watched, clears resume position. Returns updated job. |

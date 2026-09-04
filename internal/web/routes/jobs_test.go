@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1003,5 +1004,58 @@ func TestRestartRoute_NotLoopbackGated(t *testing.T) {
 	case <-restarted:
 	case <-time.After(2 * time.Second):
 		t.Fatal("onRestart callback never fired")
+	}
+}
+
+// Media URLs are stable but their CONTENT changes (retry/reinit, incomplete-tail
+// resume, part merge). `immutable` let a browser keep serving the old file for
+// a year; Last-Modified revalidation costs one conditional request per play.
+func TestJobVideoIsRevalidatedNotImmutable(t *testing.T) {
+	f := newJobsFixture(t)
+	if err := os.WriteFile(filepath.Join(f.outputDir, "cc.mp4"), []byte("mp4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.addJob(t, "yt_cc", func(j *database.Job) { j.Filename = "cc.mp4" })
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_cc/video", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	cc := rec.Header().Get("Cache-Control")
+	if strings.Contains(cc, "immutable") || !strings.Contains(cc, "no-cache") {
+		t.Errorf("Cache-Control = %q, want a revalidating policy", cc)
+	}
+	if rec.Header().Get("Last-Modified") == "" {
+		t.Error("Last-Modified missing — the browser cannot revalidate")
+	}
+}
+
+// The chat file is 50–100 MB on a long VOD and was re-read and re-gzipped on
+// every selection. A conditional GET must get a body-less 304.
+func TestJobChatAnswers304WhenUnmodified(t *testing.T) {
+	f := newJobsFixture(t)
+	chatPath := filepath.Join(f.outputDir, "chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.addJob(t, "yt_chat304", func(j *database.Job) { j.ChatFilename = "chat.json" })
+
+	first := doRequest(t, f.router, "GET", "/api/jobs/yt_chat304/chat", nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first GET: want 200, got %d", first.Code)
+	}
+	lm := first.Header().Get("Last-Modified")
+	if lm == "" {
+		t.Fatal("first GET has no Last-Modified")
+	}
+	req := httptest.NewRequest("GET", "/api/jobs/yt_chat304/chat", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("If-Modified-Since", lm)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("conditional GET: want 304, got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
 	}
 }

@@ -2,9 +2,11 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -328,12 +330,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			rw.Header().Set("Content-Type", "application/octet-stream")
 		}
 
-		// Cache headers (match TS: immutable for finished, no-cache for others)
-		if job.Status == database.StatusFinished {
-			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		}
+		// Revalidate, never immutable: retry/reinit, incomplete-tail resume and
+		// part merges rewrite the file behind the same URL. ServeFile emits
+		// Last-Modified and honours If-Modified-Since / Range.
+		rw.Header().Set("Cache-Control", "private, no-cache")
 
 		http.ServeFile(rw, req, filePath)
 	})
@@ -521,11 +521,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		rw.Header().Set("Content-Type", "video/mp4")
-		if job.Status == database.StatusFinished {
-			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		}
+		// Revalidate, never immutable: retry/reinit, incomplete-tail resume and
+		// part merges rewrite the file behind the same URL. ServeFile emits
+		// Last-Modified and honours If-Modified-Since / Range.
+		rw.Header().Set("Cache-Control", "private, no-cache")
 		http.ServeFile(rw, req, filePath)
 	})
 
@@ -591,18 +590,27 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		// Read and validate JSON (match TS: 422 for corrupt/unreadable)
-		data, err := os.ReadFile(chatPath)
+		f, err := os.Open(chatPath)
 		if err != nil {
 			jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
 			return
 		}
-		if !json.Valid(data) {
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
 			jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
 			return
 		}
-
+		data, err := io.ReadAll(f)
+		if err != nil || !json.Valid(data) {
+			jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
+			return
+		}
 		rw.Header().Set("Content-Type", "application/json")
-		rw.Write(data)
+		rw.Header().Set("Cache-Control", "private, no-cache")
+		// ServeContent adds Last-Modified and answers If-Modified-Since with a
+		// body-less 304 — the gzip middleware then has nothing to compress.
+		http.ServeContent(rw, req, "chat.json", fi.ModTime(), bytes.NewReader(data))
 	})
 
 	// GET /api/jobs/:id/trims
