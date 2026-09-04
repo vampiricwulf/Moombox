@@ -526,6 +526,7 @@ All API routes use the `/api/` prefix (no version). Non-API routes exist for POT
 - `GET /api/jobs/{id}/video` — Stream video file (supports Range)
 - `GET /api/jobs/{id}/segments` — List multi-segment recordings
 - `GET /api/jobs/{id}/segments/{index}/video` — Stream specific segment
+- `GET /api/jobs/{id}/segments/{index}/chat` — Get one part's chat (multi-part Twitch)
 - `GET /api/jobs/{id}/chat` — Get chat data
 - `GET /api/jobs/{id}/trims` — List trim clips
 - `POST /api/jobs/{id}/trims` — Create trim clip
