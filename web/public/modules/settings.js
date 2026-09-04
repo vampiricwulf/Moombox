@@ -2762,22 +2762,23 @@ export class SettingsController {
       // Branches POSITIVELY on the string, so an older binary that omits the
       // key reads undefined and falls through to exactly today's copy.
       //
-      // TOASTED ONLY WHEN THE RESTORED CREDENTIALS THEN VERIFIED. A rollback
-      // re-checks what it kept, and that check can come back not-accepted —
-      // the previous rows verified before the write and were rejected after
-      // it, which happens when the session expires mid-import. "Moombox kept
-      // the working ones it already had" beside the inline "No login detected.
-      // Try again." is two contradictory answers to one gesture, and the
-      // inline one is the true half: nothing is working for that platform. The
-      // suppression of the ACCEPTED toast still happens either way (the return
-      // value), because that toast must never describe a paste that was
+      // ONE SENTENCE PER ROLLED-BACK PLATFORM, whatever the sibling did, and
+      // which sentence depends on whether the RESTORED credentials then
+      // verified — see cookieImportRolledBackToast's two arms. A rollback
+      // re-checks what it kept and that check can come back not-accepted (a
+      // session expiring mid-import), and that platform cannot be left silent:
+      // the inline rejection message below only renders when NEITHER platform
+      // was accepted, so a rolled-back-and-dead YouTube beside an accepted
+      // Twitch would otherwise produce a green Twitch toast and nothing at all
+      // about YouTube.
+      //
+      // The ACCEPTED toast is suppressed for a rolled-back platform either way
+      // (the return value), because it must never describe a paste that was
       // thrown out.
       const rolledBack = (label, outcome, accepted) => {
         if (outcome !== "rolled-back") return false;
-        if (accepted) {
-          const toast = cookieImportRolledBackToast(label);
-          this.app.showToast(toast.message, toast.variant);
-        }
+        const toast = cookieImportRolledBackToast(label, accepted);
+        this.app.showToast(toast.message, toast.variant);
         return true;
       };
       const ytRolledBack = rolledBack("YouTube", data.youtubeImport, ytOk);

@@ -306,8 +306,14 @@ func TestImportRollbackThatDoesNotLandIsNotReportedAsOne(t *testing.T) {
 		if !result.Wrote {
 			t.Error("Wrote is false although cookies.txt was replaced — the caller's re-check is gated on it")
 		}
-		if !strings.Contains(err.Error(), "still holds the rejected new credentials") {
-			t.Errorf("error = %q — it does not say what is on disk, which is the only actionable half", err)
+		if !strings.Contains(err.Error(), "Twitch did not verify and the previous cookies could not be "+
+			"restored") || !strings.Contains(err.Error(), "still holds the rejected new credentials") {
+			t.Errorf("error = %q — it does not name the platform and what is on disk, which is the "+
+				"only actionable half", err)
+		}
+		if strings.Contains(err.Error(), "twitch") {
+			t.Errorf("error = %q carries the internal lowercase platform key; every other "+
+				"operator-facing string in this package renders platformDisplayName", err)
 		}
 		if got := lastErrorSnapshot(s); got != err.Error() {
 			t.Errorf("lastError = %q but the caller was handed %q — Settings and the dialog that "+
@@ -340,7 +346,8 @@ func TestImportRollbackThatDoesNotLandIsNotReportedAsOne(t *testing.T) {
 		if !errors.Is(err, ErrImportRollbackIncomplete) {
 			t.Fatalf("error = %v, want it to wrap ErrImportRollbackIncomplete", err)
 		}
-		if !strings.Contains(err.Error(), "this process is still using the rejected credentials") {
+		if !strings.Contains(err.Error(), "Twitch's previous cookies were restored but could not be "+
+			"reloaded") || !strings.Contains(err.Error(), "this process is still using the rejected credentials") {
 			t.Errorf("error = %q — the two exits are different states and this one says the process "+
 				"is stale, not that the file is wrong", err)
 		}

@@ -45,9 +45,17 @@ const (
 	// against a 120s cap. RAISING processTimeout WITHOUT RAISING
 	// refreshOverallBudget makes the outer ctx cancel the second platform's
 	// launch mid-flight instead of granting it the budget it was just given.
-	processTimeout       = 30 * time.Second
-	authVerifyTimeout    = 15 * time.Second // single VerifyYouTubeAuth / VerifyTwitchAuth call
-	refreshOverallBudget = 2 * time.Minute  // periodic refresh: ctx cap end-to-end (see processTimeout)
+	processTimeout = 30 * time.Second
+	// authVerifyTimeout bounds ONE checkPlatformAuth call — both platforms
+	// together, not each. checkPlatformAuth builds a single
+	// context.WithTimeout and hands the same deadline to VerifyYouTubeAuth and
+	// VerifyTwitchAuth, so a slow YouTube check eats into what is left for
+	// Twitch and the pair can never take longer than this. Read as a per-call
+	// bound it looks like a 30 s ceiling, which is what
+	// data-and-storage.md's cross-writer window sentence would then be pricing
+	// the import path against.
+	authVerifyTimeout    = 15 * time.Second
+	refreshOverallBudget = 2 * time.Minute // periodic refresh: ctx cap end-to-end (see processTimeout)
 	// taskkillDrainDelay is the post-taskkill pause that lets Windows release
 	// the process handle before the next cleanup step inspects state. Replaces
 	// a bare 300ms literal in killSetupProcess (audit reports/cookies.md #45).

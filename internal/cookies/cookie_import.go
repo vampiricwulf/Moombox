@@ -472,10 +472,17 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 	}
 	if len(restore) > 0 {
 		restoredPlatforms := make([]string, 0, len(restore))
+		restoredLabels := make([]string, 0, len(restore))
 		verdicts := make([]string, 0, len(restore))
 		for _, platform := range []string{"youtube", "twitch"} {
 			if restore[platform] {
 				restoredPlatforms = append(restoredPlatforms, platform)
+				// The keys stay lowercase in the LOG fields, where they are
+				// the same machine-readable names the refresh path uses; the
+				// operator-facing sentences below take the capitalised name
+				// every other message in this package renders. See
+				// platformDisplayName.
+				restoredLabels = append(restoredLabels, platformDisplayName(platform))
 				verdicts = append(verdicts, platform+"="+verdictOf(importCheck[platform]).String())
 			}
 		}
@@ -502,10 +509,15 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		// where the dialog that caused this never looks — and the route then
 		// fell through to its `result.Wrote` arm and told the operator the
 		// cookies had been imported and written, which is false on both exits.
+		//
+		// Neither sentence repeats the sentinel's subject: it already says the
+		// pasted cookies were rejected and the rollback did not complete, and
+		// what each of these adds is WHICH platform, WHICH half failed and what
+		// is left in force.
 		if restoreErr := writeCookieFile(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
-			failure := fmt.Errorf("%w: the pasted cookies did not verify for %s, and Moombox could not "+
-				"restore the previous ones (%w) — cookies.txt still holds the rejected new credentials",
-				ErrImportRollbackIncomplete, strings.Join(restoredPlatforms, " + "), restoreErr)
+			failure := fmt.Errorf("%w: %s did not verify and the previous cookies could not be "+
+				"restored (%w) — cookies.txt still holds the rejected new credentials",
+				ErrImportRollbackIncomplete, strings.Join(restoredLabels, " + "), restoreErr)
 			s.setError(failure.Error())
 			s.logger.Error("could not restore the previous cookies.txt after a rejected import",
 				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
@@ -513,10 +525,9 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		}
 		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
 			// The FILE is correct here; the running process is not.
-			failure := fmt.Errorf("%w: the previous cookies for %s were restored after the pasted ones "+
-				"did not verify, but reloading them failed (%w) — this process is still using the "+
-				"rejected credentials until the next refresh",
-				ErrImportRollbackIncomplete, strings.Join(restoredPlatforms, " + "), loadErr)
+			failure := fmt.Errorf("%w: %s's previous cookies were restored but could not be reloaded "+
+				"(%w) — this process is still using the rejected credentials until the next refresh",
+				ErrImportRollbackIncomplete, strings.Join(restoredLabels, " + "), loadErr)
 			s.setError(failure.Error())
 			s.logger.Error("could not reload cookie jar after restoring the previous cookies.txt",
 				"err", loadErr, "platforms", strings.Join(restoredPlatforms, ","))
