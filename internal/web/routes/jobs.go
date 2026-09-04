@@ -241,8 +241,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// Cache headers: always revalidate. Even Finished jobs mutate after
 		// completion (watched, resumePosition, chatOffset, trims), so an
 		// immutable year-long cache here served stale state to any consumer
-		// that didn't explicitly bypass the browser cache. Long-lived
-		// immutable caching belongs on the media/thumbnail file routes only.
+		// that didn't explicitly bypass the browser cache. The media and chat
+		// file routes revalidate as well (private, no-cache + Last-Modified);
+		// /api/jobs/{id}/thumbnail is the only long-lived cache left.
 		rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
 
 		var stagingBase string

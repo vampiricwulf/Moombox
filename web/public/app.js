@@ -3270,8 +3270,15 @@ class MoomboxApp {
     }
   }
 
+  /**
+   * Open the selected job in the Player tab. Returns a promise that resolves
+   * once the job is loaded and the keyboard has been handed over, so a caller
+   * can await the player being ready; it never rejects (a failed load is
+   * swallowed below, exactly as the fire-and-forget click path needs).
+   * @returns {Promise<void>}
+   */
   openInPlayer() {
-    if (!this.selectedJobId) return;
+    if (!this.selectedJobId) return Promise.resolve();
     const jobId = this.selectedJobId;
 
     // Close the details dialog
@@ -3292,7 +3299,7 @@ class MoomboxApp {
       this.player.initPlayer();
     }
 
-    this.player.loadPlayerJobList().then(() => {
+    return this.player.loadPlayerJobList().then(() => {
       const select = document.getElementById("player-job-select");
       select.value = jobId;
       // Returned so the .catch below covers the selection as well, and so the
