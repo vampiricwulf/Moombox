@@ -544,6 +544,17 @@ func (g *gzipResponseWriter) WriteHeader(code int) {
 	if g.headerSent {
 		return
 	}
+	// A 206's Content-Range describes an exact byte span of the identity
+	// encoding. Gzipping the body would change its length without updating
+	// Content-Range and pair Content-Encoding: gzip with a range the client
+	// asked for against the uncompressed resource — malformed on the wire
+	// (R16). Commit it plain immediately, the same way a body-less response
+	// (e.g. 304) already reaches the client uncompressed by never touching
+	// the gzip threshold.
+	if code == http.StatusPartialContent {
+		g.commitPlain()
+		return
+	}
 	// Don't send headers yet — wait until we know if we need gzip
 }
 

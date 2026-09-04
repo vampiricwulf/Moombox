@@ -304,6 +304,39 @@ func TestShouldSkipCompression(t *testing.T) {
 	}
 }
 
+// A Range request against a chat route answers 206 with a Content-Range
+// describing the exact byte span of the underlying resource; chat routes
+// are NOT in shouldSkipCompression's /video exemption, so they are wrapped
+// by the gzip middleware like any other JSON response. Compressing a 206
+// would pair Content-Encoding: gzip with a Content-Range computed on the
+// identity encoding — a malformed response the client cannot decode against
+// the byte range it asked for (R16). The compression middleware must commit
+// a 206 response uncompressed regardless of size or Accept-Encoding.
+func TestCompressionMiddlewareNeverCompresses206(t *testing.T) {
+	body := strings.Repeat("range-body-byte-", 200) // > gzipMinSize (1024 bytes)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-3199/5000")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write([]byte(body))
+	})
+
+	req := httptest.NewRequest("GET", "/api/jobs/abc/chat", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	CompressionMiddleware(handler).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("want 206, got %d", rec.Code)
+	}
+	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("Content-Encoding = %q, want none on a 206", enc)
+	}
+	if rec.Body.String() != body {
+		t.Errorf("body mismatch: got %d bytes, want %d bytes", rec.Body.Len(), len(body))
+	}
+}
+
 func TestIsLoopbackRequest(t *testing.T) {
 	tests := []struct {
 		name       string
