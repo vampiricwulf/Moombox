@@ -540,3 +540,79 @@ func TestReplayResumeKeepsSidecarContinuation(t *testing.T) {
 		t.Errorf("messageCount = %d, want 2 from the sidecar", cd.MessageCount())
 	}
 }
+
+// --- Fix round 1 ---------------------------------------------------------
+
+// TestReplayStartDoesNotAdoptExistingFile gates adoption to the live/upcoming
+// path. A replay/VOD run's continuation restarts the archive FROM THE TOP, and
+// the loop culls the dedup to dedupKeepSize (5000) on its first successful
+// fetch — so adoption on that path re-appends every message older than the
+// retained window (the reviewer measured a 5002-message seed ending at 5004).
+// The whole motivating bug is live/upcoming; the replay path must behave
+// exactly as it did before this branch, i.e. start at zero and full-write.
+func TestReplayStartDoesNotAdoptExistingFile(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	seed := ChatData{
+		VideoID:      "vidReplayNoAdopt",
+		DownloadedAt: time.Now().UTC().Format(time.RFC3339),
+		MessageCount: 3,
+		Messages:     []ChatMessage{makeTestMessage("m1"), makeTestMessage("m2"), makeTestMessage("m3")},
+	}
+	if err := utils.WriteChatFileAtomic(out, &seed); err != nil {
+		t.Fatalf("seed chat file: %v", err)
+	}
+	if _, ok := readSidecar(t, out+".resume.json"); ok {
+		t.Fatal("test setup: there must be NO resume sidecar")
+	}
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidReplayNoAdopt",
+		OutputFile:          out,
+		InitialContinuation: "tok0",
+		ApiKey:              "k",
+		IsReplay:            true,
+		IsLiveOrUpcoming:    false,
+	})
+	var startCount int
+	var startResuming bool
+	cd.OnStart = func(messageCount int, resuming bool) { startCount, startResuming = messageCount, resuming }
+
+	startWithScript(t, cd, chatResponseWithIDs([]string{"m4"}, ""))
+
+	if startCount != 0 || startResuming {
+		t.Errorf("OnStart(%d, %v), want (0, false) — a replay run must not adopt an existing chat file", startCount, startResuming)
+	}
+	got := readChatFileHeader(t, out)
+	if len(got.Messages) != 1 || got.Messages[0].ID != "m4" || got.MessageCount != 1 {
+		ids := make([]string, len(got.Messages))
+		for i, m := range got.Messages {
+			ids[i] = m.ID
+		}
+		t.Errorf("replay first flush must be a full write holding only the polled message, got %v (header count %d)", ids, got.MessageCount)
+	}
+}
+
+// TestOnFinishFiresOncePerRun closes the reviewer's surviving mutant: nothing
+// in either package pinned how many times OnFinish fires. Exactly once per run
+// that reaches the end of Start. (It fires ZERO times when Start panics —
+// Start's recovery defer returns before it — which is why the worker's restart
+// flag is set from the run goroutine's own defer instead; see runEarlyChat.)
+func TestOnFinishFiresOncePerRun(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidFinishOnce",
+		OutputFile:          out,
+		InitialContinuation: "tok0",
+		ApiKey:              "k",
+		IsReplay:            true,
+		IsLiveOrUpcoming:    false,
+	})
+	finishes := 0
+	cd.OnFinish = func() { finishes++ }
+
+	startWithScript(t, cd, chatResponseWithIDs([]string{"m1"}, ""))
+
+	if finishes != 1 {
+		t.Errorf("OnFinish fired %d time(s), want exactly 1 per completed run", finishes)
+	}
+}

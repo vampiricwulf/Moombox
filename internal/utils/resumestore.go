@@ -30,9 +30,14 @@ type ResumeStore[T any] struct {
 // The fsync before rename matters (mirrors WriteChatFileAtomic): without it,
 // an OS crash / power loss can journal the rename while the data pages never
 // hit disk, leaving a zero-length/corrupt sidecar. Consumers treat any Load
-// failure as "no resume" and start fresh — for the YouTube chat downloader a
-// fresh start full-rewrites chat.json, so a corrupt sidecar would destroy
-// previously archived chat.
+// failure as "no resume" and start fresh. For the YouTube chat downloader a
+// fresh start no longer means losing the archive: its adoption rule
+// (adoptExistingChatFile, internal/chat/downloader.go) makes a LIVE/upcoming
+// run adopt the chat.json already on disk and append to it, so a corrupt
+// sidecar now costs only the saved continuation and dedup window. A REPLAY run
+// is not adopted — it re-reads the archive from the top — so there a corrupt
+// sidecar still means a full rewrite, which for a replay is the intended
+// behaviour rather than a loss.
 func (s ResumeStore[T]) Save(state T) error {
 	if s.Path == "" {
 		return nil

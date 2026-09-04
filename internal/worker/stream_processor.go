@@ -26,6 +26,16 @@ const (
 	twitchPollInterval  = 15 * time.Second
 	twitchPollJitterMax = 5 * time.Second
 
+	// earlyChatMinRestartInterval is the floor between two early-chat starts
+	// for the SAME waiting job. tryStartEarlyChat opens with a full watch-page
+	// fetch (~5 MB of HTML), and a run that dies immediately — dead cookies
+	// returning ErrAuthRequired is the realistic case — would otherwise be
+	// restarted on every probe for the rest of the wait. The case the restart
+	// exists for, a waiting-room chat YouTube reset, self-limits at roughly
+	// the ~50 minutes recoverStaleContinuation spends before giving up, so
+	// this floor never delays it.
+	earlyChatMinRestartInterval = 5 * time.Minute
+
 	// offlineProbeFloor throttles probing while the oracle reports offline.
 	// We probe anyway (not skip) so a wrongly-offline oracle can't strand a
 	// waiting stream — network errors no longer count — but no faster than

@@ -4,7 +4,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/chat"
 )
@@ -23,23 +25,29 @@ import (
 // OnFinish, which the chat downloader fires only after its final flush.
 func TestEarlyChatNeedsRestart(t *testing.T) {
 	dl := chat.NewChatDownloader(chat.ChatDownloaderOptions{VideoID: "v1", OutputFile: "unused"})
+	now := time.Now()
+	longAgo := now.Add(-2 * earlyChatMinRestartInterval)
+	justNow := now.Add(-time.Second)
 
 	cases := []struct {
-		name     string
-		chatDl   *chat.ChatDownloader
-		finished bool
-		want     bool
+		name        string
+		chatDl      *chat.ChatDownloader
+		finished    bool
+		lastRestart time.Time
+		want        bool
 	}{
-		{"never started — nothing to keep", nil, false, true},
-		{"run in progress — leave it alone", dl, false, false},
-		{"run ended — start a new one", dl, true, true},
-		{"no downloader, stale flag — still start one", nil, true, true},
+		{"never started — nothing to keep", nil, false, longAgo, true},
+		{"never started, and the interval never applies to the first start", nil, false, justNow, true},
+		{"run in progress — leave it alone", dl, false, longAgo, false},
+		{"run ended and past the interval — start a new one", dl, true, longAgo, true},
+		{"run ended but within the interval — wait", dl, true, justNow, false},
+		{"no downloader, stale flag — still start one", nil, true, justNow, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := earlyChatNeedsRestart(c.chatDl, c.finished); got != c.want {
-				t.Errorf("earlyChatNeedsRestart(%v, %v) = %v, want %v",
-					c.chatDl != nil, c.finished, got, c.want)
+			if got := earlyChatNeedsRestart(c.chatDl, c.finished, c.lastRestart, now); got != c.want {
+				t.Errorf("earlyChatNeedsRestart(hasDownloader=%v, finished=%v, since=%v) = %v, want %v",
+					c.chatDl != nil, c.finished, now.Sub(c.lastRestart), got, c.want)
 			}
 		})
 	}
@@ -119,32 +127,62 @@ func selectorCallPos(n ast.Node, recv, method string) token.Pos {
 	return found
 }
 
-// TestTryStartEarlyChatWiresOnFinish pins the producer side: without the
-// OnFinish assignment nothing ever sets the flag earlyChatNeedsRestart reads,
-// and the restart arm is dead code that no behavioural test in the tree can
-// see.
-func TestTryStartEarlyChatWiresOnFinish(t *testing.T) {
+// TestRunEarlyChatRecordsEndOnEveryPath is the producer side of the restart
+// flag. It is deliberately NOT ChatDownloader.OnFinish: Start's own recovery
+// defer returns before OnFinish is reached, so a run that panicked never fired
+// it — the downloader then sat non-nil and dead for the rest of the wait,
+// never restarted, which is the exact shape earlyChatNeedsRestart exists to
+// eliminate, reached through a different door.
+func TestRunEarlyChatRecordsEndOnEveryPath(t *testing.T) {
+	t.Run("normal return", func(t *testing.T) {
+		var finished atomic.Bool
+		panics := 0
+		runEarlyChat(&finished, func(any) { panics++ }, func() {})
+		if !finished.Load() {
+			t.Error("a run that returned normally must be recorded as ended")
+		}
+		if panics != 0 {
+			t.Errorf("onPanic fired %d time(s) for a clean run, want 0", panics)
+		}
+	})
+
+	t.Run("panicking run", func(t *testing.T) {
+		var finished atomic.Bool
+		var got any
+		panics := 0
+		runEarlyChat(&finished, func(r any) { panics++; got = r }, func() { panic("chat blew up") })
+		if !finished.Load() {
+			t.Error("a run that PANICKED must still be recorded as ended — otherwise nothing ever restarts it")
+		}
+		if panics != 1 || got != "chat blew up" {
+			t.Errorf("onPanic fired %d time(s) with %v, want 1 with the panic value", panics, got)
+		}
+	})
+}
+
+// TestTryStartEarlyChatRunsThroughRunEarlyChat pins the wiring: the background
+// goroutine must go through runEarlyChat, or the end-of-run flag is never set
+// and earlyChatNeedsRestart's finished arm is dead. tryStartEarlyChat itself
+// begins with youtube.FetchWatchPage, so only the shape is assertable here —
+// the same approach cmd/moombox/recheck_callsite_test.go takes.
+func TestTryStartEarlyChatRunsThroughRunEarlyChat(t *testing.T) {
 	_, file := parseYouTubeProcessor(t)
 	fn := funcDeclNamed(t, file, "tryStartEarlyChat")
 
 	wired := false
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
-		assign, ok := node.(*ast.AssignStmt)
-		if !ok || len(assign.Lhs) != 1 {
+		goStmt, ok := node.(*ast.GoStmt)
+		if !ok {
 			return true
 		}
-		sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "OnFinish" {
-			return true
-		}
-		if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "dl" {
+		if ident, ok := goStmt.Call.Fun.(*ast.Ident); ok && ident.Name == "runEarlyChat" {
 			wired = true
 			return false
 		}
 		return true
 	})
 	if !wired {
-		t.Error("tryStartEarlyChat must assign dl.OnFinish — it is the only thing that records that an early-chat run ended, and earlyChatNeedsRestart's finished arm is dead without it")
+		t.Error("tryStartEarlyChat must launch its run as `go runEarlyChat(...)` — that defer is the only thing that records an early-chat run ending, panics included")
 	}
 }
 
