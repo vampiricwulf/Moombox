@@ -83,6 +83,10 @@ test("safePlay swallows a rejected play() promise and tolerates a void return", 
   try {
     safePlay({ play: () => Promise.reject(new Error("AbortError")) });
     safePlay({ play: () => undefined });
+    // phase-2-review.md §4 mutant MU6: the `media && media.play` guard is the
+    // documented tolerance, so pin it — a bare `media.play()` throws on both.
+    safePlay(null);
+    safePlay({});
     await new Promise((r) => setImmediate(r));
     assert.equal(rejections, 0);
   } finally {

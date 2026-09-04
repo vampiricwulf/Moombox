@@ -14,6 +14,14 @@ test("normalizeOffsetMs: numbers, json.Number strings, garbage", () => {
   assert.equal(normalizeOffsetMs(null), 0);
   assert.equal(normalizeOffsetMs("abc"), 0);
   assert.equal(normalizeOffsetMs(NaN), 0);
+  // phase-2-review.md §4 mutant MU4: the guard is Number.isFinite, not
+  // !Number.isNaN — an infinity has to become 0 too. Every case above passes
+  // under `Number.isNaN(n) ? 0 : n`; these are the ones that do not, and an
+  // offset that reached the overlay as Infinity would make its lane busy
+  // forever.
+  assert.equal(normalizeOffsetMs(Infinity), 0);
+  assert.equal(normalizeOffsetMs(-Infinity), 0);
+  assert.equal(normalizeOffsetMs("Infinity"), 0);
 });
 
 test("computeChatBiasMs: twitch offsets are already video-relative → 0", () => {

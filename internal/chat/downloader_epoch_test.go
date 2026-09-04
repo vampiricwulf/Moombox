@@ -205,3 +205,81 @@ func TestPreUpgradeSidecarKeepsOptionsEpoch(t *testing.T) {
 		t.Errorf("appended offset = %d, want %d (the run's OWN options epoch — the pre-upgrade sidecar has no streamStartMs to override it)", appended.OffsetMs, want)
 	}
 }
+
+// Chat offsets are millisecond quantities, so a fractional-second start time
+// has to survive the header round-trip: rendering it with RFC3339 (which has
+// no fractional field) would truncate the epoch by up to 999 ms and leave the
+// header describing a different clock from the offsets underneath it. Same
+// shape as TestFullRewriteKeepsFileEpoch — chat.json is deleted between the
+// runs so the second one takes the full-rewrite path, the only one that
+// writes the header under test.
+func TestFullRewriteKeepsFractionalFileEpoch(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	sched := "2026-06-11T10:00:00.250Z"
+	actual := "2026-06-11T10:12:00Z"
+	schedMs := time.Date(2026, 6, 11, 10, 0, 0, 250_000_000, time.UTC).UnixMilli()
+
+	cd1 := NewChatDownloader(ChatDownloaderOptions{
+		VideoID: "vidFracEpoch", OutputFile: out, InitialContinuation: "tok0", ApiKey: "k",
+		IsLiveOrUpcoming: true, StreamStartTime: sched,
+	})
+	cd1.testRecoveryOverride = func(context.Context) bool { return false } // stale exit keeps the sidecar
+	startWithScript(t, cd1, chatResponseWithIDs([]string{"m1"}, ""))
+
+	if state, ok := readSidecar(t, out+".resume.json"); !ok || state.StreamStartMs != schedMs {
+		t.Fatalf("sidecar streamStartMs = %d (present %v), want %d", state.StreamStartMs, ok, schedMs)
+	}
+	if err := os.Remove(out); err != nil {
+		t.Fatalf("remove chat.json: %v", err)
+	}
+
+	cd2 := NewChatDownloader(ChatDownloaderOptions{
+		VideoID: "vidFracEpoch", OutputFile: out, InitialContinuation: "tok1", ApiKey: "k",
+		IsLiveOrUpcoming: true, StreamStartTime: actual,
+	})
+	cd2.testRecoveryOverride = func(context.Context) bool { return false }
+	startWithScript(t, cd2, chatResponseWithIDs([]string{"m2"}, ""))
+
+	got := readChatFileHeader(t, out)
+	parsed, err := time.Parse(time.RFC3339, got.StreamStartTime)
+	if err != nil {
+		t.Fatalf("header streamStartTime %q does not parse as RFC3339: %v", got.StreamStartTime, err)
+	}
+	if parsed.UnixMilli() != schedMs {
+		t.Errorf("header streamStartTime = %q (%d ms), want %d ms — the fraction must survive the round-trip",
+			got.StreamStartTime, parsed.UnixMilli(), schedMs)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("want 1 message (chat.json was deleted before run 2), got %d", len(got.Messages))
+	}
+	if want := testMsgUsec/1000 - schedMs; got.Messages[0].OffsetMs != want {
+		t.Errorf("run-2 offset = %d, want %d (the same fractional epoch the header claims)", got.Messages[0].OffsetMs, want)
+	}
+}
+
+// A run with no start time at all has no epoch to describe, and epochRFC3339's
+// `cd.streamStartMs > 0` guard is what keeps the header honest about it:
+// rendering UnixMilli(0) instead would stamp 1970-01-01T00:00:00Z, which the
+// player reads as a real epoch and subtracts from every message — a 56-year
+// bias on a file whose messages carry no offset in the first place.
+func TestNoStartTimeWritesEmptyHeaderEpoch(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID: "vidNoEpoch", OutputFile: out, InitialContinuation: "tok0", ApiKey: "k",
+		IsLiveOrUpcoming: true, // StreamStartTime deliberately unset
+	})
+	cd.testRecoveryOverride = func(context.Context) bool { return false }
+	startWithScript(t, cd, chatResponseWithIDs([]string{"m1"}, ""))
+
+	got := readChatFileHeader(t, out)
+	if got.StreamStartTime != "" {
+		t.Errorf("header streamStartTime = %q, want empty — there is no epoch to describe", got.StreamStartTime)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("want 1 message, got %d", len(got.Messages))
+	}
+	if got.Messages[0].HasOffset {
+		t.Errorf("message hasOffset = true (offsetMs %d), want false with no epoch to count from", got.Messages[0].OffsetMs)
+	}
+}
