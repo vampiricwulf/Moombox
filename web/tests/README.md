@@ -48,9 +48,9 @@ that throws, every test in the file is registered with `{ skip: "..." }`, so a
 checkout without `npm ci` reports them as **skipped**, never failed:
 
 ```
-ℹ pass 67
+ℹ pass 69
 ℹ fail 0
-ℹ skipped 9
+ℹ skipped 16
 ```
 
 The helper (`helpers/player-dom.mjs`) is imported only after the probe
@@ -75,7 +75,7 @@ const h = harness.makePlayer({
   jobs: [ /* GET /api/jobs */ ],
   watchStateById: { j1: { chatOffset: 1.5 } },
   chat: { platform: "twitch", messages: [ /* ... */ ] },
-  geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+  geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },  // msgH defaults to rowH
   storage: { "player-sidebar-toggle": "true" },
 });
 await h.selectJob("j1");

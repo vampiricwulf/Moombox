@@ -39,10 +39,10 @@ The file structure:
 |------|-------|---------|
 | `web/public/index.html` | — | SPA shell. Loads Shoelace from CDN, defines the base HTML structure, imports `app.js`. |
 | `web/public/login.html` | — | Authentication page. Served inline by `AuthMiddleware` when auth is required and the user is not authenticated. The URL bar is preserved (no redirect to `/login`). |
-| `web/public/app.js` | ~2,560 | Main SPA module. Job list, unified filter control, log viewer, status bar, WebSocket connection management, settings integration, theme switching. |
+| `web/public/app.js` | ~5,010 | Main SPA module. Job list, unified filter control, log viewer, status bar, WebSocket connection management, settings integration, theme switching. |
 | `web/public/modules/player.js` | ~2.0k | Video player with per-job chat replay. Niconico-style scrolling overlay (`nico-lanes.js` `LaneAllocator`, a two-edge bound covering both collision conditions, 4 s traverse, a pending list with a 2 s lateness bound, a "+N not shown" pill, overlay sized to the video's rendered rect with rows from a measured line box, 120 ms geometry settle, off by default under `prefers-reduced-motion`); sidebar with pre-show/post-end dividers and counts derived from the loaded message array, never a chat file header's own `messageCount` (`chat-timeline.js` `partitionChatByVideo`/`formatChatHeader`/`dividerLabelFor`); chat search; per-job chat offset (positive = chat earlier: effective = video + offset — a positive offset can spawn overlay rows the sidebar already marks `.post`, by design); resume/watched tracking; per-part Twitch chat merge for multi-segment jobs (`chat-timeline.js` `mergePartChats` over `GET /api/jobs/{id}/segments/{index}/chat`); keyboard shortcuts (`Space`/arrows/`F`/`M`/`C`/`S`) work right after selection, and the player's own `F` (fullscreen) overrides the Web UI's global `F` (filter-focus) shortcut while the player tab is active; during a window drag the overlay flies on its previous committed geometry until `NICO_GEO_SETTLE_MS` (120 ms) after the drag stops. Multi-segment seeking stitches separate segment video files into one timeline (`segments.js` `SegmentPlayer`). |
 | `web/public/modules/segments.js` | ~140 | `SegmentPlayer` — multi-segment playback helper shared by the player and the trimmer: sequential segment sources, cumulative time offsets, cross-segment seeking. |
-| `web/public/modules/chat-timeline.js` | ~115 | Pure chat/video timeline math: offset normalization, chat-to-video bias, pre-show/post-end partitioning, per-part chat merge. No DOM, no fetch; covered by `web/tests/chat-timeline.test.mjs`. |
+| `web/public/modules/chat-timeline.js` | ~120 | Pure chat/video timeline math: offset normalization, chat-to-video bias, pre-show/post-end partitioning, per-part chat merge. No DOM, no fetch; covered by `web/tests/chat-timeline.test.mjs`. |
 | `web/public/modules/nico-lanes.js` | ~75 | `LaneAllocator` — the niconico lane-collision math (right-to-left constant-traverse scrolling) and seed-cursor selection on reset/seek. Pure; covered by `web/tests/nico-lanes.test.mjs`. |
 | `web/public/modules/setup.js` | ~785 | First-run setup wizard. Walks the user through initial configuration, FFmpeg installation, yt-dlp plugin setup, and cookie capture. |
 | `web/public/modules/settings.js` | ~1,600 | Settings dialog. Covers full config editing, channel management, cookie management, integration settings. |
@@ -51,8 +51,8 @@ The file structure:
 | `web/public/modules/imports.js` | ~210 | Zip archive import. Upload a zip file containing video/chat/metadata to create a job from external content. |
 | `web/public/modules/filter-parser.js` | ~110 | Filter query parser. Booru-style tag syntax: `status:active`, `channel:"name"`, `platform:youtube`, negation (`-tag`), OR groups (`a\|b`), quoting for spaces. |
 | `web/public/modules/filter-engine.js` | ~65 | Filter engine. Evaluates parsed tokens against job objects. AND intersection across tokens, OR union within pipe groups. |
-| `web/public/modules/utils.js` | ~70 | Shared formatting helpers (durations, file sizes, dates, etc.). |
-| `web/public/moombox.css` | ~2,090 | All styles. Includes desktop layout, mobile responsive breakpoints, dark/light theme variables, and component-specific styles. |
+| `web/public/modules/utils.js` | ~750 | Shared formatting helpers (durations, file sizes, dates, etc.). |
+| `web/public/moombox.css` | ~3,490 | All styles. Includes desktop layout, mobile responsive breakpoints, dark/light theme variables, and component-specific styles. |
 | `web/public/favicon.svg` | — | SVG favicon for the web dashboard. |
 
 ### Embedding and Serving
@@ -510,11 +510,11 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 
 ### Watch Tracking
 
-Every route below 404s with `{ error: "job not found" }` (or a body-less `404` for the beacon-fallback POST) when `id` names no job (`WatchRoutes`, `internal/web/routes/watch.go`).
+Every route below that takes `{id}` in its path 404s with `{ error: "job not found" }` (or a body-less `404` for the beacon-fallback POST) when `id` names no job; the two batch watched routes take a `jobIds` body instead, accept unknown ids silently and always answer `{ success: true }` (`WatchRoutes`, `internal/web/routes/watch.go`).
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/jobs/{id}/watch-state` | Get mutable player state (watched, resumePosition, chatOffset). Uncached — like `/api/jobs/{id}` itself (`Cache-Control: no-cache, must-revalidate`, `jobs.go:246`), not immutably cached; only the media/thumbnail file routes use long-lived caching. |
+| `GET` | `/api/jobs/{id}/watch-state` | Get mutable player state (watched, resumePosition, chatOffset). Uncached — like `/api/jobs/{id}` itself (`Cache-Control: no-cache, must-revalidate`, `jobs.go:246`), not immutably cached. The media and chat file routes revalidate too (`private, no-cache` plus `Last-Modified`, so a repeat request answers `304`); `/api/jobs/{id}/thumbnail` (`jobs.go:398`, `public, max-age=86400`) is the only long-lived cache left. |
 | `PUT` | `/api/jobs/{id}/resume-position` | Save playback resume position (lightweight, no WebSocket broadcast). |
 | `POST` | `/api/jobs/{id}/resume-position` | Same as PUT — sendBeacon fallback (beacon only sends POST). |
 | `POST` | `/api/jobs/{id}/watched` | Mark job as watched, clears resume position. Returns updated job. |
