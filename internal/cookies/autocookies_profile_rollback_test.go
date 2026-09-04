@@ -766,7 +766,7 @@ func TestBrowserRefreshKeepsFreshCookiesWhenTheCheckIsInconclusive(t *testing.T)
 	}
 }
 
-// TestPlatformsToRestoreAfterBrowserRefreshIgnoresAPlatformAbsentFromPre pins
+// TestPlatformsToRestoreOnRegressionIgnoresAPlatformAbsentFromPre pins
 // mutant 8 from the arc-close review at the unit level: the loop ranges over
 // `pre`, not `post`, on purpose. A platform present in `post` as verifyFailed
 // but absent from `pre` — the shape of every platform on a fresh install,
@@ -780,18 +780,18 @@ func TestBrowserRefreshKeepsFreshCookiesWhenTheCheckIsInconclusive(t *testing.T)
 // fresh install ever runs. TestBrowserRefreshWithNoPreviousCookiesKeepsTheFetchedRows
 // below is the same claim through the whole RefreshCookies call; this is the
 // same claim with nothing else in the way.
-func TestPlatformsToRestoreAfterBrowserRefreshIgnoresAPlatformAbsentFromPre(t *testing.T) {
+func TestPlatformsToRestoreOnRegressionIgnoresAPlatformAbsentFromPre(t *testing.T) {
 	pre := map[string]platformAuth{}
 	post := map[string]platformAuth{
 		"youtube": {hasCookies: true, state: verifyFailed, attempted: true},
 	}
-	if restore := platformsToRestoreAfterBrowserRefresh(pre, post); len(restore) != 0 {
+	if restore := platformsToRestoreOnRegression(pre, post); len(restore) != 0 {
 		t.Errorf("a platform absent from pre must never be restored, got %v", restore)
 	}
 }
 
 // TestBrowserRefreshWithNoPreviousCookiesKeepsTheFetchedRows is
-// TestPlatformsToRestoreAfterBrowserRefreshIgnoresAPlatformAbsentFromPre's
+// TestPlatformsToRestoreOnRegressionIgnoresAPlatformAbsentFromPre's
 // twin through the whole RefreshCookies call, closing the gap the arc-close
 // review's probe found: no test anywhere in the package reached the browser
 // path's restore decision with an empty `pre` snapshot.

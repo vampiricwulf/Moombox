@@ -297,7 +297,12 @@ func importServiceWithLog(t *testing.T, seed string) (*AutoCookieService, *argRe
 // merged text, or a row of either — the shape a "helpful" diagnostic naming the
 // offending row would take.
 func TestImportFailurePathsCarryNoValue(t *testing.T) {
-	secrets := []string{"fake-sapisid-aaaa", "fake-logininfo-aaaa", "fake-authtoken-aaaa"}
+	secrets := []string{"fake-sapisid-aaaa", "fake-logininfo-aaaa", "fake-authtoken-aaaa",
+		// The rollback fixtures' two generations, for the last two subtests.
+		// Both generations, deliberately: an exit that named the credential it
+		// REJECTED would leak just as surely as one that named the credential
+		// it kept.
+		previousTwitchToken, pastedTwitchToken, previousSAPISID, pastedSAPISID}
 	paste := netscapeHeader + fakeYouTubeRows
 
 	scan := func(t *testing.T, err error, log *argRecordingLogger, s *AutoCookieService) {
@@ -355,6 +360,60 @@ func TestImportFailurePathsCarryNoValue(t *testing.T) {
 		if !result.Wrote {
 			t.Fatalf("Wrote = false on the reload failure — the route's re-check is gated on it (err = %v)", err)
 		}
+		scan(t, err, log, s)
+	})
+
+	// The two ROLLBACK-INCOMPLETE exits. They are the newest strings this
+	// endpoint composes and the most tempting place for a value to ride along:
+	// each is about one specific credential that was rejected and another that
+	// was being put back, and a diagnostic naming "the row we could not
+	// restore" would be the obvious thing to reach for. Both of them go to
+	// lastError AND to the dialog, so a leak here is rendered twice.
+	//
+	// Driven through the two fixtures the rollback tests already build — the
+	// same seams, so these subtests test the strings rather than re-testing the
+	// mechanism.
+	rollbackWrites := func(t *testing.T, second func(path string, data []byte, perm os.FileMode) error) *AutoCookieService {
+		t.Helper()
+		s, _ := importServiceWithLog(t, importRollbackSeed)
+		s.VerifyTwitchAuth = twitchLiveFromJar(s)
+		real := writeCookieFile
+		writes := 0
+		writeCookieFile = func(path string, data []byte, perm os.FileMode) error {
+			writes++
+			if writes == 1 {
+				return real(path, data, perm)
+			}
+			return second(path, data, perm)
+		}
+		t.Cleanup(func() { writeCookieFile = real })
+		return s
+	}
+
+	t.Run("the rollback's write failed", func(t *testing.T) {
+		s := rollbackWrites(t, func(string, []byte, os.FileMode) error {
+			return errors.New("rename temp cookie file: device or resource busy")
+		})
+		log, ok := s.logger.(*argRecordingLogger)
+		if !ok {
+			t.Fatalf("the fixture's logger is %T, not the recorder this scan reads", s.logger)
+		}
+		_, err := s.ImportCookies(context.Background(), importRollbackPaste)
+		scan(t, err, log, s)
+	})
+
+	t.Run("the rollback landed and the jar could not read it back", func(t *testing.T) {
+		s := rollbackWrites(t, func(path string, _ []byte, _ os.FileMode) error {
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			return os.Mkdir(path, 0o755)
+		})
+		log, ok := s.logger.(*argRecordingLogger)
+		if !ok {
+			t.Fatalf("the fixture's logger is %T, not the recorder this scan reads", s.logger)
+		}
+		_, err := s.ImportCookies(context.Background(), importRollbackPaste)
 		scan(t, err, log, s)
 	})
 }

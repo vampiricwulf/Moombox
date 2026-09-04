@@ -139,6 +139,100 @@ func stripEmptyValuedRows(netscape string) string {
 	return strings.Join(kept, "\n")
 }
 
+// platformsInNetscape reports which platforms a Netscape blob carries rows for.
+//
+// Asked of the CLEANED rows by its one caller, never of the submitted text: a
+// row the empty-value filter threw away changes nothing on disk, and counting
+// it as "the operator supplied credentials for this platform" would report an
+// import of a credential that was never installed.
+//
+// Built out of netscapeDataRows and cookieRowPlatform — the same pair
+// restorePlatformRows swaps rows with — so "which platform is this row" has one
+// reading across the write and the rollback. A second reading is how a rollback
+// gives back rows an outcome says were never touched.
+func platformsInNetscape(netscape string) map[string]bool {
+	touched := map[string]bool{}
+	for _, row := range netscapeDataRows(netscape) {
+		if platform := cookieRowPlatform(row); platform != "" {
+			touched[platform] = true
+		}
+	}
+	return touched
+}
+
+// ImportOutcome is what one import DID to one platform's rows on disk, which is
+// a different question from what verifying them CONCLUDED.
+//
+// The pair (RefreshOK, ImportRolledBack) is the state this type exists to
+// carry, and the one the dashboard had no way to say: the platform
+// authenticates, and the rows doing it are not the ones the operator just
+// pasted. Read through the verdict alone that import is a success, and the
+// operator walks away believing a paste that was thrown out — which is finding
+// F6's second half, the first being that the paste used to destroy those rows
+// instead.
+type ImportOutcome int
+
+const (
+	// ImportUnknown means this import reached no conclusion about the
+	// platform's rows. It is the ZERO VALUE on purpose, the same guard
+	// RefreshUnknown is: the exits that fail with cookies.txt already replaced
+	// — a rollback that could not be written, a jar that could not read the
+	// file back — must not claim a platform was imported or left alone.
+	ImportUnknown ImportOutcome = iota
+	// ImportUnchanged means the paste carried no row for this platform, so
+	// whatever was on disk for it is still there. mergeCookieFiles carries the
+	// sibling platform verbatim; this is that guarantee, reported.
+	ImportUnchanged
+	// ImportInstalled means the paste's rows for this platform are what is on
+	// disk now. It says nothing about the verdict — an accepted-but-unverified
+	// import lands here, because the rows ARE installed and in use.
+	ImportInstalled
+	// ImportRolledBack means the paste's rows were written, conclusively
+	// rejected, and the previous rows put back. The credentials in force are
+	// the previous ones, and the verdict beside this describes THOSE.
+	ImportRolledBack
+	// ImportRejected means the paste's rows were written and conclusively
+	// rejected with nothing established to give back — no previous file, no
+	// snapshot, or a platform that was already dead. The rejected rows are on
+	// disk, deliberately: replacing dead cookies with other dead cookies costs
+	// nothing, and the fresher set is the better guess for the next attempt.
+	ImportRejected
+)
+
+func (o ImportOutcome) String() string {
+	switch o {
+	case ImportUnchanged:
+		return "unchanged"
+	case ImportInstalled:
+		return "imported"
+	case ImportRolledBack:
+		return "rolled-back"
+	case ImportRejected:
+		return "rejected"
+	default:
+		return "unknown"
+	}
+}
+
+// importOutcomeFor answers ImportOutcome for one platform.
+//
+// `check` is the check that JUDGED the paste, never a re-verification after a
+// rollback: the question "what happened to these rows" can only be answered by
+// the check that rejected them. Same rule, same reason, as
+// rollbackWasInconclusive on the refresh path.
+func importOutcomeFor(platform string, touched, restored map[string]bool, check map[string]platformAuth) ImportOutcome {
+	switch {
+	case !touched[platform]:
+		return ImportUnchanged
+	case restored[platform]:
+		return ImportRolledBack
+	case check[platform].state == verifyFailed:
+		return ImportRejected
+	default:
+		return ImportInstalled
+	}
+}
+
 // ImportResult reports what ONE operator-supplied cookie import concluded, per
 // platform.
 //
@@ -163,6 +257,32 @@ type ImportResult struct {
 	YouTubeAccepted bool
 	TwitchAccepted  bool
 
+	// What this import DID to each platform's rows. ADDED, never replacing the
+	// two facts above: those still answer "can we do authenticated work" and
+	// "did we accept what the operator supplied", and after a rollback both are
+	// about the RESTORED credentials. This third fact is the one that says the
+	// paste itself was thrown out, and without it a rolled-back import is
+	// indistinguishable on the wire from a successful one.
+	YouTubeOutcome ImportOutcome
+	TwitchOutcome  ImportOutcome
+
+	// RollbackProtected reports whether this import could have given a platform
+	// its previous rows back: a pre-write snapshot was taken AND it describes
+	// the file that was about to be replaced.
+	//
+	// False in two situations that must not be confused with each other in the
+	// wording, which is why the log line and this field are separate: there was
+	// no cookies.txt at all (a first acquisition — nothing to protect, nothing
+	// to warn about), or the pre-write load failed (protection is off, and the
+	// log says so in the refresh path's own sentence). In both, no platform was
+	// restored and none could have been.
+	//
+	// Deliberately NOT on the wire. It is a fact about the FILE and about what
+	// this import risked, not a verdict about a platform, and the operator's
+	// next move does not change with it — the same split SetupResult.Wrote
+	// makes. cookieImportOutcome carries the per-platform outcomes instead.
+	RollbackProtected bool
+
 	// Wrote reports that this import REPLACED cookies.txt, and it is true on
 	// one error path as well as on success — the jar reload after a successful
 	// write can fail, and that exit returns an error over a file that has
@@ -174,7 +294,22 @@ type ImportResult struct {
 }
 
 // ImportCookies merges an operator-supplied Netscape cookie file into
-// cookies.txt, reloads the jar and verifies what it just installed.
+// cookies.txt, reloads the jar, verifies what it just installed and gives a
+// platform its previous rows back if the paste killed it.
+//
+// VERIFIED AND REVERSIBLE, per platform, on the same machinery both refresh
+// paths use: snapshotPlatformAuth before the write, platformsToRestoreOnRegression
+// over the check after it, restorePlatformRows to swap the rows back. Until
+// this, a paste whose rows for one platform were dead REPLACED that platform's
+// working rows — mergeCookieFiles lets the pasted value win by
+// name+domain+path — and the operator was told the credentials failed, over a
+// session that had been alive until they pressed the button. The sibling
+// platform was safe (the merge carries it verbatim) and, verifying, made the
+// whole import look partly successful.
+//
+// The result says which of the four things happened to each platform; see
+// ImportOutcome, and RollbackProtected for what "could not have been undone"
+// looks like.
 //
 // THE FIFTH WRITER of cookies.txt, and it inherits Arc 2's catalogue whole: the
 // read goes through the readCookieFile seam and distinguishes "does not exist"
@@ -240,6 +375,41 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		return ImportResult{}, err
 	}
 
+	// Which platforms this paste actually carries. cleanNetscapeRows is pure
+	// and runs a second time for it, which is cheaper than widening
+	// prepareCookieImport's contract and the table tests that pin it — and the
+	// answer has to come from the cleaned rows; see platformsInNetscape.
+	cleaned, _, _, _ := cleanNetscapeRows(netscape)
+	touched := platformsInNetscape(cleaned)
+
+	// Verify BEFORE overwriting, exactly as both refresh paths do and through
+	// the same helper. Rolling a regression back is impossible without knowing
+	// what worked beforehand, and "the file had cookies" is not the same as
+	// "those cookies worked" — which is precisely how a paste whose rows for
+	// one platform are dead used to replace that platform's working rows and be
+	// reported as a failure of the credentials rather than of the paste.
+	//
+	// Skipped when there is nothing to protect, so a first acquisition — every
+	// fresh container — costs no extra round trips and produces no warning
+	// about protection being off. On an install that already has credentials
+	// the cost is two verification round trips: the price of not silently
+	// destroying them.
+	pre := map[string]platformAuth{}
+	rollbackProtected := false
+	if existing != "" {
+		pre, rollbackProtected = s.snapshotPlatformAuth(ctx, "import")
+		if !rollbackProtected {
+			// The snapshot describes whatever the jar last held rather than the
+			// file about to be replaced, so it establishes nothing about what
+			// this import would be destroying and must not license handing rows
+			// back. The import still PROCEEDS: refusing it would throw away
+			// credentials the operator supplied by hand for the sake of a read
+			// that failed, and this endpoint is the only re-authentication a
+			// container has. snapshotPlatformAuth has already logged it.
+			pre = map[string]platformAuth{}
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
 		s.setError("could not create the directory for cookies.txt: " + err.Error())
 		return ImportResult{}, err
@@ -270,10 +440,116 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 	}
 
 	yt, tw := s.checkPlatformAuth(ctx)
+
+	// importCheck is kept under its own name because the rollback below
+	// REPLACES yt/tw with a re-verification of what was restored. The question
+	// "why were these rows rejected" can only be answered by the check that
+	// rejected them; after the re-verify that check is no longer in scope. Same
+	// name, same reason, as the refresh path's.
+	importCheck := map[string]platformAuth{"youtube": yt, "twitch": tw}
+
+	// Roll back, per platform, a paste that made that platform worse.
+	//
+	// platformsToRestoreOnRegression is the REGRESSION ARM ONLY, shared with
+	// the browser refresh: "it verified before the write and is conclusively
+	// rejected after it". An inconclusive check is not a failure and must not
+	// roll anything back — see that function for the full argument, and note
+	// that on this path the opposite would contradict credentialAccepted, which
+	// ACCEPTS an inconclusive check over a credential a human just supplied.
+	//
+	// Filtered to the platforms the paste TOUCHED. A platform this paste never
+	// mentioned cannot have been damaged by it — mergeCookieFiles carries its
+	// rows verbatim — so a restore there would write its own rows back over
+	// themselves and make the log and the outcome claim something happened. The
+	// one way an untouched platform can still lose rows is the merge's expiry
+	// prune, and restorePlatformRows applies that same prune to the previous
+	// rows, so there is nothing a rollback could give it either.
+	restore := map[string]bool{}
+	for platform, wanted := range platformsToRestoreOnRegression(pre, importCheck) {
+		if wanted && touched[platform] {
+			restore[platform] = true
+		}
+	}
+	if len(restore) > 0 {
+		restoredPlatforms := make([]string, 0, len(restore))
+		restoredLabels := make([]string, 0, len(restore))
+		verdicts := make([]string, 0, len(restore))
+		for _, platform := range []string{"youtube", "twitch"} {
+			if restore[platform] {
+				restoredPlatforms = append(restoredPlatforms, platform)
+				// The keys stay lowercase in the LOG fields, where they are
+				// the same machine-readable names the refresh path uses; the
+				// operator-facing sentences below take the capitalised name
+				// every other message in this package renders. See
+				// platformDisplayName.
+				restoredLabels = append(restoredLabels, platformDisplayName(platform))
+				verdicts = append(verdicts, platform+"="+verdictOf(importCheck[platform]).String())
+			}
+		}
+		s.logger.Warn("the pasted cookies did not hold up — restoring the previous credentials for those platforms",
+			"platforms", strings.Join(restoredPlatforms, ","),
+			"verdicts", strings.Join(verdicts, " "),
+			"rows", countNetscapeCookieRows(cleaned))
+
+		restored := restorePlatformRows(merged, existing, restore)
+
+		// A rollback that does not land must not be reported as one. Both
+		// failures below leave the process describing a file that is not on
+		// disk, and a result saying "kept the previous cookies for X" while the
+		// rejected paste is what the next download actually uses. So they end
+		// the import instead, with a message describing the state that really
+		// exists — and they set lastError, because unlike a rejected paste this
+		// IS a state of the install: cookies.txt holds credentials that do not
+		// work. The per-platform outcomes stay ImportUnknown, which is what that
+		// zero value is for.
+		//
+		// The SAME message is returned and recorded, wrapped around
+		// ErrImportRollbackIncomplete. Returning a short "restore previous
+		// cookies: %w" instead left the only truthful sentence in lastError,
+		// where the dialog that caused this never looks — and the route then
+		// fell through to its `result.Wrote` arm and told the operator the
+		// cookies had been imported and written, which is false on both exits.
+		//
+		// Neither sentence repeats the sentinel's subject: it already says the
+		// pasted cookies were rejected and the rollback did not complete, and
+		// what each of these adds is WHICH platform, WHICH half failed and what
+		// is left in force.
+		if restoreErr := writeCookieFile(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
+			failure := fmt.Errorf("%w: %s did not verify and the previous cookies could not be "+
+				"restored (%w) — cookies.txt still holds the rejected new credentials",
+				ErrImportRollbackIncomplete, strings.Join(restoredLabels, " + "), restoreErr)
+			s.setError(failure.Error())
+			s.logger.Error("could not restore the previous cookies.txt after a rejected import",
+				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
+			return result, failure
+		}
+		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
+			// The FILE is correct here; the running process is not.
+			failure := fmt.Errorf("%w: %s's previous cookies were restored but could not be reloaded "+
+				"(%w) — this process is still using the rejected credentials until the next refresh",
+				ErrImportRollbackIncomplete, strings.Join(restoredLabels, " + "), loadErr)
+			s.setError(failure.Error())
+			s.logger.Error("could not reload cookie jar after restoring the previous cookies.txt",
+				"err", loadErr, "platforms", strings.Join(restoredPlatforms, ","))
+			return result, failure
+		}
+
+		// Re-verify the file we actually KEPT. Without this the result would
+		// describe the discarded paste and flag a re-login over credentials
+		// that were restored and never re-checked — an instruction a container
+		// operator cannot act on. No setError on the way out: the credentials
+		// in force are the previous, working ones, so "your recordings will
+		// fail" would be alarming an operator whose recordings are fine.
+		yt, tw = s.checkPlatformAuth(ctx)
+	}
+
 	result.YouTube = verdictOf(yt)
 	result.Twitch = verdictOf(tw)
 	result.YouTubeAccepted = credentialAccepted(yt)
 	result.TwitchAccepted = credentialAccepted(tw)
+	result.RollbackProtected = rollbackProtected
+	result.YouTubeOutcome = importOutcomeFor("youtube", touched, restore, importCheck)
+	result.TwitchOutcome = importOutcomeFor("twitch", touched, restore, importCheck)
 
 	// Clear the re-login flag for every platform this import ACCEPTED, not just
 	// the ones it verified — the operator has just done the thing the flag asks
@@ -289,6 +565,16 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		s.needsRelogin["twitch"] = false
 	}
 	s.mu.Unlock()
+
+	// The completion line, and on a container it is the only view an operator
+	// has of what their paste did. Platform, outcome, verdict and a row count —
+	// never a cookie value, never the paste; see TestImportFailurePathsCarryNoValue
+	// for the rule this line lives under.
+	s.logger.Info("cookie import completed",
+		"youtube", result.YouTubeOutcome.String()+"/"+result.YouTube.String(),
+		"twitch", result.TwitchOutcome.String()+"/"+result.Twitch.String(),
+		"rows", countNetscapeCookieRows(cleaned),
+		"rollback_protected", rollbackProtected)
 
 	return result, nil
 }

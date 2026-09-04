@@ -681,6 +681,44 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 	return yt, tw
 }
 
+// snapshotPlatformAuth records what the credentials ALREADY ON DISK prove,
+// before a writer replaces them.
+//
+// Rolling a regression back is impossible without this: "the file had cookies"
+// is not the same as "those cookies worked", and only a check taken BEFORE the
+// write can tell a platform this write killed from one that was already dead.
+// It is the pre-half of the pair regressedAfterWrite compares.
+//
+// ONE copy for three writers — the browser refresh, the mounted-profile import
+// (both inside RefreshCookiesDetailed) and the operator's pasted import
+// (ImportCookies). The load and the check have to stay a matched pair: a
+// snapshot taken without the load would describe whatever the jar last held,
+// which on the import path is not necessarily the file about to be replaced.
+//
+// `gesture` is the one word that varies, and it varies only in the warning.
+// Callers pass the noun their operator would recognise ("refresh", "import").
+//
+// `protected` reports whether the snapshot describes the FILE. A jar.Load
+// failure leaves the check running against the jar's previous contents, which
+// is not a basis for handing rows back — but the caller decides what to do
+// about that, because the two paths differ: the refresh path has always gone
+// on to use the snapshot regardless, and changing that is not this extraction's
+// business.
+//
+// Says nothing about whether there is anything TO protect. A caller with no
+// existing cookie file must not call this at all: jar.Load answers nil for a
+// missing file, so it would report a protected snapshot of nothing and cost two
+// verification round trips to do it.
+func (s *AutoCookieService) snapshotPlatformAuth(ctx context.Context, gesture string) (snapshot map[string]platformAuth, protected bool) {
+	protected = true
+	if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
+		s.logger.Warn("could not load existing cookies before the "+gesture+" — rollback protection is off", "err", loadErr)
+		protected = false
+	}
+	preYT, preTW := s.checkPlatformAuth(ctx)
+	return map[string]platformAuth{"youtube": preYT, "twitch": preTW}, protected
+}
+
 // regressedAfterWrite is the REGRESSION arm, shared by both rollback policies
 // so the two cannot drift.
 //
@@ -725,9 +763,11 @@ func regressedAfterWrite(before, after platformAuth) bool {
 // still restores nothing, which is what keeps seeding a fresh container from
 // being treated as a loss.
 //
-// This is the IMPORT policy. The browser path has its own —
-// platformsToRestoreAfterBrowserRefresh — which takes the regression arm and
-// not the inconclusive one. Both share regressedAfterWrite.
+// This is the MOUNTED-PROFILE import policy — the automatic read of a profile
+// directory inside a refresh pass. The browser refresh and the operator's
+// pasted import (ImportCookies) share the other one,
+// platformsToRestoreOnRegression, which takes the regression arm and not the
+// inconclusive one. Both share regressedAfterWrite.
 func platformsToRestore(pre, post map[string]platformAuth) map[string]bool {
 	restore := map[string]bool{}
 	for platform, before := range pre {
@@ -742,31 +782,42 @@ func platformsToRestore(pre, post map[string]platformAuth) map[string]bool {
 	return restore
 }
 
-// platformsToRestoreAfterBrowserRefresh is the BROWSER path's rollback policy:
-// the regression arm, and only the regression arm.
+// platformsToRestoreOnRegression is the rollback policy for a write whose
+// credentials arrived DELIBERATELY AND NOW: the regression arm, and only the
+// regression arm.
 //
-// The import policy's second arm — "had credentials before, could not be
-// checked after" — is deliberately excluded here, and that exclusion is the
-// whole content of this function. That arm reasons about a mounted profile of
-// unknown age: it may be days stale, so committing a set nobody could evaluate
-// over one that may be fine is a bet with no upside. A browser refresh has
-// just re-fetched from the live site, or — on the Chromium DPAPI fallback
-// (autocookies.go's "CDP refresh failed; attempting DPAPI fallback" branch,
-// where the headless launch already failed) — read from the user's own
-// profile; in neither case is an inconclusive verify evidence of regression,
-// so a check that then could not reach the network is evidence about the
-// NETWORK — and restoring on it would discard a genuinely fresher set on
-// every DNS blip, on the path a desktop install runs every thirty minutes.
+// Two callers. The browser refresh has just re-fetched from the live site, or
+// — on the Chromium DPAPI fallback (autocookies.go's "CDP refresh failed;
+// attempting DPAPI fallback" branch, where the headless launch already
+// failed) — read from the user's own profile. The operator's pasted import
+// (ImportCookies) has just been handed a session by a human who went and got
+// it. Neither is a set of unknown age, and both were named this way rather
+// than after either caller so the third one cannot arrive as a verbatim copy
+// of the loop.
 //
-// What the browser path DOES need is the first arm, which is the half the old
-// scoping comment got wrong. "Cannot be staler than what was on disk" is true
-// of the values' AGE and says nothing about whether they authenticate: a
-// profile the desktop browser signed out of hands back rows that win the merge
-// and do not work.
+// The mounted-profile policy's second arm — "had credentials before, could not
+// be checked after" — is deliberately excluded here, and that exclusion is the
+// whole content of this function. That arm reasons about a profile that may be
+// days stale, so committing a set nobody could evaluate over one that may be
+// fine is a bet with no upside. Here an inconclusive verify is evidence about
+// the NETWORK, and restoring on it would discard a genuinely fresher set on
+// every DNS blip — on the path a desktop install runs every thirty minutes,
+// and on the one gesture a container operator has. On the import path it would
+// also contradict the result the same call returns: credentialAccepted ACCEPTS
+// an inconclusive check over a credential a human just supplied, so rolling it
+// off the disk would report a credential as accepted and gone.
 //
-// TestBrowserRefreshRestoresARegressedPlatform and
-// TestBrowserRefreshKeepsFreshCookiesWhenTheCheckIsInconclusive are the halves.
-func platformsToRestoreAfterBrowserRefresh(pre, post map[string]platformAuth) map[string]bool {
+// What both paths DO need is the first arm, which is the half the old scoping
+// comment got wrong. "Cannot be staler than what was on disk" is true of the
+// values' AGE and says nothing about whether they authenticate: a profile the
+// desktop browser signed out of, and a paste from a browser that has since
+// been signed out, both hand back rows that win the merge and do not work.
+//
+// TestBrowserRefreshRestoresARegressedPlatform,
+// TestBrowserRefreshKeepsFreshCookiesWhenTheCheckIsInconclusive,
+// TestImportRollsBackAPlatformThePasteKilled and
+// TestImportKeepsAPasteTheCheckCouldNotEvaluate are the four halves.
+func platformsToRestoreOnRegression(pre, post map[string]platformAuth) map[string]bool {
 	restore := map[string]bool{}
 	for platform, before := range pre {
 		if regressedAfterWrite(before, post[platform]) {

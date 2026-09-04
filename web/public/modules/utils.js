@@ -250,6 +250,44 @@ export function cookieSetupRejectedMessage(verification) {
 }
 
 /**
+ * Word the toast for a platform whose pasted rows were REJECTED and given back.
+ *
+ * The state every other field in the payload misreports. After a rollback the
+ * platform authenticates and its verification reads "ok" — truthfully, because
+ * the previous credentials are in force and they work — so
+ * cookieSetupAcceptedToast would say "YouTube cookies configured" in green over
+ * a paste Moombox threw out, and the operator would go away believing the
+ * import landed.
+ *
+ * TWO ARMS, on whether the RESTORED credentials then verified — a rollback
+ * re-checks what it kept, and that check can come back not-accepted, which is
+ * what a session expiring mid-import looks like. Saying "Moombox kept the
+ * working ones it already had" about credentials that do not work is the same
+ * false reassurance this helper exists to stop, one step further along; and
+ * that platform still needs its own sentence, because the inline rejection
+ * message only renders when NEITHER platform was accepted. One truthful
+ * sentence per platform, whatever the sibling did.
+ *
+ * Warning for the kept arm: nothing is broken. The session that was working
+ * before the paste is still working, which is the whole point of the rollback;
+ * what failed is the credential they supplied. Danger for the other: this
+ * platform has no working credential at all now, and the next move is a fresh
+ * export from a browser that is still signed in.
+ */
+export function cookieImportRolledBackToast(platformLabel, restoredVerified) {
+  if (!restoredVerified) {
+    return {
+      message: `${platformLabel} cookies were not accepted, and the ones Moombox put back do not authenticate either — sign in again and export a fresh file`,
+      variant: "danger",
+    };
+  }
+  return {
+    message: `${platformLabel} cookies were not accepted — they did not authenticate, so Moombox kept the working ones it already had`,
+    variant: "warning",
+  };
+}
+
+/**
  * How long the abort-path probe may take before it gives up.
  *
  * BOUNDED ON PURPOSE, and the bound is the point. The branch that calls this

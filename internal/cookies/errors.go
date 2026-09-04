@@ -249,6 +249,28 @@ var (
 	// returning the raw write error to their existing callers.
 	ErrCookieFileUnwritable = errors.New("cookies.txt could not be written")
 
+	// ErrImportRollbackIncomplete marks an import that REJECTED the pasted
+	// credentials and then could not finish giving the previous ones back —
+	// either the restore write failed, leaving the rejected paste on disk, or
+	// it landed and the jar could not read it back, leaving this process on
+	// credentials the file no longer holds.
+	//
+	// ONE sentinel for both, deliberately, because the DECISION every consumer
+	// makes about them is the same one: neither may be answered with "the
+	// cookies were imported and written", which is what the import route said
+	// about both until this existed — the nearest arm, and false on both. What
+	// differs is the sentence, and both exits carry their own, wrapped around
+	// this: what is on disk, what this process is using, and what the operator
+	// should expect. Consumers render the message and must not compose their
+	// own from the sentinel alone.
+	//
+	// The rule it enforces is Arc 9's: a rollback that does not land must not
+	// be reported as one. Reaching this state means cookies.txt and the running
+	// jar disagree about which generation of credentials is in force, and
+	// saying anything reassuring about it sends the operator away from the one
+	// thing that needs their attention.
+	ErrImportRollbackIncomplete = errors.New("the pasted cookies were rejected and the rollback did not complete")
+
 	// ErrAuthCheckNotAttempted marks an auth check that failed BEFORE any
 	// request left the process — the jar holds something, but not enough to
 	// build a request out of (no cookie header, no SAPISIDHASH). It is still

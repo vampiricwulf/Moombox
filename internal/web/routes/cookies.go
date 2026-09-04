@@ -329,14 +329,37 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 // cookieImportOutcome renders one operator-supplied cookie import onto the
 // wire.
 //
-// The KEY SET IS cookieSetupOutcome's, exactly, and that is the point rather
-// than a coincidence: the two answer the same question about the same three
-// states, the dashboard already has copy for it (cookieSetupAcceptedToast /
-// cookieSetupRejectedMessage in web/public/modules/utils.js), and a fourth
-// phrasing of "saved, but we could not check them" is how the copy drifts
-// apart. See cookieSetupOutcome for what each key means and why `authenticated`
-// and `*Verification` can disagree. Pinned by
-// TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary.
+// The KEY SET IS cookieSetupOutcome's, PLUS the per-platform import outcome,
+// and the shared half is the point rather than a coincidence: the two answer
+// the same question about the same three states, the dashboard already has copy
+// for it (cookieSetupAcceptedToast / cookieSetupRejectedMessage in
+// web/public/modules/utils.js), and a fourth phrasing of "saved, but we could
+// not check them" is how the copy drifts apart. See cookieSetupOutcome for what
+// each shared key means and why `authenticated` and `*Verification` can
+// disagree. Pinned by TestCookieImportOutcomeSpeaksTheSetupOutcomeVocabulary.
+//
+//   - youtubeImport / twitchImport — what the import DID to that platform's
+//     rows: "imported", "rolled-back", "rejected" or "unchanged". The setup has
+//     no counterpart because a wizard finish has no paste to give back — it
+//     extracts from a browser the user just signed into, and there is no second
+//     generation of rows to choose between.
+//
+//     FOUR values on the wire, not five. ImportOutcome's zero value renders
+//     "unknown", and no response carries it: every exit that leaves the
+//     outcomes unset returns an error, and the handler answers all of those
+//     with jsonError before reaching this projection. The zero value is a guard
+//     inside the package (see ImportOutcome), not a state the dashboard has to
+//     have copy for — and if a future exit ever returns one on a 200, that is
+//     the bug, not a fifth case to render.
+//
+//     This is the key the toast could not be written without. After a rollback
+//     `authenticated` is TRUE and the verification is "ok" — correctly, because
+//     the previous credentials are in force and they work — so every existing
+//     key says success while the operator's paste was thrown out. Additive, by
+//     the precedent `renewed` and `ran`/`verdict` set: an older frontend ignores
+//     it and behaves as it did, and the new frontend branches POSITIVELY on
+//     "rolled-back", so against an older binary it reads undefined and falls
+//     back to today's copy.
 //
 // Deliberately NOT carrying a cookieStatus block. That comes from
 // RefreshService.GetStatus, whose pass has not run yet at the moment this is
@@ -351,8 +374,17 @@ func cookieImportOutcome(result cookies.ImportResult) map[string]any {
 		"twitchAuthenticated": result.TwitchAccepted,
 		"youtubeVerification": result.YouTube.String(),
 		"twitchVerification":  result.Twitch.String(),
+		"youtubeImport":       result.YouTubeOutcome.String(),
+		"twitchImport":        result.TwitchOutcome.String(),
 	}
 }
+
+// cookieImportOnlyKeys are the keys cookieImportOutcome carries that
+// cookieSetupOutcome has no counterpart for. Written down rather than inferred
+// so that adding a third one is a deliberate edit here and not a silent
+// widening of the two payloads' shared vocabulary. See cookieImportOutcome for
+// why these two exist and the setup's equivalents do not.
+var cookieImportOnlyKeys = map[string]bool{"youtubeImport": true, "twitchImport": true}
 
 // CookieRoutes registers cookie-related API routes. The optional rate
 // limiter wraps the headless-browser endpoints (/auto-refresh and the
@@ -621,6 +653,27 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// is what actually produces it in a container.
 			case errors.Is(err, cookies.ErrCookieFileUnwritable):
 				jsonError(rw, err.Error(), http.StatusConflict)
+			// The paste was REJECTED and the rollback did not finish. Verbatim,
+			// and AHEAD of the `result.Wrote` arm below, which is the arm both
+			// of these used to fall into: `Wrote` is true here (cookies.txt was
+			// replaced), so that arm answered "the cookies were imported and
+			// written" about a paste Moombox had just judged dead and tried to
+			// undo. False in both directions at once — the paste was not
+			// accepted, and the state left behind is not one a re-check
+			// repairs.
+			//
+			// The sentinel's own message is a summary; the wrapped sentence
+			// says which of the two states this is (the rejected paste is still
+			// on disk, or the file is right and this process is not), and that
+			// distinction is the whole of what the operator can act on. See
+			// cookies.ErrImportRollbackIncomplete.
+			//
+			// 500, not 409: unlike the unwritable-file arm above this is not a
+			// condition the operator changes and retries into success — the
+			// import already ran, was rejected, and left two things disagreeing
+			// about which credentials are in force.
+			case errors.Is(err, cookies.ErrImportRollbackIncomplete):
+				jsonError(rw, err.Error(), http.StatusInternalServerError)
 			// The write LANDED and this process could not load it. Saying "the
 			// import failed" would be false about the file on disk, and would
 			// send an operator to repeat an import that already worked.

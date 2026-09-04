@@ -225,6 +225,143 @@ func TestImportPanelHedgesWhenTheCheckCouldNotConclude(t *testing.T) {
 	}
 }
 
+// TestImportPanelSaysWhenThePasteWasGivenBack is the UI half of the rollback:
+// the server verified the pasted rows, rejected them, restored the previous
+// ones and re-verified THOSE — so `authenticated` is true and the verification
+// reads "ok", truthfully, about credentials the operator did not paste.
+//
+// Every field the panel read before this change therefore says success. The
+// only thing that says otherwise is youtubeImport, and a panel that ignores it
+// toasts "YouTube cookies configured" in green over a paste that was thrown
+// out — the operator closes the dialog believing their re-authentication
+// landed, and finds out at the next members-only stream.
+//
+// The mutation: dropping the rolled-back arm, or keeping it and still firing
+// the accepted toast beside it (two contradictory toasts for one platform).
+func TestImportPanelSaysWhenThePasteWasGivenBack(t *testing.T) {
+	run := runImportPanel(t, map[string]any{
+		"ok":   true,
+		"text": "# Netscape HTTP Cookie File\n",
+		"body": map[string]any{
+			"success": true, "authenticated": true, "twitchAuthenticated": false,
+			"youtubeVerification": "ok", "twitchVerification": "failed",
+			"youtubeImport": "rolled-back", "twitchImport": "unchanged",
+		},
+	})
+	if len(run.toasts) != 1 {
+		t.Fatalf("toasts = %v, want exactly one — the rolled-back toast, and NOT the accepted one "+
+			"beside it", run.toasts)
+	}
+	msg, _ := run.toasts[0]["message"].(string)
+	if !strings.Contains(msg, "YouTube") || !strings.Contains(msg, "kept the working ones") {
+		t.Errorf("toast = %q, want the copy that says the paste was refused and the previous "+
+			"credentials kept", msg)
+	}
+	if strings.Contains(msg, "configured") {
+		t.Errorf("toast = %q — that is the accepted copy, over a paste that was rolled back", msg)
+	}
+	if v, _ := run.toasts[0]["variant"].(string); v != "warning" {
+		t.Errorf("variant = %q, want warning: nothing is broken — the session that worked before the "+
+			"paste is still working", v)
+	}
+}
+
+// TestImportPanelDoesNotClaimAWorkingSessionAfterAFailedRestore is the other
+// half of the rolled-back arm, and the reason cookieImportRolledBackToast takes
+// the accepted flag rather than wording one outcome one way.
+//
+// A rollback re-verifies what it KEPT, and that check can come back
+// not-accepted: the previous rows verified before the write and are rejected
+// after it, which is what an expiring session mid-import looks like. The
+// outcome is still "rolled-back" — the rows really were given back — but
+// nothing authenticates any more, so "Moombox kept the working ones it already
+// had" is the same false reassurance one step further along.
+//
+// The mutation: wording the toast from the outcome alone, which puts "kept the
+// working ones it already had" beside the inline "No login detected. Try
+// again." — one gesture answered twice, contradicting itself.
+func TestImportPanelDoesNotClaimAWorkingSessionAfterAFailedRestore(t *testing.T) {
+	run := runImportPanel(t, map[string]any{
+		"ok":   true,
+		"text": "# Netscape HTTP Cookie File\n",
+		"body": map[string]any{
+			"success": true, "authenticated": false, "twitchAuthenticated": false,
+			"youtubeVerification": "failed", "twitchVerification": "failed",
+			"youtubeImport": "rolled-back", "twitchImport": "unchanged",
+		},
+	})
+	if len(run.toasts) != 1 {
+		t.Fatalf("toasts = %v, want exactly one — the rolled-back platform's own sentence", run.toasts)
+	}
+	msg, _ := run.toasts[0]["message"].(string)
+	if strings.Contains(msg, "kept the working ones") {
+		t.Errorf("toast = %q — nothing authenticates, so no toast may say a working session was kept", msg)
+	}
+	if !strings.Contains(msg, "do not authenticate either") {
+		t.Errorf("toast = %q, want the arm that says the restored credentials are dead too", msg)
+	}
+	if v, _ := run.toasts[0]["variant"].(string); v != "danger" {
+		t.Errorf("variant = %q, want danger: this platform now has no working credential at all", v)
+	}
+	if !strings.Contains(run.result, "No login detected") {
+		t.Errorf("inline result = %q, want the rejection message beside it", run.result)
+	}
+}
+
+// TestImportPanelSpeaksAboutARolledBackPlatformWhenTheSiblingIsAccepted closes
+// the gap the round-1 guard opened. The inline rejection message renders only
+// when NEITHER platform was accepted, so a YouTube that was rolled back and
+// whose restored rows are dead, beside a Twitch the same paste installed
+// successfully, produced a green "Twitch cookies configured" and NOTHING about
+// YouTube — the platform the operator was most likely trying to fix.
+//
+// One truthful sentence per platform, whatever the sibling did. That is why the
+// rolled-back arm fires before the accepted branch and independently of it.
+//
+// The mutation: gating the rolled-back toast on `accepted`, which is exactly
+// what this test exists to catch — every other panel test stays green.
+func TestImportPanelSpeaksAboutARolledBackPlatformWhenTheSiblingIsAccepted(t *testing.T) {
+	run := runImportPanel(t, map[string]any{
+		"ok":   true,
+		"text": "# Netscape HTTP Cookie File\n",
+		"body": map[string]any{
+			"success": true, "authenticated": false, "twitchAuthenticated": true,
+			"youtubeVerification": "failed", "twitchVerification": "ok",
+			"youtubeImport": "rolled-back", "twitchImport": "imported",
+		},
+	})
+	if len(run.toasts) != 2 {
+		t.Fatalf("toasts = %v, want two — one per platform, and the YouTube one is the whole point",
+			run.toasts)
+	}
+	var youtube, twitch map[string]any
+	for _, toast := range run.toasts {
+		msg, _ := toast["message"].(string)
+		switch {
+		case strings.Contains(msg, "YouTube"):
+			youtube = toast
+		case strings.Contains(msg, "Twitch"):
+			twitch = toast
+		}
+	}
+	if youtube == nil {
+		t.Fatalf("no toast mentions YouTube: %v — the rolled-back platform is silent because its "+
+			"sibling was accepted, which is the defect", run.toasts)
+	}
+	if msg, _ := youtube["message"].(string); !strings.Contains(msg, "do not authenticate either") {
+		t.Errorf("the YouTube toast = %q, want the dead-restore arm", msg)
+	}
+	if v, _ := youtube["variant"].(string); v != "danger" {
+		t.Errorf("the YouTube toast's variant = %q, want danger", v)
+	}
+	if twitch == nil {
+		t.Fatal("the accepted sibling lost its toast")
+	}
+	if msg, _ := twitch["message"].(string); !strings.Contains(msg, "configured") {
+		t.Errorf("the Twitch toast = %q, want the ordinary accepted copy", msg)
+	}
+}
+
 // TestImportPanelShowsTheServersRefusalInline. The three refusals are the whole
 // diagnostic value of the endpoint; a panel that renders "HTTP 422" throws it
 // away.
