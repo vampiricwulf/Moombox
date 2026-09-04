@@ -69,6 +69,47 @@ test("reset clears occupancy and can change the lane count", () => {
   assert.equal(alloc(la, 0, 100), 0);
 });
 
+// F2 (phase 3+4 review, mutation N4): the BARE reset() is what player.js calls
+// from clearNicoOverlay and _resetNicoCursor, and a mutant that defaulted
+// `laneCount` to 0 — silently emptying the stage's rows on every clear —
+// survived all 13 cases here. Both halves of the default matter: the current
+// count is kept AND every lane is freed.
+test("reset() with no argument keeps the lane count and frees every lane", () => {
+  const la = new LaneAllocator(3);
+  assert.equal(alloc(la, 0, 100), 0);
+  assert.equal(alloc(la, 0, 100), 1);
+  assert.equal(alloc(la, 0, 100), 2);
+  assert.equal(alloc(la, 0, 100), -1, "all three lanes are busy");
+
+  la.reset();
+
+  assert.equal(la.laneCount, 3, "the lane count survives a bare reset");
+  assert.equal(alloc(la, 0, 100), 0, "lane 0 is free again");
+  assert.equal(alloc(la, 0, 100), 1);
+  assert.equal(alloc(la, 0, 100), 2, "and so are the other two");
+});
+
+// N6: every other fixture in this file runs at D = 8000 with no gap. This is
+// the only case at the constants the player actually ships — NICO_DURATION_MS
+// 4000, NICO_LANE_GAP_MS 150, a 1280 px stage and the 17 rows a 408 px overlay
+// yields at a 24 px line box.
+test("production constants: a full 17-row stage frees a lane at D·w/(W+w) + gap", () => {
+  const PD = 4000, PW = 1280, GAP = 150, ROWS = 17, WIDTH = 300;
+  const la = new LaneAllocator(ROWS);
+  const req = (nowMs) => la.allocate({
+    nowMs, widthPx: WIDTH, stageWidthPx: PW, durationMs: PD, lanesNeeded: 1, gapMs: GAP,
+  });
+
+  for (let i = 0; i < ROWS; i++) assert.equal(req(0), i, `lane ${i} taken at t=0`);
+  assert.equal(req(0), -1, "the stage is full");
+
+  // Leader and follower are the same width, so max(wi, wj) = WIDTH.
+  const bound = (PD * WIDTH) / (PW + WIDTH) + GAP;
+  assert.ok(Math.abs(bound - 909.4937) < 1e-3, `bound = ${bound}`);
+  assert.equal(req(bound - 1), -1, "a millisecond early every lane is still busy");
+  assert.equal(req(bound), 0, "at the bound lane 0 accepts the follower");
+});
+
 const msgsAt = (...offsets) => offsets.map((o, i) => ({ id: String(i), offsetMs: o }));
 
 test("seedCursorIndex: byTime wins when the count window is far larger (5 msgs, seedMax 30)", () => {
