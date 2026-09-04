@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -222,6 +223,93 @@ func TestDownloadFileHTTPError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("error should contain 404, got %v", err)
+	}
+}
+
+// TestDownloadFileHTMLErrorPage covers yt-dlp #17550: GitHub can answer a
+// release-asset URL with an HTML error page under HTTP 200 (a stale asset
+// link, a CDN blip). Before this fix that "succeeded" as a download and
+// only failed later, confusingly, at ed25519 verification. downloadFile
+// must instead name the real problem and leave nothing at dest.
+//
+// Four bodies guard looksLikeHTML's case-insensitivity and its BOM/
+// whitespace trimming, not just the one exact shape GitHub happens to send
+// today: an uppercase doctype, a lowercase doctype, a bare <html> tag
+// preceded by leading whitespace and no doctype at all, and a UTF-8 BOM
+// ahead of an uppercase doctype.
+func TestDownloadFileHTMLErrorPage(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "uppercase doctype",
+			body: []byte("<!DOCTYPE html>\n<html><head><title>Error</title></head><body>Not Found</body></html>"),
+		},
+		{
+			name: "lowercase doctype",
+			body: []byte("<!doctype html>\n<html><body>Not Found</body></html>"),
+		},
+		{
+			name: "leading whitespace, no doctype",
+			body: []byte("\n\n  <html><body>404</body></html>"),
+		},
+		{
+			name: "UTF-8 BOM prefix",
+			body: append([]byte{0xEF, 0xBB, 0xBF}, []byte("<!DOCTYPE html><html><body>Not Found</body></html>")...),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+				rw.Header().Set("Content-Type", "text/html")
+				rw.WriteHeader(http.StatusOK)
+				rw.Write(tc.body)
+			}))
+			t.Cleanup(srv.Close)
+
+			u, _ := newTestUpdater(t, "1.0.0", srv, nil)
+			dest := filepath.Join(t.TempDir(), "moombox.exe.new")
+			err := u.downloadFile(context.Background(), srv.URL, dest)
+			if err == nil {
+				t.Fatal("downloadFile on an HTML 200 body: want an error, got nil")
+			}
+			if !strings.Contains(err.Error(), "error page") {
+				t.Errorf("error should name a GitHub error page, got %v", err)
+			}
+			if strings.Contains(err.Error(), "signature") {
+				t.Errorf("error should not blame signature verification, got %v", err)
+			}
+			if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+				t.Errorf("downloadFile on an HTML body should leave no file at dest, stat err = %v", statErr)
+			}
+		})
+	}
+}
+
+// TestDownloadFileSmallBinaryIntact is the sniff's negative case: a small
+// (well under the 512-byte sniff window) non-HTML body must still download
+// byte-for-byte, proving the sniffed prefix is written to dest along with
+// the rest rather than being consumed and dropped.
+func TestDownloadFileSmallBinaryIntact(t *testing.T) {
+	payload := []byte{0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF}
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		rw.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, _ := newTestUpdater(t, "1.0.0", srv, nil)
+	dest := filepath.Join(t.TempDir(), "moombox.exe.new")
+	if err := u.downloadFile(context.Background(), srv.URL, dest); err != nil {
+		t.Fatalf("downloadFile on a small binary body: want nil, got %v", err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("reading downloaded file: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("downloaded content mismatch: got %x, want %x", got, payload)
 	}
 }
 

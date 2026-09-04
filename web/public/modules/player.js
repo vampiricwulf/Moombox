@@ -460,6 +460,15 @@ export class PlayerController {
       // Block shortcuts when a dialog is open (e.g. trim dialog)
       if (document.querySelector("sl-dialog[open]")) return;
 
+      // Block shortcuts while the resume overlay is up: it is a modal scrim
+      // over the video, and a keypress must not toggle playback or seek
+      // behind it. Escape is handled by the overlay's own document keydown
+      // listener (added in _showResumeDialog, torn down in
+      // _dismissResumeDialog) rather than by this switch below, so letting
+      // this handler return early for every key — Escape included — does not
+      // stop the overlay from dismissing itself.
+      if (document.querySelector("#player-video-wrapper .resume-overlay")) return;
+
       // Skip when typing in inputs (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
 

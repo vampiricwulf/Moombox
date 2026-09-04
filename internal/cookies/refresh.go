@@ -540,7 +540,7 @@ type RefreshService struct {
 	// This is deliberately NOT the same thing as hasCheckedOnce, which is
 	// service-wide: nothing AUTOMATIC ever prunes Cookies.Platforms — both
 	// automatic writers only add, and the sole removal path is an operator
-	// replacing the list wholesale through PATCH /api/config — so
+	// replacing the list wholesale through PUT /api/config — so
 	// SetExpectedPlatforms can seed hasCheckedOnce=true from YouTube's
 	// presence alone while Twitch cookies exist on disk but were never
 	// verified. Using the shared hasCheckedOnce for the "first conclusive

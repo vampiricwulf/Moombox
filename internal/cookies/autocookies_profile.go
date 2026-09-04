@@ -787,12 +787,13 @@ func platformsToRestore(pre, post map[string]platformAuth) map[string]bool {
 // regression arm.
 //
 // Two callers. The browser refresh has just re-fetched from the live site, or
-// — on the Chromium DPAPI fallback (`autocookies.go:~2166`, where the headless
-// launch already failed) — read from the user's own profile. The operator's
-// pasted import (ImportCookies) has just been handed a session by a human who
-// went and got it. Neither is a set of unknown age, and both were named this
-// way rather than after either caller so the third one cannot arrive as a
-// verbatim copy of the loop.
+// — on the Chromium DPAPI fallback (autocookies.go's "CDP refresh failed;
+// attempting DPAPI fallback" branch, where the headless launch already
+// failed) — read from the user's own profile. The operator's pasted import
+// (ImportCookies) has just been handed a session by a human who went and got
+// it. Neither is a set of unknown age, and both were named this way rather
+// than after either caller so the third one cannot arrive as a verbatim copy
+// of the loop.
 //
 // The mounted-profile policy's second arm — "had credentials before, could not
 // be checked after" — is deliberately excluded here, and that exclusion is the

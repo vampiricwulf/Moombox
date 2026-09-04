@@ -265,7 +265,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// conclusive check of every start. And nothing AUTOMATIC ever prunes
 		// Cookies.Platforms — both automatic writers only add, and the sole
 		// removal path is an operator replacing the list wholesale through
-		// PATCH /api/config — so seeding here would set everConcluded for
+		// PUT /api/config — so seeding here would set everConcluded for
 		// platforms this process never checked and no longer has cookies for,
 		// sending them down the witnessed-transition arm,
 		// which never consults cookiesPresent, and firing "auth lost" after
