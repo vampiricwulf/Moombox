@@ -30,8 +30,15 @@ export class PlayerController {
     this.playerScrollLock = false;
     this.playerActiveChatIndex = 0;
     this.nicoEnabled = true;
-    /** @type {LaneAllocator} rows are re-derived from geometry in a later task */
+    /** @type {LaneAllocator} the row count is re-derived by _updateNicoGeometry */
     this._lanes = new LaneAllocator(15);
+    /**
+     * The overlay stage: the video's rendered rect and the row grid measured
+     * from it. Undefined until _updateNicoGeometry has seen a visible overlay.
+     * `version` is bumped on every real change (stale-geometry checks).
+     * @type {{width: number, height: number, laneHeight: number, rows: number, version: number}|undefined}
+     */
+    this._nicoGeo = undefined;
     /** Index of the next message to consider; -1 = not anchored yet */
     this.nicoCursor = -1;
     /**
@@ -109,7 +116,12 @@ export class PlayerController {
       localStorage.setItem("player-nico-toggle", nicoToggle.checked);
       const overlay = document.getElementById("player-nico-overlay");
       overlay.style.display = this.nicoEnabled ? "" : "none";
-      if (!this.nicoEnabled) {
+      if (this.nicoEnabled) {
+        // Measure now that the overlay is visible — geometry updates are refused
+        // while it is display:none, so without this the first tick after the
+        // toggle would run on stale (or missing) geometry.
+        this._updateNicoGeometry();
+      } else {
         this.clearNicoOverlay();
         // Un-anchor: no ticks run while the overlay is off, so the next enabled
         // tick must re-seed at the current time instead of grinding through
@@ -174,6 +186,25 @@ export class PlayerController {
     video.addEventListener("ended", () => {
       for (const a of this._nicoAnims) a.play();
     });
+
+    // Overlay geometry — the stage is the video's RENDERED rect, so re-measure
+    // whenever the intrinsic size (`loadedmetadata`, `resize`), the fullscreen
+    // state or the wrapper's own box changes.
+    video.addEventListener("loadedmetadata", () => this._updateNicoGeometry());
+    video.addEventListener("resize", () => this._updateNicoGeometry());
+    document.addEventListener("fullscreenchange", () => this._updateNicoGeometry());
+    const wrapper = document.getElementById("player-video-wrapper");
+    if (wrapper && "ResizeObserver" in window) {
+      // One measurement per frame: a sidebar-toggle animation or a window drag
+      // fires a callback storm, and each measurement forces a layout flush (the
+      // probe). The repeats are no-ops anyway — _updateNicoGeometry only clears
+      // when the box or row count actually changed.
+      let pending = 0;
+      new ResizeObserver(() => {
+        cancelAnimationFrame(pending);
+        pending = requestAnimationFrame(() => this._updateNicoGeometry());
+      }).observe(wrapper);
+    }
 
     // Surface video load errors to user (e.g. segment 404s)
     video.addEventListener("error", () => {
@@ -770,6 +801,13 @@ export class PlayerController {
         this.playerCustomOffsetMs = savedOffset * 1000;
       }
     }
+
+    // Same rule as the nico toggle: the overlay's display was just decided, so
+    // measure it now it is visible — a job switch that reveals a previously
+    // hidden overlay (the last job had no chat) resizes nothing and may have
+    // already missed this video's `loadedmetadata`. Last, so the re-anchor it
+    // may trigger sees the restored chat offset.
+    this._updateNicoGeometry();
   }
 
   /**
@@ -1003,6 +1041,75 @@ export class PlayerController {
 
   // Niconico overlay engine
 
+  /**
+   * Size the overlay to the VIDEO'S RENDERED RECT (not the wrapper, which has
+   * letterbox bars around a video whose aspect ratio differs from its box) and
+   * derive the row count from a MEASURED line box, so the rows follow the
+   * container-query font instead of a hard-coded constant.
+   *
+   * Only a real change (width, height or row count) clears the stage and
+   * re-anchors: in-flight keyframes were computed for the old stage width and
+   * pending entries cache measurements taken at the old font size, so neither
+   * can survive it. An unchanged geometry must NOT clear — a ResizeObserver
+   * fires a burst for one sidebar-toggle animation, and a clear per callback
+   * would blank the overlay for the length of the animation.
+   */
+  _updateNicoGeometry() {
+    const video = document.getElementById("player-video");
+    const overlay = document.getElementById("player-nico-overlay");
+    if (!video || !overlay) return;
+    // A hidden overlay (toggle off, player tab inactive) measures 0x0 and its
+    // container query resolves against nothing, so a measurement here would be
+    // garbage. Leave _nicoGeo untouched; the toggle-on handler re-measures once
+    // the overlay is visible again.
+    if (overlay.clientWidth === 0 || overlay.clientHeight === 0) return;
+
+    // Letterbox math: the <video> paints its content centred inside its box at
+    // the largest scale that fits, so a portrait video in a landscape box gets
+    // pillarbox bars (and vice versa). Before `loadedmetadata` the intrinsic
+    // size is unknown (0) and the element box is the best available stage.
+    const bw = video.clientWidth, bh = video.clientHeight;
+    let w = bw, h = bh, left = video.offsetLeft, top = video.offsetTop;
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (vw > 0 && vh > 0 && bw > 0 && bh > 0) {
+      const scale = Math.min(bw / vw, bh / vh);
+      w = Math.round(vw * scale);
+      h = Math.round(vh * scale);
+      left += Math.round((bw - w) / 2);
+      top += Math.round((bh - h) / 2);
+    }
+    // Never write a zero-sized box: the guard above would then refuse every
+    // later measurement, wedging the overlay shut. Keep the last good geometry
+    // and wait for the next resize instead.
+    if (w <= 0 || h <= 0) return;
+    Object.assign(overlay.style, { left: `${left}px`, top: `${top}px`, width: `${w}px`, height: `${h}px` });
+
+    // Measure one real line box AFTER the box is applied — the font is sized in
+    // cqh, so the probe has to see the new overlay height.
+    const probe = document.createElement("div");
+    probe.className = "nico-message";
+    probe.style.visibility = "hidden";
+    probe.textContent = "Ag";
+    overlay.appendChild(probe);
+    const rowH = probe.offsetHeight || 24;
+    probe.remove();
+
+    const rows = Math.max(1, Math.floor(h / rowH));
+    const geo = this._nicoGeo;
+    if (geo && geo.width === w && geo.height === h && geo.rows === rows) return;
+
+    this._nicoGeo = { width: w, height: h, laneHeight: h / rows, rows, version: (geo?.version || 0) + 1 };
+    // clearNicoOverlay() also empties _nicoPending, so no cached w/h measured at
+    // the old font size can outlive the change.
+    this.clearNicoOverlay();
+    this._lanes.reset(rows);
+    if (this.playerChatMessages.length) {
+      // Re-anchor so the messages that should be on screen come back mid-flight
+      // at the new scale (rather than the overlay staying blank for a traverse).
+      this._reanchorNicoAt(this.getGlobalTimeMs() + this.playerCustomOffsetMs);
+    }
+  }
+
   clearNicoOverlay() {
     for (const a of this._nicoAnims) a.cancel();
     this._nicoAnims.clear();
@@ -1063,9 +1170,7 @@ export class PlayerController {
     const overlay = document.getElementById("player-nico-overlay");
     const video = document.getElementById("player-video");
     if (!overlay || !video) return;
-    const stageW = overlay.clientWidth;
-    const stageH = overlay.clientHeight;
-    if (!stageW || !stageH) {
+    if (overlay.clientWidth === 0 || overlay.clientHeight === 0) {
       // The player panel is hidden (another app tab is active) but `timeupdate`
       // keeps firing. Un-anchor instead of returning: leaving the cursor parked
       // would make every message in the gap arrive >NICO_MAX_LATENESS_MS late and
@@ -1077,7 +1182,13 @@ export class PlayerController {
       this.nicoCursor = -1;
       return;
     }
-    const laneHeight = stageH / (this._lanes.laneCount || 1);
+    const geo = this._nicoGeo;
+    // Visible but not measured yet (a tick that beats `loadedmetadata`), or a
+    // zero-sized video. Distinct from hidden: there is nothing to place, but the
+    // cursor is still valid, so this must NOT clear or un-anchor.
+    if (!geo || !geo.width || !geo.height) return;
+    const stageW = geo.width;
+    const laneHeight = geo.laneHeight;
     const ctx = {
       stageW,
       laneHeight,
