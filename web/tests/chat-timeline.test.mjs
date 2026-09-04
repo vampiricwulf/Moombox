@@ -76,3 +76,30 @@ test("mergePartChats: shifts each part by its start offset and keeps first heade
   assert.deepEqual(merged.emotes, { bttv: [] });
   assert.deepEqual(merged.messages.map((m) => [m.id, m.offsetMs]), [["a", 5000], ["b", 3601500], ["c", 3598500]]);
 });
+
+// phase-2-review.md §4 mutants (MU1/MU2/MU3/MU7), one case:
+// - a whole-null part payload (a chat file whose JSON is literally `null`)
+//   must be skipped, not crash the loop (MU2, `if (!data) continue` removed)
+// - a part whose `messages` field is `null` (Go's nil-slice encoding) must
+//   count as zero messages, not throw (MU1, `data.messages || []` dropped)
+// - a later part's differing platform must not overwrite an earlier part's
+//   value — header fields come from the FIRST part that has them (MU3,
+//   `??=` mutated to unconditional `=`). Deviation from the brief's literal
+//   "platform present only on the second part": with only ONE part ever
+//   carrying a platform value, first-wins and last-wins produce the same
+//   result (proven empirically — both implementations converge), so this
+//   uses two parts with DIFFERING platform values instead, which is what
+//   actually distinguishes the two behaviours.
+// - a fractional startOffsetSec (301.00000000000006, the float-sum shape
+//   the review's example calls out) must still shift onto an integer
+//   offsetMs (MU7, `Math.round` dropped from the shift).
+test("mergePartChats: null part, null messages, first-wins platform and a fractional shift", () => {
+  const merged = mergePartChats([
+    { startOffsetSec: 0, data: null },
+    { startOffsetSec: 100.1, data: { platform: "youtube", messages: null } },
+    { startOffsetSec: 301.00000000000006, data: { platform: "twitch", messages: [{ id: "a", offsetMs: 0 }] } },
+  ]);
+  assert.equal(merged.platform, "youtube");
+  assert.deepEqual(merged.messages.map((m) => [m.id, m.offsetMs]), [["a", 301000]]);
+  assert.equal(Number.isInteger(merged.messages[0].offsetMs), true);
+});

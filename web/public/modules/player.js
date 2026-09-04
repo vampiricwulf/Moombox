@@ -786,12 +786,17 @@ export class PlayerController {
     const segments = this.playerJob.segments || [];
     const withChat = segments.filter((s) => s.chatFile);
     if (segments.length > 1 && withChat.length > 0 && this._seg.active) {
+      // Captured BEFORE the per-part fetch: a newer selection's reset()
+      // nulls this._seg.segOffsets mid-flight, and reading it after the
+      // await inside the closure would throw on the stale `.find()` call
+      // instead of falling through to the seq check below.
+      const segOffsets = this._seg.segOffsets;
       const parts = await Promise.all(withChat.map(async (s) => {
         try {
           const r = await fetch(`/api/jobs/${jobId}/segments/${s.segmentIndex}/chat`);
           if (!r.ok) return null;
           const data = await r.json();
-          const off = this._seg.segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
+          const off = segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
           return { startOffsetSec: off ? off.startOffset : 0, data };
         } catch {
           return null;
