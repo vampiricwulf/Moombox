@@ -558,8 +558,33 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
+	// GitHub can answer a release-asset URL with an HTML error page under
+	// HTTP 200 (yt-dlp #17550) — a stale/rotated asset link, a CDN blip.
+	// Left unchecked, that "succeeds" as a download and only fails two
+	// steps later at ed25519 verification, surfacing as a baffling
+	// "signature verification failed" that has nothing to do with the
+	// signature. Sniff the first bytes of the body before writing anything:
+	// neither a compiled binary nor a detached signature ever opens with an
+	// HTML doctype or tag, so this catches the real problem here, by name.
+	const sniffSize = 512
+	sniff := make([]byte, sniffSize)
+	sn, err := io.ReadFull(resp.Body, sniff)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return err
+	}
+	sniff = sniff[:sn]
+	if looksLikeHTML(sniff) {
+		os.Remove(dest) // clear any partial/stale file left at this path
+		return fmt.Errorf("GitHub returned an error page instead of the release asset")
+	}
+
 	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
 	if err != nil {
+		return err
+	}
+
+	if _, err := f.Write(sniff); err != nil {
+		f.Close()
 		return err
 	}
 
@@ -567,14 +592,16 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 	// source. Read one extra byte so a payload of *exactly* maxDownloadSize
 	// is accepted while anything larger is rejected — without the +1 the
 	// previous `n >= maxDownloadSize` check rejected the boundary case.
-	// Audit reports/small-packages.md.
+	// Audit reports/small-packages.md. The sniffed prefix already written
+	// above counts toward the cap, so the limit reader only needs to cover
+	// what is left of it.
 	const maxDownloadSize = 200 << 20
-	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize+1))
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize+1-int64(sn)))
 	if err != nil {
 		f.Close()
 		return err
 	}
-	if n > maxDownloadSize {
+	if int64(sn)+n > maxDownloadSize {
 		f.Close()
 		return fmt.Errorf("download exceeds %d MB size limit", maxDownloadSize>>20)
 	}
@@ -586,4 +613,17 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 	}
 
 	return f.Close()
+}
+
+// looksLikeHTML reports whether the sniffed prefix of a response body looks
+// like an HTML document (a doctype or an <html> tag), after trimming a
+// leading UTF-8 BOM and ASCII whitespace. Used by downloadFile to catch
+// GitHub answering a release-asset URL with an HTML error page under HTTP
+// 200 (yt-dlp #17550) before it gets written to disk and mistaken for the
+// real asset.
+func looksLikeHTML(b []byte) bool {
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
+	b = bytes.TrimLeft(b, " \t\r\n")
+	lower := bytes.ToLower(b)
+	return bytes.HasPrefix(lower, []byte("<!doctype html")) || bytes.HasPrefix(lower, []byte("<html"))
 }

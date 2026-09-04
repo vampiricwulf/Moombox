@@ -205,6 +205,16 @@
 # auto_enabled = false
 # browser_profile_dir = "./browser-profile"
 
+# acquisition selects HOW a cookie REFRESH acquires credentials:
+#   "auto"    — a resolvable browser takes the headless launch path above; a
+#               host with none imports browser_profile_dir read-only.
+#   "profile" — never launches a browser for a refresh; always imports
+#               browser_profile_dir read-only, even on a desktop that has a
+#               browser installed.
+# Default: "auto". Read live through the running service — no restart
+# needed, unlike auto_enabled above.
+# acquisition = "auto"
+
 # ─── BotGuard PO Token Sidecar ─────────────────────────────────────────────
 # Moombox bundles a Node.js + JSDOM + bgutils-js subprocess that produces
 # real PO tokens for YouTube. The sidecar binds locally only and runs

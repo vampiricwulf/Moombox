@@ -12,7 +12,7 @@ try {
 } catch (e) {
   // ONLY an absent module is a skip. Any other import failure — a half-written
   // install, a syntax error inside jsdom — must fail loudly instead of turning
-  // twelve DOM tests into a green "skipped" line nobody reads.
+  // every DOM test into a green "skipped" line nobody reads.
   if (e.code !== "ERR_MODULE_NOT_FOUND") throw e;
   jsdomMissing = `jsdom not installed — run \`npm ci\` in web/tests (${e.code})`;
 }
@@ -911,4 +911,33 @@ test("a retried entry whose entry instant is still ahead waits for it too", { sk
   assert.equal(anim.currentTime, 0, "and never gets a head start into the flight");
   assert.equal(h.player._lanes.lanes[0].spawnAt, 1800,
     "the lane is still taken at the CURRENT time, not at the entry instant");
+});
+
+// ── 17. Resume overlay is modal to player shortcuts (2.8.7 A4) ──────────────
+
+test("player shortcuts are ignored while the resume overlay is up", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1")],
+    watchState: { resumePosition: 42 },
+  });
+
+  await h.selectJob("j1");
+  const wrapper = h.el("player-video-wrapper");
+  assert.ok(wrapper.querySelector(".resume-overlay"), "a saved resumePosition shows the resume overlay");
+
+  // Space must not reach the video behind the scrim.
+  h.key(" ");
+  assert.ok(!h.mediaCalls.includes("play"), "Space must not start playback behind the resume scrim");
+  assert.equal(h.video.paused, true);
+
+  // Dismiss the overlay ("Start from beginning" — this itself starts
+  // playback), then reset the paused/call state to isolate the NEXT keypress.
+  h.el("resume-start").click();
+  assert.equal(wrapper.querySelector(".resume-overlay"), null, "the overlay is gone once dismissed");
+  h.video.paused = true;
+  h.mediaCalls.length = 0;
+
+  // The same shortcut works again once nothing is modal over the player.
+  h.key(" ");
+  assert.ok(h.mediaCalls.includes("play"), "Space toggles playback again once the overlay is dismissed");
 });

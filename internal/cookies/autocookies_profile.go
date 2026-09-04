@@ -751,12 +751,12 @@ func platformsToRestore(pre, post map[string]platformAuth) map[string]bool {
 // unknown age: it may be days stale, so committing a set nobody could evaluate
 // over one that may be fine is a bet with no upside. A browser refresh has
 // just re-fetched from the live site, or — on the Chromium DPAPI fallback
-// (`autocookies.go:~2166`, where the headless launch already failed) — read
-// from the user's own profile; in neither case is an inconclusive verify
-// evidence of regression, so a check that then could not reach the network is
-// evidence about the NETWORK — and restoring on it would discard a genuinely
-// fresher set on every DNS blip, on the path a desktop install runs every
-// thirty minutes.
+// (autocookies.go's "CDP refresh failed; attempting DPAPI fallback" branch,
+// where the headless launch already failed) — read from the user's own
+// profile; in neither case is an inconclusive verify evidence of regression,
+// so a check that then could not reach the network is evidence about the
+// NETWORK — and restoring on it would discard a genuinely fresher set on
+// every DNS blip, on the path a desktop install runs every thirty minutes.
 //
 // What the browser path DOES need is the first arm, which is the half the old
 // scoping comment got wrong. "Cannot be staler than what was on disk" is true
