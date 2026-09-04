@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -82,5 +83,100 @@ func TestAdoptionKeepsFileEpoch(t *testing.T) {
 	}
 	if want := testMsgUsec/1000 - schedMs; got.Messages[1].OffsetMs != want {
 		t.Errorf("appended offset = %d, want %d (file epoch)", got.Messages[1].OffsetMs, want)
+	}
+}
+
+// TestResumeKeepsFileEpochOverNewOptions's header assertion is vacuous on its
+// own: run 2 there takes the incremental-append path, which never rewrites
+// streamStartTime, so a mutant that makes epochRFC3339() return
+// cd.opts.StreamStartTime unconditionally still passes it. Force the OTHER
+// write path: delete chat.json (keep the sidecar) before run 2 — Start's
+// on-disk cross-check then clears flushedToDisk because the file it expects
+// to append to is gone, so run 2's first (and only) flush goes through
+// writeFullChatFile, and the header it writes is the one under test.
+func TestFullRewriteKeepsFileEpoch(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	sched := "2026-06-11T10:00:00Z"
+	actual := "2026-06-11T10:12:00Z"
+	schedMs := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC).UnixMilli()
+
+	cd1 := NewChatDownloader(ChatDownloaderOptions{
+		VideoID: "vidFullRewrite", OutputFile: out, InitialContinuation: "tok0", ApiKey: "k",
+		IsLiveOrUpcoming: true, StreamStartTime: sched,
+	})
+	cd1.testRecoveryOverride = func(context.Context) bool { return false } // stale exit keeps the sidecar
+	startWithScript(t, cd1, chatResponseWithIDs([]string{"m1"}, ""))
+
+	if _, ok := readSidecar(t, out+".resume.json"); !ok {
+		t.Fatal("sidecar missing after run 1")
+	}
+	if err := os.Remove(out); err != nil {
+		t.Fatalf("remove chat.json: %v", err)
+	}
+
+	cd2 := NewChatDownloader(ChatDownloaderOptions{
+		VideoID: "vidFullRewrite", OutputFile: out, InitialContinuation: "tok1", ApiKey: "k",
+		IsLiveOrUpcoming: true, StreamStartTime: actual,
+	})
+	cd2.testRecoveryOverride = func(context.Context) bool { return false }
+	startWithScript(t, cd2, chatResponseWithIDs([]string{"m2"}, ""))
+
+	got := readChatFileHeader(t, out)
+	if got.StreamStartTime != sched {
+		t.Errorf("full-rewrite header streamStartTime = %q, want the original %q", got.StreamStartTime, sched)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("want 1 message (chat.json was deleted before run 2, so run 1's message isn't recovered), got %d", len(got.Messages))
+	}
+	if want := testMsgUsec/1000 - schedMs; got.Messages[0].OffsetMs != want {
+		t.Errorf("run-2 offset = %d, want %d (the sidecar's file epoch, via the full rewrite)", got.Messages[0].OffsetMs, want)
+	}
+}
+
+// A sidecar saved before StreamStartMs existed has no such field. The
+// `state.StreamStartMs > 0` guard on the resume branch must leave
+// cd.streamStartMs at whatever NewChatDownloader already parsed from this
+// run's own options rather than zeroing it — processBatch only computes an
+// offset when cd.streamStartMs > 0, so zeroing it would silently strip
+// offsets from every message this run appends.
+func TestPreUpgradeSidecarKeepsOptionsEpoch(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	optsStart := "2026-06-11T10:12:00Z"
+	optsMs := time.Date(2026, 6, 11, 10, 12, 0, 0, time.UTC).UnixMilli()
+
+	seed := ChatData{
+		VideoID: "vidPreUpgrade", StreamStartTime: "2026-06-11T10:00:00Z",
+		DownloadedAt: time.Now().UTC().Format(time.RFC3339),
+		MessageCount: 1, Messages: []ChatMessage{makeTestMessage("m1")},
+	}
+	if err := utils.WriteChatFileAtomic(out, &seed); err != nil {
+		t.Fatalf("seed chat file: %v", err)
+	}
+	// Hand-write a pre-upgrade sidecar: every field the CURRENT
+	// ChatResumeState has except streamStartMs, which did not exist yet.
+	preUpgrade := `{"messageCount":1,"continuation":"tok-old","timestamp":1700000000,"videoId":"vidPreUpgrade","recentIds":["m1"]}`
+	if err := os.WriteFile(out+".resume.json", []byte(preUpgrade), 0o644); err != nil {
+		t.Fatalf("write pre-upgrade sidecar: %v", err)
+	}
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID: "vidPreUpgrade", OutputFile: out, InitialContinuation: "tok1", ApiKey: "k",
+		IsLiveOrUpcoming: true, StreamStartTime: optsStart,
+	})
+	cd.testRecoveryOverride = func(context.Context) bool { return false }
+	startWithScript(t, cd, chatResponseWithIDs([]string{"m2"}, ""))
+
+	got := readChatFileHeader(t, out)
+	var appended *ChatMessage
+	for i := range got.Messages {
+		if got.Messages[i].ID == "m2" {
+			appended = &got.Messages[i]
+		}
+	}
+	if appended == nil {
+		t.Fatalf("appended message m2 not found in %+v", got.Messages)
+	}
+	if want := testMsgUsec/1000 - optsMs; appended.OffsetMs != want {
+		t.Errorf("appended offset = %d, want %d (the run's OWN options epoch — the pre-upgrade sidecar has no streamStartMs to override it)", appended.OffsetMs, want)
 	}
 }

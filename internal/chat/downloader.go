@@ -1084,9 +1084,13 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 	// already computed against — take it over this run's own options so an
 	// appended message lands on the same clock as the ones already on disk.
 	if existingData.StreamStartTime != "" {
-		if t, perr := time.Parse(time.RFC3339, existingData.StreamStartTime); perr == nil && t.UnixMilli() != cd.streamStartMs {
-			cd.logDebug("chat: adopting the file's epoch", "videoID", cd.opts.VideoID, "fileEpoch", existingData.StreamStartTime)
-			cd.streamStartMs = t.UnixMilli()
+		if t, perr := time.Parse(time.RFC3339, existingData.StreamStartTime); perr == nil {
+			if t.UnixMilli() != cd.streamStartMs {
+				cd.logDebug("chat: adopting the file's epoch", "videoID", cd.opts.VideoID, "fileEpoch", existingData.StreamStartTime)
+				cd.streamStartMs = t.UnixMilli()
+			}
+		} else {
+			cd.logDebug("chat: ignoring an unparseable file epoch", "videoID", cd.opts.VideoID, "fileEpoch", existingData.StreamStartTime)
 		}
 	}
 
