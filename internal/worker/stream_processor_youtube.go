@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/chat"
@@ -31,6 +32,54 @@ func isTerminalPlayability(p youtube.PlayabilityError) bool {
 	default:
 		return false
 	}
+}
+
+// earlyChatNeedsRestart reports whether the upcoming-wait loop should start a
+// new early-chat downloader on this probe: either none has been started yet,
+// or the one it has has finished its run and lastRestart is at least
+// earlyChatMinRestartInterval behind now.
+//
+// The finished arm is the fix for the waiting-room wipe. YouTube resets a
+// waiting-room chat after a period of inactivity; the run then exhausts
+// recoverStaleContinuation's ~50-minute budget and leaves. The downloader
+// stays non-nil, so a `chatDl == nil` gate never restarted it and nothing
+// captured the waiting room again until the process restarted.
+//
+// finished must be recorded by the goroutine that ran the downloader (see
+// runEarlyChat), NOT by IsRunning(): IsRunning is also false in the window
+// between NewChatDownloader and that goroutine reaching Start, so it would
+// restart a downloader that has not begun yet.
+//
+// The interval applies ONLY to the finished arm. Having no downloader at all
+// is the pre-existing "chat is not available yet" retry, which runs at the
+// wait loop's own probe cadence and must not be slowed.
+func earlyChatNeedsRestart(chatDl *chat.ChatDownloader, finished bool, lastRestart, now time.Time) bool {
+	if chatDl == nil {
+		return true
+	}
+	if !finished {
+		return false
+	}
+	return now.Sub(lastRestart) >= earlyChatMinRestartInterval
+}
+
+// runEarlyChat runs one early-chat run to completion and records that it
+// ended, however it ended.
+//
+// The flag is set from THIS defer rather than from ChatDownloader.OnFinish
+// because Start's own recovery defer returns before OnFinish is reached: a run
+// that panicked never fired it, so the downloader sat non-nil and dead for the
+// rest of the wait and was never restarted — the exact shape
+// earlyChatNeedsRestart exists to eliminate, reached through a different door.
+// Registered before the recover defer so it runs last and cannot be skipped.
+func runEarlyChat(finished *atomic.Bool, onPanic func(r any), run func()) {
+	defer finished.Store(true)
+	defer func() {
+		if r := recover(); r != nil {
+			onPanic(r)
+		}
+	}()
+	run()
 }
 
 func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, initialInfo *youtube.VideoInfo) (*StreamProcessResult, error) {
@@ -93,10 +142,18 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 
 	// Per audit reports/worker.md F16 — pass onProgress into tryStartEarlyChat so
 	// the wiring is centralized and can't drift between the initial start and
-	// the in-loop retry path below.
+	// the in-loop retry path below. chatFinished is set by runEarlyChat's defer
+	// when the run goroutine returns, and with chatStartedAt is what
+	// earlyChatNeedsRestart consults on each probe; both are REPLACED (never
+	// reused) whenever a new downloader is started, so they always describe the
+	// current run. chatDl too is reassigned in the loop, so every
+	// sp.stopEarlyChat(chatDl) exit below stops whichever downloader is current.
 	var chatDl *chat.ChatDownloader
+	var chatFinished *atomic.Bool
+	var chatStartedAt time.Time
 	if downloadChat {
-		chatDl = sp.tryStartEarlyChat(ctx, job, initialInfo, chatProgressFn)
+		chatDl, chatFinished = sp.tryStartEarlyChat(ctx, job, initialInfo, chatProgressFn)
+		chatStartedAt = time.Now()
 	}
 
 	for {
@@ -250,14 +307,25 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			lastFullFetch = time.Now()
 		}
 
-		// B2: Try starting chat if not yet available
+		// B2: Try starting chat if not yet available — or RESTART the one whose
+		// run has ended. A waiting-room chat that YouTube reset after a period
+		// of inactivity leaves its downloader non-nil but finished; without the
+		// restart nothing captures the waiting room again for the rest of the
+		// wait. The new run loads the resume sidecar the finished one kept (or
+		// adopts chat.json outright) and appends, so no history is lost.
 		var downloadChatRetry bool
 		sp.readConfig(func(c *config.MoomboxConfig) {
 			downloadChatRetry = c.Downloader.DownloadChat
 		})
-		if chatDl == nil && downloadChatRetry {
+		if downloadChatRetry && earlyChatNeedsRestart(chatDl, chatFinished != nil && chatFinished.Load(), chatStartedAt, time.Now()) {
+			if chatDl != nil {
+				sp.logger.Info("restarting early chat download after its run ended",
+					"videoID", job.VideoID, "messages", chatDl.MessageCount())
+				sp.untrackChat(chatDl)
+			}
 			// onProgress wired inside tryStartEarlyChat — see F16.
-			chatDl = sp.tryStartEarlyChat(ctx, job, probeInfo, chatProgressFn)
+			chatDl, chatFinished = sp.tryStartEarlyChat(ctx, job, probeInfo, chatProgressFn)
+			chatStartedAt = time.Now()
 		}
 
 		// B1: Handle transition to members-only during upcoming
@@ -395,7 +463,15 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 // tryStartEarlyChat attempts to start a chat downloader during the upcoming phase (B2).
 // onProgress is wired before Start so callers don't need a follow-up SetOnProgress
 // (per audit reports/worker.md F16 — keeps initial+retry paths in sync).
-func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.Job, info *youtube.VideoInfo, onProgress func(chat.ChatProgress)) *chat.ChatDownloader {
+//
+// Returns the downloader together with the flag its OnFinish sets when the run
+// ends — the input earlyChatNeedsRestart consults on each probe. Both are nil
+// when no downloader could be started. The flag belongs to THIS run: the
+// caller replaces it whenever it starts a new one. Once the stream goes live
+// and completeStreamTransition hands the downloader to the orchestrator the
+// flag has no reader left, which is harmless — the orchestrator never wires
+// OnFinish itself.
+func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.Job, info *youtube.VideoInfo, onProgress func(chat.ChatProgress)) (*chat.ChatDownloader, *atomic.Bool) {
 	// Fetch watch page to get chat continuation token. One-shot call, so a
 	// snapshot is correct here; the chat downloader below gets a live getter.
 	cookieHeader := ""
@@ -406,14 +482,14 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	watchResult, err := youtube.FetchWatchPage(ctx, job.VideoID, cookieHeader)
 	if err != nil {
 		sp.logger.Debug("failed to fetch watch page for early chat", "err", err, "videoID", job.VideoID)
-		return nil
+		return nil, nil
 	}
 
 	continuation := watchResult.ChatContinuation
 	isReplay := watchResult.ChatIsReplay
 	if continuation == "" {
 		sp.logger.Debug("no chat continuation for early chat", "videoID", job.VideoID, "err", watchResult.ChatErr)
-		return nil
+		return nil, nil
 	}
 
 	visitorData := ""
@@ -432,7 +508,7 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	chatStagingDir := filepath.Join(stagingBase, job.ID)
 	if err := os.MkdirAll(chatStagingDir, 0o755); err != nil {
 		sp.logger.Warn("failed to create staging dir for early chat", "err", err)
-		return nil
+		return nil, nil
 	}
 	chatPath := filepath.Join(chatStagingDir, "chat.json")
 
@@ -477,6 +553,11 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 			"chat_status": "downloading",
 		})
 	}
+	// The processor-owned end-of-run flag behind earlyChatNeedsRestart, set by
+	// runEarlyChat's defer once Start has returned by ANY route — after the
+	// run's final flush, header update and sidecar decision, so a restart
+	// triggered by it can never race this run's writes to chat.json.
+	finished := &atomic.Bool{}
 	sp.trackChat(dl)
 
 	sp.db.UpdateJobFields(job.ID, map[string]any{
@@ -484,17 +565,12 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	})
 
 	// Start in background
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				sp.logger.Error("panic in early chat downloader", "jobID", job.ID, "panic", fmt.Sprint(r))
-			}
-		}()
-		dl.Start(ctx)
-	}()
+	go runEarlyChat(finished, func(r any) {
+		sp.logger.Error("panic in early chat downloader", "jobID", job.ID, "panic", fmt.Sprint(r))
+	}, func() { dl.Start(ctx) })
 
 	sp.logger.Info("started early chat download for upcoming stream", "videoID", job.VideoID)
-	return dl
+	return dl, finished
 }
 
 func (sp *StreamProcessor) stopEarlyChat(chatDl *chat.ChatDownloader) {

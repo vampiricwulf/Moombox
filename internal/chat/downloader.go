@@ -26,6 +26,12 @@ const (
 	// window further (audit chat.md R2 — was 30, tightened to 12).
 	maxStaleContinuationAttempts = 12
 	writeInterval                = 1 * time.Second // Flush batched messages to disk at most once per interval
+	// corruptChatSuffix names the copy adoptExistingChatFile moves an
+	// unparseable chat file to before the run starts writing a new one. One
+	// fixed name, not a timestamped series: the point is that the bytes
+	// survive for a human to look at, not that every failed parse accumulates
+	// its own artifact in staging.
+	corruptChatSuffix = ".corrupt"
 )
 
 // ChatDownloaderOptions configures a ChatDownloader.
@@ -189,6 +195,41 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 // Start begins the chat download process.
 // If the downloader is already running (e.g., early chat handed to the orchestrator),
 // Start blocks until the existing run completes or ctx is cancelled.
+//
+// THE COMPLETION RULE. Start clears the resume sidecar only on a GENUINE
+// completion: the orchestrator marked the stream ended (MarkStreamEnded), or
+// this was a replay/VOD run (!IsLiveOrUpcoming). The predicate is exactly
+// that — ANY exit of a replay run counts, not only a finished loop, so a
+// replay that dies on its 5-error budget clears too. That is the
+// pre-existing behaviour and it is right: a replay run that leaves its loop
+// has either reached the end of the archive or hit a permanent error, and
+// neither leaves a position worth resuming from. The one replay path that
+// DOES keep its sidecar is cancellation/shutdown, which the first arm of the
+// switch below handles before this rule is reached — and that is exactly the
+// path a resume needs, because a replay's sidecar continuation IS its
+// position in the archive (the resume block installs it over any fresh token;
+// see preferFresh), so keeping it is what stops a cancelled VOD chat
+// re-downloading from the top. Every
+// other exit of a live/upcoming run — stale-continuation exhaustion
+// (recoverStaleContinuation giving up after maxStaleContinuationAttempts),
+// handleFetchError's consecutive-error budget, ErrAuthRequired — is NOT the
+// stream ending: the broadcast is still coming and another run will follow.
+// Those exits KEEP the sidecar and refresh it (saveResume) on the way out, so
+// the continuation and count on disk match what this run reached. The
+// cancel/shutdown save in runChatLoop and the ioErrorOccurred guard (never
+// clear after a failed flush) are unchanged. Without this rule a
+// waiting-room chat that YouTube reset after inactivity lost its whole
+// archive: the next run found no sidecar, started at count 0, and its first
+// message took the full-write path over chat.json.
+//
+// THE ADOPTION RULE (the other half of the same guarantee). When there is no
+// usable sidecar but OutputFile already exists, Start adopts that file as
+// history — see adoptExistingChatFile.
+//
+// THE CONTINUATION-PREFERENCE RULE. A sidecar that IS loaded supplies the
+// count and dedup IDs, but for a live/upcoming run it does not supply the
+// continuation when the caller already has a fresh one — see the resume
+// block's own comment below.
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	if cd.running {
@@ -266,9 +307,31 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 
 	// Load resume state
 	resuming := false
+	// preferFresh means "do NOT overwrite cd.continuation with the sidecar's
+	// token". It installs nothing — it skips an assignment. On a freshly
+	// constructed downloader what therefore survives is the caller's
+	// InitialContinuation (NewChatDownloader seeds cd.continuation from it),
+	// which on the live/upcoming path is the token the caller just fetched from
+	// the watch page. On a REUSED instance — the orchestrator re-Starting a
+	// finished early downloader — what survives is instead the token that
+	// instance's previous run last used; the sidecar was saved from that same
+	// value, so the two coincide and behaviour is unaffected.
+	//
+	// Either way the point is that the sidecar's token is by definition the one
+	// the previous run left off at, and the exit the completion rule preserves
+	// it for is stale-continuation exhaustion — so for a live/upcoming run that
+	// token is typically the EXPIRED one. Take only the count and dedup IDs
+	// from the sidecar. For a REPLAY the sidecar's continuation IS the position
+	// in the archive — a fresh token would restart the VOD from the top — so it
+	// always wins; and a live run with no InitialContinuation (a resumed job
+	// carrying only the sidecar) has nothing fresher to prefer.
+	preferFresh := false
 	state, err := cd.loadResume()
 	if err == nil && state != nil && state.VideoID == cd.opts.VideoID {
-		cd.continuation = state.Continuation
+		preferFresh = cd.opts.IsLiveOrUpcoming && cd.opts.InitialContinuation != ""
+		if !preferFresh {
+			cd.continuation = state.Continuation
+		}
 		cd.messageCount = state.MessageCount
 		cd.messages = nil // Start fresh — old messages already on disk
 		if len(state.RecentIDs) > 0 {
@@ -288,12 +351,35 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		resuming = true
 	}
 
-	if cd.OnStart != nil {
-		cd.OnStart(cd.messageCount, resuming)
+	// No usable sidecar — adopt whatever chat file is already on disk as this
+	// job's history (the adoption rule; see adoptExistingChatFile).
+	//
+	// LIVE/UPCOMING ONLY. A replay/VOD run's continuation restarts the archive
+	// from the top, and the loop culls the dedup to dedupKeepSize on its first
+	// successful fetch — so adopting there would re-append every message older
+	// than the retained window. The bug adoption exists for is a live
+	// waiting-room reset; on replay the full rewrite is the correct, and the
+	// pre-existing, behaviour.
+	adopted := 0
+	if !resuming && cd.opts.IsLiveOrUpcoming {
+		adopted = cd.adoptExistingChatFile()
 	}
 
-	// Run chat loop
-	cd.runChatLoop(ctx, resuming)
+	if cd.OnStart != nil {
+		// Adopted history counts as resuming for the CALLER: the counts this
+		// run reports are cumulative, so a job row fed from them
+		// (total_chat_messages) never drops back towards zero. It does NOT
+		// count as resuming for runChatLoop below — an adopted file comes with
+		// a freshly-fetched continuation, which still defaults to Top Chat and
+		// so still needs the All Chat upgrade a sidecar resume skips.
+		cd.OnStart(cd.messageCount, resuming || adopted > 0)
+	}
+
+	// Run chat loop. runChatLoop's `resuming` means one specific thing — "the
+	// continuation is already mid-stream, skip the All Chat switch" — so a run
+	// that kept the FRESH watch-page token is not resuming by that definition:
+	// a watch-page token is a Top Chat token and still needs the upgrade.
+	cd.runChatLoop(ctx, resuming && !preferFresh)
 
 	// Write remaining messages
 	if len(cd.messages) > 0 {
@@ -305,13 +391,28 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.updateChatFileHeader()
 	}
 
-	// Clear resume state on clean completion (not cancelled), but only if the
-	// final flush + header update succeeded — preserve the resume file when an
-	// IO error fired so the next run can recover (audit chat.md C8).
+	// Apply the completion rule (Start's doc comment): the sidecar survives
+	// every exit that is not a genuine completion.
 	cd.mu.Lock()
 	ioErr := cd.ioErrorOccurred
+	// Genuine completion: the orchestrator declared the stream over, or this
+	// was a replay/VOD run and its loop reached the end of the archive.
+	completed := cd.streamEnded || !cd.opts.IsLiveOrUpcoming
 	cd.mu.Unlock()
-	if !cd.wasCancelledOrShutdown(ctx) && !ioErr {
+	switch {
+	case cd.wasCancelledOrShutdown(ctx):
+		// Cancellation / shutdown — runChatLoop already saved on its way out.
+	case !completed:
+		// A live/upcoming run that left for some reason OTHER than the stream
+		// ending. The next run needs the sidecar to know chat.json already
+		// holds history; refresh it so the continuation and count are current.
+		if cd.flushedToDisk || len(cd.messages) > 0 {
+			cd.saveResume()
+		}
+	case !ioErr:
+		// Genuine completion AND the final flush + header update succeeded.
+		// A failed flush keeps the sidecar so the next run can recover
+		// (audit chat.md C8).
 		cd.clearResume()
 	}
 
@@ -885,25 +986,97 @@ func (cd *ChatDownloader) writeFullChatFile() {
 }
 
 // readExistingMessages attempts to read previously-flushed messages from the
-// chat file on disk. Returns nil on any error (caller should log a warning).
-func (cd *ChatDownloader) readExistingMessages(path string) []ChatMessage {
+// chat file on disk. The error is returned (rather than folded into a nil
+// slice) so adoptExistingChatFile can tell "no file" from "a file that does
+// not parse" — those two need opposite handling; callers that only care
+// whether anything came back can ignore it.
+func (cd *ChatDownloader) readExistingMessages(path string) ([]ChatMessage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var chatData ChatData
 	if err := json.Unmarshal(data, &chatData); err != nil {
-		return nil
+		return nil, err
 	}
-	return chatData.Messages
+	return chatData.Messages, nil
+}
+
+// adoptExistingChatFile is THE ADOPTION RULE: when Start finds no usable
+// resume sidecar but OutputFile already exists, that file is history from an
+// earlier run of this same job — most often an early-chat run that exited
+// when YouTube reset the waiting-room chat — and it must be appended to, not
+// replaced. Returns the number of messages adopted (0 = start fresh). Called
+// on the LIVE/upcoming path only; see the gate at its call site in Start.
+//
+// Three cases:
+//   - The file is missing: 0, and the run starts fresh exactly as before.
+//   - It parses and holds messages: messageCount becomes the length of the
+//     messages ARRAY — deliberately, not the header's messageCount, which may
+//     be stale or wrong. The array is the data; a header that over-counts would
+//     otherwise propagate forever, whereas taking the array length self-heals
+//     the header on the very first flush (incrementalAppend writes
+//     cd.messageCount into it, and the tail's updateChatFileHeader rewrites it
+//     even when no new message arrived). The dedup is seeded with the file's
+//     IDs so an overlapping poll cannot duplicate them, flushedToDisk is set
+//     and the in-memory buffer cleared — so the first flush takes the
+//     incremental-append path.
+//   - It does NOT parse: reportIOError (the caller sees the failure, and the
+//     latched ioErrorOccurred keeps this run's resume sidecar), then the
+//     unreadable bytes are moved aside to <OutputFile>.corrupt. Overwriting
+//     them in place destroys the only copy of something a human could still
+//     salvage; refusing to write at all is worse again, because a multi-hour
+//     waiting room would then buffer its entire chat in memory and persist none
+//     of it. Moving the file keeps the bytes, keeps memory bounded, and is
+//     never silent. If the RENAME ITSELF fails — a Windows AV lock, say — that
+//     failure is reported too and the run proceeds anyway, so the first full
+//     write DOES then overwrite the unreadable bytes: an unreadable file must
+//     not stop the job archiving for good.
+//
+// A file that parses but holds no messages is not adopted: there is no history
+// for a full write to lose.
+func (cd *ChatDownloader) adoptExistingChatFile() int {
+	outputFile, _ := cd.getOutputPaths()
+	if outputFile == "" {
+		return 0
+	}
+	existing, err := cd.readExistingMessages(outputFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0 // nothing on disk — fresh start
+		}
+		corruptPath := outputFile + corruptChatSuffix
+		cd.reportIOError(fmt.Errorf("existing chat file unreadable, preserving it as %s: %w", corruptPath, err))
+		if renameErr := os.Rename(outputFile, corruptPath); renameErr != nil {
+			cd.reportIOError(fmt.Errorf("preserve unreadable chat file: %w", renameErr))
+		}
+		return 0
+	}
+	if len(existing) == 0 {
+		return 0
+	}
+
+	cd.mu.Lock()
+	cd.messageCount = len(existing)
+	cd.messages = nil // already on disk
+	cd.flushedToDisk = true
+	adopted := cd.messageCount
+	cd.mu.Unlock()
+
+	for _, msg := range existing {
+		if msg.ID != "" {
+			cd.dedup.Add(msg.ID)
+		}
+	}
+	return adopted
 }
 
 // prependExistingMessages reads previously-flushed messages from disk and prepends
 // them to cd.messages. It also registers their IDs in seenIDs to prevent duplicates
 // on subsequent API responses that may overlap with the recovered messages.
 func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
-	existing := cd.readExistingMessages(outputFile)
-	if existing == nil {
+	existing, err := cd.readExistingMessages(outputFile)
+	if err != nil || existing == nil {
 		return
 	}
 	// Locked for the same reason as processBatch: MessageCount() reads
@@ -976,6 +1149,13 @@ func (cd *ChatDownloader) saveResume() {
 	}
 }
 
+// clearResume deletes the resume sidecar. Call it ONLY on a genuine
+// completion — the orchestrator's MarkStreamEnded verdict, or a replay/VOD
+// run whose loop finished — and only when no IO error fired during this run.
+// Start owns that decision (see its doc comment's completion rule); the
+// sidecar is the only record that tells the NEXT run chat.json already holds
+// history, so clearing it after a merely-interrupted live/upcoming run makes
+// that run's first message overwrite the archive.
 func (cd *ChatDownloader) clearResume() {
 	_, resumeFile := cd.getOutputPaths()
 	store := utils.ResumeStore[ChatResumeState]{Path: resumeFile}
