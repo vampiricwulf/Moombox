@@ -22,6 +22,12 @@ const NICO_LANE_GAP_MS = 150;       // spacing buffer between consecutive occupa
 const NICO_MAX_PER_TICK = 20;       // DOM work cap for NEW messages per timeupdate tick
 const NICO_SEED_MAX_FALLBACK = 30;  // seed cap when the row count is unknown
 
+// WALL-CLOCK milliseconds (not media time): how long the stage box must hold
+// still before a changed geometry is committed. A window drag or an animated
+// fullscreen transition is a continuous stream of REAL changes, and committing
+// each one would clear the stage every frame.
+const NICO_GEO_SETTLE_MS = 120;
+
 function announcementColorClass(color) {
   return ANNOUNCEMENT_COLORS.has(color) ? color : "primary";
 }
@@ -46,12 +52,16 @@ export class PlayerController {
     /** @type {LaneAllocator} the row count is re-derived by _updateNicoGeometry */
     this._lanes = new LaneAllocator(15);
     /**
-     * The overlay stage: the video's rendered rect and the row grid measured
-     * from it. Undefined until _updateNicoGeometry has seen a visible overlay.
-     * `version` is bumped on every real change (stale-geometry checks).
+     * The COMMITTED overlay stage: the video's rendered rect and the row grid
+     * measured from it. Undefined until _updateNicoGeometry has seen a visible
+     * overlay. During a resize the overlay's own box is already ahead of this
+     * (see _updateNicoGeometry). `version` is bumped on every commit; it is
+     * reserved for stale-geometry checks — nothing reads it yet.
      * @type {{width: number, height: number, laneHeight: number, rows: number, version: number}|undefined}
      */
     this._nicoGeo = undefined;
+    /** @type {ReturnType<typeof setTimeout>|null} pending geometry commit (NICO_GEO_SETTLE_MS) */
+    this._nicoGeoSettle = null;
     /** Index of the next message to consider; -1 = not anchored yet */
     this.nicoCursor = -1;
     /**
@@ -140,8 +150,9 @@ export class PlayerController {
       if (this.nicoEnabled) {
         // Measure now that the overlay is visible — geometry updates are refused
         // while it is display:none, so without this the first tick after the
-        // toggle would run on stale (or missing) geometry.
-        this._updateNicoGeometry();
+        // toggle would run on stale (or missing) geometry. Immediate: the user
+        // just asked for the overlay, so it must not wait out a settle window.
+        this._updateNicoGeometry({ immediate: true });
       } else {
         this.clearNicoOverlay();
         // Un-anchor: no ticks run while the overlay is off, so the next enabled
@@ -228,10 +239,11 @@ export class PlayerController {
     document.addEventListener("fullscreenchange", () => this._updateNicoGeometry());
     const wrapper = document.getElementById("player-video-wrapper");
     if (wrapper && "ResizeObserver" in window) {
-      // One measurement per frame: a sidebar-toggle animation or a window drag
-      // fires a callback storm, and each measurement forces a layout flush (the
-      // probe). The repeats are no-ops anyway — _updateNicoGeometry only clears
-      // when the box or row count actually changed.
+      // One measurement per frame: a window drag fires a callback storm, and
+      // each measurement forces a layout flush (the probe). Note that during a
+      // drag every frame IS a real change, so R11's same-size skip does nothing
+      // here — what keeps the stage from being cleared per frame is the settle
+      // timer in _updateNicoGeometry, which commits once the box holds still.
       let pending = 0;
       new ResizeObserver(() => {
         cancelAnimationFrame(pending);
@@ -519,6 +531,9 @@ export class PlayerController {
     this._chatParts = null;
     this._updateSidebarHeader();
     this.nicoCursor = -1;
+    // A geometry commit armed by the last resize has nothing left to commit.
+    clearTimeout(this._nicoGeoSettle);
+    this._nicoGeoSettle = null;
     this._resetNicoDropCount();
     this.playerCustomOffsetMs = 0;
     const offsetInput = document.getElementById("player-chat-offset");
@@ -848,8 +863,9 @@ export class PlayerController {
     // measure it now it is visible — a job switch that reveals a previously
     // hidden overlay (the last job had no chat) resizes nothing and may have
     // already missed this video's `loadedmetadata`. Last, so the re-anchor it
-    // may trigger sees the restored chat offset.
-    this._updateNicoGeometry();
+    // may trigger sees the restored chat offset; immediate, because the first
+    // tick of a freshly selected job must already have the right row count.
+    this._updateNicoGeometry({ immediate: true });
   }
 
   /**
@@ -1242,14 +1258,27 @@ export class PlayerController {
    * derive the row count from a MEASURED line box, so the rows follow the
    * container-query font instead of a hard-coded constant.
    *
-   * Only a real change (width, height or row count) clears the stage and
-   * re-anchors: in-flight keyframes were computed for the old stage width and
-   * pending entries cache measurements taken at the old font size, so neither
-   * can survive it. An unchanged geometry must NOT clear — a ResizeObserver
-   * fires a burst for one sidebar-toggle animation, and a clear per callback
-   * would blank the overlay for the length of the animation.
+   * Committing a changed geometry is destructive — in-flight keyframes were
+   * computed for the old stage width and pending entries cache measurements
+   * taken at the old font size, so the stage has to be cleared and re-anchored.
+   * Two things keep that rare:
+   * - a callback that measures the SAME width, height and row count returns
+   *   here and commits nothing (R11);
+   * - a callback that measures a real change only ARMS the commit, which fires
+   *   once the box has held still for NICO_GEO_SETTLE_MS (R23). Dragging a
+   *   window edge produces a different box on every frame — all of them real
+   *   changes — so without the timer the overlay would be cleared per frame and
+   *   stay blank for the whole drag.
+   *
+   * The overlay's own box follows every call, so the stage never lags the video
+   * during a drag. In that window the messages still fly on the previously
+   * committed width — a small horizontal offset for ~120 ms, against a blank
+   * overlay for as long as the drag lasts.
+   * @param {{immediate?: boolean}} [opts] `immediate` commits without waiting —
+   *   used where the overlay has just been made visible and the very next tick
+   *   must already use the right row count.
    */
-  _updateNicoGeometry() {
+  _updateNicoGeometry({ immediate = false } = {}) {
     const video = document.getElementById("player-video");
     const overlay = document.getElementById("player-nico-overlay");
     if (!video || !overlay) return;
@@ -1291,17 +1320,55 @@ export class PlayerController {
 
     const rows = Math.max(1, Math.floor(h / rowH));
     const geo = this._nicoGeo;
+    if (geo && geo.width === w && geo.height === h && geo.rows === rows) {
+      // R11: nothing to commit. Also drop a commit armed earlier in the same
+      // gesture — a drag that returned to its starting size would otherwise
+      // install a stage that is no longer on screen.
+      clearTimeout(this._nicoGeoSettle);
+      this._nicoGeoSettle = null;
+      return;
+    }
+
+    clearTimeout(this._nicoGeoSettle);
+    this._nicoGeoSettle = null;
+    // The first-ever measurement has no stage to protect (nothing is flying and
+    // spawning is blocked until _nicoGeo exists), so it commits at once, as do
+    // the calls that follow making the overlay visible.
+    if (immediate || !geo) {
+      this._commitNicoGeometry(w, h, rows);
+      return;
+    }
+    this._nicoGeoSettle = setTimeout(() => this._commitNicoGeometry(w, h, rows), NICO_GEO_SETTLE_MS);
+  }
+
+  /**
+   * Install a settled geometry — the destructive half of _updateNicoGeometry.
+   * Both guards are re-checked because this can run NICO_GEO_SETTLE_MS after the
+   * measurement: the overlay may have been hidden meanwhile (toggle off, tab
+   * switch), and the box may have been committed by another path.
+   * @param {number} w
+   * @param {number} h
+   * @param {number} rows
+   */
+  _commitNicoGeometry(w, h, rows) {
+    this._nicoGeoSettle = null;
+    const overlay = document.getElementById("player-nico-overlay");
+    if (!overlay || overlay.clientWidth === 0 || overlay.clientHeight === 0) return;
+    const geo = this._nicoGeo;
     if (geo && geo.width === w && geo.height === h && geo.rows === rows) return;
 
     this._nicoGeo = { width: w, height: h, laneHeight: h / rows, rows, version: (geo?.version || 0) + 1 };
-    // clearNicoOverlay() also empties _nicoPending, so no cached w/h measured at
-    // the old font size can outlive the change.
-    this.clearNicoOverlay();
     this._lanes.reset(rows);
+    // Exactly one clear on this path: _reanchorNicoAt clears before re-seeding
+    // (and clearNicoOverlay empties _nicoPending, so no cached w/h measured at
+    // the old font size outlives the change); _lanes.reset() inside it keeps the
+    // row count just set above.
     if (this.playerChatMessages.length) {
       // Re-anchor so the messages that should be on screen come back mid-flight
       // at the new scale (rather than the overlay staying blank for a traverse).
       this._reanchorNicoAt(this.getGlobalTimeMs() + this.playerCustomOffsetMs);
+    } else {
+      this.clearNicoOverlay();
     }
   }
 
