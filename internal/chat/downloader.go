@@ -214,6 +214,11 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 // THE ADOPTION RULE (the other half of the same guarantee). When there is no
 // usable sidecar but OutputFile already exists, Start adopts that file as
 // history — see adoptExistingChatFile.
+//
+// THE CONTINUATION-PREFERENCE RULE. A sidecar that IS loaded supplies the
+// count and dedup IDs, but for a live/upcoming run it does not supply the
+// continuation when the caller already has a fresh one — see the resume
+// block's own comment below.
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	if cd.running {
@@ -291,9 +296,24 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 
 	// Load resume state
 	resuming := false
+	// preferFresh is set when the sidecar's continuation must NOT be adopted.
+	// The sidecar's token is by definition the one the previous run left off
+	// at, and the exit the completion rule preserves it for is
+	// stale-continuation exhaustion — so for a live/upcoming run that token is
+	// typically the EXPIRED one, while the caller has just fetched a working
+	// token from the watch page (InitialContinuation). Keep the fresh token
+	// and take only the count and dedup IDs from the sidecar. For a REPLAY the
+	// sidecar's continuation IS the position in the archive — a fresh token
+	// would restart the VOD from the top — so it always wins; and a live run
+	// with no InitialContinuation (a resumed job carrying only the sidecar)
+	// has nothing fresher to prefer.
+	preferFresh := false
 	state, err := cd.loadResume()
 	if err == nil && state != nil && state.VideoID == cd.opts.VideoID {
-		cd.continuation = state.Continuation
+		preferFresh = cd.opts.IsLiveOrUpcoming && cd.opts.InitialContinuation != ""
+		if !preferFresh {
+			cd.continuation = state.Continuation
+		}
 		cd.messageCount = state.MessageCount
 		cd.messages = nil // Start fresh — old messages already on disk
 		if len(state.RecentIDs) > 0 {
@@ -330,8 +350,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.OnStart(cd.messageCount, resuming || adopted > 0)
 	}
 
-	// Run chat loop
-	cd.runChatLoop(ctx, resuming)
+	// Run chat loop. runChatLoop's `resuming` means one specific thing — "the
+	// continuation is already mid-stream, skip the All Chat switch" — so a run
+	// that kept the FRESH watch-page token is not resuming by that definition:
+	// a watch-page token is a Top Chat token and still needs the upgrade.
+	cd.runChatLoop(ctx, resuming && !preferFresh)
 
 	// Write remaining messages
 	if len(cd.messages) > 0 {

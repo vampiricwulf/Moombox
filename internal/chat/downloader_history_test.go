@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -341,5 +342,201 @@ func TestUnparseableChatFileIsNotOverwritten(t *testing.T) {
 	got := readChatFileHeader(t, out)
 	if len(got.Messages) != 1 || got.Messages[0].ID != "new1" {
 		t.Errorf("the run must keep archiving after preserving the corrupt file, got %d message(s)", len(got.Messages))
+	}
+}
+
+// --- Part D: a restarted LIVE run polls the fresh continuation -----------
+
+// withAllChatHeader attaches the viewSelector sub-menu extractAllChatContinuation
+// reads, so a response can offer the unfiltered "Live Chat" upgrade token.
+func withAllChatHeader(resp map[string]any, allChatToken string) map[string]any {
+	cont := resp["continuationContents"].(map[string]any)
+	liveChatCont := cont["liveChatContinuation"].(map[string]any)
+	liveChatCont["header"] = map[string]any{
+		"liveChatHeaderRenderer": map[string]any{
+			"viewSelector": map[string]any{
+				"sortFilterSubMenuRenderer": map[string]any{
+					"subMenuItems": []any{
+						map[string]any{"title": "Top chat"},
+						map[string]any{
+							"title": "Live chat",
+							"continuation": map[string]any{
+								"reloadContinuationData": map[string]any{"continuation": allChatToken},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return resp
+}
+
+// continuationRecorder answers every chat poll from a queue and records the
+// continuation token each request actually carried — the only direct evidence
+// of WHICH token the run polls with.
+type continuationRecorder struct {
+	mu        sync.Mutex
+	tokens    []string
+	responses []map[string]any
+	t         *testing.T
+}
+
+func (h *continuationRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Continuation string `json:"continuation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.t.Errorf("decode chat request body: %v", err)
+	}
+	h.mu.Lock()
+	h.tokens = append(h.tokens, body.Continuation)
+	i := len(h.tokens) - 1
+	if i >= len(h.responses) {
+		i = len(h.responses) - 1
+	}
+	out, _ := json.Marshal(h.responses[i])
+	h.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(out)
+}
+
+// startAndRecordTokens runs cd.Start against a recorder and returns the
+// continuation token of every poll the run made, in order.
+func startAndRecordTokens(t *testing.T, cd *ChatDownloader, resps ...map[string]any) []string {
+	t.Helper()
+	rec := &continuationRecorder{responses: resps, t: t}
+	server := httptest.NewServer(rec)
+	defer server.Close()
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	cd.api.client = &http.Client{Transport: rewriteTransport{target: target}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := cd.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("test context expired during Start — the run took a cancellation path, not the one under test")
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return append([]string(nil), rec.tokens...)
+}
+
+// seedResumeSidecar writes a resume sidecar for out with the given state.
+func seedResumeSidecar(t *testing.T, out, videoID, continuation string, count int, ids []string) {
+	t.Helper()
+	store := utils.ResumeStore[ChatResumeState]{Path: out + ".resume.json"}
+	if err := store.Save(ChatResumeState{
+		MessageCount: count,
+		Continuation: continuation,
+		Timestamp:    time.Now().Unix(),
+		VideoID:      videoID,
+		RecentIDs:    ids,
+	}); err != nil {
+		t.Fatalf("seed resume sidecar: %v", err)
+	}
+}
+
+// TestLiveResumePrefersFreshContinuation is the fix for the stale-token cost
+// Part A's preservation introduced. The sidecar's continuation is BY
+// DEFINITION the token the previous run left off at, and the exit Part A
+// preserves it for is stale-continuation exhaustion — so the token in the
+// sidecar is the expired one. A live/upcoming run whose caller has just
+// fetched a fresh token from the watch page must poll THAT, and take only the
+// count and dedup IDs from the sidecar.
+//
+// The fresh token is a Top Chat token (that is what the watch page serves), so
+// the run must also still perform the All Chat upgrade — the second poll here
+// proves it does.
+func TestLiveResumePrefersFreshContinuation(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	seed := ChatData{
+		VideoID:      "vidLiveResume",
+		DownloadedAt: time.Now().UTC().Format(time.RFC3339),
+		MessageCount: 2,
+		Messages:     []ChatMessage{makeTestMessage("a"), makeTestMessage("b")},
+	}
+	if err := utils.WriteChatFileAtomic(out, &seed); err != nil {
+		t.Fatalf("seed chat file: %v", err)
+	}
+	seedResumeSidecar(t, out, "vidLiveResume", "stale", 2, []string{"a", "b"})
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidLiveResume",
+		OutputFile:          out,
+		InitialContinuation: "fresh",
+		ApiKey:              "k",
+		IsLiveOrUpcoming:    true,
+	})
+	cd.testRecoveryOverride = func(context.Context) bool { return false }
+
+	tokens := startAndRecordTokens(t, cd,
+		withAllChatHeader(chatResponseWithIDs(nil, "next"), "allchat"),
+		chatResponseWithIDs(nil, ""),
+	)
+
+	if len(tokens) == 0 {
+		t.Fatal("the run made no poll at all")
+	}
+	if tokens[0] != "fresh" {
+		t.Errorf("first poll used continuation %q, want %q — a live run must keep the token the watch page just supplied, not the stale one in the sidecar",
+			tokens[0], "fresh")
+	}
+	if len(tokens) < 2 || tokens[1] != "allchat" {
+		t.Errorf("polls were %v, want the second to be the All Chat upgrade token — a fresh watch-page token is a Top Chat token and still needs the switch",
+			tokens)
+	}
+
+	if cd.MessageCount() != 2 {
+		t.Errorf("messageCount = %d, want 2 from the sidecar", cd.MessageCount())
+	}
+	for _, id := range []string{"a", "b"} {
+		if !cd.dedup.Seen(id) {
+			t.Errorf("dedup must still be restored from the sidecar's recentIds; %q is missing", id)
+		}
+	}
+}
+
+// TestReplayResumeKeepsSidecarContinuation is the sibling guard. For a replay
+// the sidecar's continuation IS the position in the archive — a fresh
+// watch-page token would restart the VOD from the top — so it always wins.
+func TestReplayResumeKeepsSidecarContinuation(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	seed := ChatData{
+		VideoID:      "vidReplayResume",
+		DownloadedAt: time.Now().UTC().Format(time.RFC3339),
+		MessageCount: 2,
+		Messages:     []ChatMessage{makeTestMessage("a"), makeTestMessage("b")},
+	}
+	if err := utils.WriteChatFileAtomic(out, &seed); err != nil {
+		t.Fatalf("seed chat file: %v", err)
+	}
+	seedResumeSidecar(t, out, "vidReplayResume", "stale", 2, []string{"a", "b"})
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidReplayResume",
+		OutputFile:          out,
+		InitialContinuation: "fresh",
+		ApiKey:              "k",
+		IsReplay:            true,
+		IsLiveOrUpcoming:    false,
+	})
+
+	tokens := startAndRecordTokens(t, cd, chatResponseWithIDs(nil, ""))
+
+	if len(tokens) == 0 {
+		t.Fatal("the run made no poll at all")
+	}
+	if tokens[0] != "stale" {
+		t.Errorf("first poll used continuation %q, want %q — for a replay the sidecar's continuation is the position in the archive and must win",
+			tokens[0], "stale")
+	}
+	if cd.MessageCount() != 2 {
+		t.Errorf("messageCount = %d, want 2 from the sidecar", cd.MessageCount())
 	}
 }
