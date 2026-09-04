@@ -91,12 +91,13 @@ const (
 	// one loss. The back-off keeps the first hour responsive and then gets out
 	// of the way.
 	//
-	// INERT UNTIL ARMING: recordLiveness computes the schedule and
-	// ObserveLiveness logs the answer, but livenessRecoveryArmed is false, so
-	// OnRecoveryNeeded is never called — the state itself still moves on
-	// every observation, which is what makes the pilot's wouldFireRecovery
-	// field meaningful. That is the point of landing it now — the schedule is
-	// mutation-tested here and arming stays a one-constant change.
+	// LIVE SINCE ARMING (2026-09-03): recordLiveness computes the schedule,
+	// ObserveLiveness logs the answer, and livenessRecoveryArmed is true, so
+	// that same answer is what decides whether OnRecoveryNeeded is called. The
+	// state moves on every observation whatever the verdict, which is what
+	// keeps the wouldFireRecovery field on that line honest — it is the bool
+	// the fire reads. The schedule landed and was mutation-tested ahead of the
+	// flip, which is what kept arming a one-constant change.
 	livenessRefireFactor = 2
 	livenessRefireCap    = 24 * time.Hour
 
@@ -610,10 +611,12 @@ type RefreshService struct {
 	// auto-cookie service single-flights — but a goroutine and its two-minute
 	// timeout spent being told no.
 	//
-	// "Decided", not "fired": while livenessRecoveryArmed is false a cleared
-	// liveness verdict is logged rather than acted on, so the stamp records
-	// the decision this map exists to de-duplicate and not, in that case, a
-	// call that happened. A LoggedIn observation must never write here.
+	// "Decided", not "fired", and the distinction outlived arming. The stamp is
+	// written by recordLiveness, UPSTREAM of ObserveLiveness's nil check on
+	// OnRecoveryNeeded, so a service with no callback wired still consumes the
+	// window. What the map records is the DECISION it exists to de-duplicate;
+	// whether a call followed is a separate question, which is why nothing
+	// reads this map to find out. A LoggedIn observation must never write here.
 	lastRecoveryDecided map[string]time.Time
 
 	// lastLivenessKnown is the last thing this process learned about a
@@ -625,7 +628,7 @@ type RefreshService struct {
 	//
 	// THREE states, not two, because the fallback probe has a third outcome.
 	// An inconclusive probe is not a verdict and must move no other state, but
-	// it is the outcome the log-only pilot most needs to be able to see: with
+	// it is the outcome the liveness pilot most needs to be able to see: with
 	// only conclusive outcomes recorded, a signal that has gone permanently
 	// dead behind a redirecting intermediary is indistinguishable from a
 	// healthy install with nothing to report. It shares this map rather than
@@ -763,10 +766,11 @@ func livenessRecordOf(loggedIn bool) livenessRecord {
 // livenessRecoveryArmed gates whether an external liveness verdict may
 // actually invoke OnRecoveryNeeded.
 //
-// It is false, and that is the entire point of this landing. What arming would
-// actually do, on BOTH install shapes — cmd/moombox's handleRecoveryNeeded
-// splits on cookies.auto_enabled and neither arm is silent about a session it
-// cannot restore:
+// ARMED 2026-09-03 by owner ruling — "if our goal is to have it armed, then we
+// should arm it" — which also skipped the five-day pre-arming soak the staged
+// rollout had asked for. What that means, on BOTH install shapes — cmd/moombox's
+// handleRecoveryNeeded splits on cookies.auto_enabled and neither arm is silent
+// about a session it cannot restore:
 //
 //   - auto_enabled = true: a goroutine runs RefreshCookiesDetailed under a
 //     2-minute timeout, which drives a headless browser. TWO outcomes are
@@ -790,24 +794,38 @@ func livenessRecordOf(loggedIn bool) livenessRecord {
 //     without calling the refresher, so there is no single-flight to lose. A
 //     SYNCHRONOUS "Cookie Re-Authentication Required" (TypeError) naming the
 //     cookie file, every time. This arm used to Debug-log and send nothing;
-//     Task 7 replaced that silence, so arming now alarms the population this
-//     arc elsewhere identifies as LEAST able to reach the remedy it names —
-//     containers, remote dashboards, a loopback-gated setup wizard.
+//     Task 7 replaced that silence, so an armed tier 2 now alarms the
+//     population this remediation elsewhere identifies as LEAST able to reach
+//     the remedy it names — containers, remote dashboards, a loopback-gated
+//     setup wizard.
 //
 // A per-platform 30-minute cooldown in wireMonitorCallbacks bounds how often
 // that repeats; it does not withhold the first one.
 //
-// So the risk of arming is NOT scoped to auto_enabled installs, and the reason
-// to stage it is not the browser — the disabled shape is if anything the worse
-// of the two, because the operator it pages has no automated attempt that might
+// So the risk carried by this constant is NOT scoped to auto_enabled installs,
+// and it was never the browser — the disabled shape is if anything the worse of
+// the two, because the operator it pages has no automated attempt that might
 // have quietly fixed things first. It is that a false LoggedOut sends an
 // operator to re-export credentials that were never wrong, on every install
-// shape, and these verdicts have never been in the health path before. They
-// therefore run log-only first: the observation, the dedupe and the freshness
-// accounting all happen and are logged, and only the last step is withheld.
-// Flipping this to true is a deliberate, separate change — not a side effect of
-// wiring something else.
-const livenessRecoveryArmed = false
+// shape. That risk is now ACCEPTED rather than deferred.
+//
+// WHAT BOUNDS A WRONG VERDICT now that this gate no longer does:
+//
+//   - The per-platform back-off recordLiveness computes. The first re-alarm
+//     lands livenessRefireWindow (30 min) after the first alarm; every alarm
+//     after that multiplies the window by livenessRefireFactor, up to
+//     livenessRefireCap (24 h); only a conclusive signed-in verdict puts the
+//     platform back on the base (resetLivenessRefire). A session that reads
+//     dead forever therefore pages on a decaying schedule, not 48 times a day.
+//   - The tier-1 stamp. Both tier-1 fire paths — refresh's status block and
+//     NoteTwitchAuthLoss — call noteRecoveryDecided, which writes
+//     lastRecoveryDecided, the same map recordLiveness consults. So tier 2
+//     cannot fire a SECOND recovery for a loss tier 1 has already raised.
+//
+// THE WAY BACK IS ANOTHER BUILD. This is a source constant, not a config flag:
+// nothing toggles it at runtime and -ldflags cannot reach it. A false verdict
+// in the field is reversed by setting it back to false and rebuilding.
+const livenessRecoveryArmed = true
 
 // NewRefreshService creates a new cookie refresh service.
 // If refreshInterval is zero, the default of 30 minutes is used.
@@ -986,8 +1004,9 @@ func (rs *RefreshService) CheckNow(ctx context.Context) bool {
 }
 
 // ObserveLiveness records an external verdict about whether `platform`'s
-// stored session is still signed in, and — once livenessRecoveryArmed is true
-// — fires OnRecoveryNeeded for a signed-out one.
+// stored session is still signed in and — livenessRecoveryArmed having been
+// true since 2026-09-03 — fires OnRecoveryNeeded for a signed-out one that
+// cleared the per-platform dedupe.
 //
 // Callers must filter their own inconclusive results out: reaching this method
 // means "the platform told us", not "we asked". A consent wall, a rate limit, an
@@ -1002,9 +1021,11 @@ func (rs *RefreshService) CheckNow(ctx context.Context) bool {
 func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 	due, notable := rs.recordLiveness(platform, loggedIn, time.Now())
 
-	// While the pilot is disarmed this line is the ONLY evidence of what the
-	// new signal would have done, so the level is chosen to keep every line
-	// that evidence needs at Info while a healthy install stays quiet.
+	// This line is the record of what the signal DID, written whether or not
+	// the verdict goes on to fire, so the level is chosen to keep every line
+	// that reading needs at Info while a healthy install stays quiet. Since
+	// arming, wouldFireRecovery=true here is the line the Warn below and a
+	// recovery attempt follow.
 	//
 	// Notable (Info) is every signed-out verdict, every change of verdict, and
 	// the first observation of the process. Everything else is a repeat of an
@@ -1038,8 +1059,8 @@ func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 		// States what this method was told, and stops there. ObserveLiveness
 		// has three producers — the per-channel membership probe and the two
 		// channel-independent fallbacks — and cannot tell which sent this
-		// verdict. This is the line that will page an operator the day the
-		// gate flips, so it must not name a mechanism it cannot know.
+		// verdict. This is the line that pages an operator, so it must not
+		// name a mechanism it cannot know.
 		rs.logger.Warn("a liveness observation reports this platform is signed out, triggering recovery", "platform", platform)
 		fn(platform)
 	}
@@ -1055,7 +1076,7 @@ func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 //     of the process. See ObserveLiveness for why the distinction exists.
 //
 // Split out of ObserveLiveness so both decisions are testable on their own,
-// upstream of the pilot gate that currently suppresses the call.
+// upstream of the pilot gate and of the callback it guards.
 //
 // `now` is a parameter so a test can drive the windows without sleeping
 // through them.
@@ -1167,7 +1188,7 @@ func (rs *RefreshService) resetLivenessRefire(platform string) {
 // the same per-platform record a real verdict goes into, and reports whether
 // that is worth an operator-visible line.
 //
-// It exists because the log-only pilot is being read as evidence, and silence
+// It exists because the liveness pilot's log is read as evidence, and silence
 // was ambiguous: an install whose probe is permanently refused — a redirecting
 // captive portal, a proxy answering on another host, a rate limit that never
 // clears — produced exactly the same log as a perfectly healthy install with
@@ -1185,10 +1206,10 @@ func (rs *RefreshService) resetLivenessRefire(platform string) {
 //     condition — only a conclusive signed-in verdict is (recordLiveness).
 //     Resetting the back-off here would let an install stuck behind a
 //     captive portal, proxy or rate limit — inconclusive on EVERY cycle —
-//     clear its own escalation every cycle too, so an armed tier 2 would page
-//     every base window forever: exactly the failure mode the schedule exists
-//     to prevent, reintroduced through the one door silence is supposed to
-//     leave shut.
+//     clear its own escalation every cycle too, so tier 2 would page every
+//     base window forever: exactly the failure mode the schedule exists to
+//     prevent, reintroduced through the one door silence is supposed to leave
+//     shut.
 //
 // TestFallbackInconclusiveMovesNothing pins all three.
 //
@@ -1781,8 +1802,8 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			// Not a verdict, but not nothing either. This branch used to be
 			// absent entirely, which made a probe that has NEVER been able to
 			// answer look identical in the log to a healthy install with
-			// nothing to report — while the pilot's whole purpose is to be
-			// read as evidence about the signal. Deduped through the same
+			// nothing to report — while this line is the only evidence anyone
+			// has that the signal itself works. Deduped through the same
 			// record a verdict uses, so a permanently-refused probe says so
 			// once per process instead of once per cycle.
 			//
@@ -1815,10 +1836,11 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 	}
 
 	// Tier 2, Twitch. The same shape as the block above, and the same pilot
-	// gate withholds the same last step. What differs is the jar condition:
-	// this probe SENDS the auth-token, so an install without one is not
-	// "unreported", it is unprobeable — and asking anyway would get an
-	// anonymous playback token by design and read as a dead session.
+	// gate — armed since 2026-09-03 — carries the same last step. What differs
+	// is the jar condition: this probe SENDS the auth-token, so an install
+	// without one is not "unreported", it is unprobeable — and asking anyway
+	// would get an anonymous playback token by design and read as a dead
+	// session.
 	//
 	// Runs inline on the ticker goroutine, which carries Start's inline
 	// recover. Nothing is spawned.

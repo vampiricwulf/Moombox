@@ -167,7 +167,7 @@ func TestTwitchFallbackSkippedWhenObservedRecently(t *testing.T) {
 // no configured channel is inconclusive on EVERY tick, forever: a line per tick
 // is noise fanned out over the WebSocket stream to both UIs, and no line makes
 // "the signal is dead" indistinguishable from "healthy, nothing to say" — the
-// judgement the disarmed pilot exists to inform.
+// one distinction the pilot's log has to be able to draw about its own signal.
 //
 // MUTATION CLOSED: logging unconditionally at Info (3 lines), dropping the line
 // (0), or recording through recordLiveness instead of
@@ -288,9 +288,49 @@ func TestTwitchFallbackWritesNoAuthStatus(t *testing.T) {
 		t.Fatal("the signed-out verdict never reached ObserveLiveness — the assertion below would pass vacuously")
 	}
 	if got := rs.GetStatus(); !got.TwitchAuthenticated {
-		t.Error("a tier-2 signed-out verdict flipped AuthStatus.TwitchAuthenticated while the pilot is disarmed")
+		t.Error("a tier-2 signed-out verdict flipped AuthStatus.TwitchAuthenticated — the probe is an OBSERVATION producer, and Arc 10's mark stays the only writer outside doRefresh's status block")
 	}
-	if livenessRecoveryArmed {
-		t.Error("livenessRecoveryArmed is true — this arc does not arm the pilot")
+}
+
+// TestTwitchFallbackFiresRecoveryWhenArmed is the armed twin of the pin above,
+// and the Twitch half of the 2026-09-03 flip.
+//
+// The YouTube path's armed pin (TestLivenessRecoveryPilotIsArmed) drives
+// ObserveLiveness directly. This one drives the whole Twitch tier-2 route the
+// way production does — the periodic refresh calls TwitchFallbackLiveness,
+// which routes a conclusive verdict into ObserveLiveness("twitch", …) — so a
+// gate, a platform key or a conclusiveness check wrong anywhere on that route
+// shows up here.
+//
+// MUTATIONS CLOSED: deleting `fn(platform)` in ObserveLiveness, or the constant
+// back to false (0 fires); passing the probe's verdict for the wrong platform
+// (the platform assertion); reporting an INCONCLUSIVE probe as a verdict (the
+// second half — `false, false` must reach nothing at all).
+func TestTwitchFallbackFiresRecoveryWhenArmed(t *testing.T) {
+	healthyRefreshSeams(t)
+
+	rs := NewRefreshService(jarWithTwitchAuth(t), 0, nopLogger{})
+	var fired []string
+	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.TwitchFallbackLiveness = func(context.Context) (bool, bool) { return false, true }
+
+	rs.doRefresh(context.Background())
+
+	if len(fired) != 1 || fired[0] != "twitch" {
+		t.Fatalf("OnRecoveryNeeded calls = %v, want exactly one for \"twitch\" — a due signed-out entitlement verdict must raise the alarm now the pilot is armed", fired)
+	}
+
+	// An inconclusive probe on a fresh service must reach nothing: a 401/403,
+	// a rate limit or an unconfigured channel is not a dead session, and the
+	// one above proves nothing if every probe outcome fires.
+	inconclusive := NewRefreshService(jarWithTwitchAuth(t), 0, nopLogger{})
+	var quiet []string
+	inconclusive.OnRecoveryNeeded = func(platform string) { quiet = append(quiet, platform) }
+	inconclusive.TwitchFallbackLiveness = func(context.Context) (bool, bool) { return false, false }
+
+	inconclusive.doRefresh(context.Background())
+
+	if len(quiet) != 0 {
+		t.Errorf("OnRecoveryNeeded fired %v for an INCONCLUSIVE probe — 401/403 and a missing channel are silence, not a verdict", quiet)
 	}
 }

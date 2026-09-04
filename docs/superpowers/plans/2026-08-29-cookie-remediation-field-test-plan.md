@@ -1,4 +1,4 @@
-# Cookie Remediation - Field-Test Plan (before arming, before the version bump)
+# Cookie Remediation - Field-Test Plan (armed 2026-09-03; before the version bump)
 
 Written 2026-08-29 against `ed89fd2` (Arc 9 in flight) and kept current through every later
 merge; last reconciled at the final whole-plan review on `main` @ `a674caf` (2026-09-03), which
@@ -22,13 +22,14 @@ Two rules for every step in this document:
 
 ## Part 1 - What "arming" is
 
-**Arming is one line.** `const livenessRecoveryArmed = false` in `internal/cookies/refresh.go`
-(`:810` at `a674caf`; the decision comment sits directly above it). Line numbers in this document
+**Arming was one line, and it is DONE.** `const livenessRecoveryArmed` in
+`internal/cookies/refresh.go` (the decision comment sits directly above it) was flipped from `false`
+to `true` on 2026-09-03 by owner ruling - "if our goal is to have it armed, then we should arm it" -
+which also skipped the five-day pre-arming soak Part 2 describes. Line numbers in this document
 drift with every commit - always re-derive with
-`grep -n "livenessRecoveryArmed = false" internal/cookies/refresh.go`. Arming means changing `false` to `true`, rebuilding, and
-running that binary. It is a source constant, not a config flag: it cannot be toggled at runtime,
-`-ldflags` cannot reach it, and the only way back is another build (progress-arc1.md, Task 6
-review: "accidental arming impossible").
+`grep -n "livenessRecoveryArmed = " internal/cookies/refresh.go`. It is a source constant, not a
+config flag: it cannot be toggled at runtime, `-ldflags` cannot reach it, and the only way back is
+another build (progress-arc1.md, Task 6 review: "accidental arming impossible").
 
 **What is gated.** Moombox has two tiers of session-liveness checking (plan §Arc 1):
 
@@ -41,14 +42,16 @@ review: "accidental arming impossible").
   `POST /api/cookies/recheck` deliberately never run it - plan §Staged rollout item 1). **This is
   what the constant gates.** Both feed `ObserveLiveness` (`refresh.go:796`).
 
-**Disarmed (today):** a tier-2 verdict writes one log line and does nothing else:
-`liveness observation platform=youtube loggedIn=<bool> wouldFireRecovery=<bool> armed=false`
-(`refresh.go:822-830`). `wouldFireRecovery=true` on that line is the only evidence of what arming
-would have done.
+**Disarmed (until 2026-09-03):** a tier-2 verdict wrote one log line and did nothing else:
+`liveness observation platform=youtube loggedIn=<bool> wouldFireRecovery=<bool> armed=false`.
+`wouldFireRecovery=true` on that line was the only evidence of what arming would do. Every reading
+rule below that expects `armed=false` was written for that build; on today's build the field reads
+`armed=true` and the line is otherwise identical.
 
-**Armed:** the same verdict, if signed out and past the 30-minute dedupe (`livenessRefireWindow`),
-logs `a liveness observation reports this platform is signed out, triggering recovery` and calls
-`OnRecoveryNeeded` (`refresh.go:831-839`). From there `handleRecoveryNeeded` in
+**Armed (today):** the same verdict, if signed out and past the dedupe (`livenessRefireWindow`,
+then the back-off), logs
+`a liveness observation reports this platform is signed out, triggering recovery` at Warn and calls
+`OnRecoveryNeeded` (`ObserveLiveness`, `internal/cookies/refresh.go`). From there `handleRecoveryNeeded` in
 `cmd/moombox/monitor_callbacks.go` splits on `cookies.auto_enabled` (refresh.go:562-594 decision
 comment; plan §EXECUTION STATUS "settled meaning"):
 
@@ -64,51 +67,54 @@ alarm, then doubling per alarm to a 24 h cap, reset to 30 min only by a conclusi
 notification on `auto_enabled = false`, a browser launch on `auto_enabled = true`, at that cadence (plan
 §Staged rollout item 7). Before H2 it was every 30 minutes forever.
 
-**So "is it just testing?" - no. Arming is four things, in this order:**
+**So "is it just testing?" - no. Arming was four things, and here is where each one stands:**
 
-1. **A soak (testing).** Run the disarmed build against real traffic for days and read the log
-   (Part 2). This is the only thing that can show a systematically wrong verdict BEFORE it pages you
-   every 30 minutes.
+1. **A soak (testing) - SKIPPED by the 2026-09-03 owner ruling.** The plan was to run the disarmed
+   build against real traffic for days and read the log (Part 2), which was the only thing that
+   could show a systematically wrong verdict BEFORE it pages you. The ruling took the flip instead
+   and accepted that risk; Part 2's reading rules now apply to the ARMED build, where a wrong
+   verdict also notifies. Read them the same way and treat any `loggedIn=false` on a healthy
+   install as the signal to rebuild with the constant back to `false`.
 2. **A decision (yours, not testing) - TAKEN and BUILT.** Plan §Staged rollout item 7 asked what a
    genuinely dead session should do once the gate is true: re-alarm every 30 minutes forever, once
    per process, or a back-off. You ruled a back-off (Q1, 2026-08-29) and H2 R1 built it before the
    flip: `recordLiveness` (`internal/cookies/refresh.go`) re-alarms 30 min after the first alarm, then
    doubles per alarm (`livenessRefireFactor`) to a 24 h cap (`livenessRefireCap`), and resets to the
    base on a conclusive signed-in verdict; `TestLivenessRefireScheduleIsTheRuledNumbers` pins the
-   three numbers and `TestLivenessRecoveryPilotIsDisarmed` pins that none of it calls
-   `OnRecoveryNeeded` today. Tier 1 still notifies once per process. Nothing here is left to decide;
-   at arming, confirm the schedule landed (`grep -n livenessRefireCap internal/cookies/refresh.go`)
-   and remember `monitor_callbacks.go`'s `withAuthFailureCooldown` (30 min) is the only OTHER
-   coalescing window in play.
-3. **The flip (not testing).** `false` -> `true` at the constant, its own commit
-   ("Flipping this to true is a deliberate, separate change" - the constant's doc comment). Before you
-   flip, re-read the decision comment above the constant and the two comments corrected at `cc51b81`
-   (plan §Staged rollout item 3) - they are the decision documents and some of their justifications
-   expire the moment the constant is true. **The arming commit also owes the second half of ARMING
-   row 12** (`progress-arc8.md`; `2026-09-03-housekeeping-h2.md` § Final state): with the constant
-   true, one chat-marked Twitch loss must reach `OnRecoveryNeeded` ONCE, not twice. The stamp
-   `NoteTwitchAuthLoss` writes through `noteRecoveryDecided("twitch", ...)` and the tier-2 suppression
-   it produces are already asserted disarmed by `TestTwitchMarkStampsTheSharedRecoveryDedupe`
-   (`internal/cookies/refresh_twitch_mark_test.go`), which also pins that the stamp does NOT escalate
-   the back-off; the double-FIRE assertion is the one test the flip must add.
-4. **An armed re-run (testing).** A5 must be re-run ARMED (Part 3) - the disarmed run passes for
-   the wrong mechanism. Then the armed build soaks again with the same reading rules as Part 2,
-   now watching for the Warn line and the notifications.
+   three numbers and `TestLivenessRecoveryPilotIsArmed` pins that a due signed-out verdict now DOES
+   call `OnRecoveryNeeded`, exactly once, with the Warn sentence. Tier 1 still notifies once per
+   process. The schedule landed before the flip
+   (`grep -n livenessRefireCap internal/cookies/refresh.go`); remember `monitor_callbacks.go`'s
+   `withAuthFailureCooldown` (30 min) is the only OTHER coalescing window in play.
+3. **The flip (not testing) - DONE 2026-09-03,** in its own commit, which also rewrote the decision
+   comment above the constant and every other comment whose justification expired with it. The
+   second half of ARMING row 12 (`progress-arc8.md`; `2026-09-03-housekeeping-h2.md` § Final state)
+   was paid at the same time: `TestTwitchMarkAndTierTwoFireRecoveryOnce`
+   (`internal/cookies/refresh_twitch_mark_test.go`) pins that one chat-marked Twitch loss reaches
+   `OnRecoveryNeeded` ONCE, that the tier-2 verdict following it inside the window reaches it zero
+   more times, and that the re-alarm lands only once the back-off window has passed. Its neighbour
+   `TestTwitchMarkStampsTheSharedRecoveryDedupe` still pins the stamp itself and that it does NOT
+   escalate the back-off.
+4. **An armed re-run (testing) - OPEN, and now the only run left.** A5 must be run ARMED (Part 3);
+   there is no disarmed run to compare it against any more. Then the armed build soaks with the
+   same reading rules as Part 2, now watching for the Warn line and the notifications.
 
-What arming requires of you, in the ledger's own words: "three runs (items 4, 6, and the five-day
-soak) and one decision (item 7). Everything code-side is done." (progress-arc8.md §ARMING). Add A4
-to that list - the plan's acceptance section still marks it "worth one live run".
+What arming required of you, in the ledger's own words: "three runs (items 4, 6, and the five-day
+soak) and one decision (item 7). Everything code-side is done." (progress-arc8.md §ARMING), plus A4
+- the plan's acceptance section still marks it "worth one live run". The decision is taken, the
+five-day soak is waived by the same ruling, and the runs are what remain.
 
 ---
 
-## Part 2 - The pre-arming soak
+## Part 2 - The soak (was pre-arming; now the armed soak)
 
 Sources: plan §Staged rollout items 1-11; plan §Arc 0 acceptance (the "STILL OPEN" item);
 progress-arc8.md §ARMING; progress-arc1.md Task 6 (log granularity rulings).
 
 **Build.** From `main` (or this branch - see Part 6 about which), `go build -o moombox.exe
-./cmd/moombox` with the constant still `false`. Confirm: `grep -n "livenessRecoveryArmed = false"
-internal/cookies/refresh.go` before you build.
+./cmd/moombox`. The constant is `true` as of 2026-09-03; confirm with
+`grep -n "livenessRecoveryArmed = " internal/cookies/refresh.go` before you build, because it is
+what decides whether a wrong verdict merely logs or also pages you.
 
 **Config.** Your real install, real cookies, real channels. Two runs are required (item 4):
 
@@ -129,12 +135,12 @@ long; Run B a day is enough to see the tier-1 shape stays silent with the browse
 | Step | Command / action | Expected | STOP if |
 |---|---|---|---|
 | 1 | Start the binary; read the first minute | `Cookies loaded completeAuthSet=true anyAuthCookie=true expiredYouTubeAuth=0 expiredTwitchAuth=0 youtubeAuthHorizon=<ISO-8601 or none> twitchAuthHorizon=<ISO-8601 or none> twitchLoginExpiry=<ISO-8601 or none>` (`cookiesLoadedFields`, `cmd/moombox/services.go`; the three horizons come from `CookieJar.HorizonLogFields`, H2 R2). Non-zero expired counts mean the file on disk is stale - fix the export before soaking. A horizon is a TIMESTAMP, never a value: the soonest auth-cookie expiry per platform, and `twitchLoginExpiry` is the `login` row's own. Write the three down - they are the BEFORE half of Part 4 gate 7. | `youtube auth lost, triggering recovery` or `auth lost and automatic cookie refresh is disabled` appears at boot with cookies you know work (tier-1 false positive). |
-| 2 | Wait ~30 min (item 1: the first tier-2 observation lands one cadence after boot; nothing can force it) | At least one Info `liveness observation platform=youtube loggedIn=true wouldFireRecovery=false armed=false` per process (Task 6 I4: healthy install = about one line per process). | Nothing for hours AND no "learned nothing" line: the probes are not running. Check membership discovery is on for at least one YouTube channel and that the jar holds a YouTube auth cookie (both probes gate on `HasAnyAuthCookie`, item 2 re-read note). |
-| 3 | Every day: `grep "liveness observation" moombox.log` | Only `loggedIn=true`. Repeats are Debug and invisible; a change of verdict is Info. | **Any `loggedIn=false` while downloads are succeeding = FALSE POSITIVE. Stop. Do not arm.** Diagnose the page shape first (plan §Staged rollout "Any LoggedOut while downloads are succeeding"). Also stop on `wouldFireRecovery=true` on a healthy install. |
+| 2 | Wait ~30 min (item 1: the first tier-2 observation lands one cadence after boot; nothing can force it) | At least one Info `liveness observation platform=youtube loggedIn=true wouldFireRecovery=false armed=true` per process (Task 6 I4: healthy install = about one line per process). `armed=true` is the flip; the rest of the line is unchanged. | Nothing for hours AND no "learned nothing" line: the probes are not running. Check membership discovery is on for at least one YouTube channel and that the jar holds a YouTube auth cookie (both probes gate on `HasAnyAuthCookie`, item 2 re-read note). |
+| 3 | Every day: `grep "liveness observation" moombox.log` | Only `loggedIn=true`. Repeats are Debug and invisible; a change of verdict is Info. | **Any `loggedIn=false` while downloads are succeeding = FALSE POSITIVE. Stop, and now it has also notified you.** Since the pilot is armed, rebuild with `livenessRecoveryArmed = false` to stop it repeating, then diagnose the page shape (plan §Staged rollout "Any LoggedOut while downloads are succeeding"). Also stop on `wouldFireRecovery=true` on a healthy install. |
 | 4 | `grep "learned nothing" moombox.log` | Absent, or one Info line once and then a normal `loggedIn=true` line later. | The "learned nothing" line is the ONLY liveness line for days = "all Unknown". Item 5b: F1's authenticated-side body shape was inferred, never measured; this is the first thing to measure (log the cookie NAMES `processYouTubeSetCookies` updates on one authenticated cycle - never values). Re-open the page choice (plan §Staged rollout). |
-| 5 | `grep "triggering recovery" moombox.log` | Absent (healthy). | Present without a real outage: tier-1 false positive; A3-class diagnosis. |
+| 5 | `grep "triggering recovery" moombox.log` | Absent (healthy). Two lines can match now: tier 1's `youtube auth lost, triggering recovery` / `twitch credentials were refused where they were used, triggering recovery`, and - since the flip - tier 2's `a liveness observation reports this platform is signed out, triggering recovery`. | Present without a real outage. The tier-2 sentence names a false liveness verdict (rebuild disarmed, then diagnose the page shape); either tier-1 sentence is an A3-class diagnosis. |
 | 6 | Check Discord daily | Nothing from Moombox about cookies. (With jobs parked in `COOKIES?`, the first healthy check of a process may send an info "parked jobs re-evaluated" notice - that is correct resume behaviour, not an alarm; plan §A4 caveat.) | Any "Cookie Re-Authentication Required" / "Cookie Auto-Refresh Failed" while cookies work. |
-| 7 | Twitch | Since Arc 12b Twitch HAS a tier-2 producer: `TwitchFallbackLiveness`, the playback-access-token probe, on the periodic path only - Part 4 gate 22 is its reading rule. The startup line's `expiredTwitchAuth`, `twitchAuthHorizon` and `twitchLoginExpiry` (H2 R2) are the early warnings. | As gate 22: `loggedIn=false` for Twitch while Twitch downloads and authenticated chat still work is a false verdict - stop, do not arm. |
+| 7 | Twitch | Since Arc 12b Twitch HAS a tier-2 producer: `TwitchFallbackLiveness`, the playback-access-token probe, on the periodic path only - Part 4 gate 22 is its reading rule. The startup line's `expiredTwitchAuth`, `twitchAuthHorizon` and `twitchLoginExpiry` (H2 R2) are the early warnings. | As gate 22: `loggedIn=false` for Twitch while Twitch downloads and authenticated chat still work is a false verdict - stop, and since the flip it has also fired recovery; rebuild disarmed before diagnosing. |
 | 8 | Item 11(a) - if you click Refresh / `R C` during the soak | Count passes from the LOG, never from clicks. A click landing during a ticker pass runs no pass; at `DEBUG` you will see `cookie refresh skipped, another pass is already in flight` (`refresh.go:1044`). After `R F` or a recovery, an Info `auth re-check after ... was skipped` line is expected, not a fault. A ticker tick landing during a manual pass is dropped for one interval. | - (nothing here is a failure) |
 | 9 | Item 11(b) - only if you reset `config.toml` but kept the data dir | `cookies.meta.json`'s verified `Platforms` seeds the platform list first (`services.go:378-385`, source is logged). If the sidecar still records a platform the jar no longer holds, the first conclusive check fires "auth lost" for it. | Do NOT read that one line as a false verdict; it is the same witnessed-transition behaviour a persisted config produces on every restart. |
 | 10 | Item 11(c) - reasons | `youtubeError`/`twitchError` render on `GET /api/cookies/status`, the web badge title (inconclusive arm only) and the `R C` line. The push-driven TUI status bar renders NO reason, by design. | A reason string reading stale on the always-on TUI bar (it should never be there at all). |
@@ -157,7 +163,7 @@ A1-A4. It does NOT run the tier-2 fallback probe (item 1), which is why A5 needs
 | A2 - the half-cleared jar (LOGIN_INFO absent, SAPISID present) | **PASSED 2026-08-27.** Log showed `Cookies loaded ... completeAuthSet=false` and the check still probed and fired. Identical notification copy is correct. | - | Same as A1. |
 | A3 - no false alarm on a transient error | **PASSED 2026-08-27** (guide URL pointed at RFC 5737 TEST-NET via a build variant, reverted). | - | No auth-loss line, no notification. |
 | A4 - a healthy session stays silent | **OPEN** - source-established (progress-arc1.md, Fable Arc 1 review) "still worth one live run". | Your real install, working cookies, no jobs parked in `COOKIES?` (or expect the info notice). | `POST /api/cookies/recheck` -> no notification; YouTube green in the TUI status bar (`YT` green) and the dashboard badge ("YouTube: Authenticated"). The badge needs the platform in `activePlatforms`. |
-| A5 - N channels do not mean N alerts | **OPEN, and MUST BE RE-RUN ARMED.** Disarmed, `ObserveLiveness` withholds the call, so the one notification comes from tier 1 and the run passes for the wrong mechanism (plan §A5 caveat; progress-arc1.md Fable review). | A throwaway instance with several YouTube channels configured, membership discovery on, a Discord webhook copied config-to-config (never printed), and a deliberately broken cookie file: edit the NAME of the `LOGIN_INFO` row (e.g. `LOGIN_INFO_X`) or delete the row on the throwaway copy. Never touch the value. | **Disarmed run (do it now):** after one monitor cycle, N `liveness observation ... loggedIn=false` Info lines, exactly ONE with `wouldFireRecovery=true`, and exactly ONE Discord notification (tier 1). **Armed run (after the flip):** same N lines, ONE `a liveness observation reports this platform is signed out, triggering recovery` Warn, ONE notification per platform - never N - and the re-alarm on H2 R1's back-off (the second 30 min after the first, then 1 h, 2 h, ... capped at 24 h, back to 30 min once a signed-in verdict lands), not every 30 minutes forever. Restart between runs (30-min cooldown). |
+| A5 - N channels do not mean N alerts | **OPEN, and THE ARMED RUN IS NOW THE RUN.** The disarmed run it used to also ask for is moot - the build is armed as of 2026-09-03, `ObserveLiveness` no longer withholds the call, and there is nothing left that could pass for the wrong mechanism (plan §A5 caveat; progress-arc1.md Fable review). | A throwaway instance with several YouTube channels configured, membership discovery on, a Discord webhook copied config-to-config (never printed), and a deliberately broken cookie file: edit the NAME of the `LOGIN_INFO` row (e.g. `LOGIN_INFO_X`) or delete the row on the throwaway copy. Never touch the value. | After one monitor cycle: N `liveness observation ... loggedIn=false armed=true` Info lines, exactly ONE with `wouldFireRecovery=true`, exactly ONE `a liveness observation reports this platform is signed out, triggering recovery` Warn, and ONE notification per platform - never N. Then the re-alarm on H2 R1's back-off (the second 30 min after the first, then 1 h, 2 h, ... capped at 24 h, back to 30 min once a signed-in verdict lands), not every 30 minutes forever. Restart between runs (30-min cooldown). |
 
 ---
 
@@ -170,7 +176,7 @@ looks like.
 
 | # | Gate (opened by) | What it proves | Setup | Closes when you observe | Failed looks like |
 |---|---|---|---|---|---|
-| 1 | Five-day pilot soak (Arc 0 acceptance "STILL OPEN"; plan §Staged rollout; progress-arc8 §ARMING) | The headless refresh keeps the profile signed in past the point it used to die, and tier-2 verdicts are correct on real traffic | Part 2, Run A, five days | Profile mtime advancing every periodic pass; no `loggedIn=false`; no cookie notifications; downloads that need an account still work on day five | A `loggedIn=false` while downloads succeed; or the profile stops being written while the log claims success |
+| 1 | Five-day pilot soak (Arc 0 acceptance "STILL OPEN"; plan §Staged rollout; progress-arc8 §ARMING). No longer a PRE-arming soak - the 2026-09-03 ruling skipped that; this is the armed soak | The headless refresh keeps the profile signed in past the point it used to die, and tier-2 verdicts are correct on real traffic | Part 2, Run A, five days | Profile mtime advancing every periodic pass; no `loggedIn=false`; no cookie notifications; downloads that need an account still work on day five | A `loggedIn=false` while downloads succeed; or the profile stops being written while the log claims success |
 | 2 | Badges on a real subscriber-only Twitch capture (progress-arc5.md Tasks 7+8 field gate; plan §Arc 5 gate 1; §Arc 8 gate 1) | Twitch's IRC actually accepts `PASS oauth:<token>` + `NICK <login>` - a premise from chatterino7's shape, never observed here. Before Arc 5, IRC had NEVER authenticated (unconditional `justinfan` nick) | Real install, Twitch cookies present with `auth-token` AND `login` rows, chat capture on; archive a live stream on a channel you are subscribed to where subscriber-only mode or sub badges are in play | Subscriber badges (and sub-only messages) in the captured chat; NO `continuing anonymously` Warn and NO `no usable login cookie` Warn in the log. Reading rule: presence of chat does not distinguish success from failure - the Warn and the badges do (plan §Arc 5 gate 1) | Chat captured with no badges; or a Warn `twitch never acknowledged the authenticated IRC login` / `twitch rejected the authenticated IRC login` (`internal/twitch/chat.go:426-434`) |
 | 3 | Degradation notification arriving in Discord (progress-arc8.md Task 10 concern 4; plan §Arc 8 gate 1, second half) | The once-per-job "Twitch chat is anonymous for <channel>" notice is delivered, with the NEXT-capture sentence | Throwaway instance, Discord webhook, Twitch cookies with the `login` row deliberately broken: rename it (e.g. `login_X`) or delete it; start a Twitch live capture with chat on | Log: `twitch chat: auth-token present but no usable login cookie` (`chat.go:361`); Discord: warning titled `Twitch chat is anonymous for <channel>` whose body says this download is unaffected and "the NEXT capture will start anonymous" (`internal/worker/stream_processor_twitch.go:146-152`). Exactly one per job, even across reconnects | No notification (nobody has ever seen it arrive); or two per job; or a body naming a token or login |
 | 4 | Credentialed Twitch IRC reconnect surviving a real network outage (plan §Arc 5 gate 2; §Arc 8 gate 2; progress-arc5.md fix round 2) | The drop-vs-refusal discriminator: a dropped socket is not a refused login, so a reconnect after an outage stays credentialed instead of latching anonymous | A real Twitch capture with credentials and chat on; pull the network cable / disable the adapter for 1-2 minutes; restore | Chat resumes after reconnect WITH badges; no `continuing anonymously` Warn; the job is not abandoned | Chat resumes without badges (latched anonymous), or the reconnect budget burns and chat is abandoned |
@@ -191,7 +197,7 @@ looks like.
 | 19 | Recovery interaction, one attempt not one per refusal (Arc 10 field gate 5; `2026-08-29-arc10-twitch-credential-lifecycle.md:5172`; ledger Task 7) | With `auto_enabled = true`, a Twitch chat downgrade produces exactly ONE browser recovery attempt even when more than one refusal reports it | Trigger a Twitch chat downgrade with `auto_enabled = true` | Exactly one browser recovery attempt runs | One recovery attempt per refusal - repeated browser launches for what is really one credential problem |
 | 20 | The four newly-wired reload sites (Arc 10 field gate 6a-6d; `2026-08-29-arc10-twitch-credential-lifecycle.md:5173`; ledger Task 7a) | Each site `recheckAfterCookieWrite` now reaches - the job-triggered refresh, a failed recovery attempt, both UIs' wizard finish, and the `auto_enabled` periodic tick - actually runs an auth re-check afterward in a real deployment. (d) is a NAMED RESIDUAL: nothing offline can pin the tick's call to `OnPassCompleted`, because that branch needs a browser profile, a browser and a network | (a) Let a Twitch job fail on an expired token with `auto_enabled` on. (b) Let a recovery attempt run and FAIL. (c) Finish the setup wizard from each UI. (d) Leave the `auto_enabled` periodic timer to fire once | (a)-(c) each show an auth re-check in the log right after the write, and (c) updates the badge without waiting for a tick; (d) shows the same after a tick that ran a pass | Any of the four writes leaving the badge stale until the next unrelated tick; for (d), a tick that ran a pass and did not fire the hook - which looks exactly like a tick that declined, per the residual note |
 | 21 | Arc 11 re-auth ingest (Arc 11 Task 5 decision: no live Go gate is warranted; this is what replaces it) | That a real export, pasted or uploaded through a real browser, lands on disk, reloads, verifies and resumes parked jobs — including the two things no unit test reaches: a browser-assembled multipart body, and the single-file bind-mount write failure | Any instance with real cookies. (a) Export a fresh Netscape cookies.txt from a signed-in private window on any desktop; paste it into Settings -> Cookies and press Import. (b) Repeat with the file picker instead of the textarea. (c) On a throwaway container ONLY, bind-mount cookies.txt as an individual file (`- ./cookies.txt:/data/cookies.txt`) and import again | (a) and (b): a green toast per accepted platform, the file on the volume gaining the pasted rows while keeping the sibling platform's, the header badge going green without a restart, and any `COOKIES?` job resuming. (c) a 409 whose message names the bind mount, and cookies.txt unchanged | A toast that says "configured" while the badge stays red (the verdict is being read from a pre-import snapshot); a merged file that lost the sibling platform's rows; a 500 with "cookie import failed" for the bind-mount case; or any cookie value visible in the response, the log or the notification |
-| 22 | Twitch tier-2 entitlement probe answering on a real session (Arc 12b; `2026-09-02-arc12b-twitch-entitlement-probe.md` Tasks 1-3) | That `TwitchFallbackLiveness` returns a CONCLUSIVE verdict against a real Twitch session on the periodic path — the arc's only claim no offline test can reach. Everything else is unit-tested and mutated; nobody has watched this probe answer | Real install with a Twitch `auth-token` in `cookies.txt` and at least one enabled `platform = "twitch"` channel configured. Leave it running through at least two 30-minute `RefreshService` cycles at `DEBUG` (Twitch has no cheaper producer to make the probe stand down and its own stamp ages out inside one cadence, so EVERY periodic tick pays for one probe; the probe asks about the FIRST enabled configured Twitch channel whether or not it is live — Task 0 measured on 2026-09-02 that an offline channel's authenticated token still carries `user_id` — so nothing needs to be live during the window). Do NOT press Recheck Cookies or `R C` — `CheckNow` deliberately skips the probe | An Info line `liveness observation` with `platform=twitch`, `loggedIn=true`, `wouldFireRecovery=false`, `armed=false`, once per process for a healthy session (repeats drop to Debug). No `tier-2 twitch liveness probe did not answer` line, and no `liveness fallback probe learned nothing about this session platform=twitch` | `loggedIn=false` while Twitch downloads and authenticated chat still work — a false verdict, and the reason the pilot is disarmed; report it rather than arming. Or `tier-2 twitch liveness probe did not answer` on every cycle: read its `err` — `not attempted` means the jar or channel gate refused (check the `auth-token` row and the `platform = "twitch"` spelling), `twitch refused the credentials` means a 401/403 the arc deliberately treats as inconclusive (that is field gate 18's question, not this one), `did not say which session` means Twitch renamed `user_id` and `PlaybackTokenSession` needs re-measuring |
+| 22 | Twitch tier-2 entitlement probe answering on a real session (Arc 12b; `2026-09-02-arc12b-twitch-entitlement-probe.md` Tasks 1-3) | That `TwitchFallbackLiveness` returns a CONCLUSIVE verdict against a real Twitch session on the periodic path — the arc's only claim no offline test can reach. Everything else is unit-tested and mutated; nobody has watched this probe answer | Real install with a Twitch `auth-token` in `cookies.txt` and at least one enabled `platform = "twitch"` channel configured. Leave it running through at least two 30-minute `RefreshService` cycles at `DEBUG` (Twitch has no cheaper producer to make the probe stand down and its own stamp ages out inside one cadence, so EVERY periodic tick pays for one probe; the probe asks about the FIRST enabled configured Twitch channel whether or not it is live — Task 0 measured on 2026-09-02 that an offline channel's authenticated token still carries `user_id` — so nothing needs to be live during the window). Do NOT press Recheck Cookies or `R C` — `CheckNow` deliberately skips the probe | An Info line `liveness observation` with `platform=twitch`, `loggedIn=true`, `wouldFireRecovery=false`, `armed=true`, once per process for a healthy session (repeats drop to Debug). No `tier-2 twitch liveness probe did not answer` line, and no `liveness fallback probe learned nothing about this session platform=twitch` | `loggedIn=false` while Twitch downloads and authenticated chat still work — a false verdict, and since the flip it also fires recovery; rebuild with the constant back to `false` and report it. Or `tier-2 twitch liveness probe did not answer` on every cycle: read its `err` — `not attempted` means the jar or channel gate refused (check the `auth-token` row and the `platform = "twitch"` spelling), `twitch refused the credentials` means a 401/403 the arc deliberately treats as inconclusive (that is field gate 18's question, not this one), `did not say which session` means Twitch renamed `user_id` and `PlaybackTokenSession` needs re-measuring |
 | 23 | Arc 12c `cookies.acquisition = "profile"` against a REAL Firefox profile on a desktop (`2026-09-02-arc12c-acquisition-mode.md` §Final state) | That the opt-in lifts exactly the read-only refusal and nothing else: no browser launches, the snapshot copy of `cookies.sqlite` + `-wal` reads real rows from a profile an installed browser owns, the launch guard still refuses that directory on every subprocess site, and the periodic tick stands down on a populated `cookies.txt` instead of re-reading the profile on a schedule. Every Arc 12c test reads a synthetic `t.TempDir()` profile and the guard tests use a path that does not exist, so nobody has watched this run against a live profile tree | A desktop with Firefox installed. (a) `[cookies] acquisition = "profile"` and `browser_profile_dir` = your real Firefox profile directory (the one holding `cookies.sqlite`); no restart. Press `R F` or the Settings-page "Refresh cookies from browser profile" button, once with Firefox CLOSED and once with it OPEN. (b) `acquisition = "auto"`, same directory, press again. (c) Back in `"profile"`, with `auto_enabled = true` (restart), leave the timer through one `refresh_interval` at `DEBUG`. (d) Still in `"profile"`, start the interactive login (`R L` / Settings) | (a) Pre-flight `Importing cookies from the browser profile...` on both surfaces; no browser process (Task Manager); `cookies.txt` gains rows and the badge goes green. With Firefox OPEN: either the same, or a 409 saying `cookies.sqlite` is locked - record which; it is the README recipe's "close the browser and press the button again" premise, unmeasured. (b) A 422 whose message names `cookies.acquisition = "profile"` on both surfaces, no browser process. (c) `periodic auto-cookie refresh skipped - a browser-free import may only run when there is nothing to lose` on each tick at `DEBUG`; `cookies.txt` mtime unchanged. (d) A browser window opens against Moombox's own managed profile - `StartSetup` ignores the mode. Reading rules: with this directory configured, `"profile"` mode logs ONE INFO at boot naming the directory and saying no headless browser will be launched against it and that the read-only import is what runs (`AutoCookieService.LogProfileDirVerdict`); `"auto"` logs the same verdict at ERROR, which is correct there — a browser refresh WOULD be refused. An ERROR on a `"profile"` boot is a regression of H2 R9, not the expected line. The post-flight sentence in (a) must open `Browser-profile cookie import ...` on both surfaces, not `Browser cookie refresh ...` | (a) A browser process; an import that verified nothing (`ErrNoCookiesInProfile` on a profile you are signed in with means the `-wal` copy is not reaching the snapshot); any cookie value in a log or toast. (b) A 500 `cookie refresh failed`, a 404 (rung 3 swallowing the sentence), or a message that says "refusing to launch". (c) `cookies.txt` rewritten from the profile on a tick. (d) `no supported browser installed` from the login in `"profile"` mode |
 
 Not listed: the "next premiere" attestation gate from `project_attestation_pot_coherence.md` - the
@@ -296,9 +302,10 @@ its 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real b
 
 **Then the release checklist from `CLAUDE.md` §Release Process:**
 
-1. `RELEASE_NOTES.md` is written (`a674caf`: 49 bullets in the four groups, no heading, the F3
-   copy included, the arming state stated as DISARMED). Review it; if you arm before the bump,
-   change its arming sentences first.
+1. `RELEASE_NOTES.md` is written (49 bullets in the four groups, no heading, the F3 copy included),
+   and its arming sentences were rewritten by the arming commit: the state is stated as ARMED, with
+   what fires on each `auto_enabled` arm, the back-off cadence, and that the only way back from a
+   false verdict is a rebuild. Review it.
 2. Bump `version = "2.8.5"` in `cmd/moombox/main.go:26`.
 3. Commit both together: `chore: bump version to x.y.z - <short summary>`. Never re-tag; bump
    instead (memory: no tag replacement). Before committing, check that every non-Go text file you
@@ -322,7 +329,7 @@ run it. Never `git stash -u` or `git clean` in this repo (progress-arc1.md Task 
 | A1 (abandoned setup wedges acquisition) on Linux / Docker | **Built, not field-verified.** The reap fires on Linux and in Docker via a process group (`Setpgid` at launch, `/proc` for the count, an explicit group kill where Windows closes a Job Object handle); the decisions are unit-tested against a fake process table on Windows. By owner ruling there is NO Linux live gate here — a user's bug report is the gate. Still unreaped on darwin and the fallback build, where `abandon` remains the only release | `operations.md` § Browser Cookie Acquisition (Platform Differences); `2026-09-02-a1-linux-process-group-reap.md` § Final state |
 | Widening the `authStatusChanged` gate so a push-driven surface could render `youtubeError`/`twitchError` | **Documented, not widened - and now PINNED** (H2 R4: the two "alone" rows of `TestAuthStatusChangedGateCoversEverySurfaceInput`, `internal/cookies/refresh_threestate_test.go`). No push surface renders the reason strings; per-request paths do | `data-and-storage.md` § Refresh Service ("`authStatusChanged` is a CONTRACT"); `user-interfaces.md` § Status Bar |
 | An in-process Twitch keepalive | **Does not exist, by research conclusion.** yt-dlp never writes `auth-token` back; chatterino7 only detects expiry; the only issuer is `passport.twitch.tv/login`. Whether the browser pass renews it is Part 4 gate 7 | `platform-services.md` § Twitch Authentication (the research conclusion is stated there); Part 4 gate 7 |
-| Twitch tier-2 liveness / channel entitlement probe | **Built, Arc 12b - no longer belongs on this list.** `TwitchFallbackLiveness` over the playback-access-token probe, on the periodic path only; the pilot stays disarmed. What remains open is the field gate, not the feature - see Part 4 row 22 | `data-and-storage.md` § Refresh Service; `2026-09-02-arc12b-twitch-entitlement-probe.md` § Final state |
+| Twitch tier-2 liveness / channel entitlement probe | **Built, Arc 12b - no longer belongs on this list.** `TwitchFallbackLiveness` over the playback-access-token probe, on the periodic path only; the pilot was armed separately on 2026-09-03. What remains open is the field gate, not the feature - see Part 4 row 22 | `data-and-storage.md` § Refresh Service; `2026-09-02-arc12b-twitch-entitlement-probe.md` § Final state |
 | The two Arc 2 evaluation items | (1) Cross-writer lost update: **ruled NO** in Arc 8 (11(h)) - five writers of one file, no shared lock; the window is seconds wide on the import path only and loses at most a rotation the next pass repairs; re-open only with a profile or a field report. (2) The browser path's no-rollback overwrite: **BUILT** as the narrowed A2 (H2 R3, Q13 revised) - the regression arm only | `data-and-storage.md` § Auto-Cookie Service (both) |
 | G3/G4 explicit acquisition mode | **Built, Arc 12c - no longer belongs on this list.** `cookies.acquisition` (`auto` \| `profile`) and the launch-guard / read-only-import split; both UIs carry the control. What remains open is the field gate, not the feature - see Part 4 row 23 and Part 5 rows 28-30 | `2026-09-02-arc12c-acquisition-mode.md` § Final state; `data-and-storage.md` § Auto-Cookie Service |
 | V9 TUI cookie-setup entry point, T3 within-platform convergence | **Done, Arc 12a** (`R L`; `mergeCookieFiles` keyed by name+domain+path) - not on this list either | `user-interfaces.md` § What the TUI renders (`R L`); `data-and-storage.md` § Auto-Cookie Service (the merge key); `2026-09-02-arc12a-tui-cookie-login-and-merge-key.md` § Final state |

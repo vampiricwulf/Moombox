@@ -427,13 +427,15 @@ func TestTwitchMarkFiresAuthChangeOnAVerdictTransitionOnly(t *testing.T) {
 }
 
 // TestTwitchMarkStampsTheSharedRecoveryDedupe is ARMING checklist row 12, the
-// half assertable while the pilot is DISARMED.
+// half that was assertable BEFORE the pilot was armed and is unchanged by the
+// flip: it reads the map, not the callback.
 //
 // NoteTwitchAuthLoss's fire path calls noteRecoveryDecided("twitch", …). That
-// stamp looks inert today — livenessRecoveryArmed is false — and was therefore
-// asserted by nothing. It is not inert: recordLiveness consults the same map,
-// so the stamp is what stops an ARMED tier 2 firing a second recovery for a
-// loss the chat mark already raised. Only the double-FIRE needs arming.
+// stamp looked inert while livenessRecoveryArmed was false and was therefore
+// asserted by nothing. It never was inert: recordLiveness consults the same
+// map, so the stamp is what stops tier 2 firing a second recovery for a loss
+// the chat mark already raised. The double-FIRE half needed arming and is
+// TestTwitchMarkAndTierTwoFireRecoveryOnce, below.
 //
 // Two assertions, and the second is the one that matters. "The map has an
 // entry" is satisfied by any write; "a signed-out verdict one second later is
@@ -475,6 +477,103 @@ func TestTwitchMarkStampsTheSharedRecoveryDedupe(t *testing.T) {
 	if due, _ := rs.recordLiveness("twitch", false, stamp.Add(time.Second)); due {
 		t.Error("a tier-2 signed-out verdict one second after the mark still warranted recovery — the mark's stamp is not reaching the dedupe recordLiveness reads")
 	}
+}
+
+// TestTwitchMarkAndTierTwoFireRecoveryOnce is ARMING checklist row 12's OTHER
+// half — the one the arming commit of 2026-09-03 owed, because it cannot be
+// written until livenessRecoveryArmed is true.
+//
+// The test above asserts the STAMP and the tier-2 decision it suppresses. This
+// one asserts the CALL, end to end and through the public entry points: one
+// chat-marked Twitch loss reaches OnRecoveryNeeded once (tier 1), the tier-2
+// observation that follows it inside the window reaches it zero more times, and
+// the re-alarm lands only once the back-off window has actually passed.
+//
+// The window is driven by rewinding the stamp under rs.mu rather than by
+// sleeping 30 minutes — the same fake-clock shape refresh_liveness_test.go uses
+// on lastLivenessObserved. Both sides of the boundary are asserted: one second
+// INSIDE the window must still be silent, or "it fired eventually" would pass
+// for a dedupe that had simply stopped working.
+//
+// Mutations closed: deleting noteRecoveryDecided("twitch", …) from
+// NoteTwitchAuthLoss (the in-window verdict fires, count 2); making
+// recordLiveness report recoveryDue inside the window (same); the constant back
+// to false (the re-alarm never lands, count stays 1); deleting fn(platform)
+// from ObserveLiveness (same).
+func TestTwitchMarkAndTierTwoFireRecoveryOnce(t *testing.T) {
+	if !livenessRecoveryArmed {
+		t.Fatal("livenessRecoveryArmed is false — with the gate shut the tier-2 half of this test cannot fire at all and every count below would pass vacuously")
+	}
+
+	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusOK)
+	var fired []string
+	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	twitchFires := func() int {
+		n := 0
+		for _, p := range fired {
+			if p == "twitch" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// A healthy first pass, so the mark below is a WITNESSED fall and its fire
+	// path is reached at all.
+	rs.doRefresh(context.Background())
+	if twitchFires() != 0 {
+		t.Fatalf("premise broken: a healthy pass already fired recovery for twitch: %v", fired)
+	}
+
+	// Tier 1: the chat downgrade.
+	rs.NoteTwitchAuthLoss(twitchLossLoginRefused)
+	if got := twitchFires(); got != 1 {
+		t.Fatalf("the chat mark fired recovery %d times, want 1: %v", got, fired)
+	}
+
+	// Tier 2, same loss, inside the window: nothing more. This is the
+	// double-fire the tier-1 stamp exists to prevent — under it the operator is
+	// paged twice and a second two-minute recovery goroutine is spent being
+	// told no.
+	rs.ObserveLiveness("twitch", false)
+	if got := twitchFires(); got != 1 {
+		t.Fatalf("a tier-2 signed-out verdict inside the window fired recovery again (%d total) — one loss must raise one alarm: %v", got, fired)
+	}
+
+	// One second short of the window: still nothing. Without this the assertion
+	// below is satisfied by a dedupe that never refuses anything.
+	rewindTwitchDedupe(t, rs, livenessRefireWindow-time.Second)
+	rs.ObserveLiveness("twitch", false)
+	if got := twitchFires(); got != 1 {
+		t.Fatalf("the re-alarm landed %v early — recordLiveness must hold it for the full livenessRefireWindow (%v): %v", time.Second, livenessRefireWindow, fired)
+	}
+
+	// Past the window: the re-alarm, exactly once, and for twitch.
+	rewindTwitchDedupe(t, rs, livenessRefireWindow+time.Second)
+	rs.ObserveLiveness("twitch", false)
+	if got := twitchFires(); got != 2 {
+		t.Fatalf("twitch recovery fires = %d once the back-off window passed, want 2 (the mark, then the re-alarm): %v", got, fired)
+	}
+	if len(fired) != 2 {
+		t.Errorf("recovery also fired for another platform: %v — nothing on this path may alarm youtube", fired)
+	}
+}
+
+// rewindTwitchDedupe moves Twitch's recovery-dedupe stamp to exactly `age` ago,
+// so the next verdict reads as `age` after the last cleared one. Absolute
+// rather than relative on purpose: two successive rewinds must each mean what
+// they say about the window, not compound.
+//
+// The refresh service takes no clock; recordLiveness's `now` parameter is not
+// reachable through ObserveLiveness, and ObserveLiveness is where the fire is.
+func rewindTwitchDedupe(t *testing.T, rs *RefreshService, age time.Duration) {
+	t.Helper()
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if _, ok := rs.lastRecoveryDecided["twitch"]; !ok {
+		t.Fatal("no twitch recovery-dedupe stamp to rewind — the fire path never stamped it")
+	}
+	rs.lastRecoveryDecided["twitch"] = time.Now().Add(-age)
 }
 
 // TestTwitchAuthLossWarnCarriesTheMappedSentenceOnly closes the hole the

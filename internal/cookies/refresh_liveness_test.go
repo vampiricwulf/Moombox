@@ -3,6 +3,7 @@ package cookies
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -296,44 +297,71 @@ func TestLivenessRefireScheduleIsTheRuledNumbers(t *testing.T) {
 	}
 }
 
-// TestLivenessRecoveryPilotIsDisarmed is the guard on the staged rollout.
+// TestLivenessRecoveryPilotIsArmed is the guard on the flip taken 2026-09-03
+// by owner ruling. It replaces TestLivenessRecoveryPilotIsDisarmed, which
+// pinned the opposite of every line below.
 //
 // One logged-out verdict reaching OnRecoveryNeeded notifies the operator on
 // EITHER install shape — there is no quiet arm. cmd/moombox's
 // handleRecoveryNeeded either runs a headless refresh and reports "Cookie
 // Auto-Refresh Failed"/"Ineffective" (auto_enabled = true), or sends "Cookie
 // Re-Authentication Required" synchronously (auto_enabled = false, since Task 7
-// replaced that arm's silence). The second shape is the one least able to act
-// on the remedy the notification names: a container or a remote dashboard
-// cannot reach the loopback-gated Settings wizard.
+// replaced that arm's silence). That is what makes the three assertions below
+// worth pinning separately: a MISSING fire loses the whole feature silently, an
+// EXTRA one pages an operator twice for one loss, and a fire on a healthy
+// session sends them to re-export credentials that were never wrong.
 //
-// That is why this signal lands log-only, and why the gate is not a statement
-// about browsers: a false LoggedOut costs an operator a re-export of
-// credentials that were never wrong, whatever auto_enabled says.
+// Driven through ObserveLiveness on purpose — that is where the gate, the Warn
+// and the call all live; recordLiveness alone would assert the decision and
+// none of the consequence.
 //
-// The premise runs on its own service ON PURPOSE. "OnRecoveryNeeded was not
-// called" sits downstream of a junction: a logged-in verdict, a consumed
-// dedupe window, or a nil callback each satisfy it just as well as the gate
-// does. Establishing on an identical service that this exact observation DOES
-// warrant recovery removes every one of those explanations.
-func TestLivenessRecoveryPilotIsDisarmed(t *testing.T) {
-	if livenessRecoveryArmed {
-		t.Fatal("livenessRecoveryArmed is true — the liveness verdicts must land log-only; arming them is a separate, deliberate change")
+// Mutations closed: deleting `fn(platform)` in ObserveLiveness (b fails);
+// dropping the `!livenessRecoveryArmed` return, i.e. the constant back to false
+// (b fails); rewording the Warn (b fails — the sentence is what pages an
+// operator); making recordLiveness report recoveryDue inside the window (c
+// fails); firing on a signed-in verdict (a fails).
+func TestLivenessRecoveryPilotIsArmed(t *testing.T) {
+	if !livenessRecoveryArmed {
+		t.Fatal("livenessRecoveryArmed is false — the pilot was armed 2026-09-03 by owner ruling; the way back is a deliberate rebuild, not a drift")
 	}
 
-	premise := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
-	if due, _ := premise.recordLiveness("youtube", false, time.Now()); !due {
-		t.Fatal("premise broken: a first logged-out observation must warrant recovery")
+	const warnLine = "a liveness observation reports this platform is signed out, triggering recovery"
+
+	// (a) A signed-in verdict must reach nothing. Its own service, so the
+	// zero below cannot be explained by a window some earlier call consumed.
+	healthy := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	var healthyFired []string
+	healthy.OnRecoveryNeeded = func(platform string) { healthyFired = append(healthyFired, platform) }
+	healthy.ObserveLiveness("youtube", true)
+	if len(healthyFired) != 0 {
+		t.Errorf("OnRecoveryNeeded fired %v for a SIGNED-IN verdict — positive evidence must never page an operator", healthyFired)
 	}
 
-	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	// (b) A due signed-out verdict fires exactly once, with the platform, and
+	// logs the sentence.
+	rec := &argRecordingLogger{}
+	rs := NewRefreshService(jarWithAuth(t), 0, rec)
 	var fired []string
 	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
 
 	rs.ObserveLiveness("youtube", false)
 
-	if len(fired) != 0 {
-		t.Errorf("OnRecoveryNeeded fired %v — the pilot gate must suppress it, or every install shape starts notifying its operator off a signal nobody has field-checked", fired)
+	if len(fired) != 1 || fired[0] != "youtube" {
+		t.Fatalf("OnRecoveryNeeded calls = %v, want exactly one for \"youtube\" — an armed tier 2 must raise one alarm per due signed-out verdict", fired)
+	}
+	if !strings.Contains(rec.all(), warnLine) {
+		t.Errorf("the recovery Warn is missing or reworded; want a line containing %q — this is the sentence an operator greps for and pages on. Got:\n%s", warnLine, rec.all())
+	}
+
+	// (c) A second signed-out verdict inside the back-off window adds nothing.
+	// Same service, so the dedupe under test is the one the first call
+	// stamped.
+	rs.ObserveLiveness("youtube", false)
+	if len(fired) != 1 {
+		t.Errorf("OnRecoveryNeeded calls = %v after a second in-window verdict, want still one — N channels per feed cycle must not mean N alarms", fired)
+	}
+	if got := strings.Count(rec.all(), warnLine); got != 1 {
+		t.Errorf("%d recovery Warn lines for one loss, want 1 — the dedupe must silence the log line as well as the call", got)
 	}
 }
 

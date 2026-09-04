@@ -438,13 +438,14 @@ type authFailureNotifier func(platform, title, desc string, ntype notifications.
 //     dead answer, so it stays false until the platform genuinely
 //     re-authenticates. A platform that flaps dead → alive → dead fires again
 //     on each real transition, which is the case this window still coalesces.
-//   - Arming cookies.livenessRecoveryArmed adds a SECOND producer that is
-//     periodic by design: a signed-out liveness verdict may clear its own
-//     dedupe once per livenessRefireWindow (30 minutes), on every cycle a dead
+//   - cookies.livenessRecoveryArmed has been true since 2026-09-03, and it is
+//     a SECOND producer that is periodic by design: a signed-out liveness
+//     verdict may clear its own dedupe once per livenessRefireWindow (30
+//     minutes at first, then doubling to a 24 h cap), on every cycle a dead
 //     session persists.
 //
-// So the per-poll alarm this was written to bound does not exist yet; what the
-// window really covers is the armed case and the flap.
+// So the per-poll alarm this was written to bound is tier 2's, not tier 1's;
+// what the window really covers is the armed case and the flap.
 //
 // What must NOT reach here is a recovery pass that DECLINED to run. Stamping
 // this map for a pass that learned nothing suppresses the accurate verdict
@@ -790,17 +791,17 @@ func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refre
 		// the witnessed-transition arm of shouldFireRecovery never consults
 		// cookiesPresent, so the file may have been deleted outright.
 		//
-		// WHY "conclusive" holds, and what to re-check before it stops. Today
-		// there is exactly one producer: shouldFireRecovery, which fires only on
-		// checkErr == nil && !nowAuth. cookies.livenessRecoveryArmed is false, so
-		// the liveness probes cannot reach here at all. ARMING IT ADDS A SECOND
-		// PRODUCER — and this copy survives it, because ObserveLiveness is
-		// documented to take only conclusive verdicts (SessionAuthUnknown is
-		// dropped upstream in routeLivenessVerdict), so a liveness LoggedOut is
-		// conclusive in the same sense. Nothing here fails loudly if that stops
-		// being true, so any THIRD producer has to be checked against this
-		// sentence by hand: a caller that could pass an inconclusive result would
-		// make this notification assert a dead session it does not have.
+		// WHY "conclusive" holds, and what to re-check before it stops. There
+		// are two producers. shouldFireRecovery fires only on
+		// checkErr == nil && !nowAuth. cookies.livenessRecoveryArmed has been
+		// true since 2026-09-03, so a tier-2 liveness verdict reaches here too
+		// — and this copy survives it, because ObserveLiveness is documented to
+		// take only conclusive verdicts (SessionAuthUnknown is dropped upstream
+		// in routeLivenessVerdict), so a liveness LoggedOut is conclusive in the
+		// same sense. Nothing here fails loudly if that stops being true, so any
+		// THIRD producer has to be checked against this sentence by hand: a
+		// caller that could pass an inconclusive result would make this
+		// notification assert a dead session it does not have.
 		//
 		// "on its own" scopes the claim to AUTOMATIC attempts, which is all
 		// this branch knows about. POST /api/cookies/auto-refresh

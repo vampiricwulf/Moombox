@@ -846,10 +846,13 @@ func (v autoImportVerdict) String() string {
 // This guard protects credentials that MIGHT BE WORKING. Recovery runs only
 // when they are known not to be — shouldFireRecovery fires on
 // `checkErr == nil && !nowAuth`, a conclusive not-authenticated for that
-// platform, and livenessRecoveryArmed is false so there is no second, weaker
-// producer. Applying the rule there would refuse the one automatic import most
-// likely to fix the problem, on the grounds that a file exists which has just
-// been proven not to work.
+// platform. Since livenessRecoveryArmed was armed (2026-09-03) a tier-2
+// liveness verdict is a SECOND producer, and the exemption survives it because
+// that producer is conclusive in the same sense: ObserveLiveness is documented
+// to take only conclusive verdicts, and its callers filter their own
+// inconclusive results out. Applying the rule here would refuse the one
+// automatic import most likely to fix the problem, on the grounds that a file
+// exists which has just been proven not to work.
 //
 // The case that could have made that unsafe is a two-platform install where
 // only one platform died: the import rewrites cookies.txt, and the survivor's
