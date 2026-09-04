@@ -296,44 +296,80 @@ func TestLivenessRefireScheduleIsTheRuledNumbers(t *testing.T) {
 	}
 }
 
-// TestLivenessRecoveryPilotIsDisarmed is the guard on the staged rollout.
+// TestLivenessRecoveryPilotIsArmed is the guard on the flip taken 2026-09-03
+// by owner ruling. It replaces TestLivenessRecoveryPilotIsDisarmed, which
+// pinned the opposite of every line below.
 //
 // One logged-out verdict reaching OnRecoveryNeeded notifies the operator on
 // EITHER install shape — there is no quiet arm. cmd/moombox's
 // handleRecoveryNeeded either runs a headless refresh and reports "Cookie
 // Auto-Refresh Failed"/"Ineffective" (auto_enabled = true), or sends "Cookie
 // Re-Authentication Required" synchronously (auto_enabled = false, since Task 7
-// replaced that arm's silence). The second shape is the one least able to act
-// on the remedy the notification names: a container or a remote dashboard
-// cannot reach the loopback-gated Settings wizard.
+// replaced that arm's silence). That is what makes the three assertions below
+// worth pinning separately: a MISSING fire loses the whole feature silently, an
+// EXTRA one pages an operator twice for one loss, and a fire on a healthy
+// session sends them to re-export credentials that were never wrong.
 //
-// That is why this signal lands log-only, and why the gate is not a statement
-// about browsers: a false LoggedOut costs an operator a re-export of
-// credentials that were never wrong, whatever auto_enabled says.
+// Driven through ObserveLiveness on purpose — that is where the gate, the Warn
+// and the call all live; recordLiveness alone would assert the decision and
+// none of the consequence.
 //
-// The premise runs on its own service ON PURPOSE. "OnRecoveryNeeded was not
-// called" sits downstream of a junction: a logged-in verdict, a consumed
-// dedupe window, or a nil callback each satisfy it just as well as the gate
-// does. Establishing on an identical service that this exact observation DOES
-// warrant recovery removes every one of those explanations.
-func TestLivenessRecoveryPilotIsDisarmed(t *testing.T) {
-	if livenessRecoveryArmed {
-		t.Fatal("livenessRecoveryArmed is true — the liveness verdicts must land log-only; arming them is a separate, deliberate change")
+// Mutations closed: deleting `fn(platform)` in ObserveLiveness (b fails);
+// dropping the `!livenessRecoveryArmed` return, i.e. the constant back to false
+// (b fails); rewording the Warn (b fails — the sentence is what pages an
+// operator); DEMOTING that Warn to Debug with the sentence unchanged (b fails —
+// a level-flattening recorder cannot see this one, which is why the recorder
+// below is capturingLogger); making recordLiveness report recoveryDue inside
+// the window (c fails); firing on a signed-in verdict (a fails).
+func TestLivenessRecoveryPilotIsArmed(t *testing.T) {
+	if !livenessRecoveryArmed {
+		t.Fatal("livenessRecoveryArmed is false — the pilot was armed 2026-09-03 by owner ruling; the way back is a deliberate rebuild, not a drift")
 	}
 
-	premise := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
-	if due, _ := premise.recordLiveness("youtube", false, time.Now()); !due {
-		t.Fatal("premise broken: a first logged-out observation must warrant recovery")
+	const warnLine = "a liveness observation reports this platform is signed out, triggering recovery"
+
+	// (a) A signed-in verdict must reach nothing. Its own service, so the
+	// zero below cannot be explained by a window some earlier call consumed.
+	healthy := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	var healthyFired []string
+	healthy.OnRecoveryNeeded = func(platform string) { healthyFired = append(healthyFired, platform) }
+	healthy.ObserveLiveness("youtube", true)
+	if len(healthyFired) != 0 {
+		t.Errorf("OnRecoveryNeeded fired %v for a SIGNED-IN verdict — positive evidence must never page an operator", healthyFired)
 	}
 
-	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	// (b) A due signed-out verdict fires exactly once, with the platform, and
+	// logs the sentence AT WARN.
+	//
+	// capturingLogger, not argRecordingLogger: the level is half the claim
+	// here. This line is what an operator's log view surfaces by default and
+	// what a webhook-less install has instead of a notification, so a Warn
+	// quietly demoted to Debug is a real regression — and a recorder that
+	// flattens levels cannot see it (autocookies_drain_test.go says so at the
+	// type). The args carry only the platform, which `fired` already pins.
+	rec := &capturingLogger{}
+	rs := NewRefreshService(jarWithAuth(t), 0, rec)
 	var fired []string
 	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
 
 	rs.ObserveLiveness("youtube", false)
 
-	if len(fired) != 0 {
-		t.Errorf("OnRecoveryNeeded fired %v — the pilot gate must suppress it, or every install shape starts notifying its operator off a signal nobody has field-checked", fired)
+	if len(fired) != 1 || fired[0] != "youtube" {
+		t.Fatalf("OnRecoveryNeeded calls = %v, want exactly one for \"youtube\" — an armed tier 2 must raise one alarm per due signed-out verdict", fired)
+	}
+	if !rec.containsAtWarn(warnLine) {
+		t.Errorf("no WARN line contains %q — this is the sentence an operator greps for and pages on, and it must not be reworded or demoted. Warns: %q; every level: %q", warnLine, rec.warns, rec.msgs)
+	}
+
+	// (c) A second signed-out verdict inside the back-off window adds nothing.
+	// Same service, so the dedupe under test is the one the first call
+	// stamped.
+	rs.ObserveLiveness("youtube", false)
+	if len(fired) != 1 {
+		t.Errorf("OnRecoveryNeeded calls = %v after a second in-window verdict, want still one — N channels per feed cycle must not mean N alarms", fired)
+	}
+	if got := countContaining(rec.msgs, warnLine); got != 1 {
+		t.Errorf("%d recovery lines for one loss at any level, want 1 — the dedupe must silence the log line as well as the call: %q", got, rec.msgs)
 	}
 }
 
@@ -486,11 +522,12 @@ func TestFallbackInconclusiveMovesNothing(t *testing.T) {
 // TestFallbackInconclusiveMovesNothing: moving no state must not mean saying
 // nothing.
 //
-// The pilot is log-only, so the log IS its evidence — and with the
-// inconclusive outcome unlogged, "the probe is healthy and has nothing new to
-// report" and "the probe has never once been able to answer" produced the
-// identical (empty) record. Whether the tier-2 signal is alive is precisely
-// the judgement the pilot exists to inform, so it has to be visible.
+// This line is the only evidence there is that the tier-2 signal still works
+// — and with the inconclusive outcome unlogged, "the probe is healthy and has
+// nothing new to report" and "the probe has never once been able to answer"
+// produced the identical (empty) record. Arming raised the stakes rather than
+// settling them: a signal that has quietly died now withholds a real alarm,
+// and nothing else in the log would say so.
 //
 // Deduped, and that is the harder half. An install permanently behind a
 // redirecting captive portal or a proxy answering on another host is

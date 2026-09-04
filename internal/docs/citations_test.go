@@ -580,10 +580,11 @@ type absenceClaim struct {
 	check func(t *testing.T, files []parsedFile)
 }
 
-// pilotDisarmed re-verifies "const livenessRecoveryArmed = false", which two
-// docs quote verbatim. The day the owner flips the constant, both sentences
-// must flip with it -- this is the check that says so.
-func pilotDisarmed(t *testing.T, files []parsedFile) {
+// pilotArmed re-verifies "const livenessRecoveryArmed = true", which two docs
+// quote verbatim. It was pilotDisarmed until the owner armed the pilot on
+// 2026-09-03; the shape is unchanged, and the day the constant moves again both
+// sentences must move with it -- this is the check that says so.
+func pilotArmed(t *testing.T, files []parsedFile) {
 	found := false
 	for _, pf := range files {
 		for _, d := range pf.file.Decls {
@@ -605,8 +606,8 @@ func pilotDisarmed(t *testing.T, files []parsedFile) {
 						t.Errorf("%s declares livenessRecoveryArmed without a value", pf.rel)
 						continue
 					}
-					if id, ok := vs.Values[i].(*ast.Ident); !ok || id.Name != "false" {
-						t.Errorf("%s declares livenessRecoveryArmed with a value other than the literal false -- the docs quote `const livenessRecoveryArmed = false` and must change with it", pf.rel)
+					if id, ok := vs.Values[i].(*ast.Ident); !ok || id.Name != "true" {
+						t.Errorf("%s declares livenessRecoveryArmed with a value other than the literal true -- the docs quote `const livenessRecoveryArmed = true` and must change with it", pf.rel)
 					}
 				}
 			}
@@ -727,14 +728,14 @@ func TestSpecDocAbsenceClaimsHold(t *testing.T) {
 		},
 	}, {
 		doc:   "data-and-storage.md",
-		key:   "const livenessRecoveryArmed = false",
-		why:   "the automatic-recovery pilot is disarmed, and the doc quotes the constant",
-		check: pilotDisarmed,
+		key:   "const livenessRecoveryArmed = true",
+		why:   "the automatic-recovery pilot is armed, and the doc quotes the constant",
+		check: pilotArmed,
 	}, {
 		doc:   "operations.md",
-		key:   "const livenessRecoveryArmed = false",
+		key:   "const livenessRecoveryArmed = true",
 		why:   "same constant, quoted by the operations doc",
-		check: pilotDisarmed,
+		check: pilotArmed,
 	}}
 
 	for _, c := range claims {

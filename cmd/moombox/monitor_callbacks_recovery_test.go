@@ -237,7 +237,8 @@ func TestRecoveryDeclineSaysNothingAndRanUnknownStaysNonCommittal(t *testing.T) 
 //
 // The third step is deliberately not tied to a particular producer — a flap
 // back to dead, the operator's own POST /api/cookies/auto-refresh, or a
-// signed-out liveness verdict once cookies.livenessRecoveryArmed flips. What
+// signed-out liveness verdict, which since cookies.livenessRecoveryArmed was
+// armed (2026-09-03) is a real producer rather than a prospective one. What
 // is being pinned is that a pass which did no work leaves the window unspent
 // for whatever arrives next.
 func TestDeclinedRecoveryDoesNotSpendTheCooldown(t *testing.T) {
