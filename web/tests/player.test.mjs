@@ -434,3 +434,49 @@ test("refreshing the job list mid-playback never re-selects the playing video", 
   assert.equal(select.value, "j1");
   assert.equal(h.video.src, playingSrc);
 });
+
+// ── 10. Seek event order (Phases 3+4 fix wave, F1) ──────────────────────────
+
+test("a seek's pre-`seeked` timeupdate counts nothing as dropped", { skip }, async () => {
+  // 15 msg/s for 70 s — the rate the phase review simulated the bug at.
+  const messages = Array.from({ length: 70 * 15 },
+    (_, i) => msg(Math.round((i * 1000) / 15), `m${i}`, `u${i}`));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf(messages),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+  const video = h.video;
+  const fire = (type) => video.dispatchEvent(new h.window.Event(type));
+
+  // Anchor at 10 s — through `seeked`, the only way a player reaches a new
+  // position. The seed window is 2 s wide, so nothing here is a drop.
+  h.seek(10000);
+  assert.equal(h.player.nicoDropped, 0);
+  assert.ok(h.player.nicoCursor > 0, "anchored");
+
+  // A 30 s forward seek, in the order the HTML seek algorithm actually uses:
+  // currentTime moves, `seeking` fires, a `timeupdate` is queued, and only THEN
+  // `seeked`. That middle tick is the one that used to run the overlay loop
+  // with the cursor still at 10 s and charge all ~420 skipped messages.
+  video.currentTime = 40;
+  fire("seeking");
+  fire("timeupdate");
+  assert.equal(h.player.nicoDropped, 0, "the pre-`seeked` tick must not count the gap");
+  fire("seeked");
+  fire("timeupdate");
+  assert.equal(h.player.nicoDropped, 0, "and neither does the re-anchored one");
+  assert.equal(h.el("player-nico-dropped").hidden, true, "no pill");
+
+  // Second half of the same fix: a tick with no decoded frame at the current
+  // position (readyState < HAVE_CURRENT_DATA — a source swap, a seek still in
+  // flight) does nothing at all rather than walking the cursor forward.
+  const placed = h.overlay().children.length;
+  video.readyState = 0;
+  h.tick(70000);
+  assert.equal(h.player.nicoDropped, 0, "an unloaded tick counts nothing");
+  assert.equal(h.overlay().children.length, placed, "and places nothing");
+});

@@ -350,6 +350,11 @@ export function makePlayer(opts = {}) {
   const mp = window.HTMLMediaElement.prototype;
   defineBacked(mp, "currentTime", 0);
   defineBacked(mp, "duration", NaN);   // NaN = metadata not in, like a real unloaded element
+  // jsdom loads no media, so its readyState is permanently HAVE_NOTHING (0) —
+  // which spawnNicoMessages reads as "no frame to sync to" and returns on.
+  // Default to HAVE_ENOUGH_DATA so a tick means what the tests mean by it; a
+  // test that wants the unloaded case sets `h.video.readyState = 0`.
+  defineBacked(mp, "readyState", 4);
   defineBacked(mp, "paused", true);
   defineBacked(mp, "ended", false);
   defineBacked(mp, "playbackRate", 1);
@@ -517,6 +522,7 @@ function installGlobals(window, { http, clock, rafQueue, nextRafId }) {
     "navigator",        // sendBeacon
     "localStorage",     // the two toggle preferences
     "HTMLElement",      // `target instanceof HTMLElement` in the Space guard + isTypingInInput
+    "HTMLMediaElement", // HAVE_CURRENT_DATA, the readyState guard in spawnNicoMessages
     "Event",            // new Event("sl-change") from the C / S shortcuts
     "Blob",             // the beforeunload resume beacon
     "AbortController",  // the resume dialog and the cross-segment seek

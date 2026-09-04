@@ -189,6 +189,21 @@ export class PlayerController {
     // Video timeupdate
     video.addEventListener("timeupdate", () => this.onPlayerTimeUpdate());
 
+    // Video seeking — un-anchor the overlay BEFORE the seek's own timeupdate.
+    // The HTML seek algorithm queues `timeupdate` and only THEN `seeked`, so
+    // one tick runs in between with `currentTime` already at the target but
+    // `nicoCursor` still parked at the old position: the loop walks every
+    // message in the gap, finds each one more than NICO_MAX_LATENESS_MS late
+    // and — being newer than the anchor — counts it, i.e. a bogus
+    // "+N not shown" on every forward seek longer than 2 s. The load algorithm
+    // fires its own `timeupdate` too, so cross-segment part loads had the same
+    // pill. Un-anchored the intervening tick does nothing; `seeked` below
+    // re-anchors at the target.
+    video.addEventListener("seeking", () => {
+      this.clearNicoOverlay();
+      this.nicoCursor = -1;
+    });
+
     // Video seeked — reset both systems
     video.addEventListener("seeked", () => {
       const currentMs = this.getGlobalTimeMs();
@@ -240,7 +255,11 @@ export class PlayerController {
     // A single-file job only learns its real length here, so the post-end
     // region (and its divider) can only be final once metadata is in. Kept
     // separate from the geometry listener above: different concern, and the
-    // re-stamp is skipped when the partition did not actually move.
+    // re-stamp is skipped when the partition did not actually move. The empty
+    // guard is also what keeps a job switch honest: onPlayerJobSelect empties
+    // the array before assigning the new source, so this listener is a no-op
+    // until the new chat has been built rather than partitioning the previous
+    // job's messages against the new video's duration.
     video.addEventListener("loadedmetadata", () => {
       if (!this.playerChatMessages.length) return;
       const before = this._chatParts ? this._chatParts.firstPostIndex : -1;
@@ -776,6 +795,23 @@ export class PlayerController {
     // Remove resume overlay if present from previous job
     this._dismissResumeDialog();
 
+    // Drop the previous job's chat and overlay state BEFORE the new source is
+    // assigned and before any await below. Two reasons:
+    // - the new video's `loadedmetadata` would otherwise partition the PREVIOUS
+    //   job's messages against the new duration (a ~100 ms flash of wrong
+    //   dividers); with the array already empty that listener no-ops until
+    //   buildSidebarChat has run;
+    // - a `seeked` inside the fetch window (a restored resume position) would
+    //   re-anchor over the old job's flying text on top of the new picture.
+    this.playerChatMessages = [];
+    this.playerChatData = null;
+    this._chatParts = null;
+    this.twitchEmoteMap = new Map();
+    this.playerActiveChatIndex = 0;
+    this.clearNicoOverlay();
+    this.nicoCursor = -1;
+    this._resetNicoDropCount();
+
     // Multi-segment or single-file video source
     if (this.playerJob.segments && this.playerJob.segments.length > 0) {
       this.initMultiSegmentPlayer(jobId, this.playerJob.segments);
@@ -806,14 +842,8 @@ export class PlayerController {
       this._startWatchTracking(jobId);
     }
 
-    // Load chat if available
-    this.playerChatMessages = [];
-    this.playerChatData = null;
-    this.twitchEmoteMap = new Map();
-    this.playerActiveChatIndex = 0;
-    this.nicoCursor = -1;
-    this._resetNicoDropCount();
-
+    // Load chat if available (the state it replaces was cleared above, before
+    // the source swap).
     if (this.playerJob.chatFilename || (this.playerJob.segments || []).some((s) => s.chatFile)) {
       try {
         this.playerChatData = await this._fetchChatData(jobId, selectionId);
@@ -873,9 +903,10 @@ export class PlayerController {
     // here — the `loadedmetadata` listener recomputes and re-stamps.
     this._computeChatParts();
 
-    // Build sidebar chat
+    // Build sidebar chat. The overlay was cleared and un-anchored before the
+    // source swap and nothing can have spawned since (the message array was
+    // empty for the whole fetch window), so there is nothing to clear here.
     this.buildSidebarChat();
-    this.clearNicoOverlay();
 
     // Load saved custom chat offset (from watch-state response, already on playerJob)
     this._applyOffsetUI(this.playerJob.chatOffset || 0);
@@ -1289,8 +1320,13 @@ export class PlayerController {
    *
    * The overlay's own box follows every call, so the stage never lags the video
    * during a drag. In that window the messages still fly on the previously
-   * committed width — a small horizontal offset for ~120 ms, against a blank
-   * overlay for as long as the drag lasts.
+   * committed width — a small horizontal offset, against a blank overlay for as
+   * long as the drag lasts. The window is the WHOLE gesture plus
+   * NICO_GEO_SETTLE_MS, not 120 ms in total, and the overlay text is sized in
+   * `cqh`, so applying the new box re-sizes in-flight and already-measured text
+   * immediately while the lane records still hold the widths measured at the old
+   * size: a transient overlap is possible until the commit wipes the stage
+   * (accepted trade, R23).
    * @param {{immediate?: boolean}} [opts] `immediate` commits without waiting —
    *   used where the overlay has just been made visible and the very next tick
    *   must already use the right row count.
@@ -1445,10 +1481,15 @@ export class PlayerController {
   spawnNicoMessages(effectiveMs) {
     const messages = this.playerChatMessages;
     if (!messages.length || document.hidden) return;
-    if (this.nicoCursor < 0) this._reanchorNicoAt(effectiveMs);
     const overlay = document.getElementById("player-nico-overlay");
     const video = document.getElementById("player-video");
     if (!overlay || !video) return;
+    // No decoded frame at the current position — a seek still in flight, or a
+    // source that has only just been assigned. There is nothing to sync to, and
+    // the `timeupdate` the seek/load algorithm queues before `seeked` lands
+    // here; placing against it would use a position the picture has not reached.
+    // `seeked`/`loadedmetadata` re-anchor once there is a frame.
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     if (overlay.clientWidth === 0 || overlay.clientHeight === 0) {
       // The player panel is hidden (another app tab is active) but `timeupdate`
       // keeps firing. Un-anchor instead of returning: leaving the cursor parked
@@ -1461,6 +1502,10 @@ export class PlayerController {
       this.nicoCursor = -1;
       return;
     }
+    // Lazy anchor, AFTER the hidden-panel guard: with the two the other way
+    // round a hidden tick paid a seedCursorIndex + replaceChildren (~4 Hz) to
+    // build a cursor the guard then threw away again.
+    if (this.nicoCursor < 0) this._reanchorNicoAt(effectiveMs);
     const geo = this._nicoGeo;
     // Visible but not measured yet (a tick that beats `loadedmetadata`), or a
     // zero-sized video. Distinct from hidden: there is nothing to place, but the
