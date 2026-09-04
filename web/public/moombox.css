@@ -1637,6 +1637,29 @@ sl-progress-bar {
     opacity: 1;
 }
 
+/* Messages after the recording ran out. Not "future" — they are readable and
+   reachable, just marked as outside the video. neutral-700 (not 600) keeps
+   4.5:1 against both striped backgrounds in the light AND dark themes. */
+.chat-msg.post {
+    opacity: 1;
+    color: var(--sl-color-neutral-700);
+}
+
+/* Region divider — pseudo-content on the first row of the region, so the
+   sidebar's children[i] === messages[i] alignment is not disturbed. The
+   negative inline margin cancels .chat-msg's padding so it spans the panel. */
+.chat-msg.divider-before::before {
+    content: attr(data-divider);
+    display: block;
+    margin: 6px calc(-1 * var(--sl-spacing-small)) 4px;
+    padding: 2px var(--sl-spacing-small);
+    font-size: var(--sl-font-size-x-small);
+    color: var(--sl-color-neutral-700);
+    background: var(--sl-color-neutral-200);
+    border-top: 1px solid var(--sl-color-neutral-300);
+    border-bottom: 1px solid var(--sl-color-neutral-300);
+}
+
 .chat-msg-time {
     color: var(--sl-color-neutral-500);
     font-family: var(--sl-font-mono);
