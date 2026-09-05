@@ -631,14 +631,17 @@ func credentialAccepted(p platformAuth) bool {
 // finding about the Twitch credentials at all, but a report of YouTube's
 // latency wearing Twitch's name. Everything downstream reads it as the former
 // — credentialAccepted turns it into a green badge when the user just signed
-// in, and platformsToRestoreOnRegression treats it as a platform worth rolling
-// an import back for. Two independent budgets, and neither platform's answer
-// depends on how slow the other one was.
+// in, and platformsToRestore rolls a mounted-profile import back over it — its
+// second arm is exactly "had credentials before, could not be checked after".
+// (Not platformsToRestoreOnRegression: that one needs a conclusive
+// verifyFailed after the write, so a spurious unknown never reaches it.) Two
+// independent budgets, and neither platform's answer depends on how slow the
+// other one was.
 //
 // The two halves of that are one fix, not two. Separate windows taken in
 // sequence would have made a call cost 2 × the window, and this function is
 // called TWICE per refresh pass (the pre-write snapshot and the post-write
-// verify) and three times when the pass rolls back — 125.5 s against a 120 s
+// verify) and three times when the pass rolls back — ≈125 s against a 120 s
 // refreshOverallBudget. Running them together holds a call at ONE window
 // whatever the platform count, so the pass costs 101 s (113 s with the
 // rollback re-verify), the binding Chromium setup column costs 42.3 s against
@@ -707,7 +710,7 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 	// per-platform WAIT. The refresh pass makes two of these calls (the
 	// pre-write snapshot and the post-write verify) and three when it rolls
 	// back, so run sequentially the split would have priced one pass at
-	// 125.5 s against a 120 s refreshOverallBudget — the split paying for
+	// ≈125 s against a 120 s refreshOverallBudget — the split paying for
 	// itself out of a budget it does not own. Run together, a call costs ONE
 	// window no matter how many platforms are configured.
 	//
@@ -727,9 +730,13 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 					s.logger.Error(platform+" auth verification panicked", "panic", r)
 					// A panic is the "could not form the question" unknown:
 					// no verdict was reached, and attempted stays false so
-					// credentialAccepted will not turn it into a sign-in and
-					// platformsToRestoreOnRegression keeps protecting the
-					// platform. hasCookies is still the truth about the jar.
+					// credentialAccepted will not turn it into a sign-in.
+					// platformsToRestore — the mounted-profile policy, whose
+					// second arm is "had credentials before, could not be
+					// checked after" — keeps protecting the platform. The
+					// regression policy is NOT what protects here: it needs a
+					// conclusive verifyFailed, which an unknown is not.
+					// hasCookies is still the truth about the jar.
 					*dst = platformAuth{hasCookies: hasCookies, state: verifyUnknown}
 				}
 			}()

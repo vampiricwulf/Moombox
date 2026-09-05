@@ -13,6 +13,10 @@ import (
 // Only the reload that follows a RESTORE goes through it. The ordinary
 // post-write reloads on both paths stay direct calls, so a test that breaks
 // this one still reaches the rollback it wants to observe.
+//
+// It lives HERE rather than with cookie_files.go's seams because that is what
+// it is for: those are thin stand-ins for utils file operations, this one
+// exists for the rollback exit below and its doc is that exit's argument.
 var loadCookieJar = func(s *AutoCookieService, path string) error { return s.jar.Load(path) }
 
 // The half of each sentence that is a fact about the INSTALL rather than about

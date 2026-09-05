@@ -119,10 +119,21 @@ func TestEachPlatformGetsItsOwnAuthVerifyWindow(t *testing.T) {
 // together, a call costs ONE window however many platforms are configured,
 // so the pass is ≈101 s (≈113 s with the rollback re-verify).
 //
-// Both verifiers burn their whole window here, which is the only arrangement
-// that can tell the two apart: with one instant verifier a sequential pair and
-// a concurrent pair both finish in ≈ one window. Sequential would take 2 ×
-// window; the bound is 1.5 × to leave scheduling slack without admitting it.
+// The proof is a BARRIER, not a stopwatch. Each fake announces its own start
+// and then waits for the other's, bounded by its own context. Run together,
+// both waits are satisfied at once. Run one after the other, the first
+// verifier can never see the second start — the second has not been called yet
+// — so it waits out its whole window and reports that it saw nothing, and the
+// second sees a start channel that was closed in a window that has already
+// ended. The earlier form asserted `elapsed < 1.5 × window` against a green
+// path of ≈1 × window; a 150 ms scheduling stall on a loaded CI runner was
+// enough to fail it (review F7). The barrier discriminates the same two
+// arrangements while reading no clock at all.
+//
+// Both verifiers still burn their whole window, which is what makes the
+// sequential arrangement observable: with one instant verifier, sequential and
+// concurrent both finish in ≈ one window and neither the old bound nor this
+// one would see anything.
 func TestBothPlatformAuthChecksRunAtOnce(t *testing.T) {
 	const window = 300 * time.Millisecond
 	shortAuthVerifyWindow(t, window)
@@ -136,24 +147,90 @@ func TestBothPlatformAuthChecksRunAtOnce(t *testing.T) {
 		t.Fatalf("jar.Load: %v", err)
 	}
 
-	burnTheWindow := func(ctx context.Context) (bool, error) {
-		<-ctx.Done()
-		return false, ctx.Err()
+	// Results travel on buffered channels rather than shared variables: the
+	// two fakes run on goroutines checkPlatformAuth owns, and a channel is
+	// race-free by construction rather than by argument about wg.Wait.
+	ytStarted, twStarted := make(chan struct{}), make(chan struct{})
+	ytSawOther, twSawOther := make(chan bool, 1), make(chan bool, 1)
+	barrier := func(mine, theirs chan struct{}, sawOther chan<- bool) func(context.Context) (bool, error) {
+		return func(ctx context.Context) (bool, error) {
+			close(mine)
+			select {
+			case <-theirs:
+				sawOther <- true
+			case <-ctx.Done():
+				sawOther <- false
+			}
+			<-ctx.Done() // spend the whole window either way
+			return false, ctx.Err()
+		}
 	}
-	s.VerifyYouTubeAuth = burnTheWindow
-	s.VerifyTwitchAuth = burnTheWindow
+	s.VerifyYouTubeAuth = barrier(ytStarted, twStarted, ytSawOther)
+	s.VerifyTwitchAuth = barrier(twStarted, ytStarted, twSawOther)
 
-	start := time.Now()
 	yt, tw := s.checkPlatformAuth(context.Background())
-	elapsed := time.Since(start)
 
-	if elapsed >= 3*window/2 {
-		t.Errorf("two full windows cost %v (≥ 1.5×%v): the platforms must be verified at the same time, not one after the other", elapsed, window)
+	// Fatal, not Error: the receives below would block forever on a verifier
+	// that was never called.
+	if !yt.attempted || !tw.attempted {
+		t.Fatalf("attempted = YouTube %v / Twitch %v, want both true — both checks timed out mid-request", yt.attempted, tw.attempted)
+	}
+	if !<-ytSawOther {
+		t.Error("the YouTube verifier's window ended without the Twitch verifier having started: the two run one after the other, not at once")
+	}
+	if !<-twSawOther {
+		t.Error("the Twitch verifier's window ended without the YouTube verifier having started: the two run one after the other, not at once")
 	}
 	if yt.state != verifyUnknown || tw.state != verifyUnknown {
 		t.Errorf("states = YouTube %v / Twitch %v, want both verifyUnknown — each verifier spent its own full window", yt.state, tw.state)
 	}
-	if !yt.attempted || !tw.attempted {
-		t.Errorf("attempted = YouTube %v / Twitch %v, want both true — both checks timed out mid-request", yt.attempted, tw.attempted)
+}
+
+// TestAuthVerifyBudgetsStayUnderTheirCaps re-derives autocookies.go's two
+// comment tables from the constants they name and asserts the caps they claim.
+//
+// The tables carry hand-summed figures (≈101 s, ≈113 s, ≈42.3 s) and the
+// margins are thin — ~7 s on the refresh pass, ~17.7 s on the setup grace — so
+// a one-line edit to any term can put a pass over its cap while the comment
+// still reads as if it fits. Every term below is a named constant for exactly
+// that reason; nothing here restates a number.
+//
+// A checkPlatformAuth call costs ONE authVerifyTimeout however many platforms
+// are configured, because the platforms are verified concurrently. That is a
+// property of the code, not of these constants, and it is pinned by
+// TestBothPlatformAuthChecksRunAtOnce above — this test only spends the number
+// that property buys.
+func TestAuthVerifyBudgetsStayUnderTheirCaps(t *testing.T) {
+	// The one call FinishSetup makes, on the binding (Chromium) column of the
+	// setupAbandonGrace table.
+	if got := cdpExtractTimeout + taskkillDrainDelay + authVerifyTimeout; got >= setupAbandonGrace {
+		t.Errorf("Chromium finish column = %v, want < setupAbandonGrace (%v). "+
+			"Serialising checkPlatformAuth or raising authVerifyTimeout re-opens the overrun the J5a/J5b rulings closed; "+
+			"this constant and BOTH clients' own 60 s FinishSetup caps have to move together.", got, setupAbandonGrace)
+	}
+
+	// The refresh pass, on the two-platform Firefox column of the
+	// processTimeout table. Per-pass fixed cost first, then the
+	// checkPlatformAuth calls.
+	fixed := 2*(processTimeout+postKillReapGrace) +
+		firefoxLaunchSpacing +
+		(cookieDBReadRetries-1)*cookieDBReadRetryBackoff
+	for _, tc := range []struct {
+		calls int
+		why   string
+	}{
+		// The pre-write snapshot (snapshotPlatformAuth) and the post-write
+		// verify.
+		{2, "a pass that does not roll back"},
+		// Plus the rollback arm's re-verify after restorePreviousCookies. A
+		// fourth is unreachable: the snapshot is taken once per pass, and the
+		// post-verify and the rollback re-verify are the two arms of one
+		// decision.
+		{3, "a pass that rolls back"},
+	} {
+		if got := fixed + time.Duration(tc.calls)*authVerifyTimeout; got >= refreshOverallBudget {
+			t.Errorf("refresh pass with %d checkPlatformAuth calls (%s) = %v, want < refreshOverallBudget (%v)",
+				tc.calls, tc.why, got, refreshOverallBudget)
+		}
 	}
 }

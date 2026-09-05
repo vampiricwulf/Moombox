@@ -174,12 +174,18 @@ func (s *runState) wireRoutes() func() {
 			default:
 			}
 		},
-		// An empty UpdateStatusMsg means "cleared": the dashboard skipped
-		// this release, so the TUI's badge must go out too instead of
-		// advertising a version the operator already dismissed.
-		OnDismissed: func(string) {
+		// An empty Version means "cleared": the dashboard skipped this
+		// release, so the TUI's badge must go out too instead of advertising a
+		// version the operator already dismissed.
+		//
+		// The TAG travels with the clear. The TUI holds its own copy of the
+		// pending release and drops it only when the dismiss names the release
+		// it is showing — otherwise a dismiss racing a newly-found release
+		// would blank the badge for an update nobody skipped. This is the ONLY
+		// producer of a cleared UpdateStatusMsg, so the tag is always set.
+		OnDismissed: func(tag string) {
 			select {
-			case s.tuiUpdateStatusCh <- tui.UpdateStatusMsg{}:
+			case s.tuiUpdateStatusCh <- tui.UpdateStatusMsg{TagName: tag}:
 			default:
 			}
 		},

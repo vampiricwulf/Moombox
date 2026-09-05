@@ -1007,9 +1007,11 @@ export class PlayerController {
           const data = await r.json();
           // Per part, against the PART's own header epoch — before
           // mergePartChats shifts it onto the global timeline (one file, one
-          // epoch). A no-op for the Twitch parts this path normally serves;
-          // it earns its keep on a legacy part that has a header epoch.
-          if (data) deriveMissingOffsets(data.messages, data.streamStartTime);
+          // epoch). Skipped for the Twitch parts this path normally serves:
+          // a Twitch part's offsets are already video-relative and its header
+          // epoch is the recording start, so nothing here may touch them. It
+          // earns its keep on a legacy YouTube part that has a header epoch.
+          if (data && data.platform !== "twitch") deriveMissingOffsets(data.messages, data.streamStartTime);
           const off = segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
           return { startOffsetSec: off ? off.startOffset : 0, data };
         } catch {
@@ -1025,10 +1027,12 @@ export class PlayerController {
     if (!chatRes.ok) return null;
     const data = await chatRes.json();
     if (this._selectionSeq !== selectionId) return null;
-    // A chat file written before the producer stamped hasOffset has every
-    // message at offset 0; recover them from the header epoch before the
-    // caller applies the bias and sorts (T-F12).
-    if (data) deriveMissingOffsets(data.messages, data.streamStartTime);
+    // A message the producer left without an offset of its own (offsetMs 0
+    // and no hasOffset) is recovered from the header epoch before the caller
+    // applies the bias and sorts (T-F12); one that already carries a real
+    // offset is authoritative and untouched. Twitch files are skipped
+    // outright — their offsets are already video-relative (F1).
+    if (data && data.platform !== "twitch") deriveMissingOffsets(data.messages, data.streamStartTime);
     return data;
   }
 
@@ -1859,13 +1863,22 @@ export class PlayerController {
 
     // Focus trap (U-M8): Tab and Shift+Tab cycle within the dialog's two
     // actions while it is open; focus is restored on dismiss (already wired).
+    //
+    // Bound on `document`, like the Escape handler above: focus can legitimately
+    // sit OUTSIDE the overlay while the dialog is up — a click on the scrim (the
+    // overlay div is not focusable) leaves it on <body>, and so does a Tab
+    // pressed before the requestAnimationFrame focus below has run or before
+    // Shoelace has upgraded <sl-button>. An overlay-bound handler never sees
+    // those keystrokes and focus walks into the page behind the dialog, so the
+    // third case pulls it back in.
     const focusables = () => [...overlay.querySelectorAll("sl-button, button, [tabindex]:not([tabindex='-1'])")]
       .filter((el) => !el.disabled);
-    overlay.addEventListener("keydown", (e) => {
+    document.addEventListener("keydown", (e) => {
       if (e.key !== "Tab") return;
       const items = focusables();
       if (!items.length) return;
       const first = items[0], last = items[items.length - 1];
+      if (!overlay.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     }, { signal: sig });

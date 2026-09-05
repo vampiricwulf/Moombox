@@ -150,12 +150,17 @@ test("mergePartChats: null part, null messages, first-wins platform and a fracti
 
 // --- deriveMissingOffsets (T-F12 remainder) ------------------------------
 //
-// Chat files written before the Go producer had HasOffset carry offsetMs 0 on
-// every message, so the whole archive piles at t=0 and the sidebar/overlay
-// show it all at once (R10 caps the flood, it does not fix it). The offset is
-// recoverable whenever the file header has an epoch: the Go producer computes
-// offsetMs = timestampUsec/1000 − streamStartMs (internal/chat/downloader.go),
-// so the player can do the same arithmetic on load.
+// A message with no offset of its own — offsetMs 0 and no hasOffset, the
+// producer's pre-2026-04-22 sentinel (internal/chat/types.go: "offsetMs=0 was
+// the unset sentinel") — piles at t=0 and the sidebar/overlay show it all at
+// once (R10 caps the flood, it does not fix it). The offset is recoverable
+// whenever the file header has an epoch: the Go producer computes
+// offsetMs = timestampUsec/1000 − streamStartMs (internal/chat/downloader.go,
+// integer division), so the player can do the same arithmetic on load.
+//
+// A NON-ZERO offsetMs is authoritative even with no hasOffset — a
+// pre-2026-04-22 file has real offsets on every message and the flag on none —
+// so the skip tests the sentinel, not just the flag (F1).
 //
 // EPOCH_MS below is the file header's `streamStartTime`, i.e. the file's own
 // (first run's) epoch — the same "one file, one epoch" value everything else
@@ -178,6 +183,27 @@ test("deriveMissingOffsets: a message that already has an offset is untouched", 
   const messages = [{ id: "a", offsetMs: 4242, hasOffset: true, timestampUsec: usecAt(9999) }];
   deriveMissingOffsets(messages, EPOCH);
   assert.equal(messages[0].offsetMs, 4242, "an authoritative offset must not be recomputed");
+});
+
+test("deriveMissingOffsets: a pre-2026-04-22 REAL offset (no hasOffset) is untouched (F1)", () => {
+  // The class this pass exists for is "offsetMs 0 AND no hasOffset". Every
+  // message in a file written before 068465ed lacks hasOffset while carrying
+  // a real offset — on a replay/VOD file, YouTube's own video-relative
+  // videoOffsetTimeMsec. Deriving from wall-clock there would shift the whole
+  // archive by the ingest latency. Mutant: `if (m.hasOffset) continue;`.
+  const messages = [{ id: "legacy-real", offsetMs: 4242, timestampUsec: usecAt(9999) }];
+  deriveMissingOffsets(messages, EPOCH);
+  assert.deepEqual([messages[0].offsetMs, messages[0].hasOffset], [4242, undefined],
+    "a legacy message's own offset is authoritative — the sentinel is offsetMs 0, not the flag");
+});
+
+test("deriveMissingOffsets: the division truncates, matching the Go int64 divide", () => {
+  // The producer writes `usec/1000` on int64 — truncation, not rounding.
+  // Mutant: Math.round → 1501 − EPOCH_MS. usec is an absolute microsecond
+  // clock, so build it from the epoch and add a sub-millisecond remainder.
+  const messages = [{ id: "a", offsetMs: 0, timestampUsec: String(EPOCH_MS * 1000 + 1_500_999) }];
+  deriveMissingOffsets(messages, EPOCH);
+  assert.equal(messages[0].offsetMs, 1500, "1_500_999 µs past the epoch is 1500 ms, not 1501");
 });
 
 test("deriveMissingOffsets: no usable header epoch → nothing changes", () => {

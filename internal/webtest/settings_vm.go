@@ -34,6 +34,12 @@ var utilsImportRe = regexp.MustCompile(`(?s)import \{[^}]*\} from "\./utils\.js"
 // so what runs here is the source the binary serves. Line endings are
 // normalised first because web/public is a mix of CRLF and LF.
 //
+// settings.js imports only ./utils.js; never add a second import — this
+// harness strips exactly that one line. A second import survives into the
+// source goja is handed and every test that calls this fails on a parse error
+// with no hint of why, so the rule is stated where a caller reads it and again
+// on utilsImportRe where the pattern lives.
+//
 // utils.js is evaluated FIRST so the helpers settings.js imports are ordinary
 // global function declarations by the time settings.js is parsed — without
 // them every reference is a ReferenceError, which inside a method's own

@@ -138,7 +138,8 @@ func TestReplayRunRefusesLiveRunSidecar(t *testing.T) {
 		IsReplay: true, IsLiveOrUpcoming: false, StreamStartTime: replayEpoch,
 	})
 	var logged []string
-	cd.Logger = &recordingChatLogger{lines: &logged}
+	logger := &recordingChatLogger{lines: &logged}
+	cd.Logger = logger
 
 	tokens := startWithRecordedScript(t, cd, chatResponseWithIDs([]string{"dup1"}, ""))
 
@@ -158,8 +159,17 @@ func TestReplayRunRefusesLiveRunSidecar(t *testing.T) {
 	if got.StreamStartTime != replayEpoch {
 		t.Errorf("header streamStartTime = %q, want %q (the refused sidecar's epoch must not travel)", got.StreamStartTime, replayEpoch)
 	}
-	if !containsLine(logged, "chat: ignoring the live run's resume sidecar for a replay run") {
+	// At INFO, not Debug: the rule discards a position on disk and rewrites
+	// the file, so it has to be visible without turning debug on. And the
+	// logger reaching this at all is what the worker's `dl.Logger = o.logger`
+	// wiring buys — before it, ChatDownloader.Logger was nil in production
+	// and this line went nowhere (D6).
+	const refusal = "chat: ignoring the live run's resume sidecar for a replay run"
+	if !containsLine(logged, refusal) {
 		t.Errorf("no refusal log line; got %v", logged)
+	}
+	if !logger.loggedAt("info", refusal) {
+		t.Errorf("refusal was not logged at info; got %v at %v", logged, logger.levels)
 	}
 }
 
@@ -259,16 +269,39 @@ func TestLiveRunLeavesLiveTaggedSidecar(t *testing.T) {
 
 // --- helpers -------------------------------------------------------------
 
-// recordingChatLogger captures the downloader's debug diagnostics.
+// recordingChatLogger captures the downloader's diagnostics AND the level each
+// was emitted at. It implements the full CLAUDE.md logger shape because
+// ChatDownloader.Logger is that shape — the worker assigns its own logger to
+// it at both construction sites, so the fake has to match what production
+// hands over.
 type recordingChatLogger struct {
-	mu    sync.Mutex
-	lines *[]string
+	mu     sync.Mutex
+	lines  *[]string
+	levels []string // parallel to *lines
 }
 
-func (l *recordingChatLogger) Debug(msg string, args ...any) {
+func (l *recordingChatLogger) record(level, msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	*l.lines = append(*l.lines, msg)
+	l.levels = append(l.levels, level)
+}
+
+func (l *recordingChatLogger) Debug(msg string, _ ...any) { l.record("debug", msg) }
+func (l *recordingChatLogger) Info(msg string, _ ...any)  { l.record("info", msg) }
+func (l *recordingChatLogger) Warn(msg string, _ ...any)  { l.record("warn", msg) }
+func (l *recordingChatLogger) Error(msg string, _ ...any) { l.record("error", msg) }
+
+// loggedAt reports whether msg was emitted at exactly that level.
+func (l *recordingChatLogger) loggedAt(level, msg string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i, m := range *l.lines {
+		if m == msg && l.levels[i] == level {
+			return true
+		}
+	}
+	return false
 }
 
 func containsLine(lines []string, want string) bool {

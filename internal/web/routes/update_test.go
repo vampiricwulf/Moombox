@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -267,6 +268,52 @@ func TestUpdateDismissWithoutPendingSkipsOnDismissed(t *testing.T) {
 	}
 	if called {
 		t.Error("OnDismissed must not fire when there was nothing to dismiss")
+	}
+}
+
+// TestUpdateDismissConfigSaveFailureDoesNotNotify: the skip is not persisted,
+// so nothing may act as if it were. The 500 tells the dashboard the release is
+// still pending, and OnDismissed must stay silent — firing it would put out the
+// TUI's badge for a version that will be offered again on the next launch,
+// which is worse than the failure it is reporting.
+func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
+	resetUpdateGlobals(t)
+	t.Cleanup(func() { resetUpdateGlobals(t) })
+
+	// A DIRECTORY where the config file belongs: config.Save cannot write it,
+	// on Windows or Linux, without any permission trickery.
+	blocked := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatalf("mkdir the blocking directory: %v", err)
+	}
+	store := config.NewStore(config.Defaults(), blocked)
+
+	called := false
+	r := chi.NewRouter()
+	UpdateRoutes(r, &UpdateRouteDeps{
+		Version:     "2.6.0-test",
+		OnDismissed: func(string) { called = true },
+	}, store)
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+
+	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("dismiss with an unwritable config: want 500, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Error("OnDismissed fired although the skip was never persisted")
+	}
+	// And the release is still pending, so the dashboard keeps showing it.
+	if SharedUpdateInfo.Load() == nil {
+		t.Error("SharedUpdateInfo was cleared although the skip failed to save")
+	}
+	var skipped string
+	store.Read(func(c *config.MoomboxConfig) { skipped = c.Updates.SkippedVersion })
+	if skipped != "" {
+		t.Errorf("in-memory SkippedVersion = %q, want empty — DismissUpdate must roll its write back when the save fails", skipped)
 	}
 }
 

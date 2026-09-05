@@ -203,37 +203,55 @@ func TestSeedingIsUnnecessaryForStartupDeadAuthAndFiresFalselyWithoutCookies(t *
 	}
 }
 
-// TestGetStatusReturnsSnapshot verifies the AuthStatus returned by
-// GetStatus is a value copy — mutations to the returned struct must
-// not bleed back into the service.
+// TestGetStatusReturnsSnapshot verifies the AuthStatus returned by GetStatus
+// is a SNAPSHOT: the whole struct as it stood at the call, and it does not
+// move afterwards.
 //
-// The second assertion is the non-boolean half: a string field has to survive
-// the round trip untouched, which catches a GetStatus that starts rebuilding
-// the struct instead of copying it. It read LastCheck until Arc 9 removed that
-// field for having no reader; YouTubeError stands in its place because it is
-// the other string on the struct, and it has two.
+// The direction that matters is this one. "A caller's mutation does not reach
+// the service" is guaranteed by the language for a struct of bools, enums and
+// strings, and the assertion that used to make that point compared a field the
+// test had just assigned against one it had already asserted the opposite of —
+// it could not fail unless the assertion above it had already failed. What CAN
+// break is the other direction: a GetStatus that handed out a window onto
+// rs.status (a pointer return, or the struct growing a slice/map field) would
+// let a copy the caller is still holding change underneath them, and a
+// GetStatus that cached would stop tracking the service at all.
+//
+// Both halves compare the WHOLE struct rather than one field, which is the
+// string half's old job too: a GetStatus that starts rebuilding the struct
+// instead of copying it drops YouTubeError and fails here.
 func TestGetStatusReturnsSnapshot(t *testing.T) {
 	rs := newTransitionService(nil)
-	rs.mu.Lock()
-	rs.status = AuthStatus{
+	seeded := AuthStatus{
 		YouTubeAuthenticated: true,
 		TwitchAuthenticated:  false,
 		YouTubeError:         "unexpected status 503",
 	}
+	rs.mu.Lock()
+	rs.status = seeded
 	rs.mu.Unlock()
 
 	got := rs.GetStatus()
-	got.YouTubeAuthenticated = false // mutate the returned copy
+	if got != seeded {
+		t.Fatalf("GetStatus = %+v, want the seeded %+v", got, seeded)
+	}
 
-	got2 := rs.GetStatus()
-	if !got2.YouTubeAuthenticated {
-		t.Error("GetStatus return is not a value copy — service state was mutated")
+	// The service moves on, under the lock, exactly as a refresh pass would.
+	moved := AuthStatus{
+		YouTubeAuthenticated: false,
+		TwitchAuthenticated:  true,
+		YouTubeError:         "",
+		TwitchError:          "unexpected status 401",
 	}
-	if got.YouTubeAuthenticated == got2.YouTubeAuthenticated {
-		t.Error("the mutated copy and a fresh GetStatus agree — they should differ since only the copy was corrupted")
+	rs.mu.Lock()
+	rs.status = moved
+	rs.mu.Unlock()
+
+	if got != seeded {
+		t.Errorf("the copy taken earlier now reads %+v — GetStatus handed out a window onto rs.status, not a snapshot of it", got)
 	}
-	if got2.YouTubeError != "unexpected status 503" {
-		t.Errorf("YouTubeError round-trip: want stable, got %q", got2.YouTubeError)
+	if got2 := rs.GetStatus(); got2 != moved {
+		t.Errorf("a later GetStatus = %+v, want %+v — it is not reading the service's current state", got2, moved)
 	}
 }
 

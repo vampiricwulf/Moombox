@@ -28,9 +28,9 @@ const (
 	//
 	// It is COUPLED to refreshOverallBudget below, which caps the same work
 	// end to end. Worst case for a two-platform Firefox refresh:
-	//   2 × (processTimeout + the 5s post-kill reap in runWithTimeout) = 70s
+	//   2 × (processTimeout + postKillReapGrace)                       = 70s
 	//   + firefoxLaunchSpacing                                          =  5s
-	//   + the cookie-DB read retries (4 × 500ms)                        ≈  2.0s
+	//   + the cookie-DB read retries (4 × cookieDBReadRetryBackoff)     ≈  2.0s
 	//   + authVerifyTimeout — TWO checkPlatformAuth calls per pass, the
 	//     pre-write snapshot and the post-write verify, each costing
 	//     ONE window because the platforms verify concurrently  2 × 12s = 24s
@@ -40,8 +40,14 @@ const (
 	// snapshot is taken once per pass and the post-verify and the rollback
 	// re-verify are the two arms of one decision.
 	//
-	// Four retries, not five: the loop runs five attempts but sleeps only
-	// BEFORE a re-try (autocookies_firefox.go), so it costs 4 × 500ms.
+	// Four retries, not five: the loop runs cookieDBReadRetries attempts but
+	// sleeps only BEFORE a re-try (autocookies_firefox.go), so it costs
+	// (cookieDBReadRetries-1) × cookieDBReadRetryBackoff.
+	//
+	// Every term above is a named constant, and
+	// TestAuthVerifyBudgetsStayUnderTheirCaps re-sums this table and the
+	// setupAbandonGrace one below from those constants — so an edit to any of
+	// them that breaks a cap fails a test instead of rotting a comment.
 	//
 	// RAISING processTimeout WITHOUT RAISING refreshOverallBudget makes the
 	// outer ctx cancel the second platform's launch mid-flight instead of
@@ -124,7 +130,7 @@ const (
 	// Server-side worst case inside that window, summed rather than sampled:
 	//
 	//   Firefox   taskkillDrainDelay            0.3s
-	//             readFirefoxCookies retries   ~2.0s   (4 × 500ms)
+	//             readFirefoxCookies retries   ~2.0s   (4 × cookieDBReadRetryBackoff)
 	//             both authVerifyTimeouts      12.0s
 	//                                        ≈ 14.3s
 	//   Chromium  cdpExtractTimeout            30.0s
@@ -170,8 +176,8 @@ const (
 )
 
 // authVerifyWindow is the value checkPlatformAuth actually spends, and it is a
-// var for exactly one reason: a test cannot wait 12 s twice to prove the two
-// platforms are budgeted apart. Production never assigns it — the constant
+// var for exactly one reason: a test cannot wait out a 12 s window to prove the
+// two platforms are budgeted apart. Production never assigns it — the constant
 // above is the number, this is only the seam a test shortens. Same shape as
 // applyUserOnlyDACL and loadCookieJar elsewhere in this package.
 var authVerifyWindow = authVerifyTimeout

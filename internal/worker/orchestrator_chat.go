@@ -13,7 +13,7 @@ import (
 // setupChatDownloader creates a chat downloader for a YouTube job (A3).
 // Fetches the watch page to extract the chat continuation token, visitor data,
 // and determines whether chat is live or replay. Returns nil if chat is unavailable.
-func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool) *chat.ChatDownloader {
+func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo) *chat.ChatDownloader {
 	// Fetch watch page to get chat continuation and visitor data. This is a
 	// ONE-SHOT call, so a snapshot of the header is the right thing here — the
 	// long-lived chat downloader below gets a live getter instead.
@@ -77,6 +77,10 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	}
 
 	dl := chat.NewChatDownloader(opts)
+	// The downloader's own diagnostics — the mode rule's sidecar refusal, the
+	// file-epoch adoption, API drift — are dropped on the floor unless a
+	// logger is assigned here (Arc J D6).
+	dl.Logger = o.logger
 	dl.OnError = func(err error) {
 		o.logger.Warn("[Chat] Chat API error", "jobID", jobCtx.Job.ID, "err", err)
 	}
@@ -126,7 +130,7 @@ func (o *DownloadOrchestrator) waitForChat(chatDl *chat.ChatDownloader, chatDone
 }
 
 // cleanup handles cancellation cleanup.
-func (o *DownloadOrchestrator) cleanup(jobCtx *JobContext, chatDl *chat.ChatDownloader, chatDone chan struct{}) {
+func (o *DownloadOrchestrator) cleanup(chatDl *chat.ChatDownloader, chatDone chan struct{}) {
 	if chatDl != nil {
 		chatDl.Stop()
 		if chatDone != nil {

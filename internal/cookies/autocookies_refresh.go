@@ -557,10 +557,18 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 				" after the browser profile did not verify, but reloading them failed",
 			writeLog: "could not restore the previous cookies.txt",
 		}); fail != nil {
-			if fail.stage == rollbackWriteFailed {
+			// Explicit on BOTH stages rather than "write, else reload": the
+			// two short wrappers are what this path's callers match on, and a
+			// third stage added to rollbackStage must not silently inherit
+			// the reload wording.
+			switch fail.stage {
+			case rollbackWriteFailed:
 				return refreshAborted(), fmt.Errorf("restore previous cookies: %w", fail.cause)
+			case rollbackReloadFailed:
+				return refreshAborted(), fmt.Errorf("reload cookie jar after restore: %w", fail.cause)
+			default:
+				return refreshAborted(), fmt.Errorf("restore previous cookies (unknown rollback stage %d): %w", fail.stage, fail.cause)
 			}
-			return refreshAborted(), fmt.Errorf("reload cookie jar after restore: %w", fail.cause)
 		}
 
 		// Re-verify the file we actually kept. Without this, the status

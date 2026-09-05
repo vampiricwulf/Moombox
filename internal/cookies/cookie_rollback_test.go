@@ -17,10 +17,15 @@ var errFakeJarReload = errors.New("fake reload failure: cookies.txt is not reada
 
 // fakeLoadCookieJar swaps the loadCookieJar seam for the duration of a test,
 // restoring the real one via t.Cleanup. Same shape, and the same reason, as
-// fakeApplyUserOnlyDACL: the reload that follows a restore is otherwise only
-// reachable by breaking the filesystem underneath the jar (the directory trick
-// in cookie_import_rollback_test.go), which the browser path's fixture cannot
-// do without also breaking the write that precedes it.
+// fakeApplyUserOnlyDACL.
+//
+// It is not the ONLY way to reach the reload failure — a counting
+// writeCookieFile stub that lets the merged write through and turns
+// cookies.txt into a directory on the RESTORE write gets there on either
+// caller, which is the directory trick cookie_import_rollback_test.go uses.
+// It is the right way: OS-independent, and it fails the reload WITHOUT
+// co-opting the write seam, so a test of "the file is correct and the process
+// is not" cannot quietly become a test of a failed write instead.
 func fakeLoadCookieJar(t *testing.T, fn func(s *AutoCookieService, path string) error) {
 	t.Helper()
 	real := loadCookieJar
@@ -65,9 +70,11 @@ func TestImportRollbackReportsAJarReloadThatFails(t *testing.T) {
 }
 
 // TestBrowserRefreshRollbackReportsAJarReloadThatFails is the same exit on the
-// other caller, and the reason the seam exists: the browser path reaches its
-// restore only after a successful write, so the filesystem trick the import
-// tests use cannot break the reload without also breaking that write.
+// other caller. What the fixture actually drives is the MOUNTED-PROFILE arm of
+// RefreshCookiesDetailed — detectBrowser returns nil, so no browser is
+// launched and the profile's own cookies are the ones that fail to verify.
+// That arm is where the refresh path words its rollback sentence, and the seam
+// is what makes its reload fail without disturbing the write in front of it.
 //
 // The refresh path words its own sentence and returns its own short error —
 // it does NOT carry ErrImportRollbackIncomplete — and both must survive the

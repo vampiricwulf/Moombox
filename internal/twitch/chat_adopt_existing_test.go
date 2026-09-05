@@ -448,7 +448,7 @@ func TestStartLeavesAnUnreadablePartFileWhenTheSidecarRestoredIt(t *testing.T) {
 	}
 }
 
-// TestStartLeavesAnUnopenablePartFileAlone pins the other half of Minor 3: a
+// TestStartLeavesAPartFileItCannotReadAlone pins the other half of Minor 3: a
 // file whose BYTES could not be read is not a verdict on its content, so it is
 // left exactly where it is. Only a file that read fine and did not parse is
 // preserved as .corrupt — and preservation means a RENAME, which against a
@@ -456,8 +456,9 @@ func TestStartLeavesAnUnreadablePartFileWhenTheSidecarRestoredIt(t *testing.T) {
 // the file's place) would move it out from under the archive for no reason.
 //
 // A directory at the output path is the portable way to make the read fail:
-// os.Open succeeds on both Windows and Linux, and the first Read does not.
-func TestStartLeavesAnUnopenablePartFileAlone(t *testing.T) {
+// os.Open succeeds on both Windows and Linux, and the first Read does not —
+// which is why the warning says "cannot read", not "cannot open".
+func TestStartLeavesAPartFileItCannotReadAlone(t *testing.T) {
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	chatPath := filepath.Join(t.TempDir(), "seg_2", "chat.json")
 	if err := os.MkdirAll(chatPath, 0o755); err != nil {
@@ -481,8 +482,8 @@ func TestStartLeavesAnUnopenablePartFileAlone(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Errorf("the path was not left alone: stat err = %v", err)
 	}
-	if !logger.sawContaining("cannot open the existing part file") {
-		t.Errorf("no warning for the unopenable part file: %v", logger.lines)
+	if !logger.sawContaining("cannot read the existing part file") {
+		t.Errorf("no warning for the part file that could not be read: %v", logger.lines)
 	}
 	if logger.sawContaining("unreadable") {
 		t.Errorf("an open failure was reported as corruption: %v", logger.lines)

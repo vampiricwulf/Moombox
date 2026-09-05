@@ -325,9 +325,9 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 | `CookieStatusMsg` | Cookie service | `{YT, TW, YTActive, TWActive}` — one `CookieStatus` per platform (`None`, `OK`, `CookiesOnly`, `Relogin`, `Unknown`) plus each platform's active flag. There is no *expired* state: expiry has no UI reader at all. See §Status Bar. |
 | `DiskStatusMsg` | Disk monitor | Disk usage percentage and warning/critical thresholds. |
 | `BackfillStatusMsg` | Feed monitor backfill sweep | One message per completed scan page (`state: "scanning"`) plus one per scan-state change (`"done"`, `"error"`, `"idle"` — those carry `Tab` `""` and `Pages` 0); mirrors the Web's `backfill_status` WebSocket payload. |
-| `UpdateStatusMsg` | Updater | New version available (tag name, release notes); an empty message clears the badge (Web-side dismiss). |
+| `UpdateStatusMsg` | Updater | New version available (tag name, release notes). An empty `Version` means "cleared" (a Web-side dismiss) and carries the skipped `TagName`: the TUI drops its badge only when that tag is the release it is showing, so a dismiss racing a newer release cannot blank a badge nobody skipped. |
 | `ConnectivityMsg` | Connectivity monitor | Online/offline transition (`Online bool`). |
-| `channelClosedMsg` | Channel poll commands | Sent when a backend channel (job update, log, cookie status, disk status, backfill status, or update status) closes; names the channel so the App stops polling it. |
+| `channelClosedMsg` | Channel poll commands | Sent when one of the eleven backend channels `listenForUpdates` selects on closes, naming it so the App nils the field and stops polling it: `jobUpdate`, `jobAdded`, `jobDeleted`, `jobTrimsChanged`, `jobsUpdate`, `log`, `checkTimers`, `cookieStatus`, `diskStatus`, `backfillStatus`, `updateStatus`. A name with no case would leave the field set and the select would re-fire on the closed channel forever. |
 
 **Internal tick messages:**
 

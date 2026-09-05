@@ -559,7 +559,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	result, err := w.streamProc.Process(ctx, job)
 	if err != nil {
 		if ctx.Err() != nil {
-			w.handleCancellation(job, "")
+			w.handleCancellation(job)
 			return
 		}
 		w.setJobError(job, err)
@@ -570,7 +570,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		if result.Error == "cancelled" {
 			// "cancelled" comes from waitForLive on ctx.Done() or DB status change.
 			// Route through handleCancellation so shutdown preserves state.
-			w.handleCancellation(job, "")
+			w.handleCancellation(job)
 			return
 		}
 		if result.Error != "" {
@@ -586,7 +586,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 
 	// Check cancellation between stream processing and download
 	if ctx.Err() != nil {
-		w.handleCancellation(job, "")
+		w.handleCancellation(job)
 		return
 	}
 
@@ -596,7 +596,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	// consuming download slots; actual downloading requires a separate download slot.
 	if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
 		// Context cancelled while waiting for download slot
-		w.handleCancellation(job, "")
+		w.handleCancellation(job)
 		return
 	}
 
@@ -678,7 +678,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 
 	if dlErr != nil {
 		if ctx.Err() != nil {
-			w.handleCancellation(job, jobCtx.StagingDir)
+			w.handleCancellation(job)
 			return
 		}
 		w.setJobError(job, dlErr)
@@ -749,7 +749,7 @@ func hasUnmuxedPartsForJob(db *database.Database, jobID, stagingDir string) bool
 // handleCancellation handles a cancelled/shutdown job.
 // User-initiated cancels update status to Cancelled.
 // Shutdown cancels preserve original status so jobs resume on restart (matches TS).
-func (w *DownloadWorker) handleCancellation(job *database.Job, stagingDir string) {
+func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	// Consume the user-cancel flag BEFORE Complete — Complete clears any
 	// leftover flag as part of slot cleanup. Reading the flag is lock-only
 	// (no DB write), so the free-slot-before-DB-writes ordering below holds.
