@@ -1540,18 +1540,30 @@ class MoomboxApp {
     }
   }
 
+  /**
+   * Store the latest /api/auth/status payload and sync the status-bar logout
+   * icon to it. Called from checkSecurityBanner() at boot and from
+   * settings.js loadSecurityStatus() after a password is set or removed —
+   * removing the password on an external install flips authRequired off,
+   * and the icon must follow without a reload.
+   */
+  applyAuthStatus(status) {
+    this.authStatus = status;
+    applyLogoutVisibility(document.getElementById("btn-logout"), status);
+  }
+
   async checkSecurityBanner() {
     // Passwordless external access — mirrors the server's startup warning.
     // Every interactive surface refuses to SET this combination, so it can
     // only come from a hand-edited config file; warn persistently, don't
     // block (update-path compatibility).
-    // Also the one read of /api/auth/status the logout icon keys off.
+    // One of the two reads of /api/auth/status the logout icon keys off (the
+    // other is settings.js loadSecurityStatus); both go through applyAuthStatus.
     try {
       const resp = await fetch("/api/auth/status");
       if (!resp.ok) return;
       const status = await resp.json();
-      this.authStatus = status;
-      applyLogoutVisibility(document.getElementById("btn-logout"), status);
+      this.applyAuthStatus(status);
       document
         .getElementById("security-banner")
         ?.classList.toggle("show", !!status.passwordlessExternal);

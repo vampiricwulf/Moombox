@@ -2049,6 +2049,11 @@ export class SettingsController {
       if (!response.ok) return;
       const status = await response.json();
 
+      // Second reader of /api/auth/status: removing the password on an
+      // external install flips authRequired off, so the status-bar logout
+      // icon has to follow without a reload.
+      this.app.applyAuthStatus?.(status);
+
       // Keep the global banner in sync when the user fixes (or creates)
       // the passwordless-external state from the Security section.
       document
