@@ -841,6 +841,25 @@ export function canResumeJob(job, { requireKnownStaging = false } = {}) {
   return statusOk && job.platform === "youtube" && stagingOk;
 }
 
+/**
+ * streamUrl is the JS twin of the TUI's streamURL (internal/tui/app_actions.go,
+ * the O C chord): the job's own url when it has one, else derived from the
+ * platform. Twitch VOD ids carry a "tw_v" prefix on the wire; Twitch live has
+ * no id-addressable page, only the channel's. Empty string = nothing to copy.
+ * @param {{url?: string, videoId?: string, platform?: string, isVod?: boolean, channelName?: string}|null} job
+ * @returns {string}
+ */
+export function streamUrl(job) {
+  if (!job) return "";
+  if (job.url) return job.url;
+  if (!job.videoId) return "";
+  if (job.platform === "twitch") {
+    if (job.isVod) return "https://www.twitch.tv/videos/" + job.videoId.replace(/^tw_v/, "");
+    return job.channelName ? "https://www.twitch.tv/" + job.channelName : "";
+  }
+  return "https://www.youtube.com/watch?v=" + job.videoId;
+}
+
 /** Read a dotted path ("network.port") from a config object; undefined when absent. */
 export function resolveConfigPath(config, path) {
   return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), config);

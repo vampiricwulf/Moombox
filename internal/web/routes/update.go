@@ -57,13 +57,34 @@ type UpdateRouteDeps struct {
 	OnFound   func(*updater.ReleaseInfo) // broadcast update to WebSocket + TUI
 }
 
+// DismissUpdate records tag as the skipped version and clears the shared
+// pending-update pointer if it still names that tag. Shared by the
+// POST /api/update/dismiss route and the TUI's S key in the release-notes
+// overlay. CompareAndSwap, not Store(nil): a newer release found while the
+// dismiss was in flight must survive.
+func DismissUpdate(store *config.Store, tag string) error {
+	mu := store.RWMutex()
+	cfg := store.Config()
+	mu.Lock()
+	old := cfg.Updates.SkippedVersion
+	cfg.Updates.SkippedVersion = tag
+	if err := store.SaveLocked(); err != nil {
+		cfg.Updates.SkippedVersion = old
+		mu.Unlock()
+		return err
+	}
+	mu.Unlock()
+	if pending := SharedUpdateInfo.Load(); pending != nil && pending.TagName == tag {
+		SharedUpdateInfo.CompareAndSwap(pending, nil)
+	}
+	return nil
+}
+
 // UpdateRoutes registers the update check/apply/dismiss API endpoints. The
 // Store carries the cfg + lock + savePath; /api/update/dismiss flips the
 // AutoCheckUpdates field and persists via store.SaveLocked, rolling back
 // the in-memory mutation if the save fails.
 func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
-	mu := store.RWMutex()
-	cfg := store.Config()
 	// GET /api/update/status — current update status
 	r.Get("/api/update/status", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
@@ -220,21 +241,10 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			jsonError(w, "no update pending", http.StatusBadRequest)
 			return
 		}
-		mu.Lock()
-		oldVal := cfg.Updates.SkippedVersion
-		cfg.Updates.SkippedVersion = pending.TagName
-		if err := store.SaveLocked(); err != nil {
-			cfg.Updates.SkippedVersion = oldVal
-			mu.Unlock()
+		if err := DismissUpdate(store, pending.TagName); err != nil {
 			jsonError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
-		mu.Unlock()
-		// CompareAndSwap, not Store(nil): a check that stored a NEWER,
-		// non-skipped release between our Load and here must not be wiped
-		// by this dismiss — only the release the user actually skipped.
-		SharedUpdateInfo.CompareAndSwap(pending, nil)
-
 		jsonResponse(w, map[string]any{"success": true, "skipped": pending.TagName})
 	})
 }

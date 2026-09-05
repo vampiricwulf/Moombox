@@ -13,6 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
 // FocusPanel identifies which panel is focused.
@@ -99,6 +100,12 @@ type (
 	updateApplyResultMsg struct {
 		Err string // empty on success (process exits before this is seen)
 	}
+	// dismissUpdateResultMsg is the async result of OnDismissUpdate, dispatched
+	// by the S key in the release-notes overlay.
+	dismissUpdateResultMsg struct {
+		Tag string
+		Err error
+	}
 	signatureVerifyResultMsg struct {
 		Err string // empty on success
 	}
@@ -124,6 +131,16 @@ type (
 		Title string
 		Err   string
 	}
+	// cookieImportResultMsg is the async result of OnImportCookieFile (R I).
+	// The whole cookies.ImportResult, not a bool: the overlay words each
+	// platform off the outcome AND the verdict, and neither survives being
+	// flattened. Err is the error VALUE rather than a string because the
+	// import's refusals are sentinels the renderer prints verbatim; nothing
+	// here ever carries cookie content.
+	cookieImportResultMsg struct {
+		Result cookies.ImportResult
+		Err    error
+	}
 	createTrimResultMsg struct {
 		Filename string
 		Err      string
@@ -141,6 +158,12 @@ type (
 		Count int
 		Title string
 	}
+	// setWatchedResultMsg reports completion of an async A W toggle.
+	setWatchedResultMsg struct {
+		Count   int
+		Watched bool
+		Err     error
+	}
 	fetchOrphansResultMsg struct {
 		Files []OrphanedFileEntry
 		Err   string
@@ -156,6 +179,13 @@ type (
 	deleteHistoryEntryResultMsg struct {
 		VideoID string
 		Err     string
+	}
+	// bulkOrphanResultMsg reports the outcome of an A-key delete-all sweep
+	// over one section (orphaned files or orphaned history) — the per-item
+	// callback ran once per entry, so partial failure is normal, not fatal.
+	bulkOrphanResultMsg struct {
+		Deleted  int
+		Failures []string
 	}
 
 	// Async results for FFmpeg check overlay
@@ -271,6 +301,19 @@ type (
 		Err string
 	}
 
+	// Async results for the R Y yt-dlp plugin overlay. Info is the same
+	// ytdlpplugin.Info GET /api/ytdlp-plugin/status returns — read straight
+	// from the package the route's own body uses, so the terminal never has to
+	// import the HTTP layer for one struct; Err is the error VALUE rather than
+	// a string because nothing here reformats it.
+	ytdlpStatusMsg struct {
+		Info ytdlpplugin.Info
+		Err  error
+	}
+	ytdlpInstallResultMsg struct {
+		Err error
+	}
+
 	// Async results for setup wizard cookie extraction.
 	//
 	// Carries the whole SetupResult rather than the bool pair it used to. Two
@@ -320,9 +363,11 @@ type App struct {
 	help            *HelpModel
 	addVideo        *AddVideoModel
 	importDlg       *ImportDialogModel
+	cookieImportDlg *CookieImportDialogModel
 	trimDlg         *TrimDialogModel
 	filesDlg        *FilesDialogModel
 	clientTokensDlg *ClientTokensDialogModel
+	ytdlpDlg        *YtdlpDialogModel
 	setupWiz        *SetupWizardModel
 	settings        *SettingsModel
 
@@ -470,9 +515,12 @@ type App struct {
 	seenChordHint bool
 
 	// Callbacks for actions
-	OnAddVideo        func(url string)
-	OnCancelJob       func(jobID string)
-	OnDeleteJob       func(jobID string)
+	OnAddVideo  func(url string)
+	OnCancelJob func(jobID string)
+	OnDeleteJob func(jobID string)
+	// OnSetWatched marks jobs watched/unwatched (the A W chord); the Web's
+	// /watched routes are the twin.
+	OnSetWatched      func(ids []string, watched bool) error
 	OnResumeJob       func(jobID string)
 	OnReinitializeJob func(jobID string)
 	OnMuxJob          func(jobID string) error
@@ -503,6 +551,9 @@ type App struct {
 	OnBackfillRescan  func()                           // force a feed-history backfill re-scan of all channels (R B)
 	OnApplyUpdate     func(version string) string      // returns error string (empty on success, process exits)
 	OnVerifySignature func() error                     // verify current binary's signature
+	// OnDismissUpdate skips a pending version (the S key in the
+	// release-notes overlay); nil hides the key.
+	OnDismissUpdate func(tag string) error
 	// OnFetchReleaseNotes fetches release notes for a specific version from GitHub.
 	// Used by R N chord when no update is available — shows the CURRENT version's
 	// notes in the same overlay used for pending-update notes.
@@ -534,6 +585,33 @@ type App struct {
 	// rather than a bool: see cookieForceRefreshResultMsg for why the
 	// flattened form could not be worded truthfully.
 	OnForceRefreshCookies func() (cookies.RefreshResult, error)
+	// OnImportCookieFile imports a Netscape cookies.txt from disk through
+	// AutoCookieService.ImportCookies — the R I chord, and the TUI's half of
+	// the Web dashboard's import panel. nil when there is no auto-cookie
+	// service, and nil DELETES the chord rather than making it inert: like
+	// OnForceRefreshCookies, dispatchAction, buildMenuItems and the help
+	// overlay each test the field.
+	//
+	// It takes a PATH and returns a result, never bytes in either direction.
+	// Reading the file belongs to the wiring, so nothing in this package can
+	// put a credential on the screen or in a log line; see
+	// CookieImportDialogModel.
+	OnImportCookieFile func(path string) (cookies.ImportResult, error)
+
+	// OnYtdlpPluginStatus reports the yt-dlp PO-token plugin's state for the
+	// port and scheme this process is actually serving on — the R Y overlay's
+	// body, and the same ytdlpplugin.Status the dashboard's Integrations card
+	// reads through routes.YtdlpPluginStatus. nil DELETES the chord rather than making it inert, like
+	// OnImportCookieFile: an overlay whose only content can never load is
+	// worse than a chord that is not offered.
+	OnYtdlpPluginStatus func() (ytdlpplugin.Info, error)
+	// OnInstallYtdlpPlugin (re)writes the yt-dlp plugin for the live port —
+	// the R Y overlay's I key. Distinct from the setup wizard's
+	// OnInstallYtdlp, which reports nothing back.
+	//
+	// It does NOT gate the chord: with a status callback and no install one,
+	// the overlay is still worth reading and I says so instead of no-opping.
+	OnInstallYtdlpPlugin func() error
 
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
@@ -579,9 +657,11 @@ func NewApp() *App {
 		help:              NewHelpModel(),
 		addVideo:          NewAddVideoModel(),
 		importDlg:         NewImportDialogModel(),
+		cookieImportDlg:   NewCookieImportDialogModel(),
 		trimDlg:           NewTrimDialogModel(),
 		filesDlg:          NewFilesDialogModel(),
 		clientTokensDlg:   NewClientTokensDialogModel(),
+		ytdlpDlg:          NewYtdlpDialogModel(),
 		setupWiz:          NewSetupWizardModel(),
 		settings:          NewSettingsModel(),
 		ffmpegCheck:       NewFFmpegCheckModel(),
@@ -912,10 +992,12 @@ func (a *App) hasActiveOverlay() bool {
 		a.help.IsVisible() ||
 		(a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen()) ||
 		a.importDlg.IsVisible() ||
+		a.cookieImportDlg.IsVisible() ||
 		a.addVideo.IsVisible() ||
 		a.trimDlg.IsVisible() ||
 		a.filesDlg.IsVisible() ||
 		a.clientTokensDlg.IsVisible() ||
+		a.ytdlpDlg.IsVisible() ||
 		a.setupWiz.IsVisible() ||
 		a.ffmpegCheck.IsVisible() ||
 		a.actionMenu.IsVisible()

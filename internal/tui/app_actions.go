@@ -239,6 +239,40 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return deleteJobsResultMsg{Count: 1, Title: title}
 			})
 		}
+	case "A W":
+		if a.OnSetWatched == nil {
+			a.setFeedback("Watched toggling is unavailable")
+			return a, nil
+		}
+		setFn := a.OnSetWatched
+		if job == nil && a.taskList.SelectedCount() > 0 {
+			ids := a.taskList.SelectedIDs()
+			allWatched := true
+			finished := ids[:0]
+			for _, id := range ids {
+				if j := a.taskList.GetJobByID(id); j != nil && j.Status == database.StatusFinished {
+					finished = append(finished, id)
+					if !j.Watched {
+						allWatched = false
+					}
+				}
+			}
+			if len(finished) == 0 {
+				a.setFeedback("No finished jobs in selection")
+				return a, nil
+			}
+			a.taskList.ClearSelection()
+			watched := !allWatched
+			return a, safeCmd(func() tea.Msg {
+				return setWatchedResultMsg{Count: len(finished), Watched: watched, Err: setFn(finished, watched)}
+			})
+		} else if job != nil && job.Status == database.StatusFinished {
+			watched := !job.Watched
+			id := job.ID
+			return a, safeCmd(func() tea.Msg {
+				return setWatchedResultMsg{Count: 1, Watched: watched, Err: setFn([]string{id}, watched)}
+			})
+		}
 	case "A T":
 		if a.trimInProgress {
 			a.setFeedback("A trim is already in progress")
@@ -297,6 +331,28 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// Preselect whatever the status bar is alarming about, so answering a
 		// "TW: Re-login" badge does not open on YouTube.
 		a.setupWiz.OpenCookieLogin(a.statusBar.ReloginPlatform())
+	case "R I":
+		// Defensive for the same reason R L's guard is, and unreachable the
+		// same way: with no callback the chord is not registered, so
+		// processSecondKey never reaches this case. The guard keeps a direct
+		// caller from opening an overlay whose Enter dead-ends.
+		if a.OnImportCookieFile == nil {
+			a.setFeedback("Cookie import is unavailable — no auto-cookie service is configured")
+			return a, nil
+		}
+		a.clearFeedback()
+		a.cookieImportDlg.SetSize(a.width, a.height)
+		return a, a.cookieImportDlg.Open()
+	case "R Y":
+		// Defensive for the same reason R I's guard is, and unreachable the
+		// same way: with no status callback the chord is not registered, so
+		// processSecondKey never reaches this case.
+		if a.OnYtdlpPluginStatus == nil {
+			a.setFeedback("yt-dlp plugin status is unavailable in this process")
+			return a, nil
+		}
+		a.ytdlpDlg.SetSize(a.width, a.height)
+		return a, tea.Batch(a.ytdlpDlg.Open(), a.ytdlpStatusCmd())
 	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
@@ -324,6 +380,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.updateAvailable.ReleaseNotes,
 				a.width, a.height,
 			)
+			a.releaseNotesPopup.setPending(true)
 			return a, nil
 		}
 		if a.OnFetchReleaseNotes == nil || a.version == "" {
@@ -332,6 +389,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 		// No pending update — fetch current version's notes asynchronously.
 		a.releaseNotesPopup.open("v"+a.version, "Loading release notes…", a.width, a.height)
+		a.releaseNotesPopup.setPending(false)
 		fetchFn := a.OnFetchReleaseNotes
 		ver := a.version
 		return a, safeCmd(func() tea.Msg {
@@ -597,6 +655,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			}},
 		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no deletable jobs"},
+		{Chord: "A W", Label: "Toggle Watched", HintLabel: "Watched", Category: "Action", NeedsJob: true, SupportsBatch: true,
+			DisabledReason: "no finished jobs",
+			JobFilter:      func(j *database.Job) bool { return j.Status == database.StatusFinished }},
 		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
 			DisabledReason: "no finished jobs with files",
 			JobFilter: func(j *database.Job) bool {
@@ -625,6 +686,19 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// acquisition and is never gated on cookies.auto_enabled.
 	if a.setupWiz.OnStartAutoCookie != nil {
 		items = append(items, ActionMenuItem{Chord: "R L", Label: "Cookie Login", HintLabel: "Login", Category: "Request"})
+	}
+	// R I: the browser-free half of the same answer R L gives. It imports a
+	// Netscape cookies.txt the operator exported elsewhere, through the same
+	// verify-and-roll-back path as the Web dashboard's import panel — the one
+	// re-authentication route that works on a headless host.
+	if a.OnImportCookieFile != nil {
+		items = append(items, ActionMenuItem{Chord: "R I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Request"})
+	}
+	// R Y: the terminal's half of the dashboard's Integrations card. Gated on
+	// the STATUS callback alone — the overlay is worth reading on a host where
+	// the install would fail, and I explains itself there.
+	if a.OnYtdlpPluginStatus != nil {
+		items = append(items, ActionMenuItem{Chord: "R Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Request"})
 	}
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})

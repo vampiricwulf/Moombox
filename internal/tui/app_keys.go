@@ -77,6 +77,22 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd := a.applyUpdateAction()
 			a.releaseNotesPopup.close()
 			return a, cmd
+		case "s", "S":
+			// S skips exactly the version whose notes are on screen. The footer
+			// offers it only while pending is set, and this keys off the same
+			// flag: an UpdateStatusMsg landing while an arbitrary version's
+			// notes are open would otherwise let S permanently skip a release
+			// the operator has never seen, with no key on screen saying so.
+			if !a.releaseNotesPopup.pending || a.updateAvailable == nil || a.OnDismissUpdate == nil {
+				return a, nil
+			}
+			if a.updateAvailable.TagName != a.releaseNotesPopup.tag {
+				return a, nil
+			}
+			tag := a.updateAvailable.TagName
+			fn := a.OnDismissUpdate
+			a.setFeedback("Skipping " + tag + "...")
+			return a, safeCmd(func() tea.Msg { return dismissUpdateResultMsg{Tag: tag, Err: fn(tag)} })
 		}
 		// All other keys (arrows, pgup/pgdn) are forwarded to the viewport via
 		// routeComponentMsg — nothing to do here.
@@ -231,6 +247,14 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	if a.cookieImportDlg.IsVisible() {
+		action, path := a.cookieImportDlg.HandleKey(key)
+		if action == "import" {
+			a.cookieImportDlg.SetImporting()
+			return a, tea.Batch(a.importCookieFileCmd(path), a.cookieImportDlg.SpinnerInit())
+		}
+		return a, nil
+	}
 	if a.addVideo.IsVisible() {
 		action, data := a.addVideo.HandleKey(key)
 		switch action {
@@ -274,7 +298,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if a.filesDlg.IsVisible() {
-		action, cmd := a.filesDlg.HandleKey(msg)
+		action, data := a.filesDlg.HandleKey(msg)
 		switch action {
 		case "refresh":
 			return a, tea.Batch(a.fetchOrphansCmd(), a.fetchOrphanedHistoryCmd(), a.filesDlg.SpinnerInit())
@@ -286,8 +310,12 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if sel := a.filesDlg.SelectedHistory(); sel != nil {
 				return a, a.deleteHistoryEntryCmd(sel.VideoID)
 			}
+		case "delete-all-files":
+			return a, tea.Batch(a.deleteAllOrphansCmd(data.([]string)), a.filesDlg.SpinnerInit())
+		case "delete-all-history":
+			return a, a.deleteAllHistoryCmd(data.([]string))
 		}
-		if cmd != nil {
+		if cmd, ok := data.(tea.Cmd); ok && cmd != nil {
 			return a, cmd
 		}
 		return a, nil
@@ -304,6 +332,24 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if cmd != nil {
 			return a, cmd
+		}
+		return a, nil
+	}
+	// The whole KeyPressMsg for symmetry with the dialogs above, but this one
+	// owns no component: HandleKey only decides. See YtdlpDialogModel.
+	if a.ytdlpDlg.IsVisible() {
+		switch a.ytdlpDlg.HandleKey(msg) {
+		case "install":
+			// The chord is gated on the STATUS callback, so the overlay can be
+			// open with no way to install. Say so rather than swallowing I.
+			if a.OnInstallYtdlpPlugin == nil {
+				a.ytdlpDlg.SetError("Install is unavailable in this process")
+				return a, nil
+			}
+			a.ytdlpDlg.SetInstalling()
+			return a, tea.Batch(a.ytdlpInstallCmd(), a.ytdlpDlg.SpinnerInit())
+		case "refresh":
+			return a, tea.Batch(a.ytdlpStatusCmd(), a.ytdlpDlg.Open())
 		}
 		return a, nil
 	}
@@ -400,6 +446,16 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				a.taskList.ToggleSelection(job.ID)
 			}
 		}
+		return a, nil
+	}
+
+	// "c" clears the log view (history, filtered lines, and any active
+	// search — the level filter stays) when the log panel is focused. The
+	// search intercept above already consumes "c" while typing a query;
+	// IsSearching() here is defense-in-depth, not the primary guard.
+	if key == "c" && a.focusedPanel == PanelLogs && !a.logs.IsSearching() {
+		a.logs.Clear()
+		a.setFeedback("Log view cleared")
 		return a, nil
 	}
 

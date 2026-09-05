@@ -98,6 +98,25 @@ func (s *runState) runTUI() {
 			s.log.Error("Failed to delete job", slog.String("error", err.Error()))
 		}
 	}
+	app.OnSetWatched = func(ids []string, watched bool) error {
+		if len(ids) == 1 {
+			// Single job: the per-job update path (OnJobUpdate), mirroring
+			// the web's POST/DELETE /api/jobs/{id}/watched exactly — both
+			// routes clear resume_position, whichever way watched flips.
+			watchedVal := 0
+			if watched {
+				watchedVal = 1
+			}
+			if s.db.UpdateJobFields(ids[0], map[string]any{
+				"watched":         watchedVal,
+				"resume_position": nil,
+			}) == nil {
+				return fmt.Errorf("job %s not found", ids[0])
+			}
+			return nil
+		}
+		return s.db.BatchSetWatched(ids, watched)
+	}
 	app.OnResumeJob = func(jobID string) {
 		s.dlWorker.ResumeJob(jobID)
 	}
@@ -330,6 +349,9 @@ func (s *runState) runTUI() {
 			}
 			return info.TagName, info.ReleaseNotes, nil
 		}
+		app.OnDismissUpdate = func(tag string) error {
+			return routes.DismissUpdate(s.configStore, tag)
+		}
 	}
 	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
 		s.log.Info("Cookie recheck requested from TUI")
@@ -452,6 +474,90 @@ func (s *runState) runTUI() {
 		return result, err
 	}
 
+	// R I — import a Netscape cookies.txt the operator exported elsewhere.
+	//
+	// The browser-free half of R L, and on a headless host the only
+	// re-authentication route there is: StartSetup needs a browser it can put
+	// on a screen, and this needs a file. It is the same gesture the Web
+	// dashboard's import panel makes (POST /api/cookies/import), through the
+	// same AutoCookieService.ImportCookies — verified per platform, and rolled
+	// back for a platform the paste killed.
+	//
+	// GATED ON THE SERVICE EXISTING, not on a config flag. A nil callback does
+	// not make the chord inert, it DELETES it — see the note on
+	// OnForceRefreshCookies above — and that is exactly right here: with no
+	// auto-cookie service there is nothing to import into, and offering a path
+	// prompt that can only fail is worse than offering nothing. In production
+	// the service is always present (initServices §15 constructs it before the
+	// TUI is wired), so the chord is always there.
+	//
+	// THE FILE IS READ HERE, not in the TUI. internal/tui is handed a path and
+	// handed back a cookies.ImportResult; no cookie byte reaches a model, a
+	// tea.Msg, the screen or a log line. The path is the only thing logged,
+	// deliberately — an operator who mistyped it needs to see which file was
+	// opened.
+	if s.autoCookieSvc != nil {
+		app.OnImportCookieFile = func(path string) (cookies.ImportResult, error) {
+			s.log.Info("Cookie file import requested from TUI", slog.String("path", path))
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return cookies.ImportResult{}, err
+			}
+			// 60 s, the wizard-finish budget rather than the route's. The Web
+			// import inherits its request's deadline, which has no counterpart
+			// here; what the two share is the work — a merge, a write and a
+			// live auth check per platform — and that is what
+			// FinishSetupDetailed is priced for one call over.
+			importCtx, importCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer importCancel()
+			result, err := s.autoCookieSvc.ImportCookies(importCtx, string(data))
+
+			// ImportCookies is the fifth WRITER of cookies.txt, so it ends in a
+			// re-check like every other gesture that can (Arc 10 R4). Without
+			// it the status-bar cookie badge keeps reporting the credentials
+			// this import just replaced, until the 30-minute ticker.
+			//
+			// Gated on Wrote and DEFERRED, the same shape as the setup-wizard
+			// finish and for the same reason: the jar reload after a successful
+			// write can fail, and that exit hands back an error over a
+			// cookies.txt that has already been replaced — the one case where
+			// the re-check is worth most, because refresh's own jar.Reload
+			// repairs the stale in-memory jar the error left behind. The defer
+			// is what keeps that true if an early error return is ever added
+			// above it; see TestEveryCookieWriteRecheckIsDeferred.
+			//
+			// context.Background rather than importCtx: defers run LIFO, so
+			// this one completes before importCancel fires, but the 60 s budget
+			// is the IMPORT's and the re-check is not the import's work to
+			// spend it on — the same call the other five sites make.
+			//
+			// The re-check runs before this returns, so the overlay's spinner
+			// covers it (≤30 s worst case: two 15 s auth probes); the web route
+			// flushes its response first and re-checks after. Kept blocking
+			// here on purpose: the AST test pins every cookies.txt write to end
+			// in a deferred re-check, and a goroutine would satisfy the test
+			// while deleting the property it protects.
+			defer func() {
+				if result.Wrote {
+					recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "a cookie file import")
+				}
+			}()
+
+			return result, err
+		}
+	}
+
+	// R Y — the yt-dlp plugin overlay. Both closures read the SAME port getter
+	// and HTTPS flag wireRoutes hands routes.YtdlpRoutes, so the terminal and
+	// the dashboard cannot disagree about which port the plugin should point
+	// at or whether the one on disk matches.
+	app.OnYtdlpPluginStatus = func() (routes.YtdlpPluginInfo, error) {
+		return routes.YtdlpPluginStatus(s.currentWebPort(), s.cfg.Network.HTTPSEnabled)
+	}
+	app.OnInstallYtdlpPlugin = func() error {
+		return routes.InstallYtdlpPlugin(s.currentWebPort(), s.cfg.Network.HTTPSEnabled)
+	}
+
 	app.OnHashPassword = func(password string) string {
 		hash, err := s.authSvc.HashPassword(password)
 		if err != nil {
@@ -516,7 +622,7 @@ func (s *runState) runTUI() {
 			// The reason is that its 60 s budget is the WIZARD's — priced
 			// against the server-side setup grace window, as the comment on the
 			// timeout says — and the re-check is not the wizard's work to spend
-			// it on. Same as the other four sites: none of them wants a
+			// it on. Same as the other five sites: none of them wants a
 			// fingerprint comparison cancelled by its caller's teardown, and
 			// the re-check has to outlive nothing.
 			defer func() {

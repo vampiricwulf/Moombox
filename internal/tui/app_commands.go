@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -281,6 +283,31 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 	})
 }
 
+// importCookieFileCmd runs OnImportCookieFile off the UI goroutine.
+//
+// The PATH is the only thing that crosses this seam, in either direction: the
+// callback reads the file in cmd/moombox and hands back a cookies.ImportResult,
+// so no cookie byte is ever held by a tea.Msg, rendered, or logged. Only the
+// path is ever shown.
+//
+// No HTTP fallback, unlike importFileCmd: the import writes cookies.txt and
+// then verifies each platform against the live services, and there is no
+// meaningful version of that against a remote dashboard the operator may not
+// even be authenticated to.
+func (a *App) importCookieFileCmd(path string) tea.Cmd {
+	fn := a.OnImportCookieFile
+	return safeCmd(func() tea.Msg {
+		if fn == nil {
+			// Unreachable from the keyboard — with no callback the chord is
+			// not registered — but a nil call here would panic the command
+			// goroutine rather than the UI, which is the worse failure.
+			return cookieImportResultMsg{Err: errors.New("cookie import is not available in this process")}
+		}
+		res, err := fn(path)
+		return cookieImportResultMsg{Result: res, Err: err}
+	})
+}
+
 func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 	createFn := a.OnCreateTrim
 	progressMu := &a.trimProgressMu
@@ -364,6 +391,36 @@ func (a *App) deleteClientTokenCmd(id string) tea.Cmd {
 	})
 }
 
+// ytdlpStatusCmd reads the yt-dlp plugin's state off the UI goroutine — the
+// R Y overlay's open, its R key, and the reload that follows a successful
+// install all go through it.
+func (a *App) ytdlpStatusCmd() tea.Cmd {
+	statusFn := a.OnYtdlpPluginStatus
+	return safeCmd(func() tea.Msg {
+		if statusFn == nil {
+			// Unreachable from the keyboard — with no callback the chord is
+			// not registered — but a nil call here would take down the
+			// command goroutine rather than report anything.
+			return ytdlpStatusMsg{Err: errors.New("yt-dlp plugin status is not available in this process")}
+		}
+		info, err := statusFn()
+		return ytdlpStatusMsg{Info: info, Err: err}
+	})
+}
+
+// ytdlpInstallCmd rewrites the plugin for the live port. The keypress arm has
+// already refused the nil case with a message on the overlay; this guard is
+// for a direct caller.
+func (a *App) ytdlpInstallCmd() tea.Cmd {
+	installFn := a.OnInstallYtdlpPlugin
+	return safeCmd(func() tea.Msg {
+		if installFn == nil {
+			return ytdlpInstallResultMsg{Err: errors.New("yt-dlp plugin install is not available in this process")}
+		}
+		return ytdlpInstallResultMsg{Err: installFn()}
+	})
+}
+
 func (a *App) deleteOrphanCmd(path string) tea.Cmd {
 	deleteFn := a.OnDeleteOrphan
 	return safeCmd(func() tea.Msg {
@@ -401,6 +458,59 @@ func (a *App) deleteHistoryEntryCmd(videoID string) tea.Cmd {
 			return deleteHistoryEntryResultMsg{VideoID: videoID, Err: err.Error()}
 		}
 		return deleteHistoryEntryResultMsg{VideoID: videoID}
+	})
+}
+
+// deleteAllOrphansCmd loops the per-item callback over every orphaned-file
+// path in the section, collecting failures instead of stopping the sweep at
+// the first one so the dialog can name exactly what didn't go. The list is
+// refreshed afterward by the bulkOrphanResultMsg arm.
+func (a *App) deleteAllOrphansCmd(paths []string) tea.Cmd {
+	fn := a.OnDeleteOrphan
+	return safeCmd(func() tea.Msg {
+		if fn == nil {
+			failures := make([]string, 0, len(paths))
+			for _, p := range paths {
+				failures = append(failures, filepath.Base(p)+": Not available")
+			}
+			return bulkOrphanResultMsg{Failures: failures}
+		}
+		var failures []string
+		deleted := 0
+		for _, p := range paths {
+			if err := fn(p); err != nil {
+				failures = append(failures, filepath.Base(p)+": "+err.Error())
+				continue
+			}
+			deleted++
+		}
+		return bulkOrphanResultMsg{Deleted: deleted, Failures: failures}
+	})
+}
+
+// deleteAllHistoryCmd is the history-half twin of deleteAllOrphansCmd, over
+// OnDeleteHistoryEntry. Failures are named by video ID rather than a
+// filesystem path.
+func (a *App) deleteAllHistoryCmd(ids []string) tea.Cmd {
+	fn := a.OnDeleteHistoryEntry
+	return safeCmd(func() tea.Msg {
+		if fn == nil {
+			failures := make([]string, 0, len(ids))
+			for _, id := range ids {
+				failures = append(failures, id+": Not available")
+			}
+			return bulkOrphanResultMsg{Failures: failures}
+		}
+		var failures []string
+		deleted := 0
+		for _, id := range ids {
+			if err := fn(id); err != nil {
+				failures = append(failures, id+": "+err.Error())
+				continue
+			}
+			deleted++
+		}
+		return bulkOrphanResultMsg{Deleted: deleted, Failures: failures}
 	})
 }
 

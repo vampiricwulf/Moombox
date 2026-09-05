@@ -141,7 +141,7 @@ Example: Logs focused (100% width, 75% height)
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility.
+**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility. A watched job carries a dim `•` between the platform tag and the title (`watchedGlyph`, counted in `titleWidth`).
 
 **Job Details (top right):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
 
@@ -222,13 +222,16 @@ The chord system is a three-state finite automaton:
 | Chord | Action | Requires Job | Confirm | Job Filter |
 |-------|--------|:------------:|:-------:|------------|
 | `A A` | Add Video dialog | No | No | — |
-| `A I` | Import Archive | No | No | — |
-| `A R` | Retry Job | Yes | No | Status is Error, Cancelled, or COOKIES? |
+| `A Z` | Import Archive | No | No | — |
+| `A R` | Resume Job | Yes | No | YouTube, staging files present, and status is Error, Cancelled, COOKIES?, or Finished with an incomplete tail |
+| `A I` | Reinitialize Job | Yes | No | Status is Error, Cancelled, or COOKIES? |
+| `A M` | Mux Job | Yes | Yes | Status is Cancelled or Error, and segment files are present |
 | `A C` | Cancel Job | Yes | Yes | Status is not Finished, Cancelled, or Error |
 | `A D` | Delete Job | Yes | Yes | Any job |
+| `A W` | Toggle Watched | Yes | No | Status is Finished |
 | `A T` | Trim Video | Yes | No | Status is Finished and has output file |
 | `A K` | Manage Client Tokens | No | No | Client tokens callback configured |
-| `A O` | Browse Orphaned Files | No | No | — |
+| `A O` | Browse Orphaned Items | No | No | — |
 
 **Request chords (R prefix):**
 
@@ -238,8 +241,10 @@ The chord system is a three-state finite automaton:
 | `R C` | Recheck Cookies | Cookie recheck callback is configured |
 | `R F` | Refresh Cookies from Browser | Cookie force-refresh callback is configured |
 | `R L` | Cookie Login | Interactive-setup callback is configured (`SetSetupCallbacks`, bound unconditionally by `cmd/moombox`). Opens the setup wizard's cookie step **alone** — pick YouTube or Twitch, sign in in the browser that opens on the host, `Enter` extracts. Preselects the platform the status bar is flagging for re-login. |
+| `R I` | Import Cookie File | Import callback is configured (auto-cookie service present). A path prompt (with `~` expansion and an existence check), then `AutoCookieService.ImportCookies` — the same verify-and-roll-back path as the Web import panel — then the per-platform outcome (imported / unchanged / rolled-back / rejected) in the overlay. The file is read in `cmd/moombox`; only the path is ever shown or logged. |
+| `R Y` | yt-dlp Plugin | Status callback is configured. An async overlay over `routes.YtdlpPluginStatus` — the same computation `GET /api/ytdlp-plugin/status` returns — showing installed / plugin dir / live port / the port the installed file points at / mismatch. `I` rewrites the plugin for the live port through `routes.InstallYtdlpPlugin` (the call the dashboard's Install button makes) and reloads; `R` re-reads; `Esc`/`Q` closes. `I` is gated separately: with a status callback and no install one the overlay still reads, and `I` says the install is unavailable rather than no-opping. |
 | `R V` | Check for Updates | Update check callback is configured |
-| `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. |
+| `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. `S` inside the overlay skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`, the same helper `POST /api/update/dismiss` uses). |
 | `R U` | Apply Update | An update is available and apply callback is configured |
 | `R S` | Verify Signature | Signature verification callback is configured |
 | `R P` | Restart Program | Restart callback is configured. Requires confirmation. |
@@ -263,6 +268,7 @@ The chord system is a three-state finite automaton:
 | `` ` `` | Open Settings dialog |
 | `?` | Open Help overlay |
 | `/` | Enter log search mode (log panel focused only). `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
+| `c` | Clear the log view (log panel focused only). Drops history, the filtered view, and any active search; the level filter is kept. |
 
 **Quit chord:**
 
@@ -279,14 +285,15 @@ Overlays are full-screen or near-full-screen modal views that take over keyboard
 | Help | `?` | Displays all chords grouped by category with descriptions. Read-only. |
 | Action Menu | `M` | Command palette. Searchable list of all available actions. Selecting an item executes it. |
 | Add Video | `A A` | Multi-step form: (1) enter URL, (2) fetch and select format, (3) set timestamps, (4) confirm. Format fetch is async with a spinner. On error, auto-advances past format selection after a timeout. |
-| Import | `A I` | Zip import form with title and channel override fields. |
+| Import | `A Z` | Zip import form with title and channel override fields. |
 | Trim | `A T` | Clip creation. Enter start/end seconds. Encoding runs asynchronously with a progress callback that updates the UI. |
-| Orphaned Files & History | `A O` | Two sections in one list (with a divider): orphaned files in the output directory with no corresponding job, and orphaned processing-history rows (history entries with no matching job, which otherwise block re-discovery). Each section loads independently — a failure in one is shown inline without hiding the other. Delete with confirmation. |
+| Orphaned Files & History | `A O` | Two sections in one list (with a divider): orphaned files in the output directory with no corresponding job, and orphaned processing-history rows (history entries with no matching job, which otherwise block re-discovery). Each section loads independently — a failure in one is shown inline without hiding the other. Delete with confirmation. `A` deletes every entry in the half the cursor is in (files or history) after the same two-press confirm as `D`; per-item failures are collected and listed in the dialog. |
 | Client Tokens | `A K` | List of persistent client authentication tokens. Delete individual tokens. |
 | Settings | `` ` `` | Full config editor built with the `huh` form framework. Supports full mouse interaction (click tabs, fields, toggles, cycle options, and action buttons). Action buttons at the bottom: `[ Save & Return ]` / `[ Return Without Saving ]` (when dirty), or `[ Return ]` (when clean). Presents a close confirmation when there are unsaved changes and the user attempts to dismiss. Smart dirty tracking: reverting a field back to its original value clears the dirty flag. Job detail panel renders clickable hyperlinks (OSC 8) for stream URLs and output paths. Both channel editors expose the four per-channel overrides (`num_desc_lookbehind`, `output_directory`, `archive_window_days`, `archive_slots`); blank means the global value, and the TUI editor now preserves every field it does not show (it rebuilt the channel from the visible fields before Arc B). |
 | Setup Wizard | First run, `R L` | Multi-step initial setup: configuration, FFmpeg check/install, yt-dlp plugin, cookie capture. Built with `huh`. `R L` opens the same overlay in **cookie-only** mode: the cookie step with no stages around it, `Esc` and the third row close it instead of advancing, and leaving cancels any browser it opened. |
 | FFmpeg Check | Setup flow | Validates FFmpeg is on PATH. Offers installation options if missing. On Linux, also shows the distro-appropriate package manager command (`apt`, `dnf`, `pacman`, etc.) from `GET /api/ffmpeg/install-suggestion`. |
-| Release Notes | `R N` | Shows release notes for the pending update (when an update is available) or the current version (fetched from GitHub). Rendered via `glamour` in the TUI. From inside: `U` applies the update, `Esc`/`Q` closes. Uses `bubbles/viewport` for scrolling. |
+| yt-dlp Plugin | `R Y` | Async status overlay for the yt-dlp PO-token plugin (`YtdlpDialogModel`, `internal/tui/ytdlp_dialog.go`). Renders `ytdlpplugin.Info` verbatim rather than re-deriving it for the terminal. `I` installs/reinstalls for the live port and reloads, `R` refreshes, `Esc` closes. |
+| Release Notes | `R N` | Shows release notes for the pending update (when an update is available) or the current version (fetched from GitHub). Rendered via `glamour` in the TUI. From inside: `U` applies the update, `Esc`/`Q` closes. Uses `bubbles/viewport` for scrolling. `S` skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`) and is offered only while the notes on screen are a pending update's. |
 
 ### Async Message Types
 
@@ -565,7 +572,7 @@ The two cookie blocks come from `routes`' own projections rather than being rebu
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `POST` | `/api/backfill/rescan` | Force a feed-history backfill re-scan of every configured YouTube channel (same operation as the TUI `R B` chord). Debounced to one accepted run per 30s — a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}`. |
+| `POST` | `/api/backfill/rescan` | Force a feed-history backfill re-scan of every configured YouTube channel (same operation as the TUI `R B` chord). Debounced to one accepted run per 30s — a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}`. Web: the "Re-scan Feed History" button in the Settings → Channels panel (`rescan-feeds-btn`, `settings.js` `rescanFeedHistory`). |
 
 ### Configuration
 
@@ -764,7 +771,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 | `POST` | `/api/update/check` | Manually check for updates. |
 | `POST` | `/api/update/apply` | Download and apply an available update. Triggers restart. |
 | `POST` | `/api/update/verify` | Verify the Ed25519 signature of the current binary. |
-| `POST` | `/api/update/dismiss` | Dismiss the update notification. |
+| `POST` | `/api/update/dismiss` | Dismiss the update notification. Body shared with the TUI via `DismissUpdate`. |
 
 ### FFmpeg
 
@@ -788,7 +795,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/ytdlp-plugin/status` | Check if the yt-dlp PO token plugin is installed. |
+| `GET` | `/api/ytdlp-plugin/status` | Check if the yt-dlp PO token plugin is installed. The computation lives in `Status` (`internal/ytdlpplugin/ytdlpplugin.go`), a stdlib-only package outside the HTTP layer so the TUI's `R Y` overlay can share the answer without importing `routes`; `YtdlpPluginStatus` (`internal/web/routes/ytdlp.go`) is the shim this route calls, and its `YtdlpPluginInfo` alias's struct tags are the seven-key wire contract `settings.js` `loadYtdlpPluginStatus` reads. `installedPort` is `null` until a plugin is installed (and stays `null` if the installed file's URL line does not parse). |
 | `POST` | `/api/ytdlp-plugin/install` | Install the yt-dlp plugin to the user's yt-dlp config directory. |
 
 ### Setup
@@ -910,8 +917,11 @@ Every major feature exists in both UIs:
 | Trim creation | `modules/trimmer.js` | `trim_dialog.go` |
 | Statistics | `modules/stats.js` | N/A (data available via API) |
 | Zip import | `modules/imports.js` | `import_dialog.go` |
+| Cookie import | `modules/settings.js` import panel | `CookieImportDialogModel` (`internal/tui/cookie_import_dialog.go`) |
 | Orphaned files | `app.js` (inline) | `files_dialog.go` |
 | Client tokens | `app.js` (inline) | `client_tokens_dialog.go` |
+| yt-dlp plugin | Settings → Integrations card (`settings.js` `loadYtdlpPluginStatus`) | `YtdlpDialogModel` (`internal/tui/ytdlp_dialog.go`) |
+| Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`) |
 
 **Note on video playback:** The TUI cannot play video inline (it is a terminal). The `O W` chord opens the Web UI in the default browser, where the user can access the player. This is the intended design — video playback is a Web UI strength, and the TUI defers to it rather than attempting a degraded experience.
 

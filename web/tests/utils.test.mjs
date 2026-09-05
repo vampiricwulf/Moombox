@@ -15,6 +15,7 @@ import {
   resolveConfigPath,
   snapshotRestartValues,
   restartValuesChanged,
+  streamUrl,
 } from "../public/modules/utils.js";
 
 test("formatTimestamp: zero and invalid inputs", () => {
@@ -261,4 +262,23 @@ test("channelTermsForSave: an edited field writes through, preserving a stream-k
 test("channelTermsForSave: clearing an edited field removes terms", () => {
   assert.equal(channelTermsForSave("karaoke", "karaoke", ""), undefined);
   assert.equal(channelTermsForSave({ stream: "karaoke" }, "karaoke", ""), undefined);
+});
+
+// streamUrl mirrors internal/tui/app_actions.go streamURL (the TUI's O C
+// chord): an explicit url wins; else YouTube watch URL; Twitch VOD strips the
+// tw_v prefix; Twitch live needs a channel name.
+test("streamUrl: explicit url wins over derivation", () => {
+  assert.equal(streamUrl({ url: "https://example/x", videoId: "abc", platform: "youtube" }), "https://example/x");
+});
+test("streamUrl: youtube derives the watch URL", () => {
+  assert.equal(streamUrl({ videoId: "dQw4w9WgXcQ", platform: "youtube" }), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+});
+test("streamUrl: twitch VOD strips the tw_v prefix", () => {
+  assert.equal(streamUrl({ videoId: "tw_v123456", platform: "twitch", isVod: true }), "https://www.twitch.tv/videos/123456");
+});
+test("streamUrl: twitch live is the channel page, empty without a channel", () => {
+  assert.equal(streamUrl({ videoId: "live1", platform: "twitch", channelName: "somestreamer" }), "https://www.twitch.tv/somestreamer");
+  assert.equal(streamUrl({ videoId: "live1", platform: "twitch" }), "");
+  assert.equal(streamUrl({ platform: "youtube" }), "");
+  assert.equal(streamUrl(null), "");
 });

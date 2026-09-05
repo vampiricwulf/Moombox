@@ -130,7 +130,7 @@ func TestCheckNowFnHasNoFuncWithoutAService(t *testing.T) {
 
 // TestCheckNowFnRunsTheServicesCheck. The accessor must still be the real
 // re-check when there IS a service; a guard that returns nil unconditionally
-// would silence every one of the five sites.
+// would silence every one of the six sites.
 //
 // The mutation: returning nil unconditionally.
 func TestCheckNowFnRunsTheServicesCheck(t *testing.T) {

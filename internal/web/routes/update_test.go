@@ -235,6 +235,32 @@ func TestUpdateDismissWithoutPendingIs400(t *testing.T) {
 	}
 }
 
+// TestDismissUpdateSkipsExactlyThePendingTag: the helper the route and the
+// TUI share persists the skipped version and clears the shared pointer only
+// when it still holds that tag — a newer release found meanwhile survives.
+func TestDismissUpdateSkipsExactlyThePendingTag(t *testing.T) {
+	_, store := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test"})
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{TagName: "v9.9.9"})
+	if err := DismissUpdate(store, "v9.9.9"); err != nil {
+		t.Fatal(err)
+	}
+	var skipped string
+	store.Read(func(c *config.MoomboxConfig) { skipped = c.Updates.SkippedVersion })
+	if skipped != "v9.9.9" {
+		t.Errorf("SkippedVersion = %q", skipped)
+	}
+	if SharedUpdateInfo.Load() != nil {
+		t.Error("pending pointer not cleared")
+	}
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{TagName: "v10.0.0"})
+	if err := DismissUpdate(store, "v9.9.9"); err != nil {
+		t.Fatal(err)
+	}
+	if p := SharedUpdateInfo.Load(); p == nil || p.TagName != "v10.0.0" {
+		t.Error("a newer pending release must survive a stale dismiss")
+	}
+}
+
 func TestUpdateDismissPersistsToDisk(t *testing.T) {
 	// SaveLocked writes through the savePath; verify the on-disk TOML
 	// reflects the dismiss so the next launch doesn't ask again.

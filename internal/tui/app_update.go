@@ -317,6 +317,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// On success, the process is already exiting (QuitTUI was called)
 		return a, nil
 
+	case dismissUpdateResultMsg:
+		if msg.Err != nil {
+			a.setFeedback("Could not skip " + msg.Tag + ": " + msg.Err.Error())
+			return a, nil
+		}
+		if a.updateAvailable != nil && a.updateAvailable.TagName == msg.Tag {
+			a.updateAvailable = nil
+		}
+		a.releaseNotesPopup.close()
+		a.setFeedback("Skipped " + msg.Tag + " — you'll be notified about the next release")
+		return a, nil
+
 	case signatureVerifyResultMsg:
 		if msg.Err != "" {
 			a.setFeedback("Signature verification failed: " + msg.Err)
@@ -484,6 +496,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Async close uncovers the task list — resume a paused marquee now.
 		return a, a.ensureMarqueeTicking()
 
+	case cookieImportResultMsg:
+		// IsImporting, not IsVisible: the overlay that gets this result must be
+		// the one that STARTED it. Esc during a slow import and then R I again
+		// leaves a visible dialog that is a fresh path prompt, and the first
+		// import's outcome landing on it would describe a different file.
+		//
+		// The answer still gets delivered, on the feedback line — the import is
+		// not cancellable, so Esc closed the place the answer was going to be
+		// written and nothing else. Same words as the overlay's rows, from the
+		// same helper; outcomes and verdicts only, never cookie content.
+		if !a.cookieImportDlg.IsImporting() {
+			a.setFeedback(importResultSummary(msg.Result, msg.Err))
+			return a, nil
+		}
+		a.cookieImportDlg.SetResult(msg.Result, msg.Err)
+		return a, nil
+
 	case createTrimResultMsg:
 		a.trimInProgress = false
 		if a.trimDlg.IsVisible() {
@@ -529,6 +558,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case setWatchedResultMsg:
+		// Row updates arrive via the normal DB subscriber path:
+		// UpdateJobFields fires OnJobUpdate, BatchSetWatched fires
+		// OnJobsChange. This just reports completion.
+		if msg.Err != nil {
+			a.setFeedback("Watched update failed: " + msg.Err.Error())
+			return a, nil
+		}
+		verb := "Marked"
+		if !msg.Watched {
+			verb = "Unmarked"
+		}
+		a.setFeedback(fmt.Sprintf("%s %d job(s) watched", verb, msg.Count))
+		return a, nil
+
 	case fetchOrphansResultMsg:
 		// A files-fetch failure is non-fatal: still show any loaded history,
 		// with the error surfaced inline (see SetFilesError).
@@ -564,6 +608,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case bulkOrphanResultMsg:
+		// Unlike the single-item arms above, a sweep doesn't know which
+		// entries survived beyond the named failures, so it re-fetches both
+		// sources (the same commands "R" uses) rather than guessing which
+		// ones to remove from the local slices.
+		a.filesDlg.SetBulkResult(msg.Deleted, msg.Failures)
+		return a, tea.Batch(a.fetchOrphansCmd(), a.fetchOrphanedHistoryCmd())
+
 	case fetchClientTokensResultMsg:
 		if msg.Err != "" {
 			a.clientTokensDlg.SetError(msg.Err)
@@ -571,6 +623,31 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmd := a.clientTokensDlg.SetTokens(msg.Tokens)
 		return a, cmd
+
+	case ytdlpStatusMsg:
+		// Visible-only, like every other overlay result: a status that lands
+		// after Esc has nowhere to go, and the chord re-reads on open.
+		if !a.ytdlpDlg.IsVisible() {
+			return a, nil
+		}
+		if msg.Err != nil {
+			a.ytdlpDlg.SetError(msg.Err.Error())
+			return a, nil
+		}
+		a.ytdlpDlg.SetStatus(msg.Info)
+		return a, nil
+
+	case ytdlpInstallResultMsg:
+		if !a.ytdlpDlg.IsVisible() {
+			return a, nil
+		}
+		if msg.Err != nil {
+			a.ytdlpDlg.SetError("Install failed: " + msg.Err.Error())
+			return a, nil
+		}
+		// Re-read rather than assume: the install's own verdict is a nil
+		// error, and what the operator needs to see is the file it wrote.
+		return a, a.ytdlpStatusCmd()
 
 	case deleteClientTokenResultMsg:
 		if msg.Err != "" {
@@ -1186,6 +1263,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	if a.importDlg.IsVisible() {
 		return a.importDlg.UpdateComponents(msg)
 	}
+	if a.cookieImportDlg.IsVisible() {
+		return a.cookieImportDlg.UpdateComponents(msg)
+	}
 	if a.addVideo.IsVisible() {
 		return a.addVideo.UpdateComponents(msg)
 	}
@@ -1197,6 +1277,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	if a.clientTokensDlg.IsVisible() {
 		return a.clientTokensDlg.UpdateComponents(msg)
+	}
+	if a.ytdlpDlg.IsVisible() {
+		return a.ytdlpDlg.UpdateComponents(msg)
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {

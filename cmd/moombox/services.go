@@ -1181,12 +1181,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// what the operator is told.
 		//
 		// context.Background rather than refreshCtx, which is still alive here:
-		// uniformity with the other four sites. Two of them have no caller
-		// context to reach for at all; the two that do — runCookieRecovery's
-		// ctx and the Web wizard finish handler's req.Context() — hold a budget
-		// that belongs to their own gesture, not to a fingerprint comparison that must not be
-		// cancelled by its caller's teardown. The re-check has to outlive
-		// nothing.
+		// uniformity with the other five sites. One of them — the
+		// OnPassCompleted hook above — has no caller context to reach for at
+		// all; every one that does (runCookieRecovery's ctx, R F's refreshCtx,
+		// the TUI wizard finish's and the TUI cookie-file import's) holds a
+		// budget that belongs to its own gesture, not to a fingerprint
+		// comparison that must not be cancelled by its caller's teardown. The
+		// re-check has to outlive nothing.
 		defer func() {
 			if result.Ran {
 				recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "the job-triggered cookie refresh", "platform", platform)

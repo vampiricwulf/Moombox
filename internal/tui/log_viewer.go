@@ -129,6 +129,25 @@ func (m *LogViewerModel) AddLines(batch []string) {
 	}
 }
 
+// Clear empties the view: history, filtered lines, and any search. The
+// level filter is kept — it is a preference, not content.
+func (m *LogViewerModel) Clear() {
+	m.lines = nil
+	m.searching = false
+	m.searchInput.SetValue("")
+	m.searchQuery = ""
+	m.searchRegex = nil
+	m.matchCount = 0
+	m.viewport.ClearHighlights()
+	m.rebuildFiltered()
+	// setAutoScroll (not a direct field assignment) so the viewport height
+	// is recalculated when this un-pauses — it owns the pause-hint row (see
+	// resizeViewport), and skipping that leaves a stale short viewport if
+	// the log was paused (scrolled up) when cleared.
+	m.setAutoScroll(true)
+	m.viewport.GotoTop()
+}
+
 // SetSize updates the panel dimensions.
 func (m *LogViewerModel) SetSize(w, h int) {
 	m.width = w

@@ -409,10 +409,13 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | Chord | Action |
 |-------|--------|
 | A A | Add video |
-| A I | Import archive |
-| A R | Retry failed/cancelled job |
+| A Z | Import archive |
+| A R | Resume job |
+| A I | Reinitialize job |
+| A M M | Mux job from existing segments (confirm) |
 | A C C | Cancel active job (confirm) |
 | A D D | Delete job (confirm) |
+| A W | Toggle watched (Finished jobs) |
 | A T | Trim finished video |
 | A O | Browse orphaned files |
 | A K | Manage client tokens |
@@ -421,18 +424,26 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 
 | Chord | Action |
 |-------|--------|
+| R B | Re-scan feed history |
 | R C | Recheck cookie authentication |
 | R F | Refresh cookies from browser |
+| R L | Cookie login (browser) |
+| R I | Import cookie file (path prompt) |
+| R Y | yt-dlp plugin status / install |
 | R V | Check for updates |
+| R M | Check monitors now |
 | R N | View release notes for pending update |
 | R U | Apply pending update |
+| R S | Verify signature |
 | R P P | Restart program (confirm) |
 
 **Open (O)**
 
 | Chord | Action |
 |-------|--------|
+| O C | Copy stream URL to clipboard |
 | O F | Open output/staging folder |
+| O G | Open GitHub page |
 | O S | Open stream page in browser |
 | O W | Open web dashboard |
 
@@ -447,6 +458,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | Tab | Switch focus between Tasks/Details/Logs |
 | ` | Open settings |
 | ? | Toggle help overlay |
+| c | Clear log view (log panel focused) |
 
 **Navigation**: Up/Down to select/scroll, PgUp/PgDn for log pages, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
 

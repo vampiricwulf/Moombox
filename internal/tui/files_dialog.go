@@ -172,6 +172,13 @@ type FilesDialogModel struct {
 	actionErr       string // transient error from a delete; the list stays visible
 	feedbackMsg     string
 
+	// Section-wide delete-all confirm (A), distinct from the per-item confirm
+	// (D) above. deleteAllSection is "files" or "history" — whichever half was
+	// armed — so a cursor move to the other half or elsewhere disarms it.
+	deleteAllArmed   bool
+	deleteAllTimer   time.Time
+	deleteAllSection string
+
 	// Two async sources feed one list: orphaned files and orphaned history.
 	files         []OrphanedFileEntry
 	history       []OrphanedHistoryEntry
@@ -224,6 +231,9 @@ func (m *FilesDialogModel) Open() {
 	m.list.SetItems(nil)
 	m.deleteConfirmID = ""
 	m.confirmTimer = time.Time{}
+	m.deleteAllArmed = false
+	m.deleteAllSection = ""
+	m.deleteAllTimer = time.Time{}
 	m.filesErr = ""
 	m.historyErr = ""
 	m.actionErr = ""
@@ -250,7 +260,11 @@ func (m *FilesDialogModel) SetSize(w, h int) {
 	m.height = h
 	boxW := max(min(80, w-4), 40)
 	boxH := max(min(24, h-4), 10)
-	listH := max(boxH-6, 1)
+	// boxH-7, not -6: the fixed rows around the list are the title, a blank,
+	// two blank+message rows and the footer, and centerBox never truncates —
+	// one row of slack short and a bulk result renders past the last line the
+	// terminal has.
+	listH := max(boxH-7, 1)
 	m.list.SetSize(boxW-2, listH)
 }
 
@@ -319,6 +333,43 @@ func (m *FilesDialogModel) SetHistoryError(msg string) tea.Cmd {
 // list, which remains valid.
 func (m *FilesDialogModel) SetActionError(msg string) {
 	m.actionErr = msg
+	m.feedbackMsg = ""
+}
+
+// SetBulkResult reports the outcome of a section-wide delete-all sweep: how
+// many entries were deleted, and — when any per-item call failed — names the
+// failures instead of silently dropping them. Named failures are capped at
+// two; the rest are summarized by count.
+//
+// It writes ONE message, never both: every other writer in this file keeps
+// "either the error or the feedback" (SetActionError clears feedbackMsg, the
+// D arm clears actionErr), and the box's row budget is sized for exactly one
+// of them. The count goes into the error line when there are failures because
+// a sweep that partly failed is one outcome, not two.
+//
+// The line is truncated to the box's own content width, with the "…and N more"
+// tail preserved: the failure names are arbitrary file paths, and a wrapped
+// message row is the row that pushes the bottom border off the terminal.
+// The list itself is refreshed separately by the caller so it reflects which
+// entries actually survived.
+func (m *FilesDialogModel) SetBulkResult(deleted int, failures []string) {
+	if len(failures) == 0 {
+		m.feedbackMsg = fmt.Sprintf("Deleted %d", deleted)
+		m.actionErr = ""
+		return
+	}
+	shown := failures
+	more := ""
+	if len(failures) > 2 {
+		shown = failures[:2]
+		more = fmt.Sprintf(" …and %d more", len(failures)-2)
+	}
+	prefix := fmt.Sprintf("Deleted %d · %d failed: ", deleted, len(failures))
+	// The box width View() computes, less its border and the two-space indent
+	// every message row carries.
+	contentW := max(max(min(80, m.width-4), 40)-4, 24)
+	budget := max(contentW-lipgloss.Width(prefix)-lipgloss.Width(more), 8)
+	m.actionErr = prefix + truncateString(strings.Join(shown, "; "), budget) + more
 	m.feedbackMsg = ""
 }
 
@@ -394,13 +445,23 @@ func (m *FilesDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 // SpinnerInit returns the spinner's initial tick command.
 func (m *FilesDialogModel) SpinnerInit() tea.Cmd { return spinnerTickCmd(m.spinner) }
 
-// HandleKey processes key input. Returns action string and optional command:
-// "close", "refresh", "delete", or "" for no action.
-func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
-	// Confirmation timeout check
+// HandleKey processes key input. Returns an action string and, depending on
+// the action, either a tea.Cmd (list navigation) or a payload the caller must
+// type-assert: "close", "refresh", "delete", "delete-history",
+// "delete-all-files"/"delete-all-history" (payload []string — every path or
+// video ID in the section), or "" for no action.
+func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
+	// Confirmation timeout check — both confirms, or the bulk hint outlives
+	// its own 3 s window and stands until a navigation key happens by.
 	if m.deleteConfirmID != "" && !m.confirmTimer.IsZero() && time.Now().After(m.confirmTimer) {
 		m.deleteConfirmID = ""
 		m.confirmTimer = time.Time{}
+		m.feedbackMsg = ""
+	}
+	if m.deleteAllArmed && !m.deleteAllTimer.IsZero() && time.Now().After(m.deleteAllTimer) {
+		m.deleteAllArmed = false
+		m.deleteAllSection = ""
+		m.deleteAllTimer = time.Time{}
 		m.feedbackMsg = ""
 	}
 
@@ -417,11 +478,52 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 		m.filesLoaded = false
 		m.historyLoaded = false
 		return "refresh", nil
+	case "a", "A":
+		section, count := m.currentSection()
+		if count == 0 {
+			return "", nil
+		}
+		m.actionErr = "" // starting a fresh sweep clears any prior failure
+		// A section sweep and a single-item delete are different questions;
+		// arming one must retract the other rather than leave two live confirms
+		// with one hint between them.
+		m.deleteConfirmID = ""
+		m.confirmTimer = time.Time{}
+		if m.deleteAllArmed && m.deleteAllSection == section && !m.deleteAllTimer.IsZero() && time.Now().Before(m.deleteAllTimer) {
+			m.deleteAllArmed = false
+			m.deleteAllSection = ""
+			m.feedbackMsg = ""
+			if section == "files" {
+				paths := make([]string, 0, len(m.files))
+				for _, f := range m.files {
+					paths = append(paths, f.Path)
+				}
+				return "delete-all-files", paths
+			}
+			ids := make([]string, 0, len(m.history))
+			for _, h := range m.history {
+				ids = append(ids, h.VideoID)
+			}
+			return "delete-all-history", ids
+		}
+		m.deleteAllArmed = true
+		m.deleteAllSection = section
+		m.deleteAllTimer = time.Now().Add(3 * time.Second)
+		noun := "orphaned files"
+		if section == "history" {
+			noun = "history entries"
+		}
+		m.feedbackMsg = fmt.Sprintf("Press A again to delete all %d %s", count, noun)
+		return "", nil
 	case "d", "D":
 		if len(m.list.Items()) == 0 {
 			return "", nil
 		}
 		m.actionErr = "" // starting a fresh delete clears any prior failure
+		// The mirror of the A arm: a single-item confirm retracts the bulk one.
+		m.deleteAllArmed = false
+		m.deleteAllSection = ""
+		m.deleteAllTimer = time.Time{}
 		// Files: two-press confirm, returns "delete" (routed to file deletion).
 		if f := m.SelectedFile(); f != nil {
 			if m.deleteConfirmID == f.Path && !m.confirmTimer.IsZero() && time.Now().Before(m.confirmTimer) {
@@ -454,6 +556,8 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 	switch key {
 	case keyUp, keyDown, keyPgUp, keyPgDown, keyHome, keyEnd:
 		m.deleteConfirmID = ""
+		m.deleteAllArmed = false
+		m.deleteAllSection = ""
 		m.feedbackMsg = ""
 	}
 
@@ -475,6 +579,20 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 		return "", cmd
 	}
 	return "", nil
+}
+
+// currentSection reports which half of the combined list the cursor is in —
+// "files" or "history" — and how many entries that half holds. Returns ""
+// when the cursor is on the non-selectable divider or nothing is selected, so
+// the A-to-delete-all sweep has nothing to arm.
+func (m *FilesDialogModel) currentSection() (string, int) {
+	if m.SelectedFile() != nil {
+		return "files", len(m.files)
+	}
+	if m.SelectedHistory() != nil {
+		return "history", len(m.history)
+	}
+	return "", 0
 }
 
 // loadErrorText composes a single message from the two independent fetch
@@ -538,7 +656,9 @@ func (m *FilesDialogModel) View() string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("↑↓: Navigate | D: Delete | R: Refresh | Esc: Close"))
+	// 62 columns: at 80 the content width is 74, and the longer wording wrapped
+	// onto a second row. The arm hint already names what "all" covers.
+	lines = append(lines, DimStyle.Render("↑↓: Navigate | D: Delete | A: Delete all | R: Refresh | Esc: Close"))
 
 	content := strings.Join(lines, "\n")
 

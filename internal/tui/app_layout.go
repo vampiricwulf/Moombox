@@ -59,9 +59,11 @@ func (a *App) recalcLayout() {
 	a.help.SetSize(a.width, a.height)
 	a.addVideo.SetSize(a.width, a.height)
 	a.importDlg.SetSize(a.width, a.height)
+	a.cookieImportDlg.SetSize(a.width, a.height)
 	a.trimDlg.SetSize(a.width, a.height)
 	a.filesDlg.SetSize(a.width, a.height)
 	a.clientTokensDlg.SetSize(a.width, a.height)
+	a.ytdlpDlg.SetSize(a.width, a.height)
 	a.setupWiz.SetSize(a.width, a.height)
 	a.ffmpegCheck.SetSize(a.width, a.height)
 	a.actionMenu.SetSize(a.width, a.height)
@@ -113,6 +115,9 @@ func (a *App) View() tea.View {
 	if a.importDlg.IsVisible() {
 		return a.viewWithMode(a.importDlg.View())
 	}
+	if a.cookieImportDlg.IsVisible() {
+		return a.viewWithMode(a.cookieImportDlg.View())
+	}
 	if a.addVideo.IsVisible() {
 		return a.viewWithMode(a.addVideo.View())
 	}
@@ -124,6 +129,9 @@ func (a *App) View() tea.View {
 	}
 	if a.clientTokensDlg.IsVisible() {
 		return a.viewWithMode(a.clientTokensDlg.View())
+	}
+	if a.ytdlpDlg.IsVisible() {
+		return a.viewWithMode(a.ytdlpDlg.View())
 	}
 
 	// Sync status bar state before rendering
