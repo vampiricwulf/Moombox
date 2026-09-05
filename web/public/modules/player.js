@@ -13,6 +13,7 @@ import {
   dividerLabelFor,
 } from "./chat-timeline.js";
 import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
+import { letterboxStage, rowsFor, sameStage, nextGeometry, NICO_GEO_SETTLE_MS } from "./nico-geometry.js";
 
 const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
 
@@ -32,12 +33,6 @@ const NICO_MAX_LATENESS_MS = 2000;  // a message not placed within 2 s of ENTERI
 const NICO_LANE_GAP_MS = 150;       // spacing buffer between consecutive occupants of a lane
 const NICO_MAX_PER_TICK = 20;       // DOM work cap for NEW messages per timeupdate tick
 const NICO_SEED_MAX_FALLBACK = 30;  // seed cap when the row count is unknown
-
-// WALL-CLOCK milliseconds (not media time): how long the stage box must hold
-// still before a changed geometry is committed. A window drag or an animated
-// fullscreen transition is a continuous stream of REAL changes, and committing
-// each one would clear the stage every frame.
-const NICO_GEO_SETTLE_MS = 120;
 
 function announcementColorClass(color) {
   return ANNOUNCEMENT_COLORS.has(color) ? color : "primary";
@@ -1432,20 +1427,16 @@ export class PlayerController {
     // the largest scale that fits, so a portrait video in a landscape box gets
     // pillarbox bars (and vice versa). Before `loadedmetadata` the intrinsic
     // size is unknown (0) and the element box is the best available stage.
-    const bw = video.clientWidth, bh = video.clientHeight;
-    let w = bw, h = bh, left = video.offsetLeft, top = video.offsetTop;
-    const vw = video.videoWidth, vh = video.videoHeight;
-    if (vw > 0 && vh > 0 && bw > 0 && bh > 0) {
-      const scale = Math.min(bw / vw, bh / vh);
-      w = Math.round(vw * scale);
-      h = Math.round(vh * scale);
-      left += Math.round((bw - w) / 2);
-      top += Math.round((bh - h) / 2);
-    }
+    const stage = letterboxStage({
+      boxW: video.clientWidth, boxH: video.clientHeight,
+      offsetLeft: video.offsetLeft, offsetTop: video.offsetTop,
+      videoW: video.videoWidth, videoH: video.videoHeight,
+    });
     // Never write a zero-sized box: the guard above would then refuse every
     // later measurement, wedging the overlay shut. Keep the last good geometry
     // and wait for the next resize instead.
-    if (w <= 0 || h <= 0) return;
+    if (!stage) return;
+    const { left, top, w, h } = stage;
     Object.assign(overlay.style, { left: `${left}px`, top: `${top}px`, width: `${w}px`, height: `${h}px` });
 
     // Measure one real line box AFTER the box is applied — the font is sized in
@@ -1458,9 +1449,9 @@ export class PlayerController {
     const rowH = probe.offsetHeight || 24;
     probe.remove();
 
-    const rows = Math.max(1, Math.floor(h / rowH));
+    const rows = rowsFor(h, rowH);
     const geo = this._nicoGeo;
-    if (geo && geo.width === w && geo.height === h && geo.rows === rows) {
+    if (sameStage(geo, w, h, rows)) {
       // R11: nothing to commit. Also drop a commit armed earlier in the same
       // gesture — a drag that returned to its starting size would otherwise
       // install a stage that is no longer on screen.
@@ -1495,9 +1486,9 @@ export class PlayerController {
     const overlay = document.getElementById("player-nico-overlay");
     if (!overlay || overlay.clientWidth === 0 || overlay.clientHeight === 0) return;
     const geo = this._nicoGeo;
-    if (geo && geo.width === w && geo.height === h && geo.rows === rows) return;
+    if (sameStage(geo, w, h, rows)) return;
 
-    this._nicoGeo = { width: w, height: h, laneHeight: h / rows, rows, version: (geo?.version || 0) + 1 };
+    this._nicoGeo = nextGeometry(geo, w, h, rows);
     this._lanes.reset(rows);
     // Exactly one clear on this path: _reanchorNicoAt clears before re-seeding
     // (and clearNicoOverlay empties _nicoPending, so no cached w/h measured at
