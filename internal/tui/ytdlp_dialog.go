@@ -129,20 +129,27 @@ func (m *YtdlpDialogModel) View() string {
 	boxH := max(min(m.height-4, 20), 12)
 
 	var b strings.Builder
-	b.WriteString(TitleStyle.Render("yt-dlp Plugin") + "\n\n")
+	b.WriteString(TitleStyle.Render("yt-dlp Plugin"))
+	b.WriteString("\n\n")
 
 	switch {
 	case m.installing:
-		b.WriteString("  " + m.spinner.View() + " Installing...\n")
+		b.WriteString("  ")
+		b.WriteString(m.spinner.View())
+		b.WriteString(" Installing...\n")
 	case m.loading:
-		b.WriteString("  " + m.spinner.View() + " Loading...\n")
+		b.WriteString("  ")
+		b.WriteString(m.spinner.View())
+		b.WriteString(" Loading...\n")
 	case m.errorMsg != "":
-		b.WriteString(ErrorStyle.Render("  "+m.errorMsg) + "\n")
+		b.WriteString(ErrorStyle.Render("  " + m.errorMsg))
+		b.WriteString("\n")
 	default:
 		b.WriteString(m.statusRows())
 	}
 
-	b.WriteString("\n" + DimStyle.Render("I: Install / reinstall   R: Refresh   Esc: Close"))
+	b.WriteString("\n")
+	b.WriteString(DimStyle.Render("I: Install / reinstall   R: Refresh   Esc: Close"))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -181,7 +188,8 @@ func (m *YtdlpDialogModel) statusRows() string {
 		// Short on purpose: the label column plus this value has to fit the
 		// 66-column content box, or the sentence wraps with a dangling second
 		// line at every width up to ~88.
-		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Port mismatch:", fmt.Sprintf("yes — I rewrites it for port %d", m.info.CurrentPort))) + "\n")
+		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Port mismatch:", fmt.Sprintf("yes — I rewrites it for port %d", m.info.CurrentPort))))
+		b.WriteString("\n")
 	}
 	if m.info.ExtractedPath != "" {
 		b.WriteString(ytdlpRow("Plugin file:", m.info.ExtractedPath))

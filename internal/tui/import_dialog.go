@@ -263,8 +263,10 @@ func (m *ImportDialogModel) View() string {
 		content.WriteString(DimStyle.Render("Tab: Switch field  Enter: Import  Esc: Back"))
 
 	case 2:
-		content.WriteString(TitleStyle.Render("Importing...") + "\n\n")
-		content.WriteString(m.spinner.View() + " Please wait...")
+		content.WriteString(TitleStyle.Render("Importing..."))
+		content.WriteString("\n\n")
+		content.WriteString(m.spinner.View())
+		content.WriteString(" Please wait...")
 	}
 
 	borderColor := ColorGreen
