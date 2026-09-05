@@ -157,6 +157,17 @@ func StatusColor(status string) color.Color {
 	}
 }
 
+// StatusLabel is the text the TUI shows for a job status. Every status is
+// its own name except COOKIES?, which reads "Auth Required" — the wording the
+// Web UI already uses for that state (2026-09-04 improvement chain, Q5).
+// Colour and icon keep keying off the raw status.
+func StatusLabel(status string) string {
+	if database.JobStatus(status) == database.StatusCookies {
+		return "Auth Required"
+	}
+	return status
+}
+
 // StatusIcon returns a display icon for a job status.
 func StatusIcon(status string) string {
 	switch database.JobStatus(status) {

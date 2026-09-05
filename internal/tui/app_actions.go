@@ -567,7 +567,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action"},
 		{Chord: "A Z", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
 		{Chord: "A R", Label: "Resume Job", HintLabel: "Resume", Category: "Action", NeedsJob: true, SupportsBatch: true,
-			DisabledReason: "no resumable jobs",
+			DisabledReason: "no jobs to resume",
 			JobFilter: func(j *database.Job) bool {
 				canResume := (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies || (j.Status == database.StatusFinished && j.IncompleteTail)) &&
 					j.Platform == "youtube"
@@ -577,7 +577,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 				return false
 			}},
 		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true, SupportsBatch: true,
-			DisabledReason: "no retriable jobs",
+			DisabledReason: "no jobs to reinitialize",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
 			}},
@@ -617,7 +617,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		items = append(items, ActionMenuItem{Chord: "R C", Label: "Recheck Cookies", HintLabel: "Cookies", Category: "Request"})
 	}
 	if a.OnForceRefreshCookies != nil {
-		items = append(items, ActionMenuItem{Chord: "R F", Label: "Force Cookie Refresh", HintLabel: "Force Refresh", Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R F", Label: "Refresh Cookies from Browser", HintLabel: "Refresh Cookies", Category: "Request"})
 	}
 	// R L: open the setup wizard's cookie step alone, so an interactive login
 	// is reachable after first run. Gated on the callback for the same reason
