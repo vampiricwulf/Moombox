@@ -28,7 +28,7 @@ func TestParityButtonsArePinned(t *testing.T) {
 	// would also pass if streamUrl were merely used, never imported): find
 	// the utils.js import line specifically and require streamUrl inside it.
 	utilsImportLine := ""
-	for _, line := range strings.Split(appJS, "\n") {
+	for line := range strings.SplitSeq(appJS, "\n") {
 		if strings.HasPrefix(line, "import {") && strings.Contains(line, `from "./modules/utils.js"`) {
 			utilsImportLine = line
 			break

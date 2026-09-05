@@ -1079,7 +1079,7 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 		title += strings.Repeat(" ", titleWidth-tw)
 	}
 
-	// Build styled output - order: selector | icon | progress | [TW] | title (match TS)
+	// Build styled output - order: selector | icon | progress | [TW] | watched-glyph | title (match TS)
 	var parts []string
 
 	// Selector (with batch selection marker)

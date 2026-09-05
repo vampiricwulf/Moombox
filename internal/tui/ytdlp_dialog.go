@@ -8,7 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/vampiricwulf/Moombox/internal/web/routes"
+	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
 // YtdlpDialogModel is the R Y overlay: what the yt-dlp PO-token plugin looks
@@ -16,9 +16,8 @@ import (
 // written for is still the port this process serves on — plus the one key
 // that fixes the last of those.
 //
-// It renders routes.YtdlpPluginInfo, the SAME value GET
-// /api/ytdlp-plugin/status returns, rather than a terminal-shaped
-// re-derivation: "installed" and "mismatched" are verdicts about a file on
+// It renders ytdlpplugin.Info, the SAME value GET /api/ytdlp-plugin/status
+// returns, rather than a terminal-shaped re-derivation: "installed" and "mismatched" are verdicts about a file on
 // disk, and the dashboard and the TUI disagreeing about them would be a bug
 // with no owner.
 //
@@ -31,7 +30,7 @@ type YtdlpDialogModel struct {
 	width, height int
 	loading       bool
 	installing    bool
-	info          routes.YtdlpPluginInfo
+	info          ytdlpplugin.Info
 	errorMsg      string
 	spinner       spinner.Model
 }
@@ -72,7 +71,7 @@ func (m *YtdlpDialogModel) SetInstalling() {
 }
 
 // SetStatus renders a freshly read status, ending whichever wait was running.
-func (m *YtdlpDialogModel) SetStatus(info routes.YtdlpPluginInfo) {
+func (m *YtdlpDialogModel) SetStatus(info ytdlpplugin.Info) {
 	m.loading = false
 	m.installing = false
 	m.errorMsg = ""
@@ -171,15 +170,18 @@ func (m *YtdlpDialogModel) statusRows() string {
 	b.WriteString(ytdlpRow("Installed:", installed))
 	b.WriteString(ytdlpRow("Plugin dir:", ytdlpValueOrDash(m.info.PluginDir)))
 	b.WriteString(ytdlpRow("Moombox port:", fmt.Sprintf("%d (https: %s)", m.info.CurrentPort, https)))
-	// Gated on the PORT, not on Installed: InstalledPort is non-zero only
-	// when a plugin file actually parsed, and it is the number the mismatch
-	// row is about — a mismatch whose other half is not on screen is not an
-	// explanation.
-	if m.info.InstalledPort > 0 {
-		b.WriteString(ytdlpRow("Plugin points:", fmt.Sprintf("%d", m.info.InstalledPort)))
+	// Gated on the PORT, not on Installed: InstalledPort is non-nil only when
+	// a plugin file actually parsed, and it is the number the mismatch row is
+	// about — a mismatch whose other half is not on screen is not an
+	// explanation. The nil case is also the wire's "installedPort": null.
+	if m.info.InstalledPort != nil {
+		b.WriteString(ytdlpRow("Plugin points:", fmt.Sprintf("%d", *m.info.InstalledPort)))
 	}
 	if m.info.PortMismatch {
-		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Port mismatch:", "yes — press I to rewrite the plugin for the current port")) + "\n")
+		// Short on purpose: the label column plus this value has to fit the
+		// 66-column content box, or the sentence wraps with a dangling second
+		// line at every width up to ~88.
+		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Port mismatch:", fmt.Sprintf("yes — I rewrites it for port %d", m.info.CurrentPort))) + "\n")
 	}
 	if m.info.ExtractedPath != "" {
 		b.WriteString(ytdlpRow("Plugin file:", m.info.ExtractedPath))

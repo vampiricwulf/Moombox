@@ -2,117 +2,49 @@ package routes
 
 import (
 	"encoding/json"
-	"os"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
-// redirectPluginDir points ytdlpPluginDir() at a temp directory for the
-// duration of the test, so nothing here writes into the operator's real
-// yt-dlp plugin folder. The function reads only the environment on the two
-// platforms CI runs (APPDATA on Windows, XDG_CONFIG_HOME elsewhere); darwin
-// resolves the home directory instead, which a test must not rewrite, so the
-// test skips there rather than pretending.
-func redirectPluginDir(t *testing.T) string {
-	t.Helper()
-	// Cleaned: GOTMPDIR can carry forward slashes on Windows, and
-	// ytdlpPluginDir's filepath.Join normalises them, so the raw TempDir
-	// string is not a prefix of its own subdirectory.
+// TestYtdlpStatusRouteReportsNullPortWhenNotInstalled drives the seven-key
+// wire contract through the actual handler, not just the helper: settings.js's
+// loadYtdlpPluginStatus reads all seven, and `installedPort` must arrive as a
+// JSON null (never 0) when no plugin file parsed — a 0 would read as a real
+// port to anything stricter than a truthiness test.
+//
+// The plugin dir is redirected the same way the ytdlpplugin tests do it (the
+// two env vars ytdlpplugin.Dir consults), so this never reads or writes the
+// operator's real yt-dlp plugin folder; darwin resolves the home directory
+// instead and is skipped rather than rewritten.
+func TestYtdlpStatusRouteReportsNullPortWhenNotInstalled(t *testing.T) {
 	dir := filepath.Clean(t.TempDir())
 	t.Setenv("APPDATA", dir)
 	t.Setenv("XDG_CONFIG_HOME", dir)
-	got := ytdlpPluginDir()
-	if got == "" || !strings.HasPrefix(got, dir) {
-		t.Skipf("ytdlpPluginDir() is not redirectable on %s (got %q)", runtime.GOOS, got)
-	}
-	return got
-}
-
-// TestYtdlpPluginStatusReportsInstallAndPortMismatch pins the computation the
-// GET route and the TUI's R Y overlay now share: absent → installed → the
-// same file read against a different port.
-func TestYtdlpPluginStatusReportsInstallAndPortMismatch(t *testing.T) {
-	pluginDir := redirectPluginDir(t)
-
-	info, err := YtdlpPluginStatus(7740, false)
-	if err != nil {
-		t.Fatalf("YtdlpPluginStatus on an empty dir: %v", err)
-	}
-	if info.Installed {
-		t.Error("an empty plugin dir reports Installed")
-	}
-	if info.PluginDir != pluginDir {
-		t.Errorf("PluginDir = %q, want %q", info.PluginDir, pluginDir)
-	}
-	if info.CurrentPort != 7740 || info.HTTPSEnabled {
-		t.Errorf("CurrentPort/HTTPSEnabled = %d/%v, want 7740/false", info.CurrentPort, info.HTTPSEnabled)
-	}
-	if want := filepath.Join(pluginDir, "moombox"); info.ExtractedPath != want {
-		t.Errorf("ExtractedPath = %q, want %q", info.ExtractedPath, want)
-	}
-	if info.PortMismatch {
-		t.Error("a plugin that is not installed cannot have a port mismatch")
+	if got := ytdlpplugin.Dir(); got == "" || !strings.HasPrefix(got, dir) {
+		t.Skipf("ytdlpplugin.Dir() is not redirectable on %s (got %q)", runtime.GOOS, got)
 	}
 
-	if err := InstallYtdlpPlugin(7740, false); err != nil {
-		t.Fatalf("InstallYtdlpPlugin: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor", "getpot_moombox.py")); err != nil {
-		t.Fatalf("install wrote no plugin file: %v", err)
+	r := chi.NewRouter()
+	YtdlpRoutes(r, func() int { return 7740 }, false)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/ytdlp-plugin/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/ytdlp-plugin/status: want 200, got %d (%s)", rec.Code, rec.Body.String())
 	}
 
-	info, err = YtdlpPluginStatus(7740, false)
-	if err != nil {
-		t.Fatalf("YtdlpPluginStatus after install: %v", err)
-	}
-	if !info.Installed {
-		t.Error("the installed plugin is not reported as installed")
-	}
-	if info.InstalledPort != 7740 {
-		t.Errorf("InstalledPort = %d, want 7740", info.InstalledPort)
-	}
-	if info.PortMismatch {
-		t.Error("the plugin was written for this exact port and reports a mismatch")
-	}
-
-	// Same file, different live port — this is the state the overlay's I key
-	// exists to fix.
-	info, err = YtdlpPluginStatus(7741, false)
-	if err != nil {
-		t.Fatalf("YtdlpPluginStatus on the other port: %v", err)
-	}
-	if !info.Installed || info.InstalledPort != 7740 {
-		t.Errorf("Installed=%v InstalledPort=%d, want true/7740", info.Installed, info.InstalledPort)
-	}
-	if !info.PortMismatch {
-		t.Error("a plugin pointing at 7740 while the server runs on 7741 is not flagged")
-	}
-
-	// The scheme is half the mismatch: same port, HTTPS on.
-	info, err = YtdlpPluginStatus(7740, true)
-	if err != nil {
-		t.Fatalf("YtdlpPluginStatus with https: %v", err)
-	}
-	if !info.PortMismatch {
-		t.Error("an http plugin under an https server is not flagged")
-	}
-}
-
-// TestYtdlpPluginInfoJSONKeys holds the wire contract of
-// GET /api/ytdlp-plugin/status. The handler used to build the map inline; the
-// struct's tags are now the only thing keeping settings.js's seven reads
-// (loadYtdlpPluginStatus) pointed at real fields.
-func TestYtdlpPluginInfoJSONKeys(t *testing.T) {
-	blob, err := json.Marshal(YtdlpPluginInfo{})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
 	var m map[string]any
-	if err := json.Unmarshal(blob, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, rec.Body.String())
 	}
 	got := make([]string, 0, len(m))
 	for k := range m {
@@ -122,5 +54,14 @@ func TestYtdlpPluginInfoJSONKeys(t *testing.T) {
 	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "pluginDir", "portMismatch"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("JSON keys = %v, want %v", got, want)
+	}
+	if m["installed"] != false {
+		t.Errorf("installed = %v, want false on an empty plugin dir", m["installed"])
+	}
+	if v, ok := m["installedPort"]; !ok || v != nil {
+		t.Errorf("installedPort = %v (present=%v), want a present null", v, ok)
+	}
+	if m["currentPort"] != float64(7740) {
+		t.Errorf("currentPort = %v, want 7740 (the getter's value)", m["currentPort"])
 	}
 }

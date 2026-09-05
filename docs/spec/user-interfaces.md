@@ -222,14 +222,16 @@ The chord system is a three-state finite automaton:
 | Chord | Action | Requires Job | Confirm | Job Filter |
 |-------|--------|:------------:|:-------:|------------|
 | `A A` | Add Video dialog | No | No | — |
-| `A I` | Import Archive | No | No | — |
-| `A R` | Retry Job | Yes | No | Status is Error, Cancelled, or COOKIES? |
+| `A Z` | Import Archive | No | No | — |
+| `A R` | Resume Job | Yes | No | YouTube, staging files present, and status is Error, Cancelled, COOKIES?, or Finished with an incomplete tail |
+| `A I` | Reinitialize Job | Yes | No | Status is Error, Cancelled, or COOKIES? |
+| `A M` | Mux Job | Yes | Yes | Status is Cancelled or Error, and segment files are present |
 | `A C` | Cancel Job | Yes | Yes | Status is not Finished, Cancelled, or Error |
 | `A D` | Delete Job | Yes | Yes | Any job |
 | `A W` | Toggle Watched | Yes | No | Status is Finished |
 | `A T` | Trim Video | Yes | No | Status is Finished and has output file |
 | `A K` | Manage Client Tokens | No | No | Client tokens callback configured |
-| `A O` | Browse Orphaned Files | No | No | — |
+| `A O` | Browse Orphaned Items | No | No | — |
 
 **Request chords (R prefix):**
 
@@ -283,15 +285,15 @@ Overlays are full-screen or near-full-screen modal views that take over keyboard
 | Help | `?` | Displays all chords grouped by category with descriptions. Read-only. |
 | Action Menu | `M` | Command palette. Searchable list of all available actions. Selecting an item executes it. |
 | Add Video | `A A` | Multi-step form: (1) enter URL, (2) fetch and select format, (3) set timestamps, (4) confirm. Format fetch is async with a spinner. On error, auto-advances past format selection after a timeout. |
-| Import | `A I` | Zip import form with title and channel override fields. |
+| Import | `A Z` | Zip import form with title and channel override fields. |
 | Trim | `A T` | Clip creation. Enter start/end seconds. Encoding runs asynchronously with a progress callback that updates the UI. |
 | Orphaned Files & History | `A O` | Two sections in one list (with a divider): orphaned files in the output directory with no corresponding job, and orphaned processing-history rows (history entries with no matching job, which otherwise block re-discovery). Each section loads independently — a failure in one is shown inline without hiding the other. Delete with confirmation. `A` deletes every entry in the half the cursor is in (files or history) after the same two-press confirm as `D`; per-item failures are collected and listed in the dialog. |
 | Client Tokens | `A K` | List of persistent client authentication tokens. Delete individual tokens. |
 | Settings | `` ` `` | Full config editor built with the `huh` form framework. Supports full mouse interaction (click tabs, fields, toggles, cycle options, and action buttons). Action buttons at the bottom: `[ Save & Return ]` / `[ Return Without Saving ]` (when dirty), or `[ Return ]` (when clean). Presents a close confirmation when there are unsaved changes and the user attempts to dismiss. Smart dirty tracking: reverting a field back to its original value clears the dirty flag. Job detail panel renders clickable hyperlinks (OSC 8) for stream URLs and output paths. Both channel editors expose the four per-channel overrides (`num_desc_lookbehind`, `output_directory`, `archive_window_days`, `archive_slots`); blank means the global value, and the TUI editor now preserves every field it does not show (it rebuilt the channel from the visible fields before Arc B). |
 | Setup Wizard | First run, `R L` | Multi-step initial setup: configuration, FFmpeg check/install, yt-dlp plugin, cookie capture. Built with `huh`. `R L` opens the same overlay in **cookie-only** mode: the cookie step with no stages around it, `Esc` and the third row close it instead of advancing, and leaving cancels any browser it opened. |
 | FFmpeg Check | Setup flow | Validates FFmpeg is on PATH. Offers installation options if missing. On Linux, also shows the distro-appropriate package manager command (`apt`, `dnf`, `pacman`, etc.) from `GET /api/ffmpeg/install-suggestion`. |
-| yt-dlp Plugin | `R Y` | Async status overlay for the yt-dlp PO-token plugin (`YtdlpDialogModel`, `internal/tui/ytdlp_dialog.go`). Renders `routes.YtdlpPluginInfo` verbatim rather than re-deriving it for the terminal. `I` installs/reinstalls for the live port and reloads, `R` refreshes, `Esc` closes. |
-| Release Notes | `R N` | Shows release notes for the pending update (when an update is available) or the current version (fetched from GitHub). Rendered via `glamour` in the TUI. From inside: `U` applies the update, `Esc`/`Q` closes. Uses `bubbles/viewport` for scrolling. |
+| yt-dlp Plugin | `R Y` | Async status overlay for the yt-dlp PO-token plugin (`YtdlpDialogModel`, `internal/tui/ytdlp_dialog.go`). Renders `ytdlpplugin.Info` verbatim rather than re-deriving it for the terminal. `I` installs/reinstalls for the live port and reloads, `R` refreshes, `Esc` closes. |
+| Release Notes | `R N` | Shows release notes for the pending update (when an update is available) or the current version (fetched from GitHub). Rendered via `glamour` in the TUI. From inside: `U` applies the update, `Esc`/`Q` closes. Uses `bubbles/viewport` for scrolling. `S` skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`) and is offered only while the notes on screen are a pending update's. |
 
 ### Async Message Types
 
@@ -572,8 +574,6 @@ The two cookie blocks come from `routes`' own projections rather than being rebu
 |--------|------|-------|
 | `POST` | `/api/backfill/rescan` | Force a feed-history backfill re-scan of every configured YouTube channel (same operation as the TUI `R B` chord). Debounced to one accepted run per 30s — a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}`. Web: the "Re-scan Feed History" button in the Settings → Channels panel (`rescan-feeds-btn`, `settings.js` `rescanFeedHistory`). |
 
-**Job details.** A "Stream URL" row with its own copy button (`streamUrl` in `web/public/modules/utils.js`, the twin of the TUI's `O C`) appears whenever the job has or can derive a page URL.
-
 ### Configuration
 
 | Method | Path | Notes |
@@ -795,7 +795,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/ytdlp-plugin/status` | Check if the yt-dlp PO token plugin is installed. Computation shared with the TUI's `R Y` overlay via `YtdlpPluginStatus` (`internal/web/routes/ytdlp.go`), whose `YtdlpPluginInfo` struct tags are the seven-key wire contract `settings.js` `loadYtdlpPluginStatus` reads. |
+| `GET` | `/api/ytdlp-plugin/status` | Check if the yt-dlp PO token plugin is installed. The computation lives in `Status` (`internal/ytdlpplugin/ytdlpplugin.go`), a stdlib-only package outside the HTTP layer so the TUI's `R Y` overlay can share the answer without importing `routes`; `YtdlpPluginStatus` (`internal/web/routes/ytdlp.go`) is the shim this route calls, and its `YtdlpPluginInfo` alias's struct tags are the seven-key wire contract `settings.js` `loadYtdlpPluginStatus` reads. `installedPort` is `null` until a plugin is installed (and stays `null` if the installed file's URL line does not parse). |
 | `POST` | `/api/ytdlp-plugin/install` | Install the yt-dlp plugin to the user's yt-dlp config directory. |
 
 ### Setup
@@ -921,6 +921,7 @@ Every major feature exists in both UIs:
 | Orphaned files | `app.js` (inline) | `files_dialog.go` |
 | Client tokens | `app.js` (inline) | `client_tokens_dialog.go` |
 | yt-dlp plugin | Settings → Integrations card (`settings.js` `loadYtdlpPluginStatus`) | `YtdlpDialogModel` (`internal/tui/ytdlp_dialog.go`) |
+| Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`) |
 
 **Note on video playback:** The TUI cannot play video inline (it is a terminal). The `O W` chord opens the Web UI in the default browser, where the user can access the player. This is the intended design — video playback is a Web UI strength, and the TUI defers to it rather than attempting a degraded experience.
 

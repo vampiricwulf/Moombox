@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestWatchedGlyphIsCountedInTheRow(t *testing.T) {
 		t.Errorf("watched row lacks the glyph: %q", rowWatched)
 	}
 	for _, row := range []string{rowPlain, rowWatched} {
-		for _, line := range strings.Split(row, "\n") {
+		for line := range strings.SplitSeq(row, "\n") {
 			if w := runewidth.StringWidth(stripANSI(line)); w > 58 {
 				t.Errorf("row wraps: width %d > 58: %q", w, line)
 			}
@@ -71,5 +72,51 @@ func TestToggleWatchedChord(t *testing.T) {
 	}
 	if gotWatched != false {
 		t.Fatal("a watched job must toggle to unwatched")
+	}
+
+	// The batch path, which the single-job case above never reaches: a
+	// selection of three, only two of them Finished. The Downloading one must
+	// be filtered out (its row has no watched state to flip), and the flag is
+	// "watched unless every selected Finished job already is".
+	fin1 := &database.Job{ID: "f1", Status: database.StatusFinished}
+	fin2 := &database.Job{ID: "f2", Status: database.StatusFinished, Watched: true}
+	down := &database.Job{ID: "d1", Status: database.StatusDownloading}
+	app.taskList.SetJobs([]*database.Job{fin1, fin2, down})
+	for _, id := range []string{"f1", "f2", "d1"} {
+		app.taskList.ToggleSelection(id)
+	}
+	if got := app.taskList.SelectedCount(); got != 3 {
+		t.Fatalf("selected %d jobs, want 3 — the batch arm needs a selection", got)
+	}
+	gotIDs, gotWatched = nil, false
+	if _, cmd := app.dispatchAction("A W", nil); cmd != nil {
+		cmd()
+	}
+	// Sorted: SelectedIDs ranges a map, so only the SET is defined.
+	if got := slices.Sorted(slices.Values(gotIDs)); len(got) != 2 || got[0] != "f1" || got[1] != "f2" {
+		t.Fatalf("batch ids = %v, want [f1 f2] — the Downloading job must be filtered out", got)
+	}
+	if !gotWatched {
+		t.Error("one of the two Finished jobs is unwatched, so the batch must set watched")
+	}
+	if app.taskList.SelectedCount() != 0 {
+		t.Error("a fired batch must clear the selection")
+	}
+
+	// Both Finished jobs already watched: the batch flips the other way.
+	fin1.Watched = true
+	app.taskList.SetJobs([]*database.Job{fin1, fin2, down})
+	for _, id := range []string{"f1", "f2", "d1"} {
+		app.taskList.ToggleSelection(id)
+	}
+	gotIDs, gotWatched = nil, true
+	if _, cmd := app.dispatchAction("A W", nil); cmd != nil {
+		cmd()
+	}
+	if len(gotIDs) != 2 {
+		t.Fatalf("batch ids = %v, want the two Finished jobs", gotIDs)
+	}
+	if gotWatched {
+		t.Error("every selected Finished job was watched, so the batch must unwatch")
 	}
 }

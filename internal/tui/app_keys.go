@@ -78,7 +78,15 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.releaseNotesPopup.close()
 			return a, cmd
 		case "s", "S":
-			if a.updateAvailable == nil || a.OnDismissUpdate == nil {
+			// S skips exactly the version whose notes are on screen. The footer
+			// offers it only while pending is set, and this keys off the same
+			// flag: an UpdateStatusMsg landing while an arbitrary version's
+			// notes are open would otherwise let S permanently skip a release
+			// the operator has never seen, with no key on screen saying so.
+			if !a.releaseNotesPopup.pending || a.updateAvailable == nil || a.OnDismissUpdate == nil {
+				return a, nil
+			}
+			if a.updateAvailable.TagName != a.releaseNotesPopup.tag {
 				return a, nil
 			}
 			tag := a.updateAvailable.TagName
@@ -239,10 +247,8 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
-	// The whole KeyPressMsg, not the derived key string: this dialog owns a
-	// textinput and has to hand it the typed runes.
 	if a.cookieImportDlg.IsVisible() {
-		action, path := a.cookieImportDlg.HandleKey(msg)
+		action, path := a.cookieImportDlg.HandleKey(key)
 		if action == "import" {
 			a.cookieImportDlg.SetImporting()
 			return a, tea.Batch(a.importCookieFileCmd(path), a.cookieImportDlg.SpinnerInit())

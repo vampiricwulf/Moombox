@@ -412,6 +412,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | A Z | Import archive |
 | A R | Resume job |
 | A I | Reinitialize job |
+| A M M | Mux job from existing segments (confirm) |
 | A C C | Cancel active job (confirm) |
 | A D D | Delete job (confirm) |
 | A W | Toggle watched (Finished jobs) |
@@ -430,8 +431,10 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | R I | Import cookie file (path prompt) |
 | R Y | yt-dlp plugin status / install |
 | R V | Check for updates |
+| R M | Check monitors now |
 | R N | View release notes for pending update |
 | R U | Apply pending update |
+| R S | Verify signature |
 | R P P | Restart program (confirm) |
 
 **Open (O)**

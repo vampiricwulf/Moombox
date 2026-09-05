@@ -231,6 +231,9 @@ func (m *FilesDialogModel) Open() {
 	m.list.SetItems(nil)
 	m.deleteConfirmID = ""
 	m.confirmTimer = time.Time{}
+	m.deleteAllArmed = false
+	m.deleteAllSection = ""
+	m.deleteAllTimer = time.Time{}
 	m.filesErr = ""
 	m.historyErr = ""
 	m.actionErr = ""
@@ -257,7 +260,11 @@ func (m *FilesDialogModel) SetSize(w, h int) {
 	m.height = h
 	boxW := max(min(80, w-4), 40)
 	boxH := max(min(24, h-4), 10)
-	listH := max(boxH-6, 1)
+	// boxH-7, not -6: the fixed rows around the list are the title, a blank,
+	// two blank+message rows and the footer, and centerBox never truncates —
+	// one row of slack short and a bulk result renders past the last line the
+	// terminal has.
+	listH := max(boxH-7, 1)
 	m.list.SetSize(boxW-2, listH)
 }
 
@@ -332,22 +339,38 @@ func (m *FilesDialogModel) SetActionError(msg string) {
 // SetBulkResult reports the outcome of a section-wide delete-all sweep: how
 // many entries were deleted, and — when any per-item call failed — names the
 // failures instead of silently dropping them. Named failures are capped at
-// three so one enormous sweep can't blow out the dialog box; the rest are
-// summarized by count. The list itself is refreshed separately by the caller
-// so it reflects which entries actually survived.
+// two; the rest are summarized by count.
+//
+// It writes ONE message, never both: every other writer in this file keeps
+// "either the error or the feedback" (SetActionError clears feedbackMsg, the
+// D arm clears actionErr), and the box's row budget is sized for exactly one
+// of them. The count goes into the error line when there are failures because
+// a sweep that partly failed is one outcome, not two.
+//
+// The line is truncated to the box's own content width, with the "…and N more"
+// tail preserved: the failure names are arbitrary file paths, and a wrapped
+// message row is the row that pushes the bottom border off the terminal.
+// The list itself is refreshed separately by the caller so it reflects which
+// entries actually survived.
 func (m *FilesDialogModel) SetBulkResult(deleted int, failures []string) {
-	m.feedbackMsg = fmt.Sprintf("Deleted %d", deleted)
 	if len(failures) == 0 {
+		m.feedbackMsg = fmt.Sprintf("Deleted %d", deleted)
 		m.actionErr = ""
 		return
 	}
 	shown := failures
 	more := ""
-	if len(failures) > 3 {
-		shown = failures[:3]
-		more = fmt.Sprintf(" …and %d more", len(failures)-3)
+	if len(failures) > 2 {
+		shown = failures[:2]
+		more = fmt.Sprintf(" …and %d more", len(failures)-2)
 	}
-	m.actionErr = fmt.Sprintf("%d failed: %s%s", len(failures), strings.Join(shown, "; "), more)
+	prefix := fmt.Sprintf("Deleted %d · %d failed: ", deleted, len(failures))
+	// The box width View() computes, less its border and the two-space indent
+	// every message row carries.
+	contentW := max(max(min(80, m.width-4), 40)-4, 24)
+	budget := max(contentW-lipgloss.Width(prefix)-lipgloss.Width(more), 8)
+	m.actionErr = prefix + truncateString(strings.Join(shown, "; "), budget) + more
+	m.feedbackMsg = ""
 }
 
 // SelectedFile returns the currently selected file entry.
@@ -428,10 +451,17 @@ func (m *FilesDialogModel) SpinnerInit() tea.Cmd { return spinnerTickCmd(m.spinn
 // "delete-all-files"/"delete-all-history" (payload []string — every path or
 // video ID in the section), or "" for no action.
 func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
-	// Confirmation timeout check
+	// Confirmation timeout check — both confirms, or the bulk hint outlives
+	// its own 3 s window and stands until a navigation key happens by.
 	if m.deleteConfirmID != "" && !m.confirmTimer.IsZero() && time.Now().After(m.confirmTimer) {
 		m.deleteConfirmID = ""
 		m.confirmTimer = time.Time{}
+		m.feedbackMsg = ""
+	}
+	if m.deleteAllArmed && !m.deleteAllTimer.IsZero() && time.Now().After(m.deleteAllTimer) {
+		m.deleteAllArmed = false
+		m.deleteAllSection = ""
+		m.deleteAllTimer = time.Time{}
 		m.feedbackMsg = ""
 	}
 
@@ -454,6 +484,11 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 			return "", nil
 		}
 		m.actionErr = "" // starting a fresh sweep clears any prior failure
+		// A section sweep and a single-item delete are different questions;
+		// arming one must retract the other rather than leave two live confirms
+		// with one hint between them.
+		m.deleteConfirmID = ""
+		m.confirmTimer = time.Time{}
 		if m.deleteAllArmed && m.deleteAllSection == section && !m.deleteAllTimer.IsZero() && time.Now().Before(m.deleteAllTimer) {
 			m.deleteAllArmed = false
 			m.deleteAllSection = ""
@@ -485,6 +520,10 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 			return "", nil
 		}
 		m.actionErr = "" // starting a fresh delete clears any prior failure
+		// The mirror of the A arm: a single-item confirm retracts the bulk one.
+		m.deleteAllArmed = false
+		m.deleteAllSection = ""
+		m.deleteAllTimer = time.Time{}
 		// Files: two-press confirm, returns "delete" (routed to file deletion).
 		if f := m.SelectedFile(); f != nil {
 			if m.deleteConfirmID == f.Path && !m.confirmTimer.IsZero() && time.Now().Before(m.confirmTimer) {
@@ -617,7 +656,9 @@ func (m *FilesDialogModel) View() string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("↑↓: Navigate | D: Delete | A: Delete all in section | R: Refresh | Esc: Close"))
+	// 62 columns: at 80 the content width is 74, and the longer wording wrapped
+	// onto a second row. The arm hint already names what "all" covers.
+	lines = append(lines, DimStyle.Render("↑↓: Navigate | D: Delete | A: Delete all | R: Refresh | Esc: Close"))
 
 	content := strings.Join(lines, "\n")
 

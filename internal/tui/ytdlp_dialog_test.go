@@ -8,7 +8,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/vampiricwulf/Moombox/internal/web/routes"
+	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
 // runCmd executes cmd — flattening tea.Batch, whose message is the list of
@@ -55,13 +55,13 @@ func firstRealMsg(cmd tea.Cmd) tea.Msg {
 func TestYtdlpDialogShowsStatusAndInstalls(t *testing.T) {
 	app := NewApp()
 	statusCalls, installCalls := 0, 0
-	app.OnYtdlpPluginStatus = func() (routes.YtdlpPluginInfo, error) {
+	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
 		statusCalls++
-		return routes.YtdlpPluginInfo{
+		return ytdlpplugin.Info{
 			Installed:     statusCalls > 1,
 			PluginDir:     "/plug",
 			CurrentPort:   7740,
-			InstalledPort: 7739,
+			InstalledPort: intPtr(7739),
 			PortMismatch:  statusCalls == 1,
 		}, nil
 	}
@@ -113,8 +113,8 @@ func TestYtdlpDialogShowsStatusAndInstalls(t *testing.T) {
 // callback says so instead of doing nothing.
 func TestYtdlpDialogReportsErrors(t *testing.T) {
 	app := NewApp()
-	app.OnYtdlpPluginStatus = func() (routes.YtdlpPluginInfo, error) {
-		return routes.YtdlpPluginInfo{}, errors.New("cannot determine yt-dlp plugin directory")
+	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
+		return ytdlpplugin.Info{}, errors.New("cannot determine yt-dlp plugin directory")
 	}
 	_, cmd := app.dispatchAction("R Y", nil)
 	app.Update(runCmd(t, cmd))
@@ -150,9 +150,9 @@ func TestYtdlpDialogReportsErrors(t *testing.T) {
 func TestYtdlpDialogRefreshReloads(t *testing.T) {
 	app := NewApp()
 	calls := 0
-	app.OnYtdlpPluginStatus = func() (routes.YtdlpPluginInfo, error) {
+	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
 		calls++
-		return routes.YtdlpPluginInfo{Installed: true, PluginDir: "/plug", CurrentPort: 7740, InstalledPort: 7740}, nil
+		return ytdlpplugin.Info{Installed: true, PluginDir: "/plug", CurrentPort: 7740, InstalledPort: intPtr(7740)}, nil
 	}
 	_, cmd := app.dispatchAction("R Y", nil)
 	app.Update(runCmd(t, cmd))
@@ -181,8 +181,8 @@ func TestYtdlpPluginChordExistsOnlyWhenWired(t *testing.T) {
 	if app.ytdlpDlg.IsVisible() {
 		t.Fatal("dispatching R Y with no callback opened an overlay that can never load")
 	}
-	app.OnYtdlpPluginStatus = func() (routes.YtdlpPluginInfo, error) {
-		return routes.YtdlpPluginInfo{}, nil
+	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
+		return ytdlpplugin.Info{}, nil
 	}
 	if !ryOffered(t, app) {
 		t.Fatal("R Y missing with the callback wired")

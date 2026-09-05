@@ -13,7 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/web/routes"
+	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
 // FocusPanel identifies which panel is focused.
@@ -302,10 +302,12 @@ type (
 	}
 
 	// Async results for the R Y yt-dlp plugin overlay. Info is the same
-	// routes.YtdlpPluginInfo GET /api/ytdlp-plugin/status returns; Err is the
-	// error VALUE rather than a string because nothing here reformats it.
+	// ytdlpplugin.Info GET /api/ytdlp-plugin/status returns — read straight
+	// from the package the route's own body uses, so the terminal never has to
+	// import the HTTP layer for one struct; Err is the error VALUE rather than
+	// a string because nothing here reformats it.
 	ytdlpStatusMsg struct {
-		Info routes.YtdlpPluginInfo
+		Info ytdlpplugin.Info
 		Err  error
 	}
 	ytdlpInstallResultMsg struct {
@@ -598,11 +600,11 @@ type App struct {
 
 	// OnYtdlpPluginStatus reports the yt-dlp PO-token plugin's state for the
 	// port and scheme this process is actually serving on — the R Y overlay's
-	// body, and the same routes.YtdlpPluginStatus the dashboard's Integrations
-	// card reads. nil DELETES the chord rather than making it inert, like
+	// body, and the same ytdlpplugin.Status the dashboard's Integrations card
+	// reads through routes.YtdlpPluginStatus. nil DELETES the chord rather than making it inert, like
 	// OnImportCookieFile: an overlay whose only content can never load is
 	// worse than a chord that is not offered.
-	OnYtdlpPluginStatus func() (routes.YtdlpPluginInfo, error)
+	OnYtdlpPluginStatus func() (ytdlpplugin.Info, error)
 	// OnInstallYtdlpPlugin (re)writes the yt-dlp plugin for the live port —
 	// the R Y overlay's I key. Distinct from the setup wizard's
 	// OnInstallYtdlp, which reports nothing back.

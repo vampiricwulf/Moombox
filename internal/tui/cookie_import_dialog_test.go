@@ -20,7 +20,7 @@ func typeInto(m *CookieImportDialogModel, s string) {
 	for _, r := range s {
 		msg := tea.KeyPressMsg{Code: r, Text: string(r)}
 		m.UpdateComponents(msg)
-		m.HandleKey(msg)
+		m.HandleKey(msg.String())
 	}
 }
 
@@ -35,7 +35,7 @@ func TestCookieImportDialogValidatesThePath(t *testing.T) {
 	m := NewCookieImportDialogModel()
 	m.Open()
 	typeInto(m, filepath.Join(dir, "missing.txt"))
-	if action, _ := m.HandleKey(tea.KeyPressMsg{Code: tea.KeyEnter}); action != "" {
+	if action, _ := m.HandleKey(keyEnter); action != "" {
 		t.Fatalf("missing file must not import, got action %q", action)
 	}
 	if !strings.Contains(m.View(), "does not exist") {
@@ -43,12 +43,12 @@ func TestCookieImportDialogValidatesThePath(t *testing.T) {
 	}
 	m.Open()
 	typeInto(m, dir)
-	if action, _ := m.HandleKey(tea.KeyPressMsg{Code: tea.KeyEnter}); action != "" {
+	if action, _ := m.HandleKey(keyEnter); action != "" {
 		t.Fatalf("a directory must not import, got %q", action)
 	}
 	m.Open()
 	typeInto(m, file)
-	action, path := m.HandleKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	action, path := m.HandleKey(keyEnter)
 	if action != "import" || path != file {
 		t.Fatalf("existing file: action=%q path=%q", action, path)
 	}
@@ -104,7 +104,7 @@ func TestCookieImportDialogRendersEveryOutcome(t *testing.T) {
 	if !strings.Contains(m.View(), "not a Netscape cookie file") {
 		t.Errorf("error not rendered:\n%s", m.View())
 	}
-	if action, _ := m.HandleKey(tea.KeyPressMsg{Code: tea.KeyEscape}); action != "close" || m.IsVisible() {
+	if action, _ := m.HandleKey(keyEsc); action != "close" || m.IsVisible() {
 		t.Fatalf("Esc must close the dialog (action %q, visible %v)", action, m.IsVisible())
 	}
 }

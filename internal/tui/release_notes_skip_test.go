@@ -37,11 +37,28 @@ func TestReleaseNotesSkipKey(t *testing.T) {
 	app.updateAvailable = nil
 	skipped = ""
 	app.releaseNotesPopup.open("v1.0.0", "current notes", 80, 24)
+	app.releaseNotesPopup.setPending(false)
 	if strings.Contains(app.releaseNotesPopup.View(), "S: Skip") {
 		t.Fatal("footer must not offer S without a pending update")
 	}
-	app.handleKey(tea.KeyPressMsg{Code: 's', Text: "s"})
+	_, cmd = app.handleKey(tea.KeyPressMsg{Code: 's', Text: "s"})
+	if cmd != nil {
+		cmd()
+	}
 	if skipped != "" {
 		t.Fatal("S without a pending update must not call OnDismissUpdate")
+	}
+	// The race the guard exists for: a periodic check lands WHILE the current
+	// version's notes are open. updateAvailable is non-nil again, but the
+	// footer still does not offer S (pending is false), so S must not skip a
+	// release nobody has read yet — skipping is permanent. The command has to
+	// be RUN: OnDismissUpdate is called inside it, not by handleKey.
+	app.updateAvailable = &UpdateStatusMsg{Version: "2.0.0", TagName: "v2.0.0", ReleaseNotes: "unread"}
+	_, cmd = app.handleKey(tea.KeyPressMsg{Code: 's', Text: "s"})
+	if cmd != nil {
+		cmd()
+	}
+	if skipped != "" {
+		t.Fatalf("S skipped %q while showing another version's notes with no S in the footer", skipped)
 	}
 }

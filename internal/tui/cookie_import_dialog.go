@@ -141,20 +141,19 @@ func expandHome(p string) string {
 // is answered inline over the still-filled prompt instead of round-tripping
 // through the callback and coming back as a failed import.
 //
-// IT NEVER TOUCHES THE TEXTINPUT, and that is the rule, not an omission.
-// App.Update's keypress arm calls routeComponentMsg AND handleKey for the same
-// message, so the input is fed once already — by UpdateComponents, which runs
-// FIRST. Feeding it here too inserts every rune twice ("abc" → "aabbcc") and
-// makes one Backspace eat two characters, and no test that calls HandleKey
-// directly can see it. ImportDialogModel keeps the same split
-// (import_dialog.go: HandleKey takes a derived key string and cannot reach its
-// input). Pinned by TestCookieImportTypingIsNotDoubled, which drives
-// App.Update.
+// IT CANNOT TOUCH THE TEXTINPUT, and that is structural rather than a rule to
+// remember: it is handed the derived key STRING, exactly as ImportDialogModel
+// is (import_dialog.go), so there is no KeyPressMsg here to feed a component
+// with. App.Update's keypress arm calls routeComponentMsg AND handleKey for
+// the same message, so the input is fed once already — by UpdateComponents,
+// which runs FIRST. Feeding it a second time would insert every rune twice
+// ("abc" → "aabbcc") and make one Backspace eat two characters, and no test
+// that calls HandleKey directly could see it. Pinned by
+// TestCookieImportTypingIsNotDoubled, which drives App.Update.
 //
 // Because UpdateComponents ran first, m.input.Value() on Enter already
 // includes everything typed up to and including the keypress before it.
-func (m *CookieImportDialogModel) HandleKey(msg tea.KeyPressMsg) (string, string) {
-	key := msg.String()
+func (m *CookieImportDialogModel) HandleKey(key string) (string, string) {
 	if key == keyEsc || (m.step == cookieImportStepResult && (key == "q" || key == keyEnter)) {
 		m.Close()
 		return "close", ""
