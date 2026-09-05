@@ -49,8 +49,8 @@ The file structure:
 | `web/public/modules/trimmer.js` | ~510 | Trim clip creation UI. Lets the user define start/end timestamps on a finished recording and create a trimmed clip. |
 | `web/public/modules/stats.js` | ~160 | Statistics dashboard. Displays job counts, sizes, durations, and other aggregate metrics. |
 | `web/public/modules/imports.js` | ~210 | Zip archive import. Upload a zip file containing video/chat/metadata to create a job from external content. |
-| `web/public/modules/filter-parser.js` | ~110 | Filter query parser. Booru-style tag syntax: `status:active`, `channel:"name"`, `platform:youtube`, negation (`-tag`), OR groups (`a\|b`), quoting for spaces. |
-| `web/public/modules/filter-engine.js` | ~65 | Filter engine. Evaluates parsed tokens against job objects. AND intersection across tokens, OR union within pipe groups. |
+| `web/public/modules/filter-parser.js` | ~110 | Filter query parser. Booru-style tag syntax: `status:active`, `channel:"name"`, `platform:youtube`, negation (`-tag`), OR groups (`a\|b`), quoting for spaces. Go twin: `internal/jobfilter`. |
+| `web/public/modules/filter-engine.js` | ~65 | Filter engine. Evaluates parsed tokens against job objects. AND intersection across tokens, OR union within pipe groups. Go twin: `internal/jobfilter`. |
 | `web/public/modules/logout.js` | ~45 | Status-bar logout icon: `logoutVisible` (shown only when `authRequired && authenticated`, read from `GET /api/auth/status` in `checkSecurityBanner`) and `bindLogout` (click → `POST /api/auth/logout` → reload). |
 | `web/public/modules/utils.js` | ~750 | Shared formatting helpers (durations, file sizes, dates, etc.). |
 | `web/public/moombox.css` | ~3,490 | All styles. Includes desktop layout, mobile responsive breakpoints, dark/light theme variables, and component-specific styles. |
@@ -66,7 +66,7 @@ The login page (`login.html`) is not served as a separate route. Instead, `AuthM
 
 The Web UI uses a centralized `MoomboxApp` class (defined in `app.js`) as the single state container. It holds the current job list, filter tokens, theme preference, WebSocket connection, and references to loaded modules.
 
-**Unified filter state:** Each panel (Tasks, Archived) maintains an independent array of filter tokens (`tasksFilterTokens`, `archivedFilterTokens`). Tokens are parsed from user input by `filter-parser.js` and evaluated against jobs by `filter-engine.js`. Structured tokens (status/channel/platform) appear as visual chips (`sl-tag`); free text stays in the input. An optgroup dropdown offers clickable options grouped by Statuses, Platforms, and Channels (auto-populated from current jobs).
+**Unified filter state:** Each panel (Tasks, Archived) maintains an independent array of filter tokens (`tasksFilterTokens`, `archivedFilterTokens`). Tokens are parsed from user input by `filter-parser.js` and evaluated against jobs by `filter-engine.js`. Structured tokens (status/channel/platform) appear as visual chips (`sl-tag`); free text stays in the input. An optgroup dropdown offers clickable options grouped by Statuses, Platforms, and Channels (auto-populated from current jobs). The TUI's `/` box speaks the same language through `internal/jobfilter` (`Parse`, `Match`), and its `F` key cycles the `status:` token of that query.
 
 Persistent client-side state is stored in `localStorage`:
 - Theme preference (dark/light)
@@ -265,11 +265,12 @@ The chord system is a three-state finite automaton:
 
 | Key | Action |
 |-----|--------|
-| `F` | Cycle filter mode (All / Downloading / Finished / Error / etc.) |
+| `F` | Tasks panel: cycle the query's `status:` token — none → `status:active` → `status:issues` → `status:finished` → none, replacing any existing status token in place. Details panel: toggle description expansion. Logs panel: cycle log level. |
 | `M` | Open Action Menu (command palette) |
 | `` ` `` | Open Settings dialog |
 | `?` | Open Help overlay |
-| `/` | Enter log search mode (log panel focused only). `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
+| `/` | Tasks panel: open the filter query box, which speaks the dashboard's filter language — free text plus `status:`/`channel:`/`platform:` tokens, `-` negation, `a\|b` OR groups, quoted values. Free text is a case-insensitive substring of the title, channel name or video ID (both UIs). `Enter` applies and closes; losing panel focus closes the box but keeps the applied query. Log panel: enter search mode. `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
+| `Esc` | Clear the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together. |
 | `c` | Clear the log view (log panel focused only). Drops history, the filtered view, and any active search; the level filter is kept. |
 
 **Quit chord:**
@@ -924,6 +925,7 @@ Every major feature exists in both UIs:
 | Client tokens | `app.js` (inline) | `client_tokens_dialog.go` |
 | yt-dlp plugin | Settings → Integrations card (`settings.js` `loadYtdlpPluginStatus`) | `YtdlpDialogModel` (`internal/tui/ytdlp_dialog.go`) |
 | Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`) |
+| Filter language | `filter-parser.js` / `filter-engine.js` | `internal/jobfilter` behind the Tasks panel's `/` box |
 
 **Note on video playback:** The TUI cannot play video inline (it is a terminal). The `O W` chord opens the Web UI in the default browser, where the user can access the player. This is the intended design — video playback is a Web UI strength, and the TUI defers to it rather than attempting a degraded experience.
 

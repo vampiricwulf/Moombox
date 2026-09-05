@@ -453,6 +453,8 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | Key | Action |
 |-----|--------|
 | F | Cycle status filter (All/Active/Issues/Finished) |
+| / | Filter jobs (Tasks) / search (Logs) — status:active channel:"name" -platform:twitch. Free text is a case-insensitive substring of the title, channel name or video ID (both UIs) |
+| Esc | Clear the active filter — text and status together (Tasks) |
 | M | Open action menu |
 | Q Q | Quit |
 | Ctrl+C | Quit immediately |

@@ -41,7 +41,9 @@ func visibleJobIDs(m *TaskListModel) []string {
 	return ids
 }
 
-// TestPassesSearch covers the fuzzy match across title, channel, and video ID.
+// TestPassesSearch covers the bare-text match across title, channel, and
+// video ID. Text terms are case-insensitive SUBSTRINGS (the Web dashboard's
+// semantics), not fuzzy subsequences — see the "mchi" case.
 func TestPassesSearch(t *testing.T) {
 	m := searchTestList()
 	j := m.jobs[0] // "Minecraft with Chika" / "Nanashi Mumei" / aaaaaaaaaaa
@@ -50,18 +52,20 @@ func TestPassesSearch(t *testing.T) {
 		query string
 		want  bool
 	}{
-		{"", true},            // empty matches all
-		{"minecraft", true},   // title exact-ish
-		{"MINECRAFT", true},   // case-insensitive
-		{"mchi", true},        // fuzzy subsequence in title
-		{"mumei", true},       // channel match
-		{"aaaaaaaaaaa", true}, // video ID match
-		{"zatsudan", false},   // belongs to another job
+		{"", true},                // empty matches all
+		{"minecraft", true},       // title exact-ish
+		{"MINECRAFT", true},       // case-insensitive
+		{`"with chika"`, true},    // quoted phrase, substring of the title
+		{"mumei", true},           // channel match
+		{"aaaaaaaaaaa", true},     // video ID match
+		{"zatsudan", false},       // belongs to another job
+		{"mchi", false},           // subsequence only — no longer a match
+		{"minecraft mumei", true}, // two terms, ANDed across fields
 	}
 	for _, c := range cases {
-		m.searchQuery = c.query
-		if got := m.passesSearch(j); got != c.want {
-			t.Errorf("passesSearch(%q) = %v, want %v", c.query, got, c.want)
+		m.applyQuery(c.query)
+		if got := m.passes(j); got != c.want {
+			t.Errorf("passes(%q) = %v, want %v", c.query, got, c.want)
 		}
 	}
 }
@@ -74,24 +78,21 @@ func TestSearchFiltersVisibleList(t *testing.T) {
 		t.Fatalf("baseline visible = %d, want 3", got)
 	}
 
-	// "chika" fuzzy-matches job 1 (title) and job 3 (channel "Chika Fansub").
-	m.searchQuery = "chika"
-	m.rebuildVirtualList()
+	// "chika" matches job 1 (title) and job 3 (channel "Chika Fansub").
+	m.applyQuery("chika")
 	ids := visibleJobIDs(m)
 	if len(ids) != 2 {
 		t.Fatalf("search 'chika' visible = %v, want 2 (jobs 1,3)", ids)
 	}
 
 	// A miss empties the list.
-	m.searchQuery = "nonexistentquery"
-	m.rebuildVirtualList()
+	m.applyQuery("nonexistentquery")
 	if got := len(visibleJobIDs(m)); got != 0 {
 		t.Errorf("search miss visible = %d, want 0", got)
 	}
 
 	// Clearing restores everything.
-	m.searchQuery = ""
-	m.rebuildVirtualList()
+	m.applyQuery("")
 	if got := len(visibleJobIDs(m)); got != 3 {
 		t.Errorf("after clear visible = %d, want 3", got)
 	}
@@ -114,8 +115,8 @@ func TestSearchLifecycle(t *testing.T) {
 	if m.IsSearching() {
 		t.Error("Enter should close the box")
 	}
-	if m.searchQuery != "apex" {
-		t.Errorf("query after Enter = %q, want %q", m.searchQuery, "apex")
+	if m.Query() != "apex" {
+		t.Errorf("query after Enter = %q, want %q", m.Query(), "apex")
 	}
 	if got := visibleJobIDs(m); len(got) != 1 || got[0] != "3" {
 		t.Errorf("after Enter visible = %v, want [3]", got)
@@ -125,8 +126,8 @@ func TestSearchLifecycle(t *testing.T) {
 	if !m.ClearSearch() {
 		t.Error("ClearSearch should report it cleared an active query")
 	}
-	if m.searchQuery != "" || len(visibleJobIDs(m)) != 3 {
-		t.Errorf("after ClearSearch query=%q visible=%d, want empty/3", m.searchQuery, len(visibleJobIDs(m)))
+	if m.Query() != "" || len(visibleJobIDs(m)) != 3 {
+		t.Errorf("after ClearSearch query=%q visible=%d, want empty/3", m.Query(), len(visibleJobIDs(m)))
 	}
 	if m.ClearSearch() {
 		t.Error("ClearSearch with nothing active should return false")
@@ -158,8 +159,8 @@ func TestSearchClosesOnFocusLoss(t *testing.T) {
 		t.Error("focus loss should close the search box")
 	}
 	// The applied query survives as a filter.
-	if m.searchQuery != "chika" || len(visibleJobIDs(m)) != 2 {
-		t.Errorf("after focus loss query=%q visible=%d, want chika/2", m.searchQuery, len(visibleJobIDs(m)))
+	if m.Query() != "chika" || len(visibleJobIDs(m)) != 2 {
+		t.Errorf("after focus loss query=%q visible=%d, want chika/2", m.Query(), len(visibleJobIDs(m)))
 	}
 }
 
@@ -167,15 +168,14 @@ func TestSearchClosesOnFocusLoss(t *testing.T) {
 // applied query in one press.
 func TestSearchEscClearsQuery(t *testing.T) {
 	m := searchTestList()
-	m.searchQuery = "apex"
-	m.rebuildVirtualList()
+	m.applyQuery("apex")
 
 	m.StartSearch() // reopen over the active query
 	if _, consumed := m.HandleSearchKey(keyMsg("esc")); !consumed {
 		t.Fatal("Esc should be consumed by the open search box")
 	}
-	if m.IsSearching() || m.searchQuery != "" {
-		t.Errorf("after Esc searching=%v query=%q, want closed/empty", m.IsSearching(), m.searchQuery)
+	if m.IsSearching() || m.Query() != "" {
+		t.Errorf("after Esc searching=%v query=%q, want closed/empty", m.IsSearching(), m.Query())
 	}
 	if len(visibleJobIDs(m)) != 3 {
 		t.Errorf("after Esc visible = %d, want 3", len(visibleJobIDs(m)))

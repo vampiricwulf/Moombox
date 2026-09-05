@@ -118,12 +118,13 @@ export function serializeToken(token) {
     // Re-quote spaced phrases or the round-trip corrupts them: the chip
     // extractor rewrites leftover text tokens into the input, and an
     // unquoted `-jelly fin` re-tokenizes as TWO tokens — flipping half the
-    // phrase from negated to required.
-    const needsQuotes = token.value.includes(" ");
+    // phrase from negated to required. A pipe needs the quotes just as much
+    // — unquoted, `channel:a|b` comes back as an OR group.
+    const needsQuotes = /[ |]/.test(token.value);
     const val = needsQuotes ? `"${token.value}"` : token.value;
     return `${prefix}${val}`;
   }
-  const needsQuotes = token.value.includes(" ");
+  const needsQuotes = /[ |]/.test(token.value);
   const val = needsQuotes ? `"${token.value}"` : token.value;
   return `${prefix}${token.type}:${val}`;
 }
