@@ -421,6 +421,24 @@ func (a *App) ytdlpInstallCmd() tea.Cmd {
 	})
 }
 
+// fetchStatsCmd runs OnGetStats off the UI goroutine.
+func (a *App) fetchStatsCmd() tea.Cmd {
+	fn := a.OnGetStats
+	return safeCmd(func() tea.Msg {
+		snap, err := fn()
+		return statsSnapshotMsg{Snap: snap, Err: err}
+	})
+}
+
+// statsRefreshInterval is the R T overlay's refresh cadence while open — the
+// Web Stats tab's own poll interval.
+const statsRefreshInterval = 60 * time.Second
+
+// statsRefreshTick schedules the overlay's 60 s refresh (the Web's poll).
+func statsRefreshTick() tea.Cmd {
+	return tea.Tick(statsRefreshInterval, func(time.Time) tea.Msg { return statsRefreshTickMsg{} })
+}
+
 func (a *App) deleteOrphanCmd(path string) tea.Cmd {
 	deleteFn := a.OnDeleteOrphan
 	return safeCmd(func() tea.Msg {

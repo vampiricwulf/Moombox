@@ -354,6 +354,13 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	if a.statsDlg.IsVisible() {
+		if a.statsDlg.HandleKey(key) == "refresh" {
+			return a, tea.Batch(a.statsDlg.Open(), a.fetchStatsCmd())
+		}
+		return a, nil
+	}
+
 	// Log search intercept — must be before key normalization to preserve
 	// case for N (shift+n) and before chord system to capture / and n/N.
 	if a.focusedPanel == PanelLogs {

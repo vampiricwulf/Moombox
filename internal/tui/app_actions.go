@@ -353,6 +353,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 		a.ytdlpDlg.SetSize(a.width, a.height)
 		return a, tea.Batch(a.ytdlpDlg.Open(), a.ytdlpStatusCmd())
+	case "R T":
+		if a.OnGetStats == nil {
+			a.setFeedback("Statistics are unavailable")
+			return a, nil
+		}
+		a.clearFeedback()
+		a.statsDlg.SetSize(a.width, a.height)
+		return a, tea.Batch(a.statsDlg.Open(), a.fetchStatsCmd())
 	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
@@ -699,6 +707,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// the install would fail, and I explains itself there.
 	if a.OnYtdlpPluginStatus != nil {
 		items = append(items, ActionMenuItem{Chord: "R Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Request"})
+	}
+	if a.OnGetStats != nil {
+		items = append(items, ActionMenuItem{Chord: "R T", Label: "Statistics", HintLabel: "Stats", Category: "Request"})
 	}
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})

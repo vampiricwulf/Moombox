@@ -13,6 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
@@ -314,6 +315,17 @@ type (
 		Err error
 	}
 
+	// statsSnapshotMsg is the async result of OnGetStats — the R T overlay's
+	// open, its r key, and the 60 s refresh tick all go through it.
+	statsSnapshotMsg struct {
+		Snap stats.Snapshot
+		Err  error
+	}
+	// statsRefreshTickMsg fires every statsRefreshInterval while the R T
+	// overlay is open (the Web Stats tab's own poll cadence); ignored once
+	// the overlay is closed or OnGetStats is nil.
+	statsRefreshTickMsg struct{}
+
 	// Async results for setup wizard cookie extraction.
 	//
 	// Carries the whole SetupResult rather than the bool pair it used to. Two
@@ -368,6 +380,7 @@ type App struct {
 	filesDlg        *FilesDialogModel
 	clientTokensDlg *ClientTokensDialogModel
 	ytdlpDlg        *YtdlpDialogModel
+	statsDlg        *StatsDialogModel
 	setupWiz        *SetupWizardModel
 	settings        *SettingsModel
 
@@ -613,6 +626,10 @@ type App struct {
 	// the overlay is still worth reading and I says so instead of no-opping.
 	OnInstallYtdlpPlugin func() error
 
+	// OnGetStats returns the numbers the Web Stats tab shows (the R T
+	// chord); nil deletes the chord.
+	OnGetStats func() (stats.Snapshot, error)
+
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
 	OnCheckPrereqs   func() (bool, bool)                                                        // returns (chocoAvail, wingetAvail)
@@ -662,6 +679,7 @@ func NewApp() *App {
 		filesDlg:          NewFilesDialogModel(),
 		clientTokensDlg:   NewClientTokensDialogModel(),
 		ytdlpDlg:          NewYtdlpDialogModel(),
+		statsDlg:          NewStatsDialogModel(),
 		setupWiz:          NewSetupWizardModel(),
 		settings:          NewSettingsModel(),
 		ffmpegCheck:       NewFFmpegCheckModel(),
@@ -998,6 +1016,7 @@ func (a *App) hasActiveOverlay() bool {
 		a.filesDlg.IsVisible() ||
 		a.clientTokensDlg.IsVisible() ||
 		a.ytdlpDlg.IsVisible() ||
+		a.statsDlg.IsVisible() ||
 		a.setupWiz.IsVisible() ||
 		a.ffmpegCheck.IsVisible() ||
 		a.actionMenu.IsVisible()

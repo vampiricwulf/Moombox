@@ -649,6 +649,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// error, and what the operator needs to see is the file it wrote.
 		return a, a.ytdlpStatusCmd()
 
+	case statsSnapshotMsg:
+		if !a.statsDlg.IsVisible() {
+			return a, nil
+		}
+		if msg.Err != nil {
+			a.statsDlg.SetError("Statistics unavailable: " + msg.Err.Error())
+		} else {
+			a.statsDlg.SetSnapshot(msg.Snap)
+		}
+		// One tick chain per fetch result; closing the overlay ends it at the
+		// next tick. Open→close→reopen inside 60 s can overlap one extra tick —
+		// one 5 s-cached query, accepted.
+		return a, statsRefreshTick()
+	case statsRefreshTickMsg:
+		if !a.statsDlg.IsVisible() || a.OnGetStats == nil {
+			return a, nil
+		}
+		return a, a.fetchStatsCmd()
+
 	case deleteClientTokenResultMsg:
 		if msg.Err != "" {
 			a.clientTokensDlg.SetError(msg.Err)
@@ -1280,6 +1299,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	if a.ytdlpDlg.IsVisible() {
 		return a.ytdlpDlg.UpdateComponents(msg)
+	}
+	if a.statsDlg.IsVisible() {
+		return a.statsDlg.UpdateComponents(msg)
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {
