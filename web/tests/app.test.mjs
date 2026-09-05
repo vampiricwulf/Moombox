@@ -178,7 +178,7 @@ test("typing a filter query turns structured terms into labelled chips", { skip 
   // The tokens the app now holds are exactly what the parser produces.
   const parsed = parseFilterQuery("status:live -platform:twitch keyword");
   assert.deepEqual(
-    h.app.tasksFilterTokens.map((t) => ({ type: t.type, value: t.value, negate: !!t.negate })),
+    h.app.filterBar.tasksFilterTokens.map((t) => ({ type: t.type, value: t.value, negate: !!t.negate })),
     parsed.map((t) => ({ type: t.type, value: t.value, negate: !!t.negate })),
   );
 
@@ -190,10 +190,10 @@ test("typing a filter query turns structured terms into labelled chips", { skip 
   assert.equal(h.el("tasks-filter").querySelector(".unified-filter-clear").style.display, "");
 
   // The labels come from _filterTokenLabel, so pin it directly too.
-  assert.equal(h.app._filterTokenLabel({ type: "status", value: "issues" }), "Issues");
-  assert.equal(h.app._filterTokenLabel({ type: "platform", value: "youtube" }), "YouTube");
-  assert.equal(h.app._filterTokenLabel({ type: "channel", value: "Chan" }), "Chan");
-  assert.equal(h.app._filterTokenLabel({ type: "text", value: "raw" }), "raw");
+  assert.equal(h.app.filterBar._filterTokenLabel({ type: "status", value: "issues" }), "Issues");
+  assert.equal(h.app.filterBar._filterTokenLabel({ type: "platform", value: "youtube" }), "YouTube");
+  assert.equal(h.app.filterBar._filterTokenLabel({ type: "channel", value: "Chan" }), "Chan");
+  assert.equal(h.app.filterBar._filterTokenLabel({ type: "text", value: "raw" }), "raw");
 });
 
 // ── 6. Toasts ───────────────────────────────────────────────────────────────
