@@ -17,9 +17,9 @@ name: CI
 #   - gofmt / vet / staticcheck / build / full `go test`; ubuntu also
 #     cross-builds linux/arm64 and runs the node suite in web/tests
 #
-# staticcheck is ADVISORY (continue-on-error) until Arc C of the 2026-09-04
-# improvement chain removes the seven pre-existing findings; Arc C flips it
-# to a hard gate.
+# staticcheck is a hard gate, pinned to a release rather than @latest:
+# staticcheck lags Go releases, and an unpinned install can refuse to build
+# against a new toolchain the morning go.mod moves to it.
 
 on:
   push:
@@ -107,10 +107,9 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: staticcheck (advisory until Arc C)
-        continue-on-error: true
+      - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
           staticcheck ./...
 
       - name: go build

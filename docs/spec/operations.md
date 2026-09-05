@@ -217,7 +217,7 @@ Steps 9–11 are sequential (not parallel). On a 4-vCPU runner each `go build` s
 
 Steps, on both runners: checkout → the release workflow's embed-blob cache (key also carries `runner.os`, since the sidecar tarball is produced by the runner's own `tar`) → `setup-go` from `go.mod` → `setup-node` 24 → on a cache miss, the sidecar payload build and `go run ./tools/fetch-node` → FFmpeg (`apt-get` on ubuntu, `choco` on windows) so `muxer_concatcopy_test.go` and `probe_params_test.go` run instead of skipping → `gofmt -l` must print nothing → `go vet ./...` → `staticcheck ./...` → `go build ./...` → `go test -count=1 ./...`. ubuntu additionally cross-builds `linux/arm64` and runs the frontend suite (`npm ci` in `web/tests`, `node --test web/tests/*.test.mjs`).
 
-`staticcheck` is advisory (`continue-on-error`) until Arc C of the 2026-09-04 improvement chain removes the seven pre-existing findings and flips it to a hard gate. The live gates (`MOOMBOX_LIVE_*`) never run in CI: they need YouTube and Twitch.
+`staticcheck ./...` is a hard gate, installed at a pinned release (`2026.2.1` in `.github/workflows/ci.yml`) because staticcheck lags Go releases and `@latest` can refuse a new toolchain. The live gates (`MOOMBOX_LIVE_*`) never run in CI: they need YouTube and Twitch.
 
 ### Release Body Format
 
