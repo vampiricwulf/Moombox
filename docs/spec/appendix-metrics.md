@@ -1,6 +1,6 @@
 # Appendix: Project Metrics
 
-> **Last verified:** 2026-09-03
+> **Last verified:** 2026-09-04
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >

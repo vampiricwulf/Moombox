@@ -401,7 +401,7 @@ YouTube requires Proof of Origin (PO) tokens for certain requests, particularly 
 
 **Architecture (sidecar primary, goja fallback):**
 
-1. **Sidecar path (preferred)** — A bundled Node.js v24 binary plus `bgutils-js` + JSDOM are extracted from `go:embed`'d blobs to `%LOCALAPPDATA%/Moombox/sidecar/` on first launch (~36 MB embed: ~33 MB gzipped node.exe + ~3.5 MB tarball of production node_modules + src/server.js). Moombox spawns the subprocess pinned to a Windows Job Object (so the child dies with the parent), pipes JSON-RPC requests over stdin/stdout, and consumes real PO tokens. First mint hits Google's WAA endpoint in ~460 ms; subsequent mints with the same binding hit the sidecar's internal minter cache in ~500 µs.
+1. **Sidecar path (preferred)** — A bundled Node.js v24 binary plus `bgutils-js` + JSDOM are extracted from `go:embed`'d blobs to `%LOCALAPPDATA%/Moombox/sidecar/` on first launch (~38 MB embed: ~34 MB gzipped node.exe + ~4 MB tarball of production node_modules + src/server.js). Moombox spawns the subprocess pinned to a Windows Job Object (so the child dies with the parent), pipes JSON-RPC requests over stdin/stdout, and consumes real PO tokens. First mint hits Google's WAA endpoint in ~460 ms; subsequent mints with the same binding hit the sidecar's internal minter cache in ~500 µs.
 
 2. **Goja fallback path** — When the sidecar is disabled (`[bgutils] use_sidecar = false` in config), fails to start, or dies mid-flight, `PotProvider` falls through to the legacy in-process flow:
    1. Fetch challenge (POST to `jnn-pa.googleapis.com` or YouTube fallback)
