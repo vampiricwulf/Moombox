@@ -816,7 +816,15 @@ export function applyChannelOverrides(channel, { numDescLookbehind, outputDirect
   return { channel: out, error: null };
 }
 
-const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
+/**
+ * Job-status action sets — single source of truth for which statuses each
+ * quick action targets, read by the details dialog (job-details.js), the job
+ * cards, and the batch action bar (app.js).
+ */
+export const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
+export const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
+export const MUX_STATUSES = new Set(["Cancelled", "Error"]);
+export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
 
 /**
  * Whether a job can be resumed (staging preserved, continue where it stopped).
@@ -825,6 +833,10 @@ const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
  * must be a YouTube job with staging on disk. The server enforces the same
  * three conditions (jobs.go resume route); this keeps the UI from offering
  * what the server will refuse.
+ *
+ * The resumable set is exactly REINIT_STATUSES (Error, Cancelled, COOKIES?) —
+ * a stuck job re-initializes from the same three statuses it can resume from
+ * — so this reuses that export rather than a second literal.
  *
  * `hasStaging` is only populated when the details view fetched the job; list
  * rows (the batch bar's input) do not carry it, so `undefined` means unknown
@@ -836,7 +848,7 @@ const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
  * fails. There, staging must be exactly `true`.
  */
 export function canResumeJob(job, { requireKnownStaging = false } = {}) {
-  const statusOk = RESUMABLE_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
+  const statusOk = REINIT_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
   const stagingOk = requireKnownStaging ? job.hasStaging === true : job.hasStaging !== false;
   return statusOk && job.platform === "youtube" && stagingOk;
 }
