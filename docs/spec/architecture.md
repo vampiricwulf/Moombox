@@ -23,7 +23,7 @@ These are hard requirements that must be followed in all code changes:
 Moombox uses a two-process model controlled by the `_MOOMBOX_CHILD` environment variable:
 
 **Launcher process** (no `_MOOMBOX_CHILD`):
-- Executes `launchAndSupervise()` in `cmd/moombox/main.go`
+- Executes `launchAndSupervise()` in `cmd/moombox/launcher.go`
 - Ignores SIGINT (the child handles Ctrl+C)
 - Spawns itself as a child with `_MOOMBOX_CHILD=1` added to the environment
 - Passes through stdin/stdout/stderr so the child's TUI renders in the launcher's console
