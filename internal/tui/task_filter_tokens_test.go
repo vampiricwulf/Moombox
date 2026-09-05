@@ -32,7 +32,7 @@ func visibleIDs(m *TaskListModel) []string {
 // serialized query.
 func TestFCyclesTheStatusToken(t *testing.T) {
 	m := NewTaskListModel()
-	m.SetSize(100, 30)
+	m.SetSize(120, 30)
 	m.SetJobs(tokenFixtureJobs())
 	if got := m.Query(); got != "" {
 		t.Fatalf("initial query %q", got)
@@ -63,11 +63,11 @@ func TestFCyclesTheStatusToken(t *testing.T) {
 	if m.Query() != "status:finished -platform:twitch" {
 		t.Fatalf("F must replace the typed status token in place: %q", m.Query())
 	}
-	// 32 columns, inside renderHeader's max(w/3, 12) = 33 budget, so the
-	// indicator is shown whole here — the ellipsizing is pinned separately
-	// by TestHeaderEllipsizesALongQuery.
-	if !strings.Contains(stripANSI(m.renderHeader(100)), "[status:finished -platform:twitch]") {
-		t.Fatalf("header must show the serialized query: %q", stripANSI(m.renderHeader(100)))
+	// 32 columns, inside renderHeader's max(w/3, 12) = 40 budget at width
+	// 120, so the indicator is shown whole here — the ellipsizing is pinned
+	// separately by TestHeaderEllipsizesALongQuery.
+	if !strings.Contains(stripANSI(m.renderHeader(120)), "[status:finished -platform:twitch]") {
+		t.Fatalf("header must show the serialized query: %q", stripANSI(m.renderHeader(120)))
 	}
 
 	// H3's wide rule: a raw status value is F's token too. Keeping it beside
@@ -77,6 +77,24 @@ func TestFCyclesTheStatusToken(t *testing.T) {
 	m.CycleFilter()
 	if m.Query() != "status:active" {
 		t.Fatalf("F must replace a raw status token, not keep it: %q", m.Query())
+	}
+
+	// Ruling C2: F replaces EVERY non-negated status token, not just the
+	// first — two of them would AND to nothing — and the replacement takes
+	// the first one's position.
+	m.applyQuery("status:active status:finished foo")
+	m.CycleFilter()
+	if m.Query() != "status:issues foo" {
+		t.Fatalf("F must replace every non-negated status token: %q", m.Query())
+	}
+
+	// Ruling F4: Esc clears the whole query, the F-set token included —
+	// there is no cycle position surviving behind an empty box.
+	m.applyQuery("foo")
+	m.CycleFilter()
+	m.ClearSearch()
+	if m.Query() != "" || len(m.tokens) != 0 {
+		t.Fatalf("Esc must drop the F-set token too: %q %d tokens", m.Query(), len(m.tokens))
 	}
 }
 
@@ -134,29 +152,26 @@ func TestTypedTokensFilterTheList(t *testing.T) {
 	}
 }
 
-// TestArchiveVisibilityFollowsTheStatusToken: the archive section is hidden
-// while a status token excludes Finished; a negated token does not hide it.
-func TestArchiveVisibilityFollowsTheStatusToken(t *testing.T) {
+// TestEmptyStateQuotesLikeTheHeader: the "no matches" line uses the header's
+// [query] delimiter (not Go's %q, which escapes the very quotes the
+// placeholder invites) and is cut to the row so the panel keeps its height.
+func TestEmptyStateQuotesLikeTheHeader(t *testing.T) {
 	m := NewTaskListModel()
-	m.applyQuery("status:active")
-	if m.showArchive() {
-		t.Error("status:active must hide the archive")
+	m.SetSize(40, 8)
+	m.SetJobs(tokenFixtureJobs())
+	m.applyQuery(`channel:"shachi too" zzz`)
+	if got := len(visibleIDs(m)); got != 0 {
+		t.Fatalf("query must match nothing, matched %d", got)
 	}
-	m.applyQuery("status:finished")
-	if !m.showArchive() {
-		t.Error("status:finished must show the archive")
+	view := stripANSI(m.View())
+	if !strings.Contains(view, `No tasks match [channel:"shachi too`) {
+		t.Errorf("the empty state must echo the query unescaped on one line: %q", view)
 	}
-	m.applyQuery("status:live")
-	if m.showArchive() {
-		t.Error("a raw status name other than Finished must hide the archive")
+	if strings.Contains(view, `\"`) {
+		t.Errorf("the empty state must not source-quote the query: %q", view)
 	}
-	m.applyQuery("-status:active")
-	if !m.showArchive() {
-		t.Error("a negated status token must not hide the archive")
-	}
-	m.applyQuery("channel:x")
-	if !m.showArchive() {
-		t.Error("no status token → archive shown")
+	if lines := strings.Count(view, "\n") + 1; lines > 8 {
+		t.Errorf("the panel must stay inside its 8 rows, rendered %d: %q", lines, view)
 	}
 }
 

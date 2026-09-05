@@ -42,6 +42,16 @@ test("multiple AND text filters", () => {
   assert.deepEqual(filterWith("debut -muxing"), ["4"]);
 });
 
+test("text filter matches the video ID", () => {
+  // Its own fixture: the shared `jobs` carry no videoId, and giving them one
+  // would let an ID fragment leak into every other text expectation.
+  const idJobs = [
+    { id: "v", title: "Karaoke night", channelName: "Debut Channel", status: "Finished", platform: "youtube", videoId: "abc123xyzAB" },
+    { id: "w", title: "Karaoke night", channelName: "Debut Channel", status: "Finished", platform: "youtube", videoId: "zzzzzzzzzzz" },
+  ];
+  assert.deepEqual(applyFilterTokens(idJobs, parseFilterQuery("abc123")).map(j => j.id), ["v"]);
+});
+
 test("status: active groups live/upcoming/downloading/muxing", () => {
   assert.deepEqual(filterWith("status:active").sort(), ["1", "4", "5"]);
 });

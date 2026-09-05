@@ -479,7 +479,7 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 The TUI uses Charmbracelet's full suite: bubbletea for the Elm architecture, bubbles for pre-built components, huh for form/dialog wizards, and lipgloss for styling.
 
 **Layout:** Two-over-one split — two panels side-by-side on top, full-width logs on bottom. The focused panel's row expands vertically (top focused = 70% height, logs focused = 75% height). Width split depends on focus: tasks focused = 45%/55%, details focused = 35%/65%, logs focused = 50%/50%:
-- **TaskList** (top left) — Job list with status icons, channel names, titles. Scrollable, filterable (TUI uses single-key `F` cycle; Web UI has a unified tag-based filter).
+- **TaskList** (top left) — Job list with status icons, channel names, titles. Scrollable, filterable — both UIs share one filter language (`internal/jobfilter` is the Go twin of `filter-parser.js`/`filter-engine.js`): the TUI's `/` box takes free text plus `status:`/`channel:`/`platform:` tokens, `-` negation and `a|b` OR groups, and its `F` key cycles the query's `status:` token.
 - **JobDetails** (top right) — Selected job's metadata, progress, segment counts, file info.
 - **Logs** (bottom, full width) — Real-time log output, 250ms batched flush, scrollable viewport.
 

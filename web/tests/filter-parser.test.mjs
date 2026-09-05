@@ -94,6 +94,16 @@ test("serializeToken: round-trips namespaced with space → quoted", () => {
   );
 });
 
+test("serializeToken: round-trips a value holding a pipe", () => {
+  // Unquoted, channel:a|b re-parses as an OR group — a different query.
+  const token = parseFilterQuery('channel:"a|b"')[0];
+  assert.equal(serializeToken(token), 'channel:"a|b"');
+  const reparsed = parseFilterQuery(serializeToken(token));
+  assert.equal(reparsed.length, 1);
+  assert.equal(reparsed[0].type, "channel");
+  assert.equal(reparsed[0].value, "a|b");
+});
+
 test("serializeToken: round-trips OR group", () => {
   const or = {
     type: "or",

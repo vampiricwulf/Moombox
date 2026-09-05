@@ -41,13 +41,12 @@ type Token struct {
 	lower  string
 }
 
-// BucketStatuses is the Web's STATUS_FILTER_MAP.
+// BucketStatuses is the Web's STATUS_FILTER_MAP. It is keyed by the canonical
+// bucket names only — every lookup goes through StatusBucket, which folds the
+// "errors" alias into "issues" first.
 var BucketStatuses = map[string][]database.JobStatus{
-	"active": {database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing, database.StatusQueued},
-	"issues": {database.StatusError, database.StatusCancelled, database.StatusCookies},
-	// status:errors was the bucket's name before Cancelled joined it; keep
-	// hand-typed queries working.
-	"errors":   {database.StatusError, database.StatusCancelled, database.StatusCookies},
+	"active":   {database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing, database.StatusQueued},
+	"issues":   {database.StatusError, database.StatusCancelled, database.StatusCookies},
 	"finished": {database.StatusFinished},
 }
 
@@ -60,6 +59,8 @@ func StatusBucket(value string) string {
 	case "issues":
 		return "issues"
 	case "errors":
+		// The bucket's name before Cancelled joined it; keep hand-typed
+		// queries working.
 		return "issues"
 	case "finished":
 		return "finished"
@@ -202,9 +203,10 @@ func serializeToken(t Token) string {
 	}
 	// Re-quote spaced phrases or the round-trip corrupts them: an unquoted
 	// "-jelly fin" re-tokenizes as TWO tokens, flipping half the phrase
-	// from negated to required.
+	// from negated to required. A pipe needs the quotes just as much —
+	// unquoted, channel:"a|b" comes back as an OR group.
 	val := t.Value
-	if strings.Contains(val, " ") {
+	if strings.ContainsAny(val, " |") {
 		val = `"` + val + `"`
 	}
 	if t.Kind == KindText {
@@ -233,7 +235,7 @@ func matchTerm(t Token, job *database.Job) bool {
 			strings.Contains(strings.ToLower(job.ChannelName), t.lower) ||
 			strings.Contains(strings.ToLower(job.VideoID), t.lower)
 	case KindStatus:
-		if statuses, ok := BucketStatuses[StatusBucket(t.lower)]; ok {
+		if statuses, ok := BucketStatuses[StatusBucket(t.Value)]; ok {
 			result = slices.Contains(statuses, job.Status)
 		} else {
 			result = strings.EqualFold(string(job.Status), t.Value)

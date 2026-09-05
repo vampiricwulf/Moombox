@@ -24,9 +24,13 @@ function matchTerm(term, job) {
   let result;
   switch (term.type) {
     case "text": {
+      // A free-text term is a case-insensitive substring of the title, the
+      // channel name or the video ID — the same three fields the TUI's
+      // internal/jobfilter matches, so one query reads alike in both UIs.
       const val = term.value.toLowerCase();
       result = (job.title || "").toLowerCase().includes(val) ||
-               (job.channelName || "").toLowerCase().includes(val);
+               (job.channelName || "").toLowerCase().includes(val) ||
+               (job.videoId || "").toLowerCase().includes(val);
       break;
     }
     case "status": {

@@ -269,7 +269,7 @@ The chord system is a three-state finite automaton:
 | `M` | Open Action Menu (command palette) |
 | `` ` `` | Open Settings dialog |
 | `?` | Open Help overlay |
-| `/` | Tasks panel: open the filter query box, which speaks the dashboard's filter language — free text plus `status:`/`channel:`/`platform:` tokens, `-` negation, `a\|b` OR groups, quoted values. `Enter` applies and closes; losing panel focus closes the box but keeps the applied query. Log panel: enter search mode. `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
+| `/` | Tasks panel: open the filter query box, which speaks the dashboard's filter language — free text plus `status:`/`channel:`/`platform:` tokens, `-` negation, `a\|b` OR groups, quoted values. Free text is a case-insensitive substring of the title, channel name or video ID (both UIs). `Enter` applies and closes; losing panel focus closes the box but keeps the applied query. Log panel: enter search mode. `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
 | `Esc` | Clear the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together. |
 | `c` | Clear the log view (log panel focused only). Drops history, the filtered view, and any active search; the level filter is kept. |
 

@@ -169,6 +169,21 @@ func TestSerializeRoundTripsNamespacedQuoted(t *testing.T) {
 	}
 }
 
+func TestSerializeQuotesAPipeInsideAValue(t *testing.T) {
+	// node test: "serializeToken: round-trips a value holding a pipe"
+	// Unquoted, channel:a|b re-parses as an OR group — a different query.
+	// The TUI runs every F press through Serialize, so this must survive.
+	parsed := Parse(`channel:"a|b"`)
+	got := Serialize(parsed)
+	if got != `channel:"a|b"` {
+		t.Fatalf("Serialize = %q, want %q", got, `channel:"a|b"`)
+	}
+	reparsed := Parse(got)
+	if len(reparsed) != 1 || reparsed[0].Kind != KindChannel || reparsed[0].Value != "a|b" {
+		t.Fatalf("re-parse must stay one channel term with value %q: %+v", "a|b", reparsed)
+	}
+}
+
 func TestSerializeRoundTripsOrGroup(t *testing.T) {
 	// node test: "serializeToken: round-trips OR group"
 	got := Serialize([]Token{{
@@ -363,6 +378,11 @@ func TestStatusBucket(t *testing.T) {
 		if got := StatusBucket(in); got != want {
 			t.Errorf("StatusBucket(%q) = %q, want %q", in, got, want)
 		}
+	}
+	// The alias lives in StatusBucket alone — every lookup folds it into
+	// "issues" first, so the map must not carry a second copy of the set.
+	if _, ok := BucketStatuses["errors"]; ok {
+		t.Error(`BucketStatuses must not key "errors" — StatusBucket maps it to "issues"`)
 	}
 }
 

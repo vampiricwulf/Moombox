@@ -169,7 +169,7 @@ type TaskListModel struct {
 func NewTaskListModel() *TaskListModel {
 	ti := newTextInput()
 	ti.Prompt = "/"
-	ti.Placeholder = `text  status:active  channel:"name"  -platform:twitch`
+	ti.Placeholder = `text status:active channel:"name" -platform:twitch`
 	ti.CharLimit = 200
 	m := &TaskListModel{
 		hideFinishedAgeDays: 30,
@@ -850,7 +850,9 @@ func (m *TaskListModel) rebuildVirtualList() {
 		items = append(items, taskItem{job: j})
 	}
 
-	if len(archived) > 0 && m.showArchive() {
+	// Every archived job is Finished and already passed Match, so a status token
+	// that excludes Finished empties this bucket by itself — no separate rule.
+	if len(archived) > 0 {
 		items = append(items, taskItem{
 			divider: true,
 			count:   len(archived),
@@ -874,29 +876,6 @@ func (m *TaskListModel) passes(j *database.Job) bool {
 	return jobfilter.Match(m.tokens, j)
 }
 
-// showArchive reports whether the archived section may appear. It is hidden
-// only while a non-negated status token excludes Finished — status:active
-// and status:live both hide it, status:finished and a negated -status:active
-// do not, and a query with no status token never hides it.
-func (m *TaskListModel) showArchive() bool {
-	for _, t := range m.tokens {
-		if t.Kind != jobfilter.KindStatus || t.Negate {
-			continue
-		}
-		if statuses, ok := jobfilter.BucketStatuses[jobfilter.StatusBucket(t.Value)]; ok {
-			if !slices.Contains(statuses, database.StatusFinished) {
-				return false
-			}
-			continue
-		}
-		// A raw status name — the engine's equality fallback.
-		if !strings.EqualFold(t.Value, string(database.StatusFinished)) {
-			return false
-		}
-	}
-	return true
-}
-
 // View renders the task list panel.
 func (m *TaskListModel) View() string {
 	contentW := max(m.width-2, 1)
@@ -907,7 +886,7 @@ func (m *TaskListModel) View() string {
 	if len(m.list.Items()) == 0 {
 		switch {
 		case len(m.tokens) > 0:
-			listContent = DimStyle.Render(fmt.Sprintf("No tasks match %q.", m.Query()))
+			listContent = DimStyle.Render("No tasks match [" + truncateString(m.Query(), max(contentW-18, 8)) + "].")
 		case m.JustCompletedSetup:
 			listContent = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ecc71")).Render("Setup complete!") + "\n\n" +
 				DimStyle.Render("Press ` to open Settings and add channels,") + "\n" +

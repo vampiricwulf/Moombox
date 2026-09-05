@@ -40,7 +40,7 @@ var navigationKeys = helpSection{
 		{"PgUp/PgDn", "Page scroll (Logs)"},
 		{"Enter", "Expand/collapse archives"},
 		{"/", "Filter query (Tasks) · Find text (Logs)"},
-		{"", "Filter: status:live channel:name platform:youtube -negate a|b \"quoted\""},
+		{"", "Filter: status:live channel:\"name\" platform:youtube -negate a|b \"quoted\""},
 		{"n / N", "Next / previous search match (Logs)"},
 		{"c", "Clear the log view (Logs)"},
 	},
