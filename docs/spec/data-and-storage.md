@@ -465,8 +465,8 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | TLSCertPath | string | "" | `tls_cert_path` | |
 | TLSKeyPath | string | "" | `tls_key_path` | |
 | PasswordHash | string | "" | `password_hash` | scrypt hash, omitted from JSON; a plaintext value is auto-converted on the next start |
-| ClientTokenTTLDays | int | 365 | `client_token_ttl_days` | Valid range: 1-3650 |
-| TrustForwardedProto | bool | false | `trust_forwarded_proto` | Only behind a TLS-terminating proxy that strips the client's own header |
+| ClientTokenTTLDays | int | 365 | `client_token_ttl_days` | Valid range: 1-3650. Also enforced by `PUT /api/config` (`validateConfigUpdates`), so an out-of-range value is a field error, not a silent clamp. |
+| TrustForwardedProto | bool | false | `trust_forwarded_proto` | Only behind a TLS-terminating proxy that strips the client's own header. Hot-reloadable: a config save re-applies it (`OnTrustForwardedProtoChange`). |
 | TrustedProxies | []string | `[]` | `trusted_proxies` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored. Entries must parse as an IP or CIDR (invalid ones are reported and dropped). Hot-reloadable — no restart. See [security.md](security.md) |
 
 #### [paths]
@@ -477,7 +477,7 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | LogFilePath | string | "./moombox.log" | `log_file_path` |
 | OutputDirectory | string | "./output" | `output_directory` |
 | StagingDirectory | string | "./staging" | `staging_directory` |
-| FfmpegPath | string | "" | `ffmpeg_path` |
+| FfmpegPath | string | "" | `ffmpeg_path` | Hot-reloadable: `TrimService.SetFfmpegPath` rebuilds the muxer on save; in-flight trims keep the muxer they started with. |
 
 #### [logs]
 
@@ -553,9 +553,21 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 
 | Field | Type | Default | TOML Key | Notes |
 |-------|------|---------|----------|-------|
-| GoSoftLimitMB | int | 256 | `go_soft_limit_mb` | `debug.SetMemoryLimit`. Soft cap — Go GC ramps up near the limit but allocations succeed beyond it. 0 disables. |
+| GoSoftLimitMB | int | 256 | `go_soft_limit_mb` | `debug.SetMemoryLimit`. Soft cap — Go GC ramps up near the limit but allocations succeed beyond it. 0 disables. Hot-reloadable: re-applied on save (`0` clears the limit via `math.MaxInt64`). |
 | SidecarSoftLimitMB | int | 200 | `sidecar_soft_limit_mb` | RSS threshold. When sidecar RSS crosses, Moombox calls `triggerGC` JSON-RPC. 0 disables. |
-| SidecarHardLimitMB | int | 512 | `sidecar_hard_limit_mb` | V8 `--max-old-space-size`. Hitting this OOM-aborts the sidecar (no graceful soft stop). Must be comfortably above SidecarSoftLimitMB. 0 uses V8's default (~512–1500 MB depending on host). |
+| SidecarHardLimitMB | int | 512 | `sidecar_hard_limit_mb` | V8 `--max-old-space-size`. Hitting this OOM-aborts the sidecar (no graceful soft stop). Must be comfortably above SidecarSoftLimitMB. 0 uses V8's default (~512–1500 MB depending on host). **Restart-required** (the sidecar is started with it once); both settings UIs mark it so. |
+
+#### [bgutils]
+
+| Field | Type | Default | TOML Key | Notes |
+|-------|------|---------|----------|-------|
+| UseSidecar | bool | true | `use_sidecar` | Node + JSDOM + bgutils-js sidecar for real PO tokens. **Restart-required**; both UIs mark it so. |
+
+#### [connectivity]
+
+| Field | Type | Default | TOML Key | Notes |
+|-------|------|---------|----------|-------|
+| ProbeTargets | []string | `1.1.1.1:443, 8.8.8.8:443, 9.9.9.9:443` | `probe_targets` | host:port TCP targets raced to detect internet reachability. Exposed in both settings UIs' Network section; `PUT /api/config` validates each entry with `net.SplitHostPort` and rejects an empty list. **Restart-required** (the monitor takes its targets at construction). |
 
 #### [[channels]] (array of tables)
 
@@ -566,11 +578,11 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 | Platform | string | "youtube" | `platform` | "youtube" or "twitch" |
 | Enabled | *bool | nil (true) | `enabled` | nil defaults to true |
 | Terms | ChannelTerms | empty | `terms` | Regex filter (string or map of named patterns) |
-| NumDescLookbehind | *int | nil | `num_desc_lookbehind` | |
-| OutputDirectory | string | "" | `output_directory` | Per-channel override |
+| NumDescLookbehind | *int | nil | `num_desc_lookbehind` | Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
+| OutputDirectory | string | "" | `output_directory` | Per-channel override. Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
 | IncludeNonLiveContent | bool | false | `include_non_live_content` | |
-| ArchiveWindowDays | *int | nil | `archive_window_days` | Per-channel override (1-3650) |
-| ArchiveSlots | *int | nil | `archive_slots` | Per-channel override (1-100) |
+| ArchiveWindowDays | *int | nil | `archive_window_days` | Per-channel override (1-3650). Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
+| ArchiveSlots | *int | nil | `archive_slots` | Per-channel override (1-100). Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
 | QualityPreference | string | "" | `quality_preference` | e.g. "1080p60", "best", "audio_only" |
 
 #### [[notifications]] (array of tables)
