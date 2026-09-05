@@ -526,7 +526,14 @@ func (s *runState) runTUI() {
 			// context.Background rather than importCtx: defers run LIFO, so
 			// this one completes before importCancel fires, but the 60 s budget
 			// is the IMPORT's and the re-check is not the import's work to
-			// spend it on — the same call the other four sites make.
+			// spend it on — the same call the other five sites make.
+			//
+			// The re-check runs before this returns, so the overlay's spinner
+			// covers it (≤30 s worst case: two 15 s auth probes); the web route
+			// flushes its response first and re-checks after. Kept blocking
+			// here on purpose: the AST test pins every cookies.txt write to end
+			// in a deferred re-check, and a goroutine would satisfy the test
+			// while deleting the property it protects.
 			defer func() {
 				if result.Wrote {
 					recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "a cookie file import")
@@ -601,7 +608,7 @@ func (s *runState) runTUI() {
 			// The reason is that its 60 s budget is the WIZARD's — priced
 			// against the server-side setup grace window, as the comment on the
 			// timeout says — and the re-check is not the wizard's work to spend
-			// it on. Same as the other four sites: none of them wants a
+			// it on. Same as the other five sites: none of them wants a
 			// fingerprint comparison cancelled by its caller's teardown, and
 			// the re-check has to outlive nothing.
 			defer func() {

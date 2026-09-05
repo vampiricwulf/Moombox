@@ -485,12 +485,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.ensureMarqueeTicking()
 
 	case cookieImportResultMsg:
-		// Dropped when the operator closed the overlay while the import ran.
-		// Deliberately silent: the import is not cancellable, cookies.txt has
-		// already been written or rolled back, and the status bar's cookie
-		// badge is what reports the state afterwards — the re-check the wiring
-		// fires after a write is what refreshes it.
-		if !a.cookieImportDlg.IsVisible() {
+		// IsImporting, not IsVisible: the overlay that gets this result must be
+		// the one that STARTED it. Esc during a slow import and then R I again
+		// leaves a visible dialog that is a fresh path prompt, and the first
+		// import's outcome landing on it would describe a different file.
+		//
+		// The answer still gets delivered, on the feedback line — the import is
+		// not cancellable, so Esc closed the place the answer was going to be
+		// written and nothing else. Same words as the overlay's rows, from the
+		// same helper; outcomes and verdicts only, never cookie content.
+		if !a.cookieImportDlg.IsImporting() {
+			a.setFeedback(importResultSummary(msg.Result, msg.Err))
 			return a, nil
 		}
 		a.cookieImportDlg.SetResult(msg.Result, msg.Err)

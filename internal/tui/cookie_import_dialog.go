@@ -58,6 +58,16 @@ func NewCookieImportDialogModel() *CookieImportDialogModel {
 // IsVisible returns true if the dialog is shown.
 func (m *CookieImportDialogModel) IsVisible() bool { return m.visible }
 
+// IsImporting reports whether the overlay is on the spinner step, waiting for
+// the import IT started.
+//
+// Narrower than IsVisible on purpose: Esc during a slow import and then R I
+// again leaves a VISIBLE dialog that is a fresh path prompt, and the first
+// import's result must not overwrite it with an outcome for a different file.
+func (m *CookieImportDialogModel) IsImporting() bool {
+	return m.visible && m.step == cookieImportStepRunning
+}
+
 // SetSize updates the dialog dimensions.
 func (m *CookieImportDialogModel) SetSize(w, h int) {
 	m.width, m.height = w, h
@@ -130,23 +140,27 @@ func expandHome(p string) string {
 // The existence check happens HERE rather than inside the command, so a typo
 // is answered inline over the still-filled prompt instead of round-tripping
 // through the callback and coming back as a failed import.
+//
+// IT NEVER TOUCHES THE TEXTINPUT, and that is the rule, not an omission.
+// App.Update's keypress arm calls routeComponentMsg AND handleKey for the same
+// message, so the input is fed once already — by UpdateComponents, which runs
+// FIRST. Feeding it here too inserts every rune twice ("abc" → "aabbcc") and
+// makes one Backspace eat two characters, and no test that calls HandleKey
+// directly can see it. ImportDialogModel keeps the same split
+// (import_dialog.go: HandleKey takes a derived key string and cannot reach its
+// input). Pinned by TestCookieImportTypingIsNotDoubled, which drives
+// App.Update.
+//
+// Because UpdateComponents ran first, m.input.Value() on Enter already
+// includes everything typed up to and including the keypress before it.
 func (m *CookieImportDialogModel) HandleKey(msg tea.KeyPressMsg) (string, string) {
 	key := msg.String()
 	if key == keyEsc || (m.step == cookieImportStepResult && (key == "q" || key == keyEnter)) {
 		m.Close()
 		return "close", ""
 	}
-
-	switch m.step {
-	case cookieImportStepPath:
-		if key == keyEnter {
-			return m.confirmPath()
-		}
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		_ = cmd // the App drives the cursor blink through UpdateComponents
-	case cookieImportStepRunning:
-		// Only Esc does anything, and it is handled above.
+	if m.step == cookieImportStepPath && key == keyEnter {
+		return m.confirmPath()
 	}
 	return "", ""
 }
@@ -226,8 +240,17 @@ func (m *CookieImportDialogModel) View() string {
 		} else {
 			b.WriteString(platformOutcomeLine("YouTube", m.result.YouTubeOutcome, m.result.YouTube, m.result.YouTubeAccepted) + "\n")
 			b.WriteString(platformOutcomeLine("Twitch", m.result.TwitchOutcome, m.result.Twitch, m.result.TwitchAccepted) + "\n")
-			if m.result.RollbackProtected {
-				b.WriteString("\n" + DimStyle.Render("A platform that stopped authenticating kept its previous cookies.") + "\n")
+			// ON THE OUTCOME, never on RollbackProtected. That flag says a
+			// rollback was POSSIBLE — a pre-write snapshot succeeded over an
+			// existing cookies.txt — which is true of virtually every import
+			// on an install that already has credentials. Gated on it, this
+			// past-tense sentence followed two clean "imported (authenticates)"
+			// lines and told the operator a platform had stopped
+			// authenticating. The Web keeps RollbackProtected off the wire
+			// entirely and words its rollback toast off the outcome string
+			// alone; this is the same rule.
+			if m.result.YouTubeOutcome == cookies.ImportRolledBack || m.result.TwitchOutcome == cookies.ImportRolledBack {
+				b.WriteString("\n" + DimStyle.Render("A platform that stopped authenticating kept its previous cookies (rolled back).") + "\n")
 			}
 		}
 		b.WriteString("\n" + DimStyle.Render("Esc/Enter: Close"))
@@ -243,8 +266,8 @@ func (m *CookieImportDialogModel) View() string {
 	return centerBox(box, m.width, m.height)
 }
 
-// platformOutcomeLine words one platform's result off the two facts the import
-// reports, and never off one of them.
+// platformOutcomePhrase words one platform's result off the two facts the
+// import reports, and never off one of them.
 //
 // What happened to the ROWS (cookies.ImportOutcome) and whether the platform
 // AUTHENTICATES afterwards (the verdict, or the accepted flag for a check that
@@ -252,10 +275,33 @@ func (m *CookieImportDialogModel) View() string {
 // (RefreshOK, ImportRolledBack): the platform is alive precisely because the
 // paste was thrown out. A single pass/fail cannot say that, which is why the
 // Web import's payload keeps the same two fields apart.
-func platformOutcomeLine(name string, outcome cookies.ImportOutcome, verdict cookies.RefreshVerdict, accepted bool) string {
+func platformOutcomePhrase(outcome cookies.ImportOutcome, verdict cookies.RefreshVerdict, accepted bool) string {
 	auth := verdict.String()
 	if accepted {
 		auth = "authenticates"
 	}
-	return fmt.Sprintf("  %-9s %s (%s)", name+":", outcome.String(), auth)
+	return outcome.String() + " (" + auth + ")"
+}
+
+// platformOutcomeLine is that phrase as one column-aligned overlay row.
+func platformOutcomeLine(name string, outcome cookies.ImportOutcome, verdict cookies.RefreshVerdict, accepted bool) string {
+	return fmt.Sprintf("  %-9s %s", name+":", platformOutcomePhrase(outcome, verdict, accepted))
+}
+
+// importResultSummary is the same answer on ONE line, for the feedback bar.
+//
+// It exists because Esc during a slow import used to throw the outcome away:
+// the import is not cancellable, so closing the overlay only closed the place
+// the answer was going to be written. Same words as the overlay's rows, from
+// the same helper, so the two surfaces cannot drift — and, like them, it
+// carries outcomes, verdicts and sentinel error text only. Never cookie
+// content: every ImportCookies failure is a sentinel or a sentinel wrapped
+// with a platform name, and none of them quotes the file.
+func importResultSummary(r cookies.ImportResult, err error) string {
+	if err != nil {
+		return "Cookie import failed: " + err.Error()
+	}
+	return fmt.Sprintf("Cookie import: YouTube %s; Twitch %s",
+		platformOutcomePhrase(r.YouTubeOutcome, r.YouTube, r.YouTubeAccepted),
+		platformOutcomePhrase(r.TwitchOutcome, r.Twitch, r.TwitchAccepted))
 }

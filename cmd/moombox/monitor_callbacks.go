@@ -165,7 +165,7 @@ func recheckAfterCookieWrite(ctx context.Context, checkNow func(context.Context)
 // s.cookieRefresh.CheckNow, and a method value taken off a nil *RefreshService
 // is non-nil, so recheckAfterCookieWrite's nil check was stepped over and the
 // dereference landed inside refresh at rs.mu.Lock(). Returning the nil func
-// instead makes that check mean what it says at all five sites, and lets
+// instead makes that check mean what it says at all six sites, and lets
 // runCookieRecovery be driven from a zero-value runState.
 //
 // A func rather than the concrete pointer so the helper keeps the seam its own
@@ -173,7 +173,7 @@ func recheckAfterCookieWrite(ctx context.Context, checkNow func(context.Context)
 // all asserted with a fake CheckNow, and none of that survives a parameter that
 // can only be a live RefreshService.
 //
-// Nil is not reachable in production at any of the five sites: initServices
+// Nil is not reachable in production at any of the six sites: initServices
 // constructs and assigns cookieRefresh in §15, before the auto-cookie wiring,
 // the worker callbacks and runTUI all of which follow it.
 func (s *runState) checkNowFn() func(context.Context) bool {

@@ -325,10 +325,12 @@ type ImportResult struct {
 // start anyway.
 //
 // The caller runs the auth re-check. Every gesture that can write cookies.txt
-// must end in one (Arc 10 R4) and this one's caller lives in
-// internal/web/routes, which — like the two setup-wizard finishes — runs it
-// itself rather than through the OnPassCompleted seam. Firing that seam here
-// would double every external site; see its doc comment.
+// must end in one (Arc 10 R4) and this one has TWO callers: the Web import
+// route in internal/web/routes, and the TUI's R I wiring in
+// cmd/moombox/tui_wiring.go (which goes through recheckAfterCookieWrite, as
+// the other cmd/moombox writers do). Both — like the two setup-wizard finishes
+// — run it themselves rather than through the OnPassCompleted seam. Firing
+// that seam here would double every external site; see its doc comment.
 func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) (ImportResult, error) {
 	if s.cookiePath == "" {
 		// Unreachable in production — cmd/moombox always constructs the service
