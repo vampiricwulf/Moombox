@@ -7,7 +7,7 @@ import { PlayerController, focusPlayerSurface } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob, streamUrl } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
@@ -2634,6 +2634,11 @@ class MoomboxApp {
             <span class="details-label">${isTwitch ? "Stream ID:" : "Video ID:"}</span>
             <span class="details-value"><code>${this.escapeHtml(job.videoId)}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy" data-copy="${this.escapeHtml(job.videoId)}"></sl-icon-button></span>
           </div>
+          ${streamUrl(job) ? `
+          <div class="details-row">
+            <span class="details-label">Stream URL:</span>
+            <span class="details-value"><code>${this.escapeHtml(streamUrl(job))}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy stream URL" data-copy="${this.escapeHtml(streamUrl(job))}"></sl-icon-button></span>
+          </div>` : ""}
           <div class="details-row">
             <span class="details-label">Title:</span>
             <span class="details-value">${this.escapeHtml(job.title)}</span>

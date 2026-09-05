@@ -565,7 +565,9 @@ The two cookie blocks come from `routes`' own projections rather than being rebu
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `POST` | `/api/backfill/rescan` | Force a feed-history backfill re-scan of every configured YouTube channel (same operation as the TUI `R B` chord). Debounced to one accepted run per 30s — a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}`. |
+| `POST` | `/api/backfill/rescan` | Force a feed-history backfill re-scan of every configured YouTube channel (same operation as the TUI `R B` chord). Debounced to one accepted run per 30s — a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}`. Web: the "Re-scan Feed History" button in the Settings → Channels panel (`rescan-feeds-btn`, `settings.js` `rescanFeedHistory`). |
+
+**Job details.** A "Stream URL" row with its own copy button (`streamUrl` in `web/public/modules/utils.js`, the twin of the TUI's `O C`) appears whenever the job has or can derive a page URL.
 
 ### Configuration
 

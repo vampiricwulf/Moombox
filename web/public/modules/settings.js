@@ -211,6 +211,12 @@ export class SettingsController {
       );
     }
 
+    // Re-scan feed history (Web twin of the TUI's R B)
+    const rescanBtn = document.getElementById("rescan-feeds-btn");
+    if (rescanBtn) {
+      rescanBtn.addEventListener("click", () => this.rescanFeedHistory());
+    }
+
     // Channel dialog buttons
     const channelCancelBtn = document.getElementById("channel-cancel-btn");
     if (channelCancelBtn) {
@@ -1670,6 +1676,27 @@ export class SettingsController {
     } catch (e) {
       this.app.showToast("Failed to update channel: " + e.message, "danger");
       this.renderChannelsList(); // Revert toggle to match local config state
+    }
+  }
+
+  /**
+   * Force a full-catalog backfill re-scan — the Web twin of the TUI's R B.
+   * Same fire-and-forget shape as app.checkMonitorsNow(): the server debounces
+   * (30 s) and answers {debounced, retryAfterMs}; nothing is throttled here.
+   */
+  async rescanFeedHistory() {
+    try {
+      const resp = await fetch("/api/backfill/rescan", { method: "POST" });
+      const data = await resp.json().catch(() => ({}));
+      if (data.debounced) {
+        this.app.showToast(`Just re-scanned — try again in ${Math.ceil((data.retryAfterMs || 0) / 1000)}s`, "primary");
+      } else if (resp.ok && data.success) {
+        this.app.showToast("Re-scanning feed history…", "success");
+      } else {
+        this.app.showToast("Re-scan failed", "danger");
+      }
+    } catch {
+      this.app.showToast("Re-scan failed: could not reach server", "danger");
     }
   }
 
