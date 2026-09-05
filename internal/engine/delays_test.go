@@ -75,15 +75,11 @@ func fastDelays() delays {
 // fast scales a test's own timing knob (a MaxTimeout, a ceiling) by the same
 // factor the loop waits were scaled by, so the knob keeps its relationship to
 // the loop.
-//
-//lint:ignore U1000 consumed by Tasks 2-3's tests, not yet written in this task
 func fast(d time.Duration) time.Duration { return d / fastScale }
 
 // activityRecorder wires OnActivity to a buffered channel so a test can wait
 // for the loop to REACH a state instead of sleeping a wall-clock margin and
 // hoping. Non-blocking send: a test that stops reading never stalls the loop.
-//
-//lint:ignore U1000 consumed by Tasks 2-3's tests, not yet written in this task
 func activityRecorder(d *SegmentDownloader) <-chan DownloadActivity {
 	ch := make(chan DownloadActivity, 1024)
 	d.OnActivity = func(a DownloadActivity) {
@@ -96,8 +92,6 @@ func activityRecorder(d *SegmentDownloader) <-chan DownloadActivity {
 }
 
 // awaitActivity blocks until want is observed on ch or within elapses.
-//
-//lint:ignore U1000 consumed by Tasks 2-3's tests, not yet written in this task
 func awaitActivity(t *testing.T, ch <-chan DownloadActivity, want DownloadActivity, within time.Duration) {
 	t.Helper()
 	deadline := time.After(within)

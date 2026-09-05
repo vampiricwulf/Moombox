@@ -32,10 +32,19 @@ import (
 // branch defers the verdict without deciding it). Tests 2 and 5 below use
 // the error-returning form.
 //
-// The stall's retry sleep is interruptionStallRetryDelay (5s, not the
-// 500ms singleGoneRetryDelay used elsewhere) -- see its doc comment in
-// downloader_dash.go. Assertions that wait for a post-flip/post-ceiling
-// return use a margin of at least 2x that delay.
+// The stall's retry sleep is interruptionStallRetry (the delays field named
+// for interruptionStallRetryDelay), an order of magnitude longer than the
+// singleGoneRetry used elsewhere -- see its doc comment in
+// downloader_dash.go.
+//
+// Every test below installs fastDelays(), which divides every loop wait by
+// the same fastScale, and scales its own MaxTimeout / InterruptionTimeout
+// knobs with fast() so escalation counts and orderings stay exactly
+// production's -- only the wall clock shrinks. Consequently no assertion
+// here may key off a wall-clock duration: the "still stalling" checks wait
+// for the loop to REACH ActivityWaitingResume (awaitActivity) and the
+// bounded time.After arms are safety nets a working loop never reaches, not
+// measurements.
 
 // TestBackstopStallsWhileMayResume drives handleHTTPError's MaxTimeout
 // backstop (segments beyond head permanently 500) with MayResume() latched
@@ -57,11 +66,10 @@ func TestBackstopStallsWhileMayResume(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "v")
-	const maxTimeout = 1 * time.Second
+	maxTimeout := fast(1 * time.Second)
 	var mayResume atomic.Bool
 	mayResume.Store(true)
 	var mayResumeCalls atomic.Int64
-	var sawWaitingResume atomic.Bool
 
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    srv.URL + "/videoplayback?id=itest.interrupt1&itag=140",
@@ -72,42 +80,40 @@ func TestBackstopStallsWhileMayResume(t *testing.T) {
 		// to prove the stall is independent of it.
 		CheckStreamStatus: func(context.Context) (bool, error) { return false, nil },
 	})
+	d.delays = fastDelays()
 	d.MayResume = func() bool {
 		mayResumeCalls.Add(1)
 		return mayResume.Load()
 	}
-	d.OnActivity = func(a DownloadActivity) {
-		if a == ActivityWaitingResume {
-			sawWaitingResume.Store(true)
-		}
-	}
+	act := activityRecorder(d)
 
 	done := make(chan error, 1)
 	go func() { done <- d.Start(context.Background()) }()
 
-	// Would-fail check (a): still running well after MaxTimeout+margin
-	// elapsed, with MayResume()==true throughout. MayResume never flips
-	// during this wait, so any check point past the natural backstop-entry
-	// time (~1s, per handleHTTPError's own sleep progression) is valid
-	// regardless of where the 5s stall-sleep cycle currently sits.
+	// Would-fail check (a): the backstop engaged the stall arm and is still
+	// running, with MayResume()==true throughout. The stall arm is engaged
+	// once the loop reports ActivityWaitingResume; waiting for the event
+	// replaces the old fixed-seconds margin (which had to out-sit the
+	// backstop-entry escalation and land somewhere in an
+	// interruptionStallRetry cycle to mean anything).
+	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
 	select {
 	case err := <-done:
-		t.Fatalf("Start returned (err=%v) before MayResume flipped false -- backstop did not stall", err)
-	case <-time.After(6 * time.Second):
-		// still running, as expected -- fall through to flip MayResume.
+		t.Fatalf("Start returned (err=%v) while MayResume was still true -- the stall did not hold", err)
+	default:
 	}
 
 	mayResume.Store(false)
 
 	// Would-fail check (b): flipping MayResume false must release the
-	// finalize within about one interruptionStallRetryDelay cycle, not
-	// require another full MaxTimeout wait.
+	// finalize within about one interruptionStallRetry cycle, not require
+	// another full MaxTimeout wait.
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("Start = %v, want nil after MayResume flipped false", err)
 		}
-	case <-time.After(12 * time.Second): // >= 2x interruptionStallRetryDelay
+	case <-time.After(5 * time.Second): // safety net, orders of magnitude past one cycle
 		t.Fatal("Start did not return promptly after MayResume flipped false")
 	}
 
@@ -117,14 +123,14 @@ func TestBackstopStallsWhileMayResume(t *testing.T) {
 	if mayResumeCalls.Load() == 0 {
 		t.Error("MayResume was never consulted -- stallForPossibleResume not reached")
 	}
-	if !sawWaitingResume.Load() {
-		t.Error("ActivityWaitingResume never emitted during the stall")
-	}
+	// ActivityWaitingResume is asserted by the awaitActivity call above --
+	// reaching this line means the stall arm emitted it before the flip.
 	wantSegments(t, out, 0, head)
 }
 
 // TestBackstopCeilingExpires drives handleGoneError's fallthrough (site 1,
-// 403 past head) with InterruptionTimeout=2s and MayResume permanently true
+// 403 past head) with a scaled InterruptionTimeout ceiling (2x this test's
+// own MaxTimeout, both run through fast()) and MayResume permanently true
 // (it never resolves the interruption itself -- only the ceiling can end
 // this run). CheckStreamStatus returns an error so the verdict stays
 // deferred (see the file-level comment on why (true/false, nil) can't reach
@@ -154,8 +160,8 @@ func TestBackstopCeilingExpires(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "v")
-	const maxTimeout = 1 * time.Second
-	const ceiling = 2 * time.Second
+	maxTimeout := fast(1 * time.Second)
+	ceiling := fast(2 * time.Second)
 	statusCheckErr := errors.New("status check unavailable")
 	var mayResumeCalls atomic.Int64
 
@@ -168,6 +174,7 @@ func TestBackstopCeilingExpires(t *testing.T) {
 			return false, statusCheckErr // defers the verdict -- handleGoneError's checkErr branch
 		},
 	})
+	d.delays = fastDelays()
 	d.MayResume = func() bool {
 		mayResumeCalls.Add(1)
 		return true // never resolves -- only the ceiling can end this
@@ -182,7 +189,7 @@ func TestBackstopCeilingExpires(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil (ceiling-forced finalize)", err)
 		}
-	case <-time.After(20 * time.Second):
+	case <-time.After(5 * time.Second): // safety net, far past the scaled ceiling
 		t.Fatal("Start did not return once the InterruptionTimeout ceiling expired -- stall is unbounded")
 	}
 	elapsed := time.Since(start)
@@ -225,12 +232,13 @@ func TestNilMayResumeByteCompat(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "v")
-	const maxTimeout = 2 * time.Second
+	maxTimeout := fast(2 * time.Second)
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    srv.URL + "/videoplayback?id=itest.interrupt3&itag=140",
 		OutputFile: out,
 		MaxTimeout: maxTimeout,
 	})
+	d.delays = fastDelays()
 	// d.MayResume intentionally left nil.
 
 	start := time.Now()
@@ -242,7 +250,7 @@ func TestNilMayResumeByteCompat(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil", err)
 		}
-	case <-time.After(maxTimeout + 5*time.Second):
+	case <-time.After(5 * time.Second): // safety net, far past the scaled MaxTimeout
 		t.Fatal("Start did not return -- nil MayResume must behave exactly like pre-feature code (bounded finalize at MaxTimeout), not stall indefinitely")
 	}
 	elapsed := time.Since(start)
@@ -264,7 +272,7 @@ func TestNilMayResumeByteCompat(t *testing.T) {
 // handleGoneError insertion site -- MayResume would then be consulted, the
 // stall would engage, and (since MayResume never flips and
 // InterruptionTimeout is unset/0, i.e. no ceiling) Start would never
-// return, caught by the bounded 20s wait; the explicit mayResumeCalls
+// return, caught by the bounded safety-net wait; the explicit mayResumeCalls
 // assertion catches the same regression even if some other unbounded
 // ceiling accidentally masked the hang.
 func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
@@ -287,6 +295,7 @@ func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
 			return true, nil // confirmed ended
 		},
 	})
+	d.delays = fastDelays()
 	d.MayResume = func() bool {
 		mayResumeCalls.Add(1)
 		return true // must be ignored once the end is confirmed
@@ -301,12 +310,12 @@ func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil", err)
 		}
-	case <-time.After(20 * time.Second):
+	case <-time.After(5 * time.Second): // safety net
 		t.Fatal("Start did not return -- a confirmed-ended verdict must bypass MayResume/the stall entirely, not wait on it")
 	}
 
-	if elapsed := time.Since(start); elapsed > 15*time.Second {
-		t.Errorf("finalized after %v -- slower than the ~5.5s goneRetryDuringDownload escalation (10 x singleGoneRetryDelay) should allow", elapsed)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("finalized after %v -- slower than the goneRetryDuringDownload escalation (10 x singleGoneRetry) should allow", elapsed)
 	}
 	if mayResumeCalls.Load() != 0 {
 		t.Errorf("MayResume consulted %d times, want 0 -- confirmed end must bypass stallForPossibleResume entirely", mayResumeCalls.Load())
@@ -335,8 +344,9 @@ func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
 // resolution the way TestBackstopStallsWhileMayResume does for site 2).
 // Would catch: site 1's stall insertion being deleted or bypassed, or
 // stallForPossibleResume returning false when MayResume is true -- either
-// regression finalizes right after the ~5.5s goneRetryDuringDownload
-// escalation instead of stalling, observed as an early receive on `done`.
+// regression finalizes right after the goneRetryDuringDownload escalation
+// (10 x singleGoneRetry) instead of stalling, observed as a never-emitted
+// ActivityWaitingResume and then an early receive on `done`.
 func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 	t.Parallel()
 	const head = 2
@@ -348,11 +358,12 @@ func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "v")
-	const maxTimeout = 1 * time.Second // < the ~5.5s it takes to reach the block, so the budget has already expired by then
+	// Shorter than the goneRetryDuringDownload escalation it takes to reach
+	// the block, so the budget has already expired by then.
+	maxTimeout := fast(1 * time.Second)
 	var mayResume atomic.Bool
 	mayResume.Store(true)
 	var mayResumeCalls atomic.Int64
-	var sawWaitingResume atomic.Bool
 	statusCheckErr := errors.New("status check unavailable")
 
 	d := NewSegmentDownloader(DownloaderOptions{
@@ -363,38 +374,37 @@ func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 			return false, statusCheckErr
 		},
 	})
+	d.delays = fastDelays()
 	d.MayResume = func() bool {
 		mayResumeCalls.Add(1)
 		return mayResume.Load()
 	}
-	d.OnActivity = func(a DownloadActivity) {
-		if a == ActivityWaitingResume {
-			sawWaitingResume.Store(true)
-		}
-	}
+	act := activityRecorder(d)
 
 	done := make(chan error, 1)
 	go func() { done <- d.Start(context.Background()) }()
 
-	// Would-fail check (a): still running well past the ~5.5s
-	// goneRetryDuringDownload escalation, with MayResume()==true throughout.
+	// Would-fail check (a): the loop got past the goneRetryDuringDownload
+	// escalation and is still running, with MayResume()==true throughout.
+	// The stall arm is engaged once the loop reports ActivityWaitingResume;
+	// waiting for the event replaces the old fixed-seconds margin.
+	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
 	select {
 	case err := <-done:
-		t.Fatalf("Start returned (err=%v) before MayResume flipped false -- handleGoneError's stall arm did not engage", err)
-	case <-time.After(9 * time.Second):
-		// still running, as expected -- fall through to flip MayResume.
+		t.Fatalf("Start returned (err=%v) while MayResume was still true -- the stall did not hold", err)
+	default:
 	}
 
 	mayResume.Store(false)
 
 	// Would-fail check (b): flipping MayResume false must release the
-	// finalize within about one interruptionStallRetryDelay cycle.
+	// finalize within about one interruptionStallRetry cycle.
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("Start = %v, want nil after MayResume flipped false", err)
 		}
-	case <-time.After(12 * time.Second): // >= 2x interruptionStallRetryDelay
+	case <-time.After(5 * time.Second): // safety net, orders of magnitude past one cycle
 		t.Fatal("Start did not return promptly after MayResume flipped false")
 	}
 
@@ -404,9 +414,8 @@ func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 	if mayResumeCalls.Load() == 0 {
 		t.Error("MayResume was never consulted -- stallForPossibleResume not reached")
 	}
-	if !sawWaitingResume.Load() {
-		t.Error("ActivityWaitingResume never emitted during the stall")
-	}
+	// ActivityWaitingResume is asserted by the awaitActivity call above --
+	// reaching this line means the stall arm emitted it before the flip.
 	wantSegments(t, out, 0, head)
 }
 
@@ -503,15 +512,16 @@ func TestStallForPossibleResumeNoStallSentinel(t *testing.T) {
 // full Start()-loop level, not just at a direct stallForPossibleResume
 // call. Same fake-GVS shape as TestBackstopCeilingExpires (which this test
 // is the direct counterpart to): reaching the budget-expired block still
-// costs the same ~5.5s goneRetryDuringDownload escalation floor regardless
-// of this fix, but unlike TestBackstopCeilingExpires (which adds a further
-// ceiling wait) and TestGoneErrorStallReachedViaStatusCheckError (which
-// adds an unbounded stall until MayResume flips), this must finalize on
-// the SAME iteration it first reaches stallForPossibleResume -- no
-// interruptionStallRetryDelay (5s) sleep, no ceiling. A regression back to
-// treating InterruptionNoStall as an ordinary ceiling (or as 0/unbounded)
-// would either add a further 5s+ delay or hang outright, either of which
-// this test's tight elapsed bound catches.
+// costs the same goneRetryDuringDownload escalation floor (10 x
+// singleGoneRetry) regardless of this fix, but unlike
+// TestBackstopCeilingExpires (which adds a further ceiling wait) and
+// TestGoneErrorStallReachedViaStatusCheckError (which adds an unbounded
+// stall until MayResume flips), this must finalize on the SAME iteration it
+// first reaches stallForPossibleResume -- no interruptionStallRetry sleep,
+// no ceiling. A regression back to treating InterruptionNoStall as an
+// ordinary ceiling (or as 0/unbounded) would either add a further
+// interruptionStallRetry cycle or hang outright, either of which this
+// test's tight elapsed bound catches.
 func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 	t.Parallel()
 	const head = 2
@@ -523,7 +533,7 @@ func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "v")
-	const maxTimeout = 1 * time.Second
+	maxTimeout := fast(1 * time.Second)
 	statusCheckErr := errors.New("status check unavailable")
 	var mayResumeCalls atomic.Int64
 
@@ -536,6 +546,7 @@ func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 			return false, statusCheckErr // defers the verdict -- handleGoneError's checkErr branch
 		},
 	})
+	d.delays = fastDelays()
 	d.MayResume = func() bool {
 		mayResumeCalls.Add(1)
 		return true // evidence holds throughout -- must still never stall
@@ -550,18 +561,21 @@ func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(5 * time.Second): // safety net
 		t.Fatal("Start did not return -- InterruptionNoStall must never stall, even with MayResume permanently true")
 	}
 	elapsed := time.Since(start)
 
-	// The ~5.5s escalation to reach the budget-expired block is an
-	// unavoidable floor shared with every sibling test in this file; what
-	// this bound actually catches is the ABSENCE of any further delay on
-	// top of it -- a real stall would add at least one
-	// interruptionStallRetryDelay (5s) cycle, pushing this past ~10.5s.
-	if elapsed > 9*time.Second {
-		t.Errorf("finalized after %v -- InterruptionNoStall must skip the stall entirely (no interruptionStallRetryDelay cycle on top of the ~5.5s escalation floor)", elapsed)
+	// The goneRetryDuringDownload escalation to reach the budget-expired
+	// block is an unavoidable floor shared with every sibling test in this
+	// file; this bound catches the ABSENCE of any further delay on top of
+	// it -- a real stall would add at least one interruptionStallRetry
+	// cycle (which roughly doubles the elapsed time at either scale) and,
+	// since MayResume never flips, would then repeat forever. The exact
+	// "not even one cycle" proof is the mayResumeCalls == 1 assertion
+	// below, which needs no clock at all.
+	if elapsed > 2*time.Second {
+		t.Errorf("finalized after %v -- InterruptionNoStall must skip the stall entirely (no interruptionStallRetry cycle on top of the goneRetryDuringDownload escalation floor)", elapsed)
 	}
 	if !d.FinalizedDuringInterruption() {
 		t.Error("FinalizedDuringInterruption() = false, want true (evidence held on the one consult)")
@@ -598,7 +612,7 @@ func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "v")
-	const maxTimeout = 1 * time.Second
+	maxTimeout := fast(1 * time.Second)
 	statusCheckErr := errors.New("status check unavailable")
 
 	d := NewSegmentDownloader(DownloaderOptions{
@@ -610,6 +624,7 @@ func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
 			return false, statusCheckErr
 		},
 	})
+	d.delays = fastDelays()
 	d.MayResume = func() bool { return false }
 
 	start := time.Now()
@@ -621,10 +636,10 @@ func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(5 * time.Second): // safety net
 		t.Fatal("Start did not return")
 	}
-	if elapsed := time.Since(start); elapsed > 9*time.Second {
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("finalized after %v, want promptly (same bound as the evidence-true sibling test)", elapsed)
 	}
 	if d.FinalizedDuringInterruption() {
