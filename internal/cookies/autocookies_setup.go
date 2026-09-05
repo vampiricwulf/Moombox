@@ -504,8 +504,9 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 // cancelling twice reported a cancel that never happened.
 func (s *AutoCookieService) CancelSetup() error {
 	s.mu.Lock()
-	// Deliberately a superset of setupInProgressLocked — see above. Not a
-	// missed migration.
+	// Deliberately a superset of setupInProgressLocked — see
+	// setupInProgressLocked in autocookies_setup_slot.go. Not a missed
+	// migration.
 	if s.setupProcess == nil && !s.setupClaimed {
 		s.mu.Unlock()
 		return ErrNoSetupInProgress

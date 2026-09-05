@@ -10,7 +10,7 @@ jsdom is the only dev dependency, and it is **optional**.
 From the repo root:
 
 ```bash
-# Run every test file (the DOM suite skips if jsdom is not installed)
+# Run every test file (the DOM suites skip if jsdom is not installed)
 node --test web/tests/*.test.mjs
 
 # Run a single file
@@ -45,12 +45,13 @@ node --test web/tests/*.test.mjs
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
 throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed:
+checkout without `npm ci` reports them as **skipped**, never failed — the 33
+DOM tests (23 player + 10 app):
 
 ```
-ℹ pass 69
+ℹ pass 108
 ℹ fail 0
-ℹ skipped 16
+ℹ skipped 33
 ```
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
@@ -119,10 +120,10 @@ h.flush();                  // let promises settle
 
 Beyond the player harness's stubs it adds: a `WebSocket` that never connects
 (a live socket would replay `initial_state` into the renderers under test),
-`sl-alert.toast()` / `sl-dialog.show()` and friends, `navigator.clipboard`,
-`scrollIntoView`, `IntersectionObserver` — and, unlike the player harness, a
-**frozen wall clock** (`NOW`) plus an en-US/UTC pin on `toLocaleString`, so
-relative timestamps render the same string on every machine.
+`sl-alert.toast()` / `sl-dialog.show()` and friends, `navigator.clipboard` and
+`scrollIntoView` — and, unlike the player harness, a **frozen wall clock**
+(`NOW`) plus an en-US/UTC pin on `toLocaleString`, so relative timestamps
+render the same string on every machine.
 
 `app.test.mjs` is a **pin**, not a behaviour suite: it snapshots what the
 dashboard draws so the controller extractions can be proved to change nothing.

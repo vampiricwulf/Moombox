@@ -237,3 +237,44 @@ test("renderJobDetails draws the details panel exactly as the snapshot", { skip 
   assert.match(SNAPSHOT.jobDetails, /A "quoted" &lt;title&gt; &amp; more/);
   assert.ok(!SNAPSHOT.jobDetails.includes("<script"));
 });
+
+// ── 8. Controller bind() wiring ─────────────────────────────────────────────
+//
+// Every listener a controller owns is registered by its own bind(), called
+// from initializeApp — so a dropped bind() is the one regression the
+// extraction can newly produce. The rendering pins above all call methods
+// directly and would not notice; these three drive the real gesture instead.
+// log-panel's and filter-bar's bind() are already covered by sections 4 and 5.
+
+test("the Files tab's refresh button is wired by FilesController.bind()", { skip }, async () => {
+  const h = await harness.makeApp({ routes: { "GET /api/files/orphaned": () => [] } });
+  assert.equal(h.http.matching("/api/files/orphaned", "GET").length, 0);
+
+  h.el("files-refresh-btn").click();
+  await h.flush();
+
+  assert.equal(h.http.matching("/api/files/orphaned", "GET").length, 1);
+});
+
+test("the update dialog's Update Now button is wired by UpdateController.bind()", { skip }, async () => {
+  // The route is registered so applyUpdate takes its success arm; with no
+  // active jobs there is no confirm to answer first.
+  const h = await harness.makeApp({ routes: { "POST /api/update/apply": () => ({ ok: true }) } });
+  assert.equal(h.http.matching("/api/update/apply", "POST").length, 0);
+
+  h.el("update-now-btn").click();
+  await h.flush();
+
+  assert.equal(h.http.matching("/api/update/apply", "POST").length, 1);
+});
+
+test("dismissing the details dialog clears the selection (JobDetailsController.bind())", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.selectedJobId = "x";
+
+  // The dialog stub has no `open`, so the guard that protects a dialog already
+  // re-opening for another job does not fire and the clear runs.
+  h.el("details-dialog").dispatchEvent(new h.window.CustomEvent("sl-after-hide"));
+
+  assert.equal(h.app.selectedJobId, null);
+});

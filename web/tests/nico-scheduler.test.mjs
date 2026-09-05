@@ -199,6 +199,64 @@ test("unanchor + re-anchor after a seek counts nothing from the gap", () => {
   }
 });
 
+test("countDrop is strict at the anchor: entering exactly on it is not a drop", () => {
+  const s = make(fakeLanes());
+  s.anchor([], 5000);
+  assert.equal(s.anchorMs, 5000);
+
+  // The comparison is on ENTRY time (offsetMs − lead), not on the timestamp a
+  // whole lead later. A message entering exactly at the anchor was already
+  // flying when the viewer landed — a seed-window skip, not a drop.
+  s.countDrop({ offsetMs: 5000 + NICO_LEAD_MS });
+  assert.equal(s.dropped, 0);
+
+  // One millisecond past the anchor and it is a message the overlay owed the
+  // viewer and never showed.
+  s.countDrop({ offsetMs: 5000 + NICO_LEAD_MS + 1 });
+  assert.equal(s.dropped, 1);
+});
+
+test("the lateness bound is strict: exactly NICO_MAX_LATENESS_MS late still flies", () => {
+  // One message, entering at 2000 (offsetMs − NICO_LEAD_MS), anchored at 0 so
+  // a drop would be counted.
+  const msgs = [{ offsetMs: 2000 + NICO_LEAD_MS }];
+
+  const lanesA = fakeLanes();
+  const onTheBound = make(lanesA);
+  const recA = fakeHooks(lanesA);
+  onTheBound.anchor(msgs, 0);
+  const rA = onTheBound.tick(msgs, 2000 + NICO_MAX_LATENESS_MS, recA.hooks);
+  assert.deepEqual(rA, { placed: 1, deferred: 0, skipped: 0 }, "at the bound it is still shown");
+  assert.equal(onTheBound.dropped, 0);
+
+  const lanesB = fakeLanes();
+  const oneMsLate = make(lanesB);
+  const recB = fakeHooks(lanesB);
+  oneMsLate.anchor(msgs, 0);
+  const rB = oneMsLate.tick(msgs, 2000 + NICO_MAX_LATENESS_MS + 1, recB.hooks);
+  assert.deepEqual(rB, { placed: 0, deferred: 0, skipped: 1 }, "one ms past it is dropped");
+  assert.equal(oneMsLate.dropped, 1);
+  assert.deepEqual(recB.prepared, [], "a skip builds nothing");
+});
+
+test("unanchor drops the deferred entries, not just the cursor", () => {
+  const lanes = fakeLanes();
+  const s = make(lanes);
+  const rec = fakeHooks(lanes);
+  const msgs = [{ offsetMs: 1000 }];
+
+  s.anchor(msgs, 0);
+  lanes.refuse = true; // nothing finds a lane, so the entry defers
+  assert.equal(s.tick(msgs, 200, rec.hooks).deferred, 1);
+  assert.equal(s.pending.length, 1);
+
+  // The caller has already cleared the overlay; a pending entry caches a
+  // detached element that must not be retried against the new anchor.
+  s.unanchor();
+  assert.equal(s.cursor, -1);
+  assert.equal(s.pending.length, 0);
+});
+
 test("a message with nothing renderable consumes the cursor and places nothing", () => {
   const lanes = fakeLanes();
   const s = make(lanes);

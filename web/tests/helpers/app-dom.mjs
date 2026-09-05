@@ -25,6 +25,14 @@
  * imported DYNAMICALLY, after the jsdom globals are published — and because
  * the document is already "complete" by then, DOMContentLoaded never fires
  * again and the harness constructs `new MoomboxApp()` itself.
+ *
+ * Those side effects run ONCE PER PROCESS, not once per test: the ES module
+ * cache keeps the first evaluation, so app.js's `window.fetch = …` wrapper and
+ * its two document listeners were installed against the FIRST makeApp's jsdom
+ * window and are never re-installed for later ones. What makes later tests
+ * work anyway is that the globals published below are accessors onto the
+ * CURRENT window, so the one evaluated wrapper reaches whichever window is
+ * live. Nothing here re-intercepts per test.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -300,15 +308,13 @@ export async function makeApp({ routes = {}, initialState = {}, storage = {}, li
     onchange: null, dispatchEvent: () => false,
   });
 
-  // ResizeObserver / IntersectionObserver — jsdom has neither; the dashboard
-  // only ever constructs and observes with them.
+  // ResizeObserver — jsdom has none; the player observes its video wrapper
+  // with one and only ever constructs and observes.
   window.ResizeObserver = class { constructor(cb) { this.cb = cb; } observe() {} unobserve() {} disconnect() {} };
-  window.IntersectionObserver = class { constructor(cb) { this.cb = cb; } observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } };
 
-  // scrollIntoView / scrollTo — jsdom implements no scrolling at all, and the
-  // job list scrolls the focused row into view on keyboard navigation.
+  // scrollIntoView — jsdom implements no scrolling at all, and the job list
+  // scrolls the focused row into view on keyboard navigation.
   window.HTMLElement.prototype.scrollIntoView = function () {};
-  window.Element.prototype.scrollTo = function () {};
 
   // navigator.clipboard — absent in jsdom; copyTextToClipboard prefers it.
   const clipboard = [];
@@ -368,9 +374,12 @@ export async function makeApp({ routes = {}, initialState = {}, storage = {}, li
 
   // Dynamic, and only now: app.js wraps window.fetch and registers its
   // document listeners the moment it is evaluated, so every global it reaches
-  // for has to already be the jsdom one. The module cache is per-process, so
-  // the second makeApp of a run re-uses the first evaluation — which is why
-  // the globals are accessors onto the CURRENT window (see installGlobals).
+  // for has to already be the jsdom one. That evaluation happens exactly once
+  // per process — the second and later makeApp of a run re-use it, and the
+  // wrapper and listeners they inherit are the ones installed against the
+  // FIRST window. Nothing re-runs them here, which is why the globals are
+  // accessors onto the CURRENT window (see installGlobals): the single
+  // evaluated wrapper is what keeps reaching the live window.
   const { MoomboxApp } = await import("../../public/app.js");
   const app = new MoomboxApp();
 
@@ -422,17 +431,21 @@ function installGlobals(window, { http, clock, rafQueue, nextRafId }) {
     "AbortController",     // details fetches and the resume dialog
     "CSS",                 // CSS.escape in every job-card query
     "WebSocket",           // stubbed above
-    "ResizeObserver", "IntersectionObserver",
-    "getComputedStyle",
+    "ResizeObserver",      // the player's video-wrapper observer
   ]) {
     const v = name === "window" ? window : window[name];
-    if (v !== undefined) set(name, typeof v === "function" && name === "getComputedStyle" ? v.bind(window) : v);
+    if (v !== undefined) set(name, v);
   }
 
   // fetch is an ACCESSOR onto window.fetch, not a copy: app.js replaces
   // window.fetch with its 401-interceptor at module scope, and in a browser
   // (where window IS the global) that also replaces the bare `fetch` binding.
-  // Mirroring that here is what puts the interceptor on the path under test.
+  // Mirroring that here is what puts the interceptor on the path under test —
+  // once. app.js's module scope runs against the FIRST window only, so from
+  // the second makeApp onward the interceptor already installed there is the
+  // one in play; the accessor is what lets it reach the current window's
+  // `http`. The assignment below re-seats window.fetch on the new window, but
+  // it does not re-run app.js's wrapping.
   window.fetch = (input, init) => http.fetch(input, init);
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,

@@ -10,6 +10,36 @@ import (
 	"strings"
 )
 
+// dangerousProfilePathSubstrings flags absolute profile directories that
+// belong to a real installed browser. Allowing the auto-cookie service
+// to launch headless against one of these would let a malicious config
+// (or, in the future, a compromised /api/config write) launch Chrome
+// against the user's actual logged-in profile and exfiltrate session
+// cookies via the cookies.txt export. Patterns are matched
+// case-insensitively against the path's lowercased absolute form;
+// backslashes on Windows are preserved (filepath.Abs already
+// canonicalises). Audit reports/cookies.md #26.
+var dangerousProfilePathSubstrings = []string{
+	`\google\chrome\user data`,
+	`\google\chrome beta\user data`,
+	`\google\chrome dev\user data`,
+	`\google\chrome canary\user data`,
+	`\microsoft\edge\user data`,
+	`\microsoft\edge beta\user data`,
+	`\microsoft\edge dev\user data`,
+	`\microsoft\edge canary\user data`,
+	`\bravesoftware\brave-browser\user data`,
+	`\chromium\user data`,
+	`\vivaldi\user data`,
+	`\opera software\opera stable`,
+	`\opera software\opera gx stable`,
+	`\mozilla\firefox\profiles`,
+	`\mozilla\firefox developer edition\profiles`,
+	`\waterfox\profiles`,
+	`\thunderbird\profiles`,
+	`\librewolf\profiles`,
+}
+
 // validateBrowserProfileDirForLaunch refuses configured profile directories
 // that sit inside any user-installed browser's real profile tree, for the
 // purpose of LAUNCHING a browser against them. Empty input is allowed — it just

@@ -11,7 +11,7 @@ import { FilesController } from "./modules/files.js";
 import { LogPanelController } from "./modules/log-panel.js";
 import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
-import { JobDetailsController, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./modules/job-details.js";
+import { JobDetailsController, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/job-details.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 

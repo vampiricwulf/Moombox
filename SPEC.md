@@ -453,11 +453,18 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 
 | File | Purpose |
 |------|---------|
-| `app.js` | Main SPA: job list, unified filter, log viewer, status bar, WebSocket client, settings integration |
+| `app.js` | Main SPA module. Job list rendering (`renderJobs`/`renderJobItem`/`renderArchivedJobs`), WebSocket connection management, status bar, theme switching. The Files tab, log viewer, version indicator/update dialog, unified filter bar and job details dialog are delegated to controller modules below — each constructed with `this` in the same pattern as `settings.js`/`stats.js` — with a one-line delegating method kept on `MoomboxApp` for any cross-module call site. |
+| `modules/files.js` | `FilesController` — the Files tab: orphaned output files and orphaned feed-history entries, their refresh/delete-all actions |
+| `modules/log-panel.js` | `LogPanelController` — the log viewer: level filter buttons, debounced text search with match highlighting, auto-scroll with the resume pill, clear |
+| `modules/update-indicator.js` | `UpdateController` — the header version indicator and the update-available dialog (apply/skip) |
+| `modules/filter-bar.js` | `FilterBarController` — the unified filter bar shared by the Tasks and Archived tabs: token parsing/rendering, chip removal, channel/platform pickers |
+| `modules/job-details.js` | `JobDetailsController` — the job details dialog: render, live updates, action buttons, per-job logs |
 | `modules/player.js` | Video player with per-job chat replay: niconico-style media-time scrolling overlay, chat sidebar with pre-show/post-end dividers, chat search, per-job chat offset, resume/watched tracking, per-part Twitch chat merge, multi-segment seeking |
 | `modules/segments.js` | `SegmentPlayer` — multi-segment playback helper shared by the player and the trimmer |
 | `modules/chat-timeline.js` | Pure chat/video timeline math: offset normalization, chat-to-video bias, pre-show/post-end partitioning, per-part chat merge |
 | `modules/nico-lanes.js` | `LaneAllocator` — niconico lane-collision math for the overlay's right-to-left scrolling |
+| `modules/nico-geometry.js` | Pure niconico overlay geometry: the centred-fit `letterboxStage`, `rowsFor` row count, and `sameStage`/`nextGeometry` change detection |
+| `modules/nico-scheduler.js` | `NicoScheduler` — the niconico overlay's cursor/anchor/pending-list/drop-count state machine and the `NICO_*` tuning constants |
 | `modules/setup.js` | First-run setup wizard + FFmpeg install flow |
 | `modules/settings.js` | Settings dialog: config editing, channel management, cookies, integrations |
 | `modules/trimmer.js` | Trim clip creation with timeline visualization |
@@ -472,7 +479,7 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 
 **Mobile breakpoints:** 992px (tablet layout), 768px (phone layout), `hover: none` (touch interaction adjustments).
 
-**Frontend test harness:** `web/tests/` runs pure-JS suites (chat-timeline, nico-lanes, filter-parser, filter-engine, utils) plus one jsdom-backed suite (`player.test.mjs`) on Node's built-in test runner (`node --test web/tests/*.test.mjs`); jsdom is an optional dev dependency installed separately inside `web/tests/`. See `web/tests/README.md`.
+**Frontend test harness:** `web/tests/` runs pure-JS suites (chat-timeline, filter-engine, filter-parser, logout, nico-geometry, nico-lanes, nico-scheduler, utils) plus two jsdom-backed suites (`player.test.mjs`, `app.test.mjs`) on Node's built-in test runner (`node --test web/tests/*.test.mjs`); jsdom is an optional dev dependency installed separately inside `web/tests/`. See `web/tests/README.md`.
 
 ### TUI
 

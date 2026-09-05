@@ -343,15 +343,16 @@ export class SettingsController {
             if (data.releaseNotesHtml) {
               // SECURITY CONTRACT: raw-HTML sink safe ONLY because the server
               // sanitizes via bluemonday.UGCPolicy() (internal/updater) — see
-              // the matching comment in app.js showUpdateDialog before
-              // changing either side.
+              // the matching comment in update-indicator.js's
+              // UpdateController.showUpdateDialog before changing either side.
               notes.innerHTML = data.releaseNotesHtml;
             } else {
               notes.textContent = data.releaseNotes || "No release notes available.";
             }
             // Viewer mode: this is just a notes viewer, not the update prompt.
             // Hide "Update Now", relabel the dismiss button to "Close", and
-            // flag the dialog so app.js's dismissUpdate() plain-hides instead
+            // flag the dialog so update-indicator.js's
+            // UpdateController.dismissUpdate() plain-hides instead
             // of POSTing /api/update/dismiss (which errors "no update pending"
             // here, and would wrongly SKIP a version if one were pending).
             const updateBtn = document.getElementById("update-now-btn");

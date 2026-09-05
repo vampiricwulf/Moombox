@@ -15,6 +15,66 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
+// writeCookieFile is the cookie-file write RefreshCookies goes through, as a
+// package variable so tests can exercise the branches that only exist for a
+// FAILED write — notably a rollback that cannot put the previous credentials
+// back, which decides what the operator is told is on disk.
+var writeCookieFile = writeFileAtomic
+
+// readCookieFile is the read FinishSetup and RefreshCookiesDetailed go
+// through before merging freshly-extracted cookies into an existing
+// cookies.txt, as a package variable so tests can exercise a read that fails
+// for a reason OTHER than "file does not exist" (a permission blip, a locked
+// file, an I/O error) without needing to make a real fixture file
+// unreadable — mirrors writeCookieFile above. See the callers for why that
+// distinction matters: os.IsNotExist is the normal first-run case, and every
+// other error must abort rather than silently proceed as if there were
+// nothing to merge.
+var readCookieFile = os.ReadFile
+
+// statProfileDir is os.Stat, behind a seam, for the three places that ask
+// whether the configured browser profile directory can be looked at: the
+// missing-profile gate in RefreshCookiesDetailed, the import in
+// importProfileCookies, and the periodic loop's per-tick precondition in
+// periodicRefreshHasSource. The first two are the reason it is a seam at all:
+// a test needs to drive the real sequence — the gate sees a non-ENOENT error
+// and proceeds, and the import classifies it. The third goes through it for
+// consistency, so all three answer the same way when a test does substitute;
+// TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime does not substitute, and
+// creates a real directory mid-test instead.
+//
+// A seam rather than a fixture because the states that matter are not portably
+// constructible: EACCES needs a chmod that means nothing on Windows, and the
+// ENOTDIR shape (a file in the middle of the path) surfaces as ERROR_PATH_NOT_
+// FOUND there, which os.IsNotExist reports as true. Building the failure by
+// hand would pin the case on one platform and skip it on the other, and the one
+// it would skip is the one this seam exists to test.
+var statProfileDir = os.Stat
+
+// cookieTempFileMaxAge bounds how long an orphaned writeFileAtomic temp file
+// may survive before the sweep below reclaims it. A write completes in
+// milliseconds; this is three orders of magnitude of margin, so nothing but
+// a genuinely abandoned temp file — left behind by a crash, a kill, or a
+// panic between os.CreateTemp and the rename — is ever old enough to match.
+// Do not lower this "to be thorough": age is the only guard against
+// sweeping a write in progress.
+const cookieTempFileMaxAge = time.Hour
+
+// cookieTempFileSweepOnce fires sweepStaleCookieTempFiles exactly once per
+// process. Package-level state, same shape as snapshotSweepOnce in
+// autocookies_profile.go — different root (the cookie file's own directory,
+// not os.TempDir()) and a different secret (the whole cookie file, not a
+// browser DB snapshot), so it stays a sibling rather than merging with it.
+//
+// Wired at service construction (NewAutoCookieService), which is the one
+// place in the package that always holds the REAL cookie file path up
+// front. writeFileAtomic itself is a generic temp-then-rename helper shared
+// with meta.go's cookies.meta.json sidecar writes and refresh.go's own
+// cookies.txt rewrite, so keying the "once" off whichever path happens to
+// call writeFileAtomic first would risk sweeping with the wrong base name
+// if call order ever changed.
+var cookieTempFileSweepOnce sync.Once
+
 // writeFileAtomic writes data to a temp file then renames it to the target path,
 // preventing corruption on partial failure. Applies
 // utils.ApplyUserOnlyDACL to the parent directory (successful attempts are

@@ -11,14 +11,13 @@ import (
 	"time"
 )
 
-// --- helpers ---
-
 // refreshChromiumCookies is the Chromium browser-refresh step behind a package
 // variable, so a test can exercise what RefreshCookiesDetailed DOES WITH the
 // step's result without launching a browser — notably the ErrNoCookiesInProfile
-// downgrade above, which is unreachable otherwise: the real function has to
-// start a headless Chromium and speak CDP to it before it can report an empty
-// profile, and no test in this package may launch a browser.
+// downgrade in autocookies_refresh.go (refreshCookiesDetailed), which is
+// unreachable otherwise: the real function has to start a headless Chromium and
+// speak CDP to it before it can report an empty profile, and no test in this
+// package may launch a browser.
 //
 // Same seam convention as detectBrowser, setupBrowserGone, killProcessTree and
 // writeCookieFile. Nothing in production reassigns it.
@@ -28,8 +27,8 @@ var refreshChromiumCookies = (*AutoCookieService).refreshChromium
 // or just the process itself on other platforms.
 //
 // A package variable purely so tests can exercise the kill DECISION without a
-// real process — same reason writeCookieFile below is one. Nothing in
-// production reassigns it, and it is always addressed by PID: never by image
+// real process — same reason writeCookieFile in cookie_files.go is one. Nothing
+// in production reassigns it, and it is always addressed by PID: never by image
 // name, which on a developer's machine would take out their own browser.
 var killProcessTree = func(proc *os.Process) {
 	if proc == nil {
