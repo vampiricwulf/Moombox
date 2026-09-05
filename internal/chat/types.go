@@ -88,6 +88,29 @@ type ChatResumeState struct {
 	// computed against. A resumed or adopted run keeps it even when its own
 	// options carry a newer start time — one file, one epoch.
 	StreamStartMs int64 `json:"streamStartMs,omitempty"`
+	// Mode records which kind of run wrote the sidecar: resumeModeLive (the
+	// run was live/upcoming) or resumeModeReplay. A replay run must not adopt
+	// a live run's sidecar — its count, continuation and dedup IDs describe
+	// the live half of a mixed-mode file, and its epoch is the live run's.
+	// Empty on sidecars written before this field existed, which keeps the
+	// pre-existing behaviour so an upgrade never strands a mid-resume job.
+	// Start's mode rule is the only reader.
+	Mode string `json:"mode,omitempty"`
+}
+
+// ChatResumeState.Mode's values — the kind of run that wrote a sidecar.
+const (
+	resumeModeLive   = "live"
+	resumeModeReplay = "replay"
+)
+
+// resumeModeFor names the kind of run writing a sidecar, from the same
+// live/upcoming predicate Start's completion rule uses.
+func resumeModeFor(liveOrUpcoming bool) string {
+	if liveOrUpcoming {
+		return resumeModeLive
+	}
+	return resumeModeReplay
 }
 
 // Superchat tier color mapping (YouTube's internal ARGB color codes).

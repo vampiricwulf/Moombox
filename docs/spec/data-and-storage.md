@@ -1122,10 +1122,11 @@ type ChatResumeState struct {
     VideoID       string   `json:"videoId"`
     RecentIDs     []string `json:"recentIds"`
     StreamStartMs int64    `json:"streamStartMs,omitempty"`
+    Mode          string   `json:"mode,omitempty"`
 }
 ```
 
-Saved as `<chat_file>.resume.json`. Updated every 10 seconds during chat download. `streamStartMs` is the epoch every `offsetMs` already written to the chat file was computed against; a restarted run reads it back and keeps it even when its own `StreamStartTime` option carries a newer (actual, vs. scheduled) start — one chat file, one epoch, never two. (An older `lastTimestampUsec` field may still appear in sidecars written before this field existed — it is ignored on load and no longer written.)
+Saved as `<chat_file>.resume.json`. Updated every 10 seconds during chat download. `streamStartMs` is the epoch every `offsetMs` already written to the chat file was computed against; a restarted run reads it back and keeps it even when its own `StreamStartTime` option carries a newer (actual, vs. scheduled) start — one chat file, one epoch, never two. `mode` is `"live"` or `"replay"` — which kind of run wrote the sidecar (the mode rule: a replay run refuses a live run's sidecar and starts from scratch, since its count, continuation, dedup IDs and epoch all describe the live half of the file; an empty `mode`, written before the field existed, is adopted as before). (An older `lastTimestampUsec` field may still appear in sidecars written before this field existed — it is ignored on load and no longer written.)
 
 **Batching:**
 

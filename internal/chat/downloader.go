@@ -226,6 +226,10 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 // usable sidecar but OutputFile already exists, Start adopts that file as
 // history — see adoptExistingChatFile.
 //
+// THE MODE RULE. Before any of that, a REPLAY run refuses a sidecar a
+// LIVE/upcoming run wrote (ChatResumeState.Mode) and proceeds as if there
+// were none — see the resume block's own comment below.
+//
 // THE CONTINUATION-PREFERENCE RULE. A sidecar that IS loaded supplies the
 // count and dedup IDs, but for a live/upcoming run it does not supply the
 // continuation when the caller already has a fresh one — see the resume
@@ -327,7 +331,30 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	// carrying only the sidecar) has nothing fresher to prefer.
 	preferFresh := false
 	state, err := cd.loadResume()
-	if err == nil && state != nil && state.VideoID == cd.opts.VideoID {
+	sidecarUsable := err == nil && state != nil && state.VideoID == cd.opts.VideoID
+	// THE MODE RULE. A sidecar written by a LIVE/upcoming run describes the
+	// LIVE half of the file: its count, continuation and dedup IDs were all
+	// reached against the live endpoint, and its epoch is that run's. A REPLAY
+	// run that adopted them would append its archive on top of the live half
+	// and compute its offsets against the live run's epoch, so the whole
+	// replay half reads early by the late-start delta. It must instead take
+	// the full-rewrite path the adoption rule below already says a replay run
+	// takes — so a replay run refuses a live-tagged sidecar and falls through
+	// as if there were none. A sidecar with no Mode was written before the
+	// field existed and keeps the pre-existing behaviour: an upgrade must
+	// never strand a job that was mid-resume.
+	//
+	// A refused sidecar is NOT deleted here. The completion rule above owns
+	// the sidecar's lifetime, and it is decided on EXIT for a reason: the live
+	// run that wrote this one may still be running (the orchestrator can
+	// re-Start a downloader while a live one holds the same paths), so
+	// deleting on entry would race it and destroy its resume position.
+	if sidecarUsable && state.Mode == resumeModeLive && !cd.opts.IsLiveOrUpcoming {
+		cd.logDebug("chat: ignoring the live run's resume sidecar for a replay run",
+			"videoID", cd.opts.VideoID, "sidecarMessageCount", state.MessageCount)
+		sidecarUsable = false
+	}
+	if sidecarUsable {
 		preferFresh = cd.opts.IsLiveOrUpcoming && cd.opts.InitialContinuation != ""
 		if !preferFresh {
 			cd.continuation = state.Continuation
@@ -1181,6 +1208,7 @@ func (cd *ChatDownloader) saveResume() {
 		VideoID:       cd.opts.VideoID,
 		RecentIDs:     recentIDs,
 		StreamStartMs: cd.streamStartMs,
+		Mode:          resumeModeFor(cd.opts.IsLiveOrUpcoming),
 	}
 	cd.mu.Unlock()
 
