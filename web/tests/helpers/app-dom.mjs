@@ -375,11 +375,12 @@ export async function makeApp({ routes = {}, initialState = {}, storage = {}, li
   // Dynamic, and only now: app.js wraps window.fetch and registers its
   // document listeners the moment it is evaluated, so every global it reaches
   // for has to already be the jsdom one. That evaluation happens exactly once
-  // per process — the second and later makeApp of a run re-use it, and the
-  // wrapper and listeners they inherit are the ones installed against the
-  // FIRST window. Nothing re-runs them here, which is why the globals are
-  // accessors onto the CURRENT window (see installGlobals): the single
-  // evaluated wrapper is what keeps reaching the live window.
+  // per process: the FIRST makeApp of a run gets app.js's own wrapper and
+  // listeners on its window; the second and later makeApp re-use the cached
+  // module, whose wrapper and listeners stay bound to that first window and
+  // are NOT re-installed here. The globals are accessors onto the CURRENT
+  // window (see installGlobals) so the cached module code itself keeps
+  // reaching the live document.
   const { MoomboxApp } = await import("../../public/app.js");
   const app = new MoomboxApp();
 
@@ -440,12 +441,12 @@ function installGlobals(window, { http, clock, rafQueue, nextRafId }) {
   // fetch is an ACCESSOR onto window.fetch, not a copy: app.js replaces
   // window.fetch with its 401-interceptor at module scope, and in a browser
   // (where window IS the global) that also replaces the bare `fetch` binding.
-  // Mirroring that here is what puts the interceptor on the path under test —
-  // once. app.js's module scope runs against the FIRST window only, so from
-  // the second makeApp onward the interceptor already installed there is the
-  // one in play; the accessor is what lets it reach the current window's
-  // `http`. The assignment below re-seats window.fetch on the new window, but
-  // it does not re-run app.js's wrapping.
+  // Here that happens ONCE, on the first makeApp's window: app.js's module
+  // scope never re-runs, and the assignment below re-seats window.fetch on
+  // every new window with the plain fake, so from the second makeApp onward
+  // the interceptor is NOT on the path — it stays stranded on window #1. Only
+  // the first test of a process exercises the interceptor; the rest exercise
+  // app.js's fetch calls against the fake directly.
   window.fetch = (input, init) => http.fetch(input, init);
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
