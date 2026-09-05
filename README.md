@@ -417,7 +417,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | A D D | Delete job (confirm) |
 | A W | Toggle watched (Finished jobs) |
 | A T | Trim finished video |
-| A O | Browse orphaned files |
+| A O | Browse orphaned items |
 | A K | Manage client tokens |
 
 **Request (R)**
@@ -430,6 +430,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | R L | Cookie login (browser) |
 | R I | Import cookie file (path prompt) |
 | R Y | yt-dlp plugin status / install |
+| R T | Statistics |
 | R V | Check for updates |
 | R M | Check monitors now |
 | R N | View release notes for pending update |

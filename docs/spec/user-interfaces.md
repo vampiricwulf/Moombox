@@ -243,7 +243,9 @@ The chord system is a three-state finite automaton:
 | `R L` | Cookie Login | Interactive-setup callback is configured (`SetSetupCallbacks`, bound unconditionally by `cmd/moombox`). Opens the setup wizard's cookie step **alone** — pick YouTube or Twitch, sign in in the browser that opens on the host, `Enter` extracts. Preselects the platform the status bar is flagging for re-login. |
 | `R I` | Import Cookie File | Import callback is configured (auto-cookie service present). A path prompt (with `~` expansion and an existence check), then `AutoCookieService.ImportCookies` — the same verify-and-roll-back path as the Web import panel — then the per-platform outcome (imported / unchanged / rolled-back / rejected) in the overlay. The file is read in `cmd/moombox`; only the path is ever shown or logged. |
 | `R Y` | yt-dlp Plugin | Status callback is configured. An async overlay over `routes.YtdlpPluginStatus` — the same computation `GET /api/ytdlp-plugin/status` returns — showing installed / plugin dir / live port / the port the installed file points at / mismatch. `I` rewrites the plugin for the live port through `routes.InstallYtdlpPlugin` (the call the dashboard's Install button makes) and reloads; `R` re-reads; `Esc`/`Q` closes. `I` is gated separately: with a status callback and no install one the overlay still reads, and `I` says the install is unavailable rather than no-opping. |
+| `R T` | Statistics | Stats callback is configured |
 | `R V` | Check for Updates | Update check callback is configured |
+| `R M` | Check Monitors Now | Force-check callback is configured. Forces an immediate poll of every configured monitor; debounced against rapid repeats. |
 | `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. `S` inside the overlay skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`, the same helper `POST /api/update/dismiss` uses). |
 | `R U` | Apply Update | An update is available and apply callback is configured |
 | `R S` | Verify Signature | Signature verification callback is configured |
@@ -789,7 +791,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/stats` | Aggregate statistics: job counts by status, total sizes, durations, disk usage. |
+| `GET` | `/api/stats` | Aggregate statistics: job counts by status, total sizes, durations, disk usage. Derivations shared with the TUI via `stats.Build` (`internal/stats`). |
 
 ### yt-dlp Plugin
 
@@ -915,7 +917,7 @@ Every major feature exists in both UIs:
 | Settings | `modules/settings.js` | `settings.go` |
 | First-run setup | `modules/setup.js` | `setup_wizard.go` |
 | Trim creation | `modules/trimmer.js` | `trim_dialog.go` |
-| Statistics | `modules/stats.js` | N/A (data available via API) |
+| Statistics | `modules/stats.js` | `StatsDialogModel` (`internal/tui/stats_dialog.go`) |
 | Zip import | `modules/imports.js` | `import_dialog.go` |
 | Cookie import | `modules/settings.js` import panel | `CookieImportDialogModel` (`internal/tui/cookie_import_dialog.go`) |
 | Orphaned files | `app.js` (inline) | `files_dialog.go` |
