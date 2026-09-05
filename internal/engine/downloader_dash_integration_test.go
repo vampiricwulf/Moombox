@@ -119,6 +119,7 @@ func TestDashLoopCleanPostLiveEnd(t *testing.T) {
 		MaxTimeout:        time.Minute,
 		CheckStreamStatus: func(context.Context) (bool, error) { return true, nil }, // post-live: ended
 	})
+	d.delays = fastDelays()
 
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start = %v, want nil (clean finalize)", err)
@@ -161,6 +162,7 @@ func TestDashLoopTransientBurstRecovers(t *testing.T) {
 		MaxTimeout:        time.Minute,
 		CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
 	})
+	d.delays = fastDelays()
 
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start = %v, want nil", err)
@@ -189,20 +191,22 @@ func TestDashLoopBehindHeadBudgetExhaustionWarns(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    srv.URL + "/videoplayback?id=itest.3&itag=140",
 		OutputFile: out,
-		// Budget: long enough that the escalation (10 gones x 500ms) fires
-		// with budget remaining — exercising the defer loop — short enough
-		// the test finishes promptly.
-		MaxTimeout:        7 * time.Second,
+		// Budget: long enough that the escalation (10 gones x singleGoneRetry)
+		// fires with budget remaining — exercising the defer loop — short
+		// enough the test finishes promptly. Budget and waits are scaled by
+		// the same fastScale, so the iteration count is production's.
+		MaxTimeout:        fast(7 * time.Second),
 		Logger:            warns,
 		CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
 	})
+	d.delays = fastDelays()
 
 	start := time.Now()
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start = %v, want nil (bounded finalize)", err)
 	}
 	wantSegments(t, out, 0, lastAvailable)
-	if elapsed := time.Since(start); elapsed < 6*time.Second {
+	if elapsed := time.Since(start); elapsed < fast(6*time.Second) {
 		t.Errorf("finalized after %v — did not defer within the MaxTimeout budget", elapsed)
 	}
 	if !strings.Contains(warns.joined(), "unfetched tail") {
@@ -267,6 +271,7 @@ func TestDashLoopRecoversFromCredentialExpiry(t *testing.T) {
 			return "", "fresh-token"
 		},
 	})
+	d.delays = fastDelays()
 
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start = %v, want nil (credential refresh should have recovered the download)", err)

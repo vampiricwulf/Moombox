@@ -174,6 +174,7 @@ func TestHlsLive_FMP4InitChangeSplitsPart(t *testing.T) {
 		IsHls:      true,
 		StopOnGap:  true,
 	})
+	d.delays = fastDelays()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -226,6 +227,7 @@ func TestHlsLive_FMP4InitURLRotatedSameContent(t *testing.T) {
 		IsHls:      true,
 		StopOnGap:  true,
 	})
+	d.delays = fastDelays()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -327,6 +329,7 @@ func TestHlsLive_FMP4StuckSegmentSkipsNotSplitCycle(t *testing.T) {
 		IsHls:      true,
 		StopOnGap:  true,
 	})
+	d.delays = fastDelays()
 	var gaps []DownloadGap
 	d.OnGap = func(g DownloadGap) { gaps = append(gaps, g) }
 
@@ -383,6 +386,7 @@ func TestHlsLive_FMP4RevertsToTSSplitsPart(t *testing.T) {
 		IsHls:      true,
 		StopOnGap:  true,
 	})
+	d.delays = fastDelays()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -537,6 +541,7 @@ func TestHls_FMP4ResumeDoesNotRewriteInit(t *testing.T) {
 
 	// First session: record seg0+seg1, then get interrupted.
 	d1 := NewSegmentDownloader(opts)
+	d1.delays = fastDelays()
 	d1.OnProgress = func(p DownloadProgress) {
 		if p.Seq >= 1 {
 			d1.Cancel()
@@ -551,6 +556,7 @@ func TestHls_FMP4ResumeDoesNotRewriteInit(t *testing.T) {
 	// Second session: same staging, resume sidecar present, stream continues.
 	phase.Store(2)
 	d2 := NewSegmentDownloader(opts)
+	d2.delays = fastDelays()
 	if err := d2.Start(ctx); err != nil {
 		t.Fatalf("second Start: %v", err)
 	}

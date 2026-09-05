@@ -254,6 +254,11 @@ func TestForbiddenBehindHeadExhaustsToPermanent(t *testing.T) {
 	d.noteHeadSeq(5000)
 	d.currentSeq.Store(10)
 	d.lastSegTime.StoreNow()
+	// The recovery loop backs off singleGoneRetry<<attempt between HTTP
+	// attempts; fastDelays() keeps the doubling and the attempt count and
+	// only shrinks the wall clock. Start() is bypassed here, so the poke
+	// goes right before the call under test.
+	d.delays = fastDelays()
 
 	_, err := d.fetchSegmentWithRetry(context.Background(), d.buildSegmentURL(10), nil)
 	if err != ErrSegmentPermanent {

@@ -40,17 +40,22 @@ func TestHlsLoop_EnforceMaxTimeoutForcesFinalize(t *testing.T) {
 
 	var statusChecks atomic.Int32
 	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL:           srv.URL + "/playlist.m3u8",
-		OutputFile:        filepath.Join(t.TempDir(), "video_stream"),
-		StartSeq:          -1,
-		IsHls:             true,
-		MaxTimeout:        300 * time.Millisecond,
+		BaseURL:    srv.URL + "/playlist.m3u8",
+		OutputFile: filepath.Join(t.TempDir(), "video_stream"),
+		StartSeq:   -1,
+		IsHls:      true,
+		// 60ms, not fast(300ms): a pure fastScale division lands at 15ms,
+		// inside timer jitter. Still an order of magnitude under the
+		// hlsReloadUnit-scaled reload cycle, so the backstop still fires
+		// after the first segment exactly as it did at 300ms.
+		MaxTimeout:        60 * time.Millisecond,
 		EnforceMaxTimeout: true,
 		CheckStreamStatus: func(ctx context.Context) (bool, error) {
 			statusChecks.Add(1)
 			return false, nil // perpetually "live"
 		},
 	})
+	d.delays = fastDelays()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -82,13 +87,15 @@ func TestHlsLoop_NoEnforceRespectsStatusCheck(t *testing.T) {
 		IsHls:      true,
 		// A short MaxTimeout that WOULD fire almost immediately if the loop
 		// honored it — but EnforceMaxTimeout is false, so it must be ignored.
-		MaxTimeout:        300 * time.Millisecond,
+		// 60ms rather than fast(300ms), for the jitter reason above.
+		MaxTimeout:        60 * time.Millisecond,
 		EnforceMaxTimeout: false,
 		CheckStreamStatus: func(ctx context.Context) (bool, error) {
 			statusChecks.Add(1)
 			return true, nil // report ended so the stale path can exit
 		},
 	})
+	d.delays = fastDelays()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -137,8 +144,9 @@ func TestHlsLoop_EnforceMaxTimeoutPausesForOfflineOutage(t *testing.T) {
 	defer srv.Close()
 
 	// Offline for the first two probes (the 404 branch's direct check +
-	// waitForConnectivity's first poll), online thereafter. The intervening 5s
-	// connectivity poll ages lastSegTime well past the 3s MaxTimeout, so only
+	// waitForConnectivity's first poll), online thereafter. The intervening
+	// connectivityPoll ages lastSegTime well past the MaxTimeout budget (the
+	// poll is the longer of the two, at fast scale as in production), so only
 	// the waitOnline reset keeps the backstop from finalizing on reconnect.
 	var probes atomic.Int32
 	d := NewSegmentDownloader(DownloaderOptions{
@@ -146,11 +154,12 @@ func TestHlsLoop_EnforceMaxTimeoutPausesForOfflineOutage(t *testing.T) {
 		OutputFile:        filepath.Join(t.TempDir(), "video_stream"),
 		StartSeq:          -1,
 		IsHls:             true,
-		MaxTimeout:        3 * time.Second,
+		MaxTimeout:        fast(3 * time.Second),
 		EnforceMaxTimeout: true,
 		IsOnline:          func() bool { return probes.Add(1) > 2 },
 		CheckStreamStatus: func(ctx context.Context) (bool, error) { return false, nil },
 	})
+	d.delays = fastDelays()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

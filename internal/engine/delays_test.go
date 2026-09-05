@@ -2,6 +2,7 @@ package engine
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,5 +115,30 @@ func TestFastDelaysKeepRatios(t *testing.T) {
 	}
 	if f.singleGoneRetry < 20*time.Millisecond {
 		t.Fatalf("singleGoneRetry %v is below the 20 ms floor timer jitter makes unsafe", f.singleGoneRetry)
+	}
+}
+
+// TestDownloadActivityStringsAreDistinct pins DownloadActivity's String():
+// awaitActivity and every %v on an activity must name the state, not print
+// an integer. A new enum member without a case is caught by the "Activity"
+// prefix check falling through to the numeric fallback.
+func TestDownloadActivityStringsAreDistinct(t *testing.T) {
+	seen := map[string]DownloadActivity{}
+	for a := ActivityNone; a <= ActivityWaitingResume; a++ {
+		got := a.String()
+		if got == "" {
+			t.Errorf("DownloadActivity(%d).String() is empty", int(a))
+			continue
+		}
+		if !strings.HasPrefix(got, "Activity") {
+			t.Errorf("DownloadActivity(%d).String() = %q, want the Activity<Name> constant name", int(a), got)
+		}
+		if prev, dup := seen[got]; dup {
+			t.Errorf("DownloadActivity(%d) and (%d) both stringify to %q", int(prev), int(a), got)
+		}
+		seen[got] = a
+	}
+	if got, want := DownloadActivity(99).String(), "DownloadActivity(99)"; got != want {
+		t.Errorf("unknown activity String() = %q, want %q", got, want)
 	}
 }
