@@ -13,6 +13,8 @@ var ErrSidecarUnavailable = errors.New("cipher: sidecar solver not configured")
 
 // compositeSolver routes cipher requests across two underlying solvers
 // per the policy in docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md
+// (removed after implementation; read it from git history, e.g. `git show
+// 67755b9:docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md`)
 // section 7:
 //
 //	sig: sidecar only. Goja sig is dead on current players. If the

@@ -684,7 +684,7 @@ BotGuard inspects the JS runtime's wall-clock timing as part of its fingerprint 
 
 The hand-rolled real-class DOM shim work (test.50–test.55) raised the goja runtime's API fidelity to browser parity (`document instanceof HTMLDocument`, real event dispatch with capture/bubble, real `CSSStyleDeclaration`, real `URL`/`AbortController`, etc.) but couldn't bridge the timing gap because the gap is below the JS API surface — it lives in the V8-vs-interpreter speed difference itself.
 
-The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v22 binary plus `bgutils-js` + `jsdom` (both MIT-licensed) and runs them as a subprocess. This is the same combination `bgutil-ytdlp-pot-provider/server/` ships in production.
+The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v24 binary plus `bgutils-js` + `jsdom` (both MIT-licensed) and runs them as a subprocess. This is the same combination `bgutil-ytdlp-pot-provider/server/` ships in production.
 
 ### Architecture
 
@@ -733,8 +733,8 @@ The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v22 b
 ### Sidecar lifecycle (`internal/bgutils/sidecar/`)
 
 **Embed:** `internal/bgutils/embed/` is a standalone package exposing three `go:embed`'d package vars:
-- `EmbeddedNode []byte` — gzipped Node.js v22 binary for the build's GOOS/GOARCH (~33-43 MB), produced by `tools/fetch-node` and selected via per-platform `embed_<goos>_<goarch>.go` build tags.
-- `SidecarTarGz []byte` — gzipped tarball of `bgutil-sidecar/` production deps + JS source (~3.5 MB), produced by `bgutil-sidecar/build.mjs`.
+- `EmbeddedNode []byte` — gzipped Node.js v24 binary for the build's GOOS/GOARCH (~34-44 MB), produced by `tools/fetch-node` and selected via per-platform `embed_<goos>_<goarch>.go` build tags.
+- `SidecarTarGz []byte` — gzipped tarball of `bgutil-sidecar/` production deps + JS source (~4 MB), produced by `bgutil-sidecar/build.mjs`.
 - `Version string` — content of `internal/bgutils/embed/version.txt`, format `node@vX.Y.Z sha256@<sha>`. Used as the cache-invalidation key.
 
 **First-launch extraction:** `extractIfNeeded(cacheDir)` resolves `cacheDir = os.UserCacheDir() + "/Moombox/sidecar"` (Windows: `%LOCALAPPDATA%/Moombox/sidecar`), tightens the dir's ACL via `utils.ApplyUserOnlyDACL` (always — even on cache-hit, so users upgrading from v2.5.x get the security benefit), then compares on-disk `version.txt` against the embedded `Version`. On match + key files present, the function returns immediately. On mismatch, it gunzip-extracts `node.exe`, gunzip+tar-extracts the sidecar payload using stdlib `archive/tar` + `compress/gzip` (end users do NOT need a system `tar` binary — that's a build-time-only requirement for `bgutil-sidecar/build.mjs`), and writes the new `version.txt` LAST so a partial extraction next time forces a redo. Tar-slip defense rejects entries whose target escapes `cacheDir`. File modes are clamped to `0o644` minimum to defend against tar variants that emit zero-mode headers.

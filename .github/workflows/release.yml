@@ -66,7 +66,7 @@ jobs:
       - uses: actions/setup-node@v7
         if: steps.cache-embed.outputs.cache-hit != 'true'
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Build BotGuard sidecar payload
         # --ignore-scripts: a compromised dep's postinstall could
@@ -80,7 +80,7 @@ jobs:
           cd ..
 
       - name: Fetch embedded Node binaries (all platforms)
-        # Downloads pinned Node v22 LTS binaries for Windows x64, Linux x64,
+        # Downloads pinned Node v24 LTS binaries for Windows x64, Linux x64,
         # and Linux arm64; verifies SHA-256; gzips to per-platform embed
         # files. Idempotent: skips re-download if version.txt matches.
         if: steps.cache-embed.outputs.cache-hit != 'true'

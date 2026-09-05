@@ -2,7 +2,7 @@
 
 Comprehensive AI-first reference for the Moombox project. Written for machine comprehension — explicit, unambiguous, no assumed context. Each section stands alone; an LLM reading just one section should understand that subsystem well enough to modify its code correctly. For deeper implementation details, follow the deep-dive pointer at the end of each section.
 
-Module: `github.com/vampiricwulf/Moombox` — Go 1.26, single binary. Windows x64 + Linux x64 + Linux arm64.
+Module: `github.com/vampiricwulf/Moombox` — Go 1.27, single binary. Windows x64 + Linux x64 + Linux arm64.
 
 ---
 
@@ -35,7 +35,7 @@ The application listens on port 774 by default. Configuration lives in `config.t
 | `golang.org/x/crypto/scrypt` | Password hashing |
 | `golang.org/x/sync/errgroup` | Concurrent download coordination |
 | Shoelace v2.16 (CDN) | Web UI component library |
-| Node.js v22 LTS (embedded) | Real V8 + JSDOM for the BotGuard sidecar. Pinned per-platform Node binaries (`node-windows-amd64.gz`, `node-linux-amd64.gz`, `node-linux-arm64.gz`) are `go:embed`'d and extracted on first launch — users do not need a Node install. |
+| Node.js v24 LTS (embedded) | Real V8 + JSDOM for the BotGuard sidecar. Pinned per-platform Node binaries (`node-windows-amd64.gz`, `node-linux-amd64.gz`, `node-linux-arm64.gz`) are `go:embed`'d and extracted on first launch — users do not need a Node install. |
 | `bgutils-js` (npm, embedded) | LuanRT's BotGuard JS implementation (MIT). Bundled inside the sidecar payload. Used directly; the higher-level `bgutil-ytdlp-pot-provider` wrapper is GPL-3.0 and deliberately not depended on. |
 | `jsdom` (npm, embedded) | DOM implementation for the sidecar's globalThis bootstrap. Bundled inside the sidecar payload. |
 
@@ -401,7 +401,7 @@ YouTube requires Proof of Origin (PO) tokens for certain requests, particularly 
 
 **Architecture (sidecar primary, goja fallback):**
 
-1. **Sidecar path (preferred)** — A bundled Node.js v22 binary plus `bgutils-js` + JSDOM are extracted from `go:embed`'d blobs to `%LOCALAPPDATA%/Moombox/sidecar/` on first launch (~36 MB embed: ~33 MB gzipped node.exe + ~3.5 MB tarball of production node_modules + src/server.js). Moombox spawns the subprocess pinned to a Windows Job Object (so the child dies with the parent), pipes JSON-RPC requests over stdin/stdout, and consumes real PO tokens. First mint hits Google's WAA endpoint in ~460 ms; subsequent mints with the same binding hit the sidecar's internal minter cache in ~500 µs.
+1. **Sidecar path (preferred)** — A bundled Node.js v24 binary plus `bgutils-js` + JSDOM are extracted from `go:embed`'d blobs to `%LOCALAPPDATA%/Moombox/sidecar/` on first launch (~38 MB embed: ~34 MB gzipped node.exe + ~4 MB tarball of production node_modules + src/server.js). Moombox spawns the subprocess pinned to a Windows Job Object (so the child dies with the parent), pipes JSON-RPC requests over stdin/stdout, and consumes real PO tokens. First mint hits Google's WAA endpoint in ~460 ms; subsequent mints with the same binding hit the sidecar's internal minter cache in ~500 µs.
 
 2. **Goja fallback path** — When the sidecar is disabled (`[bgutils] use_sidecar = false` in config), fails to start, or dies mid-flight, `PotProvider` falls through to the legacy in-process flow:
    1. Fetch challenge (POST to `jnn-pa.googleapis.com` or YouTube fallback)
@@ -797,7 +797,7 @@ go test ./...                              # Run all tests
 go vet ./...                               # Static analysis
 ```
 
-Go 1.26 required. Runtime requires FFmpeg on PATH. Windows resource embedding (exe icon, version info) via `go-winres`: `go install github.com/tc-hib/go-winres@latest && cd cmd/moombox && go-winres make`. This generates `.syso` files in `cmd/moombox/winres/` — CI generates these at build time, none are committed to the repo.
+Go 1.27 required (go.mod carries `toolchain go1.27.1` as the floor: an older local Go and CI auto-download it; the Docker image pins its own 1.27 patch). Runtime requires FFmpeg on PATH. Windows resource embedding (exe icon, version info) via `go-winres`: `go install github.com/tc-hib/go-winres@latest && cd cmd/moombox && go-winres make`. This generates `.syso` files in `cmd/moombox/winres/` — CI generates these at build time, none are committed to the repo.
 
 ### CI/CD
 

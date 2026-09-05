@@ -54,7 +54,7 @@ go tool pprof -inuse_space -base heap-t0.pprof heap-t1.pprof
 # 1. Fetch + gzip the pinned Node.js binaries for all 3 platforms (~150 MB total):
 go run ./tools/fetch-node                 # idempotent; skips on version match
 
-# 2. Build the JS sidecar payload (~3.5 MB tarball):
+# 2. Build the JS sidecar payload (~4 MB tarball):
 cd bgutil-sidecar
 npm ci --omit=dev                         # production deps only (jsdom + bgutils-js)
 node build.mjs                            # tars node_modules + src/ to ../internal/bgutils/embed/

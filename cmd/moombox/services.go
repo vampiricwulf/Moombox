@@ -637,7 +637,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// gojaSolver provides in-process n decryption (and historically sig,
 	// though sig is broken on current YouTube players — see
-	// docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md).
+	// docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md
+	// (removed after implementation; read it from git history, e.g.
+	// `git show 67755b9:docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md`)).
 	// sidecarSolver routes sig + n to the BotGuard sidecar via ejs; it's
 	// only constructed when the sidecar is healthy. compositeSolver
 	// applies the routing policy (sig: sidecar-only; n: sidecar primary,
