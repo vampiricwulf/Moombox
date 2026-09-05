@@ -174,6 +174,15 @@ func (s *runState) wireRoutes() func() {
 			default:
 			}
 		},
+		// An empty UpdateStatusMsg means "cleared": the dashboard skipped
+		// this release, so the TUI's badge must go out too instead of
+		// advertising a version the operator already dismissed.
+		OnDismissed: func(string) {
+			select {
+			case s.tuiUpdateStatusCh <- tui.UpdateStatusMsg{}:
+			default:
+			}
+		},
 	}, s.configStore)
 	authDeps := &routes.AuthRoutesDeps{
 		Auth:       s.authSvc,

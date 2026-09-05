@@ -55,6 +55,11 @@ type UpdateRouteDeps struct {
 	Version   string
 	OnRestart func()
 	OnFound   func(*updater.ReleaseInfo) // broadcast update to WebSocket + TUI
+	// OnDismissed runs after a dismiss is persisted, carrying the tag that
+	// was skipped. The Web hides its own indicator from SharedUpdateInfo,
+	// but the TUI holds a separate copy of the pending release — this is
+	// how it learns to drop the badge. Optional.
+	OnDismissed func(tag string)
 }
 
 // DismissUpdate records tag as the skipped version and clears the shared
@@ -244,6 +249,9 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		if err := DismissUpdate(store, pending.TagName); err != nil {
 			jsonError(w, "failed to save config", http.StatusInternalServerError)
 			return
+		}
+		if deps.OnDismissed != nil {
+			deps.OnDismissed(pending.TagName)
 		}
 		jsonResponse(w, map[string]any{"success": true, "skipped": pending.TagName})
 	})

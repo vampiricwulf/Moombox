@@ -319,7 +319,7 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 | `CheckTimersMsg` | Monitor callbacks | Next check times for Feed, DECAPI, and Twitch monitors. |
 | `CookieStatusMsg` | Cookie service | `{YT, TW, YTActive, TWActive}` — one `CookieStatus` per platform (`None`, `OK`, `CookiesOnly`, `Relogin`, `Unknown`) plus each platform's active flag. There is no *expired* state: expiry has no UI reader at all. See §Status Bar. |
 | `DiskStatusMsg` | Disk monitor | Disk usage percentage and warning/critical thresholds. |
-| `UpdateStatusMsg` | Updater | New version available (tag name, release notes). |
+| `UpdateStatusMsg` | Updater | New version available (tag name, release notes); an empty message clears the badge (Web-side dismiss). |
 
 **Internal tick messages:**
 

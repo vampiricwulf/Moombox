@@ -224,6 +224,52 @@ func TestUpdateDismissSkipsVersionAndClearsSharedInfo(t *testing.T) {
 	}
 }
 
+// TestUpdateDismissNotifiesOnDismissed: the dismiss route reports the tag it
+// skipped through OnDismissed so the other UI (the TUI's badge) can drop the
+// release too — the Web hides its own indicator from SharedUpdateInfo, but the
+// TUI holds its own copy and would otherwise keep advertising a version the
+// operator already dismissed.
+func TestUpdateDismissNotifiesOnDismissed(t *testing.T) {
+	var got []string
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
+		Version:     "2.6.0-test",
+		OnDismissed: func(tag string) { got = append(got, tag) },
+	})
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+
+	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if len(got) != 1 || got[0] != "v9.9.9" {
+		t.Fatalf(`OnDismissed calls: want ["v9.9.9"], got %q`, got)
+	}
+}
+
+// TestUpdateDismissWithoutPendingSkipsOnDismissed: nothing was skipped, so
+// nothing is announced — a 400 must not clear a badge that is still valid.
+func TestUpdateDismissWithoutPendingSkipsOnDismissed(t *testing.T) {
+	called := false
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
+		Version:     "2.6.0-test",
+		OnDismissed: func(string) { called = true },
+	})
+
+	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("dismiss with no pending update: want 400, got %d", rec.Code)
+	}
+	if called {
+		t.Error("OnDismissed must not fire when there was nothing to dismiss")
+	}
+}
+
 func TestUpdateDismissWithoutPendingIs400(t *testing.T) {
 	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test"})
 	// No SharedUpdateInfo seeded — nothing to skip.

@@ -294,6 +294,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case UpdateStatusMsg:
+		if msg.Version == "" {
+			// A dismiss elsewhere (the Web dashboard's
+			// POST /api/update/dismiss) cleared the pending update.
+			a.updateAvailable = nil
+			a.details.updateInfo = nil
+			return a, a.listenForUpdates()
+		}
 		a.updateAvailable = &msg
 		a.details.updateInfo = &msg
 		return a, a.listenForUpdates()
