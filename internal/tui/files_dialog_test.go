@@ -11,6 +11,18 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// TestFilesBoxDims pins the box-sizing formula extracted from the three call
+// sites (SetSize, SetBulkResult, View) into one helper — a change to any one
+// of them used to risk drifting from the other two.
+func TestFilesBoxDims(t *testing.T) {
+	if boxW, boxH, listH := filesBoxDims(200, 50); boxW != 80 || boxH != 24 || listH != 17 {
+		t.Errorf("filesBoxDims(200, 50) = (%d, %d, %d), want (80, 24, 17)", boxW, boxH, listH)
+	}
+	if boxW, boxH, listH := filesBoxDims(50, 12); boxW != 46 || boxH != 10 || listH != 3 {
+		t.Errorf("filesBoxDims(50, 12) = (%d, %d, %d), want (46, 10, 3)", boxW, boxH, listH)
+	}
+}
+
 // itemCounts tallies the list items by concrete type.
 func itemCounts(m *FilesDialogModel) (files, history, dividers int) {
 	for _, it := range m.list.Items() {

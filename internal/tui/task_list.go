@@ -42,7 +42,7 @@ type Filter int
 const (
 	FilterAll Filter = iota
 	FilterActive
-	FilterErrors
+	FilterIssues
 	FilterFinished
 )
 
@@ -50,7 +50,7 @@ func (f Filter) String() string {
 	switch f {
 	case FilterActive:
 		return "Active"
-	case FilterErrors:
+	case FilterIssues:
 		return "Issues"
 	case FilterFinished:
 		return "Finished"
@@ -633,7 +633,7 @@ func (m *TaskListModel) filterPosition() Filter {
 			case "active":
 				return FilterActive
 			case "issues":
-				return FilterErrors
+				return FilterIssues
 			case "finished":
 				return FilterFinished
 			}

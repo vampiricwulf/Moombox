@@ -398,7 +398,7 @@ See [BUILDING.md](BUILDING.md) for prerequisites and build commands for Windows,
 
 ## Terminal UI
 
-The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space.
+The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space. A terminal narrower than 60 columns or shorter than 20 rows shows a "Terminal too small" message instead of the panels.
 
 ### Keyboard Controls
 

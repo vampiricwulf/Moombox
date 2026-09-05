@@ -156,6 +156,8 @@ Example: Logs focused (100% width, 75% height)
 
 **Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input and has a visually distinct border.
 
+**Minimum terminal size:** below 60 columns × 20 rows, `App.View` skips the panel layout entirely and renders a single "Terminal too small" line naming the current and required dimensions, since every panel/overlay computes negative or near-zero content widths under that floor.
+
 ### Source Files
 
 | File | Purpose |
