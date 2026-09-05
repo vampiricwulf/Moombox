@@ -1307,7 +1307,7 @@
                             </p>
                             <sl-switch id="cfg-bgutils-use-sidecar">
                                 Enable sidecar
-                                <span slot="help-text">Use the embedded Node sidecar for real BotGuard PO tokens (default: on).</span>
+                                <span slot="help-text">Use the embedded Node sidecar for real BotGuard PO tokens (default: on). Requires restart.</span>
                             </sl-switch>
                         </div>
 
@@ -1350,7 +1350,7 @@
                                 max="65536"
                                 label="Sidecar hard limit (MB)"
                                 placeholder="512"
-                                help-text="V8 --max-old-space-size for the sidecar. Hitting this OOM-aborts the sidecar (no graceful soft stop). Must be comfortably above the soft limit. 0 uses V8's default (~512–1500 MB). Default: 512."
+                                help-text="V8 --max-old-space-size for the sidecar. Hitting this OOM-aborts the sidecar (no graceful soft stop). Must be comfortably above the soft limit. 0 uses V8's default (~512–1500 MB). Default: 512. Requires restart."
                             ></sl-input>
                         </div>
 

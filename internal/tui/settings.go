@@ -62,18 +62,21 @@ type settingsSection struct {
 // Kept in step with RESTART_REQUIRED_FIELDS in web/public/modules/settings.js;
 // the two lists are pinned against each other by TestRestartRequiredListsAgree.
 var restartRequiredKeys = map[string]bool{
-	"port":                true,
-	"network_access":      true,
-	"https_enabled":       true,
-	"tls_cert_path":       true,
-	"tls_key_path":        true,
-	"database_path":       true,
-	"log_file_path":       true,
-	"log_max_file_size":   true,
-	"log_max_files":       true,
-	"cookie_file":         true,
-	"auto_enabled":        true,
-	"browser_profile_dir": true,
+	"port":                  true,
+	"network_access":        true,
+	"https_enabled":         true,
+	"tls_cert_path":         true,
+	"tls_key_path":          true,
+	"database_path":         true,
+	"log_file_path":         true,
+	"log_max_file_size":     true,
+	"log_max_files":         true,
+	"cookie_file":           true,
+	"auto_enabled":          true,
+	"browser_profile_dir":   true,
+	"probe_targets":         true,
+	"sidecar_hard_limit_mb": true,
+	"use_sidecar":           true,
 }
 
 var sections = []settingsSection{
@@ -173,7 +176,7 @@ var sections = []settingsSection{
 	{
 		name: "BotGuard Sidecar",
 		fields: []fieldDef{
-			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens (default: on; falls back to goja-only when off)", nil},
+			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens (default: on; falls back to goja-only when off) (requires restart)", nil},
 		},
 	},
 	{
@@ -181,7 +184,7 @@ var sections = []settingsSection{
 		fields: []fieldDef{
 			{"go_soft_limit_mb", "Go soft limit (MB)", fieldNumber, nil, "soft cap; GC ramps up but no OOM (default: 256, 0 disables)", nil},
 			{"sidecar_soft_limit_mb", "Sidecar soft limit (MB)", fieldNumber, nil, "RSS threshold to trigger V8 GC (default: 200, 0 disables)", nil},
-			{"sidecar_hard_limit_mb", "Sidecar hard limit (MB)", fieldNumber, nil, "V8 --max-old-space-size; OOMs on hit, must exceed soft (default: 512, 0 = V8 default)", nil},
+			{"sidecar_hard_limit_mb", "Sidecar hard limit (MB)", fieldNumber, nil, "V8 --max-old-space-size; OOMs on hit, must exceed soft (default: 512, 0 = V8 default) (requires restart)", nil},
 		},
 	},
 	{

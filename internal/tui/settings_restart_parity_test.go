@@ -188,6 +188,8 @@ func TestRestartOverlayNamesEveryCategoryItCovers(t *testing.T) {
 		"database_path": "database", "log_file_path": "log",
 		"log_max_file_size": "log", "log_max_files": "log",
 		"cookie_file": "cookie", "auto_enabled": "cookie", "browser_profile_dir": "cookie",
+		"probe_targets":         "connectivity",
+		"sidecar_hard_limit_mb": "sidecar", "use_sidecar": "sidecar",
 	}
 	var wanted []string
 	seen := map[string]bool{}
