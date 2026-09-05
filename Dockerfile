@@ -37,7 +37,7 @@ RUN npm ci --no-audit --no-fund --ignore-scripts \
 # Output: /src/internal/bgutils/embed/sidecar.tar.gz
 
 # ── Stage 2: Go build ────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
 
 WORKDIR /src
 

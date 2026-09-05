@@ -6,7 +6,7 @@ This document covers building, testing, releasing, updating, and running Moombox
 
 ## Rules and Constraints
 
-- Build requires **Go 1.26** (see `go.mod` for exact patch version). Produces binaries for Windows x64, Linux x64, and Linux arm64 (cross-compiled via `GOOS`/`GOARCH` env vars; no CGo means the toolchain handles the rest transparently).
+- Build requires **Go 1.27**; `go.mod` carries `toolchain go1.27.1`, the floor every build (local, CI, Docker) auto-downloads. Produces binaries for Windows x64, Linux x64, and Linux arm64 (cross-compiled via `GOOS`/`GOARCH` env vars; no CGo means the toolchain handles the rest transparently).
 - **FFmpeg is required at runtime** — must be on PATH or configured via `cfg.Paths.FFmpegPath`. The first-run setup wizard validates FFmpeg availability and can install it via chocolatey or winget.
 - **CI builds on tag push only** (tags matching `v*`). The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
 - **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected.
@@ -96,7 +96,7 @@ The first-run setup wizard checks for FFmpeg and offers to install it via chocol
 Three-stage build that runs the entire pipeline inside the image build — no host Go/Node toolchain needed:
 
 1. **sidecar** (`node:22-bookworm-slim`): `npm ci --ignore-scripts` + `node build.mjs` → `sidecar.tar.gz` (mirrors release.yml).
-2. **build** (`golang:1.26-bookworm`): `go run ./tools/fetch-node`, then `CGO_ENABLED=0` cross-compile for `$TARGETOS/$TARGETARCH`. Both stages run on `$BUILDPLATFORM`, so multi-arch builds don't emulate the compile.
+2. **build** (`golang:1.27-bookworm`): `go run ./tools/fetch-node`, then `CGO_ENABLED=0` cross-compile for `$TARGETOS/$TARGETARCH`. Both stages run on `$BUILDPLATFORM`, so multi-arch builds don't emulate the compile.
 3. **runtime** (`debian:bookworm-slim` + ffmpeg + ca-certificates + tzdata): must be glibc — the sidecar extracts an official nodejs.org Linux binary at runtime, and those are glibc-linked (Alpine/musl won't run it).
 
 Container conventions:
