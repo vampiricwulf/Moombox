@@ -647,6 +647,12 @@
                                 placeholder="172.18.0.0/16, 10.0.0.5"
                                 help-text="Comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is used for access control. Leave empty unless Moombox sits behind a reverse proxy you control. Applies immediately."
                             ></sl-input>
+                            <sl-input
+                                id="cfg-probe-targets"
+                                label="Connectivity Probe Targets"
+                                placeholder="1.1.1.1:443, 8.8.8.8:443, 9.9.9.9:443"
+                                help-text="Comma-separated host:port TCP targets raced to detect internet reachability. Leave empty to keep the current targets. Requires restart."
+                            ></sl-input>
 
                             <sl-divider></sl-divider>
                             <h4>Password</h4>
@@ -1301,7 +1307,7 @@
                             </p>
                             <sl-switch id="cfg-bgutils-use-sidecar">
                                 Enable sidecar
-                                <span slot="help-text">Use the embedded Node sidecar for real BotGuard PO tokens (default: on).</span>
+                                <span slot="help-text">Use the embedded Node sidecar for real BotGuard PO tokens (default: on). Requires restart.</span>
                             </sl-switch>
                         </div>
 
@@ -1344,7 +1350,7 @@
                                 max="65536"
                                 label="Sidecar hard limit (MB)"
                                 placeholder="512"
-                                help-text="V8 --max-old-space-size for the sidecar. Hitting this OOM-aborts the sidecar (no graceful soft stop). Must be comfortably above the soft limit. 0 uses V8's default (~512–1500 MB). Default: 512."
+                                help-text="V8 --max-old-space-size for the sidecar. Hitting this OOM-aborts the sidecar (no graceful soft stop). Must be comfortably above the soft limit. 0 uses V8's default (~512–1500 MB). Default: 512. Requires restart."
                             ></sl-input>
                         </div>
 
@@ -1587,6 +1593,14 @@
                     containing "shorts" or "clip"
                 </div>
             </sl-details>
+            <sl-input id="channel-lookbehind-input" type="number" min="0" max="1000" label="Description lookbehind"
+                help-text="Compare descriptions with N older feed items. Blank = default."></sl-input>
+            <sl-input id="channel-output-dir-input" label="Output directory"
+                help-text="Per-channel override. Blank = the global output directory."></sl-input>
+            <sl-input id="channel-archive-window-input" type="number" min="1" max="3650" label="Archive window (days)"
+                help-text="Per-channel override, 1-3650. Blank = global."></sl-input>
+            <sl-input id="channel-archive-slots-input" type="number" min="1" max="100" label="Archive slots"
+                help-text="Per-channel override, 1-100. Blank = global."></sl-input>
             <div id="channel-include-vods-row">
                 <sl-checkbox id="channel-include-vods"
                     >Also archive uploads &amp; premieres (YouTube only)</sl-checkbox

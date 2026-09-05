@@ -786,3 +786,110 @@ export function reloginPromptTarget(status, hostname) {
   const available = status && Array.isArray(status.availableBrowsers) ? status.availableBrowsers.length : 0;
   return available > 0 ? "wizard" : "import";
 }
+
+/**
+ * Apply the per-channel override inputs to a channel payload. A blank input
+ * (undefined number / empty string) clears the key so the server falls back
+ * to the global value; a present value is validated against the same bounds
+ * config.Validate uses for the globals. Returns { channel, error }.
+ */
+export function applyChannelOverrides(channel, { numDescLookbehind, outputDirectory, archiveWindowDays, archiveSlots }) {
+  const out = { ...channel };
+  const setInt = (key, value, label, min, max) => {
+    if (value === undefined || value === null || value === "") {
+      delete out[key];
+      return null;
+    }
+    if (!Number.isInteger(value) || value < min || value > max) {
+      return `${label} must be a whole number ${min}-${max} (blank = use the global/default value)`;
+    }
+    out[key] = value;
+    return null;
+  };
+  const err =
+    setInt("num_desc_lookbehind", numDescLookbehind, "Description lookbehind", 0, 1000) ||
+    setInt("archive_window_days", archiveWindowDays, "Archive window", 1, 3650) ||
+    setInt("archive_slots", archiveSlots, "Archive slots", 1, 100);
+  if (err) return { channel, error: err };
+  const dir = (outputDirectory || "").trim();
+  if (dir) out.output_directory = dir; else delete out.output_directory;
+  return { channel: out, error: null };
+}
+
+const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
+
+/**
+ * Whether a job can be resumed (staging preserved, continue where it stopped).
+ * One rule for the details button, the batch bar, and the batch action: the
+ * status must be resumable — or Finished with an incomplete tail — AND the job
+ * must be a YouTube job with staging on disk. The server enforces the same
+ * three conditions (jobs.go resume route); this keeps the UI from offering
+ * what the server will refuse.
+ *
+ * `hasStaging` is only populated when the details view fetched the job; list
+ * rows (the batch bar's input) do not carry it, so `undefined` means unknown
+ * and passes through to the server's check — only a known `false` excludes.
+ *
+ * `requireKnownStaging` inverts that tolerance for the one caller that DOES
+ * fetch staging: the details view renders before _fetchStagingFields resolves,
+ * so pass-through would flash the button and leave it showing when the fetch
+ * fails. There, staging must be exactly `true`.
+ */
+export function canResumeJob(job, { requireKnownStaging = false } = {}) {
+  const statusOk = RESUMABLE_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
+  const stagingOk = requireKnownStaging ? job.hasStaging === true : job.hasStaging !== false;
+  return statusOk && job.platform === "youtube" && stagingOk;
+}
+
+/** Read a dotted path ("network.port") from a config object; undefined when absent. */
+export function resolveConfigPath(config, path) {
+  return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), config);
+}
+
+/**
+ * Snapshot the values of every restart-required path for later comparison.
+ * The caller passes RESTART_REQUIRED_FIELDS so the snapshot can never fall
+ * behind the list the badges are drawn from — the bug this replaced kept a
+ * hand-written nine-key literal and prompted for a restart on every save.
+ */
+export function snapshotRestartValues(config, fields) {
+  const out = {};
+  for (const { path } of fields) out[path] = resolveConfigPath(config, path);
+  return out;
+}
+
+/**
+ * Whether any restart-required path changed between two snapshots. Booleans
+ * compare by truthiness (a server that omits a false field must not read as a
+ * change); everything else compares as strings (arrays join with commas).
+ */
+export function restartValuesChanged(original, current, fields) {
+  return fields.some(({ path }) => {
+    const a = current[path];
+    const b = original[path];
+    if (typeof a === "boolean" || typeof b === "boolean") return !!a !== !!b;
+    return String(a ?? "") !== String(b ?? "");
+  });
+}
+
+/**
+ * Decide what a channel's `terms` should be after a save of the single-line
+ * terms field. The dialog can only show ONE string, so a named map like
+ * {live, vod} — or any map without a `stream` key — renders blank; rebuilding
+ * terms from the field would then silently replace it with nothing.
+ *
+ * The TUI's rule, applied here: an UNCHANGED field keeps the existing shape
+ * verbatim, whatever it is. Only an edit writes through — clearing the field
+ * removes terms, and a stream-keyed map has just its `stream` key rewritten so
+ * sibling keys survive.
+ *
+ * `seedShown` is the exact string the dialog placed in the input.
+ */
+export function channelTermsForSave(existingTerms, seedShown, typed) {
+  if (typed === seedShown) return existingTerms;
+  if (typed === "") return undefined;
+  if (existingTerms && typeof existingTerms === "object" && !Array.isArray(existingTerms) && existingTerms.stream !== undefined) {
+    return { ...existingTerms, stream: typed };
+  }
+  return typed;
+}

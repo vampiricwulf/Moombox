@@ -2,6 +2,8 @@ package tui
 
 import (
 	"cmp"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -20,22 +22,58 @@ func channelToValues(ch config.ChannelConfig) map[string]string {
 		enabled = "No"
 	}
 	return map[string]string{
-		"id":                 ch.ID,
-		"name":               ch.Name,
-		"platform":           ch.GetPlatform(),
-		"enabled":            enabled,
-		"terms":              terms,
-		"include_non_live":   boolToDisplay(ch.IncludeNonLiveContent),
-		"quality_preference": cmp.Or(ch.QualityPreference, "best"),
+		"id":                  ch.ID,
+		"name":                ch.Name,
+		"platform":            ch.GetPlatform(),
+		"enabled":             enabled,
+		"terms":               terms,
+		"include_non_live":    boolToDisplay(ch.IncludeNonLiveContent),
+		"quality_preference":  cmp.Or(ch.QualityPreference, "best"),
+		"num_desc_lookbehind": optIntString(ch.NumDescLookbehind),
+		"output_directory":    ch.OutputDirectory,
+		"archive_window_days": optIntString(ch.ArchiveWindowDays),
+		"archive_slots":       optIntString(ch.ArchiveSlots),
 	}
 }
 
-func valuesToChannel(vals map[string]string) config.ChannelConfig {
-	ch := config.ChannelConfig{
-		ID:       strings.TrimSpace(vals["id"]),
-		Name:     strings.TrimSpace(vals["name"]),
-		Platform: vals["platform"],
+// optIntString renders an optional override for the form: "" when unset.
+func optIntString(p *int) string {
+	if p == nil {
+		return ""
 	}
+	return strconv.Itoa(*p)
+}
+
+// optIntFromString parses a form value back to an optional override; blank
+// or unparseable text clears it (validateChannelValues rejects the latter
+// before the save reaches here).
+func optIntFromString(s string) *int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
+// valuesToChannel turns the editor's form values into a ChannelConfig. For an
+// edit, existing is the channel being edited: every field is copied from it
+// first, so the fields this editor does not show (num_desc_lookbehind,
+// output_directory, archive_window_days, archive_slots, named terms) survive
+// the round trip — the bug this parameter exists to close. nil means a new
+// channel. Shown fields are assigned unconditionally so clearing one clears
+// it in the result too.
+func valuesToChannel(vals map[string]string, existing *config.ChannelConfig) config.ChannelConfig {
+	var ch config.ChannelConfig
+	if existing != nil {
+		ch = *existing
+	}
+	ch.ID = strings.TrimSpace(vals["id"])
+	ch.Name = strings.TrimSpace(vals["name"])
+	ch.Platform = vals["platform"]
 	switch vals["enabled"] {
 	case "No":
 		boolFalse := false
@@ -44,16 +82,49 @@ func valuesToChannel(vals map[string]string) config.ChannelConfig {
 		boolTrue := true
 		ch.Enabled = &boolTrue
 	}
-	if vals["terms"] != "" {
-		ch.Terms = config.ChannelTerms{Simple: vals["terms"]}
+	// The editor shows one pattern string. Unchanged text keeps whatever
+	// shape the config had (a named map shows as its Simple, ""); changed
+	// text becomes the simple form, and "" clears the terms.
+	if existing == nil || vals["terms"] != channelToValues(*existing)["terms"] {
+		ch.Terms = config.ChannelTerms{}
+		if vals["terms"] != "" {
+			ch.Terms = config.ChannelTerms{Simple: vals["terms"]}
+		}
 	}
-	if vals["platform"] == "youtube" && vals["include_non_live"] == "Yes" {
-		ch.IncludeNonLiveContent = true
+	ch.IncludeNonLiveContent = vals["platform"] == "youtube" && vals["include_non_live"] == "Yes"
+	ch.QualityPreference = ""
+	if q := vals["quality_preference"]; q != "" && q != "best" {
+		ch.QualityPreference = q
 	}
-	if vals["quality_preference"] != "" && vals["quality_preference"] != "best" {
-		ch.QualityPreference = vals["quality_preference"]
-	}
+	ch.NumDescLookbehind = optIntFromString(vals["num_desc_lookbehind"])
+	ch.OutputDirectory = strings.TrimSpace(vals["output_directory"])
+	ch.ArchiveWindowDays = optIntFromString(vals["archive_window_days"])
+	ch.ArchiveSlots = optIntFromString(vals["archive_slots"])
 	return ch
+}
+
+// validateChannelValues checks the numeric overrides before a save so a
+// typo produces a field error instead of a silently-cleared override.
+// Bounds match config.Validate's global monitors bounds.
+func validateChannelValues(vals map[string]string) string {
+	check := func(key, label string, min, max int) string {
+		s := strings.TrimSpace(vals[key])
+		if s == "" {
+			return ""
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n < min || n > max {
+			return fmt.Sprintf("%s must be a whole number %d-%d (blank = use the global/default value)", label, min, max)
+		}
+		return ""
+	}
+	if msg := check("num_desc_lookbehind", "Description lookbehind", 0, 1000); msg != "" {
+		return msg
+	}
+	if msg := check("archive_window_days", "Archive window", 1, 3650); msg != "" {
+		return msg
+	}
+	return check("archive_slots", "Archive slots", 1, 100)
 }
 
 func (m *SettingsModel) handleChannelKey(key string) string {
@@ -102,6 +173,8 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
 			"include_non_live": "No", "quality_preference": "best",
+			"num_desc_lookbehind": "", "output_directory": "",
+			"archive_window_days": "", "archive_slots": "",
 		}
 		m.channelEditField = 0
 		m.channelIndex = len(m.channels) // Will be new index
@@ -161,6 +234,11 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 			m.errorMsg = "Channel ID is required"
 			return ""
 		}
+		if msg := validateChannelValues(m.channelEditValues); msg != "" {
+			m.errorMsg = msg
+			m.status = saveError
+			return ""
+		}
 		if strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") || strings.Contains(id, "twitch.tv/") {
 			m.channelResolving = true
 			return "resolve_channel"
@@ -205,7 +283,11 @@ func (m *SettingsModel) autoDetectPlatform() {
 
 // saveCurrentChannel saves the current channel edit values to the channel list.
 func (m *SettingsModel) saveCurrentChannel() {
-	ch := valuesToChannel(m.channelEditValues)
+	var existing *config.ChannelConfig
+	if m.channelIndex < len(m.channels) {
+		existing = &m.channels[m.channelIndex]
+	}
+	ch := valuesToChannel(m.channelEditValues, existing)
 	if m.channelIndex < len(m.channels) {
 		m.channels[m.channelIndex] = ch
 	} else {

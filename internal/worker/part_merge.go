@@ -50,11 +50,14 @@ type partMerger struct {
 // resurrecting and re-merging already-consumed content — see merge's doc
 // comment for the full chain).
 func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx *JobContext, segments []database.Segment) []database.Segment {
+	// One read of the hot-reloadable muxer, so the probe and the concat this
+	// merge run uses are the same binary even if a save lands mid-merge.
+	m := o.mux()
 	pm := &partMerger{
-		ffprobePath: o.muxer.FFprobePath(),
+		ffprobePath: m.FFprobePath(),
 		logger:      o.logger,
 		probe:       probeStreamParamsFn,
-		concat:      o.muxer.ConcatCopy,
+		concat:      m.ConcatCopy,
 		replace:     o.db.ReplaceJobSegments,
 		updateFile:  o.db.UpdateSegmentFile,
 		rename:      os.Rename,

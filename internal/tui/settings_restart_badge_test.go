@@ -38,11 +38,22 @@ func TestRestartBadgeIdsAreTheControlsTheirPathsDrive(t *testing.T) {
 
 	baseline := runPopulate(t, vm, map[string]any{})
 
-	// Switches read `config.x?.y === true`, so the only value that moves them
-	// off the baseline is a real true. Everything else takes the sentinel.
-	booleanPaths := map[string]bool{
-		"network.https_enabled": true,
-		"cookies.auto_enabled":  true,
+	// Most restart-required fields are plain text or number inputs, where any
+	// string that differs from the empty baseline is a valid probe. Three
+	// controls need a specific override so "changed" stays unambiguous:
+	//
+	//   - https_enabled and auto_enabled read `config.x?.y === true`; the
+	//     baseline (unset) is false, so only a literal true moves them.
+	//   - use_sidecar reads the opposite way, `!== false`, and so defaults to
+	//     true when unset — a literal false is the only value that moves it
+	//     off that baseline.
+	//   - probe_targets is rendered with `.join(", ")`; a bare string sentinel
+	//     has no such method, so its probe must already be an array.
+	probeOverrides := map[string]any{
+		"network.https_enabled":      true,
+		"cookies.auto_enabled":       true,
+		"bgutils.use_sidecar":        false,
+		"connectivity.probe_targets": []any{"moombox-restart-probe-connectivity.probe_targets"},
 	}
 
 	for _, row := range restartFieldsFromJS(t) {
@@ -50,9 +61,9 @@ func TestRestartBadgeIdsAreTheControlsTheirPathsDrive(t *testing.T) {
 		id, _ := row["id"].(string)
 
 		t.Run(path, func(t *testing.T) {
-			var probeValue any = "moombox-restart-probe-" + path
-			if booleanPaths[path] {
-				probeValue = true
+			probeValue, overridden := probeOverrides[path]
+			if !overridden {
+				probeValue = "moombox-restart-probe-" + path
 			}
 
 			seen := runPopulate(t, vm, nestedConfig(path, probeValue))

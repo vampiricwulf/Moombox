@@ -61,6 +61,15 @@ type ConfigRoutesCallbacks struct {
 	// so the notification manager can hot-reload its targets (previously
 	// edits silently required a restart nothing prompted for).
 	OnNotificationsChange func()
+	// OnGoSoftLimitChange is called when memory.go_soft_limit_mb changes so the
+	// runtime soft limit follows without a restart (0 = disable).
+	OnGoSoftLimitChange func(mb int)
+	// OnTrustForwardedProtoChange is called when network.trust_forwarded_proto
+	// changes; the web package's atomic flag follows.
+	OnTrustForwardedProtoChange func(trust bool)
+	// OnFfmpegPathChange is called when paths.ffmpeg_path changes so services
+	// that captured the path at construction (TrimService) rebuild.
+	OnFfmpegPathChange func(path string)
 }
 
 // pathFieldError returns the per-field error for a user-supplied path value,
@@ -118,6 +127,11 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 			case "localhost", "lan", "external":
 			default:
 				errs["network.network_access"] = "network_access must be localhost, lan, or external"
+			}
+		}
+		if v, ok := net["client_token_ttl_days"].(float64); ok {
+			if v < 1 || v > 3650 {
+				errs["network.client_token_ttl_days"] = "client_token_ttl_days must be between 1 and 3650"
 			}
 		}
 		if v, ok := net["trusted_proxies"].([]any); ok {
@@ -322,6 +336,32 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 		if hasSideSoft && hasSideHard && sideSoft > 0 && sideHard > 0 && sideHard <= sideSoft {
 			errs["memory.sidecar_hard_limit_mb"] = "hard limit must be higher than soft limit"
+		}
+	}
+
+	// Connectivity sub-fields
+	if conn, ok := updates["connectivity"].(map[string]any); ok {
+		if v, ok := conn["probe_targets"].([]any); ok {
+			valid := 0
+			for _, item := range v {
+				s, ok := item.(string)
+				if !ok {
+					errs["connectivity.probe_targets"] = "probe_targets must be an array of host:port strings"
+					break
+				}
+				s = strings.TrimSpace(s)
+				if s == "" {
+					continue
+				}
+				if _, _, err := net2.SplitHostPort(s); err != nil {
+					errs["connectivity.probe_targets"] = fmt.Sprintf("%q is not a valid host:port", s)
+					break
+				}
+				valid++
+			}
+			if _, bad := errs["connectivity.probe_targets"]; !bad && valid == 0 {
+				errs["connectivity.probe_targets"] = "at least one probe target is required"
+			}
 		}
 	}
 
@@ -661,6 +701,23 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 	}
 
+	// Connectivity
+	if conn, ok := updates["connectivity"].(map[string]any); ok {
+		if v, ok := conn["probe_targets"].([]any); ok {
+			targets := make([]string, 0, len(v))
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					if s = strings.TrimSpace(s); s != "" {
+						targets = append(targets, s)
+					}
+				}
+			}
+			if len(targets) > 0 {
+				cfg.Connectivity.ProbeTargets = targets
+			}
+		}
+	}
+
 	// Notifications
 	if notifs, ok := updates["notifications"].([]any); ok {
 		var configs []config.NotificationConfig
@@ -809,6 +866,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldLogLevel := cfg.Logs.LogLevel
 		oldNumParallel := cfg.Downloader.NumParallelDownloads
 		oldHideAge := cfg.Monitors.HideFinishedAgeDays.Value
+		oldGoSoft := cfg.Memory.GoSoftLimitMB
+		oldTrust := cfg.Network.TrustForwardedProto
+		oldFfmpeg := cfg.Paths.FfmpegPath
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -830,6 +890,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newLogLevel := cfg.Logs.LogLevel
 		newNumParallel := cfg.Downloader.NumParallelDownloads
 		newHideAge := cfg.Monitors.HideFinishedAgeDays.Value
+		newGoSoft := cfg.Memory.GoSoftLimitMB
+		newTrust := cfg.Network.TrustForwardedProto
+		newFfmpeg := cfg.Paths.FfmpegPath
 
 		mu.Unlock()
 
@@ -849,6 +912,15 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if _, hasNotifs := updates["notifications"]; hasNotifs && callbacks.OnNotificationsChange != nil {
 				callbacks.OnNotificationsChange()
+			}
+			if newGoSoft != oldGoSoft && callbacks.OnGoSoftLimitChange != nil {
+				callbacks.OnGoSoftLimitChange(newGoSoft)
+			}
+			if newTrust != oldTrust && callbacks.OnTrustForwardedProtoChange != nil {
+				callbacks.OnTrustForwardedProtoChange(newTrust)
+			}
+			if newFfmpeg != oldFfmpeg && callbacks.OnFfmpegPathChange != nil {
+				callbacks.OnFfmpegPathChange(newFfmpeg)
 			}
 		}
 

@@ -33,9 +33,13 @@ func (m *SettingsModel) updateTextInputForField() {
 		fields := m.visibleChannelFields()
 		if m.channelEditField < len(fields) {
 			field := fields[m.channelEditField]
-			if field.ftype == fieldText {
+			if field.ftype == fieldText || field.ftype == fieldNumber {
 				m.textInput.EchoMode = textinput.EchoNormal
-				m.textInput.Validate = nil
+				if field.ftype == fieldNumber {
+					m.textInput.Validate = validateDigitsOnly
+				} else {
+					m.textInput.Validate = nil
+				}
 				m.textInput.SetValue(m.channelEditValues[field.key])
 				m.textInput.Focus()
 				return
@@ -123,7 +127,7 @@ func (m *SettingsModel) syncFromTextInput() {
 		fields := m.visibleChannelFields()
 		if m.channelEditField < len(fields) {
 			field := fields[m.channelEditField]
-			if field.ftype == fieldText {
+			if field.ftype == fieldText || field.ftype == fieldNumber {
 				m.channelEditValues[field.key] = val
 				if field.key == "id" {
 					m.autoDetectPlatform()

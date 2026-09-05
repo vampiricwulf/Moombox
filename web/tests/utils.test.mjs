@@ -9,6 +9,12 @@ import {
   formatDurationSeconds,
   formatMsToTime,
   safePlay,
+  applyChannelOverrides,
+  canResumeJob,
+  channelTermsForSave,
+  resolveConfigPath,
+  snapshotRestartValues,
+  restartValuesChanged,
 } from "../public/modules/utils.js";
 
 test("formatTimestamp: zero and invalid inputs", () => {
@@ -92,4 +98,167 @@ test("safePlay swallows a rejected play() promise and tolerates a void return", 
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
+});
+
+test("applyChannelOverrides: values set, blanks clear, existing preserved", () => {
+  const existing = { id: "UC1", name: "N", num_desc_lookbehind: 5, output_directory: "D:/old", archive_window_days: 7, archive_slots: 2 };
+  const r = applyChannelOverrides({ ...existing }, {
+    numDescLookbehind: undefined, outputDirectory: "", archiveWindowDays: 14, archiveSlots: 4,
+  });
+  assert.equal(r.error, null);
+  assert.equal("num_desc_lookbehind" in r.channel, false, "blank clears the key");
+  assert.equal("output_directory" in r.channel, false, "blank clears the key");
+  assert.equal(r.channel.archive_window_days, 14);
+  assert.equal(r.channel.archive_slots, 4);
+  assert.equal(r.channel.name, "N", "unrelated keys untouched");
+});
+
+test("applyChannelOverrides: rejects out-of-range and non-integer values", () => {
+  const cases = [
+    [{ numDescLookbehind: -1 }, /lookbehind/i],
+    [{ numDescLookbehind: 1.5 }, /lookbehind/i],
+    [{ archiveWindowDays: 0 }, /window/i],
+    [{ archiveWindowDays: 3651 }, /window/i],
+    [{ archiveSlots: 0 }, /slots/i],
+    [{ archiveSlots: 101 }, /slots/i],
+  ];
+  for (const [ov, re] of cases) {
+    const r = applyChannelOverrides({ id: "UC1" }, ov);
+    assert.match(r.error ?? "", re, JSON.stringify(ov));
+  }
+  const ok = applyChannelOverrides({ id: "UC1" }, { numDescLookbehind: 0, archiveWindowDays: 3650, archiveSlots: 100, outputDirectory: " D:/x " });
+  assert.equal(ok.error, null);
+  assert.equal(ok.channel.output_directory, "D:/x", "trimmed");
+});
+
+test("canResumeJob: the single-job gate, applied everywhere", () => {
+  const yt = (status, extra = {}) => ({ status, platform: "youtube", hasStaging: true, ...extra });
+  assert.equal(canResumeJob(yt("Error")), true);
+  assert.equal(canResumeJob(yt("Cancelled")), true);
+  assert.equal(canResumeJob(yt("COOKIES?")), true);
+  assert.equal(canResumeJob(yt("Finished", { incompleteTail: true })), true);
+  assert.equal(canResumeJob(yt("Finished")), false, "a complete Finished job is not resumable");
+  assert.equal(canResumeJob(yt("Downloading")), false);
+  assert.equal(canResumeJob({ ...yt("Error"), platform: "twitch" }), false, "resume is YouTube-only");
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: false }), false, "no staging, nothing to resume");
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: undefined }), true, "unknown staging (list row) defers to the server");
+});
+
+test("canResumeJob: requireKnownStaging hides the button until the details fetch lands", () => {
+  const yt = (status, extra = {}) => ({ status, platform: "youtube", hasStaging: true, ...extra });
+  const strict = { requireKnownStaging: true };
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: undefined }, strict), false, "the details view renders before _fetchStagingFields resolves");
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: true }, strict), true);
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: false }, strict), false);
+  assert.equal(canResumeJob(yt("Downloading"), strict), false, "the status gate still applies");
+  // Default mode is unchanged for the batch sites, which never carry staging.
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: undefined }, {}), true);
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: undefined }), true);
+});
+
+// The fifteen restart-required paths, copied literally from
+// RESTART_REQUIRED_FIELDS in web/public/modules/settings.js. They cannot be
+// imported (the goja harness in internal/tui/settings_js_vm_test.go strips
+// `export` from that module), so they are duplicated here; the Go test
+// TestRestartRequiredListsAgree pins the Web list against the TUI's.
+const RESTART_FIELDS = [
+  { path: "network.port" },
+  { path: "network.network_access" },
+  { path: "network.https_enabled" },
+  { path: "network.tls_cert_path" },
+  { path: "network.tls_key_path" },
+  { path: "paths.database_path" },
+  { path: "paths.log_file_path" },
+  { path: "logs.log_max_file_size" },
+  { path: "logs.log_max_files" },
+  { path: "cookies.cookie_file" },
+  { path: "cookies.auto_enabled" },
+  { path: "cookies.browser_profile_dir" },
+  { path: "connectivity.probe_targets" },
+  { path: "memory.sidecar_hard_limit_mb" },
+  { path: "bgutils.use_sidecar" },
+];
+
+// A fresh default-shaped config every call, so two snapshots hold DISTINCT
+// array instances — an identity comparison inside restartValuesChanged would
+// then report probe_targets as changed.
+const makeRestartConfig = () => ({
+  network: { port: 774, network_access: "localhost", https_enabled: false, tls_cert_path: "", tls_key_path: "" },
+  paths: { database_path: "./moombox.db", log_file_path: "./logs/moombox.log" },
+  logs: { log_max_file_size: 10, log_max_files: 5 },
+  cookies: { cookie_file: "./cookies.txt", auto_enabled: false, browser_profile_dir: "" },
+  connectivity: { probe_targets: ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"] },
+  memory: { sidecar_hard_limit_mb: 512 },
+  bgutils: { use_sidecar: true },
+});
+
+test("resolveConfigPath: dotted lookup, undefined for absent branches", () => {
+  const cfg = makeRestartConfig();
+  assert.equal(resolveConfigPath(cfg, "network.port"), 774);
+  assert.deepEqual(resolveConfigPath(cfg, "connectivity.probe_targets"), ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"]);
+  assert.equal(resolveConfigPath(cfg, "nope.missing"), undefined);
+  assert.equal(resolveConfigPath(cfg, "network.missing"), undefined);
+  assert.equal(resolveConfigPath(undefined, "network.port"), undefined);
+});
+
+test("restartValuesChanged: an unchanged save over all fifteen paths prompts nothing", () => {
+  assert.equal(RESTART_FIELDS.length, 15, "the Web restart list has fifteen paths");
+  const snap = snapshotRestartValues(makeRestartConfig(), RESTART_FIELDS);
+  assert.equal(Object.keys(snap).length, 15, "every path is snapshotted, not just the network/log nine");
+  const current = snapshotRestartValues(makeRestartConfig(), RESTART_FIELDS);
+  assert.equal(restartValuesChanged(snap, current, RESTART_FIELDS), false, "an unchanged save must not prompt for a restart");
+});
+
+test("restartValuesChanged: an omitted false boolean is not a change", () => {
+  const snap = snapshotRestartValues(makeRestartConfig(), RESTART_FIELDS);
+  const served = makeRestartConfig();
+  delete served.network.https_enabled; // the server omits a false field
+  const current = snapshotRestartValues(served, RESTART_FIELDS);
+  assert.equal(restartValuesChanged(snap, current, RESTART_FIELDS), false);
+});
+
+test("restartValuesChanged: real edits to the six formerly-unsnapshotted paths are detected", () => {
+  const snap = snapshotRestartValues(makeRestartConfig(), RESTART_FIELDS);
+  const probes = makeRestartConfig();
+  probes.connectivity.probe_targets = ["1.1.1.1:443"];
+  assert.equal(restartValuesChanged(snap, snapshotRestartValues(probes, RESTART_FIELDS), RESTART_FIELDS), true, "probe_targets");
+
+  const sidecar = makeRestartConfig();
+  sidecar.bgutils.use_sidecar = false;
+  assert.equal(restartValuesChanged(snap, snapshotRestartValues(sidecar, RESTART_FIELDS), RESTART_FIELDS), true, "use_sidecar");
+
+  const cookieFile = makeRestartConfig();
+  cookieFile.cookies.cookie_file = "./other.txt";
+  assert.equal(restartValuesChanged(snap, snapshotRestartValues(cookieFile, RESTART_FIELDS), RESTART_FIELDS), true, "cookie_file");
+
+  const hardLimit = makeRestartConfig();
+  hardLimit.memory.sidecar_hard_limit_mb = 1024;
+  assert.equal(restartValuesChanged(snap, snapshotRestartValues(hardLimit, RESTART_FIELDS), RESTART_FIELDS), true, "sidecar_hard_limit_mb");
+});
+
+test("channelTermsForSave: an untouched field keeps whatever shape the config holds", () => {
+  // A named map with no `stream` key: the dialog shows "" for it, so an
+  // untouched save must return it verbatim rather than clear the entry.
+  const named = { live: "concert", vod: "archive" };
+  assert.equal(channelTermsForSave(named, "", ""), named, "the same object, not a rebuilt one");
+  // Same rule for a simple string the operator did not edit.
+  assert.equal(channelTermsForSave("karaoke", "karaoke", "karaoke"), "karaoke");
+  // And for a channel that never had terms.
+  assert.equal(channelTermsForSave(undefined, "", ""), undefined);
+});
+
+test("channelTermsForSave: an edited field writes through, preserving a stream-keyed map", () => {
+  const withStream = { stream: "karaoke", vod: "archive" };
+  assert.deepEqual(
+    channelTermsForSave(withStream, "karaoke", "singing"),
+    { stream: "singing", vod: "archive" },
+    "only the stream key is rewritten",
+  );
+  assert.equal(channelTermsForSave("karaoke", "karaoke", "singing"), "singing", "a simple string becomes the new string");
+  assert.equal(channelTermsForSave(undefined, "", "singing"), "singing", "a new channel gets a simple string");
+});
+
+test("channelTermsForSave: clearing an edited field removes terms", () => {
+  assert.equal(channelTermsForSave("karaoke", "karaoke", ""), undefined);
+  assert.equal(channelTermsForSave({ stream: "karaoke" }, "karaoke", ""), undefined);
 });

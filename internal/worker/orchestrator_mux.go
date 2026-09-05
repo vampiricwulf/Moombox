@@ -170,7 +170,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		return fmt.Errorf("no media files to mux")
 	}
 
-	if err := o.muxer.MuxCopy(ctx, videoPath, audioPath, outputFile); err != nil {
+	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputFile); err != nil {
 		return fmt.Errorf("mux: %w", err)
 	}
 
@@ -742,7 +742,7 @@ func (o *DownloadOrchestrator) muxSegment(
 	}
 
 	// MuxCopy (no re-encoding)
-	if err := o.muxer.MuxCopy(ctx, videoPath, audioPath, outputPath); err != nil {
+	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputPath); err != nil {
 		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 	}
 

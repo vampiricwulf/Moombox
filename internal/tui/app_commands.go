@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -236,17 +237,9 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		}
 		defer f.Close()
 
-		url := fmt.Sprintf("%s/api/import", baseURL)
-		req, err := http.NewRequest("POST", url, f)
+		req, err := newImportRequest(baseURL, f, title, channel)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
-		}
-		req.Header.Set("Content-Type", "application/octet-stream")
-		if title != "" {
-			req.Header.Set("X-Import-Title", strings.TrimSpace(title))
-		}
-		if channel != "" {
-			req.Header.Set("X-Import-Channel", strings.TrimSpace(channel))
 		}
 
 		resp, err := client.Do(req)
@@ -516,6 +509,26 @@ func openBrowser(url string) {
 	// browser escapes the launcher's Job Object AND query-string URLs
 	// survive explorer's legacy argument parser.
 	_ = openBrowserCmd(url).Start()
+}
+
+// newImportRequest builds the archive-import POST. The metadata headers are
+// percent-encoded (url.PathEscape) because HTTP headers are Latin-1 and the
+// server PathUnescapes them — compatible with the Web UI's encodeURIComponent
+// (the server's url.PathUnescape decodes both; PathEscape additionally escapes
+// !'()*). Blank values set no header.
+func newImportRequest(baseURL string, body io.Reader, title, channel string) (*http.Request, error) {
+	req, err := http.NewRequest("POST", baseURL+"/api/import", body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if t := strings.TrimSpace(title); t != "" {
+		req.Header.Set("X-Import-Title", url.PathEscape(t))
+	}
+	if c := strings.TrimSpace(channel); c != "" {
+		req.Header.Set("X-Import-Channel", url.PathEscape(c))
+	}
+	return req, nil
 }
 
 // Run starts the TUI program.

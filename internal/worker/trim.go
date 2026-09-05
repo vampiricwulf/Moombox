@@ -22,6 +22,7 @@ const defaultTrimCRF = 18
 // TrimService handles creating and deleting trim records.
 type TrimService struct {
 	muxer     *engine.Muxer
+	muxerMu   sync.RWMutex // guards muxer across SetFfmpegPath hot-reload vs. in-flight trims
 	db        *database.Database
 	notifier  *notifications.Manager
 	activeMu  sync.Mutex
@@ -53,6 +54,26 @@ func NewTrimService(db *database.Database, ffmpegPath string, logger interface {
 func (ts *TrimService) SetNotifier(nm *notifications.Manager) {
 	ts.notifier = nm
 }
+
+// SetFfmpegPath rebuilds the muxer for a new ffmpeg path (config hot-reload).
+// In-flight trims keep the muxer they captured; new trims see the new path.
+func (ts *TrimService) SetFfmpegPath(path string) {
+	m := engine.NewMuxer(path, ts.logger)
+	ts.muxerMu.Lock()
+	ts.muxer = m
+	ts.muxerMu.Unlock()
+}
+
+// mux returns the current muxer under the read lock.
+func (ts *TrimService) mux() *engine.Muxer {
+	ts.muxerMu.RLock()
+	defer ts.muxerMu.RUnlock()
+	return ts.muxer
+}
+
+// FFprobePath reports the ffprobe path of the current muxer (observability
+// for the hot-reload path; trims themselves go through mux()).
+func (ts *TrimService) FFprobePath() string { return ts.mux().FFprobePath() }
 
 // CreateTrim creates a trimmed version of a finished download. progressFn is
 // called with 0-100 as FFmpeg encoding progresses; pass nil when progress
@@ -134,7 +155,8 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 	ts.logger.Info("creating trim", "jobID", job.ID, "start", startTime, "end", endTime)
 
 	// Probe audio bitrate to match source quality (matches TS probeAudioBitrate)
-	audioBitrate := probeAudioBitrate(ctx, ts.muxer.FFprobePath(), job.OutputFile)
+	m := ts.mux()
+	audioBitrate := probeAudioBitrate(ctx, m.FFprobePath(), job.OutputFile)
 
 	// Run FFmpeg with progress if callback provided
 	opts := &engine.TrimOptions{
@@ -145,7 +167,7 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 		UsePreciseTrim:  true,
 		ProgressFn:      progressFn,
 	}
-	if err := ts.muxer.Mux(ctx, job.OutputFile, "", trimPath, opts); err != nil {
+	if err := m.Mux(ctx, job.OutputFile, "", trimPath, opts); err != nil {
 		return nil, fmt.Errorf("ffmpeg trim: %w", err)
 	}
 
@@ -370,8 +392,9 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 
 	// Single-segment fast path
 	if len(involved) == 1 {
+		m := ts.mux()
 		seg := involved[0]
-		audioBitrate := probeAudioBitrate(ctx, ts.muxer.FFprobePath(), seg.Segment.FilePath)
+		audioBitrate := probeAudioBitrate(ctx, m.FFprobePath(), seg.Segment.FilePath)
 		duration := seg.LocalEnd - seg.LocalStart
 		opts := &engine.TrimOptions{
 			TrimStartOffset: seg.LocalStart,
@@ -381,7 +404,7 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 			UsePreciseTrim:  true,
 			ProgressFn:      progressFn,
 		}
-		if err := ts.muxer.Mux(ctx, seg.Segment.FilePath, "", trimPath, opts); err != nil {
+		if err := m.Mux(ctx, seg.Segment.FilePath, "", trimPath, opts); err != nil {
 			return nil, fmt.Errorf("ffmpeg trim: %w", err)
 		}
 	} else {
@@ -415,7 +438,8 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 		}
 
 		// Probe audio bitrate from the first involved segment
-		audioBitrate := probeAudioBitrate(ctx, ts.muxer.FFprobePath(), involved[0].Segment.FilePath)
+		m := ts.mux()
+		audioBitrate := probeAudioBitrate(ctx, m.FFprobePath(), involved[0].Segment.FilePath)
 
 		// Build TrimSegmentInput slice
 		var inputs []engine.TrimSegmentInput
@@ -440,11 +464,11 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 		}
 
 		if progressFn != nil {
-			if err := ts.muxer.TrimAndConcatWithProgress(ctx, inputs, trimPath, targetW, targetH, targetFPS, defaultTrimCRF, audioBitrate, progressFn); err != nil {
+			if err := m.TrimAndConcatWithProgress(ctx, inputs, trimPath, targetW, targetH, targetFPS, defaultTrimCRF, audioBitrate, progressFn); err != nil {
 				return nil, fmt.Errorf("multi-segment trim: %w", err)
 			}
 		} else {
-			if err := ts.muxer.TrimAndConcat(ctx, inputs, trimPath, targetW, targetH, targetFPS, defaultTrimCRF, audioBitrate); err != nil {
+			if err := m.TrimAndConcat(ctx, inputs, trimPath, targetW, targetH, targetFPS, defaultTrimCRF, audioBitrate); err != nil {
 				return nil, fmt.Errorf("multi-segment trim: %w", err)
 			}
 		}

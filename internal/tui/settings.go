@@ -62,18 +62,21 @@ type settingsSection struct {
 // Kept in step with RESTART_REQUIRED_FIELDS in web/public/modules/settings.js;
 // the two lists are pinned against each other by TestRestartRequiredListsAgree.
 var restartRequiredKeys = map[string]bool{
-	"port":                true,
-	"network_access":      true,
-	"https_enabled":       true,
-	"tls_cert_path":       true,
-	"tls_key_path":        true,
-	"database_path":       true,
-	"log_file_path":       true,
-	"log_max_file_size":   true,
-	"log_max_files":       true,
-	"cookie_file":         true,
-	"auto_enabled":        true,
-	"browser_profile_dir": true,
+	"port":                  true,
+	"network_access":        true,
+	"https_enabled":         true,
+	"tls_cert_path":         true,
+	"tls_key_path":          true,
+	"database_path":         true,
+	"log_file_path":         true,
+	"log_max_file_size":     true,
+	"log_max_files":         true,
+	"cookie_file":           true,
+	"auto_enabled":          true,
+	"browser_profile_dir":   true,
+	"probe_targets":         true,
+	"sidecar_hard_limit_mb": true,
+	"use_sidecar":           true,
 }
 
 var sections = []settingsSection{
@@ -87,6 +90,7 @@ var sections = []settingsSection{
 			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)", nil},
 			{"trust_forwarded_proto", "Trust forwarded proto", fieldToggle, nil, "ONLY enable behind a TLS-terminating reverse proxy that strips client X-Forwarded-Proto", nil},
 			{"trusted_proxies", "Trusted proxies", fieldText, nil, "comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is honored — leave empty unless behind a proxy you control", nil},
+			{"probe_targets", "Connectivity probe targets", fieldText, nil, "comma-separated host:port TCP targets raced to detect internet reachability; blank = defaults (requires restart)", nil},
 		},
 	},
 	{
@@ -172,7 +176,7 @@ var sections = []settingsSection{
 	{
 		name: "BotGuard Sidecar",
 		fields: []fieldDef{
-			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens (default: on; falls back to goja-only when off)", nil},
+			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens (default: on; falls back to goja-only when off) (requires restart)", nil},
 		},
 	},
 	{
@@ -180,7 +184,7 @@ var sections = []settingsSection{
 		fields: []fieldDef{
 			{"go_soft_limit_mb", "Go soft limit (MB)", fieldNumber, nil, "soft cap; GC ramps up but no OOM (default: 256, 0 disables)", nil},
 			{"sidecar_soft_limit_mb", "Sidecar soft limit (MB)", fieldNumber, nil, "RSS threshold to trigger V8 GC (default: 200, 0 disables)", nil},
-			{"sidecar_hard_limit_mb", "Sidecar hard limit (MB)", fieldNumber, nil, "V8 --max-old-space-size; OOMs on hit, must exceed soft (default: 512, 0 = V8 default)", nil},
+			{"sidecar_hard_limit_mb", "Sidecar hard limit (MB)", fieldNumber, nil, "V8 --max-old-space-size; OOMs on hit, must exceed soft (default: 512, 0 = V8 default) (requires restart)", nil},
 		},
 	},
 	{
@@ -261,6 +265,10 @@ var channelFields = []channelFieldDef{
 	{"terms", "Filter regex", fieldText, nil, "e.g. (?i)karaoke", ""},
 	{"include_non_live", "Archive uploads & premieres (YouTube only)", fieldToggle, []string{"No", "Yes"}, "also capture uploads and premieres, not just live streams", "youtube"},
 	{"quality_preference", "Quality preference", fieldCycle, []string{"best", "2160p60", "2160p", "1440p60", "1440p", "1080p60", "1080p", "900p60", "900p", "720p60", "720p", "480p", "360p", "160p", "audio_only"}, "", ""},
+	{"num_desc_lookbehind", "Description lookbehind", fieldNumber, nil, "compare descriptions with N older feed items; blank = default", ""},
+	{"output_directory", "Output directory", fieldText, nil, "per-channel override; blank = the global output directory", ""},
+	{"archive_window_days", "Archive window (days)", fieldNumber, nil, "per-channel override, 1-3650; blank = global", ""},
+	{"archive_slots", "Archive slots", fieldNumber, nil, "per-channel override, 1-100; blank = global", ""},
 }
 
 // SettingsModel manages the settings overlay panel.
@@ -454,6 +462,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["tls_key_path"] = cfg.Network.TLSKeyPath
 	m.values["trust_forwarded_proto"] = boolToDisplay(cfg.Network.TrustForwardedProto)
 	m.values["trusted_proxies"] = strings.Join(cfg.Network.TrustedProxies, ", ")
+	m.values["probe_targets"] = strings.Join(cfg.Connectivity.ProbeTargets, ", ")
 
 	// Paths
 	m.values["database_path"] = cfg.Paths.DatabasePath
@@ -571,6 +580,20 @@ func (m *SettingsModel) applyValues() {
 		}
 		if !ok {
 			m.errorMsg = fmt.Sprintf("Trusted proxies: %q is not a valid IP or CIDR", p)
+			m.status = saveError
+			return
+		}
+	}
+
+	// Validate probe_targets entries. Same rationale as trusted_proxies above:
+	// config.Validate refuses an unparseable host:port, so gate it here too.
+	for _, p := range strings.Split(m.values["probe_targets"], ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, _, err := net.SplitHostPort(p); err != nil {
+			m.errorMsg = fmt.Sprintf("Probe targets: %q is not a valid host:port", p)
 			m.status = saveError
 			return
 		}
@@ -703,6 +726,16 @@ func (m *SettingsModel) applyValues() {
 		}
 	}
 	m.cfg.Network.TrustedProxies = proxies
+	targets := []string(nil)
+	for _, p := range strings.Split(m.values["probe_targets"], ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			targets = append(targets, p)
+		}
+	}
+	if len(targets) == 0 {
+		targets = append([]string(nil), config.DefaultProbeTargets...)
+	}
+	m.cfg.Connectivity.ProbeTargets = targets
 
 	// Paths
 	m.cfg.Paths.DatabasePath = m.values["database_path"]

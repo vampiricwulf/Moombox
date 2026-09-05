@@ -2,14 +2,18 @@
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
 import {
+  applyChannelOverrides,
   browserPathValidationOutcome,
+  channelTermsForSave,
   cookieImportRolledBackToast,
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
   cookieSetupProbe,
   cookieSetupRejectedMessage,
   formatRelativeTime,
+  restartValuesChanged,
   serverErrorMessage,
+  snapshotRestartValues,
 } from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
@@ -98,6 +102,9 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "cookies.cookie_file", id: "cfg-cookie-file" },
   { path: "cookies.auto_enabled", id: "cfg-auto-cookies-enabled" },
   { path: "cookies.browser_profile_dir", id: "cfg-auto-cookies-profile-dir" },
+  { path: "connectivity.probe_targets", id: "cfg-probe-targets" },
+  { path: "memory.sidecar_hard_limit_mb", id: "cfg-memory-sidecar-hard-limit-mb" },
+  { path: "bgutils.use_sidecar", id: "cfg-bgutils-use-sidecar" },
 ];
 
 /** Render a template preview string using sample data. */
@@ -691,6 +698,7 @@ export class SettingsController {
       trustForwardedProtoSwitch.checked = !!config.network?.trust_forwarded_proto;
     }
     this.app.setInputValue("cfg-trusted-proxies", (config.network?.trusted_proxies || []).join(", "));
+    this.app.setInputValue("cfg-probe-targets", (config.connectivity?.probe_targets || []).join(", "));
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     if (dpapiFallbackSwitch) {
       dpapiFallbackSwitch.checked = !!config.cookies?.dpapi_fallback;
@@ -717,18 +725,11 @@ export class SettingsController {
     // Add restart-required badges to relevant fields
     this._addRestartBadges();
 
-    // Snapshot restart-required values for change detection
-    this._originalRestartValues = {
-      "network.port": config.network?.port,
-      "network.network_access": config.network?.network_access,
-      "network.https_enabled": config.network?.https_enabled,
-      "network.tls_cert_path": config.network?.tls_cert_path,
-      "network.tls_key_path": config.network?.tls_key_path,
-      "paths.database_path": config.paths?.database_path,
-      "paths.log_file_path": config.paths?.log_file_path,
-      "logs.log_max_file_size": config.logs?.log_max_file_size,
-      "logs.log_max_files": config.logs?.log_max_files,
-    };
+    // Snapshot restart-required values for change detection. Driven by
+    // RESTART_REQUIRED_FIELDS rather than a hand-written literal: a shorter
+    // literal left the paths it omitted comparing against undefined, so every
+    // save reported "changed" and prompted for a restart.
+    this._originalRestartValues = snapshotRestartValues(config, RESTART_REQUIRED_FIELDS);
 
     // Network is the default visible section, so load security status now.
     // Reset flag so the form fields are cleared on a full config repopulate —
@@ -851,6 +852,12 @@ export class SettingsController {
       .map((s) => s.trim())
       .filter(Boolean);
 
+    const probeTargetsEl = document.getElementById("cfg-probe-targets");
+    const probeTargets = (probeTargetsEl?.value || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     const dpapiFallback = dpapiFallbackSwitch ? dpapiFallbackSwitch.checked : false;
 
@@ -944,6 +951,7 @@ export class SettingsController {
       bgutils: {
         use_sidecar: useSidecar,
       },
+      ...(probeTargets.length ? { connectivity: { probe_targets: probeTargets } } : {}),
     };
 
     // Only send refresh_interval when the field has a value — the server
@@ -1077,33 +1085,10 @@ export class SettingsController {
    * If so, prompt the user and call POST /api/restart.
    */
   async _checkRestartRequired(config) {
-    /** Resolve a dotted path like "network.port" from the config object */
-    const resolve = (obj, path) => {
-      const parts = path.split(".");
-      let v = obj;
-      for (const p of parts) {
-        if (v == null) return undefined;
-        v = v[p];
-      }
-      return v;
-    };
-
-    const current = {};
-    for (const { path } of RESTART_REQUIRED_FIELDS) {
-      current[path] = resolve(config, path);
+    const current = snapshotRestartValues(config, RESTART_REQUIRED_FIELDS);
+    if (!restartValuesChanged(this._originalRestartValues, current, RESTART_REQUIRED_FIELDS)) {
+      return;
     }
-
-    const changed = RESTART_REQUIRED_FIELDS.some(({ path }) => {
-      const a = current[path];
-      const b = this._originalRestartValues[path];
-      // For booleans: treat null/undefined as false to avoid false positives
-      // when the server omits a field that defaults to false
-      if (typeof a === "boolean" || typeof b === "boolean") {
-        return !!a !== !!b;
-      }
-      return String(a ?? "") !== String(b ?? "");
-    });
-    if (!changed) return;
 
     // Capture old network values for redirect detection
     const oldPort = this._originalRestartValues["network.port"] || 774;
@@ -1115,7 +1100,7 @@ export class SettingsController {
       // shown a list naming four things they did not touch reads this as a
       // prompt about something else and dismisses it — which is the failure the
       // cookie entries exist to prevent.
-      "Some settings require a restart to take effect (port, network access, database path, log settings, cookie settings).\n\nRestart Moombox now?",
+      "Some settings require a restart to take effect (port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings).\n\nRestart Moombox now?",
       { okLabel: "Restart", okVariant: "primary", title: "Restart Required" },
     );
     if (!shouldRestart) {
@@ -1439,8 +1424,17 @@ export class SettingsController {
         : channel.terms.stream || ""
       : "";
     document.getElementById("channel-terms-input").value = termsValue;
+    // What the operator was SHOWN. saveChannel compares against it so an
+    // untouched field keeps the existing terms shape — a named map with no
+    // `stream` key shows blank here and must not be saved away.
+    this._channelTermsSeed = termsValue;
     document.getElementById("channel-include-vods").checked =
       channel?.include_non_live_content || false;
+
+    this.app.setInputValue("channel-lookbehind-input", channel?.num_desc_lookbehind ?? "");
+    this.app.setInputValue("channel-output-dir-input", channel?.output_directory ?? "");
+    this.app.setInputValue("channel-archive-window-input", channel?.archive_window_days ?? "");
+    this.app.setInputValue("channel-archive-slots-input", channel?.archive_slots ?? "");
 
     // Platform selector
     const platformSelect = document.getElementById("channel-platform-select");
@@ -1563,9 +1557,8 @@ export class SettingsController {
 
     const isTwitch = platform === "twitch";
 
-    // When editing, start from the existing channel to preserve fields
-    // the UI doesn't expose (num_desc_lookbehind, output_directory,
-    // archive_window_days, archive_slots).
+    // When editing, start from the existing channel so keys this dialog
+    // doesn't manage survive.
     const existingChannel = this.editingChannelId
       ? this.app.config?.channels?.find(c => c.id === this.editingChannelId)
       : null;
@@ -1579,17 +1572,11 @@ export class SettingsController {
       ...(!isTwitch ? { include_non_live_content: includeVods || undefined } : {}),
     };
 
-    // Preserve terms structure: if existing terms was a named map (e.g. {stream, vod}),
-    // only update the "stream" key and keep other keys intact.
-    if (termsValue) {
-      if (existingChannel?.terms && typeof existingChannel.terms === "object" && !Array.isArray(existingChannel.terms) && existingChannel.terms.stream !== undefined) {
-        channel.terms = { ...existingChannel.terms, stream: termsValue };
-      } else {
-        channel.terms = termsValue;
-      }
-    } else {
-      channel.terms = undefined;
-    }
+    // Preserve terms structure: an untouched field keeps whatever shape the
+    // config holds, a stream-keyed map has only its "stream" key rewritten,
+    // and clearing an edited field removes terms (JSON.stringify drops the
+    // undefined key from the payload).
+    channel.terms = channelTermsForSave(existingChannel?.terms, this._channelTermsSeed ?? "", termsValue);
 
     // Add quality preference (both platforms)
     const qualitySelect = document.getElementById("channel-quality-select");
@@ -1600,13 +1587,25 @@ export class SettingsController {
       delete channel.quality_preference;
     }
 
+    const overrides = applyChannelOverrides(channel, {
+      numDescLookbehind: this.app.getInputNumber("channel-lookbehind-input"),
+      outputDirectory: document.getElementById("channel-output-dir-input")?.value ?? "",
+      archiveWindowDays: this.app.getInputNumber("channel-archive-window-input"),
+      archiveSlots: this.app.getInputNumber("channel-archive-slots-input"),
+    });
+    if (overrides.error) {
+      this.app.showToast(overrides.error, "danger");
+      return;
+    }
+    const channelPayload = overrides.channel;
+
     const saveBtn = document.getElementById("channel-save-btn");
     if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
     try {
       const response = await fetch("/api/config/channels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(channel),
+        body: JSON.stringify(channelPayload),
       });
 
       if (response.ok) {

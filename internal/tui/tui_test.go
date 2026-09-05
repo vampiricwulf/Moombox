@@ -399,3 +399,39 @@ func TestApplyValuesRejectsBadTrustedProxy(t *testing.T) {
 		t.Errorf("TrustedProxies = %v, want cleared", cfg.Network.TrustedProxies)
 	}
 }
+
+// TestApplyValuesProbeTargets: comma-separated host:port list; one bad entry
+// blocks the save with a field error (config.Validate would refuse the whole
+// file), blank falls back to the defaults, valid entries land trimmed.
+func TestApplyValuesProbeTargets(t *testing.T) {
+	cfg := config.Defaults()
+	m := NewSettingsModel()
+	m.configStore = config.NewStore(cfg, "")
+	m.Open(cfg)
+
+	if got := m.values["probe_targets"]; got != "1.1.1.1:443, 8.8.8.8:443, 9.9.9.9:443" {
+		t.Fatalf("loaded probe_targets = %q", got)
+	}
+
+	m.values["probe_targets"] = "1.1.1.1:443, 8.8.8.8"
+	m.applyValues()
+	if m.status != saveError {
+		t.Fatalf("status = %v, want saveError for a host without a port", m.status)
+	}
+
+	m.status, m.errorMsg = saveIdle, ""
+	m.values["probe_targets"] = " 1.0.0.1:443 ,[2606:4700::1111]:443"
+	m.applyValues()
+	if m.status == saveError {
+		t.Fatalf("valid entries rejected: %s", m.errorMsg)
+	}
+	if got := cfg.Connectivity.ProbeTargets; len(got) != 2 || got[0] != "1.0.0.1:443" || got[1] != "[2606:4700::1111]:443" {
+		t.Errorf("ProbeTargets = %v", got)
+	}
+
+	m.values["probe_targets"] = "  "
+	m.applyValues()
+	if got := cfg.Connectivity.ProbeTargets; len(got) != 3 || got[0] != "1.1.1.1:443" {
+		t.Errorf("blank must restore the defaults, got %v", got)
+	}
+}

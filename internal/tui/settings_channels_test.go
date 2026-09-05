@@ -1,0 +1,308 @@
+package tui
+
+import (
+	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
+)
+
+func intPtr(v int) *int { return &v }
+
+// fullChannel is a channel carrying every field the TUI editor does NOT
+// show, plus named (map) terms. Any of these vanishing after an edit is
+// the data-loss bug this file exists to pin.
+func fullChannel() config.ChannelConfig {
+	enabled := true
+	return config.ChannelConfig{
+		ID:                    "UC123",
+		Name:                  "Old name",
+		Platform:              "youtube",
+		Enabled:               &enabled,
+		Terms:                 config.ChannelTerms{IsMap: true, Named: map[string]string{"stream": "(?i)karaoke", "vod": "(?i)vod"}},
+		NumDescLookbehind:     intPtr(5),
+		OutputDirectory:       "D:/special",
+		IncludeNonLiveContent: true,
+		ArchiveWindowDays:     intPtr(7),
+		ArchiveSlots:          intPtr(2),
+		QualityPreference:     "720p",
+	}
+}
+
+// TestValuesToChannelPreservesUnshownFields: editing only the display name
+// keeps the four hidden fields and the named terms verbatim.
+func TestValuesToChannelPreservesUnshownFields(t *testing.T) {
+	existing := fullChannel()
+	vals := channelToValues(existing)
+	vals["name"] = "New name"
+
+	got := valuesToChannel(vals, &existing)
+
+	if got.Name != "New name" {
+		t.Errorf("Name = %q, want New name", got.Name)
+	}
+	if got.NumDescLookbehind == nil || *got.NumDescLookbehind != 5 {
+		t.Errorf("NumDescLookbehind = %v, want 5", got.NumDescLookbehind)
+	}
+	if got.OutputDirectory != "D:/special" {
+		t.Errorf("OutputDirectory = %q, want D:/special", got.OutputDirectory)
+	}
+	if got.ArchiveWindowDays == nil || *got.ArchiveWindowDays != 7 {
+		t.Errorf("ArchiveWindowDays = %v, want 7", got.ArchiveWindowDays)
+	}
+	if got.ArchiveSlots == nil || *got.ArchiveSlots != 2 {
+		t.Errorf("ArchiveSlots = %v, want 2", got.ArchiveSlots)
+	}
+	if !got.Terms.IsMap || got.Terms.Named["vod"] != "(?i)vod" {
+		t.Errorf("Terms = %+v, want the named map preserved", got.Terms)
+	}
+	if !got.IncludeNonLiveContent || got.QualityPreference != "720p" {
+		t.Errorf("shown fields drifted: include=%v quality=%q", got.IncludeNonLiveContent, got.QualityPreference)
+	}
+}
+
+// TestValuesToChannelEditedTermsReplaceNamedMap: typing a new pattern
+// replaces the whole terms value with the simple form (the editor shows one
+// string, so that is what the operator meant).
+func TestValuesToChannelEditedTermsReplaceNamedMap(t *testing.T) {
+	existing := fullChannel()
+	vals := channelToValues(existing)
+	vals["terms"] = "(?i)new"
+
+	got := valuesToChannel(vals, &existing)
+	if got.Terms.IsMap || got.Terms.Simple != "(?i)new" {
+		t.Errorf("Terms = %+v, want Simple (?i)new", got.Terms)
+	}
+}
+
+// TestValuesToChannelClearedFieldsClear: clearing terms, switching the
+// uploads toggle off and quality back to best must clear, not keep, the
+// existing values (a copied-then-conditionally-set field would keep them).
+func TestValuesToChannelClearedFieldsClear(t *testing.T) {
+	existing := fullChannel()
+	existing.Terms = config.ChannelTerms{Simple: "(?i)old"}
+	vals := channelToValues(existing)
+	vals["terms"] = ""
+	vals["include_non_live"] = "No"
+	vals["quality_preference"] = "best"
+	vals["enabled"] = "No"
+
+	got := valuesToChannel(vals, &existing)
+	if got.Terms.Simple != "" || got.Terms.IsMap {
+		t.Errorf("Terms = %+v, want empty", got.Terms)
+	}
+	if got.IncludeNonLiveContent {
+		t.Error("IncludeNonLiveContent still true after toggling No")
+	}
+	if got.QualityPreference != "" {
+		t.Errorf("QualityPreference = %q, want empty for best", got.QualityPreference)
+	}
+	if got.Enabled == nil || *got.Enabled {
+		t.Errorf("Enabled = %v, want false", got.Enabled)
+	}
+}
+
+// TestValuesToChannelNewChannel: nil existing behaves exactly like before —
+// a fresh ChannelConfig from the form values only.
+func TestValuesToChannelNewChannel(t *testing.T) {
+	vals := map[string]string{
+		"id": " UC999 ", "name": "N", "platform": "youtube", "enabled": "Yes",
+		"terms": "(?i)x", "include_non_live": "Yes", "quality_preference": "best",
+	}
+	got := valuesToChannel(vals, nil)
+	if got.ID != "UC999" || got.Name != "N" || got.Platform != "youtube" {
+		t.Errorf("identity fields = %q %q %q", got.ID, got.Name, got.Platform)
+	}
+	if got.Enabled == nil || !*got.Enabled || !got.IncludeNonLiveContent || got.Terms.Simple != "(?i)x" || got.QualityPreference != "" {
+		t.Errorf("form fields drifted: %+v", got)
+	}
+	if got.NumDescLookbehind != nil || got.OutputDirectory != "" || got.ArchiveWindowDays != nil || got.ArchiveSlots != nil {
+		t.Errorf("hidden fields must be zero for a new channel: %+v", got)
+	}
+}
+
+// TestSaveCurrentChannelPassesExisting: the settings overlay's save path hands
+// the channel being edited to valuesToChannel (an edit) but nil for an add.
+func TestSaveCurrentChannelPassesExisting(t *testing.T) {
+	m := NewSettingsModel()
+	m.channels = []config.ChannelConfig{fullChannel()}
+	m.channelIndex = 0
+	m.channelEditValues = channelToValues(m.channels[0])
+	m.channelEditValues["name"] = "Renamed"
+	m.saveCurrentChannel()
+	if got := m.channels[0]; got.Name != "Renamed" || got.ArchiveSlots == nil || *got.ArchiveSlots != 2 {
+		t.Errorf("edit lost fields: %+v", got)
+	}
+
+	m.channelIndex = len(m.channels) // add sentinel
+	m.channelEditValues = map[string]string{"id": "UC2", "name": "", "platform": "youtube", "enabled": "Yes", "terms": "", "include_non_live": "No", "quality_preference": "best"}
+	m.saveCurrentChannel()
+	if len(m.channels) != 2 || m.channels[1].ID != "UC2" || m.channels[1].ArchiveSlots != nil {
+		t.Errorf("add produced %+v", m.channels)
+	}
+}
+
+// TestChannelValuesRoundTripOverrides: the four override fields render as
+// text ("" when unset) and parse back to pointers (nil when blank).
+func TestChannelValuesRoundTripOverrides(t *testing.T) {
+	existing := fullChannel()
+	vals := channelToValues(existing)
+	for k, want := range map[string]string{
+		"num_desc_lookbehind": "5", "output_directory": "D:/special",
+		"archive_window_days": "7", "archive_slots": "2",
+	} {
+		if vals[k] != want {
+			t.Errorf("channelToValues[%q] = %q, want %q", k, vals[k], want)
+		}
+	}
+
+	vals["num_desc_lookbehind"] = ""
+	vals["output_directory"] = ""
+	vals["archive_window_days"] = "14"
+	vals["archive_slots"] = " 4 "
+	got := valuesToChannel(vals, &existing)
+	if got.NumDescLookbehind != nil {
+		t.Errorf("blank lookbehind must clear, got %v", *got.NumDescLookbehind)
+	}
+	if got.OutputDirectory != "" {
+		t.Errorf("blank output dir must clear, got %q", got.OutputDirectory)
+	}
+	if got.ArchiveWindowDays == nil || *got.ArchiveWindowDays != 14 {
+		t.Errorf("ArchiveWindowDays = %v, want 14", got.ArchiveWindowDays)
+	}
+	if got.ArchiveSlots == nil || *got.ArchiveSlots != 4 {
+		t.Errorf("ArchiveSlots = %v, want 4 (trimmed)", got.ArchiveSlots)
+	}
+
+	unset := config.ChannelConfig{ID: "UC1"}
+	if v := channelToValues(unset); v["num_desc_lookbehind"] != "" || v["archive_window_days"] != "" || v["archive_slots"] != "" || v["output_directory"] != "" {
+		t.Errorf("unset overrides must render blank: %v", v)
+	}
+}
+
+// TestValidateChannelValues: ranges mirror config.Validate's global bounds
+// (window 1-3650, slots 1-100) and lookbehind must be >= 0; blanks pass.
+func TestValidateChannelValues(t *testing.T) {
+	base := func() map[string]string {
+		return map[string]string{"id": "UC1", "num_desc_lookbehind": "", "archive_window_days": "", "archive_slots": ""}
+	}
+	if msg := validateChannelValues(base()); msg != "" {
+		t.Errorf("blanks rejected: %s", msg)
+	}
+	cases := map[string][2]string{
+		"lookbehind negative": {"num_desc_lookbehind", "-1"},
+		"lookbehind text":     {"num_desc_lookbehind", "three"},
+		"window zero":         {"archive_window_days", "0"},
+		"window too big":      {"archive_window_days", "3651"},
+		"slots zero":          {"archive_slots", "0"},
+		"slots too big":       {"archive_slots", "101"},
+	}
+	for name, c := range cases {
+		vals := base()
+		vals[c[0]] = c[1]
+		if msg := validateChannelValues(vals); msg == "" {
+			t.Errorf("%s: %s=%q accepted", name, c[0], c[1])
+		}
+	}
+	ok := base()
+	ok["num_desc_lookbehind"], ok["archive_window_days"], ok["archive_slots"] = "0", "3650", "100"
+	if msg := validateChannelValues(ok); msg != "" {
+		t.Errorf("boundary values rejected: %s", msg)
+	}
+}
+
+// TestChannelFieldsIncludeOverrides: the form shows the four fields for both
+// platforms (they are platform-neutral).
+func TestChannelFieldsIncludeOverrides(t *testing.T) {
+	keys := map[string]bool{}
+	for _, f := range channelFields {
+		keys[f.key] = true
+		if f.key == "num_desc_lookbehind" || f.key == "output_directory" || f.key == "archive_window_days" || f.key == "archive_slots" {
+			if f.platformFilter != "" {
+				t.Errorf("%s must not be platform-filtered", f.key)
+			}
+		}
+	}
+	for _, k := range []string{"num_desc_lookbehind", "output_directory", "archive_window_days", "archive_slots"} {
+		if !keys[k] {
+			t.Errorf("channelFields lacks %s", k)
+		}
+	}
+}
+
+// TestChannelNumberFieldsAreEditable: a fieldNumber channel field (e.g.
+// archive_slots) must bind the shared text input exactly like fieldText
+// fields do. The channel-edit branches of updateTextInputForField and
+// syncFromTextInput used to gate on fieldText only, so a fieldNumber channel
+// field showed its value but silently blurred the input — nothing typed on
+// it ever reached channelEditValues.
+func TestChannelNumberFieldsAreEditable(t *testing.T) {
+	m := NewSettingsModel()
+	for i, s := range sections {
+		if s.name == "Channels" {
+			m.sectionIndex = i
+			break
+		}
+	}
+	m.channelMode = "edit"
+	m.channelEditValues = channelToValues(fullChannel())
+
+	fields := m.visibleChannelFields()
+	idx := -1
+	for i, f := range fields {
+		if f.key == "archive_slots" {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		t.Fatal("archive_slots missing from visibleChannelFields")
+	}
+	m.channelEditField = idx
+
+	m.updateTextInputForField()
+	if !m.textInput.Focused() {
+		t.Error("archive_slots did not focus the text input")
+	}
+	if got := m.textInput.Value(); got != "2" {
+		t.Errorf("textInput.Value() = %q, want %q", got, "2")
+	}
+
+	m.textInput.SetValue("9")
+	m.syncFromTextInput()
+	if got := m.channelEditValues["archive_slots"]; got != "9" {
+		t.Errorf("channelEditValues[archive_slots] = %q, want %q", got, "9")
+	}
+
+	// The setup wizard shares the same channelFields and the same bug: its
+	// updateTextInputForField/syncFromTextInput had the identical fieldText-only
+	// gate. NewSetupWizardModel is cheap (no I/O, no goroutines), so cover it too.
+	w := NewSetupWizardModel()
+	w.channelMode = "edit"
+	w.channelEditValues = channelToValues(fullChannel())
+	wFields := w.visibleSetupChannelFields()
+	wIdx := -1
+	for i, f := range wFields {
+		if f.key == "archive_slots" {
+			wIdx = i
+			break
+		}
+	}
+	if wIdx == -1 {
+		t.Fatal("archive_slots missing from visibleSetupChannelFields")
+	}
+	w.channelEditField = wIdx
+
+	w.updateTextInputForField()
+	if !w.textInput.Focused() {
+		t.Error("wizard: archive_slots did not focus the text input")
+	}
+	if got := w.textInput.Value(); got != "2" {
+		t.Errorf("wizard: textInput.Value() = %q, want %q", got, "2")
+	}
+
+	w.textInput.SetValue("9")
+	w.syncFromTextInput()
+	if got := w.channelEditValues["archive_slots"]; got != "9" {
+		t.Errorf("wizard: channelEditValues[archive_slots] = %q, want %q", got, "9")
+	}
+}

@@ -591,7 +591,7 @@ func (m *SetupWizardModel) syncFromTextInput() {
 		fields := m.visibleSetupChannelFields()
 		if m.channelEditField < len(fields) {
 			field := fields[m.channelEditField]
-			if field.ftype == fieldText {
+			if field.ftype == fieldText || field.ftype == fieldNumber {
 				m.channelEditValues[field.key] = val
 			}
 		}
@@ -604,9 +604,13 @@ func (m *SetupWizardModel) updateTextInputForField() {
 		fields := m.visibleSetupChannelFields()
 		if m.channelEditField < len(fields) {
 			field := fields[m.channelEditField]
-			if field.ftype == fieldText {
+			if field.ftype == fieldText || field.ftype == fieldNumber {
 				m.textInput.EchoMode = textinput.EchoNormal
-				m.textInput.Validate = nil
+				if field.ftype == fieldNumber {
+					m.textInput.Validate = validateDigitsOnly
+				} else {
+					m.textInput.Validate = nil
+				}
 				m.textInput.SetValue(m.channelEditValues[field.key])
 				m.textInput.Focus()
 				m.updateTextInputWidth()
@@ -862,6 +866,8 @@ func (m *SetupWizardModel) handleChannelListKey(key string, onEsc func() string,
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
 			"include_non_live": "No", "quality_preference": "best",
+			"num_desc_lookbehind": "", "output_directory": "",
+			"archive_window_days": "", "archive_slots": "",
 		}
 		m.channelEditField = 0
 		m.channelIndex = len(m.channels)
@@ -922,7 +928,15 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 				return ""
 			}
 		}
-		ch := valuesToChannel(m.channelEditValues)
+		if msg := validateChannelValues(m.channelEditValues); msg != "" {
+			m.errorMsg = msg
+			return ""
+		}
+		var existing *config.ChannelConfig
+		if m.channelIndex < len(m.channels) {
+			existing = &m.channels[m.channelIndex]
+		}
+		ch := valuesToChannel(m.channelEditValues, existing)
 		if m.channelIndex < len(m.channels) {
 			m.channels[m.channelIndex] = ch
 		} else {

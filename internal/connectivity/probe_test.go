@@ -48,3 +48,24 @@ func TestReachabilityProbe_EmptyTargetsUsesDefaults(t *testing.T) {
 	// only assert it doesn't panic and returns a bool within the deadline.
 	_ = reachabilityProbe(context.Background(), nil)
 }
+
+// TestReachabilityProbe_RecoversFromDialPanic: a panicking dial goroutine must
+// still deliver its result, or the receive loop waits forever (project rule:
+// every goroutine recovers inline). No logger is in scope in this free
+// function, so the recover reports "unreachable" silently.
+func TestReachabilityProbe_RecoversFromDialPanic(t *testing.T) {
+	orig := probeDial
+	t.Cleanup(func() { probeDial = orig })
+	probeDial = func(context.Context, *net.Dialer, string) (net.Conn, error) { panic("boom") }
+
+	done := make(chan bool, 1)
+	go func() { done <- reachabilityProbe(context.Background(), []string{"127.0.0.1:1", "127.0.0.1:2"}) }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("a panicking dial must not count as reachable")
+		}
+	case <-time.After(probeRaceTimeout + 2*time.Second):
+		t.Fatal("reachabilityProbe hung after a dial panic")
+	}
+}

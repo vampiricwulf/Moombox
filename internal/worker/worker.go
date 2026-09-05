@@ -1201,6 +1201,24 @@ func (w *DownloadWorker) SetParallelDownloads(n int) {
 	w.queue.SetMaxParallel(n)
 }
 
+// SetFfmpegPath forwards a paths.ffmpeg_path hot-reload to the orchestrator,
+// whose muxer serves every download's mux, probe and part merge.
+func (w *DownloadWorker) SetFfmpegPath(path string) {
+	if w.orchestrator != nil {
+		w.orchestrator.SetFfmpegPath(path)
+	}
+}
+
+// FFprobePath reports the ffprobe path of the orchestrator's current muxer
+// (observability for the hot-reload path; downloads themselves go through the
+// orchestrator's own accessor). Empty when there is no orchestrator yet.
+func (w *DownloadWorker) FFprobePath() string {
+	if w.orchestrator == nil {
+		return ""
+	}
+	return w.orchestrator.mux().FFprobePath()
+}
+
 // SetOnTwitchAuthLoss wires the Twitch platform-mark seam through to the
 // stream processor, which is where the chat downgrade is observed.
 //

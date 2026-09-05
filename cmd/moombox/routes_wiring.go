@@ -98,6 +98,9 @@ func (s *runState) wireRoutes() func() {
 			// previously they silently required a restart nothing asked for.
 			s.notifyMgr.Reload(s.configStore.Snapshot())
 		},
+		OnGoSoftLimitChange:         s.applyGoSoftLimit,
+		OnTrustForwardedProtoChange: s.applyTrustForwardedProto,
+		OnFfmpegPathChange:          s.applyFfmpegPath,
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})
 	routes.MonitorRoutes(s.r, &routes.MonitorRouteDeps{CheckNow: func() {

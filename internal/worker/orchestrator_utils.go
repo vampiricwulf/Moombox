@@ -48,7 +48,7 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, o.muxer.FFprobePath(),
+	cmd := exec.CommandContext(ctx, o.mux().FFprobePath(),
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",
