@@ -409,8 +409,9 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | Chord | Action |
 |-------|--------|
 | A A | Add video |
-| A I | Import archive |
-| A R | Retry failed/cancelled job |
+| A Z | Import archive |
+| A R | Resume job |
+| A I | Reinitialize job |
 | A C C | Cancel active job (confirm) |
 | A D D | Delete job (confirm) |
 | A T | Trim finished video |
@@ -421,8 +422,11 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 
 | Chord | Action |
 |-------|--------|
+| R B | Re-scan feed history |
 | R C | Recheck cookie authentication |
 | R F | Refresh cookies from browser |
+| R L | Cookie login (browser) |
+| R I | Import cookie file (path prompt) |
 | R V | Check for updates |
 | R N | View release notes for pending update |
 | R U | Apply pending update |
@@ -432,7 +436,9 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 
 | Chord | Action |
 |-------|--------|
+| O C | Copy stream URL to clipboard |
 | O F | Open output/staging folder |
+| O G | Open GitHub page |
 | O S | Open stream page in browser |
 | O W | Open web dashboard |
 

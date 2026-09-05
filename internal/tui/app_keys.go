@@ -231,6 +231,16 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	// The whole KeyPressMsg, not the derived key string: this dialog owns a
+	// textinput and has to hand it the typed runes.
+	if a.cookieImportDlg.IsVisible() {
+		action, path := a.cookieImportDlg.HandleKey(msg)
+		if action == "import" {
+			a.cookieImportDlg.SetImporting()
+			return a, tea.Batch(a.importCookieFileCmd(path), a.cookieImportDlg.SpinnerInit())
+		}
+		return a, nil
+	}
 	if a.addVideo.IsVisible() {
 		action, data := a.addVideo.HandleKey(key)
 		switch action {

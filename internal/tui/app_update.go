@@ -484,6 +484,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Async close uncovers the task list — resume a paused marquee now.
 		return a, a.ensureMarqueeTicking()
 
+	case cookieImportResultMsg:
+		// Dropped when the operator closed the overlay while the import ran.
+		// Deliberately silent: the import is not cancellable, cookies.txt has
+		// already been written or rolled back, and the status bar's cookie
+		// badge is what reports the state afterwards — the re-check the wiring
+		// fires after a write is what refreshes it.
+		if !a.cookieImportDlg.IsVisible() {
+			return a, nil
+		}
+		a.cookieImportDlg.SetResult(msg.Result, msg.Err)
+		return a, nil
+
 	case createTrimResultMsg:
 		a.trimInProgress = false
 		if a.trimDlg.IsVisible() {
@@ -1185,6 +1197,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	if a.importDlg.IsVisible() {
 		return a.importDlg.UpdateComponents(msg)
+	}
+	if a.cookieImportDlg.IsVisible() {
+		return a.cookieImportDlg.UpdateComponents(msg)
 	}
 	if a.addVideo.IsVisible() {
 		return a.addVideo.UpdateComponents(msg)

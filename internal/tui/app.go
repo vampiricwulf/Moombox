@@ -124,6 +124,16 @@ type (
 		Title string
 		Err   string
 	}
+	// cookieImportResultMsg is the async result of OnImportCookieFile (R I).
+	// The whole cookies.ImportResult, not a bool: the overlay words each
+	// platform off the outcome AND the verdict, and neither survives being
+	// flattened. Err is the error VALUE rather than a string because the
+	// import's refusals are sentinels the renderer prints verbatim; nothing
+	// here ever carries cookie content.
+	cookieImportResultMsg struct {
+		Result cookies.ImportResult
+		Err    error
+	}
 	createTrimResultMsg struct {
 		Filename string
 		Err      string
@@ -320,6 +330,7 @@ type App struct {
 	help            *HelpModel
 	addVideo        *AddVideoModel
 	importDlg       *ImportDialogModel
+	cookieImportDlg *CookieImportDialogModel
 	trimDlg         *TrimDialogModel
 	filesDlg        *FilesDialogModel
 	clientTokensDlg *ClientTokensDialogModel
@@ -534,6 +545,18 @@ type App struct {
 	// rather than a bool: see cookieForceRefreshResultMsg for why the
 	// flattened form could not be worded truthfully.
 	OnForceRefreshCookies func() (cookies.RefreshResult, error)
+	// OnImportCookieFile imports a Netscape cookies.txt from disk through
+	// AutoCookieService.ImportCookies — the R I chord, and the TUI's half of
+	// the Web dashboard's import panel. nil when there is no auto-cookie
+	// service, and nil DELETES the chord rather than making it inert: like
+	// OnForceRefreshCookies, dispatchAction, buildMenuItems and the help
+	// overlay each test the field.
+	//
+	// It takes a PATH and returns a result, never bytes in either direction.
+	// Reading the file belongs to the wiring, so nothing in this package can
+	// put a credential on the screen or in a log line; see
+	// CookieImportDialogModel.
+	OnImportCookieFile func(path string) (cookies.ImportResult, error)
 
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
@@ -579,6 +602,7 @@ func NewApp() *App {
 		help:              NewHelpModel(),
 		addVideo:          NewAddVideoModel(),
 		importDlg:         NewImportDialogModel(),
+		cookieImportDlg:   NewCookieImportDialogModel(),
 		trimDlg:           NewTrimDialogModel(),
 		filesDlg:          NewFilesDialogModel(),
 		clientTokensDlg:   NewClientTokensDialogModel(),
@@ -912,6 +936,7 @@ func (a *App) hasActiveOverlay() bool {
 		a.help.IsVisible() ||
 		(a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen()) ||
 		a.importDlg.IsVisible() ||
+		a.cookieImportDlg.IsVisible() ||
 		a.addVideo.IsVisible() ||
 		a.trimDlg.IsVisible() ||
 		a.filesDlg.IsVisible() ||

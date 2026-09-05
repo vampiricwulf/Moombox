@@ -18,7 +18,7 @@ type recheckSite struct {
 	inPassCompletedHook bool
 }
 
-// TestEveryCookieWriteRecheckIsDeferred pins the SHAPE of the five re-check
+// TestEveryCookieWriteRecheckIsDeferred pins the SHAPE of the six re-check
 // sites the Arc 10 reload-site table names.
 //
 // Shape and not behaviour: refresh's status block is the only place the Twitch
@@ -27,7 +27,7 @@ type recheckSite struct {
 // gesture that can put new credentials on disk has to reach CheckNow, or a
 // repaired cookie waits on the 30-minute ticker while a stale "Twitch needs
 // re-authorization" stands over a file that no longer has that problem and no
-// live chat session is told to reconnect. Driving any of these five from a test
+// live chat session is told to reconnect. Driving any of these six from a test
 // means a live guide POST and a live oauth2/validate (youtubeGuideURL and
 // twitchValidateURL are unexported package vars in internal/cookies), so the
 // behavioural half is pinned inside that package and what can only be asserted
@@ -36,11 +36,13 @@ type recheckSite struct {
 // THE DEFER IS LOAD-BEARING. Three of the eight refreshAborted() exits happen
 // AFTER cookies.txt was rewritten, so a call placed after the error check
 // returns first on exactly those passes — the ones whose write nobody
-// compared. Hoisting one out is the obvious "simplification" and is invisible
-// to every behavioural test in the tree. THE MUTANT: move any of the four out
+// compared. ImportCookies has the same exit: the jar reload after a successful
+// write can fail, and that return hands back an error over a file already
+// replaced. Hoisting one out is the obvious "simplification" and is invisible
+// to every behavioural test in the tree. THE MUTANT: move any of the five out
 // of its defer and place it after the `if err != nil` block.
 //
-// The fifth site is OnPassCompleted, which is NOT deferred and must not be: it
+// The sixth site is OnPassCompleted, which is NOT deferred and must not be: it
 // is a hook fired later by notePassCompleted() from inside internal/cookies,
 // through postRefreshRecheckHook's recover guard. It is pinned by its own
 // shape. Its mutant: assign the bare closure, losing the recover, and a panic
@@ -55,6 +57,7 @@ func TestEveryCookieWriteRecheckIsDeferred(t *testing.T) {
 	// here is a site deleted or renamed; an unexpected one is a new
 	// credential-writing gesture whose shape nobody has decided.
 	wantGestures := []string{
+		"a cookie file import",
 		"an automatic cookie refresh",
 		"browser refresh",
 		"recovery",

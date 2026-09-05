@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -278,6 +279,31 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			importedTitle = "archive"
 		}
 		return importResultMsg{Title: importedTitle}
+	})
+}
+
+// importCookieFileCmd runs OnImportCookieFile off the UI goroutine.
+//
+// The PATH is the only thing that crosses this seam, in either direction: the
+// callback reads the file in cmd/moombox and hands back a cookies.ImportResult,
+// so no cookie byte is ever held by a tea.Msg, rendered, or logged. Only the
+// path is ever shown.
+//
+// No HTTP fallback, unlike importFileCmd: the import writes cookies.txt and
+// then verifies each platform against the live services, and there is no
+// meaningful version of that against a remote dashboard the operator may not
+// even be authenticated to.
+func (a *App) importCookieFileCmd(path string) tea.Cmd {
+	fn := a.OnImportCookieFile
+	return safeCmd(func() tea.Msg {
+		if fn == nil {
+			// Unreachable from the keyboard — with no callback the chord is
+			// not registered — but a nil call here would panic the command
+			// goroutine rather than the UI, which is the worse failure.
+			return cookieImportResultMsg{Err: errors.New("cookie import is not available in this process")}
+		}
+		res, err := fn(path)
+		return cookieImportResultMsg{Result: res, Err: err}
 	})
 }
 

@@ -238,6 +238,7 @@ The chord system is a three-state finite automaton:
 | `R C` | Recheck Cookies | Cookie recheck callback is configured |
 | `R F` | Refresh Cookies from Browser | Cookie force-refresh callback is configured |
 | `R L` | Cookie Login | Interactive-setup callback is configured (`SetSetupCallbacks`, bound unconditionally by `cmd/moombox`). Opens the setup wizard's cookie step **alone** — pick YouTube or Twitch, sign in in the browser that opens on the host, `Enter` extracts. Preselects the platform the status bar is flagging for re-login. |
+| `R I` | Import Cookie File | Import callback is configured (auto-cookie service present). A path prompt (with `~` expansion and an existence check), then `AutoCookieService.ImportCookies` — the same verify-and-roll-back path as the Web import panel — then the per-platform outcome (imported / unchanged / rolled-back / rejected) in the overlay. The file is read in `cmd/moombox`; only the path is ever shown or logged. |
 | `R V` | Check for Updates | Update check callback is configured |
 | `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. |
 | `R U` | Apply Update | An update is available and apply callback is configured |
@@ -912,6 +913,7 @@ Every major feature exists in both UIs:
 | Trim creation | `modules/trimmer.js` | `trim_dialog.go` |
 | Statistics | `modules/stats.js` | N/A (data available via API) |
 | Zip import | `modules/imports.js` | `import_dialog.go` |
+| Cookie import | `modules/settings.js` import panel | `CookieImportDialogModel` (`internal/tui/cookie_import_dialog.go`) |
 | Orphaned files | `app.js` (inline) | `files_dialog.go` |
 | Client tokens | `app.js` (inline) | `client_tokens_dialog.go` |
 

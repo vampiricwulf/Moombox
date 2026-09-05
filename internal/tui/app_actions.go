@@ -297,6 +297,18 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// Preselect whatever the status bar is alarming about, so answering a
 		// "TW: Re-login" badge does not open on YouTube.
 		a.setupWiz.OpenCookieLogin(a.statusBar.ReloginPlatform())
+	case "R I":
+		// Defensive for the same reason R L's guard is, and unreachable the
+		// same way: with no callback the chord is not registered, so
+		// processSecondKey never reaches this case. The guard keeps a direct
+		// caller from opening an overlay whose Enter dead-ends.
+		if a.OnImportCookieFile == nil {
+			a.setFeedback("Cookie import is unavailable — no auto-cookie service is configured")
+			return a, nil
+		}
+		a.clearFeedback()
+		a.cookieImportDlg.SetSize(a.width, a.height)
+		return a, a.cookieImportDlg.Open()
 	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
@@ -625,6 +637,13 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// acquisition and is never gated on cookies.auto_enabled.
 	if a.setupWiz.OnStartAutoCookie != nil {
 		items = append(items, ActionMenuItem{Chord: "R L", Label: "Cookie Login", HintLabel: "Login", Category: "Request"})
+	}
+	// R I: the browser-free half of the same answer R L gives. It imports a
+	// Netscape cookies.txt the operator exported elsewhere, through the same
+	// verify-and-roll-back path as the Web dashboard's import panel — the one
+	// re-authentication route that works on a headless host.
+	if a.OnImportCookieFile != nil {
+		items = append(items, ActionMenuItem{Chord: "R I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Request"})
 	}
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})
