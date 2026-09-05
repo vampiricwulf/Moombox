@@ -157,18 +157,7 @@ func (s *runState) wireRoutes() func() {
 	routes.LogRoutes(s.r, s.log.GetRecentLines)
 	importCleanup := routes.ImportRoutes(s.r, s.db, s.configStore)
 	routes.CookieRoutes(s.r, s.cookieRefresh, s.autoCookieSvc, s.getActivePlatforms, s.apiRL)
-	routes.YtdlpRoutes(s.r, func() int {
-		// Per-request port resolution: the listener binds after route wiring,
-		// and with auto-pick (port 0) only ActualPort knows the real value.
-		if s.webServer != nil && s.webServer.ActualPort > 0 {
-			return s.webServer.ActualPort
-		}
-		var port int
-		s.configStore.Read(func(c *config.MoomboxConfig) {
-			port = c.Network.Port
-		})
-		return port
-	}, s.cfg.Network.HTTPSEnabled)
+	routes.YtdlpRoutes(s.r, s.currentWebPort, s.cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(s.r, func() { s.triggerRestart("API") })
 	routes.UpdateRoutes(s.r, &routes.UpdateRouteDeps{
 		Updater:   s.upd,
@@ -198,4 +187,23 @@ func (s *runState) wireRoutes() func() {
 	routes.WatchRoutes(s.r, s.db)
 
 	return importCleanup
+}
+
+// currentWebPort resolves the port this process is actually serving on.
+//
+// A GETTER, not a value: the listener binds after route wiring, and with
+// auto-pick (port 0) only ActualPort knows the real number — a captured value
+// would write a plugin file pointing at ":0" forever.
+//
+// Shared with the TUI's R Y overlay (tui_wiring.go), which asks the same
+// question about the same plugin file and must not answer it differently.
+func (s *runState) currentWebPort() int {
+	if s.webServer != nil && s.webServer.ActualPort > 0 {
+		return s.webServer.ActualPort
+	}
+	var port int
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		port = c.Network.Port
+	})
+	return port
 }

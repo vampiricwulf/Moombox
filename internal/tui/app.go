@@ -13,6 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
 
 // FocusPanel identifies which panel is focused.
@@ -300,6 +301,17 @@ type (
 		Err string
 	}
 
+	// Async results for the R Y yt-dlp plugin overlay. Info is the same
+	// routes.YtdlpPluginInfo GET /api/ytdlp-plugin/status returns; Err is the
+	// error VALUE rather than a string because nothing here reformats it.
+	ytdlpStatusMsg struct {
+		Info routes.YtdlpPluginInfo
+		Err  error
+	}
+	ytdlpInstallResultMsg struct {
+		Err error
+	}
+
 	// Async results for setup wizard cookie extraction.
 	//
 	// Carries the whole SetupResult rather than the bool pair it used to. Two
@@ -353,6 +365,7 @@ type App struct {
 	trimDlg         *TrimDialogModel
 	filesDlg        *FilesDialogModel
 	clientTokensDlg *ClientTokensDialogModel
+	ytdlpDlg        *YtdlpDialogModel
 	setupWiz        *SetupWizardModel
 	settings        *SettingsModel
 
@@ -583,6 +596,21 @@ type App struct {
 	// CookieImportDialogModel.
 	OnImportCookieFile func(path string) (cookies.ImportResult, error)
 
+	// OnYtdlpPluginStatus reports the yt-dlp PO-token plugin's state for the
+	// port and scheme this process is actually serving on — the R Y overlay's
+	// body, and the same routes.YtdlpPluginStatus the dashboard's Integrations
+	// card reads. nil DELETES the chord rather than making it inert, like
+	// OnImportCookieFile: an overlay whose only content can never load is
+	// worse than a chord that is not offered.
+	OnYtdlpPluginStatus func() (routes.YtdlpPluginInfo, error)
+	// OnInstallYtdlpPlugin (re)writes the yt-dlp plugin for the live port —
+	// the R Y overlay's I key. Distinct from the setup wizard's
+	// OnInstallYtdlp, which reports nothing back.
+	//
+	// It does NOT gate the chord: with a status callback and no install one,
+	// the overlay is still worth reading and I says so instead of no-opping.
+	OnInstallYtdlpPlugin func() error
+
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
 	OnCheckPrereqs   func() (bool, bool)                                                        // returns (chocoAvail, wingetAvail)
@@ -631,6 +659,7 @@ func NewApp() *App {
 		trimDlg:           NewTrimDialogModel(),
 		filesDlg:          NewFilesDialogModel(),
 		clientTokensDlg:   NewClientTokensDialogModel(),
+		ytdlpDlg:          NewYtdlpDialogModel(),
 		setupWiz:          NewSetupWizardModel(),
 		settings:          NewSettingsModel(),
 		ffmpegCheck:       NewFFmpegCheckModel(),
@@ -966,6 +995,7 @@ func (a *App) hasActiveOverlay() bool {
 		a.trimDlg.IsVisible() ||
 		a.filesDlg.IsVisible() ||
 		a.clientTokensDlg.IsVisible() ||
+		a.ytdlpDlg.IsVisible() ||
 		a.setupWiz.IsVisible() ||
 		a.ffmpegCheck.IsVisible() ||
 		a.actionMenu.IsVisible()

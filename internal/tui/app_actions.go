@@ -343,6 +343,16 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		a.clearFeedback()
 		a.cookieImportDlg.SetSize(a.width, a.height)
 		return a, a.cookieImportDlg.Open()
+	case "R Y":
+		// Defensive for the same reason R I's guard is, and unreachable the
+		// same way: with no status callback the chord is not registered, so
+		// processSecondKey never reaches this case.
+		if a.OnYtdlpPluginStatus == nil {
+			a.setFeedback("yt-dlp plugin status is unavailable in this process")
+			return a, nil
+		}
+		a.ytdlpDlg.SetSize(a.width, a.height)
+		return a, tea.Batch(a.ytdlpDlg.Open(), a.ytdlpStatusCmd())
 	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
@@ -683,6 +693,12 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// re-authentication route that works on a headless host.
 	if a.OnImportCookieFile != nil {
 		items = append(items, ActionMenuItem{Chord: "R I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Request"})
+	}
+	// R Y: the terminal's half of the dashboard's Integrations card. Gated on
+	// the STATUS callback alone — the overlay is worth reading on a host where
+	// the install would fail, and I explains itself there.
+	if a.OnYtdlpPluginStatus != nil {
+		items = append(items, ActionMenuItem{Chord: "R Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Request"})
 	}
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})

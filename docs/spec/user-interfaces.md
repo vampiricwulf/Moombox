@@ -240,6 +240,7 @@ The chord system is a three-state finite automaton:
 | `R F` | Refresh Cookies from Browser | Cookie force-refresh callback is configured |
 | `R L` | Cookie Login | Interactive-setup callback is configured (`SetSetupCallbacks`, bound unconditionally by `cmd/moombox`). Opens the setup wizard's cookie step **alone** — pick YouTube or Twitch, sign in in the browser that opens on the host, `Enter` extracts. Preselects the platform the status bar is flagging for re-login. |
 | `R I` | Import Cookie File | Import callback is configured (auto-cookie service present). A path prompt (with `~` expansion and an existence check), then `AutoCookieService.ImportCookies` — the same verify-and-roll-back path as the Web import panel — then the per-platform outcome (imported / unchanged / rolled-back / rejected) in the overlay. The file is read in `cmd/moombox`; only the path is ever shown or logged. |
+| `R Y` | yt-dlp Plugin | Status callback is configured. An async overlay over `routes.YtdlpPluginStatus` — the same computation `GET /api/ytdlp-plugin/status` returns — showing installed / plugin dir / live port / the port the installed file points at / mismatch. `I` rewrites the plugin for the live port through `routes.InstallYtdlpPlugin` (the call the dashboard's Install button makes) and reloads; `R` re-reads; `Esc`/`Q` closes. `I` is gated separately: with a status callback and no install one the overlay still reads, and `I` says the install is unavailable rather than no-opping. |
 | `R V` | Check for Updates | Update check callback is configured |
 | `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. `S` inside the overlay skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`, the same helper `POST /api/update/dismiss` uses). |
 | `R U` | Apply Update | An update is available and apply callback is configured |
@@ -289,6 +290,7 @@ Overlays are full-screen or near-full-screen modal views that take over keyboard
 | Settings | `` ` `` | Full config editor built with the `huh` form framework. Supports full mouse interaction (click tabs, fields, toggles, cycle options, and action buttons). Action buttons at the bottom: `[ Save & Return ]` / `[ Return Without Saving ]` (when dirty), or `[ Return ]` (when clean). Presents a close confirmation when there are unsaved changes and the user attempts to dismiss. Smart dirty tracking: reverting a field back to its original value clears the dirty flag. Job detail panel renders clickable hyperlinks (OSC 8) for stream URLs and output paths. Both channel editors expose the four per-channel overrides (`num_desc_lookbehind`, `output_directory`, `archive_window_days`, `archive_slots`); blank means the global value, and the TUI editor now preserves every field it does not show (it rebuilt the channel from the visible fields before Arc B). |
 | Setup Wizard | First run, `R L` | Multi-step initial setup: configuration, FFmpeg check/install, yt-dlp plugin, cookie capture. Built with `huh`. `R L` opens the same overlay in **cookie-only** mode: the cookie step with no stages around it, `Esc` and the third row close it instead of advancing, and leaving cancels any browser it opened. |
 | FFmpeg Check | Setup flow | Validates FFmpeg is on PATH. Offers installation options if missing. On Linux, also shows the distro-appropriate package manager command (`apt`, `dnf`, `pacman`, etc.) from `GET /api/ffmpeg/install-suggestion`. |
+| yt-dlp Plugin | `R Y` | Async status overlay for the yt-dlp PO-token plugin (`YtdlpDialogModel`, `internal/tui/ytdlp_dialog.go`). Renders `routes.YtdlpPluginInfo` verbatim rather than re-deriving it for the terminal. `I` installs/reinstalls for the live port and reloads, `R` refreshes, `Esc` closes. |
 | Release Notes | `R N` | Shows release notes for the pending update (when an update is available) or the current version (fetched from GitHub). Rendered via `glamour` in the TUI. From inside: `U` applies the update, `Esc`/`Q` closes. Uses `bubbles/viewport` for scrolling. |
 
 ### Async Message Types
@@ -793,7 +795,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/ytdlp-plugin/status` | Check if the yt-dlp PO token plugin is installed. |
+| `GET` | `/api/ytdlp-plugin/status` | Check if the yt-dlp PO token plugin is installed. Computation shared with the TUI's `R Y` overlay via `YtdlpPluginStatus` (`internal/web/routes/ytdlp.go`), whose `YtdlpPluginInfo` struct tags are the seven-key wire contract `settings.js` `loadYtdlpPluginStatus` reads. |
 | `POST` | `/api/ytdlp-plugin/install` | Install the yt-dlp plugin to the user's yt-dlp config directory. |
 
 ### Setup
@@ -918,6 +920,7 @@ Every major feature exists in both UIs:
 | Cookie import | `modules/settings.js` import panel | `CookieImportDialogModel` (`internal/tui/cookie_import_dialog.go`) |
 | Orphaned files | `app.js` (inline) | `files_dialog.go` |
 | Client tokens | `app.js` (inline) | `client_tokens_dialog.go` |
+| yt-dlp plugin | Settings → Integrations card (`settings.js` `loadYtdlpPluginStatus`) | `YtdlpDialogModel` (`internal/tui/ytdlp_dialog.go`) |
 
 **Note on video playback:** The TUI cannot play video inline (it is a terminal). The `O W` chord opens the Web UI in the default browser, where the user can access the player. This is the intended design — video playback is a Web UI strength, and the TUI defers to it rather than attempting a degraded experience.
 

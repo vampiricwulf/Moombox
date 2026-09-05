@@ -428,6 +428,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | R F | Refresh cookies from browser |
 | R L | Cookie login (browser) |
 | R I | Import cookie file (path prompt) |
+| R Y | yt-dlp plugin status / install |
 | R V | Check for updates |
 | R N | View release notes for pending update |
 | R U | Apply pending update |

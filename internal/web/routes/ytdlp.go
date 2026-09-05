@@ -24,6 +24,67 @@ func parseInstalledPlugin(content string) (scheme string, port int) {
 	return m[1], port
 }
 
+// YtdlpPluginInfo is what GET /api/ytdlp-plugin/status reports and what the
+// TUI's R Y overlay shows. The JSON tags are the wire contract: settings.js's
+// loadYtdlpPluginStatus reads all seven keys, and they were an inline
+// map[string]any until the TUI needed the same answer.
+//
+// InstalledPort is a plain int rather than the *int the map carried. The
+// only consumer of the old null was settings.js's `status.installed &&
+// status.installedPort` truthiness test, which reads 0 and null alike, and a
+// nil pointer on a model the TUI renders is a panic waiting for a row.
+type YtdlpPluginInfo struct {
+	Installed     bool   `json:"installed"`
+	PluginDir     string `json:"pluginDir"`
+	CurrentPort   int    `json:"currentPort"`
+	HTTPSEnabled  bool   `json:"httpsEnabled"`
+	InstalledPort int    `json:"installedPort"`
+	PortMismatch  bool   `json:"portMismatch"`
+	ExtractedPath string `json:"extractedPath"`
+}
+
+// YtdlpPluginStatus reads the installed plugin file, if any, and reports it
+// against the port and scheme this process is actually serving on.
+//
+// Shared by the GET route and the TUI's R Y overlay rather than reimplemented
+// for the terminal: "installed" and "mismatched" are file-parsing verdicts,
+// and two copies of the parse are two answers to the same question.
+//
+// The error return is for a future read failure that is worth reporting; an
+// undeterminable plugin directory is NOT one — it is reported as an empty
+// PluginDir with Installed false, exactly as the route always has, because
+// that is the state of a platform where yt-dlp has no standard plugin dir
+// rather than a failure of this call.
+func YtdlpPluginStatus(port int, httpsEnabled bool) (YtdlpPluginInfo, error) {
+	pluginDir := ytdlpPluginDir()
+	info := YtdlpPluginInfo{
+		PluginDir:    pluginDir,
+		CurrentPort:  port,
+		HTTPSEnabled: httpsEnabled,
+	}
+
+	expectedScheme := "http"
+	if httpsEnabled {
+		expectedScheme = "https"
+	}
+
+	if pluginDir != "" {
+		pluginPath := filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor", "getpot_moombox.py")
+		if data, err := os.ReadFile(pluginPath); err == nil {
+			info.Installed = true
+			if scheme, p := parseInstalledPlugin(string(data)); p > 0 {
+				info.InstalledPort = p
+				info.PortMismatch = p != port || scheme != expectedScheme
+			}
+		}
+		// extractedPath: the plugin source dir for --plugin-dirs usage.
+		// In Go we generate inline, so point to the installed location.
+		info.ExtractedPath = filepath.Join(pluginDir, "moombox")
+	}
+
+	return info, nil
+}
+
 // YtdlpRoutes registers yt-dlp plugin routes. currentPort is a GETTER
 // evaluated per request: route wiring runs before the listener binds, so a
 // port captured by value would be the configured port — with auto-pick
@@ -31,44 +92,12 @@ func parseInstalledPlugin(content string) (scheme string, port int) {
 func YtdlpRoutes(r chi.Router, currentPort func() int, httpsEnabled bool) {
 	// GET /api/ytdlp-plugin/status
 	r.Get("/api/ytdlp-plugin/status", func(rw http.ResponseWriter, req *http.Request) {
-		port := currentPort()
-		pluginDir := ytdlpPluginDir()
-		installed := false
-		var installedPort *int
-		portMismatch := false
-
-		expectedScheme := "http"
-		if httpsEnabled {
-			expectedScheme = "https"
+		info, err := YtdlpPluginStatus(currentPort(), httpsEnabled)
+		if err != nil {
+			jsonError(rw, err.Error(), http.StatusInternalServerError)
+			return
 		}
-
-		if pluginDir != "" {
-			pluginPath := filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor", "getpot_moombox.py")
-			if data, err := os.ReadFile(pluginPath); err == nil {
-				installed = true
-				if scheme, p := parseInstalledPlugin(string(data)); p > 0 {
-					installedPort = &p
-					portMismatch = p != port || scheme != expectedScheme
-				}
-			}
-		}
-
-		// extractedPath: the plugin source dir for --plugin-dirs usage
-		// In Go we generate inline, so point to the installed location
-		extractedPath := ""
-		if pluginDir != "" {
-			extractedPath = filepath.Join(pluginDir, "moombox")
-		}
-
-		jsonResponse(rw, map[string]any{
-			"installed":     installed,
-			"pluginDir":     pluginDir,
-			"currentPort":   port,
-			"httpsEnabled":  httpsEnabled,
-			"installedPort": installedPort,
-			"portMismatch":  portMismatch,
-			"extractedPath": extractedPath,
-		})
+		jsonResponse(rw, info)
 	})
 
 	// POST /api/ytdlp-plugin/install

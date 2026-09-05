@@ -547,6 +547,17 @@ func (s *runState) runTUI() {
 		}
 	}
 
+	// R Y — the yt-dlp plugin overlay. Both closures read the SAME port getter
+	// and HTTPS flag wireRoutes hands routes.YtdlpRoutes, so the terminal and
+	// the dashboard cannot disagree about which port the plugin should point
+	// at or whether the one on disk matches.
+	app.OnYtdlpPluginStatus = func() (routes.YtdlpPluginInfo, error) {
+		return routes.YtdlpPluginStatus(s.currentWebPort(), s.cfg.Network.HTTPSEnabled)
+	}
+	app.OnInstallYtdlpPlugin = func() error {
+		return routes.InstallYtdlpPlugin(s.currentWebPort(), s.cfg.Network.HTTPSEnabled)
+	}
+
 	app.OnHashPassword = func(password string) string {
 		hash, err := s.authSvc.HashPassword(password)
 		if err != nil {

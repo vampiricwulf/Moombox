@@ -329,6 +329,24 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	// The whole KeyPressMsg for symmetry with the dialogs above, but this one
+	// owns no component: HandleKey only decides. See YtdlpDialogModel.
+	if a.ytdlpDlg.IsVisible() {
+		switch a.ytdlpDlg.HandleKey(msg) {
+		case "install":
+			// The chord is gated on the STATUS callback, so the overlay can be
+			// open with no way to install. Say so rather than swallowing I.
+			if a.OnInstallYtdlpPlugin == nil {
+				a.ytdlpDlg.SetError("Install is unavailable in this process")
+				return a, nil
+			}
+			a.ytdlpDlg.SetInstalling()
+			return a, tea.Batch(a.ytdlpInstallCmd(), a.ytdlpDlg.SpinnerInit())
+		case "refresh":
+			return a, tea.Batch(a.ytdlpStatusCmd(), a.ytdlpDlg.Open())
+		}
+		return a, nil
+	}
 
 	// Log search intercept — must be before key normalization to preserve
 	// case for N (shift+n) and before chord system to capture / and n/N.

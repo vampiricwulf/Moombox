@@ -391,6 +391,36 @@ func (a *App) deleteClientTokenCmd(id string) tea.Cmd {
 	})
 }
 
+// ytdlpStatusCmd reads the yt-dlp plugin's state off the UI goroutine — the
+// R Y overlay's open, its R key, and the reload that follows a successful
+// install all go through it.
+func (a *App) ytdlpStatusCmd() tea.Cmd {
+	statusFn := a.OnYtdlpPluginStatus
+	return safeCmd(func() tea.Msg {
+		if statusFn == nil {
+			// Unreachable from the keyboard — with no callback the chord is
+			// not registered — but a nil call here would take down the
+			// command goroutine rather than report anything.
+			return ytdlpStatusMsg{Err: errors.New("yt-dlp plugin status is not available in this process")}
+		}
+		info, err := statusFn()
+		return ytdlpStatusMsg{Info: info, Err: err}
+	})
+}
+
+// ytdlpInstallCmd rewrites the plugin for the live port. The keypress arm has
+// already refused the nil case with a message on the overlay; this guard is
+// for a direct caller.
+func (a *App) ytdlpInstallCmd() tea.Cmd {
+	installFn := a.OnInstallYtdlpPlugin
+	return safeCmd(func() tea.Msg {
+		if installFn == nil {
+			return ytdlpInstallResultMsg{Err: errors.New("yt-dlp plugin install is not available in this process")}
+		}
+		return ytdlpInstallResultMsg{Err: installFn()}
+	})
+}
+
 func (a *App) deleteOrphanCmd(path string) tea.Cmd {
 	deleteFn := a.OnDeleteOrphan
 	return safeCmd(func() tea.Msg {

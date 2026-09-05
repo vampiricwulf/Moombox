@@ -624,6 +624,31 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := a.clientTokensDlg.SetTokens(msg.Tokens)
 		return a, cmd
 
+	case ytdlpStatusMsg:
+		// Visible-only, like every other overlay result: a status that lands
+		// after Esc has nowhere to go, and the chord re-reads on open.
+		if !a.ytdlpDlg.IsVisible() {
+			return a, nil
+		}
+		if msg.Err != nil {
+			a.ytdlpDlg.SetError(msg.Err.Error())
+			return a, nil
+		}
+		a.ytdlpDlg.SetStatus(msg.Info)
+		return a, nil
+
+	case ytdlpInstallResultMsg:
+		if !a.ytdlpDlg.IsVisible() {
+			return a, nil
+		}
+		if msg.Err != nil {
+			a.ytdlpDlg.SetError("Install failed: " + msg.Err.Error())
+			return a, nil
+		}
+		// Re-read rather than assume: the install's own verdict is a nil
+		// error, and what the operator needs to see is the file it wrote.
+		return a, a.ytdlpStatusCmd()
+
 	case deleteClientTokenResultMsg:
 		if msg.Err != "" {
 			a.clientTokensDlg.SetError(msg.Err)
@@ -1252,6 +1277,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	if a.clientTokensDlg.IsVisible() {
 		return a.clientTokensDlg.UpdateComponents(msg)
+	}
+	if a.ytdlpDlg.IsVisible() {
+		return a.ytdlpDlg.UpdateComponents(msg)
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {
