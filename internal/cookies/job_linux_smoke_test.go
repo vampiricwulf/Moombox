@@ -12,9 +12,10 @@ import (
 // TestLivePgroupSeesAndKillsARealGroup is a SMOKE TEST and nothing depends on
 // it.
 //
-// IT IS NOT RUN IN CI HERE, and that is deliberate rather than an oversight.
-// The release workflow cross-compiles the Linux binaries from ubuntu and never
-// runs `go test`; the machine this project is developed on is Windows; and the
+// IT IS NOT A CI GATE, and that is deliberate rather than an oversight.
+// ci.yml runs the suite on ubuntu, where this file compiles, but it skips
+// there because MOOMBOX_LIVE_PGROUP is unset; the machine this project is
+// developed on is Windows; and the
 // owner's ruling for this arc is explicit that there is no Linux live gate and
 // that a user's bug report is the gate. Every DECISION this file's production
 // code makes is already pinned cross-platform in job_pgroup_test.go against a

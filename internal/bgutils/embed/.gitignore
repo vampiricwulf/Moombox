@@ -4,6 +4,8 @@ node-linux-amd64.gz
 node-linux-arm64.gz
 node.exe.gz
 sidecar.tar.gz
+# Written by tools/fetch-node beside the blobs; the idempotency stamp.
+node-blobs.stamp
 
 # Keep version.txt tracked.
 !version.txt
