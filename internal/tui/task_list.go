@@ -674,10 +674,8 @@ func (m *TaskListModel) CycleFilter() {
 
 	m.tokens = kept
 	m.queryText = jobfilter.Serialize(m.tokens)
-	m.rebuildVirtualList()
-	// Reset selection on filter change (match TS)
-	m.list.Select(0)
-	m.resetMarquee()
+	// Reset selection on filter change (match TS).
+	m.refilterSelectTop()
 }
 
 // ToggleArchive toggles the archive divider expansion.
@@ -909,7 +907,7 @@ func (m *TaskListModel) View() string {
 	if len(m.list.Items()) == 0 {
 		switch {
 		case len(m.tokens) > 0:
-			listContent = DimStyle.Render("No tasks match " + m.Query())
+			listContent = DimStyle.Render(fmt.Sprintf("No tasks match %q.", m.Query()))
 		case m.JustCompletedSetup:
 			listContent = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ecc71")).Render("Setup complete!") + "\n\n" +
 				DimStyle.Render("Press ` to open Settings and add channels,") + "\n" +
@@ -951,11 +949,13 @@ func (m *TaskListModel) renderHeader(w int) string {
 		left += fmt.Sprintf(" (%d)", total)
 	}
 
-	// One indicator for one filter: the active query, exactly as an operator
-	// would retype it. The MaxWidth clamp at the bottom of this function
-	// bounds a long one on a narrow panel.
+	// One indicator for one filter: the active query, reserialized — live
+	// feedback that the parser understood what was typed. Held to a third of
+	// the panel so a long query can't push the timers and the [n-m/total]
+	// position range off the right-hand side; the MaxWidth clamp at the
+	// bottom of this function is the last-resort bound, not this one.
 	if query := m.Query(); query != "" {
-		left += " " + YellowStyle.Render("["+query+"]")
+		left += " " + YellowStyle.Render("["+truncateString(query, max(w/3, 12))+"]")
 	}
 
 	// Countdown timers (T3 - match TS format, colored dots before labels)

@@ -72,6 +72,9 @@ func StatusBucket(value string) string {
 // query instead of typing it — the TUI's F cycle inserts its status token
 // this way. Value's lower-cased form is private, so a Token{…} literal built
 // outside this package would silently fail to match; go through Term.
+//
+// Not for KindOr: OR groups are only built by Parse; a KindOr token from Term
+// has no Terms and matches nothing.
 func Term(kind Kind, value string, negate bool) Token {
 	return Token{Kind: kind, Value: value, Negate: negate, lower: strings.ToLower(value)}
 }

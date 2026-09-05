@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -52,14 +53,64 @@ func TestFCyclesTheStatusToken(t *testing.T) {
 	if m.Query() != "" || len(visibleIDs(m)) != 4 {
 		t.Fatalf("fourth F must clear: %q %v", m.Query(), visibleIDs(m))
 	}
-	// A typed status token is the same token: F replaces it and keeps the rest.
-	m.applyQuery(`-platform:twitch status:issues`)
+	// A typed status token is the same token: F replaces it IN PLACE and
+	// keeps the rest. The status token leads here on purpose — with it last,
+	// an implementation that appended the replacement instead of inserting
+	// at the vacated index would serialize identically and the assertion
+	// would prove nothing.
+	m.applyQuery(`status:issues -platform:twitch`)
 	m.CycleFilter() // issues → finished
-	if m.Query() != "-platform:twitch status:finished" {
+	if m.Query() != "status:finished -platform:twitch" {
 		t.Fatalf("F must replace the typed status token in place: %q", m.Query())
 	}
-	if !strings.Contains(stripANSI(m.renderHeader(100)), "[-platform:twitch status:finished]") {
+	// 32 columns, inside renderHeader's max(w/3, 12) = 33 budget, so the
+	// indicator is shown whole here — the ellipsizing is pinned separately
+	// by TestHeaderEllipsizesALongQuery.
+	if !strings.Contains(stripANSI(m.renderHeader(100)), "[status:finished -platform:twitch]") {
 		t.Fatalf("header must show the serialized query: %q", stripANSI(m.renderHeader(100)))
+	}
+
+	// H3's wide rule: a raw status value is F's token too. Keeping it beside
+	// the new one would AND two disjoint status sets and show nothing, so F
+	// replaces it rather than adding to it.
+	m.applyQuery("status:live")
+	m.CycleFilter()
+	if m.Query() != "status:active" {
+		t.Fatalf("F must replace a raw status token, not keep it: %q", m.Query())
+	}
+}
+
+// TestHeaderEllipsizesALongQuery: the indicator is held to a third of the
+// panel so a long query cannot evict the position range on the right.
+func TestHeaderEllipsizesALongQuery(t *testing.T) {
+	const channel = "some-very-long-channel-name-here"
+	jobs := make([]*database.Job, 0, 10)
+	for i := range 10 {
+		jobs = append(jobs, &database.Job{
+			ID:          string(rune('a' + i)),
+			Title:       "Archive run",
+			ChannelName: channel,
+			Status:      database.StatusFinished,
+			Platform:    "youtube",
+		})
+	}
+	m := NewTaskListModel()
+	m.SetSize(60, 8) // contentHeight 5 < 10 rows, so a position range renders
+	m.SetJobs(jobs)
+	m.applyQuery("status:finished channel:" + channel + " platform:youtube")
+	if got := len(visibleIDs(m)); got != 10 {
+		t.Fatalf("query should match all 10 jobs, matched %d", got)
+	}
+
+	hdr := stripANSI(m.renderHeader(60))
+	if !regexp.MustCompile(`\[\d+-\d+/10\]`).MatchString(hdr) {
+		t.Errorf("the position range must survive a long query: %q", hdr)
+	}
+	if !strings.Contains(hdr, "…]") {
+		t.Errorf("a query wider than w/3 must be ellipsized: %q", hdr)
+	}
+	if strings.Contains(hdr, "platform:youtube") {
+		t.Errorf("the full query must not be rendered at width 60: %q", hdr)
 	}
 }
 
@@ -94,6 +145,10 @@ func TestArchiveVisibilityFollowsTheStatusToken(t *testing.T) {
 	m.applyQuery("status:finished")
 	if !m.showArchive() {
 		t.Error("status:finished must show the archive")
+	}
+	m.applyQuery("status:live")
+	if m.showArchive() {
+		t.Error("a raw status name other than Finished must hide the archive")
 	}
 	m.applyQuery("-status:active")
 	if !m.showArchive() {
