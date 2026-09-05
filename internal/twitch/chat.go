@@ -1,9 +1,12 @@
 package twitch
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -20,6 +23,13 @@ const (
 	// PING every ~5 min; this gives us one missed heartbeat plus slack
 	// before we treat the socket as dead and trigger the reconnect path.
 	ircReadDeadline = 6 * time.Minute
+	// chatHeaderScanLimit bounds the prefix chatFileRecordingBaseMs reads out
+	// of an existing part file. TwitchChatData's header is a handful of short
+	// scalars written before the messages array — that field order is already
+	// load-bearing for AppendChatMessages — so 4 KB is far more than it can
+	// occupy, and the point of the bound is that a marathon part's chat.json
+	// is tens of megabytes that must not be pulled into memory for one stamp.
+	chatHeaderScanLimit = 4096
 )
 
 // The fixed vocabulary of Twitch auth-downgrade reasons: one value per route
@@ -572,6 +582,134 @@ func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 	cd.mu.Unlock()
 }
 
+// adoptPartRecordingBase seeds recordingStartMs from the part file already on
+// disk, so a part RESUMED after a daemon restart keeps counting offsets from
+// the base its earlier messages were written against instead of from the
+// restart. No-op when there is no part file, or no base recorded in it.
+//
+// The file, not the run. The orchestrator hands every session time.Now() as
+// the recording start — SetRecordingStartTime, and the RollFile that redirects
+// a resumed job into the part it left off in — which is right for a part that
+// begins now and wrong for one that began hours ago. The resumed part's VIDEO
+// is appended to (the engine reopens video_stream O_APPEND at the resume
+// sidecar's byte position, and the part is muxed with a derived start rather
+// than the restart time), so the part's timeline still starts where it always
+// did. Rebasing the chat to the restart drops every post-restart message back
+// onto the head of the part — landing on top of the pre-restart chat, hours
+// out of position, with two clocks in one file. One file, one epoch: the same
+// rule the YouTube downloader states as "keeping the file's epoch over the
+// run's start time" (internal/chat/downloader.go).
+//
+// What is left wrong is bounded and is the outage itself: offsets are placed
+// at (message − base) while the video lost whatever segments expired from the
+// playlist window while the daemon was down. Twitch live has no DVR, so a
+// resume across a gap the window cannot cover makes the engine report a gap
+// and the orchestrator split into a FRESH part — new dir, new file, new base —
+// which is the case this function then correctly declines to touch. The
+// residual is therefore at most a window's worth of drift, against hours of
+// misplacement for the alternative.
+//
+// Only on a fresh Start (the caller's !alreadyInitialized gate). A downloader
+// the orchestrator re-Starts after a connectivity outage already holds the
+// base its part file was written with, so there is nothing to adopt and no
+// reason to race a roll for it.
+//
+// The store is conditional on outputPath still being the path that was read.
+// Start runs on its own goroutine while the video loop is already going, so a
+// gap split can call RollFile in between — and the new part's base must not be
+// overwritten with the closed part's.
+func (cd *ChatDownloader) adoptPartRecordingBase() {
+	path := cd.currentOutputPath()
+	if path == "" {
+		return
+	}
+	fileBaseMs, ok := chatFileRecordingBaseMs(path)
+	if !ok {
+		return
+	}
+
+	cd.mu.Lock()
+	runBaseMs := cd.recordingStartMs.Load()
+	adopt := cd.outputPath == path && runBaseMs != fileBaseMs
+	if adopt {
+		cd.recordingStartMs.Store(fileBaseMs)
+	}
+	cd.mu.Unlock()
+
+	if !adopt {
+		return
+	}
+	cd.logger.Info("twitch chat: resuming part with its recorded base",
+		"channel", cd.channelLogin, "path", path,
+		"fileBaseMs", fileBaseMs, "runBaseMs", runBaseMs)
+}
+
+// chatFileRecordingBaseMs reads recordingStartTime out of an existing part's
+// chat file and returns it in Unix milliseconds.
+//
+// ok is false for everything it cannot read POSITIVELY — no file, a file this
+// package did not write, a header written before the field existed, a header
+// longer than chatHeaderScanLimit, an unparseable stamp. The caller's fallback
+// is the run's own start time, and an invented base is worse than a stale one.
+//
+// Token-walked rather than unmarshalled: json.Decoder.Decode buffers the whole
+// top-level value, which for a part file is the entire message history.
+func chatFileRecordingBaseMs(path string) (int64, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+
+	head := make([]byte, chatHeaderScanLimit)
+	n, err := io.ReadFull(f, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return 0, false
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(head[:n]))
+	opening, err := dec.Token()
+	if err != nil {
+		return 0, false
+	}
+	if delim, isDelim := opening.(json.Delim); !isDelim || delim != '{' {
+		return 0, false
+	}
+	for {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return 0, false
+		}
+		key, isKey := keyTok.(string)
+		if !isKey {
+			return 0, false // the object closed without the field
+		}
+		valTok, err := dec.Token()
+		if err != nil {
+			return 0, false
+		}
+		if key != "recordingStartTime" {
+			// Every header field is a scalar and all of them precede
+			// "emotes"/"messages", so a composite value means the header is
+			// over (or this is not one of our files) — and descending into it
+			// is exactly the read the scan limit exists to avoid.
+			if _, composite := valTok.(json.Delim); composite {
+				return 0, false
+			}
+			continue
+		}
+		stamp, isString := valTok.(string)
+		if !isString {
+			return 0, false
+		}
+		t, err := time.Parse(time.RFC3339, stamp)
+		if err != nil {
+			return 0, false
+		}
+		return t.UnixMilli(), true
+	}
+}
+
 // clearResumeState deletes the resume state file on successful completion.
 func (cd *ChatDownloader) clearResumeState() {
 	store := utils.ResumeStore[ChatResumeState]{Path: cd.getResumeFilePath()}
@@ -608,6 +746,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			cd.logger.Info("[TwitchChat] Resuming from saved state",
 				"fileMessages", resumeState.MessageCount, "totalMessages", cd.MessageCount())
 		}
+		// Independently of the sidecar: the part FILE decides this part's
+		// offset base, and it outlives any resume state (RollFile clears a
+		// closed part's, and a crash can lose one). See adoptPartRecordingBase
+		// for why the restart is the wrong base for a part that began hours ago.
+		cd.adoptPartRecordingBase()
 	}
 
 	defer func() {

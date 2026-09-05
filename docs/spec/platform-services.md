@@ -540,7 +540,7 @@ The IRC parser handles two message types:
 - Tag fields extracted: `id`, `tmi-sent-ts` (epoch ms), `bits`, `display-name`, `login`, `user-id`, `badges`, `color`, `emotes`.
 - If `bits > 0`, message type is `"bits"`, otherwise `"chat"`.
 - Emote tags parsed from format `id:start-end,start-end/id:start-end` into `TwitchEmoteRef` structs with start/end as rune indices (not byte indices), matching Twitch's character offset convention.
-- `OffsetMs` computed as `tmiSentTs - baseMs` (signed; negative before the recording base) where baseMs is the recording start time (or stream start time as fallback).
+- `OffsetMs` computed as `tmiSentTs - baseMs` (signed; negative before the recording base) where baseMs is the recording start time (or stream start time as fallback) — except that a part RESUMED after a daemon restart takes baseMs from the base its own chat file already carries in `recordingStartTime` rather than from the restart the orchestrator passes in (`adoptPartRecordingBase`, `internal/twitch/chat.go`): one file, one epoch, because the resumed part's video is appended to and so its timeline still starts where it did, and rebasing would drop every post-restart message onto the head of the part; a part file with no such header offers nothing to adopt and the run's own base stands.
 
 **USERNOTICE** (subs, raids, memberships):
 - Tag fields extracted: same as PRIVMSG plus `msg-id`, `system-msg`, `msg-param-sub-plan`, `msg-param-recipient-display-name`, `msg-param-viewerCount`.
