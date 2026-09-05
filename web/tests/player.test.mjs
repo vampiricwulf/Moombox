@@ -991,3 +991,88 @@ test("Shift+Tab from the first resume action wraps to the last", { skip }, async
   assert.equal(h.document.activeElement.id, "resume-start",
     "Shift+Tab from the first action wraps to the last");
 });
+
+// ── 19. Player review can-wait pins (Arc J, Task 12 / J15) ──────────────────
+// #23 (Space is inert under the resume dialog) is already covered by test 17
+// above ("player shortcuts are ignored while the resume overlay is up") and
+// the production guard already sits at the top of _playerKeyHandler
+// (`#player-video-wrapper .resume-overlay`, ahead of the Space case) — no new
+// test or production change needed for it here.
+
+// #1/G5 (304 without Last-Modified) is pinned in internal/web/routes/jobs_test.go,
+// not here — it is a Go route test, not a player.js one.
+
+// #2/J1 — R9: a message that entered before the seek lands mid-flight, not at
+// the right edge. Proven by probe P5b in the final review; this pins the
+// currentTime side of it (the delete-currentTime-assignment mutant).
+test("R9: a seek seeds a message already flying with currentTime > 0", { skip }, async () => {
+  const messages = [9200, 9400, 9600, 9800, 10000].map((ms, i) => msg(ms, `m${i}`, `u${i}`));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf(messages),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+
+  // Every message above entered (offsetMs − NICO_LEAD_MS) before 10000 but
+  // within NICO_MAX_LATENESS_MS of it, so the seed places all five mid-flight
+  // instead of dropping or seeding them at the right edge.
+  h.seek(10000);
+
+  assert.ok(h.anims.length > 0, "the seed placed something");
+  assert.ok(h.anims.every((a) => a.currentTime > 0),
+    "a seek lands mid-flight: every seeded animation starts partway through its traverse");
+});
+
+// #4/J4 — I2: a segmented job with unknown part durations (no durationSeconds
+// on any segment) must report an unknown total, never fall through to one
+// loaded part's own video.duration.
+test("a segmented job with unknown part durations has no post-end region", { skip }, async () => {
+  const messages = [msg(0, "hi"), msg(65000, "afterwards")];
+  const h = harness.makePlayer({
+    jobs: [finished("j1", {
+      chatFilename: "chat.json",
+      segments: [
+        { segmentIndex: 0, quality: "720p" },
+        { segmentIndex: 1, quality: "1080p" },
+      ],
+    })],
+    watchState: {},
+    chat: chatOf(messages),
+    storage: { "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  h.video.duration = 60; // one PART's own duration; must never stand in for the unknown total
+
+  assert.equal(h.player._videoDurationMs(), 0,
+    "no per-part durationSeconds means the segmented total is unknown");
+  assert.equal(h.el("player-sidebar-msg-count").textContent, "2 messages",
+    "no '· N after end' clause without a known total");
+  const rows = h.sidebar().children;
+  assert.equal(rows[1].dataset.divider, undefined,
+    "no 'Recording ended' divider without a known total");
+});
+
+// #5/J5 — a seek TO the exact end of the recording (not past it) must still
+// count as "at the end": re-dimming the tail is for seeking BEFORE the end.
+test("a seek to the exact end keeps .post", { skip }, async () => {
+  const messages = [msg(0, "start"), msg(65000, "afterwards")];
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json", lengthSeconds: 60 })],
+    watchState: {},
+    chat: chatOf(messages),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  const rows = h.sidebar().children;
+
+  h.tick(60000);
+  assert.ok(rows[1].classList.contains("post"), "reaching the end promotes the tail");
+
+  h.seek(60000);
+  assert.ok(rows[1].classList.contains("post"),
+    "seeking TO the end (not past it) still counts as at the end");
+  assert.ok(!rows[1].classList.contains("future"), "so it must not be re-dimmed");
+});
