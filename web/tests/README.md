@@ -139,7 +139,7 @@ const jobItems = Object.fromEntries(
   Object.entries(i.JOBS).map(([s, j]) => [s, h.app.renderJobItem(j)]));
 h.app.renderOrphanedFiles(i.FILES);
 h.app.renderOrphanedHistory(i.HISTORY);
-h.app.renderJobDetails(i.JOBS.Finished);
+h.app.details.renderJobDetails(i.JOBS.Finished);
 const rows = (t, r) => [...h.el(t).querySelectorAll(r)].map((x) => x.outerHTML);
 fs.writeFileSync("fixtures/app-job-items.json", JSON.stringify({
   jobItems,
