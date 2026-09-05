@@ -14,7 +14,7 @@ import (
 func TestFindOldestAvailableSeq(t *testing.T) {
 	const front = 437123
 	probe := func(_ context.Context, seq int) (bool, error) { return seq >= front, nil }
-	got, err := FindOldestAvailableSeq(context.Background(), 500000, probe)
+	got, err := FindOldestAvailableSeq(t.Context(), 500000, probe)
 	if err != nil || got != front {
 		t.Fatalf("FindOldestAvailableSeq = %d, %v; want %d", got, err, front)
 	}
@@ -26,7 +26,7 @@ func TestFindOldestAvailableSeq(t *testing.T) {
 // boundary.
 func TestFindOldestAvailableSeqDeadURL(t *testing.T) {
 	probe := func(context.Context, int) (bool, error) { return false, nil } // everything 403s
-	if got, err := FindOldestAvailableSeq(context.Background(), 500000, probe); err == nil {
+	if got, err := FindOldestAvailableSeq(t.Context(), 500000, probe); err == nil {
 		t.Fatalf("dead URL must error, got %d", got)
 	}
 }
@@ -44,7 +44,7 @@ func TestFindOldestAvailableSeqRetriesTransient(t *testing.T) {
 		}
 		return seq >= 200000, nil
 	}
-	got, err := FindOldestAvailableSeq(context.Background(), 500000, probe)
+	got, err := FindOldestAvailableSeq(t.Context(), 500000, probe)
 	if err != nil || got != 200000 {
 		t.Fatalf("= %d, %v; want 200000", got, err)
 	}
@@ -76,7 +76,7 @@ func TestFindOldestAvailableSeqFakeGVS(t *testing.T) {
 		return avail, err
 	}
 
-	got, err := FindOldestAvailableSeq(context.Background(), head, probe)
+	got, err := FindOldestAvailableSeq(t.Context(), head, probe)
 	if err != nil || got != front {
 		t.Fatalf("FindOldestAvailableSeq (fake GVS) = %d, %v; want %d", got, err, front)
 	}

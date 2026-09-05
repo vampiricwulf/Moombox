@@ -69,7 +69,7 @@ func TestHlsLive_AdBreakAcrossWindowSlide(t *testing.T) {
 		gapMu.Unlock()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	// A lagging seq would surface here as ErrGapDetected.
 	if err := d.Start(ctx); err != nil {
@@ -146,7 +146,7 @@ func TestHlsLive_TwitchStitchedAdSkipped(t *testing.T) {
 		gapMu.Unlock()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

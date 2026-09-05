@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +38,7 @@ func TestConcatCopy_Fixture(t *testing.T) {
 	outputPath := filepath.Join(dir, "concat_out.mp4")
 	m := NewMuxer(ffmpegPath, &testLogger{})
 
-	if err := m.ConcatCopy(context.Background(), []string{seg0, seg1}, outputPath); err != nil {
+	if err := m.ConcatCopy(t.Context(), []string{seg0, seg1}, outputPath); err != nil {
 		t.Fatalf("ConcatCopy: %v", err)
 	}
 
@@ -54,7 +53,7 @@ func TestConcatCopy_Fixture(t *testing.T) {
 
 func TestConcatCopy_NoInputs(t *testing.T) {
 	m := NewMuxer("ffmpeg", &testLogger{})
-	if err := m.ConcatCopy(context.Background(), nil, "out.mp4"); err == nil {
+	if err := m.ConcatCopy(t.Context(), nil, "out.mp4"); err == nil {
 		t.Error("expected an error when inputs is empty")
 	}
 }

@@ -122,7 +122,7 @@ func TestHlsLive_FMP4InitWrittenFirst(t *testing.T) {
 		StopOnGap:  true,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -176,7 +176,7 @@ func TestHlsLive_FMP4InitChangeSplitsPart(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	err := d.Start(ctx)
 	if !errors.Is(err, ErrInitSegmentChanged) {
@@ -229,7 +229,7 @@ func TestHlsLive_FMP4InitURLRotatedSameContent(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v (a rotated same-content init URL must not split)", err)
@@ -268,7 +268,7 @@ func TestHlsVod_FMP4InitWrittenFirst(t *testing.T) {
 		IsHls:      true,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -333,7 +333,7 @@ func TestHlsLive_FMP4StuckSegmentSkipsNotSplitCycle(t *testing.T) {
 	var gaps []DownloadGap
 	d.OnGap = func(g DownloadGap) { gaps = append(gaps, g) }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start = %v (ErrGapDetected here means the init write defeated the empty-file skip rule)", err)
@@ -388,7 +388,7 @@ func TestHlsLive_FMP4RevertsToTSSplitsPart(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	err := d.Start(ctx)
 	if !errors.Is(err, ErrInitSegmentChanged) {
@@ -442,7 +442,7 @@ func TestHls_FMP4LegacySidecarSplitsInsteadOfAppending(t *testing.T) {
 		StopOnGap:  true,
 		StreamID:   "12345",
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	err := d.Start(ctx)
 	if !errors.Is(err, ErrInitSegmentChanged) {
@@ -486,7 +486,7 @@ func TestHlsLive_FMP4AdBreakOwnInitNoSplit(t *testing.T) {
 		IsHls:      true,
 		StopOnGap:  true,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start = %v (an ad break's own init must not read as an init change)", err)
@@ -547,7 +547,7 @@ func TestHls_FMP4ResumeDoesNotRewriteInit(t *testing.T) {
 			d1.Cancel()
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d1.Start(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("first Start = %v, want context.Canceled", err)

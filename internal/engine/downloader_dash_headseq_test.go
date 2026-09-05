@@ -28,7 +28,7 @@ func TestFetchSegmentHarvestsHeadSeq(t *testing.T) {
 		t.Fatalf("headSeq before fetch = %d, want -1", got)
 	}
 
-	data, status, err := d.fetchSegment(context.Background(), srv.URL+"/seg?sq=10")
+	data, status, err := d.fetchSegment(t.Context(), srv.URL+"/seg?sq=10")
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("fetchSegment: status=%d err=%v", status, err)
 	}
@@ -68,7 +68,7 @@ func TestFetchSegmentIgnoresMissingOrInvalidHeadSeq(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{OutputFile: filepath.Join(t.TempDir(), "v")})
 	for _, h := range []string{"", "notanumber", "-5"} {
 		header = h
-		if _, _, err := d.fetchSegment(context.Background(), srv.URL); err != nil {
+		if _, _, err := d.fetchSegment(t.Context(), srv.URL); err != nil {
 			t.Fatalf("fetchSegment(header=%q): %v", h, err)
 		}
 		if got := d.headSeq.Load(); got != -1 {
@@ -97,7 +97,7 @@ func TestHandleGoneErrorBehindHeadDefersEnd(t *testing.T) {
 	d.headSeq.Store(100)
 	d.lastSegTime.StoreNow() // budget clock fresh — well inside MaxTimeout
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // retry sleep returns immediately
 
 	n := goneRetryDuringDownload + 1
@@ -140,7 +140,7 @@ func TestHandleGoneErrorBehindHeadRefreshesCredentials(t *testing.T) {
 	d.headSeq.Store(100)
 	d.lastSegTime.StoreNow()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // retry sleeps return immediately
 
 	n := 0
@@ -189,7 +189,7 @@ func TestHandleGoneErrorEvictionDoesNotRefreshCredentials(t *testing.T) {
 	d.headSeq.Store(100)
 	d.lastSegTime.StoreNow()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // retry sleeps return immediately
 
 	n := postBytes403CipherThreshold + 5 // already well past the refresh threshold
@@ -224,7 +224,7 @@ func TestHandleGoneErrorPastHeadDoesNotRefreshCredentials(t *testing.T) {
 	d.lastSegTime.StoreNow()
 
 	n := postBytes403CipherThreshold + 5 // already well past the refresh threshold
-	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
+	if err := d.handleGoneError(t.Context(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (past head, ended)", err)
 	}
 	if got := refreshCalls.Load(); got != 0 {
@@ -246,7 +246,7 @@ func TestHandleGoneErrorPastHeadFinalizes(t *testing.T) {
 	d.lastSegTime.StoreNow()
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
+	if err := d.handleGoneError(t.Context(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (past head, ended)", err)
 	}
 	if !d.streamEnded.Load() {
@@ -269,7 +269,7 @@ func TestHandleGoneErrorBehindHeadTimeoutFinalizes(t *testing.T) {
 	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // budget exhausted
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
+	if err := d.handleGoneError(t.Context(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone (MaxTimeout exhausted)", err)
 	}
 	if d.streamEnded.Load() {
@@ -292,7 +292,7 @@ func TestHandleGoneErrorBehindHeadStillRefreshesLive(t *testing.T) {
 	d.lastSegTime.StoreNow()
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), 403, &n, true); err != ErrQualityLost {
+	if err := d.handleGoneError(t.Context(), 403, &n, true); err != ErrQualityLost {
 		t.Fatalf("handleGoneError = %v, want ErrQualityLost (live stream refresh)", err)
 	}
 }
@@ -320,7 +320,7 @@ func TestHandleGoneErrorCheckErrorDefersWithoutLatching(t *testing.T) {
 	d.headSeq.Store(100)
 	d.lastSegTime.StoreNow()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // defer sleeps return immediately
 
 	n := goneRetryDuringDownload + 1
@@ -361,7 +361,7 @@ func TestHandleGoneErrorOfflinePausesTimeoutClock(t *testing.T) {
 	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // aged past MaxTimeout during the outage
 
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), 403, &n, true); err != nil {
+	if err := d.handleGoneError(t.Context(), 403, &n, true); err != nil {
 		t.Fatalf("offline escalation = %v, want nil (reconnect continues)", err)
 	}
 	if d.lastSegTime.Since() > time.Second {
@@ -427,7 +427,7 @@ func TestHandleHTTPErrorEndedBehindHeadDefers(t *testing.T) {
 	d.lastSegTime.Store(time.Now().Add(-(streamStatusCheckInterval + 5*time.Second)))
 	d.lastHeadProbeTime.StoreNow() // suppress the network head re-probe
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // trailing backoff sleep returns immediately
 
 	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := 0, -1, 0, -1
@@ -452,7 +452,7 @@ func TestFinalizedBehindHeadAccessor(t *testing.T) {
 	d.headSeq.Store(100)
 	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute))
 	n := goneRetryDuringDownload + 1
-	if err := d.handleGoneError(context.Background(), 403, &n, true); err != errStreamDone {
+	if err := d.handleGoneError(t.Context(), 403, &n, true); err != errStreamDone {
 		t.Fatalf("handleGoneError = %v, want errStreamDone", err)
 	}
 	if !d.FinalizedBehindHead() {
@@ -472,7 +472,7 @@ func TestFinalizedBehindHeadAccessor(t *testing.T) {
 	d2.headSeq.Store(100)
 	d2.lastSegTime.StoreNow()
 	n2 := goneRetryDuringDownload + 1
-	if err := d2.handleGoneError(context.Background(), 403, &n2, true); err != errStreamDone {
+	if err := d2.handleGoneError(t.Context(), 403, &n2, true); err != errStreamDone {
 		t.Fatalf("clean handleGoneError = %v, want errStreamDone", err)
 	}
 	if d2.FinalizedBehindHead() {

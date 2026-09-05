@@ -88,7 +88,7 @@ func TestBackstopStallsWhileMayResume(t *testing.T) {
 	act := activityRecorder(d)
 
 	done := make(chan error, 1)
-	go func() { done <- d.Start(context.Background()) }()
+	go func() { done <- d.Start(t.Context()) }()
 
 	// Would-fail check (a): the backstop engaged the stall arm and is still
 	// running, with MayResume()==true throughout. The stall arm is engaged
@@ -187,7 +187,7 @@ func TestBackstopCeilingExpires(t *testing.T) {
 
 	start := time.Now()
 	done := make(chan error, 1)
-	go func() { done <- d.Start(context.Background()) }()
+	go func() { done <- d.Start(t.Context()) }()
 
 	select {
 	case err := <-done:
@@ -248,7 +248,7 @@ func TestNilMayResumeByteCompat(t *testing.T) {
 
 	start := time.Now()
 	done := make(chan error, 1)
-	go func() { done <- d.Start(context.Background()) }()
+	go func() { done <- d.Start(t.Context()) }()
 
 	select {
 	case err := <-done:
@@ -308,7 +308,7 @@ func TestConfirmedEndedIgnoresMayResume(t *testing.T) {
 
 	start := time.Now()
 	done := make(chan error, 1)
-	go func() { done <- d.Start(context.Background()) }()
+	go func() { done <- d.Start(t.Context()) }()
 
 	select {
 	case err := <-done:
@@ -387,7 +387,7 @@ func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 	act := activityRecorder(d)
 
 	done := make(chan error, 1)
-	go func() { done <- d.Start(context.Background()) }()
+	go func() { done <- d.Start(t.Context()) }()
 
 	// Would-fail check (a): the loop got past the goneRetryDuringDownload
 	// escalation and is still running, with MayResume()==true throughout.
@@ -564,7 +564,7 @@ func TestInterruptionNoStallPromptFinalize(t *testing.T) {
 
 	start := time.Now()
 	done := make(chan error, 1)
-	go func() { done <- d.Start(context.Background()) }()
+	go func() { done <- d.Start(t.Context()) }()
 
 	select {
 	case err := <-done:
@@ -639,7 +639,7 @@ func TestInterruptionNoStallNoEvidenceFinalizesNormally(t *testing.T) {
 
 	start := time.Now()
 	done := make(chan error, 1)
-	go func() { done <- d.Start(context.Background()) }()
+	go func() { done <- d.Start(t.Context()) }()
 
 	select {
 	case err := <-done:

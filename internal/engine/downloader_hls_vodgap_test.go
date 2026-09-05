@@ -61,7 +61,7 @@ func TestHlsVodParallel_EarlyGapBoundedAndSkipped(t *testing.T) {
 		gapMu.Unlock()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -145,7 +145,7 @@ func TestHlsVodParallel_TrailingGapClosed(t *testing.T) {
 	var mu sync.Mutex
 	d.OnGap = func(g DownloadGap) { mu.Lock(); gaps = append(gaps, g); mu.Unlock() }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

@@ -233,7 +233,7 @@ func TestRunParallelCatchUpOrdersCorrectlyWithByteCeiling(t *testing.T) {
 	d.currentSeq.Store(0)
 	d.headSeq.Store(head)
 
-	nextSeq, err := d.runParallelCatchUp(context.Background())
+	nextSeq, err := d.runParallelCatchUp(t.Context())
 	if err != nil {
 		t.Fatalf("runParallelCatchUp error = %v, want nil", err)
 	}
@@ -276,7 +276,7 @@ func TestCatchUpReportsFetchArrival(t *testing.T) {
 	d.currentSeq.Store(0)
 	d.headSeq.Store(head)
 
-	if _, err := d.runParallelCatchUp(context.Background()); err != nil {
+	if _, err := d.runParallelCatchUp(t.Context()); err != nil {
 		t.Fatalf("runParallelCatchUp error = %v, want nil", err)
 	}
 
@@ -345,7 +345,7 @@ func TestRunParallelCatchUpNoDeadlockOnPermanentGap(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		nextSeq, err := d.runParallelCatchUp(context.Background())
+		nextSeq, err := d.runParallelCatchUp(t.Context())
 		done <- result{nextSeq, err}
 	}()
 
@@ -514,7 +514,7 @@ func TestCatchUpRollingWindowThroughput(t *testing.T) {
 	})
 
 	start := time.Now()
-	if err := d.Start(context.Background()); err != nil {
+	if err := d.Start(t.Context()); err != nil {
 		t.Fatalf("Start = %v, want nil", err)
 	}
 	elapsed := time.Since(start)
@@ -605,7 +605,7 @@ func TestRunParallelCatchUpCancelWhileBlockedAtCeilingUnwinds(t *testing.T) {
 	// test is exercising.
 	d.catchUpBufferBytesOverride = 256 << 10
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	type result struct {

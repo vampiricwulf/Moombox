@@ -24,7 +24,7 @@ func TestFetchSegmentWithRetryEmitsRetrying(t *testing.T) {
 
 	// The context deadline cuts the 5s retry backoff short — the emission
 	// under test happens before the sleep.
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
 	_, err := d.fetchSegmentWithRetry(ctx, srv.URL+"/seg", nil)
 

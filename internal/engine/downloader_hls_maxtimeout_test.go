@@ -59,7 +59,7 @@ func TestHlsLoop_EnforceMaxTimeoutForcesFinalize(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start() = %v, want nil (backstop finalizes cleanly)", err)
@@ -99,7 +99,7 @@ func TestHlsLoop_NoEnforceRespectsStatusCheck(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start() = %v, want nil (stale-path status check ends it)", err)
@@ -167,7 +167,7 @@ func TestHlsLoop_EnforceMaxTimeoutPausesForOfflineOutage(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start() = %v, want nil", err)

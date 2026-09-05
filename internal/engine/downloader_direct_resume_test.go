@@ -80,7 +80,7 @@ func TestDirectResume_FallbackResetsAvoidsDoubledFile(t *testing.T) {
 		OutputFile:  outFile,
 		IsDirectURL: true,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -157,7 +157,7 @@ func TestDirectDownload_MidStream200DoesNotSplice(t *testing.T) {
 		OutputFile:  outFile,
 		IsDirectURL: true,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -206,7 +206,7 @@ func TestDirectResume_RangeContinuesFromOffset(t *testing.T) {
 		OutputFile:  outFile,
 		IsDirectURL: true,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

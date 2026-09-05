@@ -121,7 +121,7 @@ func TestDashLoopCleanPostLiveEnd(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	if err := d.Start(context.Background()); err != nil {
+	if err := d.Start(t.Context()); err != nil {
 		t.Fatalf("Start = %v, want nil (clean finalize)", err)
 	}
 	wantSegments(t, out, 0, head)
@@ -164,7 +164,7 @@ func TestDashLoopTransientBurstRecovers(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	if err := d.Start(context.Background()); err != nil {
+	if err := d.Start(t.Context()); err != nil {
 		t.Fatalf("Start = %v, want nil", err)
 	}
 	wantSegments(t, out, 0, head) // no gap at flakySeq
@@ -202,7 +202,7 @@ func TestDashLoopBehindHeadBudgetExhaustionWarns(t *testing.T) {
 	d.delays = fastDelays()
 
 	start := time.Now()
-	if err := d.Start(context.Background()); err != nil {
+	if err := d.Start(t.Context()); err != nil {
 		t.Fatalf("Start = %v, want nil (bounded finalize)", err)
 	}
 	wantSegments(t, out, 0, lastAvailable)
@@ -273,7 +273,7 @@ func TestDashLoopRecoversFromCredentialExpiry(t *testing.T) {
 	})
 	d.delays = fastDelays()
 
-	if err := d.Start(context.Background()); err != nil {
+	if err := d.Start(t.Context()); err != nil {
 		t.Fatalf("Start = %v, want nil (credential refresh should have recovered the download)", err)
 	}
 	wantSegments(t, out, 0, endSeq)

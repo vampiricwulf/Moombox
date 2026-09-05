@@ -21,7 +21,7 @@ func TestHandleHTTPErrorVerifiesEndedAfterGap(t *testing.T) {
 	d.lastHeadProbeTime.StoreNow() // skip the network head re-probe
 
 	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := 0, -1, 0, -1
-	err := d.handleHTTPError(context.Background(), true,
+	err := d.handleHTTPError(t.Context(), true,
 		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
 	if err != errStreamDone {
 		t.Fatalf("handleHTTPError = %v, want errStreamDone (ended stream caught by the 30s status check)", err)
@@ -42,7 +42,7 @@ func TestHandleHTTPErrorMaxTimeoutForcesFinalize(t *testing.T) {
 	d.lastHeadProbeTime.StoreNow()                        // skip the network head re-probe
 
 	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := 0, -1, 0, -1
-	err := d.handleHTTPError(context.Background(), true,
+	err := d.handleHTTPError(t.Context(), true,
 		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
 	if err != errStreamDone {
 		t.Fatalf("handleHTTPError = %v, want errStreamDone (MaxTimeout force-finalize despite YouTube 'live')", err)
@@ -64,7 +64,7 @@ func TestHandleHTTPErrorBriefGapSkipsStatusCheck(t *testing.T) {
 	d.lastSegTime.StoreNow()       // segment just arrived — a brief hiccup
 	d.lastHeadProbeTime.StoreNow() // skip the network head re-probe
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // the trailing backoff sleep returns immediately
 
 	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := 0, -1, 0, -1
@@ -95,7 +95,7 @@ func TestHandleHTTPErrorBehindHeadStillLiveRefreshesFormat(t *testing.T) {
 	// curSeq) so the behind-head EARLY retry (return nil) is bypassed and the
 	// status-check branch runs — where behind-head + still-live yields ErrQualityLost.
 	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := MaxSegmentRetries, 50, 0, -1
-	err := d.handleHTTPError(context.Background(), true,
+	err := d.handleHTTPError(t.Context(), true,
 		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
 	if err != ErrQualityLost {
 		t.Fatalf("handleHTTPError = %v, want ErrQualityLost (known segment gone but stream still live → refresh format)", err)
