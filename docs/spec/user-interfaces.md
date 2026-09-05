@@ -265,6 +265,7 @@ The chord system is a three-state finite automaton:
 | `` ` `` | Open Settings dialog |
 | `?` | Open Help overlay |
 | `/` | Enter log search mode (log panel focused only). `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
+| `c` | Clear the log view (log panel focused only). Drops history, the filtered view, and any active search; the level filter is kept. |
 
 **Quit chord:**
 

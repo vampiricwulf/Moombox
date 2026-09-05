@@ -41,6 +41,7 @@ var navigationKeys = helpSection{
 		{"Enter", "Expand/collapse archives"},
 		{"/", "Search (Tasks: filter jobs · Logs: find text)"},
 		{"n / N", "Next / previous search match (Logs)"},
+		{"c", "Clear the log view (Logs)"},
 	},
 }
 

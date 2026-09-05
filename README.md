@@ -454,6 +454,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | Tab | Switch focus between Tasks/Details/Logs |
 | ` | Open settings |
 | ? | Toggle help overlay |
+| c | Clear log view (log panel focused) |
 
 **Navigation**: Up/Down to select/scroll, PgUp/PgDn for log pages, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
 

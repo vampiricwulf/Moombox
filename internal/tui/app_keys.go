@@ -425,6 +425,16 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// "c" clears the log view (history, filtered lines, and any active
+	// search — the level filter stays) when the log panel is focused. The
+	// search intercept above already consumes "c" while typing a query;
+	// IsSearching() here is defense-in-depth, not the primary guard.
+	if key == "c" && a.focusedPanel == PanelLogs && !a.logs.IsSearching() {
+		a.logs.Clear()
+		a.setFeedback("Log view cleared")
+		return a, nil
+	}
+
 	// Unrecognized single-character key — show invalid chord feedback
 	if len(key) == 1 {
 		a.setFeedbackWithDuration("Invalid Chord: "+strings.ToUpper(key), time.Second)
