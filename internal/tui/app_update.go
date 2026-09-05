@@ -649,6 +649,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// error, and what the operator needs to see is the file it wrote.
 		return a, a.ytdlpStatusCmd()
 
+	case statsSnapshotMsg:
+		if !a.statsDlg.IsVisible() || msg.Epoch != a.statsEpoch {
+			return a, nil // closed or re-opened since this fetch started
+		}
+		if msg.Err != nil {
+			a.statsDlg.SetError("Statistics unavailable: " + msg.Err.Error())
+		} else {
+			a.statsDlg.SetSnapshot(msg.Snap)
+		}
+		return a, nil
+	case statsRefreshTickMsg:
+		// One chain per open, re-armed here only — the Web's setInterval. A
+		// tick from a previous open (stale epoch) or after close is dropped,
+		// so r presses and reopens never multiply chains.
+		if !a.statsDlg.IsVisible() || msg.Epoch != a.statsEpoch || a.OnGetStats == nil {
+			return a, nil
+		}
+		return a, tea.Batch(a.fetchStatsCmd(msg.Epoch), statsRefreshTick(msg.Epoch))
+
 	case deleteClientTokenResultMsg:
 		if msg.Err != "" {
 			a.clientTokensDlg.SetError(msg.Err)
@@ -1280,6 +1299,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	if a.ytdlpDlg.IsVisible() {
 		return a.ytdlpDlg.UpdateComponents(msg)
+	}
+	if a.statsDlg.IsVisible() {
+		return a.statsDlg.UpdateComponents(msg)
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {

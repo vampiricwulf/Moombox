@@ -64,6 +64,7 @@ func (a *App) recalcLayout() {
 	a.filesDlg.SetSize(a.width, a.height)
 	a.clientTokensDlg.SetSize(a.width, a.height)
 	a.ytdlpDlg.SetSize(a.width, a.height)
+	a.statsDlg.SetSize(a.width, a.height)
 	a.setupWiz.SetSize(a.width, a.height)
 	a.ffmpegCheck.SetSize(a.width, a.height)
 	a.actionMenu.SetSize(a.width, a.height)
@@ -132,6 +133,9 @@ func (a *App) View() tea.View {
 	}
 	if a.ytdlpDlg.IsVisible() {
 		return a.viewWithMode(a.ytdlpDlg.View())
+	}
+	if a.statsDlg.IsVisible() {
+		return a.viewWithMode(a.statsDlg.View())
 	}
 
 	// Sync status bar state before rendering

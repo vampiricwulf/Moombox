@@ -6,13 +6,19 @@ import (
 )
 
 // FormatFileSize formats bytes into a human-readable string (e.g. "1.5GB", "250.0MB").
+// The tiers and the unit-without-a-space form are the Web's formatBytes
+// (web/public/modules/utils.js), so a figure reads the same in the dashboard,
+// the TUI job details and the TUI statistics overlay.
 func FormatFileSize(bytes int64) string {
 	const (
 		kb = 1024
 		mb = 1024 * kb
 		gb = 1024 * mb
+		tb = 1024 * gb
 	)
 	switch {
+	case bytes >= tb:
+		return fmt.Sprintf("%.1fTB", float64(bytes)/float64(tb))
 	case bytes >= gb:
 		return fmt.Sprintf("%.1fGB", float64(bytes)/float64(gb))
 	case bytes >= mb:

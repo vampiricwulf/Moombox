@@ -9,6 +9,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
+	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
@@ -61,6 +62,16 @@ func UpdateDiskStatus(outputDir string, store *config.Store) *DiskStatus {
 	return status
 }
 
+// Stats converts the shared disk reading to the neutral type both dashboards
+// read. A nil receiver — SharedDiskStatus before the first poll — converts to
+// a nil reading, which stats.Build renders as an empty disk section.
+func (d *DiskStatus) Stats() *stats.Disk {
+	if d == nil {
+		return nil
+	}
+	return &stats.Disk{Free: d.Free, Total: d.Total, UsedPct: d.UsedPct, WarnLevel: d.WarnLevel}
+}
+
 // StatsRouteDeps holds dependencies for the stats route.
 type StatsRouteDeps struct {
 	DB     *database.Database
@@ -70,56 +81,31 @@ type StatsRouteDeps struct {
 // StatsRoutes registers the /api/stats endpoint.
 func StatsRoutes(r chi.Router, deps *StatsRouteDeps) {
 	r.Get("/api/stats", func(rw http.ResponseWriter, req *http.Request) {
-		// Disk status from shared atomic
+		var js *database.JobStats
+		if got, err := deps.DB.GetJobStats(); err == nil {
+			js = got
+		}
+		snap := stats.Build(js, SharedDiskStatus.Load().Stats())
+		warn := snap.Disk.WarnLevel
+		if warn == "" {
+			warn = "ok" // the route's historical default when no reading exists yet
+		}
 		diskResp := map[string]any{
-			"free": 0, "total": 0, "usedPct": 0.0, "warnLevel": "ok",
+			"free": snap.Disk.Free, "total": snap.Disk.Total, "usedPct": snap.Disk.UsedPct, "warnLevel": warn,
 		}
-		if ds := SharedDiskStatus.Load(); ds != nil {
-			diskResp["free"] = ds.Free
-			diskResp["total"] = ds.Total
-			diskResp["usedPct"] = ds.UsedPct
-			diskResp["warnLevel"] = ds.WarnLevel
-		}
-
-		// Job stats from database
 		storageResp := map[string]any{
-			"totalSize":  int64(0),
-			"byPlatform": map[string]int64{"youtube": 0, "twitch": 0},
-			"byStatus":   map[string]int64{"finished": 0, "error": 0, "cancelled": 0},
-			"jobCount":   0,
+			"totalSize":  snap.TotalSize,
+			"byPlatform": snap.SizeByPlatform,
+			"byStatus":   snap.SizeByStatus,
+			"jobCount":   snap.JobCount,
 		}
 		activityResp := map[string]any{
-			"totalFinished":     0,
-			"totalDuration":     int64(0),
-			"totalChatMessages": int64(0),
-			"activeDownloads":   0,
-			"activeMuxing":      0,
-			"byPlatform":        map[string]int{"youtube": 0, "twitch": 0},
-		}
-
-		if stats, err := deps.DB.GetJobStats(); err == nil {
-			storageResp["totalSize"] = stats.FinishedSize + stats.ErrorSize + stats.CancelledSize
-			storageResp["byPlatform"] = map[string]int64{
-				"youtube": stats.YouTubeSize,
-				"twitch":  stats.TwitchSize,
-			}
-			storageResp["byStatus"] = map[string]int64{
-				"finished":  stats.FinishedSize,
-				"error":     stats.ErrorSize,
-				"cancelled": stats.CancelledSize,
-			}
-			storageResp["jobCount"] = stats.FinishedCount + stats.ErrorCount + stats.CancelledCount +
-				stats.ActiveCount + stats.MuxingCount
-
-			activityResp["totalFinished"] = stats.FinishedCount
-			activityResp["totalDuration"] = stats.TotalDuration
-			activityResp["totalChatMessages"] = stats.TotalChatMessages
-			activityResp["activeDownloads"] = stats.ActiveCount
-			activityResp["activeMuxing"] = stats.MuxingCount
-			activityResp["byPlatform"] = map[string]int{
-				"youtube": stats.YouTubeCount,
-				"twitch":  stats.TwitchCount,
-			}
+			"totalFinished":     snap.TotalFinished,
+			"totalDuration":     snap.TotalDuration,
+			"totalChatMessages": snap.TotalChatMessages,
+			"activeDownloads":   snap.ActiveDownloads,
+			"activeMuxing":      snap.ActiveMuxing,
+			"byPlatform":        snap.CountByPlatform,
 		}
 
 		resp := map[string]any{

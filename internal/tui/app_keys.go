@@ -354,6 +354,21 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	if a.statsDlg.IsVisible() {
+		switch a.statsDlg.HandleKey(key) {
+		case "refresh":
+			// Re-fetch on the open session's epoch — the chain R T started
+			// keeps ticking, and starting a second one here is what made
+			// every r press double the polling.
+			return a, tea.Batch(a.statsDlg.Open(), a.fetchStatsCmd(a.statsEpoch))
+		case "close":
+			// HandleKey already hid the overlay (esc/q). Retiring the epoch
+			// orphans the session's pending tick and any in-flight fetch.
+			a.statsEpoch++
+		}
+		return a, nil
+	}
+
 	// Log search intercept — must be before key normalization to preserve
 	// case for N (shift+n) and before chord system to capture / and n/N.
 	if a.focusedPanel == PanelLogs {

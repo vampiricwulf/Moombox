@@ -14,6 +14,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
@@ -240,6 +241,16 @@ func (s *runState) runTUI() {
 	}
 	app.OnDeleteClientToken = func(id string) error {
 		return s.db.DeleteClientToken(id)
+	}
+	app.OnGetStats = func() (stats.Snapshot, error) {
+		js, err := s.db.GetJobStats()
+		if err != nil {
+			return stats.Snapshot{}, err
+		}
+		// The same derivation and the same disk reading /api/stats serves.
+		snap := stats.Build(js, routes.SharedDiskStatus.Load().Stats())
+		snap.Uptime = time.Since(s.startTime)
+		return snap, nil
 	}
 	app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) {
 		// Serialize on the store lock like every other saver (web routes,
