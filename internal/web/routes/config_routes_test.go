@@ -847,3 +847,46 @@ func TestAcquisitionModeApplied(t *testing.T) {
 		t.Errorf("an update with no acquisition key reset it to %q", kept.Cookies.Acquisition)
 	}
 }
+
+func TestConfigUpdatesClientTokenTTL(t *testing.T) {
+	for _, bad := range []float64{0, -1, 3651} {
+		u := map[string]any{"network": map[string]any{"client_token_ttl_days": bad}}
+		if errs := validateConfigUpdates(u); errs["network.client_token_ttl_days"] == "" {
+			t.Errorf("ttl %v accepted: %v", bad, errs)
+		}
+	}
+	good := map[string]any{"network": map[string]any{"client_token_ttl_days": float64(30)}}
+	if errs := validateConfigUpdates(good); len(errs) != 0 {
+		t.Errorf("ttl 30 rejected: %v", errs)
+	}
+	cfg := config.Defaults()
+	applyConfigUpdates(cfg, good)
+	if cfg.Network.ClientTokenTTLDays != 30 {
+		t.Errorf("apply: %d, want 30", cfg.Network.ClientTokenTTLDays)
+	}
+}
+
+func TestConfigUpdatesProbeTargets(t *testing.T) {
+	bad := map[string]any{"connectivity": map[string]any{"probe_targets": []any{"1.1.1.1:443", "8.8.8.8"}}}
+	if errs := validateConfigUpdates(bad); errs["connectivity.probe_targets"] == "" {
+		t.Errorf("host without port accepted: %v", errs)
+	}
+	empty := map[string]any{"connectivity": map[string]any{"probe_targets": []any{}}}
+	if errs := validateConfigUpdates(empty); errs["connectivity.probe_targets"] == "" {
+		t.Errorf("empty list accepted (config.Validate would reject it): %v", errs)
+	}
+	notStrings := map[string]any{"connectivity": map[string]any{"probe_targets": []any{443}}}
+	if errs := validateConfigUpdates(notStrings); errs["connectivity.probe_targets"] == "" {
+		t.Errorf("non-string entry accepted: %v", errs)
+	}
+	good := map[string]any{"connectivity": map[string]any{"probe_targets": []any{" 1.1.1.1:443 ", "[2606:4700::1111]:443"}}}
+	if errs := validateConfigUpdates(good); len(errs) != 0 {
+		t.Errorf("valid targets rejected: %v", errs)
+	}
+	cfg := config.Defaults()
+	applyConfigUpdates(cfg, good)
+	want := []string{"1.1.1.1:443", "[2606:4700::1111]:443"}
+	if len(cfg.Connectivity.ProbeTargets) != 2 || cfg.Connectivity.ProbeTargets[0] != want[0] || cfg.Connectivity.ProbeTargets[1] != want[1] {
+		t.Errorf("apply: %v, want %v (trimmed)", cfg.Connectivity.ProbeTargets, want)
+	}
+}
