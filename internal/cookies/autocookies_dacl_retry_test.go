@@ -20,6 +20,40 @@ func fakeApplyUserOnlyDACL(t *testing.T, fn func(dir string) error) {
 	applyUserOnlyDACL = fn
 }
 
+// awaitSignal receives one signal from ch or fails the test after 5 s — a
+// regression must fail fast, never hang the suite to its timeout.
+func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not happen within 5s", what)
+	}
+}
+
+// awaitSettled waits until the memo has finished its bookkeeping for dir —
+// the in-flight marker is gone (a failed apply) or dirTighteningDone (a
+// successful one). The fakes signal from inside the apply, BEFORE the
+// goroutine's deferred marker update, so a test that writes again straight
+// after its receive could otherwise be deduped as "in flight" and hang on
+// the next receive.
+func awaitSettled(t *testing.T, dir string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tightenedCookieDirsMu.Lock()
+		state, present := tightenedCookieDirs[dir]
+		tightenedCookieDirsMu.Unlock()
+		if !present || state == dirTighteningDone {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tightenCookieDirOnce(%q) still in flight after 5s", dir)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestTightenCookieDirOnceRetriesAfterFailure is the memo-before-apply
 // regression test: with the old code (memoised BEFORE the apply ran), the
 // very first failure would permanently disable hardening for the dir, and
@@ -40,7 +74,8 @@ func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
 
 	// First write: attempted, fails, must NOT be memoised as done.
 	tightenCookieDirOnce(dir)
-	<-done
+	awaitSignal(t, done, "the first DACL apply")
+	awaitSettled(t, dir)
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("after first write: calls = %d, want 1", got)
 	}
@@ -48,7 +83,8 @@ func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
 	// Second write: the prior failure must have reset the dir to "not
 	// started", so this attempts again (and this time succeeds).
 	tightenCookieDirOnce(dir)
-	<-done
+	awaitSignal(t, done, "the second DACL apply")
+	awaitSettled(t, dir)
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("after second write: calls = %d, want 2 (failure was not retried)", got)
 	}
@@ -90,7 +126,7 @@ func TestTightenCookieDirOnceConcurrentWritesSpawnOneApply(t *testing.T) {
 	tightenCookieDirOnce(dir) // spawns the one apply, marks in flight synchronously
 	tightenCookieDirOnce(dir) // lands while the first is in flight — must be a no-op
 
-	<-started // the one apply has started
+	awaitSignal(t, started, "the one DACL apply starting")
 
 	select {
 	case <-started:
@@ -99,7 +135,7 @@ func TestTightenCookieDirOnceConcurrentWritesSpawnOneApply(t *testing.T) {
 	}
 
 	close(release)
-	<-done
+	awaitSignal(t, done, "the released DACL apply")
 
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("calls = %d, want 1 (two concurrent writes must spawn one apply)", got)
@@ -113,7 +149,9 @@ func TestTightenCookieDirOnceConcurrentWritesSpawnOneApply(t *testing.T) {
 // not a no-op), so a HOST where it fails permanently must cost exactly one
 // shell-out per cookie write — never more (no runaway retry storm within a
 // single write) and never fewer (no cap or backoff silently swallowing
-// later writes' attempts).
+// later writes' attempts). Each write waits for the memo to settle before
+// the next, because the fake signals before the goroutine's deferred
+// bookkeeping runs.
 func TestTightenCookieDirOncePermanentFailureCostIsOnePerWrite(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cookiedir")
 	var calls int32
@@ -127,7 +165,8 @@ func TestTightenCookieDirOncePermanentFailureCostIsOnePerWrite(t *testing.T) {
 	const writes = 3
 	for i := 0; i < writes; i++ {
 		tightenCookieDirOnce(dir)
-		<-done
+		awaitSignal(t, done, "the DACL apply")
+		awaitSettled(t, dir)
 	}
 
 	if got := atomic.LoadInt32(&calls); got != writes {
