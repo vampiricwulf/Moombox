@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,10 +12,6 @@ import (
 )
 
 const testPlayerID = "abcdef12"
-
-func testPlayerURL(playerID string) string {
-	return "https://www.youtube.com/s/player/" + playerID + "/player_ias.vflset/en_US/base.js"
-}
 
 // fakePlayerServer hosts a fake YouTube player JS endpoint that conforms
 // to RFC 7232: returns 304 when If-Modified-Since matches the configured
@@ -368,15 +363,6 @@ func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 	fs := newFakePlayerServer(body, "Wed, 01 Jan 2025 00:00:00 GMT", "")
 	defer fs.Close()
 
-	// Build three locale variants of the same URL — singleflight key is
-	// CacheKey(playerURL) which strips the locale.
-	baseURL := strings.TrimSuffix(fs.URL(), "en_US/base.js")
-	urls := []string{
-		baseURL + "en_US/base.js",
-		baseURL + "en_GB/base.js",
-		baseURL + "de/base.js",
-	}
-
 	// Add latency so concurrent calls overlap inside fetchInternal.
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fs.hits.Add(1)
@@ -394,8 +380,9 @@ func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 		t.Fatalf("NewPlayerCache: %v", err)
 	}
 
-	// Rebuild URLs against the slow server's base.
-	urls = []string{
+	// Three locale variants of the same URL — the singleflight key is
+	// CacheKey(playerURL), which strips the locale.
+	urls := []string{
 		slowServer.URL + "/s/player/" + testPlayerID + "/player_ias.vflset/en_US/base.js",
 		slowServer.URL + "/s/player/" + testPlayerID + "/player_ias.vflset/en_GB/base.js",
 		slowServer.URL + "/s/player/" + testPlayerID + "/player_ias.vflset/de/base.js",

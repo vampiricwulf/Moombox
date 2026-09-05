@@ -27,7 +27,9 @@ type renderingLogger struct {
 
 func (l *renderingLogger) record(level, msg string, args ...any) {
 	var b strings.Builder
-	b.WriteString(level + " " + msg)
+	b.WriteString(level)
+	b.WriteString(" ")
+	b.WriteString(msg)
 	for i := 0; i < len(args); i += 2 {
 		if i+1 < len(args) {
 			fmt.Fprintf(&b, " %v=%v", args[i], args[i+1])

@@ -251,7 +251,7 @@ func (s *Service) FetchChannelTabPage(ctx context.Context, channelID, tab, conti
 
 	page := &TabPage{Continuation: token, Items: make([]TabItem, 0, len(items))}
 	for _, v := range items {
-		page.Items = append(page.Items, TabItem{VideoID: v.VideoID, Title: v.Title, Age: v.Age})
+		page.Items = append(page.Items, TabItem(v))
 	}
 	return page, nil
 }

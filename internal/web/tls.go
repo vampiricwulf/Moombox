@@ -162,9 +162,6 @@ func LoadOrGenerateTLSConfig(certPath, keyPath, networkAccess string, logger int
 			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 		},
-		// Server picks the cipher to enforce the curated order rather
-		// than letting the client downgrade us to a weaker entry.
-		PreferServerCipherSuites: true,
 	}, nil
 }
 

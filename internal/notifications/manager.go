@@ -15,17 +15,6 @@ import (
 // discordWebhookRe validates standard Discord webhook URLs (HTTPS only).
 var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord\.com/api/webhooks/\d+/[\w-]+`)
 
-// discordWebhookPath matches the path prefix of a Discord webhook URL so we
-// can redact everything after /api/webhooks/ in error logs.
-var discordWebhookPath = regexp.MustCompile(`(?i)(discord\.com/api/webhooks)/[^\s]*`)
-
-// redactDiscordWebhookURL strips the ID/token segments after /api/webhooks/
-// so a rejected-webhook log can still indicate "it was a discord URL" without
-// copying the secret portion verbatim.
-func redactDiscordWebhookURL(url string) string {
-	return discordWebhookPath.ReplaceAllString(url, "$1/<redacted>")
-}
-
 // redactURLForLog reduces an arbitrary notification URL to scheme://host for
 // log lines. Webhook URLs routinely embed secrets in their path or query
 // (Discord tokens, Slack /services/ paths, ntfy tokens) — a rejection log

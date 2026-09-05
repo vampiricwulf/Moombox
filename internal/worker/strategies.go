@@ -237,7 +237,6 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 // video", "DASH audio", "HLS").
 func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, tag string) {
 	job.Logger.Warn("[Cipher] "+tag+" 403 signal — invalidating solver and POT", "jobID", job.Job.ID, "playerURL", playerURL)
-	playerID := cipher.PlayerIDFromURL(playerURL)
 	if cipherSolver != nil {
 		cipherSolver.InvalidateSolver(playerURL)
 	}
@@ -245,9 +244,6 @@ func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher
 		potProvider.InvalidateCaches()
 	}
 	if job.YT != nil {
-		// Clear the sig-route log dedup so the "sig decrypted via …" Info
-		// fires once on recovery rather than staying silent.
-		job.YT.PlayerAPI.ClearLoggedRoutes(playerID)
 		job.YT.InvalidateVisitorData()
 	}
 }
@@ -543,19 +539,4 @@ func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind stri
 		return videoInfo.GvsBinding, videoInfo.GvsBindingKind
 	}
 	return job.Job.VideoID, youtube.BindingVideoID
-}
-
-// challengeLabel compresses a challenge value to the label the provenance
-// log line reports: "page" (watch-page ytAtN challenge present) or "none".
-//
-// Currently unreferenced by the active mint path: GVS mints use the cached
-// /att/get minter (upstream provider parity), and the challenge-sourced
-// minters (GenerateGvsPoToken) stay dormant — they exceed what yt-dlp does.
-// If premieres 403 despite the yt-dlp-parity bindings, those minters are the
-// next variable to trial, and this label joins the provenance log then.
-func challengeLabel(challenge string) string {
-	if challenge != "" {
-		return "page"
-	}
-	return "none"
 }

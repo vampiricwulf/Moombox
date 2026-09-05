@@ -48,7 +48,7 @@ func (s *GojaResolver) DecryptSignature(ctx context.Context, req SignatureReques
 // that the legacy goja path still handles n when the routed solver is
 // unavailable.
 //
-// This is the worker-side equivalent of PlayerAPI.decryptSig / decryptN:
+// This is the worker-side equivalent of PlayerAPI.decryptN:
 // it keeps the worker's URL-resolution call sites routing through the sidecar
 // on cb017549-family players where the goja extractor cannot produce a sig.
 //

@@ -110,25 +110,15 @@ func startHoldingIRCServer(t *testing.T, scripts ...[]string) *holdingIRCServer 
 	return h
 }
 
-func (h *holdingIRCServer) nextSession(t *testing.T) []string {
-	t.Helper()
-	select {
-	case lines := <-h.sessions:
-		return lines
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for an IRC session to reach its scripted state")
-		return nil
-	}
-}
-
-// nextSessionWhileRunning is nextSession for the tests that drive a real Start,
-// and it watches Start as well as the fixture.
+// nextSessionWhileRunning is the session wait for the tests that drive a real
+// Start (the others go through ircReplier.nextSession in
+// chat_irc_fallback_test.go), and it watches Start as well as the fixture.
 //
 // A Start that has given up produces no further session, so waiting on the
-// fixture alone reports the generic ten-second timeout above — the fixture
-// complaining that nothing arrived — instead of the reason nothing did. A
-// non-blocking poll of done before the wait does not fix that: Start unwinds
-// its session, its loop and its deferred flush AFTER the last reconnect the
+// fixture alone reports the fixture's generic ten-second timeout — the
+// fixture complaining that nothing arrived — instead of the reason nothing
+// did. A non-blocking poll of done before the wait does not fix that: Start
+// unwinds its session, its loop and its deferred flush AFTER the last reconnect the
 // test asked for, so the poll almost always loses the race. Selecting on both
 // is the only shape that reports the real failure.
 //
