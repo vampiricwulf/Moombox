@@ -348,7 +348,7 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 
 	// Generic non-HTTP error (timeout, network, etc.) -- simple fixed-delay retry
 	*consecutiveGoneErrors = 0
-	utils.Sleep(ctx, genericRetryDelay)
+	utils.Sleep(ctx, d.delays.genericRetry)
 	return nil
 }
 
@@ -424,7 +424,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
-			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+			if err := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); err != nil {
 				return err
 			}
 			// Offline pauses the clock (mirrors handleHTTPError's offline
@@ -471,7 +471,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 		// (it fires at postBytes403CipherThreshold, below the gone threshold).
 		if d.behindHeadTailPending() {
 			d.emitActivity(ActivityWaitingForSegment)
-			utils.Sleep(ctx, singleGoneRetryDelay)
+			utils.Sleep(ctx, d.delays.singleGoneRetry)
 			return nil // Continue loop
 		}
 		if !verdictKnown && d.lastSegTime.Since() < d.opts.MaxTimeout {
@@ -480,7 +480,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 			// treated a failed status check as "ended", which silently
 			// truncated on a transient probe failure).
 			d.emitActivity(ActivityWaitingForSegment)
-			utils.Sleep(ctx, singleGoneRetryDelay)
+			utils.Sleep(ctx, d.delays.singleGoneRetry)
 			return nil // Continue loop
 		}
 		// Interruption spec Tier 1/2: a confirmed-ended verdict (streamEndVerified)
@@ -488,7 +488,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 		// UNCONFIRMED budget expiry defers for possible resume.
 		if !d.streamEndVerified && d.stallForPossibleResume() {
 			d.emitActivity(ActivityWaitingResume)
-			utils.Sleep(ctx, interruptionStallRetryDelay)
+			utils.Sleep(ctx, d.delays.interruptionStallRetry)
 			return nil // Continue loop — the refresh path revives in place on resume
 		}
 		if d.finalizeBehindHead() {
@@ -527,7 +527,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 	// the wait (the tracker's 2s segment grace suppresses it for a healthy
 	// stream); it escalates to VerifyingEnd above once gones pile up.
 	d.emitActivity(ActivityWaitingForSegment)
-	utils.Sleep(ctx, singleGoneRetryDelay)
+	utils.Sleep(ctx, d.delays.singleGoneRetry)
 	return nil // Continue loop
 }
 
@@ -590,7 +590,7 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 	// Shift count is clamped so the int64 cast can't overflow.
 	const maxShift = 6 // 1<<6 == 64s — beyond delayCap default of 60s
 	shift := min(max(*sameHeadRetryDelay-1, 0), maxShift)
-	backoff := min(time.Duration(int64(1)<<uint(shift))*time.Second, time.Duration(delayCap)*time.Second)
+	backoff := min(time.Duration(int64(1)<<uint(shift))*d.delays.atEdgeBackoffUnit, time.Duration(delayCap)*d.delays.atEdgeBackoffUnit)
 	d.emitActivity(ActivityRateLimited)
 	d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq.Load(), "delay", backoff)
 	utils.Sleep(ctx, backoff)
@@ -633,7 +633,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		// Transient failure while behind head -- retry with small delay. Surface
 		// the wait (2s grace suppresses it for a stream that recovers quickly).
 		d.emitActivity(ActivityWaitingForSegment)
-		utils.Sleep(ctx, transientFailureRetryDelay)
+		utils.Sleep(ctx, d.delays.transientFailureRetry)
 		return nil // Continue loop
 	}
 
@@ -662,7 +662,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
-			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+			if err := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); err != nil {
 				return err
 			}
 			// Offline pauses the clock: reset lastSegTime so the outage doesn't
@@ -725,7 +725,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
-			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+			if err := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); err != nil {
 				return err
 			}
 			d.lastSegTime.StoreNow() // reset the timeout clock on recovery
@@ -739,7 +739,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		// before reaching here.
 		if !d.streamEndVerified && d.stallForPossibleResume() {
 			d.emitActivity(ActivityWaitingResume)
-			utils.Sleep(ctx, interruptionStallRetryDelay)
+			utils.Sleep(ctx, d.delays.interruptionStallRetry)
 			return nil // Continue loop — the refresh path revives in place on resume
 		}
 		d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
@@ -752,6 +752,6 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		return errStreamDone
 	}
 
-	utils.Sleep(ctx, time.Duration(*sameHeadRetryDelay)*time.Second)
+	utils.Sleep(ctx, time.Duration(*sameHeadRetryDelay)*d.delays.atEdgeBackoffUnit)
 	return nil // Continue loop
 }

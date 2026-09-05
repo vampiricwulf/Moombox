@@ -51,6 +51,7 @@ func TestHlsLoop_StopOnGapReturnsErrGapDetected(t *testing.T) {
 		IsHls:      true,
 		StopOnGap:  true,
 	})
+	d.delays = fastDelays()
 
 	var gap atomic.Value
 	d.OnGap = func(g DownloadGap) { gap.Store(g) }

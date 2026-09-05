@@ -283,7 +283,7 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			// outlive credentialRefreshCooldown so this segment's LATER
 			// attempts can actually claim a refresh. 500ms/1s/2s/4s spans
 			// 7.5s against a 5s cooldown. See forbiddenRefreshAttempts.
-			utils.Sleep(ctx, singleGoneRetryDelay<<attempt)
+			utils.Sleep(ctx, d.delays.singleGoneRetry<<attempt)
 			continue
 		}
 		// Surface the backoff in the progress line — the tracker's grace

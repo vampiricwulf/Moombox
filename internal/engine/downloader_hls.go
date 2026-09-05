@@ -118,12 +118,23 @@ func (d *SegmentDownloader) ensureHlsInit(ctx context.Context, mapURI string) er
 // true, so the backstop's own offline sub-branch never gets a chance to reset
 // the clock first. Returns the context error if cancelled while waiting.
 func (d *SegmentDownloader) waitOnline(ctx context.Context) error {
-	if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+	if err := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); err != nil {
 		return err
 	}
 	d.lastSegTime.StoreNow()
 	return nil
 }
+
+const (
+	// hlsPlaylistRetryDelay is the pause after a media-playlist fetch or
+	// parse failure before the next attempt (bounded by the consecutive-error
+	// budget at the call sites).
+	hlsPlaylistRetryDelay = 5 * time.Second
+	// hlsStuckRetryDelay is the pause after a segment or init-segment fetch
+	// fails before the same one is retried (MaxSegmentRetries rounds, then
+	// the skip-forward / ErrQualityLost logic decides).
+	hlsStuckRetryDelay = 2 * time.Second
+)
 
 // hlsReloadDelay returns how long to wait before the next media-playlist reload,
 // porting ffmpeg's libavformat/hls.c pacing so the live loop hugs the live edge
@@ -140,7 +151,10 @@ func (d *SegmentDownloader) waitOnline(ctx context.Context) error {
 //     ffmpeg's `now - last_load_time >= reload_interval` (its wait `while` is then
 //     false). The caught-up cadence is still floored by the interval, so this
 //     never reloads faster than the segment rate once we've caught up.
-func hlsReloadDelay(lastSegDur, targetDur float64, hadNewSegments bool, elapsed time.Duration) time.Duration {
+//
+// unit is the duration one playlist second maps to — time.Second in
+// production, scaled down by tests (delays.hlsReloadUnit).
+func hlsReloadDelay(lastSegDur, targetDur float64, hadNewSegments bool, elapsed, unit time.Duration) time.Duration {
 	if targetDur <= 0 {
 		targetDur = 2.0
 	}
@@ -153,7 +167,7 @@ func hlsReloadDelay(lastSegDur, targetDur float64, hadNewSegments bool, elapsed 
 	} else {
 		interval = targetDur / 2
 	}
-	remain := time.Duration(interval*float64(time.Second)) - elapsed
+	remain := time.Duration(interval*float64(unit)) - elapsed
 	if remain < 0 {
 		remain = 0
 	}
@@ -292,7 +306,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				return fmt.Errorf("HLS playlist fetch failed after %d consecutive errors: %w", consecutiveErrors, err)
 			}
 			d.emitActivity(ActivityRetrying)
-			utils.Sleep(ctx, 5*time.Second)
+			utils.Sleep(ctx, d.delays.hlsPlaylistRetry)
 			continue
 		}
 
@@ -340,7 +354,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				return fmt.Errorf("failed to parse HLS playlist after %d consecutive errors", consecutiveErrors)
 			}
 			d.emitActivity(ActivityRetrying)
-			utils.Sleep(ctx, 5*time.Second)
+			utils.Sleep(ctx, d.delays.hlsPlaylistRetry)
 			continue
 		}
 		pl := result.Playlist
@@ -538,7 +552,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					}
 				}
 				d.emitActivity(ActivityRetrying)
-				utils.Sleep(ctx, 2*time.Second)
+				utils.Sleep(ctx, d.delays.hlsStuckRetry)
 				segFailed = true
 				break
 			}
@@ -587,7 +601,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					return fmt.Errorf("HLS init segment fetch failed after %d rounds: %w", initFetchFailures, initErr)
 				}
 				d.emitActivity(ActivityRetrying)
-				utils.Sleep(ctx, 2*time.Second)
+				utils.Sleep(ctx, d.delays.hlsStuckRetry)
 				segFailed = true
 				break
 			}
@@ -711,7 +725,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		if n := len(pl.Segments); n > 0 {
 			lastSegDur = pl.Segments[n-1].Duration
 		}
-		utils.Sleep(ctx, hlsReloadDelay(lastSegDur, pl.TargetDuration, len(newSegments) > 0, time.Since(loadTime)))
+		utils.Sleep(ctx, hlsReloadDelay(lastSegDur, pl.TargetDuration, len(newSegments) > 0, time.Since(loadTime), d.delays.hlsReloadUnit))
 	}
 }
 

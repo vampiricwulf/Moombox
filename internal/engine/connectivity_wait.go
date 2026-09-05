@@ -48,12 +48,13 @@ func callIsOnline(isOnline func() bool) bool {
 // waitForConnectivity blocks until isOnline returns true or ctx is cancelled.
 // Returns nil when online, or ctx.Err() if cancelled. The isOnline callback
 // is run with a per-call timeout (see callIsOnline) so a slow or hung probe
-// can't block cancellation.
-func waitForConnectivity(ctx context.Context, isOnline func() bool) error {
+// can't block cancellation. poll is how often isOnline is re-asked
+// (connectivityPollInterval in production; tests pass milliseconds).
+func waitForConnectivity(ctx context.Context, isOnline func() bool, poll time.Duration) error {
 	if callIsOnline(isOnline) {
 		return nil
 	}
-	ticker := time.NewTicker(connectivityPollInterval)
+	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	for {
 		select {

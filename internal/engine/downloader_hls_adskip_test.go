@@ -60,6 +60,7 @@ func TestHlsLive_AdBreakAcrossWindowSlide(t *testing.T) {
 		IsHls:      true,
 		StopOnGap:  true,
 	})
+	d.delays = fastDelays()
 	var gapMu sync.Mutex
 	var gaps []DownloadGap
 	d.OnGap = func(g DownloadGap) {

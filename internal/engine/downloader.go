@@ -230,6 +230,29 @@ const (
 	ActivityWaitingResume                               // broadcast interrupted; deferring finalize while resume is plausible
 )
 
+// String names the activity for logs and test failures.
+func (a DownloadActivity) String() string {
+	switch a {
+	case ActivityNone:
+		return "ActivityNone"
+	case ActivityVerifyingEnd:
+		return "ActivityVerifyingEnd"
+	case ActivityReconnecting:
+		return "ActivityReconnecting"
+	case ActivityRateLimited:
+		return "ActivityRateLimited"
+	case ActivityFindingFirstSegment:
+		return "ActivityFindingFirstSegment"
+	case ActivityRetrying:
+		return "ActivityRetrying"
+	case ActivityWaitingForSegment:
+		return "ActivityWaitingForSegment"
+	case ActivityWaitingResume:
+		return "ActivityWaitingResume"
+	}
+	return fmt.Sprintf("DownloadActivity(%d)", int(a))
+}
+
 // DownloadProgress holds progress information for event callbacks.
 type DownloadProgress struct {
 	Seq        int
@@ -344,6 +367,10 @@ type SegmentDownloader struct {
 	lastStreamStatusCheck atomicTime
 	logger                DownloaderLogger
 	cipherFailureFired    atomic.Bool
+
+	// delays is every wait the loops sleep on; defaultDelays() in production,
+	// fastDelays() in tests (see delays.go).
+	delays delays
 
 	// hlsInitWritten / hlsInitURI / hlsInitHash track the #EXT-X-MAP init
 	// segment at the head of the output file (fMP4/CMAF HLS — see
@@ -695,6 +722,7 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 	d := &SegmentDownloader{
 		opts:   opts,
 		logger: logger,
+		delays: defaultDelays(),
 	}
 	d.currentSeq.Store(int64(opts.StartSeq))
 	d.headSeq.Store(-1)
