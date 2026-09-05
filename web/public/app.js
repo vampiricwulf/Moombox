@@ -3850,7 +3850,7 @@ class MoomboxApp {
 
     const STATUS_OPTIONS = [
       { type: "status", value: "active", label: "Active" },
-      { type: "status", value: "errors", label: "Errors" },
+      { type: "status", value: "issues", label: "Issues" },
       { type: "status", value: "finished", label: "Finished" },
     ];
     const PLATFORM_OPTIONS = [
@@ -4109,7 +4109,7 @@ class MoomboxApp {
   _filterTokenLabel(token) {
     if (token.type === "text") return token.value;
     if (token.type === "status") {
-      const labels = { active: "Active", errors: "Errors", finished: "Finished" };
+      const labels = { active: "Active", issues: "Issues", errors: "Issues", finished: "Finished" };
       return labels[token.value] || token.value;
     }
     if (token.type === "platform") {

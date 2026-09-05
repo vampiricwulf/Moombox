@@ -440,7 +440,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 
 | Key | Action |
 |-----|--------|
-| F | Cycle status filter (All/Active/Errors/Finished) |
+| F | Cycle status filter (All/Active/Issues/Finished) |
 | M | Open action menu |
 | Q Q | Quit |
 | Ctrl+C | Quit immediately |
