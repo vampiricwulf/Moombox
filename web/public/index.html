@@ -647,6 +647,12 @@
                                 placeholder="172.18.0.0/16, 10.0.0.5"
                                 help-text="Comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is used for access control. Leave empty unless Moombox sits behind a reverse proxy you control. Applies immediately."
                             ></sl-input>
+                            <sl-input
+                                id="cfg-probe-targets"
+                                label="Connectivity Probe Targets"
+                                placeholder="1.1.1.1:443, 8.8.8.8:443, 9.9.9.9:443"
+                                help-text="Comma-separated host:port TCP targets raced to detect internet reachability. Leave empty for the defaults. Requires restart."
+                            ></sl-input>
 
                             <sl-divider></sl-divider>
                             <h4>Password</h4>

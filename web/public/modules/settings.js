@@ -692,6 +692,7 @@ export class SettingsController {
       trustForwardedProtoSwitch.checked = !!config.network?.trust_forwarded_proto;
     }
     this.app.setInputValue("cfg-trusted-proxies", (config.network?.trusted_proxies || []).join(", "));
+    this.app.setInputValue("cfg-probe-targets", (config.connectivity?.probe_targets || []).join(", "));
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     if (dpapiFallbackSwitch) {
       dpapiFallbackSwitch.checked = !!config.cookies?.dpapi_fallback;
@@ -852,6 +853,12 @@ export class SettingsController {
       .map((s) => s.trim())
       .filter(Boolean);
 
+    const probeTargetsEl = document.getElementById("cfg-probe-targets");
+    const probeTargets = (probeTargetsEl?.value || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     const dpapiFallback = dpapiFallbackSwitch ? dpapiFallbackSwitch.checked : false;
 
@@ -945,6 +952,7 @@ export class SettingsController {
       bgutils: {
         use_sidecar: useSidecar,
       },
+      ...(probeTargets.length ? { connectivity: { probe_targets: probeTargets } } : {}),
     };
 
     // Only send refresh_interval when the field has a value — the server
