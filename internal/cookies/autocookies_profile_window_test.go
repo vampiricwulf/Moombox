@@ -107,3 +107,53 @@ func TestEachPlatformGetsItsOwnAuthVerifyWindow(t *testing.T) {
 		t.Error("a YouTube check that timed out mid-request was attempted")
 	}
 }
+
+// TestBothPlatformAuthChecksRunAtOnce pins the windows as CONCURRENT, which
+// is the half of the fix that keeps them affordable.
+//
+// Per-platform windows taken in sequence cost 2 × the window per call, and
+// checkPlatformAuth is called twice per refresh pass — three times when the
+// pass rolls back — inside one refreshOverallBudget. At 12 s a window that
+// priced one call at 24 s put the pass at ≈125 s against a 120 s cap, i.e.
+// the split would have been paid for out of a budget it does not own. Run
+// together, a call costs ONE window however many platforms are configured,
+// so the pass is ≈101 s (≈113 s with the rollback re-verify).
+//
+// Both verifiers burn their whole window here, which is the only arrangement
+// that can tell the two apart: with one instant verifier a sequential pair and
+// a concurrent pair both finish in ≈ one window. Sequential would take 2 ×
+// window; the bound is 1.5 × to leave scheduling slack without admitting it.
+func TestBothPlatformAuthChecksRunAtOnce(t *testing.T) {
+	const window = 300 * time.Millisecond
+	shortAuthVerifyWindow(t, window)
+
+	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(bothPlatformsCookieFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewAutoCookieService("", cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+	if err := s.jar.Load(cookiePath); err != nil {
+		t.Fatalf("jar.Load: %v", err)
+	}
+
+	burnTheWindow := func(ctx context.Context) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	s.VerifyYouTubeAuth = burnTheWindow
+	s.VerifyTwitchAuth = burnTheWindow
+
+	start := time.Now()
+	yt, tw := s.checkPlatformAuth(context.Background())
+	elapsed := time.Since(start)
+
+	if elapsed >= 3*window/2 {
+		t.Errorf("two full windows cost %v (≥ 1.5×%v): the platforms must be verified at the same time, not one after the other", elapsed, window)
+	}
+	if yt.state != verifyUnknown || tw.state != verifyUnknown {
+		t.Errorf("states = YouTube %v / Twitch %v, want both verifyUnknown — each verifier spent its own full window", yt.state, tw.state)
+	}
+	if !yt.attempted || !tw.attempted {
+		t.Errorf("attempted = YouTube %v / Twitch %v, want both true — both checks timed out mid-request", yt.attempted, tw.attempted)
+	}
+}

@@ -30,13 +30,24 @@ const (
 	// end to end. Worst case for a two-platform Firefox refresh:
 	//   2 × (processTimeout + the 5s post-kill reap in runWithTimeout) = 70s
 	//   + firefoxLaunchSpacing                                          =  5s
-	//   + the cookie-DB read retries (5 × 500ms)                        ≈  2.5s
-	//   + authVerifyTimeout — ONE window PER PLATFORM since the split,
-	//     so 2 × 12s rather than one 15s shared; checkPlatformAuth      = 24s
+	//   + the cookie-DB read retries (4 × 500ms)                        ≈  2.0s
+	//   + authVerifyTimeout — TWO checkPlatformAuth calls per pass, the
+	//     pre-write snapshot and the post-write verify, each costing
+	//     ONE window because the platforms verify concurrently  2 × 12s = 24s
 	//                                                                   ≈ 101s
-	// against a 120s cap. RAISING processTimeout WITHOUT RAISING
-	// refreshOverallBudget makes the outer ctx cancel the second platform's
-	// launch mid-flight instead of granting it the budget it was just given.
+	// against a 120s cap. The rollback arm makes a THIRD call, which is the
+	// real worst case at ≈ 113s — still under. Four is not reachable: the
+	// snapshot is taken once per pass and the post-verify and the rollback
+	// re-verify are the two arms of one decision.
+	//
+	// Four retries, not five: the loop runs five attempts but sleeps only
+	// BEFORE a re-try (autocookies_firefox.go), so it costs 4 × 500ms.
+	//
+	// RAISING processTimeout WITHOUT RAISING refreshOverallBudget makes the
+	// outer ctx cancel the second platform's launch mid-flight instead of
+	// granting it the budget it was just given. Making the two platform checks
+	// SEQUENTIAL again would put the two-call pass at ≈ 125s and the
+	// three-call pass at ≈ 149s, both over the cap — see checkPlatformAuth.
 	processTimeout = 30 * time.Second
 	// authVerifyTimeout bounds ONE VERIFIER — one window per platform, not one
 	// window for the pair. checkPlatformAuth builds a context.WithTimeout
@@ -46,21 +57,25 @@ const (
 	//
 	// It used to be one shared deadline, and a YouTube check that spent it
 	// left Twitch reporting verifyUnknown about a credential nobody had asked
-	// about; see checkPlatformAuth for what that cost downstream. The price of
-	// the fix is that a two-platform call's ceiling is 2 × this = 24 s, which
-	// is the number the refresh sum above, the setupAbandonGrace columns below
-	// and data-and-storage.md's cross-writer window sentence all carry.
+	// about; see checkPlatformAuth for what that cost downstream.
+	//
+	// A whole checkPlatformAuth call is still worth ONE of these, not two: the
+	// two platforms are verified concurrently, so this is both the per-verifier
+	// bound and the per-call bound, and it stays that way if a third platform
+	// is ever added. That is the number the refresh sum above (once per call,
+	// two or three calls per pass), the setupAbandonGrace columns below and
+	// data-and-storage.md's cross-writer window sentence all carry.
 	//
 	// 12 s, NOT the 15 s it was, and the 3 s came off here rather than out of
-	// any outer budget (ruling J5a). Doubling a 15 s window would have put the
-	// binding Chromium setup column at 60.3 s against a 60 s setupAbandonGrace
-	// and against both clients' own 60 s FinishSetup caps — three constants
-	// the cookie remediation set deliberately. Paying for the split out of the
-	// window it doubles keeps every one of them where it was: 24 s for the
-	// pair leaves that column at 54.3 s, 5.7 s under.
+	// any outer budget (ruling J5a). The split alone would have put the binding
+	// Chromium setup column at 60.3 s against a 60 s setupAbandonGrace and
+	// against both clients' own 60 s FinishSetup caps — three constants the
+	// cookie remediation set deliberately — and would have put a refresh pass
+	// over refreshOverallBudget outright. Paying for it here, plus the
+	// concurrency (J5b), keeps every one of them where it was.
 	//
 	// The value spent is authVerifyWindow, a var below, so a test can prove
-	// the two budgets are separate without waiting 12 s twice.
+	// the windows are per platform and simultaneous without waiting 12 s.
 	//
 	// It is the TIGHTEST of the three bounds a real verify sits under, which
 	// is why the worst cases below are reachable and the margins worth keeping
@@ -109,25 +124,31 @@ const (
 	// Server-side worst case inside that window, summed rather than sampled:
 	//
 	//   Firefox   taskkillDrainDelay            0.3s
-	//             readFirefoxCookies retries   ~2.0s   (5 × 500ms)
-	//             2 × authVerifyTimeout        24.0s
-	//                                        ≈ 26.3s
+	//             readFirefoxCookies retries   ~2.0s   (4 × 500ms)
+	//             both authVerifyTimeouts      12.0s
+	//                                        ≈ 14.3s
 	//   Chromium  cdpExtractTimeout            30.0s
 	//             taskkillDrainDelay            0.3s
-	//             2 × authVerifyTimeout        24.0s
-	//                                        ≈ 54.3s
+	//             both authVerifyTimeouts      12.0s
+	//                                        ≈ 42.3s
 	//
-	// TWO authVerifyTimeouts, not one, since the split that gave each platform
-	// its own window (see checkPlatformAuth). CHROMIUM IS THE BINDING COLUMN,
-	// so the real margin is ~5.7s — not the ~34s a "2 × authVerifyTimeout plus
-	// the read retries" reading suggests.
+	// BOTH platforms' windows are in those columns and TOGETHER they cost one,
+	// not two: checkPlatformAuth verifies the two concurrently, so a call is
+	// worth 12.0s however many platforms are configured. FinishSetup makes
+	// exactly one such call, so unlike the refresh sum above this column
+	// multiplies nothing. CHROMIUM IS THE BINDING COLUMN, so the real margin
+	// is ~17.7s — not the ~45s a "one column plus the read retries" reading
+	// suggests.
 	//
-	// That margin was paid for, not found: the split doubled this line, and
-	// authVerifyTimeout was cut 15s → 12s in the same breath so the doubling
-	// came out of the window rather than out of this constant (ruling J5a). At
-	// 15s the column would have been 60.3s — OVER both this window and the
-	// clients' own 60s cap. Raising authVerifyTimeout back now silently
-	// re-opens that, so the two move together or not at all.
+	// That margin was paid for, not found: the per-platform split doubled this
+	// line, running the checks concurrently halved it back, and
+	// authVerifyTimeout was cut 15s → 12s alongside (rulings J5a, J5b). Take
+	// the concurrency away and this column is 54.3s; take the cut away as well
+	// and it is 60.3s — OVER both this window and the clients' own 60s cap.
+	// Both of those are load-bearing, so neither is a free edit: serialising
+	// checkPlatformAuth or raising authVerifyTimeout re-opens the overrun
+	// silently, and either one has to move this constant and the two client
+	// caps with it.
 	//
 	// The Firefox column deliberately does NOT price closeFirefoxGracefully's
 	// 8.0s poll or the 0.5s cdpCloseFlushDelay behind it. That branch is
