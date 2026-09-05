@@ -9,14 +9,11 @@ import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
 import { FilesController } from "./modules/files.js";
 import { LogPanelController } from "./modules/log-panel.js";
+import { UpdateController } from "./modules/update-indicator.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob, streamUrl } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
-
-// Moombox GitHub repository page — opened by double-clicking the version
-// indicator. Mirrors constants.ProjectRepoURL on the Go side (keep in sync).
-const GITHUB_REPO_URL = "https://github.com/vampiricwulf/Moombox";
 
 // Status sets for quick action visibility (single source of truth)
 const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
@@ -84,6 +81,7 @@ export class MoomboxApp {
     this.stats = new StatsController(this);
     this.files = new FilesController(this);
     this.logPanel = new LogPanelController(this);
+    this.updates = new UpdateController(this);
 
     this.init();
   }
@@ -124,6 +122,7 @@ export class MoomboxApp {
     this.setupEventListeners();
     this.files.bind();
     this.logPanel.bind();
+    this.updates.bind();
     this.setupKeyboardShortcuts();
     this.settings.setupListeners();
     this.connectWebSocket();
@@ -452,12 +451,6 @@ export class MoomboxApp {
       });
     }
 
-    // Update dialog buttons
-    const updateNowBtn = document.getElementById("update-now-btn");
-    if (updateNowBtn) updateNowBtn.addEventListener("click", () => this.applyUpdate());
-    const updateDismissBtn = document.getElementById("update-dismiss-btn");
-    if (updateDismissBtn) updateDismissBtn.addEventListener("click", () => this.dismissUpdate());
-
     // Force-check monitors: the header countdown is the click target.
     const checkCountdown = document.getElementById("check-countdown");
     if (checkCountdown) {
@@ -693,19 +686,19 @@ export class MoomboxApp {
           }
         }
         if (status.updateAvailable) {
-          this._updateAvailable = status.updateAvailable;
-        } else if (this._updateAvailable) {
+          this.updates.available = status.updateAvailable;
+        } else if (this.updates.available) {
           // Server no longer reports a pending update (it was applied or
           // superseded) — clear the stale badge instead of advertising an
           // update we're already running.
-          this._updateAvailable = null;
+          this.updates.available = null;
         }
         if (status.uptime != null) {
           this._uptimeSeconds = status.uptime;
           this._uptimeCapturedAt = Date.now();
         }
         if (status.disk) this.stats.updateDiskIndicator(status.disk);
-        this.updateVersionIndicator();
+        this.updates.updateVersionIndicator();
         this.updateStatusBar();
       }
     } catch (e) {
@@ -996,140 +989,18 @@ export class MoomboxApp {
 
   // ===== Version / Update Indicator =====
 
-  updateVersionIndicator() {
-    const el = document.getElementById("version-indicator");
-    if (!el) return;
-    if (!this._version) { el.style.display = "none"; return; }
-
-    el.style.display = "";
-    // Bind a single stable click handler once; toggle what it does via
-    // the _updateAvailable flag. Previously we cloneNode(false)'d the
-    // element to drop the prior listener, which also dropped any nested
-    // icon children that might be added later and any unrelated listeners.
-    if (!this._versionClickHandler) {
-      this._versionClickHandler = () => {
-        if (this._updateAvailable) {
-          this.showUpdateDialog();
-          return;
-        }
-        // No update pending: click-twice-to-open. The first click arms and
-        // pops the manual tooltip ("Click again to open the GitHub page");
-        // a second click inside the window opens the repo. Mirrors the
-        // TUI's O G chord (and its confirm-chord arming pattern).
-        const tooltip = document.getElementById("version-open-tooltip");
-        if (this._versionOpenArmed) {
-          clearTimeout(this._versionOpenArmTimer);
-          this._versionOpenArmed = false;
-          tooltip?.hide();
-          window.open(GITHUB_REPO_URL, "_blank", "noopener");
-          return;
-        }
-        this._versionOpenArmed = true;
-        tooltip?.show();
-        this._versionOpenArmTimer = setTimeout(() => {
-          this._versionOpenArmed = false;
-          tooltip?.hide();
-        }, 3000);
-      };
-      el.addEventListener("click", this._versionClickHandler);
-    }
-    if (this._updateAvailable) {
-      el.textContent = `v${this._version} ⬆`;
-      el.className = "version-indicator has-update";
-      el.title = `Update available: v${this._updateAvailable.version}`;
-      el.style.cursor = "pointer";
-    } else {
-      el.textContent = `v${this._version}`;
-      el.className = "version-indicator";
-      el.title = `Moombox v${this._version} — click to open the GitHub page`;
-      el.style.cursor = "";
-    }
+  /** Delegates to UpdateController — settings.js calls this through `app.`. */
+  updateVersionIndicator(...args) {
+    return this.updates.updateVersionIndicator(...args);
   }
 
-  showUpdateDialog() {
-    const dlg = document.getElementById("update-dialog");
-    const notes = document.getElementById("update-release-notes");
-    if (!dlg || !this._updateAvailable) return;
-    dlg.label = `Update to v${this._updateAvailable.version}`;
-    // SECURITY CONTRACT: this is the app's ONLY innerHTML sink for external
-    // content (GitHub release markdown), deliberately unescaped because the
-    // server renders AND sanitizes it via bluemonday.UGCPolicy()
-    // (internal/updater/updater.go, pinned by
-    // TestRenderReleaseNotesHtmlSanitizesScripts). If this field ever gets a
-    // different source or the server policy loosens, this becomes stored XSS
-    // — keep the sanitizer, or switch to textContent. Fall back to the raw
-    // stripped markdown as TEXT if an older server didn't send the html
-    // field, and finally to a generic message.
-    const html = this._updateAvailable.releaseNotesHtml || "";
-    if (html) {
-      notes.innerHTML = html;
-    } else {
-      notes.textContent = this._updateAvailable.releaseNotes || "No release notes available.";
-    }
-    dlg.show();
+  /** Delegates to UpdateController — settings.js reads this and the Task 5 pin assigns it. */
+  get _updateAvailable() {
+    return this.updates.available;
   }
 
-  async applyUpdate() {
-    // Updating restarts the whole process: active recordings are
-    // interrupted and resume on the new binary, but live segments broadcast
-    // during the ~30s gap can be lost (Twitch expires them fastest). Make
-    // that a deliberate choice, not a surprise.
-    const active = (this.jobs || []).filter(
-      (j) => j.status === "Downloading" || j.status === "Live" || j.status === "Muxing",
-    ).length;
-    if (active > 0) {
-      const noun = active === 1 ? "download is" : "downloads are";
-      const ok = await this.showConfirm(
-        `${active} ${noun} active — the update restart interrupts them, and live segments during the ~30s gap may be lost (Twitch especially). Update anyway?`,
-        { okLabel: "Update Anyway", okVariant: "warning" },
-      );
-      if (!ok) return;
-    }
-    const btn = document.getElementById("update-now-btn");
-    if (btn) { btn.loading = true; btn.disabled = true; }
-    try {
-      const resp = await fetch("/api/update/apply", { method: "POST" });
-      if (resp.ok) {
-        this.showToast("Update applied. Restarting...", "success");
-        document.getElementById("update-dialog")?.hide();
-      } else {
-        const data = await resp.json().catch(() => ({ error: resp.statusText }));
-        this.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
-      }
-    } catch (e) {
-      this.showToast("Update failed: " + e.message, "danger");
-    } finally {
-      if (btn) { btn.loading = false; btn.disabled = false; }
-    }
-  }
-
-  async dismissUpdate() {
-    // Viewer mode: the shared update dialog is being reused by Settings >
-    // View Release Notes, with this same button relabeled "Close" (see
-    // settings.js). In that mode there may be no pending update at all, and
-    // even if there is, "Close" must NOT skip it — just hide the dialog.
-    const dlg = document.getElementById("update-dialog");
-    if (dlg?.dataset.viewerMode === "true") {
-      dlg.hide();
-      return;
-    }
-    try {
-      const resp = await fetch("/api/update/dismiss", { method: "POST" });
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({ error: resp.statusText }));
-        this.showToast("Failed to dismiss: " + (data.error || "Unknown error"), "danger");
-        return;
-      }
-      const skipped = this._updateAvailable?.tagName || "this version";
-      this._updateAvailable = null;
-      this.updateVersionIndicator();
-      document.getElementById("update-dialog")?.hide();
-      // Version-scoped skip (the old behavior disabled ALL update checks —
-      // that lives in Settings > Updates now); the next release notifies.
-      this.showToast(`Skipped ${skipped} — you'll be notified about the next release.`, "primary");
-    } catch (e) {
-      this.showToast("Failed to dismiss: " + e.message, "danger");
-    }
+  set _updateAvailable(v) {
+    this.updates.available = v;
   }
 
   // ===== WebSocket Management =====
@@ -1448,8 +1319,8 @@ export class MoomboxApp {
         break;
 
       case "update_available":
-        this._updateAvailable = p;
-        this.updateVersionIndicator();
+        this.updates.available = p;
+        this.updates.updateVersionIndicator();
         break;
 
       case "connectivity":
