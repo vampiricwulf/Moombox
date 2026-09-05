@@ -150,7 +150,7 @@ test("the WARN filter renders only ERROR and WARN lines, with the count suffix",
   // The real gesture: click the WARN filter button.
   h.el("logs-container").ownerDocument.querySelector('.log-filter[data-level="WARN"]').click();
 
-  assert.equal(h.app.logFilter, "WARN");
+  assert.equal(h.app.logPanel.logFilter, "WARN");
   assert.equal(viewer.children.length, 4, "DEBUG is below the WARN threshold");
   assert.equal(h.el("log-count").textContent, "4 log entries (WARN+)");
   assert.deepEqual([...viewer.children].map((d) => d.className),
@@ -160,7 +160,7 @@ test("the WARN filter renders only ERROR and WARN lines, with the count suffix",
 
   // Clear empties both the buffer and the view.
   h.el("clear-logs-btn").click();
-  assert.deepEqual(h.app.logs, []);
+  assert.deepEqual(h.app.logPanel.logs, []);
   assert.equal(viewer.children.length, 0);
 });
 
