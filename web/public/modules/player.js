@@ -1857,6 +1857,19 @@ export class PlayerController {
       this._startWatchTracking(jobId);
     }, { signal: sig });
 
+    // Focus trap (U-M8): Tab and Shift+Tab cycle within the dialog's two
+    // actions while it is open; focus is restored on dismiss (already wired).
+    const focusables = () => [...overlay.querySelectorAll("sl-button, button, [tabindex]:not([tabindex='-1'])")]
+      .filter((el) => !el.disabled);
+    overlay.addEventListener("keydown", (e) => {
+      if (e.key !== "Tab") return;
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }, { signal: sig });
+
     overlay.querySelector("#resume-continue").addEventListener("click", () => {
       dismiss();
       const video = document.getElementById("player-video");

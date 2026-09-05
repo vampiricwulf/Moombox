@@ -941,3 +941,53 @@ test("player shortcuts are ignored while the resume overlay is up", { skip }, as
   h.key(" ");
   assert.ok(h.mediaCalls.includes("play"), "Space toggles playback again once the overlay is dismissed");
 });
+
+// ── 18. Resume dialog traps Tab within its actions (Arc J, J6) ──────────────
+
+// The harness's `sl-button` stub (helpers/player-dom.mjs) is a bare custom
+// element with no shadow root, so jsdom's isFocusableAreaElement never treats
+// it as a focusable area on its own (it requires a `tabindex` attribute) —
+// unlike a real Shoelace <sl-button>, whose internal shadow-DOM <button> makes
+// the host itself `document.activeElement` once focused. The two
+// setAttribute calls below are a TEST-ONLY fix for that jsdom fidelity gap,
+// applied to the already-rendered nodes; no tabindex is added to
+// _showResumeDialog's markup.
+test("Tab from the last resume action wraps to the first", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1")],
+    watchState: { resumePosition: 42 },
+  });
+
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "the resume overlay is up");
+
+  const continueBtn = h.el("resume-continue");
+  const startBtn = h.el("resume-start");
+  continueBtn.setAttribute("tabindex", "-1");
+  startBtn.setAttribute("tabindex", "-1");
+
+  startBtn.focus();
+  h.key("Tab", { target: startBtn });
+  assert.equal(h.document.activeElement.id, "resume-continue",
+    "Tab from the last action wraps to the first");
+});
+
+test("Shift+Tab from the first resume action wraps to the last", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1")],
+    watchState: { resumePosition: 42 },
+  });
+
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "the resume overlay is up");
+
+  const continueBtn = h.el("resume-continue");
+  const startBtn = h.el("resume-start");
+  continueBtn.setAttribute("tabindex", "-1");
+  startBtn.setAttribute("tabindex", "-1");
+
+  continueBtn.focus();
+  h.key("Tab", { target: continueBtn, shiftKey: true });
+  assert.equal(h.document.activeElement.id, "resume-start",
+    "Shift+Tab from the first action wraps to the last");
+});
