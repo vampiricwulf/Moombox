@@ -20,6 +20,12 @@ var defaultProbeTargets = []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
 // answers in tens of ms; a dead/blackholed network fails within this window.
 const probeRaceTimeout = 3 * time.Second
 
+// probeDial performs one TCP dial; a variable so tests can inject failure
+// modes (including a panic) without a real network.
+var probeDial = func(ctx context.Context, d *net.Dialer, addr string) (net.Conn, error) {
+	return d.DialContext(ctx, "tcp", addr)
+}
+
 // reachabilityProbe races TCP dials to targets and returns true as soon as ANY
 // handshake completes. A completed TCP handshake proves actual routability to a
 // live host — unlike Windows' InternetGetConnectedState, which only reports
@@ -36,7 +42,16 @@ func reachabilityProbe(ctx context.Context, targets []string) bool {
 	var d net.Dialer
 	for _, t := range targets {
 		go func(addr string) {
-			conn, err := d.DialContext(ctx, "tcp", addr)
+			// Inline recovery (project rule). A panic before the send would
+			// leave the receive loop waiting for a result that never comes;
+			// report "unreachable" instead. No logger is available in this
+			// free function — the Monitor's own recover logs at its level.
+			defer func() {
+				if r := recover(); r != nil {
+					resultCh <- false
+				}
+			}()
+			conn, err := probeDial(ctx, &d, addr)
 			if err != nil {
 				resultCh <- false
 				return
