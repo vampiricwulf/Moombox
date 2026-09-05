@@ -670,13 +670,3 @@ func TestAbandonAnswersAMissingSetupLikeCancelDoes(t *testing.T) {
 			err, cancelErr)
 	}
 }
-
-// restoreRealProbe puts the genuine setupBrowserGone back for one test, undoing
-// a jobReports stub installed earlier in the same test (abandonedSetup installs
-// one). Used by the Windows tests that want the real syscall.
-func restoreRealProbe(t *testing.T) {
-	t.Helper()
-	stub := setupBrowserGone
-	setupBrowserGone = realSetupBrowserGone
-	t.Cleanup(func() { setupBrowserGone = stub })
-}

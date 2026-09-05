@@ -97,7 +97,9 @@ func (m *SettingsModel) View() string {
 	hintRight := m.renderHintText()
 	hintGap := innerW - runewidth.StringWidth("Esc: Close") - runewidth.StringWidth(hintRight)
 	hintGap = max(hintGap, 1)
-	content.WriteString(hintLeft + strings.Repeat(" ", hintGap) + DimStyle.Render(hintRight))
+	content.WriteString(hintLeft)
+	content.WriteString(strings.Repeat(" ", hintGap))
+	content.WriteString(DimStyle.Render(hintRight))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -656,7 +658,7 @@ func (m *SettingsModel) renderSecurity(w int) string {
 	}
 }
 
-func (m *SettingsModel) renderSecurityStatus(w int) string {
+func (m *SettingsModel) renderSecurityStatus(_ int) string {
 	var lines []string
 
 	// Password status
@@ -810,14 +812,16 @@ func (m *SettingsModel) renderRestartOverlay() string {
 	h := 10
 
 	var content strings.Builder
-	content.WriteString(YellowBoldStyle.Render("Restart Required") + "\n\n")
+	content.WriteString(YellowBoldStyle.Render("Restart Required"))
+	content.WriteString("\n\n")
 	content.WriteString("Some settings require a restart to take effect:\n")
 	// Enumerates the CATEGORIES restartRequiredKeys covers. It has to keep pace
 	// with that map: an operator who changed only a cookie setting and is shown
 	// a list naming four things they did not touch reads this as a prompt about
 	// something else and dismisses it — which is the failure the whole entry
 	// exists to prevent.
-	content.WriteString(DimStyle.Render("port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings") + "\n\n")
+	content.WriteString(DimStyle.Render("port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings"))
+	content.WriteString("\n\n")
 
 	content.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Render("Enter: Restart now"))
 	content.WriteString("  ")

@@ -443,3 +443,14 @@ func TestAbandonDefersToARealJobObject(t *testing.T) {
 		t.Fatal("AbandonSetup cleared the setup slot on the deferral path")
 	}
 }
+
+// restoreRealProbe puts the genuine setupBrowserGone back for one test, undoing
+// a jobReports stub installed earlier in the same test (abandonedSetup installs
+// one). Only the Windows tests that want the real syscall use it, so it lives
+// here rather than in the cross-platform reap test file.
+func restoreRealProbe(t *testing.T) {
+	t.Helper()
+	stub := setupBrowserGone
+	setupBrowserGone = realSetupBrowserGone
+	t.Cleanup(func() { setupBrowserGone = stub })
+}

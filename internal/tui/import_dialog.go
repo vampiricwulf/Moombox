@@ -212,18 +212,24 @@ func (m *ImportDialogModel) View() string {
 
 	switch m.step {
 	case 0:
-		content.WriteString(TitleStyle.Render("Import Archive") + "\n")
-		content.WriteString(DimStyle.Render("Select a .zip archive to import") + "\n\n")
-		content.WriteString(m.picker.View() + "\n")
+		content.WriteString(TitleStyle.Render("Import Archive"))
+		content.WriteString("\n")
+		content.WriteString(DimStyle.Render("Select a .zip archive to import"))
+		content.WriteString("\n\n")
+		content.WriteString(m.picker.View())
+		content.WriteString("\n")
 		content.WriteString(DimStyle.Render("↑↓: Navigate  ←/Backspace: Back  →/Enter: Open/Select  Esc: Cancel"))
 
 	case 1:
-		content.WriteString(TitleStyle.Render("Import Archive — Metadata") + "\n")
-		content.WriteString(DimStyle.Render("Optional: override title and channel") + "\n\n")
+		content.WriteString(TitleStyle.Render("Import Archive — Metadata"))
+		content.WriteString("\n")
+		content.WriteString(DimStyle.Render("Optional: override title and channel"))
+		content.WriteString("\n\n")
 
 		// Show selected file
-		content.WriteString(lipgloss.NewStyle().Foreground(ColorGreen).Render("File: ") +
-			truncateString(filepath.Base(m.filePath), contentW-6) + "\n\n")
+		content.WriteString(lipgloss.NewStyle().Foreground(ColorGreen).Render("File: "))
+		content.WriteString(truncateString(filepath.Base(m.filePath), contentW-6))
+		content.WriteString("\n\n")
 
 		// Title field
 		titleLabel := "Title:   "
@@ -231,7 +237,8 @@ func (m *ImportDialogModel) View() string {
 			content.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Render("> " + titleLabel))
 			content.WriteString(m.textInput.View())
 		} else {
-			content.WriteString("  " + DimStyle.Render(titleLabel))
+			content.WriteString("  ")
+			content.WriteString(DimStyle.Render(titleLabel))
 			content.WriteString(renderInactiveInput(m.title, contentW-runewidth.StringWidth(titleLabel)-2, ColorGray))
 		}
 		content.WriteString("\n")
@@ -242,15 +249,18 @@ func (m *ImportDialogModel) View() string {
 			content.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Render("> " + channelLabel))
 			content.WriteString(m.textInput.View())
 		} else {
-			content.WriteString("  " + DimStyle.Render(channelLabel))
+			content.WriteString("  ")
+			content.WriteString(DimStyle.Render(channelLabel))
 			content.WriteString(renderInactiveInput(m.channel, contentW-runewidth.StringWidth(channelLabel)-2, ColorGray))
 		}
 		content.WriteString("\n")
 
 		if m.errorMsg != "" {
-			content.WriteString("\n" + ErrorStyle.Render(m.errorMsg))
+			content.WriteString("\n")
+			content.WriteString(ErrorStyle.Render(m.errorMsg))
 		}
-		content.WriteString("\n" + DimStyle.Render("Tab: Switch field  Enter: Import  Esc: Back"))
+		content.WriteString("\n")
+		content.WriteString(DimStyle.Render("Tab: Switch field  Enter: Import  Esc: Back"))
 
 	case 2:
 		content.WriteString(TitleStyle.Render("Importing...") + "\n\n")

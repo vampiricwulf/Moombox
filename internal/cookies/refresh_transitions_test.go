@@ -229,6 +229,9 @@ func TestGetStatusReturnsSnapshot(t *testing.T) {
 	if !got2.YouTubeAuthenticated {
 		t.Error("GetStatus return is not a value copy — service state was mutated")
 	}
+	if got.YouTubeAuthenticated == got2.YouTubeAuthenticated {
+		t.Error("the mutated copy and a fresh GetStatus agree — they should differ since only the copy was corrupted")
+	}
 	if got2.YouTubeError != "unexpected status 503" {
 		t.Errorf("YouTubeError round-trip: want stable, got %q", got2.YouTubeError)
 	}

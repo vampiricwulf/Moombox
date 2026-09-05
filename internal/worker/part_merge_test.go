@@ -602,7 +602,7 @@ func TestPartMergerMerge_ChatMergeFailureRunIsolatesFromOtherRuns(t *testing.T) 
 	paths := make([]string, 4)
 	for i := range paths {
 		paths[i] = filepath.Join(dir, fmt.Sprintf("base - part%d.mp4", i+1))
-		if err := os.WriteFile(paths[i], []byte(fmt.Sprintf("orig%d", i+1)), 0o644); err != nil {
+		if err := os.WriteFile(paths[i], fmt.Appendf(nil, "orig%d", i+1), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -629,7 +629,7 @@ func TestPartMergerMerge_ChatMergeFailureRunIsolatesFromOtherRuns(t *testing.T) 
 	concatCalls := 0
 	pm.concat = func(_ context.Context, inputs []string, outputPath string) error {
 		concatCalls++
-		return os.WriteFile(outputPath, []byte(fmt.Sprintf("merged:%d", len(inputs))), 0o644)
+		return os.WriteFile(outputPath, fmt.Appendf(nil, "merged:%d", len(inputs)), 0o644)
 	}
 	pm.replace = func(jobID string, segs []database.Segment) error {
 		for i := range segs {
@@ -961,7 +961,7 @@ func TestPartMergerMerge_MultiRunBatch(t *testing.T) {
 	paths := make([]string, 5)
 	for i := range paths {
 		paths[i] = filepath.Join(dir, fmt.Sprintf("base - part%d.mp4", i+1))
-		if err := os.WriteFile(paths[i], []byte(fmt.Sprintf("orig%d", i+1)), 0o644); err != nil {
+		if err := os.WriteFile(paths[i], fmt.Appendf(nil, "orig%d", i+1), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -979,7 +979,7 @@ func TestPartMergerMerge_MultiRunBatch(t *testing.T) {
 	concatCalls := 0
 	pm.concat = func(_ context.Context, inputs []string, outputPath string) error {
 		concatCalls++
-		return os.WriteFile(outputPath, []byte(fmt.Sprintf("merged:%d", len(inputs))), 0o644)
+		return os.WriteFile(outputPath, fmt.Appendf(nil, "merged:%d", len(inputs)), 0o644)
 	}
 	pm.replace = func(jobID string, segs []database.Segment) error {
 		for i := range segs {
