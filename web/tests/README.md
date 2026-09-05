@@ -1,9 +1,9 @@
 # Frontend JS tests
 
 Uses Node.js's built-in test runner (`node:test`). Most suites are pure — no
-dependencies, no DOM — and just import from `../public/modules/`. One suite
-(`player.test.mjs`) drives `player.js` inside a jsdom document; jsdom is the
-only dev dependency, and it is **optional**.
+dependencies, no DOM — and just import from `../public/modules/`. Two suites
+(`player.test.mjs`, `app.test.mjs`) drive their module inside a jsdom document;
+jsdom is the only dev dependency, and it is **optional**.
 
 ## Running
 
@@ -26,10 +26,10 @@ node --test --test-name-pattern="selection" web/tests/player.test.mjs
 Requires Node.js 20+. The `.mjs` extension tells Node to parse files as ES
 modules.
 
-## The DOM suite (jsdom)
+## The DOM suites (jsdom)
 
-`player.test.mjs` is the only suite that needs a DOM. Install it **inside
-`web/tests/`** — never at the repo root:
+`player.test.mjs` and `app.test.mjs` are the suites that need a DOM. Install
+jsdom **inside `web/tests/`** — never at the repo root:
 
 ```bash
 cd web/tests
@@ -43,8 +43,8 @@ node --test web/tests/*.test.mjs
 
 ### How the skip works
 
-`player.test.mjs` probes `await import("jsdom")` at the top of the file. If
-that throws, every test in the file is registered with `{ skip: "..." }`, so a
+Each DOM suite probes `await import("jsdom")` at the top of the file. If that
+throws, every test in the file is registered with `{ skip: "..." }`, so a
 checkout without `npm ci` reports them as **skipped**, never failed:
 
 ```
@@ -53,14 +53,14 @@ checkout without `npm ci` reports them as **skipped**, never failed:
 ℹ skipped 16
 ```
 
-The helper (`helpers/player-dom.mjs`) is imported only after the probe
-succeeds, so a genuine fault in the harness is a failure rather than a silent
-skip.
+The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
+after the probe succeeds, so a genuine fault in the harness is a failure rather
+than a silent skip.
 
 | Suite | Needs jsdom |
 |-------|-------------|
-| `chat-timeline.test.mjs`, `filter-engine.test.mjs`, `filter-parser.test.mjs`, `nico-lanes.test.mjs`, `utils.test.mjs` | no |
-| `player.test.mjs` | yes |
+| `chat-timeline.test.mjs`, `filter-engine.test.mjs`, `filter-parser.test.mjs`, `logout.test.mjs`, `nico-geometry.test.mjs`, `nico-lanes.test.mjs`, `nico-scheduler.test.mjs`, `utils.test.mjs` | no |
+| `player.test.mjs`, `app.test.mjs` | yes |
 
 ## The player harness
 
@@ -97,13 +97,64 @@ globals. Nothing under `web/public/` is patched.
 `setTimeout`/`setInterval` with `h.advance(ms)` and `requestAnimationFrame`
 with `h.flushRaf()`.
 
+## The app harness
+
+`helpers/app-dom.mjs` exports `makeApp(opts)`, the same shape one level up: it
+builds a jsdom document from the **whole `<body>` of `web/public/index.html`**
+(the dashboard touches every panel), publishes the globals, answers the boot
+fetches, imports `app.js` **dynamically** — it has module-level side effects,
+so every global has to exist first — and constructs a real `MoomboxApp`:
+
+```js
+const h = await harness.makeApp({
+  initialState: { status: { version: "2.8.7" }, config: { /* GET /api/config */ } },
+  routes: { "GET /api/files/orphaned": () => [] },
+  storage: { "moombox-theme": "light" },
+});
+h.app.renderJobItem(job);   // the live controller
+h.el("logs-viewer");        // getElementById
+h.advance(1000);            // manual clock
+h.flush();                  // let promises settle
+```
+
+Beyond the player harness's stubs it adds: a `WebSocket` that never connects
+(a live socket would replay `initial_state` into the renderers under test),
+`sl-alert.toast()` / `sl-dialog.show()` and friends, `navigator.clipboard`,
+`scrollIntoView`, `IntersectionObserver` — and, unlike the player harness, a
+**frozen wall clock** (`NOW`) plus an en-US/UTC pin on `toLocaleString`, so
+relative timestamps render the same string on every machine.
+
+`app.test.mjs` is a **pin**, not a behaviour suite: it snapshots what the
+dashboard draws so the controller extractions can be proved to change nothing.
+The snapshot lives in `fixtures/app-job-items.json` and its inputs in
+`fixtures/app-render-inputs.mjs`. When a rendering change is *intended*,
+regenerate it deliberately — from `web/tests/`:
+
+```bash
+node --input-type=module -e '
+import fs from "node:fs";
+const h = await (await import("./helpers/app-dom.mjs")).makeApp();
+const i = await import("./fixtures/app-render-inputs.mjs");
+const jobItems = Object.fromEntries(
+  Object.entries(i.JOBS).map(([s, j]) => [s, h.app.renderJobItem(j)]));
+h.app.renderOrphanedFiles(i.FILES);
+h.app.renderOrphanedHistory(i.HISTORY);
+const rows = (t, r) => [...h.el(t).querySelectorAll(r)].map((x) => x.outerHTML);
+fs.writeFileSync("fixtures/app-job-items.json", JSON.stringify({
+  jobItems,
+  orphanedFiles: rows("files-table", ".files-row"),
+  orphanedHistory: rows("history-table", ".history-row"),
+}, null, 2) + "\n");
+'
+```
+
 ## Scope
 
 Pure modules under `web/public/modules/` — parsers, formatters, timeline math,
-the lane allocator — are covered by the plain suites. `player.js` is covered by
-the jsdom suite above. The other UI-heavy modules (`settings.js`, `setup.js`,
-`trimmer.js`, `app.js`) have no harness yet; `helpers/player-dom.mjs` is the
-pattern to extend if one is wanted.
+the lane allocator, the overlay scheduler — are covered by the plain suites.
+`player.js` and `app.js` are covered by the jsdom suites above. The other
+UI-heavy modules (`settings.js`, `setup.js`, `trimmer.js`) have no harness yet;
+the two helpers are the pattern to extend if one is wanted.
 
 ## Adding a test
 

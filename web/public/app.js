@@ -22,7 +22,7 @@ const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
 const MUX_STATUSES = new Set(["Cancelled", "Error"]);
 const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
 
-class MoomboxApp {
+export class MoomboxApp {
   constructor() {
     this.ws = null;
     this.jobs = [];
