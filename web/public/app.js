@@ -2516,7 +2516,8 @@ class MoomboxApp {
 
   updateDetailsButtons(job) {
     const canCancel = CANCEL_STATUSES.has(job.status);
-    const canResume = canResumeJob(job);
+    // the details view fetches staging; hide until it is known
+    const canResume = canResumeJob(job, { requireKnownStaging: true });
     const canReinit = REINIT_STATUSES.has(job.status);
     const canMux = MUX_STATUSES.has(job.status) && job.hasSegments;
     const canDelete = DELETE_STATUSES.has(job.status);

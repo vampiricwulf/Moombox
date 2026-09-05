@@ -44,8 +44,9 @@ func reachabilityProbe(ctx context.Context, targets []string) bool {
 		go func(addr string) {
 			// Inline recovery (project rule). A panic before the send would
 			// leave the receive loop waiting for a result that never comes;
-			// report "unreachable" instead. No logger is available in this
-			// free function — the Monitor's own recover logs at its level.
+			// report "unreachable" instead. A recovered dial panic is not
+			// logged (no logger reaches this free function); the Monitor's
+			// recover covers its poll loop, not these goroutines.
 			defer func() {
 				if r := recover(); r != nil {
 					resultCh <- false

@@ -166,7 +166,7 @@ func TestRestartRequiredWebIdsExist(t *testing.T) {
 // actually reads.
 //
 // Both UIs summarise the list as a handful of CATEGORIES rather than enumerate
-// twelve keys, and that summary went stale the moment the cookie settings were
+// fifteen keys, and that summary went stale the moment the cookie settings were
 // added: an operator who changed only a cookie setting was shown a prompt
 // naming port, network access, database path and log settings — four things
 // they had not touched — which reads as a prompt about something else and gets
@@ -178,7 +178,7 @@ func TestRestartRequiredWebIdsExist(t *testing.T) {
 // DOM-coupled method, so it cannot be executed here, but the literal is
 // extracted by its own opening rather than searched for file-wide.
 func TestRestartOverlayNamesEveryCategoryItCovers(t *testing.T) {
-	// The categories the twelve keys fall into, each paired with a word the
+	// The categories the fifteen keys fall into, each paired with a word the
 	// summary must contain. Derived from restartRequiredKeys rather than
 	// listed, so a future key in a fifth category fails here instead of
 	// quietly widening the gap between the list and the sentence.

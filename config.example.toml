@@ -241,6 +241,10 @@
 # sidecar_soft_limit_mb = 200                # RSS threshold to fire sidecar GC.
 # sidecar_hard_limit_mb = 512                # V8 --max-old-space-size; OOMs on hit.
 
+# ─── Connectivity ───────────────────────────────────────────────────────────
+# [connectivity]
+# probe_targets = ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"]  # host:port TCP targets raced to detect internet reachability (requires restart)
+
 # ─── Webhook Notifications ──────────────────────────────────────────────────
 # Send webhook notifications for stream events.
 # Works with Discord, Slack, ntfy, or any service that accepts POST webhooks.

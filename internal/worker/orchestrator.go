@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
@@ -54,8 +55,12 @@ func connIsOnline(c Connectivity) func() bool {
 
 // DownloadOrchestrator coordinates the full download lifecycle for a job.
 type DownloadOrchestrator struct {
+	// muxer and ffmpegPath are both guarded by muxerMu: paths.ffmpeg_path is
+	// hot-reloadable, and SetFfmpegPath swaps the pair while downloads run.
+	// Read them through mux() / ffmpegPathValue(), never directly.
 	muxer        *engine.Muxer
 	ffmpegPath   string
+	muxerMu      sync.RWMutex
 	db           *database.Database
 	queue        *JobQueue
 	cipherSolver *cipher.GojaResolver
@@ -89,6 +94,32 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath 
 		conn:         conn,
 		logger:       logger,
 	}
+}
+
+// SetFfmpegPath rebuilds the muxer for a new ffmpeg path (config hot-reload),
+// mirroring TrimService.SetFfmpegPath. Downloads already in flight keep the
+// muxer they captured; new muxes, probes, part merges and post-download trims
+// see the new binary.
+func (o *DownloadOrchestrator) SetFfmpegPath(path string) {
+	m := engine.NewMuxer(path, o.logger)
+	o.muxerMu.Lock()
+	o.muxer = m
+	o.ffmpegPath = path
+	o.muxerMu.Unlock()
+}
+
+// mux returns the current muxer under the read lock.
+func (o *DownloadOrchestrator) mux() *engine.Muxer {
+	o.muxerMu.RLock()
+	defer o.muxerMu.RUnlock()
+	return o.muxer
+}
+
+// ffmpegPathValue returns the current ffmpeg path under the read lock.
+func (o *DownloadOrchestrator) ffmpegPathValue() string {
+	o.muxerMu.RLock()
+	defer o.muxerMu.RUnlock()
+	return o.ffmpegPath
 }
 
 // Execute runs the full download pipeline for a YouTube job.
@@ -570,7 +601,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			"startTime", jobCtx.Job.StartTime,
 			"endTime", jobCtx.Job.EndTime)
 
-		trimService := NewTrimService(o.db, o.ffmpegPath, o.logger)
+		trimService := NewTrimService(o.db, o.ffmpegPathValue(), o.logger)
 		if o.notifier != nil {
 			trimService.SetNotifier(o.notifier)
 		}

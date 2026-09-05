@@ -513,8 +513,9 @@ func openBrowser(url string) {
 
 // newImportRequest builds the archive-import POST. The metadata headers are
 // percent-encoded (url.PathEscape) because HTTP headers are Latin-1 and the
-// server PathUnescapes them — the same contract the Web UI follows with
-// encodeURIComponent. Blank values set no header.
+// server PathUnescapes them — compatible with the Web UI's encodeURIComponent
+// (the server's url.PathUnescape decodes both; PathEscape additionally escapes
+// !'()*). Blank values set no header.
 func newImportRequest(baseURL string, body io.Reader, title, channel string) (*http.Request, error) {
 	req, err := http.NewRequest("POST", baseURL+"/api/import", body)
 	if err != nil {

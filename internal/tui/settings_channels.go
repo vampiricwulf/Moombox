@@ -114,7 +114,7 @@ func validateChannelValues(vals map[string]string) string {
 		}
 		n, err := strconv.Atoi(s)
 		if err != nil || n < min || n > max {
-			return fmt.Sprintf("%s must be a whole number %d-%d (blank = default)", label, min, max)
+			return fmt.Sprintf("%s must be a whole number %d-%d (blank = use the global/default value)", label, min, max)
 		}
 		return ""
 	}

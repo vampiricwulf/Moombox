@@ -479,7 +479,7 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | StagingDirectory | string | "./staging" | `staging_directory` |
 | FfmpegPath | string | "" | `ffmpeg_path` |
 
-`ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath`, which rebuilds the muxer; in-flight trims keep the muxer they started with.
+`ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath` and `DownloadWorker.SetFfmpegPath` (the orchestrator's muxer), so new trims, muxes, probes and part merges use the new binary; operations already running keep the muxer they started with.
 
 #### [logs]
 

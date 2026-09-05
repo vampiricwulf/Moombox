@@ -4,13 +4,16 @@
 import {
   applyChannelOverrides,
   browserPathValidationOutcome,
+  channelTermsForSave,
   cookieImportRolledBackToast,
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
   cookieSetupProbe,
   cookieSetupRejectedMessage,
   formatRelativeTime,
+  restartValuesChanged,
   serverErrorMessage,
+  snapshotRestartValues,
 } from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
@@ -722,18 +725,11 @@ export class SettingsController {
     // Add restart-required badges to relevant fields
     this._addRestartBadges();
 
-    // Snapshot restart-required values for change detection
-    this._originalRestartValues = {
-      "network.port": config.network?.port,
-      "network.network_access": config.network?.network_access,
-      "network.https_enabled": config.network?.https_enabled,
-      "network.tls_cert_path": config.network?.tls_cert_path,
-      "network.tls_key_path": config.network?.tls_key_path,
-      "paths.database_path": config.paths?.database_path,
-      "paths.log_file_path": config.paths?.log_file_path,
-      "logs.log_max_file_size": config.logs?.log_max_file_size,
-      "logs.log_max_files": config.logs?.log_max_files,
-    };
+    // Snapshot restart-required values for change detection. Driven by
+    // RESTART_REQUIRED_FIELDS rather than a hand-written literal: a shorter
+    // literal left the paths it omitted comparing against undefined, so every
+    // save reported "changed" and prompted for a restart.
+    this._originalRestartValues = snapshotRestartValues(config, RESTART_REQUIRED_FIELDS);
 
     // Network is the default visible section, so load security status now.
     // Reset flag so the form fields are cleared on a full config repopulate —
@@ -1089,33 +1085,10 @@ export class SettingsController {
    * If so, prompt the user and call POST /api/restart.
    */
   async _checkRestartRequired(config) {
-    /** Resolve a dotted path like "network.port" from the config object */
-    const resolve = (obj, path) => {
-      const parts = path.split(".");
-      let v = obj;
-      for (const p of parts) {
-        if (v == null) return undefined;
-        v = v[p];
-      }
-      return v;
-    };
-
-    const current = {};
-    for (const { path } of RESTART_REQUIRED_FIELDS) {
-      current[path] = resolve(config, path);
+    const current = snapshotRestartValues(config, RESTART_REQUIRED_FIELDS);
+    if (!restartValuesChanged(this._originalRestartValues, current, RESTART_REQUIRED_FIELDS)) {
+      return;
     }
-
-    const changed = RESTART_REQUIRED_FIELDS.some(({ path }) => {
-      const a = current[path];
-      const b = this._originalRestartValues[path];
-      // For booleans: treat null/undefined as false to avoid false positives
-      // when the server omits a field that defaults to false
-      if (typeof a === "boolean" || typeof b === "boolean") {
-        return !!a !== !!b;
-      }
-      return String(a ?? "") !== String(b ?? "");
-    });
-    if (!changed) return;
 
     // Capture old network values for redirect detection
     const oldPort = this._originalRestartValues["network.port"] || 774;
@@ -1451,6 +1424,10 @@ export class SettingsController {
         : channel.terms.stream || ""
       : "";
     document.getElementById("channel-terms-input").value = termsValue;
+    // What the operator was SHOWN. saveChannel compares against it so an
+    // untouched field keeps the existing terms shape — a named map with no
+    // `stream` key shows blank here and must not be saved away.
+    this._channelTermsSeed = termsValue;
     document.getElementById("channel-include-vods").checked =
       channel?.include_non_live_content || false;
 
@@ -1595,17 +1572,11 @@ export class SettingsController {
       ...(!isTwitch ? { include_non_live_content: includeVods || undefined } : {}),
     };
 
-    // Preserve terms structure: if existing terms was a named map (e.g. {stream, vod}),
-    // only update the "stream" key and keep other keys intact.
-    if (termsValue) {
-      if (existingChannel?.terms && typeof existingChannel.terms === "object" && !Array.isArray(existingChannel.terms) && existingChannel.terms.stream !== undefined) {
-        channel.terms = { ...existingChannel.terms, stream: termsValue };
-      } else {
-        channel.terms = termsValue;
-      }
-    } else {
-      channel.terms = undefined;
-    }
+    // Preserve terms structure: an untouched field keeps whatever shape the
+    // config holds, a stream-keyed map has only its "stream" key rewritten,
+    // and clearing an edited field removes terms (JSON.stringify drops the
+    // undefined key from the payload).
+    channel.terms = channelTermsForSave(existingChannel?.terms, this._channelTermsSeed ?? "", termsValue);
 
     // Add quality preference (both platforms)
     const qualitySelect = document.getElementById("channel-quality-select");
