@@ -87,6 +87,7 @@ var sections = []settingsSection{
 			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)", nil},
 			{"trust_forwarded_proto", "Trust forwarded proto", fieldToggle, nil, "ONLY enable behind a TLS-terminating reverse proxy that strips client X-Forwarded-Proto", nil},
 			{"trusted_proxies", "Trusted proxies", fieldText, nil, "comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is honored — leave empty unless behind a proxy you control", nil},
+			{"probe_targets", "Connectivity probe targets", fieldText, nil, "comma-separated host:port TCP targets raced to detect internet reachability; blank = defaults (requires restart)", nil},
 		},
 	},
 	{
@@ -458,6 +459,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["tls_key_path"] = cfg.Network.TLSKeyPath
 	m.values["trust_forwarded_proto"] = boolToDisplay(cfg.Network.TrustForwardedProto)
 	m.values["trusted_proxies"] = strings.Join(cfg.Network.TrustedProxies, ", ")
+	m.values["probe_targets"] = strings.Join(cfg.Connectivity.ProbeTargets, ", ")
 
 	// Paths
 	m.values["database_path"] = cfg.Paths.DatabasePath
@@ -575,6 +577,20 @@ func (m *SettingsModel) applyValues() {
 		}
 		if !ok {
 			m.errorMsg = fmt.Sprintf("Trusted proxies: %q is not a valid IP or CIDR", p)
+			m.status = saveError
+			return
+		}
+	}
+
+	// Validate probe_targets entries. Same rationale as trusted_proxies above:
+	// config.Validate refuses an unparseable host:port, so gate it here too.
+	for _, p := range strings.Split(m.values["probe_targets"], ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, _, err := net.SplitHostPort(p); err != nil {
+			m.errorMsg = fmt.Sprintf("Probe targets: %q is not a valid host:port", p)
 			m.status = saveError
 			return
 		}
@@ -707,6 +723,16 @@ func (m *SettingsModel) applyValues() {
 		}
 	}
 	m.cfg.Network.TrustedProxies = proxies
+	targets := []string(nil)
+	for _, p := range strings.Split(m.values["probe_targets"], ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			targets = append(targets, p)
+		}
+	}
+	if len(targets) == 0 {
+		targets = append([]string(nil), config.DefaultProbeTargets...)
+	}
+	m.cfg.Connectivity.ProbeTargets = targets
 
 	// Paths
 	m.cfg.Paths.DatabasePath = m.values["database_path"]
