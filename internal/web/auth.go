@@ -327,8 +327,9 @@ func VerifyToken(token, storedHash string) bool {
 // doc for the security rationale.
 var trustForwardedProto atomic.Bool
 
-// SetTrustForwardedProto enables/disables X-Forwarded-Proto trust at
-// startup. Only call once during service init.
+// SetTrustForwardedProto enables/disables X-Forwarded-Proto trust. Set at
+// startup from cmd/moombox/services.go and re-applied by the config
+// hot-reload callback (routes_wiring.go); the atomic makes both safe.
 func SetTrustForwardedProto(trust bool) { trustForwardedProto.Store(trust) }
 
 // IsRequestSecure returns true when the request arrived over TLS, or

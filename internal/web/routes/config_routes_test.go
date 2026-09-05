@@ -19,12 +19,15 @@ import (
 // configRoutesFixture wires ConfigRoutes against a fresh temp store.
 // The Callbacks atomics let tests verify which hot-reload paths fired.
 type configRoutesFixture struct {
-	router   chi.Router
-	store    *config.Store
-	logLevel atomic.Pointer[string] // last value passed to OnLogLevelChange
-	parallel atomic.Int32           // last value passed to OnMaxParallelChange
-	hideAge  atomic.Bool            // OnHideFinishedAgeChanged was invoked
-	channels atomic.Bool            // OnChannelChange was invoked
+	router     chi.Router
+	store      *config.Store
+	logLevel   atomic.Pointer[string] // last value passed to OnLogLevelChange
+	parallel   atomic.Int32           // last value passed to OnMaxParallelChange
+	hideAge    atomic.Bool            // OnHideFinishedAgeChanged was invoked
+	channels   atomic.Bool            // OnChannelChange was invoked
+	goSoft     atomic.Int32           // last value passed to OnGoSoftLimitChange
+	trustProto atomic.Pointer[bool]   // last value passed to OnTrustForwardedProtoChange
+	ffmpeg     atomic.Pointer[string] // last value passed to OnFfmpegPathChange
 }
 
 func newConfigRoutesFixture(t *testing.T) *configRoutesFixture {
@@ -38,14 +41,29 @@ func newConfigRoutesFixture(t *testing.T) *configRoutesFixture {
 	f := &configRoutesFixture{router: r, store: store}
 
 	cb := &ConfigRoutesCallbacks{
-		OnLogLevelChange:         func(level string) { f.logLevel.Store(&level) },
-		OnMaxParallelChange:      func(n int) { f.parallel.Store(int32(n)) },
-		OnHideFinishedAgeChanged: func() { f.hideAge.Store(true) },
-		OnChannelChange:          func() { f.channels.Store(true) },
+		OnLogLevelChange:            func(level string) { f.logLevel.Store(&level) },
+		OnMaxParallelChange:         func(n int) { f.parallel.Store(int32(n)) },
+		OnHideFinishedAgeChanged:    func() { f.hideAge.Store(true) },
+		OnChannelChange:             func() { f.channels.Store(true) },
+		OnGoSoftLimitChange:         func(mb int) { f.goSoft.Store(int32(mb)) },
+		OnTrustForwardedProtoChange: func(b bool) { f.trustProto.Store(&b) },
+		OnFfmpegPathChange:          func(p string) { f.ffmpeg.Store(&p) },
 	}
 	ConfigRoutes(r, store, cb)
 
 	return f
+}
+
+// putConfig PUTs one JSON body and fails the test on a non-200.
+func putConfig(t *testing.T, f *configRoutesFixture, body map[string]any) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(raw))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT %v: want 200, got %d (body: %s)", body, rec.Code, rec.Body.String())
+	}
 }
 
 // --- GET /api/config ---
@@ -421,6 +439,32 @@ func TestConfigPutFiresChannelChangeCallback(t *testing.T) {
 	}
 }
 
+func TestConfigPutFiresGoSoftLimitCallback(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+	putConfig(t, f, map[string]any{"memory": map[string]any{"go_soft_limit_mb": 512}})
+	if got := f.goSoft.Load(); got != 512 {
+		t.Errorf("OnGoSoftLimitChange: want 512, got %d", got)
+	}
+}
+
+func TestConfigPutFiresTrustForwardedProtoCallback(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+	putConfig(t, f, map[string]any{"network": map[string]any{"trust_forwarded_proto": true}})
+	if got := f.trustProto.Load(); got == nil || !*got {
+		t.Errorf("OnTrustForwardedProtoChange: want true, got %v", got)
+	}
+}
+
+func TestConfigPutFiresFfmpegPathCallback(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+	// An absolute path that pathFieldError accepts (read pathFieldError: it
+	// rejects traversal and, for required fields, blanks; ffmpeg_path is optional).
+	putConfig(t, f, map[string]any{"paths": map[string]any{"ffmpeg_path": "C:/tools/ffmpeg.exe"}})
+	if got := f.ffmpeg.Load(); got == nil || *got != "C:/tools/ffmpeg.exe" {
+		t.Errorf("OnFfmpegPathChange: want C:/tools/ffmpeg.exe, got %v", got)
+	}
+}
+
 func TestConfigPutDoesNotFireUnchangedCallbacks(t *testing.T) {
 	// Hot-reload callbacks are gated on actual value changes — a no-op
 	// PUT (e.g. settings UI re-saves the same form) shouldn't broadcast
@@ -450,6 +494,15 @@ func TestConfigPutDoesNotFireUnchangedCallbacks(t *testing.T) {
 	}
 	if f.channels.Load() {
 		t.Error("OnChannelChange should NOT fire when channels[] absent")
+	}
+	if f.goSoft.Load() != 0 {
+		t.Error("OnGoSoftLimitChange should NOT fire for port-only PUT")
+	}
+	if f.trustProto.Load() != nil {
+		t.Error("OnTrustForwardedProtoChange should NOT fire for port-only PUT")
+	}
+	if f.ffmpeg.Load() != nil {
+		t.Error("OnFfmpegPathChange should NOT fire for port-only PUT")
 	}
 }
 

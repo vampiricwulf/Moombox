@@ -2,10 +2,13 @@ package main
 
 import (
 	"log/slog"
+	"math"
+	"runtime/debug"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/updater"
+	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
 
@@ -97,6 +100,19 @@ func (s *runState) wireRoutes() func() {
 			// Hot-reload notification targets so edits apply immediately —
 			// previously they silently required a restart nothing asked for.
 			s.notifyMgr.Reload(s.configStore.Snapshot())
+		},
+		OnGoSoftLimitChange: func(mb int) {
+			if mb > 0 {
+				debug.SetMemoryLimit(int64(mb) << 20)
+			} else {
+				debug.SetMemoryLimit(math.MaxInt64) // Go's "no limit"
+			}
+			s.log.Info("Go soft memory limit re-applied", slog.Int("mb", mb))
+		},
+		OnTrustForwardedProtoChange: web.SetTrustForwardedProto,
+		OnFfmpegPathChange: func(path string) {
+			s.trimSvc.SetFfmpegPath(path)
+			s.log.Info("trim service ffmpeg path re-applied", slog.String("path", path))
 		},
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})
