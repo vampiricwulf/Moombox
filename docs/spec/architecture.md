@@ -436,6 +436,8 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 | `ProgressThrottle` | 500ms | Throttle VOD progress emission |
 | `DefaultRetryDelayCap` | 60s | Max retry delay (exponential backoff cap) |
 
+Every wait the loops sleep on is a field of the unexported `delays` struct (`internal/engine/delays.go`), defaulting to the named constants and pinned by `TestDefaultDelaysMatchConstants`; the engine tests poke `fastDelays()` (÷20) so `go test ./internal/engine/` runs in seconds while production timing is untouched.
+
 #### Catch-up: rolling window and byte-bounded buffer
 
 Parallel catch-up (`runParallelCatchUp`, `internal/engine/downloader_parallel.go`) is a rolling window, not per-batch barriers: workers claim sequences continuously off a shared cursor and completed segments flush to disk in strict ascending order as they arrive, rather than waiting for an entire batch of `segment_workers` fetches to land before the next batch starts. The prior per-batch design paid a full HEAD-probe round trip between every batch; the synthetic-latency harness for this path (`TestCatchUpRollingWindowThroughput`, `downloader_parallel_test.go`) measured a batched run at 4.888s dropping to 0.84s for the same segment count under the rolling window.
