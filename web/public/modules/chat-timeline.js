@@ -27,6 +27,39 @@ export function normalizeOffsetMs(raw) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * T-F12 remainder: messages written before `hasOffset` existed (or with
+ * `hasOffset` false) carry `offsetMs` 0 and pile at the start of the timeline.
+ * When the file header has an epoch and the message a `timestampUsec`, the
+ * offset is derivable with the arithmetic the Go producer itself uses
+ * (`offsetMs = timestampUsec/1000 − epochMs`, internal/chat/downloader.go), so
+ * the player recovers it at load. Messages that already have an offset are
+ * untouched — theirs is authoritative — and without a parseable epoch nothing
+ * changes (R10 keeps the pile from flooding the overlay). Derived offsets are
+ * signed: waiting-room chat predates the epoch and stays negative (N-F2).
+ *
+ * `streamStartTime` must be the FILE's own header epoch — one file, one epoch
+ * — so on a multi-part job this runs per part, before mergePartChats shifts
+ * the parts onto the global timeline. Twitch parts carry no `timestampUsec`
+ * and fall through untouched; their offsets are already video-relative.
+ *
+ * Returns the same array, mutated in place.
+ * @param {Array<{offsetMs?:number, hasOffset?:boolean, timestampUsec?:string|number}>} messages
+ * @param {string|undefined} streamStartTime the chat file header's epoch
+ */
+export function deriveMissingOffsets(messages, streamStartTime) {
+  const epochMs = Date.parse(streamStartTime || "");
+  if (!Number.isFinite(epochMs)) return messages;
+  for (const m of messages || []) {
+    if (m.hasOffset) continue;
+    const usec = typeof m.timestampUsec === "number" ? m.timestampUsec : Number(m.timestampUsec);
+    if (!Number.isFinite(usec) || usec <= 0) continue;
+    m.offsetMs = Math.round(usec / 1000) - epochMs;
+    m.hasOffset = true;
+  }
+  return messages;
+}
+
 export function computeChatBiasMs({ platform, chatStreamStartTime, jobStreamStartTime }) {
   if (platform === "twitch") return 0;
   const chatStart = Date.parse(chatStreamStartTime || "");

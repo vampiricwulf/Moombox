@@ -6,6 +6,7 @@ import { SegmentPlayer } from "./segments.js";
 import {
   normalizeOffsetMs,
   computeChatBiasMs,
+  deriveMissingOffsets,
   mergePartChats,
   indexAfter,
   partitionChatByVideo,
@@ -1004,6 +1005,11 @@ export class PlayerController {
           const r = await fetch(`/api/jobs/${jobId}/segments/${s.segmentIndex}/chat`);
           if (!r.ok) return null;
           const data = await r.json();
+          // Per part, against the PART's own header epoch — before
+          // mergePartChats shifts it onto the global timeline (one file, one
+          // epoch). A no-op for the Twitch parts this path normally serves;
+          // it earns its keep on a legacy part that has a header epoch.
+          if (data) deriveMissingOffsets(data.messages, data.streamStartTime);
           const off = segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
           return { startOffsetSec: off ? off.startOffset : 0, data };
         } catch {
@@ -1018,7 +1024,12 @@ export class PlayerController {
     if (this._selectionSeq !== selectionId) return null;
     if (!chatRes.ok) return null;
     const data = await chatRes.json();
-    return this._selectionSeq !== selectionId ? null : data;
+    if (this._selectionSeq !== selectionId) return null;
+    // A chat file written before the producer stamped hasOffset has every
+    // message at offset 0; recover them from the header epoch before the
+    // caller applies the bias and sorts (T-F12).
+    if (data) deriveMissingOffsets(data.messages, data.streamStartTime);
+    return data;
   }
 
   buildSidebarChat() {

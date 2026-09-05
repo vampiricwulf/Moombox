@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeOffsetMs, computeChatBiasMs, partitionChatByVideo, indexAfter, mergePartChats,
-  formatChatHeader, dividerLabelFor,
+  formatChatHeader, dividerLabelFor, deriveMissingOffsets,
 } from "../public/modules/chat-timeline.js";
 
 test("normalizeOffsetMs: numbers, json.Number strings, garbage", () => {
@@ -146,4 +146,77 @@ test("mergePartChats: null part, null messages, first-wins platform and a fracti
   assert.equal(merged.platform, "youtube");
   assert.deepEqual(merged.messages.map((m) => [m.id, m.offsetMs]), [["a", 301000]]);
   assert.equal(Number.isInteger(merged.messages[0].offsetMs), true);
+});
+
+// --- deriveMissingOffsets (T-F12 remainder) ------------------------------
+//
+// Chat files written before the Go producer had HasOffset carry offsetMs 0 on
+// every message, so the whole archive piles at t=0 and the sidebar/overlay
+// show it all at once (R10 caps the flood, it does not fix it). The offset is
+// recoverable whenever the file header has an epoch: the Go producer computes
+// offsetMs = timestampUsec/1000 − streamStartMs (internal/chat/downloader.go),
+// so the player can do the same arithmetic on load.
+//
+// EPOCH_MS below is the file header's `streamStartTime`, i.e. the file's own
+// (first run's) epoch — the same "one file, one epoch" value everything else
+// on the timeline is measured against.
+const EPOCH = "2026-06-11T10:00:00Z";
+const EPOCH_MS = Date.parse(EPOCH);
+const usecAt = (ms) => String((EPOCH_MS + ms) * 1000);
+
+test("deriveMissingOffsets: legacy messages get the offset the producer would have written", () => {
+  const messages = [
+    { id: "a", offsetMs: 0, timestampUsec: usecAt(1500) },              // hasOffset absent (legacy)
+    { id: "b", offsetMs: 0, hasOffset: false, timestampUsec: usecAt(2500) }, // explicit false
+  ];
+  const same = deriveMissingOffsets(messages, EPOCH);
+  assert.equal(same, messages, "mutates in place and returns the same array");
+  assert.deepEqual(messages.map((m) => [m.offsetMs, m.hasOffset]), [[1500, true], [2500, true]]);
+});
+
+test("deriveMissingOffsets: a message that already has an offset is untouched", () => {
+  const messages = [{ id: "a", offsetMs: 4242, hasOffset: true, timestampUsec: usecAt(9999) }];
+  deriveMissingOffsets(messages, EPOCH);
+  assert.equal(messages[0].offsetMs, 4242, "an authoritative offset must not be recomputed");
+});
+
+test("deriveMissingOffsets: no usable header epoch → nothing changes", () => {
+  const rows = () => [{ id: "a", offsetMs: 0, timestampUsec: usecAt(1500) }];
+  for (const header of [undefined, "", null, "not a date"]) {
+    const messages = rows();
+    deriveMissingOffsets(messages, header);
+    assert.deepEqual(messages.map((m) => [m.offsetMs, m.hasOffset]), [[0, undefined]],
+      `header ${JSON.stringify(header)} must leave the pile at 0 — R10 bounds it`);
+  }
+});
+
+test("deriveMissingOffsets: pre-show chat derives a NEGATIVE offset (N-F2)", () => {
+  // Waiting-room messages precede the epoch. A clamp to 0 here would put the
+  // whole waiting room back on the pile it was just rescued from.
+  const messages = [{ id: "a", offsetMs: 0, timestampUsec: usecAt(-90_000) }];
+  deriveMissingOffsets(messages, EPOCH);
+  assert.deepEqual([messages[0].offsetMs, messages[0].hasOffset], [-90_000, true]);
+});
+
+test("deriveMissingOffsets: no derivable timestamp → left alone", () => {
+  // Twitch chat files (internal/twitch/types.go) carry offsetMs with no
+  // timestampUsec at all and their offsets are already video-relative — they
+  // must fall through untouched, as must a missing/garbage/zero usec.
+  const messages = [
+    { id: "twitch", offsetMs: 7000 },
+    { id: "garbage", offsetMs: 0, timestampUsec: "not-a-number" },
+    { id: "empty", offsetMs: 0, timestampUsec: "" },
+    { id: "zero", offsetMs: 0, timestampUsec: "0" },
+  ];
+  deriveMissingOffsets(messages, EPOCH);
+  assert.deepEqual(messages.map((m) => [m.offsetMs, m.hasOffset]),
+    [[7000, undefined], [0, undefined], [0, undefined], [0, undefined]]);
+});
+
+test("deriveMissingOffsets: a numeric timestampUsec works too", () => {
+  // The Go producer writes a string, but an imported/hand-edited file may
+  // carry a JSON number.
+  const messages = [{ id: "a", offsetMs: 0, timestampUsec: Number(usecAt(3000)) }];
+  deriveMissingOffsets(messages, EPOCH);
+  assert.equal(messages[0].offsetMs, 3000);
 });
