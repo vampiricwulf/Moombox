@@ -35,7 +35,7 @@ func TestHlsReloadDelay(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := hlsReloadDelay(tc.lastSegDur, tc.targetDur, tc.hadNewSegments, tc.elapsed)
+			got := hlsReloadDelay(tc.lastSegDur, tc.targetDur, tc.hadNewSegments, tc.elapsed, time.Second)
 			if got != tc.want {
 				t.Errorf("hlsReloadDelay(%v, %v, %v, %v) = %v, want %v",
 					tc.lastSegDur, tc.targetDur, tc.hadNewSegments, tc.elapsed, got, tc.want)

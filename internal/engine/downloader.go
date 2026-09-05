@@ -345,6 +345,10 @@ type SegmentDownloader struct {
 	logger                DownloaderLogger
 	cipherFailureFired    atomic.Bool
 
+	// delays is every wait the loops sleep on; defaultDelays() in production,
+	// fastDelays() in tests (see delays.go).
+	delays delays
+
 	// hlsInitWritten / hlsInitURI / hlsInitHash track the #EXT-X-MAP init
 	// segment at the head of the output file (fMP4/CMAF HLS — see
 	// ensureHlsInit). URI is the map URI the init was adopted under (updated
@@ -695,6 +699,7 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 	d := &SegmentDownloader{
 		opts:   opts,
 		logger: logger,
+		delays: defaultDelays(),
 	}
 	d.currentSeq.Store(int64(opts.StartSeq))
 	d.headSeq.Store(-1)

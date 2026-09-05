@@ -9,7 +9,7 @@ import (
 
 func TestWaitForConnectivity_AlreadyOnline(t *testing.T) {
 	start := time.Now()
-	err := waitForConnectivity(context.Background(), func() bool { return true })
+	err := waitForConnectivity(context.Background(), func() bool { return true }, connectivityPollInterval)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestWaitForConnectivity_WaitsAndReturns(t *testing.T) {
 		online.Store(true)
 	}()
 
-	err := waitForConnectivity(context.Background(), func() bool { return online.Load() })
+	err := waitForConnectivity(context.Background(), func() bool { return online.Load() }, connectivityPollInterval)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestWaitForConnectivity_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := waitForConnectivity(ctx, func() bool { return false })
+	err := waitForConnectivity(ctx, func() bool { return false }, connectivityPollInterval)
 	if err != context.DeadlineExceeded {
 		t.Fatalf("expected DeadlineExceeded, got %v", err)
 	}
