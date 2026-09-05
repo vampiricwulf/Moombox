@@ -156,6 +156,10 @@ type SendOptions struct {
 // events firing in the same second). Audit reports/small-packages.md.
 const maxInflightNotifications = 16
 
+// defaultWaitTimeout bounds Manager.Wait during graceful shutdown. Tests
+// inject a shorter waitTimeout; a Manager built without one uses this.
+const defaultWaitTimeout = 30 * time.Second
+
 // Manager dispatches notifications to configured targets.
 type Manager struct {
 	// targetsMu guards targets: Reload (config hot-apply) rebuilds the
@@ -164,7 +168,10 @@ type Manager struct {
 	targets   []notificationTarget
 	wg        sync.WaitGroup
 	semaphore chan struct{}
-	logger    interface {
+	// waitTimeout bounds Wait; zero means defaultWaitTimeout (test literals
+	// omit it). Set once at construction, never written afterwards.
+	waitTimeout time.Duration
+	logger      interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -309,9 +316,10 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 	Error(msg string, args ...any)
 }) *Manager {
 	m := &Manager{
-		logger:    logger,
-		semaphore: make(chan struct{}, maxInflightNotifications),
-		targets:   buildTargets(cfg, logger),
+		logger:      logger,
+		semaphore:   make(chan struct{}, maxInflightNotifications),
+		targets:     buildTargets(cfg, logger),
+		waitTimeout: defaultWaitTimeout,
 	}
 
 	if len(m.targets) > 0 {
@@ -391,8 +399,17 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	}
 }
 
+// effectiveWaitTimeout returns waitTimeout, or defaultWaitTimeout when the
+// field was never set (zero or negative).
+func (m *Manager) effectiveWaitTimeout() time.Duration {
+	if m.waitTimeout <= 0 {
+		return defaultWaitTimeout
+	}
+	return m.waitTimeout
+}
+
 // Wait blocks until all in-flight notification goroutines have finished
-// or a 30-second timeout expires, whichever comes first.
+// or the wait timeout (defaultWaitTimeout, 30 s, unless injected) expires, whichever comes first.
 // Call during graceful shutdown to avoid losing notifications.
 //
 // **Single-call**: Wait drains the WaitGroup once. Subsequent Send calls
@@ -412,11 +429,12 @@ func (m *Manager) Wait() {
 		m.wg.Wait()
 		close(done)
 	}()
+	timeout := m.effectiveWaitTimeout()
 	select {
 	case <-done:
-	case <-time.After(30 * time.Second):
+	case <-time.After(timeout):
 		if m.logger != nil {
-			m.logger.Warn("notification wait timed out after 30s")
+			m.logger.Warn("notification wait timed out", "after", timeout)
 		}
 	}
 }
