@@ -650,23 +650,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.ytdlpStatusCmd()
 
 	case statsSnapshotMsg:
-		if !a.statsDlg.IsVisible() {
-			return a, nil
+		if !a.statsDlg.IsVisible() || msg.Epoch != a.statsEpoch {
+			return a, nil // closed or re-opened since this fetch started
 		}
 		if msg.Err != nil {
 			a.statsDlg.SetError("Statistics unavailable: " + msg.Err.Error())
 		} else {
 			a.statsDlg.SetSnapshot(msg.Snap)
 		}
-		// One tick chain per fetch result; closing the overlay ends it at the
-		// next tick. Open→close→reopen inside 60 s can overlap one extra tick —
-		// one 5 s-cached query, accepted.
-		return a, statsRefreshTick()
+		return a, nil
 	case statsRefreshTickMsg:
-		if !a.statsDlg.IsVisible() || a.OnGetStats == nil {
+		// One chain per open, re-armed here only — the Web's setInterval. A
+		// tick from a previous open (stale epoch) or after close is dropped,
+		// so r presses and reopens never multiply chains.
+		if !a.statsDlg.IsVisible() || msg.Epoch != a.statsEpoch || a.OnGetStats == nil {
 			return a, nil
 		}
-		return a, a.fetchStatsCmd()
+		return a, tea.Batch(a.fetchStatsCmd(msg.Epoch), statsRefreshTick(msg.Epoch))
 
 	case deleteClientTokenResultMsg:
 		if msg.Err != "" {

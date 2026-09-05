@@ -62,6 +62,16 @@ func UpdateDiskStatus(outputDir string, store *config.Store) *DiskStatus {
 	return status
 }
 
+// Stats converts the shared disk reading to the neutral type both dashboards
+// read. A nil receiver — SharedDiskStatus before the first poll — converts to
+// a nil reading, which stats.Build renders as an empty disk section.
+func (d *DiskStatus) Stats() *stats.Disk {
+	if d == nil {
+		return nil
+	}
+	return &stats.Disk{Free: d.Free, Total: d.Total, UsedPct: d.UsedPct, WarnLevel: d.WarnLevel}
+}
+
 // StatsRouteDeps holds dependencies for the stats route.
 type StatsRouteDeps struct {
 	DB     *database.Database
@@ -75,11 +85,7 @@ func StatsRoutes(r chi.Router, deps *StatsRouteDeps) {
 		if got, err := deps.DB.GetJobStats(); err == nil {
 			js = got
 		}
-		var diskReading *stats.Disk
-		if ds := SharedDiskStatus.Load(); ds != nil {
-			diskReading = &stats.Disk{Free: ds.Free, Total: ds.Total, UsedPct: ds.UsedPct, WarnLevel: ds.WarnLevel}
-		}
-		snap := stats.Build(js, diskReading)
+		snap := stats.Build(js, SharedDiskStatus.Load().Stats())
 		warn := snap.Disk.WarnLevel
 		if warn == "" {
 			warn = "ok" // the route's historical default when no reading exists yet

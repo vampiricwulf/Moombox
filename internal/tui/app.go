@@ -316,15 +316,19 @@ type (
 	}
 
 	// statsSnapshotMsg is the async result of OnGetStats — the R T overlay's
-	// open, its r key, and the 60 s refresh tick all go through it.
+	// open, its r key, and the 60 s refresh tick all go through it. Epoch is
+	// the App.statsEpoch the fetch started under; a result that outlives its
+	// open is dropped rather than painted over the new one.
 	statsSnapshotMsg struct {
-		Snap stats.Snapshot
-		Err  error
+		Epoch int
+		Snap  stats.Snapshot
+		Err   error
 	}
 	// statsRefreshTickMsg fires every statsRefreshInterval while the R T
 	// overlay is open (the Web Stats tab's own poll cadence); ignored once
-	// the overlay is closed or OnGetStats is nil.
-	statsRefreshTickMsg struct{}
+	// the overlay is closed, OnGetStats is nil, or Epoch names an earlier
+	// open (see App.statsEpoch).
+	statsRefreshTickMsg struct{ Epoch int }
 
 	// Async results for setup wizard cookie extraction.
 	//
@@ -383,6 +387,13 @@ type App struct {
 	statsDlg        *StatsDialogModel
 	setupWiz        *SetupWizardModel
 	settings        *SettingsModel
+
+	// statsEpoch names the current R T session. It is bumped on every open
+	// and every close, and both stats messages carry the epoch they were
+	// created under, so exactly one 60 s refresh chain is alive at a time:
+	// ticks and fetch results from an earlier open are dropped instead of
+	// re-arming a second chain (the Web's single setInterval).
+	statsEpoch int
 
 	// Trim progress (async encoding)
 	trimInProgress  bool

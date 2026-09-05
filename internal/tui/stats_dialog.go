@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
@@ -11,12 +10,22 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/stats"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // statsDialogMaxWidth is the content box's preferred width — wide enough for
-// the disk bar plus a two-column stat row without cramming (see the sibling
-// dialogs' 60-72 range in ffmpeg_check.go/setup_wizard.go/ytdlp_dialog.go).
+// the disk bar and for the widest stat line (the 22-column label plus its
+// value, and the disk line's used/total/free triple) without wrapping (see
+// the sibling dialogs' 60-72 range in
+// ffmpeg_check.go/setup_wizard.go/ytdlp_dialog.go).
 const statsDialogMaxWidth = 76
+
+// statsDialogFullHeight is the shortest terminal that fits the overlay with
+// its blank spacers: 23 content lines + 2 border rows, and View's boxH takes
+// m.height-4. Below it the spacers go — lipgloss.Height only pads, and Bubble
+// Tea v2 drops overflow from the TOP, so a box taller than the terminal loses
+// its border and title rather than its footer.
+const statsDialogFullHeight = 27
 
 // StatsDialogModel is the R T overlay: the Web Stats tab's disk bar, six
 // storage figures, seven activity figures and uptime, from the same
@@ -114,10 +123,17 @@ func (m *StatsDialogModel) View() string {
 
 	boxW, _ := dialogBox(statsDialogMaxWidth, m.width)
 	boxH := max(min(m.height-4, 34), 22)
+	// On a terminal too short for the full box, drop the two blank spacers
+	// (title, section gap) and keep the footer's — 21 content lines fit 24
+	// rows. See statsDialogFullHeight.
+	spaced := m.height >= statsDialogFullHeight
 
 	var b strings.Builder
 	b.WriteString(TitleStyle.Render("Statistics"))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if spaced {
+		b.WriteString("\n")
+	}
 	switch {
 	case m.loading && !m.haveSnap:
 		fmt.Fprintf(&b, "  %s Loading...\n", m.spinner.View())
@@ -125,7 +141,9 @@ func (m *StatsDialogModel) View() string {
 		fmt.Fprintf(&b, "  %s\n", ErrorStyle.Render(m.errorMsg))
 	default:
 		m.writeStorage(&b)
-		b.WriteString("\n")
+		if spaced {
+			b.WriteString("\n")
+		}
 		m.writeActivity(&b)
 	}
 	b.WriteString("\n")
@@ -142,7 +160,8 @@ func (m *StatsDialogModel) View() string {
 }
 
 // writeStorage is the Web Stats tab's Storage card, flattened to rows: the
-// disk bar, a used/total/percent line, then the six size figures.
+// disk bar, the Web's two labels under it (used of total, free and the
+// percentage) folded onto one line, then the six size figures.
 func (m *StatsDialogModel) writeStorage(b *strings.Builder) {
 	d := m.snap.Disk
 	fmt.Fprintf(b, "%s\n", HeaderStyle.Render("Storage"))
@@ -161,22 +180,25 @@ func (m *StatsDialogModel) writeStorage(b *strings.Builder) {
 		bar.FullColor = ColorFinished
 	}
 	fmt.Fprintf(b, "  %s\n", bar.ViewAs(d.UsedPct/100))
-	fmt.Fprintf(b, "  %s used of %s (%.1f%%)\n", formatSize(used), formatSize(int64(d.Total)), d.UsedPct)
+	fmt.Fprintf(b, "  %s used of %s   %s free (%.1f%% used)\n",
+		utils.FormatFileSize(used), utils.FormatFileSize(int64(d.Total)),
+		utils.FormatFileSize(int64(d.Free)), d.UsedPct)
 
 	writeStatRows(b, [][2]string{
-		{"Total Recorded", formatSize(m.snap.TotalSize)},
+		{"Total Recorded", utils.FormatFileSize(m.snap.TotalSize)},
 		{"Total Jobs", groupThousands(int64(m.snap.JobCount))},
-		{"YouTube Storage", formatSize(m.snap.SizeByPlatform["youtube"])},
-		{"Twitch Storage", formatSize(m.snap.SizeByPlatform["twitch"])},
-		{"Finished", formatSize(m.snap.SizeByStatus["finished"])},
-		{"Error", formatSize(m.snap.SizeByStatus["error"])},
+		{"YouTube Storage", utils.FormatFileSize(m.snap.SizeByPlatform["youtube"])},
+		{"Twitch Storage", utils.FormatFileSize(m.snap.SizeByPlatform["twitch"])},
+		{"Finished", utils.FormatFileSize(m.snap.SizeByStatus["finished"])},
+		{"Error", utils.FormatFileSize(m.snap.SizeByStatus["error"])},
 	})
 }
 
 // writeActivity is the Web Stats tab's Activity card, flattened the same
 // way, plus Uptime — the one figure the Web derives client-side instead
 // (stats.Snapshot doc comment) that the TUI has for free from its own
-// process start time.
+// process start time. It prints in the Web's duration format too, so the
+// two dashboards show the same string and not just the same number.
 func (m *StatsDialogModel) writeActivity(b *strings.Builder) {
 	fmt.Fprintf(b, "%s\n", HeaderStyle.Render("Activity"))
 
@@ -190,7 +212,7 @@ func (m *StatsDialogModel) writeActivity(b *strings.Builder) {
 		{"Twitch Jobs", groupThousands(int64(m.snap.CountByPlatform["twitch"]))},
 	}
 	if m.snap.Uptime > 0 {
-		rows = append(rows, [2]string{"Uptime", formatUptime(m.snap.Uptime)})
+		rows = append(rows, [2]string{"Uptime", formatHMS(int64(m.snap.Uptime.Seconds()))})
 	}
 	writeStatRows(b, rows)
 }
@@ -200,29 +222,6 @@ func (m *StatsDialogModel) writeActivity(b *strings.Builder) {
 func writeStatRows(b *strings.Builder, rows [][2]string) {
 	for _, r := range rows {
 		fmt.Fprintf(b, "  %-22s %s\n", r[0], r[1])
-	}
-}
-
-// formatSize renders bytes with the space-separated unit the stats overlay
-// uses ("512.0 GB", "250.0 MB") — the same scale tiers as
-// utils.FormatFileSize, whose concatenated form ("512.0GB") suits the
-// inline per-file rows it was written for (job_details.go) but reads
-// cramped next to this dialog's other space-separated stat rows.
-func formatSize(bytes int64) string {
-	const (
-		kb = 1 << 10
-		mb = 1 << 20
-		gb = 1 << 30
-	)
-	switch {
-	case bytes >= gb:
-		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(gb))
-	case bytes >= mb:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(mb))
-	case bytes >= kb:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(kb))
-	default:
-		return fmt.Sprintf("%d B", bytes)
 	}
 }
 
@@ -239,23 +238,6 @@ func formatHMS(seconds int64) string {
 		return fmt.Sprintf("%dm %ds", mins, s)
 	}
 	return fmt.Sprintf("%ds", s)
-}
-
-// formatUptime: "2d 1h 30m", "5h 3m", "5m" — the one figure with no Web
-// counterpart (stats.Snapshot doc comment: the Web derives uptime
-// client-side from /api/status instead).
-func formatUptime(d time.Duration) string {
-	d = d.Round(time.Minute)
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	mins := int(d.Minutes()) % 60
-	switch {
-	case days > 0:
-		return fmt.Sprintf("%dd %dh %dm", days, hours, mins)
-	case hours > 0:
-		return fmt.Sprintf("%dh %dm", hours, mins)
-	}
-	return fmt.Sprintf("%dm", mins)
 }
 
 // groupThousands renders 1234567 as "1,234,567" (the Web's toLocaleString).

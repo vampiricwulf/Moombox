@@ -247,11 +247,8 @@ func (s *runState) runTUI() {
 		if err != nil {
 			return stats.Snapshot{}, err
 		}
-		var disk *stats.Disk
-		if ds := routes.SharedDiskStatus.Load(); ds != nil {
-			disk = &stats.Disk{Free: ds.Free, Total: ds.Total, UsedPct: ds.UsedPct, WarnLevel: ds.WarnLevel}
-		}
-		snap := stats.Build(js, disk)
+		// The same derivation and the same disk reading /api/stats serves.
+		snap := stats.Build(js, routes.SharedDiskStatus.Load().Stats())
 		snap.Uptime = time.Since(s.startTime)
 		return snap, nil
 	}

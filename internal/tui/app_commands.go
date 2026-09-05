@@ -421,12 +421,13 @@ func (a *App) ytdlpInstallCmd() tea.Cmd {
 	})
 }
 
-// fetchStatsCmd runs OnGetStats off the UI goroutine.
-func (a *App) fetchStatsCmd() tea.Cmd {
+// fetchStatsCmd runs OnGetStats off the UI goroutine, tagging the result with
+// the overlay session (App.statsEpoch) that asked for it.
+func (a *App) fetchStatsCmd(epoch int) tea.Cmd {
 	fn := a.OnGetStats
 	return safeCmd(func() tea.Msg {
 		snap, err := fn()
-		return statsSnapshotMsg{Snap: snap, Err: err}
+		return statsSnapshotMsg{Epoch: epoch, Snap: snap, Err: err}
 	})
 }
 
@@ -434,9 +435,12 @@ func (a *App) fetchStatsCmd() tea.Cmd {
 // Web Stats tab's own poll interval.
 const statsRefreshInterval = 60 * time.Second
 
-// statsRefreshTick schedules the overlay's 60 s refresh (the Web's poll).
-func statsRefreshTick() tea.Cmd {
-	return tea.Tick(statsRefreshInterval, func(time.Time) tea.Msg { return statsRefreshTickMsg{} })
+// statsRefreshTick schedules the overlay's 60 s refresh (the Web's poll) for
+// one overlay session. Only two places call it: the R T open, which starts
+// the session's single chain, and the tick arm, which re-arms that same
+// chain. A fetch result never does — that is what multiplied the chains.
+func statsRefreshTick(epoch int) tea.Cmd {
+	return tea.Tick(statsRefreshInterval, func(time.Time) tea.Msg { return statsRefreshTickMsg{Epoch: epoch} })
 }
 
 func (a *App) deleteOrphanCmd(path string) tea.Cmd {

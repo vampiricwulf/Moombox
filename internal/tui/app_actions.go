@@ -360,7 +360,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 		a.clearFeedback()
 		a.statsDlg.SetSize(a.width, a.height)
-		return a, tea.Batch(a.statsDlg.Open(), a.fetchStatsCmd())
+		// The only place a refresh chain starts. The tick goes LAST in the
+		// batch: a consumer that stops at the first real message (the tests'
+		// drainer) then never sits on the 60 s timer.
+		a.statsEpoch++
+		return a, tea.Batch(a.statsDlg.Open(), a.fetchStatsCmd(a.statsEpoch), statsRefreshTick(a.statsEpoch))
 	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
