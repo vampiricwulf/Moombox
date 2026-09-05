@@ -246,7 +246,7 @@ func TestCleanupFailedMux_PreservesOnCtxCancel(t *testing.T) {
 	}
 
 	// Cancelled parent ctx: cleanup should NOT remove the file
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	cleanupFailedMux(ctx, errors.New("ffmpeg killed"), outPath)
 
@@ -263,7 +263,7 @@ func TestCleanupFailedMux_RemovesOnRealError(t *testing.T) {
 	}
 
 	// Fresh ctx (not cancelled) + real error: file SHOULD be removed
-	cleanupFailedMux(context.Background(), errors.New("ffmpeg: invalid args"), outPath)
+	cleanupFailedMux(t.Context(), errors.New("ffmpeg: invalid args"), outPath)
 
 	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
 		t.Errorf("broken output should have been removed, stat err=%v", err)
@@ -278,7 +278,7 @@ func TestCleanupFailedMux_NoopOnSuccess(t *testing.T) {
 	}
 
 	// err == nil: file should be left alone
-	cleanupFailedMux(context.Background(), nil, outPath)
+	cleanupFailedMux(t.Context(), nil, outPath)
 
 	if _, err := os.Stat(outPath); err != nil {
 		t.Errorf("successful mux output was removed: %v", err)

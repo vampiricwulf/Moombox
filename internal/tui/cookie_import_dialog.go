@@ -215,30 +215,43 @@ func (m *CookieImportDialogModel) View() string {
 	boxH := max(min(m.height-4, 20), 10)
 
 	var b strings.Builder
-	b.WriteString(TitleStyle.Render("Import Cookie File") + "\n")
+	b.WriteString(TitleStyle.Render("Import Cookie File"))
+	b.WriteString("\n")
 
 	switch m.step {
 	case cookieImportStepPath:
-		b.WriteString(DimStyle.Render("Path to a Netscape-format cookies.txt exported from your browser") + "\n\n")
-		b.WriteString(m.input.View() + "\n")
+		b.WriteString(DimStyle.Render("Path to a Netscape-format cookies.txt exported from your browser"))
+		b.WriteString("\n\n")
+		b.WriteString(m.input.View())
+		b.WriteString("\n")
 		if m.errorMsg != "" {
-			b.WriteString("\n" + ErrorStyle.Render(m.errorMsg) + "\n")
+			b.WriteString("\n")
+			b.WriteString(ErrorStyle.Render(m.errorMsg))
+			b.WriteString("\n")
 		}
-		b.WriteString("\n" + DimStyle.Render("Enter: Import  Esc: Cancel"))
+		b.WriteString("\n")
+		b.WriteString(DimStyle.Render("Enter: Import  Esc: Cancel"))
 
 	case cookieImportStepRunning:
 		b.WriteString("\n")
-		b.WriteString(m.spinner.View() + " Importing, then verifying each platform...\n")
-		b.WriteString("\n" + DimStyle.Render("Esc: Close (the import keeps running)"))
+		b.WriteString(m.spinner.View())
+		b.WriteString(" Importing, then verifying each platform...\n")
+		b.WriteString("\n")
+		b.WriteString(DimStyle.Render("Esc: Close (the import keeps running)"))
 
 	case cookieImportStepResult:
 		b.WriteString("\n")
 		if m.resultErr != nil {
-			b.WriteString(ErrorStyle.Render("Import failed") + "\n")
-			b.WriteString("  " + m.resultErr.Error() + "\n")
+			b.WriteString(ErrorStyle.Render("Import failed"))
+			b.WriteString("\n")
+			b.WriteString("  ")
+			b.WriteString(m.resultErr.Error())
+			b.WriteString("\n")
 		} else {
-			b.WriteString(platformOutcomeLine("YouTube", m.result.YouTubeOutcome, m.result.YouTube, m.result.YouTubeAccepted) + "\n")
-			b.WriteString(platformOutcomeLine("Twitch", m.result.TwitchOutcome, m.result.Twitch, m.result.TwitchAccepted) + "\n")
+			b.WriteString(platformOutcomeLine("YouTube", m.result.YouTubeOutcome, m.result.YouTube, m.result.YouTubeAccepted))
+			b.WriteString("\n")
+			b.WriteString(platformOutcomeLine("Twitch", m.result.TwitchOutcome, m.result.Twitch, m.result.TwitchAccepted))
+			b.WriteString("\n")
 			// ON THE OUTCOME, never on RollbackProtected. That flag says a
 			// rollback was POSSIBLE — a pre-write snapshot succeeded over an
 			// existing cookies.txt — which is true of virtually every import
@@ -249,10 +262,13 @@ func (m *CookieImportDialogModel) View() string {
 			// entirely and words its rollback toast off the outcome string
 			// alone; this is the same rule.
 			if m.result.YouTubeOutcome == cookies.ImportRolledBack || m.result.TwitchOutcome == cookies.ImportRolledBack {
-				b.WriteString("\n" + DimStyle.Render("A platform that stopped authenticating kept its previous cookies (rolled back).") + "\n")
+				b.WriteString("\n")
+				b.WriteString(DimStyle.Render("A platform that stopped authenticating kept its previous cookies (rolled back)."))
+				b.WriteString("\n")
 			}
 		}
-		b.WriteString("\n" + DimStyle.Render("Esc/Enter: Close"))
+		b.WriteString("\n")
+		b.WriteString(DimStyle.Render("Esc/Enter: Close"))
 	}
 
 	box := lipgloss.NewStyle().

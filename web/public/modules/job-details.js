@@ -2,15 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl } from "./utils.js";
-
-// Status sets for quick action visibility (single source of truth). They live
-// here because the details buttons are their densest reader; app.js imports
-// them back for the job cards and the batch action bar.
-export const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
-export const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
-export const MUX_STATUSES = new Set(["Cancelled", "Error"]);
-export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
+import { canResumeJob, streamUrl, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
 
 export class JobDetailsController {
   constructor(app) {

@@ -40,9 +40,10 @@ func jsBlock(t *testing.T, src, anchor string) string {
 	for i := 0; i < len(rest); i++ {
 		c := rest[i]
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 			continue

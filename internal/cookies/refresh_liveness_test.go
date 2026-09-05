@@ -652,8 +652,10 @@ func TestInconclusiveFallbackDoesNotSuppressTheNextProbe(t *testing.T) {
 
 // TestCheckNowSkipsFallbackProbe: POST /api/cookies/recheck runs the refresh
 // synchronously on the HTTP handler goroutine, already paying for a 15s auth
-// check. Adding a 20s page fetch to a button press is a bad trade, and the
-// periodic path owns that probe anyway.
+// check per platform (authCheckTimeout, which this path wraps around each
+// verifier — NOT AutoCookieService's authVerifyTimeout, which is a different
+// constant on a path CheckNow never touches). Adding a 20s page fetch to a
+// button press is a bad trade, and the periodic path owns that probe anyway.
 //
 // The doRefresh half of this test is not decoration: without it, `called == 0`
 // is equally well explained by a fresh observation, a nil callback, or the

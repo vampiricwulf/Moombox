@@ -56,7 +56,7 @@ func TestHlsLoop_StopOnGapReturnsErrGapDetected(t *testing.T) {
 	var gap atomic.Value
 	d.OnGap = func(g DownloadGap) { gap.Store(g) }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	err := d.Start(ctx)
 
@@ -115,7 +115,7 @@ func TestHlsLoop_StopOnGapEmptyFileSkipsForward(t *testing.T) {
 	var gap atomic.Value
 	d.OnGap = func(g DownloadGap) { gap.Store(g) }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start() = %v, want nil (skip forward, download from window)", err)

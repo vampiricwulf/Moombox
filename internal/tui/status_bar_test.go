@@ -221,6 +221,28 @@ func TestStatusBarChordHintDegrades(t *testing.T) {
 	}
 }
 
+// TestStatusBarChordHintNeverOverflows pins the newcomer-hint half to the
+// bar's own bound: controlTiers' ShowChordHint branch is already narrower at
+// every rung than the named-chord branch it replaces (a fixed-string ladder,
+// not a width computation), and View's trailing MaxWidth clamp truncates the
+// single-line bar rather than letting it wrap — so this combination (busy
+// metrics, hint shown, a width the pre-tier bar used to overflow at) can
+// never render wider than the terminal or spill onto a second line. Pinned
+// directly rather than only through the general sweep in
+// TestStatusBarNeverExceedsWidth, whose fixture never sets ShowChordHint.
+func TestStatusBarChordHintNeverOverflows(t *testing.T) {
+	m := busyStatusBar()
+	m.ShowChordHint = true
+	m.SetWidth(60)
+	out := m.View()
+	if got := lipgloss.Width(out); got > 60 {
+		t.Errorf("width 60: rendered %d columns (would wrap): %q", got, out)
+	}
+	if strings.Contains(out, "\n") {
+		t.Errorf("width 60: chord hint bar must stay a single line, got %q", out)
+	}
+}
+
 // TestStatusBarZeroWidth: an unsized bar renders nothing rather than
 // panicking on a negative pad.
 func TestStatusBarZeroWidth(t *testing.T) {

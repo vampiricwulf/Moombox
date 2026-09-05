@@ -458,7 +458,7 @@ func (m *TrimDialogModel) View() string {
 	return centerBox(box, m.width, m.height)
 }
 
-func (m *TrimDialogModel) renderCreateMode(w, h int) string {
+func (m *TrimDialogModel) renderCreateMode(w, _ int) string {
 	var lines []string
 
 	switch m.createStep {
@@ -542,7 +542,7 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *TrimDialogModel) renderDeleteMode(w, h int) string {
+func (m *TrimDialogModel) renderDeleteMode(w, _ int) string {
 	var lines []string
 
 	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCookies).Bold(true).Render("Delete Trim"))

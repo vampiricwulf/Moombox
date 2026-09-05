@@ -381,7 +381,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		chatDl = nil
 	}
 	if chatDl == nil && jobCtx.Config.DownloadChat {
-		chatDl = o.setupChatDownloader(ctx, jobCtx, videoInfo, isVod)
+		chatDl = o.setupChatDownloader(ctx, jobCtx, videoInfo)
 	}
 	if chatDl != nil {
 		chatDone = make(chan struct{})
@@ -522,7 +522,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			}
 			return ctx.Err()
 		}
-		o.cleanup(jobCtx, chatDl, chatDone)
+		o.cleanup(chatDl, chatDone)
 		return fmt.Errorf("download: %w", err)
 	}
 

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 
@@ -8,6 +9,16 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+)
+
+// minTermWidth and minTermHeight are the smallest terminal a rendered frame
+// can be trusted at. Below this every panel/overlay computes negative or
+// near-zero content widths (task list, details, the box dialogs' own
+// min-40/min-10 floors), so View() shows one warning line instead of the
+// garbage that would otherwise reach the screen.
+const (
+	minTermWidth  = 60
+	minTermHeight = 20
 )
 
 func (a *App) recalcLayout() {
@@ -92,6 +103,10 @@ func (a *App) viewWithMode(content string) tea.View {
 func (a *App) View() tea.View {
 	if a.width == 0 || a.height == 0 {
 		return a.viewWithMode("Initializing...")
+	}
+	if a.width < minTermWidth || a.height < minTermHeight {
+		return a.viewWithMode(fmt.Sprintf("Terminal too small: %d×%d (Moombox needs at least %d×%d)",
+			a.width, a.height, minTermWidth, minTermHeight))
 	}
 
 	// Render overlays on top (priority matches handleKey order)

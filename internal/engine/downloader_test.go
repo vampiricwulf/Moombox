@@ -119,7 +119,7 @@ func TestSegmentDownloader_CancelErr(t *testing.T) {
 		OutputFile: "test.mp4",
 	})
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Neither cancelled nor context done
 	if err := d.cancelErr(ctx); err != nil {
@@ -133,7 +133,7 @@ func TestSegmentDownloader_CancelErr(t *testing.T) {
 	}
 
 	// Context cancelled
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	d2 := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    "https://example.com/sq/$Number$",
@@ -209,7 +209,7 @@ func TestSegmentDownloader_DoubleStart(t *testing.T) {
 	d.running = true
 	d.mu.Unlock()
 
-	err := d.Start(context.Background())
+	err := d.Start(t.Context())
 	if err == nil || err.Error() != "already running" {
 		t.Errorf("expected 'already running' error, got %v", err)
 	}

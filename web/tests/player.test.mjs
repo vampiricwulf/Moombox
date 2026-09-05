@@ -941,3 +941,277 @@ test("player shortcuts are ignored while the resume overlay is up", { skip }, as
   h.key(" ");
   assert.ok(h.mediaCalls.includes("play"), "Space toggles playback again once the overlay is dismissed");
 });
+
+// ── 18. Resume dialog traps Tab within its actions (Arc J, J6) ──────────────
+
+// The harness's `sl-button` stub (helpers/player-dom.mjs) is a bare custom
+// element with no shadow root, so jsdom's isFocusableAreaElement never treats
+// it as a focusable area on its own (it requires a `tabindex` attribute) —
+// unlike a real Shoelace <sl-button>, whose internal shadow-DOM <button> makes
+// the host itself `document.activeElement` once focused. The two
+// setAttribute calls below are a TEST-ONLY fix for that jsdom fidelity gap,
+// applied to the already-rendered nodes; no tabindex is added to
+// _showResumeDialog's markup.
+test("Tab from the last resume action wraps to the first", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1")],
+    watchState: { resumePosition: 42 },
+  });
+
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "the resume overlay is up");
+
+  const continueBtn = h.el("resume-continue");
+  const startBtn = h.el("resume-start");
+  continueBtn.setAttribute("tabindex", "-1");
+  startBtn.setAttribute("tabindex", "-1");
+
+  startBtn.focus();
+  h.key("Tab", { target: startBtn });
+  assert.equal(h.document.activeElement.id, "resume-continue",
+    "Tab from the last action wraps to the first");
+});
+
+test("Shift+Tab from the first resume action wraps to the last", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1")],
+    watchState: { resumePosition: 42 },
+  });
+
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "the resume overlay is up");
+
+  const continueBtn = h.el("resume-continue");
+  const startBtn = h.el("resume-start");
+  continueBtn.setAttribute("tabindex", "-1");
+  startBtn.setAttribute("tabindex", "-1");
+
+  continueBtn.focus();
+  h.key("Tab", { target: continueBtn, shiftKey: true });
+  assert.equal(h.document.activeElement.id, "resume-start",
+    "Shift+Tab from the first action wraps to the last");
+});
+
+// F3: a trap that only holds focus already INSIDE the dialog is not a trap.
+// Focus legitimately sits on <body> while the overlay is up — a click on the
+// scrim, or a Tab before the rAF focus/Shoelace upgrade — and an overlay-bound
+// listener never sees that keystroke. Mutants: binding on `overlay` instead of
+// `document`, or dropping the `!overlay.contains(document.activeElement)` case.
+test("Tab from outside the dialog is pulled into it", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1")],
+    watchState: { resumePosition: 42 },
+  });
+
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "the resume overlay is up");
+
+  h.el("resume-continue").setAttribute("tabindex", "-1");
+  h.el("resume-start").setAttribute("tabindex", "-1");
+
+  h.document.activeElement?.blur?.();
+  assert.equal(h.document.activeElement, h.document.body, "focus starts outside the dialog");
+
+  h.key("Tab");                                   // dispatched on document
+  assert.equal(h.document.activeElement.id, "resume-continue",
+    "Tab from the page behind the dialog enters it at the first action");
+});
+
+// ── 19. Player review can-wait pins (Arc J, Task 12 / J15) ──────────────────
+// #23 (Space is inert under the resume dialog) is already covered by test 17
+// above ("player shortcuts are ignored while the resume overlay is up") and
+// the production guard already sits at the top of _playerKeyHandler
+// (`#player-video-wrapper .resume-overlay`, ahead of the Space case) — no new
+// test or production change needed for it here.
+
+// #1/G5 (304 without Last-Modified) is pinned in internal/web/routes/jobs_test.go,
+// not here — it is a Go route test, not a player.js one.
+
+// #2/J1 — R9: a message that entered before the seek lands mid-flight, not at
+// the right edge. Proven by probe P5b in the final review; this pins the
+// currentTime side of it (the delete-currentTime-assignment mutant).
+test("R9: a seek seeds a message already flying with currentTime > 0", { skip }, async () => {
+  const messages = [9200, 9400, 9600, 9800, 10000].map((ms, i) => msg(ms, `m${i}`, `u${i}`));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf(messages),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+
+  // Every message above entered (offsetMs − NICO_LEAD_MS) before 10000 but
+  // within NICO_MAX_LATENESS_MS of it, so the seed places all five mid-flight
+  // instead of dropping or seeding them at the right edge.
+  h.seek(10000);
+
+  assert.ok(h.anims.length > 0, "the seed placed something");
+  assert.ok(h.anims.every((a) => a.currentTime > 0),
+    "a seek lands mid-flight: every seeded animation starts partway through its traverse");
+});
+
+// #4/J4 — I2: a segmented job with unknown part durations (no durationSeconds
+// on any segment) must report an unknown total, never fall through to one
+// loaded part's own video.duration.
+test("a segmented job with unknown part durations has no post-end region", { skip }, async () => {
+  const messages = [msg(0, "hi"), msg(65000, "afterwards")];
+  const h = harness.makePlayer({
+    jobs: [finished("j1", {
+      chatFilename: "chat.json",
+      segments: [
+        { segmentIndex: 0, quality: "720p" },
+        { segmentIndex: 1, quality: "1080p" },
+      ],
+    })],
+    watchState: {},
+    chat: chatOf(messages),
+    storage: { "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  h.video.duration = 60; // one PART's own duration; must never stand in for the unknown total
+
+  assert.equal(h.player._videoDurationMs(), 0,
+    "no per-part durationSeconds means the segmented total is unknown");
+  assert.equal(h.el("player-sidebar-msg-count").textContent, "2 messages",
+    "no '· N after end' clause without a known total");
+  const rows = h.sidebar().children;
+  assert.equal(rows[1].dataset.divider, undefined,
+    "no 'Recording ended' divider without a known total");
+});
+
+// #5/J5 — resetSidebarToTime's re-dim block is guarded by
+// `!this._atRecordingEnd(effectiveMs)`: at (not merely past) the end of the
+// recording the tail stays `.post` instead of being dimmed back to `.future`.
+//
+// It has to be driven from a call site with no corrective `timeupdate` behind
+// it. `h.seek()` is not one — it fires `seeked` (the reset) AND `timeupdate`
+// (which re-runs _markPostEnd and repairs the damage), so a seek-based test
+// passes with the guard deleted. The chat-offset box is: its `input` handler
+// calls resetSidebarToTime and nothing re-promotes afterwards.
+test("editing the chat offset at the recording's end keeps .post", { skip }, async () => {
+  const messages = [msg(0, "start"), msg(65000, "afterwards")];
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json", lengthSeconds: 60 })],
+    watchState: {},
+    chat: chatOf(messages),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  const rows = h.sidebar().children;
+  const offset = h.el("player-chat-offset");
+  const type = (v) => {
+    offset.value = v;
+    offset.dispatchEvent(new h.window.Event("input"));
+  };
+
+  h.tick(60000);
+  assert.ok(rows[1].classList.contains("post"), "reaching the end promotes the tail");
+
+  // Past the end: fails the mutant that drops `!this._atRecordingEnd(...)`.
+  type("0.2");
+  assert.ok(rows[1].classList.contains("post"),
+    "a chat-offset edit past the end must not re-dim the tail");
+  assert.ok(!rows[1].classList.contains("future"), "so it must not be re-dimmed");
+
+  // Back to exactly the end: fails the mutant that narrows the predicate to
+  // `effectiveMs > durationMs` (60000 is AT the end, not past it).
+  type("0");
+  assert.ok(rows[1].classList.contains("post"),
+    "AT the end (not past it) still counts as at the end");
+  assert.ok(!rows[1].classList.contains("future"), "so it must not be re-dimmed");
+});
+
+// ── 20. deriveMissingOffsets is wired into both chat paths (Arc J, F1) ──────
+//
+// chat-timeline.test.mjs owns the arithmetic; these four pin the CALL SITES in
+// _fetchChatData — that it runs at all, that it runs per part against the
+// PART's own header epoch, and that Twitch files are skipped outright.
+
+const D_EPOCH = "2026-06-11T10:00:00Z";
+const D_EPOCH_MS = Date.parse(D_EPOCH);
+const P1_EPOCH = "2026-06-11T11:30:00Z";          // a later part, its own epoch
+const P1_EPOCH_MS = Date.parse(P1_EPOCH);
+/** A legacy row: no hasOffset, `offsetMs` at the pre-2026-04-22 sentinel. */
+const legacyMsg = (epochMs, ms, text, offsetMs = 0) =>
+  ({ offsetMs, timestampUsec: String((epochMs + ms) * 1000), authorName: "u", message: [{ text }] });
+
+test("a legacy job-level chat file is derived at load, and its real offsets are left alone", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],   // no streamStartTime → bias 0
+    watchState: {},
+    chat: chatOf([
+      legacyMsg(D_EPOCH_MS, 4500, "sentinel"),               // derived to 4500
+      legacyMsg(D_EPOCH_MS, 90000, "authoritative", 7000),   // kept at 7000
+    ], { platform: "youtube", streamStartTime: D_EPOCH }),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [4500, 7000],
+    "the sentinel row is recovered from the header epoch; the row with a real offset is not touched");
+});
+
+test("a legacy multi-part chat is derived per part, against that part's own epoch", { skip }, async () => {
+  const job = finished("j1", {
+    segments: [
+      { segmentIndex: 0, durationSeconds: 60, quality: "720p", chatFile: "p0.chat.json" },
+      { segmentIndex: 1, durationSeconds: 60, quality: "720p", chatFile: "p1.chat.json" },
+    ],
+  });
+  const h = harness.makePlayer({
+    jobs: [job],
+    watchState: {},
+    segmentChatById: {
+      "j1/0": { platform: "youtube", streamStartTime: D_EPOCH, messages: [legacyMsg(D_EPOCH_MS, 5000, "a")] },
+      // 90 minutes later, and the merged header keeps only part 0's epoch —
+      // so a derivation done after mergePartChats would be 90 minutes wrong.
+      "j1/1": { platform: "youtube", streamStartTime: P1_EPOCH, messages: [legacyMsg(P1_EPOCH_MS, 1000, "b")] },
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [5000, 61000],
+    "each part is derived against its own header epoch, then shifted by its start offset");
+});
+
+test("a Twitch job-level chat file is never re-derived", { skip }, async () => {
+  // Defence in depth: the Go producer writes `timestampMs`, not
+  // `timestampUsec` (internal/twitch/types.go), so only an imported or
+  // hand-edited file reaches this. Twitch offsets are already video-relative
+  // and the header epoch is the RECORDING start, so deriving would move them.
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([legacyMsg(D_EPOCH_MS, 4500, "at the recording start")],
+      { streamStartTime: D_EPOCH }),                          // chatOf's platform is "twitch"
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [0],
+    "a Twitch message at offset 0 is AT the recording start, not an unset sentinel");
+});
+
+test("a Twitch part's chat is never re-derived either", { skip }, async () => {
+  const job = finished("j1", {
+    segments: [
+      { segmentIndex: 0, durationSeconds: 60, quality: "720p", chatFile: "p0.chat.json" },
+      { segmentIndex: 1, durationSeconds: 60, quality: "720p", chatFile: "p1.chat.json" },
+    ],
+  });
+  const h = harness.makePlayer({
+    jobs: [job],
+    watchState: {},
+    segmentChatById: {
+      "j1/0": { platform: "twitch", streamStartTime: D_EPOCH, messages: [legacyMsg(D_EPOCH_MS, 5000, "a")] },
+      "j1/1": { platform: "twitch", streamStartTime: P1_EPOCH, messages: [legacyMsg(P1_EPOCH_MS, 1000, "b")] },
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [0, 60000],
+    "both parts keep their part-relative 0; only mergePartChats' shift applies");
+});

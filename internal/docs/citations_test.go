@@ -268,11 +268,20 @@ func TestCitationShapes(t *testing.T) {
 }
 
 // fileFacts is what one cited .go file's CODE contains: every identifier
-// (a declaration's own name is one, so declarations are covered) and every
-// string literal. Comments are deliberately excluded -- a symbol that
-// survives only in a comment is exactly the rot at platform-services.md:907.
+// (a declaration's own name is one, so declarations are covered), every
+// string literal, and -- separately -- the top-level names the file DECLARES.
+// Comments are deliberately excluded -- a symbol that survives only in a
+// comment is exactly the rot at platform-services.md:907.
+//
+// idents and declared answer two different questions. "Does this file spell
+// the symbol?" keeps a citation of a struct field or a cross-file const
+// alive; "is this file where the symbol comes from?" is what a reader
+// following a citation actually wants, and is the only one that notices a
+// citation left pointing at a CALLER after the declaration moved to a
+// sibling file.
 type fileFacts struct {
 	idents   map[string]bool
+	declared map[string]bool
 	literals string
 }
 
@@ -291,6 +300,20 @@ func (ff *fileFacts) resolves(sym string) bool {
 		return true
 	}
 	return regexp.MustCompile(`\b` + regexp.QuoteMeta(last) + `\b`).MatchString(ff.literals)
+}
+
+// declares mirrors resolves' dotted-form fallback -- parseGoFile records a
+// method as both Type.Method and Method, and pkg.Name falls back to Name --
+// but consults only the declaration set. A call, an import, a struct field
+// or a string literal is a mention, never a declaration.
+func (ff *fileFacts) declares(sym string) bool {
+	if ff.declared[sym] {
+		return true
+	}
+	if i := strings.LastIndex(sym, "."); i >= 0 {
+		return ff.declared[sym[i+1:]]
+	}
+	return false
 }
 
 func receiverTypeName(e ast.Expr) string {
@@ -314,7 +337,7 @@ func parseGoFile(t *testing.T, abs string) *fileFacts {
 	if err != nil {
 		t.Fatalf("parse %s: %v", abs, err)
 	}
-	ff := &fileFacts{idents: map[string]bool{}}
+	ff := &fileFacts{idents: map[string]bool{}, declared: map[string]bool{}}
 	var lits strings.Builder
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
@@ -329,12 +352,152 @@ func parseGoFile(t *testing.T, abs string) *fileFacts {
 		return true
 	})
 	ff.literals = lits.String()
+	// Top-level declarations only: f.Decls, not a walk. A method is recorded
+	// both as Type.Method (how the docs usually cite it) and bare (how a
+	// reader may write it); grouped var/const/type specs each contribute
+	// every name they bind.
+	for _, d := range f.Decls {
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			ff.declared[d.Name.Name] = true
+			if d.Recv != nil && len(d.Recv.List) == 1 {
+				if recv := receiverTypeName(d.Recv.List[0].Type); recv != "" {
+					ff.declared[recv+"."+d.Name.Name] = true
+				}
+			}
+		case *ast.GenDecl:
+			for _, s := range d.Specs {
+				switch s := s.(type) {
+				case *ast.TypeSpec:
+					ff.declared[s.Name.Name] = true
+				case *ast.ValueSpec:
+					for _, n := range s.Names {
+						ff.declared[n.Name] = true
+					}
+				}
+			}
+		}
+	}
 	return ff
 }
 
+// namedFacts is one sibling file of a package directory, kept with its base
+// name so an error message can say where a symbol actually lives.
+type namedFacts struct {
+	name  string
+	facts *fileFacts
+}
+
+// siblingFacts caches each package directory's non-test .go files, parsed
+// once in os.ReadDir's sorted order. The doc walk cites dozens of files from
+// a handful of packages; without this, a package would be re-parsed per
+// citation.
+var siblingFacts = map[string][]namedFacts{}
+
+// declaredElsewhere names the first non-test .go file in dir, other than abs,
+// that DECLARES sym. It is what turns "the cited file only mentions this"
+// into a one-line fix: the citation's file half should name what this
+// returns.
+func declaredElsewhere(t *testing.T, dir, abs, sym string) (string, bool) {
+	t.Helper()
+	sibs, cached := siblingFacts[dir]
+	if !cached {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read dir %s: %v", dir, err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			sibs = append(sibs, namedFacts{name: name, facts: parseGoFile(t, filepath.Join(dir, name))})
+		}
+		siblingFacts[dir] = sibs
+	}
+	self := filepath.Base(abs)
+	for _, s := range sibs {
+		if s.name != self && s.facts.declares(sym) {
+			return s.name, true
+		}
+	}
+	return "", false
+}
+
+// citationProblem is check (b)'s rule, in one place so the doc walk and
+// TestCitationDeclaringFile exercise the same code. It returns the reason a
+// symbol/file pair fails, or "" when it holds:
+//
+//   - the file DECLARES the symbol: the citation names its home. Fine.
+//   - the file only MENTIONS it and a sibling declares it: the citation is
+//     pointing at a caller (or an importer) -- a reader following it lands
+//     somewhere the symbol is used, not defined. Fails, naming the sibling.
+//   - the file only mentions it and nothing in the package declares it:
+//     a struct field, a const or a type from another package. Fine -- a
+//     mention is the best evidence available.
+//   - neither: rot.
+func citationProblem(t *testing.T, ff *fileFacts, abs, sym string) string {
+	t.Helper()
+	switch {
+	case ff.declares(sym):
+		return ""
+	case ff.resolves(sym):
+		if other, ok := declaredElsewhere(t, filepath.Dir(abs), abs, sym); ok {
+			return "only mentions it -- it is declared in " + other
+		}
+		return ""
+	default:
+		return "neither declares nor mentions it (a comment does not count)"
+	}
+}
+
+// TestCitationDeclaringFile pins citationProblem's three-way rule on a temp
+// two-file package: a.go declares, b.go calls. Without it the difference
+// between "declares" and "mentions" is invisible to the suite, and the rule
+// could be relaxed back to a bare resolves() -- which is what let
+// architecture.md go on citing `launchAndSupervise()` against main.go for as
+// long as it did, after the function moved to launcher.go.
+func TestCitationDeclaringFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, src string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write("a.go", "package p\n\ntype Widget struct{ Size int }\n\nconst (\n\tLimit = 3\n\tSpare = 4\n)\n\nfunc Foo() {}\n\nfunc (w *Widget) Resize() {}\n")
+	write("b.go", "package p\n\nfunc caller() {\n\tFoo()\n\tw := &Widget{Size: Limit}\n\tw.Resize()\n\t_ = \"looseEnd\"\n}\n")
+	// A _test.go sibling must be invisible to declaredElsewhere: it declares
+	// looseEnd, and naming it would send a reader to a file the docs never
+	// cite. The "string literal" case below is what proves it is skipped.
+	write("a_test.go", "package p\n\nfunc looseEnd() {}\n")
+
+	for _, tc := range []struct {
+		name, file, sym, want string
+	}{
+		{"declaring file passes", "a.go", "Foo", ""},
+		{"caller names the declaring file", "b.go", "Foo", "only mentions it -- it is declared in a.go"},
+		{"grouped const counts as a declaration", "b.go", "Limit", "only mentions it -- it is declared in a.go"},
+		{"type declaration", "b.go", "Widget", "only mentions it -- it is declared in a.go"},
+		{"method cited as Type.Method", "a.go", "Widget.Resize", ""},
+		{"method cited from its caller", "b.go", "Widget.Resize", "only mentions it -- it is declared in a.go"},
+		{"struct field: mentioned, declared nowhere at top level", "b.go", "Size", ""},
+		{"string literal, declared nowhere", "b.go", "looseEnd", ""},
+		{"absent everywhere is still rot", "a.go", "Ghost", "neither declares nor mentions it (a comment does not count)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			abs := filepath.Join(dir, tc.file)
+			if got := citationProblem(t, parseGoFile(t, abs), abs, tc.sym); got != tc.want {
+				t.Errorf("citationProblem(%s, %q) = %q, want %q", tc.file, tc.sym, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSpecDocCitationsResolve is checks (a), (a') and (b): every path, every
-// directory and every symbol the six docs cite still exists. It names each
-// failure by doc:line so the fix is a one-line edit, not a hunt.
+// directory and every symbol the six docs cite still exists -- and, for a
+// symbol, that the cited file is where it is DECLARED whenever some file in
+// that package declares it. It names each failure by doc:line so the fix is
+// a one-line edit, not a hunt.
 //
 // It also counts what it reached and fails below a floor. Without that, one
 // token is enough to make this -- the largest of the three walks -- pass green
@@ -402,8 +565,8 @@ func TestSpecDocCitationsResolve(t *testing.T) {
 						ff = parseGoFile(t, abs)
 						factsCache[abs] = ff
 					}
-					if !ff.resolves(sym) {
-						t.Errorf("%s:%d cites `%s` (`%s`), but that file neither declares nor mentions it (a comment does not count)", doc, lineNo, prev.text, tok)
+					if why := citationProblem(t, ff, abs, sym); why != "" {
+						t.Errorf("%s:%d cites `%s` (`%s`), but that file %s", doc, lineNo, prev.text, tok, why)
 					}
 					continue
 				}

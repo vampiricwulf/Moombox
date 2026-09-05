@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -94,7 +93,7 @@ func TestSegmentFetchReadsCookieHeaderPerRequest(t *testing.T) {
 	})
 
 	for seq := range 2 {
-		if _, _, err := d.fetchSegment(context.Background(), d.buildSegmentURL(seq)); err != nil {
+		if _, _, err := d.fetchSegment(t.Context(), d.buildSegmentURL(seq)); err != nil {
 			t.Fatalf("fetchSegment(%d): %v", seq, err)
 		}
 	}
@@ -122,13 +121,13 @@ func TestCookieHeaderReachesEveryFetchPath(t *testing.T) {
 		CookieHeader: headerSequence("SID=at-segment", "SID=at-head-probe", "SID=at-size-probe"),
 	})
 
-	if _, _, err := d.fetchSegment(context.Background(), d.buildSegmentURL(1)); err != nil {
+	if _, _, err := d.fetchSegment(t.Context(), d.buildSegmentURL(1)); err != nil {
 		t.Fatalf("fetchSegment: %v", err)
 	}
-	if _, err := d.probeHeadAt(context.Background(), 2); err != nil {
+	if _, err := d.probeHeadAt(t.Context(), 2); err != nil {
 		t.Fatalf("probeHeadAt: %v", err)
 	}
-	d.probeFileSize(context.Background())
+	d.probeFileSize(t.Context())
 
 	got := rec.cookies()
 	want := []string{"SID=at-segment", "SID=at-head-probe", "SID=at-size-probe"}
@@ -147,7 +146,7 @@ func TestNilCookieGetterSendsNoCookieHeader(t *testing.T) {
 		// CookieHeader intentionally left nil.
 	})
 
-	if _, _, err := d.fetchSegment(context.Background(), d.buildSegmentURL(1)); err != nil {
+	if _, _, err := d.fetchSegment(t.Context(), d.buildSegmentURL(1)); err != nil {
 		t.Fatalf("fetchSegment: %v", err)
 	}
 
@@ -167,7 +166,7 @@ func TestEmptyCookieGetterSendsNoCookieHeader(t *testing.T) {
 		CookieHeader: func() string { return "" },
 	})
 
-	if _, _, err := d.fetchSegment(context.Background(), d.buildSegmentURL(1)); err != nil {
+	if _, _, err := d.fetchSegment(t.Context(), d.buildSegmentURL(1)); err != nil {
 		t.Fatalf("fetchSegment: %v", err)
 	}
 
@@ -195,7 +194,7 @@ func TestUnrotatedJarSendsByteIdenticalHeader(t *testing.T) {
 	})
 
 	for seq := range 3 {
-		if _, _, err := d.fetchSegment(context.Background(), d.buildSegmentURL(seq)); err != nil {
+		if _, _, err := d.fetchSegment(t.Context(), d.buildSegmentURL(seq)); err != nil {
 			t.Fatalf("fetchSegment(%d): %v", seq, err)
 		}
 	}

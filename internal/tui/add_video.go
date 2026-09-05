@@ -613,7 +613,7 @@ func (m *AddVideoModel) View() string {
 	return centerBox(box, m.width, m.height)
 }
 
-func (m *AddVideoModel) renderURLStep(w, h int) string {
+func (m *AddVideoModel) renderURLStep(w, _ int) string {
 	var lines []string
 
 	title := "Add Video"
@@ -663,7 +663,7 @@ func (m *AddVideoModel) renderURLStep(w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
+func (m *AddVideoModel) renderFormatStep(_, h int, isVideo bool) string {
 	var lines []string
 
 	stepNum := "1/4"
@@ -711,7 +711,7 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *AddVideoModel) renderTimestamps(w, h int) string {
+func (m *AddVideoModel) renderTimestamps(w, _ int) string {
 	var lines []string
 
 	lines = append(lines, TitleStyle.Render("Timestamps (Optional)")+" "+DimStyle.Render("(Step 3/4)"))
@@ -732,7 +732,7 @@ func (m *AddVideoModel) renderTimestamps(w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *AddVideoModel) renderConfirm(w, h int) string {
+func (m *AddVideoModel) renderConfirm(w, _ int) string {
 	var lines []string
 
 	lines = append(lines, TitleStyle.Render("Confirmation")+" "+DimStyle.Render("(Step 4/4)"))

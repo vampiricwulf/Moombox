@@ -6,6 +6,7 @@ import { SegmentPlayer } from "./segments.js";
 import {
   normalizeOffsetMs,
   computeChatBiasMs,
+  deriveMissingOffsets,
   mergePartChats,
   indexAfter,
   partitionChatByVideo,
@@ -1004,6 +1005,13 @@ export class PlayerController {
           const r = await fetch(`/api/jobs/${jobId}/segments/${s.segmentIndex}/chat`);
           if (!r.ok) return null;
           const data = await r.json();
+          // Per part, against the PART's own header epoch — before
+          // mergePartChats shifts it onto the global timeline (one file, one
+          // epoch). Skipped for the Twitch parts this path normally serves:
+          // a Twitch part's offsets are already video-relative and its header
+          // epoch is the recording start, so nothing here may touch them. It
+          // earns its keep on a legacy YouTube part that has a header epoch.
+          if (data && data.platform !== "twitch") deriveMissingOffsets(data.messages, data.streamStartTime);
           const off = segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
           return { startOffsetSec: off ? off.startOffset : 0, data };
         } catch {
@@ -1018,7 +1026,14 @@ export class PlayerController {
     if (this._selectionSeq !== selectionId) return null;
     if (!chatRes.ok) return null;
     const data = await chatRes.json();
-    return this._selectionSeq !== selectionId ? null : data;
+    if (this._selectionSeq !== selectionId) return null;
+    // A message the producer left without an offset of its own (offsetMs 0
+    // and no hasOffset) is recovered from the header epoch before the caller
+    // applies the bias and sorts (T-F12); one that already carries a real
+    // offset is authoritative and untouched. Twitch files are skipped
+    // outright — their offsets are already video-relative (F1).
+    if (data && data.platform !== "twitch") deriveMissingOffsets(data.messages, data.streamStartTime);
+    return data;
   }
 
   buildSidebarChat() {
@@ -1844,6 +1859,28 @@ export class PlayerController {
       dismiss();
       safePlay(document.getElementById("player-video"));
       this._startWatchTracking(jobId);
+    }, { signal: sig });
+
+    // Focus trap (U-M8): Tab and Shift+Tab cycle within the dialog's two
+    // actions while it is open; focus is restored on dismiss (already wired).
+    //
+    // Bound on `document`, like the Escape handler above: focus can legitimately
+    // sit OUTSIDE the overlay while the dialog is up — a click on the scrim (the
+    // overlay div is not focusable) leaves it on <body>, and so does a Tab
+    // pressed before the requestAnimationFrame focus below has run or before
+    // Shoelace has upgraded <sl-button>. An overlay-bound handler never sees
+    // those keystrokes and focus walks into the page behind the dialog, so the
+    // third case pulls it back in.
+    const focusables = () => [...overlay.querySelectorAll("sl-button, button, [tabindex]:not([tabindex='-1'])")]
+      .filter((el) => !el.disabled);
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Tab") return;
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (!overlay.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     }, { signal: sig });
 
     overlay.querySelector("#resume-continue").addEventListener("click", () => {

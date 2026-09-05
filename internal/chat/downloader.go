@@ -108,11 +108,17 @@ type ChatDownloader struct {
 	onProgressMu sync.RWMutex
 	onProgress   func(p ChatProgress)
 
-	// Logger is an optional diagnostic sink for non-fatal, debug-level drift
-	// signals (e.g. unexpected API field shapes). nil-safe — if not set,
-	// debug diagnostics are silently dropped.
+	// Logger is an optional diagnostic sink for non-fatal signals: the mode
+	// rule's sidecar refusal at Info, and drift (unexpected API field shapes,
+	// the file-epoch adoption, marshal failures) at Debug. nil-safe — if not
+	// set, the diagnostics are silently dropped. The worker assigns its own
+	// logger at both construction sites (setupChatDownloader and
+	// tryStartEarlyChat), so in production these lines DO reach the log.
 	Logger interface {
 		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
 	}
 }
 
@@ -144,6 +150,17 @@ func (cd *ChatDownloader) logDebug(msg string, args ...any) {
 	}
 }
 
+// logInfo routes an operator-visible diagnostic through the optional Logger.
+// No-op when Logger is nil. Reserved for the entry-time decisions that DISCARD
+// something on disk — today, the mode rule refusing a live run's sidecar — so
+// an operator reading a resumed job's log sees them without switching to
+// debug. Everything else stays on logDebug.
+func (cd *ChatDownloader) logInfo(msg string, args ...any) {
+	if cd.Logger != nil {
+		cd.Logger.Info(msg, args...)
+	}
+}
+
 // reportIOError marks an IO failure and routes the error through OnError.
 // The flag is inspected by Start() before clearResume() so the resume file
 // is preserved when the final flush failed (audit chat.md C8).
@@ -156,9 +173,10 @@ func (cd *ChatDownloader) reportIOError(err error) {
 	}
 }
 
-// chatWarnAdapter adapts the Debug-only cd.Logger to the Warn-shaped
-// utils.ChatFileLogger. Per-message marshal failures inside AppendChatMessages
-// are non-fatal drift signals; Debug is the right severity.
+// chatWarnAdapter adapts cd.Logger to the Warn-shaped utils.ChatFileLogger,
+// deliberately DOWNGRADING to Debug: per-message marshal failures inside
+// AppendChatMessages are non-fatal drift signals, so Debug is the right
+// severity even though the widened Logger now offers Warn.
 type chatWarnAdapter struct{ cd *ChatDownloader }
 
 func (a chatWarnAdapter) Warn(msg string, args ...any) { a.cd.logDebug(msg, args...) }
@@ -222,9 +240,14 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 // archive: the next run found no sidecar, started at count 0, and its first
 // message took the full-write path over chat.json.
 //
-// THE ADOPTION RULE (the other half of the same guarantee). When there is no
-// usable sidecar but OutputFile already exists, Start adopts that file as
-// history — see adoptExistingChatFile.
+// THE MODE RULE (the first thing Start decides, before either rule below). A
+// REPLAY run refuses a sidecar a LIVE/upcoming run wrote (ChatResumeState.Mode)
+// and proceeds as if there were none — see the resume block's own comment
+// below.
+//
+// THE ADOPTION RULE (the other half of the completion rule's guarantee). When
+// there is no usable sidecar but OutputFile already exists, Start adopts that
+// file as history — see adoptExistingChatFile.
 //
 // THE CONTINUATION-PREFERENCE RULE. A sidecar that IS loaded supplies the
 // count and dedup IDs, but for a live/upcoming run it does not supply the
@@ -327,7 +350,33 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	// carrying only the sidecar) has nothing fresher to prefer.
 	preferFresh := false
 	state, err := cd.loadResume()
-	if err == nil && state != nil && state.VideoID == cd.opts.VideoID {
+	sidecarUsable := err == nil && state != nil && state.VideoID == cd.opts.VideoID
+	// THE MODE RULE. A sidecar written by a LIVE/upcoming run describes the
+	// LIVE half of the file: its count, continuation and dedup IDs were all
+	// reached against the live endpoint, and its epoch is that run's. A REPLAY
+	// run that adopted them would append its archive on top of the live half
+	// and compute its offsets against the live run's epoch, so the whole
+	// replay half reads early by the late-start delta. It must instead take
+	// the full-rewrite path the adoption rule below already says a replay run
+	// takes — so a replay run refuses a live-tagged sidecar and falls through
+	// as if there were none. A sidecar with no Mode was written before the
+	// field existed and keeps the pre-existing behaviour: an upgrade must
+	// never strand a job that was mid-resume.
+	//
+	// A refused sidecar is NOT deleted here. The completion rule above owns
+	// the sidecar's lifetime, and it is decided on EXIT for a reason: the live
+	// run that wrote this one may still be running (the orchestrator can
+	// re-Start a downloader while a live one holds the same paths), so
+	// deleting on entry would race it and destroy its resume position.
+	if sidecarUsable && state.Mode == resumeModeLive && !cd.opts.IsLiveOrUpcoming {
+		// Info, not Debug: this rule silently discards a position on disk and
+		// rewrites the file. An operator diagnosing "my replay chat came out
+		// short" has to be able to see it without turning debug on.
+		cd.logInfo("chat: ignoring the live run's resume sidecar for a replay run",
+			"videoID", cd.opts.VideoID, "sidecarMessageCount", state.MessageCount)
+		sidecarUsable = false
+	}
+	if sidecarUsable {
 		preferFresh = cd.opts.IsLiveOrUpcoming && cd.opts.InitialContinuation != ""
 		if !preferFresh {
 			cd.continuation = state.Continuation
@@ -1181,6 +1230,7 @@ func (cd *ChatDownloader) saveResume() {
 		VideoID:       cd.opts.VideoID,
 		RecentIDs:     recentIDs,
 		StreamStartMs: cd.streamStartMs,
+		Mode:          resumeModeFor(cd.opts.IsLiveOrUpcoming),
 	}
 	cd.mu.Unlock()
 

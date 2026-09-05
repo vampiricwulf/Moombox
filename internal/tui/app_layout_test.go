@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"strings"
 	"testing"
 	"time"
 
@@ -402,5 +403,52 @@ func TestSecurityBannerText(t *testing.T) {
 	// Nil store (tests / early init) must not panic.
 	if got := (&App{}).securityBannerText(); got != "" {
 		t.Errorf("nil store: got %q, want empty", got)
+	}
+}
+
+// TestViewWarnsBelowMinimumTerminalSize pins the minimum-size guard: below
+// minTermWidth x minTermHeight, every panel/overlay renders garbage (negative
+// widths, wrapped borders), so View() must short-circuit to a single-line
+// warning instead — the same shape as the "Initializing..." guard it sits
+// beside, one check further down.
+func TestViewWarnsBelowMinimumTerminalSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		w, h        int
+		wantTooSmal bool
+	}{
+		{"narrow width", minTermWidth - 1, minTermHeight + 5, true},
+		{"short height", minTermWidth + 5, minTermHeight - 1, true},
+		{"both under", 50, 10, true},
+		{"exactly at minimum", minTermWidth, minTermHeight, false},
+		{"comfortably sized", 120, 40, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := NewApp()
+			app.width = tt.w
+			app.height = tt.h
+			view := app.View().Content
+			got := strings.Contains(view, "Terminal too small")
+			if got != tt.wantTooSmal {
+				t.Errorf("at %dx%d: Contains(view, \"Terminal too small\") = %v, want %v\nview:\n%s",
+					tt.w, tt.h, got, tt.wantTooSmal, view)
+			}
+		})
+	}
+}
+
+// TestViewTerminalTooSmallNamesTheSize pins the message content: the current
+// and required dimensions, so an operator resizing a pane knows how far to
+// go rather than guessing.
+func TestViewTerminalTooSmallNamesTheSize(t *testing.T) {
+	app := NewApp()
+	app.width = 50
+	app.height = 10
+	view := app.View().Content
+	for _, want := range []string{"50", "10", fmt.Sprintf("%d", minTermWidth), fmt.Sprintf("%d", minTermHeight)} {
+		if !strings.Contains(view, want) {
+			t.Errorf("terminal-too-small view lacks %q:\n%s", want, view)
+		}
 	}
 }

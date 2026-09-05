@@ -398,7 +398,7 @@ See [BUILDING.md](BUILDING.md) for prerequisites and build commands for Windows,
 
 ## Terminal UI
 
-The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space.
+The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space. A terminal narrower than 60 columns or shorter than 20 rows shows a "Terminal too small" message instead of the panels.
 
 ### Keyboard Controls
 
@@ -417,7 +417,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | A D D | Delete job (confirm) |
 | A W | Toggle watched (Finished jobs) |
 | A T | Trim finished video |
-| A O | Browse orphaned items |
+| A O | Browse Orphaned Items |
 | A K | Manage client tokens |
 
 **Request (R)**

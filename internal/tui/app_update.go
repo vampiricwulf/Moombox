@@ -173,6 +173,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.cookieStatusCh = nil
 		case "diskStatus":
 			a.diskStatusCh = nil
+		case "backfillStatus":
+			a.backfillStatusCh = nil
 		case "updateStatus":
 			a.updateStatusCh = nil
 		}
@@ -294,6 +296,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case UpdateStatusMsg:
+		if msg.Version == "" {
+			// A dismiss elsewhere (the Web dashboard's
+			// POST /api/update/dismiss) cleared the pending update. TagName
+			// carries WHICH release was skipped: clear only when it is the one
+			// this TUI is showing (or when nothing is shown). A dismiss that
+			// raced a newly-found release names the older tag, and blanking the
+			// badge for the new one would hide an update nobody skipped.
+			if a.updateAvailable == nil || a.updateAvailable.TagName == msg.TagName {
+				a.updateAvailable = nil
+				a.details.updateInfo = nil
+			}
+			return a, a.listenForUpdates()
+		}
 		a.updateAvailable = &msg
 		a.details.updateInfo = &msg
 		return a, a.listenForUpdates()
@@ -324,6 +339,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if a.updateAvailable != nil && a.updateAvailable.TagName == msg.Tag {
 			a.updateAvailable = nil
+			// And the details header's glyph, which renders from
+			// details.updateInfo (job_details.go). Clearing only
+			// updateAvailable left the operator's own S skip with the glyph
+			// still lit, while the Web dismiss above cleared both (review F2).
+			a.details.updateInfo = nil
 		}
 		a.releaseNotesPopup.close()
 		a.setFeedback("Skipped " + msg.Tag + " — you'll be notified about the next release")

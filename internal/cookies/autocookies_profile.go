@@ -622,6 +622,34 @@ func credentialAccepted(p platformAuth) bool {
 
 // checkPlatformAuth verifies both platforms against the CURRENT jar contents.
 //
+// EACH PLATFORM GETS ITS OWN authVerifyWindow, AND THE TWO RUN AT THE SAME
+// TIME. They used to share one window — a single context.WithTimeout wrapped
+// around both calls, taken one after the other — so a YouTube check that spent
+// the whole window handed Twitch a deadline that was already gone. The Twitch
+// verifier is an HTTP round trip and an HTTP round trip on an expired context
+// fails before a packet leaves, so Twitch came back verifyUnknown: not a
+// finding about the Twitch credentials at all, but a report of YouTube's
+// latency wearing Twitch's name. Everything downstream reads it as the former
+// — credentialAccepted turns it into a green badge when the user just signed
+// in, and platformsToRestore rolls a mounted-profile import back over it — its
+// second arm is exactly "had credentials before, could not be checked after".
+// (Not platformsToRestoreOnRegression: that one needs a conclusive
+// verifyFailed after the write, so a spurious unknown never reaches it.) Two
+// independent budgets, and neither platform's answer depends on how slow the
+// other one was.
+//
+// The two halves of that are one fix, not two. Separate windows taken in
+// sequence would have made a call cost 2 × the window, and this function is
+// called TWICE per refresh pass (the pre-write snapshot and the post-write
+// verify) and three times when the pass rolls back — ≈125 s against a 120 s
+// refreshOverallBudget. Running them together holds a call at ONE window
+// whatever the platform count, so the pass costs 101 s (113 s with the
+// rollback re-verify), the binding Chromium setup column costs 42.3 s against
+// its 60 s grace, and no outer budget had to move for any of it (rulings J5a,
+// J5b). authVerifyTimeout was also cut 15 s → 12 s under J5a, which is the
+// number autocookies.go's two tables, operations.md's grace-window derivation
+// and data-and-storage.md's cross-writer-window sentence all carry.
+//
 // The bool projection (`state == verifyOK`) is exactly what RefreshCookies
 // computed inline before, including the "no verify callback wired" contract:
 // presence is then the only signal available, so it is reported as success
@@ -639,9 +667,6 @@ func credentialAccepted(p platformAuth) bool {
 // unable to see either a regression or an unknown, so a destructive import
 // went in over a working session with no rollback.
 func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platformAuth) {
-	vctx, cancel := context.WithTimeout(ctx, authVerifyTimeout)
-	defer cancel()
-
 	check := func(hasCookies bool, verify func(context.Context) (bool, error), platform string) platformAuth {
 		if !hasCookies {
 			// No credential of any kind for this platform. verifyFailed is a
@@ -656,6 +681,11 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 			s.logger.Warn(platform + " auth verification callback not wired — reporting based on cookie presence alone")
 			return platformAuth{hasCookies: true, state: verifyOK}
 		}
+		// One window PER PLATFORM, built here rather than once around both
+		// calls. Built after the two early returns above so a platform that is
+		// never asked costs nothing. See the function comment.
+		vctx, cancel := context.WithTimeout(ctx, authVerifyWindow)
+		defer cancel()
 		verified, err := verify(vctx)
 		switch {
 		case err != nil:
@@ -676,8 +706,46 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 		}
 	}
 
-	yt = check(s.jar.HasAnyYouTubeAuthCookie(), s.VerifyYouTubeAuth, "YouTube")
-	tw = check(s.jar.HasAnyTwitchAuthCookie(), s.VerifyTwitchAuth, "Twitch")
+	// CONCURRENTLY, which is what keeps a per-platform window from costing a
+	// per-platform WAIT. The refresh pass makes two of these calls (the
+	// pre-write snapshot and the post-write verify) and three when it rolls
+	// back, so run sequentially the split would have priced one pass at
+	// ≈125 s against a 120 s refreshOverallBudget — the split paying for
+	// itself out of a budget it does not own. Run together, a call costs ONE
+	// window no matter how many platforms are configured.
+	//
+	// The two checks share nothing that is written: each owns its own context
+	// and its own platformAuth, the jar reads under its own RWMutex, and the
+	// only common object is the logger. The predicates are evaluated on this
+	// goroutine so the jar is read once per platform, before either starts.
+	var wg sync.WaitGroup
+	run := func(dst *platformAuth, hasCookies bool, verify func(context.Context) (bool, error), platform string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Deferred AFTER wg.Done, so it runs BEFORE it: dst is written
+			// while the joiner is still waiting.
+			defer func() {
+				if r := recover(); r != nil {
+					s.logger.Error(platform+" auth verification panicked", "panic", r)
+					// A panic is the "could not form the question" unknown:
+					// no verdict was reached, and attempted stays false so
+					// credentialAccepted will not turn it into a sign-in.
+					// platformsToRestore — the mounted-profile policy, whose
+					// second arm is "had credentials before, could not be
+					// checked after" — keeps protecting the platform. The
+					// regression policy is NOT what protects here: it needs a
+					// conclusive verifyFailed, which an unknown is not.
+					// hasCookies is still the truth about the jar.
+					*dst = platformAuth{hasCookies: hasCookies, state: verifyUnknown}
+				}
+			}()
+			*dst = check(hasCookies, verify, platform)
+		}()
+	}
+	run(&yt, s.jar.HasAnyYouTubeAuthCookie(), s.VerifyYouTubeAuth, "YouTube")
+	run(&tw, s.jar.HasAnyTwitchAuthCookie(), s.VerifyTwitchAuth, "Twitch")
+	wg.Wait()
 	return yt, tw
 }
 

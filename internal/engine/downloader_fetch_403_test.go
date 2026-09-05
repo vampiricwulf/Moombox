@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -47,7 +46,7 @@ func TestForbiddenBehindHeadRefreshesAndRetries(t *testing.T) {
 	// downloader_dash_headseq_test.go's d.lastSegTime.StoreNow() calls).
 	d.lastSegTime.StoreNow()
 
-	body, err := d.fetchSegmentWithRetry(context.Background(), d.buildSegmentURL(10), nil)
+	body, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(10), nil)
 	if err != nil {
 		t.Fatalf("fetch failed after refresh: %v", err)
 	}
@@ -88,7 +87,7 @@ func TestForbiddenBehindHeadNoCallbackStaysPermanent(t *testing.T) {
 	d.currentSeq.Store(10) // well behind head
 	d.lastSegTime.StoreNow()
 
-	_, err := d.fetchSegmentWithRetry(context.Background(), d.buildSegmentURL(10), nil)
+	_, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(10), nil)
 	if err != ErrSegmentPermanent {
 		t.Fatalf("err = %v, want ErrSegmentPermanent (no callback installed)", err)
 	}
@@ -122,7 +121,7 @@ func TestForbiddenAtHeadStaysPermanent(t *testing.T) {
 	d.noteHeadSeq(100)
 	d.currentSeq.Store(101) // past head — this is the end of the stream
 
-	_, err := d.fetchSegmentWithRetry(context.Background(), d.buildSegmentURL(101), nil)
+	_, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(101), nil)
 	if err != ErrSegmentPermanent {
 		t.Fatalf("err = %v, want ErrSegmentPermanent at head", err)
 	}
@@ -157,7 +156,7 @@ func TestGoneAlwaysPermanent(t *testing.T) {
 	d.noteHeadSeq(5000)
 	d.currentSeq.Store(10)
 
-	if _, err := d.fetchSegmentWithRetry(context.Background(), d.buildSegmentURL(10), nil); err != ErrSegmentPermanent {
+	if _, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(10), nil); err != ErrSegmentPermanent {
 		t.Fatalf("err = %v, want ErrSegmentPermanent for 410", err)
 	}
 	if got := calls.Load(); got != 1 {
@@ -212,7 +211,7 @@ func TestForbiddenBehindHeadURLRefreshRebuildsSegURL(t *testing.T) {
 
 	seq := 10
 	segURL := d.buildSegmentURL(seq)
-	body, err := d.fetchSegmentWithRetry(context.Background(), segURL, func() string {
+	body, err := d.fetchSegmentWithRetry(t.Context(), segURL, func() string {
 		return d.buildSegmentURL(seq)
 	})
 	if err != nil {
@@ -260,7 +259,7 @@ func TestForbiddenBehindHeadExhaustsToPermanent(t *testing.T) {
 	// goes right before the call under test.
 	d.delays = fastDelays()
 
-	_, err := d.fetchSegmentWithRetry(context.Background(), d.buildSegmentURL(10), nil)
+	_, err := d.fetchSegmentWithRetry(t.Context(), d.buildSegmentURL(10), nil)
 	if err != ErrSegmentPermanent {
 		t.Fatalf("err = %v, want ErrSegmentPermanent once refresh attempts are exhausted", err)
 	}

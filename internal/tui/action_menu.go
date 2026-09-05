@@ -536,9 +536,9 @@ func (m *ActionMenuModel) View() string {
 	case menuMain:
 		return m.renderMain(contentW, boxW)
 	case menuJobSelect:
-		return m.renderJobSelect(contentW, boxW)
+		return m.renderJobSelect(boxW)
 	case menuConfirm:
-		return m.renderConfirm(contentW, boxW)
+		return m.renderConfirm(boxW)
 	}
 	return ""
 }
@@ -555,7 +555,7 @@ func (m *ActionMenuModel) renderMain(contentW, boxW int) string {
 	return centerBox(box, m.width, m.height)
 }
 
-func (m *ActionMenuModel) renderJobSelect(contentW, boxW int) string {
+func (m *ActionMenuModel) renderJobSelect(boxW int) string {
 	header := TitleStyle.Render(m.pendingLabel) +
 		DimStyle.Render(fmt.Sprintf(" — Select job (%d)", len(m.filtered)))
 
@@ -572,7 +572,7 @@ func (m *ActionMenuModel) renderJobSelect(contentW, boxW int) string {
 	return centerBox(box, m.width, m.height)
 }
 
-func (m *ActionMenuModel) renderConfirm(contentW, boxW int) string {
+func (m *ActionMenuModel) renderConfirm(boxW int) string {
 	ch := 3
 	prompt := YellowBoldStyle.Render(
 		fmt.Sprintf("Confirm: %s?", m.confirmLabel))

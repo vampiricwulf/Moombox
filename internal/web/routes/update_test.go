@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -221,6 +222,98 @@ func TestUpdateDismissSkipsVersionAndClearsSharedInfo(t *testing.T) {
 	// SharedUpdateInfo cleared so /api/update/status returns available=false
 	if SharedUpdateInfo.Load() != nil {
 		t.Error("SharedUpdateInfo should be nil after dismiss")
+	}
+}
+
+// TestUpdateDismissNotifiesOnDismissed: the dismiss route reports the tag it
+// skipped through OnDismissed so the other UI (the TUI's badge) can drop the
+// release too — the Web hides its own indicator from SharedUpdateInfo, but the
+// TUI holds its own copy and would otherwise keep advertising a version the
+// operator already dismissed.
+func TestUpdateDismissNotifiesOnDismissed(t *testing.T) {
+	var got []string
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
+		Version:     "2.6.0-test",
+		OnDismissed: func(tag string) { got = append(got, tag) },
+	})
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+
+	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if len(got) != 1 || got[0] != "v9.9.9" {
+		t.Fatalf(`OnDismissed calls: want ["v9.9.9"], got %q`, got)
+	}
+}
+
+// TestUpdateDismissWithoutPendingSkipsOnDismissed: nothing was skipped, so
+// nothing is announced — a 400 must not clear a badge that is still valid.
+func TestUpdateDismissWithoutPendingSkipsOnDismissed(t *testing.T) {
+	called := false
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
+		Version:     "2.6.0-test",
+		OnDismissed: func(string) { called = true },
+	})
+
+	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("dismiss with no pending update: want 400, got %d", rec.Code)
+	}
+	if called {
+		t.Error("OnDismissed must not fire when there was nothing to dismiss")
+	}
+}
+
+// TestUpdateDismissConfigSaveFailureDoesNotNotify: the skip is not persisted,
+// so nothing may act as if it were. The 500 tells the dashboard the release is
+// still pending, and OnDismissed must stay silent — firing it would put out the
+// TUI's badge for a version that will be offered again on the next launch,
+// which is worse than the failure it is reporting.
+func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
+	resetUpdateGlobals(t)
+	t.Cleanup(func() { resetUpdateGlobals(t) })
+
+	// A DIRECTORY where the config file belongs: config.Save cannot write it,
+	// on Windows or Linux, without any permission trickery.
+	blocked := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatalf("mkdir the blocking directory: %v", err)
+	}
+	store := config.NewStore(config.Defaults(), blocked)
+
+	called := false
+	r := chi.NewRouter()
+	UpdateRoutes(r, &UpdateRouteDeps{
+		Version:     "2.6.0-test",
+		OnDismissed: func(string) { called = true },
+	}, store)
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+
+	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("dismiss with an unwritable config: want 500, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Error("OnDismissed fired although the skip was never persisted")
+	}
+	// And the release is still pending, so the dashboard keeps showing it.
+	if SharedUpdateInfo.Load() == nil {
+		t.Error("SharedUpdateInfo was cleared although the skip failed to save")
+	}
+	var skipped string
+	store.Read(func(c *config.MoomboxConfig) { skipped = c.Updates.SkippedVersion })
+	if skipped != "" {
+		t.Errorf("in-memory SkippedVersion = %q, want empty — DismissUpdate must roll its write back when the save fails", skipped)
 	}
 }
 

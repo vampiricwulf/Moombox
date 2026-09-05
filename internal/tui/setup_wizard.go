@@ -1639,7 +1639,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	if m.channelMode == "edit" {
 		lines = append(lines, m.renderChannelEditor(contentW)...)
 	} else {
-		lines = append(lines, m.renderChannelList(contentW)...)
+		lines = append(lines, m.renderChannelList()...)
 	}
 
 	// Error
@@ -1758,7 +1758,7 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		if m.channelMode == "edit" {
 			lines = append(lines, m.renderChannelEditor(contentW)...)
 		} else {
-			lines = append(lines, m.renderChannelList(contentW)...)
+			lines = append(lines, m.renderChannelList()...)
 		}
 
 		if m.errorMsg != "" {
@@ -1891,7 +1891,7 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 
 // --- Shared Channel Rendering ---
 
-func (m *SetupWizardModel) renderChannelList(contentW int) []string {
+func (m *SetupWizardModel) renderChannelList() []string {
 	var lines []string
 
 	if len(m.channels) == 0 {

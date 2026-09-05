@@ -1,9 +1,14 @@
 package twitch
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -20,6 +25,26 @@ const (
 	// PING every ~5 min; this gives us one missed heartbeat plus slack
 	// before we treat the socket as dead and trigger the reconnect path.
 	ircReadDeadline = 6 * time.Minute
+	// chatHeaderScanLimit bounds the prefix chatFileRecordingBaseMs reads out
+	// of an existing part file. TwitchChatData's header is a handful of short
+	// scalars written before the messages array — that field order is already
+	// load-bearing for AppendChatMessages — so 4 KB is far more than it can
+	// occupy, and the point of the bound is that a marathon part's chat.json
+	// is tens of megabytes that must not be pulled into memory for one stamp.
+	chatHeaderScanLimit = 4096
+	// chatPartReadBuffer sizes the reader readChatPartFileSummary streams a
+	// part file through. json.Decoder refills 512 bytes at a time on its own,
+	// which is ~100k syscalls for a 50 MB part; one buffered read per 64 KB
+	// is the whole reason the bufio wrapper is there.
+	chatPartReadBuffer = 64 * 1024
+	// chatCorruptSuffix names the copy adoptExistingPartFile moves an
+	// unreadable part file to before the session starts writing a new one.
+	// One fixed name, not a timestamped series: the point is that the bytes
+	// survive for a human to look at, not that every failed parse accumulates
+	// its own artifact in staging. Same suffix the YouTube downloader uses
+	// (internal/chat/downloader.go corruptChatSuffix) — one recovery
+	// convention across both platforms.
+	chatCorruptSuffix = ".corrupt"
 )
 
 // The fixed vocabulary of Twitch auth-downgrade reasons: one value per route
@@ -76,6 +101,18 @@ const (
 // Info line beside that `continue` is what says what happened. Its text is
 // therefore for a reader of the code, not for an operator.
 var errReauthRequested = errors.New("IRC session cancelled to present refreshed credentials")
+
+// errChatPartMalformed marks a part file whose BYTES were read in full and are
+// not chat JSON this package can use — a truncated write, a half-flushed
+// array, something else entirely at the path.
+//
+// It exists because the caller's response to it is DESTRUCTIVE: a malformed
+// part file is renamed to <path>.corrupt so the session can start a fresh one
+// beside it. A file we merely failed to READ — an antivirus lock, a sharing
+// violation, a directory in its place — has told us nothing about its content,
+// and moving it aside on that basis would take a healthy archive out from
+// under the job. See adoptExistingPartFile.
+var errChatPartMalformed = errors.New("chat part file is not readable as chat JSON")
 
 // ChatDownloader connects to Twitch IRC and records live chat messages.
 type ChatDownloader struct {
@@ -572,6 +609,489 @@ func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 	cd.mu.Unlock()
 }
 
+// adoptPartRecordingBase seeds recordingStartMs from the part file already on
+// disk, so a part RESUMED after a daemon restart keeps counting offsets from
+// the base its earlier messages were written against instead of from the
+// restart. No-op when there is no part file, or no base recorded in it.
+//
+// The file, not the run. The orchestrator hands every session time.Now() as
+// the recording start — SetRecordingStartTime, and the RollFile that redirects
+// a resumed job into the part it left off in — which is right for a part that
+// begins now and wrong for one that began hours ago. The resumed part's VIDEO
+// is appended to (the engine reopens video_stream O_APPEND at the resume
+// sidecar's byte position, and the part is muxed with a derived start rather
+// than the restart time), so the part's timeline still starts where it always
+// did. Rebasing the chat to the restart drops every post-restart message back
+// onto the head of the part — landing on top of the pre-restart chat, hours
+// out of position, with two clocks in one file. One file, one epoch: the same
+// rule the YouTube downloader states as "keeping the file's epoch over the
+// run's start time" (internal/chat/downloader.go).
+//
+// What is left wrong is bounded and is the outage itself: offsets are placed
+// at (message − base) while the video lost whatever segments expired from the
+// playlist window while the daemon was down. Twitch live has no DVR, so a
+// resume across a gap the window cannot cover makes the engine report a gap
+// and the orchestrator split into a FRESH part — new dir, new file, new base —
+// which is the case this function then correctly declines to touch. The
+// residual is therefore at most a window's worth of drift, against hours of
+// misplacement for the alternative.
+//
+// Only on a fresh Start (the caller's !alreadyInitialized gate). A downloader
+// the orchestrator re-Starts after a connectivity outage already holds the
+// base its part file was written with, so there is nothing to adopt and no
+// reason to race a roll for it.
+//
+// The store is conditional on outputPath still being the path that was read.
+// Start runs on its own goroutine while the video loop is already going, so a
+// gap split can call RollFile in between — and the new part's base must not be
+// overwritten with the closed part's.
+func (cd *ChatDownloader) adoptPartRecordingBase() {
+	path := cd.currentOutputPath()
+	if path == "" {
+		return
+	}
+	fileBaseMs, ok, readErr := chatFileRecordingBaseMs(path)
+	if !ok {
+		// "No file" is the ordinary case and stays silent. Anything else —
+		// a Windows sharing violation, an AV lock, a directory in the file's
+		// place — means the part MAY have had a base to adopt and we could not
+		// see it, so the run's restart time stands and every offset in this
+		// part is shifted by the outage. Without a line here that drift is
+		// indistinguishable from a fresh part (review F6).
+		if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+			cd.logger.Debug("twitch chat: could not read the part file's recording base; using the run's start",
+				"channel", cd.channelLogin, "path", path, "err", readErr)
+		}
+		return
+	}
+
+	cd.mu.Lock()
+	runBaseMs := cd.recordingStartMs.Load()
+	adopt := cd.outputPath == path && runBaseMs != fileBaseMs
+	if adopt {
+		cd.recordingStartMs.Store(fileBaseMs)
+	}
+	cd.mu.Unlock()
+
+	if !adopt {
+		return
+	}
+	cd.logger.Info("twitch chat: resuming part with its recorded base",
+		"channel", cd.channelLogin, "path", path,
+		"fileBaseMs", fileBaseMs, "runBaseMs", runBaseMs)
+}
+
+// chatFileRecordingBaseMs reads recordingStartTime out of an existing part's
+// chat file and returns it in Unix milliseconds.
+//
+// ok is false for everything it cannot read POSITIVELY — no file, a file this
+// package did not write, a header written before the field existed, a header
+// longer than chatHeaderScanLimit, an unparseable stamp. The caller's fallback
+// is the run's own start time, and an invented base is worse than a stale one.
+//
+// The third return separates "the bytes never arrived" from "the bytes said
+// nothing": it is non-nil ONLY for an os.Open / io.ReadFull failure, so the
+// caller can tell a missing file (silence) from an unreadable one (a Debug
+// line). Every content verdict returns a nil error, because none of them is a
+// fault worth logging on an ordinary fresh part.
+//
+// Token-walked rather than unmarshalled: json.Decoder.Decode buffers the whole
+// top-level value, which for a part file is the entire message history.
+//
+// A var, not a func, so a test can drive the race the caller's outputPath
+// guard exists for — a RollFile landing between this read and the store. The
+// same seam shape as readChatPartFileSummary below.
+var chatFileRecordingBaseMs = func(path string) (int64, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false, err
+	}
+	defer f.Close()
+
+	head := make([]byte, chatHeaderScanLimit)
+	n, err := io.ReadFull(f, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return 0, false, err
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(head[:n]))
+	opening, err := dec.Token()
+	if err != nil {
+		return 0, false, nil
+	}
+	if delim, isDelim := opening.(json.Delim); !isDelim || delim != '{' {
+		return 0, false, nil
+	}
+	for {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return 0, false, nil
+		}
+		key, isKey := keyTok.(string)
+		if !isKey {
+			return 0, false, nil // the object closed without the field
+		}
+		valTok, err := dec.Token()
+		if err != nil {
+			return 0, false, nil
+		}
+		if key != "recordingStartTime" {
+			// Every header field is a scalar and all of them precede
+			// "emotes"/"messages", so a composite value means the header is
+			// over (or this is not one of our files) — and descending into it
+			// is exactly the read the scan limit exists to avoid.
+			if _, composite := valTok.(json.Delim); composite {
+				return 0, false, nil
+			}
+			continue
+		}
+		stamp, isString := valTok.(string)
+		if !isString {
+			return 0, false, nil
+		}
+		t, err := time.Parse(time.RFC3339, stamp)
+		if err != nil {
+			return 0, false, nil
+		}
+		return t.UnixMilli(), true, nil
+	}
+}
+
+// adoptExistingPartFile is THE ADOPTION RULE, the Twitch twin of the YouTube
+// downloader's adoptExistingChatFile (internal/chat/downloader.go): when no
+// usable sidecar restored this part's state but its chat file is on disk, the
+// FILE is the part's history and it must be appended to, not replaced.
+// Returns the number of messages adopted (0 = start fresh).
+//
+// Without it, flushedToDisk stays false and the first flush takes
+// writeFullChatFileTo, which writes the file from scratch out of the current
+// batch alone — every message archived before the restart is gone. A sidecar
+// goes missing on any of several ordinary routes: a crash in the window
+// between the file write and the sidecar write, a stream-end drain that
+// cleared it before the job was resumed anyway, or an operator tidying
+// staging. None of them should cost the part its chat.
+//
+// CALLED ONLY WHEN NO SIDECAR RESTORED THE PART — see the gate at its call
+// site in Start, which mirrors the twin's (internal/chat/downloader.go's
+// `if !resuming`). Not a nicety: this function's failure branch RENAMES the
+// part file aside, and a sidecar restore has already set flushedToDisk from a
+// file that merely stats. Renaming under that flag would leave every later
+// flush appending to a path with no file — failing, failing again through the
+// merge fallback, and buffering the whole broadcast in memory with nothing on
+// disk. The gate also keeps the O(file) read off every ordinary resume, where
+// its result would be discarded anyway.
+//
+// Four cases:
+//   - No file: 0, and the part starts fresh exactly as before.
+//   - It reads and holds messages: fileCount becomes the length of the
+//     messages ARRAY, not the header's messageCount — the array is the data,
+//     and a header that over-counts would propagate forever, whereas the array
+//     length self-heals the header on the very first flush (AppendChatMessages
+//     writes the new count into it). flushedToDisk is set so that flush takes
+//     the append path, and the tail of the file's IDs seeds the dedup so an
+//     IRC reconnect replaying messages already on disk cannot duplicate them.
+//   - Its BYTES read fine and are not our JSON (errChatPartMalformed): they
+//     are moved aside to <path>.corrupt and the part starts fresh. Overwriting
+//     them destroys the only copy of something a human could still salvage;
+//     refusing to write at all is worse again, because the session would then
+//     buffer the whole broadcast's chat in memory and persist none of it. If
+//     the RENAME itself fails, the failure is logged and the run proceeds
+//     anyway — an unreadable file must not stop the job archiving for good.
+//   - The bytes could not be READ at all — an antivirus lock, a Windows
+//     sharing violation, a directory in the file's place: logged and left
+//     exactly where it is. A failed read is not a verdict on the content, and
+//     the response to the verdict is a rename; moving a healthy archive out
+//     from under a running job on the strength of a transient lock is a
+//     worse outcome than not adopting it.
+//
+// A file that reads but holds no messages is not adopted: there is no history
+// for a full write to lose, and its header base has already been taken by
+// adoptPartRecordingBase.
+//
+// The adoption is conditional on outputPath still being the path that was
+// read, for the same reason adoptPartRecordingBase's store is: Start runs on
+// its own goroutine while the video loop is already going, so a gap split can
+// call RollFile in between — and the new part's counters must not be seeded
+// from the closed part's file.
+func (cd *ChatDownloader) adoptExistingPartFile() int {
+	path := cd.currentOutputPath()
+	if path == "" {
+		return 0
+	}
+	summary, err := readChatPartFileSummary(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0 // nothing on disk — a fresh part
+		}
+		if !errors.Is(err, errChatPartMalformed) {
+			// Read failure, not a content verdict. Leave the file where it is
+			// and leave flushedToDisk false: this part behaves exactly as it
+			// did before the adoption existed.
+			cd.logger.Warn("twitch chat: cannot read the existing part file; leaving it in place",
+				"channel", cd.channelLogin, "path", path, "err", err)
+			return 0
+		}
+		corruptPath := path + chatCorruptSuffix
+		cd.logger.Error("twitch chat: existing part file unreadable; preserving it instead of overwriting",
+			"channel", cd.channelLogin, "path", path, "preservedAs", corruptPath, "err", err)
+		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
+			cd.logger.Error("twitch chat: could not preserve the unreadable part file; the next flush will overwrite it",
+				"channel", cd.channelLogin, "path", path, "err", renameErr)
+		}
+		return 0
+	}
+	if summary.messages == 0 {
+		return 0
+	}
+
+	cd.mu.Lock()
+	adopt := cd.outputPath == path && !cd.flushedToDisk
+	if adopt {
+		cd.fileCount = summary.messages
+		// The job-level metric never drops: a sidecar that restored a larger
+		// cumulative total (parts closed earlier in this job) keeps it.
+		cd.totalCount = max(cd.totalCount, summary.messages)
+		cd.flushedToDisk = true
+		// Add, not Restore: additive seeding cannot discard whatever a
+		// sidecar restore already put there.
+		for _, id := range summary.recentIDs {
+			cd.dedup.Add(id)
+		}
+	}
+	// cd.messages is deliberately NOT cleared. On a fresh Start it is empty,
+	// and anything it did hold would be unwritten messages — dropping them is
+	// the very loss this function exists to prevent.
+	cd.mu.Unlock()
+
+	if !adopt {
+		return 0
+	}
+	cd.logger.Info("twitch chat: adopting the existing part file",
+		"channel", cd.channelLogin, "path", path, "messages", summary.messages)
+	return summary.messages
+}
+
+// chatPartFileSummary is everything adoptExistingPartFile needs out of a part
+// file already on disk: how many messages it holds and the tail of their IDs.
+type chatPartFileSummary struct {
+	messages  int
+	recentIDs []string
+}
+
+// readChatPartFileSummary reads an existing part's chat file and reports its
+// message count and the last chatDedupMax message IDs in it.
+//
+// STREAMED, not unmarshalled. A marathon part's chat.json runs to tens of
+// megabytes and this runs at Start for every resumed job, so the decoder walks
+// the header's tokens to the "messages" key and then decodes one message at a
+// time into an id-only shape — peak memory is one message plus the decoder's
+// buffer, instead of the whole file twice (raw bytes plus the decoded slice),
+// which is what readChatFileMessages' os.ReadFile + json.Unmarshal costs the
+// append-failure fallback. Counting still means reading every byte of the
+// file; that is inherent to the format (the header's messageCount is exactly
+// the number this function refuses to trust) and it is one sequential pass at
+// startup, not per flush.
+//
+// The price is a second reader that has to know the file's shape. That shape
+// is already load-bearing elsewhere — AppendChatMessages splices at the
+// messages array's closing bracket, and TwitchChatData documents why
+// "messages" must serialize last — so this reader adds no new constraint: it
+// tolerates any field order, and steps over an enriched file's "emotes"
+// object on the way.
+//
+// An error means the file could not be read as one of ours, INCLUDING a
+// well-formed messages array followed by a broken tail: such a file cannot be
+// appended to (AppendChatMessages would splice at whatever ']' the tail's last
+// 256 bytes happen to hold), so the caller must preserve it rather than adopt
+// it. A missing file returns an os.IsNotExist error, which the caller reads as
+// "fresh part" rather than as damage.
+// A var, not a func, for the same reason chatFileRecordingBaseMs is one: a
+// test needs a RollFile to land between this read and the counter store the
+// caller guards with `cd.outputPath == path`.
+var readChatPartFileSummary = func(path string) (chatPartFileSummary, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return chatPartFileSummary{}, err
+	}
+	defer f.Close()
+
+	// The reader is wrapped so a mid-file I/O failure can be told apart from
+	// bad bytes AFTER the decoder has folded both into one error. Both arrive
+	// at the caller through json.Decoder, but only one of them is a verdict on
+	// the file's content — and the caller acts destructively on that verdict.
+	src := &ioErrReader{r: f}
+	summary, err := decodeChatPartFile(bufio.NewReaderSize(src, chatPartReadBuffer))
+	if err == nil {
+		return summary, nil
+	}
+	if src.err != nil {
+		// The bytes never arrived. Nothing is known about the content, so the
+		// error is reported as-is: not malformed.
+		return chatPartFileSummary{}, src.err
+	}
+	return chatPartFileSummary{}, fmt.Errorf("%w: %w", errChatPartMalformed, err)
+}
+
+// ioErrReader records the first non-EOF error the underlying reader returns.
+// io.EOF and io.ErrUnexpectedEOF are NOT recorded: a truncated file is a real
+// corruption signal and reaches the decoder as an unexpected end of input,
+// which is exactly the verdict the caller should act on.
+//
+// The ErrUnexpectedEOF arm is unreachable through today's ONE caller — the
+// reader underneath is an *os.File, and Read never manufactures that error;
+// io.ReadFull and io.ReadAtLeast do, and this path uses neither. It stays
+// because the rule it states belongs to this type rather than to that caller:
+// the field is an io.Reader, and a future one wrapping a ReadFull-based source
+// would otherwise have a truncation silently reclassified from "the content is
+// corrupt" to "the bytes never arrived", which is the opposite verdict.
+type ioErrReader struct {
+	r   io.Reader
+	err error
+}
+
+func (r *ioErrReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if err != nil && r.err == nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		r.err = err
+	}
+	return n, err
+}
+
+// decodeChatPartFile is readChatPartFileSummary's walk, over an already-open
+// reader so the caller can classify what went wrong.
+func decodeChatPartFile(r io.Reader) (chatPartFileSummary, error) {
+	dec := json.NewDecoder(r)
+	opening, err := dec.Token()
+	if err != nil {
+		return chatPartFileSummary{}, fmt.Errorf("parse chat file: %w", err)
+	}
+	if delim, isDelim := opening.(json.Delim); !isDelim || delim != '{' {
+		return chatPartFileSummary{}, fmt.Errorf("parse chat file: top level is not a JSON object")
+	}
+
+	var summary chatPartFileSummary
+	found := false
+	for !found {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return chatPartFileSummary{}, fmt.Errorf("parse chat file: %w", err)
+		}
+		if delim, isDelim := keyTok.(json.Delim); isDelim && delim == '}' {
+			// A well-formed file with no messages array at all: nothing to
+			// adopt, but nothing damaged either.
+			return chatPartFileSummary{}, nil
+		}
+		key, isKey := keyTok.(string)
+		if !isKey {
+			return chatPartFileSummary{}, fmt.Errorf("parse chat file: unexpected token %v", keyTok)
+		}
+		if key != "messages" {
+			if err := skipJSONValue(dec); err != nil {
+				return chatPartFileSummary{}, fmt.Errorf("parse chat file: %w", err)
+			}
+			continue
+		}
+		summary, err = decodeChatMessageIDs(dec)
+		if err != nil {
+			return chatPartFileSummary{}, err
+		}
+		found = true
+	}
+
+	// The rest of the document has to be well-formed too — see the doc above
+	// on why a broken tail must not be adopted.
+	if err := finishJSONValue(dec, 1); err != nil {
+		return chatPartFileSummary{}, fmt.Errorf("parse chat file: %w", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return chatPartFileSummary{}, fmt.Errorf("parse chat file: trailing data after the top-level object")
+	}
+	return summary, nil
+}
+
+// decodeChatMessageIDs consumes the messages array, counting its entries and
+// keeping the last chatDedupMax IDs — the window an IRC reconnect replay can
+// overlap. Holding all of them would scale the dedup with the file instead of
+// with the window. "messages": null is an empty part, not damage.
+func decodeChatMessageIDs(dec *json.Decoder) (chatPartFileSummary, error) {
+	opening, err := dec.Token()
+	if err != nil {
+		return chatPartFileSummary{}, fmt.Errorf("parse chat messages: %w", err)
+	}
+	if opening == nil {
+		return chatPartFileSummary{}, nil
+	}
+	if delim, isDelim := opening.(json.Delim); !isDelim || delim != '[' {
+		return chatPartFileSummary{}, fmt.Errorf("parse chat messages: not an array")
+	}
+
+	var summary chatPartFileSummary
+	for dec.More() {
+		// id only: the decoder skips every other field without materialising
+		// it, so a 400-byte message costs nothing but the scan.
+		var msg struct {
+			ID string `json:"id"`
+		}
+		if err := dec.Decode(&msg); err != nil {
+			return chatPartFileSummary{}, fmt.Errorf("parse chat messages: %w", err)
+		}
+		summary.messages++
+		if msg.ID == "" {
+			continue
+		}
+		summary.recentIDs = append(summary.recentIDs, msg.ID)
+		// Compact at 2x so the trim is amortised rather than per message.
+		if len(summary.recentIDs) >= chatDedupMax*2 {
+			summary.recentIDs = append([]string(nil), summary.recentIDs[len(summary.recentIDs)-chatDedupMax:]...)
+		}
+	}
+	if _, err := dec.Token(); err != nil { // the array's ']'
+		return chatPartFileSummary{}, fmt.Errorf("parse chat messages: %w", err)
+	}
+	if len(summary.recentIDs) > chatDedupMax {
+		summary.recentIDs = summary.recentIDs[len(summary.recentIDs)-chatDedupMax:]
+	}
+	return summary, nil
+}
+
+// skipJSONValue consumes exactly one JSON value from dec: a scalar in one
+// token, a composite by walking to its matching close. Used to step over the
+// header's fields — and an enriched file's "emotes" object — on the way to
+// the messages array.
+func skipJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, isDelim := tok.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	if delim != '{' && delim != '[' {
+		return fmt.Errorf("unexpected %q where a value was expected", delim)
+	}
+	return finishJSONValue(dec, 1)
+}
+
+// finishJSONValue walks tokens until the given open-composite depth closes.
+func finishJSONValue(dec *json.Decoder, depth int) error {
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if delim, isDelim := tok.(json.Delim); isDelim {
+			switch delim {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+	}
+	return nil
+}
+
 // clearResumeState deletes the resume state file on successful completion.
 func (cd *ChatDownloader) clearResumeState() {
 	store := utils.ResumeStore[ChatResumeState]{Path: cd.getResumeFilePath()}
@@ -607,6 +1127,44 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			cd.restoreResumeState(resumeState)
 			cd.logger.Info("[TwitchChat] Resuming from saved state",
 				"fileMessages", resumeState.MessageCount, "totalMessages", cd.MessageCount())
+		}
+		// Independently of the sidecar: the part FILE decides this part's
+		// offset base, and it outlives any resume state (RollFile clears a
+		// closed part's, and a crash can lose one). See adoptPartRecordingBase
+		// for why the restart is the wrong base for a part that began hours ago.
+		cd.adoptPartRecordingBase()
+
+		// And the part file is this part's HISTORY. With the file on disk but
+		// no usable sidecar, flushedToDisk would otherwise stay false and the
+		// first flush would write the file from scratch out of the new batch
+		// alone. Base first, deliberately: a malformed file is moved aside
+		// there, and the base read out of its header before that is the epoch
+		// the preserved copy's offsets were computed against — so the fresh
+		// file and the .corrupt beside it keep one clock between them.
+		//
+		// ONLY when no sidecar restored the part. flushedToDisk is the record
+		// of that (restoreResumeState is the one thing that sets it before
+		// this point), and reading it here rather than inside the adoption
+		// keeps the destructive branch unreachable in the restored case
+		// instead of merely harmless — see adoptExistingPartFile. It also
+		// keeps a full pass over a marathon part file off every ordinary
+		// resume, where the result would be discarded.
+		cd.mu.Lock()
+		sidecarRestored := cd.flushedToDisk
+		cd.mu.Unlock()
+		if !sidecarRestored {
+			// The adopted count is deliberately NOT pushed through
+			// callOnProgress here. MessageCount() is cd.totalCount, which this
+			// path seeds from the CURRENT PART's file alone, and
+			// ProgressTracker.SetChatCount is a plain assignment rather than a
+			// max (internal/worker/progress.go). On a multi-part job whose row
+			// already holds the cumulative total, pushing at Start would drop
+			// the row to this part's count immediately. That undercount is a
+			// pre-existing intake item — totalCount is not seeded from the
+			// sidecar-less earlier parts' files — and a push here would only
+			// make its symptom instant and deterministic instead of waiting
+			// for the next message. Fix the seeding, then push.
+			cd.adoptExistingPartFile()
 		}
 	}
 

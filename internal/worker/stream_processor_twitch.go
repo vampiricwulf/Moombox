@@ -324,12 +324,14 @@ func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job)
 	isVodJob := strings.HasPrefix(job.VideoID, "tw_v")
 
 	if isVodJob {
-		return sp.processTwitchVod(ctx, job, login)
+		// No login: a VOD is addressed by its own ID, and the login above is
+		// only computed to reject a job Moombox cannot place at all.
+		return sp.processTwitchVod(ctx, job)
 	}
 	return sp.processTwitchLive(ctx, job, login)
 }
 
-func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.Job, login string) (*StreamProcessResult, error) {
+func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
 	vodID := strings.TrimPrefix(job.VideoID, "tw_v")
 
 	vodInfo, err := sp.tw.GetVodInfo(ctx, vodID)

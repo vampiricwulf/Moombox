@@ -47,7 +47,7 @@ The file structure:
 | `web/public/modules/job-details.js` | ~765 | `JobDetailsController` — the job details dialog: render, live updates, action buttons, per-job logs. |
 | `web/public/modules/player.js` | ~2.0k | Video player with per-job chat replay. Niconico-style scrolling overlay (`nico-lanes.js` `LaneAllocator` for lane collision, `nico-geometry.js` for the letterbox/row math, `nico-scheduler.js` `NicoScheduler` for the cursor/anchor/pending-list state machine; a two-edge bound covering both collision conditions, 4 s traverse, a pending list with a 2 s lateness bound, a "+N not shown" pill, overlay sized to the video's rendered rect with rows from a measured line box, 120 ms geometry settle, off by default under `prefers-reduced-motion`); sidebar with pre-show/post-end dividers and counts derived from the loaded message array, never a chat file header's own `messageCount` (`chat-timeline.js` `partitionChatByVideo`/`formatChatHeader`/`dividerLabelFor`); chat search; per-job chat offset (positive = chat earlier: effective = video + offset — a positive offset can spawn overlay rows the sidebar already marks `.post`, by design); resume/watched tracking; per-part Twitch chat merge for multi-segment jobs (`chat-timeline.js` `mergePartChats` over `GET /api/jobs/{id}/segments/{index}/chat`); keyboard shortcuts (`Space`/arrows/`F`/`M`/`C`/`S`) work right after selection, and the player's own `F` (fullscreen) overrides the Web UI's global `F` (filter-focus) shortcut while the player tab is active; during a window drag the overlay flies on its previous committed geometry until `NICO_GEO_SETTLE_MS` (120 ms) after the drag stops. A message enters at the right edge one second before its timestamp (`NICO_LEAD_MS`, niconico's lead) and is a quarter of the way across when its timestamp arrives; the cursor takes it up to one tick early (`NICO_TICK_AHEAD_MS`) and the Web Animations `delay` holds the exact entry instant, so the ~4 Hz `timeupdate` rate never shows and messages slide in instead of appearing mid-stage. Multi-segment seeking stitches separate segment video files into one timeline (`segments.js` `SegmentPlayer`). |
 | `web/public/modules/segments.js` | ~140 | `SegmentPlayer` — multi-segment playback helper shared by the player and the trimmer: sequential segment sources, cumulative time offsets, cross-segment seeking. |
-| `web/public/modules/chat-timeline.js` | ~120 | Pure chat/video timeline math: offset normalization, chat-to-video bias, pre-show/post-end partitioning, per-part chat merge. No DOM, no fetch; covered by `web/tests/chat-timeline.test.mjs`. |
+| `web/public/modules/chat-timeline.js` | ~150 | Pure chat/video timeline math: offset normalization, chat-to-video bias, pre-show/post-end partitioning, per-part chat merge, and offset recovery for legacy files (`deriveMissingOffsets` — a message with no offset of its own is placed from the chat file's header epoch and its `timestampUsec`, per part before the merge; without a header epoch it stays where it was). No DOM, no fetch; covered by `web/tests/chat-timeline.test.mjs`. |
 | `web/public/modules/nico-lanes.js` | ~75 | `LaneAllocator` — the niconico lane-collision math (right-to-left constant-traverse scrolling) and seed-cursor selection on reset/seek. Pure; covered by `web/tests/nico-lanes.test.mjs`. |
 | `web/public/modules/nico-geometry.js` | ~50 | Pure niconico overlay geometry: the centred-fit `letterboxStage`, `rowsFor` row count, and `sameStage`/`nextGeometry` change detection. No DOM — `player.js` reads the element sizes and writes the styles; covered by `web/tests/nico-geometry.test.mjs`. |
 | `web/public/modules/nico-scheduler.js` | ~185 | `NicoScheduler` — the niconico overlay's cursor/anchor/pending-list/drop-count state machine and the `NICO_*` tuning constants (`player.js` imports them). Pure; covered by `web/tests/nico-scheduler.test.mjs`. |
@@ -155,6 +155,8 @@ Example: Logs focused (100% width, 75% height)
 **Logs (bottom, full width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and vim-style regex search (`/` to enter search, `n`/`N` to navigate matches, `Esc` to clear). Matched lines are highlighted in the viewport. Long lines soft-wrap within the available width. Auto-scrolls to newest entries unless the user has manually scrolled up.
 
 **Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input and has a visually distinct border.
+
+**Minimum terminal size:** below 60 columns × 20 rows, `App.View` skips the panel layout entirely and renders a single "Terminal too small" line naming the current and required dimensions, since every panel/overlay computes negative or near-zero content widths under that floor.
 
 ### Source Files
 
@@ -314,12 +316,18 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 | Message Type | Source | Content |
 |--------------|--------|---------|
 | `JobUpdateMsg` | Database subscriber | Single job that changed. Contains the full `*database.Job`. |
+| `JobAddedMsg` | Database subscriber | A newly added job (lifecycle event) — appended directly to local state instead of triggering a full job-list rebuild. Contains `*database.JobAdded`. |
+| `JobDeletedMsg` | Database subscriber | The ID of a removed job (lifecycle event) — the row is removed from local state directly instead of reloading a fresh full-list snapshot. Contains `*database.JobDeleted`. |
+| `TrimsChangedMsg` | Database subscriber (re-fetched via `tui_wiring`) | A refreshed `*database.Job` snapshot after a trim was added or deleted; applied to the cached row and, if selected, the detail panel. |
 | `JobsUpdateMsg` | Database subscriber | Full job list changed (job added or deleted). Contains `[]*database.Job`. |
 | `LogBatchMsg` | Logger subscriber | Batch of log lines accumulated over a 250ms flush window. Contains `[]string`. |
 | `CheckTimersMsg` | Monitor callbacks | Next check times for Feed, DECAPI, and Twitch monitors. |
 | `CookieStatusMsg` | Cookie service | `{YT, TW, YTActive, TWActive}` — one `CookieStatus` per platform (`None`, `OK`, `CookiesOnly`, `Relogin`, `Unknown`) plus each platform's active flag. There is no *expired* state: expiry has no UI reader at all. See §Status Bar. |
 | `DiskStatusMsg` | Disk monitor | Disk usage percentage and warning/critical thresholds. |
-| `UpdateStatusMsg` | Updater | New version available (tag name, release notes). |
+| `BackfillStatusMsg` | Feed monitor backfill sweep | One message per completed scan page (`state: "scanning"`) plus one per scan-state change (`"done"`, `"error"`, `"idle"` — those carry `Tab` `""` and `Pages` 0); mirrors the Web's `backfill_status` WebSocket payload. |
+| `UpdateStatusMsg` | Updater | New version available (tag name, release notes). An empty `Version` means "cleared" (a Web-side dismiss) and carries the skipped `TagName`: the TUI drops its badge only when that tag is the release it is showing, so a dismiss racing a newer release cannot blank a badge nobody skipped. |
+| `ConnectivityMsg` | Connectivity monitor | Online/offline transition (`Online bool`). |
+| `channelClosedMsg` | Channel poll commands | Sent when one of the eleven backend channels `listenForUpdates` selects on closes, naming it so the App nils the field and stops polling it: `jobUpdate`, `jobAdded`, `jobDeleted`, `jobTrimsChanged`, `jobsUpdate`, `log`, `checkTimers`, `cookieStatus`, `diskStatus`, `backfillStatus`, `updateStatus`. A name with no case would leave the field set and the select would re-fire on the closed channel forever. |
 
 **Internal tick messages:**
 
@@ -329,6 +337,8 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 | `progressTickMsg` | 16ms (active) / 500ms (idle) | Progress bar animation. Runs at ~60fps during active downloads, drops to 2fps when idle to save CPU. |
 | `logFlushMsg` | 250ms | Triggers flushing accumulated log lines from the buffer to the viewport. |
 | `marqueeTickMsg` | 150ms | Advances scrolling marquee text for overflowed labels. |
+| `cookieCountdownTickMsg` | 1 second, while the setup wizard's cookie step is counting down | Decrements the cookie-capture countdown; ticks from a superseded chain (`gen`) are ignored so a stacked chain cannot drain the countdown faster than one per second. |
+| `statsRefreshTickMsg` | 60 seconds, while the `R T` Statistics overlay is open | Refreshes the overlay on the Web Stats tab's own poll cadence; a tick naming an earlier `Epoch` than the current open is dropped. |
 
 **Async operation result messages:**
 
@@ -338,24 +348,40 @@ These are returned by Bubble Tea commands that perform HTTP requests to the back
 |---------|-----------|
 | `updateCheckResultMsg` | Manual update check |
 | `updateApplyResultMsg` | Update download and apply |
+| `dismissUpdateResultMsg` | Skip pending update version (Release Notes overlay's `S` key) |
+| `releaseNotesFetchedMsg` | Fetch current version's release notes (`R N` when no update is pending) |
 | `signatureVerifyResultMsg` | Ed25519 signature verification |
 | `fetchFormatsResultMsg` | Format list fetch for Add Video |
 | `fetchFormatsAutoAdvanceMsg` | Timer to auto-skip format selection on error |
 | `addVideoResultMsg` | Job creation result |
 | `importResultMsg` | Zip import result |
+| `cookieImportResultMsg` | Cookie file import (`R I`) |
 | `createTrimResultMsg` | Trim creation result |
 | `deleteTrimResultMsg` | Trim deletion result |
+| `deleteJobsResultMsg` | Job deletion, single or batch (`A D D`) |
+| `setWatchedResultMsg` | Toggle watched flag (`A W`) |
 | `fetchOrphansResultMsg` | Orphaned file list fetch |
 | `deleteOrphanResultMsg` | Orphaned file deletion |
+| `fetchOrphanedHistoryResultMsg` | Orphaned processing-history list fetch |
+| `deleteHistoryEntryResultMsg` | Orphaned history entry deletion |
+| `bulkOrphanResultMsg` | Bulk delete-all sweep over one Orphaned Files/History section (the `A O` overlay's `A` key) |
 | `ffmpegCheckResultMsg` | FFmpeg PATH check |
 | `ffmpegPrepareResultMsg` | FFmpeg download preparation |
 | `ffmpegConfirmResultMsg` | FFmpeg install confirmation |
+| `ffmpegMenuActionMsg` | FFmpeg check/install menu action resolved via `huh` form completion |
+| `backfillRescanQueuedMsg` | Feed-history re-scan queued (`R B`) |
 | `cookieRecheckResultMsg` | Cookie recheck |
 | `cookieForceRefreshResultMsg` | Cookie force refresh |
 | `channelResolvedMsg` | Channel URL/name resolution |
 | `fetchClientTokensResultMsg` | Client token list fetch |
 | `deleteClientTokenResultMsg` | Client token deletion |
+| `ytdlpStatusMsg` | yt-dlp plugin status fetch (`R Y`) |
+| `ytdlpInstallResultMsg` | yt-dlp plugin install/reinstall (`R Y`'s `I`) |
+| `statsSnapshotMsg` | Statistics snapshot fetch (`R T` open/refresh) |
 | `setupCookieFinishMsg` | Setup wizard cookie step completion |
+| `setupSaveResultMsg` | Setup wizard config save |
+| `testNotificationResultMsg` | Test notification send (Settings overlay) |
+| `panicRecoveryMsg` | Panic recovered from an async `tea.Cmd` closure |
 
 ### Non-Blocking Channel Communication
 

@@ -254,17 +254,27 @@ func (m *FilesDialogModel) IsVisible() bool {
 	return m.visible
 }
 
+// filesBoxDims computes the dialog's box dimensions from the terminal size:
+// boxW/boxH are the outer box, listH is the list's content height inside it.
+// Extracted once from three call sites (SetSize, SetBulkResult, View) that
+// each carried their own copy of this formula and could drift apart.
+//
+// boxH-7, not -6: the fixed rows around the list are the title, a blank, two
+// blank+message rows and the footer, and centerBox never truncates — one row
+// of slack short and a bulk result renders past the last line the terminal
+// has.
+func filesBoxDims(w, h int) (boxW, boxH, listH int) {
+	boxW = max(min(80, w-4), 40)
+	boxH = max(min(24, h-4), 10)
+	listH = max(boxH-7, 1)
+	return boxW, boxH, listH
+}
+
 // SetSize updates the dialog dimensions.
 func (m *FilesDialogModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	boxW := max(min(80, w-4), 40)
-	boxH := max(min(24, h-4), 10)
-	// boxH-7, not -6: the fixed rows around the list are the title, a blank,
-	// two blank+message rows and the footer, and centerBox never truncates —
-	// one row of slack short and a bulk result renders past the last line the
-	// terminal has.
-	listH := max(boxH-7, 1)
+	boxW, _, listH := filesBoxDims(w, h)
 	m.list.SetSize(boxW-2, listH)
 }
 
@@ -367,7 +377,8 @@ func (m *FilesDialogModel) SetBulkResult(deleted int, failures []string) {
 	prefix := fmt.Sprintf("Deleted %d · %d failed: ", deleted, len(failures))
 	// The box width View() computes, less its border and the two-space indent
 	// every message row carries.
-	contentW := max(max(min(80, m.width-4), 40)-4, 24)
+	boxW, _, _ := filesBoxDims(m.width, m.height)
+	contentW := max(boxW-4, 24)
 	budget := max(contentW-lipgloss.Width(prefix)-lipgloss.Width(more), 8)
 	m.actionErr = prefix + truncateString(strings.Join(shown, "; "), budget) + more
 	m.feedbackMsg = ""
@@ -617,8 +628,7 @@ func (m *FilesDialogModel) View() string {
 		return ""
 	}
 
-	boxW := max(min(80, m.width-4), 40)
-	boxH := max(min(24, m.height-4), 10)
+	boxW, boxH, _ := filesBoxDims(m.width, m.height)
 
 	total := len(m.list.Items())
 	loadErr := m.loadErrorText()

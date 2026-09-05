@@ -28,25 +28,69 @@ const (
 	//
 	// It is COUPLED to refreshOverallBudget below, which caps the same work
 	// end to end. Worst case for a two-platform Firefox refresh:
-	//   2 × (processTimeout + the 5s post-kill reap in runWithTimeout) = 70s
+	//   2 × (processTimeout + postKillReapGrace)                       = 70s
 	//   + firefoxLaunchSpacing                                          =  5s
-	//   + the cookie-DB read retries (5 × 500ms)                        ≈  2.5s
-	//   + authVerifyTimeout — ONE window covering BOTH platforms, not
-	//     one each; see checkPlatformAuth                               = 15s
-	//                                                                   ≈ 92s
-	// against a 120s cap. RAISING processTimeout WITHOUT RAISING
-	// refreshOverallBudget makes the outer ctx cancel the second platform's
-	// launch mid-flight instead of granting it the budget it was just given.
+	//   + the cookie-DB read retries (4 × cookieDBReadRetryBackoff)     ≈  2.0s
+	//   + authVerifyTimeout — TWO checkPlatformAuth calls per pass, the
+	//     pre-write snapshot and the post-write verify, each costing
+	//     ONE window because the platforms verify concurrently  2 × 12s = 24s
+	//                                                                   ≈ 101s
+	// against a 120s cap. The rollback arm makes a THIRD call, which is the
+	// real worst case at ≈ 113s — still under. Four is not reachable: the
+	// snapshot is taken once per pass and the post-verify and the rollback
+	// re-verify are the two arms of one decision.
+	//
+	// Four retries, not five: the loop runs cookieDBReadRetries attempts but
+	// sleeps only BEFORE a re-try (autocookies_firefox.go), so it costs
+	// (cookieDBReadRetries-1) × cookieDBReadRetryBackoff.
+	//
+	// Every term above is a named constant, and
+	// TestAuthVerifyBudgetsStayUnderTheirCaps re-sums this table and the
+	// setupAbandonGrace one below from those constants — so an edit to any of
+	// them that breaks a cap fails a test instead of rotting a comment.
+	//
+	// RAISING processTimeout WITHOUT RAISING refreshOverallBudget makes the
+	// outer ctx cancel the second platform's launch mid-flight instead of
+	// granting it the budget it was just given. Making the two platform checks
+	// SEQUENTIAL again would put the two-call pass at ≈ 125s and the
+	// three-call pass at ≈ 149s, both over the cap — see checkPlatformAuth.
 	processTimeout = 30 * time.Second
-	// authVerifyTimeout bounds ONE checkPlatformAuth call — both platforms
-	// together, not each. checkPlatformAuth builds a single
-	// context.WithTimeout and hands the same deadline to VerifyYouTubeAuth and
-	// VerifyTwitchAuth, so a slow YouTube check eats into what is left for
-	// Twitch and the pair can never take longer than this. Read as a per-call
-	// bound it looks like a 30 s ceiling, which is what
-	// data-and-storage.md's cross-writer window sentence would then be pricing
-	// the import path against.
-	authVerifyTimeout    = 15 * time.Second
+	// authVerifyTimeout bounds ONE VERIFIER — one window per platform, not one
+	// window for the pair. checkPlatformAuth builds a context.WithTimeout
+	// around each check(...) call, so VerifyYouTubeAuth and VerifyTwitchAuth
+	// each get the full value and neither platform's verdict depends on how
+	// slow the other one was.
+	//
+	// It used to be one shared deadline, and a YouTube check that spent it
+	// left Twitch reporting verifyUnknown about a credential nobody had asked
+	// about; see checkPlatformAuth for what that cost downstream.
+	//
+	// A whole checkPlatformAuth call is still worth ONE of these, not two: the
+	// two platforms are verified concurrently, so this is both the per-verifier
+	// bound and the per-call bound, and it stays that way if a third platform
+	// is ever added. That is the number the refresh sum above (once per call,
+	// two or three calls per pass), the setupAbandonGrace columns below and
+	// data-and-storage.md's cross-writer window sentence all carry.
+	//
+	// 12 s, NOT the 15 s it was, and the 3 s came off here rather than out of
+	// any outer budget (ruling J5a). The split alone would have put the binding
+	// Chromium setup column at 60.3 s against a 60 s setupAbandonGrace and
+	// against both clients' own 60 s FinishSetup caps — three constants the
+	// cookie remediation set deliberately — and would have put a refresh pass
+	// over refreshOverallBudget outright. Paying for it here, plus the
+	// concurrency (J5b), keeps every one of them where it was.
+	//
+	// The value spent is authVerifyWindow, a var below, so a test can prove
+	// the windows are per platform and simultaneous without waiting 12 s.
+	//
+	// It is the TIGHTEST of the three bounds a real verify sits under, which
+	// is why the worst cases below are reachable and the margins worth keeping
+	// positive: cookiesHTTPClient's own timeout is 30 s and refresh.go's
+	// authCheckTimeout — which CheckYouTubeAuth and CheckTwitchAuth wrap
+	// around themselves — is 15 s, so at 12 s this window is what actually
+	// stops a hung verifier. Raise it past 15 s and authCheckTimeout starts
+	// binding instead, and this constant quietly stops meaning anything.
+	authVerifyTimeout    = 12 * time.Second
 	refreshOverallBudget = 2 * time.Minute // periodic refresh: ctx cap end-to-end (see processTimeout)
 	// taskkillDrainDelay is the post-taskkill pause that lets Windows release
 	// the process handle before the next cleanup step inspects state. Replaces
@@ -86,17 +130,31 @@ const (
 	// Server-side worst case inside that window, summed rather than sampled:
 	//
 	//   Firefox   taskkillDrainDelay            0.3s
-	//             readFirefoxCookies retries   ~2.0s   (5 × 500ms)
-	//             authVerifyTimeout            15.0s
-	//                                        ≈ 17.3s
+	//             readFirefoxCookies retries   ~2.0s   (4 × cookieDBReadRetryBackoff)
+	//             both authVerifyTimeouts      12.0s
+	//                                        ≈ 14.3s
 	//   Chromium  cdpExtractTimeout            30.0s
 	//             taskkillDrainDelay            0.3s
-	//             authVerifyTimeout            15.0s
-	//                                        ≈ 45.3s
+	//             both authVerifyTimeouts      12.0s
+	//                                        ≈ 42.3s
 	//
-	// plus merge / write / jar-load I/O in both columns. CHROMIUM IS THE
-	// BINDING COLUMN, so the real margin is ~14.7s — not the ~42s an
-	// "authVerifyTimeout plus the read retries" reading suggests.
+	// BOTH platforms' windows are in those columns and TOGETHER they cost one,
+	// not two: checkPlatformAuth verifies the two concurrently, so a call is
+	// worth 12.0s however many platforms are configured. FinishSetup makes
+	// exactly one such call, so unlike the refresh sum above this column
+	// multiplies nothing. CHROMIUM IS THE BINDING COLUMN, so the real margin
+	// is ~17.7s — not the ~45s a "one column plus the read retries" reading
+	// suggests.
+	//
+	// That margin was paid for, not found: the per-platform split doubled this
+	// line, running the checks concurrently halved it back, and
+	// authVerifyTimeout was cut 15s → 12s alongside (rulings J5a, J5b). Take
+	// the concurrency away and this column is 54.3s; take the cut away as well
+	// and it is 60.3s — OVER both this window and the clients' own 60s cap.
+	// Both of those are load-bearing, so neither is a free edit: serialising
+	// checkPlatformAuth or raising authVerifyTimeout re-opens the overrun
+	// silently, and either one has to move this constant and the two client
+	// caps with it.
 	//
 	// The Firefox column deliberately does NOT price closeFirefoxGracefully's
 	// 8.0s poll or the 0.5s cdpCloseFlushDelay behind it. That branch is
@@ -116,6 +174,13 @@ const (
 	// reason on the finish side.
 	setupAbandonGrace = 60 * time.Second
 )
+
+// authVerifyWindow is the value checkPlatformAuth actually spends, and it is a
+// var for exactly one reason: a test cannot wait out a 12 s window to prove the
+// two platforms are budgeted apart. Production never assigns it — the constant
+// above is the number, this is only the seam a test shortens. Same shape as
+// applyUserOnlyDACL and loadCookieJar elsewhere in this package.
+var authVerifyWindow = authVerifyTimeout
 
 // platformRefreshURLs maps platform names to their refresh URLs.
 var platformRefreshURLs = map[string]string{

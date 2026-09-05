@@ -535,6 +535,10 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	}
 
 	dl := chat.NewChatDownloader(opts)
+	// Same as setupChatDownloader: without this the downloader's own
+	// diagnostics (the mode rule's refusal, the file-epoch adoption, API
+	// drift) never reach the log (Arc J D6).
+	dl.Logger = sp.logger
 	if onProgress != nil {
 		// Wire OnProgress before Start so the surge-detection callback fires
 		// from the very first batch (F16).

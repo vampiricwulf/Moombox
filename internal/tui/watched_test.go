@@ -23,8 +23,8 @@ func TestWatchedGlyphIsCountedInTheRow(t *testing.T) {
 	if got, want := m.titleWidth(plain)-m.titleWidth(watched), watchedGlyphWidth; got != want {
 		t.Fatalf("title budget shrank by %d, want %d", got, want)
 	}
-	rowPlain := m.renderJob(plain, false, false, 58)
-	rowWatched := m.renderJob(watched, false, false, 58)
+	rowPlain := m.renderJob(plain, false, false)
+	rowWatched := m.renderJob(watched, false, false)
 	if strings.Contains(stripANSI(rowPlain), watchedGlyph) {
 		t.Errorf("unwatched row carries the glyph: %q", rowPlain)
 	}

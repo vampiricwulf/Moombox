@@ -1230,6 +1230,12 @@ func TestJobChat304DoesNotReadTheFile(t *testing.T) {
 	if rec.Body.Len() != 0 {
 		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
 	}
+	// RFC 7232 §4.1 SHOULD: a 304 carries the validator it agreed with, so a
+	// cache/proxy sitting in front of the browser can revalidate too (belt
+	// and braces — the browser itself already holds the value it sent back).
+	if got := rec.Header().Get("Last-Modified"); got == "" {
+		t.Error("304 response has no Last-Modified")
+	}
 }
 
 // Same short-circuit proof as TestJobChat304DoesNotReadTheFile, for the
@@ -1277,6 +1283,12 @@ func TestSegmentChat304DoesNotReadTheFile(t *testing.T) {
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("304 must have no body, got %d bytes", rec.Body.Len())
+	}
+	// RFC 7232 §4.1 SHOULD: a 304 carries the validator it agreed with, so a
+	// cache/proxy sitting in front of the browser can revalidate too (belt
+	// and braces — the browser itself already holds the value it sent back).
+	if got := rec.Header().Get("Last-Modified"); got == "" {
+		t.Error("304 response has no Last-Modified")
 	}
 }
 

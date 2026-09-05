@@ -273,7 +273,9 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		s.mu.Lock()
 		// Restore the claim SENTINEL, not nil: RefreshCookies still has its
 		// critical tail to run after this returns (merge → atomic write → jar
-		// reload → auth verify → meta save, up to ~15s). Clearing the slot
+		// reload → auth verify → meta save, up to ~12s — one authVerifyTimeout,
+		// which covers BOTH platforms because checkPlatformAuth runs them
+		// concurrently; ~24s when the rollback arm re-verifies). Clearing the slot
 		// here opened that window to a concurrent RefreshCookies or a
 		// StartSetup — a second browser launched against the same profile
 		// mid-write. The outer defer in RefreshCookies releases the slot when

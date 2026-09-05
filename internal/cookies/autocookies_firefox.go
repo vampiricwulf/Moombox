@@ -43,6 +43,21 @@ const (
 	// refresh launches so the previous instance has time to release
 	// the profile directory's parent.lock. Audit reports/cookies.md #45.
 	firefoxLaunchSpacing = 5 * time.Second
+	// cookieDBReadRetries and cookieDBReadRetryBackoff bound readFirefoxCookies'
+	// wait for a WAL lock to clear. Package-level rather than local to that
+	// function because they are a TERM in autocookies.go's refresh budget
+	// table, and TestAuthVerifyBudgetsStayUnderTheirCaps sums the table from
+	// the constants themselves rather than from copied numbers.
+	//
+	// The loop runs cookieDBReadRetries attempts but sleeps only BEFORE a
+	// re-try, so the wall cost is (cookieDBReadRetries-1) × the backoff.
+	cookieDBReadRetries      = 5
+	cookieDBReadRetryBackoff = 500 * time.Millisecond
+	// postKillReapGrace is how long runWithTimeout waits for a killed launcher
+	// to be reaped before forcing it. It is spent only after processTimeout has
+	// already elapsed, so the budget table prices one launch at
+	// processTimeout + postKillReapGrace.
+	postKillReapGrace = 5 * time.Second
 )
 
 func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url string) error {
@@ -472,25 +487,22 @@ func readFirefoxCookies(profileDir string) (string, firefoxReadStats, error) {
 	// or non-database file is permanent, and retrying it five times at 500ms
 	// only delays the error the operator needs — so the loop breaks on
 	// anything that is not retryable.
-	const maxRetries = 5
-	const retryBackoff = 500 * time.Millisecond
-
 	var lines []string
 	var lastErr error
 
-	for attempt := range maxRetries {
+	for attempt := range cookieDBReadRetries {
 		if attempt > 0 {
-			time.Sleep(retryBackoff)
+			time.Sleep(cookieDBReadRetryBackoff)
 		}
 
-		lines, stats, lastErr = querySnapshotOrLive(profileDir, dbPath, attempt == maxRetries-1)
+		lines, stats, lastErr = querySnapshotOrLive(profileDir, dbPath, attempt == cookieDBReadRetries-1)
 		if lastErr == nil || !isRetryableDBError(lastErr) {
 			break
 		}
 	}
 
 	if lastErr != nil {
-		return "", stats, classifyCookieDBError(fmt.Errorf("after %d attempts: %w", maxRetries, lastErr))
+		return "", stats, classifyCookieDBError(fmt.Errorf("after %d attempts: %w", cookieDBReadRetries, lastErr))
 	}
 
 	// Zero relevant cookies is NEVER a success. It is what a dropped -wal
@@ -1028,7 +1040,7 @@ func runWithTimeout(ctx context.Context, cmd *exec.Cmd, timeout time.Duration, o
 			if onLauncherReaped != nil {
 				onLauncherReaped()
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(postKillReapGrace):
 			logger.Warn("process did not exit after kill, forcing", "pid", cmd.Process.Pid)
 			if cmd.Process != nil {
 				cmd.Process.Kill()

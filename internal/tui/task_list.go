@@ -42,7 +42,7 @@ type Filter int
 const (
 	FilterAll Filter = iota
 	FilterActive
-	FilterErrors
+	FilterIssues
 	FilterFinished
 )
 
@@ -50,7 +50,7 @@ func (f Filter) String() string {
 	switch f {
 	case FilterActive:
 		return "Active"
-	case FilterErrors:
+	case FilterIssues:
 		return "Issues"
 	case FilterFinished:
 		return "Finished"
@@ -108,7 +108,7 @@ func (d taskDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	if ti.divider {
 		fmt.Fprint(w, d.panel.renderDivider(ti.count, selected, contentW))
 	} else {
-		fmt.Fprint(w, d.panel.renderJob(ti.job, selected, ti.archived, contentW))
+		fmt.Fprint(w, d.panel.renderJob(ti.job, selected, ti.archived))
 	}
 }
 
@@ -633,7 +633,7 @@ func (m *TaskListModel) filterPosition() Filter {
 			case "active":
 				return FilterActive
 			case "issues":
-				return FilterErrors
+				return FilterIssues
 			case "finished":
 				return FilterFinished
 			}
@@ -1094,7 +1094,7 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 	return color.Render(line)
 }
 
-func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived bool, maxW int) string {
+func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived bool) string {
 	statusStr := string(job.Status)
 	icon := StatusIcon(statusStr)
 	color := StatusColor(statusStr)

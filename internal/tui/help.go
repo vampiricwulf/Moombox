@@ -8,6 +8,16 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+)
+
+// helpKeyColWidth is the fixed width of the rendered key column (matches
+// keyStyle's own Width(14) in buildContent); helpRowIndent is the 2-space
+// margin before it. A wrapped description's continuation lines are padded by
+// their sum so they land under the description column instead of the margin.
+const (
+	helpKeyColWidth = 14
+	helpRowIndent   = "  "
 )
 
 type helpSection struct {
@@ -152,20 +162,35 @@ func (m *HelpModel) UpdateViewport(msg tea.Msg) tea.Cmd {
 // buildContent constructs the help text and sets it into the viewport.
 func (m *HelpModel) buildContent() {
 	sections := m.orderedSections()
+
+	w := max(m.width-4, 20)
+	h := max(m.height-4, 5)
+
+	// The viewport's own SoftWrap is off, so it CUTS any line past its
+	// content width rather than wrapping it — at anything narrower than
+	// ~92 columns that silently drops the tail of the longer descriptions
+	// (the filter query-language rows exist to teach that syntax to a
+	// newcomer). Wrap each description ourselves at the column the desc
+	// text actually starts in, and indent continuation lines under it, so
+	// every row survives at a normal 80-column terminal.
+	descW := max(w-len(helpRowIndent)-helpKeyColWidth, 1)
+	contPad := strings.Repeat(" ", len(helpRowIndent)+helpKeyColWidth)
+
 	var allLines []string
 	for i, sec := range sections {
 		if i > 0 {
 			allLines = append(allLines, "")
 		}
 		allLines = append(allLines, HeaderStyle.Render(sec.title))
-		keyStyle := YellowStyle.Width(14)
+		keyStyle := YellowStyle.Width(helpKeyColWidth)
 		for _, k := range sec.keys {
-			allLines = append(allLines, "  "+keyStyle.Render(k.key)+k.desc)
+			descLines := strings.Split(ansi.Wrap(k.desc, descW, ""), "\n")
+			allLines = append(allLines, helpRowIndent+keyStyle.Render(k.key)+descLines[0])
+			for _, cont := range descLines[1:] {
+				allLines = append(allLines, contPad+cont)
+			}
 		}
 	}
-
-	w := max(m.width-4, 20)
-	h := max(m.height-4, 5)
 
 	m.viewport.SetWidth(w)
 	m.viewport.SetHeight(h - 1) // -1 for header line

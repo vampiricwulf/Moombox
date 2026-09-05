@@ -540,7 +540,7 @@ The IRC parser handles two message types:
 - Tag fields extracted: `id`, `tmi-sent-ts` (epoch ms), `bits`, `display-name`, `login`, `user-id`, `badges`, `color`, `emotes`.
 - If `bits > 0`, message type is `"bits"`, otherwise `"chat"`.
 - Emote tags parsed from format `id:start-end,start-end/id:start-end` into `TwitchEmoteRef` structs with start/end as rune indices (not byte indices), matching Twitch's character offset convention.
-- `OffsetMs` computed as `tmiSentTs - baseMs` (signed; negative before the recording base) where baseMs is the recording start time (or stream start time as fallback).
+- `OffsetMs` computed as `tmiSentTs - baseMs` (signed; negative before the recording base) where baseMs is the recording start time (or stream start time as fallback) — except that a part RESUMED after a daemon restart takes baseMs from the base its own chat file already carries in `recordingStartTime` rather than from the restart the orchestrator passes in (`adoptPartRecordingBase`, `internal/twitch/chat.go`): one file, one epoch, because the resumed part's video is appended to and so its timeline still starts where it did, and rebasing would drop every post-restart message onto the head of the part; a part file with no such header offers nothing to adopt and the run's own base stands.
 
 **USERNOTICE** (subs, raids, memberships):
 - Tag fields extracted: same as PRIVMSG plus `msg-id`, `system-msg`, `msg-param-sub-plan`, `msg-param-recipient-display-name`, `msg-param-viewerCount`.
@@ -586,7 +586,7 @@ The sidecar `.resume.json` file contains:
 }
 ```
 
-On restart, if the `streamId` matches, the downloader resumes with the saved message count, last timestamp, and dedup set. The resume file is deleted on clean completion.
+On restart, if the `streamId` matches, the downloader resumes with the saved message count, last timestamp, and dedup set. The resume file is deleted on clean completion. A part whose chat file is on disk but whose sidecar is GONE or REFUSED — for example a re-go-live, which changes the stream ID so `loadResumeState` refuses the old sidecar, when the job resumes into the same part; or a crash in the window between the file write and the sidecar write, a sidecar cleared by a stream-end drain, or one deleted by hand — is adopted rather than overwritten (`adoptExistingPartFile`, `internal/twitch/chat.go`): the file is streamed to count its messages array, `flushedToDisk` is set so the first write appends instead of rewriting the part from the new batch alone, and the tail of its IDs seeds the dedup; a file whose bytes read fine but are not chat JSON is preserved beside itself as `<file>.corrupt` and the part starts fresh, never silently overwritten, while a file that could not be READ at all (a lock, a directory in its place) is left exactly where it is. The adoption runs only when no sidecar restored the part, so an ordinary resume neither pays the full read nor can reach the rename.
 
 ### VOD Chat
 
@@ -1147,11 +1147,12 @@ Sidecar `.resume.json` file:
   "timestamp": 1709000000,
   "videoId": "dQw4w9WgXcQ",
   "recentIds": ["msg-1", "msg-2", ...],
-  "streamStartMs": 1709000000000
+  "streamStartMs": 1709000000000,
+  "mode": "live"
 }
 ```
 
-Resume state is saved after each disk flush. On restart, the downloader loads the continuation token and dedup set, skips the All Chat switch (continuation is already mid-stream), and resumes.
+Resume state is saved after each disk flush. On restart, the downloader loads the continuation token and dedup set, skips the All Chat switch (continuation is already mid-stream), and resumes. `mode` is `"live"` or `"replay"` — which kind of run wrote the sidecar: the mode rule is that a replay run refuses a live-tagged sidecar and starts from scratch instead of adopting its count/continuation/dedup/epoch, since those all describe the live half of the file; a sidecar with no `mode` (written before the field existed) is adopted as before.
 
 **Continuation-preference rule (`Start`'s resume block, `internal/chat/downloader.go`):** a LIVE/upcoming run whose caller already supplied an `InitialContinuation` (the token `FetchWatchPage` just returned) keeps that fresh token and takes only `MessageCount`, `RecentIDs`, `flushedToDisk` and `StreamStartMs` from the sidecar. The rule skips an assignment rather than installing anything: on a freshly constructed downloader what survives is the caller's `InitialContinuation`, and on a reused instance (the orchestrator re-`Start`ing a finished early downloader) it is the token that instance's previous run last used — the same value the sidecar was saved from. The sidecar's continuation is by definition the one the previous run left off at, and the exit the completion rule preserves it for is stale-continuation exhaustion — so adopting it costs a wasted poll at best and, when the expired token errors rather than completing, the whole consecutive-error budget. Because a watch-page token is a Top Chat token, such a run is NOT `resuming` as far as `runChatLoop` is concerned: it is entered with `resuming = false` so the All Chat upgrade still happens. For a REPLAY the sidecar's continuation IS the position in the archive (a fresh token would restart the VOD from the top), so it always wins; a live run with no `InitialContinuation` also keeps today's behaviour.
 
