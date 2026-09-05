@@ -4,7 +4,7 @@ This document covers prerequisites and build commands for Moombox on Windows and
 
 ## Prerequisites
 
-- **Go 1.25+** — https://go.dev/dl/
+- **Go 1.27+** — https://go.dev/dl/ (go.mod carries `toolchain go1.27.1`; any Go ≥ 1.21 auto-downloads it)
 - **Node.js 24 LTS** — https://nodejs.org/ (only required for building the BotGuard sidecar tarball; not a runtime dep)
 - **FFmpeg** — only required at runtime, not at build time
 
@@ -13,7 +13,7 @@ This document covers prerequisites and build commands for Moombox on Windows and
 After a fresh checkout, run these once to populate the `internal/bgutils/embed/` directory with the BotGuard sidecar tarball and the Node.js binaries embedded in the final executable:
 
 ```bash
-# Build the BotGuard sidecar payload (~3.5 MB tarball)
+# Build the BotGuard sidecar payload (~4 MB tarball)
 cd bgutil-sidecar
 npm ci --omit=dev
 node build.mjs

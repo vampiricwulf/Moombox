@@ -83,7 +83,7 @@ func TestLiveOfflineChannelPlaybackToken(t *testing.T) {
 		// header.
 		t.Logf("AUTHENTICATED reply for an offline channel FAILED (error type %T)", authedErr)
 		t.Log("FINDING: BRANCH B — an offline channel cannot be probed. " +
-			"Task 3 takes the plan's branch-B form (2026-09-02-arc12b-twitch-entitlement-probe.md, Task 3 Step 3-ALT).")
+			"Task 3 takes the plan's branch-B form (2026-09-02-arc12b-twitch-entitlement-probe.md at git 6b2be7b, Task 3 Step 3-ALT).")
 		return
 	}
 
@@ -110,7 +110,7 @@ func TestLiveOfflineChannelPlaybackToken(t *testing.T) {
 	} else {
 		t.Logf("FINDING: BRANCH B — the offline reply decoded but did not identify the session "+
 			"(signedIn:%v conclusive:%v). Task 3 takes the plan's branch-B form "+
-			"(2026-09-02-arc12b-twitch-entitlement-probe.md, Task 3 Step 3-ALT).",
+			"(2026-09-02-arc12b-twitch-entitlement-probe.md at git 6b2be7b, Task 3 Step 3-ALT).",
 			authedSignedIn, authedConclusive)
 	}
 

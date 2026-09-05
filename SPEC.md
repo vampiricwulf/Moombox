@@ -797,7 +797,7 @@ go test ./...                              # Run all tests
 go vet ./...                               # Static analysis
 ```
 
-Go 1.27 required (go.mod carries `toolchain go1.27.1` as the floor, so an older local Go auto-downloads it). Runtime requires FFmpeg on PATH. Windows resource embedding (exe icon, version info) via `go-winres`: `go install github.com/tc-hib/go-winres@latest && cd cmd/moombox && go-winres make`. This generates `.syso` files in `cmd/moombox/winres/` — CI generates these at build time, none are committed to the repo.
+Go 1.27 required (go.mod carries `toolchain go1.27.1` as the floor: an older local Go and CI auto-download it; the Docker image pins its own 1.27 patch). Runtime requires FFmpeg on PATH. Windows resource embedding (exe icon, version info) via `go-winres`: `go install github.com/tc-hib/go-winres@latest && cd cmd/moombox && go-winres make`. This generates `.syso` files in `cmd/moombox/winres/` — CI generates these at build time, none are committed to the repo.
 
 ### CI/CD
 

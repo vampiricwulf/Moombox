@@ -6,8 +6,11 @@ closed the remediation chain. `origin/main` is at `613ae12`; nothing since has b
 Citations of the form "plan §..." refer to the umbrella plan
 `docs/superpowers/plans/2026-08-25-cookie-subsystem-remediation.md`, which that review DELETED by
 owner ruling (git history is the archive - read it at `a674caf`); the ledgers under
-`.superpowers/sdd/` are gitignored. Where a plan and a ledger disagreed, the ledger won. Every
-arc's own plan under `docs/superpowers/plans/` stays and carries a `## Final state` section.
+`.superpowers/sdd/` are gitignored. Where a plan and a ledger disagreed, the ledger won. The
+per-arc plans (arc10, a1, arc11, arc12a/b/c, h1, h2) were pruned by Arc A on 2026-09-04
+(`cd30140`, `009a269`) once implemented; read any of them at `6b2be7b`, e.g.
+`git show 6b2be7b:docs/superpowers/plans/2026-08-29-arc10-twitch-credential-lifecycle.md`.
+Line-number citations below refer to that revision.
 
 Two rules for every step in this document:
 

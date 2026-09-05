@@ -6,7 +6,7 @@ This document covers building, testing, releasing, updating, and running Moombox
 
 ## Rules and Constraints
 
-- Build requires **Go 1.27**; `go.mod` carries `toolchain go1.27.1`, the floor every build (local, CI, Docker) auto-downloads. Produces binaries for Windows x64, Linux x64, and Linux arm64 (cross-compiled via `GOOS`/`GOARCH` env vars; no CGo means the toolchain handles the rest transparently).
+- Build requires **Go 1.27**; `go.mod` carries `toolchain go1.27.1`, the floor local builds and CI auto-download; the Docker stage takes its patch from the floating `golang:1.27-bookworm` tag (`GOTOOLCHAIN=local` inside the image). Produces binaries for Windows x64, Linux x64, and Linux arm64 (cross-compiled via `GOOS`/`GOARCH` env vars; no CGo means the toolchain handles the rest transparently).
 - **FFmpeg is required at runtime** — must be on PATH or configured via `cfg.Paths.FFmpegPath`. The first-run setup wizard validates FFmpeg availability and can install it via chocolatey or winget.
 - **CI builds on tag push only** (tags matching `v*`). The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
 - **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected.
@@ -41,7 +41,7 @@ Two embed blobs must be present in `internal/bgutils/embed/` before `go build` w
 # 1. Fetch + gzip the pinned Node.js binaries for all 3 platforms (~150 MB total).
 go run ./tools/fetch-node                 # idempotent; skips on version match.
 
-# 2. Build the JS sidecar payload (~3.5 MB tarball).
+# 2. Build the JS sidecar payload (~4 MB tarball).
 cd bgutil-sidecar
 npm ci --omit=dev --ignore-scripts        # production deps only.
 node build.mjs                            # writes ../internal/bgutils/embed/sidecar.tar.gz

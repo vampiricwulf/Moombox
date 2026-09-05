@@ -201,7 +201,9 @@ type DownloaderOptions struct {
 	// a freshly-minted GVS PO token; either may be "" to leave that half
 	// unchanged. Both upstreams recover this way rather than treating the
 	// 403 as terminal (see docs/superpowers/plans/2026-08-15-live-403-
-	// credential-recovery.md). Optional; nil disables recovery, restoring
+	// credential-recovery.md — removed after implementation; read it from
+	// git history, e.g. `git show aedc162^:docs/superpowers/plans/2026-08-15-live-403-credential-recovery.md`).
+	// Optional; nil disables recovery, restoring
 	// the previous behaviour exactly.
 	OnCredentialRefresh func() (baseURL string, poToken string)
 	Logger              DownloaderLogger
