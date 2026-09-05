@@ -931,11 +931,10 @@ Each GVS mint attempt logs one line at Info (`[POT] GVS mint`) on success or War
 |---|---|
 | `jobID` | the job that requested the mint |
 | `binding` | which rule produced the content binding: `"videoID"` \| `"datasyncID"` \| `"visitorData"` \| `"channelID"` |
-| `challenge` | `"page"` if the watch page carried a `ytAtN` challenge, else `"none"` (`challengeLabel` helper, `internal/worker/strategies.go`) |
-| `minterSource` | `"challenge"` \| `"att_get"` \| `"goja-fallback"` |
-| `minterFresh` | whether this call triggered a fresh BotGuard run |
-| `sidecar` | whether the mint went through the sidecar (`true`) or the goja fallback (`false`) |
-| `tokenLength` | length of the minted PO token string — a cheap sanity signal without logging the token itself |
+| `tokenLength` | (Info line) length of the minted PO token string — a cheap sanity signal without logging the token itself |
+| `err` | (Warn line) the mint error |
+
+The challenge-sourced minters stay dormant (the mint-path comment in `internal/worker/strategy_youtube_dash.go` says why), so the line carries no challenge / minter-source / sidecar provenance today; if those minters are ever trialled, those fields join the line then.
 
 The line exists so that if a future premiere still 403s, the log alone identifies the exact configuration in play — no reproduction needed. Datasync-ID binding is no longer a pending suspect: the full yt-dlp rule is implemented (see **Binding** above), so an authenticated session without the experiment already binds to its datasync ID.
 

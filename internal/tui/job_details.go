@@ -275,7 +275,7 @@ func (m *JobDetailsModel) buildRows() {
 	if j.URL != "" {
 		m.addFieldLink("URL", j.URL, j.URL)
 	}
-	m.addFieldColor("Status", status, StatusColor(status))
+	m.addFieldColor("Status", StatusLabel(status), StatusColor(status))
 	// VOD/Live type indicator (matching Web UI)
 	if j.IsVod {
 		m.addField("Type", "VOD")

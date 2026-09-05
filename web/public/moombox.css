@@ -2634,7 +2634,7 @@ html.sl-theme-light {
 
     .status-divider { margin: 0 var(--sl-spacing-2x-small); height: 12px; }
 
-    #status-bar sl-icon-button:not(#btn-refresh-cookies):not(#theme-toggle)::part(base) {
+    #status-bar sl-icon-button:not(#btn-refresh-cookies):not(#theme-toggle):not(#btn-logout)::part(base) {
         min-height: 28px;
         min-width: 28px;
     }
@@ -2774,9 +2774,9 @@ html.sl-theme-light {
 .version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-400); letter-spacing: -0.02em; user-select: none; }
 .version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
 .version-indicator.has-update:hover { text-decoration: underline; }
-#theme-toggle { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
-#theme-toggle::part(base) { padding: 0; min-height: auto; min-width: auto; }
-#theme-toggle:hover { color: var(--sl-color-neutral-700); }
+#theme-toggle, #btn-logout { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
+#theme-toggle::part(base), #btn-logout::part(base) { padding: 0; min-height: auto; min-width: auto; }
+#theme-toggle:hover, #btn-logout:hover { color: var(--sl-color-neutral-700); }
 #update-release-notes { max-height: 400px; overflow-y: auto; word-break: break-word; font-size: 0.95em; line-height: 1.5; }
 #update-release-notes h1, #update-release-notes h2, #update-release-notes h3 { margin: 1em 0 0.4em; font-weight: 600; }
 #update-release-notes h1 { font-size: 1.3em; }

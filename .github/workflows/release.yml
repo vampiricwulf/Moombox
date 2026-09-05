@@ -82,7 +82,8 @@ jobs:
       - name: Fetch embedded Node binaries (all platforms)
         # Downloads pinned Node v24 LTS binaries for Windows x64, Linux x64,
         # and Linux arm64; verifies SHA-256; gzips to per-platform embed
-        # files. Idempotent: skips re-download if version.txt matches.
+        # files. Idempotent: skips re-download when the stamp fetch-node writes
+        # beside the blobs (node-blobs.stamp) matches and every blob is present.
         if: steps.cache-embed.outputs.cache-hit != 'true'
         run: go run ./tools/fetch-node
 

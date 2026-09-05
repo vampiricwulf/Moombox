@@ -105,7 +105,10 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// on videoInfo, so every strategy mints under the same identity. Minted
 	// via the cached /att/get minter, the same sourcing
 	// bgutil-ytdlp-pot-provider uses; the challenge-sourced fresh-per-mint
-	// minters exceed upstream and stay dormant (see GenerateGvsPoToken).
+	// minters exceed upstream and stay dormant (see GenerateGvsPoToken). If
+	// premieres 403 despite the yt-dlp-parity bindings, those minters are the
+	// next variable to trial, and the provenance log line should then also
+	// say whether a watch-page ytAtN challenge was present ("page"/"none").
 	// Activated 2026-08-16 after the 10c2efd revert's suspect — the bundled
 	// token-policy change — was exonerated (the stall reproduced on baseline;
 	// root cause was the ANDROID_VR client ranking, fixed in e9d1388).

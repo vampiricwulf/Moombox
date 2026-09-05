@@ -172,7 +172,7 @@ func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
 		"for this job. This download is unaffected — its playback token was already issued — but " +
 		"the NEXT capture will start anonymous: expect ad-break gaps in the archive, and outright " +
 		"failure on subscriber-only content, until the cookies are fixed. Re-export cookies from " +
-		"a browser signed in to Twitch, or run R F (Force Cookie Refresh)."
+		"a browser signed in to Twitch, or run R F (Refresh Cookies from Browser)."
 	fields = []notifications.Field{
 		{Name: "Channel", Value: channel, Inline: true},
 		{Name: "Job", Value: job.ID, Inline: true},

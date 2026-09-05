@@ -4,7 +4,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 )
 
 // cleanupOrphans is a no-op on Linux. Linux can delete a running
@@ -32,11 +31,6 @@ func handleUpdateRestart(exePath string) bool {
 func rollbackArtifactPath(exePath string) string {
 	return exePath + ".old"
 }
-
-// setSysProcAttr is a no-op on Linux. There's no equivalent of
-// CreationFlags=createNoWindow because Linux processes don't open
-// console windows the same way Windows ones do.
-func setSysProcAttr(cmd *exec.Cmd) {}
 
 // deferDeleteOldLauncher is a no-op on Linux. No deferred cleanup
 // needed because Linux has no orphan files to clean.

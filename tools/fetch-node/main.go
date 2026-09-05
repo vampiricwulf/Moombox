@@ -8,8 +8,9 @@
 //
 //	go run ./tools/fetch-node
 //
-// Idempotent: if internal/bgutils/embed/version.txt already matches the
-// pinned manifest, this tool exits 0 without re-downloading.
+// Idempotent: if the gitignored stamp beside the blobs (node-blobs.stamp)
+// matches the pinned manifest and every blob is present, nothing is fetched.
+// version.txt is the tracked build input and is not consulted.
 //
 // Bumping the pinned version:
 //  1. Pick a new Node v24 LTS patch from https://nodejs.org/dist/index.json
@@ -82,6 +83,29 @@ func nodeTargets() []nodeTarget {
 	}
 }
 
+// blobStampName is written beside the .gz blobs by the run that produced them
+// and is gitignored with them. It — not the tracked version.txt — is what the
+// idempotency check trusts: a checkout can carry a newer version.txt beside
+// older blobs (seen 2026-09-04 after the Node 22→24 bump), and a tracked file
+// cannot vouch for untracked ones.
+const blobStampName = "node-blobs.stamp"
+
+// blobsUpToDate reports whether every embed blob is present and non-empty and
+// the stamp beside them matches the pinned manifest.
+func blobsUpToDate(embedDir, wantStamp string) bool {
+	stamp, err := os.ReadFile(filepath.Join(embedDir, blobStampName))
+	if err != nil || strings.TrimSpace(string(stamp)) != wantStamp {
+		return false
+	}
+	for _, tgt := range nodeTargets() {
+		info, err := os.Stat(filepath.Join(embedDir, tgt.embedName))
+		if err != nil || info.Size() == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "fetch-node:", err)
@@ -102,20 +126,9 @@ func run() error {
 	versionPath := filepath.Join(embedDir, "version.txt")
 	wantStamp := versionStamp()
 
-	// Idempotency: skip if every target already exists and version.txt
-	// matches the pinned manifest.
-	if existing, _ := os.ReadFile(versionPath); strings.TrimSpace(string(existing)) == wantStamp {
-		allPresent := true
-		for _, tgt := range nodeTargets() {
-			if _, err := os.Stat(filepath.Join(embedDir, tgt.embedName)); err != nil {
-				allPresent = false
-				break
-			}
-		}
-		if allPresent {
-			fmt.Printf("fetch-node: already up to date (%s)\n", wantStamp)
-			return nil
-		}
+	if blobsUpToDate(embedDir, wantStamp) {
+		fmt.Printf("fetch-node: already up to date (%s)\n", wantStamp)
+		return nil
 	}
 
 	for _, tgt := range nodeTargets() {
@@ -126,6 +139,9 @@ func run() error {
 
 	if err := os.WriteFile(versionPath, []byte(wantStamp+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write version.txt: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(embedDir, blobStampName), []byte(wantStamp+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", blobStampName, err)
 	}
 	fmt.Printf("fetch-node: %s\n", wantStamp)
 	return nil

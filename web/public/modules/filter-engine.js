@@ -5,9 +5,14 @@
 
 const STATUS_FILTER_MAP = {
   active: ["Downloading", "Live", "Upcoming", "Muxing", "Queued"],
-  errors: ["Error", "COOKIES?"],
-  finished: ["Finished", "Cancelled"],
+  // "Issues" is everything waiting on a human — failed, cancelled, or parked
+  // on credentials — the bucket the TUI's F filter calls Issues too.
+  issues: ["Error", "Cancelled", "COOKIES?"],
+  finished: ["Finished"],
 };
+// status:errors was the bucket's name before Cancelled joined it; keep
+// hand-typed queries working.
+STATUS_FILTER_MAP.errors = STATUS_FILTER_MAP.issues;
 
 /**
  * Test whether a single term matches a job.

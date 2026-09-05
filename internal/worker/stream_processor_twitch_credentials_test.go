@@ -227,7 +227,7 @@ func TestTwitchChatDowngradeSendsOneNoticeNamingTheChannel(t *testing.T) {
 		"for this job. This download is unaffected — its playback token was already issued — but " +
 		"the NEXT capture will start anonymous: expect ad-break gaps in the archive, and outright " +
 		"failure on subscriber-only content, until the cookies are fixed. Re-export cookies from " +
-		"a browser signed in to Twitch, or run R F (Force Cookie Refresh)."
+		"a browser signed in to Twitch, or run R F (Refresh Cookies from Browser)."
 	if got.description != wantDescription {
 		t.Errorf("description =\n  %q\nwant\n  %q", got.description, wantDescription)
 	}

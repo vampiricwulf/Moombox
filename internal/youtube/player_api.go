@@ -3,7 +3,6 @@ package youtube
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"regexp"
 	"sync"
 	"time"
@@ -57,11 +56,6 @@ type PlayerAPI struct {
 	// lookup) which isn't part of the Solver interface.
 	cipher      cipher.Solver
 	potProvider PotTokenProvider
-	// loggedSigRoutes tracks which (playerID, route) tuples we've already
-	// logged "sig decrypted" for. Prevents 20-50 lines per video probe;
-	// operators only need to see the route the FIRST time it succeeds for
-	// a given player.
-	loggedSigRoutes sync.Map // map[string]struct{} keyed by "<playerID>|<route>"
 	// OnVisitorData is called when visitor data is extracted from a watch page.
 	OnVisitorData func(visitorData string)
 	logger        interface {
@@ -94,7 +88,7 @@ func (p *PlayerAPI) SetCipherSolver(solver *cipher.GojaResolver) {
 
 // SetCipher wires a routed cipher.Solver for sig/n decryption.
 // Optional; when nil, PlayerAPI falls back to the legacy
-// GetSolvers/DecryptSig/DecryptN path on cipherSolver.
+// GetSolvers/DecryptN path on cipherSolver.
 func (p *PlayerAPI) SetCipher(s cipher.Solver) {
 	p.cipher = s
 }
@@ -103,83 +97,6 @@ func (p *PlayerAPI) SetCipher(s cipher.Solver) {
 // resolver is available. Used by format-parsing guards.
 func (p *PlayerAPI) hasCipher() bool {
 	return p.cipher != nil || p.cipherSolver != nil
-}
-
-// ClearLoggedRoutes drops the per-route log dedup state for a player.
-// Call this whenever the goja solver cache for that player is invalidated
-// (cipher rotation detected), so the next successful sig decrypt emits
-// the "sig decrypted via …" Info log once per recovery cycle rather than
-// only once per process lifetime.
-//
-// The invalidation itself lives in the cipher package
-// (cipher.GojaResolver.InvalidateSolver); callers that observe a cipher
-// rotation should call both InvalidateSolver and ClearLoggedRoutes so the
-// recovery signal is visible in the log.
-func (p *PlayerAPI) ClearLoggedRoutes(playerID string) {
-	p.loggedSigRoutes.Delete(playerID + "|sidecar")
-	p.loggedSigRoutes.Delete(playerID + "|goja")
-}
-
-// decryptSig solves sig via the routed cipher.Solver if set, falling
-// back to the legacy goja path (GetSolvers + Solvers.DecryptSig) otherwise.
-// Returns the decrypted value or an error when no solver can produce a sig
-// (e.g. goja extraction failed AND no sidecar is configured).
-func (p *PlayerAPI) decryptSig(ctx context.Context, playerURL, encrypted string) (string, error) {
-	if p.cipher != nil {
-		playerID := cipher.PlayerIDFromURL(playerURL)
-		out, err := p.cipher.Sig(ctx, playerID, encrypted)
-		if err == nil {
-			key := playerID + "|sidecar"
-			if _, loaded := p.loggedSigRoutes.LoadOrStore(key, struct{}{}); !loaded {
-				p.logger.Info("[Cipher] sig decrypted via sidecar", "playerID", playerID)
-			}
-			return out, nil
-		}
-		// Fall through to legacy on any error so a transient sidecar
-		// failure doesn't take sig down completely. The composite solver
-		// already routes around fixable errors internally; reaching here
-		// means both sidecar and composite-internal fallback failed.
-		// Log once per (playerID, error-prefix) so we surface why sig is
-		// failing (the warning that fires next would otherwise just say
-		// "sig unavailable for this player" — the goja-fallback symptom,
-		// not the sidecar-failure root cause). The dedup key uses the
-		// first 60 chars of the error so a transient blip doesn't spam
-		// while a persistent failure is still loud-once.
-		errSnip := err.Error()
-		if len(errSnip) > 60 {
-			errSnip = errSnip[:60]
-		}
-		key := playerID + "|sidecar-err|" + errSnip
-		if _, loaded := p.loggedSigRoutes.LoadOrStore(key, struct{}{}); !loaded {
-			p.logger.Warn("[Cipher] sidecar sig failed; falling back to goja",
-				slog.String("playerID", playerID),
-				slog.String("err", err.Error()))
-		}
-	}
-	out, err := p.decryptSigLegacy(ctx, playerURL, encrypted)
-	if err == nil {
-		playerID := cipher.PlayerIDFromURL(playerURL)
-		key := playerID + "|goja"
-		if _, loaded := p.loggedSigRoutes.LoadOrStore(key, struct{}{}); !loaded {
-			p.logger.Info("[Cipher] sig decrypted via goja fallback", "playerID", playerID)
-		}
-		return out, nil
-	}
-	return "", err
-}
-
-func (p *PlayerAPI) decryptSigLegacy(ctx context.Context, playerURL, encrypted string) (string, error) {
-	if p.cipherSolver == nil {
-		return "", cipher.ErrSigUnavailable
-	}
-	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
-	if err != nil {
-		return "", err
-	}
-	if !solvers.HasSig() {
-		return "", cipher.ErrSigUnavailable
-	}
-	return solvers.DecryptSig(encrypted)
 }
 
 // decryptN solves the n-param via the routed cipher.Solver if set, falling

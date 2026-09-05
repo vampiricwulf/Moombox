@@ -492,7 +492,7 @@ The TUI uses a chord-based keybinding system with a single source of truth:
 - `buildMenuItems()` in `app.go` defines all chords, their display text, action menu entries, hint bar text, and help text in one place.
 - `dispatchAction(chord, job)` is the unified handler that executes the action for any chord.
 
-**Chord prefixes:** A=Action (AC=Cancel, AD=Delete, AR=Retry, AA=Add), R=Request (RC=Recheck Cookies, RF=Force Refresh), O=Open (OF=Folder, OS=Stream Page, OW=Web UI), Q=Quit (QQ=Quit confirm). **Single keys:** F=Filter, M=Action Menu, `=Settings, ?=Help. **Confirm chords** require a third keypress within 3 seconds (e.g., "Q" then "Q" within 3s to quit).
+**Chord prefixes:** A=Action (AC=Cancel, AD=Delete, AR=Resume, AI=Reinitialize, AA=Add), R=Request (RC=Recheck Cookies, RF=Refresh Cookies from Browser), O=Open (OF=Folder, OS=Stream Page, OW=Web UI), Q=Quit (QQ=Quit confirm). **Single keys:** F=Filter, M=Action Menu, `=Settings, ?=Help. **Confirm chords** require a third keypress within 3 seconds (e.g., "Q" then "Q" within 3s to quit).
 
 ### WebSocket Protocol
 
@@ -613,7 +613,7 @@ When a channel is full, the send is dropped and a drop counter is incremented. O
 ### Shared UI Patterns
 
 Both the web UI and TUI implement the same user-facing features:
-- **Status bar** — Shows version, uptime, cookie status (per-platform icons), disk usage (warning/critical thresholds), connection count, monitor check timers
+- **Status bar** — Shows version, uptime, cookie status (per-platform icons), disk usage (warning/critical thresholds), connection count, monitor check timers, theme toggle, and a logout icon when a password protects the UI and the session is authenticated
 - **Job list** — Sortable/filterable list of all jobs with status icons, channel names, titles, progress indicators
 - **Job details** — Full metadata: video/audio segment counts, chat message count, file sizes, format info, quality, timestamps
 - **Add video** — URL input, platform detection, format selection (optional), quality preference

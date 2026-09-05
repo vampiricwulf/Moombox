@@ -180,9 +180,8 @@ type DownloaderConfig struct {
 	// they must never be returned by GET /api/config — use json:"-" to hide
 	// them from any encoder walking the Config struct. Operators who need to
 	// inspect them can read config.toml directly.
-	PoToken        string `toml:"po_token,omitempty" json:"-"`
-	VisitorData    string `toml:"visitor_data,omitempty" json:"-"`
-	PotProviderURL string `toml:"pot_provider_url,omitempty" json:"pot_provider_url,omitempty"`
+	PoToken     string `toml:"po_token,omitempty" json:"-"`
+	VisitorData string `toml:"visitor_data,omitempty" json:"-"`
 }
 
 // CookiesConfig holds cookie file and auto-cookie acquisition settings.

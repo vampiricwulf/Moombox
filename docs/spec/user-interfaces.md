@@ -51,6 +51,7 @@ The file structure:
 | `web/public/modules/imports.js` | ~210 | Zip archive import. Upload a zip file containing video/chat/metadata to create a job from external content. |
 | `web/public/modules/filter-parser.js` | ~110 | Filter query parser. Booru-style tag syntax: `status:active`, `channel:"name"`, `platform:youtube`, negation (`-tag`), OR groups (`a\|b`), quoting for spaces. |
 | `web/public/modules/filter-engine.js` | ~65 | Filter engine. Evaluates parsed tokens against job objects. AND intersection across tokens, OR union within pipe groups. |
+| `web/public/modules/logout.js` | ~45 | Status-bar logout icon: `logoutVisible` (shown only when `authRequired && authenticated`, read from `GET /api/auth/status` in `checkSecurityBanner`) and `bindLogout` (click → `POST /api/auth/logout` → reload). |
 | `web/public/modules/utils.js` | ~750 | Shared formatting helpers (durations, file sizes, dates, etc.). |
 | `web/public/moombox.css` | ~3,490 | All styles. Includes desktop layout, mobile responsive breakpoints, dark/light theme variables, and component-specific styles. |
 | `web/public/favicon.svg` | — | SVG favicon for the web dashboard. |
@@ -235,7 +236,7 @@ The chord system is a three-state finite automaton:
 |-------|--------|-----------|
 | `R B` | Re-scan Feed History | Backfill rescan callback is configured. Forces a full-catalog backfill re-scan of every configured YouTube channel. |
 | `R C` | Recheck Cookies | Cookie recheck callback is configured |
-| `R F` | Force Cookie Refresh | Cookie force-refresh callback is configured |
+| `R F` | Refresh Cookies from Browser | Cookie force-refresh callback is configured |
 | `R L` | Cookie Login | Interactive-setup callback is configured (`SetSetupCallbacks`, bound unconditionally by `cmd/moombox`). Opens the setup wizard's cookie step **alone** — pick YouTube or Twitch, sign in in the browser that opens on the host, `Enter` extracts. Preselects the platform the status bar is flagging for re-login. |
 | `R V` | Check for Updates | Update check callback is configured |
 | `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. |
@@ -475,7 +476,7 @@ This is **dashboard** authentication — the operator's password and session. It
 |--------|------|:----------:|-------|
 | `GET` | `/api/auth/status` | — | Public. Returns `{ authRequired, authenticated, hasPassword, passwordlessExternal }` (`AuthRoutes`, `internal/web/routes/auth.go`). `passwordlessExternal` is `network_access` of `external`/`public` with no password hash — a state only a hand-edited config file can produce, and it drives the Web UI's persistent security banner. |
 | `POST` | `/api/auth/login` | 5 req / 60s | `{ password }` body, max 128 chars. Sets the session cookie and — when a database is wired — issues a persistent `moombox_client` token cookie, revoking any previous one from the same browser. Returns `{ success: true }`; the token itself is never in the body. |
-| `POST` | `/api/auth/logout` | — | Invalidates the session and revokes the presented client token, then clears both cookies. |
+| `POST` | `/api/auth/logout` | — | Invalidates the session and revokes the presented client token, then clears both cookies. The Web UI's status bar shows a logout icon (`btn-logout`, beside the theme toggle) only while `authRequired && authenticated`; its click is this POST followed by a reload. |
 | `POST` | `/api/auth/set-password` | 3 req / 60s | Sets or changes the password. Requires a valid session **or** a loopback/private-network origin. |
 | `POST` | `/api/auth/remove-password` | 3 req / 60s | Removes password (disables auth). Same session-or-local gate. |
 
@@ -706,7 +707,7 @@ The verdict clause is `cookies.RecheckReport`, shared with the Web toast. A reas
 
 `not authenticated` is **red** on both `R C` and `R F`. Red is the actionable end — the remedy is to re-export credentials — and yellow is reserved for "we could not check", which asks for nothing. A mixed line, one platform refused and the other unreachable, is red: the conclusive half is the half to act on, which is the same precedence the badge and the dashboard toast apply.
 
-**`R F` — Force Cookie Refresh.** Wired unconditionally; do not put an `auto_enabled` gate back, in either shape. A nil `OnForceRefreshCookies` does not make the chord inert, it *deletes* it — `dispatchAction`, `buildMenuItems` and the help overlay all test the field — so on an install with the flag off, an operator told their cookies were dead had no key to press and no entry naming one. It is a three-rung ladder; the rungs are chosen inside `RefreshCookiesDetailed` (see `data-and-storage.md §Auto-Cookie Service`) and the TUI only renders the outcome. Five of the seven lines below open with `<mechanism label>` rather than a fixed subject: `internal/tui/app_update.go`'s `cookieForceRefreshResultMsg` arm computes it once as `cookieRefreshMechanismLabel(msg.Result.Mechanism, a.cookieAcquisitionMode())` (`internal/tui/app_actions.go`), which resolves to `Browser cookie refresh` or `Browser-profile cookie import` depending on which source the pass actually used (H2 R9) — never on which mode was merely configured:
+**`R F` — Refresh Cookies from Browser.** Wired unconditionally; do not put an `auto_enabled` gate back, in either shape. A nil `OnForceRefreshCookies` does not make the chord inert, it *deletes* it — `dispatchAction`, `buildMenuItems` and the help overlay all test the field — so on an install with the flag off, an operator told their cookies were dead had no key to press and no entry naming one. It is a three-rung ladder; the rungs are chosen inside `RefreshCookiesDetailed` (see `data-and-storage.md §Auto-Cookie Service`) and the TUI only renders the outcome. Five of the seven lines below open with `<mechanism label>` rather than a fixed subject: `internal/tui/app_update.go`'s `cookieForceRefreshResultMsg` arm computes it once as `cookieRefreshMechanismLabel(msg.Result.Mechanism, a.cookieAcquisitionMode())` (`internal/tui/app_actions.go`), which resolves to `Browser cookie refresh` or `Browser-profile cookie import` depending on which source the pass actually used (H2 R9) — never on which mode was merely configured:
 
 | Outcome | Line |
 |---------|------|
@@ -892,7 +893,7 @@ Job status is visualized consistently in both UIs using the same conceptual mode
 | `Finished` | Complete, output file available | Success color (green) |
 | `Error` | Failed at some stage | Error color (red), error message displayed |
 | `Cancelled` | Manually cancelled by user | Dimmed/muted |
-| `COOKIES?` | Authentication required but cookies are missing or expired | Warning color (yellow/orange), actionable prompt |
+| `COOKIES?` | Authentication required but cookies are missing or expired | Warning color (yellow/orange), actionable prompt; the TUI labels it `Auth Required` (`StatusLabel`, `internal/tui/styles.go`), as the Web UI does |
 
 The specific colors and icons differ between the Web UI (CSS classes, Shoelace icons) and TUI (lipgloss styles, Unicode symbols), but the status-to-visual-treatment mapping is consistent.
 

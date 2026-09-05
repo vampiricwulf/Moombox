@@ -1151,3 +1151,31 @@ func TestCookiesAcquisitionRoundTripsThroughSave(t *testing.T) {
 		t.Errorf("acquisition round-tripped as %q, want \"profile\"", reloaded.Cookies.Acquisition)
 	}
 }
+
+// TestLoadIgnoresRetiredPotProviderURL: pot_provider_url was read by nothing
+// and was removed from DownloaderConfig (2026-09-04 improvement chain, Q8).
+// A config.toml written by an older build still carries the key; toml.Decode
+// ignores keys the struct does not declare, so the file must load, and the
+// next Save drops the key.
+func TestLoadIgnoresRetiredPotProviderURL(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `
+[network]
+port = 8080
+
+[downloader]
+pot_provider_url = "http://127.0.0.1:4416"
+max_video_resolution = 720
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load with the retired key: %v", err)
+	}
+	if cfg.Downloader.MaxVideoResolution != 720 {
+		t.Errorf("MaxVideoResolution = %d, want 720 (the section around the retired key must still decode)", cfg.Downloader.MaxVideoResolution)
+	}
+}

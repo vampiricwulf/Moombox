@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -35,4 +37,73 @@ func TestNodeTargetsCoverAllPlatforms(t *testing.T) {
 			t.Errorf("missing target for %s", want)
 		}
 	}
+}
+
+// TestBlobsUpToDate: the skip decision trusts only the stamp written beside
+// the blobs by the run that produced them — never the tracked version.txt,
+// which can be newer than the gitignored blobs after a merge (2026-09-04:
+// Node 24 version.txt beside Node 22 blobs reported "already up to date").
+func TestBlobsUpToDate(t *testing.T) {
+	want := versionStamp()
+	writeAll := func(dir string) {
+		for _, tgt := range nodeTargets() {
+			if err := os.WriteFile(filepath.Join(dir, tgt.embedName), []byte("gz"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	stamp := func(dir, s string) {
+		if err := os.WriteFile(filepath.Join(dir, blobStampName), []byte(s+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("stamp matches and every blob present → up to date", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAll(dir)
+		stamp(dir, want)
+		if !blobsUpToDate(dir, want) {
+			t.Fatal("want true")
+		}
+	})
+	t.Run("no stamp → not up to date, even with a matching version.txt", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAll(dir)
+		if err := os.WriteFile(filepath.Join(dir, "version.txt"), []byte(want+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if blobsUpToDate(dir, want) {
+			t.Fatal("version.txt must not vouch for the blobs")
+		}
+	})
+	t.Run("stale stamp → not up to date", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAll(dir)
+		stamp(dir, "node@v22.0.0 old")
+		if blobsUpToDate(dir, want) {
+			t.Fatal("want false")
+		}
+	})
+	t.Run("a missing blob → not up to date", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAll(dir)
+		stamp(dir, want)
+		if err := os.Remove(filepath.Join(dir, nodeTargets()[0].embedName)); err != nil {
+			t.Fatal(err)
+		}
+		if blobsUpToDate(dir, want) {
+			t.Fatal("want false")
+		}
+	})
+	t.Run("an empty blob → not up to date", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAll(dir)
+		stamp(dir, want)
+		if err := os.WriteFile(filepath.Join(dir, nodeTargets()[0].embedName), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if blobsUpToDate(dir, want) {
+			t.Fatal("want false")
+		}
+	})
 }

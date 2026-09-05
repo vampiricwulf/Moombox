@@ -10,6 +10,7 @@ import { StatsController } from "./modules/stats.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
+import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // Moombox GitHub repository page — opened by double-clicking the version
 // indicator. Mirrors constants.ProjectRepoURL on the Go side (keep in sync).
@@ -454,6 +455,13 @@ class MoomboxApp {
         }
       });
     }
+
+    // Status-bar logout — shown by checkSecurityBanner() when auth is on and
+    // this session is authenticated (modules/logout.js owns both rules).
+    bindLogout(document.getElementById("btn-logout"), {
+      fetchFn: (url, opts) => fetch(url, opts),
+      reload: () => window.location.reload(),
+    });
 
     // Files tab buttons
     const filesRefreshBtn = document.getElementById("files-refresh-btn");
@@ -1532,15 +1540,30 @@ class MoomboxApp {
     }
   }
 
+  /**
+   * Store the latest /api/auth/status payload and sync the status-bar logout
+   * icon to it. Called from checkSecurityBanner() at boot and from
+   * settings.js loadSecurityStatus() after a password is set or removed —
+   * removing the password on an external install flips authRequired off,
+   * and the icon must follow without a reload.
+   */
+  applyAuthStatus(status) {
+    this.authStatus = status;
+    applyLogoutVisibility(document.getElementById("btn-logout"), status);
+  }
+
   async checkSecurityBanner() {
     // Passwordless external access — mirrors the server's startup warning.
     // Every interactive surface refuses to SET this combination, so it can
     // only come from a hand-edited config file; warn persistently, don't
     // block (update-path compatibility).
+    // One of the two reads of /api/auth/status the logout icon keys off (the
+    // other is settings.js loadSecurityStatus); both go through applyAuthStatus.
     try {
       const resp = await fetch("/api/auth/status");
       if (!resp.ok) return;
       const status = await resp.json();
+      this.applyAuthStatus(status);
       document
         .getElementById("security-banner")
         ?.classList.toggle("show", !!status.passwordlessExternal);
@@ -3839,7 +3862,7 @@ class MoomboxApp {
 
     const STATUS_OPTIONS = [
       { type: "status", value: "active", label: "Active" },
-      { type: "status", value: "errors", label: "Errors" },
+      { type: "status", value: "issues", label: "Issues" },
       { type: "status", value: "finished", label: "Finished" },
     ];
     const PLATFORM_OPTIONS = [
@@ -4098,7 +4121,7 @@ class MoomboxApp {
   _filterTokenLabel(token) {
     if (token.type === "text") return token.value;
     if (token.type === "status") {
-      const labels = { active: "Active", errors: "Errors", finished: "Finished" };
+      const labels = { active: "Active", issues: "Issues", errors: "Issues", finished: "Finished" };
       return labels[token.value] || token.value;
     }
     if (token.type === "platform") {

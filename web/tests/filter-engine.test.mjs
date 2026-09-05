@@ -46,12 +46,28 @@ test("status: active groups live/upcoming/downloading/muxing", () => {
   assert.deepEqual(filterWith("status:active").sort(), ["1", "4", "5"]);
 });
 
-test("status: errors groups Error + COOKIES?", () => {
-  assert.deepEqual(filterWith("status:errors"), ["3"]);
+// Bucket membership is checked on its own fixture so the shared `jobs` list
+// (which has no Cancelled/COOKIES? rows) keeps every other expectation.
+const bucketJobs = [
+  { id: "e", title: "", channelName: "", status: "Error", platform: "youtube" },
+  { id: "c", title: "", channelName: "", status: "Cancelled", platform: "youtube" },
+  { id: "k", title: "", channelName: "", status: "COOKIES?", platform: "youtube" },
+  { id: "f", title: "", channelName: "", status: "Finished", platform: "youtube" },
+];
+function bucketWith(query) {
+  return applyFilterTokens(bucketJobs, parseFilterQuery(query)).map(j => j.id);
+}
+
+test("status: issues groups Error + Cancelled + COOKIES? (Q4 — the TUI's Issues bucket)", () => {
+  assert.deepEqual(bucketWith("status:issues"), ["e", "c", "k"]);
 });
 
-test("status: finished groups Finished + Cancelled", () => {
-  assert.deepEqual(filterWith("status:finished"), ["2"]);
+test("status: finished is Finished only — Cancelled moved to issues", () => {
+  assert.deepEqual(bucketWith("status:finished"), ["f"]);
+});
+
+test("status: errors stays an alias of issues for hand-typed queries", () => {
+  assert.deepEqual(bucketWith("status:errors"), bucketWith("status:issues"));
 });
 
 test("platform: twitch matches platform only", () => {
@@ -67,7 +83,7 @@ test("channel: exact match (case-insensitive)", () => {
 });
 
 test("OR pipe: matches any branch", () => {
-  assert.deepEqual(filterWith("status:active|status:errors").sort(), ["1", "3", "4", "5"]);
+  assert.deepEqual(filterWith("status:active|status:issues").sort(), ["1", "3", "4", "5"]);
 });
 
 test("negated namespaced filter", () => {

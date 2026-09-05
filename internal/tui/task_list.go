@@ -1156,7 +1156,7 @@ func formatCountdown(d time.Duration) string {
 // deliberate difference at maxW <= 0: the old code returned an ellipsis
 // there, emitting a column of output into a space with no columns to give.
 // Empty is the correct answer, and callers do pass non-positive widths on
-// narrow terminals (action_menu.go's contentW-17, for one).
+// narrow terminals (action_menu.go's contentW-19, for one).
 //
 // The ANSI-awareness is insurance rather than a fix: every current caller
 // styles AFTER truncating, so none can sever an escape sequence today --
