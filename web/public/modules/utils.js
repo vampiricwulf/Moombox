@@ -825,8 +825,12 @@ const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
  * must be a YouTube job with staging on disk. The server enforces the same
  * three conditions (jobs.go resume route); this keeps the UI from offering
  * what the server will refuse.
+ *
+ * `hasStaging` is only populated when the details view fetched the job; list
+ * rows (the batch bar's input) do not carry it, so `undefined` means unknown
+ * and passes through to the server's check — only a known `false` excludes.
  */
 export function canResumeJob(job) {
   const statusOk = RESUMABLE_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
-  return statusOk && job.platform === "youtube" && !!job.hasStaging;
+  return statusOk && job.platform === "youtube" && job.hasStaging !== false;
 }

@@ -137,5 +137,5 @@ test("canResumeJob: the single-job gate, applied everywhere", () => {
   assert.equal(canResumeJob(yt("Downloading")), false);
   assert.equal(canResumeJob({ ...yt("Error"), platform: "twitch" }), false, "resume is YouTube-only");
   assert.equal(canResumeJob({ ...yt("Error"), hasStaging: false }), false, "no staging, nothing to resume");
-  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: undefined }), false);
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: undefined }), true, "unknown staging (list row) defers to the server");
 });
