@@ -586,7 +586,7 @@ The sidecar `.resume.json` file contains:
 }
 ```
 
-On restart, if the `streamId` matches, the downloader resumes with the saved message count, last timestamp, and dedup set. The resume file is deleted on clean completion.
+On restart, if the `streamId` matches, the downloader resumes with the saved message count, last timestamp, and dedup set. The resume file is deleted on clean completion. A part whose chat file is on disk but whose sidecar is GONE — a crash in the window between the file write and the sidecar write, a sidecar cleared by a stream-end drain, or one deleted by hand — is adopted rather than overwritten (`adoptExistingPartFile`, `internal/twitch/chat.go`): the file is streamed to count its messages array, `flushedToDisk` is set so the first write appends instead of rewriting the part from the new batch alone, and the tail of its IDs seeds the dedup; a file that cannot be read is preserved beside itself as `<file>.corrupt` and the part starts fresh, never silently overwritten.
 
 ### VOD Chat
 
