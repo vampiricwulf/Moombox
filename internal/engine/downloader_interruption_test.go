@@ -37,7 +37,7 @@ import (
 // singleGoneRetry used elsewhere -- see its doc comment in
 // downloader_dash.go.
 //
-// Every test below installs fastDelays(), which divides every loop wait by
+// Every loop test below installs fastDelays(), which divides every loop wait by
 // the same fastScale, and scales its own MaxTimeout / InterruptionTimeout
 // knobs with fast() so escalation counts and orderings stay exactly
 // production's -- only the wall clock shrinks. Consequently no assertion
@@ -51,9 +51,9 @@ import (
 // true. Would catch: deleting/bypassing the `!d.streamEndVerified &&
 // d.stallForPossibleResume()` insertion in handleHTTPError (or a
 // stallForPossibleResume that returns false when MayResume is true) — either
-// regression finalizes right at MaxTimeout instead of stalling, which the
-// first select below observes as an early receive on `done` and fails via
-// t.Fatalf. A MayResume that is consulted but ignored (e.g. hard-coded
+// regression finalizes right at MaxTimeout instead of stalling, observed as
+// a never-emitted ActivityWaitingResume and then an early receive on
+// `done`. A MayResume that is consulted but ignored (e.g. hard-coded
 // false) would show the same symptom.
 func TestBackstopStallsWhileMayResume(t *testing.T) {
 	t.Parallel()
@@ -96,6 +96,11 @@ func TestBackstopStallsWhileMayResume(t *testing.T) {
 	// replaces the old fixed-seconds margin (which had to out-sit the
 	// backstop-entry escalation and land somewhere in an
 	// interruptionStallRetry cycle to mean anything).
+	// Two ActivityWaitingResume emissions, not one: the second can only come
+	// after the loop slept a full interruptionStallRetry and asked MayResume
+	// again, so this proves the stall HELD a cycle — not merely that the arm
+	// was reached an instant before a finalize.
+	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
 	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
 	select {
 	case err := <-done:
@@ -388,6 +393,11 @@ func TestGoneErrorStallReachedViaStatusCheckError(t *testing.T) {
 	// escalation and is still running, with MayResume()==true throughout.
 	// The stall arm is engaged once the loop reports ActivityWaitingResume;
 	// waiting for the event replaces the old fixed-seconds margin.
+	// Two ActivityWaitingResume emissions, not one: the second can only come
+	// after the loop slept a full interruptionStallRetry and asked MayResume
+	// again, so this proves the stall HELD a cycle — not merely that the arm
+	// was reached an instant before a finalize.
+	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
 	awaitActivity(t, act, ActivityWaitingResume, 5*time.Second)
 	select {
 	case err := <-done:

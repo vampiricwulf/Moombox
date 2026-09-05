@@ -120,8 +120,9 @@ func TestFastDelaysKeepRatios(t *testing.T) {
 
 // TestDownloadActivityStringsAreDistinct pins DownloadActivity's String():
 // awaitActivity and every %v on an activity must name the state, not print
-// an integer. A new enum member without a case is caught by the "Activity"
-// prefix check falling through to the numeric fallback.
+// an integer. Iterates ActivityNone..ActivityWaitingResume; a member
+// appended after ActivityWaitingResume is NOT covered — extend the upper
+// bound when one is added.
 func TestDownloadActivityStringsAreDistinct(t *testing.T) {
 	seen := map[string]DownloadActivity{}
 	for a := ActivityNone; a <= ActivityWaitingResume; a++ {

@@ -436,7 +436,7 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 | `ProgressThrottle` | 500ms | Throttle VOD progress emission |
 | `DefaultRetryDelayCap` | 60s | Max retry delay (exponential backoff cap) |
 
-Every wait the loops sleep on is a field of the unexported `delays` struct (`internal/engine/delays.go`), defaulting to the named constants and pinned by `TestDefaultDelaysMatchConstants`; the engine tests poke `fastDelays()` (÷20) so `go test ./internal/engine/` runs in seconds while production timing is untouched.
+Every retry and backoff wait the live loops sleep on is a field of the unexported `delays` struct (`internal/engine/delays.go`), defaulting to the named constants and pinned by `TestDefaultDelaysMatchConstants` (the first-segment hunt, the direct-download backoffs and the eviction probe keep their own constants); the engine tests poke `fastDelays()` (÷20) so `go test ./internal/engine/` runs in seconds while production timing is untouched.
 
 #### Catch-up: rolling window and byte-bounded buffer
 
