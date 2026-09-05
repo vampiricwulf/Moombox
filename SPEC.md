@@ -613,7 +613,7 @@ When a channel is full, the send is dropped and a drop counter is incremented. O
 ### Shared UI Patterns
 
 Both the web UI and TUI implement the same user-facing features:
-- **Status bar** — Shows version, uptime, cookie status (per-platform icons), disk usage (warning/critical thresholds), connection count, monitor check timers
+- **Status bar** — Shows version, uptime, cookie status (per-platform icons), disk usage (warning/critical thresholds), connection count, monitor check timers, theme toggle, and a logout icon when a password protects the UI and the session is authenticated
 - **Job list** — Sortable/filterable list of all jobs with status icons, channel names, titles, progress indicators
 - **Job details** — Full metadata: video/audio segment counts, chat message count, file sizes, format info, quality, timestamps
 - **Add video** — URL input, platform detection, format selection (optional), quality preference

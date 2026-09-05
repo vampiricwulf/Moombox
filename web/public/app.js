@@ -10,6 +10,7 @@ import { StatsController } from "./modules/stats.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
+import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // Moombox GitHub repository page — opened by double-clicking the version
 // indicator. Mirrors constants.ProjectRepoURL on the Go side (keep in sync).
@@ -454,6 +455,13 @@ class MoomboxApp {
         }
       });
     }
+
+    // Status-bar logout — shown by checkSecurityBanner() when auth is on and
+    // this session is authenticated (modules/logout.js owns both rules).
+    bindLogout(document.getElementById("btn-logout"), {
+      fetchFn: (url, opts) => fetch(url, opts),
+      reload: () => window.location.reload(),
+    });
 
     // Files tab buttons
     const filesRefreshBtn = document.getElementById("files-refresh-btn");
@@ -1537,10 +1545,13 @@ class MoomboxApp {
     // Every interactive surface refuses to SET this combination, so it can
     // only come from a hand-edited config file; warn persistently, don't
     // block (update-path compatibility).
+    // Also the one read of /api/auth/status the logout icon keys off.
     try {
       const resp = await fetch("/api/auth/status");
       if (!resp.ok) return;
       const status = await resp.json();
+      this.authStatus = status;
+      applyLogoutVisibility(document.getElementById("btn-logout"), status);
       document
         .getElementById("security-banner")
         ?.classList.toggle("show", !!status.passwordlessExternal);
