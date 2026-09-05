@@ -151,6 +151,58 @@ func TestFilesDialog_NavigationSkipsDivider(t *testing.T) {
 	}
 }
 
+// TestFilesDialog_DeleteAllInSectionNeedsTwoPresses: A arms a section-wide
+// confirm distinct from the per-item one; a second A within the window
+// returns the bulk action with every entry of THAT section; navigation
+// disarms.
+func TestFilesDialog_DeleteAllInSectionNeedsTwoPresses(t *testing.T) {
+	m := NewFilesDialogModel()
+	m.SetSize(80, 24)
+	m.SetFiles([]OrphanedFileEntry{{Path: "/a/one.ts", RelPath: "one.ts", Type: "staging"}, {Path: "/a/two.ts", RelPath: "two.ts", Type: "output"}})
+	m.SetHistory([]OrphanedHistoryEntry{{VideoID: "vid1"}})
+	// cursor starts on the first file
+	action, _ := m.HandleKey(keyMsg("A"))
+	if action != "" || !strings.Contains(m.feedbackMsg, "Press A again") {
+		t.Fatalf("first A must arm, got action %q feedback %q", action, m.feedbackMsg)
+	}
+	m.HandleKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.deleteAllArmed {
+		t.Fatal("navigation must disarm the section confirm")
+	}
+	m.HandleKey(keyMsg("A"))
+	action, data := m.HandleKey(keyMsg("A"))
+	paths, ok := data.([]string)
+	if action != "delete-all-files" || !ok || len(paths) != 2 {
+		t.Fatalf("second A = (%q, %#v), want delete-all-files with both paths", action, data)
+	}
+	// Move onto the history half and repeat. Cursor sits on the second file
+	// (two.ts, index 1); a single Down steps over the divider straight onto
+	// the sole history row (index 3) — the list wraps on InfiniteScrolling,
+	// so a second Down here would wrap back to the first file instead.
+	m.HandleKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	m.HandleKey(keyMsg("A"))
+	action, data = m.HandleKey(keyMsg("A"))
+	ids, ok := data.([]string)
+	if action != "delete-all-history" || !ok || len(ids) != 1 || ids[0] != "vid1" {
+		t.Fatalf("history half: (%q, %#v)", action, data)
+	}
+}
+
+// TestFilesDialog_BulkFailuresAreListed: the dialog shows how many were
+// deleted and names the failures.
+func TestFilesDialog_BulkFailuresAreListed(t *testing.T) {
+	m := NewFilesDialogModel()
+	m.SetSize(80, 24)
+	m.visible = true // View() renders nothing while hidden; a real sweep only completes on an open dialog
+	m.SetBulkResult(3, []string{"two.ts: permission denied"})
+	v := m.View()
+	for _, want := range []string{"Deleted 3", "1 failed", "two.ts: permission denied"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("view lacks %q:\n%s", want, v)
+		}
+	}
+}
+
 // TestFilesDialog_BothErrorsEmpty shows the error as the main message when there
 // is nothing at all to list.
 func TestFilesDialog_BothErrorsEmpty(t *testing.T) {

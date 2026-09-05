@@ -173,6 +173,13 @@ type (
 		VideoID string
 		Err     string
 	}
+	// bulkOrphanResultMsg reports the outcome of an A-key delete-all sweep
+	// over one section (orphaned files or orphaned history) — the per-item
+	// callback ran once per entry, so partial failure is normal, not fatal.
+	bulkOrphanResultMsg struct {
+		Deleted  int
+		Failures []string
+	}
 
 	// Async results for FFmpeg check overlay
 	ffmpegCheckResultMsg struct {

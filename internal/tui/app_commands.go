@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -427,6 +428,59 @@ func (a *App) deleteHistoryEntryCmd(videoID string) tea.Cmd {
 			return deleteHistoryEntryResultMsg{VideoID: videoID, Err: err.Error()}
 		}
 		return deleteHistoryEntryResultMsg{VideoID: videoID}
+	})
+}
+
+// deleteAllOrphansCmd loops the per-item callback over every orphaned-file
+// path in the section, collecting failures instead of stopping the sweep at
+// the first one so the dialog can name exactly what didn't go. The list is
+// refreshed afterward by the bulkOrphanResultMsg arm.
+func (a *App) deleteAllOrphansCmd(paths []string) tea.Cmd {
+	fn := a.OnDeleteOrphan
+	return safeCmd(func() tea.Msg {
+		if fn == nil {
+			failures := make([]string, 0, len(paths))
+			for _, p := range paths {
+				failures = append(failures, filepath.Base(p)+": Not available")
+			}
+			return bulkOrphanResultMsg{Failures: failures}
+		}
+		var failures []string
+		deleted := 0
+		for _, p := range paths {
+			if err := fn(p); err != nil {
+				failures = append(failures, filepath.Base(p)+": "+err.Error())
+				continue
+			}
+			deleted++
+		}
+		return bulkOrphanResultMsg{Deleted: deleted, Failures: failures}
+	})
+}
+
+// deleteAllHistoryCmd is the history-half twin of deleteAllOrphansCmd, over
+// OnDeleteHistoryEntry. Failures are named by video ID rather than a
+// filesystem path.
+func (a *App) deleteAllHistoryCmd(ids []string) tea.Cmd {
+	fn := a.OnDeleteHistoryEntry
+	return safeCmd(func() tea.Msg {
+		if fn == nil {
+			failures := make([]string, 0, len(ids))
+			for _, id := range ids {
+				failures = append(failures, id+": Not available")
+			}
+			return bulkOrphanResultMsg{Failures: failures}
+		}
+		var failures []string
+		deleted := 0
+		for _, id := range ids {
+			if err := fn(id); err != nil {
+				failures = append(failures, id+": "+err.Error())
+				continue
+			}
+			deleted++
+		}
+		return bulkOrphanResultMsg{Deleted: deleted, Failures: failures}
 	})
 }
 

@@ -172,6 +172,13 @@ type FilesDialogModel struct {
 	actionErr       string // transient error from a delete; the list stays visible
 	feedbackMsg     string
 
+	// Section-wide delete-all confirm (A), distinct from the per-item confirm
+	// (D) above. deleteAllSection is "files" or "history" — whichever half was
+	// armed — so a cursor move to the other half or elsewhere disarms it.
+	deleteAllArmed   bool
+	deleteAllTimer   time.Time
+	deleteAllSection string
+
 	// Two async sources feed one list: orphaned files and orphaned history.
 	files         []OrphanedFileEntry
 	history       []OrphanedHistoryEntry
@@ -322,6 +329,27 @@ func (m *FilesDialogModel) SetActionError(msg string) {
 	m.feedbackMsg = ""
 }
 
+// SetBulkResult reports the outcome of a section-wide delete-all sweep: how
+// many entries were deleted, and — when any per-item call failed — names the
+// failures instead of silently dropping them. Named failures are capped at
+// three so one enormous sweep can't blow out the dialog box; the rest are
+// summarized by count. The list itself is refreshed separately by the caller
+// so it reflects which entries actually survived.
+func (m *FilesDialogModel) SetBulkResult(deleted int, failures []string) {
+	m.feedbackMsg = fmt.Sprintf("Deleted %d", deleted)
+	if len(failures) == 0 {
+		m.actionErr = ""
+		return
+	}
+	shown := failures
+	more := ""
+	if len(failures) > 3 {
+		shown = failures[:3]
+		more = fmt.Sprintf(" …and %d more", len(failures)-3)
+	}
+	m.actionErr = fmt.Sprintf("%d failed: %s%s", len(failures), strings.Join(shown, "; "), more)
+}
+
 // SelectedFile returns the currently selected file entry.
 func (m *FilesDialogModel) SelectedFile() *OrphanedFileEntry {
 	sel := m.list.SelectedItem()
@@ -394,9 +422,12 @@ func (m *FilesDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 // SpinnerInit returns the spinner's initial tick command.
 func (m *FilesDialogModel) SpinnerInit() tea.Cmd { return spinnerTickCmd(m.spinner) }
 
-// HandleKey processes key input. Returns action string and optional command:
-// "close", "refresh", "delete", or "" for no action.
-func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
+// HandleKey processes key input. Returns an action string and, depending on
+// the action, either a tea.Cmd (list navigation) or a payload the caller must
+// type-assert: "close", "refresh", "delete", "delete-history",
+// "delete-all-files"/"delete-all-history" (payload []string — every path or
+// video ID in the section), or "" for no action.
+func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 	// Confirmation timeout check
 	if m.deleteConfirmID != "" && !m.confirmTimer.IsZero() && time.Now().After(m.confirmTimer) {
 		m.deleteConfirmID = ""
@@ -417,6 +448,38 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 		m.filesLoaded = false
 		m.historyLoaded = false
 		return "refresh", nil
+	case "a", "A":
+		section, count := m.currentSection()
+		if count == 0 {
+			return "", nil
+		}
+		m.actionErr = "" // starting a fresh sweep clears any prior failure
+		if m.deleteAllArmed && m.deleteAllSection == section && !m.deleteAllTimer.IsZero() && time.Now().Before(m.deleteAllTimer) {
+			m.deleteAllArmed = false
+			m.deleteAllSection = ""
+			m.feedbackMsg = ""
+			if section == "files" {
+				paths := make([]string, 0, len(m.files))
+				for _, f := range m.files {
+					paths = append(paths, f.Path)
+				}
+				return "delete-all-files", paths
+			}
+			ids := make([]string, 0, len(m.history))
+			for _, h := range m.history {
+				ids = append(ids, h.VideoID)
+			}
+			return "delete-all-history", ids
+		}
+		m.deleteAllArmed = true
+		m.deleteAllSection = section
+		m.deleteAllTimer = time.Now().Add(3 * time.Second)
+		noun := "orphaned files"
+		if section == "history" {
+			noun = "history entries"
+		}
+		m.feedbackMsg = fmt.Sprintf("Press A again to delete all %d %s", count, noun)
+		return "", nil
 	case "d", "D":
 		if len(m.list.Items()) == 0 {
 			return "", nil
@@ -454,6 +517,8 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 	switch key {
 	case keyUp, keyDown, keyPgUp, keyPgDown, keyHome, keyEnd:
 		m.deleteConfirmID = ""
+		m.deleteAllArmed = false
+		m.deleteAllSection = ""
 		m.feedbackMsg = ""
 	}
 
@@ -475,6 +540,20 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 		return "", cmd
 	}
 	return "", nil
+}
+
+// currentSection reports which half of the combined list the cursor is in —
+// "files" or "history" — and how many entries that half holds. Returns ""
+// when the cursor is on the non-selectable divider or nothing is selected, so
+// the A-to-delete-all sweep has nothing to arm.
+func (m *FilesDialogModel) currentSection() (string, int) {
+	if m.SelectedFile() != nil {
+		return "files", len(m.files)
+	}
+	if m.SelectedHistory() != nil {
+		return "history", len(m.history)
+	}
+	return "", 0
 }
 
 // loadErrorText composes a single message from the two independent fetch
@@ -538,7 +617,7 @@ func (m *FilesDialogModel) View() string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("↑↓: Navigate | D: Delete | R: Refresh | Esc: Close"))
+	lines = append(lines, DimStyle.Render("↑↓: Navigate | D: Delete | A: Delete all in section | R: Refresh | Esc: Close"))
 
 	content := strings.Join(lines, "\n")
 

@@ -284,7 +284,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if a.filesDlg.IsVisible() {
-		action, cmd := a.filesDlg.HandleKey(msg)
+		action, data := a.filesDlg.HandleKey(msg)
 		switch action {
 		case "refresh":
 			return a, tea.Batch(a.fetchOrphansCmd(), a.fetchOrphanedHistoryCmd(), a.filesDlg.SpinnerInit())
@@ -296,8 +296,12 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if sel := a.filesDlg.SelectedHistory(); sel != nil {
 				return a, a.deleteHistoryEntryCmd(sel.VideoID)
 			}
+		case "delete-all-files":
+			return a, tea.Batch(a.deleteAllOrphansCmd(data.([]string)), a.filesDlg.SpinnerInit())
+		case "delete-all-history":
+			return a, a.deleteAllHistoryCmd(data.([]string))
 		}
-		if cmd != nil {
+		if cmd, ok := data.(tea.Cmd); ok && cmd != nil {
 			return a, cmd
 		}
 		return a, nil

@@ -591,6 +591,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case bulkOrphanResultMsg:
+		// Unlike the single-item arms above, a sweep doesn't know which
+		// entries survived beyond the named failures, so it re-fetches both
+		// sources (the same commands "R" uses) rather than guessing which
+		// ones to remove from the local slices.
+		a.filesDlg.SetBulkResult(msg.Deleted, msg.Failures)
+		return a, tea.Batch(a.fetchOrphansCmd(), a.fetchOrphanedHistoryCmd())
+
 	case fetchClientTokensResultMsg:
 		if msg.Err != "" {
 			a.clientTokensDlg.SetError(msg.Err)
