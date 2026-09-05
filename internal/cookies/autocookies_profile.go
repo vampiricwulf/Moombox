@@ -635,9 +635,12 @@ func credentialAccepted(p platformAuth) bool {
 // an import back for. Two independent budgets, and neither platform's answer
 // depends on how slow the other one was.
 //
-// The cost is bounded and priced: worst case for the pair doubles from one
-// window to two (15 s → 30 s), which autocookies.go's refresh budget and
-// data-and-storage.md's cross-writer-window sentence both account for.
+// The cost is bounded and priced: the pair's worst case goes from ONE window
+// to TWO, and authVerifyTimeout was cut 15 s → 12 s in the same breath so the
+// pair costs 24 s rather than 30 s and no outer budget had to move for it
+// (ruling J5a). autocookies.go's refresh sum, its setupAbandonGrace columns,
+// operations.md's grace-window derivation and data-and-storage.md's
+// cross-writer-window sentence all carry that 24 s.
 //
 // The bool projection (`state == verifyOK`) is exactly what RefreshCookies
 // computed inline before, including the "no verify callback wired" contract:
