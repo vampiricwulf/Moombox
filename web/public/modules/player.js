@@ -14,25 +14,9 @@ import {
 } from "./chat-timeline.js";
 import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 import { letterboxStage, rowsFor, sameStage, nextGeometry, NICO_GEO_SETTLE_MS } from "./nico-geometry.js";
+import { NicoScheduler, NICO_DURATION_MS, NICO_LEAD_MS, NICO_LANE_GAP_MS } from "./nico-scheduler.js";
 
 const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
-
-// Niconico overlay engine tuning. All times are MEDIA milliseconds, so the
-// overlay freezes with the video and scales with playbackRate for free.
-//
-// A message ENTERS at the right edge NICO_LEAD_MS before its timestamp, so at
-// its timestamp it is NICO_LEAD_MS / NICO_DURATION_MS = a quarter of the way
-// across — niconico's own model, and what makes messages slide in from the edge
-// instead of appearing mid-stage. `entryMs = msg.offsetMs − NICO_LEAD_MS` is the
-// clock the rest of the engine works in: consumption, the lateness bound, the
-// lane allocator and the seed all measure from it (R29).
-const NICO_DURATION_MS = 4000;      // niconico's traverse time (owner decision D4)
-const NICO_LEAD_MS = 1000;          // niconico: a comment starts moving 1 s before its timestamp (100 vpos)
-const NICO_TICK_AHEAD_MS = 300;     // consume up to one timeupdate interval early; the WAAPI delay holds the entry instant
-const NICO_MAX_LATENESS_MS = 2000;  // a message not placed within 2 s of ENTERING (1 s past its timestamp) is dropped and counted
-const NICO_LANE_GAP_MS = 150;       // spacing buffer between consecutive occupants of a lane
-const NICO_MAX_PER_TICK = 20;       // DOM work cap for NEW messages per timeupdate tick
-const NICO_SEED_MAX_FALLBACK = 30;  // seed cap when the row count is unknown
 
 function announcementColorClass(color) {
   return ANNOUNCEMENT_COLORS.has(color) ? color : "primary";
@@ -83,19 +67,16 @@ export class PlayerController {
     this._nicoGeo = undefined;
     /** @type {ReturnType<typeof setTimeout>|null} pending geometry commit (NICO_GEO_SETTLE_MS) */
     this._nicoGeoSettle = null;
-    /** Index of the next message to consider; -1 = not anchored yet */
-    this.nicoCursor = -1;
     /**
-     * Entries that found no lane yet, in offset order. Each caches the built,
-     * detached element and its measurements so a retry costs no DOM work.
-     * @type {Array<{msg: object, el: HTMLElement, w: number, h: number}>}
+     * The cursor, the anchor, the deferred entries and the drop count — the
+     * overlay's whole "what is shown when" state machine. Its pending entries
+     * cache the built, detached element and its measurements (see
+     * `_prepareNico`), so a retry costs no DOM work.
+     * @type {NicoScheduler}
      */
-    this._nicoPending = [];
-    /** Effective time of the last reset; only newer messages count as drops */
-    this._nicoAnchorMs = -Infinity;
+    this.nico = new NicoScheduler({ lanes: this._lanes, indexAfter, seedCursorIndex });
     /** @type {Set<Animation>} every in-flight overlay animation */
     this._nicoAnims = new Set();
-    this.nicoDropped = 0;
     this._nicoDroppedShown = 0;
     this._nicoDropPillTimer = null;
     this.playerCustomOffsetMs = 0;
@@ -195,7 +176,7 @@ export class PlayerController {
         // count every message newer than that stale anchor as dropped (and the
         // re-measure below cannot save us: an unchanged stage returns early).
         // The next tick lazily re-anchors at the current time.
-        this.nicoCursor = -1;
+        this.nico.unanchor();
         // Measure now that the overlay is visible — geometry updates are refused
         // while it is display:none, so without this the first tick after the
         // toggle would run on stale (or missing) geometry. Immediate: the user
@@ -206,7 +187,7 @@ export class PlayerController {
         // Un-anchor: no ticks run while the overlay is off, so the next enabled
         // tick must re-seed at the current time instead of grinding through
         // (and counting as dropped) every message that passed meanwhile.
-        this.nicoCursor = -1;
+        this.nico.unanchor();
       }
     });
 
@@ -228,7 +209,7 @@ export class PlayerController {
     // Video seeking — un-anchor the overlay BEFORE the seek's own timeupdate.
     // The HTML seek algorithm queues `timeupdate` and only THEN `seeked`, so
     // one tick runs in between with `currentTime` already at the target but
-    // `nicoCursor` still parked at the old position: the loop walks every
+    // `nico.cursor` still parked at the old position: the loop walks every
     // message in the gap, finds each one more than NICO_MAX_LATENESS_MS late
     // and — being newer than the anchor — counts it, i.e. a bogus
     // "+N not shown" on every forward seek longer than 2 s. The load algorithm
@@ -237,7 +218,7 @@ export class PlayerController {
     // re-anchors at the target.
     video.addEventListener("seeking", () => {
       this.clearNicoOverlay();
-      this.nicoCursor = -1;
+      this.nico.unanchor();
     });
 
     // Video seeked — reset both systems
@@ -628,7 +609,7 @@ export class PlayerController {
     this.playerActiveChatIndex = 0;
     this._chatParts = null;
     this._updateSidebarHeader();
-    this.nicoCursor = -1;
+    this.nico.unanchor();
     // A geometry commit armed by the last resize has nothing left to commit.
     clearTimeout(this._nicoGeoSettle);
     this._nicoGeoSettle = null;
@@ -882,7 +863,7 @@ export class PlayerController {
     document.getElementById("player-sidebar-messages").replaceChildren();
     this._updateSidebarHeader();
     this.clearNicoOverlay();
-    this.nicoCursor = -1;
+    this.nico.unanchor();
     this._resetNicoDropCount();
 
     // Multi-segment or single-file video source
@@ -988,7 +969,7 @@ export class PlayerController {
     // tick would walk the whole file up to `now` and count the gap as dropped.
     // _updateNicoGeometry below cannot undo it — an unchanged stage returns
     // early — so drop the seed here and let the next tick anchor lazily.
-    this.nicoCursor = -1;
+    this.nico.unanchor();
 
     // Load saved custom chat offset (from watch-state response, already on playerJob)
     this._applyOffsetUI(this.playerJob.chatOffset || 0);
@@ -1491,7 +1472,7 @@ export class PlayerController {
     this._nicoGeo = nextGeometry(geo, w, h, rows);
     this._lanes.reset(rows);
     // Exactly one clear on this path: _reanchorNicoAt clears before re-seeding
-    // (and clearNicoOverlay empties _nicoPending, so no cached w/h measured at
+    // (and clearNicoOverlay empties nico.pending, so no cached w/h measured at
     // the old font size outlives the change); _lanes.reset() inside it keeps the
     // row count just set above.
     if (this.playerChatMessages.length) {
@@ -1510,7 +1491,7 @@ export class PlayerController {
     if (overlay) overlay.replaceChildren();
     this._lanes.reset();
     // Pending entries hold DETACHED elements, so dropping the list is the discard.
-    this._nicoPending = [];
+    this.nico.pending = [];
   }
 
   /**
@@ -1525,29 +1506,14 @@ export class PlayerController {
     this._resetNicoCursor(effectiveMs);
   }
 
-  /**
-   * Anchor the overlay cursor at `effectiveMs`: the next tick considers only a
-   * short seed of "chat that was already flying" (it ENTERED within the last
-   * NICO_MAX_LATENESS_MS, and at most two screens' worth of rows), never the
-   * whole pre-show backlog. The horizon is handed to `seedCursorIndex` shifted
-   * by NICO_LEAD_MS — the seed works in message time while the engine works in
-   * entry time, and the shift is what keeps "entered within the last 2 s" and
-   * "the last 2×rows to have entered" meaning what they say. Also drops any
-   * deferred messages and frees every lane — the caller has cleared the overlay.
-   */
+  /** Anchor the cursor at `effectiveMs` — the seed rule lives in NicoScheduler. */
   _resetNicoCursor(effectiveMs) {
-    const rows = this._lanes.laneCount || NICO_SEED_MAX_FALLBACK / 2;
-    this.nicoCursor = seedCursorIndex(
-      this.playerChatMessages, effectiveMs + NICO_LEAD_MS, NICO_MAX_LATENESS_MS, 2 * rows, indexAfter,
-    );
-    this._nicoPending = [];
-    this._nicoAnchorMs = effectiveMs;
-    this._lanes.reset();
+    this.nico.anchor(this.playerChatMessages, effectiveMs);
   }
 
   /** Zero the drop counter and hide the pill (job switch / player teardown). */
   _resetNicoDropCount() {
-    this.nicoDropped = 0;
+    this.nico.resetDropCount();
     this._nicoDroppedShown = 0;
     clearTimeout(this._nicoDropPillTimer);
     this._nicoDropPillTimer = null;
@@ -1580,13 +1546,13 @@ export class PlayerController {
       // The clear is required — _resetNicoCursor frees the lanes, which must not
       // happen under elements that are still flying.
       this.clearNicoOverlay();
-      this.nicoCursor = -1;
+      this.nico.unanchor();
       return;
     }
     // Lazy anchor, AFTER the hidden-panel guard: with the two the other way
     // round a hidden tick paid a seedCursorIndex + replaceChildren (~4 Hz) to
     // build a cursor the guard then threw away again.
-    if (this.nicoCursor < 0) this._reanchorNicoAt(effectiveMs);
+    if (this.nico.cursor < 0) this._reanchorNicoAt(effectiveMs);
     const geo = this._nicoGeo;
     // Visible but not measured yet (a tick that beats `loadedmetadata`), or a
     // zero-sized video. Distinct from hidden: there is nothing to place, but the
@@ -1602,59 +1568,13 @@ export class PlayerController {
       overlay,
     };
 
-    // 1. Deferred entries first (oldest first) — no head-of-line blocking: an
-    //    entry that still finds no lane stays pending, one that is now too late
-    //    is dropped (and counted when it is newer than the anchor), and the
-    //    ones behind it are still tried this tick. A retry is placed at the
-    //    CURRENT time (retry mode, see _placeEntry) and reuses the element and
-    //    measurements taken at first sight — no rebuild, no re-measure.
-    const stillPending = [];
-    for (const entry of this._nicoPending) {
-      if (effectiveMs - (entry.msg.offsetMs - NICO_LEAD_MS) > NICO_MAX_LATENESS_MS) {
-        this._countNicoDrop(entry.msg); // entry (and its detached element) is discarded
-        continue;
-      }
-      if (!this._placeEntry(entry, effectiveMs, ctx, true)) stillPending.push(entry);
-    }
-    this._nicoPending = stillPending;
-
-    // 2. New messages up to the per-tick cap; the cursor ALWAYS advances.
-    //    The cap bounds DOM WORK, not the walk: skipping a too-late message
-    //    builds nothing, so it must not consume a slot — otherwise a backlog
-    //    would drain at only NICO_MAX_PER_TICK per tick, leaving the overlay
-    //    dead for seconds. Skips are free, so any backlog clears in one tick.
-    //    A message is taken as soon as it enters, plus NICO_TICK_AHEAD_MS: ticks
-    //    arrive at ~4 Hz and an entry instant almost never lands on one, so the
-    //    engine takes it up to a tick early and lets the animation's `delay`
-    //    hold the exact instant (see _placeEntry). Consuming late instead would
-    //    make the tick rate visible as a start already inside the stage.
-    let work = 0;
-    while (this.nicoCursor < messages.length
-           && messages[this.nicoCursor].offsetMs - NICO_LEAD_MS <= effectiveMs + NICO_TICK_AHEAD_MS) {
-      const msg = messages[this.nicoCursor];
-      if (effectiveMs - (msg.offsetMs - NICO_LEAD_MS) > NICO_MAX_LATENESS_MS) {
-        this.nicoCursor++;
-        this._countNicoDrop(msg);
-        continue;
-      }
-      if (work++ >= NICO_MAX_PER_TICK) break; // cursor stays put — retried next tick
-      this.nicoCursor++;
-      const entry = this._prepareNico(msg, ctx);
-      if (!entry) continue; // nothing renderable (system-only message)
-      if (!this._placeEntry(entry, effectiveMs, ctx, false)) this._nicoPending.push(entry);
-    }
+    this.nico.tick(messages, effectiveMs, {
+      prepare: (msg) => this._prepareNico(msg, ctx),
+      place: (entry, at, retry) => this._placeEntry(entry, at, ctx, retry),
+      discard: () => {}, // the entry's element is already detached (see _placeEntry)
+    });
 
     this._updateNicoDropPill();
-  }
-
-  /**
-   * Count a message the overlay could not show. A message that had already
-   * ENTERED at the last anchor is a seed-window skip, not a drop — the viewer
-   * landed in the middle of its flight — so the comparison is on entry time,
-   * not on the timestamp a whole NICO_LEAD_MS later.
-   */
-  _countNicoDrop(msg) {
-    if (msg.offsetMs - NICO_LEAD_MS > this._nicoAnchorMs) this.nicoDropped++;
   }
 
   /**
@@ -1783,9 +1703,9 @@ export class PlayerController {
   _updateNicoDropPill() {
     const pill = document.getElementById("player-nico-dropped");
     if (!pill) return;
-    if (this.nicoDropped === this._nicoDroppedShown) return;
-    this._nicoDroppedShown = this.nicoDropped;
-    pill.textContent = `+${this.nicoDropped} not shown`;
+    if (this.nico.dropped === this._nicoDroppedShown) return;
+    this._nicoDroppedShown = this.nico.dropped;
+    pill.textContent = `+${this.nico.dropped} not shown`;
     pill.hidden = false;
     clearTimeout(this._nicoDropPillTimer);
     this._nicoDropPillTimer = setTimeout(() => { pill.hidden = true; }, 3000);
