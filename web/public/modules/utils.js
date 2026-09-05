@@ -826,6 +826,10 @@ export const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
 export const MUX_STATUSES = new Set(["Cancelled", "Error"]);
 export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
 
+// Equal to REINIT_STATUSES today by coincidence, not by contract — resume
+// preserves staging, reinitialize deletes it; keep them separately gated.
+export const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
+
 /**
  * Whether a job can be resumed (staging preserved, continue where it stopped).
  * One rule for the details button, the batch bar, and the batch action: the
@@ -833,10 +837,6 @@ export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKI
  * must be a YouTube job with staging on disk. The server enforces the same
  * three conditions (jobs.go resume route); this keeps the UI from offering
  * what the server will refuse.
- *
- * The resumable set is exactly REINIT_STATUSES (Error, Cancelled, COOKIES?) —
- * a stuck job re-initializes from the same three statuses it can resume from
- * — so this reuses that export rather than a second literal.
  *
  * `hasStaging` is only populated when the details view fetched the job; list
  * rows (the batch bar's input) do not carry it, so `undefined` means unknown
@@ -848,7 +848,7 @@ export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKI
  * fails. There, staging must be exactly `true`.
  */
 export function canResumeJob(job, { requireKnownStaging = false } = {}) {
-  const statusOk = REINIT_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
+  const statusOk = RESUMABLE_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
   const stagingOk = requireKnownStaging ? job.hasStaging === true : job.hasStaging !== false;
   return statusOk && job.platform === "youtube" && stagingOk;
 }
