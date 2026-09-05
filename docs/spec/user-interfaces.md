@@ -141,7 +141,7 @@ Example: Logs focused (100% width, 75% height)
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility.
+**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility. A watched job carries a dim `•` between the platform tag and the title (`watchedGlyph`, counted in `titleWidth`).
 
 **Job Details (top right):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
 
@@ -226,6 +226,7 @@ The chord system is a three-state finite automaton:
 | `A R` | Retry Job | Yes | No | Status is Error, Cancelled, or COOKIES? |
 | `A C` | Cancel Job | Yes | Yes | Status is not Finished, Cancelled, or Error |
 | `A D` | Delete Job | Yes | Yes | Any job |
+| `A W` | Toggle Watched | Yes | No | Status is Finished |
 | `A T` | Trim Video | Yes | No | Status is Finished and has output file |
 | `A K` | Manage Client Tokens | No | No | Client tokens callback configured |
 | `A O` | Browse Orphaned Files | No | No | — |

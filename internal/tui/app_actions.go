@@ -239,6 +239,40 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return deleteJobsResultMsg{Count: 1, Title: title}
 			})
 		}
+	case "A W":
+		if a.OnSetWatched == nil {
+			a.setFeedback("Watched toggling is unavailable")
+			return a, nil
+		}
+		setFn := a.OnSetWatched
+		if job == nil && a.taskList.SelectedCount() > 0 {
+			ids := a.taskList.SelectedIDs()
+			allWatched := true
+			finished := ids[:0]
+			for _, id := range ids {
+				if j := a.taskList.GetJobByID(id); j != nil && j.Status == database.StatusFinished {
+					finished = append(finished, id)
+					if !j.Watched {
+						allWatched = false
+					}
+				}
+			}
+			if len(finished) == 0 {
+				a.setFeedback("No finished jobs in selection")
+				return a, nil
+			}
+			a.taskList.ClearSelection()
+			watched := !allWatched
+			return a, safeCmd(func() tea.Msg {
+				return setWatchedResultMsg{Count: len(finished), Watched: watched, Err: setFn(finished, watched)}
+			})
+		} else if job != nil && job.Status == database.StatusFinished {
+			watched := !job.Watched
+			id := job.ID
+			return a, safeCmd(func() tea.Msg {
+				return setWatchedResultMsg{Count: 1, Watched: watched, Err: setFn([]string{id}, watched)}
+			})
+		}
 	case "A T":
 		if a.trimInProgress {
 			a.setFeedback("A trim is already in progress")
@@ -609,6 +643,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			}},
 		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no deletable jobs"},
+		{Chord: "A W", Label: "Toggle Watched", HintLabel: "Watched", Category: "Action", NeedsJob: true, SupportsBatch: true,
+			DisabledReason: "no finished jobs",
+			JobFilter:      func(j *database.Job) bool { return j.Status == database.StatusFinished }},
 		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
 			DisabledReason: "no finished jobs with files",
 			JobFilter: func(j *database.Job) bool {

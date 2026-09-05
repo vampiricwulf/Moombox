@@ -98,6 +98,25 @@ func (s *runState) runTUI() {
 			s.log.Error("Failed to delete job", slog.String("error", err.Error()))
 		}
 	}
+	app.OnSetWatched = func(ids []string, watched bool) error {
+		if len(ids) == 1 {
+			// Single job: the per-job update path (OnJobUpdate), mirroring
+			// the web's POST/DELETE /api/jobs/{id}/watched exactly — both
+			// routes clear resume_position, whichever way watched flips.
+			watchedVal := 0
+			if watched {
+				watchedVal = 1
+			}
+			if s.db.UpdateJobFields(ids[0], map[string]any{
+				"watched":         watchedVal,
+				"resume_position": nil,
+			}) == nil {
+				return fmt.Errorf("job %s not found", ids[0])
+			}
+			return nil
+		}
+		return s.db.BatchSetWatched(ids, watched)
+	}
 	app.OnResumeJob = func(jobID string) {
 		s.dlWorker.ResumeJob(jobID)
 	}

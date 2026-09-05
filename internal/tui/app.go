@@ -151,6 +151,12 @@ type (
 		Count int
 		Title string
 	}
+	// setWatchedResultMsg reports completion of an async A W toggle.
+	setWatchedResultMsg struct {
+		Count   int
+		Watched bool
+		Err     error
+	}
 	fetchOrphansResultMsg struct {
 		Files []OrphanedFileEntry
 		Err   string
@@ -481,9 +487,12 @@ type App struct {
 	seenChordHint bool
 
 	// Callbacks for actions
-	OnAddVideo        func(url string)
-	OnCancelJob       func(jobID string)
-	OnDeleteJob       func(jobID string)
+	OnAddVideo  func(url string)
+	OnCancelJob func(jobID string)
+	OnDeleteJob func(jobID string)
+	// OnSetWatched marks jobs watched/unwatched (the A W chord); the Web's
+	// /watched routes are the twin.
+	OnSetWatched      func(ids []string, watched bool) error
 	OnResumeJob       func(jobID string)
 	OnReinitializeJob func(jobID string)
 	OnMuxJob          func(jobID string) error

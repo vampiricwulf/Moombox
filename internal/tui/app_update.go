@@ -541,6 +541,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case setWatchedResultMsg:
+		// Row updates arrive via the normal DB subscriber path:
+		// UpdateJobFields fires OnJobUpdate, BatchSetWatched fires
+		// OnJobsChange. This just reports completion.
+		if msg.Err != nil {
+			a.setFeedback("Watched update failed: " + msg.Err.Error())
+			return a, nil
+		}
+		verb := "Marked"
+		if !msg.Watched {
+			verb = "Unmarked"
+		}
+		a.setFeedback(fmt.Sprintf("%s %d job(s) watched", verb, msg.Count))
+		return a, nil
+
 	case fetchOrphansResultMsg:
 		// A files-fetch failure is non-fatal: still show any loaded history,
 		// with the error surfaced inline (see SetFilesError).

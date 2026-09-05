@@ -26,6 +26,14 @@ var (
 	taskTwitchTagStyle  = lipgloss.NewStyle().Foreground(ColorTwitch)
 )
 
+// watchedGlyph marks a Finished job the operator has watched (the Web UI's
+// eye badge). Dim, one cell plus a space, counted in titleWidth so the row
+// never wraps.
+const (
+	watchedGlyph      = "•"
+	watchedGlyphWidth = 2 // "• "
+)
+
 // Filter represents a task list filter mode.
 type Filter int
 
@@ -579,10 +587,14 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 	if job.Platform == "twitch" {
 		platformTagWidth = 5
 	}
+	watchedW := 0
+	if job.Watched {
+		watchedW = watchedGlyphWidth
+	}
 	// Include progress width for active jobs
 	progressText, _ := m.progressCellText(job)
 	progressTextWidth := runewidth.StringWidth(progressText)
-	tw := max(contentW-selectorWidth-iconWidth-progressTextWidth-platformTagWidth, 5)
+	tw := max(contentW-selectorWidth-iconWidth-progressTextWidth-platformTagWidth-watchedW, 5)
 	return tw
 }
 
@@ -1116,6 +1128,15 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 			tagStyle = tagStyle.Faint(true)
 		}
 		parts = append(parts, tagStyle.Render("[TW] "))
+	}
+
+	// Watched glyph — same position titleWidth accounts for it.
+	if job.Watched {
+		glyphStyle := DimStyle
+		if dimmed {
+			glyphStyle = glyphStyle.Faint(true)
+		}
+		parts = append(parts, glyphStyle.Render(watchedGlyph+" "))
 	}
 
 	// Title (blue bg + white text when selected, status color when not selected, match TS)
