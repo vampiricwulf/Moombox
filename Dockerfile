@@ -23,7 +23,7 @@
 #   docker build --platform linux/arm64 -t moombox:arm64 .
 
 # ── Stage 1: BotGuard sidecar payload ────────────────────────────────────
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS sidecar
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS sidecar
 
 WORKDIR /src/bgutil-sidecar
 COPY bgutil-sidecar/ ./

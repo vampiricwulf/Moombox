@@ -12,7 +12,7 @@
 // pinned manifest, this tool exits 0 without re-downloading.
 //
 // Bumping the pinned version:
-//  1. Pick a new Node v22 LTS patch from https://nodejs.org/dist/index.json
+//  1. Pick a new Node v24 LTS patch from https://nodejs.org/dist/index.json
 //  2. Fetch SHASUMS256.txt for that release; copy the per-platform SHAs.
 //  3. Update nodeVersion + per-target expectedSHA constants below.
 //  4. `go run ./tools/fetch-node` to refresh all three embeds.
@@ -40,11 +40,11 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-// Pinned Node.js v22 LTS release. Bump quarterly or on critical CVE.
+// Pinned Node.js v24 LTS release. Bump quarterly or on critical CVE.
 //
-// Last bumped: 2026-04-26 — v22.22.2 was the latest v22 LTS (Jod) at the
-// time the sidecar landed.
-const nodeVersion = "v22.22.2"
+// Last bumped: 2026-09-04 — v24.20.0 was the latest v24 LTS (Krypton);
+// moved off the v22 (Jod) line, which is in maintenance until 2027-04.
+const nodeVersion = "v24.20.0"
 
 // nodeTarget describes one platform's Node release artifact.
 type nodeTarget struct {
@@ -65,19 +65,19 @@ func nodeTargets() []nodeTarget {
 			goos: "windows", goarch: "amd64",
 			archiveType: "zip", binaryName: "node.exe",
 			embedName: "node-windows-amd64.gz", urlInfix: "win-x64",
-			expectedSHA: "7c93e9d92bf68c07182b471aa187e35ee6cd08ef0f24ab060dfff605fcc1c57c",
+			expectedSHA: "6cac9ffbca8f6a47091e4b5c772e0606049c3871cb67d900c0cedde630e545ba",
 		},
 		{
 			goos: "linux", goarch: "amd64",
 			archiveType: "tar.xz", binaryName: "node",
 			embedName: "node-linux-amd64.gz", urlInfix: "linux-x64",
-			expectedSHA: "88fd1ce767091fd8d4a99fdb2356e98c819f93f3b1f8663853a2dee9b438068a",
+			expectedSHA: "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2",
 		},
 		{
 			goos: "linux", goarch: "arm64",
 			archiveType: "tar.xz", binaryName: "node",
 			embedName: "node-linux-arm64.gz", urlInfix: "linux-arm64",
-			expectedSHA: "e9e1930fd321a470e29bb68f30318bf58e3ecb4acb4f1533fb19c58328a091fe",
+			expectedSHA: "5f4ddab610c1ab2016b3c227cebdbf6d9495161487e4739c7b90090595f465f7",
 		},
 	}
 }
@@ -265,7 +265,7 @@ func extractFromTarXz(xzBytes []byte, binaryName string) ([]byte, error) {
 			return nil, fmt.Errorf("tar header: %w", err)
 		}
 		// Linux Node tarballs put node at bin/node under a versioned dir,
-		// e.g. node-v22.22.2-linux-x64/bin/node
+		// e.g. node-v24.20.0-linux-x64/bin/node
 		if filepath.Base(hdr.Name) == binaryName && strings.Contains(hdr.Name, "/bin/") {
 			data, err := io.ReadAll(tr)
 			if err != nil {

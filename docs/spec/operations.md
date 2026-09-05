@@ -95,7 +95,7 @@ The first-run setup wizard checks for FFmpeg and offers to install it via chocol
 
 Three-stage build that runs the entire pipeline inside the image build — no host Go/Node toolchain needed:
 
-1. **sidecar** (`node:22-bookworm-slim`): `npm ci --ignore-scripts` + `node build.mjs` → `sidecar.tar.gz` (mirrors release.yml).
+1. **sidecar** (`node:24-bookworm-slim`): `npm ci --ignore-scripts` + `node build.mjs` → `sidecar.tar.gz` (mirrors release.yml).
 2. **build** (`golang:1.27-bookworm`): `go run ./tools/fetch-node`, then `CGO_ENABLED=0` cross-compile for `$TARGETOS/$TARGETARCH`. Both stages run on `$BUILDPLATFORM`, so multi-arch builds don't emulate the compile.
 3. **runtime** (`debian:bookworm-slim` + ffmpeg + ca-certificates + tzdata): must be glibc — the sidecar extracts an official nodejs.org Linux binary at runtime, and those are glibc-linked (Alpine/musl won't run it).
 
@@ -194,7 +194,7 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 3. **Set up Go** — `actions/setup-go@v6` with version from `go.mod`
 4. **Set up Node** — `actions/setup-node@v6` (only when cache missed)
 5. **Build BotGuard sidecar payload** — `npm ci --omit=dev --ignore-scripts && node build.mjs` (only when cache missed)
-6. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v22 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files (only when cache missed)
+6. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v24 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files (only when cache missed)
 7. **Generate Windows resources** — Patches `winres.json` with tag version + commit hash via `jq`, runs `go-winres make --arch amd64` in `cmd/moombox/`. `go-winres` runs on any host OS; the resulting `.syso` uses filename build constraints so it's included only under `GOOS=windows`.
 8. **Compute version + ldflags** — Exports `VERSION`, `COMMIT`, `LDFLAGS` to `$GITHUB_ENV` once so all per-binary steps reference the same values.
 9. **Build Moombox.exe** — `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS"`
