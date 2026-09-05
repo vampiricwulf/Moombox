@@ -23,7 +23,7 @@ type helpKey struct {
 var quickKeys = helpSection{
 	title: "Quick Keys",
 	keys: []helpKey{
-		{"F", "Filter (panel-sensitive)"},
+		{"F", "Cycle status filter (Tasks) · description (Details) · log level (Logs)"},
 		{"M", "Action menu"},
 		{"Q Q", "Quit program"},
 		{"Ctrl+C", "Quit immediately"},
@@ -39,7 +39,8 @@ var navigationKeys = helpSection{
 		{"↑/↓", "Select / Scroll"},
 		{"PgUp/PgDn", "Page scroll (Logs)"},
 		{"Enter", "Expand/collapse archives"},
-		{"/", "Search (Tasks: filter jobs · Logs: find text)"},
+		{"/", "Filter query (Tasks) · Find text (Logs)"},
+		{"", "Filter: status:live channel:name platform:youtube -negate a|b \"quoted\""},
 		{"n / N", "Next / previous search match (Logs)"},
 		{"c", "Clear the log view (Logs)"},
 	},
