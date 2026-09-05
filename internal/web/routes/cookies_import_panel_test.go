@@ -1,55 +1,14 @@
 package routes
 
 import (
-	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/dop251/goja"
 )
 
 // The import panel, asserted by RUNNING the shipped settings.js against a stub
 // DOM — same technique, same reason, as cookies_lasterror_panel_test.go: three
 // rounds of review found three defects where an assertion about JS was written
 // as a string match and stayed green while the behaviour it named was broken.
-
-// settingsPanelVMWithUtils is settingsPanelVM plus the module settingsPanelVM
-// deliberately strips.
-//
-// settingsPanelVM (cookies_lasterror_panel_test.go:33) removes settings.js's
-// `import {...} from "./utils.js"` line, because goja parses no ES modules, and
-// nothing puts those helpers back. Its one existing consumer,
-// loadAutoCookieStatus, references none of them — importCookies references
-// three: serverErrorMessage, cookieSetupAcceptedToast and
-// cookieSetupRejectedMessage. In a VM without them each is a ReferenceError
-// thrown inside the method's own try/catch, which renders it into the result
-// div: no toast is ever pushed, `failure` stays empty because the catch handled
-// it, and three of the four tests below would fail against a perfectly correct
-// implementation.
-//
-// utils.js is evaluated FIRST, under utilsVM's transform (strip `export`), so
-// the helpers are ordinary global function declarations by the time settings.js
-// is parsed. What the assertions then measure is the SHIPPED copy — the same
-// cookieSetupAcceptedToast the browser calls, not a stub of it, which is what
-// makes the hedged-copy assertion below worth anything.
-func settingsPanelVMWithUtils(t *testing.T) *goja.Runtime {
-	t.Helper()
-	utils := readEmbeddedModule(t, "public/modules/utils.js")
-	utils = strings.ReplaceAll("\n"+utils, "\nexport ", "\n")
-
-	settings := readEmbeddedModule(t, "public/modules/settings.js")
-	settings = regexp.MustCompile(`(?s)import \{[^}]*\} from "\./utils\.js";`).ReplaceAllString(settings, "")
-	settings = strings.ReplaceAll("\n"+settings, "\nexport ", "\n")
-
-	vm := goja.New()
-	if _, err := vm.RunString(utils); err != nil {
-		t.Fatalf("utils.js does not evaluate — the browser would fail the same way: %v", err)
-	}
-	if _, err := vm.RunString(settings); err != nil {
-		t.Fatalf("settings.js does not evaluate — the browser would fail the same way: %v", err)
-	}
-	return vm
-}
 
 // FormData is stubbed as a recorder rather than skipped. The multipart branch is
 // the one a phone uses, and "the file picker posts something" is the whole claim
@@ -115,7 +74,7 @@ type importPanelRun struct {
 
 func runImportPanel(t *testing.T, opts map[string]any) importPanelRun {
 	t.Helper()
-	vm := settingsPanelVMWithUtils(t)
+	vm := settingsPanelVM(t)
 	if _, err := vm.RunString(importPanelProbe); err != nil {
 		t.Fatalf("install the import panel probe: %v", err)
 	}

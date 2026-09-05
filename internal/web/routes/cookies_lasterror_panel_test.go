@@ -23,21 +23,38 @@ import (
 // cleanup() forbidden from clearing — which is what makes a non-empty value
 // worth showing permanently rather than only where it was produced.
 
-// settingsPanelVM loads the shipped settings.js into a goja runtime.
+// settingsPanelVM loads the shipped settings.js into a goja runtime, on top of
+// the shipped utils.js it imports from.
 //
-// Same two transforms settingsVM in internal/tui applies — strip the utils.js
+// Same transforms settingsVM in internal/tui applies — strip the utils.js
 // import and the `export` keyword, neither of which goja parses — and nothing
 // else, so what runs is the source the binary serves. Kept here rather than
 // shared with that copy because the two packages cannot see each other's test
 // helpers; the transform is the module's, not this assertion's.
+//
+// utils.js is evaluated FIRST so the helpers settings.js imports are ordinary
+// global function declarations by the time settings.js is parsed. Without them
+// every reference is a ReferenceError, which is not a stub's failure but a
+// silent rewrite of what the assertion measures: inside a method's own
+// try/catch it renders as a handled error (no toast, empty failure) and a
+// correct implementation reads as broken; outside one — populateConfigForm's
+// snapshotRestartValues call — the whole method throws. Loading the SHIPPED
+// utils.js also means the assertions measure the same helper the browser
+// calls, not a stub of it.
 func settingsPanelVM(t *testing.T) *goja.Runtime {
 	t.Helper()
-	src := readEmbeddedModule(t, "public/modules/settings.js")
-	src = regexp.MustCompile(`(?s)import \{[^}]*\} from "\./utils\.js";`).ReplaceAllString(src, "")
-	src = strings.ReplaceAll("\n"+src, "\nexport ", "\n")
+	utils := readEmbeddedModule(t, "public/modules/utils.js")
+	utils = strings.ReplaceAll("\n"+utils, "\nexport ", "\n")
+
+	settings := readEmbeddedModule(t, "public/modules/settings.js")
+	settings = regexp.MustCompile(`(?s)import \{[^}]*\} from "\./utils\.js";`).ReplaceAllString(settings, "")
+	settings = strings.ReplaceAll("\n"+settings, "\nexport ", "\n")
 
 	vm := goja.New()
-	if _, err := vm.RunString(src); err != nil {
+	if _, err := vm.RunString(utils); err != nil {
+		t.Fatalf("utils.js does not evaluate — the browser would fail the same way: %v", err)
+	}
+	if _, err := vm.RunString(settings); err != nil {
 		t.Fatalf("settings.js does not evaluate — the browser would fail the same way: %v", err)
 	}
 	return vm
