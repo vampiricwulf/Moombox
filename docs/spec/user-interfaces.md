@@ -241,7 +241,7 @@ The chord system is a three-state finite automaton:
 | `R L` | Cookie Login | Interactive-setup callback is configured (`SetSetupCallbacks`, bound unconditionally by `cmd/moombox`). Opens the setup wizard's cookie step **alone** — pick YouTube or Twitch, sign in in the browser that opens on the host, `Enter` extracts. Preselects the platform the status bar is flagging for re-login. |
 | `R I` | Import Cookie File | Import callback is configured (auto-cookie service present). A path prompt (with `~` expansion and an existence check), then `AutoCookieService.ImportCookies` — the same verify-and-roll-back path as the Web import panel — then the per-platform outcome (imported / unchanged / rolled-back / rejected) in the overlay. The file is read in `cmd/moombox`; only the path is ever shown or logged. |
 | `R V` | Check for Updates | Update check callback is configured |
-| `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. |
+| `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. `S` inside the overlay skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`, the same helper `POST /api/update/dismiss` uses). |
 | `R U` | Apply Update | An update is available and apply callback is configured |
 | `R S` | Verify Signature | Signature verification callback is configured |
 | `R P` | Restart Program | Restart callback is configured. Requires confirmation. |
@@ -768,7 +768,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 | `POST` | `/api/update/check` | Manually check for updates. |
 | `POST` | `/api/update/apply` | Download and apply an available update. Triggers restart. |
 | `POST` | `/api/update/verify` | Verify the Ed25519 signature of the current binary. |
-| `POST` | `/api/update/dismiss` | Dismiss the update notification. |
+| `POST` | `/api/update/dismiss` | Dismiss the update notification. Body shared with the TUI via `DismissUpdate`. |
 
 ### FFmpeg
 

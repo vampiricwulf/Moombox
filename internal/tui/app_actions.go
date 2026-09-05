@@ -370,6 +370,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.updateAvailable.ReleaseNotes,
 				a.width, a.height,
 			)
+			a.releaseNotesPopup.setPending(true)
 			return a, nil
 		}
 		if a.OnFetchReleaseNotes == nil || a.version == "" {
@@ -378,6 +379,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 		// No pending update — fetch current version's notes asynchronously.
 		a.releaseNotesPopup.open("v"+a.version, "Loading release notes…", a.width, a.height)
+		a.releaseNotesPopup.setPending(false)
 		fetchFn := a.OnFetchReleaseNotes
 		ver := a.version
 		return a, safeCmd(func() tea.Msg {

@@ -13,13 +13,18 @@ import (
 // update. Scrollable via arrow keys / pgup-pgdn (handled by the
 // embedded viewport; letter-key bindings disabled to avoid conflict
 // with app chords). Opened via R N chord; from within, U applies the
-// update or Esc/Q closes.
+// update, S skips it (only while pending is set), or Esc/Q closes.
 type releaseNotesOverlay struct {
 	open_    bool
 	tag      string
 	rawNotes string
 	width    int
 	height   int
+	// pending marks that the notes being shown are for a still-skippable
+	// update (set via setPending by the R N open site when a.updateAvailable
+	// is non-nil), so the footer offers the S key. Reset on close so a
+	// later open() for an arbitrary version's notes defaults to false.
+	pending bool
 	// isDark mirrors App.isDark (terminal background detection) so the
 	// markdown renderer matches the terminal, exactly as the huh themes
 	// already do. Defaults true: dark is Moombox's historical assumption
@@ -37,6 +42,12 @@ func newReleaseNotesOverlay() *releaseNotesOverlay {
 
 // isOpen reports whether the overlay is currently visible.
 func (o *releaseNotesOverlay) isOpen() bool { return o.open_ }
+
+// setPending marks whether the notes currently shown belong to a still
+// pending (skippable) update. The R N chord calls this right after open()
+// with a.updateAvailable != nil; fetching an arbitrary version's notes (no
+// update pending) leaves it false.
+func (o *releaseNotesOverlay) setPending(p bool) { o.pending = p }
 
 // open prepares and shows the overlay. width/height are the terminal
 // dimensions; the overlay sizes itself to ~80% of those.
@@ -90,6 +101,7 @@ func (o *releaseNotesOverlay) close() {
 	o.open_ = false
 	o.tag = ""
 	o.rawNotes = ""
+	o.pending = false
 }
 
 // Update routes a tea.Msg to the embedded viewport for scroll handling.
@@ -124,12 +136,22 @@ func (o *releaseNotesOverlay) View() string {
 	// and the title truncates.
 	inner := o.vp.Width()
 	footerText := "U: Apply update  ↑/↓: Scroll  Esc/Q: Close"
-	for _, cand := range []string{
+	candidates := []string{
 		footerText,
 		"U update · ↑/↓ scroll · Esc close",
 		"U · ↑/↓ · Esc",
 		"Esc",
-	} {
+	}
+	if o.pending {
+		footerText = "U: Apply update  S: Skip  ↑/↓: Scroll  Esc/Q: Close"
+		candidates = []string{
+			footerText,
+			"U update · S skip · ↑/↓ scroll · Esc close",
+			"U · S · ↑/↓ · Esc",
+			"Esc",
+		}
+	}
+	for _, cand := range candidates {
 		footerText = cand
 		if lipgloss.Width(cand)+2 <= inner { // +2 for the style's horizontal padding
 			break

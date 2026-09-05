@@ -349,6 +349,9 @@ func (s *runState) runTUI() {
 			}
 			return info.TagName, info.ReleaseNotes, nil
 		}
+		app.OnDismissUpdate = func(tag string) error {
+			return routes.DismissUpdate(s.configStore, tag)
+		}
 	}
 	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
 		s.log.Info("Cookie recheck requested from TUI")

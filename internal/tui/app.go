@@ -99,6 +99,12 @@ type (
 	updateApplyResultMsg struct {
 		Err string // empty on success (process exits before this is seen)
 	}
+	// dismissUpdateResultMsg is the async result of OnDismissUpdate, dispatched
+	// by the S key in the release-notes overlay.
+	dismissUpdateResultMsg struct {
+		Tag string
+		Err error
+	}
 	signatureVerifyResultMsg struct {
 		Err string // empty on success
 	}
@@ -530,6 +536,9 @@ type App struct {
 	OnBackfillRescan  func()                           // force a feed-history backfill re-scan of all channels (R B)
 	OnApplyUpdate     func(version string) string      // returns error string (empty on success, process exits)
 	OnVerifySignature func() error                     // verify current binary's signature
+	// OnDismissUpdate skips a pending version (the S key in the
+	// release-notes overlay); nil hides the key.
+	OnDismissUpdate func(tag string) error
 	// OnFetchReleaseNotes fetches release notes for a specific version from GitHub.
 	// Used by R N chord when no update is available — shows the CURRENT version's
 	// notes in the same overlay used for pending-update notes.

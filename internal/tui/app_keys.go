@@ -77,6 +77,14 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd := a.applyUpdateAction()
 			a.releaseNotesPopup.close()
 			return a, cmd
+		case "s", "S":
+			if a.updateAvailable == nil || a.OnDismissUpdate == nil {
+				return a, nil
+			}
+			tag := a.updateAvailable.TagName
+			fn := a.OnDismissUpdate
+			a.setFeedback("Skipping " + tag + "...")
+			return a, safeCmd(func() tea.Msg { return dismissUpdateResultMsg{Tag: tag, Err: fn(tag)} })
 		}
 		// All other keys (arrows, pgup/pgdn) are forwarded to the viewport via
 		// routeComponentMsg — nothing to do here.

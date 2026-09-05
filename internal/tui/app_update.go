@@ -317,6 +317,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// On success, the process is already exiting (QuitTUI was called)
 		return a, nil
 
+	case dismissUpdateResultMsg:
+		if msg.Err != nil {
+			a.setFeedback("Could not skip " + msg.Tag + ": " + msg.Err.Error())
+			return a, nil
+		}
+		if a.updateAvailable != nil && a.updateAvailable.TagName == msg.Tag {
+			a.updateAvailable = nil
+		}
+		a.releaseNotesPopup.close()
+		a.setFeedback("Skipped " + msg.Tag + " — you'll be notified about the next release")
+		return a, nil
+
 	case signatureVerifyResultMsg:
 		if msg.Err != "" {
 			a.setFeedback("Signature verification failed: " + msg.Err)
