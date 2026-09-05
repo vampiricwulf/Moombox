@@ -99,7 +99,7 @@ jobs:
 
       - name: gofmt
         run: |
-          out="$(gofmt -l ./cmd ./internal ./tools)"
+          out="$(gofmt -l ./cmd ./internal ./tools ./web)"
           if [ -n "$out" ]; then
             echo "gofmt would reformat:"; echo "$out"; exit 1
           fi
@@ -131,5 +131,5 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: web/tests
         run: |
-          npm ci --no-audit --no-fund
+          npm ci --no-audit --no-fund --ignore-scripts
           node --test ./*.test.mjs

@@ -17,11 +17,11 @@ import (
 // costs milliseconds instead of the production 30 s.
 // Audit reports/small-packages.md notifications Wait timeout.
 func TestManagerWaitTimesOut(t *testing.T) {
-	hangForever := make(chan struct{}) // intentionally never closed
+	hangForever := make(chan struct{}) // closed only in Cleanup, after Wait timed out
 	t.Cleanup(func() {
-		// The sender goroutine is wedged on a never-closing channel; the
-		// test process exits when the test completes and collects it.
-		_ = hangForever
+		// Release the wedged sender so its goroutine exits and the
+		// WaitGroup drains instead of leaking past the test.
+		close(hangForever)
 	})
 
 	hanging := senderFunc(func(string, string, int, []Field, SendOptions) error {

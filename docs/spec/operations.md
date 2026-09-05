@@ -187,7 +187,7 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 **Runner:** `ubuntu-latest` (single job; cross-compiles all platforms from Linux)
 **Permissions:** `contents: write` (to create releases and upload assets)
 
-### Steps
+#### Steps
 
 1. **Checkout** — `actions/checkout@v7`
 2. **Restore embed blob cache** — `actions/cache@v6` keyed by hash of `version.txt` + sidecar `package-lock.json` + `build.mjs` + `tools/fetch-node/main.go`. On cache hit, the sidecar build and Node fetch are skipped entirely (~55s saved). Cache evicts after 7 days of disuse.
