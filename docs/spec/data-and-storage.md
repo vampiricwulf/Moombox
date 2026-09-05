@@ -477,7 +477,9 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | LogFilePath | string | "./moombox.log" | `log_file_path` |
 | OutputDirectory | string | "./output" | `output_directory` |
 | StagingDirectory | string | "./staging" | `staging_directory` |
-| FfmpegPath | string | "" | `ffmpeg_path` | Hot-reloadable: `TrimService.SetFfmpegPath` rebuilds the muxer on save; in-flight trims keep the muxer they started with. |
+| FfmpegPath | string | "" | `ffmpeg_path` |
+
+`ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath`, which rebuilds the muxer; in-flight trims keep the muxer they started with.
 
 #### [logs]
 

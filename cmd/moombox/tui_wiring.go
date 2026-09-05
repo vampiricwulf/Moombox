@@ -265,7 +265,14 @@ func (s *runState) runTUI() {
 		// updatedCfg: that's the live *MoomboxConfig pointer, and reading
 		// its Notifications slice unlocked would race a concurrent web
 		// PUT /api/config whole-struct store.
-		s.notifyMgr.Reload(s.configStore.Snapshot())
+		snap := s.configStore.Snapshot()
+		s.notifyMgr.Reload(snap)
+		// The three read-once settings the web PUT re-applies via
+		// ConfigRoutesCallbacks; applied unconditionally here for the same
+		// reason the cache invalidation above is (no pre-mutation snapshot).
+		s.applyGoSoftLimit(snap.Memory.GoSoftLimitMB)
+		s.applyTrustForwardedProto(snap.Network.TrustForwardedProto)
+		s.applyFfmpegPath(snap.Paths.FfmpegPath)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
 	}

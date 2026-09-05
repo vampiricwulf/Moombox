@@ -71,6 +71,10 @@ func (ts *TrimService) mux() *engine.Muxer {
 	return ts.muxer
 }
 
+// FFprobePath reports the ffprobe path of the current muxer (observability
+// for the hot-reload path; trims themselves go through mux()).
+func (ts *TrimService) FFprobePath() string { return ts.mux().FFprobePath() }
+
 // CreateTrim creates a trimmed version of a finished download. progressFn is
 // called with 0-100 as FFmpeg encoding progresses; pass nil when progress
 // reporting is not needed (audit reports/worker.md F58 — previously split
