@@ -31,21 +31,32 @@ const (
 	//   2 × (processTimeout + the 5s post-kill reap in runWithTimeout) = 70s
 	//   + firefoxLaunchSpacing                                          =  5s
 	//   + the cookie-DB read retries (5 × 500ms)                        ≈  2.5s
-	//   + authVerifyTimeout — ONE window covering BOTH platforms, not
-	//     one each; see checkPlatformAuth                               = 15s
-	//                                                                   ≈ 92s
+	//   + authVerifyTimeout — ONE window PER PLATFORM since the split,
+	//     so 2 × 15s rather than one 15s shared; checkPlatformAuth      = 30s
+	//                                                                   ≈ 107s
 	// against a 120s cap. RAISING processTimeout WITHOUT RAISING
 	// refreshOverallBudget makes the outer ctx cancel the second platform's
 	// launch mid-flight instead of granting it the budget it was just given.
 	processTimeout = 30 * time.Second
-	// authVerifyTimeout bounds ONE checkPlatformAuth call — both platforms
-	// together, not each. checkPlatformAuth builds a single
-	// context.WithTimeout and hands the same deadline to VerifyYouTubeAuth and
-	// VerifyTwitchAuth, so a slow YouTube check eats into what is left for
-	// Twitch and the pair can never take longer than this. Read as a per-call
-	// bound it looks like a 30 s ceiling, which is what
-	// data-and-storage.md's cross-writer window sentence would then be pricing
-	// the import path against.
+	// authVerifyTimeout bounds ONE VERIFIER — one window per platform, not one
+	// window for the pair. checkPlatformAuth builds a context.WithTimeout
+	// around each check(...) call, so VerifyYouTubeAuth and VerifyTwitchAuth
+	// each get the full value and neither platform's verdict depends on how
+	// slow the other one was.
+	//
+	// It used to be one shared deadline, and a YouTube check that spent it
+	// left Twitch reporting verifyUnknown about a credential nobody had asked
+	// about; see checkPlatformAuth for what that cost downstream. The price of
+	// the fix is that a two-platform call's ceiling is 2 × this = 30 s, which
+	// is the number the refresh sum above, the setupAbandonGrace columns below
+	// and data-and-storage.md's cross-writer window sentence all carry.
+	//
+	// The value spent is authVerifyWindow, a var below, so a test can prove
+	// the two budgets are separate without waiting 15 s twice.
+	//
+	// It is NOT the round-trip bound it might look like: cookiesHTTPClient's
+	// own timeout is 30 s, longer than this, so this window is what actually
+	// stops a hung verifier — the worst cases below are reachable.
 	authVerifyTimeout    = 15 * time.Second
 	refreshOverallBudget = 2 * time.Minute // periodic refresh: ctx cap end-to-end (see processTimeout)
 	// taskkillDrainDelay is the post-taskkill pause that lets Windows release
@@ -87,16 +98,26 @@ const (
 	//
 	//   Firefox   taskkillDrainDelay            0.3s
 	//             readFirefoxCookies retries   ~2.0s   (5 × 500ms)
-	//             authVerifyTimeout            15.0s
-	//                                        ≈ 17.3s
+	//             2 × authVerifyTimeout        30.0s
+	//                                        ≈ 32.3s
 	//   Chromium  cdpExtractTimeout            30.0s
 	//             taskkillDrainDelay            0.3s
-	//             authVerifyTimeout            15.0s
-	//                                        ≈ 45.3s
+	//             2 × authVerifyTimeout        30.0s
+	//                                        ≈ 60.3s
 	//
-	// plus merge / write / jar-load I/O in both columns. CHROMIUM IS THE
-	// BINDING COLUMN, so the real margin is ~14.7s — not the ~42s an
-	// "authVerifyTimeout plus the read retries" reading suggests.
+	// TWO authVerifyTimeouts, not one, since the split that gave each platform
+	// its own window (see checkPlatformAuth). That doubled 15.0s to 30.0s in
+	// both columns and it is what ate the margin: CHROMIUM IS THE BINDING
+	// COLUMN and its worst case is now 60.3s — 0.3s OVER this window and over
+	// the clients' own 60s cap, where it used to sit ~14.7s under.
+	//
+	// The overrun is written down rather than papered over. Reaching it needs
+	// a Chromium finish in which BOTH verifiers hang for a full window, and
+	// the split shipped on that basis (Arc J, ruling J5): a Twitch verdict
+	// that was really a report of YouTube's latency was the worse defect. The
+	// fix, if a field report ever produces the case, is to raise this and the
+	// two client caps together — NOT to put the two platforms back on one
+	// shared deadline.
 	//
 	// The Firefox column deliberately does NOT price closeFirefoxGracefully's
 	// 8.0s poll or the 0.5s cdpCloseFlushDelay behind it. That branch is
@@ -116,6 +137,13 @@ const (
 	// reason on the finish side.
 	setupAbandonGrace = 60 * time.Second
 )
+
+// authVerifyWindow is the value checkPlatformAuth actually spends, and it is a
+// var for exactly one reason: a test cannot wait 15 s twice to prove the two
+// platforms are budgeted apart. Production never assigns it — the constant
+// above is the number, this is only the seam a test shortens. Same shape as
+// applyUserOnlyDACL and loadCookieJar elsewhere in this package.
+var authVerifyWindow = authVerifyTimeout
 
 // platformRefreshURLs maps platform names to their refresh URLs.
 var platformRefreshURLs = map[string]string{

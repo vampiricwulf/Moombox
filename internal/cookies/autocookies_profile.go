@@ -622,6 +622,23 @@ func credentialAccepted(p platformAuth) bool {
 
 // checkPlatformAuth verifies both platforms against the CURRENT jar contents.
 //
+// EACH PLATFORM GETS ITS OWN authVerifyWindow. It used to get one window
+// between them — a single context.WithTimeout wrapped around both calls — and
+// the two checks run one after the other, so a YouTube check that spent the
+// whole window handed Twitch a deadline that was already gone. The Twitch
+// verifier is an HTTP round trip and an HTTP round trip on an expired context
+// fails before a packet leaves, so Twitch came back verifyUnknown: not a
+// finding about the Twitch credentials at all, but a report of YouTube's
+// latency wearing Twitch's name. Everything downstream reads it as the former
+// — credentialAccepted turns it into a green badge when the user just signed
+// in, and platformsToRestoreOnRegression treats it as a platform worth rolling
+// an import back for. Two independent budgets, and neither platform's answer
+// depends on how slow the other one was.
+//
+// The cost is bounded and priced: worst case for the pair doubles from one
+// window to two (15 s → 30 s), which autocookies.go's refresh budget and
+// data-and-storage.md's cross-writer-window sentence both account for.
+//
 // The bool projection (`state == verifyOK`) is exactly what RefreshCookies
 // computed inline before, including the "no verify callback wired" contract:
 // presence is then the only signal available, so it is reported as success
@@ -639,9 +656,6 @@ func credentialAccepted(p platformAuth) bool {
 // unable to see either a regression or an unknown, so a destructive import
 // went in over a working session with no rollback.
 func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platformAuth) {
-	vctx, cancel := context.WithTimeout(ctx, authVerifyTimeout)
-	defer cancel()
-
 	check := func(hasCookies bool, verify func(context.Context) (bool, error), platform string) platformAuth {
 		if !hasCookies {
 			// No credential of any kind for this platform. verifyFailed is a
@@ -656,6 +670,11 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 			s.logger.Warn(platform + " auth verification callback not wired — reporting based on cookie presence alone")
 			return platformAuth{hasCookies: true, state: verifyOK}
 		}
+		// One window PER PLATFORM, built here rather than once around both
+		// calls. Built after the two early returns above so a platform that is
+		// never asked costs nothing. See the function comment.
+		vctx, cancel := context.WithTimeout(ctx, authVerifyWindow)
+		defer cancel()
 		verified, err := verify(vctx)
 		switch {
 		case err != nil:
