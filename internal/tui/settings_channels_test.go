@@ -228,3 +228,81 @@ func TestChannelFieldsIncludeOverrides(t *testing.T) {
 		}
 	}
 }
+
+// TestChannelNumberFieldsAreEditable: a fieldNumber channel field (e.g.
+// archive_slots) must bind the shared text input exactly like fieldText
+// fields do. The channel-edit branches of updateTextInputForField and
+// syncFromTextInput used to gate on fieldText only, so a fieldNumber channel
+// field showed its value but silently blurred the input — nothing typed on
+// it ever reached channelEditValues.
+func TestChannelNumberFieldsAreEditable(t *testing.T) {
+	m := NewSettingsModel()
+	for i, s := range sections {
+		if s.name == "Channels" {
+			m.sectionIndex = i
+			break
+		}
+	}
+	m.channelMode = "edit"
+	m.channelEditValues = channelToValues(fullChannel())
+
+	fields := m.visibleChannelFields()
+	idx := -1
+	for i, f := range fields {
+		if f.key == "archive_slots" {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		t.Fatal("archive_slots missing from visibleChannelFields")
+	}
+	m.channelEditField = idx
+
+	m.updateTextInputForField()
+	if !m.textInput.Focused() {
+		t.Error("archive_slots did not focus the text input")
+	}
+	if got := m.textInput.Value(); got != "2" {
+		t.Errorf("textInput.Value() = %q, want %q", got, "2")
+	}
+
+	m.textInput.SetValue("9")
+	m.syncFromTextInput()
+	if got := m.channelEditValues["archive_slots"]; got != "9" {
+		t.Errorf("channelEditValues[archive_slots] = %q, want %q", got, "9")
+	}
+
+	// The setup wizard shares the same channelFields and the same bug: its
+	// updateTextInputForField/syncFromTextInput had the identical fieldText-only
+	// gate. NewSetupWizardModel is cheap (no I/O, no goroutines), so cover it too.
+	w := NewSetupWizardModel()
+	w.channelMode = "edit"
+	w.channelEditValues = channelToValues(fullChannel())
+	wFields := w.visibleSetupChannelFields()
+	wIdx := -1
+	for i, f := range wFields {
+		if f.key == "archive_slots" {
+			wIdx = i
+			break
+		}
+	}
+	if wIdx == -1 {
+		t.Fatal("archive_slots missing from visibleSetupChannelFields")
+	}
+	w.channelEditField = wIdx
+
+	w.updateTextInputForField()
+	if !w.textInput.Focused() {
+		t.Error("wizard: archive_slots did not focus the text input")
+	}
+	if got := w.textInput.Value(); got != "2" {
+		t.Errorf("wizard: textInput.Value() = %q, want %q", got, "2")
+	}
+
+	w.textInput.SetValue("9")
+	w.syncFromTextInput()
+	if got := w.channelEditValues["archive_slots"]; got != "9" {
+		t.Errorf("wizard: channelEditValues[archive_slots] = %q, want %q", got, "9")
+	}
+}

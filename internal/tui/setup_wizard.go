@@ -591,7 +591,7 @@ func (m *SetupWizardModel) syncFromTextInput() {
 		fields := m.visibleSetupChannelFields()
 		if m.channelEditField < len(fields) {
 			field := fields[m.channelEditField]
-			if field.ftype == fieldText {
+			if field.ftype == fieldText || field.ftype == fieldNumber {
 				m.channelEditValues[field.key] = val
 			}
 		}
@@ -604,9 +604,13 @@ func (m *SetupWizardModel) updateTextInputForField() {
 		fields := m.visibleSetupChannelFields()
 		if m.channelEditField < len(fields) {
 			field := fields[m.channelEditField]
-			if field.ftype == fieldText {
+			if field.ftype == fieldText || field.ftype == fieldNumber {
 				m.textInput.EchoMode = textinput.EchoNormal
-				m.textInput.Validate = nil
+				if field.ftype == fieldNumber {
+					m.textInput.Validate = validateDigitsOnly
+				} else {
+					m.textInput.Validate = nil
+				}
 				m.textInput.SetValue(m.channelEditValues[field.key])
 				m.textInput.Focus()
 				m.updateTextInputWidth()
