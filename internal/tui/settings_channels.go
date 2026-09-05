@@ -2,6 +2,8 @@ package tui
 
 import (
 	"cmp"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -20,14 +22,41 @@ func channelToValues(ch config.ChannelConfig) map[string]string {
 		enabled = "No"
 	}
 	return map[string]string{
-		"id":                 ch.ID,
-		"name":               ch.Name,
-		"platform":           ch.GetPlatform(),
-		"enabled":            enabled,
-		"terms":              terms,
-		"include_non_live":   boolToDisplay(ch.IncludeNonLiveContent),
-		"quality_preference": cmp.Or(ch.QualityPreference, "best"),
+		"id":                  ch.ID,
+		"name":                ch.Name,
+		"platform":            ch.GetPlatform(),
+		"enabled":             enabled,
+		"terms":               terms,
+		"include_non_live":    boolToDisplay(ch.IncludeNonLiveContent),
+		"quality_preference":  cmp.Or(ch.QualityPreference, "best"),
+		"num_desc_lookbehind": optIntString(ch.NumDescLookbehind),
+		"output_directory":    ch.OutputDirectory,
+		"archive_window_days": optIntString(ch.ArchiveWindowDays),
+		"archive_slots":       optIntString(ch.ArchiveSlots),
 	}
+}
+
+// optIntString renders an optional override for the form: "" when unset.
+func optIntString(p *int) string {
+	if p == nil {
+		return ""
+	}
+	return strconv.Itoa(*p)
+}
+
+// optIntFromString parses a form value back to an optional override; blank
+// or unparseable text clears it (validateChannelValues rejects the latter
+// before the save reaches here).
+func optIntFromString(s string) *int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return nil
+	}
+	return &n
 }
 
 // valuesToChannel turns the editor's form values into a ChannelConfig. For an
@@ -67,7 +96,35 @@ func valuesToChannel(vals map[string]string, existing *config.ChannelConfig) con
 	if q := vals["quality_preference"]; q != "" && q != "best" {
 		ch.QualityPreference = q
 	}
+	ch.NumDescLookbehind = optIntFromString(vals["num_desc_lookbehind"])
+	ch.OutputDirectory = strings.TrimSpace(vals["output_directory"])
+	ch.ArchiveWindowDays = optIntFromString(vals["archive_window_days"])
+	ch.ArchiveSlots = optIntFromString(vals["archive_slots"])
 	return ch
+}
+
+// validateChannelValues checks the numeric overrides before a save so a
+// typo produces a field error instead of a silently-cleared override.
+// Bounds match config.Validate's global monitors bounds.
+func validateChannelValues(vals map[string]string) string {
+	check := func(key, label string, min, max int) string {
+		s := strings.TrimSpace(vals[key])
+		if s == "" {
+			return ""
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n < min || n > max {
+			return fmt.Sprintf("%s must be a whole number %d-%d (blank = default)", label, min, max)
+		}
+		return ""
+	}
+	if msg := check("num_desc_lookbehind", "Description lookbehind", 0, 1000); msg != "" {
+		return msg
+	}
+	if msg := check("archive_window_days", "Archive window", 1, 3650); msg != "" {
+		return msg
+	}
+	return check("archive_slots", "Archive slots", 1, 100)
 }
 
 func (m *SettingsModel) handleChannelKey(key string) string {
@@ -116,6 +173,8 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
 			"include_non_live": "No", "quality_preference": "best",
+			"num_desc_lookbehind": "", "output_directory": "",
+			"archive_window_days": "", "archive_slots": "",
 		}
 		m.channelEditField = 0
 		m.channelIndex = len(m.channels) // Will be new index
@@ -173,6 +232,11 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 		id := strings.TrimSpace(m.channelEditValues["id"])
 		if id == "" {
 			m.errorMsg = "Channel ID is required"
+			return ""
+		}
+		if msg := validateChannelValues(m.channelEditValues); msg != "" {
+			m.errorMsg = msg
+			m.status = saveError
 			return ""
 		}
 		if strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") || strings.Contains(id, "twitch.tv/") {

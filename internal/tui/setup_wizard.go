@@ -862,6 +862,8 @@ func (m *SetupWizardModel) handleChannelListKey(key string, onEsc func() string,
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
 			"include_non_live": "No", "quality_preference": "best",
+			"num_desc_lookbehind": "", "output_directory": "",
+			"archive_window_days": "", "archive_slots": "",
 		}
 		m.channelEditField = 0
 		m.channelIndex = len(m.channels)
@@ -921,6 +923,10 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 				m.errorMsg = fmt.Sprintf("Channel %q already added", id)
 				return ""
 			}
+		}
+		if msg := validateChannelValues(m.channelEditValues); msg != "" {
+			m.errorMsg = msg
+			return ""
 		}
 		var existing *config.ChannelConfig
 		if m.channelIndex < len(m.channels) {
