@@ -542,26 +542,25 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		// So they end the refresh instead, with a message describing the
 		// state that really exists. Failing the call matches how every other
 		// write failure in this function is handled.
-		if restoreErr := writeCookieFile(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
-			errMsg := "the browser profile did not verify for " + strings.Join(restoredPlatforms, " + ") +
-				", and Moombox could not restore the previous cookies (" + restoreErr.Error() +
-				") — cookies.txt still holds the rejected new credentials"
-			s.setError(errMsg)
-			s.logger.Error("could not restore the previous cookies.txt",
-				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return refreshAborted(), fmt.Errorf("restore previous cookies: %w", restoreErr)
-		}
-		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
+		//
+		// The write, the reload and the two recordings are
+		// restorePreviousCookies, shared with the paste import; this path keeps
+		// its own wording — it names the browser profile, and it carries no
+		// import sentinel — and its own short returned errors.
+		if fail := s.restorePreviousCookies(restored, restoredPlatforms, rollbackMessages{
+			writeHead: "the browser profile did not verify for " + strings.Join(restoredPlatforms, " + ") +
+				", and Moombox could not restore the previous cookies",
 			// The FILE is correct here; the running process is not. Saying
 			// "kept the previous cookies" would be true of the disk and false
 			// of everything using the jar until the next successful load.
-			errMsg := "restored the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
-				" after the browser profile did not verify, but reloading them failed (" + loadErr.Error() +
-				") — this process is still using the rejected credentials until the next refresh"
-			s.setError(errMsg)
-			s.logger.Error("could not reload cookie jar after restoring the previous cookies.txt",
-				"err", loadErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return refreshAborted(), fmt.Errorf("reload cookie jar after restore: %w", loadErr)
+			reloadHead: "restored the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
+				" after the browser profile did not verify, but reloading them failed",
+			writeLog: "could not restore the previous cookies.txt",
+		}); fail != nil {
+			if fail.stage == rollbackWriteFailed {
+				return refreshAborted(), fmt.Errorf("restore previous cookies: %w", fail.cause)
+			}
+			return refreshAborted(), fmt.Errorf("reload cookie jar after restore: %w", fail.cause)
 		}
 
 		// Re-verify the file we actually kept. Without this, the status

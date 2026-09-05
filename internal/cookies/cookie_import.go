@@ -516,24 +516,21 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		// pasted cookies were rejected and the rollback did not complete, and
 		// what each of these adds is WHICH platform, WHICH half failed and what
 		// is left in force.
-		if restoreErr := writeCookieFile(s.cookiePath, []byte(restored), 0o600); restoreErr != nil {
-			failure := fmt.Errorf("%w: %s did not verify and the previous cookies could not be "+
-				"restored (%w) — cookies.txt still holds the rejected new credentials",
-				ErrImportRollbackIncomplete, strings.Join(restoredLabels, " + "), restoreErr)
-			s.setError(failure.Error())
-			s.logger.Error("could not restore the previous cookies.txt after a rejected import",
-				"err", restoreErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return result, failure
-		}
-		if loadErr := s.jar.Load(s.cookiePath); loadErr != nil {
+		//
+		// The write, the reload and the two recordings are
+		// restorePreviousCookies, shared with the browser refresh; the wording
+		// below and the returned value stay here, because they are the whole of
+		// what the two paths do differently.
+		if fail := s.restorePreviousCookies(restored, restoredPlatforms, rollbackMessages{
+			sentinel: ErrImportRollbackIncomplete,
+			writeHead: strings.Join(restoredLabels, " + ") +
+				" did not verify and the previous cookies could not be restored",
 			// The FILE is correct here; the running process is not.
-			failure := fmt.Errorf("%w: %s's previous cookies were restored but could not be reloaded "+
-				"(%w) — this process is still using the rejected credentials until the next refresh",
-				ErrImportRollbackIncomplete, strings.Join(restoredLabels, " + "), loadErr)
-			s.setError(failure.Error())
-			s.logger.Error("could not reload cookie jar after restoring the previous cookies.txt",
-				"err", loadErr, "platforms", strings.Join(restoredPlatforms, ","))
-			return result, failure
+			reloadHead: strings.Join(restoredLabels, " + ") +
+				"'s previous cookies were restored but could not be reloaded",
+			writeLog: "could not restore the previous cookies.txt after a rejected import",
+		}); fail != nil {
+			return result, fail.err
 		}
 
 		// Re-verify the file we actually KEPT. Without this the result would
