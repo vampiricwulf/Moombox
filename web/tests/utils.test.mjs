@@ -9,6 +9,7 @@ import {
   formatDurationSeconds,
   formatMsToTime,
   safePlay,
+  applyChannelOverrides,
 } from "../public/modules/utils.js";
 
 test("formatTimestamp: zero and invalid inputs", () => {
@@ -92,4 +93,35 @@ test("safePlay swallows a rejected play() promise and tolerates a void return", 
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
+});
+
+test("applyChannelOverrides: values set, blanks clear, existing preserved", () => {
+  const existing = { id: "UC1", name: "N", num_desc_lookbehind: 5, output_directory: "D:/old", archive_window_days: 7, archive_slots: 2 };
+  const r = applyChannelOverrides({ ...existing }, {
+    numDescLookbehind: undefined, outputDirectory: "", archiveWindowDays: 14, archiveSlots: 4,
+  });
+  assert.equal(r.error, null);
+  assert.equal("num_desc_lookbehind" in r.channel, false, "blank clears the key");
+  assert.equal("output_directory" in r.channel, false, "blank clears the key");
+  assert.equal(r.channel.archive_window_days, 14);
+  assert.equal(r.channel.archive_slots, 4);
+  assert.equal(r.channel.name, "N", "unrelated keys untouched");
+});
+
+test("applyChannelOverrides: rejects out-of-range and non-integer values", () => {
+  const cases = [
+    [{ numDescLookbehind: -1 }, /lookbehind/i],
+    [{ numDescLookbehind: 1.5 }, /lookbehind/i],
+    [{ archiveWindowDays: 0 }, /window/i],
+    [{ archiveWindowDays: 3651 }, /window/i],
+    [{ archiveSlots: 0 }, /slots/i],
+    [{ archiveSlots: 101 }, /slots/i],
+  ];
+  for (const [ov, re] of cases) {
+    const r = applyChannelOverrides({ id: "UC1" }, ov);
+    assert.match(r.error ?? "", re, JSON.stringify(ov));
+  }
+  const ok = applyChannelOverrides({ id: "UC1" }, { numDescLookbehind: 0, archiveWindowDays: 3650, archiveSlots: 100, outputDirectory: " D:/x " });
+  assert.equal(ok.error, null);
+  assert.equal(ok.channel.output_directory, "D:/x", "trimmed");
 });

@@ -2,6 +2,7 @@
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
 import {
+  applyChannelOverrides,
   browserPathValidationOutcome,
   cookieImportRolledBackToast,
   cookieSetupAbortReport,
@@ -1442,6 +1443,11 @@ export class SettingsController {
     document.getElementById("channel-include-vods").checked =
       channel?.include_non_live_content || false;
 
+    this.app.setInputValue("channel-lookbehind-input", channel?.num_desc_lookbehind ?? "");
+    this.app.setInputValue("channel-output-dir-input", channel?.output_directory ?? "");
+    this.app.setInputValue("channel-archive-window-input", channel?.archive_window_days ?? "");
+    this.app.setInputValue("channel-archive-slots-input", channel?.archive_slots ?? "");
+
     // Platform selector
     const platformSelect = document.getElementById("channel-platform-select");
     if (platformSelect) {
@@ -1563,9 +1569,8 @@ export class SettingsController {
 
     const isTwitch = platform === "twitch";
 
-    // When editing, start from the existing channel to preserve fields
-    // the UI doesn't expose (num_desc_lookbehind, output_directory,
-    // archive_window_days, archive_slots).
+    // When editing, start from the existing channel so keys this dialog
+    // doesn't manage survive.
     const existingChannel = this.editingChannelId
       ? this.app.config?.channels?.find(c => c.id === this.editingChannelId)
       : null;
@@ -1600,13 +1605,25 @@ export class SettingsController {
       delete channel.quality_preference;
     }
 
+    const overrides = applyChannelOverrides(channel, {
+      numDescLookbehind: this.app.getInputNumber("channel-lookbehind-input"),
+      outputDirectory: document.getElementById("channel-output-dir-input")?.value ?? "",
+      archiveWindowDays: this.app.getInputNumber("channel-archive-window-input"),
+      archiveSlots: this.app.getInputNumber("channel-archive-slots-input"),
+    });
+    if (overrides.error) {
+      this.app.showToast(overrides.error, "danger");
+      return;
+    }
+    const channelPayload = overrides.channel;
+
     const saveBtn = document.getElementById("channel-save-btn");
     if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
     try {
       const response = await fetch("/api/config/channels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(channel),
+        body: JSON.stringify(channelPayload),
       });
 
       if (response.ok) {

@@ -786,3 +786,32 @@ export function reloginPromptTarget(status, hostname) {
   const available = status && Array.isArray(status.availableBrowsers) ? status.availableBrowsers.length : 0;
   return available > 0 ? "wizard" : "import";
 }
+
+/**
+ * Apply the per-channel override inputs to a channel payload. A blank input
+ * (undefined number / empty string) clears the key so the server falls back
+ * to the global value; a present value is validated against the same bounds
+ * config.Validate uses for the globals. Returns { channel, error }.
+ */
+export function applyChannelOverrides(channel, { numDescLookbehind, outputDirectory, archiveWindowDays, archiveSlots }) {
+  const out = { ...channel };
+  const setInt = (key, value, label, min, max) => {
+    if (value === undefined || value === null || value === "") {
+      delete out[key];
+      return null;
+    }
+    if (!Number.isInteger(value) || value < min || value > max) {
+      return `${label} must be a whole number ${min}-${max} (blank = default)`;
+    }
+    out[key] = value;
+    return null;
+  };
+  const err =
+    setInt("num_desc_lookbehind", numDescLookbehind, "Description lookbehind", 0, 1000) ||
+    setInt("archive_window_days", archiveWindowDays, "Archive window", 1, 3650) ||
+    setInt("archive_slots", archiveSlots, "Archive slots", 1, 100);
+  if (err) return { channel, error: err };
+  const dir = (outputDirectory || "").trim();
+  if (dir) out.output_directory = dir; else delete out.output_directory;
+  return { channel: out, error: null };
+}
