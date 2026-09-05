@@ -173,6 +173,16 @@ func TestEmptyStateQuotesLikeTheHeader(t *testing.T) {
 	if lines := strings.Count(view, "\n") + 1; lines > 8 {
 		t.Errorf("the panel must stay inside its 8 rows, rendered %d: %q", lines, view)
 	}
+	// The width bound: the 24-character query does not fit the 20-column
+	// budget at width 40, so the line ends in an ellipsis instead of wrapping.
+	if !strings.Contains(view, "…].") {
+		t.Errorf("the empty state must be cut to the row with an ellipsis: %q", view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if n := len([]rune(line)); n > 40 {
+			t.Errorf("a rendered line exceeds the 40-column panel (%d): %q", n, line)
+		}
+	}
 }
 
 func equalIDs(a, b []string) bool {

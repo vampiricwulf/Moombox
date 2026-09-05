@@ -224,9 +224,8 @@ func Serialize(tokens []Token) string {
 	return strings.Join(parts, " ")
 }
 
-// matchTerm tests whether a single term matches a job —
-// filter-engine.js matchTerm, plus the TUI's VideoID field in the text
-// match.
+// matchTerm tests whether a single term matches a job — filter-engine.js
+// matchTerm; both twins match a text term against title, channel and video ID.
 func matchTerm(t Token, job *database.Job) bool {
 	var result bool
 	switch t.Kind {
@@ -254,8 +253,7 @@ func matchTerm(t Token, job *database.Job) bool {
 }
 
 // Match reports whether job passes every token (AND across tokens, OR within
-// a group, negation per term) — web/public/modules/filter-engine.js, plus
-// the TUI's VideoID field in the text match.
+// a group, negation per term) — web/public/modules/filter-engine.js.
 func Match(tokens []Token, job *database.Job) bool {
 	for _, t := range tokens {
 		if t.Kind == KindOr {
