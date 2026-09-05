@@ -68,6 +68,14 @@ func StatusBucket(value string) string {
 	}
 }
 
+// Term builds one term token programmatically, for callers that compose a
+// query instead of typing it — the TUI's F cycle inserts its status token
+// this way. Value's lower-cased form is private, so a Token{…} literal built
+// outside this package would silently fail to match; go through Term.
+func Term(kind Kind, value string, negate bool) Token {
+	return Token{Kind: kind, Value: value, Negate: negate, lower: strings.ToLower(value)}
+}
+
 // stripQuotePair strips one surrounding matching quote pair, if present —
 // filter-parser.js's stripQuotePair.
 func stripQuotePair(value string) string {

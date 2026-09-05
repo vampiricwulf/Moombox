@@ -14,9 +14,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
-	"github.com/sahilm/fuzzy"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 )
 
 // Package-level styles for task list rendering (avoid alloc per render).
@@ -34,7 +34,9 @@ const (
 	watchedGlyphWidth = 2 // "• "
 )
 
-// Filter represents a task list filter mode.
+// Filter is the F key's cycle position. It is no longer state — the task
+// list filters on one []jobfilter.Token query, and this position is derived
+// from the status token in it by filterPosition().
 type Filter int
 
 const (
@@ -60,6 +62,16 @@ func (f Filter) String() string {
 // Next cycles to the next filter.
 func (f Filter) Next() Filter {
 	return (f + 1) % 4
+}
+
+// statusValue names the status: bucket this cycle position selects, or "" for
+// FilterAll (which carries no status token at all). Derived from String() so
+// the cycle's names and the query language's bucket names can't drift.
+func (f Filter) statusValue() string {
+	if f == FilterAll {
+		return ""
+	}
+	return strings.ToLower(f.String())
 }
 
 // taskItem wraps a job or archive divider as a list.Item.
@@ -121,20 +133,22 @@ type TaskListModel struct {
 
 	width, height       int
 	focused             bool
-	filter              Filter
 	archiveExpanded     bool
 	hideFinishedAgeDays int // from config, default 30
 
 	// Batch selection state (Space to toggle, mirrors Web UI batch operations).
 	selected map[string]bool // selected job IDs for batch operations
 
-	// Live fuzzy search ("/" in the Tasks panel). searching is true while the
-	// input box is open; searchQuery is the applied filter (kept even after
-	// the box closes, so a search stays active until explicitly cleared with
-	// Esc, mirroring the log panel's search). Empty query = no filtering.
+	// The one filter state: the parsed query the list is showing. tokens is
+	// what both gates run (jobfilter.Match); queryText is the text it was
+	// parsed from, which seeds the box when "/" reopens it. F writes into
+	// tokens too — it cycles the status token — so there is no second,
+	// competing filter mode. searching is true while the input box is open;
+	// the query survives the box closing and clears only on Esc.
 	searching   bool
 	searchInput textinput.Model
-	searchQuery string
+	tokens      []jobfilter.Token
+	queryText   string
 
 	// Marquee for scrolling selected item title.
 	marquee Marquee
@@ -155,7 +169,7 @@ type TaskListModel struct {
 func NewTaskListModel() *TaskListModel {
 	ti := newTextInput()
 	ti.Prompt = "/"
-	ti.Placeholder = "search titles, channels…"
+	ti.Placeholder = `text  status:active  channel:"name"  -platform:twitch`
 	ti.CharLimit = 200
 	m := &TaskListModel{
 		hideFinishedAgeDays: 30,
@@ -175,7 +189,7 @@ func (m *TaskListModel) IsSearching() bool { return m.searching }
 func (m *TaskListModel) StartSearch() tea.Cmd {
 	m.searching = true
 	m.searchInput.SetWidth(max(m.width-4, 8))
-	m.searchInput.SetValue(m.searchQuery)
+	m.searchInput.SetValue(m.queryText)
 	m.searchInput.CursorEnd()
 	m.applyListSize()
 	return m.searchInput.Focus()
@@ -197,19 +211,17 @@ func (m *TaskListModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	case keyCtrlC:
 		return nil, false
 	case "enter":
-		m.searchQuery = strings.TrimSpace(m.searchInput.Value())
 		m.searching = false
 		m.searchInput.Blur()
 		m.applyListSize()
-		m.refilterSelectTop()
+		m.applyQuery(m.searchInput.Value())
 		return nil, true
 	case "esc":
 		m.searching = false
 		m.searchInput.Blur()
 		m.applyListSize()
-		if m.searchQuery != "" {
-			m.searchQuery = ""
-			m.refilterSelectTop()
+		if len(m.tokens) > 0 {
+			m.applyQuery("")
 		}
 		return nil, true
 	}
@@ -227,6 +239,23 @@ func (m *TaskListModel) refilterSelectTop() {
 	m.resetMarquee()
 }
 
+// applyQuery parses q and makes it the list's filter — the one place the
+// token list is set from text. Everything that changes the query (Enter,
+// live typing, Esc, ClearSearch) goes through here so parse and rebuild
+// never fall out of step.
+func (m *TaskListModel) applyQuery(q string) {
+	m.queryText = strings.TrimSpace(q)
+	m.tokens = jobfilter.Parse(m.queryText)
+	m.refilterSelectTop()
+}
+
+// Query is the active filter serialized back to query text — what the
+// header shows and what an operator could retype. Empty when nothing is
+// filtered.
+func (m *TaskListModel) Query() string {
+	return jobfilter.Serialize(m.tokens)
+}
+
 // UpdateSearchInput feeds a message to the search textinput and re-filters
 // live as the query changes. Called from routeComponentMsg on every message
 // while the box is open (keys for typing, cursor-blink ticks). No-op when
@@ -239,8 +268,7 @@ func (m *TaskListModel) UpdateSearchInput(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	m.searchInput, cmd = m.searchInput.Update(msg)
 	if m.searchInput.Value() != prev {
-		m.searchQuery = strings.TrimSpace(m.searchInput.Value())
-		m.refilterSelectTop()
+		m.applyQuery(m.searchInput.Value())
 	}
 	return cmd
 }
@@ -248,16 +276,15 @@ func (m *TaskListModel) UpdateSearchInput(msg tea.Msg) tea.Cmd {
 // ClearSearch drops any active query and closes the box. Called on Esc from
 // the app when nothing else claims it.
 func (m *TaskListModel) ClearSearch() bool {
-	if !m.searching && m.searchQuery == "" {
+	if !m.searching && len(m.tokens) == 0 {
 		return false
 	}
 	m.searching = false
 	m.searchInput.Blur()
 	m.searchInput.SetValue("")
-	hadQuery := m.searchQuery != ""
-	m.searchQuery = ""
+	hadQuery := len(m.tokens) > 0
 	m.applyListSize()
-	m.refilterSelectTop()
+	m.applyQuery("")
 	return hadQuery
 }
 
@@ -598,9 +625,55 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 	return tw
 }
 
-// CycleFilter cycles through filter modes.
+// filterPosition derives the F-cycle position from the status token.
+func (m *TaskListModel) filterPosition() Filter {
+	for _, t := range m.tokens {
+		if t.Kind == jobfilter.KindStatus && !t.Negate {
+			switch jobfilter.StatusBucket(t.Value) {
+			case "active":
+				return FilterActive
+			case "issues":
+				return FilterErrors
+			case "finished":
+				return FilterFinished
+			}
+		}
+	}
+	return FilterAll
+}
+
+// CycleFilter advances the F cycle: none → status:active → status:issues →
+// status:finished → none. It edits the one token list rather than a separate
+// mode, so a status token the operator typed IS this token — F replaces it
+// where it sits and leaves every other token of the query alone.
 func (m *TaskListModel) CycleFilter() {
-	m.filter = m.filter.Next()
+	next := m.filterPosition().Next()
+
+	// Drop the status token(s) F owns, remembering where the first one sat
+	// so the replacement lands in place. Raw values (status:live) go too:
+	// leaving one behind would AND against the new bucket and empty the
+	// list. Negated status tokens are the operator's, not F's.
+	kept := make([]jobfilter.Token, 0, len(m.tokens)+1)
+	insertAt := -1
+	for _, t := range m.tokens {
+		if t.Kind == jobfilter.KindStatus && !t.Negate {
+			if insertAt < 0 {
+				insertAt = len(kept)
+			}
+			continue
+		}
+		kept = append(kept, t)
+	}
+	if value := next.statusValue(); value != "" {
+		token := jobfilter.Term(jobfilter.KindStatus, value, false)
+		if insertAt < 0 {
+			insertAt = len(kept)
+		}
+		kept = slices.Insert(kept, insertAt, token)
+	}
+
+	m.tokens = kept
+	m.queryText = jobfilter.Serialize(m.tokens)
 	m.rebuildVirtualList()
 	// Reset selection on filter change (match TS)
 	m.list.Select(0)
@@ -681,7 +754,7 @@ func (m *TaskListModel) archiveBucketsDirty() bool {
 	}
 	now := time.Now()
 	for _, j := range m.jobs {
-		if !m.passesFilter(j) || !m.passesSearch(j) {
+		if !m.passes(j) {
 			continue
 		}
 		if isJobArchived(j, m.hideFinishedAgeDays, now) != m.archivedSet[j.ID] {
@@ -714,10 +787,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 	archived := make([]*database.Job, 0, len(m.jobs)/4)
 	m.archivedSet = make(map[string]bool, len(m.jobs))
 	for _, j := range m.jobs {
-		if !m.passesFilter(j) {
-			continue
-		}
-		if !m.passesSearch(j) {
+		if !m.passes(j) {
 			continue
 		}
 
@@ -782,8 +852,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 		items = append(items, taskItem{job: j})
 	}
 
-	showArchive := len(archived) > 0 && (m.filter == FilterAll || m.filter == FilterFinished)
-	if showArchive {
+	if len(archived) > 0 && m.showArchive() {
 		items = append(items, taskItem{
 			divider: true,
 			count:   len(archived),
@@ -800,32 +869,34 @@ func (m *TaskListModel) rebuildVirtualList() {
 	m.restoreSelection(prevSelectedID)
 }
 
-// passesSearch reports whether a job matches the active fuzzy query. The
-// query fuzzy-matches against title, channel name, and video ID (the same
-// fields the Web UI's bare-text search covers); an empty query matches
-// everything. Matching is case-insensitive subsequence via sahilm/fuzzy, so
-// "mchi" finds "Minecraft with Chika".
-func (m *TaskListModel) passesSearch(j *database.Job) bool {
-	if m.searchQuery == "" {
-		return true
-	}
-	// Space-joined so a query can span fields ("mumei minecraft"); a
-	// printable separator also avoids sahilm/fuzzy's NUL-byte indexing bug.
-	hay := j.Title + " " + j.ChannelName + " " + j.VideoID
-	return len(fuzzy.Find(m.searchQuery, []string{hay})) > 0
+// passes is the list's one visibility gate — the dashboard's filter language
+// evaluated against a job. No tokens means no filtering, so an empty query
+// shows everything. Both rebuild sites call this and nothing else.
+func (m *TaskListModel) passes(j *database.Job) bool {
+	return jobfilter.Match(m.tokens, j)
 }
 
-func (m *TaskListModel) passesFilter(j *database.Job) bool {
-	switch m.filter {
-	case FilterActive:
-		return !isCompletedStatus(j.Status) && j.Status != database.StatusError && j.Status != database.StatusCookies
-	case FilterErrors:
-		return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
-	case FilterFinished:
-		return j.Status == database.StatusFinished
-	default:
-		return true
+// showArchive reports whether the archived section may appear. It is hidden
+// only while a non-negated status token excludes Finished — status:active
+// and status:live both hide it, status:finished and a negated -status:active
+// do not, and a query with no status token never hides it.
+func (m *TaskListModel) showArchive() bool {
+	for _, t := range m.tokens {
+		if t.Kind != jobfilter.KindStatus || t.Negate {
+			continue
+		}
+		if statuses, ok := jobfilter.BucketStatuses[jobfilter.StatusBucket(t.Value)]; ok {
+			if !slices.Contains(statuses, database.StatusFinished) {
+				return false
+			}
+			continue
+		}
+		// A raw status name — the engine's equality fallback.
+		if !strings.EqualFold(t.Value, string(database.StatusFinished)) {
+			return false
+		}
 	}
+	return true
 }
 
 // View renders the task list panel.
@@ -837,8 +908,8 @@ func (m *TaskListModel) View() string {
 	var listContent string
 	if len(m.list.Items()) == 0 {
 		switch {
-		case m.searchQuery != "":
-			listContent = DimStyle.Render(fmt.Sprintf("No tasks match /%s.", truncateString(m.searchQuery, 30)))
+		case len(m.tokens) > 0:
+			listContent = DimStyle.Render("No tasks match " + m.Query())
 		case m.JustCompletedSetup:
 			listContent = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ecc71")).Render("Setup complete!") + "\n\n" +
 				DimStyle.Render("Press ` to open Settings and add channels,") + "\n" +
@@ -880,12 +951,11 @@ func (m *TaskListModel) renderHeader(w int) string {
 		left += fmt.Sprintf(" (%d)", total)
 	}
 
-	if m.filter != FilterAll {
-		left += " " + YellowStyle.Render("["+m.filter.String()+"]")
-	}
-	// Active-search indicator (when the box is closed but a query is applied).
-	if !m.searching && m.searchQuery != "" {
-		left += " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaa00")).Render("[/"+truncateString(m.searchQuery, 20)+"]")
+	// One indicator for one filter: the active query, exactly as an operator
+	// would retype it. The MaxWidth clamp at the bottom of this function
+	// bounds a long one on a narrow panel.
+	if query := m.Query(); query != "" {
+		left += " " + YellowStyle.Render("["+query+"]")
 	}
 
 	// Countdown timers (T3 - match TS format, colored dots before labels)
