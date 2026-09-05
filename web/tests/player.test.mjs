@@ -222,7 +222,7 @@ test("player shortcuts fire only when nothing else owns the key", { skip }, asyn
   assert.equal(nicoToggle.checked, false);
   assert.equal(h.window.localStorage.getItem("player-nico-toggle"), "false");
   assert.equal(overlay.style.display, "none");
-  assert.equal(h.player.nicoCursor, -1, "the overlay un-anchors when switched off");
+  assert.equal(h.player.nico.cursor, -1, "the overlay un-anchors when switched off");
   h.key("c");
   assert.equal(nicoToggle.checked, true);
   assert.equal(h.window.localStorage.getItem("player-nico-toggle"), "true");
@@ -269,7 +269,7 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   // of the 1000 they enter at), so nothing is due yet.
   h.tick(600);
   assert.equal(overlay.children.length, 0);
-  assert.equal(h.player.nicoDropped, 0);
+  assert.equal(h.player.nico.dropped, 0);
 
   // One row each, no two on the same row, and the 3 that found no lane are
   // deferred rather than dropped.
@@ -278,7 +278,7 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   assert.equal(tops.length, 17, "at most one message per row");
   assert.equal(new Set(tops).size, 17, "every placed message got its own row");
   assert.deepEqual(tops.slice(0, 3), ["0px", "24px", "48px"]);
-  assert.equal(h.player.nicoDropped, 0, "deferred is not dropped");
+  assert.equal(h.player.nico.dropped, 0, "deferred is not dropped");
 
   // The animation's finish callback is the overlay's only cleanup path: it has
   // to drop the animation from _nicoAnims (which pause/play/ratechange all
@@ -295,7 +295,7 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   // 2.1 s after they entered, the deferred three are past NICO_MAX_LATENESS_MS.
   // They entered after the anchor, so they are real drops and are reported.
   h.tick(3100);
-  assert.equal(h.player.nicoDropped, 3);
+  assert.equal(h.player.nico.dropped, 3);
   const pill = h.el("player-nico-dropped");
   assert.equal(pill.hidden, false);
   assert.equal(pill.textContent, "+3 not shown");
@@ -306,21 +306,21 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   h.seek(2000);
   assert.equal(overlay.children.length, 17, "the stage is rebuilt at the seek target");
   h.tick(3100);
-  assert.equal(h.player.nicoDropped, 3, "seed-window losses are not counted");
+  assert.equal(h.player.nico.dropped, 3, "seed-window losses are not counted");
 
   // A hidden panel (another app tab) empties the stage and un-anchors instead
   // of grinding through the gap.
   h.geom.overlay = { w: 0, h: 0 };
   h.tick(4000);
   assert.equal(overlay.children.length, 0);
-  assert.equal(h.player.nicoCursor, -1);
-  assert.equal(h.player.nicoDropped, 3);
+  assert.equal(h.player.nico.cursor, -1);
+  assert.equal(h.player.nico.dropped, 3);
 
   // Coming back re-seeds at the current time — the whole gap is not charged.
   h.geom.overlay = { w: 1280, h: 408 };
   h.tick(5000);
   assert.equal(overlay.children.length, 0);
-  assert.equal(h.player.nicoDropped, 3);
+  assert.equal(h.player.nico.dropped, 3);
 });
 
 // ── 7. Geometry settle timer (Task 14) ──────────────────────────────────────
@@ -475,8 +475,8 @@ test("a seek's pre-`seeked` timeupdate counts nothing as dropped", { skip }, asy
   // Anchor at 10 s — through `seeked`, the only way a player reaches a new
   // position. The seed window is 2 s wide, so nothing here is a drop.
   h.seek(10000);
-  assert.equal(h.player.nicoDropped, 0);
-  assert.ok(h.player.nicoCursor > 0, "anchored");
+  assert.equal(h.player.nico.dropped, 0);
+  assert.ok(h.player.nico.cursor > 0, "anchored");
 
   // A 30 s forward seek, in the order the HTML seek algorithm actually uses:
   // currentTime moves, `seeking` fires, a `timeupdate` is queued, and only THEN
@@ -485,10 +485,10 @@ test("a seek's pre-`seeked` timeupdate counts nothing as dropped", { skip }, asy
   video.currentTime = 40;
   fire("seeking");
   fire("timeupdate");
-  assert.equal(h.player.nicoDropped, 0, "the pre-`seeked` tick must not count the gap");
+  assert.equal(h.player.nico.dropped, 0, "the pre-`seeked` tick must not count the gap");
   fire("seeked");
   fire("timeupdate");
-  assert.equal(h.player.nicoDropped, 0, "and neither does the re-anchored one");
+  assert.equal(h.player.nico.dropped, 0, "and neither does the re-anchored one");
   assert.equal(h.el("player-nico-dropped").hidden, true, "no pill");
 
   // Second half of the same fix: a tick with no decoded frame at the current
@@ -497,7 +497,7 @@ test("a seek's pre-`seeked` timeupdate counts nothing as dropped", { skip }, asy
   const placed = h.overlay().children.length;
   video.readyState = 0;
   h.tick(70000);
-  assert.equal(h.player.nicoDropped, 0, "an unloaded tick counts nothing");
+  assert.equal(h.player.nico.dropped, 0, "an unloaded tick counts nothing");
   assert.equal(h.overlay().children.length, placed, "and places nothing");
 });
 
@@ -588,11 +588,11 @@ test("toggling the overlay back on re-seeds instead of charging the gap", { skip
 
   h.key("c");                                     // overlay OFF
   assert.equal(nicoToggle.checked, false);
-  assert.equal(h.player.nicoCursor, -1, "toggling off un-anchors");
+  assert.equal(h.player.nico.cursor, -1, "toggling off un-anchors");
 
   // A seek re-seeds even with the overlay off — this is the stale seed.
   h.seek(10000);
-  assert.ok(h.player.nicoCursor > 0, "the seek seeded a cursor nothing will consume");
+  assert.ok(h.player.nico.cursor > 0, "the seek seeded a cursor nothing will consume");
 
   // A minute of playback with nothing on stage.
   h.tick(70000);
@@ -602,7 +602,7 @@ test("toggling the overlay back on re-seeds instead of charging the gap", { skip
   assert.equal(nicoToggle.checked, true);
 
   h.tick(70250);
-  assert.equal(h.player.nicoDropped, 0, "the gap crossed while the overlay was off is not a drop");
+  assert.equal(h.player.nico.dropped, 0, "the gap crossed while the overlay was off is not a drop");
   assert.equal(h.el("player-nico-dropped").hidden, true, "no pill");
   assert.ok(h.overlay().children.length > 0, "and the overlay resumes at the current time");
 });
@@ -644,14 +644,14 @@ test("a seek during a slow chat fetch does not make the arriving chat look dropp
 
   // The resume dialog's seek, mid-fetch.
   h.seek(3600000);
-  assert.equal(h.player.nicoCursor, 0, "seeded on the still-empty array");
+  assert.equal(h.player.nico.cursor, 0, "seeded on the still-empty array");
 
   deferred.resolve(chatOf(messages));
   await pending;
   await h.flush();
 
   h.tick(3603250);
-  assert.equal(h.player.nicoDropped, 0, "the chat that arrived after the seek is not dropped");
+  assert.equal(h.player.nico.dropped, 0, "the chat that arrived after the seek is not dropped");
   assert.equal(h.el("player-nico-dropped").hidden, true, "no pill");
 });
 
@@ -708,7 +708,7 @@ test("a deferred overlay message is placed on a later tick, at the right edge", 
 
   h.tick(1000);
   assert.equal(h.overlay().children.length, 17, "17 rows filled");
-  assert.equal(h.player._nicoPending.length, 3, "the overflow is deferred, not dropped");
+  assert.equal(h.player.nico.pending.length, 3, "the overflow is deferred, not dropped");
 
   // 800 ms later the lanes are free again: each leader was allocated at the
   // batch's ENTRY time (0, a second before its 1000 ms timestamp) and cleared
@@ -716,8 +716,8 @@ test("a deferred overlay message is placed on a later tick, at the right edge", 
   // entries fit — asking again at their own entry time would not.
   h.tick(1800);
   assert.equal(h.overlay().children.length, 20, "the deferred three are on stage");
-  assert.equal(h.player._nicoPending.length, 0);
-  assert.equal(h.player.nicoDropped, 0, "and none of them aged out");
+  assert.equal(h.player.nico.pending.length, 0);
+  assert.equal(h.player.nico.dropped, 0, "and none of them aged out");
   assert.deepEqual(h.anims.slice(-3).map((a) => a.currentTime), [0, 0, 0],
     "a retry spawns at the right edge rather than mid-flight");
 });
@@ -791,12 +791,12 @@ test("the lateness bound is measured from the entry instant, not the timestamp",
   // Anchor before both messages, so neither is a seed-window skip.
   h.tick(1000);
   assert.equal(h.overlay().children.length, 0);
-  assert.equal(h.player.nicoDropped, 0);
+  assert.equal(h.player.nico.dropped, 0);
 
   // 6100 is 2100 ms after the first message entered (4000) — past the bound.
   h.tick(6100);
   assert.equal(h.overlay().children.length, 0, "nothing placed");
-  assert.equal(h.player.nicoDropped, 1);
+  assert.equal(h.player.nico.dropped, 1);
   assert.equal(h.el("player-nico-dropped").textContent, "+1 not shown");
 
   // 9900 is 1900 ms after the second entered (8000) — just inside it, so it
@@ -806,7 +806,7 @@ test("the lateness bound is measured from the entry instant, not the timestamp",
   const anim = h.anims.at(-1);
   assert.equal(anim.delay, 0);
   assert.equal(anim.currentTime, 1900);
-  assert.equal(h.player.nicoDropped, 1, "the bound is 2 s from the entry, 1 s from the timestamp");
+  assert.equal(h.player.nico.dropped, 1, "the bound is 2 s from the entry, 1 s from the timestamp");
 });
 
 // The seed and the drop counter both work in ENTRY time: a message that was
@@ -833,23 +833,23 @@ test("a seek seeds and counts drops by entry time, not by timestamp", { skip }, 
   // itself can be read.
   video.currentTime = 10;
   video.dispatchEvent(new h.window.Event("seeked"));
-  assert.equal(h.player.nicoCursor, 1,
+  assert.equal(h.player.nico.cursor, 1,
     "the seed horizon moved with the lead: the 8500 message entered at 7500, more than "
     + "NICO_MAX_LATENESS_MS before the anchor, so it is not even walked");
   video.dispatchEvent(new h.window.Event("timeupdate"));
 
   assert.equal(h.overlay().children.length, 1, "the message already in flight is put back mid-flight");
-  assert.equal(h.player._nicoPending.length, 1, "and the one behind it finds the single lane busy");
-  assert.equal(h.player.nicoDropped, 0);
+  assert.equal(h.player.nico.pending.length, 1, "and the one behind it finds the single lane busy");
+  assert.equal(h.player.nico.dropped, 0);
 
   // 10800 entered at 9800, i.e. BEFORE the anchor: losing it is a seed-window
   // skip, exactly like a message the seek landed in the middle of.
   h.tick(12200);
-  assert.equal(h.player.nicoDropped, 0, "a message already flying at the anchor is not a drop");
+  assert.equal(h.player.nico.dropped, 0, "a message already flying at the anchor is not a drop");
 
   // 11500 entered at 10500, after the anchor, so it is a real loss.
   h.tick(12800);
-  assert.equal(h.player.nicoDropped, 1);
+  assert.equal(h.player.nico.dropped, 1);
   assert.equal(h.el("player-nico-dropped").textContent, "+1 not shown");
 });
 
@@ -870,7 +870,7 @@ test("a deferred entry is retried with neither the lead's delay nor a head start
   // Consumed 200 ms before the batch enters (1000): 17 lanes fill, 3 defer.
   h.tick(800);
   assert.equal(h.overlay().children.length, 17);
-  assert.equal(h.player._nicoPending.length, 3);
+  assert.equal(h.player.nico.pending.length, 3);
   assert.ok(h.anims.every((a) => a.delay === 200 && a.currentTime === 0),
     "the whole batch waits off-stage for its entry instant");
 
@@ -878,9 +878,9 @@ test("a deferred entry is retried with neither the lead's delay nor a head start
   // three fit — at the right edge, now, not 800 ms into a flight they missed.
   h.tick(1800);
   assert.equal(h.overlay().children.length, 20, "the deferred three are on stage");
-  assert.equal(h.player._nicoPending.length, 0);
+  assert.equal(h.player.nico.pending.length, 0);
   assert.deepEqual(h.anims.slice(-3).map((a) => [a.delay, a.currentTime]), [[0, 0], [0, 0], [0, 0]]);
-  assert.equal(h.player.nicoDropped, 0, "and none of them aged out");
+  assert.equal(h.player.nico.dropped, 0, "and none of them aged out");
 });
 
 // The lookahead consumes a message up to NICO_TICK_AHEAD_MS BEFORE it enters,

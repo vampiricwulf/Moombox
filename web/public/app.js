@@ -7,27 +7,19 @@ import { PlayerController, focusPlayerSurface } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob, streamUrl } from "./modules/utils.js";
-import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
-import { applyFilterTokens } from "./modules/filter-engine.js";
+import { FilesController } from "./modules/files.js";
+import { LogPanelController } from "./modules/log-panel.js";
+import { UpdateController } from "./modules/update-indicator.js";
+import { FilterBarController } from "./modules/filter-bar.js";
+import { JobDetailsController, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/job-details.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
-// Moombox GitHub repository page — opened by double-clicking the version
-// indicator. Mirrors constants.ProjectRepoURL on the Go side (keep in sync).
-const GITHUB_REPO_URL = "https://github.com/vampiricwulf/Moombox";
-
-// Status sets for quick action visibility (single source of truth)
-const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
-const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
-const MUX_STATUSES = new Set(["Cancelled", "Error"]);
-const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
-
-class MoomboxApp {
+export class MoomboxApp {
   constructor() {
     this.ws = null;
     this.jobs = [];
     this.archivedJobs = [];
-    this.logs = [];
     this.config = null;
     // Per-channel feed-history backfill progress, keyed by channel ID.
     // Seeded from `initial_state` (payload.backfill) and updated by
@@ -50,13 +42,6 @@ class MoomboxApp {
     this.hideFinishedAgeDays = -1;
     this._countdownInterval = null;
     this._archiveSweepInterval = null;
-    this.logFilter = "all";
-    this._logAutoScroll = true;
-    this._logSearchQuery = "";
-    this.tasksFilterTokens = [];
-    this.archivedFilterTokens = [];
-    this._tasksChannels = [];
-    this._archivedChannels = [];
     this.focusedJobIndex = -1;
     // Active tab-panel name, maintained by the sl-tab-show handler. Used to
     // defer Archived-panel DOM work while that panel isn't visible (tracked
@@ -84,6 +69,11 @@ class MoomboxApp {
     this.settings = new SettingsController(this);
     this.trimmer = new TrimController(this);
     this.stats = new StatsController(this);
+    this.files = new FilesController(this);
+    this.logPanel = new LogPanelController(this);
+    this.updates = new UpdateController(this);
+    this.filterBar = new FilterBarController(this);
+    this.details = new JobDetailsController(this);
 
     this.init();
   }
@@ -122,6 +112,11 @@ class MoomboxApp {
 
     this.setTheme(this.theme, { fromOS: this._themeFollowsOS });
     this.setupEventListeners();
+    this.files.bind();
+    this.logPanel.bind();
+    this.updates.bind();
+    this.filterBar.bind();
+    this.details.bind();
     this.setupKeyboardShortcuts();
     this.settings.setupListeners();
     this.connectWebSocket();
@@ -242,117 +237,10 @@ class MoomboxApp {
       }
     });
 
-    // Details dialog buttons
-    document
-      .getElementById("details-open-url-btn")
-      .addEventListener("click", () => this.openJobUrl());
-    document
-      .getElementById("details-open-folder-btn")
-      .addEventListener("click", () => this.openJobFolder());
-    document
-      .getElementById("details-play-btn")
-      .addEventListener("click", () => this.openInPlayer());
-    document
-      .getElementById("details-trim-btn")
-      .addEventListener("click", () => {
-        const job = this.jobs.find(j => j.id === this.selectedJobId)
-          || this.archivedJobs.find(j => j.id === this.selectedJobId);
-        if (job) this.openTrimDialog(job);
-      });
-    document
-      .getElementById("details-cancel-btn")
-      .addEventListener("click", () => this.cancelJob());
-    document
-      .getElementById("details-resume-btn")
-      .addEventListener("click", () => this.resumeJob());
-    document
-      .getElementById("details-reinit-btn")
-      .addEventListener("click", () => this.reinitializeJob());
-    document
-      .getElementById("details-mux-btn")
-      .addEventListener("click", () => this.muxJob());
-    document
-      .getElementById("details-delete-btn")
-      .addEventListener("click", () => this.deleteJob());
-
     // Trim dialog cleanup on close
     document.getElementById("trim-dialog").addEventListener("sl-after-hide", () => {
       this.trimmer.destroy();
     });
-
-    // Clear selected job and release embedded iframes when details dialog is
-    // dismissed (Escape, overlay click, or close button) to stop unnecessary
-    // updateJobDetails calls and prevent background iframe resource usage.
-    document.getElementById("details-dialog").addEventListener("sl-after-hide", () => {
-      // Guard: if showJobDetails() was called between the hide start and this
-      // callback, the dialog is already re-opening for a new job. Don't clear.
-      const dlg = document.getElementById("details-dialog");
-      if (dlg.open) return;
-      this.selectedJobId = null;
-      // Clear content to stop YouTube/Twitch iframe embeds from running in background
-      const content = document.getElementById("job-details-content");
-      if (content) content.innerHTML = "";
-    });
-
-    // Copy buttons in details dialog (event delegation via data-copy attribute)
-    document.getElementById("details-dialog").addEventListener("click", (e) => {
-      const copyBtn = e.target.closest("[data-copy]");
-      if (copyBtn) {
-        this.copyTextToClipboard(copyBtn.dataset.copy);
-      }
-    });
-
-    // Clear logs
-    document
-      .getElementById("clear-logs-btn")
-      .addEventListener("click", () => this.clearLogs());
-
-    // Log level filter buttons
-    document.querySelectorAll(".log-filter").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        this.logFilter = btn.dataset.level;
-        document.querySelectorAll(".log-filter").forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        this._logAutoScroll = true;
-        this.renderLogs();
-      });
-    });
-
-    // Log scroll tracking — pause auto-scroll when user scrolls up
-    const logsViewer = document.getElementById("logs-viewer");
-    if (logsViewer) {
-      logsViewer.addEventListener("scroll", () => {
-        if (this._logRebuildingDOM) return;
-        this._logAutoScroll = logsViewer.scrollTop + logsViewer.clientHeight >= logsViewer.scrollHeight - 30;
-        const pill = document.getElementById("log-autoscroll-pill");
-        if (pill) {
-          pill.style.display = this._logAutoScroll ? "none" : "";
-        }
-      });
-    }
-
-    // Resume auto-scroll pill click handler
-    document.getElementById("log-autoscroll-pill")?.addEventListener("click", () => {
-      const viewer = document.getElementById("logs-viewer");
-      if (viewer) {
-        viewer.scrollTop = viewer.scrollHeight;
-        this._logAutoScroll = true;
-      }
-      document.getElementById("log-autoscroll-pill").style.display = "none";
-    });
-
-    // Log search
-    let logSearchTimeout = null;
-    const logSearchInput = document.getElementById("log-search");
-    if (logSearchInput) {
-      logSearchInput.addEventListener("sl-input", () => {
-        clearTimeout(logSearchTimeout);
-        logSearchTimeout = setTimeout(() => {
-          this._logSearchQuery = logSearchInput.value.trim();
-          this.renderLogs();
-        }, 200);
-      });
-    }
 
     // Tab activation handlers
     const tabGroup = document.querySelector("sl-tab-group");
@@ -384,8 +272,8 @@ class MoomboxApp {
             this.imports.initImports();
           }
         } else if (e.detail.name === "files") {
-          this.fetchOrphanedFiles();
-          this.fetchOrphanedHistory();
+          this.files.fetchOrphanedFiles();
+          this.files.fetchOrphanedHistory();
         } else if (e.detail.name === "stats") {
           this.stats.activate();
         }
@@ -463,24 +351,6 @@ class MoomboxApp {
       reload: () => window.location.reload(),
     });
 
-    // Files tab buttons
-    const filesRefreshBtn = document.getElementById("files-refresh-btn");
-    if (filesRefreshBtn) {
-      filesRefreshBtn.addEventListener("click", () => this.fetchOrphanedFiles());
-    }
-    const filesDeleteAllBtn = document.getElementById("files-delete-all-btn");
-    if (filesDeleteAllBtn) {
-      filesDeleteAllBtn.addEventListener("click", () => this.deleteAllOrphanedFiles());
-    }
-    const historyRefreshBtn = document.getElementById("history-refresh-btn");
-    if (historyRefreshBtn) {
-      historyRefreshBtn.addEventListener("click", () => this.fetchOrphanedHistory());
-    }
-    const historyDeleteAllBtn = document.getElementById("history-delete-all-btn");
-    if (historyDeleteAllBtn) {
-      historyDeleteAllBtn.addEventListener("click", () => this.deleteAllOrphanedHistory());
-    }
-
     // Status warnings — delegated click (text on desktop)
     const warningsEl = document.getElementById("status-warnings");
     if (warningsEl) {
@@ -499,19 +369,6 @@ class MoomboxApp {
       });
     }
 
-    // Unified filter controls
-    this._setupUnifiedFilter("tasks-filter", {
-      getTokens: () => this.tasksFilterTokens,
-      setTokens: (tokens) => { this.tasksFilterTokens = tokens; this.renderJobs(); },
-      getChannels: () => this._tasksChannels,
-    });
-
-    this._setupUnifiedFilter("archived-filter", {
-      getTokens: () => this.archivedFilterTokens,
-      setTokens: (tokens) => { this.archivedFilterTokens = tokens; this.renderArchivedJobs(); },
-      getChannels: () => this._archivedChannels,
-    });
-
     // Theme toggle
     const themeToggle = document.getElementById("theme-toggle");
     if (themeToggle) {
@@ -519,12 +376,6 @@ class MoomboxApp {
         this.setTheme(this.theme === "dark" ? "light" : "dark");
       });
     }
-
-    // Update dialog buttons
-    const updateNowBtn = document.getElementById("update-now-btn");
-    if (updateNowBtn) updateNowBtn.addEventListener("click", () => this.applyUpdate());
-    const updateDismissBtn = document.getElementById("update-dismiss-btn");
-    if (updateDismissBtn) updateDismissBtn.addEventListener("click", () => this.dismissUpdate());
 
     // Force-check monitors: the header countdown is the click target.
     const checkCountdown = document.getElementById("check-countdown");
@@ -629,7 +480,7 @@ class MoomboxApp {
         if (videoItem) {
           const jobId = videoItem.dataset.jobId;
           const job = jobSource().find((j) => j.id === jobId);
-          if (job) this.showJobDetails(job);
+          if (job) this.details.showJobDetails(job);
         }
       });
       // sl-menu-item selections from the mobile overflow dropdown dispatch
@@ -649,29 +500,6 @@ class MoomboxApp {
     setupJobContainer(document.getElementById("jobs-container"), "jobs", () => this.jobs);
     setupJobContainer(document.getElementById("archived-container"), "archived", () => this.archivedJobs);
 
-    // Event delegation for trim delete buttons and watch actions (avoids inline onclick)
-    const detailsContent = document.getElementById("job-details-content");
-    if (detailsContent) {
-      detailsContent.addEventListener("click", async (e) => {
-        const btn = e.target.closest("[data-delete-trim]");
-        if (btn) {
-          e.stopPropagation();
-          this.deleteTrim(btn.dataset.jobId, btn.dataset.trimId);
-          return;
-        }
-        if (e.target.closest("#details-mark-watched")) {
-          const res = await fetch(`/api/jobs/${this.selectedJobId}/watched`, { method: "POST" });
-          if (!res.ok) this.showToast("Failed to mark watched", "danger");
-          return;
-        }
-        if (e.target.closest("#details-mark-unwatched")) {
-          const res = await fetch(`/api/jobs/${this.selectedJobId}/watched`, { method: "DELETE" });
-          if (!res.ok) this.showToast("Failed to mark unwatched", "danger");
-          return;
-        }
-      });
-    }
-
     // Batch action bar buttons
     document.getElementById("batch-cancel")?.addEventListener("click", () => this.batchAction("cancel"));
     document.getElementById("batch-resume")?.addEventListener("click", () => this.batchAction("resume"));
@@ -684,9 +512,9 @@ class MoomboxApp {
       const selectionSet = this._activeSelectionSet();
       let visibleJobs;
       if (panel === "archived") {
-        visibleJobs = this.getFilteredArchivedJobs();
+        visibleJobs = this.filterBar.getFilteredArchivedJobs();
       } else {
-        visibleJobs = this.getFilteredJobs();
+        visibleJobs = this.filterBar.getFilteredJobs();
       }
       visibleJobs.forEach(j => selectionSet.add(j.id));
       // Only update checkboxes in the active panel's container
@@ -761,19 +589,19 @@ class MoomboxApp {
           }
         }
         if (status.updateAvailable) {
-          this._updateAvailable = status.updateAvailable;
-        } else if (this._updateAvailable) {
+          this.updates.available = status.updateAvailable;
+        } else if (this.updates.available) {
           // Server no longer reports a pending update (it was applied or
           // superseded) — clear the stale badge instead of advertising an
           // update we're already running.
-          this._updateAvailable = null;
+          this.updates.available = null;
         }
         if (status.uptime != null) {
           this._uptimeSeconds = status.uptime;
           this._uptimeCapturedAt = Date.now();
         }
         if (status.disk) this.stats.updateDiskIndicator(status.disk);
-        this.updateVersionIndicator();
+        this.updates.updateVersionIndicator();
         this.updateStatusBar();
       }
     } catch (e) {
@@ -1064,140 +892,18 @@ class MoomboxApp {
 
   // ===== Version / Update Indicator =====
 
-  updateVersionIndicator() {
-    const el = document.getElementById("version-indicator");
-    if (!el) return;
-    if (!this._version) { el.style.display = "none"; return; }
-
-    el.style.display = "";
-    // Bind a single stable click handler once; toggle what it does via
-    // the _updateAvailable flag. Previously we cloneNode(false)'d the
-    // element to drop the prior listener, which also dropped any nested
-    // icon children that might be added later and any unrelated listeners.
-    if (!this._versionClickHandler) {
-      this._versionClickHandler = () => {
-        if (this._updateAvailable) {
-          this.showUpdateDialog();
-          return;
-        }
-        // No update pending: click-twice-to-open. The first click arms and
-        // pops the manual tooltip ("Click again to open the GitHub page");
-        // a second click inside the window opens the repo. Mirrors the
-        // TUI's O G chord (and its confirm-chord arming pattern).
-        const tooltip = document.getElementById("version-open-tooltip");
-        if (this._versionOpenArmed) {
-          clearTimeout(this._versionOpenArmTimer);
-          this._versionOpenArmed = false;
-          tooltip?.hide();
-          window.open(GITHUB_REPO_URL, "_blank", "noopener");
-          return;
-        }
-        this._versionOpenArmed = true;
-        tooltip?.show();
-        this._versionOpenArmTimer = setTimeout(() => {
-          this._versionOpenArmed = false;
-          tooltip?.hide();
-        }, 3000);
-      };
-      el.addEventListener("click", this._versionClickHandler);
-    }
-    if (this._updateAvailable) {
-      el.textContent = `v${this._version} ⬆`;
-      el.className = "version-indicator has-update";
-      el.title = `Update available: v${this._updateAvailable.version}`;
-      el.style.cursor = "pointer";
-    } else {
-      el.textContent = `v${this._version}`;
-      el.className = "version-indicator";
-      el.title = `Moombox v${this._version} — click to open the GitHub page`;
-      el.style.cursor = "";
-    }
+  /** Delegates to UpdateController — settings.js calls this through `app.`. */
+  updateVersionIndicator(...args) {
+    return this.updates.updateVersionIndicator(...args);
   }
 
-  showUpdateDialog() {
-    const dlg = document.getElementById("update-dialog");
-    const notes = document.getElementById("update-release-notes");
-    if (!dlg || !this._updateAvailable) return;
-    dlg.label = `Update to v${this._updateAvailable.version}`;
-    // SECURITY CONTRACT: this is the app's ONLY innerHTML sink for external
-    // content (GitHub release markdown), deliberately unescaped because the
-    // server renders AND sanitizes it via bluemonday.UGCPolicy()
-    // (internal/updater/updater.go, pinned by
-    // TestRenderReleaseNotesHtmlSanitizesScripts). If this field ever gets a
-    // different source or the server policy loosens, this becomes stored XSS
-    // — keep the sanitizer, or switch to textContent. Fall back to the raw
-    // stripped markdown as TEXT if an older server didn't send the html
-    // field, and finally to a generic message.
-    const html = this._updateAvailable.releaseNotesHtml || "";
-    if (html) {
-      notes.innerHTML = html;
-    } else {
-      notes.textContent = this._updateAvailable.releaseNotes || "No release notes available.";
-    }
-    dlg.show();
+  /** Delegates to UpdateController — settings.js reads this and the Task 5 pin assigns it. */
+  get _updateAvailable() {
+    return this.updates.available;
   }
 
-  async applyUpdate() {
-    // Updating restarts the whole process: active recordings are
-    // interrupted and resume on the new binary, but live segments broadcast
-    // during the ~30s gap can be lost (Twitch expires them fastest). Make
-    // that a deliberate choice, not a surprise.
-    const active = (this.jobs || []).filter(
-      (j) => j.status === "Downloading" || j.status === "Live" || j.status === "Muxing",
-    ).length;
-    if (active > 0) {
-      const noun = active === 1 ? "download is" : "downloads are";
-      const ok = await this.showConfirm(
-        `${active} ${noun} active — the update restart interrupts them, and live segments during the ~30s gap may be lost (Twitch especially). Update anyway?`,
-        { okLabel: "Update Anyway", okVariant: "warning" },
-      );
-      if (!ok) return;
-    }
-    const btn = document.getElementById("update-now-btn");
-    if (btn) { btn.loading = true; btn.disabled = true; }
-    try {
-      const resp = await fetch("/api/update/apply", { method: "POST" });
-      if (resp.ok) {
-        this.showToast("Update applied. Restarting...", "success");
-        document.getElementById("update-dialog")?.hide();
-      } else {
-        const data = await resp.json().catch(() => ({ error: resp.statusText }));
-        this.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
-      }
-    } catch (e) {
-      this.showToast("Update failed: " + e.message, "danger");
-    } finally {
-      if (btn) { btn.loading = false; btn.disabled = false; }
-    }
-  }
-
-  async dismissUpdate() {
-    // Viewer mode: the shared update dialog is being reused by Settings >
-    // View Release Notes, with this same button relabeled "Close" (see
-    // settings.js). In that mode there may be no pending update at all, and
-    // even if there is, "Close" must NOT skip it — just hide the dialog.
-    const dlg = document.getElementById("update-dialog");
-    if (dlg?.dataset.viewerMode === "true") {
-      dlg.hide();
-      return;
-    }
-    try {
-      const resp = await fetch("/api/update/dismiss", { method: "POST" });
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({ error: resp.statusText }));
-        this.showToast("Failed to dismiss: " + (data.error || "Unknown error"), "danger");
-        return;
-      }
-      const skipped = this._updateAvailable?.tagName || "this version";
-      this._updateAvailable = null;
-      this.updateVersionIndicator();
-      document.getElementById("update-dialog")?.hide();
-      // Version-scoped skip (the old behavior disabled ALL update checks —
-      // that lives in Settings > Updates now); the next release notifies.
-      this.showToast(`Skipped ${skipped} — you'll be notified about the next release.`, "primary");
-    } catch (e) {
-      this.showToast("Failed to dismiss: " + e.message, "danger");
-    }
+  set _updateAvailable(v) {
+    this.updates.available = v;
   }
 
   // ===== WebSocket Management =====
@@ -1325,7 +1031,7 @@ class MoomboxApp {
       case "initial_state": {
         if (!p) break;
         this.jobs = p.jobs || [];
-        this.logs = p.logs || [];
+        this.logPanel.logs = p.logs || [];
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
@@ -1350,7 +1056,7 @@ class MoomboxApp {
         this.renderJobs();
         if (archivedMoved || archivedPruned) this.renderArchivedJobs();
         this._syncParkedBadge();
-        this.renderLogs();
+        this.logPanel.renderLogs();
         this.updateCheckCountdown();
         if (p.connectivity !== undefined) {
           this.handleConnectivityChange({ online: p.connectivity });
@@ -1359,7 +1065,7 @@ class MoomboxApp {
         if (this.selectedJobId) {
           const job = this.jobs.find((j) => j.id === this.selectedJobId);
           if (job) {
-            this.updateJobDetails(job);
+            this.details.updateJobDetails(job);
           } else if (!this.archivedJobs.some(j => j.id === this.selectedJobId)) {
             this._verifyJobExists(this.selectedJobId);
           }
@@ -1368,7 +1074,7 @@ class MoomboxApp {
       }
 
       case "jobs_update": {
-        this._preserveStagingFields(this.jobs, p || []);
+        this.details._preserveStagingFields(this.jobs, p || []);
         this.jobs = p || [];
         // Drop any archived rows the server just promoted back to active
         // (threshold increase) before re-evaluating, so a job is never shown
@@ -1382,7 +1088,7 @@ class MoomboxApp {
         if (this.selectedJobId) {
           const job = this.jobs.find((j) => j.id === this.selectedJobId);
           if (job) {
-            this.updateJobDetails(job);
+            this.details.updateJobDetails(job);
           } else if (!this.archivedJobs.some(j => j.id === this.selectedJobId)) {
             // Job not in active or cached archived lists — may have been archived or deleted.
             // Verify via API to avoid closing the dialog when a job simply transitions to archived.
@@ -1424,7 +1130,7 @@ class MoomboxApp {
           }
           // Update details dialog if this job is selected
           if (this.selectedJobId === updatedJob.id) {
-            this.updateJobDetails(updatedJob);
+            this.details.updateJobDetails(updatedJob);
           }
         } else {
           // Job not in the active array — either brand new, or one that had
@@ -1496,7 +1202,7 @@ class MoomboxApp {
       }
 
       case "log":
-        if (p) this.addLog(p);
+        if (p) this.logPanel.addLog(p);
         break;
 
       case "check_timers":
@@ -1516,8 +1222,8 @@ class MoomboxApp {
         break;
 
       case "update_available":
-        this._updateAvailable = p;
-        this.updateVersionIndicator();
+        this.updates.available = p;
+        this.updates.updateVersionIndicator();
         break;
 
       case "connectivity":
@@ -1609,7 +1315,7 @@ class MoomboxApp {
         } else {
           this.archivedJobs.push(job);
         }
-        this.updateJobDetails(job);
+        this.details.updateJobDetails(job);
       } else if (resp.status === 404) {
         // Job truly deleted — close dialog
         const dlg = document.getElementById("details-dialog");
@@ -1728,9 +1434,7 @@ class MoomboxApp {
   renderJobs() {
     // Remove loading skeletons on first render (any message path)
     document.getElementById("jobs-skeleton")?.remove();
-    this._tasksChannels = [...new Set(this.jobs.map(j => j.channelName).filter(Boolean))].sort(
-      (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
-    );
+    this.filterBar.refreshChannels("jobs", this.jobs);
 
     // Update active indicator in status bar
     this.stats.updateActiveIndicator(this.jobs);
@@ -1802,8 +1506,8 @@ class MoomboxApp {
       return;
     }
 
-    const filtered = this.getFilteredJobs();
-    const isFiltered = this.tasksFilterTokens.length > 0;
+    const filtered = this.filterBar.getFilteredJobs();
+    const isFiltered = this.filterBar.tokens("jobs").length > 0;
 
     // Update filter count
     if (filterCount) {
@@ -1965,9 +1669,7 @@ class MoomboxApp {
     const emptyState = document.getElementById("archived-empty-state");
     const table = document.getElementById("archived-table");
     const filterCount = document.getElementById("archived-filter-count");
-    this._archivedChannels = [...new Set(this.archivedJobs.map(j => j.channelName).filter(Boolean))].sort(
-      (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
-    );
+    this.filterBar.refreshChannels("archived", this.archivedJobs);
 
     if (this.archivedJobs.length === 0) {
       container.innerHTML = "";
@@ -1986,8 +1688,8 @@ class MoomboxApp {
       return;
     }
 
-    const filtered = this.getFilteredArchivedJobs();
-    const isFiltered = this.archivedFilterTokens.length > 0;
+    const filtered = this.filterBar.getFilteredArchivedJobs();
+    const isFiltered = this.filterBar.tokens("archived").length > 0;
 
     // Update filter count
     if (filterCount) {
@@ -2343,626 +2045,6 @@ class MoomboxApp {
       return `<span class="job-error-text" title="${this.escapeHtml(errorText)}" data-full="${this.escapeHtml(errorText)}" data-short="${this.escapeHtml(truncated)}">${this.escapeHtml(truncated)}</span>`;
     }
     return this.escapeHtml(this.formatProgress(job));
-  }
-
-  // ===== Job Details =====
-
-  showJobDetails(job) {
-    this.selectedJobId = job.id;
-    this.renderJobDetails(job);
-    this.loadJobLogs(job.id);
-    document.getElementById("details-dialog").show();
-    this._fetchStagingFields(job.id);
-  }
-
-  /**
-   * Fetch the enriched job (GET /api/jobs/{id}) to seed hasStaging/hasSegments.
-   * Every payload that populates this.jobs (WS initial_state/jobs_update/
-   * job_update, /api/jobs/archived) is a raw DB row WITHOUT these computed
-   * fields, so the Resume/Mux buttons in the details dialog would never
-   * appear without this. _preserveStagingFields keeps them alive across
-   * subsequent WS updates. Failures are silent — buttons just stay hidden.
-   */
-  async _fetchStagingFields(jobId) {
-    try {
-      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
-      if (!response.ok) return;
-      const enriched = await response.json();
-      // Look the job up again — a jobs_update may have replaced the array
-      // (and the object) while the fetch was in flight.
-      const job = this.jobs.find((j) => j.id === jobId) ||
-        this.archivedJobs.find((j) => j.id === jobId);
-      if (!job) return;
-      job.hasStaging = enriched.hasStaging;
-      job.hasSegments = enriched.hasSegments;
-      // Re-evaluate button visibility if the dialog is still on this job
-      if (this.selectedJobId === jobId && document.getElementById("details-dialog").open) {
-        this.updateDetailsButtons(job);
-      }
-    } catch { /* network blip — buttons stay hidden, same as before the fetch */ }
-  }
-
-  // Update job details without rebuilding logs section
-  updateJobDetails(job) {
-    const content = document.getElementById("job-details-content");
-    if (!content) return;
-
-    // If status changed, rebuild the details to refresh structural elements
-    // (segment rows, embed, buttons) that depend on status.
-    const statusBadge = content.querySelector(".status");
-    const currentStatus = statusBadge?.textContent;
-    if (currentStatus && currentStatus !== this.displayStatus(job.status)) {
-      this.renderJobDetails(job);
-      this.loadJobLogs(job.id);
-      return;
-    }
-
-    // If watch state changed, rebuild to refresh pill and action buttons
-    const watchPill = content.querySelector(".watch-pill");
-    const watchedNow = !!job.watched;
-    const hadWatchPill = !!watchPill;
-    const watchPillStale = watchedNow !== (watchPill?.classList.contains("watched") ?? false)
-      || (!watchedNow && (job.resumePosition != null) !== (watchPill?.classList.contains("in-progress") ?? false))
-      || (watchedNow && !hadWatchPill) || (!watchedNow && !job.resumePosition && hadWatchPill);
-    if (watchPillStale) {
-      this.renderJobDetails(job);
-      this.loadJobLogs(job.id);
-      return;
-    }
-
-    // Update status badge
-    if (statusBadge) {
-      const statusClass = job.status.toLowerCase().replace("?", "");
-      statusBadge.className = `status ${statusClass}`;
-      statusBadge.textContent = this.displayStatus(job.status);
-    }
-
-    // Update title and channel (can change for live streams mid-broadcast)
-    const rows = content.querySelectorAll(".details-row");
-    for (const row of rows) {
-      const label = row.querySelector(".details-label");
-      if (!label) continue;
-      const labelText = label.textContent;
-      const valueEl = row.querySelector(".details-value");
-      if (!valueEl) continue;
-      if (labelText === "Title:") {
-        valueEl.textContent = job.title;
-      } else if (labelText === "Channel:") {
-        valueEl.textContent = job.channelName;
-      } else if (labelText === "Category:" && job.twitchCategory) {
-        valueEl.textContent = job.twitchCategory;
-      }
-    }
-
-    // Update progress text
-    const progressRow = content.querySelector('[data-field="progress"]');
-    if (progressRow) {
-      progressRow.textContent = this.formatProgress(job);
-    }
-
-    // Update segment counts
-    const segField = content.querySelector('[data-field="segments"]');
-    if (segField && (job.lastVideoSeq || job.lastAudioSeq)) {
-      const isTwitchSeg = job.platform === "twitch";
-      const vCurrent = job.lastVideoSeq || 0;
-      const aCurrent = job.lastAudioSeq || 0;
-      const vTotal = job.totalVideoSeq;
-      const aTotal = job.totalAudioSeq;
-      const vDisplay = vTotal ? `${vCurrent}/${vTotal}` : vCurrent;
-      const aDisplay = aTotal ? `${aCurrent}/${aTotal}` : aCurrent;
-      segField.textContent = isTwitchSeg ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
-    }
-
-    // Update chat status
-    const chatField = content.querySelector('[data-field="chat"]');
-    if (chatField && job.chatStatus) {
-      const chatVariantMap = { downloading: "primary", finished: "success", error: "danger", unavailable: "neutral", pending: "neutral" };
-      const badge = chatField.querySelector("sl-badge");
-      if (badge) {
-        badge.variant = chatVariantMap[job.chatStatus] || "neutral";
-        badge.textContent = job.chatStatus;
-      }
-      // Update message count — text node after the badge
-      const existingText = badge && badge.nextSibling && badge.nextSibling.nodeType === Node.TEXT_NODE
-        ? badge.nextSibling : null;
-      const countText = job.totalChatMessages ? ` (${job.totalChatMessages.toLocaleString()} messages)` : "";
-      if (existingText) {
-        existingText.textContent = countText;
-      } else if (countText) {
-        chatField.appendChild(document.createTextNode(countText));
-      }
-    }
-
-    // Update incomplete-tail badge — its presence is conditional (job.status ===
-    // "Finished" && job.incompleteTail), like the error div below, so it needs
-    // create/remove handling rather than a plain value patch.
-    const incompleteTailValue = content.querySelector('[data-field="incomplete-tail"]');
-    const shouldShowIncompleteTail = job.status === "Finished" && job.incompleteTail;
-    if (shouldShowIncompleteTail && !incompleteTailValue) {
-      let typeRow = null;
-      for (const row of content.querySelectorAll(".details-row")) {
-        const label = row.querySelector(".details-label");
-        if (label && label.textContent === "Type:") { typeRow = row; break; }
-      }
-      if (typeRow) {
-        const newRow = document.createElement("div");
-        newRow.className = "details-row";
-        newRow.innerHTML = '<span class="details-label"></span><span class="details-value" data-field="incomplete-tail"><sl-badge variant="warning">Incomplete tail</sl-badge></span>';
-        typeRow.parentNode.insertBefore(newRow, typeRow);
-      }
-    } else if (!shouldShowIncompleteTail && incompleteTailValue) {
-      incompleteTailValue.closest(".details-row")?.remove();
-    }
-
-    // Update speed if present
-    const speedRow = document.getElementById("speed-row");
-    const speedValue = content.querySelector('[data-field="speed"]');
-    if (speedRow && speedValue) {
-      speedValue.textContent = job.speed || "";
-      speedRow.style.display = job.speed ? "" : "none";
-    }
-
-    // Update updated time
-    const updatedRow = content.querySelector('[data-field="updated"]');
-    if (updatedRow) {
-      updatedRow.textContent = this.formatRelativeTime(job.updatedAt);
-      updatedRow.dataset.timestamp = job.updatedAt;
-      updatedRow.title = new Date(job.updatedAt).toLocaleString();
-    }
-
-    // Update error display
-    const errorDiv = content.querySelector(".details-error");
-    if (job.error && !errorDiv) {
-      const logsSection = content.querySelector(".details-section:last-child");
-      if (logsSection) {
-        const newErrorDiv = document.createElement("div");
-        newErrorDiv.className = "details-error";
-        const strong = document.createElement("strong");
-        strong.textContent = "Error:";
-        newErrorDiv.appendChild(strong);
-        newErrorDiv.appendChild(document.createTextNode(" " + job.error));
-        logsSection.parentNode.insertBefore(newErrorDiv, logsSection);
-      }
-    } else if (!job.error && errorDiv) {
-      errorDiv.remove();
-    } else if (job.error && errorDiv) {
-      errorDiv.textContent = "";
-      const strong = document.createElement("strong");
-      strong.textContent = "Error:";
-      errorDiv.appendChild(strong);
-      errorDiv.appendChild(document.createTextNode(" " + job.error));
-    }
-
-    // Update button visibility
-    this.updateDetailsButtons(job);
-  }
-
-  updateDetailsButtons(job) {
-    const canCancel = CANCEL_STATUSES.has(job.status);
-    // the details view fetches staging; hide until it is known
-    const canResume = canResumeJob(job, { requireKnownStaging: true });
-    const canReinit = REINIT_STATUSES.has(job.status);
-    const canMux = MUX_STATUSES.has(job.status) && job.hasSegments;
-    const canDelete = DELETE_STATUSES.has(job.status);
-    const hasFile = job.status === "Finished" && job.filename;
-    const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(
-      job.status,
-    );
-
-    document.getElementById("details-cancel-btn").style.display = canCancel
-      ? ""
-      : "none";
-    document.getElementById("details-resume-btn").style.display = canResume
-      ? ""
-      : "none";
-    document.getElementById("details-reinit-btn").style.display = canReinit
-      ? ""
-      : "none";
-    document.getElementById("details-mux-btn").style.display = canMux
-      ? ""
-      : "none";
-    document.getElementById("details-delete-btn").style.display = canDelete
-      ? ""
-      : "none";
-    document.getElementById("details-trim-btn").style.display = hasFile
-      ? ""
-      : "none";
-    const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(
-      window.location.hostname,
-    );
-    document.getElementById("details-open-folder-btn").style.display =
-      (hasFile || isActive) && isLocalhost ? "" : "none";
-    document.getElementById("details-play-btn").style.display = hasFile
-      ? ""
-      : "none";
-  }
-
-  renderJobDetails(job) {
-    const content = document.getElementById("job-details-content");
-    const statusClass = job.status.toLowerCase().replace("?", "");
-
-    // Show segment counts for Live/Downloading/Muxing/Finished status.
-    // Always create the row for eligible statuses so updateJobDetails can
-    // update it when the first segments arrive (avoids silent no-op when
-    // the dialog was opened before any segments were recorded).
-    const showSegments = ["Live", "Downloading", "Muxing", "Finished"].includes(job.status);
-    let segmentInfo = "";
-    if (showSegments) {
-      const vCurrent = job.lastVideoSeq || 0;
-      const aCurrent = job.lastAudioSeq || 0;
-      const vTotal = job.totalVideoSeq;
-      const aTotal = job.totalAudioSeq;
-
-      // Format: "current/total" or just "current" if no total
-      const vDisplay = vTotal ? `${vCurrent}/${vTotal}` : vCurrent;
-      const aDisplay = aTotal ? `${aCurrent}/${aTotal}` : aCurrent;
-
-      // Twitch has single muxed HLS stream (no separate audio)
-      const isTwitchSegments = job.platform === "twitch";
-      const segDisplayValue = isTwitchSegments ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
-      segmentInfo = `<div class="details-row" id="segments-row">
-          <span class="details-label">Segments:</span>
-          <span class="details-value" data-field="segments">${this.escapeHtml(segDisplayValue)}</span>
-        </div>`;
-    }
-
-    const isTwitch = job.platform === "twitch";
-    // Extract Twitch login from URL or channelName for embed
-    const twitchLogin = isTwitch
-      ? (job.url ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0].split("?")[0] : job.channelName || "").toLowerCase()
-      : "";
-    const twitchVodId = isTwitch && job.videoId.startsWith("tw_v") ? job.videoId.slice(4) : "";
-
-    // Build embed HTML
-    let embedHtml;
-    if (isTwitch && twitchVodId) {
-      embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?video=${this.escapeHtml(twitchVodId)}&parent=${this.escapeHtml(location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
-    } else if (isTwitch && twitchLogin) {
-      embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?channel=${this.escapeHtml(twitchLogin)}&parent=${this.escapeHtml(location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
-    } else {
-      embedHtml = `<iframe class="details-embed" src="https://www.youtube-nocookie.com/embed/${this.escapeHtml(job.videoId)}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
-    }
-
-    content.innerHTML = `
-      <div class="details-top">
-        <div class="details-section">
-          ${embedHtml}
-        </div>
-
-        <div class="details-section">
-          <div class="details-row">
-            <span class="details-label">${isTwitch ? "Stream ID:" : "Video ID:"}</span>
-            <span class="details-value"><code>${this.escapeHtml(job.videoId)}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy" data-copy="${this.escapeHtml(job.videoId)}"></sl-icon-button></span>
-          </div>
-          ${streamUrl(job) ? `
-          <div class="details-row">
-            <span class="details-label">Stream URL:</span>
-            <span class="details-value"><code>${this.escapeHtml(streamUrl(job))}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy stream URL" data-copy="${this.escapeHtml(streamUrl(job))}"></sl-icon-button></span>
-          </div>` : ""}
-          <div class="details-row">
-            <span class="details-label">Title:</span>
-            <span class="details-value">${this.escapeHtml(job.title)}</span>
-          </div>
-          <div class="details-row">
-            <span class="details-label">Channel:</span>
-            <span class="details-value">${this.escapeHtml(job.channelName)}</span>
-          </div>
-          <div class="details-row">
-            <span class="details-label">Status:</span>
-            <span class="details-value">
-              <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
-              ${this.watchPillHtml(job)}
-            </span>
-          </div>
-          ${job.status === "Finished" ? `
-          <div class="details-row" id="watch-actions-row">
-            <span class="details-label"></span>
-            <span class="details-value">
-              ${!job.watched ? `<sl-button id="details-mark-watched" variant="success" size="small"><sl-icon slot="prefix" name="eye"></sl-icon> Mark Watched</sl-button>` : ""}
-              ${job.watched || job.resumePosition != null ? `<sl-button id="details-mark-unwatched" variant="neutral" size="small"><sl-icon slot="prefix" name="eye-slash"></sl-icon> Mark Unwatched</sl-button>` : ""}
-            </span>
-          </div>` : ""}
-          ${job.chatStatus ? (() => {
-            const chatVariantMap = { downloading: "primary", finished: "success", error: "danger", unavailable: "neutral", pending: "neutral" };
-            const chatVariant = chatVariantMap[job.chatStatus] || "neutral";
-            return `
-          <div class="details-row">
-            <span class="details-label">Chat:</span>
-            <span class="details-value" data-field="chat">
-              <sl-badge variant="${chatVariant}">${this.escapeHtml(job.chatStatus)}</sl-badge>
-              ${job.totalChatMessages ? ` (${this.escapeHtml(job.totalChatMessages.toLocaleString())} messages)` : ""}
-            </span>
-          </div>`;
-          })() : ""}
-          ${job.status === "Finished" && job.incompleteTail ? `
-          <div class="details-row">
-            <span class="details-label"></span>
-            <span class="details-value" data-field="incomplete-tail"><sl-badge variant="warning">Incomplete tail</sl-badge></span>
-          </div>` : ""}
-          ${
-            job.isVod
-              ? `
-          <div class="details-row">
-            <span class="details-label">Type:</span>
-            <span class="details-value">VOD</span>
-          </div>
-          <div class="details-row" style="${this.formatProgress(job) !== "Complete" ? "" : "display:none"}">
-            <span class="details-label">Progress:</span>
-            <span class="details-value" data-field="progress">${this.escapeHtml(this.formatProgress(job))}</span>
-          </div>
-          `
-              : `
-          <div class="details-row">
-            <span class="details-label">Type:</span>
-            <span class="details-value">Live</span>
-          </div>
-          ${segmentInfo}
-          `
-          }
-          <div class="details-row" id="speed-row" style="${job.speed ? "" : "display:none"}">
-            <span class="details-label">Speed:</span>
-            <span class="details-value" data-field="speed">${this.escapeHtml(job.speed || "")}</span>
-          </div>
-          ${
-            job.filename
-              ? `
-          <div class="details-row">
-            <span class="details-label">Filename:</span>
-            <span class="details-value">${this.escapeHtml(job.filename)}<sl-icon-button class="details-copy-btn" name="clipboard" label="Copy" data-copy="${this.escapeHtml(job.filename)}"></sl-icon-button></span>
-          </div>
-          `
-              : ""
-          }
-          <div class="details-row">
-            <span class="details-label">Created:</span>
-            <span class="details-value" data-timestamp="${this.escapeHtml(job.createdAt)}" title="${new Date(job.createdAt).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(job.createdAt))}</span>
-          </div>
-          ${job.downloadStartedAt ? `
-          <div class="details-row">
-            <span class="details-label">DL Started:</span>
-            <span class="details-value" data-timestamp="${this.escapeHtml(job.downloadStartedAt)}" title="${new Date(job.downloadStartedAt).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(job.downloadStartedAt))}</span>
-          </div>
-          ` : ""}
-          <div class="details-row">
-            <span class="details-label">Updated:</span>
-            <span class="details-value" data-field="updated" data-timestamp="${this.escapeHtml(job.updatedAt)}" title="${new Date(job.updatedAt).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(job.updatedAt))}</span>
-          </div>
-          ${isTwitch && job.twitchCategory ? `
-          <div class="details-row">
-            <span class="details-label">Category:</span>
-            <span class="details-value">${this.escapeHtml(job.twitchCategory)}</span>
-          </div>
-          ` : ""}
-          ${isTwitch && job.twitchQuality ? `
-          <div class="details-row">
-            <span class="details-label">Quality:</span>
-            <span class="details-value">${this.escapeHtml(job.twitchQuality)}</span>
-          </div>
-          ` : ""}
-          ${job.streamStartTime ? (() => {
-            const isScheduled = job.status === "Upcoming" && new Date(job.streamStartTime).getTime() > Date.now();
-            const label = isScheduled ? "Scheduled" : "Stream Start";
-            const value = isScheduled ? new Date(job.streamStartTime).toLocaleString() : this.formatRelativeTime(job.streamStartTime);
-            const tsAttr = isScheduled ? "" : ` data-timestamp="${this.escapeHtml(job.streamStartTime)}" title="${new Date(job.streamStartTime).toLocaleString()}"`;
-            return `
-          <div class="details-row">
-            <span class="details-label">${label}:</span>
-            <span class="details-value"${tsAttr}>${this.escapeHtml(value)}</span>
-          </div>
-          ${isScheduled ? `
-          <div class="details-row">
-            <span class="details-label">Starts In:</span>
-            <span class="details-value" data-timestamp-countdown="${this.escapeHtml(job.streamStartTime)}">${this.escapeHtml((() => { const diff = Math.floor((new Date(job.streamStartTime).getTime() - Date.now()) / 1000); return diff > 0 ? this.formatDurationSeconds(diff) : "Now"; })())}</span>
-          </div>` : ""}`;
-          })() : ""}
-          ${job.streamEndTime ? `
-          <div class="details-row">
-            <span class="details-label">Stream End:</span>
-            <span class="details-value" data-timestamp="${this.escapeHtml(job.streamEndTime)}" title="${new Date(job.streamEndTime).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(job.streamEndTime))}</span>
-          </div>
-          ` : ""}
-          ${job.lengthSeconds && job.lengthSeconds > 0 ? `
-          <div class="details-row">
-            <span class="details-label">Duration:</span>
-            <span class="details-value">${this.escapeHtml(this.formatDurationSeconds(job.lengthSeconds))}</span>
-          </div>
-          ` : ""}
-        </div>
-      </div>
-
-      ${!isTwitch && (job.selectedVideoItag != null || job.selectedAudioItag != null || job.startTime != null || job.endTime != null) ? `
-      <div class="details-section">
-        <strong>Advanced Options:</strong>
-        ${job.selectedVideoItag != null ? `
-        <div class="details-row">
-          <span class="details-label">Video Format:</span>
-          <span class="details-value">${
-            job.selectedVideoItag === -1
-              ? "None (audio only)"
-              : `itag ${this.escapeHtml(job.selectedVideoItag)}`
-          }</span>
-        </div>
-        ` : ""}
-        ${job.selectedAudioItag != null ? `
-        <div class="details-row">
-          <span class="details-label">Audio Format:</span>
-          <span class="details-value">${
-            job.selectedAudioItag === -1
-              ? "None (video only)"
-              : `itag ${this.escapeHtml(job.selectedAudioItag)}`
-          }</span>
-        </div>
-        ` : ""}
-        ${job.startTime != null || job.endTime != null ? `
-        <div class="details-row">
-          <span class="details-label">Time Range:</span>
-          <span class="details-value">
-            ${this.escapeHtml(this.formatTimestamp(job.startTime || 0))} - ${job.endTime != null ? this.escapeHtml(this.formatTimestamp(job.endTime)) : "end"}
-            ${job.endTime != null && job.startTime != null ? ` (${this.escapeHtml(this.formatTimestamp(job.endTime - job.startTime))})` : ""}
-          </span>
-        </div>
-        ` : ""}
-      </div>
-      ` : ""}
-
-      ${job.trims && job.trims.length > 0 ? `
-      <sl-details summary="Trims (${this.escapeHtml(job.trims.length)})" open class="details-section">
-        <div class="trim-list">
-          ${job.trims.map(trim => {
-            const range = `${this.escapeHtml(this.formatTimestamp(trim.startTime))} - ${this.escapeHtml(this.formatTimestamp(trim.endTime))}`;
-            const duration = `${this.escapeHtml(Math.floor(trim.duration))}s`;
-            const size = trim.fileSize ? this.escapeHtml(this.formatBytes(trim.fileSize)) : '?';
-            return `
-              <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--sl-color-neutral-200);">
-                <span>
-                  <strong>${range}</strong> (${duration}, ${size})
-                </span>
-                <sl-button size="small" variant="danger" data-delete-trim data-job-id="${this.escapeHtml(job.id)}" data-trim-id="${this.escapeHtml(trim.id)}">
-                  Delete
-                </sl-button>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </sl-details>
-      ` : ""}
-
-      ${
-        job.error
-          ? `
-      <div class="details-error">
-        <strong>Error:</strong> ${this.escapeHtml(job.error)}
-      </div>
-      `
-          : ""
-      }
-
-      ${(() => {
-        const hasResolution = job.videoWidth && job.videoHeight;
-        const hasFps = job.videoFps && job.videoFps > 0;
-        const hasFileSize = job.fileSize && job.fileSize > 0;
-        const isFinished = job.status === "Finished";
-        const hasFinishedSegs = isFinished && (job.lastVideoSeq || job.lastAudioSeq);
-        const hasGaps = job.gaps && job.gaps.length > 0;
-        if (!hasResolution && !hasFps && !hasFileSize && !hasFinishedSegs && !hasGaps) return "";
-
-        let rows = "";
-        if (hasResolution) {
-          rows += `<div class="details-row">
-            <span class="details-label">Resolution:</span>
-            <span class="details-value">${this.escapeHtml(job.videoWidth)}x${this.escapeHtml(job.videoHeight)}</span>
-          </div>`;
-        }
-        if (hasFps) {
-          rows += `<div class="details-row">
-            <span class="details-label">FPS:</span>
-            <span class="details-value">${this.escapeHtml(job.videoFps)}</span>
-          </div>`;
-        }
-        if (hasFileSize) {
-          rows += `<div class="details-row">
-            <span class="details-label">File Size:</span>
-            <span class="details-value">${this.escapeHtml(this.formatBytes(job.fileSize))}</span>
-          </div>`;
-        }
-        if (hasFinishedSegs) {
-          const isTwitchSeg = job.platform === "twitch";
-          const vCurrent = job.lastVideoSeq || 0;
-          const aCurrent = job.lastAudioSeq || 0;
-          const vTotal = job.totalVideoSeq;
-          const aTotal = job.totalAudioSeq;
-          const vDisplay = vTotal ? `${vCurrent}/${vTotal}` : vCurrent;
-          const aDisplay = aTotal ? `${aCurrent}/${aTotal}` : aCurrent;
-          const segValue = isTwitchSeg ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
-          rows += `<div class="details-row">
-            <span class="details-label">Segments:</span>
-            <span class="details-value">${this.escapeHtml(segValue)}</span>
-          </div>`;
-        }
-        if (hasGaps) {
-          let videoGaps = 0, audioGaps = 0;
-          for (const g of job.gaps) {
-            if (g.stream === "video") videoGaps++;
-            else if (g.stream === "audio") audioGaps++;
-          }
-          const parts = [];
-          if (videoGaps > 0) parts.push(`video: ${videoGaps}`);
-          if (audioGaps > 0) parts.push(`audio: ${audioGaps}`);
-          const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
-          rows += `<div class="details-row">
-            <span class="details-label">Gaps:</span>
-            <span class="details-value" style="color: var(--sl-color-warning-600)">${this.escapeHtml(job.gaps.length)} segments${this.escapeHtml(detail)}</span>
-          </div>`;
-        }
-        return `<div class="details-section"><strong>Media:</strong>${rows}</div>`;
-      })()}
-
-      ${(() => {
-        if (!job.segments || job.segments.length === 0) return "";
-        let segRows = "";
-        job.segments.forEach((seg) => {
-          const dur = seg.durationSeconds ? `${Math.round(seg.durationSeconds)}s` : "—";
-          const size = seg.fileSize ? this.formatBytes(seg.fileSize) : "—";
-          const res = seg.videoWidth && seg.videoHeight ? `${this.escapeHtml(seg.videoWidth)}x${this.escapeHtml(seg.videoHeight)}` : "";
-          // Part number from segmentIndex (matches the " - partN" filename),
-          // not the loop index — short-skipped spans can leave holes.
-          const partNo = (seg.segmentIndex ?? 0) + 1;
-          const chat = seg.chatFile ? " — chat" : "";
-          segRows += `<div class="details-row" style="padding-left:8px;">
-            <span class="details-label">Part ${this.escapeHtml(partNo)}:</span>
-            <span class="details-value">${this.escapeHtml(seg.quality)} — ${this.escapeHtml(dur)} — ${this.escapeHtml(size)}${res ? ` — ${res}` : ""}${chat}</span>
-          </div>`;
-        });
-        return `<div class="details-section"><strong>Parts:</strong>${segRows}</div>`;
-      })()}
-
-      ${job.description ? `
-      <div class="details-section">
-        <strong>Description:</strong>
-        <div style="white-space: pre-wrap; word-break: break-word; color: var(--sl-color-neutral-600); margin-top: 4px; font-size: 0.9em;">${this.escapeHtml(job.description)}</div>
-      </div>
-      ` : ""}
-
-      <div class="details-section">
-        <strong>Job Logs:</strong>
-        <div class="details-logs" id="job-logs-content">Loading logs...</div>
-      </div>
-    `;
-
-    // Update button visibility
-    this.updateDetailsButtons(job);
-  }
-
-  async loadJobLogs(jobId) {
-    // Abort any in-flight log fetch (e.g. user switched to a different job)
-    if (this._jobLogsAbort) this._jobLogsAbort.abort();
-    const abort = new AbortController();
-    this._jobLogsAbort = abort;
-
-    try {
-      const response = await fetch(`/api/jobs/${jobId}/logs`, { signal: abort.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      // Check selection before parsing the body; a switched-away job should
-      // short-circuit instead of wasting CPU decoding JSON we'll discard.
-      if (this.selectedJobId !== jobId || abort.signal.aborted) {
-        abort.abort();
-        return;
-      }
-      const logs = await response.json();
-      // Re-check after the async body parse — selection may have moved on.
-      if (this.selectedJobId !== jobId || abort.signal.aborted) return;
-      const logsEl = document.getElementById("job-logs-content");
-      if (logsEl) {
-        logsEl.textContent =
-          Array.isArray(logs) && logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
-      }
-    } catch (e) {
-      if (e.name === "AbortError") return; // Superseded by a new fetch
-      console.error("Failed to load job logs:", e);
-      if (this.selectedJobId !== jobId) return;
-      const logsEl = document.getElementById("job-logs-content");
-      if (logsEl) logsEl.textContent = "Failed to load logs.";
-    }
   }
 
   // ===== Job Actions =====
@@ -3355,7 +2437,7 @@ class MoomboxApp {
           this.renderArchivedJobs();
           // Update the open details dialog so buttons/status reflect the new state
           if (this.selectedJobId === id) {
-            this.updateJobDetails(archivedJob);
+            this.details.updateJobDetails(archivedJob);
           }
         }
       } else {
@@ -3514,7 +2596,7 @@ class MoomboxApp {
 
       const { trim } = await response.json();
       this.showToast('Trim created successfully', 'success');
-      await this._refreshJobDetails(jobId);
+      await this.details._refreshJobDetails(jobId);
       return trim;
     } catch (error) {
       this.showToast(error.message, 'danger');
@@ -3537,36 +2619,9 @@ class MoomboxApp {
       }
 
       this.showToast('Trim deleted', 'success');
-      await this._refreshJobDetails(jobId);
+      await this.details._refreshJobDetails(jobId);
     } catch (error) {
       this.showToast(error.message, 'danger');
-    }
-  }
-
-  /** Fetch fresh job data and update the details dialog and jobs array. */
-  async _refreshJobDetails(jobId) {
-    if (this.selectedJobId !== jobId) return;
-    try {
-      const jobResponse = await fetch(`/api/jobs/${jobId}`, {
-        cache: 'no-store',
-      });
-      if (jobResponse.ok) {
-        const updatedJob = await jobResponse.json();
-        const jobIndex = this.jobs.findIndex(j => j.id === jobId);
-        if (jobIndex !== -1) {
-          this.jobs[jobIndex] = updatedJob;
-        } else {
-          const archivedIndex = this.archivedJobs.findIndex(j => j.id === jobId);
-          if (archivedIndex !== -1) {
-            this.archivedJobs[archivedIndex] = updatedJob;
-            this.renderArchivedJobs();
-          }
-        }
-        this.renderJobDetails(updatedJob);
-        this.loadJobLogs(jobId);
-      }
-    } catch {
-      // Non-critical — job will sync via WebSocket
     }
   }
 
@@ -3582,140 +2637,12 @@ class MoomboxApp {
     return formatBytes(bytes);
   }
 
-  // ===== Log Management =====
+  // --- Log panel (LogPanelController owns this: modules/log-panel.js) ---
 
-  addLog(log) {
-    this.logs.push(log);
-    const overflowed = this.logs.length > 500;
-    if (overflowed) {
-      this.logs = this.logs.slice(-500);
-    }
-
-    // Fast path: if no filter/search active, append/trim a single DOM
-    // node instead of rebuilding all 500 lines
-    if (this.logFilter === "all" && !this._logSearchQuery) {
-      const viewer = document.getElementById("logs-viewer");
-      const countEl = document.getElementById("log-count");
-      if (viewer) {
-        // Suppress scroll-tracking during DOM mutation so that the
-        // appendChild + scrollTop assignment don't disable auto-scroll
-        this._logRebuildingDOM = true;
-        // Remove oldest DOM child if we overflowed
-        if (overflowed && viewer.firstChild) {
-          viewer.removeChild(viewer.firstChild);
-        }
-        const div = this._createLogLine(log);
-        viewer.appendChild(div);
-        if (countEl) countEl.textContent = `${this.logs.length} log entries`;
-        if (this._logAutoScroll) {
-          viewer.scrollTop = viewer.scrollHeight;
-        }
-        // Reset after next frame so any deferred scroll events are still suppressed
-        requestAnimationFrame(() => { this._logRebuildingDOM = false; });
-        return;
-      }
-    }
-
-    // Debounce full renderLogs for filtered/search cases
-    if (this._logRenderTimer) clearTimeout(this._logRenderTimer);
-    this._logRenderTimer = setTimeout(() => this.renderLogs(), 100);
-  }
-
-  /** Create a single log line DOM element. */
-  _createLogLine(log, searchQuery) {
-    const div = document.createElement("div");
-    const levelMatch = log.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR)\b/i);
-    const level = levelMatch ? levelMatch[1].toUpperCase() : "INFO";
-    let levelClass = "log-info";
-    if (level === "ERROR") levelClass = "log-error";
-    else if (level === "WARN" || level === "WARNING") levelClass = "log-warn";
-    else if (level === "DEBUG") levelClass = "log-debug";
-    div.className = `log-line ${levelClass}`;
-
-    if (searchQuery) {
-      const regex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-      let lastIndex = 0;
-      let match;
-      while ((match = regex.exec(log)) !== null) {
-        if (match.index > lastIndex) {
-          div.appendChild(document.createTextNode(log.slice(lastIndex, match.index)));
-        }
-        const mark = document.createElement("mark");
-        mark.textContent = match[0];
-        div.appendChild(mark);
-        lastIndex = regex.lastIndex;
-      }
-      if (lastIndex < log.length) {
-        div.appendChild(document.createTextNode(log.slice(lastIndex)));
-      }
-      if (lastIndex === 0) {
-        div.textContent = log;
-      }
-    } else {
-      div.textContent = log;
-    }
-    return div;
-  }
-
-  getFilteredLogs() {
-    if (this.logFilter === "all") return this.logs;
-
-    // Filter hierarchy: ERROR < WARN < INFO < DEBUG
-    const levelPriority = { ERROR: 0, WARN: 1, WARNING: 1, INFO: 2, DEBUG: 3 };
-    const threshold = levelPriority[this.logFilter] ?? 3;
-
-    return this.logs.filter((log) => {
-      const match = log.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR)\b/i);
-      if (!match) return true; // Show untagged lines always
-      const level = match[1].toUpperCase();
-      return (levelPriority[level] ?? 2) <= threshold;
-    });
-  }
-
-  renderLogs() {
-    const viewer = document.getElementById("logs-viewer");
-    const countEl = document.getElementById("log-count");
-
-    let filtered = this.getFilteredLogs();
-    const searchQuery = this._logSearchQuery || "";
-
-    // Filter by search query
-    if (searchQuery) {
-      const needle = searchQuery.toLowerCase();
-      filtered = filtered.filter((log) => log.toLowerCase().includes(needle));
-    }
-
-    const frag = document.createDocumentFragment();
-    for (const log of filtered) {
-      frag.appendChild(this._createLogLine(log, searchQuery));
-    }
-
-    this._logRebuildingDOM = true;
-    viewer.replaceChildren(frag);
-
-    const suffix = this.logFilter !== "all" ? ` (${this.logFilter}+)` : "";
-    const searchSuffix = searchQuery ? `, matching "${searchQuery}"` : "";
-    countEl.textContent = `${filtered.length} log entries${suffix}${searchSuffix}`;
-
-    // Auto-scroll to bottom (only when not paused by user scrolling up)
-    if (this._logAutoScroll) {
-      viewer.scrollTop = viewer.scrollHeight;
-    }
-    // Reset after next frame so scroll events from DOM rebuild are suppressed
-    requestAnimationFrame(() => { this._logRebuildingDOM = false; });
-  }
-
-  clearLogs() {
-    this.logs = [];
-    this._logAutoScroll = true;
-    this._logSearchQuery = "";
-    const logSearchInput = document.getElementById("log-search");
-    if (logSearchInput) logSearchInput.value = "";
-    if (this._logRenderTimer) {
-      clearTimeout(this._logRenderTimer);
-      this._logRenderTimer = null;
-    }
-    this.renderLogs();
+  // Kept as a delegating shim: addLog is called directly from
+  // web/tests/app.test.mjs, and other modules reach it through app.addLog(...).
+  addLog(...args) {
+    return this.logPanel.addLog(...args);
   }
 
   // ===== Keyboard Shortcuts =====
@@ -3776,10 +2703,10 @@ class MoomboxApp {
           break;
         case "Enter":
           if (isTasksActive && this.focusedJobIndex >= 0) {
-            const filtered = this.getFilteredJobs();
+            const filtered = this.filterBar.getFilteredJobs();
             const sorted = this._sortJobs(filtered);
             const job = sorted[this.focusedJobIndex];
-            if (job) this.showJobDetails(job);
+            if (job) this.details.showJobDetails(job);
           }
           break;
         case "f": {
@@ -3800,7 +2727,7 @@ class MoomboxApp {
   }
 
   navigateJobList(direction) {
-    const filtered = this.getFilteredJobs();
+    const filtered = this.filterBar.getFilteredJobs();
     const sorted = this._sortJobs(filtered);
     if (sorted.length === 0) return;
 
@@ -3823,14 +2750,6 @@ class MoomboxApp {
 
   // ===== Search/Filter =====
 
-  getFilteredJobs() {
-    return applyFilterTokens(this.jobs, this.tasksFilterTokens);
-  }
-
-  getFilteredArchivedJobs() {
-    return applyFilterTokens(this.archivedJobs, this.archivedFilterTokens);
-  }
-
   _sortJobs(jobs) {
     const STATUS_PRIORITY = {
       "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
@@ -3845,295 +2764,6 @@ class MoomboxApp {
       if (pa >= 7) return new Date(b.updatedAt) - new Date(a.updatedAt);
       return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
     });
-  }
-
-  /**
-   * Set up a unified filter control with chip input and optgroup dropdown.
-   * @param {string} containerId - ID of the .unified-filter container
-   * @param {object} opts
-   * @param {() => Array} opts.getTokens - returns current token array
-   * @param {(tokens: Array) => void} opts.setTokens - apply new tokens and re-render
-   * @param {() => string[]} opts.getChannels - returns current channel list for dropdown
-   */
-  _setupUnifiedFilter(containerId, { getTokens, setTokens, getChannels }) {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-    const chipsEl = container.querySelector(".unified-filter-chips");
-    const input = container.querySelector(".unified-filter-input");
-    const clearBtn = container.querySelector(".unified-filter-clear");
-    const dropdown = container.querySelector(".unified-filter-dropdown");
-    const menu = container.querySelector(".unified-filter-menu");
-    if (!chipsEl || !input || !dropdown || !menu) return;
-
-    const STATUS_OPTIONS = [
-      { type: "status", value: "active", label: "Active" },
-      { type: "status", value: "issues", label: "Issues" },
-      { type: "status", value: "finished", label: "Finished" },
-    ];
-    const PLATFORM_OPTIONS = [
-      { type: "platform", value: "youtube", label: "YouTube" },
-      { type: "platform", value: "twitch", label: "Twitch" },
-    ];
-
-    /** Render chips from current structured tokens (not free-text). */
-    const renderChips = () => {
-      const tokens = getTokens();
-      chipsEl.innerHTML = "";
-      for (const token of tokens) {
-        if (token.type === "text") continue; // text stays in input, not chipped
-        const tag = document.createElement("sl-tag");
-        tag.size = "small";
-        tag.removable = true;
-        if (token.type === "or") {
-          tag.textContent = token.terms.map(t => {
-            const prefix = t.negate ? "-" : "";
-            return prefix + this._filterTokenLabel(t);
-          }).join(" | ");
-          tag.variant = token.terms.some(t => t.negate) ? "danger" : "neutral";
-        } else {
-          const prefix = token.negate ? "-" : "";
-          tag.textContent = prefix + this._filterTokenLabel(token);
-          tag.variant = token.negate ? "danger" : "neutral";
-        }
-        tag.addEventListener("sl-remove", () => {
-          const updated = getTokens().filter(t => t !== token);
-          setTokens(updated);
-          renderChips();
-          updateClearBtn();
-          renderDropdownItems();
-        });
-        chipsEl.appendChild(tag);
-      }
-    };
-
-    /**
-     * Sync tokens from chips + current input text.
-     * Parses the input text — structured tokens (status:, channel:, platform:)
-     * become chips and are removed from the input. Free text stays in the input.
-     */
-    const syncTokens = () => {
-      const chipTokens = getTokens().filter(t => t.type !== "text");
-      const inputText = input.value.trim();
-      if (!inputText) {
-        setTokens(chipTokens);
-        updateClearBtn();
-        renderDropdownItems();
-        return;
-      }
-      const parsed = parseFilterQuery(inputText);
-      const newChips = [];
-      const remainingText = [];
-      for (const t of parsed) {
-        if (t.type === "text") {
-          remainingText.push(t);
-        } else if (t.type === "or") {
-          // OR groups with any structured term become chips; pure text ORs stay
-          const hasStructured = t.terms.some(term => term.type !== "text");
-          if (hasStructured) {
-            newChips.push(t);
-          } else {
-            remainingText.push(t);
-          }
-        } else {
-          newChips.push(t);
-        }
-      }
-      const allTokens = [...chipTokens, ...newChips, ...remainingText];
-      setTokens(allTokens);
-      // Update input to show only remaining free text
-      if (newChips.length > 0) {
-        input.value = remainingText.map(t => serializeToken(t)).join(" ");
-        renderChips();
-      }
-      updateClearBtn();
-      renderDropdownItems();
-    };
-
-    const updateClearBtn = () => {
-      const hasContent = getTokens().length > 0 || input.value.trim();
-      clearBtn.style.display = hasContent ? "" : "none";
-    };
-
-    /** Add a structured token as a chip. */
-    const addChipToken = (token) => {
-      const tokens = getTokens().filter(t => t.type !== "text");
-      const textTokens = getTokens().filter(t => t.type === "text");
-      // Check if already exists
-      const exists = tokens.some(t =>
-        t.type === token.type && t.value === token.value && t.negate === token.negate
-      );
-      if (exists) {
-        // Toggle off — remove it
-        const updated = tokens.filter(t =>
-          !(t.type === token.type && t.value === token.value && t.negate === token.negate)
-        );
-        setTokens([...updated, ...textTokens]);
-      } else {
-        // Also remove any opposite negate version
-        const cleaned = tokens.filter(t =>
-          !(t.type === token.type && t.value === token.value)
-        );
-        setTokens([...cleaned, token, ...textTokens]);
-      }
-      renderChips();
-      updateClearBtn();
-      renderDropdownItems();
-    };
-
-    /** Render the optgroup dropdown items. */
-    const renderDropdownItems = () => {
-      const query = input.value.trim().toLowerCase();
-      const activeTokens = getTokens();
-      let html = "";
-
-      const groups = [
-        { header: "Statuses", items: STATUS_OPTIONS },
-        { header: "Platforms", items: PLATFORM_OPTIONS },
-        { header: "Channels", items: getChannels().map(ch => ({ type: "channel", value: ch, label: ch })) },
-      ];
-
-      for (const group of groups) {
-        const filtered = query
-          ? group.items.filter(o => o.label.toLowerCase().includes(query))
-          : group.items;
-        if (filtered.length === 0) continue;
-
-        html += `<sl-menu-item data-group-header disabled>${this.escapeHtml(group.header)}</sl-menu-item>`;
-        for (const opt of filtered) {
-          const isActive = activeTokens.some(t =>
-            t.type === opt.type && t.value === opt.value && !t.negate
-          );
-          const isExcluded = activeTokens.some(t =>
-            t.type === opt.type && t.value === opt.value && t.negate
-          );
-          const cls = (isActive || isExcluded) ? ' class="already-active"' : "";
-          const val = this.escapeHtml(JSON.stringify({ type: opt.type, value: opt.value }));
-          html += `<sl-menu-item value='${val}'${cls}>`;
-          html += this.escapeHtml(opt.label);
-          html += `<sl-icon slot="suffix" class="filter-item-exclude" name="dash-circle" data-exclude='${val}' title="Exclude"></sl-icon>`;
-          html += `</sl-menu-item>`;
-        }
-      }
-
-      if (!html) {
-        html = `<sl-menu-item disabled>No matches</sl-menu-item>`;
-      }
-      menu.innerHTML = html;
-    };
-
-    // --- Event Wiring ---
-
-    // Clicking container focuses input
-    container.addEventListener("click", (e) => {
-      if (e.target.closest("sl-tag") || e.target.closest(".unified-filter-clear")) return;
-      input.focus();
-    });
-
-    // Input focus opens dropdown
-    input.addEventListener("focus", () => {
-      renderDropdownItems();
-      dropdown.show();
-    });
-
-    // Input typing: debounced filter update + dropdown filtering
-    let filterTimeout = null;
-    input.addEventListener("input", () => {
-      clearTimeout(filterTimeout);
-      renderDropdownItems();
-      filterTimeout = setTimeout(() => syncTokens(), 200);
-    });
-
-    // Single keydown handler — do local input behaviour AND stop propagation
-    // so global shortcuts never see keys while the filter is focused.
-    // Previously there were two keydown handlers and the listener-ordering
-    // dependency between them was implicit; one combined handler makes the
-    // ordering explicit and impossible to break by future listener shuffling.
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        clearTimeout(filterTimeout);
-        syncTokens();
-      } else if (e.key === "Backspace" && !input.value) {
-        // Remove last chip
-        const tokens = getTokens();
-        const chipTokens = tokens.filter(t => t.type !== "text");
-        if (chipTokens.length > 0) {
-          const last = chipTokens[chipTokens.length - 1];
-          const updated = tokens.filter(t => t !== last);
-          setTokens(updated);
-          renderChips();
-          updateClearBtn();
-          renderDropdownItems();
-        }
-      } else if (e.key === "Escape") {
-        dropdown.hide();
-        input.blur();
-      }
-      // Always stop propagation so app-level shortcuts don't fire for
-      // ordinary typing in this input.
-      e.stopPropagation();
-    });
-
-    // Dropdown item clicked — add as chip
-    dropdown.addEventListener("sl-select", (e) => {
-      const raw = e.detail.item.value;
-      if (!raw) return;
-      try {
-        const { type, value } = JSON.parse(raw);
-        addChipToken({ type, value, negate: false });
-      } catch {}
-      input.focus();
-    });
-
-    // Exclude icon clicked — add negated chip
-    menu.addEventListener("click", (e) => {
-      const excludeIcon = e.target.closest(".filter-item-exclude");
-      if (!excludeIcon) return;
-      e.stopPropagation(); // prevent sl-select from firing
-      try {
-        const { type, value } = JSON.parse(excludeIcon.dataset.exclude);
-        addChipToken({ type, value, negate: true });
-      } catch {}
-      input.focus();
-    });
-
-    // Clear all
-    clearBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      input.value = "";
-      setTokens([]);
-      renderChips();
-      updateClearBtn();
-    });
-
-    // Close dropdown when focus leaves filter entirely
-    container.addEventListener("focusout", (e) => {
-      // Check if new focus target is still within the container or dropdown
-      setTimeout(() => {
-        if (!container.contains(document.activeElement) &&
-            !dropdown.contains(document.activeElement)) {
-          dropdown.hide();
-        }
-      }, 100);
-    });
-
-    // Initial render
-    renderChips();
-    updateClearBtn();
-  }
-
-  /** Get display label for a filter token. */
-  _filterTokenLabel(token) {
-    if (token.type === "text") return token.value;
-    if (token.type === "status") {
-      const labels = { active: "Active", issues: "Issues", errors: "Issues", finished: "Finished" };
-      return labels[token.value] || token.value;
-    }
-    if (token.type === "platform") {
-      return token.value === "youtube" ? "YouTube" : token.value === "twitch" ? "Twitch" : token.value;
-    }
-    if (token.type === "channel") return token.value;
-    return token.value;
   }
 
   // ===== Quick Actions =====
@@ -4519,262 +3149,17 @@ class MoomboxApp {
     }
   }
 
-  // --- Files tab ---
+  // --- Files tab (FilesController owns this: modules/files.js) ---
 
-  async fetchOrphanedFiles() {
-    const refreshBtn = document.getElementById("files-refresh-btn");
-    if (refreshBtn) refreshBtn.loading = true;
-    try {
-      const resp = await fetch("/api/files/orphaned");
-      if (!resp.ok) throw new Error("Failed to fetch");
-      const data = await resp.json();
-      this._orphanedFiles = data;
-      this.renderOrphanedFiles(data);
-    } catch (err) {
-      console.error("Failed to fetch orphaned files:", err);
-      this._orphanedFiles = [];
-      this.renderOrphanedFiles(null); // null signals error vs empty
-    } finally {
-      if (refreshBtn) refreshBtn.loading = false;
-    }
-  }
-
+  // Kept as delegating shims: web/tests/app.test.mjs pins these two by
+  // calling them directly on the app, the same way the real DOM click
+  // handlers used to before the Files tab moved into FilesController.
   renderOrphanedFiles(files) {
-    const emptyEl = document.getElementById("files-empty");
-    const tableWrapper = document.getElementById("files-table-wrapper");
-    const deleteAllBtn = document.getElementById("files-delete-all-btn");
-
-    if (files === null || (Array.isArray(files) && files.length === 0)) {
-      if (emptyEl) {
-        emptyEl.style.display = "";
-        const msg = emptyEl.querySelector("p");
-        if (msg) msg.textContent = files === null
-          ? "Failed to load orphaned files. Try refreshing."
-          : "No orphaned files found.";
-      }
-      if (tableWrapper) tableWrapper.style.display = "none";
-      if (deleteAllBtn) deleteAllBtn.disabled = true;
-      return;
-    }
-
-    if (emptyEl) emptyEl.style.display = "none";
-    if (tableWrapper) tableWrapper.style.display = "";
-    if (deleteAllBtn) deleteAllBtn.disabled = false;
-
-    const table = document.getElementById("files-table");
-    // Remove existing rows (keep header)
-    table.querySelectorAll(".files-row").forEach((row) => row.remove());
-
-    // Sort: staging first, then output, then trim
-    const typeOrder = { staging: 0, output: 1, trim: 2 };
-    const sorted = [...files].sort((a, b) => (typeOrder[a.type] ?? 9) - (typeOrder[b.type] ?? 9));
-
-    for (const file of sorted) {
-      const row = document.createElement("div");
-      row.className = "files-row";
-
-      const typeBadge = `<span class="files-type-badge ${this.escapeHtml(file.type)}">${this.escapeHtml(file.type)}</span>`;
-      const pathStr = `<span class="files-path" title="${this.escapeHtml(file.path)}">${this.escapeHtml(file.relPath)}</span>`;
-      const sizeStr = `<span>${this.escapeHtml(this.formatBytes(file.size))}</span>`;
-      const modStr = `<span data-timestamp="${this.escapeHtml(file.modified)}" title="${new Date(file.modified).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(file.modified))}</span>`;
-
-      let jobStr = "";
-      if (file.jobTitle) {
-        jobStr = `<span class="files-job-info" title="${this.escapeHtml(file.jobId)}">${this.escapeHtml(file.jobTitle)} (${this.escapeHtml(file.jobStatus)})</span>`;
-      } else {
-        jobStr = `<span class="files-job-info">—</span>`;
-      }
-
-      const deleteBtn = `<sl-icon-button name="trash" label="Delete" class="files-delete-btn" data-path="${this.escapeHtml(file.path)}"></sl-icon-button>`;
-
-      row.innerHTML = typeBadge + pathStr + sizeStr + modStr + jobStr + deleteBtn;
-      table.appendChild(row);
-    }
-
-    // Event delegation for delete buttons — attach once
-    if (!table._filesDelegated) {
-      table._filesDelegated = true;
-      table.addEventListener("click", (e) => {
-        const btn = e.target.closest(".files-delete-btn");
-        if (btn) this.deleteOrphanedFile(btn.dataset.path);
-      });
-    }
-  }
-
-  async deleteOrphanedFile(path) {
-    if (!await this.showConfirm(`Delete this file?\n\n${path}`, { okLabel: "Delete", okVariant: "danger" })) return;
-
-    try {
-      const resp = await fetch("/api/files/orphaned", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths: [path] }),
-      });
-      if (!resp.ok) throw new Error("Failed to delete");
-      const result = await resp.json();
-      if (result.deleted && result.deleted.length > 0) {
-        this.showToast("File deleted", "success");
-      } else if (result.errors && result.errors.length > 0) {
-        this.showToast(`Failed: ${result.errors[0].error}`, "danger");
-      }
-      await this.fetchOrphanedFiles();
-    } catch (err) {
-      this.showToast("Failed to delete file", "danger");
-    }
-  }
-
-  async deleteAllOrphanedFiles() {
-    if (!this._orphanedFiles || this._orphanedFiles.length === 0) return;
-    const fileCount = this._orphanedFiles.length;
-    if (!await this.showConfirm(`Delete ${fileCount === 1 ? "this" : `all ${fileCount}`} orphaned file${fileCount === 1 ? "" : "s"}?`, { okLabel: "Delete All", okVariant: "danger" })) return;
-
-    const deleteAllBtn = document.getElementById("files-delete-all-btn");
-    if (deleteAllBtn) { deleteAllBtn.loading = true; deleteAllBtn.disabled = true; }
-
-    const paths = this._orphanedFiles.map((f) => f.path);
-    try {
-      const resp = await fetch("/api/files/orphaned", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths }),
-      });
-      if (!resp.ok) throw new Error("Failed to delete");
-      const result = await resp.json();
-      const count = result.deleted ? result.deleted.length : 0;
-      const errCount = result.errors ? result.errors.length : 0;
-      if (errCount > 0) {
-        this.showToast(`Deleted ${count}, ${errCount} errors`, "warning");
-      } else {
-        this.showToast(`Deleted ${count} files`, "success");
-      }
-      await this.fetchOrphanedFiles();
-    } catch (err) {
-      this.showToast("Failed to delete files", "danger");
-    } finally {
-      if (deleteAllBtn) {
-        deleteAllBtn.loading = false;
-        // Let renderOrphanedFiles control disabled state — it disables the
-        // button when the list is empty. Only force-enable here if the
-        // fetch/render didn't run (e.g. DELETE request failed).
-        const hasFiles = this._orphanedFiles && this._orphanedFiles.length > 0;
-        deleteAllBtn.disabled = !hasFiles;
-      }
-    }
-  }
-
-  async fetchOrphanedHistory() {
-    const refreshBtn = document.getElementById("history-refresh-btn");
-    if (refreshBtn) refreshBtn.loading = true;
-    try {
-      const resp = await fetch("/api/history/orphaned");
-      if (!resp.ok) throw new Error("Failed to fetch");
-      const data = await resp.json();
-      this._orphanedHistory = data;
-      this.renderOrphanedHistory(data);
-    } catch (err) {
-      console.error("Failed to fetch orphaned history:", err);
-      this._orphanedHistory = [];
-      this.renderOrphanedHistory(null); // null signals error vs empty
-    } finally {
-      if (refreshBtn) refreshBtn.loading = false;
-    }
+    return this.files.renderOrphanedFiles(files);
   }
 
   renderOrphanedHistory(entries) {
-    const emptyEl = document.getElementById("history-empty");
-    const tableWrapper = document.getElementById("history-table-wrapper");
-    const deleteAllBtn = document.getElementById("history-delete-all-btn");
-
-    if (entries === null || (Array.isArray(entries) && entries.length === 0)) {
-      if (emptyEl) {
-        emptyEl.style.display = "";
-        const msg = emptyEl.querySelector("p");
-        if (msg) msg.textContent = entries === null
-          ? "Failed to load orphaned history. Try refreshing."
-          : "No orphaned history entries found.";
-      }
-      if (tableWrapper) tableWrapper.style.display = "none";
-      if (deleteAllBtn) deleteAllBtn.disabled = true;
-      return;
-    }
-
-    if (emptyEl) emptyEl.style.display = "none";
-    if (tableWrapper) tableWrapper.style.display = "";
-    if (deleteAllBtn) deleteAllBtn.disabled = false;
-
-    const table = document.getElementById("history-table");
-    table.querySelectorAll(".history-row").forEach((row) => row.remove());
-
-    for (const entry of entries) {
-      const row = document.createElement("div");
-      row.className = "history-row";
-      const vid = this.escapeHtml(entry.videoId);
-      const vidStr = `<a class="history-vid" href="https://www.youtube.com/watch?v=${vid}" target="_blank" rel="noopener" title="${vid}">${vid}</a>`;
-      const addedStr = `<span data-timestamp="${this.escapeHtml(entry.addedAt)}" title="${new Date(entry.addedAt).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(entry.addedAt))}</span>`;
-      const deleteBtn = `<sl-icon-button name="trash" label="Remove" class="history-delete-btn" data-video-id="${vid}"></sl-icon-button>`;
-      row.innerHTML = vidStr + addedStr + deleteBtn;
-      table.appendChild(row);
-    }
-
-    // Event delegation for delete buttons — attach once.
-    if (!table._historyDelegated) {
-      table._historyDelegated = true;
-      table.addEventListener("click", (e) => {
-        const btn = e.target.closest(".history-delete-btn");
-        if (btn) this.deleteOrphanedHistory(btn.dataset.videoId);
-      });
-    }
-  }
-
-  async deleteOrphanedHistory(videoId) {
-    if (!await this.showConfirm(`Remove this history entry so the video can be re-discovered?\n\n${videoId}`, { okLabel: "Remove", okVariant: "danger" })) return;
-
-    try {
-      const resp = await fetch("/api/history/orphaned", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoIds: [videoId] }),
-      });
-      if (!resp.ok) throw new Error("Failed to delete");
-      const result = await resp.json();
-      if (result.deleted && result.deleted.length > 0) {
-        this.showToast("History entry removed", "success");
-      }
-      await this.fetchOrphanedHistory();
-    } catch (err) {
-      this.showToast("Failed to remove history entry", "danger");
-    }
-  }
-
-  async deleteAllOrphanedHistory() {
-    if (!this._orphanedHistory || this._orphanedHistory.length === 0) return;
-    const count = this._orphanedHistory.length;
-    if (!await this.showConfirm(`Remove ${count === 1 ? "this" : `all ${count}`} orphaned history entr${count === 1 ? "y" : "ies"}?`, { okLabel: "Remove All", okVariant: "danger" })) return;
-
-    const deleteAllBtn = document.getElementById("history-delete-all-btn");
-    if (deleteAllBtn) { deleteAllBtn.loading = true; deleteAllBtn.disabled = true; }
-
-    const videoIds = this._orphanedHistory.map((e) => e.videoId);
-    try {
-      const resp = await fetch("/api/history/orphaned", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoIds }),
-      });
-      if (!resp.ok) throw new Error("Failed to delete");
-      const result = await resp.json();
-      const n = result.deleted ? result.deleted.length : 0;
-      this.showToast(`Removed ${n} entr${n === 1 ? "y" : "ies"}`, "success");
-      await this.fetchOrphanedHistory();
-    } catch (err) {
-      this.showToast("Failed to remove history entries", "danger");
-    } finally {
-      if (deleteAllBtn) {
-        deleteAllBtn.loading = false;
-        const has = this._orphanedHistory && this._orphanedHistory.length > 0;
-        deleteAllBtn.disabled = !has;
-      }
-    }
+    return this.files.renderOrphanedHistory(entries);
   }
 
   /** Return selected jobs for the currently active panel. */
@@ -4812,12 +3197,12 @@ class MoomboxApp {
     if (selectAllBtn) {
       const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
       const isFiltered = panel === "archived"
-        ? this.archivedFilterTokens.length > 0
-        : this.tasksFilterTokens.length > 0;
+        ? this.filterBar.tokens("archived").length > 0
+        : this.filterBar.tokens("jobs").length > 0;
       if (isFiltered) {
         const totalVisible = panel === "archived"
-          ? this.getFilteredArchivedJobs().length
-          : this.getFilteredJobs().length;
+          ? this.filterBar.getFilteredArchivedJobs().length
+          : this.filterBar.getFilteredJobs().length;
         selectAllBtn.textContent = `Select All (${totalVisible})`;
       } else {
         selectAllBtn.textContent = "Select All";
@@ -4941,26 +3326,6 @@ class MoomboxApp {
       this.showToast(`${verb}: ${succeeded} job${succeeded !== 1 ? "s" : ""}`, "success");
     } else {
       this.showToast(`${succeeded} of ${targets.length} succeeded. ${failed} failed.`, "warning");
-    }
-  }
-
-  /**
-   * Preserve computed hasStaging/hasSegments fields from oldJobs onto newJobs.
-   * WebSocket bulk updates deliver raw DB objects without these enriched fields;
-   * carrying them forward avoids Resume/Mux buttons flickering out in the details dialog.
-   */
-  _preserveStagingFields(oldJobs, newJobs) {
-    if (!oldJobs?.length || !newJobs?.length) return;
-    const oldMap = new Map(oldJobs.map(j => [j.id, j]));
-    for (const job of newJobs) {
-      const old = oldMap.get(job.id);
-      if (!old) continue;
-      if (job.hasStaging === undefined && old.hasStaging !== undefined) {
-        job.hasStaging = old.hasStaging;
-      }
-      if (job.hasSegments === undefined && old.hasSegments !== undefined) {
-        job.hasSegments = old.hasSegments;
-      }
     }
   }
 
