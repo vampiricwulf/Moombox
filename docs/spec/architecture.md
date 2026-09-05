@@ -180,11 +180,11 @@ cmd/sign/main.go                       -- CI signing tool (Ed25519)
 
 internal/config     (4 files, ~850)    -- TOML config, FlexDuration, channel terms
 internal/updater    (3 files, ~450)    -- GitHub release checker + self-updater + Ed25519
-internal/ytdlpplugin (1 file,  ~320)  -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI R Y overlay)
+internal/ytdlpplugin (1 file,  ~320)   -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI R Y overlay)
 internal/logger     (1 file,  ~470)    -- slog wrapper, file rotation, ring buffer, pub/sub
 internal/database   (7 files, ~1,850)  -- SQLite/WAL, batch updates (100ms coalesce), pub/sub
-internal/stats      (1 file,  ~70)    -- the figures both dashboards show, derived from the job aggregate + disk reading (imports only database)
-internal/jobfilter  (1 file, ~270)    -- the dashboard's filter language (Parse/Match/Serialize), the TUI's / box
+internal/stats      (1 file,  ~70)     -- the figures both dashboards show, derived from the job aggregate + disk reading (imports only database)
+internal/jobfilter  (1 file, ~270)     -- the dashboard's filter language (Parse/Match/Serialize), the TUI's / box
 internal/cookies    (34 files, ~2,700)  -- jar, refresh, auto-cookie (Firefox/Chromium)
 internal/youtube    (8 files, ~1,950)  -- Service, PlayerAPI, Auth, watch page, format selector
 internal/twitch    (10 files, ~3,200)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes

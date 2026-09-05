@@ -316,12 +316,18 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 | Message Type | Source | Content |
 |--------------|--------|---------|
 | `JobUpdateMsg` | Database subscriber | Single job that changed. Contains the full `*database.Job`. |
+| `JobAddedMsg` | Database subscriber | A newly added job (lifecycle event) — appended directly to local state instead of triggering a full job-list rebuild. Contains `*database.JobAdded`. |
+| `JobDeletedMsg` | Database subscriber | The ID of a removed job (lifecycle event) — the row is removed from local state directly instead of reloading a fresh full-list snapshot. Contains `*database.JobDeleted`. |
+| `TrimsChangedMsg` | Database subscriber (re-fetched via `tui_wiring`) | A refreshed `*database.Job` snapshot after a trim was added or deleted; applied to the cached row and, if selected, the detail panel. |
 | `JobsUpdateMsg` | Database subscriber | Full job list changed (job added or deleted). Contains `[]*database.Job`. |
 | `LogBatchMsg` | Logger subscriber | Batch of log lines accumulated over a 250ms flush window. Contains `[]string`. |
 | `CheckTimersMsg` | Monitor callbacks | Next check times for Feed, DECAPI, and Twitch monitors. |
 | `CookieStatusMsg` | Cookie service | `{YT, TW, YTActive, TWActive}` — one `CookieStatus` per platform (`None`, `OK`, `CookiesOnly`, `Relogin`, `Unknown`) plus each platform's active flag. There is no *expired* state: expiry has no UI reader at all. See §Status Bar. |
 | `DiskStatusMsg` | Disk monitor | Disk usage percentage and warning/critical thresholds. |
+| `BackfillStatusMsg` | Feed monitor backfill sweep | One message per completed scan page (`state: "scanning"`) plus one per scan-state change (`"done"`, `"error"`, `"idle"` — those carry `Tab` `""` and `Pages` 0); mirrors the Web's `backfill_status` WebSocket payload. |
 | `UpdateStatusMsg` | Updater | New version available (tag name, release notes); an empty message clears the badge (Web-side dismiss). |
+| `ConnectivityMsg` | Connectivity monitor | Online/offline transition (`Online bool`). |
+| `channelClosedMsg` | Channel poll commands | Sent when a backend channel (job update, log, cookie status, disk status, backfill status, or update status) closes; names the channel so the App stops polling it. |
 
 **Internal tick messages:**
 
@@ -331,6 +337,8 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 | `progressTickMsg` | 16ms (active) / 500ms (idle) | Progress bar animation. Runs at ~60fps during active downloads, drops to 2fps when idle to save CPU. |
 | `logFlushMsg` | 250ms | Triggers flushing accumulated log lines from the buffer to the viewport. |
 | `marqueeTickMsg` | 150ms | Advances scrolling marquee text for overflowed labels. |
+| `cookieCountdownTickMsg` | 1 second, while the setup wizard's cookie step is counting down | Decrements the cookie-capture countdown; ticks from a superseded chain (`gen`) are ignored so a stacked chain cannot drain the countdown faster than one per second. |
+| `statsRefreshTickMsg` | 60 seconds, while the `R T` Statistics overlay is open | Refreshes the overlay on the Web Stats tab's own poll cadence; a tick naming an earlier `Epoch` than the current open is dropped. |
 
 **Async operation result messages:**
 
@@ -340,24 +348,40 @@ These are returned by Bubble Tea commands that perform HTTP requests to the back
 |---------|-----------|
 | `updateCheckResultMsg` | Manual update check |
 | `updateApplyResultMsg` | Update download and apply |
+| `dismissUpdateResultMsg` | Skip pending update version (Release Notes overlay's `S` key) |
+| `releaseNotesFetchedMsg` | Fetch current version's release notes (`R N` when no update is pending) |
 | `signatureVerifyResultMsg` | Ed25519 signature verification |
 | `fetchFormatsResultMsg` | Format list fetch for Add Video |
 | `fetchFormatsAutoAdvanceMsg` | Timer to auto-skip format selection on error |
 | `addVideoResultMsg` | Job creation result |
 | `importResultMsg` | Zip import result |
+| `cookieImportResultMsg` | Cookie file import (`R I`) |
 | `createTrimResultMsg` | Trim creation result |
 | `deleteTrimResultMsg` | Trim deletion result |
+| `deleteJobsResultMsg` | Job deletion, single or batch (`A D D`) |
+| `setWatchedResultMsg` | Toggle watched flag (`A W`) |
 | `fetchOrphansResultMsg` | Orphaned file list fetch |
 | `deleteOrphanResultMsg` | Orphaned file deletion |
+| `fetchOrphanedHistoryResultMsg` | Orphaned processing-history list fetch |
+| `deleteHistoryEntryResultMsg` | Orphaned history entry deletion |
+| `bulkOrphanResultMsg` | Bulk delete-all sweep over one Orphaned Files/History section (the `A O` overlay's `A` key) |
 | `ffmpegCheckResultMsg` | FFmpeg PATH check |
 | `ffmpegPrepareResultMsg` | FFmpeg download preparation |
 | `ffmpegConfirmResultMsg` | FFmpeg install confirmation |
+| `ffmpegMenuActionMsg` | FFmpeg check/install menu action resolved via `huh` form completion |
+| `backfillRescanQueuedMsg` | Feed-history re-scan queued (`R B`) |
 | `cookieRecheckResultMsg` | Cookie recheck |
 | `cookieForceRefreshResultMsg` | Cookie force refresh |
 | `channelResolvedMsg` | Channel URL/name resolution |
 | `fetchClientTokensResultMsg` | Client token list fetch |
 | `deleteClientTokenResultMsg` | Client token deletion |
+| `ytdlpStatusMsg` | yt-dlp plugin status fetch (`R Y`) |
+| `ytdlpInstallResultMsg` | yt-dlp plugin install/reinstall (`R Y`'s `I`) |
+| `statsSnapshotMsg` | Statistics snapshot fetch (`R T` open/refresh) |
 | `setupCookieFinishMsg` | Setup wizard cookie step completion |
+| `setupSaveResultMsg` | Setup wizard config save |
+| `testNotificationResultMsg` | Test notification send (Settings overlay) |
+| `panicRecoveryMsg` | Panic recovered from an async `tea.Cmd` closure |
 
 ### Non-Blocking Channel Communication
 

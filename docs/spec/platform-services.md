@@ -1147,11 +1147,12 @@ Sidecar `.resume.json` file:
   "timestamp": 1709000000,
   "videoId": "dQw4w9WgXcQ",
   "recentIds": ["msg-1", "msg-2", ...],
-  "streamStartMs": 1709000000000
+  "streamStartMs": 1709000000000,
+  "mode": "live"
 }
 ```
 
-Resume state is saved after each disk flush. On restart, the downloader loads the continuation token and dedup set, skips the All Chat switch (continuation is already mid-stream), and resumes.
+Resume state is saved after each disk flush. On restart, the downloader loads the continuation token and dedup set, skips the All Chat switch (continuation is already mid-stream), and resumes. `mode` is `"live"` or `"replay"` — which kind of run wrote the sidecar: the mode rule is that a replay run refuses a live-tagged sidecar and starts from scratch instead of adopting its count/continuation/dedup/epoch, since those all describe the live half of the file; a sidecar with no `mode` (written before the field existed) is adopted as before.
 
 **Continuation-preference rule (`Start`'s resume block, `internal/chat/downloader.go`):** a LIVE/upcoming run whose caller already supplied an `InitialContinuation` (the token `FetchWatchPage` just returned) keeps that fresh token and takes only `MessageCount`, `RecentIDs`, `flushedToDisk` and `StreamStartMs` from the sidecar. The rule skips an assignment rather than installing anything: on a freshly constructed downloader what survives is the caller's `InitialContinuation`, and on a reused instance (the orchestrator re-`Start`ing a finished early downloader) it is the token that instance's previous run last used — the same value the sidecar was saved from. The sidecar's continuation is by definition the one the previous run left off at, and the exit the completion rule preserves it for is stale-continuation exhaustion — so adopting it costs a wasted poll at best and, when the expired token errors rather than completing, the whole consecutive-error budget. Because a watch-page token is a Top Chat token, such a run is NOT `resuming` as far as `runChatLoop` is concerned: it is entered with `resuming = false` so the All Chat upgrade still happens. For a REPLAY the sidecar's continuation IS the position in the archive (a fresh token would restart the VOD from the top), so it always wins; a live run with no `InitialContinuation` also keeps today's behaviour.
 

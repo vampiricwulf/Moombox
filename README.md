@@ -417,7 +417,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | A D D | Delete job (confirm) |
 | A W | Toggle watched (Finished jobs) |
 | A T | Trim finished video |
-| A O | Browse orphaned items |
+| A O | Browse Orphaned Items |
 | A K | Manage client tokens |
 
 **Request (R)**
