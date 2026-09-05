@@ -30,12 +30,21 @@ func channelToValues(ch config.ChannelConfig) map[string]string {
 	}
 }
 
-func valuesToChannel(vals map[string]string) config.ChannelConfig {
-	ch := config.ChannelConfig{
-		ID:       strings.TrimSpace(vals["id"]),
-		Name:     strings.TrimSpace(vals["name"]),
-		Platform: vals["platform"],
+// valuesToChannel turns the editor's form values into a ChannelConfig. For an
+// edit, existing is the channel being edited: every field is copied from it
+// first, so the fields this editor does not show (num_desc_lookbehind,
+// output_directory, archive_window_days, archive_slots, named terms) survive
+// the round trip — the bug this parameter exists to close. nil means a new
+// channel. Shown fields are assigned unconditionally so clearing one clears
+// it in the result too.
+func valuesToChannel(vals map[string]string, existing *config.ChannelConfig) config.ChannelConfig {
+	var ch config.ChannelConfig
+	if existing != nil {
+		ch = *existing
 	}
+	ch.ID = strings.TrimSpace(vals["id"])
+	ch.Name = strings.TrimSpace(vals["name"])
+	ch.Platform = vals["platform"]
 	switch vals["enabled"] {
 	case "No":
 		boolFalse := false
@@ -44,14 +53,19 @@ func valuesToChannel(vals map[string]string) config.ChannelConfig {
 		boolTrue := true
 		ch.Enabled = &boolTrue
 	}
-	if vals["terms"] != "" {
-		ch.Terms = config.ChannelTerms{Simple: vals["terms"]}
+	// The editor shows one pattern string. Unchanged text keeps whatever
+	// shape the config had (a named map shows as its Simple, ""); changed
+	// text becomes the simple form, and "" clears the terms.
+	if existing == nil || vals["terms"] != channelToValues(*existing)["terms"] {
+		ch.Terms = config.ChannelTerms{}
+		if vals["terms"] != "" {
+			ch.Terms = config.ChannelTerms{Simple: vals["terms"]}
+		}
 	}
-	if vals["platform"] == "youtube" && vals["include_non_live"] == "Yes" {
-		ch.IncludeNonLiveContent = true
-	}
-	if vals["quality_preference"] != "" && vals["quality_preference"] != "best" {
-		ch.QualityPreference = vals["quality_preference"]
+	ch.IncludeNonLiveContent = vals["platform"] == "youtube" && vals["include_non_live"] == "Yes"
+	ch.QualityPreference = ""
+	if q := vals["quality_preference"]; q != "" && q != "best" {
+		ch.QualityPreference = q
 	}
 	return ch
 }
@@ -205,7 +219,11 @@ func (m *SettingsModel) autoDetectPlatform() {
 
 // saveCurrentChannel saves the current channel edit values to the channel list.
 func (m *SettingsModel) saveCurrentChannel() {
-	ch := valuesToChannel(m.channelEditValues)
+	var existing *config.ChannelConfig
+	if m.channelIndex < len(m.channels) {
+		existing = &m.channels[m.channelIndex]
+	}
+	ch := valuesToChannel(m.channelEditValues, existing)
 	if m.channelIndex < len(m.channels) {
 		m.channels[m.channelIndex] = ch
 	} else {

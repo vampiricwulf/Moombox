@@ -922,7 +922,11 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 				return ""
 			}
 		}
-		ch := valuesToChannel(m.channelEditValues)
+		var existing *config.ChannelConfig
+		if m.channelIndex < len(m.channels) {
+			existing = &m.channels[m.channelIndex]
+		}
+		ch := valuesToChannel(m.channelEditValues, existing)
 		if m.channelIndex < len(m.channels) {
 			m.channels[m.channelIndex] = ch
 		} else {
