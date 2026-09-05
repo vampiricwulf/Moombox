@@ -10,6 +10,7 @@ import {
   formatMsToTime,
   safePlay,
   applyChannelOverrides,
+  canResumeJob,
 } from "../public/modules/utils.js";
 
 test("formatTimestamp: zero and invalid inputs", () => {
@@ -124,4 +125,17 @@ test("applyChannelOverrides: rejects out-of-range and non-integer values", () =>
   const ok = applyChannelOverrides({ id: "UC1" }, { numDescLookbehind: 0, archiveWindowDays: 3650, archiveSlots: 100, outputDirectory: " D:/x " });
   assert.equal(ok.error, null);
   assert.equal(ok.channel.output_directory, "D:/x", "trimmed");
+});
+
+test("canResumeJob: the single-job gate, applied everywhere", () => {
+  const yt = (status, extra = {}) => ({ status, platform: "youtube", hasStaging: true, ...extra });
+  assert.equal(canResumeJob(yt("Error")), true);
+  assert.equal(canResumeJob(yt("Cancelled")), true);
+  assert.equal(canResumeJob(yt("COOKIES?")), true);
+  assert.equal(canResumeJob(yt("Finished", { incompleteTail: true })), true);
+  assert.equal(canResumeJob(yt("Finished")), false, "a complete Finished job is not resumable");
+  assert.equal(canResumeJob(yt("Downloading")), false);
+  assert.equal(canResumeJob({ ...yt("Error"), platform: "twitch" }), false, "resume is YouTube-only");
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: false }), false, "no staging, nothing to resume");
+  assert.equal(canResumeJob({ ...yt("Error"), hasStaging: undefined }), false);
 });

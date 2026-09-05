@@ -815,3 +815,18 @@ export function applyChannelOverrides(channel, { numDescLookbehind, outputDirect
   if (dir) out.output_directory = dir; else delete out.output_directory;
   return { channel: out, error: null };
 }
+
+const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
+
+/**
+ * Whether a job can be resumed (staging preserved, continue where it stopped).
+ * One rule for the details button, the batch bar, and the batch action: the
+ * status must be resumable — or Finished with an incomplete tail — AND the job
+ * must be a YouTube job with staging on disk. The server enforces the same
+ * three conditions (jobs.go resume route); this keeps the UI from offering
+ * what the server will refuse.
+ */
+export function canResumeJob(job) {
+  const statusOk = RESUMABLE_STATUSES.has(job.status) || (job.status === "Finished" && !!job.incompleteTail);
+  return statusOk && job.platform === "youtube" && !!job.hasStaging;
+}

@@ -7,7 +7,7 @@ import { PlayerController, focusPlayerSurface } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob } from "./modules/utils.js";
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
@@ -17,11 +17,6 @@ const GITHUB_REPO_URL = "https://github.com/vampiricwulf/Moombox";
 
 // Status sets for quick action visibility (single source of truth)
 const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Queued", "Muxing", "COOKIES?"]);
-const RESUME_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
-// A Finished job flagged incompleteTail (recording missing tail segments,
-// staging preserved for the resume/retry path) is resumable too, even
-// though "Finished" isn't itself one of the RESUME_STATUSES.
-const canResumeStatus = (job) => RESUME_STATUSES.has(job.status) || (job.status === "Finished" && job.incompleteTail);
 const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
 const MUX_STATUSES = new Set(["Cancelled", "Error"]);
 const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
@@ -2521,7 +2516,7 @@ class MoomboxApp {
 
   updateDetailsButtons(job) {
     const canCancel = CANCEL_STATUSES.has(job.status);
-    const canResume = canResumeStatus(job) && job.platform === "youtube" && job.hasStaging;
+    const canResume = canResumeJob(job);
     const canReinit = REINIT_STATUSES.has(job.status);
     const canMux = MUX_STATUSES.has(job.status) && job.hasSegments;
     const canDelete = DELETE_STATUSES.has(job.status);
@@ -4802,7 +4797,7 @@ class MoomboxApp {
 
     const selectedJobs = this._getSelectedJobs();
     const canCancel = selectedJobs.some(j => CANCEL_STATUSES.has(j.status));
-    const canResume = selectedJobs.some(j => canResumeStatus(j));
+    const canResume = selectedJobs.some(j => canResumeJob(j));
     const canReinit = selectedJobs.some(j => REINIT_STATUSES.has(j.status));
     const canDelete = selectedJobs.some(j => DELETE_STATUSES.has(j.status));
 
@@ -4841,7 +4836,7 @@ class MoomboxApp {
         apiCall = (id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
         break;
       case "resume":
-        targets = eligibleJobs.filter(j => canResumeStatus(j));
+        targets = eligibleJobs.filter(j => canResumeJob(j));
         confirmMsg = `Resume ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/resume`, { method: "POST" });
         break;
