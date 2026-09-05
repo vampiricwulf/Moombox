@@ -147,9 +147,6 @@
 # Advanced: manual visitor data override
 # visitor_data = ""
 
-# Advanced: external POT provider URL (instead of built-in BotGuard)
-# pot_provider_url = ""
-
 # ─── Cookies ──────────────────────────────────────────────────────────────────
 [cookies]
 

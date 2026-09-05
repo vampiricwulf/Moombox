@@ -486,6 +486,8 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | GET | `/api/jobs/{id}` | Get job details |
 | GET | `/api/jobs/{id}/video` | Stream video file (Range requests supported) |
 | GET | `/api/jobs/{id}/chat` | Get chat data |
+| GET | `/api/jobs/{id}/segments` | List segments for a multi-segment recording |
+| GET | `/api/jobs/{id}/trims` | List trim clips created from this job |
 | GET | `/api/formats/{videoId}` | Get available formats for a video |
 | POST | `/api/jobs` | Add new job |
 | POST | `/api/jobs/{id}/cancel` | Cancel job |
@@ -505,6 +507,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | GET | `/api/update/status` | Check for available updates |
 | POST | `/api/update/apply` | Download and apply update |
 | GET | `/api/stats` | Get download statistics |
+| GET | `/api/logs` | Get recent log lines (from the in-memory ring buffer) |
 
 WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `pong`
 

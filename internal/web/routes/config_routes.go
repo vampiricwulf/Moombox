@@ -599,9 +599,6 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		if v, ok := dl["visitor_data"].(string); ok {
 			cfg.Downloader.VisitorData = v
 		}
-		if v, ok := dl["pot_provider_url"].(string); ok {
-			cfg.Downloader.PotProviderURL = v
-		}
 	}
 
 	// Cookies

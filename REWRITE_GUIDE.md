@@ -517,7 +517,6 @@ type DownloaderConfig struct {
     PoToken                string `toml:"po_token,omitempty"`
     VisitorData            string `toml:"visitor_data,omitempty"`
     CookieFile             string `toml:"cookie_file"`
-    PotProviderURL         string `toml:"pot_provider_url,omitempty"`
     DownloadChat           bool   `toml:"download_chat"`
     Prefer60fps            bool   `toml:"prefer_60fps"`
     SegmentRetryDelayCap   int    `toml:"segment_retry_delay_cap"`

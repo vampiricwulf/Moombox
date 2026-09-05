@@ -517,7 +517,6 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | IncompleteStagingExpiryDays | FlexDuration | 7 (days) | `incomplete_staging_expiry_days` | Min: 0, no max. How long a Finished job flagged `incomplete_tail` keeps its staging directory shielded from orphan cleanup (`jobNeedsStaging`/`incompleteStagingExpired`, `internal/worker/orphans.go`). Only the disk-heavy staging shield expires — the flag (the "may be missing its tail" badge) never does: YouTube cannot resume a broadcast days later, so aged interruption staging has no resume value, while the badge stays honest indefinitely. Age is measured from the job's `updated_at`, so any activity restarts the window; unparseable timestamps preserve. After expiry the staging becomes an ordinary orphan-scanner candidate; auto-resume's staging-existence gate then falls to the silent drop and manual Reinitialize remains the recovery. `0` = preserve forever. Read live per scan; not restart-required. |
 | PoToken | string | "" | `po_token` | Manual PO token override |
 | VisitorData | string | "" | `visitor_data` | Manual visitor data override |
-| PotProviderURL | string | "" | `pot_provider_url` | External PO token provider |
 
 #### [cookies]
 
