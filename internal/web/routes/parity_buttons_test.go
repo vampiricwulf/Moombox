@@ -13,7 +13,9 @@ import (
 func TestParityButtonsArePinned(t *testing.T) {
 	html := readEmbeddedModule(t, "public/index.html")
 	settingsJS := readEmbeddedModule(t, "public/modules/settings.js")
-	appJS := readEmbeddedModule(t, "public/app.js")
+	// The details dialog (and its Copy stream URL button) lives in
+	// job-details.js since Arc I extracted JobDetailsController from app.js.
+	detailsJS := readEmbeddedModule(t, "public/modules/job-details.js")
 
 	if !strings.Contains(html, `id="rescan-feeds-btn"`) {
 		t.Error("index.html lacks the rescan-feeds-btn")
@@ -28,19 +30,19 @@ func TestParityButtonsArePinned(t *testing.T) {
 	// would also pass if streamUrl were merely used, never imported): find
 	// the utils.js import line specifically and require streamUrl inside it.
 	utilsImportLine := ""
-	for line := range strings.SplitSeq(appJS, "\n") {
-		if strings.HasPrefix(line, "import {") && strings.Contains(line, `from "./modules/utils.js"`) {
+	for line := range strings.SplitSeq(detailsJS, "\n") {
+		if strings.HasPrefix(line, "import {") && strings.Contains(line, `from "./utils.js"`) {
 			utilsImportLine = line
 			break
 		}
 	}
 	if utilsImportLine == "" {
-		t.Fatal("app.js has no utils.js import line to check")
+		t.Fatal("job-details.js has no utils.js import line to check")
 	}
 	if !strings.Contains(utilsImportLine, "streamUrl") {
-		t.Error("app.js does not import streamUrl from ./modules/utils.js")
+		t.Error("job-details.js does not import streamUrl from ./utils.js")
 	}
-	if !strings.Contains(appJS, `data-copy="${this.escapeHtml(streamUrl(job))}"`) {
+	if !strings.Contains(detailsJS, `data-copy="${this.app.escapeHtml(streamUrl(job))}"`) {
 		t.Error("the details dialog has no Copy stream URL button")
 	}
 }
