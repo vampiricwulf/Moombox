@@ -21,7 +21,7 @@ go test -v -run TestParseDash ./internal/engine/... # Single test
 go vet ./...                                        # Static analysis
 ```
 
-Runtime requires FFmpeg on PATH. CI (`.github/workflows/release.yml`) cross-compiles all 3 platform binaries (Windows x64, Linux x64, Linux arm64) from a single ubuntu-latest job on tag push, reads `RELEASE_NOTES.md` for GitHub release body.
+Runtime requires FFmpeg on PATH. CI: `.github/workflows/ci.yml` runs gofmt/vet/staticcheck/build/`go test ./...` on ubuntu + windows for every push to main and every PR (ubuntu also cross-builds linux/arm64 and runs `node --test web/tests/*.test.mjs`); `.github/workflows/release.yml` cross-compiles all 3 platform binaries (Windows x64, Linux x64, Linux arm64) from a single ubuntu-latest job on tag push and reads `RELEASE_NOTES.md` for the GitHub release body.
 
 ### Profiling (pprof)
 

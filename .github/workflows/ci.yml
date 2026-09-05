@@ -1,0 +1,135 @@
+name: CI
+
+# Build, lint, and test on every push to main and every pull request, on
+# both desktop platforms Moombox ships for. release.yml only runs on tag
+# push and never runs the tests; before this workflow existed the suite
+# ran only on developer machines.
+#
+# Shape:
+#   - matrix over ubuntu-latest + windows-latest (the Windows-only code —
+#     DPAPI cookie reading, Job Objects, cookie profile paths — has tests
+#     that skip everywhere else)
+#   - the same embed-blob cache as release.yml (plus runner.os, because the
+#     sidecar tarball is built per runner); on a miss the sidecar payload
+#     and the pinned Node binaries are rebuilt, ~1 min
+#   - FFmpeg installed so muxer_concatcopy_test.go and probe_params_test.go
+#     stop skipping
+#   - gofmt / vet / staticcheck / build / full `go test`; ubuntu also
+#     cross-builds linux/arm64 and runs the node suite in web/tests
+#
+# staticcheck is ADVISORY (continue-on-error) until Arc C of the 2026-09-04
+# improvement chain removes the seven pre-existing findings; Arc C flips it
+# to a hard gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore embed blob cache
+        # Same inputs as release.yml's key, plus the runner OS: the three
+        # Node binaries are identical everywhere but the sidecar tarball is
+        # produced by the runner's own tar.
+        id: cache-embed
+        uses: actions/cache@v6
+        with:
+          path: |
+            internal/bgutils/embed/sidecar.tar.gz
+            internal/bgutils/embed/node-windows-amd64.gz
+            internal/bgutils/embed/node-linux-amd64.gz
+            internal/bgutils/embed/node-linux-arm64.gz
+          key: embed-${{ runner.os }}-${{ hashFiles('internal/bgutils/embed/version.txt', 'bgutil-sidecar/package-lock.json', 'bgutil-sidecar/build.mjs', 'tools/fetch-node/main.go') }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Build BotGuard sidecar payload
+        # --ignore-scripts: a compromised dep's postinstall could exfiltrate
+        # GITHUB_TOKEN; jsdom + bgutils-js have no install scripts we need.
+        if: steps.cache-embed.outputs.cache-hit != 'true'
+        working-directory: bgutil-sidecar
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts
+          node build.mjs
+
+      - name: Fetch embedded Node binaries (all platforms)
+        if: steps.cache-embed.outputs.cache-hit != 'true'
+        run: go run ./tools/fetch-node
+
+      - name: Install FFmpeg (ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Install FFmpeg (windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install ffmpeg -y --no-progress
+          ffmpeg -version | head -1
+
+      - name: gofmt
+        run: |
+          out="$(gofmt -l ./cmd ./internal ./tools ./web)"
+          if [ -n "$out" ]; then
+            echo "gofmt would reformat:"; echo "$out"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck (advisory until Arc C)
+        continue-on-error: true
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test -count=1 ./...
+
+      - name: Cross-build linux/arm64
+        if: runner.os == 'Linux'
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: arm64
+        run: go build -o /dev/null ./cmd/moombox
+
+      - name: Frontend test suite
+        if: runner.os == 'Linux'
+        working-directory: web/tests
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts
+          node --test ./*.test.mjs

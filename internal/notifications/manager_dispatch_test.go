@@ -9,23 +9,19 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
-// TestManagerWaitTimesOut verifies the 30s timeout branch in Wait()
-// actually fires when senders never complete. We use a sender that
-// blocks on a never-closed channel so the WaitGroup stays held — this
-// is the only way to exercise the timeout path, since DiscordWebhook
-// has its own 15s ctx deadline that would unblock wg.Wait early.
+// TestManagerWaitTimesOut verifies the timeout branch in Wait() fires
+// when senders never complete. The sender blocks on a never-closed
+// channel so the WaitGroup stays held — the only way to exercise the
+// branch, since DiscordWebhook has its own 15s ctx deadline that would
+// unblock wg.Wait early. waitTimeout is injected (50 ms) so the test
+// costs milliseconds instead of the production 30 s.
 // Audit reports/small-packages.md notifications Wait timeout.
 func TestManagerWaitTimesOut(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Wait waits 30s on timeout — skipping in -short mode")
-	}
-
-	hangForever := make(chan struct{}) // intentionally never closed
+	hangForever := make(chan struct{}) // closed only in Cleanup, after Wait timed out
 	t.Cleanup(func() {
-		// We can't easily release the goroutine — it's wedged on a
-		// never-closing channel. The test process exits when the test
-		// completes; the wedged goroutine is collected with it.
-		_ = hangForever
+		// Release the wedged sender so its goroutine exits and the
+		// WaitGroup drains instead of leaking past the test.
+		close(hangForever)
 	})
 
 	hanging := senderFunc(func(string, string, int, []Field, SendOptions) error {
@@ -33,10 +29,12 @@ func TestManagerWaitTimesOut(t *testing.T) {
 		return nil
 	})
 
+	const injected = 50 * time.Millisecond
 	m := &Manager{
-		logger:    testLogger{},
-		semaphore: make(chan struct{}, maxInflightNotifications),
-		targets:   []notificationTarget{{sender: hanging}},
+		logger:      testLogger{},
+		semaphore:   make(chan struct{}, maxInflightNotifications),
+		targets:     []notificationTarget{{sender: hanging}},
+		waitTimeout: injected,
 	}
 	m.Send("t", "d", TypeInfo, nil, SendOptions{})
 
@@ -48,12 +46,37 @@ func TestManagerWaitTimesOut(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(35 * time.Second):
-		t.Fatal("Wait did not return within 35s — timeout branch did not fire")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return within 5s — timeout branch did not fire")
 	}
 	elapsed := time.Since(start)
-	if elapsed < 28*time.Second {
-		t.Errorf("Wait returned in %v — expected ~30s timeout", elapsed)
+	if elapsed < injected {
+		t.Errorf("Wait returned in %v — before the injected %v timeout", elapsed, injected)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Wait took %v — the injected %v timeout was not honoured", elapsed, injected)
+	}
+}
+
+// TestManagerWaitTimeoutDefaults pins the production timeout: NewManager
+// sets 30 s, and a Manager built without the field (the test literals in
+// this package) still waits 30 s rather than zero. Deleting the fallback
+// in effectiveWaitTimeout, or changing defaultWaitTimeout, fails this.
+func TestManagerWaitTimeoutDefaults(t *testing.T) {
+	if defaultWaitTimeout != 30*time.Second {
+		t.Fatalf("defaultWaitTimeout = %v, want 30s", defaultWaitTimeout)
+	}
+	m := NewManager(&config.MoomboxConfig{}, testLogger{})
+	if got := m.effectiveWaitTimeout(); got != defaultWaitTimeout {
+		t.Errorf("NewManager waitTimeout = %v, want %v", got, defaultWaitTimeout)
+	}
+	zero := &Manager{logger: testLogger{}}
+	if got := zero.effectiveWaitTimeout(); got != defaultWaitTimeout {
+		t.Errorf("zero-value Manager effective timeout = %v, want %v", got, defaultWaitTimeout)
+	}
+	explicit := &Manager{logger: testLogger{}, waitTimeout: 7 * time.Second}
+	if got := explicit.effectiveWaitTimeout(); got != 7*time.Second {
+		t.Errorf("explicit waitTimeout = %v, want 7s", got)
 	}
 }
 

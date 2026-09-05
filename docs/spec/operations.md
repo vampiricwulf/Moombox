@@ -180,19 +180,19 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 
 ## CI Pipeline
 
-### Workflow
+### Release Workflow
 
 **File:** `.github/workflows/release.yml`
 **Trigger:** Tag push matching `v*` (e.g., `v2.6.3`)
 **Runner:** `ubuntu-latest` (single job; cross-compiles all platforms from Linux)
 **Permissions:** `contents: write` (to create releases and upload assets)
 
-### Steps
+#### Steps
 
-1. **Checkout** — `actions/checkout@v6`
-2. **Restore embed blob cache** — `actions/cache@v5` keyed by hash of `version.txt` + sidecar `package-lock.json` + `build.mjs` + `tools/fetch-node/main.go`. On cache hit, the sidecar build and Node fetch are skipped entirely (~55s saved). Cache evicts after 7 days of disuse.
-3. **Set up Go** — `actions/setup-go@v6` with version from `go.mod`
-4. **Set up Node** — `actions/setup-node@v6` (only when cache missed)
+1. **Checkout** — `actions/checkout@v7`
+2. **Restore embed blob cache** — `actions/cache@v6` keyed by hash of `version.txt` + sidecar `package-lock.json` + `build.mjs` + `tools/fetch-node/main.go`. On cache hit, the sidecar build and Node fetch are skipped entirely (~55s saved). Cache evicts after 7 days of disuse.
+3. **Set up Go** — `actions/setup-go@v7` with version from `go.mod`
+4. **Set up Node** — `actions/setup-node@v7` (only when cache missed)
 5. **Build BotGuard sidecar payload** — `npm ci --omit=dev --ignore-scripts && node build.mjs` (only when cache missed)
 6. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v24 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files (only when cache missed)
 7. **Generate Windows resources** — Patches `winres.json` with tag version + commit hash via `jq`, runs `go-winres make --arch amd64` in `cmd/moombox/`. `go-winres` runs on any host OS; the resulting `.syso` uses filename build constraints so it's included only under `GOOS=windows`.
@@ -207,6 +207,17 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 16. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 15 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases.
 
 Steps 9–11 are sequential (not parallel). On a 4-vCPU runner each `go build` saturates the CPU, so concurrent builds contend for cores and re-download every module dep three times. Sequential is faster end-to-end; the first build also warms the module cache for the next two.
+
+### Test Workflow
+
+**File:** `.github/workflows/ci.yml`
+**Trigger:** push to `main`, every pull request
+**Runners:** `ubuntu-latest` and `windows-latest` (matrix, `fail-fast: false`) — the Windows-only code paths (DPAPI cookie reading, Job Objects, cookie profile paths) have tests that skip everywhere else
+**Permissions:** `contents: read`; one run per ref (`concurrency` with cancel-in-progress); 45-minute job timeout
+
+Steps, on both runners: checkout → the release workflow's embed-blob cache (key also carries `runner.os`, since the sidecar tarball is produced by the runner's own `tar`) → `setup-go` from `go.mod` → `setup-node` 24 → on a cache miss, the sidecar payload build and `go run ./tools/fetch-node` → FFmpeg (`apt-get` on ubuntu, `choco` on windows) so `muxer_concatcopy_test.go` and `probe_params_test.go` run instead of skipping → `gofmt -l` must print nothing → `go vet ./...` → `staticcheck ./...` → `go build ./...` → `go test -count=1 ./...`. ubuntu additionally cross-builds `linux/arm64` and runs the frontend suite (`npm ci` in `web/tests`, `node --test web/tests/*.test.mjs`).
+
+`staticcheck` is advisory (`continue-on-error`) until Arc C of the 2026-09-04 improvement chain removes the seven pre-existing findings and flips it to a hard gate. The live gates (`MOOMBOX_LIVE_*`) never run in CI: they need YouTube and Twitch.
 
 ### Release Body Format
 
