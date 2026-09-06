@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
@@ -84,7 +85,13 @@ type ChatAPI struct {
 	// signals (unexpected field shapes, parse failures). nil-safe.
 	Logger interface {
 		Debug(msg string, args ...any)
+		Warn(msg string, args ...any)
 	}
+
+	// unknownTiers remembers the header|body color pairs already warned about
+	// so an unmapped tier is reported once per API instance, not per message.
+	unknownTierMu sync.Mutex
+	unknownTiers  map[string]struct{}
 }
 
 // logDebug routes a debug-level diagnostic through the optional Logger.
@@ -92,6 +99,14 @@ type ChatAPI struct {
 func (api *ChatAPI) logDebug(msg string, args ...any) {
 	if api.Logger != nil {
 		api.Logger.Debug(msg, args...)
+	}
+}
+
+// logWarn routes an operator-visible diagnostic through the optional Logger.
+// No-op when Logger is nil.
+func (api *ChatAPI) logWarn(msg string, args ...any) {
+	if api.Logger != nil {
+		api.Logger.Warn(msg, args...)
 	}
 }
 
@@ -425,7 +440,7 @@ func (api *ChatAPI) parseAction(actionMap map[string]any) *ChatMessage {
 	if paid, ok := item["liveChatPaidMessageRenderer"].(map[string]any); ok {
 		msg.Superchat = api.parseSuperChatInfo(paid)
 	} else if sticker, ok := item["liveChatPaidStickerRenderer"].(map[string]any); ok {
-		msg.Superchat = api.parseSuperChatInfo(sticker)
+		msg.Superchat = api.parseSuperStickerInfo(sticker)
 	}
 	if _, ok := item["liveChatMembershipItemRenderer"]; ok {
 		msg.IsMembership = true
@@ -579,33 +594,98 @@ func (api *ChatAPI) parseMessageRenderer(renderer map[string]any) *ChatMessage {
 	return msg
 }
 
+// parseSuperChatInfo reads a liveChatPaidMessageRenderer: the tier comes from
+// headerBackgroundColor (header palette), falling back to bodyBackgroundColor
+// (body palette).
 func (api *ChatAPI) parseSuperChatInfo(paidRenderer map[string]any) *SuperchatInfo {
-	sc := &SuperchatInfo{}
+	return api.parseSuperchatRenderer(paidRenderer, "message", "headerBackgroundColor", "bodyBackgroundColor")
+}
 
-	if purchase, ok := paidRenderer["purchaseAmountText"].(map[string]any); ok {
+// parseSuperStickerInfo reads a liveChatPaidStickerRenderer, which carries no
+// header/body pair: moneyChipBackgroundColor uses the header palette and
+// backgroundColor the body palette.
+func (api *ChatAPI) parseSuperStickerInfo(stickerRenderer map[string]any) *SuperchatInfo {
+	return api.parseSuperchatRenderer(stickerRenderer, "sticker", "moneyChipBackgroundColor", "backgroundColor")
+}
+
+// parseSuperchatRenderer resolves the tier from whichever palette matches and
+// always records the raw colors. An unmatched pair is "Unknown tier" (tier 0)
+// and is warned about once per distinct pair: the archive keeps the hex
+// values, the amount and the kind, which is everything needed to extend the
+// palettes when YouTube changes them.
+func (api *ChatAPI) parseSuperchatRenderer(r map[string]any, kind, headerKey, bodyKey string) *SuperchatInfo {
+	sc := &SuperchatInfo{Kind: kind}
+
+	if purchase, ok := r["purchaseAmountText"].(map[string]any); ok {
 		amountText, _ := purchase["simpleText"].(string)
 		sc.Amount = amountText
 		sc.Currency = extractCurrency(amountText)
 	}
 
-	// Use headerBackgroundColor (not bodyBackgroundColor).
-	// ARGB color values are 32-bit unsigned ints; convert via uint32 so
-	// the lookup key matches superchatTierColors' natural type.
-	if bgColor, ok := paidRenderer["headerBackgroundColor"].(float64); ok {
-		colorVal := uint32(bgColor)
-		if tier, ok := superchatTierColors[colorVal]; ok {
-			sc.Tier = tier.tier
-			sc.Color = tier.color
-		} else {
-			// Unknown bgColor — log at debug so tier-table drift is visible
-			// without polluting the error channel.
-			api.logDebug("chat: unknown superchat headerBackgroundColor", "color", colorVal)
-			sc.Tier = 1
-			sc.Color = "blue"
+	// ARGB color values are 32-bit unsigned ints delivered as float64 by the
+	// JSON decoder; uint32 is the palettes' key type.
+	header, hasHeader := argbField(r, headerKey)
+	body, hasBody := argbField(r, bodyKey)
+	if hasHeader {
+		sc.HeaderColor = argbHex(header)
+	}
+	if hasBody {
+		sc.BodyColor = argbHex(body)
+	}
+
+	if hasHeader {
+		if t, ok := superchatHeaderColors[header]; ok {
+			sc.Tier, sc.Color = t.tier, t.color
+			return sc
+		}
+	}
+	if hasBody {
+		if t, ok := superchatBodyColors[body]; ok {
+			sc.Tier, sc.Color = t.tier, t.color
+			return sc
 		}
 	}
 
+	sc.Tier = 0
+	sc.Color = superchatUnknownTierLabel
+	api.warnUnknownSuperchatTier(sc)
 	return sc
+}
+
+// argbField reads an ARGB color field, reporting whether it was present.
+func argbField(r map[string]any, key string) (uint32, bool) {
+	f, ok := r[key].(float64)
+	if !ok {
+		return 0, false
+	}
+	return uint32(f), true
+}
+
+// argbHex renders an ARGB value as #RRGGBB, dropping the alpha byte.
+func argbHex(c uint32) string {
+	return fmt.Sprintf("#%06X", c&0x00FFFFFF)
+}
+
+// warnUnknownSuperchatTier logs one Warn per distinct header|body pair with
+// every detail the record carries, so tier-table drift is visible in the log
+// without a line per message.
+func (api *ChatAPI) warnUnknownSuperchatTier(sc *SuperchatInfo) {
+	key := sc.HeaderColor + "|" + sc.BodyColor
+	api.unknownTierMu.Lock()
+	if api.unknownTiers == nil {
+		api.unknownTiers = make(map[string]struct{})
+	}
+	_, seen := api.unknownTiers[key]
+	api.unknownTiers[key] = struct{}{}
+	api.unknownTierMu.Unlock()
+	if seen {
+		return
+	}
+	api.logWarn("chat: unknown superchat tier color",
+		"kind", sc.Kind,
+		"headerColor", sc.HeaderColor,
+		"bodyColor", sc.BodyColor,
+		"amount", sc.Amount)
 }
 
 func parseMessageRuns(message map[string]any) []MessagePart {

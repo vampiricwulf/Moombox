@@ -1115,7 +1115,7 @@ The chat API response contains `actions` array items. Replay responses wrap acti
 | `liveChatPaidStickerRenderer` | Super Sticker (monetary donation with sticker). |
 | `liveChatMembershipItemRenderer` | Membership milestone messages. |
 
-Super Chat tier colors are mapped from YouTube's internal `headerBackgroundColor` int64 values to tier numbers (1-7) and color names (blue, cyan, green, yellow, orange, magenta, red).
+Super Chat tiers (1-7; blue, cyan, green, yellow, orange, magenta, red) are resolved from YouTube's ARGB renderer colors against two palettes in `internal/chat/types.go`: the header palette (`headerBackgroundColor` on a paid message, `moneyChipBackgroundColor` on a Super Sticker) and, as a fallback, the body palette (`bodyBackgroundColor` / sticker `backgroundColor`). The raw colors travel with every record as `headerColor` / `bodyColor` (`#RRGGBB`) together with `kind` (`message` or `sticker`). A pair matching neither palette is archived as tier 0 with color `Unknown tier` and logged ONCE per distinct pair at Warn (`chat: unknown superchat tier color`, with kind, both hex colors and the amount) so a palette change can be added from the archive alone. Before 2026-09-05 the single table held the body palette but was looked up with the header value, so every archived Super Chat was recorded as tier 1 blue and every sticker as tier 0.
 
 ### Deduplication
 
