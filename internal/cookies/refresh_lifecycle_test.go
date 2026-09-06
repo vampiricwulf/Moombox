@@ -133,7 +133,8 @@ func TestStartupRefreshPanicDoesNotEscapeStart(t *testing.T) {
 		panic("synthetic panic inside refresh's status-update critical section")
 	})
 
-	awaitOrFail(t, 10*time.Second, "Start", func() { rs.Start(t.Context()) })
+	ctx := t.Context()
+	awaitOrFail(t, 10*time.Second, "Start", func() { rs.Start(ctx) })
 	rs.Stop()
 
 	if got := passes.Load(); got != 1 {
