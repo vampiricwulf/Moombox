@@ -48,11 +48,16 @@ type SuperchatInfo struct {
 	Amount   string `json:"amount"`
 	Currency string `json:"currency"`
 	// Color is the tier's palette name (blue, cyan, green, yellow, orange,
-	// magenta, red) or "Unknown tier" when neither renderer color matched a
-	// palette. Never a silent default.
+	// magenta, red), or empty when neither renderer color matched a palette.
+	// Never a silent default; the actual colors are always in HeaderColor /
+	// BodyColor.
 	Color string `json:"color"`
 	// Tier is YouTube's Super Chat tier, 1 (lowest) to 7; 0 means unknown.
 	Tier int `json:"tier"`
+	// TierLabel is the display-ready form of Tier: "Tier 1".."Tier 7", or
+	// "Unknown tier" when no palette matched, so a reader of the archive never
+	// has to interpret 0.
+	TierLabel string `json:"tierLabel,omitempty"`
 	// Kind names the renderer: "message" (liveChatPaidMessageRenderer) or
 	// "sticker" (liveChatPaidStickerRenderer).
 	Kind string `json:"kind,omitempty"`
@@ -164,5 +169,6 @@ var superchatBodyColors = map[uint32]superchatTier{
 	0xFFE62117: {7, "red"},     // $100-500 (YouTube's cap; the Node table said $199.99)
 }
 
-// superchatUnknownTierLabel is the Color recorded when neither palette matched.
+// superchatUnknownTierLabel is the TierLabel recorded when neither palette
+// matched; the Color is left empty.
 const superchatUnknownTierLabel = "Unknown tier"

@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -93,6 +95,9 @@ func TestSuperchatTierResolvesFromHeaderBackgroundColor(t *testing.T) {
 		if got.Kind != "message" {
 			t.Errorf("header %v: Kind = %q, want %q", tc.header, got.Kind, "message")
 		}
+		if want := fmt.Sprintf("Tier %d", tc.tier); got.TierLabel != want {
+			t.Errorf("header %v: TierLabel = %q, want %q", tc.header, got.TierLabel, want)
+		}
 	}
 	if rec.count() != 0 {
 		t.Errorf("known header colors must not warn; got %d warnings", rec.count())
@@ -119,7 +124,8 @@ func TestSuperchatTierFallsBackToBodyBackgroundColor(t *testing.T) {
 }
 
 // TestSuperchatUnknownColorIsLabelledUnknownTierWithDetails: an unmapped
-// color is recorded as tier 0 "Unknown tier" (never silently tier 1 blue),
+// color is recorded as tier 0 with an EMPTY color name and the label
+// "Unknown tier" (never silently tier 1 blue),
 // the raw colors travel with the record as hex, and ONE warning per distinct
 // color pair carries everything needed to extend the table later.
 func TestSuperchatUnknownColorIsLabelledUnknownTierWithDetails(t *testing.T) {
@@ -127,8 +133,8 @@ func TestSuperchatUnknownColorIsLabelledUnknownTierWithDetails(t *testing.T) {
 	api := newSuperchatTestAPI(rec)
 
 	got := api.parseSuperChatInfo(paidMessage("$3.00", float64(4278190080), float64(4278190081)))
-	if got.Tier != 0 || got.Color != "Unknown tier" {
-		t.Fatalf("unknown: got tier %d %q, want 0 \"Unknown tier\"", got.Tier, got.Color)
+	if got.Tier != 0 || got.Color != "" || got.TierLabel != "Unknown tier" {
+		t.Fatalf("unknown: got tier %d color %q label %q, want 0 / empty / Unknown tier", got.Tier, got.Color, got.TierLabel)
 	}
 	if got.HeaderColor != "#000000" || got.BodyColor != "#000001" {
 		t.Errorf("unknown: raw colors = %q / %q, want #000000 / #000001", got.HeaderColor, got.BodyColor)
@@ -205,7 +211,7 @@ func TestSuperStickerTierResolvesFromMoneyChipAndBackground(t *testing.T) {
 }
 
 // TestSuperStickerWithoutColorsIsUnknownTier: a sticker carrying no color at
-// all is "Unknown tier" and warned about — not a silent tier 0.
+// all is labelled "Unknown tier" and warned about — not a silent tier 0.
 func TestSuperStickerWithoutColorsIsUnknownTier(t *testing.T) {
 	rec := &superchatWarnRecorder{}
 	api := newSuperchatTestAPI(rec)
@@ -213,8 +219,8 @@ func TestSuperStickerWithoutColorsIsUnknownTier(t *testing.T) {
 	got := api.parseSuperStickerInfo(map[string]any{
 		"purchaseAmountText": map[string]any{"simpleText": "¥500"},
 	})
-	if got.Tier != 0 || got.Color != "Unknown tier" {
-		t.Fatalf("colorless sticker: got tier %d %q, want 0 \"Unknown tier\"", got.Tier, got.Color)
+	if got.Tier != 0 || got.Color != "" || got.TierLabel != "Unknown tier" {
+		t.Fatalf("colorless sticker: got tier %d color %q label %q, want 0 / empty / Unknown tier", got.Tier, got.Color, got.TierLabel)
 	}
 	if rec.count() != 1 || rec.warns[0]["kind"] != "sticker" {
 		t.Errorf("colorless sticker must warn once with kind=sticker; warns=%v", rec.warns)
@@ -325,8 +331,8 @@ func TestSuperchatUnknownWarnCarriesRawARGBAndDistinguishesAlpha(t *testing.T) {
 	api := newSuperchatTestAPI(rec)
 
 	got := api.parseSuperChatInfo(paidMessage("$2.00", float64(2147530964), nil)) // 0x8000B8D4
-	if got.Tier != 0 || got.Color != "Unknown tier" {
-		t.Fatalf("alpha-80 light blue must be unknown (palette keys are opaque); got tier %d %q", got.Tier, got.Color)
+	if got.Tier != 0 || got.Color != "" || got.TierLabel != "Unknown tier" {
+		t.Fatalf("alpha-80 light blue must be unknown (palette keys are opaque); got tier %d color %q label %q", got.Tier, got.Color, got.TierLabel)
 	}
 	if got.HeaderColor != "#00B8D4" {
 		t.Errorf("hex drops alpha: got %q, want #00B8D4", got.HeaderColor)
@@ -361,10 +367,36 @@ func TestSuperchatColorGivenAsStringStillResolves(t *testing.T) {
 	}
 
 	got = api.parseSuperChatInfo(paidMessage("$2.00", map[string]any{"odd": true}, nil))
-	if got.Tier != 0 || got.Color != "Unknown tier" || got.HeaderColor != "" {
-		t.Errorf("unparseable color: got tier %d %q hex %q, want 0 Unknown tier and no hex", got.Tier, got.Color, got.HeaderColor)
+	if got.Tier != 0 || got.Color != "" || got.TierLabel != "Unknown tier" || got.HeaderColor != "" {
+		t.Errorf("unparseable color: got tier %d color %q label %q hex %q, want 0 / empty / Unknown tier / no hex", got.Tier, got.Color, got.TierLabel, got.HeaderColor)
 	}
 	if len(rec.debugs) == 0 || rec.debugs[0] != "chat: superchat color field has an unexpected shape" {
 		t.Errorf("unexpected-shape color must be reported at Debug; debugs=%v", rec.debugs)
+	}
+}
+
+// TestSuperchatRecordJSONShape pins the archived shape of a superchat record:
+// a resolved tier carries its palette name and "Tier N"; an unmatched one
+// carries tier 0, an EMPTY color (the real colors are in the hex fields) and
+// the label "Unknown tier". Readers of chat.json depend on these keys.
+func TestSuperchatRecordJSONShape(t *testing.T) {
+	api := newSuperchatTestAPI(&superchatWarnRecorder{})
+
+	resolved, err := json.Marshal(api.parseSuperChatInfo(paidMessage("$2.00", float64(4278237396), float64(4278248959))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResolved := `{"amount":"$2.00","currency":"USD","color":"cyan","tier":2,"tierLabel":"Tier 2","kind":"message","headerColor":"#00B8D4","bodyColor":"#00E5FF"}`
+	if string(resolved) != wantResolved {
+		t.Errorf("resolved record:\n got %s\nwant %s", resolved, wantResolved)
+	}
+
+	unknown, err := json.Marshal(api.parseSuperChatInfo(paidMessage("$3.00", float64(4278190080), nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUnknown := `{"amount":"$3.00","currency":"USD","color":"","tier":0,"tierLabel":"Unknown tier","kind":"message","headerColor":"#000000"}`
+	if string(unknown) != wantUnknown {
+		t.Errorf("unknown record:\n got %s\nwant %s", unknown, wantUnknown)
 	}
 }
