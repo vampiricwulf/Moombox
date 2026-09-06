@@ -47,8 +47,22 @@ type MessagePart struct {
 type SuperchatInfo struct {
 	Amount   string `json:"amount"`
 	Currency string `json:"currency"`
-	Color    string `json:"color"`
-	Tier     int    `json:"tier"`
+	// Color is the tier's palette name (blue, cyan, green, yellow, orange,
+	// magenta, red) or "Unknown tier" when neither renderer color matched a
+	// palette. Never a silent default.
+	Color string `json:"color"`
+	// Tier is YouTube's Super Chat tier, 1 (lowest) to 7; 0 means unknown.
+	Tier int `json:"tier"`
+	// Kind names the renderer: "message" (liveChatPaidMessageRenderer) or
+	// "sticker" (liveChatPaidStickerRenderer).
+	Kind string `json:"kind,omitempty"`
+	// HeaderColor and BodyColor are the raw renderer colors as #RRGGBB (alpha
+	// dropped): headerBackgroundColor / bodyBackgroundColor for a message,
+	// moneyChipBackgroundColor / backgroundColor for a sticker. Recorded
+	// whenever present so an unmapped tier can be added to the palettes later
+	// from the archive alone.
+	HeaderColor string `json:"headerColor,omitempty"`
+	BodyColor   string `json:"bodyColor,omitempty"`
 }
 
 // ChatData is the output format for chat files.
@@ -113,17 +127,42 @@ func resumeModeFor(liveOrUpcoming bool) string {
 	return resumeModeReplay
 }
 
-// Superchat tier color mapping (YouTube's internal ARGB color codes).
-// Keys are uint32 since the raw values are 32-bit unsigned ARGB ints.
-var superchatTierColors = map[uint32]struct {
+// superchatTier is one row of YouTube's Super Chat palette.
+type superchatTier struct {
 	tier  int
 	color string
-}{
-	4280191205: {1, "blue"},
-	4278248959: {2, "cyan"},
-	4280150454: {3, "green"},
-	4294953512: {4, "yellow"},
-	4294278144: {5, "orange"},
-	4293467747: {6, "magenta"},
-	4293271831: {7, "red"},
 }
+
+// superchatHeaderColors keys YouTube's HEADER palette: headerBackgroundColor
+// on liveChatPaidMessageRenderer (confirmed by a real sample and the live
+// log), moneyChipBackgroundColor on liveChatPaidStickerRenderer (inferred
+// from the field name) and endBackgroundColor on the ticker item. Keys are
+// opaque ARGB uint32 exactly as the JSON delivers them; the two palettes are
+// disjoint and every color is looked up in both. USD ranges per row.
+var superchatHeaderColors = map[uint32]superchatTier{
+	0xFF1565C0: {1, "blue"},    // $1-1.99
+	0xFF00B8D4: {2, "cyan"},    // $2-4.99
+	0xFF00BFA5: {3, "green"},   // $5-9.99
+	0xFFFFB300: {4, "yellow"},  // $10-19.99
+	0xFFE65100: {5, "orange"},  // $20-49.99
+	0xFFC2185B: {6, "magenta"}, // $50-99.99
+	0xFFD00000: {7, "red"},     // $100-500
+}
+
+// superchatBodyColors keys the BODY palette: bodyBackgroundColor on a paid
+// message, backgroundColor on a sticker (and startBackgroundColor on the
+// ticker item). These seven values were the ORIGINAL tier table's keys, looked
+// up against the header field they can never equal, so every Super Chat
+// archived before 2026-09-05 fell back to tier 1 blue.
+var superchatBodyColors = map[uint32]superchatTier{
+	0xFF1E88E5: {1, "blue"},    // $1-1.99
+	0xFF00E5FF: {2, "cyan"},    // $2-4.99
+	0xFF1DE9B6: {3, "green"},   // $5-9.99
+	0xFFFFCA28: {4, "yellow"},  // $10-19.99
+	0xFFF57C00: {5, "orange"},  // $20-49.99
+	0xFFE91E63: {6, "magenta"}, // $50-99.99
+	0xFFE62117: {7, "red"},     // $100-500 (YouTube's cap; the Node table said $199.99)
+}
+
+// superchatUnknownTierLabel is the Color recorded when neither palette matched.
+const superchatUnknownTierLabel = "Unknown tier"
