@@ -8,11 +8,16 @@ import (
 // superchatWarnRecorder captures Warn lines WITH their key/value fields, which
 // recordingChatLogger drops. Test-only.
 type superchatWarnRecorder struct {
-	mu    sync.Mutex
-	warns []map[string]any
+	mu     sync.Mutex
+	warns  []map[string]any
+	debugs []string
 }
 
-func (r *superchatWarnRecorder) Debug(string, ...any) {}
+func (r *superchatWarnRecorder) Debug(msg string, _ ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.debugs = append(r.debugs, msg)
+}
 
 func (r *superchatWarnRecorder) Warn(msg string, args ...any) {
 	r.mu.Lock()
@@ -239,5 +244,127 @@ func TestParseMessageRoutesStickersToTheStickerParser(t *testing.T) {
 	}
 	if msg.Superchat.Kind != "sticker" || msg.Superchat.Tier != 2 {
 		t.Errorf("sticker record = kind %q tier %d, want sticker / 2", msg.Superchat.Kind, msg.Superchat.Tier)
+	}
+}
+
+// TestParseActionRoutesPaidMessagesToTheMessageParser is the sibling pin for
+// the branch the bug lived in: a liveChatPaidMessageRenderer item must reach
+// the message parser and resolve its tier from the header.
+func TestParseActionRoutesPaidMessagesToTheMessageParser(t *testing.T) {
+	api := newSuperchatTestAPI(&superchatWarnRecorder{})
+	msg := api.parseAction(map[string]any{
+		"addChatItemAction": map[string]any{"item": map[string]any{
+			"liveChatPaidMessageRenderer": map[string]any{
+				"id":                    "paid-1",
+				"timestampUsec":         "1700000000000000",
+				"authorName":            map[string]any{"simpleText": "fan"},
+				"purchaseAmountText":    map[string]any{"simpleText": "$2.00"},
+				"headerBackgroundColor": float64(4278237396),
+				"bodyBackgroundColor":   float64(4278248959),
+			},
+		}},
+	})
+	if msg == nil || msg.Superchat == nil {
+		t.Fatal("paid message item produced no superchat record")
+	}
+	if msg.Superchat.Kind != "message" || msg.Superchat.Tier != 2 || msg.Superchat.Color != "cyan" {
+		t.Errorf("paid record = kind %q tier %d %q, want message / 2 cyan", msg.Superchat.Kind, msg.Superchat.Tier, msg.Superchat.Color)
+	}
+}
+
+// TestSuperchatUnmappedHeaderWithMappedBodyResolvesFromTheBody: a header the
+// palettes do not know must not hide a body they do — the body resolves the
+// tier, the odd header is still recorded, and nothing is warned.
+func TestSuperchatUnmappedHeaderWithMappedBodyResolvesFromTheBody(t *testing.T) {
+	rec := &superchatWarnRecorder{}
+	api := newSuperchatTestAPI(rec)
+	got := api.parseSuperChatInfo(paidMessage("$10.00", float64(4278190080), float64(4294953512)))
+	if got.Tier != 4 || got.Color != "yellow" {
+		t.Fatalf("got tier %d %q, want 4 yellow", got.Tier, got.Color)
+	}
+	if got.HeaderColor != "#000000" {
+		t.Errorf("odd header must still be recorded; got %q", got.HeaderColor)
+	}
+	if rec.count() != 0 {
+		t.Errorf("a resolved tier must not warn; got %d", rec.count())
+	}
+}
+
+// TestSuperchatPalettesAreCheckedOnBothFields: the palettes are disjoint, so
+// each color is looked up in both. If YouTube (or the sticker mapping we
+// inferred) ever puts a header-palette value in the body field or vice versa,
+// the tier still resolves instead of becoming "Unknown tier".
+func TestSuperchatPalettesAreCheckedOnBothFields(t *testing.T) {
+	rec := &superchatWarnRecorder{}
+	api := newSuperchatTestAPI(rec)
+
+	// Swapped: body-palette blue in the header field, header-palette blue in the body field.
+	got := api.parseSuperChatInfo(paidMessage("$1.00", float64(4280191205), float64(4279592384)))
+	if got.Tier != 1 || got.Color != "blue" {
+		t.Errorf("swapped fields: got tier %d %q, want 1 blue", got.Tier, got.Color)
+	}
+	// Sticker with only a header-palette value in backgroundColor.
+	got = api.parseSuperStickerInfo(map[string]any{
+		"purchaseAmountText": map[string]any{"simpleText": "$5.00"},
+		"backgroundColor":    float64(4278239141),
+	})
+	if got.Tier != 3 || got.Color != "green" {
+		t.Errorf("sticker header-palette background: got tier %d %q, want 3 green", got.Tier, got.Color)
+	}
+	if rec.count() != 0 {
+		t.Errorf("resolved tiers must not warn; got %d", rec.count())
+	}
+}
+
+// TestSuperchatUnknownWarnCarriesRawARGBAndDistinguishesAlpha: the hex drops
+// the alpha byte, so two unknown values that differ only in alpha look alike
+// in HeaderColor. The warning must carry the raw ARGB decimals and the dedup
+// must treat them as distinct signals.
+func TestSuperchatUnknownWarnCarriesRawARGBAndDistinguishesAlpha(t *testing.T) {
+	rec := &superchatWarnRecorder{}
+	api := newSuperchatTestAPI(rec)
+
+	got := api.parseSuperChatInfo(paidMessage("$2.00", float64(2147530964), nil)) // 0x8000B8D4
+	if got.Tier != 0 || got.Color != "Unknown tier" {
+		t.Fatalf("alpha-80 light blue must be unknown (palette keys are opaque); got tier %d %q", got.Tier, got.Color)
+	}
+	if got.HeaderColor != "#00B8D4" {
+		t.Errorf("hex drops alpha: got %q, want #00B8D4", got.HeaderColor)
+	}
+	if rec.count() != 1 {
+		t.Fatalf("want one warning, got %d", rec.count())
+	}
+	if rec.warns[0]["headerARGB"] != uint32(2147530964) {
+		t.Errorf("warn headerARGB = %v (%T), want uint32 2147530964", rec.warns[0]["headerARGB"], rec.warns[0]["headerARGB"])
+	}
+	if _, ok := rec.warns[0]["bodyARGB"]; !ok {
+		t.Errorf("warn must carry bodyARGB even when the body is absent; fields=%v", rec.warns[0])
+	}
+
+	api.parseSuperChatInfo(paidMessage("$2.00", float64(2130753748), nil)) // 0x7F00B8D4: same hex, different alpha
+	if rec.count() != 2 {
+		t.Errorf("a different raw ARGB is a distinct unknown; want 2 warnings, got %d", rec.count())
+	}
+}
+
+// TestSuperchatColorGivenAsStringStillResolves: this API already sees numeric
+// fields flip to strings (videoOffsetTimeMsec); a color delivered as a decimal
+// string must resolve like the number. A value of another type is recorded as
+// absent and reported at Debug with the raw value, never silently.
+func TestSuperchatColorGivenAsStringStillResolves(t *testing.T) {
+	rec := &superchatWarnRecorder{}
+	api := newSuperchatTestAPI(rec)
+
+	got := api.parseSuperChatInfo(paidMessage("$2.00", "4278237396", nil))
+	if got.Tier != 2 || got.Color != "cyan" || got.HeaderColor != "#00B8D4" {
+		t.Errorf("string color: got tier %d %q hex %q, want 2 cyan #00B8D4", got.Tier, got.Color, got.HeaderColor)
+	}
+
+	got = api.parseSuperChatInfo(paidMessage("$2.00", map[string]any{"odd": true}, nil))
+	if got.Tier != 0 || got.Color != "Unknown tier" || got.HeaderColor != "" {
+		t.Errorf("unparseable color: got tier %d %q hex %q, want 0 Unknown tier and no hex", got.Tier, got.Color, got.HeaderColor)
+	}
+	if len(rec.debugs) == 0 || rec.debugs[0] != "chat: superchat color field has an unexpected shape" {
+		t.Errorf("unexpected-shape color must be reported at Debug; debugs=%v", rec.debugs)
 	}
 }

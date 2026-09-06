@@ -602,16 +602,22 @@ func (api *ChatAPI) parseSuperChatInfo(paidRenderer map[string]any) *SuperchatIn
 }
 
 // parseSuperStickerInfo reads a liveChatPaidStickerRenderer, which carries no
-// header/body pair: moneyChipBackgroundColor uses the header palette and
-// backgroundColor the body palette.
+// header/body pair. From the field names (youtubei.js confirms the names, not
+// the palettes) moneyChipBackgroundColor is taken as the header-palette color
+// and backgroundColor as the body-palette color; because every color is
+// looked up in both palettes, the tier resolves even if that inference is
+// backwards.
 func (api *ChatAPI) parseSuperStickerInfo(stickerRenderer map[string]any) *SuperchatInfo {
 	return api.parseSuperchatRenderer(stickerRenderer, "sticker", "moneyChipBackgroundColor", "backgroundColor")
 }
 
 // parseSuperchatRenderer resolves the tier from whichever palette matches and
-// always records the raw colors. An unmatched pair is "Unknown tier" (tier 0)
-// and is warned about once per distinct pair: the archive keeps the hex
-// values, the amount and the kind, which is everything needed to extend the
+// always records the raw colors. Each color is looked up in BOTH palettes (they
+// are disjoint), so a header-palette value arriving in a body field, or the
+// sticker mapping being other than inferred, still resolves. An unmatched pair
+// is "Unknown tier" (tier 0) and is warned about once per distinct raw pair:
+// the archive keeps the hex values, the amount and the kind, and the warning
+// adds the raw ARGB decimals, which is everything needed to extend the
 // palettes when YouTube changes them.
 func (api *ChatAPI) parseSuperchatRenderer(r map[string]any, kind, headerKey, bodyKey string) *SuperchatInfo {
 	sc := &SuperchatInfo{Kind: kind}
@@ -622,10 +628,8 @@ func (api *ChatAPI) parseSuperchatRenderer(r map[string]any, kind, headerKey, bo
 		sc.Currency = extractCurrency(amountText)
 	}
 
-	// ARGB color values are 32-bit unsigned ints delivered as float64 by the
-	// JSON decoder; uint32 is the palettes' key type.
-	header, hasHeader := argbField(r, headerKey)
-	body, hasBody := argbField(r, bodyKey)
+	header, hasHeader := api.argbField(r, headerKey)
+	body, hasBody := api.argbField(r, bodyKey)
 	if hasHeader {
 		sc.HeaderColor = argbHex(header)
 	}
@@ -634,13 +638,13 @@ func (api *ChatAPI) parseSuperchatRenderer(r map[string]any, kind, headerKey, bo
 	}
 
 	if hasHeader {
-		if t, ok := superchatHeaderColors[header]; ok {
+		if t, ok := lookupSuperchatTier(header); ok {
 			sc.Tier, sc.Color = t.tier, t.color
 			return sc
 		}
 	}
 	if hasBody {
-		if t, ok := superchatBodyColors[body]; ok {
+		if t, ok := lookupSuperchatTier(body); ok {
 			sc.Tier, sc.Color = t.tier, t.color
 			return sc
 		}
@@ -648,17 +652,51 @@ func (api *ChatAPI) parseSuperchatRenderer(r map[string]any, kind, headerKey, bo
 
 	sc.Tier = 0
 	sc.Color = superchatUnknownTierLabel
-	api.warnUnknownSuperchatTier(sc)
+	api.warnUnknownSuperchatTier(sc, header, hasHeader, body, hasBody)
 	return sc
 }
 
-// argbField reads an ARGB color field, reporting whether it was present.
-func argbField(r map[string]any, key string) (uint32, bool) {
-	f, ok := r[key].(float64)
-	if !ok {
+// lookupSuperchatTier resolves one ARGB value against the header palette, then
+// the body palette. The palettes are disjoint, so the order cannot change the
+// answer; it only matches the common case first.
+func lookupSuperchatTier(c uint32) (superchatTier, bool) {
+	if t, ok := superchatHeaderColors[c]; ok {
+		return t, true
+	}
+	if t, ok := superchatBodyColors[c]; ok {
+		return t, true
+	}
+	return superchatTier{}, false
+}
+
+// argbField reads an ARGB color field, reporting whether a usable value was
+// present. The JSON decoder delivers YouTube's 32-bit unsigned ints as float64;
+// this API has also seen numeric fields flip to decimal strings
+// (videoOffsetTimeMsec), so a string is parsed too. Any other non-nil shape is
+// reported at Debug with the raw value and treated as absent.
+func (api *ChatAPI) argbField(r map[string]any, key string) (uint32, bool) {
+	v, present := r[key]
+	if !present || v == nil {
 		return 0, false
 	}
-	return uint32(f), true
+	switch c := v.(type) {
+	case float64:
+		if c < 0 || c > 0xFFFFFFFF {
+			api.logDebug("chat: superchat color field has an unexpected shape", "field", key, "value", c)
+			return 0, false
+		}
+		return uint32(int64(c)), true
+	case string:
+		n, err := strconv.ParseUint(c, 10, 32)
+		if err != nil {
+			api.logDebug("chat: superchat color field has an unexpected shape", "field", key, "value", c)
+			return 0, false
+		}
+		return uint32(n), true
+	default:
+		api.logDebug("chat: superchat color field has an unexpected shape", "field", key, "value", fmt.Sprintf("%v", v))
+		return 0, false
+	}
 }
 
 // argbHex renders an ARGB value as #RRGGBB, dropping the alpha byte.
@@ -666,11 +704,21 @@ func argbHex(c uint32) string {
 	return fmt.Sprintf("#%06X", c&0x00FFFFFF)
 }
 
-// warnUnknownSuperchatTier logs one Warn per distinct header|body pair with
-// every detail the record carries, so tier-table drift is visible in the log
-// without a line per message.
-func (api *ChatAPI) warnUnknownSuperchatTier(sc *SuperchatInfo) {
-	key := sc.HeaderColor + "|" + sc.BodyColor
+// warnUnknownSuperchatTier logs one Warn per distinct raw header|body pair
+// (presence included, alpha included — the hex form drops alpha, so two
+// values that render alike can still be different signals) with every detail
+// the record carries, so tier-table drift is visible in the log without a
+// line per message.
+func (api *ChatAPI) warnUnknownSuperchatTier(sc *SuperchatInfo, header uint32, hasHeader bool, body uint32, hasBody bool) {
+	var headerRaw, bodyRaw any
+	if hasHeader {
+		headerRaw = header
+	}
+	if hasBody {
+		bodyRaw = body
+	}
+	key := fmt.Sprintf("%v|%v", headerRaw, bodyRaw)
+
 	api.unknownTierMu.Lock()
 	if api.unknownTiers == nil {
 		api.unknownTiers = make(map[string]struct{})
@@ -685,6 +733,8 @@ func (api *ChatAPI) warnUnknownSuperchatTier(sc *SuperchatInfo) {
 		"kind", sc.Kind,
 		"headerColor", sc.HeaderColor,
 		"bodyColor", sc.BodyColor,
+		"headerARGB", headerRaw,
+		"bodyARGB", bodyRaw,
 		"amount", sc.Amount)
 }
 
