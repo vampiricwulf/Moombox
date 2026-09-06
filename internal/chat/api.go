@@ -88,10 +88,18 @@ type ChatAPI struct {
 		Warn(msg string, args ...any)
 	}
 
-	// unknownTiers remembers the header|body color pairs already warned about
-	// so an unmapped tier is reported once per API instance, not per message.
+	// unknownTiers remembers the raw color pairs already warned about so an
+	// unmapped tier is reported once per API instance, not per message.
 	unknownTierMu sync.Mutex
-	unknownTiers  map[string]struct{}
+	unknownTiers  map[superchatColorPair]struct{}
+}
+
+// superchatColorPair is the dedup key for unknown-tier warnings: the raw ARGB
+// values with their presence, so alpha-only differences and a missing field
+// are distinct signals (the #RRGGBB form drops alpha).
+type superchatColorPair struct {
+	header, body       uint32
+	hasHeader, hasBody bool
 }
 
 // logDebug routes a debug-level diagnostic through the optional Logger.
@@ -595,31 +603,26 @@ func (api *ChatAPI) parseMessageRenderer(renderer map[string]any) *ChatMessage {
 }
 
 // parseSuperChatInfo reads a liveChatPaidMessageRenderer: the tier comes from
-// headerBackgroundColor (header palette), falling back to bodyBackgroundColor
-// (body palette).
+// headerBackgroundColor, falling back to bodyBackgroundColor.
 func (api *ChatAPI) parseSuperChatInfo(paidRenderer map[string]any) *SuperchatInfo {
 	return api.parseSuperchatRenderer(paidRenderer, "message", "headerBackgroundColor", "bodyBackgroundColor")
 }
 
 // parseSuperStickerInfo reads a liveChatPaidStickerRenderer, which carries no
 // header/body pair. From the field names (youtubei.js confirms the names, not
-// the palettes) moneyChipBackgroundColor is taken as the header-palette color
-// and backgroundColor as the body-palette color; because every color is
-// looked up in both palettes, the tier resolves even if that inference is
-// backwards.
+// the colors) moneyChipBackgroundColor is taken as the header color and
+// backgroundColor as the body color; the table holds both rows of every tier,
+// so the tier resolves even if that inference is backwards.
 func (api *ChatAPI) parseSuperStickerInfo(stickerRenderer map[string]any) *SuperchatInfo {
 	return api.parseSuperchatRenderer(stickerRenderer, "sticker", "moneyChipBackgroundColor", "backgroundColor")
 }
 
-// parseSuperchatRenderer resolves the tier from whichever palette matches and
-// always records the raw colors. Each color is looked up in BOTH palettes (they
-// are disjoint), so a header-palette value arriving in a body field, or the
-// sticker mapping being other than inferred, still resolves. An unmatched pair
-// is tier 0 with the color name gray, and is warned about once per distinct
-// raw pair:
-// the archive keeps the hex values, the amount and the kind, and the warning
-// adds the raw ARGB decimals, which is everything needed to extend the
-// palettes when YouTube changes them.
+// parseSuperchatRenderer resolves the tier from whichever renderer color the
+// table knows (header field first) and always records the raw colors. An
+// unmatched pair is tier 0 with the color name gray and is warned about once
+// per distinct raw pair. The archive keeps the hex values, the amount and the
+// kind; the warning adds the raw ARGB decimals. Together that is everything
+// needed to extend the table when YouTube changes its colors.
 func (api *ChatAPI) parseSuperchatRenderer(r map[string]any, kind, headerKey, bodyKey string) *SuperchatInfo {
 	sc := &SuperchatInfo{Kind: kind}
 
@@ -639,37 +642,24 @@ func (api *ChatAPI) parseSuperchatRenderer(r map[string]any, kind, headerKey, bo
 	}
 
 	if hasHeader {
-		if t, ok := lookupSuperchatTier(header); ok {
+		if t, ok := superchatTierColors[header]; ok {
 			sc.Tier, sc.Color = t.tier, t.color
 			return sc
 		}
 	}
 	if hasBody {
-		if t, ok := lookupSuperchatTier(body); ok {
+		if t, ok := superchatTierColors[body]; ok {
 			sc.Tier, sc.Color = t.tier, t.color
 			return sc
 		}
 	}
 
-	// Unknown: tier 0 is the marker and the color name is gray (no palette row
+	// Unknown: tier 0 is the marker and the color name is gray (no table row
 	// uses it); the real colors are in HeaderColor / BodyColor.
 	sc.Tier = 0
 	sc.Color = superchatUnknownColor
 	api.warnUnknownSuperchatTier(sc, header, hasHeader, body, hasBody)
 	return sc
-}
-
-// lookupSuperchatTier resolves one ARGB value against the header palette, then
-// the body palette. The palettes are disjoint, so the order cannot change the
-// answer; it only matches the common case first.
-func lookupSuperchatTier(c uint32) (superchatTier, bool) {
-	if t, ok := superchatHeaderColors[c]; ok {
-		return t, true
-	}
-	if t, ok := superchatBodyColors[c]; ok {
-		return t, true
-	}
-	return superchatTier{}, false
 }
 
 // argbField reads an ARGB color field, reporting whether a usable value was
@@ -720,11 +710,11 @@ func (api *ChatAPI) warnUnknownSuperchatTier(sc *SuperchatInfo, header uint32, h
 	if hasBody {
 		bodyRaw = body
 	}
-	key := fmt.Sprintf("%v|%v", headerRaw, bodyRaw)
+	key := superchatColorPair{header: header, body: body, hasHeader: hasHeader, hasBody: hasBody}
 
 	api.unknownTierMu.Lock()
 	if api.unknownTiers == nil {
-		api.unknownTiers = make(map[string]struct{})
+		api.unknownTiers = make(map[superchatColorPair]struct{})
 	}
 	_, seen := api.unknownTiers[key]
 	api.unknownTiers[key] = struct{}{}

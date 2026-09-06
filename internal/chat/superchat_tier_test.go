@@ -119,12 +119,12 @@ func TestSuperchatTierFallsBackToBodyBackgroundColor(t *testing.T) {
 	}
 }
 
-// TestSuperchatUnknownColorIsLabelledUnknownTierWithDetails: an unmapped
+// TestSuperchatUnknownColorIsTierZeroGrayWithDetails: an unmapped
 // color is recorded as tier 0 with the color name "gray" (never silently tier
 // 1 blue),
 // the raw colors travel with the record as hex, and ONE warning per distinct
 // color pair carries everything needed to extend the table later.
-func TestSuperchatUnknownColorIsLabelledUnknownTierWithDetails(t *testing.T) {
+func TestSuperchatUnknownColorIsTierZeroGrayWithDetails(t *testing.T) {
 	rec := &superchatWarnRecorder{}
 	api := newSuperchatTestAPI(rec)
 
@@ -206,9 +206,9 @@ func TestSuperStickerTierResolvesFromMoneyChipAndBackground(t *testing.T) {
 	}
 }
 
-// TestSuperStickerWithoutColorsIsUnknownTier: a sticker carrying no color at
+// TestSuperStickerWithoutColorsIsTierZeroGray: a sticker carrying no color at
 // all is tier 0 with color "gray" and warned about — not a silent tier 0.
-func TestSuperStickerWithoutColorsIsUnknownTier(t *testing.T) {
+func TestSuperStickerWithoutColorsIsTierZeroGray(t *testing.T) {
 	rec := &superchatWarnRecorder{}
 	api := newSuperchatTestAPI(rec)
 
@@ -292,26 +292,26 @@ func TestSuperchatUnmappedHeaderWithMappedBodyResolvesFromTheBody(t *testing.T) 
 	}
 }
 
-// TestSuperchatPalettesAreCheckedOnBothFields: the palettes are disjoint, so
-// each color is looked up in both. If YouTube (or the sticker mapping we
-// inferred) ever puts a header-palette value in the body field or vice versa,
-// the tier still resolves instead of becoming unknown.
-func TestSuperchatPalettesAreCheckedOnBothFields(t *testing.T) {
+// TestSuperchatTableIsCheckedOnBothFields: the table holds header and body
+// rows and each field is looked up against all of it. If YouTube (or the
+// sticker mapping we inferred) ever puts a header color in the body field or
+// vice versa, the tier still resolves instead of becoming unknown.
+func TestSuperchatTableIsCheckedOnBothFields(t *testing.T) {
 	rec := &superchatWarnRecorder{}
 	api := newSuperchatTestAPI(rec)
 
-	// Swapped: body-palette blue in the header field, header-palette blue in the body field.
+	// Swapped: body blue in the header field, header blue in the body field.
 	got := api.parseSuperChatInfo(paidMessage("$1.00", float64(4280191205), float64(4279592384)))
 	if got.Tier != 1 || got.Color != "blue" {
 		t.Errorf("swapped fields: got tier %d %q, want 1 blue", got.Tier, got.Color)
 	}
-	// Sticker with only a header-palette value in backgroundColor.
+	// Sticker with only a header color in backgroundColor.
 	got = api.parseSuperStickerInfo(map[string]any{
 		"purchaseAmountText": map[string]any{"simpleText": "$5.00"},
 		"backgroundColor":    float64(4278239141),
 	})
 	if got.Tier != 3 || got.Color != "green" {
-		t.Errorf("sticker header-palette background: got tier %d %q, want 3 green", got.Tier, got.Color)
+		t.Errorf("sticker header-color background: got tier %d %q, want 3 green", got.Tier, got.Color)
 	}
 	if rec.count() != 0 {
 		t.Errorf("resolved tiers must not warn; got %d", rec.count())
@@ -394,5 +394,38 @@ func TestSuperchatRecordJSONShape(t *testing.T) {
 	wantUnknown := `{"amount":"$3.00","currency":"USD","color":"gray","tier":0,"kind":"message","headerColor":"#000000"}`
 	if string(unknown) != wantUnknown {
 		t.Errorf("unknown record:\n got %s\nwant %s", unknown, wantUnknown)
+	}
+}
+
+// TestSuperchatTierTableHasAHeaderAndABodyColorPerTier pins the shape of the
+// single palette table: exactly two opaque colors per tier 1..7 (header and
+// body), one name per tier, and no row may use the unknown color "gray" —
+// the invariant that makes gray unambiguous.
+func TestSuperchatTierTableHasAHeaderAndABodyColorPerTier(t *testing.T) {
+	counts := map[int]int{}
+	names := map[int]string{}
+	for argb, row := range superchatTierColors {
+		if row.tier < 1 || row.tier > 7 {
+			t.Errorf("%08X: tier %d out of range 1..7", argb, row.tier)
+		}
+		counts[row.tier]++
+		if prev, ok := names[row.tier]; ok && prev != row.color {
+			t.Errorf("tier %d has two names: %q and %q", row.tier, prev, row.color)
+		}
+		names[row.tier] = row.color
+		if row.color == superchatUnknownColor {
+			t.Errorf("%08X: a palette row uses the unknown color %q", argb, row.color)
+		}
+		if argb>>24 != 0xFF {
+			t.Errorf("%08X: palette keys are opaque (alpha FF)", argb)
+		}
+	}
+	for tier := 1; tier <= 7; tier++ {
+		if counts[tier] != 2 {
+			t.Errorf("tier %d has %d colors, want 2 (header + body)", tier, counts[tier])
+		}
+	}
+	if len(superchatTierColors) != 14 {
+		t.Errorf("table has %d rows, want 14", len(superchatTierColors))
 	}
 }
