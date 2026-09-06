@@ -167,9 +167,7 @@ func (m *StatsDialogModel) writeStorage(b *strings.Builder) {
 	fmt.Fprintf(b, "%s\n", HeaderStyle.Render("Storage"))
 
 	used := int64(d.Total) - int64(d.Free)
-	if used < 0 {
-		used = 0
-	}
+	used = max(used, 0)
 	bar := m.bar
 	switch d.WarnLevel {
 	case "critical":

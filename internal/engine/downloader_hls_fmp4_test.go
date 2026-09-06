@@ -252,7 +252,7 @@ func TestHlsVod_FMP4InitWrittenFirst(t *testing.T) {
 		var b strings.Builder
 		b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n")
 		b.WriteString(`#EXT-X-MAP:URI="init0.mp4"` + "\n")
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			fmt.Fprintf(&b, "#EXTINF:1.000,\nseg%d.mp4\n", i)
 		}
 		b.WriteString("#EXT-X-ENDLIST\n")

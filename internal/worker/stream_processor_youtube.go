@@ -177,9 +177,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		info := &youtube.VideoInfo{ScheduledStartTime: scheduledStartTime}
 		interval := sp.calculateProbeInterval(info)
 		jitterMax := interval / 10
-		if jitterMax < time.Second {
-			jitterMax = time.Second
-		}
+		jitterMax = max(jitterMax, time.Second)
 		jitter := time.Duration(rand.Int63n(int64(jitterMax)))
 
 		// B2: Race sleep against chat surge

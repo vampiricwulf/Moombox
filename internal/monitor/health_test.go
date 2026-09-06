@@ -42,7 +42,7 @@ func TestHealthTrackerFiresOnceAtThreshold(t *testing.T) {
 	}
 	boom := errors.New("boom")
 
-	for i := 0; i < unhealthyThreshold-1; i++ {
+	for range unhealthyThreshold - 1 {
 		h.recordError("ch1", boom)
 	}
 	if fires != 0 {
@@ -60,7 +60,7 @@ func TestHealthTrackerFiresOnceAtThreshold(t *testing.T) {
 
 	// Recovery then a fresh streak re-arms the callback.
 	h.recordSuccess("ch1")
-	for i := 0; i < unhealthyThreshold; i++ {
+	for range unhealthyThreshold {
 		h.recordError("ch1", boom)
 	}
 	if fires != 2 {

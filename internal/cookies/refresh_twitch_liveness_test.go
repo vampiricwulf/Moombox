@@ -253,9 +253,7 @@ func TestTwitchFallbackSkipsTheStartupCheck(t *testing.T) {
 	rs := NewRefreshService(jarWithTwitchAuth(t), 0, nopLogger{})
 	rs.TwitchFallbackLiveness = func(context.Context) (bool, bool) { called.Add(1); return true, true }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	rs.Start(ctx)
+	rs.Start(t.Context())
 	rs.Stop()
 
 	if got := called.Load(); got != 0 {

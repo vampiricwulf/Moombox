@@ -168,9 +168,7 @@ func hlsReloadDelay(lastSegDur, targetDur float64, hadNewSegments bool, elapsed,
 		interval = targetDur / 2
 	}
 	remain := time.Duration(interval*float64(unit)) - elapsed
-	if remain < 0 {
-		remain = 0
-	}
+	remain = max(remain, 0)
 	return remain
 }
 

@@ -107,11 +107,8 @@ func TestPeriodicLoopPicksUpAProfileThatAppearsAtRuntime(t *testing.T) {
 	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { verified.Add(1); return true, nil }
 	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	const interval = 25 * time.Millisecond
-	s.StartPeriodicRefresh(ctx, interval)
+	s.StartPeriodicRefresh(t.Context(), interval)
 
 	// --- Side 1: no profile yet. Many ticks, no work, nothing to show a user.
 	time.Sleep(10 * interval)
@@ -195,11 +192,9 @@ func TestPeriodicLoopKeepsItsBrowserWhenTheFlagFlipsOff(t *testing.T) {
 
 	t.Run("the running loop", func(t *testing.T) {
 		s, log, verified := newService(t)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
 		const interval = 20 * time.Millisecond
-		s.StartPeriodicRefresh(ctx, interval)
+		s.StartPeriodicRefresh(t.Context(), interval)
 		// Wait for EITHER branch to show itself, so a loop that took the wrong
 		// one fails on the assertion that names the policy rather than on a
 		// liveness timeout that names nothing.

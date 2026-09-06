@@ -259,9 +259,7 @@ func TestScheduler_Converges300(t *testing.T) {
 		addFeedItemRow(t, db, chID, id, base.Add(time.Duration(i)*time.Hour).Format(time.RFC3339))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go s.Run(ctx)
+	go s.Run(t.Context())
 
 	// First sweep: exactly M=3 admitted.
 	s.Wake()

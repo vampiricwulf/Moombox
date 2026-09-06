@@ -484,7 +484,7 @@ func TestStallForPossibleResumeNoStallSentinel(t *testing.T) {
 		var calls int
 		d.MayResume = func() bool { calls++; return true }
 
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			if d.stallForPossibleResume() {
 				t.Fatalf("call %d: stallForPossibleResume() = true, want false", i)
 			}

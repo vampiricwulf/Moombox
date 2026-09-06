@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -115,12 +116,7 @@ func recordingProbe(probed *[]string) VideoProbeFunc {
 
 // contains reports whether s appears in list.
 func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 // addFinishedJob inserts a minimal terminal (Finished) job row keyed by

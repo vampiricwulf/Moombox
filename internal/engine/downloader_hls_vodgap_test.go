@@ -26,7 +26,7 @@ func TestHlsVodParallel_EarlyGapBoundedAndSkipped(t *testing.T) {
 	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
 		var b strings.Builder
 		b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n")
-		for i := 0; i < total; i++ {
+		for i := range total {
 			fmt.Fprintf(&b, "#EXTINF:1.0,\nseg%d.ts\n", i)
 		}
 		b.WriteString("#EXT-X-ENDLIST\n")
@@ -73,7 +73,7 @@ func TestHlsVodParallel_EarlyGapBoundedAndSkipped(t *testing.T) {
 	}
 	// Expect every segment except the gone one, in order.
 	var want strings.Builder
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if i == goneIdx {
 			continue
 		}
@@ -114,7 +114,7 @@ func TestHlsVodParallel_TrailingGapClosed(t *testing.T) {
 	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, r *http.Request) {
 		var b strings.Builder
 		b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n")
-		for i := 0; i < total; i++ {
+		for i := range total {
 			fmt.Fprintf(&b, "#EXTINF:1.0,\nseg%d.ts\n", i)
 		}
 		b.WriteString("#EXT-X-ENDLIST\n")

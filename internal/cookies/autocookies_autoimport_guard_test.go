@@ -213,9 +213,7 @@ func TestPeriodicTickWithABrowserIgnoresTheImportGuard(t *testing.T) {
 	}
 	t.Cleanup(func() { refreshChromiumCookies = realChromium })
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s.StartPeriodicRefresh(ctx, 20*time.Millisecond)
+	s.StartPeriodicRefresh(t.Context(), 20*time.Millisecond)
 
 	if !waitFor(func() bool { return launched.Load() > 0 }, 10*time.Second) {
 		t.Fatalf("the periodic timer never ran a browser refresh on a host that HAS a browser and a "+

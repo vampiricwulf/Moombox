@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -135,13 +136,7 @@ func TestCleanChromiumLockFiles(t *testing.T) {
 	dir := t.TempDir()
 
 	const freshName = "SingletonSocket" // must be a member of chromiumLockFiles
-	foundFreshName := false
-	for _, name := range chromiumLockFiles {
-		if name == freshName {
-			foundFreshName = true
-			break
-		}
-	}
+	foundFreshName := slices.Contains(chromiumLockFiles, freshName)
 	if !foundFreshName {
 		t.Fatalf("test fixture assumes %q is in chromiumLockFiles = %v — update the fixture", freshName, chromiumLockFiles)
 	}

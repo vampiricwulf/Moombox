@@ -163,7 +163,7 @@ func TestTightenCookieDirOncePermanentFailureCostIsOnePerWrite(t *testing.T) {
 	})
 
 	const writes = 3
-	for i := 0; i < writes; i++ {
+	for range writes {
 		tightenCookieDirOnce(dir)
 		awaitSignal(t, done, "the DACL apply")
 		awaitSettled(t, dir)
