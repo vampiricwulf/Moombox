@@ -107,7 +107,7 @@ func TestHlsLive_TwitchStitchedAdSkipped(t *testing.T) {
 		var b strings.Builder
 		b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n")
 		b.WriteString(`#EXT-X-DATERANGE:ID="stitched-ad-9",CLASS="twitch-stitched-ad",START-DATE="2026-07-01T00:00:04.000Z",DURATION=4.000,X-TV-TWITCH-AD-POD-LENGTH="2"` + "\n")
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			fmt.Fprintf(&b, "#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:%02d.000Z\n", i*2)
 			name := fmt.Sprintf("seg%d", i)
 			if i == 2 || i == 3 {

@@ -123,7 +123,7 @@ func TestFeedScope_QueryPlan(t *testing.T) {
 	vid := func(i int) string {
 		return "v" + strings.Repeat("x", 2) + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)) + string(rune('a'+(i/676)%26))
 	}
-	for i := 0; i < 1500; i++ { // enough rows that a bad plan is visible
+	for i := range 1500 { // enough rows that a bad plan is visible
 		db.UpsertFeedItem(fi("UC1", vid(i),
 			time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i)*time.Hour).Format(time.RFC3339),
 			"coarse", "videos", "unknown", i))
@@ -135,7 +135,7 @@ func TestFeedScope_QueryPlan(t *testing.T) {
 	// prefers a full scan over the non-covering status index (empirically
 	// verified: same query against this exact all-'unknown' population always
 	// plans as SCAN, regardless of SQL phrasing — this is not a planner bug).
-	for i := 0; i < 1450; i++ {
+	for i := range 1450 {
 		db.ApplyProbeToFeedItem("UC1", vid(i), "vod", "T", "2026-01-01T00:00:00Z", "exact")
 	}
 	db.db.Exec(`ANALYZE`)

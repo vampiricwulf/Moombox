@@ -364,11 +364,8 @@ func dpapiProfileScore(cookies []extractedCookie) int {
 			case "LOGIN_INFO":
 				hasLoginInfo = true
 			}
-			for _, n := range youtubeAuthCookieNames {
-				if c.name == n {
-					hasAnyYouTubeAuth = true
-					break
-				}
+			if slices.Contains(youtubeAuthCookieNames, c.name) {
+				hasAnyYouTubeAuth = true
 			}
 		case isTwitchDomain(c.domain):
 			switch c.name {

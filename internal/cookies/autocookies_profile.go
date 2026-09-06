@@ -720,11 +720,10 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 	// goroutine so the jar is read once per platform, before either starts.
 	var wg sync.WaitGroup
 	run := func(dst *platformAuth, hasCookies bool, verify func(context.Context) (bool, error), platform string) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Deferred AFTER wg.Done, so it runs BEFORE it: dst is written
-			// while the joiner is still waiting.
+		wg.Go(func() {
+			// wg.Go calls Done() itself after this closure returns, which is
+			// after the deferred recover below runs: dst is written while the
+			// joiner is still waiting.
 			defer func() {
 				if r := recover(); r != nil {
 					s.logger.Error(platform+" auth verification panicked", "panic", r)
@@ -741,7 +740,7 @@ func (s *AutoCookieService) checkPlatformAuth(ctx context.Context) (yt, tw platf
 				}
 			}()
 			*dst = check(hasCookies, verify, platform)
-		}()
+		})
 	}
 	run(&yt, s.jar.HasAnyYouTubeAuthCookie(), s.VerifyYouTubeAuth, "YouTube")
 	run(&tw, s.jar.HasAnyTwitchAuthCookie(), s.VerifyTwitchAuth, "Twitch")

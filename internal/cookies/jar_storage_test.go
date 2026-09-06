@@ -675,9 +675,7 @@ func TestGetTwitchCredentialsIsAtomicAcrossReload(t *testing.T) {
 	// are counted rather than raised — t.Fatal is not valid off the test
 	// goroutine.
 	var loadErrs, swaps atomic.Int64
-	writer.Add(1)
-	go func() {
-		defer writer.Done()
+	writer.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-stop:
@@ -690,16 +688,14 @@ func TestGetTwitchCredentialsIsAtomicAcrossReload(t *testing.T) {
 			}
 			swaps.Add(1)
 		}
-	}()
+	})
 
 	// Readers: every pair they observe must name ONE account. More goroutines
 	// than a typical core count, so the scheduler preempts between whatever
 	// lock acquisitions the accessor makes.
 	var torn, observed atomic.Int64
 	for range 8 {
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
+		readers.Go(func() {
 			for range 200000 {
 				token, login := jar.GetTwitchCredentials()
 				if token == "" || login == "" {
@@ -710,7 +706,7 @@ func TestGetTwitchCredentialsIsAtomicAcrossReload(t *testing.T) {
 					torn.Add(1)
 				}
 			}
-		}()
+		})
 	}
 
 	readers.Wait()

@@ -75,7 +75,7 @@ func TestReloginStatusPerformsNoBrowserDetection(t *testing.T) {
 	calls := stubDetectors(t, nil, nil)
 
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		s.ReloginStatus()
 	}
 

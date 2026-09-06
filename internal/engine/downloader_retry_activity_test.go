@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 )
@@ -31,13 +32,7 @@ func TestFetchSegmentWithRetryEmitsRetrying(t *testing.T) {
 	if !errors.Is(err, ErrSegmentRetriesExhausted) && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("fetchSegmentWithRetry err = %v, want retries-exhausted or deadline", err)
 	}
-	found := false
-	for _, a := range got {
-		if a == ActivityRetrying {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(got, ActivityRetrying)
 	if !found {
 		t.Errorf("OnActivity emissions = %v, want to include ActivityRetrying", got)
 	}

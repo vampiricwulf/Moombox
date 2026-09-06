@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -305,10 +306,5 @@ func (l *recordingChatLogger) loggedAt(level, msg string) bool {
 }
 
 func containsLine(lines []string, want string) bool {
-	for _, l := range lines {
-		if l == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(lines, want)
 }

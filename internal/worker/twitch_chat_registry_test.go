@@ -118,14 +118,12 @@ func TestRegistryIsSafeUnderConcurrentJobs(t *testing.T) {
 	reg := newTwitchChatRegistry()
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			f := &fakeChat{}
 			remove := reg.add(f)
 			reg.reauthenticateAll()
 			remove()
-		}()
+		})
 	}
 	wg.Wait()
 

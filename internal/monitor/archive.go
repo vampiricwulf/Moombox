@@ -47,9 +47,7 @@ func (d JobDisposition) String() string {
 // scope actually read: floor 60s, one second per row, capped at 15m.
 func passBudget(rows int) time.Duration {
 	d := 60*time.Second + time.Duration(rows)*time.Second
-	if d > 15*time.Minute {
-		d = 15 * time.Minute
-	}
+	d = min(d, 15*time.Minute)
 	return d
 }
 

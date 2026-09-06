@@ -82,7 +82,7 @@ func FindOldestAvailableSeq(ctx context.Context, head int, probe func(ctx contex
 // is exactly the signal the bisection searches for, not a failure to search.
 func probeWithRetry(ctx context.Context, probe func(ctx context.Context, seq int) (bool, error), seq int) (bool, error) {
 	var lastErr error
-	for attempt := 0; attempt < evictionProbeMaxAttempts; attempt++ {
+	for attempt := range evictionProbeMaxAttempts {
 		avail, err := probe(ctx, seq)
 		if err == nil {
 			return avail, nil

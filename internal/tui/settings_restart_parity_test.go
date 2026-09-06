@@ -237,12 +237,11 @@ func restartConfirmText(t *testing.T) string {
 	}
 	const opening = `"Some settings require a restart to take effect (`
 	src := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	at := strings.Index(src, opening)
-	if at < 0 {
+	_, rest, found := strings.Cut(src, opening)
+	if !found {
 		t.Fatalf("settings.js no longer opens its restart prompt with %q — if it was reworded, reword "+
 			"this extraction with it rather than deleting the assertion", opening)
 	}
-	rest := src[at+len(opening):]
 	end := strings.Index(rest, ")")
 	if end < 0 {
 		t.Fatal("the Web restart prompt's category list is unterminated")

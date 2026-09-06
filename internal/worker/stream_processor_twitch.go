@@ -712,8 +712,8 @@ func extractTwitchLoginFromJob(job *database.Job) string {
 	if job.URL != "" && strings.Contains(job.URL, "twitch.tv/") {
 		parts := strings.Split(job.URL, "twitch.tv/")
 		if len(parts) >= 2 {
-			login := strings.Split(parts[1], "/")[0]
-			login = strings.Split(login, "?")[0]
+			login, _, _ := strings.Cut(parts[1], "/")
+			login, _, _ = strings.Cut(login, "?")
 			if login != "" {
 				return strings.ToLower(login)
 			}

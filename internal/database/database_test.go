@@ -1440,7 +1440,7 @@ func TestFieldToColumnCoverage(t *testing.T) {
 		if tag == "" || tag == "-" {
 			continue
 		}
-		jsonName := strings.SplitN(tag, ",", 2)[0]
+		jsonName, _, _ := strings.Cut(tag, ",")
 		if jsonName == "" {
 			continue
 		}

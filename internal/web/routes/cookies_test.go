@@ -505,14 +505,13 @@ func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 		// signature: a missing `e.persisted` must fail as a missing bfcache
 		// guard, not as "this is not pagehide".
 		const pagehide = `window.addEventListener("pagehide"`
-		hideAt := strings.Index(js, pagehide)
-		if hideAt < 0 {
+		_, hideBody, hideFound := strings.Cut(js, pagehide)
+		if !hideFound {
 			t.Errorf("%s fires its cancel beacon from something other than pagehide; "+
 				"beforeunload can be cancelled by the user and would kill a setup they kept", mod.path)
 		} else {
 			// Bracketed to the handler body, not the file: `e.persisted`
 			// appearing anywhere else would prove nothing about this beacon.
-			hideBody := js[hideAt+len(pagehide):]
 			if end := strings.Index(hideBody, "});"); end >= 0 {
 				hideBody = hideBody[:end]
 			}
@@ -545,12 +544,11 @@ func TestCookieSetupClientsTellTheServerWhenTheUserGivesUp(t *testing.T) {
 		// cancel function is called from several other places and a match
 		// elsewhere would prove nothing about this button.
 		const skipHandler = `document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {`
-		at := strings.Index(js, skipHandler)
-		if at < 0 {
+		_, body, found := strings.Cut(js, skipHandler)
+		if !found {
 			t.Fatalf("%s no longer wires a click handler on #cookie-skip-btn — "+
 				"re-derive this test against the new shape", mod.path)
 		}
-		body := js[at+len(skipHandler):]
 		if end := strings.Index(body, "});"); end >= 0 {
 			body = body[:end]
 		}

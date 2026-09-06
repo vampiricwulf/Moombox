@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 	"testing"
 )
 
@@ -202,10 +203,8 @@ func TestProfileSeedIsWiredWithoutTheFlag(t *testing.T) {
 // gate is still there, because the next edit in this region will be near it.
 func TestExpectedPlatformSeedingStaysGatedOnTheFlag(t *testing.T) {
 	gates := gateChain(t, "main.go", "SetExpectedPlatforms")
-	for _, g := range gates {
-		if readsAutoEnabled(g) {
-			return
-		}
+	if slices.ContainsFunc(gates, readsAutoEnabled) {
+		return
 	}
 	t.Error("SetExpectedPlatforms is no longer gated on Cookies.AutoEnabled. That gate was analysed " +
 		"and kept, not overlooked: without it, seeding marks platforms this process never checked as " +

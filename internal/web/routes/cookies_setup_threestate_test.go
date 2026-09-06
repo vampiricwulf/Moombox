@@ -389,12 +389,11 @@ func TestSetupAbortReportsRealStatusInsteadOfAssertingATimeout(t *testing.T) {
 		// calls loadStatus() on the SUCCESS path, so a file-wide search would
 		// pass against the unfixed code and prove nothing about this branch.
 		const abortArm = `if (e.name === "AbortError") {`
-		at := strings.Index(js, abortArm)
-		if at < 0 {
+		_, body, found := strings.Cut(js, abortArm)
+		if !found {
 			t.Errorf("%s no longer has an abort arm to report from", path)
 			continue
 		}
-		body := js[at+len(abortArm):]
 		if end := strings.Index(body, "\n        return;"); end >= 0 {
 			body = body[:end]
 		}

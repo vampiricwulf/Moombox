@@ -384,9 +384,7 @@ func TestObserveLivenessIsSafeUnderConcurrentProducers(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					t.Errorf("panic in concurrent liveness producer: %v", r)
@@ -396,7 +394,7 @@ func TestObserveLivenessIsSafeUnderConcurrentProducers(t *testing.T) {
 				rs.ObserveLiveness("youtube", i%2 == 0)
 				rs.livenessObservedRecently("youtube", time.Now())
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -700,9 +698,7 @@ func TestStartupRefreshSkipsFallbackProbe(t *testing.T) {
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	rs.FallbackLiveness = func(context.Context) (bool, bool) { called.Add(1); return true, true }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	rs.Start(ctx)
+	rs.Start(t.Context())
 	rs.Stop()
 
 	if got := called.Load(); got != 0 {

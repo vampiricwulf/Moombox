@@ -108,7 +108,7 @@ func TestHandleFetchErrorConsecutiveBudgetExceededClosesSignal(t *testing.T) {
 	genericErr := errors.New("transient fetch failure")
 	n := 0
 	var shouldBreak bool
-	for i := 0; i < maxConsecErrorsVod+1; i++ {
+	for range maxConsecErrorsVod + 1 {
 		shouldBreak = cd.handleFetchError(context.Background(), genericErr, &n)
 		if shouldBreak {
 			break

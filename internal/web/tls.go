@@ -238,7 +238,8 @@ func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger inte
 	sans.WriteString("localhost, 127.0.0.1, ::1")
 	for _, ip := range tmpl.IPAddresses {
 		if !ip.IsLoopback() {
-			sans.WriteString(", " + ip.String())
+			sans.WriteString(", ")
+			sans.WriteString(ip.String())
 		}
 	}
 	logger.Info("[TLS] Certificate SANs: " + sans.String())
