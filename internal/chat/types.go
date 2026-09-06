@@ -48,9 +48,9 @@ type SuperchatInfo struct {
 	Amount   string `json:"amount"`
 	Currency string `json:"currency"`
 	// Color is the tier's palette name (blue, cyan, green, yellow, orange,
-	// magenta, red), or empty when neither renderer color matched a palette.
-	// Never a silent default; the actual colors are always in HeaderColor /
-	// BodyColor.
+	// magenta, red), or "gray" when neither renderer color is in the table —
+	// gray marks an unresolved tier and is never a resolved one. The actual
+	// colors are always in HeaderColor / BodyColor.
 	Color string `json:"color"`
 	// Tier is YouTube's Super Chat tier, 1 (lowest) to 7; 0 means unknown
 	// (owner ruling 2026-09-05: tier 0 IS the marker; no label field).
@@ -61,7 +61,7 @@ type SuperchatInfo struct {
 	// HeaderColor and BodyColor are the raw renderer colors as #RRGGBB (alpha
 	// dropped): headerBackgroundColor / bodyBackgroundColor for a message,
 	// moneyChipBackgroundColor / backgroundColor for a sticker. Recorded
-	// whenever present so an unmapped tier can be added to the palettes later
+	// whenever present so an unmapped tier can be added to the table later
 	// from the archive alone.
 	HeaderColor string `json:"headerColor,omitempty"`
 	BodyColor   string `json:"bodyColor,omitempty"`
@@ -135,38 +135,44 @@ type superchatTier struct {
 	color string
 }
 
-// superchatHeaderColors keys YouTube's HEADER palette: headerBackgroundColor
-// on liveChatPaidMessageRenderer (confirmed by a real sample and the live
-// log), moneyChipBackgroundColor on liveChatPaidStickerRenderer (inferred
-// from the field name) and endBackgroundColor on the ticker item. Keys are
-// opaque ARGB uint32 exactly as the JSON delivers them; the two palettes are
-// disjoint and every color is looked up in both. USD ranges per row.
-var superchatHeaderColors = map[uint32]superchatTier{
-	0xFF1565C0: {1, "blue"},    // $1-1.99
-	0xFF00B8D4: {2, "cyan"},    // $2-4.99
-	0xFF00BFA5: {3, "green"},   // $5-9.99
-	0xFFFFB300: {4, "yellow"},  // $10-19.99
-	0xFFE65100: {5, "orange"},  // $20-49.99
-	0xFFC2185B: {6, "magenta"}, // $50-99.99
-	0xFFD00000: {7, "red"},     // $100-500
+// superchatTierColors maps every ARGB color YouTube paints a Super Chat with
+// to its tier — two rows per tier: the HEADER color (headerBackgroundColor on
+// a paid message; moneyChipBackgroundColor on a Super Sticker, inferred from
+// the field name; endBackgroundColor on the ticker item) and the BODY color
+// (bodyBackgroundColor; sticker backgroundColor; ticker startBackgroundColor).
+// Every renderer color is looked up here regardless of which field carried
+// it, so a swapped field still resolves. Keys are opaque ARGB uint32 exactly
+// as the JSON delivers them; USD ranges per tier. The header rows are
+// confirmed by a real sample and the live log.
+//
+// History: until 2026-09-05 the table held ONLY the body rows but was looked
+// up with the header value, which can never equal one, so every archived
+// Super Chat fell back to tier 1 blue and every sticker to tier 0.
+var superchatTierColors = map[uint32]superchatTier{
+	// tier 1 blue, $1-1.99
+	0xFF1565C0: {1, "blue"}, // header
+	0xFF1E88E5: {1, "blue"}, // body
+	// tier 2 cyan, $2-4.99
+	0xFF00B8D4: {2, "cyan"}, // header
+	0xFF00E5FF: {2, "cyan"}, // body
+	// tier 3 green, $5-9.99
+	0xFF00BFA5: {3, "green"}, // header
+	0xFF1DE9B6: {3, "green"}, // body
+	// tier 4 yellow, $10-19.99
+	0xFFFFB300: {4, "yellow"}, // header
+	0xFFFFCA28: {4, "yellow"}, // body
+	// tier 5 orange, $20-49.99
+	0xFFE65100: {5, "orange"}, // header
+	0xFFF57C00: {5, "orange"}, // body
+	// tier 6 magenta, $50-99.99
+	0xFFC2185B: {6, "magenta"}, // header
+	0xFFE91E63: {6, "magenta"}, // body
+	// tier 7 red, $100-500 (YouTube's cap; the Node table said $199.99)
+	0xFFD00000: {7, "red"}, // header
+	0xFFE62117: {7, "red"}, // body
 }
 
-// superchatBodyColors keys the BODY palette: bodyBackgroundColor on a paid
-// message, backgroundColor on a sticker (and startBackgroundColor on the
-// ticker item). These seven values were the ORIGINAL tier table's keys, looked
-// up against the header field they can never equal, so every Super Chat
-// archived before 2026-09-05 fell back to tier 1 blue.
-var superchatBodyColors = map[uint32]superchatTier{
-	0xFF1E88E5: {1, "blue"},    // $1-1.99
-	0xFF00E5FF: {2, "cyan"},    // $2-4.99
-	0xFF1DE9B6: {3, "green"},   // $5-9.99
-	0xFFFFCA28: {4, "yellow"},  // $10-19.99
-	0xFFF57C00: {5, "orange"},  // $20-49.99
-	0xFFE91E63: {6, "magenta"}, // $50-99.99
-	0xFFE62117: {7, "red"},     // $100-500 (YouTube's cap; the Node table said $199.99)
-}
-
-// superchatUnknownColor is the Color recorded when neither palette matched
-// (owner ruling 2026-09-05): no palette row uses gray, so it cannot be
+// superchatUnknownColor is the Color recorded when neither renderer color is
+// in the table (owner ruling 2026-09-05): no row uses gray, so it cannot be
 // mistaken for a resolved tier; Tier 0 is the machine-readable marker.
 const superchatUnknownColor = "gray"
