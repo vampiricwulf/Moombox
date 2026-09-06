@@ -615,8 +615,8 @@ func (api *ChatAPI) parseSuperStickerInfo(stickerRenderer map[string]any) *Super
 // always records the raw colors. Each color is looked up in BOTH palettes (they
 // are disjoint), so a header-palette value arriving in a body field, or the
 // sticker mapping being other than inferred, still resolves. An unmatched pair
-// is tier 0 with an empty color name and the label "Unknown tier", and is
-// warned about once per distinct raw pair:
+// is tier 0 with the color name gray, and is warned about once per distinct
+// raw pair:
 // the archive keeps the hex values, the amount and the kind, and the warning
 // adds the raw ARGB decimals, which is everything needed to extend the
 // palettes when YouTube changes them.
@@ -640,27 +640,23 @@ func (api *ChatAPI) parseSuperchatRenderer(r map[string]any, kind, headerKey, bo
 
 	if hasHeader {
 		if t, ok := lookupSuperchatTier(header); ok {
-			sc.Tier, sc.Color, sc.TierLabel = t.tier, t.color, tierLabel(t.tier)
+			sc.Tier, sc.Color = t.tier, t.color
 			return sc
 		}
 	}
 	if hasBody {
 		if t, ok := lookupSuperchatTier(body); ok {
-			sc.Tier, sc.Color, sc.TierLabel = t.tier, t.color, tierLabel(t.tier)
+			sc.Tier, sc.Color = t.tier, t.color
 			return sc
 		}
 	}
 
+	// Unknown: tier 0 is the marker and the color name is gray (no palette row
+	// uses it); the real colors are in HeaderColor / BodyColor.
 	sc.Tier = 0
-	sc.Color = ""
-	sc.TierLabel = superchatUnknownTierLabel
+	sc.Color = superchatUnknownColor
 	api.warnUnknownSuperchatTier(sc, header, hasHeader, body, hasBody)
 	return sc
-}
-
-// tierLabel renders a resolved tier for display ("Tier 1".."Tier 7").
-func tierLabel(tier int) string {
-	return fmt.Sprintf("Tier %d", tier)
 }
 
 // lookupSuperchatTier resolves one ARGB value against the header palette, then
