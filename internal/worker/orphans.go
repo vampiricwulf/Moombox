@@ -10,6 +10,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // normalizePath returns a cleaned absolute path suitable for map-key comparison.
@@ -125,17 +126,23 @@ func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxC
 		return fmt.Errorf("invalid path: %w", err)
 	}
 
-	// Verify path is under staging or output directory
-	if !isUnderDirectory(absPath, resolveStagingDir(cfg)) && !isUnderDirectory(absPath, resolveOutputDir(cfg)) {
-		return fmt.Errorf("path is not under staging or output directory")
+	// Verify the path is under the staging or output directory, comparing
+	// canonical spellings on BOTH sides (symlinks, junctions, 8.3 short names;
+	// a missing path through its deepest existing ancestor). Canonicalising
+	// the candidate alone refused every legitimate delete on a short-named or
+	// junctioned drive as a "symlink escape".
+	stagingDir, outputDir := resolveStagingDir(cfg), resolveOutputDir(cfg)
+	realPath, err := utils.CanonicalPath(absPath)
+	if err != nil {
+		return fmt.Errorf("invalid path: %w", err)
 	}
-
-	// Check for symlink escape
-	realPath, err := filepath.EvalSymlinks(absPath)
-	if err == nil {
-		if !isUnderDirectory(realPath, resolveStagingDir(cfg)) && !isUnderDirectory(realPath, resolveOutputDir(cfg)) {
+	if !isUnderDirectory(realPath, canonicalDir(stagingDir)) && !isUnderDirectory(realPath, canonicalDir(outputDir)) {
+		// The raw spelling sits inside the tree but the canonical one does
+		// not: a link pointing out of it.
+		if isUnderDirectory(absPath, stagingDir) || isUnderDirectory(absPath, outputDir) {
 			return fmt.Errorf("path escapes configured directories via symlink")
 		}
+		return fmt.Errorf("path is not under staging or output directory")
 	}
 
 	// Recheck: refuse if the path is now owned by an active job. Scan filtered these out, but a job
@@ -157,6 +164,15 @@ func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxC
 		return os.RemoveAll(absPath)
 	}
 	return os.Remove(absPath)
+}
+
+// canonicalDir is CanonicalPath for a configured directory, falling back to
+// the given spelling when it cannot be resolved (it need not exist yet).
+func canonicalDir(dir string) string {
+	if c, err := utils.CanonicalPath(dir); err == nil {
+		return c
+	}
+	return dir
 }
 
 // findActiveJobForPath returns the ID of a currently-active job that owns the given path,

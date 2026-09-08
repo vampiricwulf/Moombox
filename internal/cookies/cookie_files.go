@@ -121,7 +121,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp cookie file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := utils.ReplaceFile(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename temp cookie file: %w", err)
 	}

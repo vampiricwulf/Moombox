@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -21,10 +22,14 @@ import (
 // Host-independent: the browser is gated rather than detected away, which is
 // the only way a desktop reached the import path before this arc, and the
 // profile tree exists so the pre-work missing-directory block does not answer
-// first. The element carries Windows separators as a literal so the guard
-// matches on Linux too (see existingDangerousProfileDir in internal/cookies).
+// first. The tree takes this OS's real shape (see existingDangerousProfileDir
+// in internal/cookies): the guard matches the shapes of the OS it runs on.
 func TestOptInRefusalAnswers422(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), `Mozilla\Firefox\Profiles\xxxxx.default-release`)
+	profileTree := []string{"Mozilla", "Firefox", "Profiles", "xxxxx.default-release"}
+	if runtime.GOOS != "windows" {
+		profileTree = []string{".mozilla", "firefox", "xxxxx.default-release"}
+	}
+	dir := filepath.Join(append([]string{t.TempDir()}, profileTree...)...)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

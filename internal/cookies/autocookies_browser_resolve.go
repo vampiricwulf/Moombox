@@ -16,28 +16,64 @@ import (
 // (or, in the future, a compromised /api/config write) launch Chrome
 // against the user's actual logged-in profile and exfiltrate session
 // cookies via the cookies.txt export. Patterns are matched
-// case-insensitively against the path's lowercased absolute form;
-// backslashes on Windows are preserved (filepath.Abs already
-// canonicalises). Audit reports/cookies.md #26.
+// case-insensitively against the path's absolute form with every separator
+// normalised to "/", so one list covers the Windows %AppData% trees, the
+// Linux dotfile, snap and flatpak trees, and the macOS Library trees; a Linux
+// path that carries literal backslashes is normalised the same way. Before
+// 2026-09-08 the list knew only the Windows shapes, so on Linux (Docker) a
+// real ~/.mozilla/firefox profile was never recognised and the guard was
+// inert there. Audit reports/cookies.md #26.
 var dangerousProfilePathSubstrings = []string{
-	`\google\chrome\user data`,
-	`\google\chrome beta\user data`,
-	`\google\chrome dev\user data`,
-	`\google\chrome canary\user data`,
-	`\microsoft\edge\user data`,
-	`\microsoft\edge beta\user data`,
-	`\microsoft\edge dev\user data`,
-	`\microsoft\edge canary\user data`,
-	`\bravesoftware\brave-browser\user data`,
-	`\chromium\user data`,
-	`\vivaldi\user data`,
-	`\opera software\opera stable`,
-	`\opera software\opera gx stable`,
-	`\mozilla\firefox\profiles`,
-	`\mozilla\firefox developer edition\profiles`,
-	`\waterfox\profiles`,
-	`\thunderbird\profiles`,
-	`\librewolf\profiles`,
+	// Windows: %LocalAppData% / %AppData%
+	`/google/chrome/user data`,
+	`/google/chrome beta/user data`,
+	`/google/chrome dev/user data`,
+	`/google/chrome canary/user data`,
+	`/microsoft/edge/user data`,
+	`/microsoft/edge beta/user data`,
+	`/microsoft/edge dev/user data`,
+	`/microsoft/edge canary/user data`,
+	`/bravesoftware/brave-browser/user data`,
+	`/chromium/user data`,
+	`/vivaldi/user data`,
+	`/opera software/opera stable`,
+	`/opera software/opera gx stable`,
+	`/mozilla/firefox/profiles`,
+	`/mozilla/firefox developer edition/profiles`,
+	`/waterfox/profiles`,
+	`/thunderbird/profiles`,
+	`/librewolf/profiles`,
+	// Linux: ~/.mozilla, ~/.config and the dotfile trees; snap keeps the same
+	// ~/.mozilla tree under ~/snap/firefox/common, which these still match.
+	`/.mozilla/firefox/`,
+	`/.mozilla/firefox-esr/`,
+	`/.config/google-chrome/`,
+	`/.config/google-chrome-beta/`,
+	`/.config/google-chrome-unstable/`,
+	`/.config/chromium/`,
+	`/.config/bravesoftware/brave-browser/`,
+	`/.config/microsoft-edge/`,
+	`/.config/microsoft-edge-beta/`,
+	`/.config/microsoft-edge-dev/`,
+	`/.config/vivaldi/`,
+	`/.config/opera/`,
+	`/.thunderbird/`,
+	`/.librewolf/`,
+	`/.waterfox/`,
+	// Linux flatpak sandboxes
+	`/.var/app/org.mozilla.firefox/`,
+	`/.var/app/com.google.chrome/`,
+	`/.var/app/org.chromium.chromium/`,
+	`/.var/app/com.brave.browser/`,
+	`/.var/app/com.microsoft.edge/`,
+	// macOS: ~/Library/Application Support
+	`/library/application support/firefox/profiles`,
+	`/library/application support/google/chrome`,
+	`/library/application support/chromium`,
+	`/library/application support/bravesoftware/brave-browser`,
+	`/library/application support/microsoft edge`,
+	`/library/application support/vivaldi`,
+	`/library/application support/thunderbird/profiles`,
 }
 
 // validateBrowserProfileDirForLaunch refuses configured profile directories
@@ -62,7 +98,10 @@ func validateBrowserProfileDirForLaunch(profileDir string) error {
 	if err != nil {
 		return fmt.Errorf("resolve profile dir: %w", err)
 	}
-	lower := strings.ToLower(abs)
+	// Separators are normalised to "/" before matching: filepath.Abs keeps
+	// backslashes on Windows, and a Linux path may carry them as ordinary
+	// filename bytes; one form lets a single list serve every OS.
+	lower := strings.ToLower(strings.ReplaceAll(abs, `\`, "/"))
 	for _, pat := range dangerousProfilePathSubstrings {
 		if strings.Contains(lower, pat) {
 			return fmt.Errorf("profile dir %q points at a known browser profile path; refusing to launch a headless session against it (audit cookies.md #26)", abs)

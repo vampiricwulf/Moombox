@@ -65,7 +65,7 @@ func (s ResumeStore[T]) Save(state T) error {
 		os.Remove(tmp)
 		return fmt.Errorf("close tmp: %w", err)
 	}
-	if err := os.Rename(tmp, s.Path); err != nil {
+	if err := ReplaceFile(tmp, s.Path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename: %w", err)
 	}

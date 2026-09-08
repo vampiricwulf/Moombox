@@ -110,11 +110,20 @@ func TestRotateOpenFileFailureRecoversOnNextWrite(t *testing.T) {
 	}
 	t.Cleanup(func() { l.Close() })
 
-	// Step 1: write a few lines so the file exists.
+	// Step 1: write a line so the file exists and the logger holds it open.
 	l.Info("seed line")
 
-	// Step 2: chmod the dir to read-only so the next openFile inside
-	// rotate fails, then trigger rotation via a flood of writes.
+	// Step 2: make the NEXT reopen fail. Unlinking the file first matters:
+	// POSIX lets an existing file be reopened for writing inside a read-only
+	// directory, so a read-only directory alone never reaches the failure
+	// branch — rotation would rename nothing, reopen the same inode and carry
+	// on (and the marker would then be rotated into the .1 file). With the
+	// file gone, rotation's reopen needs O_CREATE, which the read-only
+	// directory refuses, and the sentinel state (no file) is reached. The
+	// logger still writes to the old descriptor until rotation closes it.
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
@@ -123,9 +132,13 @@ func TestRotateOpenFileFailureRecoversOnNextWrite(t *testing.T) {
 	for i := range 60 {
 		l.Info("write that triggers rotation but reopen fails", "i", i, "padding", "filler")
 	}
+	if _, err := os.Stat(logPath); err == nil {
+		t.Skip("the read-only directory did not refuse the reopen (running as root?); the failure branch cannot be provoked here")
+	}
 
-	// Step 3: restore permissions and write again. The retry-on-write
-	// path should successfully reopen the file and the write should land.
+	// Step 3: restore permissions and write again. The retry-on-write path
+	// reopens (creates) the file and the marker lands in it; one short line
+	// cannot reach the rotation floor, so it stays in logPath.
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -159,46 +172,54 @@ func TestSubscriberDropDoesNotBlockBroadcast(t *testing.T) {
 	wedged := l.Subscribe() // 100-buffer, never drained
 	t.Cleanup(func() { l.Unsubscribe(wedged) })
 
+	// broadcastAll sends n lines from another goroutine and fails if they
+	// have not all been accepted within the deadline: the only way that
+	// happens is broadcast blocking on a full subscriber. The deadline
+	// guards a hang, never a race — nothing here depends on a reader keeping
+	// pace (an earlier form of this test did, and under full-suite load a
+	// starved reader legitimately lost lines to the drop-on-full rule).
+	broadcastAll := func(n int) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := range n {
+				l.Info("broadcast line", "i", i)
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("broadcast of %d lines did not complete within 3s — a wedged subscriber blocked it", n)
+		}
+	}
+
+	// Overflow the wedged subscriber: its buffer must be full and the
+	// producer must have returned regardless.
+	broadcastAll(150)
+	if len(wedged) != cap(wedged) {
+		t.Fatalf("premise: the wedged subscriber holds %d/%d lines; its buffer must be full", len(wedged), cap(wedged))
+	}
+
+	// A subscriber that joins now, beside the full one, must still receive
+	// every subsequent line — nobody drains it either, so its buffer is the
+	// exact count, with no reader goroutine to be starved.
 	fast := l.Subscribe()
 	t.Cleanup(func() { l.Unsubscribe(fast) })
-
-	const lines = 200
-	var received int
-	var mu sync.Mutex
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for line := range fast {
-			_ = line
-			mu.Lock()
-			received++
-			n := received
-			mu.Unlock()
-			if n >= lines {
-				return
-			}
-		}
-	}()
-
-	for i := range lines {
-		l.Info("broadcast line", "i", i)
+	broadcastAll(50)
+	waitFor(t, 3*time.Second, func() bool { return len(fast) == 50 })
+	if got := len(fast); got != 50 {
+		t.Fatalf("a subscriber joining beside a full one received %d of 50 subsequent lines", got)
 	}
+}
 
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		mu.Lock()
-		got := received
-		mu.Unlock()
-		t.Fatalf("fast subscriber received %d/%d lines within 3s — wedged subscriber blocked broadcast",
-			got, lines)
-	}
-
-	mu.Lock()
-	got := received
-	mu.Unlock()
-	if got < lines {
-		t.Errorf("fast subscriber received only %d lines, want %d", got, lines)
+// waitFor polls cond until it holds or the deadline passes; the caller
+// asserts the condition afterwards so the failure message names the value.
+func waitFor(t *testing.T, deadline time.Duration, cond func() bool) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for !cond() && time.Now().Before(end) {
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

@@ -48,14 +48,13 @@ func captureTrackedKills(t *testing.T) *[]trackedKillCall {
 func TestCleanupAsksForTheKillBeforeItDropsTheJob(t *testing.T) {
 	asked := captureTrackedKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
-	// A real job, not a bare &processJob{}: a zero-value job's queryable() is
-	// already false, so it cannot tell a correct "ask before close" from a
-	// mutated "close before ask" apart. A real handle starts queryable() true
-	// and only close() can turn that false.
-	job, err := newProcessJob()
-	if err != nil {
-		t.Fatalf("newProcessJob: %v", err)
-	}
+	// A queryable job, not a bare &processJob{}: a zero-value job's queryable()
+	// is already false, so it cannot tell a correct "ask before close" from a
+	// mutated "close before ask" apart. On Windows a fresh job object is such
+	// a handle; on Linux it takes a real child in its own process group
+	// (newQueryableTestJob does whichever this OS needs), and only close() can
+	// turn queryable() false.
+	job := newQueryableTestJob(t)
 	t.Cleanup(job.close)
 	s.mu.Lock()
 	s.setupJob = job
@@ -89,10 +88,7 @@ func TestAdoptClosingAStaleJobAsksForTheKill(t *testing.T) {
 	// Real, for the same reason as TestCleanupAsksForTheKillBeforeItDropsTheJob:
 	// only a live handle can distinguish "asked before close" from "asked
 	// after". fresh is never closed or asked about, so it stays a bare value.
-	stale, err := newProcessJob()
-	if err != nil {
-		t.Fatalf("newProcessJob: %v", err)
-	}
+	stale := newQueryableTestJob(t)
 	t.Cleanup(stale.close)
 	fresh := &processJob{}
 	s.mu.Lock()
@@ -163,10 +159,7 @@ func TestCloseLaunchJobAsksForTheKill(t *testing.T) {
 	// Real, for the same reason as the two tests above: a bare &processJob{}
 	// reads queryable() == false whether or not the reorder mutant is present,
 	// which would make this assertion vacuous.
-	job, err := newProcessJob()
-	if err != nil {
-		t.Fatalf("newProcessJob: %v", err)
-	}
+	job := newQueryableTestJob(t)
 	t.Cleanup(job.close)
 	closeLaunchJob(job, nopLogger{})
 	if len(*asked) != 1 || (*asked)[0].job != job {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,17 +22,26 @@ const dangerousProfileDir = `C:\Users\test\AppData\Roaming\Mozilla\Firefox\Profi
 
 // existingDangerousProfileDir creates a directory the guard refuses, for the
 // tests that must get PAST the pre-work missing-directory check and reach the
-// read-only site. The element carries the separators as a LITERAL: on Windows
-// Join splits it into the nested Mozilla\Firefox\Profiles tree, and on Linux a
-// backslash is an ordinary filename byte, so the lowercased absolute path
-// contains `\mozilla\firefox\profiles` on both.
+// read-only site. The tree takes this OS's real shape — Mozilla\Firefox\Profiles
+// under a Windows temp dir, .mozilla/firefox under a Linux one — because the
+// guard matches the shapes of the OS it runs on (a literal-backslash element
+// on Linux used to be relied on here and never matched: the byte before
+// "mozilla" is "/" there).
 func existingDangerousProfileDir(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), `Mozilla\Firefox\Profiles\xxxxx.default-release`)
+	dir := filepath.Join(append([]string{t.TempDir()}, dangerousProfileTreeElements()...)...)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// dangerousProfileTreeElements is a real Firefox profile tree's shape on this OS.
+func dangerousProfileTreeElements() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"Mozilla", "Firefox", "Profiles", "xxxxx.default-release"}
+	}
+	return []string{".mozilla", "firefox", "xxxxx.default-release"}
 }
 
 // TestLaunchGuardHoldsEveryLaunchSiteInEveryMode is the invariant G3 must not
