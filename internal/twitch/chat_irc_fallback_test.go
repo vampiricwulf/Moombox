@@ -64,6 +64,15 @@ func startIRCReplier(t *testing.T, replies ...[]string) *ircReplier {
 // after it has read and handled the PING, so the echo is a round-trip proof
 // that an inbound line was processed.
 //
+// After the echo the server stays connected and silent until the CLIENT
+// leaves. Closing right after the echo made the test's next move a race: the
+// client could observe the drop before the test cancelled or ended the
+// session, and a drop after a PING with no welcome is exactly what the
+// refusal heuristic latches on. On the Linux CI runner the drop won; on
+// Windows the test did. The tests that use this replier all end the client
+// themselves (cancel, Stop, MarkStreamEnded), which is what releases the
+// server side.
+//
 // Opt-in, because that extra read holds the connection open — a client with no
 // reply to send would keep it parked until its own read deadline.
 func startIRCReplierAwaitingEcho(t *testing.T, replies ...[]string) *ircReplier {
@@ -112,6 +121,14 @@ func newIRCReplier(t *testing.T, echoes chan string, replies ...[]string) *ircRe
 		if rep.echoes != nil && len(script) > 0 {
 			if _, data, readErr := conn.Read(r.Context()); readErr == nil {
 				rep.echoes <- string(data)
+			}
+			// Hold the connection until the client closes it (see the doc
+			// above): a server-side close here is a drop the client may read
+			// as a refusal before the test has made its move.
+			for {
+				if _, _, readErr := conn.Read(r.Context()); readErr != nil {
+					return
+				}
 			}
 		}
 	}))
