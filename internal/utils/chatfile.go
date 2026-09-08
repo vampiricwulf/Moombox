@@ -54,7 +54,7 @@ func WriteChatFileAtomic[T any](path string, data T) error {
 		os.Remove(tmpFile)
 		return fmt.Errorf("close: %w", err)
 	}
-	if err := os.Rename(tmpFile, path); err != nil {
+	if err := ReplaceFile(tmpFile, path); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("rename: %w", err)
 	}

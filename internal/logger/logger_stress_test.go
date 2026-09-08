@@ -110,11 +110,20 @@ func TestRotateOpenFileFailureRecoversOnNextWrite(t *testing.T) {
 	}
 	t.Cleanup(func() { l.Close() })
 
-	// Step 1: write a few lines so the file exists.
+	// Step 1: write a line so the file exists and the logger holds it open.
 	l.Info("seed line")
 
-	// Step 2: chmod the dir to read-only so the next openFile inside
-	// rotate fails, then trigger rotation via a flood of writes.
+	// Step 2: make the NEXT reopen fail. Unlinking the file first matters:
+	// POSIX lets an existing file be reopened for writing inside a read-only
+	// directory, so a read-only directory alone never reaches the failure
+	// branch — rotation would rename nothing, reopen the same inode and carry
+	// on (and the marker would then be rotated into the .1 file). With the
+	// file gone, rotation's reopen needs O_CREATE, which the read-only
+	// directory refuses, and the sentinel state (no file) is reached. The
+	// logger still writes to the old descriptor until rotation closes it.
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
@@ -123,9 +132,13 @@ func TestRotateOpenFileFailureRecoversOnNextWrite(t *testing.T) {
 	for i := range 60 {
 		l.Info("write that triggers rotation but reopen fails", "i", i, "padding", "filler")
 	}
+	if _, err := os.Stat(logPath); err == nil {
+		t.Skip("the read-only directory did not refuse the reopen (running as root?); the failure branch cannot be provoked here")
+	}
 
-	// Step 3: restore permissions and write again. The retry-on-write
-	// path should successfully reopen the file and the write should land.
+	// Step 3: restore permissions and write again. The retry-on-write path
+	// reopens (creates) the file and the marker lands in it; one short line
+	// cannot reach the rotation floor, so it stays in logPath.
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

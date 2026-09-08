@@ -916,7 +916,7 @@ func Save(cfg *MoomboxConfig, path string) error {
 		return fmt.Errorf("close config file: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := utils.ReplaceFile(tmpPath, path); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 

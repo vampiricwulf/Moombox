@@ -101,9 +101,10 @@ func TestCheckForUpdateOtherHTTPError(t *testing.T) {
 }
 
 // TestCheckForUpdateNoMoomboxAsset covers the "release found but no
-// Moombox.exe asset" branch. Audit reports/small-packages.md
+// asset for this platform" branch (the name follows GOOS/GOARCH). Audit reports/small-packages.md
 // updater test no asset.
 func TestCheckForUpdateNoMoomboxAsset(t *testing.T) {
+	assets, _ := currentPlatformAssets()
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(rw).Encode(githubRelease{
 			TagName: "v3.0.0",
@@ -117,9 +118,9 @@ func TestCheckForUpdateNoMoomboxAsset(t *testing.T) {
 	u, _ := newTestUpdater(t, "2.0.15", srv, nil)
 	_, err := u.CheckForUpdate(context.Background())
 	if err == nil {
-		t.Fatal("CheckForUpdate without Moombox.exe asset: want error, got nil")
+		t.Fatal("CheckForUpdate without this platform's asset: want error, got nil")
 	}
-	if !strings.Contains(err.Error(), "no Moombox.exe asset") {
+	if !strings.Contains(err.Error(), "no "+assets.binary+" asset") {
 		t.Errorf("error should mention missing asset, got %v", err)
 	}
 }
@@ -151,12 +152,13 @@ func TestCheckForUpdateUpToDateReturnsNil(t *testing.T) {
 // ordering propagates through CheckForUpdate: a pre-release client
 // checking against a higher pre-release tag should see the update.
 func TestCheckForUpdatePrereleaseOrdering(t *testing.T) {
+	assets, _ := currentPlatformAssets()
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(rw).Encode(githubRelease{
 			TagName: "v2.6.0-test.27",
 			Assets: []githubAsset{
-				{Name: "Moombox.exe", BrowserDownloadURL: "http://example.com/exe"},
-				{Name: "Moombox.exe.sig", BrowserDownloadURL: "http://example.com/sig"},
+				{Name: assets.binary, BrowserDownloadURL: "http://example.com/exe"},
+				{Name: assets.sig, BrowserDownloadURL: "http://example.com/sig"},
 			},
 		})
 	}))

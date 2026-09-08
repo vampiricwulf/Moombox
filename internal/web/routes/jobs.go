@@ -1285,24 +1285,26 @@ func FormatRoutes(r chi.Router, deps *FormatRoutesDeps) {
 
 // Helper functions
 
-// validatePathTraversal resolves symlinks on both filePath and outputDir, then
-// checks that filePath is inside outputDir. Returns the resolved file path on
-// success, or an empty string and false if the check fails.
+// validatePathTraversal canonicalises both filePath and outputDir (symlinks,
+// junctions, 8.3 short names; a missing file through its deepest existing
+// ancestor) and checks that filePath is inside outputDir. Returns the
+// canonical file path on success, or an empty string and false if the check
+// fails. Canonicalising one side only turned a legitimate path on a
+// short-named or junctioned drive into a "traversal" (403 for a missing
+// file that should have been a 404).
 func validatePathTraversal(filePath, outputDir string) (string, bool) {
-	resolvedOutputDir, err := filepath.Abs(outputDir)
+	resolvedOutputDir, err := utils.CanonicalPath(outputDir)
 	if err != nil {
 		return "", false
 	}
-	if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
-		resolvedOutputDir = real
-	}
-	if real, err := filepath.EvalSymlinks(filePath); err == nil {
-		filePath = real
-	}
-	if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
+	resolvedFile, err := utils.CanonicalPath(filePath)
+	if err != nil {
 		return "", false
 	}
-	return filePath, true
+	if !strings.HasPrefix(resolvedFile, resolvedOutputDir+string(filepath.Separator)) {
+		return "", false
+	}
+	return resolvedFile, true
 }
 
 func jsonResponse(w http.ResponseWriter, data any) {
