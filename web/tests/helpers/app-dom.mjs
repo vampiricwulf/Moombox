@@ -422,6 +422,7 @@ function installGlobals(window, { http, clock, rafQueue, nextRafId }) {
     "document",
     "navigator",           // clipboard, userAgent
     "localStorage",        // theme + panel preferences
+    "sessionStorage",        // the post-setup "justCompletedSetup" flag; Node 24 has no global of its own (Node 26 does, which hid this)
     "HTMLElement",         // `target instanceof HTMLElement` in isTypingInInput
     "HTMLMediaElement",    // the player module's readyState guard
     "Element",

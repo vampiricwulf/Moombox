@@ -7,6 +7,7 @@ import "testing"
 // side — a legacy-shaped row (INSERT omitting incomplete_tail) must read
 // back the column's DEFAULT 0.
 func TestMigrationV17(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -27,6 +28,7 @@ func TestMigrationV17(t *testing.T) {
 // the guarded ALTER block on an already-migrated DB must be a no-op, not an
 // error (a crash mid-block re-runs the whole block on next startup).
 func TestMigrationV17Idempotent(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -39,6 +41,7 @@ func TestMigrationV17Idempotent(t *testing.T) {
 // end: a fresh job defaults IncompleteTail=false, UpdateJobFields can flip
 // it, and GetJob round-trips the change.
 func TestMigrateV17IncompleteTail(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 

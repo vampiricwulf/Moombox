@@ -12,6 +12,7 @@ import (
 )
 
 func TestOpenAndClose(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -23,6 +24,7 @@ func TestOpenAndClose(t *testing.T) {
 }
 
 func TestAddAndGetJob(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -62,6 +64,7 @@ func TestAddAndGetJob(t *testing.T) {
 }
 
 func TestDeleteJob(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -93,6 +96,7 @@ func TestDeleteJob(t *testing.T) {
 }
 
 func TestHistory(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -118,6 +122,7 @@ func TestHistory(t *testing.T) {
 }
 
 func TestGaps(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -148,6 +153,7 @@ func TestGaps(t *testing.T) {
 // re-download must NOT see stale part rows (which muxAndFinalize would finalize
 // from, discarding the new media). Also confirms it's job-scoped.
 func TestClearJobSegmentsAndGaps(t *testing.T) {
+	t.Parallel()
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -187,6 +193,7 @@ func TestClearJobSegmentsAndGaps(t *testing.T) {
 // segment rows with a smaller merged set is atomic (delete + re-insert in one
 // transaction) and does NOT touch gap rows, unlike ClearJobSegmentsAndGaps.
 func TestReplaceJobSegments(t *testing.T) {
+	t.Parallel()
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -256,6 +263,7 @@ func TestReplaceJobSegments(t *testing.T) {
 // TestReplaceJobSegmentsZeroRows confirms ReplaceJobSegments works as a pure
 // insert when the job has no existing segment rows.
 func TestReplaceJobSegmentsZeroRows(t *testing.T) {
+	t.Parallel()
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -279,6 +287,7 @@ func TestReplaceJobSegmentsZeroRows(t *testing.T) {
 // TestReplaceJobSegmentsEmptySlice confirms an empty replacement slice
 // deletes all existing rows (pure delete).
 func TestReplaceJobSegmentsEmptySlice(t *testing.T) {
+	t.Parallel()
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -310,6 +319,7 @@ func TestReplaceJobSegmentsEmptySlice(t *testing.T) {
 // identically here; that still exercises rollback leaving prior state
 // unchanged.
 func TestReplaceJobSegmentsRollback(t *testing.T) {
+	t.Parallel()
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -359,6 +369,7 @@ func TestReplaceJobSegmentsRollback(t *testing.T) {
 // rows land under jobA (re-stamped, including write-back onto the caller's
 // slice) while jobB's original row is completely untouched.
 func TestReplaceJobSegmentsCrossJobRows(t *testing.T) {
+	t.Parallel()
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -407,6 +418,7 @@ func TestReplaceJobSegmentsCrossJobRows(t *testing.T) {
 }
 
 func TestTrims(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -448,6 +460,7 @@ func TestTrims(t *testing.T) {
 }
 
 func TestGetAllJobs(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -495,6 +508,7 @@ func TestGetAllJobs(t *testing.T) {
 }
 
 func TestUpdateJobFields(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -541,6 +555,7 @@ func TestUpdateJobFields(t *testing.T) {
 }
 
 func TestUpdateJobFieldsInvalidKey(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -571,6 +586,7 @@ func TestUpdateJobFieldsInvalidKey(t *testing.T) {
 }
 
 func TestUpdateJobFieldsEmpty(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -604,6 +620,7 @@ func TestUpdateJobFieldsEmpty(t *testing.T) {
 // can be read and written via UpdateJobFields. Locks down the column-plumbing
 // done in Phase 1 of the Twitch flap auto-recovery feature.
 func TestUpdateJobFieldsAutoRetryCount(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -658,6 +675,7 @@ func TestUpdateJobFieldsAutoRetryCount(t *testing.T) {
 }
 
 func TestOnJobUpdateSubscriber(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -717,6 +735,7 @@ func TestOnJobUpdateSubscriber(t *testing.T) {
 }
 
 func TestOnJobUpdateUnsubscribe(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -766,6 +785,7 @@ func TestOnJobUpdateUnsubscribe(t *testing.T) {
 }
 
 func TestOnJobsChangeSubscriber(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -815,6 +835,7 @@ func TestOnJobsChangeSubscriber(t *testing.T) {
 }
 
 func TestSubscriberSliceTrim(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -847,6 +868,7 @@ func TestSubscriberSliceTrim(t *testing.T) {
 }
 
 func TestUpdateJobSync(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -889,6 +911,7 @@ func TestUpdateJobSync(t *testing.T) {
 }
 
 func TestSegments(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -943,6 +966,7 @@ func TestSegments(t *testing.T) {
 }
 
 func TestClientTokenCRUD(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -1016,6 +1040,7 @@ func TestClientTokenCRUD(t *testing.T) {
 }
 
 func TestJobExists(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -1043,6 +1068,7 @@ func TestJobExists(t *testing.T) {
 }
 
 func TestHasActiveJob(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -1091,6 +1117,7 @@ func TestHasActiveJob(t *testing.T) {
 }
 
 func TestWatchedAndResumePosition(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -1142,6 +1169,7 @@ func TestWatchedAndResumePosition(t *testing.T) {
 }
 
 func TestUpdateResumePosition(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -1178,6 +1206,7 @@ func TestUpdateResumePosition(t *testing.T) {
 }
 
 func TestBatchSetWatched(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -1237,6 +1266,7 @@ func TestBatchSetWatched(t *testing.T) {
 // using the pre-v11 schema_version table is detected, its version carried
 // forward to PRAGMA user_version, and the legacy table is dropped.
 func TestMigrateFromLegacyVersionTable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "legacy.db")
 
@@ -1290,6 +1320,7 @@ func TestMigrateFromLegacyVersionTable(t *testing.T) {
 // TestFreshInstallUsesPragma verifies that a brand-new DB sets PRAGMA
 // user_version without ever creating the legacy schema_version table.
 func TestFreshInstallUsesPragma(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "fresh.db")
 
@@ -1369,6 +1400,7 @@ func schemaInventory(t *testing.T, db *Database) map[string][]string {
 // with identical tables, indexes, and columns. Caught the missing
 // idx_jobs_video_id on fresh installs (v4 created it only for upgrades).
 func TestFreshSchemaMatchesMigratedSchema(t *testing.T) {
+	t.Parallel()
 	freshPath := filepath.Join(t.TempDir(), "fresh.db")
 	fresh, err := Open(freshPath)
 	if err != nil {
@@ -1422,6 +1454,7 @@ func TestFreshSchemaMatchesMigratedSchema(t *testing.T) {
 // not-writable partially. Add here when a new column legitimately shouldn't go
 // through UpdateJobFields — don't just delete the map entry.
 func TestFieldToColumnCoverage(t *testing.T) {
+	t.Parallel()
 	excluded := map[string]bool{
 		"id":        true, // primary key, set at insert
 		"videoId":   true, // set at insert
@@ -1479,6 +1512,7 @@ func camelToSnake(s string) string {
 // moves the dispatch to AFTER db.mu.Unlock; this test trips the
 // deadlock by forcing the path and waits with a timeout.
 func TestSubscriberCanCallDatabaseFromCallback(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := Open(dbPath)
@@ -1541,6 +1575,7 @@ func TestSubscriberCanCallDatabaseFromCallback(t *testing.T) {
 // dispatchJobsChange runs after Unlock); the assertion is that a
 // callback that calls back into Database doesn't hang.
 func TestJobsChangeSubscriberCanCallDatabaseFromCallback(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := Open(dbPath)
@@ -1591,6 +1626,7 @@ func TestJobsChangeSubscriberCanCallDatabaseFromCallback(t *testing.T) {
 //   - Twitch/manual (no fields): channel_id stays NULL — never "" — and
 //     queue_priority is the explicit 0, NOT the column DEFAULT 1
 func TestAddJobWritesChannelIDAndQueuePriority(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -1642,6 +1678,7 @@ func TestAddJobWritesChannelIDAndQueuePriority(t *testing.T) {
 // history, other channels are untouched, and NULL-channel jobs (Twitch/manual,
 // no affiliation) must never match.
 func TestDeleteJobsAndHistoryForChannel(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -1719,6 +1756,7 @@ func TestDeleteJobsAndHistoryForChannel(t *testing.T) {
 // and can overflow the TUI's bounded drop-on-full channel. Also pins the
 // empty-statuses early return: zero deleted, no error, no dispatch.
 func TestDeleteJobsAndHistoryForChannelDispatch(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 

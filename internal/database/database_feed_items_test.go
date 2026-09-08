@@ -12,6 +12,7 @@ func fi(ch, vid, pub, prec, src, status string, pos int) FeedItem {
 }
 
 func TestUpsertFeedItem_GuardAndAlwaysArms(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	// Insert coarse; insertedNow true; status forced 'unknown' whatever caller sets.
@@ -49,6 +50,7 @@ func TestUpsertFeedItem_GuardAndAlwaysArms(t *testing.T) {
 }
 
 func TestApplyProbeToFeedItem(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	db.UpsertFeedItem(fi("UC1", "v1", "2026-07-16T00:00:00Z", "assumed", "membership", "unknown", 0))
@@ -79,6 +81,7 @@ func TestApplyProbeToFeedItem(t *testing.T) {
 }
 
 func TestFeedScope_Q1UnionQ2(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
@@ -118,6 +121,7 @@ func TestFeedScope_Q1UnionQ2(t *testing.T) {
 }
 
 func TestFeedScope_QueryPlan(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	vid := func(i int) string {
@@ -161,6 +165,7 @@ func TestFeedScope_QueryPlan(t *testing.T) {
 }
 
 func TestDeleteChannelFeedData(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	db.UpsertFeedItem(fi("UC1", "v1", "2026-07-10T00:00:00Z", "coarse", "rss", "unknown", 0))
@@ -198,6 +203,7 @@ func TestDeleteChannelFeedData(t *testing.T) {
 // UNION of channel_state and feed_items owners, deduped — a channel present
 // in either table is listed once, and a pruned channel drops out entirely.
 func TestListFeedChannelIDs(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -248,6 +254,7 @@ func TestListFeedChannelIDs(t *testing.T) {
 }
 
 func TestGetFeedItem(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	if it, err := db.GetFeedItem("UC1", "missing"); err != nil || it != nil {
@@ -264,6 +271,7 @@ func TestGetFeedItem(t *testing.T) {
 }
 
 func TestGetChannelRSSOK(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	if ts, err := db.GetChannelRSSOK("UC1"); err != nil || ts != "" {
@@ -278,6 +286,7 @@ func TestGetChannelRSSOK(t *testing.T) {
 }
 
 func TestGetChannelEstablished(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	// No channel_state row at all: NOT established (§11).
@@ -331,6 +340,7 @@ func TestGetChannelEstablished(t *testing.T) {
 // no runtime validation, so this test is the tripwire for any future writer
 // (or writer change) that would smuggle a non-Z string into the table.
 func TestFeedItems_PublishedFirstSeenAlwaysZ(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	cycleNow := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC) // checkChannel: fm.now().UTC()

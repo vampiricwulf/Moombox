@@ -3,6 +3,7 @@ package database
 import "testing"
 
 func TestPrecisionRank(t *testing.T) {
+	t.Parallel()
 	// Spec §6/§12: assumed < coarse < day < exact < started; unknown strings rank
 	// as assumed (fail-closed: a typo loses to everything rather than winning).
 	want := map[string]int{"assumed": 1, "coarse": 2, "day": 3, "exact": 4, "started": 5, "": 1, "exactt": 1}
@@ -14,6 +15,7 @@ func TestPrecisionRank(t *testing.T) {
 }
 
 func TestPrecisionRankCaseSQLMatchesGo(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 	for _, p := range []string{"assumed", "coarse", "day", "exact", "started", "bogus"} {

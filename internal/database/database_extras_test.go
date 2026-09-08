@@ -13,6 +13,7 @@ import (
 // --- GetJobStats ---
 
 func TestGetJobStatsEmptyDatabase(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -35,6 +36,7 @@ func TestGetJobStatsEmptyDatabase(t *testing.T) {
 }
 
 func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
+	t.Parallel()
 	// GetJobStats query computes COALESCE(SUM(CASE WHEN status=? ...))
 	// per category. Seed jobs covering every documented bucket and
 	// verify the row breakdown matches expectations.
@@ -118,6 +120,7 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 }
 
 func TestJobStatsQueuedCount(t *testing.T) {
+	t.Parallel()
 	// Queued is a resting state: it surfaces in its own QueuedCount bucket
 	// and must NOT inflate ActiveCount (a waiting job is not a running
 	// download).
@@ -153,6 +156,7 @@ func TestJobStatsQueuedCount(t *testing.T) {
 }
 
 func TestGetJobStatsCachesResultsBriefly(t *testing.T) {
+	t.Parallel()
 	// jobStatsCacheTTL = 5s. A second call within the window returns
 	// the cached pointer; mutations between the two reads aren't
 	// observed until the cache expires. This is documented behaviour
@@ -194,6 +198,7 @@ func TestGetJobStatsCachesResultsBriefly(t *testing.T) {
 }
 
 func TestGetJobStatsConcurrent(t *testing.T) {
+	t.Parallel()
 	// Race-detector smoke: the cache hot path uses statsMu, fresh
 	// reads acquire db.mu RLock. Concurrent GetJobStats from many
 	// goroutines must not race on the cache slot.
@@ -225,6 +230,7 @@ func TestGetJobStatsConcurrent(t *testing.T) {
 // --- attachTrimsAndGaps coverage ---
 
 func TestAttachTrimsAndGapsLoadsForMultipleJobs(t *testing.T) {
+	t.Parallel()
 	// GetAllJobs uses attachTrimsAndGaps with a chunked WHERE-IN
 	// query. Seed several jobs each with their own gaps + trims; the
 	// resulting Job structs should each carry exactly their own
@@ -280,6 +286,7 @@ func TestAttachTrimsAndGapsLoadsForMultipleJobs(t *testing.T) {
 // --- History cap ---
 
 func TestAddToHistoryDeduplicates(t *testing.T) {
+	t.Parallel()
 	// AddToHistory uses INSERT OR IGNORE so re-adding the same video
 	// ID is a no-op. Verify HasProcessed reflects the single entry.
 	dir := t.TempDir()
@@ -310,6 +317,7 @@ func TestAddToHistoryDeduplicates(t *testing.T) {
 // --- ImportFromJSON ---
 
 func TestImportFromJSONLoadsJobsAndHistory(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -369,6 +377,7 @@ func TestImportFromJSONLoadsJobsAndHistory(t *testing.T) {
 }
 
 func TestImportFromJSONHandlesMissingFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -382,6 +391,7 @@ func TestImportFromJSONHandlesMissingFile(t *testing.T) {
 }
 
 func TestImportFromJSONRejectsInvalidJSON(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -402,6 +412,7 @@ func TestImportFromJSONRejectsInvalidJSON(t *testing.T) {
 // --- Concurrent writers/readers (race smoke) ---
 
 func TestConcurrentReadsAndWrites(t *testing.T) {
+	t.Parallel()
 	// Stresses the db.mu RLock/Lock interleaving with parallel
 	// readers and a single writer. Run under -race to verify no
 	// data races on the SQL connection or the subscriber slices.
@@ -454,6 +465,7 @@ func TestConcurrentReadsAndWrites(t *testing.T) {
 // --- Subscriber lifecycle ---
 
 func TestUnsubscribeStopsCallback(t *testing.T) {
+	t.Parallel()
 	// Locks down the unsubscribe contract: after the returned func
 	// runs, the callback must NOT fire on subsequent updates. Without
 	// this, an old subscriber can keep firing on a slice clone that
@@ -500,6 +512,7 @@ func TestUnsubscribeStopsCallback(t *testing.T) {
 // minus updated_at, which is bumped on every call and would defeat
 // the consumer's "skip identity-only updates" optimisation.
 func TestOnJobChangeReceivesChangedColumns(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -544,6 +557,7 @@ func TestOnJobChangeReceivesChangedColumns(t *testing.T) {
 }
 
 func TestOnJobChangeFiresAlongsideOnJobUpdate(t *testing.T) {
+	t.Parallel()
 	// Both APIs coexist during the migration. A single UpdateJobFields
 	// call must fan out to BOTH OnJobUpdate and OnJobChange
 	// subscribers — neither path can starve the other.
@@ -585,6 +599,7 @@ func TestOnJobChangeFiresAlongsideOnJobUpdate(t *testing.T) {
 }
 
 func TestOnJobChangeUnsubscribeStopsCallbacks(t *testing.T) {
+	t.Parallel()
 	// Mirror of TestUnsubscribeStopsCallback for the new API. Once
 	// the returned unsub func runs, no further events should arrive.
 	dir := t.TempDir()
@@ -622,6 +637,7 @@ func TestOnJobChangeUnsubscribeStopsCallbacks(t *testing.T) {
 }
 
 func TestOnJobChangeSurvivesPanic(t *testing.T) {
+	t.Parallel()
 	// safeCallJobChange wraps each subscriber in a per-callback recover
 	// so one panicking handler doesn't break the rest of the fan-out
 	// or the writer path.
@@ -666,6 +682,7 @@ func TestOnJobChangeSurvivesPanic(t *testing.T) {
 // DECISIONS #21 follow-on. AddJob must deliver a JobAdded carrying
 // the inserted Job pointer (post-write — UpdatedAt populated).
 func TestOnJobAddedFires(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -707,6 +724,7 @@ func TestOnJobAddedFires(t *testing.T) {
 // the live writer dispatch for DeleteJob / AddTrim / DeleteTrim /
 // BatchSetWatched, which TestOnJobsChangeSubscriber covers.
 func TestOnJobAddedFiresAndOnJobsChangeDoesNot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -752,6 +770,7 @@ func TestOnJobAddedFiresAndOnJobsChangeDoesNot(t *testing.T) {
 // existed, no OnJobAdded event must escape — subscribers shouldn't
 // see ghost insertions for IDs that didn't actually change.
 func TestOnJobAddedDoesNotFireOnDuplicate(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -795,6 +814,7 @@ func TestOnJobAddedDoesNotFireOnDuplicate(t *testing.T) {
 // TestOnJobAddedUnsubscribeStopsCallbacks confirms the returned
 // unsub closure removes the subscriber cleanly.
 func TestOnJobAddedUnsubscribeStopsCallbacks(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -835,6 +855,7 @@ func TestOnJobAddedUnsubscribeStopsCallbacks(t *testing.T) {
 // recover so one panicking subscriber can't break the rest of the
 // fan-out or the writer path.
 func TestOnJobAddedSurvivesPanic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -874,6 +895,7 @@ func TestOnJobAddedSurvivesPanic(t *testing.T) {
 // for the DECISIONS #21 follow-on. DeleteJob must deliver a JobDeleted
 // carrying the removed job's ID once the row is gone.
 func TestOnJobDeletedFires(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -913,6 +935,7 @@ func TestOnJobDeletedFires(t *testing.T) {
 // remaining OnJobsChange writer; tests targeting that path use it
 // directly.
 func TestOnJobDeletedFiresAndOnJobsChangeDoesNot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -965,6 +988,7 @@ func TestOnJobDeletedFiresAndOnJobsChangeDoesNot(t *testing.T) {
 // no longer fires on DeleteJob, so the missing-ID case is silent
 // across both the legacy and new event paths.
 func TestOnJobDeletedDoesNotFireOnMissingID(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -992,6 +1016,7 @@ func TestOnJobDeletedDoesNotFireOnMissingID(t *testing.T) {
 // TestOnJobDeletedUnsubscribeStopsCallbacks confirms the returned
 // unsub closure removes the subscriber cleanly.
 func TestOnJobDeletedUnsubscribeStopsCallbacks(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1050,6 +1075,7 @@ func TestOnJobDeletedUnsubscribeStopsCallbacks(t *testing.T) {
 // snapshotJobsChange via BatchSetWatched-on-zero-rows instead. The
 // underlying invariant is unchanged.)
 func TestEmptyDBSnapshotIsNonNil(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1087,6 +1113,7 @@ func TestEmptyDBSnapshotIsNonNil(t *testing.T) {
 // recover so one panicking subscriber can't break the rest of the
 // fan-out or the writer path.
 func TestOnJobDeletedSurvivesPanic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1129,6 +1156,7 @@ func TestOnJobDeletedSurvivesPanic(t *testing.T) {
 // TestOnTrimsChangedFiresOnAddTrim covers the AddTrim writer path of
 // the TrimsChanged lifecycle event added for DECISIONS #21.
 func TestOnTrimsChangedFiresOnAddTrim(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1171,6 +1199,7 @@ func TestOnTrimsChangedFiresOnAddTrim(t *testing.T) {
 // path. The handler must look up the parent job_id BEFORE the DELETE
 // so the targeted event still carries it post-removal.
 func TestOnTrimsChangedFiresOnDeleteTrim(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1215,6 +1244,7 @@ func TestOnTrimsChangedFiresOnDeleteTrim(t *testing.T) {
 // (OnJobsChange still dispatches via the snapshot path — that's the
 // existing legacy contract this commit doesn't alter.)
 func TestOnTrimsChangedDoesNotFireOnMissingTrim(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1242,6 +1272,7 @@ func TestOnTrimsChangedDoesNotFireOnMissingTrim(t *testing.T) {
 // unsub closure removes the subscriber cleanly across both AddTrim
 // and DeleteTrim writer paths.
 func TestOnTrimsChangedUnsubscribeStopsCallbacks(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1289,6 +1320,7 @@ func TestOnTrimsChangedUnsubscribeStopsCallbacks(t *testing.T) {
 // TestOnTrimsChangedSurvivesPanic locks safeCallTrimsChanged's
 // per-callback recover.
 func TestOnTrimsChangedSurvivesPanic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1332,6 +1364,7 @@ func TestOnTrimsChangedSurvivesPanic(t *testing.T) {
 }
 
 func TestSubscriberSliceShrinksAfterChurn(t *testing.T) {
+	t.Parallel()
 	// Locks down shrinkJobUpdateSubs: after many subscribe/unsubscribe
 	// cycles the underlying slice is rebuilt at smaller capacity so
 	// long-running processes don't accumulate dead capacity. The
@@ -1372,6 +1405,7 @@ func TestSubscriberSliceShrinksAfterChurn(t *testing.T) {
 // --- Orphaned history ---
 
 func TestOrphanedHistory(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {

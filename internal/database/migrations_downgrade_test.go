@@ -13,6 +13,7 @@ import (
 // open (previously every `version < N` block was false and migrate()
 // silently accepted the unknown schema for writing).
 func TestMigrateRefusesNewerSchema(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 

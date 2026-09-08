@@ -12,6 +12,7 @@ import (
 //
 //	DEFAULT ''
 func TestMigrationV19(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -32,6 +33,7 @@ func TestMigrationV19(t *testing.T) {
 // already-migrated DB must be a no-op, not an error — a crash mid-block
 // re-runs the whole block on next startup, because user_version is last.
 func TestMigrationV19Idempotent(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -48,6 +50,7 @@ func TestMigrationV19Idempotent(t *testing.T) {
 // so a missing column there would hand every job an empty identity and make
 // every membership park look like it parked under an unknown account.
 func TestMigrateV19ParkIdentity(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -98,6 +101,7 @@ func TestMigrateV19ParkIdentity(t *testing.T) {
 // TestParkIdentityNotSerialized: the fingerprint is credential-derived and of
 // no use to any UI, so it must not reach the API or the WebSocket payload.
 func TestParkIdentityNotSerialized(t *testing.T) {
+	t.Parallel()
 	field, ok := jobFieldByName("ParkIdentity")
 	if !ok {
 		t.Fatal("Job has no ParkIdentity field")
