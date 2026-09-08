@@ -20,6 +20,7 @@ func newTestDB(t *testing.T) *Database {
 }
 
 func TestMigrationV16(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -64,6 +65,7 @@ func TestMigrationV16(t *testing.T) {
 }
 
 func TestMigrationV16Idempotent(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 

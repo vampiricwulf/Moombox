@@ -9,6 +9,7 @@ import (
 	"maps"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -163,6 +164,22 @@ func FileSchemaVersion(dbPath string) (int, error) {
 	return v, nil
 }
 
+// openDSN builds the SQLite connection string. Production keeps SQLite's
+// default synchronous level (FULL in WAL mode: an fsync per commit; the
+// durability ruling of 2026-07-03 stands). Under `go test` — and only there,
+// testing.Testing() is the runtime's own answer — synchronous is OFF: every
+// test opens its own database and migrates it from scratch, and those fsyncs
+// were most of a 205-second database package on the Windows CI runner
+// (5.6 s on Linux, where fsync is cheap). Nothing else about the test
+// database differs.
+func openDSN(dbPath string, underTest bool) string {
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", dbPath)
+	if underTest {
+		dsn += "&_pragma=synchronous(OFF)"
+	}
+	return dsn
+}
+
 // Open creates or opens a SQLite database at the given path.
 // The logger parameter is optional; if nil, database errors will be silently dropped.
 func Open(dbPath string, logger ...dbLogger) (*Database, error) {
@@ -171,8 +188,7 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 	// form was silently ignored, leaving foreign keys OFF (the child tables'
 	// ON DELETE CASCADE never fired), journal mode DELETE, and busy timeout
 	// 0 (the `moombox add` second process got immediate SQLITE_BUSY).
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", dbPath)
-	sqlDB, err := sql.Open("sqlite", dsn)
+	sqlDB, err := sql.Open("sqlite", openDSN(dbPath, testing.Testing()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

@@ -31,15 +31,38 @@ func requireBlobs(t *testing.T) {
 	}
 }
 
-// startSidecar spins up a Sidecar pointed at t.TempDir() so each test gets
-// its own isolated extraction. Returns the started sidecar; t.Cleanup
-// handles shutdown so even a panicking test won't leak the child process.
+// sharedSidecarCache is ONE extraction for the whole package. The payload is
+// ~36 MB and every Start that has to extract it cost about ten seconds on
+// the Windows CI runner (Defender scans each file as it lands), which made
+// six otherwise-quick tests a 75-second package. Tests run one after another
+// and each stops its own sidecar before the next starts, so the extracted
+// tree is shared safely; only TestSidecarExtractIdempotent needs a cold
+// directory of its own. Created on first use, removed by TestMain.
+var sharedSidecarCache = sync.OnceValues(func() (string, error) {
+	return os.MkdirTemp("", "moombox-sidecar-test-")
+})
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if dir, err := sharedSidecarCache(); err == nil {
+		os.RemoveAll(dir)
+	}
+	os.Exit(code)
+}
+
+// startSidecar spins up a Sidecar on the package's shared extraction.
+// Returns the started sidecar; t.Cleanup handles shutdown so even a
+// panicking test won't leak the child process.
 func startSidecar(t *testing.T) *Sidecar {
 	t.Helper()
 	requireBlobs(t)
+	cacheDir, err := sharedSidecarCache()
+	if err != nil {
+		t.Fatalf("shared sidecar cache dir: %v", err)
+	}
 
 	s := New(Config{
-		CacheDir:       t.TempDir(),
+		CacheDir:       cacheDir,
 		StartupTimeout: 30 * time.Second, // first-launch extracts ~36 MB
 		RequestTimeout: 30 * time.Second,
 		Logger:         &testLogger{t: t},

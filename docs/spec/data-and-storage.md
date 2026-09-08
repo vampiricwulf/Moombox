@@ -34,6 +34,7 @@ The database is opened via `sql.Open("sqlite", dsn)` using the `modernc.org/sqli
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
 | `_pragma=journal_mode(WAL)` | WAL | Write-ahead logging for concurrent reads during writes |
+| `_pragma=synchronous(OFF)` | tests only | Appended by `openDSN` when `testing.Testing()` reports a `go test` run: every test migrates its own database, and the per-commit fsyncs made the database package 205 s on the Windows CI runner. Production never sets it; SQLite's default (FULL in WAL mode) stands. |
 | `_pragma=busy_timeout(5000)` | 5000ms | Wait up to 5 seconds for a locked database before returning SQLITE_BUSY |
 | `_pragma=foreign_keys(1)` | on | Enforce foreign key constraints (gaps, trims, segments reference jobs — `ON DELETE CASCADE` fires on `DeleteJob`) |
 

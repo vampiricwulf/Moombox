@@ -13,6 +13,7 @@ import "testing"
 // every sweep treats as ParkReasonAuth, so a pre-v18 COOKIES? row keeps
 // exactly the resume behavior it had before the column existed.
 func TestMigrationV18(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -37,6 +38,7 @@ func TestMigrationV18(t *testing.T) {
 // error (a crash mid-block re-runs the whole block on next startup, because
 // user_version is written last).
 func TestMigrationV18Idempotent(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
@@ -55,6 +57,7 @@ func TestMigrationV18Idempotent(t *testing.T) {
 // would hand the sweep an empty reason for every job and silently restore the
 // bug this field exists to fix.
 func TestMigrateV18ParkReason(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
 
