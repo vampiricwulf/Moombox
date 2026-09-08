@@ -466,9 +466,12 @@ func TestReorderBufferFailureDoesNotReopenUnboundedGrowth(t *testing.T) {
 //	window pays exactly ONE probe (initial head discovery -- segment-header
 //	harvests keep head fresh afterward), so its nominal time is
 //	500ms + 240/4*5ms + overhead, comfortably under 1.5s even with coarse
-//	Windows timers. The 2.5s budget sits >= 2s below the batched floor and
-//	>= 1s above the rolling nominal -- it discriminates on structure, not
-//	scheduler luck.
+//	Windows timers. The structure is asserted directly first — exactly one
+//	probe — because that is what the batched shape cannot satisfy on any
+//	machine. The wall-clock budget backs it up: 4s sits below the batched
+//	floor of 4.5s and well above the rolling nominal (a loaded 2-core
+//	GitHub Windows runner measured 2.65s with the correct single probe, so
+//	the earlier 2.5s budget discriminated on runner speed, not structure).
 func TestCatchUpRollingWindowThroughput(t *testing.T) {
 	t.Parallel()
 	const (
@@ -477,7 +480,7 @@ func TestCatchUpRollingWindowThroughput(t *testing.T) {
 		numWorkers = 4
 		segDelay   = 5 * time.Millisecond
 		probeDelay = 500 * time.Millisecond
-		budget     = 2500 * time.Millisecond
+		budget     = 4000 * time.Millisecond
 	)
 	var probes atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -521,6 +524,13 @@ func TestCatchUpRollingWindowThroughput(t *testing.T) {
 
 	// Correctness first: the speed is worthless if the recording has a hole.
 	wantSegments(t, out, 0, endSeq)
+
+	// Structure: one head-discovery probe for the whole span. The batched
+	// shape pays one per batch (9 here), on any machine at any speed.
+	if got := probes.Load(); got != 1 {
+		t.Errorf("head probes = %d, want exactly 1 -- the pool is draining at batch boundaries "+
+			"and paying a head probe per batch instead of rolling continuously", got)
+	}
 
 	if elapsed > budget {
 		t.Errorf("caught up %d segments in %v, want < %v -- the pool is draining at batch boundaries "+
