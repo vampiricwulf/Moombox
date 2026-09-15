@@ -569,12 +569,20 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 				continue
 			}
 
-			// Twitch occasionally issues RECONNECT to request clients
-			// drop and reconnect. Return nil so the outer loop does a
-			// clean reconnect without incrementing the error counter.
+			// Twitch occasionally issues RECONNECT to ask clients to drop and
+			// reconnect. The SENTINEL, not nil: nil is Start's clean-exit
+			// value, so returning it ended chat capture for the rest of the
+			// job. Logged at the loop rather than here, so one directive still
+			// writes exactly one line — see errServerReconnect.
 			if strings.HasPrefix(line, "RECONNECT") {
-				cd.logger.Info("twitch IRC RECONNECT received; reconnecting", "channel", cd.channelLogin)
-				return nil
+				// Force-closed with NO close handshake, before the sentinel is
+				// returned: Twitch has already told us to leave, so waiting on
+				// a peer that may not answer buys nothing, and the deferred
+				// conn.Close() below would otherwise block for its full 5s
+				// peer-ack timeout on every RECONNECT — a real chat gap this
+				// avoids. See errServerReconnect.
+				conn.CloseNow()
+				return errServerReconnect
 			}
 
 			msg := cd.parseLine(line)
