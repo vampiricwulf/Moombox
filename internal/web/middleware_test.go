@@ -326,6 +326,29 @@ func TestIsAllowedOrigin(t *testing.T) {
 			identity:      []string{"dash.lan"},
 			expected:      true,
 		},
+		// Final review Finding 3: the row above only pinned the localhost arm
+		// (:369) against wildcard expansion; the lan arm (middleware.go:372)
+		// and the unset-default arm (middleware.go:382) had no such row, so
+		// each arm's hostInSANs(..., false) survived a mutant flipping it to
+		// true against the committed suite. These two rows close that gap.
+		{
+			// Mutant: middleware.go:372, hostInSANs(hostname, identity, false)
+			// -> hostInSANs(hostname, identity, true).
+			name:          "lan mode does not expand a wildcard SAN (review P7)",
+			origin:        "https://evil.example.com",
+			networkAccess: "lan",
+			identity:      []string{"*.example.com"},
+			expected:      false,
+		},
+		{
+			// Mutant: middleware.go:382, hostInSANs(hostname, identity, false)
+			// -> hostInSANs(hostname, identity, true).
+			name:          "unset default mode does not expand a wildcard SAN (review P7)",
+			origin:        "https://evil.example.com",
+			networkAccess: "",
+			identity:      []string{"*.example.com"},
+			expected:      false,
+		},
 	}
 
 	for _, tt := range tests {

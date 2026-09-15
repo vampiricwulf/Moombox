@@ -165,7 +165,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// own check cannot express it: authenticateOrigin returns nil
 	// unconditionally when Origin == Host, which is exactly the pair a
 	// DNS-rebinding page controls, and its OriginPatterns are matched with
-	// filepath.Match so a port can only be wildcarded or spelled literally.
+	// path.Match so a port can only be wildcarded or spelled literally.
 	// An EMPTY Origin stays acceptable — non-browser clients send none, and
 	// the library allowed them too. A nil OriginCheck fails CLOSED (fix-round-1
 	// item 3): only a WebSocketHub built without NewServer reaches this, and a

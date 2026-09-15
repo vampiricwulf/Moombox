@@ -65,10 +65,12 @@ The file structure:
 
 ### Embedding and Serving
 
-The `web.PublicFS` embedded filesystem is mounted by the HTTP server. Asset URLs inside `index.html`
-carry a `?v=<build commit>` cache-buster — though only in the SPA-FALLBACK copy the server rewrites at
-mount time, so `/` itself still serves the embedded file verbatim and its asset URLs carry none
-(pre-existing; a chain-close item). A URL that carries one is served `immutable, max-age=1y`, but only
+Asset URLs inside `index.html` carry a `?v=<build commit>` cache-buster on a trusted commit:
+`MountStaticFiles` rewrites the shell once at mount time and `serveIndex` (`internal/web/server.go`)
+serves that copy for `/`, `/index.html` and every SPA-fallback route with `Cache-Control: no-cache` and
+an `ETag` — the commit when trusted, otherwise the file's SHA-256 — answering `If-None-Match` with a
+304; on an untrusted commit no `?v=` is emitted at all, so the served bytes are the embedded file the
+hash describes. A URL that carries one is served `immutable, max-age=1y`, but only
 when the commit is TRUSTED: `unknown` (no `-ldflags` stamp and no `vcs.revision`) and a
 `<rev>-dirty` suffix (built from a modified working tree) both name bytes that can change under the
 same string, so they fall back to the revalidating policy. Every other asset path is served `no-cache`

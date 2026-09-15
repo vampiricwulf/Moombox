@@ -227,7 +227,7 @@ arc-close as "DNS rebinding (Host allowlist is the owner-level fix)".
 
 **O3b — the WebSocket origin check and the CSRF origin check disagree.**
 `allowedOriginPatterns` (`internal/web/websocket.go:477-511`) derives its host from `r.Host`
-(`:495`) — never `X-Forwarded-Host` — and emits `hostname+":*"` (`:505`), a `filepath.Match`
+(`:495`) — never `X-Forwarded-Host` — and emits `hostname+":*"` (`:505`), a `path.Match`
 wildcard over the port. The CSRF twin reads XFH from a trusted proxy and compares ports exactly
 once either side names one. Two consequences: a Host-rewriting proxy loads the dashboard and then
 has every upgrade refused (`docs/spec/security.md:196-200` documents this and calls the alignment a
@@ -277,8 +277,8 @@ added.
 
 ### 1. Certificate identity (`internal/web/tls.go`)
 
-`certWatcher.IdentitySANs() []string` returns the loaded certificate's SANs (via the existing
-`SANs()`, `:79`) — but `nil` when the certificate is Moombox's own placeholder, detected as
+`certWatcher.IdentitySANs() []string` returns the loaded certificate's SANs (via `snapshot()`) — but
+`nil` when the certificate is Moombox's own placeholder, detected as
 `Subject.CommonName == placeholderCertCN && Issuer.CommonName == placeholderCertCN`, with
 `const placeholderCertCN = "Moombox"` also used by `generateSelfSignedCert` (`:186`) so the two
 cannot drift. Rationale: that certificate's SANs are `localhost`, `127.0.0.1`, `::1` plus whatever
@@ -307,12 +307,14 @@ gain `hostInSANs` as a pure widening: those two arms are IP-class tests that rej
 and the WebSocket check (below) starts routing through this function, so without it an install with
 a real certificate for `dash.lan` would lose the socket it has today.
 
-`hostInSANs(hostname string, sans []string) bool` compares `hostname` (already `u.Hostname()`: no
-port, no brackets) against each SAN through `splitAuthority`, so IP SANs match canonically
-(`::1` == `0:0:0:0:0:0:0:1`) and DNS SANs match case-insensitively. A `*.example` SAN matches
-exactly one non-empty, dot-free leftmost label (RFC 6125), so a wildcard certificate does not
-lock its own dashboard out. Mismatch returns `false` — the caller's existing
-`403 {"error":"Forbidden: invalid origin"}` body is unchanged.
+`hostInSANs(hostname string, sans []string, allowWildcard bool) bool` compares `hostname` (already
+`u.Hostname()`: no port, no brackets) against each SAN through `splitAuthority`, so IP SANs match
+canonically (`::1` == `0:0:0:0:0:0:0:1`) and DNS SANs match case-insensitively. When `allowWildcard`
+is true, a `*.example` SAN also matches exactly one non-empty, dot-free leftmost label (RFC 6125), so
+a wildcard certificate does not lock its own dashboard out; only the external/public arm passes
+`true` — `localhost`/`lan`/default pass `false`, so a wildcard SAN widens only a same-host request
+that already passed `sameSiteOrigin`, never those three IP-class arms. Mismatch returns `false` — the
+caller's existing `403 {"error":"Forbidden: invalid origin"}` body is unchanged.
 
 `originAllowed(store, r, origin) (allowed bool, comparedHost string)` is the one decision:
 reads `network_access` once, computes `effectiveRequestHost` once, and calls `isAllowedOrigin` with
@@ -334,17 +336,18 @@ as quiet as they are today.
 ### 3. The WebSocket upgrade (`internal/web/websocket.go`)
 
 `allowedOriginPatterns` is DELETED (with the now-unused `net` and `strings` imports — they have no
-other user in that file). `WebSocketHub` gains `OriginCheck func(*http.Request) bool`, set by
-`NewServer` beside the existing `ClientIP` hook (`internal/web/server.go:101`) to
-`func(r *http.Request) bool { ok, _ := originAllowed(store, r, r.Header.Get("Origin")); return ok }`.
-Nil means accept, which only test harnesses rely on.
+other user in that file). `WebSocketHub` gains `OriginCheck func(*http.Request) (allowed bool,
+comparedHost string)`, set by `NewServer` beside the existing `ClientIP` hook
+(`internal/web/server.go:102`) to `func(r *http.Request) (bool, string) { return originAllowed(store,
+r, r.Header.Get("Origin")) }`. A nil hook REFUSES any Origin-bearing upgrade (`websocket.go:174-186`);
+only a `WebSocketHub` built without `NewServer` reaches that path.
 
 `HandleUpgrade` checks before `websocket.Accept`: when `Origin` is non-empty and `OriginCheck`
 rejects, it logs `websocket upgrade rejected: origin refused` with the clipped origin and host and
 answers `403 Forbidden`. An EMPTY `Origin` is still accepted, matching both the library and today's
 behaviour for non-browser clients. `AcceptOptions` then carries `InsecureSkipVerify: true` and no
 `OriginPatterns`, because the library's own check cannot express the rule: it accepts Origin==Host
-unconditionally and matches ports through `filepath.Match`.
+unconditionally and matches ports through `path.Match`.
 
 New inputs the check now reads that it did not before: `network_access`, `network.trusted_proxies`
 + `X-Forwarded-Host`, `network.trust_forwarded_proto` + `r.TLS` (via `effectiveRequestScheme`), and

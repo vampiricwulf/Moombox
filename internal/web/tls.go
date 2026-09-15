@@ -154,8 +154,9 @@ func (w *certWatcher) snapshot() (sans, identity []string) {
 }
 
 // SANs returns the DNS names + IP addresses that appear in the loaded
-// certificate. Used by IdentitySANs and by tests; production callers wanting
-// the certificate-ATTESTED host list should call IdentitySANs instead.
+// certificate. Used by tests; production callers want IdentitySANs instead,
+// which derives from the same snapshot() parse but returns only the
+// certificate-ATTESTED host list.
 func (w *certWatcher) SANs() []string {
 	sans, _ := w.snapshot()
 	return sans

@@ -90,7 +90,9 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   a name or address that certificate does NOT attest is refused on `external`/`public` — the same
   `403 {"error":"Forbidden: invalid origin"}` as any other mismatched origin. The fix is to add that
   name to the certificate's SANs; a certless or placeholder-only install is unaffected, because the
-  self-signed placeholder never narrows this check.
+  self-signed placeholder never narrows this check. On `localhost`/`lan`, an install reached by a DNS
+  name needs an operator certificate whose SANs name it, or access by IP / `localhost`; since the
+  upgrade shares the decision, that applies to the WebSocket as well as to POSTs.
   **Not covered:** a rebinding attacker who also controls DNS for a name the certificate attests.
   **Residual:** a proxy listed in `network.trusted_proxies` that does not itself set or overwrite
   `X-Forwarded-Host` lets its peer choose the host the Origin is compared against. A browser cannot
@@ -226,7 +228,7 @@ alternative. The WebSocket upgrade makes the SAME decision through the same help
 exactly as it satisfies CSRF and CORS, and ports are compared exactly rather than wildcarded. The
 check runs before `websocket.Accept`, which is then given `InsecureSkipVerify` — the library's own
 check accepts `Origin == Host` unconditionally, which is the pair a DNS-rebinding page controls, and
-matches ports with `filepath.Match`. An upgrade carrying no `Origin` header at all is still
+matches ports with `path.Match`. An upgrade carrying no `Origin` header at all is still
 accepted, as it was before: browsers always send one, and non-browser clients never do.
 `internal/web/routes/cookies_import_chain_test.go` drives the CSRF half through the real chain — the
 missing-origin refusal on a `public` fixture and the invalid-origin refusal on a `lan` one. The CORS

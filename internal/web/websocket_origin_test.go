@@ -106,12 +106,12 @@ func TestWebSocketUpgradeSharesTheOriginDecision(t *testing.T) {
 }
 
 // THE MUTANT: leave OriginCheck nil in NewServer — every test above still
-// passes (they wire the hook themselves) while the real server accepts
-// everything.
+// passes (they wire the hook themselves) while the real server refuses every
+// browser upgrade.
 func TestNewServerWiresTheWebSocketOriginCheck(t *testing.T) {
 	s := NewServer(config.NewStore(config.Defaults(), ""), testWSLogger{})
 	if s.WebSocket().OriginCheck == nil {
-		t.Fatal("NewServer left WebSocketHub.OriginCheck nil — the upgrade would accept any origin")
+		t.Fatal("NewServer left WebSocketHub.OriginCheck nil — the upgrade would refuse every browser origin")
 	}
 }
 
