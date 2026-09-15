@@ -72,3 +72,31 @@ func TestAttemptAutoRollbackNoArtifact(t *testing.T) {
 		t.Errorf("no marker may be written on decline, stat err: %v", err)
 	}
 }
+
+// TestRollbackArtifactPathPrefersTheOldFile pins the fix for the second
+// in-place update of one launcher lifetime: when handleUpdateRestart could not
+// rename .old out of the way (the ~ name is held by the launcher's own mapped
+// image), .old is the version that was running a moment ago and ~ is the one
+// BEFORE it. Restoring ~ there rolls back two versions AND the restored child's
+// CleanupOldBinary then deletes the real previous binary.
+//
+// Cross-platform on purpose: on Linux .old is the only artifact there has ever
+// been, so "the artifact is .old when .old exists" is true on every platform
+// and this runs on both CI runners.
+//
+// Mutant: reverting rollbackArtifactPath to `return exePath + "~"` fails this
+// on Windows.
+func TestRollbackArtifactPathPrefersTheOldFile(t *testing.T) {
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "moombox.exe")
+	if err := os.WriteFile(exePath, []byte("current binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exePath+".old", []byte("previous binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := rollbackArtifactPath(exePath), exePath+".old"; got != want {
+		t.Errorf("rollbackArtifactPath = %q, want %q — a surviving .old is the freshest previous binary", got, want)
+	}
+}
