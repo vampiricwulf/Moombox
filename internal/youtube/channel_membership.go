@@ -133,9 +133,11 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 // membershipTabHeader captures only the fields needed to locate the selected
 // membership tab. The (large) tab body stays a json.RawMessage so the deep JSON
 // walk runs over ONLY the one tab we use — a non-member's home-fallback page is
-// never deep-parsed at all. This is the hot path (fetched every cycle for every
-// YouTube channel), and lazy-decoding cut allocations ~99% for the common
-// non-member case (measured on a real fallback page: 98k → 32 allocs).
+// never deep-parsed at all. This is the hot path — fetched each feed cycle for
+// every channel the monitor's non-member memo has not memoized, plus the one
+// memoized channel it nominates to keep the liveness signal alive — and
+// lazy-decoding cut allocations ~99% for the common non-member case (measured
+// on a real fallback page: 98k → 32 allocs).
 type membershipTabHeader struct {
 	Selected      bool            `json:"selected"`
 	TabIdentifier string          `json:"tabIdentifier"`
