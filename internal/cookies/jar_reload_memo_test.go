@@ -125,27 +125,69 @@ func TestLoadReparsesAfterAWrite(t *testing.T) {
 // TestLoadNeverTrustsAFreshlyWrittenFile pins the racily-clean rule: a file
 // whose mtime is inside cookieJarStatSettle of the load is never memoised.
 //
-// Mutant named: dropping the settle window. cookies.txt has writers that
-// write twice inside one timestamp tick — the verify-and-roll-back pass
-// writes the new set and then restores the previous one, and a restore that
-// differs only in expiry digits has the same byte length — so a size+mtime
-// pair alone would leave the jar holding credentials the file no longer has.
+// Fix round 2 (I2): the original version of this test planted its marker
+// through jar.loadFrom, which was a sound seam in fix round 1 (loadFrom left
+// the memo untouched) but became a false positive once fix round 1's own
+// minor (b) restored loadFrom's memo-clearing — after that, loadFrom clearing
+// the memo made the second Load re-read regardless of whether the settle
+// window existed, so this test passed whether or not the rule it claimed to
+// pin was even present. Rewritten to (d)'s direct-observation technique
+// instead: a same-size rewrite with the stat forced back to what Load itself
+// recorded, so the only way the assertion can hold is if the settle window
+// genuinely refused to memoise a freshly written file's pair.
+//
+// Mutant named: dropping the `time.Since(postSt.ModTime()) >=
+// cookieJarStatSettle` clause from Load's post-read memo computation while
+// KEEPING the pre/post agreement check. cookies.txt has writers that write it
+// twice inside one timestamp tick — the verify-and-roll-back pass writes the
+// new set and then restores the previous one, and a restore that differs
+// only in expiry digits has the SAME byte length — so a size+mtime pair
+// trusted the instant it is recorded, with no settle margin, would leave the
+// jar holding credentials the file no longer has. Verified by execution: with
+// that clause removed, this test fails (the short-circuit fires on the
+// freshly-written pair and the rewrite is hidden) while it passes with the
+// clause present.
 func TestLoadNeverTrustsAFreshlyWrittenFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cookies.txt")
-	agedCookieFile(t, path, []string{cookieRow(".youtube.com", futureExpiry(), "SID", "from-file")}, 0)
+	const oldValue = "AAAAAAAA"
+	const newValue = "BBBBBBBB" // same length as oldValue: the stat below must be restorable exactly
+	if len(oldValue) != len(newValue) {
+		t.Fatalf("fixture values must be equal length")
+	}
+	agedCookieFile(t, path, []string{cookieRow(".youtube.com", futureExpiry(), "SID", oldValue)}, 0) // fresh: mtime = now
 
 	jar := NewCookieJar()
 	if err := jar.Load(path); err != nil {
 		t.Fatal(err)
 	}
-	jar.loadFrom([]byte("# Netscape HTTP Cookie File\n"+
-		cookieRow(".youtube.com", futureExpiry(), "SID", "from-memory")+"\n"), path)
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != oldValue {
+		t.Fatalf("setup: SID = %q, want %q", got, oldValue)
+	}
+	st := statOf(t, path)
+	size, mod := st.Size(), st.ModTime()
+
+	// Same-length rewrite, mtime forced back to the pair Load just recorded:
+	// from the jar's point of view (stat only) this looks exactly like the
+	// file it already parsed. The settle window is the ONLY thing that can
+	// still tell them apart, since the first Load happened well inside it.
+	content := "# Netscape HTTP Cookie File\n" + cookieRow(".youtube.com", futureExpiry(), "SID", newValue) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mod, mod); err != nil {
+		t.Fatal(err)
+	}
+	if st2 := statOf(t, path); st2.Size() != size || !st2.ModTime().Equal(mod) {
+		t.Fatalf("fixture rewrite did not restore (size, mtime): got (%d, %v), want (%d, %v)",
+			st2.Size(), st2.ModTime(), size, mod)
+	}
 
 	if err := jar.Load(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != "from-file" {
-		t.Errorf("SID = %q, want %q — a file written this instant was memoised", got, "from-file")
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != newValue {
+		t.Errorf("SID = %q, want %q — a freshly written file's pair was memoised and its rewrite hidden",
+			got, newValue)
 	}
 }
 
@@ -295,5 +337,109 @@ func TestLoadOnlyMemoisesWhenTheStatsAgree(t *testing.T) {
 	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != afterRead {
 		t.Errorf("SID = %q, want %q — a rewrite landing between the pre- and post-read stats must not have been memoised",
 			got, afterRead)
+	}
+}
+
+// TestLoadClearsTheMemoWhenThePostReadStatFails is fix round 2's Minor 1:
+// Load's post-read stat block had an `if postSt, postErr := os.Stat(...);
+// postErr == nil && ... { ... }` with no else. If the file vanishes between
+// the read returning and that stat — an unlucky delete, not necessarily a
+// concurrent Moombox writer — an EARLIER loadedMemo=true and its (size,
+// mtime) pair from a PRIOR successful Load simply survive, unrelated to the
+// content this Load's read actually saw and installed.
+//
+// cookieJarReadFile is the seam: this test wraps it to delete the file the
+// instant after the real read returns, landing the vanish exactly in the gap
+// between the read and Load's post-read stat — the same technique
+// TestLoadOnlyMemoisesWhenTheStatsAgree uses for a rewrite instead of a
+// delete.
+//
+// The scenario needs a REAL, ordinary rewrite between the first Load and the
+// vanish-during-read Load: the first Load's memo legitimately describes the
+// file as it existed then, and the SECOND Load can only reach the read (where
+// the vanish is injected) if its own pre-read check sees a genuinely
+// different stat and declines to short-circuit — exactly what a plain
+// rewrite (different mtime) provides, with nothing artificial about it.
+//
+// Mutant named: dropping (or gating away, e.g. behind `j.loadGen == gen`
+// alone without also requiring `j.filePath == filePath`, or vice versa) the
+// `j.loadedMemo = false` assignment in Load's post-read-stat-error branch.
+// With that mutant the FIRST Load's trusted pair outlives the vanish-during-
+// read Load, and a THIRD Load against a file recreated with that exact
+// (now long-stale, and by this point completely unrelated to the jar's
+// actual in-memory content) pair short-circuits instead of re-reading.
+func TestLoadClearsTheMemoWhenThePostReadStatFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	const first = "AAAAAAAA"
+	const second = "BBBBBBBB"
+	const third = "CCCCCCCC"
+	if len(first) != len(second) {
+		t.Fatalf("fixture values must be equal length")
+	}
+	if len(first) != len(third) {
+		t.Fatalf("fixture values must be equal length")
+	}
+	agedCookieFile(t, path, []string{cookieRow(".youtube.com", futureExpiry(), "SID", first)}, time.Hour)
+
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != first {
+		t.Fatalf("setup: SID = %q, want %q", got, first)
+	}
+	st1 := statOf(t, path)
+	size1, mod1 := st1.Size(), st1.ModTime()
+
+	// A genuine rewrite: legitimately invalidates the first Load's memo at
+	// the PRE-read check (different mtime), so the vanish-during-read Load
+	// below actually reaches cookieJarReadFile. This is what puts the FIRST
+	// Load's loadedMemo=true and its (size1, mod1) pair at risk of
+	// surviving the SECOND Load's own post-stat failure.
+	agedCookieFile(t, path, []string{cookieRow(".youtube.com", futureExpiry(), "SID", second)}, 30*time.Minute)
+
+	orig := cookieJarReadFile
+	t.Cleanup(func() { cookieJarReadFile = orig })
+	cookieJarReadFile = func(name string) ([]byte, error) {
+		data, err := orig(name)
+		if err == nil && name == path {
+			// Land the vanish in the gap between the read returning and
+			// Load's post-read stat.
+			if rmErr := os.Remove(path); rmErr != nil {
+				t.Fatal(rmErr)
+			}
+		}
+		return data, err
+	}
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	cookieJarReadFile = orig
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != second {
+		t.Fatalf("setup: SID = %q after the vanish-during-read Load, want %q", got, second)
+	}
+
+	// Recreate the file with a THIRD value but the exact (size, mtime) the
+	// FIRST Load recorded — the only pair a surviving, uncleared memo could
+	// still be pinned to; it describes neither the second Load's content nor
+	// this one.
+	content := "# Netscape HTTP Cookie File\n" + cookieRow(".youtube.com", futureExpiry(), "SID", third) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mod1, mod1); err != nil {
+		t.Fatal(err)
+	}
+	if st3 := statOf(t, path); st3.Size() != size1 || !st3.ModTime().Equal(mod1) {
+		t.Fatalf("fixture recreate did not restore (size, mtime): got (%d, %v), want (%d, %v)",
+			st3.Size(), st3.ModTime(), size1, mod1)
+	}
+
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != third {
+		t.Errorf("SID = %q, want %q — a stat error after a vanish-during-read Load left an earlier Load's "+
+			"memo (and its by-now-unrelated pair) able to short-circuit a later Load", got, third)
 	}
 }
