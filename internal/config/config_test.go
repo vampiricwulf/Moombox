@@ -1179,3 +1179,55 @@ max_video_resolution = 720
 		t.Errorf("MaxVideoResolution = %d, want 720 (the section around the retired key must still decode)", cfg.Downloader.MaxVideoResolution)
 	}
 }
+
+// TestLoadRecordsTheFileItRead pins the fix for a config saved to a different
+// file than it was loaded from. Load searches cwd, ./config/ and
+// ~/.config/moombox/ after the -config flag (see its doc), and the caller has
+// no other way to learn which one answered.
+//
+// Mutant: dropping `cfg.LoadedFrom = path` from loadFromFile leaves it empty
+// and fails this.
+func TestLoadRecordsTheFileItRead(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "config")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(nested, "config.toml")
+	if err := os.WriteFile(want, []byte("[network]\nport = 8123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir) // no cwd config.toml, so the ./config/ fallback answers
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Network.Port != 8123 {
+		t.Fatalf("fixture not loaded: port = %d", cfg.Network.Port)
+	}
+	if cfg.LoadedFrom != want {
+		t.Errorf("LoadedFrom = %q, want %q — a later save has to target the file that was read", cfg.LoadedFrom, want)
+	}
+}
+
+// TestLoadWithNothingOnDiskLeavesLoadedFromEmpty pins the other half: with no
+// file anywhere, there is no load target, so the caller keeps the path it asked
+// for and creates the file there.
+//
+// Mutant: setting LoadedFrom to the searched-for path in the defaults branch
+// fails this (and would make main.go create the file in the wrong place).
+func TestLoadWithNothingOnDiskLeavesLoadedFromEmpty(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "absent", "config.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ConfigLoaded {
+		t.Fatal("no file exists — ConfigLoaded must stay false")
+	}
+	if cfg.LoadedFrom != "" {
+		t.Errorf("LoadedFrom = %q, want empty", cfg.LoadedFrom)
+	}
+}

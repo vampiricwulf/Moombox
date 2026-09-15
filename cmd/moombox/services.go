@@ -380,6 +380,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	s.cfg = cfg
+	// Save where we loaded. config.Load searches the cwd, ./config/ and
+	// ~/.config/moombox/ after the flag path, so the file it read is often NOT
+	// the path we asked for — and s.configPath is what the store below, the
+	// auto-persist a few lines down and the TUI's two config.Save calls
+	// (tui_wiring.go) all write to.
+	s.configPath = storePathFor(s.configPath, cfg)
 	// configStore owns the synchronising mutex (no external cfgMu — every
 	// caller now goes through Store APIs per DECISIONS #8 wave 4-7).
 	s.configStore = config.NewStore(cfg, s.configPath)
