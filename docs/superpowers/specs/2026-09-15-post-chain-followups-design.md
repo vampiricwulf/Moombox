@@ -454,3 +454,154 @@ once before the listener starts — making it atomic is a separate concern.
 - User-facing strings: match the twin UI's exact output before mirroring it (read the twin's code).
 - `docs/spec/security.md` and `docs/spec/user-interfaces.md` are updated in the task that changes the
   behaviour they describe, never in a trailing docs task.
+
+# C. HLS end-verdict symmetry (O4)
+
+## Problem
+
+`runHlsLoop` (`internal/engine/downloader_hls.go:186`) consults `d.opts.CheckStreamStatus` at three exit sites. All three
+classify the answer the same way (confirmed ended / confirmed still live / the check errored); they differ only in what
+they DO with a confirmed end.
+
+| Site | Lines | Reached when | On a confirmed `ended` TODAY |
+|---|---|---|---|
+| A | `downloader_hls.go:298-312` | the playlist fetch returned 404/410 | `d.streamEnded.Store(true); return nil` — clean finalize, on the FIRST failure |
+| B | `downloader_hls.go:331-345` | the 6th consecutive playlist FETCH failure (`consecutiveErrors > 5`) | matches no `case`, falls past the switch, `return fmt.Errorf("HLS playlist fetch failed after %d consecutive errors: %w", …)` |
+| C | `downloader_hls.go:385-395` | the 6th consecutive playlist PARSE failure | same shape, `return fmt.Errorf("failed to parse HLS playlist after %d consecutive errors", …)` |
+
+B and C have `case checkErr != nil:` and `case !ended:` and no `default:`, so `(true, nil)` — the exact value site A
+finalizes on — falls straight through to the error return. This is the Arc 2 Task-1 review's deferred minor (a),
+`.superpowers/sdd/2026-09-15-sweep-2-engine/progress.md:20`: "site B has no `default:` latch — a confirmed ended arriving
+on the escalation round exits with the fetch-failed error, `streamEnded` false, stale sidecar".
+
+**"Confirmed ended"** is `CheckStreamStatus(ctx)` returning `(true, nil)` — YouTube HLS wires `ProbeVideoStatus` through
+`observeYouTubeStatusProbe` (`internal/worker/strategy_youtube_hls.go:202-205`), Twitch its GQL broadcast probe
+(`internal/worker/orchestrator_twitch.go:226` block). Same callable at all three sites; only the retry round differs.
+
+**Observable cost.** `streamEnded` is not exported; its single effect is the loop's exit defer (`downloader_hls.go:189-195`):
+`saveResume()` always, then `ClearResume()` **only** when `streamEnded` is set. So a B/C exit on a confirmed end (1) re-saves
+and keeps `.resume.json` for a recording the engine has just established is complete — the orphan the ENDLIST site's comment
+(`:756-761`) calls "a contract violation"; masked when the orchestrator wipes staging after a successful mux, NOT masked on
+the paths that preserve staging (shutdown / user cancel in the same window, a mux failure leaving the part dir for a later
+`/resume`), where the next Resume seeds from a sidecar for a broadcast that is definitively over; (2) hands the orchestrator
+an error for a clean end — Twitch logs it at ERROR (`internal/worker/orchestrator_twitch.go:653-656`) then finalizes, YouTube
+reads the value only for `ErrQualityLost` (`internal/worker/orchestrator_youtube.go:247`); (3) leaves one signal meaning two
+things, decided by which round it lands on. *Erratum on the ruling's cost wording (Arc 2 precedent: sweep spec §5.1's
+"job → Error" claim was corrected the same way): verified downstream, neither live orchestrator sets job status `Error` here
+nor needs an operator retry — both finalize and mux what was captured. (1)–(3) are the costs that survive verification; the
+FIX is unchanged.*
+
+## Decision
+
+Verbatim owner ruling **O4**: "in the HLS live download loop the end verdict has three sites. Site A finalizes cleanly when
+the playlist confirms the stream ended. Sites B and C — the escalation round after fetch failures — exit with the
+fetch-failed error, `streamEnded=false` and a stale sidecar even when the same confirmed-ended signal arrives, so those jobs
+need a retry to finalize. FIX: B and C finalize cleanly on a confirmed ended, exactly like A; one table test over the three
+sites; every existing pin stays green."
+
+## Design
+
+**One shared helper, because the classification is identical and the consequences are not.** Add to `downloader_hls.go`
+immediately above `runHlsLoop`: `type endVerdict int` with `verdictNoCheck` (nothing wired — nobody can contradict the
+site's own evidence), `verdictUnknown` (asked and ERRORED — not a verdict), `verdictEnded`, `verdictLive`; plus
+`func (d *SegmentDownloader) consultStreamEnd(ctx context.Context) endVerdict`, returning `verdictNoCheck` when
+`d.opts.CheckStreamStatus == nil`, logging the DASH loop's wording (`"stream status check failed; deferring end verdict"`,
+`"err"`) and returning `verdictUnknown` on a non-nil error, else `verdictEnded` / `verdictLive`. It decides nothing — each
+site maps the verdict onto its own exit, which is why a helper that *finalizes* would be wrong:
+
+| Site | `verdictEnded` | `verdictLive` | `verdictUnknown` | `verdictNoCheck` |
+|---|---|---|---|---|
+| A | finalize (unchanged) | `ErrQualityLost` | fall into the retry budget | finalize (the variant is gone and nothing can say otherwise) |
+| B | **finalize (new)** | `ErrQualityLost` | keep the fetch error | keep the fetch error |
+| C | **finalize (new)** | `ErrQualityLost` | keep the parse error | keep the parse error |
+
+Everything but the two bold cells is today's behaviour. Finalize = `d.streamEnded.Store(true); return nil`, exactly site A's
+two lines, so the exit defer clears the sidecar. The 4-valued enum exists because A and B/C genuinely disagree about an
+unwired check; three values would force one of those rows to lie. **The escalation-round error** is returned only on
+`verdictUnknown` / `verdictNoCheck` — unchanged text, unchanged `%w` wrap of the fetch error, so `streamEnded` stays false
+and the resume sidecar survives for a later Resume on every path that keeps it today.
+
+**The second status check the review noted** (minor (b): consults at `:300` and `:332` in one iteration, when a 404/410's
+consult deferred and that same round is the 6th failure) STAYS, and gains a comment saying why: before this change the
+second consult could only discard an "ended"; after it, that consult is the one that finalizes cleanly. Removing it to
+dedupe would delete the loop's last chance to end cleanly on the round it gives up; it costs at most one probe per six
+failures and never fires when the first consult answered. Site C keeps its Arc 2 fix-wave comment shape: "See site B."
+
+## Tests
+
+One table, `internal/engine/downloader_hls_endverdict_test.go`, 3 sites × 3 verdicts = 9 rows, driven end-to-end through
+`Start()` against an `httptest` playlist that always fails: 404 selects site A, 500 selects site B (no 404 branch; escalates
+on the 6th fetch), HTTP 200 with an HTML body selects site C (`ParseHls` rejects a first line that is not `#EXTM3U`,
+`manifest.go:501`). Each row asserts the exit error class, `streamEnded`, and the consult/fetch counts.
+
+The two **new** rows are B/ended and C/ended. Mutant each kills: deleting `case verdictEnded:` from that site — `Start()`
+then returns the consecutive-error / parse error with `streamEnded` false, so the deferred `ClearResume` never runs. The
+`verdictLive` rows kill a `default:`-latch fix that finalizes on any answered check; the `verdictUnknown` rows kill
+re-latching a failed check as "ended" (the T1-2 regression); the A rows kill a fix that routes a confirmed 404-round end
+through the retry budget.
+
+**Existing pins.** That file's three tests pin site A today (`TestHlsEndVerdict_CheckErrorDoesNotFinalize`,
+`_StillLiveAfterFailedCheckRefreshes`, `_ConfirmedEndStillFinalizes`); nothing pins B or C. They are ABSORBED into the table
+as its A rows — one table, no duplicate coverage — with every assertion preserved as a per-row field: the
+`deferring end verdict` / no-`assuming ended` warn wording, `checks >= 2` on a deferred verdict, `checks == 1` and
+`fetches == 1` on a confirmed end, and "unknown must not return `ErrQualityLost`". `hls404Server` and
+`newEndVerdictDownloader` are used nowhere else in the repo (verified). The test keeps `d.delays = fastDelays()` with
+`hlsPlaylistRetry = 10 ms` (Arc 2 seam).
+
+## Out of scope
+
+- The DASH twin's verdict block (`downloader_dash.go:443-456`) — already latches only on `checkErr == nil && ended`; its
+  `streamEndVerified` / behind-head / interruption interplay is a different contract.
+- The HLS loop's three other consults (`:587` stuck-skips, `:635` init failure, `:700` stale window) — each already latches
+  only on a confirmed end (Arc 2 Task 1 verified this).
+- Any `internal/worker` source change: the worker is a GATE here, not an edit surface — mini-SDD A also touches
+  `internal/worker` and the two must not share files (`spec-header.md` §2).
+- Job status, `incomplete_tail`, notifications, the resume-sidecar format.
+
+## Constraints
+
+Copied verbatim from the 2026-09-15 chain's global constraints; only the gate list and worktree recipe are branch-adapted.
+
+- `go 1.27`, no CGo, pure-Go dependencies; Windows x64 + Linux x64 + Linux arm64 must build.
+- LF line endings in every file the chain touches. Commits carry the two trailers
+  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` and
+  `Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq` — the project's rule, which takes precedence over
+  any attribution reminder in an implementer's own context, whatever model name it shows.
+- The anonymous logger interface (`Debug/Info/Warn/Error(msg string, args ...any)`) stays anonymous per struct. Every
+  goroutine has an inline `defer func() { if r := recover(); … }()`.
+- `internal/tui` never imports `internal/web/routes` or `internal/bgutils` (compile-time embed check).
+- Helpers are defined in the task that first uses them (staticcheck U1000 is a hard gate).
+- TDD per task: the failing test is written and run red before the change; every new assertion names the mutant that fails
+  it (the reviewer verifies at least one).
+- Every task that renames, moves or deletes a Go symbol, or edits `docs/spec/*.md`/`SPEC.md`, gates
+  `go test ./internal/docs/` (the citation test requires the DECLARING file). No JS changes here, so the node suite and
+  `./internal/web/routes/` are not gates for this branch.
+- Behaviour that the owner's rulings protect stays: ~60 Hz progress pipeline and DB write cadence (make updates cheaper,
+  never rarer); DB layer untouched for perf; `monitors.probe_cooldown` default 0; the BotGuard interpreter gate; `/retry`
+  vs `/resume` gates never shared; the Web cookie import stays unbounded (a test forbids WithTimeout).
+- Arc 2 invariants this branch must not disturb: the `hlsResumeSave` floor and the `readBody` cap;
+  `reportFetchFailure(parent, …)` semantics (a caller cancel is never a network failure); the `delays` struct and its test
+  seams (`SegmentTimeout`, `hlsPlaylistRetry = 10 ms` in tests).
+- Reviewers never edit files (they reproduce in `git archive` scratchpad exports); implementers use git only for
+  `add`/`commit` on the arc branch; no stashing, no rebasing, no checkout of other branches.
+- User-facing strings: match the twin UI's exact output before mirroring it (read the twin's code).
+
+**Branch gate list (`followup-c-engine`), run before the merge candidate:**
+
+```bash
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test ./internal/engine/... ./internal/worker/...
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test ./internal/docs/   # docs/spec edit or Go symbol move
+gofmt -l ./cmd ./internal ./tools ./web          # must print nothing
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go vet ./...
+staticcheck ./...                                # pinned 2026.2.1, clean
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go build ./...
+GOOS=linux GOARCH=amd64 GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go build ./...
+GOOS=linux GOARCH=arm64 GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go build ./...
+# ONE controller-run `go test -count=1 ./...` at merge time
+```
+
+**Worktree recipe:** `git worktree add -b followup-c-engine .worktrees/followup-c-engine main`, then copy the gitignored
+inputs a fresh worktree lacks (engine/worker tests pull `internal/bgutils` transitively):
+`internal/bgutils/embed/{node-windows-amd64.gz,node-linux-amd64.gz,node-linux-arm64.gz,sidecar.tar.gz}` and
+`internal/cipher/testdata/*.js`. No `npm ci` — no JS in this branch. Prefix every go command with
+`GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp`.
