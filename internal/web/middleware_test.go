@@ -163,6 +163,12 @@ func TestIsAllowedOrigin(t *testing.T) {
 			networkAccess: "public",
 			expected:      false,
 		},
+		// The same-host rows (sweep T1-6), and the mutants each one kills:
+		// restoring `case "external", "public": return true` in isAllowedOrigin
+		// fails all four `false` rows below; dropping the port comparison in
+		// sameSiteOrigin fails the ":8080" row; dropping the net.ParseIP
+		// canonicalisation in splitAuthority fails the IPv6 row; comparing with
+		// strings.HasSuffix instead of equality fails the "evil-dash" row.
 		{
 			name:          "public mode rejects a foreign origin",
 			origin:        "http://example.com",

@@ -65,6 +65,12 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   portless authorities compare by host alone, so a TLS-terminating reverse proxy that forwards the
   client's `Host` verbatim needs no extra configuration. See `sameSiteOrigin` in
   `internal/web/middleware.go`.
+  **Residual:** a proxy listed in `network.trusted_proxies` that does not itself set or overwrite
+  `X-Forwarded-Host` lets its peer choose the host the Origin is compared against. A browser cannot
+  reach that path — `X-Forwarded-Host` is not a CORS-safelisted request header, so setting it
+  cross-origin needs a preflight this server refuses — and a non-browser client that can set
+  arbitrary headers could already pass the check by sending `Origin` equal to the request's `Host`.
+  Configure the proxy to set the header; do not rely on its absence.
 - Default (unset): Same as `localhost`.
 
 **Source:** `CORSMiddleware` and `isAllowedOrigin` in `internal/web/middleware.go`.
@@ -90,7 +96,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 1. **Safe methods pass through.** GET, HEAD, and OPTIONS requests are never subject to CSRF validation.
 2. **Loopback-only routes are exempt.** The paths `/get_pot`, `/invalidate_caches`, and `/invalidate_it` are called by external Python scripts (yt-dlp) that do not send Origin/Referer headers. These routes are already protected by `LoopbackOnly` middleware at the route level, so CSRF protection is redundant.
 3. **Internal token bypass.** If the request includes an `X-Internal-Token` header whose value matches the server's startup-generated token (compared with `crypto/subtle.ConstantTimeCompare`), the request passes through. This is safe because browsers cannot set custom headers on cross-origin requests without a CORS preflight, which the server does not grant to untrusted origins.
-4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should set `Origin: http://localhost:<port>` or supply the internal token.
+4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should supply the internal token, or set `Origin` to the **same authority the request's own `Host` carries**. Under `external` / `public` the origin must name the request's own host and the same-host arm does not fold `localhost` to loopback, so a client dialling `127.0.0.1:774` sends `Host: 127.0.0.1:774` and must send `Origin: http://127.0.0.1:774` — `http://localhost:774` is refused there. On `localhost` / `lan`, where the check is an IP-class test, either spelling passes.
 5. **Origin/Referer validation.** When a header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`.
 
 **Source:** `CSRFMiddleware` in `internal/web/middleware.go`.
@@ -187,7 +193,10 @@ read the answers too (sweep T1-6). Both halves refuse now: `CORSMiddleware` refl
 it. **Operator consequence:** a reverse proxy must either forward the client's `Host` verbatim or be
 listed in `network.trusted_proxies` so its `X-Forwarded-Host` is read; otherwise the dashboard's own
 posts are refused with `403 Forbidden: invalid origin`.
-`internal/web/routes/cookies_import_chain_test.go` drives both refusals through the real chain.
+`internal/web/routes/cookies_import_chain_test.go` drives the CSRF half through the real chain — the
+missing-origin refusal on a `public` fixture and the invalid-origin refusal on a `lan` one. The CORS
+half is pinned separately, at middleware level, by `TestCORSReflectionFollowsTheOriginPolicy`
+(`internal/web/middleware_test.go`).
 
 ### Exemptions
 
@@ -335,7 +344,7 @@ Every trust decision in Moombox — the `network_access` IP gate, the auth skip 
 |---------|------|---------|----------|
 | `network.trusted_proxies` | list of bare IPs or CIDRs (`"172.18.0.2"`, `"10.0.0.0/8"`) | `[]` — empty, feature off | **No** — applies immediately |
 
-Empty is off, and off is exactly the behavior that existed before the setting: `X-Forwarded-For` is never read.
+Empty is off, and off is exactly the behavior that existed before the setting: neither `X-Forwarded-For` nor `X-Forwarded-Host` is ever read.
 
 The setting is hot-reloadable and deliberately absent from both restart-required lists (`restartRequiredKeys` in `internal/tui/settings.go`, `RESTART_REQUIRED_FIELDS` in `web/public/modules/settings.js`). `loadTrustedProxies` re-reads the config store on every request and rebuilds its parsed `[]*net.IPNet` only when the joined raw value changes, so a save takes effect on the next request with no restart hook and no per-request CIDR parsing.
 
@@ -363,7 +372,7 @@ One string breaks that guarantee on its own: `isLoopback` deliberately resolves 
 
 ### Where it is used
 
-Every trust decision routes through `EffectiveClientIP`:
+Every trust decision that is a function of the CLIENT IP routes through `EffectiveClientIP`. One decision is not: the same-host Origin comparison needs the DIRECT peer, not the resolved client, so `effectiveRequestHost` applies the `trusted_proxies` test itself and reads `X-Forwarded-Host` rather than going through `EffectiveClientIP`. It is the setting's second consumer.
 
 | Decision point | Source |
 |----------------|--------|
@@ -375,6 +384,7 @@ Every trust decision routes through `EffectiveClientIP`:
 | Rate limiters — API, POT, login, password | `RateLimiter.ClientIP` wired in `initServices`, `cmd/moombox/services.go` |
 | Rate limiter — import | `ImportRoutes`, `internal/web/routes/import_routes.go` |
 | Login/password audit log lines, client-token labels and `LastIP` | `internal/web/routes/auth.go`, `cmd/moombox/ws_wiring.go` |
+| Same-host Origin comparison on `external` / `public` — reads `X-Forwarded-Host`, deliberately NOT via `EffectiveClientIP` | `effectiveRequestHost`, `internal/web/middleware.go` |
 
 Keying rate limiters by the effective IP matters as much as the gate: without it, a reverse proxy collapses every remote client into one bucket, and a single attacker could exhaust the 5/min login budget for everyone behind the proxy.
 

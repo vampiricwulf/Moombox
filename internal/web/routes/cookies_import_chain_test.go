@@ -84,9 +84,12 @@ type importChain struct {
 //     names the request's own host (sweep T1-6), so this fixture derives its
 //     Host from its origin and a foreign origin is refused there too.
 //
-// Both CSRF arms are reachable on a "public" fixture now. The "lan" subtest is
-// kept because it is the policy a Docker install actually runs, and it
-// exercises the private-IP branch rather than the same-host branch.
+// Which arm each subtest drives: the missing-origin arm on the "public"
+// fixture, and the invalid-origin arm on a "lan" fixture. A "public" fixture
+// could now reach the invalid-origin arm too — since T1-6 a foreign origin no
+// longer names its host — but no subtest here does that; the "lan" one is kept
+// because it is the policy a Docker install actually runs, and it exercises the
+// private-IP branch rather than the same-host branch.
 func newImportChain(t *testing.T, networkAccess, remoteAddr, origin string) *importChain {
 	t.Helper()
 	dir := t.TempDir()

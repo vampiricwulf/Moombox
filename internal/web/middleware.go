@@ -273,11 +273,22 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme strin
 // EffectiveClientIP — a client-forged header never counts, because an untrusted
 // peer's headers are not consulted at all.
 //
-// Values+join, never Get: Header.Get returns only the FIRST field line and Go
-// never joins repeated headers, so a proxy that appends a second field line
-// would otherwise be invisible. The FIRST entry of the joined list is the host
-// the ORIGINAL client asked for — the opposite end from X-Forwarded-For, where
-// the rightmost hop the chain did not vouch for is the client.
+// Only the FIRST entry is ever used, which is the X-Forwarded-Host convention:
+// the leftmost value names the host the ORIGINAL client asked for. That is the
+// opposite end from X-Forwarded-For, whose right-to-left walk is what defeats a
+// forged prefix — none of that reasoning transfers to a header read left to
+// right. Joining Header.Values and cutting at the first comma is therefore
+// EQUIVALENT to Header.Get plus the same cut; it is written this way only so the
+// answer cannot depend on whether a proxy appended by extending the first field
+// line or by adding a second one.
+//
+// The residual, stated plainly: a proxy listed in trusted_proxies that does not
+// itself set or overwrite X-Forwarded-Host lets its peer choose the host the
+// Origin is compared against. A browser cannot reach that path —
+// X-Forwarded-Host is not CORS-safelisted, so setting it cross-origin needs a
+// preflight this server refuses — and a non-browser client that can set
+// arbitrary headers could already pass the check by sending Origin equal to
+// r.Host. Configure the proxy to set the header; do not rely on its absence.
 func effectiveRequestHost(store *config.Store, r *http.Request) string {
 	if loadTrustedProxies(store).contains(ExtractIP(r)) {
 		xfh := strings.Join(r.Header.Values("X-Forwarded-Host"), ",")
