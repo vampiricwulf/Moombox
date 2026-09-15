@@ -669,14 +669,6 @@ func TestStreamEnded_AtomicAccess(t *testing.T) {
 	}
 }
 
-type fakeReporter struct {
-	fails     int
-	successes int
-}
-
-func (f *fakeReporter) ReportFailure(string) { f.fails++ }
-func (f *fakeReporter) ReportSuccess(string) { f.successes++ }
-
 func TestApplyPoTokenQuery(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -706,7 +698,7 @@ func TestConnectivityReporter_SetAndClear(t *testing.T) {
 		t.Errorf("expected nil reporter initially, got %T", r)
 	}
 
-	f := &fakeReporter{}
+	f := &countingReporter{}
 	SetConnectivityReporter(f)
 
 	r := loadConnReporter()
@@ -715,8 +707,8 @@ func TestConnectivityReporter_SetAndClear(t *testing.T) {
 	}
 	r.ReportFailure("test")
 	r.ReportSuccess("test")
-	if f.fails != 1 || f.successes != 1 {
-		t.Errorf("expected fails=1 successes=1, got fails=%d successes=%d", f.fails, f.successes)
+	if f.fails.Load() != 1 || f.successes.Load() != 1 {
+		t.Errorf("expected fails=1 successes=1, got fails=%d successes=%d", f.fails.Load(), f.successes.Load())
 	}
 
 	// Clear it explicitly
