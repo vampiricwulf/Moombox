@@ -30,7 +30,7 @@ func ParseInstalled(content string) (scheme string, port int) {
 
 // Info is what GET /api/ytdlp-plugin/status reports and what the TUI's R Y
 // overlay shows. The JSON tags are the wire contract: settings.js's
-// loadYtdlpPluginStatus reads all seven keys, and they were an inline
+// loadYtdlpPluginStatus reads all eight keys, and they were an inline
 // map[string]any until the TUI needed the same answer.
 //
 // InstalledPort is a POINTER, without omitempty, so the wire still says
@@ -46,6 +46,13 @@ type Info struct {
 	InstalledPort *int   `json:"installedPort"`
 	PortMismatch  bool   `json:"portMismatch"`
 	ExtractedPath string `json:"extractedPath"`
+	// Unparseable is a plugin file that exists but whose base-URL line this
+	// package cannot read (a truncated install, a hand-edit, a file from a
+	// different provider under our name). Installed stays true — there IS a file
+	// — but nothing else about it is known, so PortMismatch is false and
+	// InstalledPort is nil, and without this flag the state renders as a healthy
+	// install in both UIs.
+	Unparseable bool `json:"unparseable"`
 }
 
 // Status reads the installed plugin file, if any, and reports it against the
@@ -81,6 +88,11 @@ func Status(port int, httpsEnabled bool) (Info, error) {
 				parsed := p
 				info.InstalledPort = &parsed
 				info.PortMismatch = p != port || scheme != expectedScheme
+			} else {
+				// A file we cannot read the base URL out of. Reported rather
+				// than treated as a healthy install: reinstalling is the fix,
+				// and both UIs say so.
+				info.Unparseable = true
 			}
 		}
 		// extractedPath: the plugin source dir for --plugin-dirs usage.

@@ -223,3 +223,30 @@ func ryOffered(t *testing.T, app *App) bool {
 	}
 	return menu
 }
+
+// TestYtdlpDialogFlagsAnUnrecognisedFile: the overlay renders the same verdict
+// the dashboard's card does. Without it an unparseable plugin file shows
+// "Installed: yes" with no port row and nothing to explain either.
+//
+// Mutant: dropping the Unparseable row from statusRows fails this.
+func TestYtdlpDialogFlagsAnUnrecognisedFile(t *testing.T) {
+	app := NewApp()
+	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
+		return ytdlpplugin.Info{
+			Installed:   true,
+			Unparseable: true,
+			PluginDir:   "/plug",
+			CurrentPort: 774,
+		}, nil
+	}
+	_, cmd := app.dispatchAction("R Y", nil)
+	app.Update(runCmd(t, cmd))
+
+	v := app.ytdlpDlg.View()
+	if !strings.Contains(v, "not recognized") {
+		t.Errorf("the overlay does not report the unrecognised file:\n%s", v)
+	}
+	if !strings.Contains(v, "I reinstalls") {
+		t.Errorf("the overlay does not say which key fixes it:\n%s", v)
+	}
+}

@@ -1961,6 +1961,7 @@ export class SettingsController {
     const portRow = document.getElementById("ytdlp-plugin-port-row");
     const portEl = document.getElementById("ytdlp-plugin-port");
     const mismatchWarning = document.getElementById("ytdlp-port-mismatch-warning");
+    const unparseableWarning = document.getElementById("ytdlp-unparseable-warning");
     const installBtn = document.getElementById("ytdlp-install-btn");
     const manualCmd = document.getElementById("ytdlp-manual-cmd");
     const extractorCmd = document.getElementById("ytdlp-extractor-cmd");
@@ -1970,8 +1971,13 @@ export class SettingsController {
       if (!response.ok) throw new Error("Failed to fetch status");
       const status = await response.json();
 
-      // Update badge
-      if (status.installed && !status.portMismatch) {
+      // Update badge. The unparseable arm comes FIRST: such a file reports
+      // installed with no port and no mismatch, so every later arm would call
+      // it healthy.
+      if (status.installed && status.unparseable) {
+        badge.variant = "warning";
+        badge.textContent = "Unrecognized file";
+      } else if (status.installed && !status.portMismatch) {
         badge.variant = "success";
         badge.textContent = "Installed";
       } else if (status.installed && status.portMismatch) {
@@ -1996,6 +2002,10 @@ export class SettingsController {
 
       // Port mismatch warning
       mismatchWarning.style.display = status.portMismatch ? "" : "none";
+      // Unrecognised-file warning. The button already reads "Reinstall" in this
+      // state (_ytdlpReinstall below is true: installed and not mismatched), and
+      // that path passes force, so the advice is actionable as written.
+      unparseableWarning.style.display = status.unparseable ? "" : "none";
 
       // Update button text. When it reads "Reinstall" the install call must
       // pass force — otherwise the server short-circuits "already installed"

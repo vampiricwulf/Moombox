@@ -162,7 +162,7 @@ func (m *YtdlpDialogModel) View() string {
 }
 
 // statusRows is the loaded body: the four facts that are always true and the
-// three that only exist in some states.
+// four that only exist in some states.
 func (m *YtdlpDialogModel) statusRows() string {
 	installed := "not installed"
 	if m.info.Installed {
@@ -183,6 +183,14 @@ func (m *YtdlpDialogModel) statusRows() string {
 	// explanation. The nil case is also the wire's "installedPort": null.
 	if m.info.InstalledPort != nil {
 		b.WriteString(ytdlpRow("Plugin points:", fmt.Sprintf("%d", *m.info.InstalledPort)))
+	}
+	if m.info.Unparseable {
+		// Same shape as the mismatch row below — YellowStyle, label column, one
+		// short value that fits the 66-column content box — because it is the
+		// same kind of fact: something about the file on disk is wrong and I is
+		// what fixes it.
+		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Plugin file:", "not recognized — I reinstalls it")))
+		b.WriteString("\n")
 	}
 	if m.info.PortMismatch {
 		// Short on purpose: the label column plus this value has to fit the

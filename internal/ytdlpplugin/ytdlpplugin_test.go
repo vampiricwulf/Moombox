@@ -108,7 +108,7 @@ func TestStatusReportsInstallAndPortMismatch(t *testing.T) {
 
 // TestInfoJSONKeys holds the wire contract of GET /api/ytdlp-plugin/status.
 // The handler used to build the map inline; the struct's tags are now the only
-// thing keeping settings.js's seven reads (loadYtdlpPluginStatus) pointed at
+// thing keeping settings.js's eight reads (loadYtdlpPluginStatus) pointed at
 // real fields, and the un-omitempty pointer is what keeps "installedPort" a
 // null rather than a 0 when nothing is installed.
 func TestInfoJSONKeys(t *testing.T) {
@@ -125,7 +125,7 @@ func TestInfoJSONKeys(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "pluginDir", "portMismatch"}
+	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "pluginDir", "portMismatch", "unparseable"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("JSON keys = %v, want %v", got, want)
 	}
@@ -153,5 +153,38 @@ func TestGeneratedPluginPointsAtThisRepo(t *testing.T) {
 		if m[1] != "vampiricwulf" {
 			t.Errorf("the plugin references github.com/%s/ — this project is vampiricwulf/Moombox", m[1])
 		}
+	}
+}
+
+// TestStatusFlagsAnUnparseablePluginFile: a file that exists but whose base-URL
+// line does not parse used to report installed + no mismatch — a green badge
+// and a green TUI row for a plugin yt-dlp cannot use.
+//
+// Mutant: dropping the else that sets Unparseable leaves it false and fails this.
+func TestStatusFlagsAnUnparseablePluginFile(t *testing.T) {
+	pluginDir := redirectPluginDir(t) // the file's existing helper: temp dir + skip where Dir() is not redirectable
+	target := filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "getpot_moombox.py"), []byte("# truncated by a half-written install\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Status(774, false)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !info.Installed {
+		t.Fatal("a file is on disk — Installed must stay true")
+	}
+	if !info.Unparseable {
+		t.Error("a plugin file that does not parse must be reported as unrecognised")
+	}
+	if info.PortMismatch {
+		t.Error("PortMismatch is about two known ports; there is no installed port here")
+	}
+	if info.InstalledPort != nil {
+		t.Errorf("InstalledPort = %v, want nil", *info.InstalledPort)
 	}
 }
