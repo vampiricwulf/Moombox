@@ -136,6 +136,18 @@ type TaskListModel struct {
 	archiveExpanded     bool
 	hideFinishedAgeDays int // from config, default 30
 
+	// statusSummary is renderHeader's icon-count line ("3▼ 2✓"), computed when
+	// the rows are rebuilt instead of on every frame. buildStatusSummary walks
+	// every job and time.Parses each Finished row's UpdatedAt through
+	// isJobArchived — at 60Hz with a few hundred rows that parse was the whole
+	// cost of the header. Every path that changes m.jobs ends in
+	// rebuildVirtualList, and the only other way the counts can move (a
+	// Finished job aging across hide_finished_age_days) is caught by the
+	// once-a-minute ResweepArchive sweep, which refreshes this whether or not
+	// it rebuilds. So the counts are at most one sweep stale, and only for a
+	// change no event announced.
+	statusSummary string
+
 	// Batch selection state (Space to toggle, mirrors Web UI batch operations).
 	selected map[string]bool // selected job IDs for batch operations
 
@@ -768,6 +780,11 @@ func (m *TaskListModel) archiveBucketsDirty() bool {
 // (with its selection restore + marquee reset) only happens when a job
 // actually crossed — the common every-sweep outcome is the cheap dirty check.
 func (m *TaskListModel) ResweepArchive() bool {
+	// Unconditional, and above the dirty check: the header counts EVERY job,
+	// including ones the filter hides, while archiveBucketsDirty only looks at
+	// rows that pass the filter. A hidden Finished job aging past the boundary
+	// changes the counts without dirtying the buckets.
+	m.statusSummary = m.buildStatusSummary()
 	if !m.archiveBucketsDirty() {
 		return false
 	}
@@ -867,6 +884,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 
 	m.list.SetItems(items)
 	m.restoreSelection(prevSelectedID)
+	m.statusSummary = m.buildStatusSummary()
 }
 
 // passes is the list's one visibility gate — the dashboard's filter language
@@ -914,7 +932,7 @@ func (m *TaskListModel) View() string {
 func (m *TaskListModel) renderHeader(w int) string {
 	// Status summary with icon counts (T1)
 	left := "Tasks"
-	summary := m.buildStatusSummary()
+	summary := m.statusSummary
 	if summary != "" {
 		left += " (" + summary + ")"
 	} else {

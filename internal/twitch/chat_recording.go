@@ -128,6 +128,7 @@ func (cd *ChatDownloader) writeFullChatFileTo(path string, msgs []TwitchChatMess
 		StreamStartTime:    cd.streamStartTime,
 		DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
 		MessageCount:       count,
+		EmoteOffsets:       chatEmoteOffsetsUTF16,
 		Messages:           msgs,
 	}
 	if startMs > 0 {
@@ -230,8 +231,14 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 // resolveEmotesCached resolves third-party emotes (7TV/BTTV/FFZ) once per
 // downloader and caches the result, so multi-part jobs don't re-hit the
 // emote APIs for every part. emoteMu is held across the resolve to
-// single-flight concurrent callers; a failed resolve (nil) is not cached,
-// letting a later part retry.
+// single-flight concurrent callers.
+//
+// A resolve in which NO provider answered returns nil (EmoteResolver.Resolve),
+// which this leaves uncached so a later part retries. That sentence was here
+// before the resolver could produce it: until 2026-09-15 a total failure came
+// back as a non-nil empty set, which latched here for the life of the job AND
+// in the resolver for the life of the process (T1-11). Both layers now turn on
+// the same fact.
 func (cd *ChatDownloader) resolveEmotesCached(ctx context.Context) *TwitchEmoteData {
 	if cd.emoteResolver == nil || cd.channelID == "" {
 		return nil

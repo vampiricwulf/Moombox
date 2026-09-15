@@ -54,9 +54,10 @@ func (s *Service) GetVodInfo(ctx context.Context, vodID string) (*TwitchVodInfo,
 	return s.API.GetVodInfo(ctx, vodID, s.Auth.GetAuthToken())
 }
 
-// GetVodComments fetches a page of VOD comments.
-func (s *Service) GetVodComments(ctx context.Context, vodID string, contentOffsetSeconds float64) ([]VodCommentEdge, bool, error) {
-	return s.API.GetVodComments(ctx, vodID, contentOffsetSeconds, s.Auth.GetAuthToken())
+// GetVodComments fetches a page of VOD comments. A non-empty cursor selects the
+// page after that edge; otherwise the offset selects the page containing it.
+func (s *Service) GetVodComments(ctx context.Context, vodID string, contentOffsetSeconds float64, cursor string) ([]VodCommentEdge, bool, error) {
+	return s.API.GetVodComments(ctx, vodID, contentOffsetSeconds, cursor, s.Auth.GetAuthToken())
 }
 
 // GetHLSMasterPlaylist fetches and parses the HLS master playlist for a live

@@ -25,6 +25,28 @@ const (
 	// PING every ~5 min; this gives us one missed heartbeat plus slack
 	// before we treat the socket as dead and trigger the reconnect path.
 	ircReadDeadline = 6 * time.Minute
+	// ircKeepaliveIdle is how long the session tolerates hearing NOTHING from
+	// Twitch before it speaks first. Twitch's own server PING is every ~5 min,
+	// so 45 s of silence is not by itself alarming — it is simply the point at
+	// which asking is cheaper than waiting.
+	ircKeepaliveIdle = 45 * time.Second
+	// ircKeepalivePongWait is how long Twitch has to produce ANY inbound frame
+	// after our PING before the socket is declared dead. A live connection
+	// answers in milliseconds; this is generous enough to survive a stalled
+	// second on a congested link.
+	ircKeepalivePongWait = 10 * time.Second
+	// ircKeepaliveCheck is how often the two windows above are evaluated. It
+	// bounds the detection overshoot: a dead socket is noticed within
+	// ircKeepaliveIdle + ircKeepaliveCheck + ircKeepalivePongWait ≈ 70 s,
+	// against ircReadDeadline's 6 minutes. Twitch IRC has no replay, so every
+	// second of that difference is chat that would have been lost outright.
+	ircKeepaliveCheck = 15 * time.Second
+	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
+	// rather than a WebSocket ping frame: a WS pong proves the socket is open,
+	// while this proves the IRC layer behind it is still serving us.
+	// chatterino7 pings the same way
+	// (references/chatterino7/src/providers/twitch/IrcConnection2.cpp).
+	ircKeepalivePing = "PING :moombox"
 	// chatHeaderScanLimit bounds the prefix chatFileRecordingBaseMs reads out
 	// of an existing part file. TwitchChatData's header is a handful of short
 	// scalars written before the messages array — that field order is already
@@ -45,6 +67,19 @@ const (
 	// (internal/chat/downloader.go corruptChatSuffix) — one recovery
 	// convention across both platforms.
 	chatCorruptSuffix = ".corrupt"
+	// chatEmoteOffsetsUTF16 is the only value TwitchChatData.EmoteOffsets ever
+	// carries. One constant with two writers — the IRC full-file write and the
+	// VOD one — because a file written with the marker misspelled is
+	// indistinguishable at replay from a legacy file, and would be "corrected"
+	// a second time.
+	chatEmoteOffsetsUTF16 = "utf16"
+	// chatResumeIDCap bounds the dedup IDs a resume sidecar carries. ONE
+	// constant for both chat downloaders: the VOD path has always capped at
+	// 1000 and the IRC path snapshotted its whole 5000-entry set, which is a
+	// ~200 KB marshal + fsync + rename every second on a busy channel
+	// (chatSaveInterval). The window a reconnect replay can overlap is
+	// seconds, so the newest 1000 is the whole of what the cap has to cover.
+	chatResumeIDCap = 1000
 )
 
 // The fixed vocabulary of Twitch auth-downgrade reasons: one value per route
@@ -101,6 +136,32 @@ const (
 // Info line beside that `continue` is what says what happened. Its text is
 // therefore for a reader of the code, not for an operator.
 var errReauthRequested = errors.New("IRC session cancelled to present refreshed credentials")
+
+// errKeepaliveTimeout ends an IRC session the KEEPALIVE gave up on: we spoke
+// first and Twitch produced no frame at all within ircKeepalivePongWait.
+//
+// Unlike errReauthRequested it IS compared against, with errors.Is, and that
+// comparison is the whole reason it exists. Start's loop charges
+// reconnectAttempts for a session that failed, and resets the counter only for
+// one that stayed up past reconnectResetUptime (5 min). A keepalive verdict
+// lands at ircKeepaliveIdle + ircKeepaliveCheck + ircKeepalivePongWait (~70 s),
+// which is BELOW that threshold — so without this sentinel a middlebox that
+// swallows PONGs would charge every reconnect, exhaust maxReconnects in about
+// fifteen minutes, and abandon chat for the rest of the job. Before the
+// keepalive existed the same socket was detected at ircReadDeadline (6 min),
+// always ABOVE the threshold, and chat retried forever; adding a faster
+// detector must not turn a recoverable network into a surrendered one.
+//
+// So this is OUR reconnect, exactly like the reauth path: logged, charged
+// nothing, and given no backoff of its own. At budget 0 — the ordinary case
+// here, precisely because a keepalive verdict never charges — Start's
+// `continue` re-dials at once, and the ~70 s the verdict itself took is the
+// only wait there is. A budget carried from EARLIER, real failures is applied
+// unchanged by the loop head: those failures are still a reason to slow down,
+// and this path neither adds to them nor clears them. It is wrapped rather
+// than returned bare so the operator-facing text can name the window that
+// elapsed.
+var errKeepaliveTimeout = errors.New("twitch IRC keepalive: no response")
 
 // errChatPartMalformed marks a part file whose BYTES were read in full and are
 // not chat JSON this package can use — a truncated write, a half-flushed
@@ -217,6 +278,22 @@ type ChatDownloader struct {
 	// ircReadDeadline) reacts immediately instead of minutes later.
 	sessionCancel context.CancelFunc
 
+	// delays is every keepalive wait runIRCSession sleeps on;
+	// defaultChatDelays() in production, a scaled copy in tests (see delays.go).
+	// Assigned once at construction and never written again, so the session
+	// goroutine reads it without the mutex.
+	delays chatDelays
+
+	// keepaliveWrite sends the keepalive PING, and ONLY that frame — the
+	// handshake, the PONG and everything else still write through conn
+	// directly. It is a seam rather than a call because the one behaviour that
+	// has to be pinned here is a write that never completes, and the only way
+	// to get one from a real socket is a peer with a full send buffer that a
+	// test cannot conjure. writeIRCFrame in production; assigned once at
+	// construction and read from the keepalive goroutine without the mutex,
+	// exactly like delays.
+	keepaliveWrite ircFrameWriter
+
 	// onProgress is read from addMessage under onProgressMu; callers must
 	// use SetOnProgress rather than direct field assignment to avoid a
 	// data race if the callback is reassigned after Start (audit
@@ -301,6 +378,8 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		streamStartTime: opts.StreamStartTime,
 		streamStartMs:   streamStartMs,
 		dedup:           utils.NewOrderedDedup[string](),
+		delays:          defaultChatDelays(),
+		keepaliveWrite:  writeIRCFrame,
 		emoteResolver:   opts.EmoteResolver,
 		logger:          logger,
 	}
@@ -558,7 +637,8 @@ func (cd *ChatDownloader) saveResumeState() {
 	// concurrent RollFile must not pair one part's counts with the other
 	// part's sidecar.
 	cd.mu.Lock()
-	recentIDs := cd.dedup.Snapshot(0)
+	// Newest-first window, not the whole set — see chatResumeIDCap.
+	recentIDs := cd.dedup.Snapshot(chatResumeIDCap)
 	state := ChatResumeState{
 		MessageCount:    cd.fileCount,
 		TotalCount:      cd.totalCount,
@@ -1334,6 +1414,38 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			cd.logger.Info("IRC session was stable before disconnect; resetting reconnect counter",
 				"channel", cd.channelLogin, "uptime", sessionUptime)
 			reconnectAttempts = 0
+		}
+
+		// The keepalive gave up on a socket that stopped answering. That is a
+		// reconnect WE asked for, not the network refusing us one, so it costs
+		// nothing from the budget — see errKeepaliveTimeout for why a cheaper
+		// detector would otherwise abandon chat on a network the slow one
+		// tolerated forever.
+		//
+		// NOT the reauth path's `immediate`, though: that one exists because a
+		// repaired credential must reach the wire now. Here the far side is
+		// unresponsive, so whatever the budget already carries is exactly
+		// right — and at budget 0, which is where a run of keepalive verdicts
+		// leaves it, that is no backoff at all: the `continue` below re-dials
+		// immediately and the ~70 s the verdict took is the only wait. A
+		// budget carried from EARLIER, real failures is applied unchanged by
+		// the loop head, so a session that has genuinely been failing does
+		// still wait between attempts.
+		if errors.Is(err, errKeepaliveTimeout) {
+			// Flush first, exactly as the backoff path above and the reauth
+			// path do. At budget 0 — where a keepalive verdict leaves it —
+			// the loop head's backoff block does not run at all, and that
+			// block is where a reconnect normally saves state; without the
+			// flush here the tail of this session's chat would sit in memory
+			// until the next session's flusher tick, and the session we just
+			// lost is precisely the one whose last messages are least likely
+			// to be recoverable. A budget carried from earlier real failures
+			// does reach that block and flush again — one redundant flush of
+			// an empty buffer, not a second behaviour.
+			cd.flush()
+			cd.logger.Warn("twitch IRC keepalive gave up on the connection; reconnecting without charging the reconnect budget",
+				"err", err, "channel", cd.channelLogin, "uptime", sessionUptime)
+			continue
 		}
 
 		reconnectAttempts++

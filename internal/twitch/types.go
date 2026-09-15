@@ -55,21 +55,26 @@ type TwitchChatMessage struct {
 	ID          string `json:"id"`
 	TimestampMs int64  `json:"timestampMs"`
 	// OffsetMs is the SIGNED ms offset from the part's recording start (negative = before recording began).
-	OffsetMs          int64            `json:"offsetMs"`
-	AuthorName        string           `json:"authorName"`
-	AuthorID          string           `json:"authorId"`
-	AuthorBadges      []string         `json:"authorBadges,omitempty"`
-	AuthorColor       string           `json:"authorColor,omitempty"`
-	Message           string           `json:"message"`
-	Emotes            []TwitchEmoteRef `json:"emotes,omitempty"`
-	Bits              int              `json:"bits,omitempty"`
-	MessageType       string           `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system"
-	SystemMsg         string           `json:"systemMsg,omitempty"`
-	SubPlan           string           `json:"subPlan,omitempty"`           // C1: "1000", "2000", "3000", "Prime"
-	GiftRecipient     string           `json:"giftRecipient,omitempty"`     // C1: msg-param-recipient-display-name
-	ViewerCount       int              `json:"viewerCount,omitempty"`       // C1: msg-param-viewerCount (raids)
-	AnnouncementColor string           `json:"announcementColor,omitempty"` // msg-param-color for announcements: "primary"|"blue"|"green"|"orange"|"purple"
-	Raw               string           `json:"raw,omitempty"`               // Lossless raw IRC line
+	OffsetMs     int64            `json:"offsetMs"`
+	AuthorName   string           `json:"authorName"`
+	AuthorID     string           `json:"authorId"`
+	AuthorBadges []string         `json:"authorBadges,omitempty"`
+	AuthorColor  string           `json:"authorColor,omitempty"`
+	Message      string           `json:"message"`
+	Emotes       []TwitchEmoteRef `json:"emotes,omitempty"`
+	Bits         int              `json:"bits,omitempty"`
+	MessageType  string           `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system"
+	// IsAction marks a /me message. Twitch sends those as the CTCP form
+	// \x01ACTION <text>\x01; parsePrivmsg unwraps them so Message holds only
+	// the text and the emote offsets (which index the UNWRAPPED text — see
+	// parseEmoteTags) line up. Raw keeps the verbatim wire line.
+	IsAction          bool   `json:"isAction,omitempty"`
+	SystemMsg         string `json:"systemMsg,omitempty"`
+	SubPlan           string `json:"subPlan,omitempty"`           // C1: "1000", "2000", "3000", "Prime"
+	GiftRecipient     string `json:"giftRecipient,omitempty"`     // C1: msg-param-recipient-display-name
+	ViewerCount       int    `json:"viewerCount,omitempty"`       // C1: msg-param-viewerCount (raids)
+	AnnouncementColor string `json:"announcementColor,omitempty"` // msg-param-color for announcements: "primary"|"blue"|"green"|"orange"|"purple"
+	Raw               string `json:"raw,omitempty"`               // Lossless raw IRC line
 }
 
 // TwitchEmoteRef references an emote within a message.
@@ -90,6 +95,25 @@ type TwitchChatData struct {
 	RecordingStartTime string `json:"recordingStartTime,omitempty"`
 	DownloadedAt       string `json:"downloadedAt"`
 	MessageCount       int    `json:"messageCount"`
+	// EmoteOffsets names the index space TwitchEmoteRef.Start/End count in.
+	// "utf16" is the only value any writer here produces, and its ABSENCE is
+	// what the player reads as "written before 2026-09-15, when the live IRC
+	// path mistook Twitch's code-point offsets for UTF-16 units" — an unmarked
+	// file's IRC messages are corrected at load (correctLegacyTwitchEmotes,
+	// web/public/modules/chat-timeline.js).
+	//
+	// It is a HEADER SCALAR and must stay one, before "emotes"/"messages":
+	// chatFileRecordingBaseMs stops its scan at the first composite value, and
+	// AppendChatMessages splices at the file's last ']'.
+	//
+	// KNOWN WINDOW: only the two full-file writers set it, so a part file
+	// created before this change and APPENDED to after it keeps an unmarked
+	// header while its new messages already carry UTF-16 offsets. Those few
+	// messages are over-shifted at replay. Rewriting a marathon part's whole
+	// file on resume, or carrying a second "keep emitting legacy offsets"
+	// parser mode, both cost more than the defect; the window closes at the
+	// next part roll or at job end.
+	EmoteOffsets string `json:"emoteOffsets,omitempty"`
 	// Emotes must serialize BEFORE Messages: AppendChatMessages locates the
 	// messages array via "last ] in the file tail", so the messages array has
 	// to stay the final field. With emotes trailing, any append after emote
@@ -114,7 +138,12 @@ type EmoteInfo struct {
 
 // VodCommentEdge represents a single VOD comment from GQL pagination.
 type VodCommentEdge struct {
-	ID                   string
+	ID string
+	// Cursor is the Relay edge cursor Twitch sends beside the node. It is the
+	// ONLY reliable way to page a VOD: contentOffsetSeconds is an integer
+	// second, and a second of a busy VOD holds more comments than one page, so
+	// an offset-based next-page request asks for the page it just read.
+	Cursor               string
 	ContentOffsetSeconds float64
 	CommenterDisplayName string
 	CommenterID          string

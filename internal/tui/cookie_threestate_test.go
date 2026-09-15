@@ -32,7 +32,7 @@ func TestUncheckedCookiesAreNotRenderedAsRejected(t *testing.T) {
 			m.SetActivePlatforms(true, true)
 			platform.set(m, CookieStatusUnknown)
 
-			wide := m.renderCookieStatus(tierFull)
+			wide := m.renderCookieStatus(tierFull, m.tallyJobs())
 			if !strings.Contains(wide, statusBarWrnStyle.Render(platform.code+": Unknown")) {
 				t.Errorf("%s unknown at tierFull = %q, want the warning-styled %q label",
 					platform.name, wide, platform.code+": Unknown")
@@ -51,7 +51,7 @@ func TestUncheckedCookiesAreNotRenderedAsRejected(t *testing.T) {
 			// Rendered comparison again, not stripANSI: the abbreviated form
 			// is a PREFIX of the long one as plain text, so only the styled
 			// string can tell "YT" from "YT: Unknown".
-			tight := m.renderCookieStatus(tierTight)
+			tight := m.renderCookieStatus(tierTight, m.tallyJobs())
 			if !strings.Contains(tight, statusBarWrnStyle.Render(platform.code)) {
 				t.Errorf("%s unknown at tierTight = %q, want the bare %q — the label no longer "+
 					"abbreviates where every other indicator does", platform.name, tight, platform.code)
@@ -60,7 +60,7 @@ func TestUncheckedCookiesAreNotRenderedAsRejected(t *testing.T) {
 			// The tier rule, applied: un-actionable information goes when
 			// space does, exactly like the green OK badge beside it. Before
 			// this state existed it was CookiesOnly, which never went.
-			if got := m.renderCookieStatus(tierEssential); strings.Contains(got, platform.code) {
+			if got := m.renderCookieStatus(tierEssential, m.tallyJobs()); strings.Contains(got, platform.code) {
 				t.Errorf("%s unknown survived to tierEssential (%q). The narrowest bar is "+
 					"reserved for what needs acting on, and a site that could not be reached "+
 					"is not something the operator can act on", platform.name, got)
@@ -70,7 +70,7 @@ func TestUncheckedCookiesAreNotRenderedAsRejected(t *testing.T) {
 			// contrast above would be vacuous — both states would simply be
 			// dropped and the test would pass while saying nothing.
 			platform.set(m, CookieStatusCookiesOnly)
-			if got := m.renderCookieStatus(tierEssential); !strings.Contains(got, statusBarRedStyle.Render(platform.code)) {
+			if got := m.renderCookieStatus(tierEssential, m.tallyJobs()); !strings.Contains(got, statusBarRedStyle.Render(platform.code)) {
 				t.Errorf("premise lost: %s CookiesOnly no longer survives tierEssential (%q), so "+
 					"the drop asserted above no longer distinguishes anything", platform.name, got)
 			}
@@ -137,7 +137,7 @@ func TestParkedCookieJobsOutrankAnUnknownCheck(t *testing.T) {
 				Platform: platform.jobPlatform,
 			}})
 
-			wide := parked.renderCookieStatus(tierFull)
+			wide := parked.renderCookieStatus(tierFull, parked.tallyJobs())
 			if !strings.Contains(wide, statusBarRedStyle.Render(platform.code)) {
 				t.Errorf("a %s job parked in COOKIES? renders as %q. Real evidence the credentials "+
 					"are dead must outrank a check that could not reach the site — it is the "+
@@ -151,7 +151,7 @@ func TestParkedCookieJobsOutrankAnUnknownCheck(t *testing.T) {
 			// The half the hedged arm cannot do, and the reason the swap is
 			// dangerous rather than merely wrong: `healthy` drops the unknown
 			// arm here.
-			if narrow := parked.renderCookieStatus(tierEssential); !strings.Contains(narrow, statusBarRedStyle.Render(platform.code)) {
+			if narrow := parked.renderCookieStatus(tierEssential, parked.tallyJobs()); !strings.Contains(narrow, statusBarRedStyle.Render(platform.code)) {
 				t.Errorf("the %s COOKIES? alert vanished at tierEssential (%q). The narrowest bar "+
 					"is reserved for exactly this — something that needs acting on",
 					platform.name, narrow)
@@ -162,12 +162,12 @@ func TestParkedCookieJobsOutrankAnUnknownCheck(t *testing.T) {
 			// above are satisfied by a bar that alarms unconditionally and
 			// prove nothing.
 			unparked := newBar(nil)
-			if got := unparked.renderCookieStatus(tierFull); !strings.Contains(got, statusBarWrnStyle.Render(platform.code+": Unknown")) {
+			if got := unparked.renderCookieStatus(tierFull, unparked.tallyJobs()); !strings.Contains(got, statusBarWrnStyle.Render(platform.code+": Unknown")) {
 				t.Fatalf("premise lost: with no parked %s job the unknown check no longer renders "+
 					"hedged (%q), so the override asserted above is not overriding anything",
 					platform.name, got)
 			}
-			if got := unparked.renderCookieStatus(tierEssential); got != "" {
+			if got := unparked.renderCookieStatus(tierEssential, unparked.tallyJobs()); got != "" {
 				t.Fatalf("premise lost: the %s unknown check no longer drops at tierEssential (%q), "+
 					"so \"the alert survives where the hedge does not\" distinguishes nothing",
 					platform.name, got)
@@ -213,7 +213,7 @@ func TestParkedJobsEscalateOnlyTheirOwnPlatform(t *testing.T) {
 			m.SetCookieStatus(CookieStatusOK, CookieStatusOK)
 			m.SetJobs([]*database.Job{{Status: database.StatusCookies, Platform: tc.jobPlatform}})
 
-			got := m.renderCookieStatus(tierFull)
+			got := m.renderCookieStatus(tierFull, m.tallyJobs())
 			if !strings.Contains(got, statusBarRedStyle.Render(tc.alarmed)) {
 				t.Errorf("a parked %s job did not escalate its own indicator: %q. The evidence is "+
 					"about %s and %s is where it has to show", tc.jobPlatform, got, tc.alarmed, tc.alarmed)
@@ -251,7 +251,7 @@ func TestParkedJobWithNoPlatformEscalatesYouTube(t *testing.T) {
 	m.SetCookieStatus(CookieStatusOK, CookieStatusOK)
 	m.SetJobs([]*database.Job{{Status: database.StatusCookies}}) // Platform unset
 
-	got := m.renderCookieStatus(tierFull)
+	got := m.renderCookieStatus(tierFull, m.tallyJobs())
 	if !strings.Contains(got, statusBarRedStyle.Render("YT")) {
 		t.Errorf("a parked job with no Platform stopped escalating YouTube (%q). An unset Platform "+
 			"is a pre-Twitch row, and dropping it silently loses the alert those installs get today", got)
@@ -279,7 +279,7 @@ func TestTwitchCookiesOnlyBadgeIsReachable(t *testing.T) {
 	m.SetActivePlatforms(true, true)
 	m.SetCookieStatus(CookieStatusCookiesOnly, CookieStatusCookiesOnly)
 
-	got := m.renderCookieStatus(tierFull)
+	got := m.renderCookieStatus(tierFull, m.tallyJobs())
 	for _, code := range []string{"YT", "TW"} {
 		if !strings.Contains(got, statusBarRedStyle.Render(code)) {
 			t.Errorf("%s cookies-present-but-rejected is not rendered as an alert: %q", code, got)
@@ -304,7 +304,7 @@ func TestNoCookiesKeepsItsPlatformSpecificTreatment(t *testing.T) {
 	m.SetActivePlatforms(true, true)
 	m.SetCookieStatus(CookieStatusNone, CookieStatusNone)
 
-	got := m.renderCookieStatus(tierFull)
+	got := m.renderCookieStatus(tierFull, m.tallyJobs())
 	if !strings.Contains(got, statusBarYelStyle.Render("YT")) {
 		t.Errorf("YouTube with no cookies is no longer the yellow warning: %q", got)
 	}

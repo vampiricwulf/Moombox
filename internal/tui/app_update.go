@@ -214,6 +214,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusMap = make(map[string]database.JobStatus)
 		for _, j := range msg.Jobs {
 			a.statusMap[j.ID] = j.Status
+			// Terminal rows get no entry: handleJobUpdate would delete one on
+			// the next write anyway, and a selected Finished job with a live
+			// entry pins the details panel to the 16ms rebuild path.
+			if isProgressTerminal(j.Status) {
+				continue
+			}
 			a.progressStore.Set(j.ID, &ProgressData{
 				Progress:          j.Progress,
 				Percent:           j.Percent,
@@ -1126,22 +1132,42 @@ func hasDisplayChange(changes []string) bool {
 	return false
 }
 
+// isProgressTerminal reports the statuses that must NOT hold a progress-store
+// entry: the download is over (or parked), so there is no live progress to
+// render and the 16ms tick has nothing to rebuild for the job. One predicate,
+// three readers — the full-list snapshot, the JobAdded path, and the update
+// path — because the entry leaked whenever any one of them disagreed.
+//
+// Not Job.IsTerminal(): COOKIES? is a park rather than a completed lifecycle,
+// and the entry has always been dropped for it too.
+func isProgressTerminal(s database.JobStatus) bool {
+	return isCompletedStatus(s) || s == database.StatusError || s == database.StatusCookies
+}
+
 func (a *App) handleJobUpdate(ev *database.JobChange) {
 	job := ev.Job
 
-	// Always update progress store (zero-cost)
-	a.progressStore.Set(job.ID, &ProgressData{
-		Progress:          job.Progress,
-		Percent:           job.Percent,
-		Speed:             job.Speed,
-		ETA:               job.ETA,
-		LastVideoSeq:      job.LastVideoSeq,
-		LastAudioSeq:      job.LastAudioSeq,
-		TotalVideoSeq:     job.TotalVideoSeq,
-		TotalAudioSeq:     job.TotalAudioSeq,
-		TotalChatMessages: job.TotalChatMessages,
-		ChatStatus:        job.ChatStatus,
-	})
+	// Progress store: terminal rows are DELETED rather than written, on every
+	// update and not only on the transition. The old code Set unconditionally
+	// and deleted only when the status changed, so any later write to an
+	// already-terminal row (A W's watched toggle, a filename fixup) resurrected
+	// the entry that the transition had just dropped.
+	if isProgressTerminal(job.Status) {
+		a.progressStore.Delete(job.ID)
+	} else {
+		a.progressStore.Set(job.ID, &ProgressData{
+			Progress:          job.Progress,
+			Percent:           job.Percent,
+			Speed:             job.Speed,
+			ETA:               job.ETA,
+			LastVideoSeq:      job.LastVideoSeq,
+			LastAudioSeq:      job.LastAudioSeq,
+			TotalVideoSeq:     job.TotalVideoSeq,
+			TotalAudioSeq:     job.TotalAudioSeq,
+			TotalChatMessages: job.TotalChatMessages,
+			ChatStatus:        job.ChatStatus,
+		})
+	}
 
 	// Rebuild task-list row + detail panel only when a display-relevant
 	// column was actually written. Progress-only updates (~10/sec during
@@ -1158,11 +1184,6 @@ func (a *App) handleJobUpdate(ev *database.JobChange) {
 	prevStatus, exists := a.statusMap[job.ID]
 	if !exists || prevStatus != job.Status {
 		a.statusMap[job.ID] = job.Status
-
-		// Clean up progress for terminal/error statuses (match TS behavior)
-		if isCompletedStatus(job.Status) || job.Status == database.StatusError || job.Status == database.StatusCookies {
-			a.progressStore.Delete(job.ID)
-		}
 
 		// Update terminal title on status change
 		a.updateTerminalTitle()
@@ -1192,18 +1213,21 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 	a.seenChordHint = true
 
 	a.statusMap[job.ID] = job.Status
-	a.progressStore.Set(job.ID, &ProgressData{
-		Progress:          job.Progress,
-		Percent:           job.Percent,
-		Speed:             job.Speed,
-		ETA:               job.ETA,
-		LastVideoSeq:      job.LastVideoSeq,
-		LastAudioSeq:      job.LastAudioSeq,
-		TotalVideoSeq:     job.TotalVideoSeq,
-		TotalAudioSeq:     job.TotalAudioSeq,
-		TotalChatMessages: job.TotalChatMessages,
-		ChatStatus:        job.ChatStatus,
-	})
+	// Same rule as the snapshot loop: an imported Finished row gets no entry.
+	if !isProgressTerminal(job.Status) {
+		a.progressStore.Set(job.ID, &ProgressData{
+			Progress:          job.Progress,
+			Percent:           job.Percent,
+			Speed:             job.Speed,
+			ETA:               job.ETA,
+			LastVideoSeq:      job.LastVideoSeq,
+			LastAudioSeq:      job.LastAudioSeq,
+			TotalVideoSeq:     job.TotalVideoSeq,
+			TotalAudioSeq:     job.TotalAudioSeq,
+			TotalChatMessages: job.TotalChatMessages,
+			ChatStatus:        job.ChatStatus,
+		})
+	}
 	a.taskList.AddJob(job)
 	a.statusBar.SetJobs(a.taskList.Jobs())
 	a.actionMenu.SetJobs(a.taskList.Jobs())
