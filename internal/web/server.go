@@ -113,7 +113,7 @@ func NewServer(store *config.Store, logger interface {
 	r.Use(RecoveryMiddleware(logger))
 	r.Use(CORSMiddleware(store))
 	r.Use(SecurityHeaders)
-	r.Use(CSRFMiddleware(store, token))
+	r.Use(CSRFMiddleware(store, token, logger))
 	r.Use(IPGateMiddleware(store))
 	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)

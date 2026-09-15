@@ -2,6 +2,7 @@ package web
 
 import (
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -755,7 +756,7 @@ func TestCSRFMiddleware(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := makeStore(tt.networkAccess)
-			mw := CSRFMiddleware(store, internalToken)
+			mw := CSRFMiddleware(store, internalToken, &recordingLogger{})
 			handler := mw(passHandler)
 
 			rr := httptest.NewRecorder()
@@ -798,7 +799,7 @@ func TestCSRFOriginPolicyInExternalMode(t *testing.T) {
 		req.Host = "dash.example"
 		req.Header.Set("Origin", "https://evil.example")
 		rr := httptest.NewRecorder()
-		CSRFMiddleware(newStore("external"), "tok")(pass).ServeHTTP(rr, req)
+		CSRFMiddleware(newStore("external"), "tok", &recordingLogger{})(pass).ServeHTTP(rr, req)
 
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403 — a page on evil.example reached a mutating handler "+
@@ -814,7 +815,7 @@ func TestCSRFOriginPolicyInExternalMode(t *testing.T) {
 		req.Host = "dash.example"
 		req.Header.Set("Origin", "http://dash.example")
 		rr := httptest.NewRecorder()
-		CSRFMiddleware(newStore("external"), "tok")(pass).ServeHTTP(rr, req)
+		CSRFMiddleware(newStore("external"), "tok", &recordingLogger{})(pass).ServeHTTP(rr, req)
 
 		if rr.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, want 204 — the refusals here prove nothing if the dashboard "+
@@ -829,7 +830,7 @@ func TestCSRFOriginPolicyInExternalMode(t *testing.T) {
 		req.Header.Set("X-Forwarded-Host", "dash.example")
 		req.Header.Set("Origin", "https://dash.example")
 		rr := httptest.NewRecorder()
-		CSRFMiddleware(newStore("external", "10.0.0.0/8"), "tok")(pass).ServeHTTP(rr, req)
+		CSRFMiddleware(newStore("external", "10.0.0.0/8"), "tok", &recordingLogger{})(pass).ServeHTTP(rr, req)
 
 		if rr.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, want 204 — a reverse-proxy deployment that declares its proxy in "+
@@ -844,7 +845,7 @@ func TestCSRFOriginPolicyInExternalMode(t *testing.T) {
 		req.Header.Set("X-Forwarded-Host", "evil.example")
 		req.Header.Set("Origin", "https://evil.example")
 		rr := httptest.NewRecorder()
-		CSRFMiddleware(newStore("external"), "tok")(pass).ServeHTTP(rr, req) // no trusted_proxies
+		CSRFMiddleware(newStore("external"), "tok", &recordingLogger{})(pass).ServeHTTP(rr, req) // no trusted_proxies
 
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403 — reading X-Forwarded-Host without the trusted-proxy "+
@@ -1106,4 +1107,77 @@ func TestCompressionReusesGzipWriters(t *testing.T) {
 				"Reset onto this response", len(got), len(body))
 		}
 	}
+}
+
+// recordingLogger captures Warn lines so a test can assert the refusal line
+// exists and names the pair that was compared.
+type recordingLogger struct{ warns []string }
+
+func (l *recordingLogger) Warn(msg string, args ...any) {
+	line := msg
+	for i := 0; i+1 < len(args); i += 2 {
+		line += " " + fmt.Sprint(args[i]) + "=" + fmt.Sprint(args[i+1])
+	}
+	l.warns = append(l.warns, line)
+}
+
+// TestCSRFOriginComparison pins WHICH authority the Origin is compared
+// against, through the real middleware.
+//
+// THE MUTANTS: making originAllowed read r.Host instead of
+// effectiveRequestHost fails the trusted-proxy row (403 instead of 200);
+// trusting X-Forwarded-Host without the trusted_proxies test fails the
+// untrusted row (200 instead of 403); deleting the Warn call fails the log
+// assertion.
+func TestCSRFOriginComparison(t *testing.T) {
+	newStore := func(trusted []string) *config.Store {
+		return config.NewStore(&config.MoomboxConfig{
+			Network: config.NetworkConfig{
+				NetworkAccess:  "public",
+				TrustedProxies: trusted,
+			},
+		}, "")
+	}
+	pass := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	newRequest := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(""))
+		r.RemoteAddr = "10.1.2.3:44444"
+		r.Host = "internal:774"
+		r.Header.Set("X-Forwarded-Host", "dash.example")
+		r.Header.Set("Origin", "http://dash.example")
+		return r
+	}
+
+	t.Run("trusted proxy: the forwarded host is the one compared", func(t *testing.T) {
+		log := &recordingLogger{}
+		rr := httptest.NewRecorder()
+		CSRFMiddleware(newStore([]string{"10.1.2.3"}), "tok", log)(pass).ServeHTTP(rr, newRequest())
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200 — the Origin names the forwarded host", rr.Code)
+		}
+		if len(log.warns) != 0 {
+			t.Fatalf("logged %v on an accepted request, want nothing", log.warns)
+		}
+	})
+
+	t.Run("untrusted peer: the forwarded host is ignored and the refusal names the pair", func(t *testing.T) {
+		log := &recordingLogger{}
+		rr := httptest.NewRecorder()
+		CSRFMiddleware(newStore(nil), "tok", log)(pass).ServeHTTP(rr, newRequest())
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status %d, want 403 — X-Forwarded-Host from an untrusted peer must not count", rr.Code)
+		}
+		if len(log.warns) != 1 {
+			t.Fatalf("logged %v, want exactly one refusal line", log.warns)
+		}
+		line := log.warns[0]
+		for _, want := range []string{"CSRF: origin refused", "http://dash.example", "internal:774"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("refusal line %q does not name %q", line, want)
+			}
+		}
+	})
 }

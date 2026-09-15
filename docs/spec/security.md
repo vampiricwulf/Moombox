@@ -65,6 +65,22 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   portless authorities compare by host alone, so a TLS-terminating reverse proxy that forwards the
   client's `Host` verbatim needs no extra configuration. See `sameSiteOrigin` in
   `internal/web/middleware.go`.
+  **Certificate attestation.** When a TLS certificate is loaded and it is not the placeholder
+  Moombox generates for itself, the origin's host must ALSO appear among that certificate's SANs —
+  `identityHosts` and `hostInSANs` in `internal/web/middleware.go`, sourced from `IdentitySANs` in
+  `internal/web/tls.go`. This is an additional requirement on top of the same-host comparison, not a
+  substitute for it, and it is what refuses a DNS-rebinding page: such a page controls both `Host`
+  and its own `Origin`, so the same-host comparison alone compares two values the attacker chose,
+  but `attacker.dns` appears in no certificate Moombox holds. Moombox's own self-signed certificate
+  is deliberately excluded — its SANs are `localhost`, `127.0.0.1`, `::1` and whatever interface
+  addresses the machine had at first start, which name the machine rather than the address an
+  operator points a browser at, so treating them as an allowlist would refuse every external install
+  reached by a DNS name or a NATed public address. An install with no certificate, or with only the
+  placeholder, therefore behaves exactly as it did before. A `*.` SAN matches one label. The
+  `localhost` and `lan` policies gain the SAN list as a widening only: those arms are IP-class tests
+  that reject every DNS name, and an install holding a real certificate for its own hostname would
+  otherwise lose the WebSocket it has today.
+  **Not covered:** a rebinding attacker who also controls DNS for a name the certificate attests.
   **Residual:** a proxy listed in `network.trusted_proxies` that does not itself set or overwrite
   `X-Forwarded-Host` lets its peer choose the host the Origin is compared against. A browser cannot
   reach that path — `X-Forwarded-Host` is not a CORS-safelisted request header, so setting it
@@ -97,7 +113,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 2. **Loopback-only routes are exempt.** The paths `/get_pot`, `/invalidate_caches`, and `/invalidate_it` are called by external Python scripts (yt-dlp) that do not send Origin/Referer headers. These routes are already protected by `LoopbackOnly` middleware at the route level, so CSRF protection is redundant.
 3. **Internal token bypass.** If the request includes an `X-Internal-Token` header whose value matches the server's startup-generated token (compared with `crypto/subtle.ConstantTimeCompare`), the request passes through. This is safe because browsers cannot set custom headers on cross-origin requests without a CORS preflight, which the server does not grant to untrusted origins.
 4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should supply the internal token, or set `Origin` to the **same authority the request's own `Host` carries**. Under `external` / `public` the origin must name the request's own host and the same-host arm does not fold `localhost` to loopback, so a client dialling `127.0.0.1:774` sends `Host: 127.0.0.1:774` and must send `Origin: http://127.0.0.1:774` — `http://localhost:774` is refused there. On `localhost` / `lan`, where the check is an IP-class test, either spelling passes.
-5. **Origin/Referer validation.** When a header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`.
+5. **Origin/Referer validation.** When a header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`. A refusal logs exactly one `CSRF: origin refused` line naming the origin and the authority it was compared against, both clipped by `clipForLog` (`internal/web/middleware.go`) before they reach the dashboard's log panel.
 
 **Source:** `CSRFMiddleware` in `internal/web/middleware.go`.
 

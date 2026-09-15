@@ -19,15 +19,12 @@ func CORSMiddleware(store *config.Store) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
-			var networkAccess string
-			store.Read(func(c *config.MoomboxConfig) {
-				networkAccess = c.Network.NetworkAccess
-			})
-
 			// Decided ONCE: the preflight branch below used to re-run the same
 			// comparison, and the two must never be able to disagree.
-			allowed := origin != "" &&
-				isAllowedOrigin(origin, networkAccess, effectiveRequestHost(store, r), effectiveRequestScheme(r), identityHosts())
+			allowed := false
+			if origin != "" {
+				allowed, _ = originAllowed(store, r, origin)
+			}
 
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -121,7 +118,9 @@ func SecurityHeaders(next http.Handler) http.Handler {
 // same-origin mutating requests (Fetch spec). Non-browser local CLIs
 // (e.g. `moombox add`) should set Origin to the server's base URL or use
 // the InternalToken.
-func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler) http.Handler {
+func CSRFMiddleware(store *config.Store, internalToken string, logger interface {
+	Warn(msg string, args ...any)
+}) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Only check mutating methods
@@ -149,11 +148,6 @@ func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler
 				return
 			}
 
-			var networkAccess string
-			store.Read(func(c *config.MoomboxConfig) {
-				networkAccess = c.Network.NetworkAccess
-			})
-
 			origin := r.Header.Get("Origin")
 			if origin == "" {
 				origin = r.Header.Get("Referer")
@@ -169,7 +163,18 @@ func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler
 				return
 			}
 
-			if !isAllowedOrigin(origin, networkAccess, effectiveRequestHost(store, r), effectiveRequestScheme(r), identityHosts()) {
+			allowed, comparedHost := originAllowed(store, r, origin)
+			if !allowed {
+				// One line naming the pair that was compared. The most common
+				// cause of a 403 here is a reverse proxy that rewrites Host
+				// without being listed in network.trusted_proxies, and without
+				// this the operator sees only the browser's console error
+				// (Arc 5 Task 1 follow-up). The value is client-chosen, so it
+				// is clipped before it reaches the dashboard's log panel;
+				// volume is bounded by the per-IP API rate limiter.
+				logger.Warn("CSRF: origin refused",
+					"origin", clipForLog(origin),
+					"host", clipForLog(comparedHost))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))
@@ -228,6 +233,36 @@ func LoopbackOnly(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// originAllowed is the ONE Origin decision. CORSMiddleware, CSRFMiddleware and
+// the WebSocket upgrade all route through it, so the three can never again
+// disagree about which authority the request answers as (X-Forwarded-Host from
+// a trusted proxy, else r.Host), how ports compare (exactly, once either side
+// names one), or which hostnames a certificate attests. Before this, the
+// upgrade read r.Host only and wildcarded the port, so a Host-rewriting proxy
+// loaded the dashboard and then had every socket refused (Arc 5 arc-close F6).
+//
+// Returns the authority the origin was compared against as well, so a refusal
+// can name the pair without recomputing it.
+func originAllowed(store *config.Store, r *http.Request, origin string) (bool, string) {
+	var networkAccess string
+	store.Read(func(c *config.MoomboxConfig) {
+		networkAccess = c.Network.NetworkAccess
+	})
+	host := effectiveRequestHost(store, r)
+	return isAllowedOrigin(origin, networkAccess, host, effectiveRequestScheme(r), identityHosts()), host
+}
+
+// clipForLog bounds a header value the CLIENT chose before it reaches the log
+// ring buffer the dashboard renders, and drops any invalid UTF-8 the byte cut
+// may have left behind.
+func clipForLog(s string) string {
+	const maxLoggedHeader = 200
+	if len(s) > maxLoggedHeader {
+		s = s[:maxLoggedHeader] + "…"
+	}
+	return strings.ToValidUTF8(s, "")
 }
 
 // identityHosts returns the certificate-attested hostnames for this deployment,
