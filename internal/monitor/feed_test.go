@@ -866,3 +866,102 @@ func TestFeed_AnUnrelatedErrorAfterTheNomineeAnsweredBuysNoExtraFetch(t *testing
 		t.Fatalf("cycle 2 fetches = %v, want [UC1 UCx] — the floor was satisfied by UC1, so UCx's failure buys nothing and UC2 stays memoized", order)
 	}
 }
+
+// TestFeed_ANominatedChannelThatKeepsErroringIsNotRenominated closes the last
+// hole in the liveness floor: the NOMINATION itself has to consult the errored
+// set, not only the in-cycle failover.
+//
+// armMembershipLiveness picks the memoized channel with the earliest horizon,
+// and a failed fetch writes no memo — so a nominee that keeps erroring keeps
+// the earliest horizon and keeps winning the pick, every cycle, until the 6 h
+// memo on the others finally expires. The failover inside
+// recordMembershipFetchError cannot rescue that: it can only hand the duty to
+// a memoized channel LATER in the walk, and here the failing nominee is last.
+// Every cycle then ends with zero membership fetches that RETURNED, which is
+// precisely the outcome armMembershipLiveness' comment promises cannot happen.
+//
+// Mutants this fails on:
+//   - nominating the earliest horizon without consulting
+//     membershipFetchErrored: the recovery cycle fetches UC2 again and the
+//     floor stays dark for six hours.
+//   - honouring the errored set with no fallback: once BOTH channels have
+//     errored the nomination comes back empty, the cycle attempts no fetch at
+//     all, and nothing can ever clear the errored set again.
+func TestFeed_ANominatedChannelThatKeepsErroringIsNotRenominated(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	failing := ""
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			if failing == "*" || channelID == failing {
+				return nil, false, fmt.Errorf("membership tab http 500")
+			}
+			return nil, true, nil // recognised session, confirmed non-member
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"))
+
+	fm.doCheck(context.Background()) // cycle 1: nothing memoized; both fetched
+	if len(order) != 2 {
+		t.Fatalf("cycle 1 fetches = %v, want both channels", order)
+	}
+
+	// Cycle 2 arranges the horizons the rest of the test needs. Both are equal
+	// coming out of cycle 1, so the nomination breaks the tie on config order
+	// and goes to UC1 — whose horizon is then refreshed, leaving UC2 STRICTLY
+	// the earliest from here on. The pick under test is therefore decided by
+	// the horizon, not by list position.
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC1" {
+		t.Fatalf("cycle 2 fetches = %v, want [UC1] — the equal-horizon tie breaks on config order", order)
+	}
+
+	// Cycle 3: UC2 holds the earliest horizon and starts failing. It is
+	// nominated, its fetch does not return, and nothing behind it can carry
+	// the floor.
+	failing = "UC2"
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC2" {
+		t.Fatalf("cycle 3 fetches = %v, want [UC2] — the earliest horizon is nominated, and it is last in the walk", order)
+	}
+
+	// Cycle 4 is the one under test: UC2 answered nothing last cycle and its
+	// horizon has not moved, so re-nominating it would repeat cycle 3 forever.
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC1" {
+		t.Fatalf("cycle 4 fetches = %v, want exactly [UC1] — a nominee that errored must not be re-nominated while a memoized channel that can still answer exists", order)
+	}
+
+	// Cycle 5 breaks UC1 as well, so that by cycle 6 EVERY memoized channel
+	// has errored. UC1 is still the nominee here (it answered in cycle 4, so
+	// it is not in the errored set yet) and its failure re-arms onto UC2.
+	failing = "*"
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 2 || order[0] != "UC1" || order[1] != "UC2" {
+		t.Fatalf("cycle 5 fetches = %v, want [UC1 UC2] — the nominee's failure passes the duty on", order)
+	}
+
+	// Cycle 6: with nothing left that can answer, the skip must RELAX rather
+	// than nominate nobody. An errored channel's fetch is the only thing that
+	// can clear its own flag, so a cycle that attempts none is a dead end.
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) == 0 {
+		t.Fatal("cycle 6 attempted no membership fetch at all — when every memoized channel has errored the nomination must fall back to trying one anyway, or the errored set can never clear")
+	}
+}

@@ -750,12 +750,17 @@ func (fm *FeedMonitor) membershipActive() bool {
 // channel it would otherwise fetch is inside its non-member horizon, nominates
 // the one with the earliest horizon to be fetched anyway.
 //
-// WHAT THE NOMINATION GUARANTEES, exactly: while any membership fetch can
-// still complete, every cycle makes at least one that RETURNS — and at most
-// membershipLivenessMaxTries attempts chasing it. It does NOT guarantee a
-// liveness VERDICT. The fetch feeds one — cmd/moombox's FetchMembership
-// adapter hands the SessionAuthState to
-// (*cookies.RefreshService).ObserveLiveness — but the routeLivenessVerdict
+// WHAT THE NOMINATION GUARANTEES, exactly: every cycle makes at least one
+// membership fetch that RETURNS, provided some memoized channel has not
+// recently errored. When they ALL have, the errored ones are tried again
+// rather than skipped — a fetch is the only thing that can clear the flag —
+// and that retry is bounded by membershipLivenessMaxTries, so a cycle in
+// which everything fails still costs at most two attempts and may end with
+// nothing returned. It does NOT guarantee a liveness VERDICT even when a
+// fetch does return; tier-2 FallbackLiveness is the backstop for both gaps.
+// The fetch feeds a verdict — cmd/moombox's FetchMembership adapter hands the
+// SessionAuthState to (*cookies.RefreshService).ObserveLiveness — but the
+// routeLivenessVerdict
 // that gets it there forwards only LoggedIn/LoggedOut, so a page carrying no
 // login marker observes nothing even though the fetch succeeded. That residue
 // is the tier-2 FallbackLiveness probe's job: it runs precisely when no
@@ -768,10 +773,22 @@ func (fm *FeedMonitor) membershipActive() bool {
 // skipping EVERY channel, cycle after cycle, so the tier-1 signal disappears
 // while both dashboards stay clean.
 //
-// A channel whose last fetch errored is not counted as "fetched on its own
-// account" here. Its fetch still happens (an error writes no memo, so it never
-// becomes memoized) but it answers nothing, and letting it stand in would let
-// one permanently broken channel suppress every other channel's fetch forever.
+// A channel whose last fetch errored is discounted TWICE here, for the same
+// reason: an error answers nothing.
+//
+//   - It is not counted as "fetched on its own account". Its fetch still
+//     happens (an error writes no memo, so it never becomes memoized) but it
+//     answers nothing, and letting it stand in would let one permanently
+//     broken channel suppress every other channel's fetch forever.
+//   - It is passed over when NOMINATING. A failed fetch writes no memo, so a
+//     broken nominee's horizon never advances and it would win the
+//     earliest-horizon pick every cycle — and recordMembershipFetchError's
+//     failover can only reach channels later in the walk, so a broken nominee
+//     at the end of the list would take the whole cycle down with it.
+//
+// The second only yields when EVERY memoized channel has errored: a fetch is
+// the only thing that clears the flag, so nominating nobody would be a state
+// with no exit.
 //
 // Called once per cycle from doCheck. This is a SECOND fm.now() read per
 // cycle, distinct from checkChannel's one-`now` rule (spec §7): it dates no
@@ -805,20 +822,44 @@ func (fm *FeedMonitor) armMembershipLiveness(channels []config.ChannelConfig, no
 		return // nothing is being skipped, so there is nothing to stand in for
 	}
 
-	var earliestID string
-	var earliest time.Time
+	// Two candidate slots, because "earliest horizon" alone re-nominates a
+	// channel that cannot answer. A failed fetch writes no memo, so a nominee
+	// that keeps erroring keeps the earliest horizon and keeps winning the
+	// pick — and the in-cycle failover in recordMembershipFetchError can only
+	// hand the duty to a memoized channel LATER in the walk, so with the
+	// broken nominee last, every cycle ends with nothing returned until the
+	// memo expires. The errored ones are therefore passed over here.
+	//
+	// They are not passed over unconditionally: only a fetch can clear a
+	// channel's errored flag, so a cycle that nominates nobody is a dead end
+	// once every memoized channel has failed. When the preferred slot comes
+	// up empty the earliest errored one is tried again — costing at most
+	// membershipLivenessMaxTries attempts, exactly as a failing nominee
+	// always has.
+	var earliestID, erroredID string
+	var earliest, erroredEarliest time.Time
 	for i := range channels {
 		id := channels[i].ID
 		until, memoized := fm.nonMemberUntil[id]
+		_, errored := fm.membershipFetchErrored[id]
 		if !memoized || !now.Before(until) {
-			if _, errored := fm.membershipFetchErrored[id]; errored {
+			if errored {
 				continue // it will be fetched, but it will not answer
 			}
 			return // fetched on its own account; no nomination needed
 		}
+		if errored {
+			if erroredID == "" || until.Before(erroredEarliest) {
+				erroredID, erroredEarliest = id, until
+			}
+			continue
+		}
 		if earliestID == "" || until.Before(earliest) {
 			earliestID, earliest = id, until
 		}
+	}
+	if earliestID == "" {
+		earliestID = erroredID
 	}
 	if earliestID == "" {
 		return
@@ -905,9 +946,16 @@ func (fm *FeedMonitor) recordMembershipFetchError(chID string, now time.Time) {
 	}
 	fm.membershipFetchErrored[chID] = struct{}{}
 
-	// The same test membershipFetchAllowed made before the fetch, and it reads
-	// the same answer: a failed fetch writes no memo, and a cycle walks its
-	// channels one at a time, so nothing can have moved in between.
+	// The same test membershipFetchAllowed made before the fetch. A failed
+	// fetch writes no memo and a cycle walks its channels one at a time, so
+	// the only thing that can have moved the answer in between is
+	// ResetMembershipMemo, called from the cookie-refresh goroutine. It only
+	// ever DELETES entries — never adds or extends one — so the disagreement
+	// is one-directional: a channel that was inside its horizon before the
+	// fetch can read as un-memoized here, and this returns early instead of
+	// charging the try. That leaves a try UNSPENT, which is the harmless
+	// direction; the repair it rode in on re-fetches every channel next cycle
+	// anyway.
 	until, memoized := fm.nonMemberUntil[chID]
 	if !memoized || !now.Before(until) {
 		return // fetched on its own account; not the nomination's to spend

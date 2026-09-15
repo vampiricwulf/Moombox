@@ -333,6 +333,16 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 		// This edge also fires on the first authenticated observation of every
 		// process, which costs nothing here: the memo lives in memory and is
 		// empty at that point, so the clear reports 0 and logs nothing.
+		//
+		// It also fires wider than a real account swap, on purpose:
+		// CookieJar.YouTubeIdentity is deliberately biased toward sensitivity
+		// (internal/cookies/jar.go), so a same-account LOGIN_INFO rotation
+		// reads as a change and clears the memo too. The bill for that false
+		// positive is one feed cycle in which every configured channel's
+		// /membership tab is fetched authenticated again — bounded, paid once
+		// per rotation, and never worse than the pre-memo steady state. The
+		// opposite error, missing a real swap, leaves every members-only
+		// stream on the new account undiscoverable for six hours.
 		if n := clearYouTubeMembershipMemo(platform, clearMembershipMemo); n > 0 {
 			s.log.Info("account identity observed — cleared membership non-member memos",
 				"platform", platform, "channels", n)
@@ -1076,11 +1086,15 @@ func (s *runState) wireMonitorCallbacks() {
 		// by an early return nobody re-read.
 		//
 		// This closure runs once per configured channel per feed cycle, minus
-		// the channels the non-member memo skips — and the monitor guarantees
-		// at least one call per cycle precisely so this line keeps firing. A
-		// dead session still arrives as several identical verdicts;
-		// ObserveLiveness owns the de-duplication — see livenessRefireWindow
-		// in internal/cookies.
+		// the channels the non-member memo skips — and the monitor nominates
+		// one of those skipped channels each cycle precisely so this line
+		// keeps firing. The exact bound is NOT "at least one call per cycle":
+		// armMembershipLiveness' doc comment (internal/monitor/feed.go) states
+		// what is actually promised, including the case where every memoized
+		// channel has recently errored and a cycle can end with no call that
+		// returned. A dead session still arrives as several identical
+		// verdicts; ObserveLiveness owns the de-duplication — see
+		// livenessRefireWindow in internal/cookies.
 		routeLivenessVerdict(s.cookieRefresh.ObserveLiveness, verdict)
 		if err != nil {
 			return nil, false, err
