@@ -600,3 +600,119 @@ func TestParseLineUnknownCommand(t *testing.T) {
 		t.Error("expected nil for unknown command")
 	}
 }
+
+// TestParsePrivmsgStripsActionWrapper pins the /me shape end to end.
+//
+// A "/me" chat line reaches us as the CTCP form \x01ACTION <text>\x01, and the
+// emote offsets index the STRIPPED text — verified 2026-09-15 against the two
+// real ACTION ranges in the archives: both slice to a whole word after the
+// wrapper is removed, neither does against the wrapped text.
+//
+// Mutants this kills:
+//   - no strip at all (today): Message keeps "\x01ACTION Kappa\x01" and the
+//     emote lands on "ACTION" — offsets shift by the wrapper's 8 code points.
+//   - stripping AFTER parseEmoteTags: Message is right and the emote span is
+//     still 8 units too far along.
+//   - stripping only the prefix: the trailing \x01 renders as a stray glyph and
+//     the message length is one too long.
+//   - stripping on any message that merely CONTAINS the marker: the third case
+//     below sends "\x01ACTION" mid-text and must come through untouched.
+func TestParsePrivmsgStripsActionWrapper(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		ChannelLogin: "testchan",
+		StreamID:     "stream-1",
+	}, &testLogger{})
+
+	const soh = "\x01"
+	for _, tc := range []struct {
+		name       string
+		tags       string
+		body       string
+		wantText   string
+		wantAction bool
+		wantEmotes []TwitchEmoteRef
+	}{
+		{
+			name:       "action with an emote at the head",
+			tags:       "emotes=25:0-4;id=m1;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer",
+			body:       soh + "ACTION Kappa" + soh,
+			wantText:   "Kappa",
+			wantAction: true,
+			wantEmotes: []TwitchEmoteRef{{ID: "25", Name: "Kappa", Start: 0, End: 4}},
+		},
+		{
+			name:       "real wire action range",
+			tags:       "emotes=301428:20-33;id=m2;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer",
+			body:       soh + "ACTION take care everychat shachiOrcaLove" + soh,
+			wantText:   "take care everychat shachiOrcaLove",
+			wantAction: true,
+			wantEmotes: []TwitchEmoteRef{{ID: "301428", Name: "shachiOrcaLove", Start: 20, End: 33}},
+		},
+		{
+			name:       "ordinary message is untouched",
+			tags:       "emotes=25:0-4;id=m3;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer",
+			body:       "Kappa hello",
+			wantText:   "Kappa hello",
+			wantAction: false,
+			wantEmotes: []TwitchEmoteRef{{ID: "25", Name: "Kappa", Start: 0, End: 4}},
+		},
+		{
+			name:       "the marker mid-text is not a wrapper",
+			tags:       "id=m4;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer",
+			body:       "look: " + soh + "ACTION is the CTCP form",
+			wantText:   "look: " + soh + "ACTION is the CTCP form",
+			wantAction: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "@" + tc.tags + " :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchan :" + tc.body
+			msg := cd.parseLine(line)
+			if msg == nil {
+				t.Fatal("parseLine returned nil for a well-formed PRIVMSG")
+			}
+			if msg.Message != tc.wantText {
+				t.Errorf("Message = %q, want %q", msg.Message, tc.wantText)
+			}
+			if msg.IsAction != tc.wantAction {
+				t.Errorf("IsAction = %v, want %v", msg.IsAction, tc.wantAction)
+			}
+			if len(msg.Emotes) != len(tc.wantEmotes) {
+				t.Fatalf("Emotes = %+v, want %+v", msg.Emotes, tc.wantEmotes)
+			}
+			for i := range tc.wantEmotes {
+				if msg.Emotes[i] != tc.wantEmotes[i] {
+					t.Errorf("Emotes[%d] = %+v, want %+v", i, msg.Emotes[i], tc.wantEmotes[i])
+				}
+			}
+			// The lossless line is the archive's only record of what Twitch
+			// actually sent, so the wrapper must still be in it.
+			if msg.Raw != line {
+				t.Errorf("Raw was rewritten; it must stay the verbatim wire line")
+			}
+		})
+	}
+}
+
+// TestActionIsNotStrippedFromUsernotice pins the narrowness of the strip.
+// USERNOTICE bodies (subs, raids, announcements) are never CTCP-wrapped, and a
+// strip there would silently eat the head of any system message that happened
+// to start with the marker.
+func TestActionIsNotStrippedFromUsernotice(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		ChannelLogin: "testchan",
+		StreamID:     "stream-1",
+	}, &testLogger{})
+	const soh = "\x01"
+	line := "@id=u1;tmi-sent-ts=1700000000000;msg-id=sub;display-name=Viewer;user-id=u1 " +
+		":tmi.twitch.tv USERNOTICE #testchan :" + soh + "ACTION Kappa" + soh
+	msg := cd.parseLine(line)
+	if msg == nil {
+		t.Fatal("parseLine returned nil for a well-formed USERNOTICE")
+	}
+	if msg.Message != soh+"ACTION Kappa"+soh {
+		t.Errorf("USERNOTICE body = %q, want it verbatim", msg.Message)
+	}
+	if msg.IsAction {
+		t.Error("IsAction set on a USERNOTICE — the strip must be PRIVMSG-only")
+	}
+}

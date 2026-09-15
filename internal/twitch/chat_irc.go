@@ -420,6 +420,12 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 		messageText = strings.TrimPrefix(messageText, ":")
 	}
 
+	// Unwrap /me BEFORE the emote tags are read. The offsets index the
+	// unwrapped text — measured 2026-09-15 on real ACTION lines — so parsing
+	// against the wrapped form lands every emote eight code points early and
+	// renders the word "ACTION" as part of the message.
+	messageText, isAction := stripActionWrapper(messageText)
+
 	// Author name fallback chain
 	authorName := tags["display-name"]
 	if authorName == "" {
@@ -442,6 +448,7 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 		Emotes:       parseEmoteTags(tags["emotes"], messageText),
 		Bits:         bits,
 		MessageType:  msgType,
+		IsAction:     isAction,
 		Raw:          rawLine,
 	}
 
@@ -553,6 +560,21 @@ func parseBadges(s string) []string {
 		return nil
 	}
 	return strings.Split(s, ",")
+}
+
+// stripActionWrapper unwraps the CTCP form Twitch sends a /me message in:
+// \x01ACTION <text>\x01. It returns the text and whether it was wrapped.
+//
+// PRIVMSG only, and only as a whole-value wrapper: the prefix must be at the
+// very start, and the trailing \x01 is removed only when the prefix matched.
+// A chat line that merely mentions the marker mid-text is an ordinary message,
+// and a USERNOTICE body is never wrapped at all.
+func stripActionWrapper(text string) (string, bool) {
+	rest, ok := strings.CutPrefix(text, "\x01ACTION ")
+	if !ok {
+		return text, false
+	}
+	return strings.TrimSuffix(rest, "\x01"), true
 }
 
 // parseEmoteTags parses IRC emote tags like "id:start-end,start-end/id:start-end".

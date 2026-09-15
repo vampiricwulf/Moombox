@@ -55,21 +55,26 @@ type TwitchChatMessage struct {
 	ID          string `json:"id"`
 	TimestampMs int64  `json:"timestampMs"`
 	// OffsetMs is the SIGNED ms offset from the part's recording start (negative = before recording began).
-	OffsetMs          int64            `json:"offsetMs"`
-	AuthorName        string           `json:"authorName"`
-	AuthorID          string           `json:"authorId"`
-	AuthorBadges      []string         `json:"authorBadges,omitempty"`
-	AuthorColor       string           `json:"authorColor,omitempty"`
-	Message           string           `json:"message"`
-	Emotes            []TwitchEmoteRef `json:"emotes,omitempty"`
-	Bits              int              `json:"bits,omitempty"`
-	MessageType       string           `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system"
-	SystemMsg         string           `json:"systemMsg,omitempty"`
-	SubPlan           string           `json:"subPlan,omitempty"`           // C1: "1000", "2000", "3000", "Prime"
-	GiftRecipient     string           `json:"giftRecipient,omitempty"`     // C1: msg-param-recipient-display-name
-	ViewerCount       int              `json:"viewerCount,omitempty"`       // C1: msg-param-viewerCount (raids)
-	AnnouncementColor string           `json:"announcementColor,omitempty"` // msg-param-color for announcements: "primary"|"blue"|"green"|"orange"|"purple"
-	Raw               string           `json:"raw,omitempty"`               // Lossless raw IRC line
+	OffsetMs     int64            `json:"offsetMs"`
+	AuthorName   string           `json:"authorName"`
+	AuthorID     string           `json:"authorId"`
+	AuthorBadges []string         `json:"authorBadges,omitempty"`
+	AuthorColor  string           `json:"authorColor,omitempty"`
+	Message      string           `json:"message"`
+	Emotes       []TwitchEmoteRef `json:"emotes,omitempty"`
+	Bits         int              `json:"bits,omitempty"`
+	MessageType  string           `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system"
+	// IsAction marks a /me message. Twitch sends those as the CTCP form
+	// \x01ACTION <text>\x01; parsePrivmsg unwraps them so Message holds only
+	// the text and the emote offsets (which index the UNWRAPPED text — see
+	// parseEmoteTags) line up. Raw keeps the verbatim wire line.
+	IsAction          bool   `json:"isAction,omitempty"`
+	SystemMsg         string `json:"systemMsg,omitempty"`
+	SubPlan           string `json:"subPlan,omitempty"`           // C1: "1000", "2000", "3000", "Prime"
+	GiftRecipient     string `json:"giftRecipient,omitempty"`     // C1: msg-param-recipient-display-name
+	ViewerCount       int    `json:"viewerCount,omitempty"`       // C1: msg-param-viewerCount (raids)
+	AnnouncementColor string `json:"announcementColor,omitempty"` // msg-param-color for announcements: "primary"|"blue"|"green"|"orange"|"purple"
+	Raw               string `json:"raw,omitempty"`               // Lossless raw IRC line
 }
 
 // TwitchEmoteRef references an emote within a message.
