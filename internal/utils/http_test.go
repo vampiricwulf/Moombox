@@ -83,6 +83,38 @@ func TestFetchBodyRespectsTimeout(t *testing.T) {
 	}
 }
 
+// goCancelAfter runs cancel after d in a goroutine carrying the project's
+// inline recover (the global rule: every goroutine has one). Without it a
+// panic here takes the whole test binary down with a stack naming only the
+// goroutine, attributed to no test. The goroutine cannot report the panic
+// itself — no t method is legal from a goroutine that may outlive the test —
+// so the value goes into a buffered channel and the returned join func, which
+// the test body calls while it is still running, fails the right test with it.
+func goCancelAfter(t *testing.T, d time.Duration, cancel context.CancelFunc) func() {
+	t.Helper()
+	panicked := make(chan any, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done) // registered first, so it runs AFTER the recover below
+		defer func() {
+			if r := recover(); r != nil {
+				panicked <- r
+			}
+		}()
+		time.Sleep(d)
+		cancel()
+	}()
+	return func() {
+		t.Helper()
+		<-done
+		select {
+		case r := <-panicked:
+			t.Fatalf("the cancel goroutine panicked: %v", r)
+		default:
+		}
+	}
+}
+
 // TestFetchBodyHonoursCtxCancel covers the upstream-ctx-cancellation
 // path: a parent ctx cancelled before the response body is read should
 // surface as ctx.Canceled.
@@ -94,11 +126,9 @@ func TestFetchBodyHonoursCtxCancel(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
+	joinCancel := goCancelAfter(t, 50*time.Millisecond, cancel)
 	_, err := FetchBody(ctx, srv.URL, 5*time.Second, nil)
+	joinCancel()
 	if err == nil {
 		t.Fatal("FetchBody with cancelled ctx: want error, got nil")
 	}
@@ -207,11 +237,10 @@ func TestFetchWithTimeoutCallerCancelIsNotAFailure(t *testing.T) {
 	t.Cleanup(func() { SetConnectivityReporter(nil) })
 
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
-	if _, _, err := FetchWithTimeout(ctx, srv.URL, 5*time.Second, nil); err == nil {
+	joinCancel := goCancelAfter(t, 50*time.Millisecond, cancel)
+	_, _, err := FetchWithTimeout(ctx, srv.URL, 5*time.Second, nil)
+	joinCancel()
+	if err == nil {
 		t.Fatal("FetchWithTimeout on a cancelled context returned nil error")
 	}
 	cancel()

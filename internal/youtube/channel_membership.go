@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // membershipTabIdentifier is the tabRenderer.tabIdentifier for a channel's
@@ -20,7 +21,7 @@ import (
 // live channels 2026-07.
 const membershipTabIdentifier = "TAB_ID_SPONSORSHIPS"
 
-// ytInitialDataStartRe locates the start of the ytInitialData JSON object on a
+// ytInitialDataAnchors locate the start of the ytInitialData JSON object on a
 // channel/watch page. YouTube emits it as `var ytInitialData = {…}` (and has
 // historically also used `window["ytInitialData"] = {…}`); we match either form
 // up to the opening brace, then balance-scan from there. A non-greedy regex
@@ -47,10 +48,14 @@ const membershipTabIdentifier = "TAB_ID_SPONSORSHIPS"
 // balanced scan — so the worst a forged candidate achieves is to fail the
 // scan, fail the decode, or decode to an empty object. That is a denial of the
 // channel's own metadata (or of the chat continuation), never a substitution.
-// extractPlayerResponse in watch_page.go now converts even that denial into a
-// non-event by skipping a failed candidate and searching on; this locator
-// still takes the first match, which is why it keeps the narrower anchor set.
-var ytInitialDataStartRe = regexp.MustCompile(`(?:var ytInitialData|window\["ytInitialData"\])\s*=\s*\{`)
+// Since the 2026-09-15 chain close the locator iterates candidates through
+// utils.FindJSONObjectCandidate rather than taking the first match, so a
+// forged assignment that scans but is empty or is not JSON no longer denies
+// the real document — it is skipped. The narrower anchor set stays regardless,
+// for the reason above.
+var ytInitialDataAnchors = []*regexp.Regexp{
+	regexp.MustCompile(`(?:var ytInitialData|window\["ytInitialData"\])\s*=\s*\{`),
+}
 
 // MembershipVideo is a members-only video discovered from a channel's
 // /membership tab. Stream status (live/upcoming/vod) is resolved downstream by
@@ -347,44 +352,19 @@ func rendererTitle(r map[string]any) string {
 }
 
 // extractYtInitialData pulls the ytInitialData JSON object out of a channel
-// (or watch) page via a brace-depth scan that respects string literals. Returns
-// a sub-slice of the input (no copy) and true on success. Balancing braces
-// (rather than a non-greedy regex) is necessary because the channel payload is
-// large and deeply nested. Works on []byte to avoid copying the ~1MB page.
+// (or watch) page: an anchored assignment prefix, then a string-aware
+// brace-depth scan from the `{` the match ends on. Returns a sub-slice of the
+// input (no copy) and true on success. Balancing braces rather than using a
+// non-greedy regex is necessary because the channel payload is large and
+// deeply nested; working on []byte avoids copying the ~1 MB page.
+//
+// Candidates are iterated, not first-matched (utils.FindJSONObjectCandidate).
+// The acceptance test is deliberately cheap — valid, non-empty JSON, by scan
+// rather than by decode — because both callers (parseMembershipTab,
+// extractChatContinuation) unmarshal the literal into their own typed
+// envelopes immediately afterwards, and a full map decode of a megabyte-scale
+// literal purely to decide whether to accept it would cost more than the
+// parse it guards.
 func extractYtInitialData(data []byte) ([]byte, bool) {
-	loc := ytInitialDataStartRe.FindIndex(data)
-	if loc == nil {
-		return nil, false
-	}
-	start := loc[1] - 1 // index of the opening '{'
-
-	depth := 0
-	inStr := false
-	esc := false
-	for i := start; i < len(data); i++ {
-		c := data[i]
-		if inStr {
-			switch {
-			case esc:
-				esc = false
-			case c == '\\':
-				esc = true
-			case c == '"':
-				inStr = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inStr = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return data[start : i+1], true
-			}
-		}
-	}
-	return nil, false
+	return utils.FindJSONObjectCandidate(data, ytInitialDataAnchors, utils.IsNonEmptyJSONObject)
 }

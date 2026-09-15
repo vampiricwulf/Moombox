@@ -43,7 +43,7 @@ var (
 	encryptedHostFlagsRegex = regexp.MustCompile(`"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":\{[^}]*"encryptedHostFlags":"([^"]+)"`)
 	// Assignment-PREFIX anchors for ytInitialPlayerResponse. Each pattern
 	// ends ON the opening brace; the object's extent then comes from
-	// scanBalancedObject, never from the regex.
+	// utils.ScanBalancedJSONObject, never from the regex.
 	//
 	// These used to end in a lazy `({.+?});`, which stops at the first `};`
 	// anywhere in the page. A shortDescription carrying `};` (a code sample,
@@ -64,7 +64,7 @@ var (
 	}
 	// ytAtNOpenRe locates the opening of a window.ytAtN(...) call. Only the
 	// call prefix is matched here; the object literal's extent is found by
-	// scanning balanced braces (scanBalancedObject) rather than by a
+	// scanning balanced braces (utils.ScanBalancedJSONObject) rather than by a
 	// non-greedy regex. moonarchive's INITIAL_ATTESTATION_PATTERN uses the
 	// regex form, but a `})` sequence anywhere inside the opaque challenge
 	// payload truncates that match into an unbalanced fragment, which then
@@ -606,7 +606,10 @@ type chatContinuationData struct {
 // The blob is located by extractYtInitialData (channel_membership.go), the
 // same brace-depth scan the membership path uses — which drops the old
 // regex's `;</script>` terminator while keeping its two anchored assignment
-// spellings, so page-authored text cannot present itself as the blob.
+// spellings. A page-authored assignment CAN present itself as a candidate —
+// e.g. a page-authored `var ytInitialData = {}` — but since the 2026-09-15
+// chain close every candidate is tried, so a forged or empty first candidate
+// is skipped rather than denying the real blob.
 //
 // A decode error is reported ONLY when no token came out of the decode, and
 // that rule governs BOTH passes. encoding/json records the first type error
@@ -700,34 +703,28 @@ func normalizePlayerJSURL(raw string) string {
 // candidate and searching on turns it back into nothing at all. The empty-map
 // rejection is part of that: `{}` decodes fine, so without it a forged `{}`
 // would still win.
+//
+// The loop itself — every occurrence of every anchor, skipping a candidate
+// whose scan or accept fails, and never re-offering a `{` an earlier anchor
+// already rejected — lives in utils.FindJSONObjectCandidate. The bare third
+// anchor matches inside every `var` occurrence, so that last part is what
+// keeps a failing page from paying for each candidate twice.
 func extractPlayerResponse(page []byte) (map[string]any, bool) {
-	for _, re := range playerResponseAnchors {
-		for start := 0; start < len(page); {
-			loc := re.FindIndex(page[start:])
-			if loc == nil {
-				break
-			}
-			matchEnd := start + loc[1]
-			// Resume the search one byte past THIS match's start, so a
-			// rejected candidate cannot be re-found and the scan below is
-			// free to run off the end of a forged literal.
-			start += loc[0] + 1
-			// The match ends ON the opening brace, so rescan from it.
-			obj, ok := scanBalancedObject(page[matchEnd-1:])
-			if !ok {
-				continue
-			}
-			var pr map[string]any
-			if json.Unmarshal(obj, &pr) != nil {
-				continue
-			}
-			if len(pr) == 0 {
-				continue
-			}
-			return pr, true
+	var pr map[string]any
+	// The decode happens inside accept because it IS the acceptance test: a
+	// candidate that does not decode, or decodes to an empty object, is not
+	// the player response and must not end the search.
+	if _, ok := utils.FindJSONObjectCandidate(page, playerResponseAnchors, func(obj []byte) bool {
+		var cand map[string]any
+		if json.Unmarshal(obj, &cand) != nil || len(cand) == 0 {
+			return false
 		}
+		pr = cand
+		return true
+	}); !ok {
+		return nil, false
 	}
-	return nil, false
+	return pr, true
 }
 
 func extractYtcfgAndPlayerResponse(page []byte) (*YtcfgData, map[string]any) {
@@ -860,7 +857,7 @@ func extractAttestationChallenge(page []byte) (challenge, reason string) {
 	}
 	// The regex ends on the literal '{'; rescan from there so the object's
 	// true extent comes from brace balancing, not from the first `})`.
-	obj, ok := scanBalancedObject(page[loc[1]-1:])
+	obj, ok := utils.ScanBalancedJSONObject(page[loc[1]-1:])
 	if !ok {
 		return "", atnUnbalanced
 	}
@@ -993,46 +990,4 @@ func canonicalizeChallenge(raw json.RawMessage) (canonical, reason string) {
 		return "", atnChallengeShape
 	}
 	return string(out), atnOK
-}
-
-// scanBalancedObject returns the complete `{...}` literal starting at s[0],
-// tracking JS string state so braces inside quoted payloads never affect the
-// depth count. Returns ok=false when the literal never closes.
-//
-// []byte rather than string because every caller now holds the raw response
-// body: FetchWatchPage stopped copying the ~1-5 MB page into a string for
-// the sake of four extractors that only read it.
-func scanBalancedObject(s []byte) ([]byte, bool) {
-	if len(s) == 0 || s[0] != '{' {
-		return nil, false
-	}
-	depth := 0
-	var quote byte
-	escaped := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if quote != 0 {
-			switch {
-			case escaped:
-				escaped = false
-			case c == '\\':
-				escaped = true
-			case c == quote:
-				quote = 0
-			}
-			continue
-		}
-		switch c {
-		case '\'', '"', '`':
-			quote = c
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[:i+1], true
-			}
-		}
-	}
-	return nil, false
 }

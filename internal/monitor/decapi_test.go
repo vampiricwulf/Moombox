@@ -149,22 +149,57 @@ func TestDecapi_TwoPhaseDateFetch(t *testing.T) {
 // TestDecapi_DateFetchErrorSkips: a FAILED date fetch leaves the window
 // unverifiable ⇒ the §13 treated-as-outside arm (no job, Info-logged);
 // a later sighting retries.
+//
+// The second cycle is the pin for the guard at decapi.go:747
+// (`if result.PublishedAt != ""` inside the window-skip arm). A DATED
+// verdict is durable and is memoized; a DATELESS one must not be, because
+// "treated as outside" there means only that this cycle could not verify the
+// window. Latching it would let one transient DECAPI/date failure freeze the
+// channel until its newest video changes — and on an
+// include_non_live_content channel the out-of-window arm writes no history
+// row, so `reprobe` never re-opens it either.
+//
+// Mutant this kills: deleting the `if result.PublishedAt != ""` guard so the
+// dateless skip calls noteTerminalMemoOutsideWindow. Cycle 2 then hits the
+// memo and costs no requests at all — probes/dates stay 1/1. (Before this
+// cycle existed, deleting the guard passed the whole package.)
 func TestDecapi_DateFetchErrorSkips(t *testing.T) {
 	db := newTestDB(t)
+	probes, dates := 0, 0
 	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		probes++
 		return &VideoProbeResult{StreamStatus: "vod", Title: "fresh vod"}, nil
 	})
 	dm.ProbeDate = func(ctx context.Context, videoID string) (string, string, error) {
+		dates++
 		return "", "", fmt.Errorf("boom")
 	}
 	found := recordDecapiVideoFound(dm)
 
+	// include_non_live_content keeps the vod arm from writing a history row,
+	// so `reprobe` is false on every cycle and the memo's outsideWindow arm
+	// is the only one that could ever fire here.
 	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
-	if err := dm.processResponse(context.Background(), decapiBody("vidDecTpe05", "fresh vod"), ch); err != nil {
-		t.Fatalf("processResponse: %v", err)
+	body := decapiBody("vidDecTpe05", "fresh vod")
+
+	if err := dm.processResponse(context.Background(), body, ch); err != nil {
+		t.Fatalf("cycle 1: processResponse: %v", err)
 	}
 	if len(*found) != 0 {
 		t.Fatalf("a window-unverifiable vod must not job: %v", *found)
+	}
+	if probes != 1 || dates != 1 {
+		t.Fatalf("cycle 1: probes=%d dates=%d, want 1/1 — the first sighting classifies and tries to date the video", probes, dates)
+	}
+
+	if err := dm.processResponse(context.Background(), body, ch); err != nil {
+		t.Fatalf("cycle 2: processResponse: %v", err)
+	}
+	if probes != 2 || dates != 2 {
+		t.Fatalf("cycle 2: probes=%d dates=%d, want 2/2 — a DATELESS treated-as-outside skip must not be memoized, or one transient date failure freezes the channel until its newest video changes", probes, dates)
+	}
+	if len(*found) != 0 {
+		t.Fatalf("a window-unverifiable vod must not job on a later sighting either: %v", *found)
 	}
 }
 

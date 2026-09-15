@@ -32,8 +32,11 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	}
 
 	// Chat continuation is extracted at watch-page parse time (see watch_page.go);
-	// reading from the result avoids re-parsing the 5 MB HTML and lets the body
-	// string be GC'd before this point.
+	// reading from the result avoids re-parsing the ~5 MB HTML. There is no body
+	// STRING to collect: since the 2026-09-15 sweep (Arc 3) FetchWatchPage reads
+	// the page as []byte and its extractors read it in place, and the token
+	// json.Unmarshal produced does not alias the page — so the result retains
+	// none of those bytes and the page is collectable by the time this runs.
 	continuation := watchResult.ChatContinuation
 	isReplay := watchResult.ChatIsReplay
 	if continuation == "" {

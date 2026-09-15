@@ -760,14 +760,13 @@ func (fm *FeedMonitor) membershipActive() bool {
 // fetch does return; tier-2 FallbackLiveness is the backstop for both gaps.
 // The fetch feeds a verdict — cmd/moombox's FetchMembership adapter hands the
 // SessionAuthState to (*cookies.RefreshService).ObserveLiveness — but the
-// routeLivenessVerdict
-// that gets it there forwards only LoggedIn/LoggedOut, so a page carrying no
-// login marker observes nothing even though the fetch succeeded. That residue
-// is the tier-2 FallbackLiveness probe's job: it runs precisely when no
-// conclusive observation has landed recently (livenessObservedRecently in
-// internal/cookies/refresh_liveness.go; wired to ProbeAccountLiveness in
-// cmd/moombox/services.go). This floor is the cheap first tier, not the whole
-// guarantee.
+// routeLivenessVerdict that gets it there forwards only LoggedIn/LoggedOut, so
+// a page carrying no login marker observes nothing even though the fetch
+// succeeded. That residue is the tier-2 FallbackLiveness probe's job: it runs
+// precisely when no conclusive observation has landed recently
+// (livenessObservedRecently in internal/cookies/refresh_liveness.go; wired to
+// ProbeAccountLiveness in cmd/moombox/services.go). This floor is the cheap
+// first tier, not the whole guarantee.
 //
 // What it does rule out is the silent failure the memo would otherwise create:
 // skipping EVERY channel, cycle after cycle, so the tier-1 signal disappears

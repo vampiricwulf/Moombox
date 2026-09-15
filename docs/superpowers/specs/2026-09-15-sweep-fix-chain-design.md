@@ -379,3 +379,72 @@ Every ledger item T1-1 … T4-35 is either merged with a test, or recorded in th
 ruling (R2 faststart: no change; T3-27 concurrency: not done, deadline-aware retries instead). Memory
 notes updated: cipher-cache figure (10 slots), the Twitch emote-offset fact (already written), and the
 chain outcome. `RELEASE_NOTES.md` is NOT written (owner controls release).
+
+## Errata (chain close, 2026-09-15)
+
+Corrections recorded at chain close. The design sections above are left as written — they are the
+record of what was PLANNED. These entries are what the implementation proved, and they win wherever
+they disagree with the text above.
+
+1. **§5.1 — "job → Error, which `isRecoverableTwitchError` can recover" is false.**
+   `isRecoverableTwitchError` (`internal/monitor/twitch_recover.go`) has exactly one caller: the Twitch
+   MONITOR, when it sights a live channel whose existing job is already in `Error`
+   (`internal/monitor/twitch.go:405`). It is not a hand-off the HLS loop reaches, and the YouTube
+   orchestrators finalize an errored job themselves. So the gain from deferring the end verdict is not
+   "the job gets recovered": it is that an unverifiable playlist failure RETRIES instead of truncating
+   the recording as Finished, and that the resume sidecar survives for a later `/resume`. The design's
+   behaviour is unchanged and correct; only that clause of its justification was wrong.
+
+2. **§5.5 — the 4xx drain was DROPPED, not implemented.** Go 1.27's `net/http` `Transport` already
+   drains an unread response body of up to 256 KiB when the caller closes early (`maybeDrainBody`), so
+   the brief's RED did not reproduce and the specified 64 KiB drain could not rescue a connection the
+   stdlib does not already keep (verified with a 300 KiB body: red without the fix, still red with it).
+   Arc 2 Task 5 was dropped by ruling and committed nothing. A body larger than 256 KiB is beyond any
+   sane drain cap, so nothing is owed here.
+
+3. **§7.3 — "so `ObserveLiveness` still receives a verdict" overstates the floor.** What
+   `armMembershipLiveness` guarantees is one membership fetch per cycle that RETURNS, and only while
+   some memoized channel has not recently errored; when every candidate has errored, the retry is
+   bounded by `membershipLivenessMaxTries` and the cycle may legitimately end with nothing returned. A
+   fetch that returns is also not the same thing as a verdict: `routeLivenessVerdict` forwards only
+   `LoggedIn`/`LoggedOut`, so a page carrying no login marker observes nothing even after a successful
+   fetch. Tier-2 `FallbackLiveness` remains the backstop for BOTH gaps — it is not a redundancy the
+   memo made optional.
+
+4. **§6.7 — "3-slot LRU" is the figure being CORRECTED, not a current one.** The sentence is written in
+   the present tense against a state Arc 3 has since fixed; read it as past tense. The cipher solver
+   cache holds at most 10 compiled VMs (`solverCacheSize`, `internal/cipher/solver.go`) — it was 3
+   until 2026-04, when multi-channel monitoring routinely holding 4+ active player URLs made the
+   smaller cap re-compile constantly. `.claude/skills/moombox-upstream-porting/SKILL.md` and
+   `docs/spec/platform-services.md` both state 10 as of Arc 3.
+
+5. **§10.1 — the case-(b) premise was wrong and was corrected inside Arc 7.** The design's second-update
+   path (§10.1) and the Arc 7 brief that implemented it assumed that a
+   second update in one launcher lifetime fails `os.Rename(.old → ~)` because a `~` file is already
+   there. It does not: Go's `os.Rename` on Windows is `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`,
+   which replaces a plain `~` file. The rename fails only when something denies delete-sharing on that
+   name — in the field the launcher's own mapped image (which is also why the child's
+   `CleanupOldBinary` could not delete it), or a directory at that path. The shipped test
+   (`TestHandleUpdateRestartReportsARenameItCouldNotDo`, `cmd/moombox/launcher_windows_test.go`) pins
+   the corrected premise and reproduces the failure with an ordinary open `*os.File` handle, which
+   denies exactly the same sharing mode. The FIX (report the failure, prefer a surviving `.old` as the
+   rollback artifact) is unaffected — it is right for the real failure mode too.
+
+6. **Arc 5 — the node-suite test counts in its plan were written against a 159 baseline.**
+   Arc 1 raised `node --test web/tests/*.test.mjs` to 169 before it ran, so every absolute
+   count quoted in its task steps was stale by 10 on arrival. Ruling taken at the time: the counts
+   are informational, and implementers report the count they actually observe. The gate is the suite
+   passing, never a number. That plan is deleted, so this entry is the surviving record.
+
+7. **Arc 6 — commit `fedf98c5` carries TWO tasks.** A pathspec-less `git commit` swept Task 5's
+   already-staged `internal/jobfilter` files into Task 4's commit, whose subject names only T2-20d. The
+   commit contains T2-20d (the TUI log-level cache) AND T2-24 (the jobfilter case-insensitive fold);
+   both halves were reviewed separately, by pathspec-scoped diffs. Ruling: no history rewrite — the six
+   hashes are cited across the ledgers and review packages, and the merge commit body records the
+   pairing. The process rule this produced is now in the global constraints: implementers commit with
+   `git commit -m … -- <their files>`, pathspec on the commit too.
+
+8. **§6.1 — `scanBalancedObject` moved to `utils.ScanBalancedJSONObject`
+   (`internal/utils/jsoncandidates.go`) at chain close.** Neither `scanBalancedObject` nor the
+   `watch_page.go:928` line citing it exists after `6c7beb18`; `watch_page.go` no longer declares the
+   scanner.
