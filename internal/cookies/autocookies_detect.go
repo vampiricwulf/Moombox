@@ -10,8 +10,10 @@ import (
 	"time"
 )
 
-// runtimeGOOS returns runtime.GOOS — a seam for testing.
-func runtimeGOOS() string {
+// runtimeGOOS returns runtime.GOOS — a seam so a test can drive the non-Windows
+// arms of code that only ever runs on Windows in the field (isWindows below,
+// and the DPAPI fallback's platform guard).
+var runtimeGOOS = func() string {
 	return runtime.GOOS
 }
 

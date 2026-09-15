@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies/dpapi"
 )
 
 // RefreshCookies performs a headless browser visit to refresh cookies and
@@ -293,8 +295,13 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		}
 		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger, cfgBrowserType)
 		if fallbackErr != nil {
-			s.logger.Warn("DPAPI fallback also failed; surfacing original CDP error",
-				"dpapi_err", fallbackErr)
+			// ErrNotSupported is not a failure: the fallback does not exist on
+			// this platform and has already said so once, at Debug. Everything
+			// else is a real attempt that did not work.
+			if !errors.Is(fallbackErr, dpapi.ErrNotSupported) {
+				s.logger.Warn("DPAPI fallback also failed; surfacing original CDP error",
+					"dpapi_err", fallbackErr)
+			}
 			// fall through with the original CDP err
 		} else {
 			s.logger.Info("DPAPI fallback succeeded; using user's signed-in browser cookies")
