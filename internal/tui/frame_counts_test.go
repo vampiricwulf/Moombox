@@ -61,6 +61,11 @@ func TestResweepArchiveRefreshesTheSummary(t *testing.T) {
 // tallyJobs is the one walk per frame. Empty Platform counts as YouTube —
 // the rule parkedCookieJobs documents and every other platform test in the
 // TUI follows.
+//
+// Mutant: counting Queued as active (it is admitted to Upcoming by the
+// worker's archive-slots scheduler, so it is waiting, not running);
+// attributing an empty Platform to Twitch, or to neither, which loses the
+// YouTube re-login prompt for every job written before the column existed.
 func TestTallyJobsCountsOnce(t *testing.T) {
 	m := NewStatusBarModel()
 	m.SetJobs([]*database.Job{

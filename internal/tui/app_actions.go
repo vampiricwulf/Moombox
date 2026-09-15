@@ -653,6 +653,13 @@ func (a *App) refreshTrimList(job *database.Job) {
 // chord, the job selector and the confirm-window re-validation) and the batch
 // arm of dispatchAction, which is dispatched with a nil job and so never sees
 // the filter — the same split A C and A W already carry.
+//
+// It happens to select the same four statuses as isProgressTerminal
+// (app_update.go) today, but it is a DIFFERENT rule with a different owner:
+// this one tracks the Web's DELETE_STATUSES, that one answers "can this job
+// still produce live progress". Keep them separate — never alias one to the
+// other or derive it from the other; the Web moving a status in or out of
+// DELETE_STATUSES must not silently change what the progress store holds.
 func isDeletableStatus(s database.JobStatus) bool {
 	return s == database.StatusFinished || s == database.StatusError ||
 		s == database.StatusCancelled || s == database.StatusCookies

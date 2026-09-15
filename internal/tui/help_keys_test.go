@@ -28,10 +28,13 @@ func TestHelpDocumentsTheBatchAndScrollKeys(t *testing.T) {
 	}
 }
 
-// Only keys that do something are documented. Home and PgUp/PgDn are no-ops
-// on the Tasks panel (handleTaskKey handles up/down/enter only, and
-// routeComponentMsg does not feed the list's KeyMap), so the help must not
-// claim otherwise — PgUp/PgDn is already marked (Logs).
+// Only keys that do something are documented, and they are documented on
+// every panel that handles them. Home stays undocumented: no panel handles
+// it. PgUp/PgDn is a no-op on the Tasks panel (handleTaskKey handles
+// up/down/enter only, and routeComponentMsg does not feed the list's KeyMap)
+// but IS bound on both viewports — helpViewportKeyMap binds pgup/pgdown and
+// is the Details viewport's KeyMap too — so its row must name Details and
+// Logs and nothing else.
 func TestHelpDoesNotClaimTaskPanelPaging(t *testing.T) {
 	app := NewApp()
 	h := NewHelpModel()
@@ -43,8 +46,8 @@ func TestHelpDoesNotClaimTaskPanelPaging(t *testing.T) {
 		if strings.Contains(line, "Home") {
 			t.Errorf("help documents Home, which no panel handles: %q", line)
 		}
-		if strings.Contains(line, "PgUp") && !strings.Contains(line, "(Logs)") {
-			t.Errorf("PgUp/PgDn works on the log viewport only: %q", line)
+		if strings.Contains(line, "PgUp") && !strings.Contains(line, "(Details · Logs)") {
+			t.Errorf("PgUp/PgDn pages the Details and Logs viewports, and only those: %q", line)
 		}
 	}
 }

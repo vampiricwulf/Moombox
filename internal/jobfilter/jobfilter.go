@@ -239,12 +239,12 @@ func matchTerm(t Token, job *database.Job) bool {
 		if statuses, ok := BucketStatuses[StatusBucket(t.Value)]; ok {
 			result = slices.Contains(statuses, job.Status)
 		} else {
-			result = strings.EqualFold(string(job.Status), t.Value)
+			result = equalFoldLower(string(job.Status), t.lower)
 		}
 	case KindChannel:
-		result = strings.EqualFold(job.ChannelName, t.Value)
+		result = equalFoldLower(job.ChannelName, t.lower)
 	case KindPlatform:
-		result = strings.EqualFold(job.Platform, t.Value)
+		result = equalFoldLower(job.Platform, t.lower)
 	default:
 		result = true
 	}
@@ -255,8 +255,11 @@ func matchTerm(t Token, job *database.Job) bool {
 }
 
 // containsFoldLower reports whether sub occurs in the lower-cased form of s.
-// sub must ALREADY be lower-cased — Token.lower is, and it is the only thing
-// this is called with.
+// sub must ALREADY be lower-cased (and therefore valid UTF-8 — strings.ToLower
+// never emits an invalid byte, and the scan relies on it: an invalid needle
+// byte would decode as U+FFFD and match the haystack's replacement rune where
+// the baseline does not). Token.lower is such a string, and it is the only
+// thing this is called with.
 //
 // Exactly equivalent to strings.Contains(strings.ToLower(s), sub), which is
 // what it replaces, but it lowers one rune at a time as it scans instead of
@@ -303,6 +306,39 @@ func hasPrefixFoldLower(s, sub string) bool {
 		s, sub = s[ssize:], sub[bsize:]
 	}
 	return true
+}
+
+// equalFoldLower reports whether the lower-cased form of s equals sub (already
+// lower-cased, and therefore valid UTF-8, for the reason containsFoldLower
+// spells out). Exactly equivalent to strings.ToLower(s) == sub, without
+// building the lower-cased copy.
+//
+// NOT strings.EqualFold, which is what the status, channel and platform arms
+// used to call. EqualFold is the SimpleFold ORBIT relation, and the orbit is
+// wider than case: U+017F LATIN SMALL LETTER LONG S shares 's's orbit, so
+// EqualFold("ſun", "sun") is true while the dashboard twin
+// (web/public/modules/filter-engine.js, `toLowerCase() === toLowerCase()`)
+// says false. ToLower equality is the relation the text arm already uses, so
+// after this every arm of matchTerm folds case the one way both UIs agree on.
+//
+// The twins still differ on the points where Go's ToLower and JS's
+// toLowerCase themselves disagree — U+0130 LATIN CAPITAL LETTER I WITH DOT
+// ABOVE (Go maps it to 'i', JS to "i̇") and the Greek final sigma — in this
+// arm and in the text arm alike. Pre-existing, identical in both, out of
+// scope here.
+func equalFoldLower(s, sub string) bool {
+	for len(sub) > 0 {
+		if len(s) == 0 {
+			return false
+		}
+		sr, ssize := utf8.DecodeRuneInString(s)
+		br, bsize := utf8.DecodeRuneInString(sub)
+		if lowerRune(sr) != br {
+			return false
+		}
+		s, sub = s[ssize:], sub[bsize:]
+	}
+	return len(s) == 0
 }
 
 // lowerRune is unicode.ToLower with the ASCII fast path strings.ToLower also

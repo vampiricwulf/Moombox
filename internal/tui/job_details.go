@@ -210,10 +210,24 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	contentH := max(h-3, 1)
 	m.viewport.SetWidth(w - 2)
 	m.viewport.SetHeight(contentH)
+	// A width change (focus change, terminal resize, or the initial
+	// WindowSizeMsg arriving after jobs are already loaded) invalidates the
+	// rows themselves, not just their rendering: buildRows wraps the Error
+	// and Description blocks to the value column, so the wrap is baked into
+	// the row values. cycleFocus gives each panel a different share of the
+	// terminal, so this runs on every Tab press — and a re-render alone left
+	// the old wrap standing until the next rebuild, which the SetProgress
+	// gate defers for up to a second (and for a terminal job, whose
+	// progress-store entry is deleted, until the 1Hz RefreshRelativeTimes).
+	// SetContentLines keeps the scroll offset, clamping it to the new
+	// content, so no explicit YOffset dance is needed here.
+	widthChanged := prevW != w && m.job != nil
+	if widthChanged {
+		m.buildRows()
+	}
 	m.updateViewportContent()
-	// Recalculate marquee width when panel width changes (e.g. focus change,
-	// or initial WindowSizeMsg arriving after jobs are already loaded).
-	if prevW != w && m.job != nil {
+	// Recalculate marquee width when the panel width changes.
+	if widthChanged {
 		title := m.job.Title
 		if title == "" {
 			title = m.job.VideoID

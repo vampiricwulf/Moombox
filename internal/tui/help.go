@@ -47,7 +47,7 @@ var navigationKeys = helpSection{
 	title: "Navigation",
 	keys: []helpKey{
 		{"↑/↓", "Select / Scroll"},
-		{"PgUp/PgDn", "Page scroll (Logs)"},
+		{"PgUp/PgDn", "Page scroll (Details · Logs)"},
 		{"Ctrl+U/Ctrl+D", "Half-page scroll (Details · Logs)"},
 		{"End", "Resume auto-scroll (Logs)"},
 		{"Enter", "Expand/collapse archives"},
