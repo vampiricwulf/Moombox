@@ -86,11 +86,6 @@ type VideoInfo struct {
 	// cause instead of always to "your cookies expired".
 	SessionAuth SessionAuthState `json:"-"`
 
-	// AttestationChallenge is the session's watch-page BotGuard challenge
-	// (see WatchPageResult.AttestationChallenge). Rides on VideoInfo so
-	// download strategies can mint session-coherent GVS PO tokens.
-	AttestationChallenge string `json:"-"`
-
 	// GvsBinding is the content binding GVS (segment-URL) PO tokens for this
 	// video must carry, and GvsBindingKind names the rule that produced it
 	// ("videoID", "datasyncID", "visitorData", "channelID"). Resolved once in

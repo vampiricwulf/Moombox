@@ -16,7 +16,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// withAttestation stamps the watch page's attestation challenge and the GVS
+// withAttestation stamps the watch page's session verdict and the GVS
 // PO-token content binding onto the VideoInfo being returned. Applied at
 // every GetVideoInfo* return site explicitly — NOT via
 // mergeWatchPageMetadata, which several early returns skip or call with a nil
@@ -25,12 +25,16 @@ import (
 // The binding is resolved here, at the one point that holds all three inputs
 // (the experiment flag and datasync ID from ytcfg, the login state from the
 // page), so download strategies never re-derive it and cannot drift apart.
+//
+// It no longer stamps the page's attestation challenge: that VideoInfo field
+// was write-only and went with the rest of the challenge path (owner ruling
+// R1, 2026-09-15). The name is kept because every return site names it, and
+// it is where a re-wired challenge would be stamped again.
 func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *VideoInfo {
 	if info == nil {
 		return info
 	}
 	if wp != nil {
-		info.AttestationChallenge = wp.AttestationChallenge
 		// Carry YouTube's own login verdict onto the result. It costs a
 		// string copy and it is the only thing that can tell a dead cookie
 		// file apart from a live session that simply lacks a membership.
