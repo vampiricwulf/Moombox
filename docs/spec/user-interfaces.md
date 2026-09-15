@@ -65,7 +65,13 @@ The file structure:
 
 ### Embedding and Serving
 
-The `web.PublicFS` embedded filesystem is mounted by the HTTP server. The server handles cache-busting by appending a build commit hash to asset URLs. Gzip compression is applied via `CompressionMiddleware` for responses under 1MB.
+The `web.PublicFS` embedded filesystem is mounted by the HTTP server. Asset URLs inside `index.html`
+carry a `?v=<build commit>` cache-buster, and a URL that carries one is served `immutable, max-age=1y`;
+every other asset path is served `no-cache` plus an `ETag` — the build commit when it is known,
+otherwise the file's SHA-256 — so a revalidation costs a 304 rather than the whole file. `embed.FS`
+reports a zero `ModTime`, so that `ETag` is the only validator available (see `staticCacheHeaders` in
+`internal/web/server.go`). Gzip compression is applied via `CompressionMiddleware` for responses over
+1 KB, except already-compressed bodies (`image/*`, `video/*`, or a handler-set `Content-Encoding`).
 
 The login page (`login.html`) is not served as a separate route. Instead, `AuthMiddleware` intercepts unauthenticated requests and serves the login page inline, preserving the original URL in the browser's address bar. This means users never see a `/login` URL — they see the page they were trying to reach, with the login form overlaid.
 

@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
-	"path"
 	"runtime"
 	"strings"
 	"sync"
@@ -44,14 +44,18 @@ type Server struct {
 	redirectServer atomic.Pointer[http.Server] // cross-scheme redirect server, for graceful shutdown
 	ws             *WebSocketHub
 	auth           *AuthService
-	shutdownOnce   sync.Once        // Ensures shutdown logic runs only once
-	internalToken  string           // Random secret for same-process CSRF bypass
-	commit         string           // Build commit hash for cache busting (e.g. "abc1234")
-	loginHTML      []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
-	wsHandler      http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
-	OpenBrowser    bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
-	ActualPort     int              // Actual bound port after Start (may differ from cfg if probed)
-	draining       atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
+	shutdownOnce   sync.Once // Ensures shutdown logic runs only once
+	internalToken  string    // Random secret for same-process CSRF bypass
+	commit         string    // Build commit hash for cache busting (e.g. "abc1234")
+	// assetETags memoises the content hash of each embedded asset, keyed by
+	// its FS path. Only consulted when the build commit is unknown — a
+	// commit-stamped build answers every asset from one string.
+	assetETags  sync.Map
+	loginHTML   []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
+	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
+	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
+	ActualPort  int              // Actual bound port after Start (may differ from cfg if probed)
+	draining    atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
 	// Called by AuthMiddleware when the session cookie is missing/invalid.
@@ -264,16 +268,7 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 		// Check if the file exists in the embedded FS
 		if f, err := staticFS.Open(urlPath); err == nil {
 			f.Close()
-			// Set cache headers for static assets
-			ext := path.Ext(urlPath)
-			switch ext {
-			case ".png", ".jpg", ".svg", ".ico":
-				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-			case ".css", ".js":
-				w.Header().Set("Cache-Control", "no-cache")
-			default:
-				w.Header().Set("Cache-Control", "no-cache")
-			}
+			s.staticCacheHeaders(w, r, staticFS, urlPath)
 			fileServer.ServeHTTP(w, r)
 			return
 		}
@@ -288,6 +283,53 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 
 		http.NotFound(w, r)
 	})
+}
+
+// staticCacheHeaders sets the caching policy for one embedded asset.
+//
+// A URL carrying the build's ?v= cache-buster names a body that cannot change,
+// so it is immutable for a year. Everything else must revalidate — and gets an
+// ETag so the revalidation costs 304 bytes instead of the whole file. The
+// previous policy keyed off the EXTENSION, which pinned unversioned
+// /favicon.svg for a year and left every .js/.css re-downloading in full
+// (embed.FS reports a zero ModTime, so ETag is the only validator available
+// here). Sweep T2-18.
+func (s *Server) staticCacheHeaders(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) {
+	if r.URL.Query().Get("v") != "" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	if tag := s.assetETag(fsys, name); tag != "" {
+		// net/http's serveContent reads this header to answer If-None-Match,
+		// so setting it before ServeHTTP is all the 304 handling needed.
+		w.Header().Set("ETag", tag)
+	}
+}
+
+// assetETag returns the validator for one embedded asset: the build commit
+// when it is known (every asset of a build shares it — an ETag is scoped to
+// its URL, so one string per build invalidates exactly the right things), else
+// the file's SHA-256, hashed once per path and memoised.
+//
+// "unknown" is NOT a known commit: it is what cmd/moombox/main.go's init
+// writes when there is no -ldflags stamp and no vcs.revision, and two such
+// builds sharing one validator would keep serving the pre-update app.js.
+func (s *Server) assetETag(fsys fs.FS, name string) string {
+	if s.commit != "" && s.commit != "unknown" {
+		return `"` + s.commit + `"`
+	}
+	if v, ok := s.assetETags.Load(name); ok {
+		return v.(string)
+	}
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	tag := `"` + hex.EncodeToString(sum[:]) + `"`
+	s.assetETags.Store(name, tag)
+	return tag
 }
 
 // Start begins listening for HTTP connections.
@@ -571,6 +613,10 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 	g.buf = append(g.buf, b...)
 
 	if len(g.buf) >= g.minSize {
+		if g.skipCompression() {
+			g.commitPlain()
+			return len(b), nil
+		}
 		// Buffer is big enough, start gzipping
 		if err := g.startGzip(); err != nil {
 			return 0, err
@@ -597,6 +643,24 @@ func (g *gzipResponseWriter) startGzip() error {
 		g.buf = nil
 	}
 	return err
+}
+
+// skipCompression reports whether the response committed so far must go out
+// uncompressed. Checked at the gzip threshold rather than up front, because the
+// handler sets Content-Type while it writes.
+//
+//   - image/* and video/* are already compressed: gzip buys nothing and costs a
+//     full CPU pass per response, which on a dashboard is one JPEG per job card
+//     (sweep T2-18).
+//   - a Content-Encoding the handler set itself must not be wrapped in a second
+//     one; the client would decode gzip and find an encoded body underneath.
+func (g *gzipResponseWriter) skipCompression() bool {
+	h := g.ResponseWriter.Header()
+	if h.Get("Content-Encoding") != "" {
+		return true
+	}
+	ct := h.Get("Content-Type")
+	return strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "video/")
 }
 
 func (g *gzipResponseWriter) flushStatus() {

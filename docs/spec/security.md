@@ -134,6 +134,10 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 - Skips video streaming endpoints (`/api/jobs/*/video`) to avoid buffering large media.
 - Uses a buffered approach: accumulates response bytes until the 1 KB threshold is reached, then switches to gzip. Responses under 1 KB are sent uncompressed (the overhead of gzip headers would negate the savings).
 - Implements `http.Flusher`, `http.Hijacker`, `http.Pusher`, and `Unwrap()` for compatibility with downstream code that expects these interfaces.
+- Skips bodies that are already compressed: any response whose `Content-Type` starts with `image/` or
+  `video/`, and any response whose handler set its own `Content-Encoding` (double-encoding would be
+  undecodable). Checked at the 1 KB threshold rather than up front, because a handler sets its
+  `Content-Type` while it writes. See `skipCompression` in `internal/web/server.go`.
 
 **Source:** `CompressionMiddleware` and `gzipResponseWriter` in `internal/web/server.go`.
 
