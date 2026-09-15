@@ -818,11 +818,25 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED")
 }
 
+// playerRetryBackoffBase is the first retry delay; attempt n waits
+// base<<(n-1), i.e. 1 s, 2 s, 4 s. A var rather than a const purely so tests
+// can scale the ladder down instead of sleeping for real seconds; production
+// never writes it.
+var playerRetryBackoffBase = time.Second
+
 // doRetryRequest performs an HTTP POST with retry logic (up to 4 attempts with
 // exponential backoff). Retries on transport errors, partial body reads,
 // 5xx/429 responses, and JSON unmarshal failures — all of which have been
 // observed as transient CDN issues that would otherwise unnecessarily push
 // callers through their full fallback chain.
+//
+// The backoff is bounded by the CALLER's deadline. Mid-download 403 credential
+// recovery runs under min(45 s, MaxTimeout/3) — as little as 10 s at the
+// configured floor — and the ladder alone is 7 s, so an unconditional sleep
+// could spend the whole budget and then report context.DeadlineExceeded,
+// throwing away the HTTP status that is the actual reason the caller is being
+// told no. A sleep that would not leave the deadline room for the attempt it
+// precedes is not taken at all; the last real error is returned instead.
 func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []byte, headers map[string]string, ytcfg *YtcfgData, clientLabel string) (*VideoInfo, error) {
 	var playerURL string
 	if ytcfg != nil {
@@ -836,8 +850,17 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 		}
 		if attempt > 0 {
 			// Exponential backoff: 1s, 2s, 4s (matching p-retry default factor=2, minTimeout=1000)
-			delay := 1 << (attempt - 1)
-			if err := utils.Sleep(ctx, time.Duration(delay)*time.Second); err != nil {
+			delay := playerRetryBackoffBase << (attempt - 1)
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
+				// Every `continue` above sets lastErr, so attempt > 0
+				// always has one to return.
+				p.logger.Debug("[PlayerApi] retry budget exhausted, returning the last error",
+					slog.String("client", clientLabel),
+					slog.Int("attempt", attempt+1),
+					slog.Duration("wouldSleep", delay))
+				return nil, lastErr
+			}
+			if err := utils.Sleep(ctx, delay); err != nil {
 				return nil, err
 			}
 		}
