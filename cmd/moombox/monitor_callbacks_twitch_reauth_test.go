@@ -63,14 +63,15 @@ func TestUnknownPlatformDoesNotBroadcast(t *testing.T) {
 }
 
 // repairCallbackState builds the minimum runState wireCredentialRepairCallbacks
-// needs, and returns it with a counter the broadcast increments.
+// needs, and returns it with two counters: one the Twitch chat broadcast
+// increments, one the YouTube membership-memo clear does.
 //
 // A real RefreshService over an empty jar (no network is reached — nothing
 // calls a check) and a real empty database, following
 // monitor_callbacks_recovery_test.go's fixture. The empty DB is load-bearing:
 // resumeCookieParkedJobs finds no jobs, so `resumed` stays 0, so notifyMgr is
 // never touched and may stay nil.
-func repairCallbackState(t *testing.T) (*runState, *int) {
+func repairCallbackState(t *testing.T) (*runState, *int, *int) {
 	t.Helper()
 	log, err := logger.New(filepath.Join(t.TempDir(), "repair.log"), "error", 4096, 1)
 	if err != nil {
@@ -91,8 +92,12 @@ func repairCallbackState(t *testing.T) (*runState, *int) {
 		cookieRefresh: cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, log),
 	}
 	calls := 0
-	s.wireCredentialRepairCallbacks(func() int { calls++; return 1 })
-	return s, &calls
+	memoClears := 0
+	s.wireCredentialRepairCallbacks(
+		func() int { calls++; return 1 },
+		func() int { memoClears++; return 2 },
+	)
+	return s, &calls, &memoClears
 }
 
 // TestBothRepairEdgesBroadcastForTwitch is the Task 3 review's finding 1.
@@ -110,7 +115,7 @@ func repairCallbackState(t *testing.T) (*runState, *int) {
 // 0 broadcasts. Dropping it from OnCredentialsChanged fails the second.
 func TestBothRepairEdgesBroadcastForTwitch(t *testing.T) {
 	t.Run("auth recovered", func(t *testing.T) {
-		s, calls := repairCallbackState(t)
+		s, calls, _ := repairCallbackState(t)
 		s.cookieRefresh.OnAuthRecovered("twitch")
 		if *calls != 1 {
 			t.Errorf("OnAuthRecovered(\"twitch\") broadcast %d times, want 1 — a transient refusal that heals produces no OnCredentialsChanged, so this is the only edge covering it", *calls)
@@ -118,7 +123,7 @@ func TestBothRepairEdgesBroadcastForTwitch(t *testing.T) {
 	})
 
 	t.Run("credentials changed", func(t *testing.T) {
-		s, calls := repairCallbackState(t)
+		s, calls, _ := repairCallbackState(t)
 		s.cookieRefresh.OnCredentialsChanged("twitch", "an-opaque-identity-token")
 		if *calls != 1 {
 			t.Errorf("OnCredentialsChanged(\"twitch\") broadcast %d times, want 1", *calls)
@@ -137,7 +142,7 @@ func TestBothRepairEdgesBroadcastForTwitch(t *testing.T) {
 // THE MUTATION: calling `broadcast()` from `reauth` without the platform
 // filter, or filtering on `platform != "youtube"`.
 func TestAYouTubeRepairDoesNotBroadcast(t *testing.T) {
-	s, calls := repairCallbackState(t)
+	s, calls, _ := repairCallbackState(t)
 
 	s.cookieRefresh.OnAuthRecovered("youtube")
 	s.cookieRefresh.OnCredentialsChanged("youtube", "an-opaque-identity-token")

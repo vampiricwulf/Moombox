@@ -14,7 +14,7 @@ func TestMembershipActive(t *testing.T) {
 	if fm.membershipActive() {
 		t.Error("no fetcher wired -> inactive")
 	}
-	fm.FetchMembership = func(ctx context.Context, id string) ([]MembershipVideo, error) { return nil, nil }
+	fm.FetchMembership = func(ctx context.Context, id string) ([]MembershipVideo, bool, error) { return nil, false, nil }
 	if !fm.membershipActive() {
 		t.Error("fetcher wired, no gate -> active")
 	}

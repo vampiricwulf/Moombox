@@ -15,8 +15,16 @@ import (
 
 const (
 	twitchDefaultInterval = 15 * time.Second
-	twitchStagger         = 500 * time.Millisecond
 )
+
+// twitchStagger spaces consecutive GQL batch requests. Package var so tests
+// can shrink it (the pattern discordRetryBackoff uses in internal/notifications).
+var twitchStagger = 500 * time.Millisecond
+
+// StreamInfoBatchFunc fetches live-stream info for one chunk of Twitch logins.
+// Typically wired to twitch.Service.GetStreamInfoBatch; tests inject a fake via
+// TwitchMonitor.FetchBatch — the seam FeedMonitor.FetchRSS is modelled on.
+type StreamInfoBatchFunc func(ctx context.Context, logins []string) (infos []*twitch.TwitchStreamInfo, errs []error, wholeErr error)
 
 // TwitchMonitor polls Twitch GQL for live streams from monitored channels.
 type TwitchMonitor struct {
@@ -50,6 +58,10 @@ type TwitchMonitor struct {
 	OnStreamFound   func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig)
 	OnStreamRecover func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig, jobID string)
 	IsOnline        func() bool // nil = always online
+
+	// FetchBatch overrides the GQL batch call (tm.tw.GetStreamInfoBatch) for
+	// tests. Nil uses the real client — see streamInfoBatch.
+	FetchBatch StreamInfoBatchFunc
 }
 
 // Health returns the per-channel health snapshot for /api/status.
@@ -302,39 +314,13 @@ func (tm *TwitchMonitor) doCheck(ctx context.Context) {
 		default:
 		}
 		end := min(start+twitchBatchChunk, len(channels))
-		chunk := channels[start:end]
+		tm.checkChunk(ctx, channels[start:end])
 
-		logins := make([]string, len(chunk))
-		for i := range chunk {
-			logins[i] = chunk[i].ID
-		}
-		infos, errs, wholeErr := tm.tw.GetStreamInfoBatch(ctx, logins)
-		if wholeErr != nil {
-			// A whole-request failure (transport/auth/malformed batch) is
-			// NOT any channel's fault — log once and leave every channel's
-			// health streak untouched (recording it would falsely mark all
-			// channels unhealthy on one shared outage). Retried next cycle.
-			tm.logger.Debug("twitch batch check failed", "channels", len(chunk), "err", wholeErr)
-			continue
-		}
-
-		for i := range chunk {
-			ch := &chunk[i]
-			if errs[i] != nil {
-				tm.health.recordError(ch.ID, errs[i])
-				tm.logger.Debug("twitch check failed", "channel", ch.Name, "err", errs[i])
-				continue
-			}
-			tm.health.recordSuccess(ch.ID)
-			if infos[i] == nil {
-				continue // offline
-			}
-			if err := tm.processStreamInfo(ctx, ch, infos[i]); err != nil {
-				tm.logger.Debug("twitch process failed", "channel", ch.Name, "err", err)
-			}
-		}
-
-		// Stagger between chunks (not between every channel any more).
+		// Stagger between chunks (not between every channel any more). This
+		// runs after EVERY chunk, including one whose whole-batch request
+		// failed: a GQL 429 or 5xx is exactly when pacing matters, and the old
+		// `continue` skipped it — with >30 channels every remaining chunk fired
+		// back to back into a throttled API.
 		if end < len(channels) {
 			staggerTimer := time.NewTimer(twitchStagger)
 			select {
@@ -343,6 +329,49 @@ func (tm *TwitchMonitor) doCheck(ctx context.Context) {
 				return
 			case <-staggerTimer.C:
 			}
+		}
+	}
+}
+
+// streamInfoBatch is the injectable GQL batch seam: FetchBatch when a test has
+// wired one, else the real client. Mirrors FeedMonitor.rssFetch.
+func (tm *TwitchMonitor) streamInfoBatch(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+	if tm.FetchBatch != nil {
+		return tm.FetchBatch(ctx, logins)
+	}
+	return tm.tw.GetStreamInfoBatch(ctx, logins)
+}
+
+// checkChunk runs one batched GQL request and dispatches its per-channel
+// results. A whole-request failure (transport/auth/malformed batch) is NOT any
+// channel's fault — log once and leave every channel's health streak untouched
+// (recording it would falsely mark all channels unhealthy on one shared
+// outage). Retried next cycle; the caller still staggers before the next chunk.
+func (tm *TwitchMonitor) checkChunk(ctx context.Context, chunk []config.ChannelConfig) {
+	logins := make([]string, len(chunk))
+	for i := range chunk {
+		logins[i] = chunk[i].ID
+	}
+
+	infos, errs, wholeErr := tm.streamInfoBatch(ctx, logins)
+	if wholeErr != nil {
+		tm.logger.Debug("twitch batch check failed", "channels", len(chunk), "err", wholeErr)
+		return
+	}
+
+	for i := range chunk {
+		ch := &chunk[i]
+		if errs[i] != nil {
+			tm.health.recordError(ch.ID, errs[i])
+			tm.logger.Debug("twitch check failed", "channel", ch.Name, "err", errs[i])
+			continue
+		}
+		tm.health.recordSuccess(ch.ID)
+		if infos[i] == nil {
+			continue // offline
+		}
+		if err := tm.processStreamInfo(ctx, ch, infos[i]); err != nil {
+			tm.logger.Debug("twitch process failed", "channel", ch.Name, "err", err)
 		}
 	}
 }

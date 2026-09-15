@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestDiscordWebhookSendsValidPayload verifies that a successful Send
@@ -237,5 +239,182 @@ func TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter(t *testing.T) {
 				t.Errorf("Send slept for %v despite refusing the Retry-After value", elapsed)
 			}
 		})
+	}
+}
+
+// TestDiscordWebhook4xxErrorQuotesTheBody pins T4-35: a rejected webhook must
+// say WHY. Discord's 4xx bodies name the offending field
+// ({"embeds": ["Must be 10 or fewer in length."]}); without them an operator
+// sees only "discord webhook returned 400", which is unactionable.
+//
+// Mutants this fails on:
+//   - draining the body into io.Discard without capturing it: no quote.
+//   - quoting it raw: the embedded newline survives, and a remote body that
+//     can forge a log line is a log-injection vector.
+func TestDiscordWebhook4xxErrorQuotesTheBody(t *testing.T) {
+	shrinkBackoff(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusBadRequest)
+		io.WriteString(rw, "{\"embeds\":\n[\"Must be 10 or fewer in length.\"]}")
+	}))
+	t.Cleanup(srv.Close)
+
+	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	if err == nil {
+		t.Fatal("400: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Must be 10 or fewer in length.") {
+		t.Errorf("error = %q, want the response body quoted", err)
+	}
+	if strings.ContainsAny(err.Error(), "\r\n") {
+		t.Errorf("error = %q, must be a single line — a remote body must not forge a log line", err)
+	}
+}
+
+// TestDiscordWebhookErrorBodyIsBounded pins the cap: the quote is a hint, not
+// a transcript, and an error page can be arbitrarily large.
+//
+// Mutant: io.ReadAll without the LimitReader puts the whole page in the error
+// (and in every log line and HTTP response it reaches).
+func TestDiscordWebhookErrorBodyIsBounded(t *testing.T) {
+	shrinkBackoff(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusForbidden)
+		io.WriteString(rw, strings.Repeat("a", 8192))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	if err == nil {
+		t.Fatal("403: want error, got nil")
+	}
+	if n := len(err.Error()); n > discordErrBodyBytes+64 {
+		t.Errorf("error is %d bytes, want <= %d — the body quote must be bounded", n, discordErrBodyBytes+64)
+	}
+}
+
+// TestDiscordErrSnippet pins the sanitiser directly: control characters
+// collapse to single spaces, runs collapse, and the result is trimmed.
+func TestDiscordErrSnippet(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"  plain  ", "plain"},
+		{"line one\nline two", "line one line two"},
+		{"a\r\n\tb", "a b"},
+		{"{\"message\": \"Unknown Webhook\", \"code\": 10015}", `{"message": "Unknown Webhook", "code": 10015}`},
+	}
+	for _, tc := range cases {
+		if got := discordErrSnippet([]byte(tc.in)); got != tc.want {
+			t.Errorf("discordErrSnippet(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	// Every case above is valid UTF-8, so none of them exercise the
+	// "|| r == utf8.RuneError" arm. Deleting that arm leaves the raw byte's
+	// decoded rune in the snippet (written out verbatim by sb.WriteRune
+	// instead of collapsed to a space) — these cases pin that a body
+	// containing invalid or truncated UTF-8 still comes out clean.
+	invalidCases := []struct {
+		name     string
+		in       []byte
+		want     string
+		badBytes []byte // raw bytes that must not survive into the snippet
+		words    []string
+	}{
+		{
+			name:     "raw invalid byte between words",
+			in:       []byte("foo \xff bar"),
+			want:     "foo bar",
+			badBytes: []byte{0xff},
+			words:    []string{"foo", "bar"},
+		},
+		{
+			// "café" with the trailing "é" (0xc3 0xa9) truncated after its
+			// lead byte, as a 256-byte LimitReader cut would do mid-rune.
+			name:     "multi-byte rune cut in half at the end",
+			in:       []byte("err: caf\xc3"),
+			want:     "err: caf",
+			badBytes: []byte{0xc3},
+			words:    []string{"err:", "caf"},
+		},
+		{
+			name:     "control character and invalid byte together",
+			in:       []byte("tab\t\xff word"),
+			want:     "tab word",
+			badBytes: []byte{0xff},
+			words:    []string{"tab", "word"},
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := discordErrSnippet(tc.in)
+			if got != tc.want {
+				t.Errorf("discordErrSnippet(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("discordErrSnippet(%q) = %q, not valid UTF-8", tc.in, got)
+			}
+			for _, bad := range tc.badBytes {
+				if bytes.IndexByte([]byte(got), bad) != -1 {
+					t.Errorf("discordErrSnippet(%q) = %q, raw byte %#x survived", tc.in, got, bad)
+				}
+			}
+			for _, word := range tc.words {
+				if !strings.Contains(got, word) {
+					t.Errorf("discordErrSnippet(%q) = %q, missing surrounding word %q", tc.in, got, word)
+				}
+			}
+		})
+	}
+}
+
+// TestDiscordWebhookErrorBodyAtCapIsNotTruncated pins the boundary: a body of
+// EXACTLY discordErrBodyBytes must appear whole in the error, not truncated
+// by an off-by-one in the LimitReader size.
+func TestDiscordWebhookErrorBodyAtCapIsNotTruncated(t *testing.T) {
+	shrinkBackoff(t)
+	body := strings.Repeat("a", discordErrBodyBytes)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusForbidden)
+		io.WriteString(rw, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	if err == nil {
+		t.Fatal("403: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), body) {
+		t.Errorf("error = %q, want the full %d-byte body quoted untruncated", err, discordErrBodyBytes)
+	}
+}
+
+// TestDiscordWebhookErrorBodyCapSplitsAMultiByteRune pins the case where the
+// discordErrBodyBytes cut lands mid-rune: 255 ASCII bytes followed by "é" (a
+// 2-byte rune) means the LimitReader hands discordErrSnippet only "é"'s lead
+// byte. The error must still be valid UTF-8 and must not end with that
+// stray lead byte.
+func TestDiscordWebhookErrorBodyCapSplitsAMultiByteRune(t *testing.T) {
+	shrinkBackoff(t)
+	prefix := strings.Repeat("a", discordErrBodyBytes-1)
+	body := prefix + "é" // total 257 bytes; the 256-byte cut lands after "é"'s lead byte
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusForbidden)
+		io.WriteString(rw, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	if err == nil {
+		t.Fatal("403: want error, got nil")
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Errorf("error = %q, not valid UTF-8", err)
+	}
+	if !strings.Contains(err.Error(), prefix) {
+		t.Errorf("error = %q, missing the 255-byte ASCII prefix", err)
+	}
+	if bytes.Contains([]byte(err.Error()), []byte{0xc3}) {
+		t.Errorf("error = %q, ends with a stray lead byte of the truncated multi-byte rune", err)
 	}
 }

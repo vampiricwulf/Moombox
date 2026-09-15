@@ -49,6 +49,37 @@ func withMembership(fn MembershipFetchFunc) feedMonitorOpt {
 	return func(fm *FeedMonitor) { fm.FetchMembership = fn }
 }
 
+// withClock pins fm.now to a caller-controlled instant — withNow's mutable
+// twin. The pointed-at value is what fm.now() reports, so a test can advance
+// the cycle clock between doCheck calls (the membership memo's horizon is the
+// only thing in the package that needs more than one instant).
+func withClock(clock *time.Time) feedMonitorOpt {
+	return func(fm *FeedMonitor) { fm.now = func() time.Time { return *clock } }
+}
+
+// setChannels writes chans into the monitor's config store so doCheck's
+// getYouTubeChannels sees them. Tests that drive checkChannel directly never
+// needed this; the membership memo is armed per CYCLE, so its tests drive
+// doCheck.
+func setChannels(fm *FeedMonitor, chans ...config.ChannelConfig) {
+	_ = fm.configStore.Update(func(c *config.MoomboxConfig) { c.Channels = chans })
+}
+
+// chYT is a minimal enabled YouTube channel with the given ID as both ID and
+// display name.
+func chYT(id string) config.ChannelConfig {
+	return config.ChannelConfig{ID: id, Name: id}
+}
+
+// shrinkFeedStagger cuts the inter-channel pacing sleep for a test that drives
+// several full cycles (3 channels x 3 cycles would otherwise sleep 3 s).
+func shrinkFeedStagger(t *testing.T) {
+	t.Helper()
+	orig := feedStagger
+	feedStagger = time.Millisecond
+	t.Cleanup(func() { feedStagger = orig })
+}
+
 // withNow pins fm.now to a fixed instant. checkChannel reads it exactly once
 // per cycle (the one-`now` rule — spec §7), so this is what makes the
 // FETCH/STORE date math (and later, WALK/ARCHIVE) deterministic in tests.
@@ -173,14 +204,16 @@ func rss404() RSSFetchFunc {
 // membWith adapts youtube.MembershipVideo fixtures — the real fetcher's
 // return type — into a MembershipFetchFunc, mirroring the production adapter
 // closure in cmd/moombox/monitor_callbacks.go (youtube.MembershipVideo ->
-// monitor.MembershipVideo).
+// monitor.MembershipVideo). It answers confirmedNonMember=false: a fixture of
+// a successful MEMBER fetch, empty list or not, which is what keeps every
+// pre-existing test fetching on every cycle.
 func membWith(videos ...youtube.MembershipVideo) MembershipFetchFunc {
-	return func(ctx context.Context, channelID string) ([]MembershipVideo, error) {
+	return func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
 		out := make([]MembershipVideo, len(videos))
 		for i, v := range videos {
 			out[i] = MembershipVideo{VideoID: v.VideoID, Title: v.Title, Age: v.Age}
 		}
-		return out, nil
+		return out, false, nil
 	}
 }
 
@@ -371,5 +404,564 @@ func TestFetchStep_RSSSuccessEstablishes_404DoesNot(t *testing.T) {
 	fm2.runCycleForTest(t, "UC1") // zero entries but 200 — still establishes (§11 residual)
 	if !establishedForTest(t, db, "UC1") {
 		t.Fatal("empty-but-200 RSS must establish")
+	}
+}
+
+// TestFeed_MembershipMemoSkipsNonMembersButNotMembers pins two of T2-13's
+// three cases: a "not a member" answer suppresses the authenticated ~1 MB
+// fetch for membershipMemoTTL, and a MEMBER is fetched every cycle.
+//
+// Mutants this fails on:
+//   - no memo: UC1/UC2 are fetched on every cycle (the 7,200 loads/day bug).
+//   - memoizing on an empty video list: UC3 (a member) stops being fetched,
+//     and a members-only live stream goes undiscovered for up to 6 h.
+//   - a horizon that never expires: the third cycle does not re-check UC1.
+func TestFeed_MembershipMemoSkipsNonMembersButNotMembers(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	fetches := map[string]int{}
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			fetches[channelID]++
+			if channelID == "UC3" {
+				// A member: nothing to memoize, so this channel is fetched
+				// every cycle for as long as it stays one.
+				return []MembershipVideo{{VideoID: "memberVid01", Title: "members only"}}, false, nil
+			}
+			return nil, true, nil // recognised session, confirmed non-member
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"), chYT("UC3"))
+
+	fm.doCheck(context.Background()) // cycle 1: nothing memoized yet
+	assertFetches(t, "cycle 1", fetches, map[string]int{"UC1": 1, "UC2": 1, "UC3": 1})
+
+	clock = clock.Add(10 * time.Minute)
+	fm.doCheck(context.Background()) // cycle 2: only the member
+	assertFetches(t, "cycle 2", fetches, map[string]int{"UC1": 1, "UC2": 1, "UC3": 2})
+
+	clock = clock.Add(membershipMemoTTL)
+	fm.doCheck(context.Background()) // cycle 3: the horizon expired
+	assertFetches(t, "cycle 3", fetches, map[string]int{"UC1": 2, "UC2": 2, "UC3": 3})
+}
+
+// TestFeed_MembershipMemoAlwaysFetchesOneForLiveness pins T2-13's third case
+// and the reason the memo is safe at all. The authenticated membership fetch
+// is the system's preferred YouTube liveness probe: cmd/moombox's
+// FetchMembership adapter routes its SessionAuthState to ObserveLiveness, and
+// only when the fetch actually runs. A cycle where EVERY channel is memoized
+// must still fetch exactly one, and must rotate — otherwise a dead session is
+// never observed. armMembershipLiveness' doc comment has the exact bound (a
+// fetch that RETURNS, not a verdict) and names the tier-2 backstop.
+//
+// Mutants this fails on:
+//   - skipping every memoized channel: cycle 2 makes zero fetches and the
+//     liveness signal goes dark.
+//   - fetching every memoized channel "for liveness": cycle 2 makes three.
+//   - a fixed nominee: cycle 3 re-fetches UC1 instead of rotating to UC2.
+func TestFeed_MembershipMemoAlwaysFetchesOneForLiveness(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			return nil, true, nil
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"), chYT("UC3"))
+
+	fm.doCheck(context.Background())
+	if got := len(order); got != 3 {
+		t.Fatalf("cycle 1 fetches = %d (%v), want 3", got, order)
+	}
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC1" {
+		t.Fatalf("cycle 2 fetches = %v, want exactly [UC1] — one nominated fetch keeps the liveness signal alive", order)
+	}
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC2" {
+		t.Fatalf("cycle 3 fetches = %v, want exactly [UC2] — the nomination must rotate to the earliest horizon", order)
+	}
+}
+
+// assertFetches compares a per-channel fetch tally against want, naming the
+// channel that diverged.
+func assertFetches(t *testing.T, label string, got, want map[string]int) {
+	t.Helper()
+	for id, n := range want {
+		if got[id] != n {
+			t.Fatalf("%s: %s fetched %d times, want %d (all: %v)", label, id, got[id], n, got)
+		}
+	}
+}
+
+// TestFeed_MembershipFailedFetchWritesNoMemo is the guard on the memo's entry
+// condition. MembershipFetchFunc says an error leaves both questions
+// unanswered; the monitor must ENFORCE that rather than trust the fetcher, so
+// this fixture deliberately fills the bit in alongside its error — the shape a
+// careless adapter would produce.
+//
+// Mutant: moving recordMembershipSuccess out of the success branch (or having
+// the error branch pass the fetcher's bit through) memoizes UC1 on a fetch
+// that never answered, and members-only discovery for it goes dark for 6 h on
+// the strength of one HTTP 503.
+func TestFeed_MembershipFailedFetchWritesNoMemo(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			return nil, true, fmt.Errorf("membership tab http 503")
+		}),
+	)
+	setChannels(fm, chYT("UC1"))
+
+	fm.doCheck(context.Background())
+
+	fm.mu.Lock()
+	_, memoized := fm.nonMemberUntil["UC1"]
+	fm.mu.Unlock()
+	if memoized {
+		t.Fatal("a failed fetch memoized UC1 as a non-member — an error answers neither question, whatever the fetcher put in the bit")
+	}
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC1" {
+		t.Fatalf("cycle 2 fetches = %v, want [UC1] — an un-memoized channel is fetched every cycle", order)
+	}
+}
+
+// TestFeed_MembershipMemoNominatesDespiteAPersistentlyFailingChannel pins the
+// half of the liveness floor that a fetch ATTEMPT cannot carry.
+//
+// UC0's /membership page always errors. It therefore never gets a memo, so it
+// is fetched every cycle — but that fetch answers nothing, neither for
+// discovery nor for the session. If the arm treated it as "a channel is being
+// fetched on its own account, no nomination needed", every memoized channel
+// would skip and the cycle's only membership fetch would be the one that
+// cannot produce a verdict: one broken channel switching the tier-1 liveness
+// signal off for the whole install, indefinitely.
+//
+// UC0 is deliberately LAST in the channel list. That is what makes the arm's
+// decision load-bearing rather than decorative: the re-arm inside
+// recordMembershipFetchError can hand the duty to a memoized channel that
+// comes AFTER the failure, so a failing channel in front of others is rescued
+// either way. With nothing behind it, only a nomination made up front — by an
+// arm that refuses to count it — saves the cycle.
+//
+// Mutant: dropping the membershipFetchErrored check from armMembershipLiveness
+// — cycles 2+ then fetch UC0 alone and observe nothing.
+func TestFeed_MembershipMemoNominatesDespiteAPersistentlyFailingChannel(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			if channelID == "UC0" {
+				return nil, false, fmt.Errorf("membership tab http 500")
+			}
+			return nil, true, nil // recognised session, confirmed non-member
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"), chYT("UC0"))
+
+	fm.doCheck(context.Background()) // cycle 1: nothing memoized; all three fetched
+
+	// Three cycles, because the stand-in must also ROTATE: UC1, then UC2 (its
+	// horizon is now the earlier one), then UC1 again.
+	wantStandIn := []string{"UC1", "UC2", "UC1"}
+	for i, want := range wantStandIn {
+		cycle := i + 2
+		clock = clock.Add(10 * time.Minute)
+		order = nil
+		fm.doCheck(context.Background())
+
+		if len(order) != 2 {
+			t.Fatalf("cycle %d fetches = %v, want exactly 2 — one memoized stand-in that can actually answer, plus the failing channel", cycle, order)
+		}
+		if order[0] != want {
+			t.Fatalf("cycle %d fetches = %v, want %s first — the nomination goes to the earliest horizon and rotates", cycle, order, want)
+		}
+		if order[1] != "UC0" {
+			t.Fatalf("cycle %d fetches = %v, want UC0 last — it is never memoized, so it is always fetched", cycle, order)
+		}
+	}
+}
+
+// TestFeed_MembershipLivenessFailsOverWhenTheNomineeErrors pins the other
+// half: the nomination is satisfied by a fetch that RETURNS, not by one that
+// is merely attempted. The nominee here fails, so the duty has to pass to
+// another memoized channel in the same cycle.
+//
+// Mutants this fails on:
+//   - retiring the obligation on an ATTEMPT rather than on a fetch that came
+//     back (recordMembershipFetchError clearing membershipLivenessNeeded
+//     instead of re-arming it): UC2 is skipped and the cycle ends with no
+//     answer at all.
+//   - keeping the nomination pinned to the channel that just failed: same
+//     result, and across cycles the failing nominee keeps winning the
+//     earliest-horizon pick — its horizon never advances, because a failed
+//     fetch writes no memo — so the floor never recovers.
+//   - dropping the membershipLivenessMaxTries ceiling: the last cycle walks
+//     all three channels instead of stopping at two.
+//
+// NOT a mutant here: making membershipFetchAllowed consume the nomination
+// itself. Given the re-arm this is behaviourally identical, which is why the
+// predicate is left pure — the state transitions all live in the two record
+// helpers, where the fetch's outcome is actually known.
+func TestFeed_MembershipLivenessFailsOverWhenTheNomineeErrors(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	failing := ""
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			if failing == "*" || channelID == failing {
+				return nil, false, fmt.Errorf("membership tab http 500")
+			}
+			return nil, true, nil
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"), chYT("UC3"))
+
+	fm.doCheck(context.Background()) // cycle 1: all three fetched and memoized
+	if len(order) != 3 {
+		t.Fatalf("cycle 1 fetches = %v, want all three", order)
+	}
+
+	// Cycle 2 nominates UC1 (every horizon is equal, so the first wins). Make
+	// that fetch fail.
+	failing = "UC1"
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 2 || order[0] != "UC1" || order[1] != "UC2" {
+		t.Fatalf("cycle 2 fetches = %v, want [UC1 UC2] — UC1's fetch never returned, so the floor is still owed and UC2 carries it", order)
+	}
+
+	// And the budget is a ceiling, not a licence to walk the list: with every
+	// fetch failing, the cycle stops after membershipLivenessMaxTries. The
+	// errored set is cleared first so only the budget is under test.
+	failing = "*"
+	fm.mu.Lock()
+	fm.membershipFetchErrored = nil
+	fm.mu.Unlock()
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != membershipLivenessMaxTries {
+		t.Fatalf("cycle 3 fetches = %v, want %d — a cycle where every fetch fails must not walk the whole channel list", order, membershipLivenessMaxTries)
+	}
+}
+
+// TestFeed_ResetMembershipMemoRefetchesEveryChannel pins the repair path. The
+// memo suppresses the only discovery source there is for members-only content,
+// so an operator who re-imports cookies must not wait out membershipMemoTTL —
+// cmd/moombox calls this from OnAuthRecovered.
+//
+// Mutant: an empty ResetMembershipMemo body — the cycle after the repair still
+// fetches only the nominated channel.
+func TestFeed_ResetMembershipMemoRefetchesEveryChannel(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			return nil, true, nil
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"), chYT("UC3"))
+
+	fm.doCheck(context.Background()) // memoizes all three
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 {
+		t.Fatalf("cycle 2 fetches = %v, want exactly 1 — the memo is in force", order)
+	}
+
+	if n := fm.ResetMembershipMemo(); n != 3 {
+		t.Fatalf("ResetMembershipMemo() = %d, want 3 — the count is what the repair log reports", n)
+	}
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 3 {
+		t.Fatalf("cycle 3 fetches = %v, want all three — a credential repair must not have to wait out membershipMemoTTL", order)
+	}
+}
+
+// countingReader serves n bytes and reports how many were actually read.
+type countingReader struct{ remaining, read int }
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	if c.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), c.remaining)
+	c.remaining -= n
+	c.read += n
+	return n, nil
+}
+
+// TestDrainBoundedStopsAtTheLimit pins T4-35's feed half: a non-200 body is
+// drained only far enough to keep the connection reusable, never in full.
+//
+// Mutant: the bare io.Copy(io.Discard, resp.Body) the feed fetcher used reads
+// the whole 1 MB error page to throw it away.
+func TestDrainBoundedStopsAtTheLimit(t *testing.T) {
+	big := &countingReader{remaining: 1 << 20}
+	drainBounded(big)
+	if big.read != monitorDrainLimit {
+		t.Fatalf("drained %d bytes of a 1MB body, want exactly %d", big.read, monitorDrainLimit)
+	}
+
+	// A body shorter than the limit still drains completely and returns.
+	small := &countingReader{remaining: 17}
+	drainBounded(small)
+	if small.read != 17 {
+		t.Fatalf("drained %d bytes of a 17-byte body, want 17", small.read)
+	}
+}
+
+// TestFeed_MembershipBrokenChannelsAheadOfTheNomineeDoNotStarveIt is the
+// narrow form of the liveness-floor defect, and the reason the try budget is
+// spent only on fetches the NOMINATION bought.
+//
+// UCx1 and UCx2 are permanently broken and sit at the HEAD of the channel
+// list. They are never memoized (an error writes no memo), so they are fetched
+// every cycle whatever the nomination says — their failures cost the floor
+// nothing, because the floor never asked for them. Charging them against
+// membershipLivenessMaxTries exhausts the budget before the nominee is
+// reached, and membershipFetchAllowed then refuses the one channel that could
+// actually have answered. Two broken channels would switch the tier-1 liveness
+// signal off for the whole install, indefinitely — exactly the guarantee
+// armMembershipLiveness' comment makes, broken by the budget meant to protect
+// it.
+//
+// Mutant: decrementing membershipLivenessTries unconditionally in
+// recordMembershipFetchError — cycles 2+ then attempt only [UCx1 UCx2] and
+// return nothing at all.
+func TestFeed_MembershipBrokenChannelsAheadOfTheNomineeDoNotStarveIt(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var returned []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			if strings.HasPrefix(channelID, "UCx") {
+				return nil, false, fmt.Errorf("membership tab http 500")
+			}
+			returned = append(returned, channelID) // only fetches that ANSWER
+			return nil, true, nil
+		}),
+	)
+	setChannels(fm, chYT("UCx1"), chYT("UCx2"), chYT("UC1"), chYT("UC2"))
+
+	fm.doCheck(context.Background()) // cycle 1: nothing memoized, so both answer
+	if len(returned) != 2 {
+		t.Fatalf("cycle 1 answered = %v, want both non-members", returned)
+	}
+
+	// Every later cycle must still get an answer out of somebody, and the duty
+	// must keep rotating rather than pinning to one channel.
+	wantStandIn := []string{"UC1", "UC2", "UC1"}
+	for i, want := range wantStandIn {
+		cycle := i + 2
+		clock = clock.Add(10 * time.Minute)
+		returned = nil
+		fm.doCheck(context.Background())
+
+		if len(returned) != 1 {
+			t.Fatalf("cycle %d answered = %v, want exactly 1 — two broken channels at the head of the list must not starve the nominee", cycle, returned)
+		}
+		if returned[0] != want {
+			t.Fatalf("cycle %d answered = %v, want %s — the nomination goes to the earliest horizon and rotates", cycle, returned, want)
+		}
+	}
+}
+
+// TestFeed_AnUnrelatedErrorAfterTheNomineeAnsweredBuysNoExtraFetch is the same
+// gate seen from the other side. Once the nominated fetch has come back the
+// cycle owes the session nothing more, and a later failure somewhere else is
+// not a reason to spend another authenticated ~1 MB page load on a channel the
+// memo says to skip.
+//
+// UCx sits BETWEEN the nominee and a second memoized channel, which is what
+// makes the ordering matter: its error lands after UC1 has already answered
+// and before UC2 is considered.
+//
+// Mutant: recomputing membershipLivenessNeeded from the try budget on every
+// error rather than only on nomination-driven ones — UC2 is then fetched too.
+func TestFeed_AnUnrelatedErrorAfterTheNomineeAnsweredBuysNoExtraFetch(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			if channelID == "UCx" {
+				return nil, false, fmt.Errorf("membership tab http 500")
+			}
+			return nil, true, nil
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UCx"), chYT("UC2"))
+
+	fm.doCheck(context.Background()) // cycle 1: memoizes UC1 and UC2
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+
+	// UC1 is the nominee and answers; UCx is never memoized so it is always
+	// fetched and always fails; UC2 must stay skipped.
+	if len(order) != 2 || order[0] != "UC1" || order[1] != "UCx" {
+		t.Fatalf("cycle 2 fetches = %v, want [UC1 UCx] — the floor was satisfied by UC1, so UCx's failure buys nothing and UC2 stays memoized", order)
+	}
+}
+
+// TestFeed_ANominatedChannelThatKeepsErroringIsNotRenominated closes the last
+// hole in the liveness floor: the NOMINATION itself has to consult the errored
+// set, not only the in-cycle failover.
+//
+// armMembershipLiveness picks the memoized channel with the earliest horizon,
+// and a failed fetch writes no memo — so a nominee that keeps erroring keeps
+// the earliest horizon and keeps winning the pick, every cycle, until the 6 h
+// memo on the others finally expires. The failover inside
+// recordMembershipFetchError cannot rescue that: it can only hand the duty to
+// a memoized channel LATER in the walk, and here the failing nominee is last.
+// Every cycle then ends with zero membership fetches that RETURNED, which is
+// precisely the outcome armMembershipLiveness' comment promises cannot happen.
+//
+// Mutants this fails on:
+//   - nominating the earliest horizon without consulting
+//     membershipFetchErrored: the recovery cycle fetches UC2 again and the
+//     floor stays dark for six hours.
+//   - honouring the errored set with no fallback: once BOTH channels have
+//     errored the nomination comes back empty, the cycle attempts no fetch at
+//     all, and nothing can ever clear the errored set again.
+func TestFeed_ANominatedChannelThatKeepsErroringIsNotRenominated(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	failing := ""
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			if failing == "*" || channelID == failing {
+				return nil, false, fmt.Errorf("membership tab http 500")
+			}
+			return nil, true, nil // recognised session, confirmed non-member
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"))
+
+	fm.doCheck(context.Background()) // cycle 1: nothing memoized; both fetched
+	if len(order) != 2 {
+		t.Fatalf("cycle 1 fetches = %v, want both channels", order)
+	}
+
+	// Cycle 2 arranges the horizons the rest of the test needs. Both are equal
+	// coming out of cycle 1, so the nomination breaks the tie on config order
+	// and goes to UC1 — whose horizon is then refreshed, leaving UC2 STRICTLY
+	// the earliest from here on. The pick under test is therefore decided by
+	// the horizon, not by list position.
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC1" {
+		t.Fatalf("cycle 2 fetches = %v, want [UC1] — the equal-horizon tie breaks on config order", order)
+	}
+
+	// Cycle 3: UC2 holds the earliest horizon and starts failing. It is
+	// nominated, its fetch does not return, and nothing behind it can carry
+	// the floor.
+	failing = "UC2"
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC2" {
+		t.Fatalf("cycle 3 fetches = %v, want [UC2] — the earliest horizon is nominated, and it is last in the walk", order)
+	}
+
+	// Cycle 4 is the one under test: UC2 answered nothing last cycle and its
+	// horizon has not moved, so re-nominating it would repeat cycle 3 forever.
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC1" {
+		t.Fatalf("cycle 4 fetches = %v, want exactly [UC1] — a nominee that errored must not be re-nominated while a memoized channel that can still answer exists", order)
+	}
+
+	// Cycle 5 breaks UC1 as well, so that by cycle 6 EVERY memoized channel
+	// has errored. UC1 is still the nominee here (it answered in cycle 4, so
+	// it is not in the errored set yet) and its failure re-arms onto UC2.
+	failing = "*"
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 2 || order[0] != "UC1" || order[1] != "UC2" {
+		t.Fatalf("cycle 5 fetches = %v, want [UC1 UC2] — the nominee's failure passes the duty on", order)
+	}
+
+	// Cycle 6: with nothing left that can answer, the skip must RELAX rather
+	// than nominate nobody. An errored channel's fetch is the only thing that
+	// can clear its own flag, so a cycle that attempts none is a dead end.
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) == 0 {
+		t.Fatal("cycle 6 attempted no membership fetch at all — when every memoized channel has errored the nomination must fall back to trying one anyway, or the errored set can never clear")
 	}
 }

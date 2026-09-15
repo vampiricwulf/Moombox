@@ -23,7 +23,20 @@ const (
 	decapiStagger          = 1 * time.Second
 	decapiMinInterval      = 15 * time.Second
 	decapiDefaultRateLimit = 60
+	// decapiProbeBudget bounds the classification work that runs AFTER the
+	// DECAPI body is in hand — ProcessYouTubeVideo's player probe and, for a
+	// dateless vod-family result, the §9 date fetch. It is derived from the
+	// CYCLE context, never from the request context: a DECAPI answer that took
+	// 14 s used to leave the probe ~1 s, and a probe that dies on a leftover
+	// deadline is a MISSED live stream, not a slow one.
+	decapiProbeBudget = 60 * time.Second
 )
+
+// decapiLatestVideoURL is the latest-video endpoint as a printf template. A
+// package var so a test can aim checkChannel at an httptest server — the same
+// seam shape internal/youtube uses for membershipPageBase. Production never
+// rewrites it.
+var decapiLatestVideoURL = "https://decapi.me/youtube/latest_video?id=%s"
 
 var decapiVideoIDRe = regexp.MustCompile(`(?:youtu\.be/|youtube\.com/watch\?v=)([a-zA-Z0-9_-]{11})`)
 
@@ -32,6 +45,41 @@ type rateLimitState struct {
 	limit     int
 	remaining int
 	resetAt   time.Time
+}
+
+// decapiTerminalMemo is one channel's last DECAPI answer: the newest video ID
+// the endpoint reported, the classification the probe gave it, and — when the
+// sighting ended on the §13 window skip — the window it was judged against.
+//
+// outsideWindow exists because the two ways a terminal sighting can end leave
+// DIFFERENT traces. A skip that writes a history row is picked up on the next
+// cycle by HasProcessed; the window skip writes none (it is not "we have dealt
+// with this video", it is "this video is not in scope"), so for an
+// include_non_live_content channel `reprobe` stays false forever and the memo
+// could never engage. That is the dormant-channel case the memo was built for,
+// costing two anonymous requests every 15 s: the classifying probe and the §9
+// date fetch.
+//
+// Trusting it is sound because the judgement is MONOTONE — the cutoff only
+// moves forward, so a video already behind it cannot come back inside on its
+// own. Only two things can change the answer, and both are checked: a new
+// newest video (a different videoID is a miss) and a wider archive window,
+// hence windowDays. It is recorded ONLY for a sighting with a real date: a
+// dateless result is "treated as outside" because the window is unverifiable,
+// which is a statement about this cycle's date fetch, not about the video.
+type decapiTerminalMemo struct {
+	videoID       string
+	status        string
+	outsideWindow bool
+	windowDays    int
+}
+
+// decapiTerminalStatus reports whether a classification can no longer change.
+// Only "vod" and "not_a_stream" qualify: "upcoming" becomes "live" becomes
+// "vod", and "post_live" is the transitional state that becomes "vod". This is
+// the same terminal set the feed walk refuses to re-probe (walk.go:95-107).
+func decapiTerminalStatus(status string) bool {
+	return status == "vod" || status == "not_a_stream"
 }
 
 // DecapiMonitor polls DECAPI for latest videos from YouTube channels.
@@ -45,12 +93,16 @@ type DecapiMonitor struct {
 	pendingKick bool
 	// warnedSlow rate-limits the oversubscribed warning; atomic because
 	// scheduleNext touches it outside the monitor mutex.
-	warnedSlow  atomic.Bool
-	timer       *time.Timer
-	ctx         context.Context
-	cancel      context.CancelFunc
-	rateLimit   rateLimitState
-	NextCheckAt int64 // epoch ms; -1 = check in progress, 0 = no channels
+	warnedSlow atomic.Bool
+	timer      *time.Timer
+	ctx        context.Context
+	cancel     context.CancelFunc
+	rateLimit  rateLimitState
+	// terminalMemo remembers, per channel, the newest video ID DECAPI reported
+	// and what the probe made of it. Guarded by mu; keyed by channel ID, so it
+	// is bounded by the configured channel list and pruned by PruneHealth.
+	terminalMemo map[string]decapiTerminalMemo
+	NextCheckAt  int64 // epoch ms; -1 = check in progress, 0 = no channels
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -81,13 +133,22 @@ type DecapiMonitor struct {
 // Health returns the per-channel health snapshot for /api/status.
 func (dm *DecapiMonitor) Health() []ChannelHealth { return dm.health.snapshot() }
 
-// PruneHealth drops health entries for channels no longer configured.
+// PruneHealth drops health entries — and terminal memos — for channels no
+// longer configured.
 func (dm *DecapiMonitor) PruneHealth() {
 	active := make(map[string]struct{})
 	for _, ch := range dm.getYouTubeChannels() {
 		active[ch.ID] = struct{}{}
 	}
 	dm.health.prune(active)
+
+	dm.mu.Lock()
+	for id := range dm.terminalMemo {
+		if _, ok := active[id]; !ok {
+			delete(dm.terminalMemo, id)
+		}
+	}
+	dm.mu.Unlock()
 }
 
 // SetOnChannelUnhealthy installs the callback fired when a channel crosses
@@ -422,15 +483,37 @@ func (dm *DecapiMonitor) waitForRateLimit(ctx context.Context) {
 	}
 }
 
+// checkChannel polls one channel's latest video and classifies it.
+//
+// The two phases own SEPARATE contexts on purpose (T1-10). fetchLatestVideo
+// holds the decapiRequestTimeout deadline and releases it the moment the body
+// is read; the classification phase then runs under a fresh decapiProbeBudget
+// derived from the cycle context, so how long the probe gets never depends on
+// how long DECAPI took to answer.
 func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfig) error {
-	url := fmt.Sprintf("https://decapi.me/youtube/latest_video?id=%s", ch.ID)
+	body, err := dm.fetchLatestVideo(ctx, ch)
+	if err != nil {
+		return err
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, decapiProbeBudget)
+	defer cancel()
+	return dm.processResponse(probeCtx, body, ch)
+}
+
+// fetchLatestVideo GETs the channel's DECAPI latest_video line under the
+// request timeout and returns the raw body. Rate-limit accounting and the
+// passive-connectivity report live here; the timeout context is cancelled
+// before this returns, so nothing downstream inherits it.
+func (dm *DecapiMonitor) fetchLatestVideo(ctx context.Context, ch *config.ChannelConfig) (string, error) {
+	url := fmt.Sprintf(decapiLatestVideoURL, ch.ID)
 
 	ctx, cancel := context.WithTimeout(ctx, decapiRequestTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("User-Agent", "Moombox/1.0")
 
@@ -438,7 +521,7 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	if err != nil {
 		// Transport-level failure — feeds the passive offline tracker.
 		reportMonitorResult("monitor/decapi", true)
-		return fmt.Errorf("decapi request: %w", err)
+		return "", fmt.Errorf("decapi request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -468,24 +551,23 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 		}
 		// Drain so the connection can be reused (closing an unread body
 		// discards the TCP connection — costly during a sustained 429 storm).
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("rate limited (429)")
+		drainBounded(resp.Body)
+		return "", fmt.Errorf("rate limited (429)")
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		// Non-2xx — server reachable but unhappy; leave tracker alone.
 		// Drain a bounded amount before close to keep the connection reusable.
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("decapi http %d", resp.StatusCode)
+		drainBounded(resp.Body)
+		return "", fmt.Errorf("decapi http %d", resp.StatusCode)
 	}
 	reportMonitorResult("monitor/decapi", false)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	return dm.processResponse(ctx, string(body), ch)
+	return string(body), nil
 }
 
 func (dm *DecapiMonitor) updateRateLimit(resp *http.Response) {
@@ -576,6 +658,32 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		dm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
 	}
 
+	// The cycle's archive window, read ONCE: the memo gate below and the §13
+	// check further down must judge against the same number, or a config
+	// change landing mid-channel could make the memo disagree with the skip
+	// that wrote it.
+	windowDays := dm.archiveWindowDays(ch)
+
+	// Terminal memo (T2-12): DECAPI reports the channel's NEWEST video, so a
+	// dormant channel returns the same finished VOD every cycle — with the
+	// 15 s interval floor that is ~240 anonymous player probes/hour/channel
+	// for an answer that cannot change. Skip only when the ID is the one we
+	// classified last, that classification was terminal, AND the reason it
+	// stopped being our business still holds: either history says it was
+	// processed, or it was judged outside this same archive window (see
+	// decapiTerminalMemo — the window skip writes no history row, so on an
+	// include_non_live_content channel that second arm is the only one that
+	// ever engages).
+	//
+	// The HasProcessed read above is deliberately NOT memoized. Clearing an
+	// orphaned history row is the documented way to put a video back in play
+	// (database_extras.go:48-56), and it has to work on the very next cycle.
+	if dm.terminalMemoHit(ch.ID, videoID, reprobe, windowDays) {
+		dm.logger.Debug("decapi: newest video unchanged and terminal; skipping re-probe",
+			"videoID", videoID, "channel", ch.Name)
+		return nil
+	}
+
 	if reprobe {
 		dm.logger.Debug("decapi match found (re-probe)",
 			"videoID", videoID,
@@ -601,6 +709,10 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		IsReprobe:    reprobe,
 		Logger:       dm.logger,
 	})
+	// Record what the probe made of this ID so the next cycle can skip a
+	// classification that cannot change. An errored or cooled-down probe
+	// leaves StreamStatus empty, which is never terminal.
+	dm.recordTerminalMemo(ch.ID, videoID, result.StreamStatus)
 	// Window check (§13): "the newest video on the channel" is not the same
 	// as "recent" — on a dormant channel it can be a year old, and jobbing it
 	// is the headline bug through a second door. Vod-family results job only
@@ -628,10 +740,20 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 					"videoID", videoID, "err", err)
 			}
 		}
-		cutoff := time.Now().UTC().Add(-time.Duration(dm.archiveWindowDays(ch)) * 24 * time.Hour).Format(time.RFC3339)
+		cutoff := time.Now().UTC().Add(-time.Duration(windowDays) * 24 * time.Hour).Format(time.RFC3339)
 		if result.PublishedAt == "" || result.PublishedAt < cutoff {
 			dm.logger.Info("decapi: newest video is outside the archive window; skipping",
 				"videoID", videoID, "published", result.PublishedAt)
+			if result.PublishedAt != "" {
+				// A DATED verdict is durable — the cutoff only moves forward
+				// — so the memo can carry it and spare the next cycle both
+				// requests. A dateless one is not memoized: "treated as
+				// outside" there means this cycle could not verify the
+				// window (no ProbeDate wired, or the fetch failed), and
+				// latching that would let one transient failure freeze the
+				// channel until its newest video changes.
+				dm.noteTerminalMemoOutsideWindow(ch.ID, videoID, windowDays)
+			}
 			return nil
 		}
 	}
@@ -660,6 +782,62 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 // §13 window check on vod-family probe results.
 func (dm *DecapiMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 	return resolveArchiveWindowDays(dm.configStore, ch)
+}
+
+// terminalMemoHit reports whether videoID is the exact video this channel's
+// last completed probe classified as terminal AND there is a live reason to
+// trust that classification again this cycle. A different ID — the channel
+// published something new — is a miss, and the fresh probe overwrites the memo.
+//
+// The live reason is one of two, and neither is redundant:
+//
+//   - reprobe: history says the video was dealt with, read fresh every cycle
+//     so that clearing an orphaned row re-opens it immediately.
+//   - the memoized window skip, valid only while the window is the one the
+//     skip was judged against — so widening monitors.archive_window_days (or
+//     a channel's override) re-probes once and then settles again.
+func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool, windowDays int) bool {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	m, ok := dm.terminalMemo[channelID]
+	if !ok || m.videoID != videoID || !decapiTerminalStatus(m.status) {
+		return false
+	}
+	return reprobe || (m.outsideWindow && m.windowDays == windowDays)
+}
+
+// recordTerminalMemo stores this cycle's classification for the channel,
+// replacing any previous one. An empty status (probe errored, cooldown
+// suppressed it, or no probe is wired) is recorded as-is and is not terminal,
+// so the next cycle probes again.
+func (dm *DecapiMonitor) recordTerminalMemo(channelID, videoID, status string) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	if dm.terminalMemo == nil {
+		dm.terminalMemo = make(map[string]decapiTerminalMemo)
+	}
+	dm.terminalMemo[channelID] = decapiTerminalMemo{videoID: videoID, status: status}
+}
+
+// noteTerminalMemoOutsideWindow records that the memo recordTerminalMemo just
+// wrote for channelID ended on the §13 window skip, judged against windowDays.
+//
+// Written as a second, narrow update rather than as extra arguments to
+// recordTerminalMemo because the two facts are learned at different points:
+// the classification the moment the probe returns, the window verdict only
+// after the §9 date fetch has had its say. The videoID guard makes the pairing
+// explicit — if anything replaced the memo in between, the window fact belongs
+// to a video that is no longer the newest one and is dropped.
+func (dm *DecapiMonitor) noteTerminalMemoOutsideWindow(channelID, videoID string, windowDays int) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	m, ok := dm.terminalMemo[channelID]
+	if !ok || m.videoID != videoID {
+		return
+	}
+	m.outsideWindow = true
+	m.windowDays = windowDays
+	dm.terminalMemo[channelID] = m
 }
 
 // getYouTubeChannels returns a copy of the YouTube channel list under
