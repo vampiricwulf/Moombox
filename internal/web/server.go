@@ -52,6 +52,7 @@ type Server struct {
 	// commit-stamped build answers every asset from one string.
 	assetETags  sync.Map
 	loginHTML   []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
+	indexHTML   []byte           // Dashboard shell with cache-busted asset URLs; see serveIndex
 	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
 	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
 	actualPort  atomic.Int32     // Actual bound port after Start (may differ from cfg if probed)
@@ -100,6 +101,13 @@ func NewServer(store *config.Store, logger interface {
 	// trusted reverse proxy would re-open the auth bypass there.
 	s.ws.ClientIP = func(r *http.Request) string { return EffectiveClientIP(store, r) }
 
+	// ...and the same Origin decision: before this the upgrade read r.Host
+	// only and wildcarded the port, so a Host-rewriting reverse proxy loaded
+	// the dashboard and then had every socket refused (Arc 5 arc-close F6).
+	s.ws.OriginCheck = func(r *http.Request) (bool, string) {
+		return originAllowed(store, r, r.Header.Get("Origin"))
+	}
+
 	// Apply middleware (order matters).
 	// RequestID first so RecoveryMiddleware (and any future logger
 	// middleware) can correlate log lines back to the originating request
@@ -113,7 +121,7 @@ func NewServer(store *config.Store, logger interface {
 	r.Use(RecoveryMiddleware(logger))
 	r.Use(CORSMiddleware(store))
 	r.Use(SecurityHeaders)
-	r.Use(CSRFMiddleware(store, token))
+	r.Use(CSRFMiddleware(store, token, logger))
 	r.Use(IPGateMiddleware(store))
 	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
@@ -254,12 +262,18 @@ func (s *Server) SetWebSocketHandler(handler http.HandlerFunc) {
 func (s *Server) MountStaticFiles(staticFS fs.FS) {
 	fileServer := http.FileServer(http.FS(staticFS))
 
-	// Read index.html once for SPA fallback, with cache-busted asset URLs
-	indexHTML, _ := fs.ReadFile(staticFS, "index.html")
-	if indexHTML != nil && s.commit != "" {
-		suffix := []byte("?v=" + s.commit)
-		indexHTML = bytes.ReplaceAll(indexHTML, []byte(`"/moombox.css"`), []byte(`"/moombox.css`+string(suffix)+`"`))
-		indexHTML = bytes.ReplaceAll(indexHTML, []byte(`"/app.js"`), []byte(`"/app.js`+string(suffix)+`"`))
+	// The dashboard shell, read once, with cache-busted asset URLs.
+	//
+	// The ?v= substitution is gated on trustedCommit, not merely on a non-empty
+	// commit: an untrusted commit does not identify the bytes (see
+	// trustedCommit), so "?v=unknown" and "?v=<rev>-dirty" name nothing.
+	// Omitting them also keeps serveIndex's ETag honest — with no substitution
+	// the served bytes ARE the embedded file assetETag hashes.
+	s.indexHTML, _ = fs.ReadFile(staticFS, "index.html")
+	if s.indexHTML != nil && s.trustedCommit() {
+		suffix := "?v=" + s.commit
+		s.indexHTML = bytes.ReplaceAll(s.indexHTML, []byte(`"/moombox.css"`), []byte(`"/moombox.css`+suffix+`"`))
+		s.indexHTML = bytes.ReplaceAll(s.indexHTML, []byte(`"/app.js"`), []byte(`"/app.js`+suffix+`"`))
 	}
 
 	// Cache login.html for auth middleware inline serving (matches TS serveLoginPage)
@@ -278,6 +292,15 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 			urlPath = "index.html"
 		}
 
+		// The root and /index.html serve the SUBSTITUTED copy, not the raw
+		// embedded file the FileServer below would find. Those two paths are
+		// how the dashboard is actually loaded, so they are exactly the ones
+		// that need the cache-busted asset URLs (Arc 5 arc-close F8).
+		if urlPath == "index.html" && s.indexHTML != nil {
+			s.serveIndex(w, r, staticFS)
+			return
+		}
+
 		// Check if the file exists in the embedded FS
 		if f, err := staticFS.Open(urlPath); err == nil {
 			f.Close()
@@ -286,16 +309,37 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 			return
 		}
 
-		// SPA fallback: serve index.html for non-file routes
-		if indexHTML != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Write(indexHTML)
+		// SPA fallback: serve the same shell for non-file routes.
+		if s.indexHTML != nil {
+			s.serveIndex(w, r, staticFS)
 			return
 		}
 
 		http.NotFound(w, r)
 	})
+}
+
+// serveIndex writes the dashboard shell — the copy MountStaticFiles built —
+// for the root, for /index.html, and for every SPA route.
+//
+// no-cache, never immutable: the shell names the ?v= of the build it belongs
+// to, so a cached copy would keep pointing browsers at the PREVIOUS build's
+// assets. The ETag makes that revalidation cost 304 bytes; it is the build
+// commit on a trusted build, and the embedded file's content hash otherwise —
+// correct in both arms because an untrusted build substitutes nothing, so the
+// bytes served are the bytes hashed.
+//
+// Content-Type is set explicitly rather than left to ServeContent's extension
+// lookup, which consults the Windows registry and can be overridden there. The
+// zero modtime suppresses Last-Modified, which embed.FS could not supply
+// anyway; ServeContent answers If-None-Match and HEAD against the ETag.
+func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request, fsys fs.FS) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	if tag := s.assetETag(fsys, "index.html"); tag != "" {
+		w.Header().Set("ETag", tag)
+	}
+	http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(s.indexHTML))
 }
 
 // trustedCommit reports whether s.commit identifies the served bytes uniquely
