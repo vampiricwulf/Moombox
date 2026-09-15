@@ -215,7 +215,7 @@ from yt_dlp.networking.exceptions import TransportError
 @register_provider
 class MoomboxPTP(PoTokenProvider):
     PROVIDER_NAME = 'moombox'
-    BUG_REPORT_LOCATION = 'https://github.com/Wulf/Moombox/issues'
+    BUG_REPORT_LOCATION = 'https://github.com/vampiricwulf/Moombox/issues'
     _SUPPORTED_CLIENTS = WEBPO_CLIENTS
     _SUPPORTED_CONTEXTS = (PoTokenContext.GVS, PoTokenContext.PLAYER, PoTokenContext.SUBS)
     _PING_TIMEOUT = 5.0

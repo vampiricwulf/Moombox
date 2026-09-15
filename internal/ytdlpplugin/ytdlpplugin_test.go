@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -130,5 +131,27 @@ func TestInfoJSONKeys(t *testing.T) {
 	}
 	if v, ok := m["installedPort"]; !ok || v != nil {
 		t.Errorf("installedPort = %v (present=%v), want a present null", v, ok)
+	}
+}
+
+// TestGeneratedPluginPointsAtThisRepo: the plugin told yt-dlp users to file
+// Moombox bugs at github.com/Wulf/Moombox, which is not this project. Every
+// other GitHub reference in the tree says vampiricwulf.
+//
+// Mutant: restoring any other owner in BUG_REPORT_LOCATION fails this.
+func TestGeneratedPluginPointsAtThisRepo(t *testing.T) {
+	src := Generate(774, false)
+	const want = "BUG_REPORT_LOCATION = 'https://github.com/vampiricwulf/Moombox/issues'"
+	if !strings.Contains(src, want) {
+		t.Errorf("the generated plugin does not carry %q", want)
+	}
+	owners := regexp.MustCompile(`github\.com/([A-Za-z0-9_.-]+)/`).FindAllStringSubmatch(src, -1)
+	if len(owners) == 0 {
+		t.Fatal("no github.com reference found at all — the fixture assumption is broken")
+	}
+	for _, m := range owners {
+		if m[1] != "vampiricwulf" {
+			t.Errorf("the plugin references github.com/%s/ — this project is vampiricwulf/Moombox", m[1])
+		}
 	}
 }
