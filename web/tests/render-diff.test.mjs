@@ -168,3 +168,43 @@ test("updateActiveIndicator writes nothing when the count has not changed", { sk
   assert.equal(h.el("active-indicator").style.display, "none",
     "dropping to zero active jobs must still hide the indicator");
 });
+
+// chat_status "incomplete" is written when a capture stopped short — a Twitch
+// VOD whose cursor paging stalled, an IRC session that exhausted its reconnect
+// budget. The badge text is the raw value in both code paths; only the variant
+// is mapped, and an unmapped value silently falls through to "neutral", which
+// reads as "nothing to see here" for the one status that asks for action.
+//
+// Mutants this kills:
+//   - no `incomplete` entry in either chatVariantMap: the variant is "neutral".
+//   - adding it to only ONE of the two maps: the render path and the update
+//     path disagree, so the badge changes colour on the next 60 Hz tick — each
+//     half of this test covers one map.
+test("an incomplete chat capture renders a warning badge in both paths", { skip }, async () => {
+  const h = await harness.makeApp();
+  const job = { ...downloadingJob(), status: "Finished", chatStatus: "incomplete" };
+
+  h.app.selectedJobId = job.id;
+  h.app.jobs = [job];
+  h.app.details.renderJobDetails(job);
+  await h.flush();
+
+  const badge = h.el("job-details-content").querySelector('[data-field="chat"] sl-badge');
+  assert.ok(badge, "the details panel rendered no chat badge for an incomplete capture");
+  assert.equal(badge.getAttribute("variant"), "warning",
+    "renderJobDetails mapped `incomplete` to the wrong variant — unmapped values fall through " +
+    "to `neutral`, which reads as nothing to act on");
+  assert.equal(badge.textContent.trim(), "incomplete",
+    "the badge text is the raw machine value; no display string restates it");
+
+  // The update path owns its own copy of the map. Drive it with a changed
+  // count so the block is entered, then read the PROPERTY it assigns (jsdom
+  // treats sl-badge as an unknown element, so `variant` lands as a property,
+  // not as the attribute the render path wrote).
+  h.app.details.updateJobDetails({ ...job, totalChatMessages: 4211 });
+  assert.equal(badge.variant, "warning",
+    "updateJobDetails mapped `incomplete` to the wrong variant — the two maps must agree, or " +
+    "the badge changes colour on the next job_update tick");
+  assert.equal(badge.textContent.trim(), "incomplete",
+    "updateJobDetails rewrote the badge text");
+});

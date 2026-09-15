@@ -468,23 +468,9 @@ func (m *JobDetailsModel) buildRows() {
 
 		// Chat status with color coding (J7) - always shown (not gated by hasProgress)
 		// Combined line: "status (X messages)" matching Web UI
-		chatStatus := j.ChatStatus
-		totalChatMsgs := j.TotalChatMessages
-		if p := m.progressOverlay; p != nil {
-			if p.ChatStatus != "" {
-				chatStatus = p.ChatStatus
-			}
-			if p.TotalChatMessages != nil {
-				totalChatMsgs = p.TotalChatMessages
-			}
-		}
+		chatStatus, totalChatMsgs := m.effectiveChat(j)
 		if chatStatus != "" {
-			chatVal := chatStatus
-			if totalChatMsgs != nil && *totalChatMsgs > 0 {
-				chatVal += fmt.Sprintf(" (%d messages)", *totalChatMsgs)
-			}
-			chatColor := m.chatStatusColor(chatStatus)
-			m.addFieldColor("Chat", chatVal, chatColor)
+			m.addFieldColor("Chat", chatRowValue(chatStatus, totalChatMsgs), m.chatStatusColor(chatStatus))
 		}
 	}
 
@@ -496,7 +482,15 @@ func (m *JobDetailsModel) buildRows() {
 	hasFileSize := j.FileSize != nil && *j.FileSize > 0
 	hasFps := j.VideoFps != nil && *j.VideoFps > 0
 	hasGaps := len(j.Gaps) > 0
-	hasMediaContent := (hasVideo && hasHeight) || hasFps || hasFileSize || (isFinished && (hasSegs || hasChat || hasGaps))
+	// A capture that did not complete, on a job that is no longer running. The
+	// Progress section above owns the Chat row while a job is active, and it is
+	// gated on isActiveState — so before this the TUI said NOTHING about a chat
+	// that stopped short, while the Web details badge said "incomplete". Only
+	// that one verdict reaches here: every other terminal job keeps exactly the
+	// rows it had.
+	terminalChatStatus, terminalChatCount := m.effectiveChat(j)
+	chatIncomplete := !isActiveState && terminalChatStatus == chatStatusIncomplete
+	hasMediaContent := (hasVideo && hasHeight) || hasFps || hasFileSize || (isFinished && (hasSegs || hasChat || hasGaps)) || chatIncomplete
 	if hasMediaContent {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Media"})
@@ -514,6 +508,10 @@ func (m *JobDetailsModel) buildRows() {
 		// Segment counters (only for finished jobs - active show in Progress)
 		if isFinished {
 			m.addSegmentRows(j)
+		}
+
+		if chatIncomplete {
+			m.addFieldColor("Chat", chatRowValue(terminalChatStatus, terminalChatCount), ColorWarning)
 		}
 	}
 
@@ -727,9 +725,50 @@ func (m *JobDetailsModel) addSegmentRowsCommon(j *database.Job, lastVideoSeq, la
 	}
 }
 
+// chatStatusIncomplete is the chat_status a capture that stopped short carries.
+// Written as a literal here rather than imported: internal/tui does not import
+// internal/worker, so the value crosses between them through the database row,
+// not through Go. It must stay equal to the worker's chatStatusIncomplete.
+const chatStatusIncomplete = "incomplete"
+
+// effectiveChat returns the chat status and message count the details panel
+// shows: the live progress overlay's values where it has them, else the job
+// row's. One reader for the active Progress row and the terminal verdict row
+// alike, so the two can never disagree about which source won.
+func (m *JobDetailsModel) effectiveChat(j *database.Job) (string, *int) {
+	status := j.ChatStatus
+	count := j.TotalChatMessages
+	if p := m.progressOverlay; p != nil {
+		if p.ChatStatus != "" {
+			status = p.ChatStatus
+		}
+		if p.TotalChatMessages != nil {
+			count = p.TotalChatMessages
+		}
+	}
+	return status, count
+}
+
+// chatRowValue renders the Chat row's text — the status, then the count beside
+// it, matching the Web details badge and the "(N messages)" text after it.
+func chatRowValue(status string, count *int) string {
+	if count != nil && *count > 0 {
+		return fmt.Sprintf("%s (%d messages)", status, *count)
+	}
+	return status
+}
+
 // chatStatusColor returns appropriate color for chat status (J7).
 func (m *JobDetailsModel) chatStatusColor(status string) color.Color {
 	lower := strings.ToLower(status)
+	// BEFORE the "complete" test below, and that ordering is the whole point:
+	// the value a truncated capture carries is "incomplete", which CONTAINS
+	// "complete". Reversed, a short archive renders in exactly the cyan a
+	// complete one does. Warning rather than error: the capture stopped, the
+	// archive that did land is intact.
+	if strings.Contains(lower, chatStatusIncomplete) {
+		return ColorWarning
+	}
 	if strings.Contains(lower, "downloading") || strings.Contains(lower, "running") {
 		return ColorGreen
 	}

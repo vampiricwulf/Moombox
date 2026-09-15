@@ -204,7 +204,7 @@ export class JobDetailsController {
     // Update chat status
     const chatField = content.querySelector('[data-field="chat"]');
     if (chatField && job.chatStatus) {
-      const chatVariantMap = { downloading: "primary", finished: "success", error: "danger", unavailable: "neutral", pending: "neutral" };
+      const chatVariantMap = { downloading: "primary", finished: "success", incomplete: "warning", error: "danger", unavailable: "neutral", pending: "neutral" };
       const badge = chatField.querySelector("sl-badge");
       if (badge) {
         const variant = chatVariantMap[job.chatStatus] || "neutral";
@@ -425,7 +425,7 @@ export class JobDetailsController {
             </span>
           </div>` : ""}
           ${job.chatStatus ? (() => {
-            const chatVariantMap = { downloading: "primary", finished: "success", error: "danger", unavailable: "neutral", pending: "neutral" };
+            const chatVariantMap = { downloading: "primary", finished: "success", incomplete: "warning", error: "danger", unavailable: "neutral", pending: "neutral" };
             const chatVariant = chatVariantMap[job.chatStatus] || "neutral";
             return `
           <div class="details-row">
