@@ -839,7 +839,11 @@ var playerRetryBackoffBase = time.Second
 // could spend the whole budget and then report context.DeadlineExceeded,
 // throwing away the HTTP status that is the actual reason the caller is being
 // told no. A sleep that would not leave the deadline room for the attempt it
-// precedes is not taken at all; the last real error is returned instead.
+// precedes is not taken at all; the last real error is returned instead. The
+// guard reserves a full playerRetryBackoffBase beyond the sleep itself for
+// that attempt's HTTP round trip — a bare "does the sleep fit" check would
+// still let the *request* race the deadline in the narrow window right after
+// a sleep that just barely fit.
 func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []byte, headers map[string]string, ytcfg *YtcfgData, clientLabel string) (*VideoInfo, error) {
 	var playerURL string
 	if ytcfg != nil {
@@ -854,9 +858,9 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 		if attempt > 0 {
 			// Exponential backoff: 1s, 2s, 4s (matching p-retry default factor=2, minTimeout=1000)
 			delay := playerRetryBackoffBase << (attempt - 1)
-			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
-				// Every `continue` above sets lastErr, so attempt > 0
-				// always has one to return.
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay+playerRetryBackoffBase {
+				// Every retry branch below sets lastErr before continuing, so
+				// attempt > 0 always has one to return.
 				p.logger.Debug("[PlayerApi] retry budget exhausted, returning the last error",
 					slog.String("client", clientLabel),
 					slog.Int("attempt", attempt+1),
