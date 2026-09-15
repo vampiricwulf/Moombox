@@ -1,6 +1,8 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +22,8 @@ func staticFixture(t *testing.T, commit string) (*Server, fstest.MapFS) {
 		s.SetCommit(commit)
 	}
 	fsys := fstest.MapFS{
-		"index.html":  {Data: []byte("<html><head></head><body></body></html>")},
+		"index.html": {Data: []byte(`<html><head><link rel="stylesheet" href="/moombox.css" /></head>` +
+			`<body><script type="module" src="/app.js"></script></body></html>`)},
 		"app.js":      {Data: []byte("export const app = 1;\n")},
 		"favicon.svg": {Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`)},
 	}
@@ -225,5 +228,87 @@ func TestActualPortIsReadThroughAnAccessor(t *testing.T) {
 
 	if got := s.ActualPort(); got != 8123 {
 		t.Errorf("ActualPort() = %d after the bind, want 8123", got)
+	}
+}
+
+// TestRootServesTheCacheBustedIndex: /, /index.html and every SPA route must
+// serve the SUBSTITUTED copy. Before this, only the SPA-fallback branch did —
+// the root normalised to "index.html", found it in the FS and served the RAW
+// embedded bytes through the FileServer, so the dashboard's own load never got
+// a cache-busted app.js (Arc 5 arc-close F8).
+//
+// THE MUTANT: restore the file-exists branch ahead of the index branch — the
+// ?v= assertions see the raw body.
+func TestRootServesTheCacheBustedIndex(t *testing.T) {
+	s, _ := staticFixture(t, "abc1234")
+
+	for _, target := range []string{"/", "/index.html", "/jobs/42"} {
+		rr := getStatic(t, s, target, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s: status %d, want 200", target, rr.Code)
+		}
+		body := rr.Body.String()
+		for _, want := range []string{`"/app.js?v=abc1234"`, `"/moombox.css?v=abc1234"`} {
+			if !strings.Contains(body, want) {
+				t.Errorf("GET %s: body does not carry %s", target, want)
+			}
+		}
+		if got := rr.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("GET %s: Cache-Control = %q, want no-cache", target, got)
+		}
+		if got := rr.Header().Get("ETag"); got != `"abc1234"` {
+			t.Errorf("GET %s: ETag = %q, want the quoted build commit", target, got)
+		}
+		if got := rr.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+			t.Errorf("GET %s: Content-Type = %q, want text/html", target, got)
+		}
+	}
+}
+
+// THE MUTANT: keep the substitution gate at `s.commit != ""` — the body comes
+// back carrying "?v=unknown" / "?v=abc-dirty", which names no build, and the
+// ETag then describes bytes that are not the ones served.
+func TestRootOmitsTheCacheBusterOnAnUntrustedCommit(t *testing.T) {
+	for _, commit := range []string{"unknown", "abc1234-dirty"} {
+		t.Run(commit, func(t *testing.T) {
+			s, fsys := staticFixture(t, commit)
+			rr := getStatic(t, s, "/", nil)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status %d, want 200", rr.Code)
+			}
+			if strings.Contains(rr.Body.String(), "?v=") {
+				t.Errorf("body carries a ?v= for untrusted commit %q: %s", commit, rr.Body.String())
+			}
+			// With no substitution the served bytes ARE the embedded file, so
+			// the content-hash ETag describes them exactly.
+			sum := sha256.Sum256(fsys["index.html"].Data)
+			want := `"` + hex.EncodeToString(sum[:]) + `"`
+			if got := rr.Header().Get("ETag"); got != want {
+				t.Errorf("ETag = %q, want the content hash %q", got, want)
+			}
+			if got := rr.Body.String(); got != string(fsys["index.html"].Data) {
+				t.Errorf("body = %q, want the embedded file verbatim", got)
+			}
+		})
+	}
+}
+
+// THE MUTANT: write the body with w.Write instead of http.ServeContent — the
+// conditional request is answered with a full 200.
+func TestRootAnswersConditionalGET(t *testing.T) {
+	s, _ := staticFixture(t, "abc1234")
+
+	first := getStatic(t, s, "/", nil)
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag on the first GET")
+	}
+
+	second := getStatic(t, s, "/", map[string]string{"If-None-Match": etag})
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("status %d, want 304", second.Code)
+	}
+	if second.Body.Len() != 0 {
+		t.Fatalf("304 carried %d body bytes, want 0", second.Body.Len())
 	}
 }
