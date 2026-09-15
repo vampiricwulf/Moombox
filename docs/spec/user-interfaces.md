@@ -65,10 +65,12 @@ The file structure:
 
 ### Embedding and Serving
 
-The `web.PublicFS` embedded filesystem is mounted by the HTTP server. Asset URLs inside `index.html`
-carry a `?v=<build commit>` cache-buster — though only in the SPA-FALLBACK copy the server rewrites at
-mount time, so `/` itself still serves the embedded file verbatim and its asset URLs carry none
-(pre-existing; a chain-close item). A URL that carries one is served `immutable, max-age=1y`, but only
+Asset URLs inside `index.html` carry a `?v=<build commit>` cache-buster on a trusted commit:
+`MountStaticFiles` rewrites the shell once at mount time and `serveIndex` (`internal/web/server.go`)
+serves that copy for `/`, `/index.html` and every SPA-fallback route with `Cache-Control: no-cache` and
+an `ETag` — the commit when trusted, otherwise the file's SHA-256 — answering `If-None-Match` with a
+304; on an untrusted commit no `?v=` is emitted at all, so the served bytes are the embedded file the
+hash describes. A URL that carries one is served `immutable, max-age=1y`, but only
 when the commit is TRUSTED: `unknown` (no `-ldflags` stamp and no `vcs.revision`) and a
 `<rev>-dirty` suffix (built from a modified working tree) both name bytes that can change under the
 same string, so they fall back to the revalidating policy. Every other asset path is served `no-cache`
@@ -468,7 +470,7 @@ The Web UI establishes a WebSocket connection to the server on page load. The se
 `github.com/coder/websocket` for WebSocket handling (the library upstream renamed from
 `nhooyr.io/websocket`; the import path in `go.mod` is the coder one).
 
-**Upgrade:** The WebSocket upgrade handler is registered as an interceptor on the main HTTP handler. Any request with an `Upgrade: websocket` header is routed to the WebSocket handler regardless of the URL path. Origin validation checks that the request comes from the same origin or a loopback/LAN alias.
+**Upgrade:** The WebSocket upgrade handler is registered as an interceptor on the main HTTP handler. Any request with an `Upgrade: websocket` header is routed to the WebSocket handler regardless of the URL path. Origin validation runs before the handshake and is the same decision `CSRFMiddleware` makes — the same `network_access` policy, the same `X-Forwarded-Host`-from-a-trusted-proxy rule, the same exact port comparison, and the same certificate-SAN requirement on `external`/`public`. An upgrade with no `Origin` header is accepted, which is how non-browser clients connect.
 
 **Authentication:** For external (non-loopback, non-private-network) connections when auth is configured, the `AuthCheck` function validates the upgrade request before accepting. Unauthenticated external WebSocket upgrades are rejected.
 

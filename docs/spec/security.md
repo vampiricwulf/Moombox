@@ -65,6 +65,35 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   portless authorities compare by host alone, so a TLS-terminating reverse proxy that forwards the
   client's `Host` verbatim needs no extra configuration. See `sameSiteOrigin` in
   `internal/web/middleware.go`.
+  **Certificate attestation.** When a TLS certificate is loaded and it is not the placeholder
+  Moombox generates for itself, the origin's host must ALSO appear among that certificate's SANs —
+  `identityHosts` and `hostInSANs` in `internal/web/middleware.go`, sourced from `IdentitySANs` in
+  `internal/web/tls.go`. This is an additional requirement on top of the same-host comparison, not a
+  substitute for it, and it is what refuses a DNS-rebinding page: such a page controls both `Host`
+  and its own `Origin`, so the same-host comparison alone compares two values the attacker chose,
+  but `attacker.dns` appears in no certificate Moombox holds. Moombox's own self-signed certificate
+  is deliberately excluded — its SANs are `localhost`, `127.0.0.1`, `::1` and whatever interface
+  addresses the machine had at first start, which name the machine rather than the address an
+  operator points a browser at, so treating them as an allowlist would refuse every external install
+  reached by a DNS name or a NATed public address. An install with no certificate, or with only the
+  placeholder, therefore behaves exactly as it did before. A `*.` SAN matches one label — but only
+  here, on `external`/`public`, where the same-host comparison above already pins the origin's host
+  first, so the wildcard can only NARROW which same-host requests still pass. The `localhost` and
+  `lan` policies (and the unset default) gain the SAN list as a widening only, and admit a LITERAL
+  SAN name alone, never a wildcard: those arms have no host comparison in front of them, so a
+  wildcard there would let any sibling of an operator's wildcard certificate — a stale or
+  attacker-registered subdomain under `*.example.com` — act as an allowed cross-origin request
+  against a loopback-only install. An install holding a real (literal) certificate for its own
+  hostname keeps the WebSocket it has today either way; see `hostInSANs` in
+  `internal/web/middleware.go`.
+  **Operator consequence:** once a non-placeholder certificate is loaded, reaching the dashboard by
+  a name or address that certificate does NOT attest is refused on `external`/`public` — the same
+  `403 {"error":"Forbidden: invalid origin"}` as any other mismatched origin. The fix is to add that
+  name to the certificate's SANs; a certless or placeholder-only install is unaffected, because the
+  self-signed placeholder never narrows this check. On `localhost`/`lan`, an install reached by a DNS
+  name needs an operator certificate whose SANs name it, or access by IP / `localhost`; since the
+  upgrade shares the decision, that applies to the WebSocket as well as to POSTs.
+  **Not covered:** a rebinding attacker who also controls DNS for a name the certificate attests.
   **Residual:** a proxy listed in `network.trusted_proxies` that does not itself set or overwrite
   `X-Forwarded-Host` lets its peer choose the host the Origin is compared against. A browser cannot
   reach that path — `X-Forwarded-Host` is not a CORS-safelisted request header, so setting it
@@ -97,7 +126,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 2. **Loopback-only routes are exempt.** The paths `/get_pot`, `/invalidate_caches`, and `/invalidate_it` are called by external Python scripts (yt-dlp) that do not send Origin/Referer headers. These routes are already protected by `LoopbackOnly` middleware at the route level, so CSRF protection is redundant.
 3. **Internal token bypass.** If the request includes an `X-Internal-Token` header whose value matches the server's startup-generated token (compared with `crypto/subtle.ConstantTimeCompare`), the request passes through. This is safe because browsers cannot set custom headers on cross-origin requests without a CORS preflight, which the server does not grant to untrusted origins.
 4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should supply the internal token, or set `Origin` to the **same authority the request's own `Host` carries**. Under `external` / `public` the origin must name the request's own host and the same-host arm does not fold `localhost` to loopback, so a client dialling `127.0.0.1:774` sends `Host: 127.0.0.1:774` and must send `Origin: http://127.0.0.1:774` — `http://localhost:774` is refused there. On `localhost` / `lan`, where the check is an IP-class test, either spelling passes.
-5. **Origin/Referer validation.** When a header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`.
+5. **Origin/Referer validation.** When a header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`. A refusal logs exactly one `CSRF: origin refused` line naming the origin and the authority it was compared against, both clipped by `clipForLog` (`internal/web/middleware.go`) before they reach the dashboard's log panel.
 
 **Source:** `CSRFMiddleware` in `internal/web/middleware.go`.
 
@@ -192,12 +221,15 @@ read the answers too (sweep T1-6). Both halves refuse now: `CORSMiddleware` refl
 `isAllowedOrigin` admits it, and the preflight branch reuses that one decision instead of recomputing
 it. **Operator consequence:** a reverse proxy must forward the client's `Host` verbatim; otherwise the
 dashboard's own posts are refused with `403 Forbidden: invalid origin`. Listing the proxy in
-`network.trusted_proxies` so its `X-Forwarded-Host` is read satisfies the CSRF and CORS checks only —
-it is NOT an alternative. The WebSocket upgrade builds its allowed origins from `r.Host` and the
-certificate SANs and never reads `X-Forwarded-Host` (`allowedOriginPatterns`,
-`internal/web/websocket.go`), so a Host-rewriting proxy loads the dashboard and then has every socket
-upgrade refused — a page with no live updates. Aligning the upgrade check with `trusted_proxies` is a
-chain-close residual.
+`network.trusted_proxies` so its `X-Forwarded-Host` is read is not a workaround — it is the
+alternative. The WebSocket upgrade makes the SAME decision through the same helper:
+`WebSocketHub.OriginCheck` (`internal/web/websocket.go`) is wired by `NewServer` to `originAllowed`
+(`internal/web/middleware.go`), so a proxy listed in `network.trusted_proxies` satisfies the upgrade
+exactly as it satisfies CSRF and CORS, and ports are compared exactly rather than wildcarded. The
+check runs before `websocket.Accept`, which is then given `InsecureSkipVerify` — the library's own
+check accepts `Origin == Host` unconditionally, which is the pair a DNS-rebinding page controls, and
+matches ports with `path.Match`. An upgrade carrying no `Origin` header at all is still
+accepted, as it was before: browsers always send one, and non-browser clients never do.
 `internal/web/routes/cookies_import_chain_test.go` drives the CSRF half through the real chain — the
 missing-origin refusal on a `public` fixture and the invalid-origin refusal on a `lan` one. The CORS
 half is pinned separately, at middleware level, by `TestCORSReflectionFollowsTheOriginPolicy`

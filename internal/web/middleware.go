@@ -19,15 +19,12 @@ func CORSMiddleware(store *config.Store) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
-			var networkAccess string
-			store.Read(func(c *config.MoomboxConfig) {
-				networkAccess = c.Network.NetworkAccess
-			})
-
 			// Decided ONCE: the preflight branch below used to re-run the same
 			// comparison, and the two must never be able to disagree.
-			allowed := origin != "" &&
-				isAllowedOrigin(origin, networkAccess, effectiveRequestHost(store, r), effectiveRequestScheme(r))
+			allowed := false
+			if origin != "" {
+				allowed, _ = originAllowed(store, r, origin)
+			}
 
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -121,7 +118,9 @@ func SecurityHeaders(next http.Handler) http.Handler {
 // same-origin mutating requests (Fetch spec). Non-browser local CLIs
 // (e.g. `moombox add`) should set Origin to the server's base URL or use
 // the InternalToken.
-func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler) http.Handler {
+func CSRFMiddleware(store *config.Store, internalToken string, logger interface {
+	Warn(msg string, args ...any)
+}) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Only check mutating methods
@@ -149,11 +148,6 @@ func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler
 				return
 			}
 
-			var networkAccess string
-			store.Read(func(c *config.MoomboxConfig) {
-				networkAccess = c.Network.NetworkAccess
-			})
-
 			origin := r.Header.Get("Origin")
 			if origin == "" {
 				origin = r.Header.Get("Referer")
@@ -169,7 +163,22 @@ func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler
 				return
 			}
 
-			if !isAllowedOrigin(origin, networkAccess, effectiveRequestHost(store, r), effectiveRequestScheme(r)) {
+			allowed, comparedHost := originAllowed(store, r, origin)
+			if !allowed {
+				// One line naming the pair that was compared. The most common
+				// cause of a 403 here is a reverse proxy that rewrites Host
+				// without being listed in network.trusted_proxies, and without
+				// this the operator sees only the browser's console error
+				// (Arc 5 Task 1 follow-up). The value is client-chosen, so it
+				// is clipped before it reaches the dashboard's log panel. This
+				// middleware runs ahead of the IP gate and of every per-route
+				// rate limiter, so an unauthenticated peer can fire this line
+				// once per request; volume is bounded only by the logger's
+				// fixed-size ring buffer and its file rotation
+				// (internal/logger/logger.go).
+				logger.Warn("CSRF: origin refused",
+					"origin", clipForLog(origin),
+					"host", clipForLog(comparedHost))
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))
@@ -230,6 +239,92 @@ func LoopbackOnly(next http.Handler) http.Handler {
 	})
 }
 
+// originAllowed is the ONE Origin decision. CORSMiddleware, CSRFMiddleware and
+// the WebSocket upgrade all route through it, so the three can never again
+// disagree about which authority the request answers as (X-Forwarded-Host from
+// a trusted proxy, else r.Host), how ports compare (exactly, once either side
+// names one), or which hostnames a certificate attests. Before this, the
+// upgrade read r.Host only and wildcarded the port, so a Host-rewriting proxy
+// loaded the dashboard and then had every socket refused (Arc 5 arc-close F6).
+//
+// Returns the authority the origin was compared against as well, so a refusal
+// can name the pair without recomputing it.
+func originAllowed(store *config.Store, r *http.Request, origin string) (bool, string) {
+	var networkAccess string
+	store.Read(func(c *config.MoomboxConfig) {
+		networkAccess = c.Network.NetworkAccess
+	})
+	host := effectiveRequestHost(store, r)
+	return isAllowedOrigin(origin, networkAccess, host, effectiveRequestScheme(r), identityHosts()), host
+}
+
+// clipForLog bounds a header value the CLIENT chose before it reaches the log
+// ring buffer the dashboard renders, and drops any invalid UTF-8 the byte cut
+// may have left behind.
+func clipForLog(s string) string {
+	const maxLoggedHeader = 200
+	if len(s) > maxLoggedHeader {
+		s = s[:maxLoggedHeader] + "…"
+	}
+	return strings.ToValidUTF8(s, "")
+}
+
+// identityHosts returns the certificate-attested hostnames for this deployment,
+// or nil when no certificate is loaded (no TLS at all — which is every
+// reverse-proxy deployment) or the only one is Moombox's placeholder.
+//
+// Reads the CurrentCertSANs singleton LoadOrGenerateTLSConfig publishes before
+// the listener starts (internal/web/tls.go); tests swap it around one case.
+func identityHosts() []string {
+	if CurrentCertSANs == nil {
+		return nil
+	}
+	return CurrentCertSANs.IdentitySANs()
+}
+
+// hostInSANs reports whether hostname — an Origin's url.Hostname(), so never
+// bracketed and never carrying a port — is one of the certificate-attested
+// names. Both sides go through splitAuthority, so IP SANs compare canonically
+// ("::1" == "0:0:0:0:0:0:0:1") and DNS SANs compare case-insensitively.
+//
+// allowWildcard gates the "*." expansion below (RFC 6125: exactly one
+// leftmost, non-empty, dot-free label). Only the external/public arm of
+// isAllowedOrigin passes true: there, sameSiteOrigin already pins hostname to
+// the browser's address bar first, so the wildcard can only ever NARROW which
+// same-host requests still pass. The localhost/lan/default arms have no such
+// conjunction — hostInSANs alone decides — so a wildcard there would let ANY
+// sibling of an operator's wildcard certificate (e.g. a stale or
+// attacker-registered subdomain under *.example.com) become an allowed
+// cross-origin request against a loopback-only install (fix-round-1 review
+// Finding 1 / probe P7). Passing false there means only a LITERAL SAN widens
+// those arms — an install with a real certificate for "dash.lan" keeps its
+// socket, but "evil.example.com" does not ride in on "*.example.com".
+func hostInSANs(hostname string, sans []string, allowWildcard bool) bool {
+	h, _ := splitAuthority(hostname)
+	if h == "" {
+		return false
+	}
+	for _, san := range sans {
+		s, _ := splitAuthority(san)
+		if s == "" {
+			continue
+		}
+		if s == h {
+			return true
+		}
+		if !allowWildcard {
+			continue
+		}
+		if suffix, ok := strings.CutPrefix(s, "*"); ok && strings.HasPrefix(suffix, ".") {
+			if label, found := strings.CutSuffix(h, suffix); found && label != "" &&
+				!strings.Contains(label, ".") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isAllowedOrigin validates an origin URL against the network_access config.
 // Uses proper URL parsing instead of substring matching.
 //
@@ -243,8 +338,22 @@ func LoopbackOnly(next http.Handler) http.Handler {
 // because AuthMiddleware waives loopback and private peers regardless of mode:
 // POST /api/restart, DELETE /api/jobs/{id}, PUT /api/config (sweep T1-6).
 //
-// localhost and lan keep their IP-class rules exactly as they were.
-func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme string) bool {
+// identity is the certificate-attested host list (identityHosts). On
+// external/public it is an ADDITIONAL requirement, never a substitute:
+// sameSiteOrigin must still pass, and then the origin's host must also appear
+// in the certificate. That conjunction is what closes DNS rebinding — a
+// rebinding page controls r.Host and its own Origin, so the pre-existing arm
+// compares two values it chose, but "attacker.dns" is in no certificate
+// Moombox holds (Arc 5 residual M-8). An install with no certificate, or only
+// Moombox's placeholder, has an empty identity and keeps the old behaviour
+// exactly; a rebinding attacker who also controls DNS for a name the
+// certificate attests is out of scope.
+//
+// localhost and lan keep their IP-class rules and gain identity as a pure
+// WIDENING: both arms reject every DNS name, and the WebSocket upgrade now
+// routes through this function, so without it an install holding a real
+// certificate for "dash.lan" would lose the socket it has today.
+func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme string, identity []string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
@@ -257,13 +366,20 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme strin
 
 	switch networkAccess {
 	case "localhost":
-		return isLoopback(hostname) || hostname == "localhost"
+		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)
 	case "lan":
-		return isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname)
+		return isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname) ||
+			hostInSANs(hostname, identity, false)
 	case "external", "public":
-		return sameSiteOrigin(origin, effectiveHost, effectiveScheme)
+		if !sameSiteOrigin(origin, effectiveHost, effectiveScheme) {
+			return false
+		}
+		if len(identity) == 0 {
+			return true
+		}
+		return hostInSANs(hostname, identity, true)
 	default:
-		return isLoopback(hostname) || hostname == "localhost"
+		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)
 	}
 }
 
