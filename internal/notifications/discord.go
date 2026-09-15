@@ -263,6 +263,9 @@ func (d *DiscordWebhook) post(body []byte) (status int, retryAfter, snippet stri
 	}()
 	if resp.StatusCode >= 400 {
 		// Read the reason BEFORE the deferred drain throws the rest away.
+		// The read error is intentionally ignored: a partial read (e.g. the
+		// connection drops mid-body) still yields whatever prefix arrived,
+		// which is a usable snippet — better than discarding it outright.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, discordErrBodyBytes))
 		snippet = discordErrSnippet(b)
 	}
