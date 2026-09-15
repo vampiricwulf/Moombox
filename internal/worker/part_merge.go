@@ -553,6 +553,16 @@ func mergedChatPath(mediaPath string) string {
 // merge's caller-side response to an error is to abort the WHOLE run this
 // chat merge belongs to (media included), not just fall back to a
 // chat-less media merge — see merge's doc comment.
+//
+// This is a FIFTH chat writer, and the only one that writes a chat file with
+// no emoteOffsets marker (chatEmoteOffsetsUTF16, internal/twitch/chat.go; the
+// IRC full-file write and the VOD write are the two that carry it). That is
+// harmless today for exactly the reason above: every Twitch part this can be
+// handed fails the chat.ChatData unmarshal, so it never produces a Twitch
+// file at all. If it is ever taught to merge twitch.TwitchChatData, it MUST
+// carry chatEmoteOffsetsUTF16 into the merged file — a Twitch chat file
+// without the marker is indistinguishable at replay from a legacy
+// code-point-offset file and would be "corrected" a second time.
 func mergeChatFiles(paths []string, outPath string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("no chat files to merge")
