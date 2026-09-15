@@ -95,6 +95,38 @@ func (w *certWatcher) SANs() []string {
 	return out
 }
 
+// placeholderCertCN is the Common Name generateSelfSignedCert stamps on the
+// certificate Moombox writes for itself. IdentitySANs keys off it, so the
+// generator and the reader must stay one constant.
+const placeholderCertCN = "Moombox"
+
+// IdentitySANs returns the hostnames a certificate ATTESTS this deployment
+// answers to, or nil when there is no such certificate.
+//
+// Moombox's OWN placeholder returns nil. generateSelfSignedCert stamps it with
+// placeholderCertCN and self-issues it, and its SANs are localhost, 127.0.0.1,
+// ::1 plus whatever interface addresses the machine happened to have at first
+// start: they name the MACHINE, never the address an operator points a browser
+// at. Treating them as an allowlist would refuse every external install reached
+// by a DNS name or a NATed public address. A certificate the operator installed
+// — Let's Encrypt, a corporate CA, or their own self-signed with a real CN —
+// does name the deployment, and is trusted to NARROW the Origin check
+// (isAllowedOrigin, internal/web/middleware.go).
+func (w *certWatcher) IdentitySANs() []string {
+	c := w.cert.Load()
+	if c == nil || len(c.Certificate) == 0 {
+		return nil
+	}
+	parsed, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
+		return nil
+	}
+	if parsed.Subject.CommonName == placeholderCertCN && parsed.Issuer.CommonName == placeholderCertCN {
+		return nil
+	}
+	return w.SANs()
+}
+
 // CurrentCertSANs is the package-level singleton populated by
 // LoadOrGenerateTLSConfig. Nil before the TLS config is built; consumers
 // (websocket.go) call .SANs() defensively.
@@ -185,7 +217,7 @@ func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger inte
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "Moombox"},
+		Subject:      pkix.Name{CommonName: placeholderCertCN},
 		NotBefore:    now,
 		NotAfter:     now.Add(10 * 365 * 24 * time.Hour), // ~10 years
 		KeyUsage:     x509.KeyUsageDigitalSignature,

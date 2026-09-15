@@ -75,8 +75,11 @@ func TestIsAllowedOrigin(t *testing.T) {
 		// host/scheme describe the request the Origin arrived on. Empty means
 		// the default fixture in the runner — every localhost/lan row predates
 		// the same-host rule and must keep passing without naming a host.
-		host     string
-		scheme   string
+		host   string
+		scheme string
+		// identity is the certificate-attested host list. nil means "no
+		// certificate", which is what every pre-existing row wants.
+		identity []string
 		expected bool
 	}{
 		{
@@ -218,6 +221,90 @@ func TestIsAllowedOrigin(t *testing.T) {
 			host:          "dash.example",
 			expected:      false,
 		},
+		// The certificate-identity rows (chain-close O3a), and the mutants each
+		// one kills: making the identity arm REPLACE sameSiteOrigin instead of
+		// conjoining it fails the ":8080" row; dropping hostInSANs from the
+		// external arm fails the rebinding row; denying when identity is empty
+		// fails the certless row; dropping the "*." clause fails the wildcard
+		// row; letting the wildcard span a dot fails the two-label row;
+		// dropping hostInSANs from the lan arm fails the "dash.lan" row.
+		{
+			name:          "external mode allows a certificate-attested host",
+			origin:        "http://dash.example",
+			networkAccess: "external",
+			host:          "dash.example",
+			identity:      []string{"dash.example"},
+			expected:      true,
+		},
+		{
+			name:          "external mode refuses a rebinding page once a certificate names the deployment",
+			origin:        "http://attacker.dns",
+			networkAccess: "external",
+			host:          "attacker.dns", // the rebinding page controls BOTH
+			identity:      []string{"dash.example"},
+			expected:      false,
+		},
+		{
+			name:          "external mode without a certificate keeps the same-host rule alone",
+			origin:        "http://attacker.dns",
+			networkAccess: "external",
+			host:          "attacker.dns",
+			identity:      nil,
+			expected:      true,
+		},
+		{
+			name:          "external mode still compares ports with a certificate present",
+			origin:        "http://dash.example:8080",
+			networkAccess: "external",
+			host:          "dash.example:774",
+			identity:      []string{"dash.example"},
+			expected:      false,
+		},
+		{
+			name:          "external mode still allows a TLS-terminated portless pair",
+			origin:        "https://dash.example",
+			networkAccess: "external",
+			host:          "dash.example",
+			identity:      []string{"dash.example"},
+			expected:      true,
+		},
+		{
+			name:          "external mode expands a wildcard SAN by one label",
+			origin:        "https://dash.example.com",
+			networkAccess: "external",
+			host:          "dash.example.com",
+			identity:      []string{"*.example.com"},
+			expected:      true,
+		},
+		{
+			name:          "external mode refuses a wildcard SAN spanning two labels",
+			origin:        "https://a.b.example.com",
+			networkAccess: "external",
+			host:          "a.b.example.com",
+			identity:      []string{"*.example.com"},
+			expected:      false,
+		},
+		{
+			name:          "lan mode allows a certificate-attested name",
+			origin:        "https://dash.lan",
+			networkAccess: "lan",
+			identity:      []string{"dash.lan"},
+			expected:      true,
+		},
+		{
+			name:          "lan mode still refuses a bare name with no certificate",
+			origin:        "https://dash.lan",
+			networkAccess: "lan",
+			identity:      nil,
+			expected:      false,
+		},
+		{
+			name:          "localhost mode is unchanged when no certificate is loaded",
+			origin:        "http://localhost",
+			networkAccess: "localhost",
+			identity:      nil,
+			expected:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -230,10 +317,10 @@ func TestIsAllowedOrigin(t *testing.T) {
 			if scheme == "" {
 				scheme = "http"
 			}
-			result := isAllowedOrigin(tt.origin, tt.networkAccess, host, scheme)
+			result := isAllowedOrigin(tt.origin, tt.networkAccess, host, scheme, tt.identity)
 			if result != tt.expected {
-				t.Errorf("isAllowedOrigin(%q, %q, host=%q, scheme=%q) = %v, expected %v",
-					tt.origin, tt.networkAccess, host, scheme, result, tt.expected)
+				t.Errorf("isAllowedOrigin(%q, %q, host=%q, scheme=%q, identity=%v) = %v, expected %v",
+					tt.origin, tt.networkAccess, host, scheme, tt.identity, result, tt.expected)
 			}
 		})
 	}
