@@ -100,6 +100,14 @@ func NewServer(store *config.Store, logger interface {
 	// trusted reverse proxy would re-open the auth bypass there.
 	s.ws.ClientIP = func(r *http.Request) string { return EffectiveClientIP(store, r) }
 
+	// ...and the same Origin decision: before this the upgrade read r.Host
+	// only and wildcarded the port, so a Host-rewriting reverse proxy loaded
+	// the dashboard and then had every socket refused (Arc 5 arc-close F6).
+	s.ws.OriginCheck = func(r *http.Request) bool {
+		ok, _ := originAllowed(store, r, r.Header.Get("Origin"))
+		return ok
+	}
+
 	// Apply middleware (order matters).
 	// RequestID first so RecoveryMiddleware (and any future logger
 	// middleware) can correlate log lines back to the originating request

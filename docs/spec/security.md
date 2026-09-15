@@ -208,12 +208,15 @@ read the answers too (sweep T1-6). Both halves refuse now: `CORSMiddleware` refl
 `isAllowedOrigin` admits it, and the preflight branch reuses that one decision instead of recomputing
 it. **Operator consequence:** a reverse proxy must forward the client's `Host` verbatim; otherwise the
 dashboard's own posts are refused with `403 Forbidden: invalid origin`. Listing the proxy in
-`network.trusted_proxies` so its `X-Forwarded-Host` is read satisfies the CSRF and CORS checks only —
-it is NOT an alternative. The WebSocket upgrade builds its allowed origins from `r.Host` and the
-certificate SANs and never reads `X-Forwarded-Host` (`allowedOriginPatterns`,
-`internal/web/websocket.go`), so a Host-rewriting proxy loads the dashboard and then has every socket
-upgrade refused — a page with no live updates. Aligning the upgrade check with `trusted_proxies` is a
-chain-close residual.
+`network.trusted_proxies` so its `X-Forwarded-Host` is read is not a workaround — it is the
+alternative. The WebSocket upgrade makes the SAME decision through the same helper:
+`WebSocketHub.OriginCheck` (`internal/web/websocket.go`) is wired by `NewServer` to `originAllowed`
+(`internal/web/middleware.go`), so a proxy listed in `network.trusted_proxies` satisfies the upgrade
+exactly as it satisfies CSRF and CORS, and ports are compared exactly rather than wildcarded. The
+check runs before `websocket.Accept`, which is then given `InsecureSkipVerify` — the library's own
+check accepts `Origin == Host` unconditionally, which is the pair a DNS-rebinding page controls, and
+matches ports with `filepath.Match`. An upgrade carrying no `Origin` header at all is still
+accepted, as it was before: browsers always send one, and non-browser clients never do.
 `internal/web/routes/cookies_import_chain_test.go` drives the CSRF half through the real chain — the
 missing-origin refusal on a `public` fixture and the invalid-origin refusal on a `lan` one. The CORS
 half is pinned separately, at middleware level, by `TestCORSReflectionFollowsTheOriginPolicy`

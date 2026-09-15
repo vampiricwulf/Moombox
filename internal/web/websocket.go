@@ -3,9 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,6 +72,13 @@ type WebSocketHub struct {
 	// decision (trusted_proxies / X-Forwarded-For aware). Set by NewServer;
 	// nil falls back to the raw peer address.
 	ClientIP func(*http.Request) string
+
+	// OriginCheck decides whether an upgrade's Origin header is acceptable.
+	// Set by NewServer to the SAME decision CORSMiddleware and CSRFMiddleware
+	// make (originAllowed, internal/web/middleware.go): X-Forwarded-Host from a
+	// trusted proxy, port-exact, certificate-attested on external/public.
+	// Nil accepts every origin — only test harnesses leave it nil.
+	OriginCheck func(r *http.Request) bool
 
 	// Log buffer for initial state (ring buffer)
 	logBufMu sync.RWMutex
@@ -146,11 +151,25 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Origin policy, decided here rather than by the library. The library's
+	// own check cannot express it: authenticateOrigin returns nil
+	// unconditionally when Origin == Host, which is exactly the pair a
+	// DNS-rebinding page controls, and its OriginPatterns are matched with
+	// filepath.Match so a port can only be wildcarded or spelled literally.
+	// An EMPTY Origin stays acceptable — non-browser clients send none, and
+	// the library allowed them too.
+	if origin := r.Header.Get("Origin"); origin != "" && hub.OriginCheck != nil && !hub.OriginCheck(r) {
+		hub.logger.Warn("websocket upgrade rejected: origin refused",
+			"origin", clipForLog(origin),
+			"host", clipForLog(r.Host))
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Validate same-origin: nhooyr.io/websocket checks Origin vs Host by default.
-		// Override with a custom check to allow loopback/LAN variants (localhost,
-		// 127.0.0.1, 192.168.x.x, etc.) that may not match Host exactly.
-		OriginPatterns: hub.allowedOriginPatterns(r),
+		// The check above IS the origin policy; skipping the library's leaves
+		// exactly one (sweep chain-close F6).
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		hub.logger.Error("websocket upgrade failed", "err", err)
@@ -460,54 +479,6 @@ func (hub *WebSocketHub) removeClient(client *wsClient, reason string) {
 	}()
 	close(client.writes)
 	client.conn.Close(websocket.StatusInternalError, reason)
-}
-
-// allowedOriginPatterns builds a list of host patterns for the WebSocket
-// upgrade. The library already allows same-origin (Origin host == Request
-// host), so these patterns only need to cover cross-origin localhost/LAN
-// aliases. Patterns are matched against the Origin header's host using
-// filepath.Match.
-//
-// Audit reports/web.md S-17 — when the TLS certificate is loaded, its SANs
-// (DNSNames + IPAddresses) become the trusted hostname allowlist. r.Host
-// is attacker-controlled (HTTP Host header), so falling back to it could
-// let a browser pointed at a malicious DNS entry mapping to 127.0.0.1
-// pass the origin check. Cert SANs are server-controlled, so trusting
-// them is safe.
-func (hub *WebSocketHub) allowedOriginPatterns(r *http.Request) []string {
-	var patterns []string
-
-	// Cert-SAN allowlist — preferred trust source. Only set after
-	// LoadOrGenerateTLSConfig has run; before that we fall back to the
-	// historical r.Host derivation (cert SANs land before the listener
-	// starts so this is only ever nil in test harnesses).
-	if CurrentCertSANs != nil {
-		for _, san := range CurrentCertSANs.SANs() {
-			patterns = append(patterns, san, san+":*")
-			// Loopback aliasing — cert covers 127.0.0.1, browsers may
-			// present "localhost" in the Origin header.
-			if san == "127.0.0.1" || san == "::1" {
-				patterns = append(patterns, "localhost", "localhost:*")
-			}
-		}
-	}
-
-	host := r.Host
-	if host == "" {
-		return patterns
-	}
-	hostname := host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		hostname = h
-	}
-	patterns = append(patterns, hostname+":*")
-	if hostname == "127.0.0.1" || hostname == "::1" {
-		patterns = append(patterns, "localhost", "localhost:*")
-	}
-	if strings.EqualFold(hostname, "localhost") {
-		patterns = append(patterns, "127.0.0.1", "127.0.0.1:*")
-	}
-	return patterns
 }
 
 // initialStateBytes marshals the snapshot a freshly-connected client receives.

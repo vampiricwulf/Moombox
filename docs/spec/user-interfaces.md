@@ -468,7 +468,7 @@ The Web UI establishes a WebSocket connection to the server on page load. The se
 `github.com/coder/websocket` for WebSocket handling (the library upstream renamed from
 `nhooyr.io/websocket`; the import path in `go.mod` is the coder one).
 
-**Upgrade:** The WebSocket upgrade handler is registered as an interceptor on the main HTTP handler. Any request with an `Upgrade: websocket` header is routed to the WebSocket handler regardless of the URL path. Origin validation checks that the request comes from the same origin or a loopback/LAN alias.
+**Upgrade:** The WebSocket upgrade handler is registered as an interceptor on the main HTTP handler. Any request with an `Upgrade: websocket` header is routed to the WebSocket handler regardless of the URL path. Origin validation runs before the handshake and is the same decision `CSRFMiddleware` makes — the same `network_access` policy, the same `X-Forwarded-Host`-from-a-trusted-proxy rule, the same exact port comparison, and the same certificate-SAN requirement on `external`/`public`. An upgrade with no `Origin` header is accepted, which is how non-browser clients connect.
 
 **Authentication:** For external (non-loopback, non-private-network) connections when auth is configured, the `AuthCheck` function validates the upgrade request before accepting. Unauthenticated external WebSocket upgrades are rejected.
 
