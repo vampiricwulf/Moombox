@@ -137,6 +137,21 @@ func reportSuccess(tag string) {
 	}
 }
 
+// reportFetchFailure records a connectivity failure unless the CALLER's
+// context is already done. A cancelled download (shutdown, user cancel,
+// quality split, superseded refresh) kills its in-flight requests by design,
+// and counting those as network failures drags the connectivity oracle
+// toward "offline" on every clean stop. Every fetch below derives a
+// per-request context from its caller's, so the guard must ask the parent:
+// the derived one carries the request deadline, and a request that genuinely
+// timed out IS evidence.
+func reportFetchFailure(parent context.Context, tag string) {
+	if parent.Err() != nil {
+		return
+	}
+	reportFailure(tag)
+}
+
 // readBody reads resp.Body, returns at most capBytes, and pre-allocates the
 // result when the server declared a usable Content-Length.
 //
@@ -179,8 +194,8 @@ func readBody(resp *http.Response, capBytes int64) ([]byte, error) {
 }
 
 // fetchSegment downloads a single segment (or playlist) by URL.
-func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
+func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(parent, SegmentTimeout)
 	defer cancel()
 
 	// Apply GVS PO token to segment URL (query mode: ?pot=token)
@@ -194,7 +209,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return nil, 0, err
 	}
 	reportSuccess("engine/fetch")
@@ -475,10 +490,10 @@ func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) 
 
 // probeHeadAt issues a single head-discovery GET at the given probe sequence
 // and parses the X-Head-Seqnum response header.
-func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int, error) {
+func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (int, error) {
 	probeURL := d.buildSegmentURL(probeSeq)
 	probeURL = applyPoTokenQuery(probeURL, d.getPoToken())
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
@@ -489,7 +504,7 @@ func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int,
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return -1, err
 	}
 	reportSuccess("engine/fetch")
@@ -522,8 +537,8 @@ func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int,
 // behavior unconditionally io.Copy'd the body to io.Discard first, which on
 // a non-Range-supporting CDN meant pulling a multi-GB VOD just to throw it
 // away (audit reports/engine.md Finding 14).
-func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
@@ -535,7 +550,7 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return 0
 	}
 	reportSuccess("engine/fetch")
@@ -600,8 +615,8 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 }
 
 // fetchChunk downloads a single byte range from the direct URL.
-func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
+func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(parent, SegmentTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
@@ -613,7 +628,7 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return nil, 0, err
 	}
 	reportSuccess("engine/fetch")
