@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -163,5 +165,71 @@ func TestDecapi_DateFetchErrorSkips(t *testing.T) {
 	}
 	if len(*found) != 0 {
 		t.Fatalf("a window-unverifiable vod must not job: %v", *found)
+	}
+}
+
+// TestDecapi_ProbeBudgetIsIndependentOfTheRequestTimeout pins T1-10: the
+// classification phase must NOT inherit the DECAPI request deadline.
+//
+// The old code wrapped the whole channel check in one decapiRequestTimeout
+// context and passed it to processResponse, so the player probe and the §9
+// date fetch shared whatever was left of 15 s after DECAPI answered. The
+// fixture's server is fast; it does not need to burn 14 s to kill that
+// mutant, because a probe running under the REQUEST context sees a deadline
+// of at most decapiRequestTimeout (15 s) no matter how quick the answer was,
+// and the assertion below demands 30 s.
+//
+// Mutants this fails on:
+//   - `return dm.processResponse(ctx, …)` with the request context: deadline ~15 s.
+//   - no probe context at all: the cycle context here carries no deadline.
+//   - `context.WithTimeout(context.Background(), decapiProbeBudget)`: the
+//     cancel-propagation assertion fires (a stopped monitor must cancel an
+//     in-flight probe).
+func TestDecapi_ProbeBudgetIsIndependentOfTheRequestTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond) // DECAPI latency, in miniature
+		fmt.Fprint(w, decapiBody("vidDecBud06", "budget probe"))
+	}))
+	t.Cleanup(srv.Close)
+
+	origURL := decapiLatestVideoURL
+	decapiLatestVideoURL = srv.URL + "?id=%s"
+	t.Cleanup(func() { decapiLatestVideoURL = origURL })
+
+	cycleCtx, cancelCycle := context.WithCancel(context.Background())
+	t.Cleanup(cancelCycle)
+
+	var (
+		budget             time.Duration
+		hadDeadline        bool
+		cancelledWithCycle bool
+	)
+	db := newTestDB(t)
+	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		var dl time.Time
+		dl, hadDeadline = ctx.Deadline()
+		budget = time.Until(dl)
+		// A CHILD of the cycle context, not of context.Background(): stopping
+		// the monitor has to cancel a probe that is already in flight.
+		cancelCycle()
+		cancelledWithCycle = ctx.Err() != nil
+		return &VideoProbeResult{StreamStatus: "live", Title: "budget probe"}, nil
+	})
+
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+	if err := dm.checkChannel(cycleCtx, ch); err != nil {
+		t.Fatalf("checkChannel: %v", err)
+	}
+	if !hadDeadline {
+		t.Fatal("the probe context carried no deadline — the probe must run under decapiProbeBudget")
+	}
+	if budget < 30*time.Second {
+		t.Fatalf("probe budget = %v, want >= 30s — the probe is still running under the %v request timeout", budget, decapiRequestTimeout)
+	}
+	if budget > decapiProbeBudget {
+		t.Fatalf("probe budget = %v, want <= %v", budget, decapiProbeBudget)
+	}
+	if !cancelledWithCycle {
+		t.Fatal("cancelling the cycle context did not cancel the probe context — the probe budget must derive from the cycle context, not context.Background()")
 	}
 }

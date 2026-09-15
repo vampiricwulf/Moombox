@@ -23,7 +23,20 @@ const (
 	decapiStagger          = 1 * time.Second
 	decapiMinInterval      = 15 * time.Second
 	decapiDefaultRateLimit = 60
+	// decapiProbeBudget bounds the classification work that runs AFTER the
+	// DECAPI body is in hand — ProcessYouTubeVideo's player probe and, for a
+	// dateless vod-family result, the §9 date fetch. It is derived from the
+	// CYCLE context, never from the request context: a DECAPI answer that took
+	// 14 s used to leave the probe ~1 s, and a probe that dies on a leftover
+	// deadline is a MISSED live stream, not a slow one.
+	decapiProbeBudget = 60 * time.Second
 )
+
+// decapiLatestVideoURL is the latest-video endpoint as a printf template. A
+// package var so a test can aim checkChannel at an httptest server — the same
+// seam shape internal/youtube uses for membershipPageBase. Production never
+// rewrites it.
+var decapiLatestVideoURL = "https://decapi.me/youtube/latest_video?id=%s"
 
 var decapiVideoIDRe = regexp.MustCompile(`(?:youtu\.be/|youtube\.com/watch\?v=)([a-zA-Z0-9_-]{11})`)
 
@@ -422,15 +435,37 @@ func (dm *DecapiMonitor) waitForRateLimit(ctx context.Context) {
 	}
 }
 
+// checkChannel polls one channel's latest video and classifies it.
+//
+// The two phases own SEPARATE contexts on purpose (T1-10). fetchLatestVideo
+// holds the decapiRequestTimeout deadline and releases it the moment the body
+// is read; the classification phase then runs under a fresh decapiProbeBudget
+// derived from the cycle context, so how long the probe gets never depends on
+// how long DECAPI took to answer.
 func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfig) error {
-	url := fmt.Sprintf("https://decapi.me/youtube/latest_video?id=%s", ch.ID)
+	body, err := dm.fetchLatestVideo(ctx, ch)
+	if err != nil {
+		return err
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, decapiProbeBudget)
+	defer cancel()
+	return dm.processResponse(probeCtx, body, ch)
+}
+
+// fetchLatestVideo GETs the channel's DECAPI latest_video line under the
+// request timeout and returns the raw body. Rate-limit accounting and the
+// passive-connectivity report live here; the timeout context is cancelled
+// before this returns, so nothing downstream inherits it.
+func (dm *DecapiMonitor) fetchLatestVideo(ctx context.Context, ch *config.ChannelConfig) (string, error) {
+	url := fmt.Sprintf(decapiLatestVideoURL, ch.ID)
 
 	ctx, cancel := context.WithTimeout(ctx, decapiRequestTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("User-Agent", "Moombox/1.0")
 
@@ -438,7 +473,7 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	if err != nil {
 		// Transport-level failure — feeds the passive offline tracker.
 		reportMonitorResult("monitor/decapi", true)
-		return fmt.Errorf("decapi request: %w", err)
+		return "", fmt.Errorf("decapi request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -469,23 +504,22 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 		// Drain so the connection can be reused (closing an unread body
 		// discards the TCP connection — costly during a sustained 429 storm).
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("rate limited (429)")
+		return "", fmt.Errorf("rate limited (429)")
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		// Non-2xx — server reachable but unhappy; leave tracker alone.
 		// Drain a bounded amount before close to keep the connection reusable.
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("decapi http %d", resp.StatusCode)
+		return "", fmt.Errorf("decapi http %d", resp.StatusCode)
 	}
 	reportMonitorResult("monitor/decapi", false)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	return dm.processResponse(ctx, string(body), ch)
+	return string(body), nil
 }
 
 func (dm *DecapiMonitor) updateRateLimit(resp *http.Response) {
