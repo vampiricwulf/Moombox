@@ -386,11 +386,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					ended, checkErr := d.opts.CheckStreamStatus(ctx)
 					switch {
 					case checkErr != nil:
-						// Not a verdict (see the 404 site). This exit returns
-						// an error either way, so there is nothing to defer
-						// TO — but "assuming ended" described a finalize this
-						// path never performs, and the operator reading the
-						// log needs to know the status is UNKNOWN.
+						// Not a verdict either — see the identical reasoning at the fetch-failure site above.
 						d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
 					case !ended:
 						return ErrQualityLost

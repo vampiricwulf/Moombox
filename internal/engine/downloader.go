@@ -109,12 +109,11 @@ const (
 )
 
 // SegmentTimeout bounds a single segment/chunk/probe fetch's derived
-// context (fetchSegment, probeHeadAt, probeFileSize, fetchChunk,
-// ProbeSegmentAvailable each run context.WithTimeout(parent,
-// SegmentTimeout)). A package var rather than a const purely so a test can
-// shrink it under t.Cleanup-restored assignment to exercise a genuine
-// derived-context timeout without an actual 30s wait; production code never
-// mutates it.
+// context (fetchSegment, fetchChunk, ProbeSegmentAvailable each run
+// context.WithTimeout(parent, SegmentTimeout)). A package var rather than a
+// const purely so a test can shrink it under t.Cleanup-restored assignment
+// to exercise a genuine derived-context timeout without an actual 30s wait;
+// production code never mutates it.
 var SegmentTimeout = 30 * time.Second
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced

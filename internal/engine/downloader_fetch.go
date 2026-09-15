@@ -675,12 +675,16 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	// memory past it (mirrors the maxIgnoredRangeBodyBytes cap on the 200 path).
 	data, err := readBody(resp, end-start+1)
 	if err == nil {
-		// LimitReader returns EOF the instant its counter hits 0, WITHOUT the
-		// trailing Read that lets net/http observe the body's own io.EOF — so
-		// the connection is marked non-reusable and a fresh TCP+TLS handshake
-		// is paid per 5MB chunk (thousands over a large VOD) under HTTP/1.1.
-		// A bounded drain triggers that EOF-observing read (a correct server
-		// has 0 bytes left) so the socket returns to the idle pool.
+		// A correct server declares Content-Length == end-start+1, so
+		// readBody takes its sized path and observes the body's own io.EOF
+		// itself while reading (see readBody's doc above +
+		// TestFetchSegmentReusesConnection) — the connection already
+		// returns to the idle pool without further help. This drain is
+		// belt-and-braces for the unsized fallback: when Content-Length is
+		// absent or declares more than end-start+1, readBody falls through
+		// to the bounded io.ReadAll(io.LimitReader(...)) path, which can
+		// return before net/http has observed the body's own EOF and would
+		// leave the connection non-reusable without this drain.
 		io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 	}
 	return data, resp.StatusCode, err

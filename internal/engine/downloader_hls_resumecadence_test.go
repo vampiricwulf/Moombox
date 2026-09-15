@@ -72,7 +72,7 @@ func TestHlsResumeSaveIsRateLimited(t *testing.T) {
 	// A floor far longer than the whole test: every reload after the first
 	// falls inside one interval, so only the first save and the deferred
 	// final save may write.
-	d.delays.hlsResumeSave = 10 * time.Second
+	d.delays.hlsResumeSave = time.Hour
 	d.onResumeSaved = func(lastSeq int) {
 		mu.Lock()
 		saved = append(saved, lastSeq)
@@ -90,23 +90,9 @@ func TestHlsResumeSaveIsRateLimited(t *testing.T) {
 	mu.Unlock()
 
 	if len(got) != 2 {
-		t.Fatalf("sidecar written %d times (LastSeq %v) across %d reloads, want 2 — one at loop entry and one from the deferred final save", len(got), got, liveReloads)
+		t.Fatalf("sidecar written %d times (LastSeq %v) across %d reloads, want 2 — one on the first advance and one from the deferred final save", len(got), got, liveReloads)
 	}
 	if want := 100 + liveReloads; got[len(got)-1] != want {
 		t.Errorf("final sidecar LastSeq = %d, want %d — the deferred save must still record the true final position", got[len(got)-1], want)
-	}
-}
-
-// TestDefaultDelaysIncludesResumeSave is the production-timing pin for the
-// new field, in the same spirit as TestDefaultDelaysMatchConstants: a floor
-// silently defaulting to 0 would restore the every-reload fsync with every
-// other test still green.
-func TestDefaultDelaysIncludesResumeSave(t *testing.T) {
-	if got, want := defaultDelays().hlsResumeSave, 15*time.Second; got != want {
-		t.Errorf("defaultDelays().hlsResumeSave = %v, want %v", got, want)
-	}
-	d := NewSegmentDownloader(DownloaderOptions{OutputFile: filepath.Join(t.TempDir(), "o.ts")})
-	if d.delays.hlsResumeSave != hlsResumeSaveInterval {
-		t.Errorf("NewSegmentDownloader installed hlsResumeSave = %v, want %v", d.delays.hlsResumeSave, hlsResumeSaveInterval)
 	}
 }

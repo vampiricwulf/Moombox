@@ -43,6 +43,7 @@ func newEndVerdictDownloader(t *testing.T, url string, warns *warnCollector, che
 		},
 	})
 	d.delays = fastDelays()
+	d.delays.hlsPlaylistRetry = 10 * time.Millisecond
 	return d, &checks
 }
 

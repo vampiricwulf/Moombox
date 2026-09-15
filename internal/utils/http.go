@@ -97,6 +97,15 @@ func FetchWithTimeout(parent context.Context, url string, timeout time.Duration,
 		// stop. The check is against the caller's context on purpose: the
 		// derived one above carries this helper's own timeout, and a
 		// request that genuinely ran out of time IS network evidence.
+		//
+		// A parent that carries its OWN deadline is deliberately treated
+		// the same as a cancellation: a caller-imposed budget running out
+		// is a caller abort, not transport evidence, and the oracle
+		// converges from the engine sites and its own probes regardless.
+		// The two real callers that hand this helper a deadline parent are
+		// worker/strategies.go's refreshCtx (via GetVideoInfo into
+		// internal/youtube/watch_page.go) and monitor/feed.go's
+		// walkCtx/archiveCtx.
 		if parent.Err() == nil {
 			reportConnResult(true)
 		}
