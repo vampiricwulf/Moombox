@@ -38,6 +38,20 @@ type JobDetailsModel struct {
 	// without rebuilding all rows.
 	progressOverlay *ProgressData
 
+	// lastProgress / lastProgressSec are the gate SetProgress checks: the
+	// pointer the last rebuild ran on, and the wall-clock second it ran in.
+	// The progress store allocates a FRESH *ProgressData on every database
+	// write, so an unchanged pointer means nothing about this job has moved;
+	// the only rows that can still change are wall-clock-derived, and they
+	// only need the second to be current.
+	//
+	// The invariant the gate rests on: whenever lastProgress == p, the last
+	// call that got past the gate set progressOverlay = p, and the only other
+	// writer of progressOverlay is SetJob's job-switch reset — which clears
+	// lastProgress with it.
+	lastProgress    *ProgressData
+	lastProgressSec int64
+
 	// Version display
 	version    string
 	updateInfo *UpdateStatusMsg
@@ -103,6 +117,7 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 	// overlay and snap the scrolling title back to position 0 constantly.
 	if prevID != newID {
 		m.progressOverlay = nil
+		m.lastProgress = nil // rearm the SetProgress gate with the overlay
 	}
 	m.buildRows()
 	m.updateViewportContent()
@@ -132,8 +147,20 @@ func (m *JobDetailsModel) HasProgress() bool {
 
 // SetProgress updates the progress overlay from the progress store.
 // Rebuilds rows so that segment counts, Duration, Starts In, and chat messages
-// are recomputed from live data every 100ms (matches TS re-render behavior).
+// are recomputed from live data every tick (matches TS re-render behavior).
+//
+// Identical pointer in the same second = identical rows, so the rebuild is
+// skipped. This does not slow anything down: the tick still runs at 16ms and
+// every store write still rebuilds on arrival (a new pointer) — the ~50 of 60
+// ticks that carry no new data simply cost nothing now.
 func (m *JobDetailsModel) SetProgress(p *ProgressData) {
+	sec := time.Now().Unix()
+	if p == m.lastProgress && sec == m.lastProgressSec {
+		return
+	}
+	m.lastProgress = p
+	m.lastProgressSec = sec
+
 	m.progressOverlay = p
 	yOffset := m.viewport.YOffset()
 	m.buildRows()
@@ -183,10 +210,24 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	contentH := max(h-3, 1)
 	m.viewport.SetWidth(w - 2)
 	m.viewport.SetHeight(contentH)
+	// A width change (focus change, terminal resize, or the initial
+	// WindowSizeMsg arriving after jobs are already loaded) invalidates the
+	// rows themselves, not just their rendering: buildRows wraps the Error
+	// and Description blocks to the value column, so the wrap is baked into
+	// the row values. cycleFocus gives each panel a different share of the
+	// terminal, so this runs on every Tab press — and a re-render alone left
+	// the old wrap standing until the next rebuild, which the SetProgress
+	// gate defers for up to a second (and for a terminal job, whose
+	// progress-store entry is deleted, until the 1Hz RefreshRelativeTimes).
+	// SetContentLines keeps the scroll offset, clamping it to the new
+	// content, so no explicit YOffset dance is needed here.
+	widthChanged := prevW != w && m.job != nil
+	if widthChanged {
+		m.buildRows()
+	}
 	m.updateViewportContent()
-	// Recalculate marquee width when panel width changes (e.g. focus change,
-	// or initial WindowSizeMsg arriving after jobs are already loaded).
-	if prevW != w && m.job != nil {
+	// Recalculate marquee width when the panel width changes.
+	if widthChanged {
 		title := m.job.Title
 		if title == "" {
 			title = m.job.VideoID

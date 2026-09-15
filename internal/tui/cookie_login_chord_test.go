@@ -172,7 +172,7 @@ func TestReloginBadgeNamesTheChordTheMenuRegisters(t *testing.T) {
 	}
 	app.statusBar.SetActivePlatforms(true, true)
 	app.statusBar.SetCookieStatus(CookieStatusRelogin, CookieStatusOK)
-	if full := stripANSI(app.statusBar.renderCookieStatus(tierFull)); !strings.Contains(full, chord) {
+	if full := stripANSI(app.statusBar.renderCookieStatus(tierFull, app.statusBar.tallyJobs())); !strings.Contains(full, chord) {
 		t.Errorf("the badge %q does not name the registered chord %q", full, chord)
 	}
 }

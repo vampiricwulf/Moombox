@@ -220,8 +220,20 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// removal + selection refresh arrive via the JobDeleted lifecycle
 		// event (handleJobDeleted); the result message only sets feedback.
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnDeleteJob != nil {
-			ids := a.taskList.SelectedIDs()
+			// The menu item's JobFilter never reaches here (batch dispatches
+			// with a nil job), so the same rule is applied to the selection —
+			// the Web's batch bar filters its targets the same way.
+			var ids []string
+			for _, id := range a.taskList.SelectedIDs() {
+				if j := a.taskList.GetJobByID(id); j != nil && isDeletableStatus(j.Status) {
+					ids = append(ids, id)
+				}
+			}
 			a.taskList.ClearSelection()
+			if len(ids) == 0 {
+				a.setFeedback("No deletable jobs in selection")
+				return a, nil
+			}
 			a.setFeedback(fmt.Sprintf("Deleting %d jobs...", len(ids)))
 			deleteFn := a.OnDeleteJob
 			return a, safeCmd(func() tea.Msg {
@@ -630,6 +642,29 @@ func (a *App) refreshTrimList(job *database.Job) {
 	a.trimDlg.SetTrims(trimInfosFromJob(job))
 }
 
+// isDeletableStatus is the Web's DELETE_STATUSES set
+// (web/public/modules/utils.js) — the statuses both dashboards offer Delete
+// for. Owner ruling R3 (2026-09-15): the TUI hides Delete for an active job
+// exactly as the Web's job cards, details dialog and batch bar do. The server
+// accepts a delete in any state; this is a UI rule about not pulling a running
+// download out from under its worker.
+//
+// Two readers on purpose: the A D menu item's JobFilter (which gates the
+// chord, the job selector and the confirm-window re-validation) and the batch
+// arm of dispatchAction, which is dispatched with a nil job and so never sees
+// the filter — the same split A C and A W already carry.
+//
+// It happens to select the same four statuses as isProgressTerminal
+// (app_update.go) today, but it is a DIFFERENT rule with a different owner:
+// this one tracks the Web's DELETE_STATUSES, that one answers "can this job
+// still produce live progress". Keep them separate — never alias one to the
+// other or derive it from the other; the Web moving a status in or out of
+// DELETE_STATUSES must not silently change what the progress store holds.
+func isDeletableStatus(s database.JobStatus) bool {
+	return s == database.StatusFinished || s == database.StatusError ||
+		s == database.StatusCancelled || s == database.StatusCookies
+}
+
 // buildMenuItems builds context-sensitive action menu items.
 // This is the single source of truth for all chords, menu entries, feedback hints, and help text.
 func (a *App) buildMenuItems() []ActionMenuItem {
@@ -666,7 +701,8 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 				return j.Status != database.StatusFinished && j.Status != database.StatusCancelled && j.Status != database.StatusError
 			}},
 		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
-			DisabledReason: "no deletable jobs"},
+			DisabledReason: "no deletable jobs",
+			JobFilter:      func(j *database.Job) bool { return isDeletableStatus(j.Status) }},
 		{Chord: "A W", Label: "Toggle Watched", HintLabel: "Watched", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no finished jobs",
 			JobFilter:      func(j *database.Job) bool { return j.Status == database.StatusFinished }},

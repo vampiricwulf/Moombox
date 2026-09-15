@@ -301,6 +301,32 @@ func (m *StatusBarModel) controlTiers() []string {
 	}
 }
 
+// barJobCounts is everything the bar derives from the job list. Both halves
+// of it used to be recomputed inside the per-tier renderers, and metricTiers
+// renders all six tiers before fitTiers picks one — about eight walks of the
+// whole job list per frame, at up to 60 frames a second.
+type barJobCounts struct {
+	active   int  // Downloading + Live + Muxing (Queued waits for a slot)
+	ytParked bool // a job parked in COOKIES? on YouTube (an empty Platform counts as YouTube)
+	twParked bool // a job parked in COOKIES? on Twitch
+}
+
+// tallyJobs walks the job list once per frame. Two passes rather than one:
+// parkedCookieJobs stays the named home of the attribution rule (the spec doc
+// cites it by symbol and declaring file), so this calls it instead of
+// inlining it.
+func (m *StatusBarModel) tallyJobs() barJobCounts {
+	c := barJobCounts{}
+	c.ytParked, c.twParked = m.parkedCookieJobs()
+	for _, j := range m.jobs {
+		switch j.Status {
+		case database.StatusDownloading, database.StatusLive, database.StatusMuxing:
+			c.active++
+		}
+	}
+	return c
+}
+
 // metricTiers renders the right half (metrics + auth indicators) at every
 // density, richest first, indexed by barTier.
 //
@@ -311,15 +337,16 @@ func (m *StatusBarModel) controlTiers() []string {
 // (non-warning) disk and cookie readouts, leaving a bar that is silent
 // when everything is healthy and still shouts when it isn't.
 func (m *StatusBarModel) metricTiers() []string {
+	counts := m.tallyJobs()
 	tiers := make([]string, tierNone+1)
 	for t := tierFull; t <= tierNone; t++ {
-		tiers[t] = m.renderMetrics(t) + m.renderCookieStatus(t)
+		tiers[t] = m.renderMetrics(t, counts) + m.renderCookieStatus(t, counts)
 	}
 	return tiers
 }
 
 // renderMetrics renders disk usage and activity indicators at tier t.
-func (m *StatusBarModel) renderMetrics(t barTier) string {
+func (m *StatusBarModel) renderMetrics(t barTier, counts barJobCounts) string {
 	if t >= tierNone {
 		return ""
 	}
@@ -390,20 +417,11 @@ func (m *StatusBarModel) renderMetrics(t barTier) string {
 
 	// Active download count (StatusQueued is deliberately absent — a queued
 	// job is waiting for an archive slot, not an active download).
-	if t <= tierKeys {
-		activeCount := 0
-		for _, j := range m.jobs {
-			switch j.Status {
-			case database.StatusDownloading, database.StatusLive, database.StatusMuxing:
-				activeCount++
-			}
-		}
-		if activeCount > 0 {
-			if t >= tierCompact {
-				parts = append(parts, statusBarGrnStyle.Render(fmt.Sprintf("▶%d", activeCount)))
-			} else {
-				parts = append(parts, statusBarGrnStyle.Render(fmt.Sprintf("Active: %d", activeCount)))
-			}
+	if t <= tierKeys && counts.active > 0 {
+		if t >= tierCompact {
+			parts = append(parts, statusBarGrnStyle.Render(fmt.Sprintf("▶%d", counts.active)))
+		} else {
+			parts = append(parts, statusBarGrnStyle.Render(fmt.Sprintf("Active: %d", counts.active)))
 		}
 	}
 
@@ -542,7 +560,7 @@ func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
 // precondition for putting the reason on this line; refresh.go is not this
 // task's to change. Until then the operator gets the reason on the next R C,
 // which is a recheck away, rather than live.
-func (m *StatusBarModel) renderCookieStatus(t barTier) string {
+func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) string {
 	if t >= tierNone || (!m.ytActive && !m.twActive) {
 		return ""
 	}
@@ -550,7 +568,8 @@ func (m *StatusBarModel) renderCookieStatus(t barTier) string {
 	var parts []string
 
 	// Jobs parked in COOKIES?, attributed to the platform they belong to (B1).
-	ytRejected, twRejected := m.parkedCookieJobs()
+	// Tallied once per frame by tallyJobs; see parkedCookieJobs for the rule.
+	ytRejected, twRejected := counts.ytParked, counts.twParked
 
 	// healthy reports whether a platform's indicator is pure reassurance —
 	// dropped once space is scarce (tierEssential).
