@@ -295,7 +295,41 @@ func readChromeMetaVersion(db *sql.DB) (int64, bool) {
 // for the profile the row was read from: at meta.version >= 24 the
 // decrypted plaintext is `sha256(domain) || value` and the digest has to be
 // dropped before the value is usable.
+//
+// Builds the AEAD per call; the per-profile reader uses decryptV10CookieWith
+// so one key schedule serves every row.
 func decryptV10Cookie(masterKey, encrypted []byte, hashPrefix bool) (string, error) {
+	if len(encrypted) == 0 {
+		return "", nil
+	}
+	gcm, err := newCookieAEAD(masterKey)
+	if err != nil {
+		return "", err
+	}
+	return decryptV10CookieWith(gcm, encrypted, hashPrefix)
+}
+
+// newCookieAEAD builds the AES-GCM AEAD every v10/v11 cookie value in one
+// profile is opened with. Hoisted out of decryptV10Cookie so the per-profile
+// reader can build it ONCE: a signed-in Chrome profile holds thousands of cookie
+// rows, and each row used to expand the AES key schedule and construct a fresh
+// GCM. The AEAD is immutable and safe to reuse across Open calls.
+func newCookieAEAD(masterKey []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("aes.NewCipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("cipher.NewGCM: %w", err)
+	}
+	return gcm, nil
+}
+
+// decryptV10CookieWith is decryptV10Cookie over an AEAD the caller already
+// built — the form the per-profile reader uses so one key schedule serves every
+// row. Same rules, same errors; see decryptV10Cookie's doc for the format.
+func decryptV10CookieWith(gcm cipher.AEAD, encrypted []byte, hashPrefix bool) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
@@ -320,14 +354,6 @@ func decryptV10Cookie(masterKey, encrypted []byte, hashPrefix bool) (string, err
 	nonce := encrypted[len(prefix) : len(prefix)+nonceLen]
 	ciphertextWithTag := encrypted[len(prefix)+nonceLen:]
 
-	block, err := aes.NewCipher(masterKey)
-	if err != nil {
-		return "", fmt.Errorf("aes.NewCipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("cipher.NewGCM: %w", err)
-	}
 	plaintext, err := gcm.Open(nil, nonce, ciphertextWithTag, nil)
 	if err != nil {
 		// AES-GCM authenticates, so a failure here is not "corrupt data" —

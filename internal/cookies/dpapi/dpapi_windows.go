@@ -187,6 +187,13 @@ func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, C
 	if err != nil {
 		return nil, stats, fmt.Errorf("load master key: %w", err)
 	}
+	// ONE AEAD for the whole profile: the loop below runs per cookie row, and a
+	// signed-in profile holds thousands. A key that cannot produce an AEAD at
+	// all is a property of the key, so it fails here rather than once per row.
+	gcm, err := newCookieAEAD(masterKey)
+	if err != nil {
+		return nil, stats, fmt.Errorf("master key unusable: %w", err)
+	}
 
 	cookiesPath := filepath.Join(profilePath, "Cookies")
 	if _, statErr := os.Stat(cookiesPath); statErr != nil {
@@ -255,7 +262,7 @@ func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, C
 		// Summary()'s "N of M could not be decrypted" ratio understate
 		// itself for any caller that passes an origin filter.
 		stats.Rows++
-		value, decryptErr := decryptV10Cookie(masterKey, encVal, hashPrefix)
+		value, decryptErr := decryptV10CookieWith(gcm, encVal, hashPrefix)
 		if decryptErr != nil {
 			// Skip the row but don't kill the whole extraction —
 			// legacy pre-v10 rows (rare today), master-key
