@@ -170,11 +170,14 @@ export class StatsController {
       j.status === "Downloading" || j.status === "Live" || j.status === "Muxing"
     ).length;
 
+    // renderJobs calls this on every job_update, i.e. ~60 Hz per active job.
+    // Diff before writing (sweep T2-21).
     if (active > 0) {
-      el.style.display = "";
-      el.textContent = `\u25B6 ${active}`;
-      el.className = "active-indicator-on";
-    } else {
+      if (el.style.display !== "") el.style.display = "";
+      const text = `\u25B6 ${active}`;
+      if (el.textContent !== text) el.textContent = text;
+      if (el.className !== "active-indicator-on") el.className = "active-indicator-on";
+    } else if (el.style.display !== "none") {
       el.style.display = "none";
     }
   }
