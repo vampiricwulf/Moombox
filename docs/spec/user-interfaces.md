@@ -457,7 +457,9 @@ The left side shows chord hints (key labels for A, R, O, F, M, Tab, backtick, ?)
 
 ### Connection Lifecycle
 
-The Web UI establishes a WebSocket connection to the server on page load. The server uses `nhooyr.io/websocket` for WebSocket handling.
+The Web UI establishes a WebSocket connection to the server on page load. The server uses
+`github.com/coder/websocket` for WebSocket handling (the library upstream renamed from
+`nhooyr.io/websocket`; the import path in `go.mod` is the coder one).
 
 **Upgrade:** The WebSocket upgrade handler is registered as an interceptor on the main HTTP handler. Any request with an `Upgrade: websocket` header is routed to the WebSocket handler regardless of the URL path. Origin validation checks that the request comes from the same origin or a loopback/LAN alias.
 
@@ -466,6 +468,19 @@ The Web UI establishes a WebSocket connection to the server on page load. The se
 **Detached context:** The accepted WebSocket connection uses `context.Background()` rather than the HTTP request context. This prevents the connection from being killed by the server's `ReadTimeout`, which would otherwise close long-lived connections.
 
 **Initial state:** Immediately after connection, the server sends an `initial_state` message containing the full current state: all jobs, buffered log lines (up to 200 from the ring buffer), and monitor check schedule (next check times for Feed, DECAPI, and Twitch monitors). This allows the client to hydrate without making separate REST calls.
+
+**Backpressure and resync:** each client has a `wsWriteQueueSize = 16` frame outbound queue drained by
+its own `writePump`. A broadcast that finds the queue full drops the OLDEST frame and enqueues the new
+one, so a slow consumer can never stall a fast one — but drop-oldest discards frames nothing later
+restates (`job_deleted`, `jobs_update`, `config_update`), which used to leave a lagging tab showing a
+ghost row until it reconnected. A drop therefore arms that client's resync flag, and the NEXT frame it
+receives is the full `initial_state` snapshot instead of an incremental update — byte-for-byte what a
+fresh connection is sent (`initialStateBytes`, `internal/web/websocket.go`), which `app.js`'s
+`initial_state` handler applies as a full-state replace. Drops are counted per client; the hub logs
+`WS client lagging` at Debug at most once per `wsLagLogInterval` (30 s) per client, and the lifetime
+total once at teardown. The rate limit is load-bearing rather than cosmetic: a per-drop log line reaches
+the app logger, whose subscriber broadcasts it back to every client — including the full queue that just
+dropped, which drops and logs again.
 
 ### Message Format
 
@@ -511,7 +526,7 @@ Job update broadcasts are not throttled in the WebSocket hub. The only high-freq
 | Ping interval | 30 seconds (server-initiated) |
 | Write timeout | 10 seconds per message |
 | Max message size (read limit) | 1 MB |
-| Backpressure limit | 256 KB per client (messages dropped if write buffer exceeds this) |
+| Backpressure limit | 16 queued frames per client (`wsWriteQueueSize`); on overflow the oldest is dropped and the next frame is a full `initial_state` snapshot |
 | Log ring buffer | 200 lines (oldest evicted when full) |
 
 ---
