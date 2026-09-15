@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,11 @@ type importChain struct {
 	session    string
 	remoteAddr string
 	origin     string
+	// host is the authority the fixture's server answers as, derived from
+	// `origin` because a browser fills Host and Origin from the same address
+	// bar. httptest.NewRequest's default ("example.com") would make every
+	// request cross-origin under the external/public same-host rule (T1-6).
+	host string
 }
 
 // newImportChain builds the chain for one network_access policy.
@@ -74,13 +80,13 @@ type importChain struct {
 //     password hash.
 //   - IPGateMiddleware then only lets a public address through when
 //     network_access is "external" or "public".
-//   - But isAllowedOrigin returns true for EVERY origin under those two
-//     policies.
+//   - Under those two policies isAllowedOrigin admits an origin only when it
+//     names the request's own host (sweep T1-6), so this fixture derives its
+//     Host from its origin and a foreign origin is refused there too.
 //
-// So on a fixture that can exercise auth, CSRF's invalid-origin arm is
-// unreachable and its missing-origin arm is the one that fires; the
-// invalid-origin arm needs a "lan" install, where AuthMiddleware waives. Both
-// are driven below, on the fixture each is reachable from.
+// Both CSRF arms are reachable on a "public" fixture now. The "lan" subtest is
+// kept because it is the policy a Docker install actually runs, and it
+// exercises the private-IP branch rather than the same-host branch.
 func newImportChain(t *testing.T, networkAccess, remoteAddr, origin string) *importChain {
 	t.Helper()
 	dir := t.TempDir()
@@ -118,7 +124,14 @@ func newImportChain(t *testing.T, networkAccess, remoteAddr, origin string) *imp
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	return &importChain{handler: r, cookiePath: path, session: session, remoteAddr: remoteAddr, origin: origin}
+	host := origin
+	if u, err := url.Parse(origin); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	return &importChain{
+		handler: r, cookiePath: path, session: session,
+		remoteAddr: remoteAddr, origin: origin, host: host,
+	}
 }
 
 // post drives one request through the whole chain. withSession and origin are
@@ -128,6 +141,9 @@ func (c *importChain) post(t *testing.T, body string, withSession bool, origin s
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/cookies/import", strings.NewReader(body))
 	req.RemoteAddr = c.remoteAddr
+	if c.host != "" {
+		req.Host = c.host
+	}
 	req.Header.Set("Content-Type", "text/plain")
 	if origin != "" {
 		req.Header.Set("Origin", origin)
@@ -195,10 +211,10 @@ func TestCookieImportChainRefusesUnauthenticatedAndCrossOrigin(t *testing.T) {
 	})
 
 	t.Run("a request with no Origin is refused", func(t *testing.T) {
-		// The CSRF arm that IS reachable on an auth-driving fixture: under
-		// "public", isAllowedOrigin accepts every origin, so only the
-		// missing-origin check can fire. It is the check that stops a
-		// non-browser client replaying a stolen session cookie.
+		// The CSRF arm that fires when there is no Origin at all: the check that
+		// stops a non-browser client replaying a stolen session cookie. (The
+		// invalid-origin arm is reachable on "public" too since T1-6 — the
+		// "lan" subtest below keeps exercising the private-IP branch.)
 		c := newImportChain(t, "public", publicAddr, goodOrigin)
 		before := c.read(t)
 

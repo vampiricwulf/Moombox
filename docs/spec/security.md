@@ -57,7 +57,14 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 **Origin allowance rules by network_access level:**
 - `localhost`: Only loopback IPs and `localhost`.
 - `lan`: Loopback + `localhost` + private IPs.
-- `external` / `public`: Any origin.
+- `external` / `public`: **Only an origin that names the request's own host.** The Origin (or Referer)
+  authority is compared against `r.Host` — or against `X-Forwarded-Host` when the direct peer is listed
+  in `network.trusted_proxies`, the same trust rule `EffectiveClientIP` applies. Hosts must match; ports
+  must match as well once either side writes one, each defaulted from its own scheme (the request's
+  scheme comes from `r.TLS`, or from `X-Forwarded-Proto` when `trust_forwarded_proto` is on). Two
+  portless authorities compare by host alone, so a TLS-terminating reverse proxy that forwards the
+  client's `Host` verbatim needs no extra configuration. See `sameSiteOrigin` in
+  `internal/web/middleware.go`.
 - Default (unset): Same as `localhost`.
 
 **Source:** `CORSMiddleware` and `isAllowedOrigin` in `internal/web/middleware.go`.
@@ -159,7 +166,23 @@ Moombox uses Origin/Referer header validation rather than CSRF tokens. This deci
 2. Browsers reliably send the `Origin` header on cross-origin POST/PUT/DELETE requests.
 3. The only clients that legitimately omit `Origin` are same-process clients (TUI), which authenticate via the internal token.
 
-That equivalence holds for `localhost` and `lan` installs, where `isAllowedOrigin` (`internal/web/middleware.go`) admits only loopback, `localhost` and — for `lan` — private-IP origins. Under `external` / `public` it returns true for **every** parseable origin, so on those installs `CSRFMiddleware` enforces only that an `Origin`/`Referer` is PRESENT: a cross-site form post passes the origin check (verified at Arc 11's arc-close — `public`, a valid session, `Origin: https://evil.example` → 200 through the real chain). For a client outside `AuthMiddleware`'s loopback/private-IP waiver, what then stops the post from riding a victim's session is the `moombox_session` cookie's `SameSite=Lax` (`SetSessionCookie`, `internal/web/auth.go`) — a browser omits it on a cross-site POST — and the 401 that follows. For a loopback or private-IP client of a `public`/`external` install, which `AuthMiddleware` waives before it reads any policy and which `ipAllowedByNetworkAccess` admits under those two policies, nothing further stands between a cross-site form post and a mutating handler. Pre-existing, and shared by every mutating route; it is why `internal/web/routes/cookies_import_chain_test.go` drives its invalid-origin refusal on a `lan` fixture — on the fixtures that exercise auth, that arm is unreachable.
+That equivalence now holds on every policy. On `localhost` and `lan`, `isAllowedOrigin`
+(`internal/web/middleware.go`) admits only loopback, `localhost` and — for `lan` — private-IP origins.
+On `external` / `public` there is no IP class left to test (every address is admissible), so the check
+becomes `sameSiteOrigin`: the origin must name the host the request was addressed to. Before the
+2026-09-15 sweep that arm returned true for **every** parseable origin and `CSRFMiddleware` enforced
+only that an `Origin`/`Referer` was PRESENT — a cross-site form post passed (verified at Arc 11's
+arc-close: `public`, a valid session, `Origin: https://evil.example` → 200 through the real chain).
+`SameSite=Lax` on `moombox_session` covered the session-riding case, but it covered nothing for a
+loopback or private-IP client of a `public`/`external` install, which `AuthMiddleware` waives before it
+reads any policy and `ipAllowedByNetworkAccess` admits — so any page open in a LAN browser could POST
+`/api/restart` or delete a job, and CORS reflected its origin with `Allow-Credentials: true` so it could
+read the answers too (sweep T1-6). Both halves refuse now: `CORSMiddleware` reflects an origin only when
+`isAllowedOrigin` admits it, and the preflight branch reuses that one decision instead of recomputing
+it. **Operator consequence:** a reverse proxy must either forward the client's `Host` verbatim or be
+listed in `network.trusted_proxies` so its `X-Forwarded-Host` is read; otherwise the dashboard's own
+posts are refused with `403 Forbidden: invalid origin`.
+`internal/web/routes/cookies_import_chain_test.go` drives both refusals through the real chain.
 
 ### Exemptions
 
