@@ -137,6 +137,27 @@ const (
 // therefore for a reader of the code, not for an operator.
 var errReauthRequested = errors.New("IRC session cancelled to present refreshed credentials")
 
+// errKeepaliveTimeout ends an IRC session the KEEPALIVE gave up on: we spoke
+// first and Twitch produced no frame at all within ircKeepalivePongWait.
+//
+// Unlike errReauthRequested it IS compared against, with errors.Is, and that
+// comparison is the whole reason it exists. Start's loop charges
+// reconnectAttempts for a session that failed, and resets the counter only for
+// one that stayed up past reconnectResetUptime (5 min). A keepalive verdict
+// lands at ircKeepaliveIdle + ircKeepaliveCheck + ircKeepalivePongWait (~70 s),
+// which is BELOW that threshold — so without this sentinel a middlebox that
+// swallows PONGs would charge every reconnect, exhaust maxReconnects in about
+// fifteen minutes, and abandon chat for the rest of the job. Before the
+// keepalive existed the same socket was detected at ircReadDeadline (6 min),
+// always ABOVE the threshold, and chat retried forever; adding a faster
+// detector must not turn a recoverable network into a surrendered one.
+//
+// So this is OUR reconnect, exactly like the reauth path: logged, delayed by
+// whatever backoff the budget already carries, and charged nothing. It is
+// wrapped rather than returned bare so the operator-facing text can name the
+// window that elapsed.
+var errKeepaliveTimeout = errors.New("twitch IRC keepalive: no response")
+
 // errChatPartMalformed marks a part file whose BYTES were read in full and are
 // not chat JSON this package can use — a truncated write, a half-flushed
 // array, something else entirely at the path.
@@ -1377,6 +1398,23 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			cd.logger.Info("IRC session was stable before disconnect; resetting reconnect counter",
 				"channel", cd.channelLogin, "uptime", sessionUptime)
 			reconnectAttempts = 0
+		}
+
+		// The keepalive gave up on a socket that stopped answering. That is a
+		// reconnect WE asked for, not the network refusing us one, so it costs
+		// nothing from the budget — see errKeepaliveTimeout for why a cheaper
+		// detector would otherwise abandon chat on a network the slow one
+		// tolerated forever.
+		//
+		// NOT the reauth path's `immediate`, though: that one exists because a
+		// repaired credential must reach the wire now. Here the far side is
+		// unresponsive, so the ordinary backoff — whatever the budget already
+		// carries — is exactly right, and a session that has been failing this
+		// way still waits between attempts.
+		if errors.Is(err, errKeepaliveTimeout) {
+			cd.logger.Warn("twitch IRC keepalive gave up on the connection; reconnecting without charging the reconnect budget",
+				"err", err, "channel", cd.channelLogin, "uptime", sessionUptime)
+			continue
 		}
 
 		reconnectAttempts++

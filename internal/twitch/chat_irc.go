@@ -268,8 +268,20 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	// read deadline would kill the socket on every quiet fifteen seconds.
 	// Writes are serialized inside the library, so this goroutine's PING
 	// cannot interleave with the read loop's PONG.
-	var lastInbound atomic.Int64
-	lastInbound.Store(time.Now().UnixNano())
+	//
+	// Both clocks below are ELAPSED MONOTONIC durations since sessionStart,
+	// not wall-clock instants, and that is correctness rather than taste. The
+	// inbound stamp has to cross goroutines through an atomic int64, and a
+	// time.Time that makes that trip loses its monotonic reading (time.Unix
+	// carries none), so the comparison falls back to the system clock — whose
+	// granularity on Windows is coarse enough that a PING and the PONG
+	// answering it microseconds later carry the SAME value. "Did anything
+	// arrive after we asked?" would then be false for a connection answering
+	// perfectly, and the keepalive would kill it one pong window later. Elapsed
+	// durations also make the whole mechanism immune to a system clock step
+	// part-way through a stream.
+	sessionStart := time.Now()
+	var lastInbound atomic.Int64 // time.Since(sessionStart), in nanoseconds
 	keepaliveFailed := make(chan struct{})
 	keepaliveDone := make(chan struct{})
 	defer close(keepaliveDone)
@@ -281,44 +293,95 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		}()
 		ticker := time.NewTicker(cd.delays.keepaliveCheck)
 		defer ticker.Stop()
-		// pingSent is the zero time when no PING is outstanding.
-		var pingSent time.Time
+		// declareDead is the ONE way this goroutine ends a session: say why
+		// once, publish the verdict the read loop turns into
+		// errKeepaliveTimeout, and unblock that read. Both callers below are
+		// the same fact — the IRC layer is not serving us — reached by
+		// different evidence.
+		declareDead := func(reason string) {
+			cd.logger.Warn("twitch IRC keepalive failed; reconnecting",
+				"channel", cd.channelLogin, "reason", reason, "pongWait", cd.delays.keepalivePongWait)
+			close(keepaliveFailed)
+			// Unblock the read loop, which reads keepaliveFailed and returns
+			// the error Start's reconnect path acts on.
+			sessionCancel()
+		}
+		// pingSentAt is when the outstanding PING was written, or -1 when none
+		// is outstanding. -1 rather than 0 because 0 is a legal elapsed value.
+		pingSentAt := time.Duration(-1)
 		for {
 			select {
 			case <-keepaliveDone:
 				return
 			case <-sessionCtx.Done():
 				return
-			case now := <-ticker.C:
-				last := time.Unix(0, lastInbound.Load())
-				if !pingSent.IsZero() {
+			case <-ticker.C:
+				// time.Since rather than the tick's own timestamp: a tick
+				// delivered late reports when it was SCHEDULED to fire, which
+				// understates how long we have actually been waiting — and
+				// waiting is the entire measurement here.
+				elapsed := time.Since(sessionStart)
+				last := time.Duration(lastInbound.Load())
+				if pingSentAt >= 0 {
 					// ANY inbound frame answers — a PONG, a chat line, a
 					// server PING. The question is whether the IRC layer is
 					// still serving us, not whether it used the right verb.
-					if last.After(pingSent) {
-						pingSent = time.Time{}
+					//
+					// >= rather than >: two events the clock cannot separate
+					// are not evidence of silence, and the safe reading of an
+					// ambiguous frame is that the connection is alive. A false
+					// "dead" costs a reconnect and the chat in flight; a false
+					// "alive" costs one more check tick.
+					if last >= pingSentAt {
+						pingSentAt = -1
 						continue
 					}
-					if now.Sub(pingSent) < cd.delays.keepalivePongWait {
+					if elapsed-pingSentAt < cd.delays.keepalivePongWait {
 						continue
 					}
-					cd.logger.Warn("twitch IRC went silent after a keepalive PING; reconnecting",
-						"channel", cd.channelLogin, "pongWait", cd.delays.keepalivePongWait)
-					close(keepaliveFailed)
-					// Unblock the read loop, which reads keepaliveFailed and
-					// returns the error Start's reconnect path acts on.
-					sessionCancel()
+					declareDead("no inbound frame after the keepalive PING")
 					return
 				}
-				if now.Sub(last) < cd.delays.keepaliveIdle {
+				if elapsed-last < cd.delays.keepaliveIdle {
 					continue
 				}
-				if err := conn.Write(sessionCtx, websocket.MessageText, []byte(ircKeepalivePing)); err != nil {
-					// The read loop is about to see the same failure; leaving
-					// it to the one error path keeps one verdict per session.
+				// Read BEFORE the write and only armed after it, and that order
+				// is load-bearing: the reply is recorded by a DIFFERENT
+				// goroutine, so on a fast link the PONG can be read and stored
+				// while this goroutine is still descheduled between Write
+				// returning and the stamp. A stamp taken afterwards would sit
+				// later than the very frame that answers it, the reset above
+				// could never fire, and a perfectly healthy connection would be
+				// declared dead one pong window later.
+				//
+				// The write's own duration counts against the pong window,
+				// deliberately: a socket slow to accept 13 bytes is part of
+				// what is being measured, and the deadline below bounds it.
+				sentAt := time.Since(sessionStart)
+				// Bounded by the same window a REPLY gets, because an
+				// unbounded write is the failure this keepalive exists to
+				// catch wearing a different hat: on a half-open socket with a
+				// full send buffer, conn.Write(sessionCtx, ...) parks forever
+				// and the session silently falls back to ircReadDeadline. Per
+				// coder/websocket a Write whose context expires CLOSES the
+				// connection — which is what we want, since a socket that
+				// cannot take 13 bytes in ten seconds is already gone.
+				writeCtx, writeCancel := context.WithTimeout(sessionCtx, cd.delays.keepalivePongWait)
+				err := conn.Write(writeCtx, websocket.MessageText, []byte(ircKeepalivePing))
+				writeCancel()
+				if err != nil {
+					// Unless WE are the reason: Stop, MarkStreamEnded and
+					// Reauthenticate all cancel sessionCtx, and that reaches
+					// this goroutine as a write error too. A shutdown is not
+					// Twitch going quiet, and calling it one would hand the
+					// read loop a verdict on a session nobody is judging.
+					if sessionCtx.Err() != nil {
+						return
+					}
+					declareDead("the keepalive PING could not be written")
 					return
 				}
-				pingSent = now
+				pingSentAt = sentAt
 			}
 		}
 	}()
@@ -361,10 +424,11 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			// answering. Returning the error (rather than counting a read
 			// failure) is what makes Start's loop reconnect at once instead of
 			// spinning chatMaxConsecutiveErrs reads against a cancelled
-			// context.
+			// context — and wrapping errKeepaliveTimeout is what stops that
+			// reconnect being charged to the budget. See the sentinel's doc.
 			select {
 			case <-keepaliveFailed:
-				return fmt.Errorf("twitch IRC keepalive: no response within %v", cd.delays.keepalivePongWait)
+				return fmt.Errorf("%w within %v", errKeepaliveTimeout, cd.delays.keepalivePongWait)
 			default:
 			}
 			consecutiveErrors++
@@ -376,8 +440,10 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		}
 		consecutiveErrors = 0
 		// Every inbound FRAME, before any of it is interpreted: the keepalive's
-		// question is whether Twitch is still talking to us at all.
-		lastInbound.Store(time.Now().UnixNano())
+		// question is whether Twitch is still talking to us at all. Elapsed
+		// monotonic nanoseconds, in the same frame of reference the keepalive
+		// reads them in — see sessionStart.
+		lastInbound.Store(int64(time.Since(sessionStart)))
 
 		lines := strings.SplitSeq(string(data), "\r\n")
 		for line := range lines {

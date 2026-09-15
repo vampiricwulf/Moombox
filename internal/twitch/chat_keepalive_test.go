@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,12 +77,23 @@ type keepaliveServer struct {
 	server *httptest.Server
 	mu     sync.Mutex
 	lines  []string
+	// conns counts connections that finished the handshake, which is how the
+	// reconnect-budget test below measures sessions without reading Start's
+	// internals. Counted after the four handshake reads so a half-opened
+	// connection cannot inflate it.
+	conns int
 }
 
 func (k *keepaliveServer) clientLines() []string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return append([]string(nil), k.lines...)
+}
+
+func (k *keepaliveServer) sessions() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.conns
 }
 
 func (k *keepaliveServer) pings() int {
@@ -113,6 +125,9 @@ func startKeepaliveServer(t *testing.T, answerPong bool) *keepaliveServer {
 			[]byte(":tmi.twitch.tv 001 justinfan1 :Welcome, GLHF!")); writeErr != nil {
 			return
 		}
+		k.mu.Lock()
+		k.conns++
+		k.mu.Unlock()
 		for {
 			_, data, readErr := conn.Read(r.Context())
 			if readErr != nil {
@@ -155,6 +170,25 @@ func newKeepaliveTestDownloader(t *testing.T) *ChatDownloader {
 	return cd
 }
 
+// waitFor polls cond until it holds or the budget runs out, failing with msg if
+// it never does. A bounded poll rather than a fixed sleep: the condition is
+// produced by a server goroutine these tests do not synchronise with, so the
+// only two honest shapes are "wait until it is true" and "prove it stayed
+// false", and a sleep-then-assert is neither.
+func waitFor(t *testing.T, budget time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s (within %v)", msg, budget)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // TestIRCKeepalivePingsAndGivesUpOnASilentSocket is T3-25.
 //
 // A half-open socket — one the OS still believes is connected — used to cost up
@@ -191,8 +225,20 @@ func TestIRCKeepalivePingsAndGivesUpOnASilentSocket(t *testing.T) {
 		t.Fatal("the session never noticed the silent socket")
 	}
 
+	// The server records on its own goroutine, so "exactly one" has to be
+	// REACHED before it can be held: a single immediate check races the
+	// scheduler and would pass on 0 as readily as on 1. Poll to 1, then settle
+	// and confirm nothing followed — a second PING would mean the keepalive
+	// kept running past its own verdict.
+	waitFor(t, 500*time.Millisecond, func() bool { return k.pings() >= 1 },
+		"the client never sent a keepalive PING")
 	if got := k.pings(); got != 1 {
-		t.Errorf("the client sent %d PINGs, want exactly 1", got)
+		t.Fatalf("the client sent %d PINGs before the pong deadline, want exactly 1", got)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := k.pings(); got != 1 {
+		t.Errorf("the client sent %d PINGs in total, want exactly 1 — the keepalive kept pinging "+
+			"after it had already declared the socket dead", got)
 	}
 	for _, l := range k.clientLines() {
 		if strings.HasPrefix(l, "PING") && l != "PING :moombox" {
@@ -237,5 +283,91 @@ func TestIRCKeepaliveKeepsAConnectionThatAnswers(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the session ignored its cancelled context")
+	}
+}
+
+// TestIRCKeepaliveFailureDoesNotChargeTheReconnectBudget is the cross-file half
+// of T3-25, and it is what decides whether the faster detector is an
+// improvement at all.
+//
+// Start's loop charges reconnectAttempts for every failed session and forgives
+// the charge only for one that stayed up past reconnectResetUptime (5 min).
+// Before this task a half-open socket was detected at ircReadDeadline (6 min)
+// — always ABOVE that line, so chat retried forever. The keepalive detects it
+// at ~70 s, BELOW it. Charging that to the budget would mean a middlebox that
+// swallows PONGs exhausts maxReconnects (10) in about fifteen minutes and
+// "exceeded max IRC reconnects" abandons chat for the rest of the job: a faster
+// detector turning a recoverable network into a surrendered one.
+//
+// Mutant: drop the errors.Is(err, errKeepaliveTimeout) arm from Start's loop.
+// The assertion is on the BACKOFF path's own Info line, checked every poll,
+// rather than only on the session count — with the arm gone the loop stalls in
+// exponential backoff (2s, 4s, 8s, 16s, then 30s a time) and would report a
+// timeout four minutes later instead of the reason. The line appears on the
+// second session, so the mutant dies in under a second, naming its cause.
+func TestIRCKeepaliveFailureDoesNotChargeTheReconnectBudget(t *testing.T) {
+	// Two past maxReconnects+1: enough that a charged budget has certainly
+	// given up, not so many that the test is measuring the fixture.
+	const wantSessions = 12
+
+	k := startKeepaliveServer(t, false)
+	logger := &acceptedLoginRecorder{}
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		ChannelLogin: "testchan",
+		StreamID:     "stream-1",
+		OutputPath:   t.TempDir() + "/chat.json",
+	}, logger)
+	// Before Start, and the only field this test pokes: Start owns `running`.
+	cd.delays = fastChatDelays()
+
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("Start panicked: %v", r)
+			}
+		}()
+		done <- cd.Start(context.Background())
+	}()
+	t.Cleanup(func() {
+		cd.Stop()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("Start did not return after Stop")
+		}
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for k.sessions() < wantSessions {
+		if n := logger.backoffReconnects(); n > 0 {
+			t.Fatalf("%d backoff reconnects after %d keepalive failures — the keepalive verdict is "+
+				"being charged to the reconnect budget, so a network that never answers within the "+
+				"pong window abandons chat for the rest of the job", n, k.sessions())
+		}
+		select {
+		case err := <-done:
+			// Put it back: done is buffered, and the t.Cleanup above still
+			// wants to read it rather than add a second, spurious failure.
+			done <- err
+			t.Fatalf("Start returned after %d sessions (%v), want it still reconnecting at %d",
+				k.sessions(), err, wantSessions)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d sessions in 10s, want %d — each scaled keepalive cycle is ~120ms, so "+
+				"something is waiting that should not be", k.sessions(), wantSessions)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	select {
+	case err := <-done:
+		done <- err
+		t.Fatalf("Start returned after %d sessions (%v), want it still reconnecting", wantSessions, err)
+	default:
+	}
+	if n := logger.backoffReconnects(); n != 0 {
+		t.Errorf("%d backoff reconnects over %d keepalive failures, want none", n, wantSessions)
 	}
 }
