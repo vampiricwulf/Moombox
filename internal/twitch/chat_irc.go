@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -131,6 +132,19 @@ func ircIsLoginFailureNotice(line string) bool {
 	}
 	return strings.Contains(params, "Login authentication failed") ||
 		strings.Contains(params, "Login unsuccessful")
+}
+
+// ircFrameWriter sends one IRC line as a single websocket text frame, bounded
+// by ctx.
+//
+// It is a type so ChatDownloader.keepaliveWrite can name it without chat.go
+// having to import the websocket package for one field.
+type ircFrameWriter func(ctx context.Context, conn *websocket.Conn, line string) error
+
+// writeIRCFrame is the production keepaliveWrite, and the only implementation
+// outside tests.
+func writeIRCFrame(ctx context.Context, conn *websocket.Conn, line string) error {
+	return conn.Write(ctx, websocket.MessageText, []byte(line))
 }
 
 // runIRCSession runs a single IRC connection session.
@@ -270,16 +284,19 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	// cannot interleave with the read loop's PONG.
 	//
 	// Both clocks below are ELAPSED MONOTONIC durations since sessionStart,
-	// not wall-clock instants, and that is correctness rather than taste. The
-	// inbound stamp has to cross goroutines through an atomic int64, and a
-	// time.Time that makes that trip loses its monotonic reading (time.Unix
-	// carries none), so the comparison falls back to the system clock — whose
-	// granularity on Windows is coarse enough that a PING and the PONG
-	// answering it microseconds later carry the SAME value. "Did anything
-	// arrive after we asked?" would then be false for a connection answering
-	// perfectly, and the keepalive would kill it one pong window later. Elapsed
-	// durations also make the whole mechanism immune to a system clock step
-	// part-way through a stream.
+	// not wall-clock instants. The inbound stamp has to cross goroutines
+	// through an atomic int64, and a time.Time that makes that trip loses its
+	// monotonic reading (time.Unix carries none), so a comparison against one
+	// silently falls back to the WALL clock — two different frames of
+	// reference for one question, and a system clock step part-way through a
+	// stream would skew the answer. Elapsed durations give one frame of
+	// reference and are immune to the step.
+	//
+	// What they do NOT give is resolution: Windows delivers monotonic readings
+	// at roughly the same ~0.5 ms granularity as its wall clock, so a PING and
+	// the PONG answering it microseconds later still carry the SAME value.
+	// Treating an indistinguishable frame as an answer is the `>=` below, and
+	// that is what keeps a healthy connection alive.
 	sessionStart := time.Now()
 	var lastInbound atomic.Int64 // time.Since(sessionStart), in nanoseconds
 	keepaliveFailed := make(chan struct{})
@@ -293,18 +310,32 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		}()
 		ticker := time.NewTicker(cd.delays.keepaliveCheck)
 		defer ticker.Stop()
-		// declareDead is the ONE way this goroutine ends a session: say why
-		// once, publish the verdict the read loop turns into
-		// errKeepaliveTimeout, and unblock that read. Both callers below are
-		// the same fact — the IRC layer is not serving us — reached by
-		// different evidence.
+		// declareDead is the ONE way this goroutine ends a session: publish the
+		// verdict the read loop turns into errKeepaliveTimeout, unblock that
+		// read, and only then say why. Its callers below are the same fact —
+		// the IRC layer is not serving us — reached by different evidence.
+		//
+		// The ORDER inside is the guarantee, not a style choice. Everything
+		// that ends this session also CLOSES the socket, and the read loop
+		// wakes from a closed socket instantly: its next iterations are a
+		// context.WithTimeout and an immediate net.ErrClosed read, so it can
+		// burn all chatMaxConsecutiveErrs of them in the time it takes to
+		// format one log line. It would then return "too many IRC errors",
+		// which is NOT errors.Is-able to errKeepaliveTimeout — and the
+		// reconnect would be charged to the budget after all, inverting the
+		// one guarantee this whole mechanism exists to make. So the channel
+		// closes first, the cancel second, the Warn last.
+		//
+		// sync.Once because two arms can reach this — the ticker's verdict and
+		// the write timer's — and a second close(keepaliveFailed) would panic.
+		var deadOnce sync.Once
 		declareDead := func(reason string) {
-			cd.logger.Warn("twitch IRC keepalive failed; reconnecting",
-				"channel", cd.channelLogin, "reason", reason, "pongWait", cd.delays.keepalivePongWait)
-			close(keepaliveFailed)
-			// Unblock the read loop, which reads keepaliveFailed and returns
-			// the error Start's reconnect path acts on.
-			sessionCancel()
+			deadOnce.Do(func() {
+				close(keepaliveFailed)
+				sessionCancel()
+				cd.logger.Warn("twitch IRC keepalive failed; reconnecting",
+					"channel", cd.channelLogin, "reason", reason, "pongWait", cd.delays.keepalivePongWait)
+			})
 		}
 		// pingSentAt is when the outstanding PING was written, or -1 when none
 		// is outstanding. -1 rather than 0 because 0 is a legal elapsed value.
@@ -345,30 +376,71 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 				if elapsed-last < cd.delays.keepaliveIdle {
 					continue
 				}
-				// Read BEFORE the write and only armed after it, and that order
-				// is load-bearing: the reply is recorded by a DIFFERENT
-				// goroutine, so on a fast link the PONG can be read and stored
-				// while this goroutine is still descheduled between Write
-				// returning and the stamp. A stamp taken afterwards would sit
-				// later than the very frame that answers it, the reset above
-				// could never fire, and a perfectly healthy connection would be
-				// declared dead one pong window later.
+				// Read BEFORE the write and armed only after it, for two
+				// reasons — and NOT for a third that it looks like.
 				//
-				// The write's own duration counts against the pong window,
-				// deliberately: a socket slow to accept 13 bytes is part of
-				// what is being measured, and the deadline below bounds it.
+				// It keeps the write's OWN duration inside the pong window: a
+				// socket slow to accept thirteen bytes is part of what is being
+				// measured, not an allowance on top of it.
+				//
+				// And the reply is recorded by a DIFFERENT goroutine, so on a
+				// fast link the PONG can be read and stored while this one is
+				// still descheduled after the write returns; a stamp taken
+				// afterwards would sit later than the very frame that answers
+				// it.
+				//
+				// What this ordering does NOT do is make the comparison safe on
+				// its own. The `>=` above is what does that: Windows delivers
+				// monotonic readings at roughly the same ~0.5 ms granularity as
+				// its wall clock, so a PING and a PONG landing in one tick stay
+				// indistinguishable however they are stamped.
 				sentAt := time.Since(sessionStart)
-				// Bounded by the same window a REPLY gets, because an
-				// unbounded write is the failure this keepalive exists to
-				// catch wearing a different hat: on a half-open socket with a
-				// full send buffer, conn.Write(sessionCtx, ...) parks forever
-				// and the session silently falls back to ircReadDeadline. Per
-				// coder/websocket a Write whose context expires CLOSES the
-				// connection — which is what we want, since a socket that
-				// cannot take 13 bytes in ten seconds is already gone.
-				writeCtx, writeCancel := context.WithTimeout(sessionCtx, cd.delays.keepalivePongWait)
-				err := conn.Write(writeCtx, websocket.MessageText, []byte(ircKeepalivePing))
+				// The write is bounded by a timer WE own rather than by a
+				// deadline on the context handed to the library, and that is
+				// the whole of the ordering rule above applied to this arm.
+				// coder/websocket installs a write deadline as
+				// context.AfterFunc(ctx, func(){ clearWriteTimeout(); close() })
+				// (conn.go:171-181), and that close tears down the underlying
+				// net.Conn on ANOTHER goroutine — so a plain WithTimeout kills
+				// the socket before Write returns, and the read loop is already
+				// spinning on net.ErrClosed while we still have not published
+				// the verdict. It would exhaust chatMaxConsecutiveErrs and
+				// return "too many IRC errors" instead, which charges the
+				// reconnect budget.
+				//
+				// So the timer declares the verdict FIRST and cancels SECOND;
+				// the cancel is what closes the connection, and by then the
+				// read loop's keepaliveFailed check — which sits before
+				// consecutiveErrors++ — cannot lose the race.
+				//
+				// An unbounded write is not an option: on a half-open socket
+				// with a full send buffer it parks forever and the session
+				// silently falls back to the six-minute ircReadDeadline, which
+				// is the failure this keepalive exists to catch.
+				writeCtx, writeCancel := context.WithCancel(sessionCtx)
+				writeTimer := time.AfterFunc(cd.delays.keepalivePongWait, func() {
+					defer func() {
+						if r := recover(); r != nil {
+							cd.logger.Error("chat keepalive write-timeout panic", "panic", r)
+						}
+					}()
+					declareDead("the keepalive PING could not be written in time")
+					writeCancel()
+				})
+				err := cd.keepaliveWrite(writeCtx, conn, ircKeepalivePing)
+				// Stop BEFORE our own cancel. A write that returned has already
+				// had the library clear its deadline hook, so cancelling then
+				// closes nothing; a write still in flight is only ever
+				// cancelled by the timer, which published the verdict first.
+				stopped := writeTimer.Stop()
 				writeCancel()
+				if !stopped {
+					// The timer won. The verdict is published (or is being
+					// published by that goroutine, which owns the same
+					// sync.Once), and this session is over whatever the write
+					// finally returned.
+					return
+				}
 				if err != nil {
 					// Unless WE are the reason: Stop, MarkStreamEnded and
 					// Reauthenticate all cancel sessionCtx, and that reaches

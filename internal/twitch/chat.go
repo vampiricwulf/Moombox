@@ -279,6 +279,16 @@ type ChatDownloader struct {
 	// goroutine reads it without the mutex.
 	delays chatDelays
 
+	// keepaliveWrite sends the keepalive PING, and ONLY that frame — the
+	// handshake, the PONG and everything else still write through conn
+	// directly. It is a seam rather than a call because the one behaviour that
+	// has to be pinned here is a write that never completes, and the only way
+	// to get one from a real socket is a peer with a full send buffer that a
+	// test cannot conjure. writeIRCFrame in production; assigned once at
+	// construction and read from the keepalive goroutine without the mutex,
+	// exactly like delays.
+	keepaliveWrite ircFrameWriter
+
 	// onProgress is read from addMessage under onProgressMu; callers must
 	// use SetOnProgress rather than direct field assignment to avoid a
 	// data race if the callback is reassigned after Start (audit
@@ -364,6 +374,7 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		streamStartMs:   streamStartMs,
 		dedup:           utils.NewOrderedDedup[string](),
 		delays:          defaultChatDelays(),
+		keepaliveWrite:  writeIRCFrame,
 		emoteResolver:   opts.EmoteResolver,
 		logger:          logger,
 	}
@@ -1412,6 +1423,14 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		// carries — is exactly right, and a session that has been failing this
 		// way still waits between attempts.
 		if errors.Is(err, errKeepaliveTimeout) {
+			// Flush first, exactly as the backoff path above and the reauth
+			// path do. This `continue` skips the backoff block, and that block
+			// is where a reconnect normally saves state; without the flush the
+			// tail of this session's chat would sit in memory until the next
+			// session's flusher tick — and the session we just lost is
+			// precisely the one whose last messages are least likely to be
+			// recoverable.
+			cd.flush()
 			cd.logger.Warn("twitch IRC keepalive gave up on the connection; reconnecting without charging the reconnect budget",
 				"err", err, "channel", cd.channelLogin, "uptime", sessionUptime)
 			continue

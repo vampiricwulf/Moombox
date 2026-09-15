@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -283,6 +284,71 @@ func TestIRCKeepaliveKeepsAConnectionThatAnswers(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the session ignored its cancelled context")
+	}
+}
+
+// slowWarnLogger is testLogger with a Warn that costs what a real one costs.
+//
+// It exists because the hazard this file guards is a RACE whose loser is
+// decided by how long the keepalive spends between ending the session and
+// publishing its verdict, and the production logger writes that Warn to a file
+// or a console. A no-op Warn hides the whole window, so a test that used one
+// would pass against code that is wrong in the field.
+type slowWarnLogger struct{}
+
+func (slowWarnLogger) Debug(string, ...any) {}
+func (slowWarnLogger) Info(string, ...any)  {}
+func (slowWarnLogger) Error(string, ...any) {}
+func (slowWarnLogger) Warn(string, ...any)  { time.Sleep(25 * time.Millisecond) }
+
+// TestIRCKeepaliveWriteThatNeverCompletesIsAKeepaliveVerdict pins the arm of the
+// keepalive a real socket cannot be made to exercise: a PING write that never
+// completes because the peer's send buffer is full. Reaching it needs the
+// keepaliveWrite seam — there is no way to conjure a stuck peer from a fixture.
+//
+// The stand-in models coder/websocket's own write deadline
+// (context.AfterFunc(ctx, func(){ clearWriteTimeout(); close() }), conn.go:171-181):
+// it blocks until the write context is done and then closes the connection.
+// That close is the hazard. The read loop wakes from a dead socket instantly,
+// and each of its next iterations is a context.WithTimeout plus an immediate
+// net.ErrClosed read — so it can burn all chatMaxConsecutiveErrs of them inside
+// one log line, return "too many IRC errors: …", and have that charged to the
+// reconnect budget because it is not errors.Is-able to errKeepaliveTimeout.
+//
+// Mutant this kills, verified by execution and not by reading: restore the
+// round-1 shape — declareDead logging BEFORE it closes keepaliveFailed, and the
+// write bounded by context.WithTimeout instead of a timer we own. Both halves
+// let the socket die while the verdict is still unpublished, and with a Warn
+// that costs anything at all the read loop wins every time.
+//
+// Mutant this does NOT kill, stated here so nobody mistakes the coverage:
+// cancelling the write context immediately BEFORE declareDead rather than
+// after. The window is real but the correct code closes it rather than losing
+// it — every route to the socket's death needs a goroutine wakeup, while
+// close(keepaliveFailed) is the next instruction, so the verdict wins on its
+// own. It survived 50 runs under -race. The ordering is kept because it costs
+// one line and removes the need to win.
+func TestIRCKeepaliveWriteThatNeverCompletesIsAKeepaliveVerdict(t *testing.T) {
+	startKeepaliveServer(t, false)
+	cd := newKeepaliveTestDownloader(t)
+	cd.logger = slowWarnLogger{}
+	cd.keepaliveWrite = func(ctx context.Context, conn *websocket.Conn, _ string) error {
+		<-ctx.Done()
+		conn.CloseNow()
+		return ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cd.runIRCSession(context.Background()) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errKeepaliveTimeout) {
+			t.Errorf("a PING write that never completed ended the session with %v, want a "+
+				"keepalive verdict — anything else is charged to the reconnect budget", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the session never noticed that its keepalive PING could not be written")
 	}
 }
 
