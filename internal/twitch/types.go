@@ -138,7 +138,12 @@ type EmoteInfo struct {
 
 // VodCommentEdge represents a single VOD comment from GQL pagination.
 type VodCommentEdge struct {
-	ID                   string
+	ID string
+	// Cursor is the Relay edge cursor Twitch sends beside the node. It is the
+	// ONLY reliable way to page a VOD: contentOffsetSeconds is an integer
+	// second, and a second of a busy VOD holds more comments than one page, so
+	// an offset-based next-page request asks for the page it just read.
+	Cursor               string
 	ContentOffsetSeconds float64
 	CommenterDisplayName string
 	CommenterID          string

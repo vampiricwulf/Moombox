@@ -465,13 +465,19 @@ func (rec *gqlAuthRecorder) authHeaders() []string {
 }
 
 // vodCommentPage renders one VideoCommentsByOffsetOrCursor response carrying a
-// single comment at the given offset.
+// single comment at the given offset. The edge carries a cursor of "cur-<id>"
+// — since T1-3 (vod_chat_paging_test.go) the paging loop advances by the last
+// edge's cursor, not its offset, so a page without one now reads as the end
+// of the VOD and TestVodChatReadsTokenPerPage's second page would never be
+// requested.
 func vodCommentPage(id string, offsetSeconds int, hasNext bool) string {
 	next := "false"
 	if hasNext {
 		next = "true"
 	}
-	return `{"data":{"video":{"comments":{"edges":[{"node":{` +
+	return `{"data":{"video":{"comments":{"edges":[{` +
+		`"cursor":"cur-` + id + `",` +
+		`"node":{` +
 		`"id":"` + id + `",` +
 		`"contentOffsetSeconds":` + strconv.Itoa(offsetSeconds) + `,` +
 		`"commenter":{"displayName":"Viewer","id":"u1","login":"viewer"},` +

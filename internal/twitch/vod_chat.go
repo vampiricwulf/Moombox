@@ -149,6 +149,12 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 	vcd.logger.Info("starting VOD chat download", "vodID", vcd.vodID)
 
 	var contentOffset float64
+	// cursor is empty for the FIRST request of a run (a fresh start or a
+	// resume, both of which enter by offset) and holds the previous page's
+	// last edge cursor thereafter. It is deliberately not persisted: a Twitch
+	// cursor is opaque and undocumented as durable, and a stale one answers
+	// with an empty page that this loop reads as the end of the VOD.
+	var cursor string
 	consecutiveErrors := 0
 
 	// Try loading resume state
@@ -176,7 +182,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		default:
 		}
 
-		edges, hasNext, err := vcd.api.GetVodComments(ctx, vcd.vodID, contentOffset, vcd.currentAuthToken())
+		edges, hasNext, err := vcd.api.GetVodComments(ctx, vcd.vodID, contentOffset, cursor, vcd.currentAuthToken())
 		if err != nil {
 			consecutiveErrors++
 			if consecutiveErrors >= vodChatMaxConsecutiveErrors {
@@ -255,20 +261,31 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			break
 		}
 
-		// Advance offset to the last edge's offset so the next page
-		// moves forward in time even when the current page was entirely
-		// duplicates (newCount==0 with hasNext==true).
-		if len(edges) > 0 {
-			newOffset := edges[len(edges)-1].ContentOffsetSeconds
-			// Guard against a pathological server response that never
-			// advances the offset — break to avoid an infinite loop.
-			if newCount == 0 && newOffset <= contentOffset {
-				vcd.logger.Warn("[TwitchVodChat] offset did not advance on all-duplicate page; stopping",
-					"offset", contentOffset)
-				break
-			}
-			contentOffset = newOffset
+		// Advance by the LAST edge's cursor, not by its offset.
+		// contentOffsetSeconds is an integer second, and a second of a busy
+		// VOD holds more than one page of comments — so an offset-based next
+		// request asks for the page just read, sees only duplicates, and used
+		// to break here with the rest of the VOD's chat unarchived (T1-3).
+		//
+		// contentOffset keeps tracking the last edge's offset because it is
+		// what the resume sidecar and the progress line are written from; it
+		// is no longer what the next request is built from.
+		last := edges[len(edges)-1]
+		if last.Cursor == "" {
+			vcd.logger.Warn("[TwitchVodChat] page carried no cursor; stopping",
+				"offset", last.ContentOffsetSeconds)
+			break
 		}
+		if last.Cursor == cursor {
+			// A server that answers a cursor with the page that cursor came
+			// from would otherwise spin forever. This replaces the old
+			// offset-advance guard, which the burst second tripped legitimately.
+			vcd.logger.Warn("[TwitchVodChat] cursor did not advance; stopping",
+				"offset", last.ContentOffsetSeconds)
+			break
+		}
+		cursor = last.Cursor
+		contentOffset = last.ContentOffsetSeconds
 
 		// Periodic flush every 5 seconds
 		if time.Since(lastFlush) >= vodChatFlushInterval {
