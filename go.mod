@@ -16,7 +16,7 @@ require (
 	github.com/dop251/goja v0.0.0-20260903201622-f87b40ad7341
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/mattn/go-isatty v0.0.24
-	github.com/mattn/go-runewidth v0.0.29
+	github.com/mattn/go-runewidth v0.0.30
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/ulikunitz/xz v0.5.16
 	github.com/yuin/goldmark v1.8.6
