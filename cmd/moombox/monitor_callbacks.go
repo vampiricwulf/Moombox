@@ -323,6 +323,20 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 	// covers the swap-while-healthy case for them too.
 	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
 		reauth(platform)
+		// The same clear as the recovery edge, and this is the edge that
+		// actually needs it. A swap from a Google account that is a member of
+		// nothing to one that IS a member moves the fingerprint without any
+		// auth transition at all, so OnAuthRecovered never fires — yet every
+		// memo the old account wrote is now wrong about the new one, and each
+		// is suppressing the only path members-only content is discovered by.
+		//
+		// This edge also fires on the first authenticated observation of every
+		// process, which costs nothing here: the memo lives in memory and is
+		// empty at that point, so the clear reports 0 and logs nothing.
+		if n := clearYouTubeMembershipMemo(platform, clearMembershipMemo); n > 0 {
+			s.log.Info("account identity observed — cleared membership non-member memos",
+				"platform", platform, "channels", n)
+		}
 		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
 		if resumed > 0 {
 			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)

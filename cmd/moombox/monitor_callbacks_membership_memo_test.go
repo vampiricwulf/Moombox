@@ -58,20 +58,35 @@ func TestMembershipConfirmedNonMemberRequiresARecognisedSession(t *testing.T) {
 	}
 }
 
-// TestAuthRecoveryClearsTheMembershipMemo drives the registered callback.
+// TestBothRepairEdgesClearTheMembershipMemo drives the registered callbacks.
 //
-// A YouTube repair has to drop the non-member memos, or the operator who just
-// fixed their cookies keeps getting the suppressed behaviour for up to
-// membershipMemoTTL on the one discovery path RSS cannot replace.
+// Both edges, because neither implies the other — the same reason
+// TestBothRepairEdgesBroadcastForTwitch exists:
 //
-// THE MUTATION: dropping the clearYouTubeMembershipMemo call from the
-// OnAuthRecovered closure — the first subtest then counts 0.
-func TestAuthRecoveryClearsTheMembershipMemo(t *testing.T) {
-	t.Run("youtube", func(t *testing.T) {
+//   - OnAuthRecovered: the operator's cookies had expired and now work again.
+//     Memos written before the expiry are stale.
+//   - OnCredentialsChanged: the fingerprint moved with NO auth transition, so
+//     the recovery edge never fires. This is the edge that matters most here:
+//     a swap from a Google account that is a member of nothing to one that IS
+//     a member leaves every memo the old account wrote suppressing the only
+//     discovery path members-only content has, for up to membershipMemoTTL.
+//
+// THE MUTATION: dropping the clearYouTubeMembershipMemo call from either
+// closure — that edge's subtest then counts 0.
+func TestBothRepairEdgesClearTheMembershipMemo(t *testing.T) {
+	t.Run("auth recovered", func(t *testing.T) {
 		s, _, memoClears := repairCallbackState(t)
 		s.cookieRefresh.OnAuthRecovered("youtube")
 		if *memoClears != 1 {
 			t.Errorf("OnAuthRecovered(\"youtube\") cleared the membership memo %d times, want 1", *memoClears)
+		}
+	})
+
+	t.Run("credentials changed", func(t *testing.T) {
+		s, _, memoClears := repairCallbackState(t)
+		s.cookieRefresh.OnCredentialsChanged("youtube", "an-opaque-identity-token")
+		if *memoClears != 1 {
+			t.Errorf("OnCredentialsChanged(\"youtube\") cleared the membership memo %d times, want 1 — an account swap fires no auth transition, so this is the only edge that covers it", *memoClears)
 		}
 	})
 
@@ -80,11 +95,12 @@ func TestAuthRecoveryClearsTheMembershipMemo(t *testing.T) {
 	// would throw away a cycle of suppression for no reason.
 	//
 	// THE MUTATION: dropping the platform gate in clearYouTubeMembershipMemo.
-	t.Run("twitch does not", func(t *testing.T) {
+	t.Run("twitch does not, on either edge", func(t *testing.T) {
 		s, _, memoClears := repairCallbackState(t)
 		s.cookieRefresh.OnAuthRecovered("twitch")
+		s.cookieRefresh.OnCredentialsChanged("twitch", "an-opaque-identity-token")
 		if *memoClears != 0 {
-			t.Errorf("OnAuthRecovered(\"twitch\") cleared the YouTube membership memo %d times, want 0", *memoClears)
+			t.Errorf("a Twitch repair cleared the YouTube membership memo %d times, want 0", *memoClears)
 		}
 	})
 }
