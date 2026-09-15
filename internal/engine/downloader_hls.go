@@ -134,6 +134,17 @@ const (
 	// fails before the same one is retried (MaxSegmentRetries rounds, then
 	// the skip-forward / ErrQualityLost logic decides).
 	hlsStuckRetryDelay = 2 * time.Second
+	// hlsResumeSaveInterval floors how often the live loop persists the
+	// resume sidecar. The loop reaches the save site about once per reload
+	// (~2 s on Twitch) and the position advances every time, so the
+	// pre-floor code fsync+renamed the sidecar every couple of seconds for
+	// the whole broadcast. The cost of the floor is bounded and small: an
+	// unclean kill loses at most this much POSITION, and resume truncates
+	// the file back to the sidecar's byte count (downloader.go's
+	// truncate-for-resume) and re-fetches those segments — still far
+	// tighter than the DASH loop's every-50-segments cadence
+	// (ResumeSeqInterval, ~100 s of footage).
+	hlsResumeSaveInterval = 15 * time.Second
 )
 
 // hlsReloadDelay returns how long to wait before the next media-playlist reload,
@@ -199,6 +210,10 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// per-iteration save can skip no-progress refreshes (see below). -1 forces
 	// the first save.
 	lastSavedSeq := -1
+	// lastResumeSave floors the per-iteration save at hlsResumeSaveInterval
+	// (see the constant). Zero means "never saved", which always passes the
+	// floor, so the first advance still writes immediately.
+	var lastResumeSave time.Time
 	// consecutiveStuckSkips bounds termination when EVERY segment fails
 	// (expired auth, dead variant): each skip costs ~12s of retries, and an
 	// ended stream with a long listed backlog would otherwise grind through
@@ -729,9 +744,16 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		// window). bytesWritten only
 		// changes alongside currentSeq, so the seq is a complete progress
 		// signal. The deferred saveResume still guarantees a final flush.
-		if curSeqNow := int(d.currentSeq.Load()); curSeqNow != lastSavedSeq {
+		// …and at most once per hlsResumeSaveInterval: the position advances
+		// on EVERY reload while segments flow, so the progress check alone
+		// still wrote the sidecar every ~2 s. The deferred saveResume at loop
+		// exit is unconditional and still guarantees the final flush.
+		curSeqNow := int(d.currentSeq.Load())
+		if curSeqNow != lastSavedSeq &&
+			(lastResumeSave.IsZero() || time.Since(lastResumeSave) >= d.delays.hlsResumeSave) {
 			d.saveResume()
 			lastSavedSeq = curSeqNow
+			lastResumeSave = time.Now()
 		}
 
 		// Check if stream ended (EXT-X-ENDLIST present)

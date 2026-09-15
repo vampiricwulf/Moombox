@@ -22,6 +22,7 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 		connectivityPoll:       connectivityPollInterval,
 		atEdgeBackoffUnit:      time.Second,
 		hlsReloadUnit:          time.Second,
+		hlsResumeSave:          hlsResumeSaveInterval,
 	}
 	if got := defaultDelays(); got != want {
 		t.Fatalf("defaultDelays() = %+v, want %+v", got, want)
@@ -35,6 +36,7 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 		"hlsPlaylistRetry":       {want.hlsPlaylistRetry, 5 * time.Second},
 		"hlsStuckRetry":          {want.hlsStuckRetry, 2 * time.Second},
 		"connectivityPoll":       {want.connectivityPoll, 5 * time.Second},
+		"hlsResumeSave":          {want.hlsResumeSave, 15 * time.Second},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %v, want %v (production timing must not move in this arc)", name, pair[0], pair[1])
@@ -70,6 +72,7 @@ func fastDelays() delays {
 		connectivityPoll:       d.connectivityPoll / fastScale,
 		atEdgeBackoffUnit:      d.atEdgeBackoffUnit / fastScale,
 		hlsReloadUnit:          d.hlsReloadUnit / fastScale,
+		hlsResumeSave:          d.hlsResumeSave / fastScale,
 	}
 }
 

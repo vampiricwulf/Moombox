@@ -21,6 +21,7 @@ type delays struct {
 	connectivityPoll       time.Duration // connectivityPollInterval — waitForConnectivity's ticker
 	atEdgeBackoffUnit      time.Duration // the second the 429 backoff and same-head retry count in
 	hlsReloadUnit          time.Duration // the second hlsReloadDelay scales playlist durations by
+	hlsResumeSave          time.Duration // hlsResumeSaveInterval — live-loop resume sidecar floor
 }
 
 // defaultDelays returns production timing.
@@ -35,5 +36,6 @@ func defaultDelays() delays {
 		connectivityPoll:       connectivityPollInterval,
 		atEdgeBackoffUnit:      time.Second,
 		hlsReloadUnit:          time.Second,
+		hlsResumeSave:          hlsResumeSaveInterval,
 	}
 }

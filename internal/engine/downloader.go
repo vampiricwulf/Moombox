@@ -447,6 +447,14 @@ type SegmentDownloader struct {
 	// catchUpBufferBytes" — production code never sets this.
 	catchUpBufferBytesOverride int
 
+	// onResumeSaved is a TEST SEAM, like delays and
+	// catchUpBufferBytesOverride: production code never sets it. When
+	// non-nil, saveResume calls it with the LastSeq it just persisted, after
+	// the sidecar rename succeeded. It is the only way a test can count
+	// sidecar WRITES — a clean end sets streamEnded and the loop's defer
+	// then ClearResume()s the file out from under any on-disk assertion.
+	onResumeSaved func(lastSeq int)
+
 	// startedAt + transientRetries + lastTransientErr feed HealthUpdate
 	// snapshots. transientRetries / lastTransientErrMu are read-mostly
 	// in the segment fetcher (each non-terminal error is one increment
