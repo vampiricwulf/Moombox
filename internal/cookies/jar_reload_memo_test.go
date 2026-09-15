@@ -443,3 +443,80 @@ func TestLoadClearsTheMemoWhenThePostReadStatFails(t *testing.T) {
 			"memo (and its by-now-unrelated pair) able to short-circuit a later Load", got, third)
 	}
 }
+
+// TestLoadDeclinesTheMemoAfterALaterInstall pins the `j.loadGen == gen`
+// clause in Load's post-read block — the SECOND, independent race the memo
+// has to survive, distinct from the pre/post-stat agreement one.
+//
+// Two concurrent Loads (or a Load racing a loadFrom) on the same jar can
+// install in one order and reach the post-read block in the other:
+// internal/youtube/auth.go calls SyncCookies, and so Load, once per
+// extraction, while the refresh pass loads from its own goroutine. If G1
+// installs first and G2 installs second, G1's OWN pre- and post-read stats
+// still agree — G1's read really was internally consistent — so without the
+// generation check G1 would memoise a (size, mtime) pair that now vouches for
+// bytes G2 installed, not the bytes G1 read. Every later Load would then
+// short-circuit on it.
+//
+// cookieJarAfterParse is the seam. It fires between THIS call's parseInto and
+// its post-read stat, which is precisely where the losing install has to land
+// and precisely where cookieJarReadFile (which fires BEFORE parseInto) cannot
+// reach — the gap that made this clause "not deterministically testable" in
+// fix round 2. The outer Load plays G1; the seam body plays G2 by installing
+// straight through parseInto, exactly as a concurrent loadFrom would.
+//
+// Mutant named: dropping `j.loadGen == gen` from Load's post-read memo
+// computation. Verified by execution — with that clause removed the outer
+// Load memoises (preOK holds, the stats agree, the hour-old mtime clears the
+// settle window, so every OTHER clause is true by construction), the second
+// Load short-circuits, and the jar keeps serving G2's bytes instead of the
+// file's. Passes with the clause present.
+func TestLoadDeclinesTheMemoAfterALaterInstall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	const fromFile = "AAAAAAAA"    // what the outer Load's own read installs
+	const fromLaterG2 = "BBBBBBBB" // what the install landing after it replaces that with
+	agedCookieFile(t, path, []string{cookieRow(".youtube.com", futureExpiry(), "SID", fromFile)}, time.Hour)
+
+	jar := NewCookieJar()
+
+	orig := cookieJarAfterParse
+	t.Cleanup(func() { cookieJarAfterParse = orig })
+	cookieJarAfterParse = func() {
+		// G2 installs AFTER G1's parseInto returned, so loadGen moves past
+		// the value G1 is holding. Deliberately NOT from the file: the point
+		// is that the jar's maps no longer hold what G1 read, while the file
+		// on disk is untouched and its (size, mtime) still agree across G1's
+		// two stats.
+		stale := "# Netscape HTTP Cookie File\n" +
+			cookieRow(".youtube.com", futureExpiry(), "SID", fromLaterG2) + "\n"
+		jar.parseInto([]byte(stale), path)
+	}
+
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	cookieJarAfterParse = orig // restore before the real second Load
+
+	// Direct observation of the memo, not an inference from behaviour: the
+	// clause under test IS this boolean.
+	jar.mu.RLock()
+	memoised := jar.loadedMemo
+	jar.mu.RUnlock()
+	if memoised {
+		t.Errorf("loadedMemo = true — Load memoised a (size, mtime) pair that now vouches for bytes a LATER install put in the maps, not the bytes this Load read")
+	}
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != fromLaterG2 {
+		t.Fatalf("setup: SID = %q after the later install, want %q", got, fromLaterG2)
+	}
+
+	// The behavioural half: because nothing was memoised, the next Load must
+	// go back to the file. Under the mutant it short-circuits and fromLaterG2
+	// survives forever.
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != fromFile {
+		t.Errorf("SID = %q, want %q — a memo recorded across a later install let the next Load short-circuit on a file it never re-read",
+			got, fromFile)
+	}
+}

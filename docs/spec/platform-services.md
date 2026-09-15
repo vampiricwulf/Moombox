@@ -178,6 +178,7 @@ Both `fetchWithClient` and `fetchWithCookielessClient` (used by VISIONOS and AND
 - **Non-retryable errors**: Any other HTTP status (e.g., 403, 404) returns immediately
 - **Backoff**: Exponential, factor 2, starting at 1 second: 1s, 2s, 4s
 - **Context-aware**: Checks `ctx.Err()` before each retry. Uses `utils.Sleep` which respects cancellation.
+- **Deadline-bounded**: `doRetryRequest` in `internal/youtube/player_api_strategy.go` skips a sleep that would not leave `delay + 1 s` before the caller's deadline and returns the last real error — the HTTP status the caller is actually being told no by — instead of `context.DeadlineExceeded`, because the ladder alone is 7 s against mid-download 403 credential recovery's 10 s floor.
 
 #### Cookieless Client Specifics
 

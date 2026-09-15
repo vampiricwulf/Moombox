@@ -682,29 +682,50 @@ func normalizePlayerJSURL(raw string) string {
 // extractPlayerResponse returns the decoded ytInitialPlayerResponse object.
 //
 // Per anchor: match the assignment prefix, brace-scan the literal from the
-// `{` the match ends on, unmarshal. The first anchor that yields BOTH a
-// balanced literal and parseable JSON wins; anything short of that falls
-// through to the next anchor, which is the control flow the lazy patterns
-// had. Only the first occurrence of each anchor is considered — also as
-// before — because on a real watch page ytInitialPlayerResponse is assigned
-// before any page text that could spell it, and taking later candidates
-// would open a door page-authored metadata does not have today.
+// `{` the match ends on, unmarshal. The first anchor that yields a balanced
+// literal decoding to a NON-EMPTY object wins; anything short of that falls
+// through, which is the control flow the lazy patterns had.
+//
+// Every occurrence of an anchor is tried, not just the first. First-occurrence
+// was never the safety property an earlier version of this comment claimed:
+// on a real watch page today the `name="description"` meta tag (byte ~704510)
+// and `og:description` (~706468) both precede `var ytInitialPlayerResponse = `
+// (~714427), so page-authored text genuinely does come first. What limits
+// forgery is that such text cannot yield a valid non-empty JSON object — HTML
+// attribute escaping turns `"` into `&quot;`, and inside a JSON string `\"`
+// breaks the scan — so a forged candidate can only fail the scan, fail the
+// decode, or decode to an empty object. Stopping at the first match turned
+// that harmless inability into a denial of the real player response (and with
+// it the watch page's ScheduledStartTime and format pool); skipping the failed
+// candidate and searching on turns it back into nothing at all. The empty-map
+// rejection is part of that: `{}` decodes fine, so without it a forged `{}`
+// would still win.
 func extractPlayerResponse(page []byte) (map[string]any, bool) {
 	for _, re := range playerResponseAnchors {
-		loc := re.FindIndex(page)
-		if loc == nil {
-			continue
+		for start := 0; start < len(page); {
+			loc := re.FindIndex(page[start:])
+			if loc == nil {
+				break
+			}
+			matchEnd := start + loc[1]
+			// Resume the search one byte past THIS match's start, so a
+			// rejected candidate cannot be re-found and the scan below is
+			// free to run off the end of a forged literal.
+			start += loc[0] + 1
+			// The match ends ON the opening brace, so rescan from it.
+			obj, ok := scanBalancedObject(page[matchEnd-1:])
+			if !ok {
+				continue
+			}
+			var pr map[string]any
+			if json.Unmarshal(obj, &pr) != nil {
+				continue
+			}
+			if len(pr) == 0 {
+				continue
+			}
+			return pr, true
 		}
-		// The match ends ON the opening brace, so rescan from it.
-		obj, ok := scanBalancedObject(page[loc[1]-1:])
-		if !ok {
-			continue
-		}
-		var pr map[string]any
-		if json.Unmarshal(obj, &pr) != nil {
-			continue
-		}
-		return pr, true
 	}
 	return nil, false
 }

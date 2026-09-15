@@ -706,3 +706,41 @@ func TestExtractChatContinuationShapes(t *testing.T) {
 		})
 	}
 }
+
+// TestPlayerResponseSkipsAForgedCandidate pins that a candidate which does
+// not yield a NON-EMPTY JSON object does not end the search.
+//
+// First-occurrence was never a safety property: on a real watch page the
+// `name="description"` and `og:description` meta tags are emitted thousands
+// of bytes BEFORE `var ytInitialPlayerResponse = `, so page-authored text
+// genuinely does precede the assignment. What actually limits forgery is
+// that such text cannot spell a valid non-empty object — HTML attribute
+// escaping turns `"` into `&quot;`, and inside a JSON string `\"` breaks the
+// scan — so a forged candidate can only fail the scan, fail the decode, or
+// decode to `{}`. Taking only the first occurrence turned that harmless
+// inability into a denial: the real player response was never reached.
+//
+// The fixture spells both failure shapes in one meta attribute: `{}` decodes
+// fine but is empty, and `{ x` cannot be scanned into anything that decodes.
+//
+// Mutant named: taking only the first match per anchor (the pre-change
+// control flow, `loc := re.FindIndex(page)` with no iteration). It stops on
+// the `{}` candidate and returns an empty map with ok=true, so videoDetails
+// is absent and this test fails.
+func TestPlayerResponseSkipsAForgedCandidate(t *testing.T) {
+	page := `<!DOCTYPE html><html><head>` +
+		`<meta name="description" content="var ytInitialPlayerResponse = {} var ytInitialPlayerResponse = { x">` +
+		`<script nonce="q">var ytInitialPlayerResponse = ` +
+		`{"videoDetails":{"videoId":"abc12345678","title":"T","author":"A","channelId":"UC1"}};` +
+		`var meta=1;</script></head><body></body></html>`
+
+	pr, ok := extractPlayerResponse([]byte(page))
+	if !ok {
+		t.Fatal("extractPlayerResponse found nothing — a forged candidate ahead of the real assignment ended the search")
+	}
+	vd, _ := pr["videoDetails"].(map[string]any)
+	if got, _ := vd["videoId"].(string); got != "abc12345678" {
+		t.Errorf("videoId = %q, want %q — the forged candidate was returned instead of the real player response (pr has %d keys)",
+			got, "abc12345678", len(pr))
+	}
+}

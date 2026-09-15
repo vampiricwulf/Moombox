@@ -280,6 +280,7 @@ func (j *CookieJar) Load(filePath string) error {
 	// below only memoises when j.loadGen is still gen — see the comment there
 	// and on the loadGen field.
 	gen := j.parseInto(data, filePath)
+	cookieJarAfterParse() // test seam; see the var and the loadGen check below
 
 	// Stat AFTER the read too — and require it to AGREE with the stat taken
 	// BEFORE the read, not trust the post-read stat alone. A rewrite that
@@ -305,10 +306,11 @@ func (j *CookieJar) Load(filePath string) error {
 	// pair that now describes bytes G2 installed, not the bytes G1 read. The
 	// gen check catches exactly that: by the time G1 reaches this block,
 	// j.loadGen has moved past the value G1's own parseInto call returned, so
-	// G1 correctly declines. (Not deterministically testable with only the
-	// cookieJarReadFile seam — that seam fires before parseInto, and the race
-	// needs a pause between THIS call's parseInto and this stat, which has no
-	// seam; see the report for fix round 2.)
+	// G1 correctly declines. Pinned by
+	// TestLoadDeclinesTheMemoAfterALaterInstall, which lands G2's install in
+	// that exact window through the cookieJarAfterParse seam —
+	// cookieJarReadFile cannot reach it, since that seam fires before
+	// parseInto rather than between parseInto and this stat.
 	if postSt, postErr := os.Stat(filePath); postErr == nil && postSt.Mode().IsRegular() {
 		j.mu.Lock()
 		if j.filePath == filePath {
@@ -347,6 +349,15 @@ func (j *CookieJar) Load(filePath string) error {
 // pre/post-stat agreement check exists to catch; production never reassigns
 // it.
 var cookieJarReadFile = os.ReadFile
+
+// cookieJarAfterParse fires in Load immediately after its own parseInto call
+// and before its post-read stat. Seam for the tests, so a SECOND install (a
+// concurrent Load, or a loadFrom on the same jar) can be landed in exactly
+// the window Load's `j.loadGen == gen` check exists to catch — the window
+// cookieJarReadFile cannot reach, because that seam fires before parseInto
+// rather than after it. Production never reassigns it, and a nil-body func is
+// free: the call compiles to an indirect jump with nothing to do.
+var cookieJarAfterParse = func() {}
 
 // loadFrom installs data as the jar's parsed state, for a caller that
 // already holds bytes rather than a path to read — netscapeCookiesHoldACredential
