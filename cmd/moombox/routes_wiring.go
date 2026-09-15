@@ -213,8 +213,8 @@ func (s *runState) wireRoutes() func() {
 // Shared with the TUI's R Y overlay (tui_wiring.go), which asks the same
 // question about the same plugin file and must not answer it differently.
 func (s *runState) currentWebPort() int {
-	if s.webServer != nil && s.webServer.ActualPort > 0 {
-		return s.webServer.ActualPort
+	if s.webServer != nil && s.webServer.ActualPort() > 0 {
+		return s.webServer.ActualPort()
 	}
 	var port int
 	s.configStore.Read(func(c *config.MoomboxConfig) {

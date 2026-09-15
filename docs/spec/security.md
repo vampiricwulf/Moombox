@@ -138,6 +138,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   `video/`, and any response whose handler set its own `Content-Encoding` (double-encoding would be
   undecodable). Checked at the 1 KB threshold rather than up front, because a handler sets its
   `Content-Type` while it writes. See `skipCompression` in `internal/web/server.go`.
+- Reuses `*gzip.Writer` instances from a `sync.Pool` rather than allocating one per response.
 
 **Source:** `CompressionMiddleware` and `gzipResponseWriter` in `internal/web/server.go`.
 

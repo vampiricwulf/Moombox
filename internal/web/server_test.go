@@ -158,3 +158,34 @@ func TestCompressionSkipsAlreadyCompressedMedia(t *testing.T) {
 		t.Errorf("Content-Encoding = %q on a pre-encoded body, want the handler's own %q", enc, "br")
 	}
 }
+
+// TestActualPortIsReadThroughAnAccessor: Start writes the bound port from its
+// own goroutine while main.go reads it across a 500 ms bind window
+// (cmd/moombox/main.go:373 and :452, routes_wiring.go:216). As a plain int
+// field that is an unsynchronised read of a concurrently-written word.
+//
+// THE MUTANT: make actualPort a plain int again — cmd/moombox stops compiling,
+// and `go test -race -run TestActualPort ./internal/web/` reports a DATA RACE
+// on this test's two goroutines.
+func TestActualPortIsReadThroughAnAccessor(t *testing.T) {
+	s := NewServer(config.NewStore(config.Defaults(), ""), testWSLogger{})
+
+	if got := s.ActualPort(); got != 0 {
+		t.Errorf("ActualPort() = %d before any bind, want 0 — main.go treats 0 as 'not bound yet' "+
+			"and would otherwise report a healthy dashboard as FAILED", got)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.setActualPort(8123)
+	}()
+	for range 1000 { // read concurrently with the write, the way main.go does
+		_ = s.ActualPort()
+	}
+	<-done
+
+	if got := s.ActualPort(); got != 8123 {
+		t.Errorf("ActualPort() = %d after the bind, want 8123", got)
+	}
+}

@@ -370,7 +370,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// 0` (auto-pick), persist the OS-assigned port back to disk so the
 	// next launch reuses it (predictable port across restarts; users can
 	// discover the port from the config file). Audit cmd-moombox.md Q2.
-	if actualPort := webServer.ActualPort; actualPort > 0 {
+	if actualPort := webServer.ActualPort(); actualPort > 0 {
 		var configuredPort int
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			configuredPort = c.Network.Port
@@ -449,7 +449,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "FAILED — check logs", Inline: true})
 				ntype = notifications.TypeWarning
 				desc = fmt.Sprintf("Moombox updated from v%s to v%s and restarted — but the web dashboard failed to start", lastRunVersion, version)
-			case webServer.ActualPort > 0:
+			case webServer.ActualPort() > 0:
 				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "OK", Inline: true})
 			}
 			notifyMgr.Send("Update Applied", desc, ntype, fields,

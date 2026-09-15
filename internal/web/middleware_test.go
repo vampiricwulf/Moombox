@@ -945,3 +945,56 @@ func TestIPGateHonorsTrustedProxy(t *testing.T) {
 		})
 	}
 }
+
+// TestCompressionReusesGzipWriters: gzip.NewWriter allocates its deflate
+// window and hash tables on every call — measured at 1,080,105 B/op across 15
+// allocations, against 4,099 B/op across 1 for a pooled writer. On a dashboard
+// polling /api/jobs that is ~1 MB of garbage per response (sweep T4-35).
+//
+// THE MUTANT: replace the pool Get/Reset in startGzip with gzip.NewWriter —
+// AllocedBytesPerOp jumps past 200 KB and this fails.
+func TestCompressionReusesGzipWriters(t *testing.T) {
+	body := strings.Repeat("compressible-json-byte-", 200) // ~4.6 KB, over gzipMinSize
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(body))
+	})
+	wrapped := CompressionMiddleware(handler)
+
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			wrapped.ServeHTTP(httptest.NewRecorder(), req)
+		}
+	})
+	if got := res.AllocedBytesPerOp(); got > 200*1024 {
+		t.Errorf("a gzipped response allocates %d B/op; a fresh gzip.Writer alone is ~1.08 MB and a "+
+			"pooled one ~4 KB, so anything over 200 KB means the writer is not being reused", got)
+	}
+
+	// Correctness, not just cost: a reused writer that is not Reset onto the
+	// new ResponseWriter writes into the previous response.
+	for range 3 {
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+
+		zr, err := gzip.NewReader(rec.Body)
+		if err != nil {
+			t.Fatalf("gzip.NewReader: %v", err)
+		}
+		got, err := io.ReadAll(zr)
+		zr.Close()
+		if err != nil {
+			t.Fatalf("read gzip body: %v", err)
+		}
+		if string(got) != body {
+			t.Fatalf("decoded body = %d bytes, want the original %d — the pooled writer was not "+
+				"Reset onto this response", len(got), len(body))
+		}
+	}
+}

@@ -54,7 +54,7 @@ type Server struct {
 	loginHTML   []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
 	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
 	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
-	ActualPort  int              // Actual bound port after Start (may differ from cfg if probed)
+	actualPort  atomic.Int32     // Actual bound port after Start (may differ from cfg if probed)
 	draining    atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
@@ -131,6 +131,15 @@ func (s *Server) InternalToken() string {
 func (s *Server) SetCommit(c string) {
 	s.commit = c
 }
+
+// ActualPort returns the port the listener actually bound, or 0 before the bind
+// completes. Start writes it from its own goroutine while main.go reads it
+// across a 500 ms select window, so it is atomic rather than a plain int
+// (sweep T4-35). int32 is deliberate: a TCP port never exceeds 65535.
+func (s *Server) ActualPort() int { return int(s.actualPort.Load()) }
+
+// setActualPort records the bound port. Called once, by Start.
+func (s *Server) setActualPort(port int) { s.actualPort.Store(int32(port)) }
 
 // SetAuth sets the auth service for authentication middleware.
 func (s *Server) SetAuth(auth *AuthService) {
@@ -452,7 +461,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Log the actual URL (matches TS: "Web dashboard available at ...")
 	actualPort := ln.Addr().(*net.TCPAddr).Port
-	s.ActualPort = actualPort
+	s.setActualPort(actualPort)
 	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
 	// Mirrors the host switch above: all three of these bind 0.0.0.0.
@@ -627,17 +636,25 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// gzipWriterPool recycles the deflate state a *gzip.Writer carries — a window,
+// a hash head table and a hash prev table, measured at 1,080,105 B across 15
+// allocations per fresh writer against 4,099 B across 1 for a recycled one.
+// Every writer is Reset onto its response before use and returned on Close.
+var gzipWriterPool = sync.Pool{
+	New: func() any { return gzip.NewWriter(io.Discard) },
+}
+
 func (g *gzipResponseWriter) startGzip() error {
 	g.ResponseWriter.Header().Set("Content-Encoding", "gzip")
 	g.ResponseWriter.Header().Del("Content-Length") // Length changes with compression
 	g.flushStatus()
 	g.headerSent = true
 
+	gw := gzipWriterPool.Get().(*gzip.Writer)
+	gw.Reset(g.ResponseWriter)
+	g.writer = gw
+
 	var err error
-	g.writer, err = gzip.NewWriterLevel(g.ResponseWriter, gzip.DefaultCompression)
-	if err != nil {
-		return err
-	}
 	if len(g.buf) > 0 {
 		_, err = g.writer.Write(g.buf)
 		g.buf = nil
@@ -673,6 +690,12 @@ func (g *gzipResponseWriter) flushStatus() {
 func (g *gzipResponseWriter) Close() {
 	if g.writer != nil {
 		g.writer.Close()
+		// Reset onto io.Discard before parking it: a pooled writer must not
+		// keep this response's ResponseWriter alive, and g.writer is nilled so
+		// a stray Flush after Close cannot touch a writer someone else owns.
+		g.writer.Reset(io.Discard)
+		gzipWriterPool.Put(g.writer)
+		g.writer = nil
 		return
 	}
 
