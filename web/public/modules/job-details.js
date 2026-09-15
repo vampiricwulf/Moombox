@@ -211,15 +211,25 @@ export class JobDetailsController {
         if (badge.variant !== variant) badge.variant = variant;
         if (badge.textContent !== job.chatStatus) badge.textContent = job.chatStatus;
       }
-      // Update message count — text node after the badge
-      const existingText = badge && badge.nextSibling && badge.nextSibling.nodeType === Node.TEXT_NODE
-        ? badge.nextSibling : null;
-      // toLocaleString is the expensive half: skipped unless the count moved.
-      const countText = job.totalChatMessages ? ` (${job.totalChatMessages.toLocaleString()} messages)` : "";
-      if (existingText) {
-        if (existingText.textContent !== countText) existingText.textContent = countText;
-      } else if (countText) {
-        chatField.appendChild(document.createTextNode(countText));
+      // Update message count — text node after the badge.
+      //
+      // toLocaleString is an Intl format, and this runs on every job_update
+      // (~60 Hz per active job) while the count moves once per chat flush — so
+      // the STRING is rebuilt only when the source number changes, the same
+      // way the updated row's title is gated on data-timestamp below. The last
+      // count is stashed on the field itself; dataset values are strings, so
+      // the comparison is against the String form.
+      const countKey = job.totalChatMessages ? String(job.totalChatMessages) : "";
+      if (chatField.dataset.chatCount !== countKey) {
+        chatField.dataset.chatCount = countKey;
+        const existingText = badge && badge.nextSibling && badge.nextSibling.nodeType === Node.TEXT_NODE
+          ? badge.nextSibling : null;
+        const countText = countKey ? ` (${job.totalChatMessages.toLocaleString()} messages)` : "";
+        if (existingText) {
+          if (existingText.textContent !== countText) existingText.textContent = countText;
+        } else if (countText) {
+          chatField.appendChild(document.createTextNode(countText));
+        }
       }
     }
 

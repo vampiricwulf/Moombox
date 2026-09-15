@@ -69,13 +69,15 @@ func TestStaticAssetsAnswerConditionalGET(t *testing.T) {
 }
 
 // TestStaticAssetETagFallsBackToContentHash: a build with no VCS stamp reports
-// commit "unknown". Using that as the validator would give two different builds
-// the same ETag, so an in-place update would keep serving the old app.js.
+// commit "unknown", and a build from a dirty working tree reports
+// "<rev>-dirty". Using either as the validator would give two different builds
+// the same ETag, so an in-place update — or a local-dev rebuild — would keep
+// serving the old app.js.
 //
-// THE MUTANT: treat "unknown" as a known commit — both files come back with
-// the same ETag and the assertion fails.
+// THE MUTANT: treat "unknown" (or the "-dirty" suffix) as a known commit —
+// both files come back with the same ETag and the assertion fails.
 func TestStaticAssetETagFallsBackToContentHash(t *testing.T) {
-	for _, commit := range []string{"", "unknown"} {
+	for _, commit := range []string{"", "unknown", "abc1234-dirty"} {
 		s, _ := staticFixture(t, commit)
 
 		js := getStatic(t, s, "/app.js", nil).Header().Get("ETag")
@@ -114,6 +116,42 @@ func TestStaticCachePolicyFollowsTheCacheBuster(t *testing.T) {
 	cc := getStatic(t, s, "/app.js?v=abc1234", nil).Header().Get("Cache-Control")
 	if !strings.Contains(cc, "immutable") || !strings.Contains(cc, "max-age=31536000") {
 		t.Errorf("/app.js?v= Cache-Control = %q, want the year-long immutable policy", cc)
+	}
+}
+
+// TestStaticCachePolicyNeedsATrustedCommit: the immutable branch keyed off the
+// ?v= QUERY alone, so an untrusted commit — "unknown", or a dirty-tree
+// "<rev>-dirty" — still pinned /app.js?v=<that> for a year even though the
+// ETag beside it had already been downgraded to a content hash for exactly the
+// same reason. A year-long immutable entry cannot be revalidated at all, so a
+// dev rebuild (or an in-place update of a stamp-less build) was unreachable
+// until the user hard-reloaded (sweep R5-4/F2).
+//
+// THE MUTANT: let the immutable branch check only r.URL.Query().Get("v") —
+// both untrusted commits come back immutable and this fails.
+func TestStaticCachePolicyNeedsATrustedCommit(t *testing.T) {
+	for _, commit := range []string{"unknown", "abc1234-dirty"} {
+		s, _ := staticFixture(t, commit)
+
+		rr := getStatic(t, s, "/app.js?v="+commit, nil)
+		cc := rr.Header().Get("Cache-Control")
+		if strings.Contains(cc, "immutable") {
+			t.Errorf("commit=%q: /app.js?v= Cache-Control = %q; an untrusted commit names no fixed "+
+				"body, so the URL must stay revalidatable", commit, cc)
+		}
+		if cc != "no-cache" {
+			t.Errorf("commit=%q: Cache-Control = %q, want no-cache", commit, cc)
+		}
+		// The ETag is still there: revalidation must cost a 304, not the file.
+		if tag := rr.Header().Get("ETag"); len(tag) != 66 {
+			t.Errorf("commit=%q: ETag %q is not a quoted SHA-256", commit, tag)
+		}
+	}
+
+	// The trusted case is unchanged: a real commit + ?v= is still immutable.
+	s, _ := staticFixture(t, "abc1234")
+	if cc := getStatic(t, s, "/app.js?v=abc1234", nil).Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+		t.Errorf("trusted commit: Cache-Control = %q, want the year-long immutable policy", cc)
 	}
 }
 

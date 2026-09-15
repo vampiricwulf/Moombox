@@ -83,6 +83,14 @@ export class LogPanelController {
     // forces a synchronous layout, so a 100-line burst cost 100 reflows.
     if (this.logFilter === "all" && !this._logSearchQuery) {
       this._pendingLines.push(log);
+      // Cap the queue at the same 500-line window this.logs keeps. A browser
+      // does not run rAF callbacks for a hidden document and the `log` WS
+      // handler is not gated on document.hidden, so on the 24/7 dashboard left
+      // in a background tab this queue would otherwise grow for hours —
+      // hundreds of thousands of retained strings, then one giant flush.
+      // Nothing displayed changes: _flushPendingLines already keeps only the
+      // newest 500 of an oversized batch.
+      if (this._pendingLines.length > 500) this._pendingLines.shift();
       if (this._pendingFrame === null) {
         this._pendingFrame = requestAnimationFrame(() => this._flushPendingLines());
       }

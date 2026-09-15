@@ -423,6 +423,13 @@ func TestCompressionMiddlewareCompressesLargeOK(t *testing.T) {
 	if rec.Body.Len() >= len(body) {
 		t.Errorf("wire body is %d bytes, not smaller than the %d it encodes", rec.Body.Len(), len(body))
 	}
+	// T4 made ?v= assets public+immutable with ETags, so a SHARED cache may now
+	// store this body. Without Vary it would hand the gzipped copy to the next
+	// client that negotiated identity, which cannot decode it.
+	// THE MUTANT: drop the Vary line from CompressionMiddleware.
+	if v := rec.Header().Get("Vary"); !strings.Contains(v, "Accept-Encoding") {
+		t.Errorf("Vary = %q, want it to name Accept-Encoding on a content-negotiated response", v)
+	}
 	zr, err := gzip.NewReader(rec.Body)
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v", err)
@@ -976,9 +983,18 @@ func TestCompressionReusesGzipWriters(t *testing.T) {
 			wrapped.ServeHTTP(httptest.NewRecorder(), req)
 		}
 	})
-	if got := res.AllocedBytesPerOp(); got > 200*1024 {
-		t.Errorf("a gzipped response allocates %d B/op; a fresh gzip.Writer alone is ~1.08 MB and a "+
-			"pooled one ~4 KB, so anything over 200 KB means the writer is not being reused", got)
+	// The race detector charges its shadow memory to the allocating goroutine,
+	// which lifts the SAME pooled workload from ~4 KB/op to ~291 KB/op. Raise
+	// the ceiling rather than skip the test: the unpooled baseline is ~1.09 MB,
+	// so the mutant below still fails under both builds (sweep R5/T3).
+	ceiling := 200 * 1024
+	if raceEnabled {
+		ceiling = 500 * 1024
+	}
+	if got := res.AllocedBytesPerOp(); got > int64(ceiling) {
+		t.Errorf("a gzipped response allocates %d B/op against a %d ceiling; a fresh gzip.Writer alone "+
+			"is ~1.08 MB and a pooled one ~4 KB, so anything over that means the writer is not being "+
+			"reused", got, ceiling)
 	}
 
 	// Correctness, not just cost: a reused writer that is not Reset onto the

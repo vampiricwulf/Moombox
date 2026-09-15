@@ -115,6 +115,42 @@ test("updateJobDetails still writes when a value actually changes", { skip }, as
     "details panel on its first value");
 });
 
+// The chat count's `toLocaleString` is an Intl format, and it ran on EVERY
+// job_update tick — ~60 Hz per active job — even though the count moves once
+// per chat flush. Gate it on the source value the way the updated-row title is
+// gated on data-timestamp (sweep R5/item 4).
+test("updateJobDetails re-formats the chat count only when it moves", { skip }, async () => {
+  const h = await harness.makeApp();
+  const job = downloadingJob();
+
+  h.app.selectedJobId = job.id;
+  h.app.jobs = [job];
+  h.app.details.renderJobDetails(job);
+  h.app.details.updateJobDetails(job); // settle the render-vs-update whitespace difference
+  await h.flush();
+
+  // The harness already replaced Number.prototype.toLocaleString with a
+  // locale-pinned wrapper; count calls through it and put it back afterwards.
+  const pinned = Number.prototype.toLocaleString;
+  let formats = 0;
+  Number.prototype.toLocaleString = function (...args) { formats++; return pinned.apply(this, args); };
+  try {
+    h.app.details.updateJobDetails(job);
+    assert.equal(formats, 0,
+      "an unchanged count must not be re-formatted — the ungated version (the mutant) runs an Intl " +
+      "number format on every tick for as long as the dialog is open");
+
+    h.app.details.updateJobDetails({ ...job, totalChatMessages: 9999 });
+    assert.ok(formats >= 1, "a moved count must still be re-formatted — gating must not FREEZE it");
+  } finally {
+    Number.prototype.toLocaleString = pinned;
+  }
+
+  const chat = h.el("job-details-content").querySelector('[data-field="chat"]');
+  assert.match(chat.textContent, /9,999 messages/,
+    "the new count must reach the DOM — a `return` instead of an `if` (the mutant) leaves 5,678 there");
+});
+
 test("updateActiveIndicator writes nothing when the count has not changed", { skip }, async () => {
   const h = await harness.makeApp();
   const jobs = [downloadingJob(), { ...downloadingJob(), id: "job-2", status: "Live" }];

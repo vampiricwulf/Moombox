@@ -190,9 +190,14 @@ reads any policy and `ipAllowedByNetworkAccess` admits — so any page open in a
 `/api/restart` or delete a job, and CORS reflected its origin with `Allow-Credentials: true` so it could
 read the answers too (sweep T1-6). Both halves refuse now: `CORSMiddleware` reflects an origin only when
 `isAllowedOrigin` admits it, and the preflight branch reuses that one decision instead of recomputing
-it. **Operator consequence:** a reverse proxy must either forward the client's `Host` verbatim or be
-listed in `network.trusted_proxies` so its `X-Forwarded-Host` is read; otherwise the dashboard's own
-posts are refused with `403 Forbidden: invalid origin`.
+it. **Operator consequence:** a reverse proxy must forward the client's `Host` verbatim; otherwise the
+dashboard's own posts are refused with `403 Forbidden: invalid origin`. Listing the proxy in
+`network.trusted_proxies` so its `X-Forwarded-Host` is read satisfies the CSRF and CORS checks only —
+it is NOT an alternative. The WebSocket upgrade builds its allowed origins from `r.Host` and the
+certificate SANs and never reads `X-Forwarded-Host` (`allowedOriginPatterns`,
+`internal/web/websocket.go`), so a Host-rewriting proxy loads the dashboard and then has every socket
+upgrade refused — a page with no live updates. Aligning the upgrade check with `trusted_proxies` is a
+chain-close residual.
 `internal/web/routes/cookies_import_chain_test.go` drives the CSRF half through the real chain — the
 missing-origin refusal on a `public` fixture and the invalid-origin refusal on a `lan` one. The CORS
 half is pinned separately, at middleware level, by `TestCORSReflectionFollowsTheOriginPolicy`
@@ -214,7 +219,7 @@ A mutating request that reaches the Origin check with neither an `Origin` nor a 
 
 There is no localhost/LAN exemption. An earlier version allowed missing-Origin requests from local and LAN clients, which let any local process or same-origin browser tab call `/api/restart`, `/api/auth/set-password`, or `/api/jobs/{id}/open-folder` with no proof of browser context. That bypass was removed (audit `reports/web.md` C-1/C-5/C-8) and **must not be reintroduced.**
 
-The only ways a mutating request reaches a handler without an Origin/Referer header are the two exemptions listed above, both of which short-circuit before the check: a matching `X-Internal-Token` (same-process TUI), or one of the three path-exempt POT endpoints (`/get_pot`, `/invalidate_caches`, `/invalidate_it`, each `LoopbackOnly` at the route level). Non-browser local CLIs must therefore send `Origin: http://localhost:<port>` or the internal token.
+The only ways a mutating request reaches a handler without an Origin/Referer header are the two exemptions listed above, both of which short-circuit before the check: a matching `X-Internal-Token` (same-process TUI), or one of the three path-exempt POT endpoints (`/get_pot`, `/invalidate_caches`, `/invalidate_it`, each `LoopbackOnly` at the route level). Non-browser local CLIs must therefore send the internal token, or set `Origin` to the **same authority the request's own `Host` carries** — the rule step 4 above states in full (under `localhost` / `lan` the check is an IP-class test, so either spelling of loopback passes; under `external` / `public` the origin must name the request's own host exactly).
 
 ---
 

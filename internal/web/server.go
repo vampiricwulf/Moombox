@@ -132,10 +132,14 @@ func (s *Server) SetCommit(c string) {
 	s.commit = c
 }
 
-// ActualPort returns the port the listener actually bound, or 0 before the bind
-// completes. Start writes it from its own goroutine while main.go reads it
-// across a 500 ms select window, so it is atomic rather than a plain int
-// (sweep T4-35). int32 is deliberate: a TCP port never exceeds 65535.
+// ActualPort returns the port the listener actually bound, or 0 when the bind
+// has not completed. 0 is the PENDING sentinel, not a port: every caller
+// (cmd/moombox/main.go's startup banner and its 500 ms readiness select,
+// routes_wiring.go's plugin-port lookup) tests `> 0` and falls back to the
+// configured port until it turns positive. Start writes it from its own
+// goroutine while main.go reads it across that select window, so it is atomic
+// rather than a plain int (sweep T4-35). int32 is deliberate: a TCP port never
+// exceeds 65535.
 func (s *Server) ActualPort() int { return int(s.actualPort.Load()) }
 
 // setActualPort records the bound port. Called once, by Start.
@@ -294,17 +298,36 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 	})
 }
 
+// trustedCommit reports whether s.commit identifies the served bytes uniquely
+// — the one question both cache decisions below turn on.
+//
+// Two spellings do not. "unknown" is what cmd/moombox/main.go's
+// resolveBuildCommit falls back to when a build carries no -ldflags stamp and
+// no vcs.revision, so every such build shares it. A "-dirty" suffix means the
+// build came from a working tree with uncommitted changes, so successive
+// rebuilds at the same revision serve different app.js under the same string.
+// Either way, keying a cache entry on it serves the PREVIOUS build's bytes.
+func (s *Server) trustedCommit() bool {
+	return s.commit != "" && s.commit != "unknown" && !strings.HasSuffix(s.commit, "-dirty")
+}
+
 // staticCacheHeaders sets the caching policy for one embedded asset.
 //
-// A URL carrying the build's ?v= cache-buster names a body that cannot change,
-// so it is immutable for a year. Everything else must revalidate — and gets an
-// ETag so the revalidation costs 304 bytes instead of the whole file. The
-// previous policy keyed off the EXTENSION, which pinned unversioned
+// A URL carrying a TRUSTED build's ?v= cache-buster names a body that cannot
+// change, so it is immutable for a year. Everything else must revalidate — and
+// gets an ETag so the revalidation costs 304 bytes instead of the whole file.
+// The previous policy keyed off the EXTENSION, which pinned unversioned
 // /favicon.svg for a year and left every .js/.css re-downloading in full
 // (embed.FS reports a zero ModTime, so ETag is the only validator available
 // here). Sweep T2-18.
+//
+// The immutable branch asks trustedCommit, not just "is there a ?v=": an
+// immutable entry cannot be revalidated at all for a year, so pinning one
+// against a commit that does NOT identify the bytes (see trustedCommit) is
+// strictly worse than the stale-ETag case the same predicate already guards in
+// assetETag — a hard reload would be the only way out. Sweep R5-4/F2.
 func (s *Server) staticCacheHeaders(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) {
-	if r.URL.Query().Get("v") != "" {
+	if r.URL.Query().Get("v") != "" && s.trustedCommit() {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
@@ -317,15 +340,11 @@ func (s *Server) staticCacheHeaders(w http.ResponseWriter, r *http.Request, fsys
 }
 
 // assetETag returns the validator for one embedded asset: the build commit
-// when it is known (every asset of a build shares it — an ETag is scoped to
-// its URL, so one string per build invalidates exactly the right things), else
-// the file's SHA-256, hashed once per path and memoised.
-//
-// "unknown" is NOT a known commit: it is what cmd/moombox/main.go's init
-// writes when there is no -ldflags stamp and no vcs.revision, and two such
-// builds sharing one validator would keep serving the pre-update app.js.
+// when trustedCommit vouches for it (every asset of a build shares it — an
+// ETag is scoped to its URL, so one string per build invalidates exactly the
+// right things), else the file's SHA-256, hashed once per path and memoised.
 func (s *Server) assetETag(fsys fs.FS, name string) string {
-	if s.commit != "" && s.commit != "unknown" {
+	if s.trustedCommit() {
 		return `"` + s.commit + `"`
 	}
 	if v, ok := s.assetETags.Load(name); ok {
@@ -563,6 +582,14 @@ func CompressionMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+
+		// The body this handler is about to produce depends on Accept-Encoding,
+		// and T4 made ?v= assets `public, immutable` with ETags — so a SHARED
+		// cache may now store one. Without Vary it would serve the gzipped copy
+		// to the next client that negotiated identity, which cannot decode it.
+		// Add, not Set: CORS and auth middlewares are free to name their own
+		// fields, and a second Vary line is as valid as a longer one (R5/F5).
+		w.Header().Add("Vary", "Accept-Encoding")
 
 		gz := &gzipResponseWriter{
 			ResponseWriter: w,

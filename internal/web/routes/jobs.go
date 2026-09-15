@@ -1363,12 +1363,23 @@ const chatJSONWindow = 512
 // chatJSONLooksComplete reports whether the file's first non-whitespace byte is
 // '{' and its last non-whitespace byte is '}'.
 //
-// This replaces a whole-file json.Valid. The writer is atomic
-// (write-temp-then-rename), so the only corruption seen in the field is
-// TRUNCATION — an interrupted write, a partial flush — and a truncated object
-// cannot end in '}'. On a 100 MB VOD chat file the answer now costs 1 KB of
-// I/O instead of a 100 MB read plus a full scan, on every player open
+// This replaces a whole-file json.Valid. The only corruption seen in the field
+// is TRUNCATION — an interrupted write, a partial flush — and a truncated
+// object cannot end in '}'. On a 100 MB VOD chat file the answer now costs
+// 1 KB of I/O instead of a 100 MB read plus a full scan, on every player open
 // (sweep T2-19).
+//
+// "Atomic writer" holds for the FULL-FILE writes (write-temp-then-rename) but
+// not for the live-append path, which edits in place: AppendChatMessages
+// (internal/utils/chatfile.go) does a WriteAt over the old closing bracket and
+// truncates afterwards. The conclusion survives anyway, because that payload is
+// self-closing ("…]\n}") and always longer than the "]\n}" it overwrites — so
+// once the WriteAt lands the file is already a complete document, and a crash
+// before or during it leaves either the previous complete document or a tail
+// that fails the '}' check here. The residual risk is a file that passes this
+// check and still fails to parse; the player's chat load runs inside a try
+// (web/public/modules/player.js), so a Response.json() rejection surfaces as a
+// "Failed to load chat replay" toast rather than a broken page.
 func chatJSONLooksComplete(f *os.File, size int64) bool {
 	if size <= 0 {
 		return false
