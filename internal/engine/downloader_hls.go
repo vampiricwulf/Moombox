@@ -184,8 +184,8 @@ func hlsReloadDelay(lastSegDur, targetDur float64, hadNewSegments bool, elapsed,
 }
 
 // endVerdict is what ONE CheckStreamStatus consult tells the live HLS loop.
-// runHlsLoop asks the stream-end question at three exit sites — the playlist
-// 404/410 branch, the consecutive-FETCH-failure escalation and the
+// runHlsLoop asks the stream-end question at three playlist-failure sites —
+// the playlist 404/410 branch, the consecutive-FETCH-failure escalation and the
 // consecutive-PARSE-failure escalation — and all three classify the answer
 // identically. They differ only in what an ABSENT verdict means to the
 // evidence the site already holds, which is why this helper classifies and

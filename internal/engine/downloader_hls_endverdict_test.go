@@ -13,7 +13,7 @@ import (
 )
 
 // hlsFailMode is how the playlist endpoint fails, which selects WHICH of
-// runHlsLoop's three end-verdict sites the loop reaches.
+// runHlsLoop's three playlist-failure sites the loop reaches.
 type hlsFailMode int
 
 const (
@@ -30,8 +30,8 @@ const (
 )
 
 // hlsFailServer serves the chosen failure for every playlist request and
-// counts the requests. No segment route is needed: none of the three sites
-// under test is reachable after a segment has been fetched.
+// counts the requests. No segment route is needed: every row's playlist
+// fails from the first fetch, so no segment is ever requested.
 func hlsFailServer(t *testing.T, mode hlsFailMode) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	var fetches atomic.Int32
@@ -53,20 +53,25 @@ func hlsFailServer(t *testing.T, mode hlsFailMode) (*httptest.Server, *atomic.In
 
 // newEndVerdictDownloader wires a failing playlist to a scripted status
 // check. check is called with the 1-based call number so a row can script
-// "error first, answer second".
+// "error first, answer second". A nil check leaves CheckStreamStatus unwired
+// (verdictNoCheck) instead of wrapping a nil func, which would panic on the
+// first call — the seam a `wantNoCheck` row uses.
 func newEndVerdictDownloader(t *testing.T, url string, warns *warnCollector, check func(call int) (bool, error)) (*SegmentDownloader, *atomic.Int32) {
 	t.Helper()
 	var checks atomic.Int32
-	d := NewSegmentDownloader(DownloaderOptions{
+	opts := DownloaderOptions{
 		BaseURL:    url,
 		OutputFile: filepath.Join(t.TempDir(), "video.ts"),
 		StartSeq:   -1,
 		IsHls:      true,
 		Logger:     warns,
-		CheckStreamStatus: func(context.Context) (bool, error) {
+	}
+	if check != nil {
+		opts.CheckStreamStatus = func(context.Context) (bool, error) {
 			return check(int(checks.Add(1)))
-		},
-	})
+		}
+	}
+	d := NewSegmentDownloader(opts)
 	d.delays = fastDelays()
 	// Arc 2 seam: 5 s ÷ fastScale is still 250 ms per retry round, and the
 	// escalation rows burn six of them.
@@ -75,9 +80,10 @@ func newEndVerdictDownloader(t *testing.T, url string, warns *warnCollector, che
 }
 
 // TestHlsEndVerdictSites is the O4 symmetry table: runHlsLoop asks
-// CheckStreamStatus at three sites — the playlist 404/410 branch (A), the
-// consecutive-FETCH-failure escalation (B) and the consecutive-PARSE-failure
-// escalation (C) — and the SAME answer must mean the SAME thing at all three.
+// CheckStreamStatus at three playlist-failure sites — the playlist 404/410
+// branch (A), the consecutive-FETCH-failure escalation (B) and the
+// consecutive-PARSE-failure escalation (C) — and the SAME answer must mean
+// the SAME thing at all three.
 // A confirmed "ended" finalizes cleanly (nil, streamEnded true, so
 // runHlsLoop's defer clears the resume sidecar); a confirmed "still live"
 // hands the orchestrator ErrQualityLost for its variant refresh; a failed
@@ -105,6 +111,11 @@ func TestHlsEndVerdictSites(t *testing.T) {
 		name  string
 		mode  hlsFailMode
 		check func(call int) (bool, error)
+		// wantNoCheck: check above must be nil for this row (verdictNoCheck —
+		// nothing wired to consult). newEndVerdictDownloader leaves
+		// CheckStreamStatus unset, and the harness asserts checks.Load() == 0,
+		// which wantChecks (exact-when->0) cannot express.
+		wantNoCheck bool
 		// wantErr: Start() must return non-nil. wantErrContains is an
 		// optional substring of that error ("" skips the check).
 		wantErr         bool
@@ -141,6 +152,30 @@ func TestHlsEndVerdictSites(t *testing.T) {
 			mutant:           "restoring `d.streamEnded.Store(true); return nil` under a non-nil checkErr (T1-2)",
 		},
 		{
+			// The only row that reaches BOTH consults in one iteration: site
+			// A's consult defers on every one of the six 404 rounds, so by
+			// the time the retry budget is spent it is site B's (the second,
+			// "redundant"-looking) consult that finalizes cleanly. Pins the
+			// ruling that this second consult is KEPT, not deduped.
+			name: "A/404 escalating to B's second consult on the same round (kept, not redundant)",
+			mode: fail404,
+			check: func(call int) (bool, error) {
+				if call <= 6 {
+					return false, errors.New("gql flap")
+				}
+				return true, nil
+			},
+			wantEnded: true, wantChecks: 7, wantFetches: 6,
+			wantWarnContains: "stream status check failed; deferring end verdict",
+			mutant:           `skipping site B's consult on a 404/410 round (deduping the "redundant" second consult) — Start returns the consecutive-error failure with checks=6 and the sidecar outlives the recording`,
+		},
+		{
+			name: "A/404 no check wired finalizes on the first failure",
+			mode: fail404, wantNoCheck: true,
+			wantEnded: true, wantFetches: 1,
+			mutant: "dropping verdictNoCheck from site A's finalize arm",
+		},
+		{
 			name: "B/fetch-escalation confirmed ended finalizes cleanly",
 			mode: fail500, check: alwaysEnded,
 			wantEnded: true, wantChecks: 1, wantFetches: 6,
@@ -162,6 +197,13 @@ func TestHlsEndVerdictSites(t *testing.T) {
 			mutant:           "treating verdictUnknown as ended at site B — Start returns nil and clears the sidecar a later Resume needs",
 		},
 		{
+			name: "B/fetch-escalation no check wired keeps the fetch failure",
+			mode: fail500, wantNoCheck: true,
+			wantErr: true, wantErrContains: "HLS playlist fetch failed after 6 consecutive errors",
+			wantFetches: 6,
+			mutant:      "adding verdictNoCheck to site B's finalize arm",
+		},
+		{
 			name: "C/parse-escalation confirmed ended finalizes cleanly",
 			mode: failGarbage, check: alwaysEnded,
 			wantEnded: true, wantChecks: 1, wantFetches: 6,
@@ -181,6 +223,13 @@ func TestHlsEndVerdictSites(t *testing.T) {
 			wantChecks: 1, wantFetches: 6,
 			wantWarnContains: "stream status check failed; deferring end verdict",
 			mutant:           "treating verdictUnknown as ended at site C",
+		},
+		{
+			name: "C/parse-escalation no check wired keeps the parse failure",
+			mode: failGarbage, wantNoCheck: true,
+			wantErr: true, wantErrContains: "failed to parse HLS playlist after 6 consecutive errors",
+			wantFetches: 6,
+			mutant:      "adding verdictNoCheck to site C's finalize arm",
 		},
 	}
 
@@ -225,6 +274,11 @@ func TestHlsEndVerdictSites(t *testing.T) {
 			if tc.minChecks > 0 {
 				if got := int(checks.Load()); got < tc.minChecks {
 					t.Errorf("CheckStreamStatus called %d times, want >= %d — the loop must RE-ASK after a failed check, not latch the first answer", got, tc.minChecks)
+				}
+			}
+			if tc.wantNoCheck {
+				if got := int(checks.Load()); got != 0 {
+					t.Errorf("CheckStreamStatus called %d times, want 0 — nothing is wired to consult. Mutant: %s", got, tc.mutant)
 				}
 			}
 			if tc.wantFetches > 0 {
