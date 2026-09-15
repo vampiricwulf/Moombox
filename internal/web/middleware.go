@@ -170,8 +170,12 @@ func CSRFMiddleware(store *config.Store, internalToken string, logger interface 
 				// without being listed in network.trusted_proxies, and without
 				// this the operator sees only the browser's console error
 				// (Arc 5 Task 1 follow-up). The value is client-chosen, so it
-				// is clipped before it reaches the dashboard's log panel;
-				// volume is bounded by the per-IP API rate limiter.
+				// is clipped before it reaches the dashboard's log panel. This
+				// middleware runs ahead of the IP gate and of every per-route
+				// rate limiter, so an unauthenticated peer can fire this line
+				// once per request; volume is bounded only by the logger's
+				// fixed-size ring buffer and its file rotation
+				// (internal/logger/logger.go).
 				logger.Warn("CSRF: origin refused",
 					"origin", clipForLog(origin),
 					"host", clipForLog(comparedHost))
@@ -283,11 +287,19 @@ func identityHosts() []string {
 // names. Both sides go through splitAuthority, so IP SANs compare canonically
 // ("::1" == "0:0:0:0:0:0:0:1") and DNS SANs compare case-insensitively.
 //
-// A leading "*." SAN matches exactly one leftmost label that is non-empty and
-// contains no dot (RFC 6125). Without that clause an operator running a
-// wildcard certificate would have EVERY origin refused, because the SAN list
-// then names no literal host at all.
-func hostInSANs(hostname string, sans []string) bool {
+// allowWildcard gates the "*." expansion below (RFC 6125: exactly one
+// leftmost, non-empty, dot-free label). Only the external/public arm of
+// isAllowedOrigin passes true: there, sameSiteOrigin already pins hostname to
+// the browser's address bar first, so the wildcard can only ever NARROW which
+// same-host requests still pass. The localhost/lan/default arms have no such
+// conjunction — hostInSANs alone decides — so a wildcard there would let ANY
+// sibling of an operator's wildcard certificate (e.g. a stale or
+// attacker-registered subdomain under *.example.com) become an allowed
+// cross-origin request against a loopback-only install (fix-round-1 review
+// Finding 1 / probe P7). Passing false there means only a LITERAL SAN widens
+// those arms — an install with a real certificate for "dash.lan" keeps its
+// socket, but "evil.example.com" does not ride in on "*.example.com".
+func hostInSANs(hostname string, sans []string, allowWildcard bool) bool {
 	h, _ := splitAuthority(hostname)
 	if h == "" {
 		return false
@@ -299,6 +311,9 @@ func hostInSANs(hostname string, sans []string) bool {
 		}
 		if s == h {
 			return true
+		}
+		if !allowWildcard {
+			continue
 		}
 		if suffix, ok := strings.CutPrefix(s, "*"); ok && strings.HasPrefix(suffix, ".") {
 			if label, found := strings.CutSuffix(h, suffix); found && label != "" &&
@@ -351,10 +366,10 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme strin
 
 	switch networkAccess {
 	case "localhost":
-		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity)
+		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)
 	case "lan":
 		return isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname) ||
-			hostInSANs(hostname, identity)
+			hostInSANs(hostname, identity, false)
 	case "external", "public":
 		if !sameSiteOrigin(origin, effectiveHost, effectiveScheme) {
 			return false
@@ -362,9 +377,9 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme strin
 		if len(identity) == 0 {
 			return true
 		}
-		return hostInSANs(hostname, identity)
+		return hostInSANs(hostname, identity, true)
 	default:
-		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity)
+		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)
 	}
 }
 

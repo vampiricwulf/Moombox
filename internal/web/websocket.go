@@ -77,7 +77,12 @@ type WebSocketHub struct {
 	// Set by NewServer to the SAME decision CORSMiddleware and CSRFMiddleware
 	// make (originAllowed, internal/web/middleware.go): X-Forwarded-Host from a
 	// trusted proxy, port-exact, certificate-attested on external/public.
-	// Nil accepts every origin — only test harnesses leave it nil.
+	// Nil FAILS CLOSED: an upgrade whose request carries an Origin header is
+	// refused (fix-round-1 item 3 — a silently-open upgrade is a worse default
+	// than a spuriously-refused one). A request with NO Origin header is
+	// unaffected either way — non-browser clients send none. NewServer always
+	// wires the real check; only a WebSocketHub built outside it (test
+	// harnesses today) can leave this nil.
 	OriginCheck func(r *http.Request) bool
 
 	// Log buffer for initial state (ring buffer)
@@ -157,8 +162,10 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// DNS-rebinding page controls, and its OriginPatterns are matched with
 	// filepath.Match so a port can only be wildcarded or spelled literally.
 	// An EMPTY Origin stays acceptable — non-browser clients send none, and
-	// the library allowed them too.
-	if origin := r.Header.Get("Origin"); origin != "" && hub.OriginCheck != nil && !hub.OriginCheck(r) {
+	// the library allowed them too. A nil OriginCheck fails CLOSED (fix-round-1
+	// item 3): only a WebSocketHub built without NewServer reaches this, and a
+	// silently-open upgrade is a worse default than a spuriously-refused one.
+	if origin := r.Header.Get("Origin"); origin != "" && (hub.OriginCheck == nil || !hub.OriginCheck(r)) {
 		hub.logger.Warn("websocket upgrade rejected: origin refused",
 			"origin", clipForLog(origin),
 			"host", clipForLog(r.Host))

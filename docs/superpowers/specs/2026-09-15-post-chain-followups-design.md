@@ -324,8 +324,12 @@ and `internal/web/middleware_test.go`) and its invalid-origin branch emits exact
 naming the compared pair before the 403:
 `logger.Warn("CSRF: origin refused", "origin", clipForLog(origin), "host", clipForLog(comparedHost))`.
 `clipForLog` caps an attacker-supplied value at 200 bytes and runs `strings.ToValidUTF8`, because
-the value reaches the log ring buffer the dashboard renders. Volume is bounded by the existing
-per-IP API rate limiter. The CORS and WebSocket arms stay as quiet as they are today.
+the value reaches the log ring buffer the dashboard renders. `CSRFMiddleware` is an `r.Use`
+middleware that runs ahead of every per-route rate limiter (each attached with `r.With(rl.Middleware)`)
+and ahead of `IPGateMiddleware` and `AuthMiddleware`, so an unauthenticated peer can fire this line
+once per request — no limiter runs before it. That is acceptable: volume is bounded by the logger's
+fixed-size ring buffer and its file rotation, not by a rate limit. The CORS and WebSocket arms stay
+as quiet as they are today.
 
 ### 3. The WebSocket upgrade (`internal/web/websocket.go`)
 

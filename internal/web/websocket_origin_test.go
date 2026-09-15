@@ -114,3 +114,56 @@ func TestNewServerWiresTheWebSocketOriginCheck(t *testing.T) {
 		t.Fatal("NewServer left WebSocketHub.OriginCheck nil — the upgrade would accept any origin")
 	}
 }
+
+// TestWebSocketUpgradeFailsClosedWithNoOriginCheck pins fix-round-1 item 3
+// (Task 3 Concern 2): a hub whose OriginCheck was never wired must REFUSE an
+// Origin-bearing upgrade, not accept it. NewServer always wires the real
+// check (TestNewServerWiresTheWebSocketOriginCheck above); only a hub built
+// outside it — today, only test harnesses — can reach this path.
+//
+// THE MUTANT: restore the pre-fix-round-1 condition
+// (`hub.OriginCheck != nil && !hub.OriginCheck(r)`), which treats a nil check
+// as "accept" — the first subtest starts answering 101 instead of 403.
+func TestWebSocketUpgradeFailsClosedWithNoOriginCheck(t *testing.T) {
+	newNilCheckFixture := func(t *testing.T) *httptest.Server {
+		t.Helper()
+		hub := NewWebSocketHub(testWSLogger{})
+		// OriginCheck deliberately left nil — the point of the test.
+		srv := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+		t.Cleanup(func() {
+			srv.Close()
+			hub.Close()
+		})
+		return srv
+	}
+
+	t.Run("an Origin-bearing upgrade is refused", func(t *testing.T) {
+		srv := newNilCheckFixture(t)
+		if got := upgradeStatus(t, srv, "dash.example", "http://attacker.example", nil); got != http.StatusForbidden {
+			t.Fatalf("status %d, want 403 — a nil OriginCheck must fail CLOSED", got)
+		}
+	})
+
+	t.Run("a request with no Origin header is unaffected", func(t *testing.T) {
+		srv := newNilCheckFixture(t)
+		if got := upgradeStatus(t, srv, "dash.example", "", nil); got != http.StatusSwitchingProtocols {
+			t.Fatalf("status %d, want 101 — no Origin header means no Origin check at all", got)
+		}
+	})
+}
+
+// TestWebSocketUpgradeReachesTheCertificateSANWidening pins fix-round-1 item 4
+// (Task 3 Concern 3): the localhost/lan certificate-SAN widening
+// (isAllowedOrigin's identity argument, hostInSANs) is exercised on the
+// upgrade path too, not only inside isAllowedOrigin's own unit tests.
+//
+// THE MUTANT: have wsOriginFixture's hook ignore identity — e.g. call
+// isAllowedOrigin with a nil/empty identity instead of routing through
+// originAllowed — and this row starts refusing the literal certificate name.
+func TestWebSocketUpgradeReachesTheCertificateSANWidening(t *testing.T) {
+	useIdentityCert(t, certWatcherFor(t, "dash.lan", []string{"dash.lan"}, nil))
+	srv := wsOriginFixture(t, "lan", nil)
+	if got := upgradeStatus(t, srv, "", "https://dash.lan", nil); got != http.StatusSwitchingProtocols {
+		t.Fatalf("status %d, want 101 — a literal certificate-attested SAN must widen the lan upgrade too", got)
+	}
+}

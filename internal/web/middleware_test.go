@@ -306,6 +306,26 @@ func TestIsAllowedOrigin(t *testing.T) {
 			identity:      nil,
 			expected:      true,
 		},
+		// Fix-round-1 item 1 (review Finding 1 / probe P7): the wildcard clause
+		// must NOT reach the localhost/lan/default WIDENING arms, only the
+		// external/public conjunction where sameSiteOrigin already pins the
+		// host. Mutant: re-enable wildcard expansion in the widening arms
+		// (drop the allowWildcard=false argument, or pass true) — the refused
+		// row below starts returning true.
+		{
+			name:          "localhost mode does not expand a wildcard SAN (review P7)",
+			origin:        "https://evil.example.com",
+			networkAccess: "localhost",
+			identity:      []string{"*.example.com"},
+			expected:      false,
+		},
+		{
+			name:          "lan mode still allows a literal certificate-attested name (review P7)",
+			origin:        "https://dash.lan",
+			networkAccess: "lan",
+			identity:      []string{"dash.lan"},
+			expected:      true,
+		},
 	}
 
 	for _, tt := range tests {

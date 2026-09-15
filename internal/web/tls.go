@@ -28,10 +28,33 @@ type certWatcher struct {
 	cert              atomic.Pointer[tls.Certificate]
 	mu                sync.Mutex
 	lastModTime       time.Time
-	logger            interface {
+	// identityCache holds the (SANs, IdentitySANs) pair computed from the
+	// certificate CURRENTLY in `cert`, keyed by that certificate's pointer.
+	// Guarded by mu. Before this cache, SANs()/IdentitySANs() re-parsed the
+	// DER on every call — once each from CORSMiddleware, once each from
+	// CSRFMiddleware, once each from the WebSocket upgrade, every request —
+	// and IdentitySANs loaded `cert` a SECOND time internally (once for its
+	// own placeholder guard, once again inside SANs()), so a concurrent
+	// rotation between those two loads could hand back one certificate's
+	// verdict paired with the other's SAN list (fix-round-1 review Minor #2 /
+	// probe P5b). Keying on the pointer means a swap — reloadIfChanged's
+	// plain cert.Store, or a test's — is picked up on the very next read
+	// without a separate "invalidate" call anywhere.
+	identityCache *certIdentity
+	logger        interface {
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
 	}
+}
+
+// certIdentity is one (SANs, IdentitySANs) snapshot, both derived from
+// `source` in a single DER parse. Treat the slices as immutable: SANs() and
+// IdentitySANs() hand out the cached slice itself, not a copy, so callers
+// must not mutate what they return.
+type certIdentity struct {
+	source   *tls.Certificate
+	sans     []string
+	identity []string
 }
 
 // reloadIfChanged stat's the cert file; on a newer mtime it parses the new
@@ -71,20 +94,10 @@ func (w *certWatcher) getCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, 
 	return c, nil
 }
 
-// SANs returns the DNS names + IP addresses that appear in the loaded
-// certificate, normalised to lowercase strings (IPs as their canonical
-// form). Used by the WebSocket origin allowlist (audit reports/web.md
-// S-17) to replace the r.Host-derived host check that was vulnerable to
-// Host-header spoofing.
-func (w *certWatcher) SANs() []string {
-	c := w.cert.Load()
-	if c == nil || len(c.Certificate) == 0 {
-		return nil
-	}
-	parsed, err := x509.ParseCertificate(c.Certificate[0])
-	if err != nil {
-		return nil
-	}
+// sansOf extracts the DNS names + IP addresses from a parsed certificate,
+// normalised to lowercase strings (IPs as their canonical form). Shared by
+// snapshot() so a single parse computes both SANs() and IdentitySANs().
+func sansOf(parsed *x509.Certificate) []string {
 	out := make([]string, 0, len(parsed.DNSNames)+len(parsed.IPAddresses))
 	for _, dns := range parsed.DNSNames {
 		out = append(out, strings.ToLower(dns))
@@ -96,40 +109,72 @@ func (w *certWatcher) SANs() []string {
 }
 
 // placeholderCertCN is the Common Name generateSelfSignedCert stamps on the
-// certificate Moombox writes for itself. IdentitySANs keys off it, so the
+// certificate Moombox writes for itself. snapshot keys off it, so the
 // generator and the reader must stay one constant.
 const placeholderCertCN = "Moombox"
 
-// IdentitySANs returns the hostnames a certificate ATTESTS this deployment
-// answers to, or nil when there is no such certificate.
-//
-// Moombox's OWN placeholder returns nil. generateSelfSignedCert stamps it with
-// placeholderCertCN and self-issues it, and its SANs are localhost, 127.0.0.1,
-// ::1 plus whatever interface addresses the machine happened to have at first
-// start: they name the MACHINE, never the address an operator points a browser
-// at. Treating them as an allowlist would refuse every external install reached
-// by a DNS name or a NATed public address. A certificate the operator installed
-// — Let's Encrypt, a corporate CA, or their own self-signed with a real CN —
-// does name the deployment, and is trusted to NARROW the Origin check
-// (isAllowedOrigin, internal/web/middleware.go).
-func (w *certWatcher) IdentitySANs() []string {
+// snapshot returns the (SANs, IdentitySANs) pair for the certificate
+// currently loaded, parsing it at most once per distinct *tls.Certificate —
+// see identityCache's doc comment for why. A cache hit costs one mutex
+// acquisition and one pointer comparison, no allocation.
+func (w *certWatcher) snapshot() (sans, identity []string) {
 	c := w.cert.Load()
 	if c == nil || len(c.Certificate) == 0 {
-		return nil
+		return nil, nil
 	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.identityCache != nil && w.identityCache.source == c {
+		return w.identityCache.sans, w.identityCache.identity
+	}
+
 	parsed, err := x509.ParseCertificate(c.Certificate[0])
 	if err != nil {
-		return nil
+		w.identityCache = &certIdentity{source: c}
+		return nil, nil
 	}
-	if parsed.Subject.CommonName == placeholderCertCN && parsed.Issuer.CommonName == placeholderCertCN {
-		return nil
+
+	sans = sansOf(parsed)
+	// Moombox's OWN placeholder yields no identity. generateSelfSignedCert
+	// stamps it with placeholderCertCN and self-issues it, and its SANs are
+	// localhost, 127.0.0.1, ::1 plus whatever interface addresses the machine
+	// happened to have at first start: they name the MACHINE, never the
+	// address an operator points a browser at. Treating them as an allowlist
+	// would refuse every external install reached by a DNS name or a NATed
+	// public address. A certificate the operator installed — Let's Encrypt, a
+	// corporate CA, or their own self-signed with a real CN — does name the
+	// deployment, and is trusted to NARROW the Origin check (isAllowedOrigin,
+	// internal/web/middleware.go).
+	if parsed.Subject.CommonName != placeholderCertCN || parsed.Issuer.CommonName != placeholderCertCN {
+		identity = sans
 	}
-	return w.SANs()
+	w.identityCache = &certIdentity{source: c, sans: sans, identity: identity}
+	return sans, identity
+}
+
+// SANs returns the DNS names + IP addresses that appear in the loaded
+// certificate. Used by IdentitySANs and by tests; production callers wanting
+// the certificate-ATTESTED host list should call IdentitySANs instead.
+func (w *certWatcher) SANs() []string {
+	sans, _ := w.snapshot()
+	return sans
+}
+
+// IdentitySANs returns the hostnames a certificate ATTESTS this deployment
+// answers to, or nil when there is no such certificate or it is Moombox's own
+// placeholder. See snapshot's doc comment for the placeholder rationale.
+func (w *certWatcher) IdentitySANs() []string {
+	_, identity := w.snapshot()
+	return identity
 }
 
 // CurrentCertSANs is the package-level singleton populated by
-// LoadOrGenerateTLSConfig. Nil before the TLS config is built; consumers
-// (websocket.go) call .SANs() defensively.
+// LoadOrGenerateTLSConfig. Nil before the TLS config is built. The sole
+// consumer today is identityHosts (internal/web/middleware.go), which calls
+// .IdentitySANs() and treats a nil watcher (or a nil result) as "no
+// certificate identity" — every request path that reaches it does so
+// defensively.
 var CurrentCertSANs *certWatcher
 
 // LoadOrGenerateTLSConfig returns a TLS configuration using the given cert/key

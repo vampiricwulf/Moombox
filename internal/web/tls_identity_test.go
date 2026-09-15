@@ -83,6 +83,33 @@ func TestIdentitySANsReportsAnOperatorCertificate(t *testing.T) {
 	}
 }
 
+// TestIdentitySANsRecomputesAfterAHotSwap pins fix-round-1 item 2 (review
+// Minor #2 / probe P5b): IdentitySANs/SANs now cache their result per loaded
+// *tls.Certificate rather than re-parsing the DER on every call, so a
+// certificate rotation (reloadIfChanged's plain w.cert.Store — reproduced
+// directly here) must still be visible on the very next read.
+//
+// THE MUTANT: cache the first computed result forever, ignoring whether
+// w.cert has since been swapped (e.g. a sync.Once, or comparing against
+// nothing) — this test would keep seeing "dash.example" after the swap to
+// "rotated.example".
+func TestIdentitySANsRecomputesAfterAHotSwap(t *testing.T) {
+	w := certWatcherFor(t, "dash.example", []string{"dash.example"}, nil)
+	if got := w.IdentitySANs(); !slices.Equal(got, []string{"dash.example"}) {
+		t.Fatalf("IdentitySANs() before swap = %v, want [dash.example]", got)
+	}
+
+	// Reproduce reloadIfChanged's swap directly: a plain cert.Store with no
+	// separate "invalidate the cache" call — that absence is exactly what a
+	// pointer-keyed cache must not need.
+	rotated := certWatcherFor(t, "rotated.example", []string{"rotated.example"}, nil)
+	w.cert.Store(rotated.cert.Load())
+
+	if got := w.IdentitySANs(); !slices.Equal(got, []string{"rotated.example"}) {
+		t.Fatalf("IdentitySANs() after swap = %v, want [rotated.example] — stale cache after a reload", got)
+	}
+}
+
 // THE MUTANT: have identityHosts call CurrentCertSANs.SANs() instead of
 // IdentitySANs() — the placeholder narrows the origin check again.
 func TestIdentityHostsReadsTheNarrowReader(t *testing.T) {

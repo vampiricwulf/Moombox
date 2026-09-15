@@ -76,10 +76,21 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   addresses the machine had at first start, which name the machine rather than the address an
   operator points a browser at, so treating them as an allowlist would refuse every external install
   reached by a DNS name or a NATed public address. An install with no certificate, or with only the
-  placeholder, therefore behaves exactly as it did before. A `*.` SAN matches one label. The
-  `localhost` and `lan` policies gain the SAN list as a widening only: those arms are IP-class tests
-  that reject every DNS name, and an install holding a real certificate for its own hostname would
-  otherwise lose the WebSocket it has today.
+  placeholder, therefore behaves exactly as it did before. A `*.` SAN matches one label — but only
+  here, on `external`/`public`, where the same-host comparison above already pins the origin's host
+  first, so the wildcard can only NARROW which same-host requests still pass. The `localhost` and
+  `lan` policies (and the unset default) gain the SAN list as a widening only, and admit a LITERAL
+  SAN name alone, never a wildcard: those arms have no host comparison in front of them, so a
+  wildcard there would let any sibling of an operator's wildcard certificate — a stale or
+  attacker-registered subdomain under `*.example.com` — act as an allowed cross-origin request
+  against a loopback-only install. An install holding a real (literal) certificate for its own
+  hostname keeps the WebSocket it has today either way; see `hostInSANs` in
+  `internal/web/middleware.go`.
+  **Operator consequence:** once a non-placeholder certificate is loaded, reaching the dashboard by
+  a name or address that certificate does NOT attest is refused on `external`/`public` — the same
+  `403 {"error":"Forbidden: invalid origin"}` as any other mismatched origin. The fix is to add that
+  name to the certificate's SANs; a certless or placeholder-only install is unaffected, because the
+  self-signed placeholder never narrows this check.
   **Not covered:** a rebinding attacker who also controls DNS for a name the certificate attests.
   **Residual:** a proxy listed in `network.trusted_proxies` that does not itself set or overwrite
   `X-Forwarded-Host` lets its peer choose the host the Origin is compared against. A browser cannot
