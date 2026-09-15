@@ -49,6 +49,37 @@ func withMembership(fn MembershipFetchFunc) feedMonitorOpt {
 	return func(fm *FeedMonitor) { fm.FetchMembership = fn }
 }
 
+// withClock pins fm.now to a caller-controlled instant — withNow's mutable
+// twin. The pointed-at value is what fm.now() reports, so a test can advance
+// the cycle clock between doCheck calls (the membership memo's horizon is the
+// only thing in the package that needs more than one instant).
+func withClock(clock *time.Time) feedMonitorOpt {
+	return func(fm *FeedMonitor) { fm.now = func() time.Time { return *clock } }
+}
+
+// setChannels writes chans into the monitor's config store so doCheck's
+// getYouTubeChannels sees them. Tests that drive checkChannel directly never
+// needed this; the membership memo is armed per CYCLE, so its tests drive
+// doCheck.
+func setChannels(fm *FeedMonitor, chans ...config.ChannelConfig) {
+	_ = fm.configStore.Update(func(c *config.MoomboxConfig) { c.Channels = chans })
+}
+
+// chYT is a minimal enabled YouTube channel with the given ID as both ID and
+// display name.
+func chYT(id string) config.ChannelConfig {
+	return config.ChannelConfig{ID: id, Name: id}
+}
+
+// shrinkFeedStagger cuts the inter-channel pacing sleep for a test that drives
+// several full cycles (3 channels x 3 cycles would otherwise sleep 3 s).
+func shrinkFeedStagger(t *testing.T) {
+	t.Helper()
+	orig := feedStagger
+	feedStagger = time.Millisecond
+	t.Cleanup(func() { feedStagger = orig })
+}
+
 // withNow pins fm.now to a fixed instant. checkChannel reads it exactly once
 // per cycle (the one-`now` rule — spec §7), so this is what makes the
 // FETCH/STORE date math (and later, WALK/ARCHIVE) deterministic in tests.
@@ -173,14 +204,16 @@ func rss404() RSSFetchFunc {
 // membWith adapts youtube.MembershipVideo fixtures — the real fetcher's
 // return type — into a MembershipFetchFunc, mirroring the production adapter
 // closure in cmd/moombox/monitor_callbacks.go (youtube.MembershipVideo ->
-// monitor.MembershipVideo).
+// monitor.MembershipVideo). It answers hasAccess=true: a fixture of a
+// successful member fetch, empty list or not, which is what keeps every
+// pre-existing test fetching on every cycle.
 func membWith(videos ...youtube.MembershipVideo) MembershipFetchFunc {
-	return func(ctx context.Context, channelID string) ([]MembershipVideo, error) {
+	return func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
 		out := make([]MembershipVideo, len(videos))
 		for i, v := range videos {
 			out[i] = MembershipVideo{VideoID: v.VideoID, Title: v.Title, Age: v.Age}
 		}
-		return out, nil
+		return out, true, nil
 	}
 }
 
@@ -371,5 +404,105 @@ func TestFetchStep_RSSSuccessEstablishes_404DoesNot(t *testing.T) {
 	fm2.runCycleForTest(t, "UC1") // zero entries but 200 — still establishes (§11 residual)
 	if !establishedForTest(t, db, "UC1") {
 		t.Fatal("empty-but-200 RSS must establish")
+	}
+}
+
+// TestFeed_MembershipMemoSkipsNonMembersButNotMembers pins two of T2-13's
+// three cases: a "not a member" answer suppresses the authenticated ~1 MB
+// fetch for membershipMemoTTL, and a MEMBER is fetched every cycle.
+//
+// Mutants this fails on:
+//   - no memo: UC1/UC2 are fetched on every cycle (the 7,200 loads/day bug).
+//   - memoizing on an empty video list: UC3 (a member) stops being fetched,
+//     and a members-only live stream goes undiscovered for up to 6 h.
+//   - a horizon that never expires: the third cycle does not re-check UC1.
+func TestFeed_MembershipMemoSkipsNonMembersButNotMembers(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	fetches := map[string]int{}
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			fetches[channelID]++
+			if channelID == "UC3" {
+				return []MembershipVideo{{VideoID: "memberVid01", Title: "members only"}}, true, nil
+			}
+			return nil, false, nil // signed in, simply not a member
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"), chYT("UC3"))
+
+	fm.doCheck(context.Background()) // cycle 1: nothing memoized yet
+	assertFetches(t, "cycle 1", fetches, map[string]int{"UC1": 1, "UC2": 1, "UC3": 1})
+
+	clock = clock.Add(10 * time.Minute)
+	fm.doCheck(context.Background()) // cycle 2: only the member
+	assertFetches(t, "cycle 2", fetches, map[string]int{"UC1": 1, "UC2": 1, "UC3": 2})
+
+	clock = clock.Add(membershipMemoTTL)
+	fm.doCheck(context.Background()) // cycle 3: the horizon expired
+	assertFetches(t, "cycle 3", fetches, map[string]int{"UC1": 2, "UC2": 2, "UC3": 3})
+}
+
+// TestFeed_MembershipMemoAlwaysFetchesOneForLiveness pins T2-13's third case
+// and the reason the memo is safe at all. The authenticated membership fetch
+// is the system's preferred YouTube liveness probe: the production adapter
+// routes its SessionAuthState to ObserveLiveness
+// (cmd/moombox/monitor_callbacks.go:1015) and only when the fetch actually
+// runs. A cycle where EVERY channel is memoized must still fetch exactly one,
+// and must rotate — otherwise a dead session is never observed.
+//
+// Mutants this fails on:
+//   - skipping every memoized channel: cycle 2 makes zero fetches and the
+//     liveness signal goes dark.
+//   - fetching every memoized channel "for liveness": cycle 2 makes three.
+//   - a fixed nominee: cycle 3 re-fetches UC1 instead of rotating to UC2.
+func TestFeed_MembershipMemoAlwaysFetchesOneForLiveness(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			return nil, false, nil
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UC2"), chYT("UC3"))
+
+	fm.doCheck(context.Background())
+	if got := len(order); got != 3 {
+		t.Fatalf("cycle 1 fetches = %d (%v), want 3", got, order)
+	}
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC1" {
+		t.Fatalf("cycle 2 fetches = %v, want exactly [UC1] — one nominated fetch keeps the liveness signal alive", order)
+	}
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+	if len(order) != 1 || order[0] != "UC2" {
+		t.Fatalf("cycle 3 fetches = %v, want exactly [UC2] — the nomination must rotate to the earliest horizon", order)
+	}
+}
+
+// assertFetches compares a per-channel fetch tally against want, naming the
+// channel that diverged.
+func assertFetches(t *testing.T, label string, got, want map[string]int) {
+	t.Helper()
+	for id, n := range want {
+		if got[id] != n {
+			t.Fatalf("%s: %s fetched %d times, want %d (all: %v)", label, id, got[id], n, got)
+		}
 	}
 }

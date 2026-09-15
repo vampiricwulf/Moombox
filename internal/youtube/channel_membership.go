@@ -71,19 +71,24 @@ var membershipPageBase = constants.YouTubeURLs.Base
 //
 // videos is nil when the account is not a member of the channel: the
 // /membership URL then resolves to a public tab or a "join" upsell with no
-// selected TAB_ID_SPONSORSHIPS tab. Callers may still treat that as "nothing
-// to ingest" — but the verdict has to be read separately.
+// selected TAB_ID_SPONSORSHIPS tab. hasAccess reports that separately, and it
+// is NOT derivable from the video list — a member whose tab currently lists
+// nothing returns (nil, …, true, nil) and a non-member (nil, …, false, nil).
+// The feed monitor's non-member memo (monitor.membershipMemoTTL) hangs on the
+// distinction: memoizing a MEMBER would delay members-only live discovery.
+// Callers may still treat "no videos" as "nothing to ingest" — but the verdict
+// and the access bit have to be read separately.
 //
 // Discovery does NOT require the members badge or SAPISIDHASH — a plain
 // authenticated GET of the HTML page carries the session, exactly like
 // FetchWatchPage. Cookies matter for downloading the stream, which the worker
 // already handles; here they only unlock the membership tab listing.
-func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) ([]MembershipVideo, SessionAuthState, error) {
+func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (videos []MembershipVideo, auth SessionAuthState, hasAccess bool, err error) {
 	// "Was YouTube auth ever configured", not "is the set complete right
 	// now". The complete-set predicate would skip the probe precisely when
 	// the session is half-cleared — the state the probe exists to detect.
 	if !s.Auth.HasAnyAuthCookie() {
-		return nil, SessionAuthUnknown, nil
+		return nil, SessionAuthUnknown, false, nil
 	}
 	if err := s.Auth.SyncCookies(); err != nil {
 		s.logger.Warn("[YouTube] SyncCookies failed before membership fetch", "error", err)
@@ -106,7 +111,7 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 	if err != nil {
 		// A page we never received — or one that did not come from our own
 		// credentialed request — is not an observation of the session.
-		return nil, SessionAuthUnknown, fmt.Errorf("fetch membership tab: %w", err)
+		return nil, SessionAuthUnknown, false, fmt.Errorf("fetch membership tab: %w", err)
 	}
 
 	// Read the verdict off the raw bytes — livenessVerdict, not the permissive
@@ -118,11 +123,11 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 	// Parse straight off the response bytes — no string(body)/[]byte(raw) copies
 	// of the ~1MB payload. json.Unmarshal copies any strings it keeps, so the
 	// body is free to be GC'd once this returns.
-	videos, hasAccess := parseMembershipTab(body)
-	if !hasAccess {
-		return nil, verdict, nil
+	vids, access := parseMembershipTab(body)
+	if !access {
+		return nil, verdict, false, nil
 	}
-	return videos, verdict, nil
+	return vids, verdict, true, nil
 }
 
 // membershipTabHeader captures only the fields needed to locate the selected

@@ -989,11 +989,13 @@ func (s *runState) wireMonitorCallbacks() {
 	// VideoInfo). MembershipEnabled re-reads the config flag AND cookie state
 	// live each cycle, so toggling the setting or acquiring cookies takes effect
 	// on the next cycle with no restart.
-	s.feedMon.FetchMembership = func(ctx context.Context, channelID string) ([]monitor.MembershipVideo, error) {
-		vids, verdict, err := s.ytService.FetchMembershipVideos(ctx, channelID)
+	s.feedMon.FetchMembership = func(ctx context.Context, channelID string) ([]monitor.MembershipVideo, bool, error) {
+		vids, verdict, hasAccess, err := s.ytService.FetchMembershipVideos(ctx, channelID)
 		// The login verdict is a credential-health signal, not a discovery
-		// result, so MembershipFetchFunc keeps its two-value shape and the
-		// adapter absorbs the third here.
+		// result, so MembershipFetchFunc absorbs it here rather than carrying
+		// it. hasAccess IS returned: the feed monitor's non-member memo
+		// (monitor.membershipMemoTTL) must never latch onto a member, and an
+		// empty video list cannot tell the two apart.
 		//
 		// Routed BEFORE the error return on purpose. Whether the tab scan
 		// produced videos is a different question from whether YouTube
@@ -1004,18 +1006,21 @@ func (s *runState) wireMonitorCallbacks() {
 		// fetch would still reach the health signal rather than being dropped
 		// by an early return nobody re-read.
 		//
-		// This closure runs once per configured channel per feed cycle, so a
-		// dead session arrives as N identical verdicts. ObserveLiveness owns
-		// the de-duplication — see livenessRefireWindow in internal/cookies.
+		// This closure runs once per configured channel per feed cycle, minus
+		// the channels the non-member memo skips — and the monitor guarantees
+		// at least one call per cycle precisely so this line keeps firing. A
+		// dead session still arrives as several identical verdicts;
+		// ObserveLiveness owns the de-duplication — see livenessRefireWindow
+		// in internal/cookies.
 		routeLivenessVerdict(s.cookieRefresh.ObserveLiveness, verdict)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		out := make([]monitor.MembershipVideo, len(vids))
 		for i, v := range vids {
 			out[i] = monitor.MembershipVideo{VideoID: v.VideoID, Title: v.Title, Age: v.Age}
 		}
-		return out, nil
+		return out, hasAccess, nil
 	}
 	s.feedMon.MembershipEnabled = func() bool {
 		enabled := true
