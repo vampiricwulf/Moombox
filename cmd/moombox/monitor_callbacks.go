@@ -1671,12 +1671,12 @@ func (s *runState) wireMonitorCallbacks() {
 // onJobDeleted is the OnJobDeleted subscriber's body: drop exactly the deleted
 // job's log buffer and tell the dashboards the row is gone.
 //
-// ClearJobLogs, not the activeIDs + PruneJobLogs walk this used to do. That walk
-// read the whole jobs table per delete to answer a question it already had the
-// answer to — and getAllJobsSafe returns an EMPTY slice when the read fails
-// (helpers.go), which made "prune everything not in this list" wipe every
-// per-job buffer in the process. routes/jobs.go's own delete handler has always
-// used ClearJobLogs.
+// ClearJobLogs, not the activeIDs + PruneJobLogs walk this used to do. That old
+// walk read the whole jobs table per delete to answer a question it already
+// had the answer to — and called a helper that returned an EMPTY slice when
+// the read failed (deleted along with the walk), which made "prune everything
+// not in this list" wipe every per-job buffer in the process. routes/jobs.go's
+// own delete handler has always used ClearJobLogs.
 func (s *runState) onJobDeleted(jobID string) {
 	s.db.ClearJobLogs(jobID)
 	s.wsHub.BroadcastJobDeleted(jobID)

@@ -10,15 +10,15 @@ import (
 
 // TestJobDeletionPrunesOnlyThatJobsLogBuffer pins the fix for a delete that
 // walked the whole jobs table to prune one buffer — and, when that read came
-// back empty (getAllJobsSafe swallows the error at helpers.go:85-91), deleted
-// EVERY buffer instead of one.
+// back empty (the old helper swallowed the error and returned an empty
+// slice), deleted EVERY buffer instead of one.
 //
 // The second buffer here belongs to an ID the jobs table does not hold: that is
 // precisely the shape a failed GetAllJobs produces for every job at once, and
 // the only shape in which the old and new implementations disagree.
 //
-// Mutant: restoring the getAllJobsSafe + PruneJobLogs body wipes "ghost" too
-// and fails this.
+// Mutant: restoring the old activeIDs-derived PruneJobLogs body wipes "ghost"
+// too and fails this.
 func TestJobDeletionPrunesOnlyThatJobsLogBuffer(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
