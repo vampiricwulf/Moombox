@@ -8,6 +8,11 @@ export class LogPanelController {
     this.logFilter = "all";
     this._logAutoScroll = true;
     this._logSearchQuery = "";
+
+    // Lines waiting for the next animation frame, and the rAF handle that will
+    // flush them. See _flushPendingLines.
+    this._pendingLines = [];
+    this._pendingFrame = null;
   }
 
   /** Wire up the log filter buttons, search input, scroll tracking, and clear button. */
@@ -67,39 +72,86 @@ export class LogPanelController {
 
   addLog(log) {
     this.logs.push(log);
-    const overflowed = this.logs.length > 500;
-    if (overflowed) {
+    if (this.logs.length > 500) {
       this.logs = this.logs.slice(-500);
     }
 
-    // Fast path: if no filter/search active, append/trim a single DOM
-    // node instead of rebuilding all 500 lines
+    // Fast path: no filter/search active — queue the line and append it with
+    // the next animation frame. One frame's worth of lines becomes ONE
+    // fragment append, ONE count write and ONE scroll write; the per-line
+    // version read viewer.scrollHeight once per line, and each of those reads
+    // forces a synchronous layout, so a 100-line burst cost 100 reflows.
     if (this.logFilter === "all" && !this._logSearchQuery) {
-      const viewer = document.getElementById("logs-viewer");
-      const countEl = document.getElementById("log-count");
-      if (viewer) {
-        // Suppress scroll-tracking during DOM mutation so that the
-        // appendChild + scrollTop assignment don't disable auto-scroll
-        this._logRebuildingDOM = true;
-        // Remove oldest DOM child if we overflowed
-        if (overflowed && viewer.firstChild) {
-          viewer.removeChild(viewer.firstChild);
-        }
-        const div = this._createLogLine(log);
-        viewer.appendChild(div);
-        if (countEl) countEl.textContent = `${this.logs.length} log entries`;
-        if (this._logAutoScroll) {
-          viewer.scrollTop = viewer.scrollHeight;
-        }
-        // Reset after next frame so any deferred scroll events are still suppressed
-        requestAnimationFrame(() => { this._logRebuildingDOM = false; });
-        return;
+      this._pendingLines.push(log);
+      // Cap the queue at the same 500-line window this.logs keeps. A browser
+      // does not run rAF callbacks for a hidden document and the `log` WS
+      // handler is not gated on document.hidden, so on the 24/7 dashboard left
+      // in a background tab this queue would otherwise grow for hours —
+      // hundreds of thousands of retained strings, then one giant flush.
+      // Nothing displayed changes: _flushPendingLines already keeps only the
+      // newest 500 of an oversized batch.
+      if (this._pendingLines.length > 500) this._pendingLines.shift();
+      if (this._pendingFrame === null) {
+        this._pendingFrame = requestAnimationFrame(() => this._flushPendingLines());
       }
+      return;
     }
 
     // Debounce full renderLogs for filtered/search cases
     if (this._logRenderTimer) clearTimeout(this._logRenderTimer);
     this._logRenderTimer = setTimeout(() => this.renderLogs(), 100);
+  }
+
+  /** Append every queued line in one DOM write. Runs from a rAF. */
+  _flushPendingLines() {
+    this._pendingFrame = null;
+    const pending = this._pendingLines;
+    if (pending.length === 0) return;
+    this._pendingLines = [];
+
+    // The filter or the search box may have changed between the queue and this
+    // frame. renderLogs rebuilds from this.logs, which already holds these
+    // lines, so the queue is redundant rather than lost.
+    if (this.logFilter !== "all" || this._logSearchQuery) {
+      this.renderLogs();
+      return;
+    }
+
+    const viewer = document.getElementById("logs-viewer");
+    const countEl = document.getElementById("log-count");
+    if (!viewer) return;
+
+    // Suppress scroll-tracking during DOM mutation so that the appendChild +
+    // scrollTop assignment don't disable auto-scroll
+    this._logRebuildingDOM = true;
+
+    // Trim to the same 500-line window this.logs holds. A single frame can
+    // queue more than 500 lines itself (a burst); when it does, the existing
+    // DOM is entirely older than this.logs' tail, so drop it all and keep
+    // only the newest 500 of the pending batch instead of just trimming the
+    // old DOM children.
+    let toAppend = pending;
+    if (toAppend.length >= 500) {
+      while (viewer.firstChild) viewer.removeChild(viewer.firstChild);
+      toAppend = toAppend.slice(-500);
+    } else {
+      let excess = viewer.childElementCount + toAppend.length - 500;
+      while (excess > 0 && viewer.firstChild) {
+        viewer.removeChild(viewer.firstChild);
+        excess--;
+      }
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const line of toAppend) frag.appendChild(this._createLogLine(line));
+    viewer.appendChild(frag);
+
+    if (countEl) countEl.textContent = `${this.logs.length} log entries`;
+    if (this._logAutoScroll) {
+      viewer.scrollTop = viewer.scrollHeight;
+    }
+    // Reset after next frame so any deferred scroll events are still suppressed
+    requestAnimationFrame(() => { this._logRebuildingDOM = false; });
   }
 
   /** Create a single log line DOM element. */
@@ -154,6 +206,16 @@ export class LogPanelController {
   }
 
   renderLogs() {
+    // A queued fast-path batch is superseded by a rebuild from this.logs, which
+    // already contains those lines. Dropping it here is what makes renderLogs
+    // safe to call from clearLogs, the filter buttons and the initial_state
+    // handler while a frame is pending.
+    if (this._pendingFrame !== null) {
+      cancelAnimationFrame(this._pendingFrame);
+      this._pendingFrame = null;
+    }
+    this._pendingLines = [];
+
     const viewer = document.getElementById("logs-viewer");
     const countEl = document.getElementById("log-count");
 

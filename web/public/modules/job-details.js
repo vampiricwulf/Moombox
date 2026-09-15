@@ -153,11 +153,14 @@ export class JobDetailsController {
       return;
     }
 
-    // Update status badge
+    // Update status badge. Every write below is diffed first: this method runs
+    // on the ~60 Hz job_update path, and re-assigning an identical string still
+    // dirties layout (the pattern app.js:1382 established). Sweep T2-21.
     if (statusBadge) {
-      const statusClass = job.status.toLowerCase().replace("?", "");
-      statusBadge.className = `status ${statusClass}`;
-      statusBadge.textContent = this.app.displayStatus(job.status);
+      const statusClass = `status ${job.status.toLowerCase().replace("?", "")}`;
+      if (statusBadge.className !== statusClass) statusBadge.className = statusClass;
+      const statusText = this.app.displayStatus(job.status);
+      if (statusBadge.textContent !== statusText) statusBadge.textContent = statusText;
     }
 
     // Update title and channel (can change for live streams mid-broadcast)
@@ -169,18 +172,19 @@ export class JobDetailsController {
       const valueEl = row.querySelector(".details-value");
       if (!valueEl) continue;
       if (labelText === "Title:") {
-        valueEl.textContent = job.title;
+        if (valueEl.textContent !== job.title) valueEl.textContent = job.title;
       } else if (labelText === "Channel:") {
-        valueEl.textContent = job.channelName;
+        if (valueEl.textContent !== job.channelName) valueEl.textContent = job.channelName;
       } else if (labelText === "Category:" && job.twitchCategory) {
-        valueEl.textContent = job.twitchCategory;
+        if (valueEl.textContent !== job.twitchCategory) valueEl.textContent = job.twitchCategory;
       }
     }
 
     // Update progress text
     const progressRow = content.querySelector('[data-field="progress"]');
     if (progressRow) {
-      progressRow.textContent = this.app.formatProgress(job);
+      const progressText = this.app.formatProgress(job);
+      if (progressRow.textContent !== progressText) progressRow.textContent = progressText;
     }
 
     // Update segment counts
@@ -193,7 +197,8 @@ export class JobDetailsController {
       const aTotal = job.totalAudioSeq;
       const vDisplay = vTotal ? `${vCurrent}/${vTotal}` : vCurrent;
       const aDisplay = aTotal ? `${aCurrent}/${aTotal}` : aCurrent;
-      segField.textContent = isTwitchSeg ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
+      const segText = isTwitchSeg ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
+      if (segField.textContent !== segText) segField.textContent = segText;
     }
 
     // Update chat status
@@ -202,17 +207,29 @@ export class JobDetailsController {
       const chatVariantMap = { downloading: "primary", finished: "success", error: "danger", unavailable: "neutral", pending: "neutral" };
       const badge = chatField.querySelector("sl-badge");
       if (badge) {
-        badge.variant = chatVariantMap[job.chatStatus] || "neutral";
-        badge.textContent = job.chatStatus;
+        const variant = chatVariantMap[job.chatStatus] || "neutral";
+        if (badge.variant !== variant) badge.variant = variant;
+        if (badge.textContent !== job.chatStatus) badge.textContent = job.chatStatus;
       }
-      // Update message count — text node after the badge
-      const existingText = badge && badge.nextSibling && badge.nextSibling.nodeType === Node.TEXT_NODE
-        ? badge.nextSibling : null;
-      const countText = job.totalChatMessages ? ` (${job.totalChatMessages.toLocaleString()} messages)` : "";
-      if (existingText) {
-        existingText.textContent = countText;
-      } else if (countText) {
-        chatField.appendChild(document.createTextNode(countText));
+      // Update message count — text node after the badge.
+      //
+      // toLocaleString is an Intl format, and this runs on every job_update
+      // (~60 Hz per active job) while the count moves once per chat flush — so
+      // the STRING is rebuilt only when the source number changes, the same
+      // way the updated row's title is gated on data-timestamp below. The last
+      // count is stashed on the field itself; dataset values are strings, so
+      // the comparison is against the String form.
+      const countKey = job.totalChatMessages ? String(job.totalChatMessages) : "";
+      if (chatField.dataset.chatCount !== countKey) {
+        chatField.dataset.chatCount = countKey;
+        const existingText = badge && badge.nextSibling && badge.nextSibling.nodeType === Node.TEXT_NODE
+          ? badge.nextSibling : null;
+        const countText = countKey ? ` (${job.totalChatMessages.toLocaleString()} messages)` : "";
+        if (existingText) {
+          if (existingText.textContent !== countText) existingText.textContent = countText;
+        } else if (countText) {
+          chatField.appendChild(document.createTextNode(countText));
+        }
       }
     }
 
@@ -241,16 +258,24 @@ export class JobDetailsController {
     const speedRow = document.getElementById("speed-row");
     const speedValue = content.querySelector('[data-field="speed"]');
     if (speedRow && speedValue) {
-      speedValue.textContent = job.speed || "";
-      speedRow.style.display = job.speed ? "" : "none";
+      const speedText = job.speed || "";
+      if (speedValue.textContent !== speedText) speedValue.textContent = speedText;
+      const speedDisplay = job.speed ? "" : "none";
+      if (speedRow.style.display !== speedDisplay) speedRow.style.display = speedDisplay;
     }
 
     // Update updated time
     const updatedRow = content.querySelector('[data-field="updated"]');
     if (updatedRow) {
-      updatedRow.textContent = this.app.formatRelativeTime(job.updatedAt);
-      updatedRow.dataset.timestamp = job.updatedAt;
-      updatedRow.title = new Date(job.updatedAt).toLocaleString();
+      const updatedText = this.app.formatRelativeTime(job.updatedAt);
+      if (updatedRow.textContent !== updatedText) updatedRow.textContent = updatedText;
+      // The full-date title comes from toLocaleString — an Intl format on every
+      // tick — so it is rebuilt only when the SOURCE timestamp moves, which is
+      // also exactly when data-timestamp has to be re-stamped.
+      if (updatedRow.dataset.timestamp !== job.updatedAt) {
+        updatedRow.dataset.timestamp = job.updatedAt;
+        updatedRow.title = new Date(job.updatedAt).toLocaleString();
+      }
     }
 
     // Update error display
@@ -292,32 +317,26 @@ export class JobDetailsController {
       job.status,
     );
 
-    document.getElementById("details-cancel-btn").style.display = canCancel
-      ? ""
-      : "none";
-    document.getElementById("details-resume-btn").style.display = canResume
-      ? ""
-      : "none";
-    document.getElementById("details-reinit-btn").style.display = canReinit
-      ? ""
-      : "none";
-    document.getElementById("details-mux-btn").style.display = canMux
-      ? ""
-      : "none";
-    document.getElementById("details-delete-btn").style.display = canDelete
-      ? ""
-      : "none";
-    document.getElementById("details-trim-btn").style.display = hasFile
-      ? ""
-      : "none";
+    // Same ~60 Hz path as updateJobDetails: diff before writing. Assigning an
+    // identical style.display still invalidates style on that element.
+    const setDisplay = (id, shown) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const value = shown ? "" : "none";
+      if (el.style.display !== value) el.style.display = value;
+    };
+
+    setDisplay("details-cancel-btn", canCancel);
+    setDisplay("details-resume-btn", canResume);
+    setDisplay("details-reinit-btn", canReinit);
+    setDisplay("details-mux-btn", canMux);
+    setDisplay("details-delete-btn", canDelete);
+    setDisplay("details-trim-btn", hasFile);
     const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(
       window.location.hostname,
     );
-    document.getElementById("details-open-folder-btn").style.display =
-      (hasFile || isActive) && isLocalhost ? "" : "none";
-    document.getElementById("details-play-btn").style.display = hasFile
-      ? ""
-      : "none";
+    setDisplay("details-open-folder-btn", (hasFile || isActive) && isLocalhost);
+    setDisplay("details-play-btn", hasFile);
   }
 
   renderJobDetails(job) {

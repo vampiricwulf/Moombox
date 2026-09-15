@@ -65,7 +65,20 @@ The file structure:
 
 ### Embedding and Serving
 
-The `web.PublicFS` embedded filesystem is mounted by the HTTP server. The server handles cache-busting by appending a build commit hash to asset URLs. Gzip compression is applied via `CompressionMiddleware` for responses under 1MB.
+The `web.PublicFS` embedded filesystem is mounted by the HTTP server. Asset URLs inside `index.html`
+carry a `?v=<build commit>` cache-buster — though only in the SPA-FALLBACK copy the server rewrites at
+mount time, so `/` itself still serves the embedded file verbatim and its asset URLs carry none
+(pre-existing; a chain-close item). A URL that carries one is served `immutable, max-age=1y`, but only
+when the commit is TRUSTED: `unknown` (no `-ldflags` stamp and no `vcs.revision`) and a
+`<rev>-dirty` suffix (built from a modified working tree) both name bytes that can change under the
+same string, so they fall back to the revalidating policy. Every other asset path is served `no-cache`
+plus an `ETag` — the build commit when it is trusted, otherwise the file's SHA-256 — so a revalidation
+costs a 304 rather than the whole file. `embed.FS` reports a zero `ModTime`, so that `ETag` is the only
+validator available (see `staticCacheHeaders` in `internal/web/server.go`). Gzip compression is applied
+via `CompressionMiddleware` for responses over 1 KB, except already-compressed bodies (`image/*`,
+`video/*`, or a handler-set `Content-Encoding`). Every response that reaches the gzip wrapper — i.e.
+one whose client offered gzip and whose path is not skipped — carries `Vary: Accept-Encoding`, so a
+shared cache cannot hand a gzipped body to a client that negotiated identity.
 
 The login page (`login.html`) is not served as a separate route. Instead, `AuthMiddleware` intercepts unauthenticated requests and serves the login page inline, preserving the original URL in the browser's address bar. This means users never see a `/login` URL — they see the page they were trying to reach, with the login form overlaid.
 
@@ -451,7 +464,9 @@ The left side shows chord hints (key labels for A, R, O, F, M, Tab, backtick, ?)
 
 ### Connection Lifecycle
 
-The Web UI establishes a WebSocket connection to the server on page load. The server uses `nhooyr.io/websocket` for WebSocket handling.
+The Web UI establishes a WebSocket connection to the server on page load. The server uses
+`github.com/coder/websocket` for WebSocket handling (the library upstream renamed from
+`nhooyr.io/websocket`; the import path in `go.mod` is the coder one).
 
 **Upgrade:** The WebSocket upgrade handler is registered as an interceptor on the main HTTP handler. Any request with an `Upgrade: websocket` header is routed to the WebSocket handler regardless of the URL path. Origin validation checks that the request comes from the same origin or a loopback/LAN alias.
 
@@ -460,6 +475,33 @@ The Web UI establishes a WebSocket connection to the server on page load. The se
 **Detached context:** The accepted WebSocket connection uses `context.Background()` rather than the HTTP request context. This prevents the connection from being killed by the server's `ReadTimeout`, which would otherwise close long-lived connections.
 
 **Initial state:** Immediately after connection, the server sends an `initial_state` message containing the full current state: all jobs, buffered log lines (up to 200 from the ring buffer), and monitor check schedule (next check times for Feed, DECAPI, and Twitch monitors). This allows the client to hydrate without making separate REST calls.
+
+**Backpressure and resync:** each client has a `wsWriteQueueSize = 16` frame outbound queue drained by
+its own `writePump`. A broadcast that finds the queue full drops the OLDEST frame and enqueues the new
+one, so a slow consumer can never stall a fast one — but drop-oldest discards frames nothing later
+restates (`job_deleted`, `jobs_update`, `config_update`), which used to leave a lagging tab showing a
+ghost row until it reconnected. A drop therefore arms that client's resync flag, and a later frame is
+REPLACED by the full `initial_state` snapshot instead of carrying its incremental update —
+byte-for-byte what a fresh connection is sent (`initialStateBytes`, `internal/web/websocket.go`), which
+`app.js`'s `initial_state` handler applies as a full-state replace.
+
+That replacement is rate-limited to at most one snapshot per second per client (`wsResyncMinInterval`,
+`internal/web/websocket.go`): a client that never drains re-arms on EVERY frame, and a snapshot costs a
+`GetAllJobs` plus a whole-state marshal, so the unbounded version meant tens of them a second while a
+download ran. A frame that arrives inside that window goes out incremental with the flag left armed for
+the next one. On a quiet hub the flag would otherwise sit armed indefinitely — nothing is broadcast, so
+nothing consumes it — so the 30 s ping tick flushes a pending snapshot on its own (`flushResync`,
+`internal/web/websocket.go`), which makes one ping interval the worst-case ghost-row lifetime. A
+snapshot that fails to BUILD (a marshal error, or a panic in the state provider, each logged once at
+Error) is not retried on the spot; the next drop re-arms the flag and the rate limit holds the retry —
+and so that Error line — to one per second. See `resyncSnapshot` in `internal/web/websocket.go`.
+
+Drops are counted per client; the hub logs `WS client lagging` at Debug at most once per
+`wsLagLogInterval` (30 s) per client, and the lifetime total once at teardown. The LEVEL is the first
+defence rather than the rate limit: Debug is below the default INFO threshold, so on a default install
+the line never reaches the app logger's subscriber, which broadcasts each line back to every client —
+including the full queue that just dropped, which drops and logs again. The per-client rate limit is
+what bounds that loop for an operator who has turned Debug on.
 
 ### Message Format
 
@@ -505,7 +547,7 @@ Job update broadcasts are not throttled in the WebSocket hub. The only high-freq
 | Ping interval | 30 seconds (server-initiated) |
 | Write timeout | 10 seconds per message |
 | Max message size (read limit) | 1 MB |
-| Backpressure limit | 256 KB per client (messages dropped if write buffer exceeds this) |
+| Backpressure limit | 16 queued frames per client (`wsWriteQueueSize`); on overflow the oldest is dropped and a later frame is replaced by a full `initial_state` snapshot — at most one per second per client (`wsResyncMinInterval`), flushed by the ping tick if no broadcast comes (`flushResync`) |
 | Log ring buffer | 200 lines (oldest evicted when full) |
 
 ---

@@ -40,14 +40,46 @@ func init() {
 	}
 	// Resolve commit from Go build info (populated by `go build` in a git repo)
 	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range info.Settings {
-			if s.Key == "vcs.revision" && len(s.Value) >= 7 {
-				commit = s.Value[:7]
-				return
-			}
+		if c := resolveBuildCommit(info.Settings); c != "" {
+			commit = c
+			return
 		}
 	}
 	commit = "unknown"
+}
+
+// resolveBuildCommit turns `go build`'s VCS stamp into the commit string, or
+// "" when the build carries no usable revision (the caller writes "unknown").
+//
+// A dirty working tree stamps the SAME vcs.revision a clean one would, so a
+// rebuild serves different app.js bytes under an identical commit — and the web
+// server uses that string as its ETag and as the ?v= cache-buster, which made a
+// local-dev rebuild answer If-None-Match with a 304 and keep the stale module
+// (sweep R5-4). Appending "-dirty" is what internal/web's trustedCommit tests
+// for before it trusts the commit as a cache validator; it also reads correctly
+// wherever the commit is merely displayed (`--version`, the startup log line).
+//
+// Both keys are collected before either is used: the settings slice's ORDER is
+// not part of go's contract, and returning on the first vcs.revision seen would
+// miss a vcs.modified that follows it.
+func resolveBuildCommit(settings []debug.BuildSetting) string {
+	var revision, modified string
+	for _, s := range settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if len(revision) < 7 {
+		return ""
+	}
+	out := revision[:7]
+	if modified == "true" {
+		out += "-dirty"
+	}
+	return out
 }
 
 // envDisablesTUI reports whether the MOOMBOX_NO_TUI value is one of the
@@ -370,7 +402,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// 0` (auto-pick), persist the OS-assigned port back to disk so the
 	// next launch reuses it (predictable port across restarts; users can
 	// discover the port from the config file). Audit cmd-moombox.md Q2.
-	if actualPort := webServer.ActualPort; actualPort > 0 {
+	if actualPort := webServer.ActualPort(); actualPort > 0 {
 		var configuredPort int
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			configuredPort = c.Network.Port
@@ -449,7 +481,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "FAILED — check logs", Inline: true})
 				ntype = notifications.TypeWarning
 				desc = fmt.Sprintf("Moombox updated from v%s to v%s and restarted — but the web dashboard failed to start", lastRunVersion, version)
-			case webServer.ActualPort > 0:
+			case webServer.ActualPort() > 0:
 				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "OK", Inline: true})
 			}
 			notifyMgr.Send("Update Applied", desc, ntype, fields,

@@ -1383,3 +1383,135 @@ func TestSegmentVideoIsRevalidatedNotImmutable(t *testing.T) {
 		t.Error("Last-Modified missing — the browser cannot revalidate")
 	}
 }
+
+// doRequestWithHeaders is doRequest plus request headers — Range and
+// If-Modified-Since are the two things the chat endpoint now answers itself.
+func doRequestWithHeaders(t *testing.T, router chi.Router, method, target string, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, bytes.NewReader(nil))
+	req.RemoteAddr = "127.0.0.1:54321"
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestJobChatRejectsATruncatedFile: a chat file that was cut off mid-write must
+// still 422 now that the whole-file json.Valid is gone. Truncation is the only
+// corruption the atomic writer can produce, and the bounded check is chosen to
+// catch exactly it.
+//
+// THE MUTANT: check only the leading '{' — a truncated file answers 200 and the
+// player renders a broken timeline instead of "chat unavailable".
+func TestJobChatRejectsATruncatedFile(t *testing.T) {
+	f := newJobsFixture(t)
+	chatPath := filepath.Join(f.outputDir, "cut.json")
+	if err := os.WriteFile(chatPath, []byte(`{"messages":[{"text":"hi"},{"te`), 0o644); err != nil {
+		t.Fatalf("write chat: %v", err)
+	}
+	f.addJob(t, "yt_cutchat", func(j *database.Job) { j.ChatFilename = "cut.json" })
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_cutchat/chat", nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("truncated chat file: want 422, got %d", rec.Code)
+	}
+}
+
+// TestJobChatServesARangeRequest: ServeContent with the *os.File gets Range and
+// the conditional headers for free — and, more to the point, never copies the
+// file into memory. On a long VOD that file is 50-100 MB (sweep T2-19).
+//
+// THE MUTANT: go back to io.ReadFull + bytes.NewReader — this still passes, but
+// TestJobChatIsNotReadIntoMemory below does not.
+func TestJobChatServesARangeRequest(t *testing.T) {
+	f := newJobsFixture(t)
+	chatBody := []byte(`{"messages":[{"text":"hello range"}]}`)
+	if err := os.WriteFile(filepath.Join(f.outputDir, "chat.json"), chatBody, 0o644); err != nil {
+		t.Fatalf("write chat: %v", err)
+	}
+	f.addJob(t, "yt_rangechat", func(j *database.Job) { j.ChatFilename = "chat.json" })
+
+	rec := doRequestWithHeaders(t, f.router, "GET", "/api/jobs/yt_rangechat/chat",
+		map[string]string{"Range": "bytes=0-4"})
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("Range request: want 206, got %d (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != string(chatBody[:5]) {
+		t.Errorf("206 body = %q, want %q", got, chatBody[:5])
+	}
+	if cr := rec.Header().Get("Content-Range"); cr == "" {
+		t.Error("206 carries no Content-Range")
+	}
+}
+
+// TestJobChatAnswersAConditionalGET: the If-Modified-Since short-circuit (R15)
+// stays ahead of the open, and ServeContent answers the same question for a
+// request that gets past it.
+//
+// THE MUTANT: drop the notModifiedSince short-circuit — this still passes (via
+// ServeContent) but the file is opened and stat'd for nothing on every poll.
+func TestJobChatAnswersAConditionalGET(t *testing.T) {
+	f := newJobsFixture(t)
+	chatPath := filepath.Join(f.outputDir, "chat.json")
+	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
+		t.Fatalf("write chat: %v", err)
+	}
+	f.addJob(t, "yt_condchat", func(j *database.Job) { j.ChatFilename = "chat.json" })
+
+	fi, err := os.Stat(chatPath)
+	if err != nil {
+		t.Fatalf("stat chat: %v", err)
+	}
+	rec := doRequestWithHeaders(t, f.router, "GET", "/api/jobs/yt_condchat/chat",
+		map[string]string{"If-Modified-Since": fi.ModTime().UTC().Format(http.TimeFormat)})
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("conditional GET: want 304, got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("304 carried %d body bytes, want none", rec.Body.Len())
+	}
+}
+
+// TestJobChatIsNotReadIntoMemory is the finding itself: serving a 4 MB chat
+// file must not allocate 4 MB.
+//
+// THE MUTANT: restore `data := make([]byte, fi.Size()); io.ReadFull(...)` —
+// allocation jumps past the ceiling by roughly the file size.
+func TestJobChatIsNotReadIntoMemory(t *testing.T) {
+	// serveChatJSON is driven DIRECTLY, not through f.router: the fixture's
+	// router carries a 1000-request/minute rate limiter, and a benchmark loop
+	// runs past that in under a second — every 429 after it would be counted
+	// as a cheap "served" iteration and the measurement would pass by being
+	// wrong.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.json")
+	const fileSize = 4 << 20
+	body := `{"messages":[{"text":"` + strings.Repeat("x", fileSize) + `"}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write chat: %v", err)
+	}
+
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			req := httptest.NewRequest("GET", "/api/jobs/yt_bigchat/chat", nil)
+			// Discard the body: httptest.ResponseRecorder would buffer the
+			// whole response and swamp the measurement.
+			serveChatJSON(&discardResponseWriter{h: http.Header{}}, req, path)
+		}
+	})
+	if got := res.AllocedBytesPerOp(); got > fileSize/4 {
+		t.Errorf("serving a %d-byte chat file allocates %d B/op; want well under a quarter of the "+
+			"file — the handler must stream it, not copy it", fileSize, got)
+	}
+}
+
+// discardResponseWriter throws the body away so an allocation measurement sees
+// the handler's own cost and not the recorder's buffer.
+type discardResponseWriter struct{ h http.Header }
+
+func (w *discardResponseWriter) Header() http.Header         { return w.h }
+func (w *discardResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w *discardResponseWriter) WriteHeader(int)             {}

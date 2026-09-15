@@ -72,7 +72,12 @@ func TestIsAllowedOrigin(t *testing.T) {
 		name          string
 		origin        string
 		networkAccess string
-		expected      bool
+		// host/scheme describe the request the Origin arrived on. Empty means
+		// the default fixture in the runner — every localhost/lan row predates
+		// the same-host rule and must keep passing without naming a host.
+		host     string
+		scheme   string
+		expected bool
 	}{
 		{
 			name:          "local mode allows localhost",
@@ -135,18 +140,6 @@ func TestIsAllowedOrigin(t *testing.T) {
 			expected:      false,
 		},
 		{
-			name:          "public mode allows everything",
-			origin:        "http://example.com",
-			networkAccess: "public",
-			expected:      true,
-		},
-		{
-			name:          "public mode allows external HTTPS",
-			origin:        "https://evil.example.org",
-			networkAccess: "public",
-			expected:      true,
-		},
-		{
 			name:          "default (empty) mode allows localhost",
 			origin:        "http://localhost:3000",
 			networkAccess: "",
@@ -170,14 +163,77 @@ func TestIsAllowedOrigin(t *testing.T) {
 			networkAccess: "public",
 			expected:      false,
 		},
+		// The same-host rows (sweep T1-6), and the mutants each one kills:
+		// restoring `case "external", "public": return true` in isAllowedOrigin
+		// fails all four `false` rows below; dropping the port comparison in
+		// sameSiteOrigin fails the ":8080" row; dropping the net.ParseIP
+		// canonicalisation in splitAuthority fails the IPv6 row; comparing with
+		// strings.HasSuffix instead of equality fails the "evil-dash" row.
+		{
+			name:          "public mode rejects a foreign origin",
+			origin:        "http://example.com",
+			networkAccess: "public",
+			host:          "dash.example",
+			expected:      false,
+		},
+		{
+			name:          "public mode rejects an external HTTPS origin",
+			origin:        "https://evil.example.org",
+			networkAccess: "public",
+			host:          "dash.example",
+			expected:      false,
+		},
+		{
+			name:          "external mode allows the request's own host",
+			origin:        "http://dash.example",
+			networkAccess: "external",
+			host:          "dash.example",
+			expected:      true,
+		},
+		{
+			name:          "external mode allows a TLS-terminated portless pair",
+			origin:        "https://dash.example",
+			networkAccess: "external",
+			host:          "dash.example", // proxy forwarded the client's Host verbatim
+			expected:      true,
+		},
+		{
+			name:          "external mode compares ports once either side names one",
+			origin:        "http://dash.example:8080",
+			networkAccess: "external",
+			host:          "dash.example:774",
+			expected:      false,
+		},
+		{
+			name:          "external mode matches an IPv6 literal whatever its spelling",
+			origin:        "http://[0:0:0:0:0:0:0:1]:774",
+			networkAccess: "external",
+			host:          "[::1]:774",
+			expected:      true,
+		},
+		{
+			name:          "external mode rejects a host that merely shares a suffix",
+			origin:        "http://evil-dash.example",
+			networkAccess: "external",
+			host:          "dash.example",
+			expected:      false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isAllowedOrigin(tt.origin, tt.networkAccess)
+			host := tt.host
+			if host == "" {
+				host = "127.0.0.1:774"
+			}
+			scheme := tt.scheme
+			if scheme == "" {
+				scheme = "http"
+			}
+			result := isAllowedOrigin(tt.origin, tt.networkAccess, host, scheme)
 			if result != tt.expected {
-				t.Errorf("isAllowedOrigin(%q, %q) = %v, expected %v",
-					tt.origin, tt.networkAccess, result, tt.expected)
+				t.Errorf("isAllowedOrigin(%q, %q, host=%q, scheme=%q) = %v, expected %v",
+					tt.origin, tt.networkAccess, host, scheme, result, tt.expected)
 			}
 		})
 	}
@@ -366,6 +422,13 @@ func TestCompressionMiddlewareCompressesLargeOK(t *testing.T) {
 	}
 	if rec.Body.Len() >= len(body) {
 		t.Errorf("wire body is %d bytes, not smaller than the %d it encodes", rec.Body.Len(), len(body))
+	}
+	// T4 made ?v= assets public+immutable with ETags, so a SHARED cache may now
+	// store this body. Without Vary it would hand the gzipped copy to the next
+	// client that negotiated identity, which cannot decode it.
+	// THE MUTANT: drop the Vary line from CompressionMiddleware.
+	if v := rec.Header().Get("Vary"); !strings.Contains(v, "Accept-Encoding") {
+		t.Errorf("Vary = %q, want it to name Accept-Encoding on a content-negotiated response", v)
 	}
 	zr, err := gzip.NewReader(rec.Body)
 	if err != nil {
@@ -621,6 +684,134 @@ func TestCSRFMiddleware(t *testing.T) {
 	}
 }
 
+// TestCSRFOriginPolicyInExternalMode drives the whole CSRFMiddleware on the two
+// policies that used to accept every origin. The table in TestCSRFMiddleware
+// cannot host these: they need a Host header and a trusted-proxy config, which
+// no other row varies.
+//
+// THE MUTANT: restore `case "external", "public": return true` in
+// isAllowedOrigin — the first subtest goes 403 → 204 and a cross-site form post
+// reaches /api/restart on every external install.
+func TestCSRFOriginPolicyInExternalMode(t *testing.T) {
+	newStore := func(networkAccess string, proxies ...string) *config.Store {
+		cfg := &config.MoomboxConfig{
+			Network: config.NetworkConfig{
+				NetworkAccess:  networkAccess,
+				TrustedProxies: proxies,
+			},
+		}
+		return config.NewStore(cfg, "")
+	}
+	pass := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	t.Run("a foreign origin is refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/restart", strings.NewReader(""))
+		req.Host = "dash.example"
+		req.Header.Set("Origin", "https://evil.example")
+		rr := httptest.NewRecorder()
+		CSRFMiddleware(newStore("external"), "tok")(pass).ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 — a page on evil.example reached a mutating handler "+
+				"of an external install (T1-6): %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "invalid origin") {
+			t.Errorf("body %q does not carry CSRFMiddleware's invalid-origin answer", rr.Body.String())
+		}
+	})
+
+	t.Run("the deployment's own origin is accepted", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/restart", strings.NewReader(""))
+		req.Host = "dash.example"
+		req.Header.Set("Origin", "http://dash.example")
+		rr := httptest.NewRecorder()
+		CSRFMiddleware(newStore("external"), "tok")(pass).ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 — the refusals here prove nothing if the dashboard "+
+				"cannot drive its own server: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("a trusted proxy's X-Forwarded-Host is honoured", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/restart", strings.NewReader(""))
+		req.RemoteAddr = "10.4.0.9:5555"
+		req.Host = "10.4.0.9:774" // what nginx's default proxy_set_header sends
+		req.Header.Set("X-Forwarded-Host", "dash.example")
+		req.Header.Set("Origin", "https://dash.example")
+		rr := httptest.NewRecorder()
+		CSRFMiddleware(newStore("external", "10.0.0.0/8"), "tok")(pass).ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 — a reverse-proxy deployment that declares its proxy in "+
+				"trusted_proxies must still be able to post to itself: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("X-Forwarded-Host from an UNTRUSTED peer is ignored", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/restart", strings.NewReader(""))
+		req.RemoteAddr = "10.4.0.9:5555"
+		req.Host = "dash.example"
+		req.Header.Set("X-Forwarded-Host", "evil.example")
+		req.Header.Set("Origin", "https://evil.example")
+		rr := httptest.NewRecorder()
+		CSRFMiddleware(newStore("external"), "tok")(pass).ServeHTTP(rr, req) // no trusted_proxies
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 — reading X-Forwarded-Host without the trusted-proxy "+
+				"check lets the attacker choose the host the origin is compared against, which is "+
+				"no check at all", rr.Code)
+		}
+	})
+}
+
+// TestCORSReflectionFollowsTheOriginPolicy pins the other half of T1-6: a
+// browser only honours a cross-origin READ when the server echoes the origin
+// back, so CORS must refuse exactly what CSRF refuses.
+//
+// THE MUTANT: leave CORSMiddleware calling the old two-argument
+// isAllowedOrigin — the first assertion sees
+// `Access-Control-Allow-Origin: https://evil.example` with
+// `Allow-Credentials: true`, and any page on the internet can read /api/jobs
+// out of a LAN browser.
+func TestCORSReflectionFollowsTheOriginPolicy(t *testing.T) {
+	store := config.NewStore(&config.MoomboxConfig{
+		Network: config.NetworkConfig{NetworkAccess: "external"},
+	}, "")
+	pass := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	get := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+		req.Host = "dash.example"
+		req.Header.Set("Origin", origin)
+		rr := httptest.NewRecorder()
+		CORSMiddleware(store)(pass).ServeHTTP(rr, req)
+		return rr
+	}
+
+	if got := get("https://evil.example").Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q on a foreign origin, want none", got)
+	}
+	if got := get("http://dash.example").Header().Get("Access-Control-Allow-Origin"); got != "http://dash.example" {
+		t.Errorf("Access-Control-Allow-Origin = %q on the deployment's own origin, want it echoed", got)
+	}
+
+	// The preflight branch must agree with the simple-request branch — they
+	// were two independent isAllowedOrigin calls before this task.
+	req := httptest.NewRequest(http.MethodOptions, "/api/jobs", nil)
+	req.Host = "dash.example"
+	req.Header.Set("Origin", "https://evil.example")
+	rr := httptest.NewRecorder()
+	CORSMiddleware(store)(pass).ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("preflight status = %d on a foreign origin, want 403", rr.Code)
+	}
+}
+
 func storeWithProxies(proxies ...string) *config.Store {
 	cfg := config.Defaults()
 	cfg.Network.TrustedProxies = proxies
@@ -765,5 +956,67 @@ func TestIPGateHonorsTrustedProxy(t *testing.T) {
 				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
 			}
 		})
+	}
+}
+
+// TestCompressionReusesGzipWriters: gzip.NewWriter allocates its deflate
+// window and hash tables on every call — measured at 1,080,105 B/op across 15
+// allocations, against 4,099 B/op across 1 for a pooled writer. On a dashboard
+// polling /api/jobs that is ~1 MB of garbage per response (sweep T4-35).
+//
+// THE MUTANT: replace the pool Get/Reset in startGzip with gzip.NewWriter —
+// AllocedBytesPerOp jumps past 200 KB and this fails.
+func TestCompressionReusesGzipWriters(t *testing.T) {
+	body := strings.Repeat("compressible-json-byte-", 200) // ~4.6 KB, over gzipMinSize
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(body))
+	})
+	wrapped := CompressionMiddleware(handler)
+
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			wrapped.ServeHTTP(httptest.NewRecorder(), req)
+		}
+	})
+	// The race detector charges its shadow memory to the allocating goroutine,
+	// which lifts the SAME pooled workload from ~4 KB/op to ~291 KB/op. Raise
+	// the ceiling rather than skip the test: the unpooled baseline is ~1.09 MB,
+	// so the mutant below still fails under both builds (sweep R5/T3).
+	ceiling := 200 * 1024
+	if raceEnabled {
+		ceiling = 500 * 1024
+	}
+	if got := res.AllocedBytesPerOp(); got > int64(ceiling) {
+		t.Errorf("a gzipped response allocates %d B/op against a %d ceiling; a fresh gzip.Writer alone "+
+			"is ~1.08 MB and a pooled one ~4 KB, so anything over that means the writer is not being "+
+			"reused", got, ceiling)
+	}
+
+	// Correctness, not just cost: a reused writer that is not Reset onto the
+	// new ResponseWriter writes into the previous response.
+	for range 3 {
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+
+		zr, err := gzip.NewReader(rec.Body)
+		if err != nil {
+			t.Fatalf("gzip.NewReader: %v", err)
+		}
+		got, err := io.ReadAll(zr)
+		zr.Close()
+		if err != nil {
+			t.Fatalf("read gzip body: %v", err)
+		}
+		if string(got) != body {
+			t.Fatalf("decoded body = %d bytes, want the original %d — the pooled writer was not "+
+				"Reset onto this response", len(got), len(body))
+		}
 	}
 }

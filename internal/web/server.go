@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
-	"path"
 	"runtime"
 	"strings"
 	"sync"
@@ -44,14 +44,18 @@ type Server struct {
 	redirectServer atomic.Pointer[http.Server] // cross-scheme redirect server, for graceful shutdown
 	ws             *WebSocketHub
 	auth           *AuthService
-	shutdownOnce   sync.Once        // Ensures shutdown logic runs only once
-	internalToken  string           // Random secret for same-process CSRF bypass
-	commit         string           // Build commit hash for cache busting (e.g. "abc1234")
-	loginHTML      []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
-	wsHandler      http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
-	OpenBrowser    bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
-	ActualPort     int              // Actual bound port after Start (may differ from cfg if probed)
-	draining       atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
+	shutdownOnce   sync.Once // Ensures shutdown logic runs only once
+	internalToken  string    // Random secret for same-process CSRF bypass
+	commit         string    // Build commit hash for cache busting (e.g. "abc1234")
+	// assetETags memoises the content hash of each embedded asset, keyed by
+	// its FS path. Only consulted when the build commit is unknown — a
+	// commit-stamped build answers every asset from one string.
+	assetETags  sync.Map
+	loginHTML   []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
+	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
+	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
+	actualPort  atomic.Int32     // Actual bound port after Start (may differ from cfg if probed)
+	draining    atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
 	// Called by AuthMiddleware when the session cookie is missing/invalid.
@@ -127,6 +131,19 @@ func (s *Server) InternalToken() string {
 func (s *Server) SetCommit(c string) {
 	s.commit = c
 }
+
+// ActualPort returns the port the listener actually bound, or 0 when the bind
+// has not completed. 0 is the PENDING sentinel, not a port: every caller
+// (cmd/moombox/main.go's startup banner and its 500 ms readiness select,
+// routes_wiring.go's plugin-port lookup) tests `> 0` and falls back to the
+// configured port until it turns positive. Start writes it from its own
+// goroutine while main.go reads it across that select window, so it is atomic
+// rather than a plain int (sweep T4-35). int32 is deliberate: a TCP port never
+// exceeds 65535.
+func (s *Server) ActualPort() int { return int(s.actualPort.Load()) }
+
+// setActualPort records the bound port. Called once, by Start.
+func (s *Server) setActualPort(port int) { s.actualPort.Store(int32(port)) }
 
 // SetAuth sets the auth service for authentication middleware.
 func (s *Server) SetAuth(auth *AuthService) {
@@ -264,16 +281,7 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 		// Check if the file exists in the embedded FS
 		if f, err := staticFS.Open(urlPath); err == nil {
 			f.Close()
-			// Set cache headers for static assets
-			ext := path.Ext(urlPath)
-			switch ext {
-			case ".png", ".jpg", ".svg", ".ico":
-				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-			case ".css", ".js":
-				w.Header().Set("Cache-Control", "no-cache")
-			default:
-				w.Header().Set("Cache-Control", "no-cache")
-			}
+			s.staticCacheHeaders(w, r, staticFS, urlPath)
 			fileServer.ServeHTTP(w, r)
 			return
 		}
@@ -288,6 +296,68 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 
 		http.NotFound(w, r)
 	})
+}
+
+// trustedCommit reports whether s.commit identifies the served bytes uniquely
+// — the one question both cache decisions below turn on.
+//
+// Two spellings do not. "unknown" is what cmd/moombox/main.go's
+// resolveBuildCommit falls back to when a build carries no -ldflags stamp and
+// no vcs.revision, so every such build shares it. A "-dirty" suffix means the
+// build came from a working tree with uncommitted changes, so successive
+// rebuilds at the same revision serve different app.js under the same string.
+// Either way, keying a cache entry on it serves the PREVIOUS build's bytes.
+func (s *Server) trustedCommit() bool {
+	return s.commit != "" && s.commit != "unknown" && !strings.HasSuffix(s.commit, "-dirty")
+}
+
+// staticCacheHeaders sets the caching policy for one embedded asset.
+//
+// A URL carrying a TRUSTED build's ?v= cache-buster names a body that cannot
+// change, so it is immutable for a year. Everything else must revalidate — and
+// gets an ETag so the revalidation costs 304 bytes instead of the whole file.
+// The previous policy keyed off the EXTENSION, which pinned unversioned
+// /favicon.svg for a year and left every .js/.css re-downloading in full
+// (embed.FS reports a zero ModTime, so ETag is the only validator available
+// here). Sweep T2-18.
+//
+// The immutable branch asks trustedCommit, not just "is there a ?v=": an
+// immutable entry cannot be revalidated at all for a year, so pinning one
+// against a commit that does NOT identify the bytes (see trustedCommit) is
+// strictly worse than the stale-ETag case the same predicate already guards in
+// assetETag — a hard reload would be the only way out. Sweep R5-4/F2.
+func (s *Server) staticCacheHeaders(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) {
+	if r.URL.Query().Get("v") != "" && s.trustedCommit() {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	if tag := s.assetETag(fsys, name); tag != "" {
+		// net/http's serveContent reads this header to answer If-None-Match,
+		// so setting it before ServeHTTP is all the 304 handling needed.
+		w.Header().Set("ETag", tag)
+	}
+}
+
+// assetETag returns the validator for one embedded asset: the build commit
+// when trustedCommit vouches for it (every asset of a build shares it — an
+// ETag is scoped to its URL, so one string per build invalidates exactly the
+// right things), else the file's SHA-256, hashed once per path and memoised.
+func (s *Server) assetETag(fsys fs.FS, name string) string {
+	if s.trustedCommit() {
+		return `"` + s.commit + `"`
+	}
+	if v, ok := s.assetETags.Load(name); ok {
+		return v.(string)
+	}
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	tag := `"` + hex.EncodeToString(sum[:]) + `"`
+	s.assetETags.Store(name, tag)
+	return tag
 }
 
 // Start begins listening for HTTP connections.
@@ -410,7 +480,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Log the actual URL (matches TS: "Web dashboard available at ...")
 	actualPort := ln.Addr().(*net.TCPAddr).Port
-	s.ActualPort = actualPort
+	s.setActualPort(actualPort)
 	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
 	// Mirrors the host switch above: all three of these bind 0.0.0.0.
@@ -513,6 +583,14 @@ func CompressionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// The body this handler is about to produce depends on Accept-Encoding,
+		// and T4 made ?v= assets `public, immutable` with ETags — so a SHARED
+		// cache may now store one. Without Vary it would serve the gzipped copy
+		// to the next client that negotiated identity, which cannot decode it.
+		// Add, not Set: CORS and auth middlewares are free to name their own
+		// fields, and a second Vary line is as valid as a longer one (R5/F5).
+		w.Header().Add("Vary", "Accept-Encoding")
+
 		gz := &gzipResponseWriter{
 			ResponseWriter: w,
 			minSize:        gzipMinSize,
@@ -571,6 +649,10 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 	g.buf = append(g.buf, b...)
 
 	if len(g.buf) >= g.minSize {
+		if g.skipCompression() {
+			g.commitPlain()
+			return len(b), nil
+		}
 		// Buffer is big enough, start gzipping
 		if err := g.startGzip(); err != nil {
 			return 0, err
@@ -581,22 +663,48 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// gzipWriterPool recycles the deflate state a *gzip.Writer carries — a window,
+// a hash head table and a hash prev table, measured at 1,080,105 B across 15
+// allocations per fresh writer against 4,099 B across 1 for a recycled one.
+// Every writer is Reset onto its response before use and returned on Close.
+var gzipWriterPool = sync.Pool{
+	New: func() any { return gzip.NewWriter(io.Discard) },
+}
+
 func (g *gzipResponseWriter) startGzip() error {
 	g.ResponseWriter.Header().Set("Content-Encoding", "gzip")
 	g.ResponseWriter.Header().Del("Content-Length") // Length changes with compression
 	g.flushStatus()
 	g.headerSent = true
 
+	gw := gzipWriterPool.Get().(*gzip.Writer)
+	gw.Reset(g.ResponseWriter)
+	g.writer = gw
+
 	var err error
-	g.writer, err = gzip.NewWriterLevel(g.ResponseWriter, gzip.DefaultCompression)
-	if err != nil {
-		return err
-	}
 	if len(g.buf) > 0 {
 		_, err = g.writer.Write(g.buf)
 		g.buf = nil
 	}
 	return err
+}
+
+// skipCompression reports whether the response committed so far must go out
+// uncompressed. Checked at the gzip threshold rather than up front, because the
+// handler sets Content-Type while it writes.
+//
+//   - image/* and video/* are already compressed: gzip buys nothing and costs a
+//     full CPU pass per response, which on a dashboard is one JPEG per job card
+//     (sweep T2-18).
+//   - a Content-Encoding the handler set itself must not be wrapped in a second
+//     one; the client would decode gzip and find an encoded body underneath.
+func (g *gzipResponseWriter) skipCompression() bool {
+	h := g.ResponseWriter.Header()
+	if h.Get("Content-Encoding") != "" {
+		return true
+	}
+	ct := h.Get("Content-Type")
+	return strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "video/")
 }
 
 func (g *gzipResponseWriter) flushStatus() {
@@ -609,6 +717,12 @@ func (g *gzipResponseWriter) flushStatus() {
 func (g *gzipResponseWriter) Close() {
 	if g.writer != nil {
 		g.writer.Close()
+		// Reset onto io.Discard before parking it: a pooled writer must not
+		// keep this response's ResponseWriter alive, and g.writer is nilled so
+		// a stray Flush after Close cannot touch a writer someone else owns.
+		g.writer.Reset(io.Discard)
+		gzipWriterPool.Put(g.writer)
+		g.writer = nil
 		return
 	}
 

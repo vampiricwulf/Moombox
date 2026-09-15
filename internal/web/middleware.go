@@ -24,19 +24,21 @@ func CORSMiddleware(store *config.Store) func(http.Handler) http.Handler {
 				networkAccess = c.Network.NetworkAccess
 			})
 
-			if origin != "" {
-				// Validate origin based on network_access
-				if isAllowedOrigin(origin, networkAccess) {
-					w.Header().Set("Access-Control-Allow-Origin", origin)
-					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-					w.Header().Set("Access-Control-Allow-Credentials", "true")
-					w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
-				}
+			// Decided ONCE: the preflight branch below used to re-run the same
+			// comparison, and the two must never be able to disagree.
+			allowed := origin != "" &&
+				isAllowedOrigin(origin, networkAccess, effectiveRequestHost(store, r), effectiveRequestScheme(r))
+
+			if allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
 			}
 
 			if r.Method == http.MethodOptions {
-				if origin != "" && isAllowedOrigin(origin, networkAccess) {
+				if allowed {
 					w.WriteHeader(http.StatusNoContent)
 				} else {
 					// Audit Q-8: include Allow + Access-Control-Max-Age:0 on
@@ -167,7 +169,7 @@ func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler
 				return
 			}
 
-			if !isAllowedOrigin(origin, networkAccess) {
+			if !isAllowedOrigin(origin, networkAccess, effectiveRequestHost(store, r), effectiveRequestScheme(r)) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))
@@ -230,7 +232,19 @@ func LoopbackOnly(next http.Handler) http.Handler {
 
 // isAllowedOrigin validates an origin URL against the network_access config.
 // Uses proper URL parsing instead of substring matching.
-func isAllowedOrigin(origin, networkAccess string) bool {
+//
+// effectiveHost / effectiveScheme describe the request the origin arrived on
+// (see effectiveRequestHost / effectiveRequestScheme). They are consulted ONLY
+// by the external/public arm: those two policies have no IP class left to test
+// an origin against — every address is admissible — so the only meaningful
+// question is whether the page that issued the request was served by THIS
+// deployment. Answering "yes, always" (the pre-sweep behaviour) let any page a
+// LAN browser had open drive the dashboard cross-origin WITH credentials,
+// because AuthMiddleware waives loopback and private peers regardless of mode:
+// POST /api/restart, DELETE /api/jobs/{id}, PUT /api/config (sweep T1-6).
+//
+// localhost and lan keep their IP-class rules exactly as they were.
+func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
@@ -247,10 +261,114 @@ func isAllowedOrigin(origin, networkAccess string) bool {
 	case "lan":
 		return isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname)
 	case "external", "public":
-		return true
+		return sameSiteOrigin(origin, effectiveHost, effectiveScheme)
 	default:
 		return isLoopback(hostname) || hostname == "localhost"
 	}
+}
+
+// effectiveRequestHost returns the authority this server answers as, for the
+// purpose of the same-origin comparison: r.Host normally, or X-Forwarded-Host
+// when the DIRECT peer is listed in network.trusted_proxies. Same trust rule as
+// EffectiveClientIP — a client-forged header never counts, because an untrusted
+// peer's headers are not consulted at all.
+//
+// Only the FIRST entry is ever used, which is the X-Forwarded-Host convention:
+// the leftmost value names the host the ORIGINAL client asked for. That is the
+// opposite end from X-Forwarded-For, whose right-to-left walk is what defeats a
+// forged prefix — none of that reasoning transfers to a header read left to
+// right. Joining Header.Values and cutting at the first comma is therefore
+// EQUIVALENT to Header.Get plus the same cut; it is written this way only so the
+// answer cannot depend on whether a proxy appended by extending the first field
+// line or by adding a second one.
+//
+// The residual, stated plainly: a proxy listed in trusted_proxies that does not
+// itself set or overwrite X-Forwarded-Host lets its peer choose the host the
+// Origin is compared against. A browser cannot reach that path —
+// X-Forwarded-Host is not CORS-safelisted, so setting it cross-origin needs a
+// preflight this server refuses — and a non-browser client that can set
+// arbitrary headers could already pass the check by sending Origin equal to
+// r.Host. Configure the proxy to set the header; do not rely on its absence.
+func effectiveRequestHost(store *config.Store, r *http.Request) string {
+	if loadTrustedProxies(store).contains(ExtractIP(r)) {
+		xfh := strings.Join(r.Header.Values("X-Forwarded-Host"), ",")
+		first, _, _ := strings.Cut(xfh, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
+		}
+	}
+	return r.Host
+}
+
+// effectiveRequestScheme is "https" when the connection is TLS, or when
+// network.trust_forwarded_proto is on and the proxy said so. IsRequestSecure
+// owns that policy (internal/web/auth.go) — do not restate it here.
+func effectiveRequestScheme(r *http.Request) string {
+	if IsRequestSecure(r) {
+		return "https"
+	}
+	return "http"
+}
+
+// splitAuthority splits "host", "host:port", "[::1]" or "[::1]:774" into a
+// canonical hostname and its EXPLICIT port ("" when none was written). IPv6
+// literals lose their brackets and are re-rendered through net.IP, so "[::1]"
+// and "[0:0:0:0:0:0:0:1]" compare equal; hostnames are lowercased.
+func splitAuthority(authority string) (host, port string) {
+	authority = strings.TrimSpace(authority)
+	if authority == "" {
+		return "", ""
+	}
+	if h, p, err := net.SplitHostPort(authority); err == nil {
+		host, port = h, p
+	} else {
+		host = authority
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String(), port
+	}
+	return strings.ToLower(host), port
+}
+
+// defaultedPort fills in a scheme's default port for an authority that wrote
+// none.
+func defaultedPort(port, scheme string) string {
+	if port != "" {
+		return port
+	}
+	if scheme == "https" {
+		return "443"
+	}
+	return "80"
+}
+
+// sameSiteOrigin reports whether `origin` (an Origin or Referer value) names
+// the very host this request was addressed to.
+//
+// Hosts must match. Ports must match too — but ONLY when at least one side
+// wrote one. A TLS-terminating reverse proxy forwards `Host: dash.example` with
+// no port while the browser sends `Origin: https://dash.example`, and Moombox
+// cannot know the public scheme unless trust_forwarded_proto is on; demanding a
+// port match there would 403 every such deployment on its own dashboard. Two
+// portless authorities therefore compare by host alone — which gives up
+// nothing, because a browser sets Host from the address bar and an attacker's
+// page cannot change it. The moment either side names a port, both are
+// defaulted from their OWN scheme and compared exactly.
+func sameSiteOrigin(origin, effectiveHost, effectiveScheme string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	oHost, oPort := splitAuthority(u.Host)
+	rHost, rPort := splitAuthority(effectiveHost)
+	if oHost == "" || rHost == "" || oHost != rHost {
+		return false
+	}
+	if oPort == "" && rPort == "" {
+		return true
+	}
+	return defaultedPort(oPort, u.Scheme) == defaultedPort(rPort, effectiveScheme)
 }
 
 // ExtractIP gets the client's real IP from the request.

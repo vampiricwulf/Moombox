@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -1357,14 +1356,61 @@ func notModifiedSince(req *http.Request, modtime time.Time) bool {
 	return !modtime.Truncate(time.Second).After(t)
 }
 
+// chatJSONWindow is how much of each end of the chat file the completeness
+// check reads.
+const chatJSONWindow = 512
+
+// chatJSONLooksComplete reports whether the file's first non-whitespace byte is
+// '{' and its last non-whitespace byte is '}'.
+//
+// This replaces a whole-file json.Valid. The only corruption seen in the field
+// is TRUNCATION — an interrupted write, a partial flush — and a truncated
+// object cannot end in '}'. On a 100 MB VOD chat file the answer now costs
+// 1 KB of I/O instead of a 100 MB read plus a full scan, on every player open
+// (sweep T2-19).
+//
+// "Atomic writer" holds for the FULL-FILE writes (write-temp-then-rename) but
+// not for the live-append path, which edits in place: AppendChatMessages
+// (internal/utils/chatfile.go) does a WriteAt over the old closing bracket and
+// truncates afterwards. The conclusion survives anyway, because that payload is
+// self-closing ("…]\n}") and always longer than the "]\n}" it overwrites — so
+// once the WriteAt lands the file is already a complete document, and a crash
+// before or during it leaves either the previous complete document or a tail
+// that fails the '}' check here. The residual risk is a file that passes this
+// check and still fails to parse; the player's chat load runs inside a try
+// (web/public/modules/player.js), so a Response.json() rejection surfaces as a
+// "Failed to load chat replay" toast rather than a broken page.
+func chatJSONLooksComplete(f *os.File, size int64) bool {
+	if size <= 0 {
+		return false
+	}
+	n := int64(chatJSONWindow)
+	if size < n {
+		n = size
+	}
+	head := make([]byte, n)
+	if _, err := f.ReadAt(head, 0); err != nil {
+		return false
+	}
+	tail := make([]byte, n)
+	if _, err := f.ReadAt(tail, size-n); err != nil {
+		return false
+	}
+	// JSON's whitespace is exactly these four bytes (RFC 8259 §2), so this is
+	// a precise trim rather than an approximation of unicode.IsSpace.
+	const jsonSpace = " \t\r\n"
+	head = bytes.TrimLeft(head, jsonSpace)
+	tail = bytes.TrimRight(tail, jsonSpace)
+	return len(head) > 0 && head[0] == '{' && len(tail) > 0 && tail[len(tail)-1] == '}'
+}
+
 // serveChatJSON stats the chat file at path, short-circuits to a body-less
 // 304 when the request's If-Modified-Since already covers it (R15 — this
-// MUST happen before the file is opened or read: on a long VOD the chat
-// file is 50-100 MB, and the old code paid that read + json.Valid scan on
-// every conditional GET regardless of outcome), then reads, validates and
-// serves the file. Errors map to 404 when the file is missing and 422 when
-// it can't be opened, stat'd, fully read, or parsed as JSON — matching the
-// /chat behaviour the segment route was cloned from.
+// MUST happen before the file is opened: on a long VOD the chat file is
+// 50-100 MB), then checks it is complete and streams it. Errors map to 404
+// when the file is missing and 422 when it can't be opened, stat'd, or fails
+// the completeness check — matching the /chat behaviour the segment route was
+// cloned from.
 func serveChatJSON(rw http.ResponseWriter, req *http.Request, path string) {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -1390,19 +1436,20 @@ func serveChatJSON(rw http.ResponseWriter, req *http.Request, path string) {
 	}
 	defer f.Close()
 
-	data := make([]byte, fi.Size())
-	if _, err := io.ReadFull(f, data); err != nil || !json.Valid(data) {
+	if !chatJSONLooksComplete(f, fi.Size()) {
 		jsonError(rw, "Chat file is corrupt or unreadable", http.StatusUnprocessableEntity)
 		return
 	}
 
+	// Content-Type is set explicitly rather than left to ServeContent's
+	// extension lookup: mime.TypeByExtension reads the Windows registry, which
+	// is not ours to trust for the one header the player switches on.
 	rw.Header().Set("Content-Type", "application/json")
 	rw.Header().Set("Cache-Control", "private, no-cache")
-	// ServeContent adds Last-Modified and answers If-Modified-Since with a
-	// body-less 304 — kept as a fallback (e.g. HEAD, Range); the
-	// notModifiedSince short-circuit above already avoids the read for the
-	// common conditional-GET case.
-	http.ServeContent(rw, req, "chat.json", fi.ModTime(), bytes.NewReader(data))
+	// ServeContent streams straight from the file — Range and the conditional
+	// headers for free, and no whole-file copy in RAM per request. ReadAt above
+	// leaves the file offset untouched, and ServeContent seeks for itself.
+	http.ServeContent(rw, req, "chat.json", fi.ModTime(), f)
 }
 
 // StatusRouteDeps holds dependencies for the status route.
