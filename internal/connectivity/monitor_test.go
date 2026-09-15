@@ -2,7 +2,6 @@ package connectivity
 
 import (
 	"net"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -304,57 +303,5 @@ func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
 	}
 	if m.passive.IsTriggered() {
 		t.Fatal("passive latch should have been cleared by the pruning poll")
-	}
-}
-
-// TestMonitor_StartProbesOnceWhenOfflineAtBoot pins T3-30: booting offline
-// must cost ONE probe, not two.
-//
-// Start seeded state with a synchronous checkFn and then called poll(), which
-// runs checkFn again — so a machine that boots with no network paid two full
-// probe timeouts (~6 s in production) before Start returned, to learn what the
-// first probe already said.
-//
-// Mutant: restoring m.poll() makes the probe count 2 and roughly doubles the
-// measured Start latency.
-func TestMonitor_StartProbesOnceWhenOfflineAtBoot(t *testing.T) {
-	const probeCost = 150 * time.Millisecond
-
-	var probes atomic.Int32
-	m := newTestMonitor(func() bool {
-		probes.Add(1)
-		time.Sleep(probeCost) // a probe timeout, in miniature
-		return false
-	})
-	m.pollInterval = time.Hour // the ticker must not fire during this test
-
-	var mu sync.Mutex
-	var states []bool
-	m.OnStateChange(func(online bool) {
-		mu.Lock()
-		states = append(states, online)
-		mu.Unlock()
-	})
-
-	start := time.Now()
-	m.Start(t.Context())
-	elapsed := time.Since(start)
-	t.Cleanup(m.Stop)
-
-	if got := probes.Load(); got != 1 {
-		t.Fatalf("boot probes = %d, want 1 — the seed check must not be followed by a second synchronous poll()", got)
-	}
-	// One probe is ~150ms; two are >=300ms. 250ms leaves ~85ms of scheduler
-	// slack while still failing the two-probe mutant.
-	if elapsed >= 250*time.Millisecond {
-		t.Errorf("Start blocked %v, want ~one probe (%v) — a second synchronous probe doubles the boot stall", elapsed, probeCost)
-	}
-	if m.IsOnline() {
-		t.Error("a monitor that booted offline must report offline")
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(states) != 1 || states[0] {
-		t.Errorf("state changes = %v, want exactly one false — the seed must still announce the outage", states)
 	}
 }

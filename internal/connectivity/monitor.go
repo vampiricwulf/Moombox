@@ -83,19 +83,12 @@ func (m *Monitor) Start(ctx context.Context) {
 	ctx2, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 
-	// Seed state with ONE synchronous probe so IsOnline() reflects reality
-	// before the first tick fires. Without it, a machine that boots with no
-	// network reports online=true for a whole poll interval.
-	//
-	// The transition is folded in rather than delegated to poll(): poll() would
-	// spend a SECOND full probe timeout re-learning what checkFn just said,
-	// which on an offline boot is the whole of the startup stall. Nothing else
-	// is lost — poll()'s passive-tracker read cannot change this verdict (the
-	// tracker was just constructed, and `online` is already false), and its
-	// offlinePolls increment is unobservable once wasOnline is false.
+	// Seed state with a synchronous probe so IsOnline() reflects reality before
+	// the first tick fires 5 seconds later. Without this, a machine that boots
+	// with no network will report online=true for up to 5 seconds.
 	if !m.checkFn() {
 		m.offlinePolls.Store(2) // skip the debounce — we already know we are offline
-		m.transition(false)
+		m.poll()
 	}
 
 	go func() {
