@@ -539,7 +539,8 @@ The IRC parser handles two message types:
 **PRIVMSG** (regular chat and bits):
 - Tag fields extracted: `id`, `tmi-sent-ts` (epoch ms), `bits`, `display-name`, `login`, `user-id`, `badges`, `color`, `emotes`.
 - If `bits > 0`, message type is `"bits"`, otherwise `"chat"`.
-- Emote tags parsed from format `id:start-end,start-end/id:start-end` into `TwitchEmoteRef` structs with start/end as rune indices (not byte indices), matching Twitch's character offset convention.
+- Emote tags parsed from format `id:start-end,start-end/id:start-end` into `TwitchEmoteRef` structs. **Two index spaces, and the conversion between them is the point.** The WIRE offsets count Unicode CODE POINTS of the message text — inclusive, zero-based, and neither bytes nor UTF-16 units. That was re-measured on 2026-09-15 over the raw IRC lines of 18 real archives (120 of 120 ranges preceded by a non-BMP character slice to a whole-word token by code point, 0 of 120 by UTF-16) after this file and `parseEmoteTags` (`internal/twitch/chat_irc.go`) had asserted UTF-16 since 2026-04-22; every reference client indexes by code point (`references/chatterino7/src/providers/twitch/TwitchIrc.cpp` `codepointToUtf16Idx`, gempir/go-twitch-irc, robotty/twitch-irc-rs). The EMITTED `TwitchEmoteRef.Start`/`End` are UTF-16 code units, because the only consumer is JavaScript: the player slices the span with `String.prototype.substring`, and the VOD path emits UTF-16 already (`utf16Len`, `internal/twitch/api.go`). A range that is inverted or runs past the end of the message keeps its raw wire offsets and gets an empty `Name` — one unrendered emote, never a panic inside the read loop.
+- A `/me` message arrives as the CTCP form `\x01ACTION <text>\x01` and its offsets index the UNWRAPPED text (measured the same way). `stripActionWrapper` (`internal/twitch/chat_irc.go`) unwraps it BEFORE the emote tags are read and the fact is reported as `IsAction` (`internal/twitch/types.go`, JSON `isAction`); `Raw` still carries the verbatim wire line. PRIVMSG only — a USERNOTICE body is never wrapped, and a strip there would eat the head of any system message that began with the marker.
 - `OffsetMs` computed as `tmiSentTs - baseMs` (signed; negative before the recording base) where baseMs is the recording start time (or stream start time as fallback) — except that a part RESUMED after a daemon restart takes baseMs from the base its own chat file already carries in `recordingStartTime` rather than from the restart the orchestrator passes in (`adoptPartRecordingBase`, `internal/twitch/chat.go`): one file, one epoch, because the resumed part's video is appended to and so its timeline still starts where it did, and rebasing would drop every post-restart message onto the head of the part; a part file with no such header offers nothing to adopt and the run's own base stands.
 
 **USERNOTICE** (subs, raids, memberships):
@@ -547,7 +548,9 @@ The IRC parser handles two message types:
 - `system-msg` is unescaped (`\s` to space).
 - Message type normalization: `sub` -> `"sub"`, `resub` -> `"resub"`, `subgift`/`submysterygift` -> `"subgift"`, `raid` -> `"raid"`, everything else -> `"system"`.
 
-**PING handling**: Responds with `PONG :tmi.twitch.tv`.
+**PING handling**: a server `PING` is answered with `PONG :tmi.twitch.tv`.
+
+**The session also speaks first.** `ircReadDeadline` (6 minutes) is the OUTER bound only. A half-open socket — one the OS still believes is connected — used to cost up to six minutes of chat, and Twitch IRC has no replay, so those messages are absent from the archive rather than late to it. A keepalive goroutine inside `runIRCSession` (`internal/twitch/chat_irc.go`) therefore sends `ircKeepalivePing` (`internal/twitch/chat.go` — the line `PING :moombox`) after `ircKeepaliveIdle` (45 s) without ANY inbound frame, and declares the socket dead if no inbound frame of any kind arrives within `ircKeepalivePongWait` (10 s); both windows are evaluated every `ircKeepaliveCheck` (15 s), so the detection bound is about 70 seconds. Any frame answers — a PONG, a chat line, a server PING — because the question is whether the IRC layer is still serving us, not which verb it used. Failure cancels the session and the read loop returns an error into the existing reconnect path. It is a goroutine rather than a shorter read deadline because `coder/websocket` CLOSES the connection when a read context fires, so a 15-second read deadline would kill the socket on every quiet fifteen seconds. The durations live in `chatDelays` (`internal/twitch/delays.go`) so the tests drive the whole cycle in milliseconds. Upstream shape: `references/chatterino7/src/providers/twitch/IrcConnection2.cpp`.
 
 #### Deduplication
 
@@ -596,10 +599,12 @@ The Twitch credential here is a GETTER, not a value: the downloader holds `AuthT
 
 #### Pagination
 
-- Initial request: `contentOffsetSeconds = 0` (or resumed offset).
-- Each response includes `hasNextPage` and edges with `contentOffsetSeconds`.
-- After processing each page, `contentOffset` advances to the last edge's offset.
-- Termination: no results returned, no new (non-duplicate) messages, or `hasNextPage == false`.
+The operation is `VideoCommentsByOffsetOrCursor` and the OR is load-bearing: `contentOffsetSeconds` selects the page containing a moment, `cursor` selects the page AFTER a given edge, and they are mutually exclusive (`GetVodComments`, `internal/twitch/api.go`, sends exactly one). The persisted-query hash is the same for both.
+
+- **Entering** a VOD — a fresh start, or a resume from the sidecar's `lastOffsetSeconds` — uses the offset.
+- **Every later page** uses the previous page's LAST edge cursor (`Cursor`, `internal/twitch/types.go`). A page holds 59 edges and `contentOffsetSeconds` is an integer second, so a second with 59 or more comments made an offset-based next request ask for the page just read; the loop saw only duplicates, found the offset unmoved, and stopped with the rest of the VOD's chat unarchived. The cursor is not persisted — it is opaque and undocumented as durable across sessions, and a stale one answers with an empty page the loop would read as the end of the VOD.
+- `contentOffset` still tracks the last edge's offset, because that is what the resume sidecar and the progress line are written from.
+- **Only `hasNextPage == false` completes the archive.** A page that arrives with `hasNextPage == true` can never mark the VOD chat finished, even an empty one — it can only keep paging or STALL. An empty last-edge cursor falls back to the pre-cursor offset paging, past that edge's own `contentOffsetSeconds` (one warning). A stuck (repeated) cursor, a page with zero edges, or an offset fallback that fails to advance past the last request are genuine stalls: `pagingStalled` (`internal/twitch/vod_chat.go`) flushes and PRESERVES the resume sidecar instead of deleting it, so the download errors out without ever marking the VOD chat complete, and a later `/resume` retries from the saved offset rather than the archive silently ending short.
 
 #### Error Handling
 
@@ -625,7 +630,7 @@ Similar to IRC, but tracks `lastOffsetSeconds` instead of `lastTimestampMs`:
 }
 ```
 
-Maximum 1000 recent IDs in VOD chat resume state (`vodChatResumeMaxRecentIDs`).
+Both chat downloaders cap their sidecar at the newest 1000 dedup IDs — one constant, `chatResumeIDCap` (`internal/twitch/chat.go`). The IRC path used to snapshot its whole 5000-entry set on every flush (about once a second on a busy channel: a ~200 KB marshal, fsync and rename), for a window an IRC reconnect replay can only overlap by seconds.
 
 ### Emote Resolution
 
@@ -633,7 +638,7 @@ Maximum 1000 recent IDs in VOD chat resume state (`vodChatResumeMaxRecentIDs`).
 
 #### Fetch Strategy
 
-All three providers are fetched in parallel using a `sync.WaitGroup`. Each has an 8-second timeout (`emoteTimeout`). Failures are logged at debug level and return nil (non-fatal).
+All three providers are fetched in parallel using a `sync.WaitGroup`. Each has an 8-second timeout (`emoteTimeout`). Each returns its emotes AND whether it ANSWERED — a channel with no third-party emotes is a real answer; only a provider that could not be reached or whose body could not be read is a failure. Failures are logged at warn level and are non-fatal.
 
 #### Provider Details
 
@@ -656,10 +661,12 @@ All three providers are fetched in parallel using a `sync.WaitGroup`. Each has a
 
 #### Caching
 
-- **Type**: LRU (Least Recently Used).
+- **Type**: LRU (Least Recently Used) with a time-to-live.
 - **Max size**: 200 channels.
 - **Key**: lowercased `channelLogin` (preferred) or `channelID` (fallback).
 - **Eviction**: When full, the oldest entry (by insertion order) is removed.
+- **A failure is not a result**: the set is cached only when at least one provider answered. Three providers failing together — one outage, one flaky minute — used to be written to the cache and served for the rest of the process lifetime, and the per-downloader cache one layer up (`resolveEmotesCached`, `internal/twitch/chat_recording.go`) latched the same empty set for the life of the job. A resolve in which nothing answered now returns nil, and both layers retry.
+- **An answer goes stale**: an entry older than `emoteCacheTTL` (`internal/twitch/emotes.go` — 24 hours) is refetched on the next resolve. Moombox runs for weeks and 7TV/BTTV/FFZ sets change daily. If that refetch fails outright the STALE set is served and kept — yesterday's emotes beat none.
 - **Inflight dedup**: If a request for the same cache key is already in-flight, subsequent callers block on a channel until the first completes, then read from cache.
 
 #### Emote Injection
