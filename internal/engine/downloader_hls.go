@@ -270,16 +270,36 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					consecutiveErrors = 0
 					continue
 				}
+				// The end verdict belongs to the status check. A check ERROR
+				// is not a verdict — a Twitch GQL flap and a failed YouTube
+				// probe are both routine — so it DEFERS: the 404 falls into
+				// the ordinary consecutive-error accounting below and the
+				// next reload re-asks. Mirrors the DASH loop's gone-burst
+				// verification (downloader_dash.go): only a CONFIRMED
+				// "ended" latches streamEnded, and a confirmed "still live"
+				// returns ErrQualityLost for the orchestrator's variant
+				// refresh. Latching on a failed check is what turned a live
+				// recording into a truncated Finished job (sweep T1-2).
+				verdictKnown := true
 				if d.opts.CheckStreamStatus != nil {
 					ended, checkErr := d.opts.CheckStreamStatus(ctx)
-					if checkErr != nil {
-						d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
-					} else if !ended {
+					switch {
+					case checkErr != nil:
+						d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
+						verdictKnown = false
+					case !ended:
 						return ErrQualityLost
 					}
 				}
-				d.streamEnded.Store(true)
-				return nil
+				if verdictKnown {
+					d.streamEnded.Store(true)
+					return nil
+				}
+				// Verdict unknown: fall through to the shared retry budget.
+				// If it runs out with the verdict still unknown, the loop
+				// exits with its "N consecutive errors" error — the job
+				// finalizes whatever was captured with streamEnded FALSE, so
+				// the resume sidecar survives for a later Resume.
 			}
 			consecutiveErrors++
 			if consecutiveErrors > 5 {
@@ -295,9 +315,15 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				// Before giving up, check if stream is still live (quality may have changed)
 				if d.opts.CheckStreamStatus != nil {
 					ended, checkErr := d.opts.CheckStreamStatus(ctx)
-					if checkErr != nil {
-						d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
-					} else if !ended {
+					switch {
+					case checkErr != nil:
+						// Not a verdict (see the 404 site). This exit returns
+						// an error either way, so there is nothing to defer
+						// TO — but "assuming ended" described a finalize this
+						// path never performs, and the operator reading the
+						// log needs to know the status is UNKNOWN.
+						d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
+					case !ended:
 						return ErrQualityLost
 					}
 				}
@@ -343,9 +369,15 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				}
 				if d.opts.CheckStreamStatus != nil {
 					ended, checkErr := d.opts.CheckStreamStatus(ctx)
-					if checkErr != nil {
-						d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
-					} else if !ended {
+					switch {
+					case checkErr != nil:
+						// Not a verdict (see the 404 site). This exit returns
+						// an error either way, so there is nothing to defer
+						// TO — but "assuming ended" described a finalize this
+						// path never performs, and the operator reading the
+						// log needs to know the status is UNKNOWN.
+						d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
+					case !ended:
 						return ErrQualityLost
 					}
 				}

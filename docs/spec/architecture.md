@@ -408,6 +408,7 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 - Polls the HLS playlist URL periodically
 - Downloads new segments as they appear
 - Follows the live edge (media sequence numbers); no parallel catch-up path — a stalled poller simply requests the next playlist snapshot, which already reflects whatever segments the CDN still has
+- End verdict: a playlist 404/410 finalizes ONLY on a confirmed `ended` from `CheckStreamStatus`; a confirmed "still live" returns `ErrQualityLost` for the orchestrator's variant refresh, and a check ERROR defers — the 404 rejoins the consecutive-error retry budget and the next reload re-asks. When the budget runs out with the verdict still unknown the loop exits with its consecutive-error failure and leaves `streamEnded` unset, so the resume sidecar survives for a later Resume. Same rule as the DASH gone-burst verification above (`internal/engine/downloader_hls.go`)
 
 **VOD direct download mode (`runDirectDownload`):**
 - Probes total file size via `Range: bytes=0-0` HEAD request
