@@ -291,7 +291,9 @@ The self-updater lives in `internal/updater/`. It checks GitHub Releases, downlo
 
 ### Automatic Rollback
 
-If the **first boot of a freshly-applied update** fails within `postUpdateFailureWindow` (2 minutes) — or the new binary fails to even start — the launcher rolls back automatically (`launcher.go: attemptAutoRollback`): the broken binary is removed (it is bit-identical to the published GitHub asset, so nothing is lost), the preserved rollback artifact (`~` on Windows, `.old` on Linux) is renamed back to the plain name, an `.update-failed` marker documents the rollback, and the restored binary is respawned as a fresh launch. The next boot announces the marker as a notification and — via the `.update-pending` breadcrumb — marks the failed version skipped. Rollback ping-pong is impossible: the restored binary is not "first after update", so a quick death of it takes the normal fail-fast path. When the artifact is already gone (the boot survived to the milestone sweep before dying) or the restore itself fails, the launcher falls back to preserving what remains with written manual-recovery instructions (`preserveUpdateRollback`).
+If the **first boot of a freshly-applied update** fails within `postUpdateFailureWindow` (2 minutes) — or the new binary fails to even start — the launcher rolls back automatically (`launcher.go: attemptAutoRollback`): the broken binary is removed (it is bit-identical to the published GitHub asset, so nothing is lost), the preserved rollback artifact is renamed back to the plain name (`rollbackArtifactPath` in
+`cmd/moombox/launcher_windows.go` prefers `<exe>.old` when it is still on disk and falls back to
+`<exe>~`; on Linux, `cmd/moombox/launcher_unix.go`, it is always `.old`), an `.update-failed` marker documents the rollback, and the restored binary is respawned as a fresh launch. The next boot announces the marker as a notification and — via the `.update-pending` breadcrumb — marks the failed version skipped. Rollback ping-pong is impossible: the restored binary is not "first after update", so a quick death of it takes the normal fail-fast path. When the artifact is already gone (the boot survived to the milestone sweep before dying) or the restore itself fails, the launcher falls back to preserving what remains with written manual-recovery instructions (`preserveUpdateRollback`).
 
 ### Signature Verification of Current Binary
 
@@ -325,7 +327,10 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
 - **Child process** (`_MOOMBOX_CHILD=1`): Runs the full application service stack.
 
 **Parent behavior on child exit:**
-- Exit code 42: Respawn the child (loop continues). If `<exe>.old` exists (from an update), rename it to `<exe>~` to free the `.old` name for future updates.
+- Exit code 42: Respawn the child (loop continues). If `<exe>.old` exists (from an update), rename it to
+  `<exe>~` to free the `.old` name for future updates. A rename that fails — the `~` name is still held
+  by this launcher's own mapped image, which happens on the second update of one launcher lifetime — is
+  reported on stderr and leaves `.old` in place as the rollback artifact.
 - Any other exit code: Propagate the exit code and terminate.
 - Normal exit (code 0): Terminate.
 
@@ -334,6 +339,10 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
 - The `createNoWindow` flag (`0x08000000`) is used when spawning cleanup processes, not the child itself. The child inherits the parent's console (stdin/stdout/stderr are piped through).
 
 **Old binary cleanup:** After an update, the old binary is at `<exe>.old` but is locked because the launcher (parent) is still running from the old binary. The launcher renames `.old` -> `<exe>~`. On exit, the launcher spawns a detached `cmd /C ping 127.0.0.1 -n 3 >nul & del /f /q <exe>~` process to delete the stale file after the launcher fully exits.
+
+When that rename cannot happen, the surviving `.old` is the freshest previous binary and the `~` file is
+one version older still; the rollback path prefers `.old` for exactly that reason, and the `~` file is
+swept by the next launcher start once the `.update-failed` marker is gone.
 
 ### Restart Triggers
 
