@@ -86,8 +86,9 @@ func TestTwitchLoginPrunedFromMerge(t *testing.T) {
 // carrying all three horizon keys — pinning the completion-line claim that
 // review found unpinned (brief mutation row 8).
 //
-// The auth-token's expiry is a DATED future timestamp (not the session-scoped
-// 0 the fixture used before this fix) so twitchAuthHorizon renders as a real
+// The auth-token's expiry is a CLOCK-RELATIVE future timestamp (not the
+// session-scoped 0 the fixture used before this fix, and not a pinned date
+// that would itself pass and go stale) so twitchAuthHorizon renders as a real
 // RFC3339 stamp instead of "none" — otherwise the two possible renderings
 // ("none" from an empty jar and "none" from a Unix-seconds mutant misreading
 // a zero) would be indistinguishable. twitchLoginExpiry is asserted as
@@ -103,7 +104,10 @@ func TestTwitchLoginPrunedFromMerge(t *testing.T) {
 // emit the horizon as Unix seconds instead of through AuthHorizonString
 // (kills the twitchAuthHorizon value assertion below).
 func TestRefreshWarnsWhenTheExpiredTwitchLoginIsPruned(t *testing.T) {
-	const twitchTokenExpiry = 1789000000 // dated; see doc comment above
+	// Clock-relative rather than a pinned date so this fixture's "still
+	// valid" auth-token never itself lapses into "expired" as calendar time
+	// passes; see doc comment above.
+	twitchTokenExpiry := time.Now().Add(90 * 24 * time.Hour).Unix()
 	past := time.Now().Add(-24 * time.Hour).Unix()
 	previous := "# Netscape HTTP Cookie File\n" +
 		"#HttpOnly_.twitch.tv\tTRUE\t/\tTRUE\t" + itoa(twitchTokenExpiry) + "\tauth-token\t" + goodTwitchToken + "\n" +
