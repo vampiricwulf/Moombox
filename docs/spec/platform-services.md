@@ -211,10 +211,17 @@ Parsing (`parseMembershipTab`):
 | `dataSyncID` | `"datasyncId":"([^"]+)"` | Data sync identifier. |
 | `ytInitialPlayerResponse` | Three patterns (see below) | Inline player API response embedded in the page. |
 
-The `ytInitialPlayerResponse` is extracted using three regex patterns tried in order:
-1. `var ytInitialPlayerResponse\s*=\s*({.+?});`
-2. `window["ytInitialPlayerResponse"]\s*=\s*({.+?});`
-3. `ytInitialPlayerResponse\s*=\s*({.+?});`
+The `ytInitialPlayerResponse` is located by an assignment-PREFIX anchor and then brace-scanned
+(`extractPlayerResponse`, `internal/youtube/watch_page.go`), never captured by a non-greedy regex.
+The anchors are tried in order:
+1. `var ytInitialPlayerResponse\s*=\s*\{`
+2. `window["ytInitialPlayerResponse"]\s*=\s*\{`
+3. `ytInitialPlayerResponse\s*=\s*\{`
+
+Each match ends on the opening brace; `scanBalancedObject` then walks the literal tracking JS string
+state, so a `};` inside `shortDescription` cannot truncate it. The lazy `({.+?});` form this replaces
+stopped at the first `};` in the page and failed identically on all three patterns, losing the watch
+page's `ScheduledStartTime` and format pool with nothing in the log.
 
 When found, it is JSON-parsed and the embedded `videoDetails` fields (title, author, channelId, description, thumbnail) are stored in `YtcfgData` for use as metadata fallbacks.
 

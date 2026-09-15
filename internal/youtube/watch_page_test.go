@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -376,5 +378,126 @@ func TestCanonicalizeChallengeRejectsEncodedPaths(t *testing.T) {
 		if got, reason := canonicalizeChallenge(json.RawMessage(raw)); got == "" {
 			t.Errorf("genuine URL %q rejected: %s", value, reason)
 		}
+	}
+}
+
+// synthPlayerPage renders a watch page whose ytInitialPlayerResponse carries
+// desc as its shortDescription, JSON-encoded exactly as YouTube encodes it.
+// The trailing `var meta=1;` matters: it is a second `;` for the old lazy
+// `({.+?});` pattern to reach, so a fixture without it would not reproduce
+// the truncation this task fixes.
+func synthPlayerPage(t *testing.T, desc string) string {
+	t.Helper()
+	encoded, err := json.Marshal(desc)
+	if err != nil {
+		t.Fatalf("marshal description: %v", err)
+	}
+	return `<!DOCTYPE html><html><head><script nonce="q">var ytInitialPlayerResponse = ` +
+		`{"videoDetails":{"videoId":"abc12345678","title":"T","author":"A","channelId":"UC1",` +
+		`"shortDescription":` + string(encoded) + `}};var meta=1;</script></head><body></body></html>`
+}
+
+// TestPlayerResponseSurvivesBraceSemicolonInDescription is ledger item T1-5.
+//
+// Mutant named: the old lazy `({.+?});` patterns. They stop at the FIRST `};`
+// in the page, which a description containing a code sample supplies, so the
+// captured text is unbalanced, every pattern fails identically, and
+// PlayerResponse is nil with nothing in the log.
+func TestPlayerResponseSurvivesBraceSemicolonInDescription(t *testing.T) {
+	const desc = "code sample: if (x) {y();};  thanks for watching"
+	page := synthPlayerPage(t, desc)
+
+	ytcfg, pr := extractYtcfgAndPlayerResponse(page)
+	if pr == nil {
+		t.Fatal("playerResponse is nil — a `};` inside shortDescription truncated the object")
+	}
+	vd, _ := pr["videoDetails"].(map[string]any)
+	if got, _ := vd["shortDescription"].(string); got != desc {
+		t.Errorf("shortDescription = %q, want %q", got, desc)
+	}
+	if ytcfg.Description != desc {
+		t.Errorf("ytcfg.Description = %q, want %q", ytcfg.Description, desc)
+	}
+}
+
+// TestPlayerResponseScannerHonoursEscapedQuotes pins the OTHER half of the
+// fix: the balanced scan must track backslash escapes.
+//
+// Mutant named: a scanner that does not track escapes. On this fixture the
+// description's `"` arrives as `\"`; an escape-blind scanner leaves the
+// string there, reads the following `}` as a closing brace, and returns the
+// object one level short — which then fails to parse, or worse, parses into
+// a truncated videoDetails.
+func TestPlayerResponseScannerHonoursEscapedQuotes(t *testing.T) {
+	const desc = `a " quote then } brace`
+	page := synthPlayerPage(t, desc)
+
+	_, pr := extractYtcfgAndPlayerResponse(page)
+	if pr == nil {
+		t.Fatal("playerResponse is nil — the scan mis-handled the escaped quote")
+	}
+	vd, _ := pr["videoDetails"].(map[string]any)
+	if got, _ := vd["shortDescription"].(string); got != desc {
+		t.Errorf("shortDescription = %q, want %q", got, desc)
+	}
+}
+
+// legacyPlayerResponsePatterns are the three lazy regexes this task replaces.
+// They live HERE, in the test, purely as the before-image for the equivalence
+// check below: on every page shape the lazy form parsed, the anchored brace
+// scan must return the same decoded object. The repository carries no
+// watch-page fixture corpus, so this table IS the fixture set.
+var legacyPlayerResponsePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)var ytInitialPlayerResponse\s*=\s*({.+?});`),
+	regexp.MustCompile(`(?s)window\["ytInitialPlayerResponse"\]\s*=\s*({.+?});`),
+	regexp.MustCompile(`(?s)ytInitialPlayerResponse\s*=\s*({.+?});`),
+}
+
+// legacyExtractPlayerResponse is the pre-change control flow, verbatim:
+// first pattern whose capture unmarshals wins.
+func legacyExtractPlayerResponse(html string) (map[string]any, bool) {
+	for _, re := range legacyPlayerResponsePatterns {
+		m := re.FindStringSubmatch(html)
+		if m == nil {
+			continue
+		}
+		var pr map[string]any
+		if json.Unmarshal([]byte(m[1]), &pr) == nil {
+			return pr, true
+		}
+	}
+	return nil, false
+}
+
+// TestPlayerResponseExtractionMatchesTheLegacyPatterns is the before/after
+// equivalence check. Each fixture must ALSO parse under the legacy patterns —
+// a fixture that does not is not a before-image and the subtest says so.
+//
+// Mutant named: an anchor that matches at the wrong offset (e.g. one that
+// forgets `loc[1]-1` and starts the scan one byte past the `{`) returns a
+// different object, or none, on every row here.
+func TestPlayerResponseExtractionMatchesTheLegacyPatterns(t *testing.T) {
+	fixtures := map[string]string{
+		"var form":          synthPlayerPage(t, "a benign description"),
+		"window form":       `<script>window["ytInitialPlayerResponse"] = {"videoDetails":{"shortDescription":"plain"}};</script>`,
+		"bare form":         `<script>ytInitialPlayerResponse = {"videoDetails":{"shortDescription":"plain"}};var x=1;</script>`,
+		"spaced assignment": `<script>var ytInitialPlayerResponse   =   {"videoDetails":{"shortDescription":"plain"}};</script>`,
+		"newlines inside":   "<script>var ytInitialPlayerResponse = {\n\"videoDetails\":{\"shortDescription\":\"plain\"}\n};</script>",
+		"unicode escapes":   `<script>var ytInitialPlayerResponse = {"videoDetails":{"shortDescription":"\u007d\u003b end"}};</script>`,
+	}
+	for name, page := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			want, ok := legacyExtractPlayerResponse(page)
+			if !ok {
+				t.Fatalf("fixture is not a before-image: the legacy patterns did not parse it")
+			}
+			got, ok := extractPlayerResponse(page)
+			if !ok {
+				t.Fatalf("the anchored scan found no object where the legacy patterns did")
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("anchored extraction differs from the legacy extraction\n got: %#v\nwant: %#v", got, want)
+			}
+		})
 	}
 }

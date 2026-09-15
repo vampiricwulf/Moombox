@@ -41,12 +41,26 @@ var (
 	// Matches encryptedHostFlags in flat JSON objects. May fail if nested objects
 	// precede the field (YouTube's embed page config is typically flat here).
 	encryptedHostFlagsRegex = regexp.MustCompile(`"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":\{[^}]*"encryptedHostFlags":"([^"]+)"`)
-	// Multiple patterns for extracting player response — YouTube occasionally
-	// changes the variable name or assignment format.
-	playerResponsePatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?s)var ytInitialPlayerResponse\s*=\s*({.+?});`),
-		regexp.MustCompile(`(?s)window\["ytInitialPlayerResponse"\]\s*=\s*({.+?});`),
-		regexp.MustCompile(`(?s)ytInitialPlayerResponse\s*=\s*({.+?});`),
+	// Assignment-PREFIX anchors for ytInitialPlayerResponse. Each pattern
+	// ends ON the opening brace; the object's extent then comes from
+	// scanBalancedObject, never from the regex.
+	//
+	// These used to end in a lazy `({.+?});`, which stops at the first `};`
+	// anywhere in the page. A shortDescription carrying `};` (a code sample,
+	// an emoticon) therefore yielded unbalanced JSON — and because all three
+	// patterns shared the flaw, all three failed identically, leaving
+	// PlayerResponse nil. That silently costs the watch page's
+	// ScheduledStartTime (the reschedule source) and its format pool, with
+	// nothing in the log to distinguish it from "the page had no player
+	// response". Same failure and same fix as ytAtNOpenRe below.
+	//
+	// Order is load-bearing and unchanged: the `var` form, then the
+	// window-property form (whose `"]` means the bare anchor cannot match
+	// it), then the bare form.
+	playerResponseAnchors = []*regexp.Regexp{
+		regexp.MustCompile(`var ytInitialPlayerResponse\s*=\s*\{`),
+		regexp.MustCompile(`window\["ytInitialPlayerResponse"\]\s*=\s*\{`),
+		regexp.MustCompile(`ytInitialPlayerResponse\s*=\s*\{`),
 	}
 	// ytInitialDataRegex extracts the ytInitialData JSON blob used for chat
 	// continuation token extraction. Mirrors the same regex used by
@@ -653,6 +667,36 @@ func normalizePlayerJSURL(raw string) string {
 	return strings.Clone(u)
 }
 
+// extractPlayerResponse returns the decoded ytInitialPlayerResponse object.
+//
+// Per anchor: match the assignment prefix, brace-scan the literal from the
+// `{` the match ends on, unmarshal. The first anchor that yields BOTH a
+// balanced literal and parseable JSON wins; anything short of that falls
+// through to the next anchor, which is the control flow the lazy patterns
+// had. Only the first occurrence of each anchor is considered — also as
+// before — because on a real watch page ytInitialPlayerResponse is assigned
+// before any page text that could spell it, and taking later candidates
+// would open a door page-authored metadata does not have today.
+func extractPlayerResponse(html string) (map[string]any, bool) {
+	for _, re := range playerResponseAnchors {
+		loc := re.FindStringIndex(html)
+		if loc == nil {
+			continue
+		}
+		// The match ends ON the opening brace, so rescan from it.
+		obj, ok := scanBalancedObject(html[loc[1]-1:])
+		if !ok {
+			continue
+		}
+		var pr map[string]any
+		if json.Unmarshal([]byte(obj), &pr) != nil {
+			continue
+		}
+		return pr, true
+	}
+	return nil, false
+}
+
 func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
 	ytcfg := &YtcfgData{}
 
@@ -694,36 +738,28 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
 	// the same value across all of them.
 	ytcfg.GvsBindToVideoID = gvsBindVideoIDRegex.MatchString(html)
 
-	// Extract ytInitialPlayerResponse (try multiple patterns)
-	var playerResponse map[string]any
-	for _, re := range playerResponsePatterns {
-		if m := re.FindStringSubmatch(html); m != nil {
-			if err := json.Unmarshal([]byte(m[1]), &playerResponse); err == nil {
-				// Extract video metadata from response
-				if vd, ok := playerResponse["videoDetails"].(map[string]any); ok {
-					if title, ok := vd["title"].(string); ok {
-						ytcfg.Title = title
-					}
-					if author, ok := vd["author"].(string); ok {
-						ytcfg.Author = author
-					}
-					if channelID, ok := vd["channelId"].(string); ok {
-						ytcfg.ChannelID = channelID
-					}
-					if desc, ok := vd["shortDescription"].(string); ok {
-						ytcfg.Description = desc
-					}
-					if thumb, ok := vd["thumbnail"].(map[string]any); ok {
-						if thumbs, ok := thumb["thumbnails"].([]any); ok && len(thumbs) > 0 {
-							if last, ok := thumbs[len(thumbs)-1].(map[string]any); ok {
-								if url, ok := last["url"].(string); ok {
-									ytcfg.ThumbnailURL = url
-								}
-							}
-						}
+	// Extract ytInitialPlayerResponse (anchor + balanced scan, see above)
+	playerResponse, _ := extractPlayerResponse(html)
+	if vd, ok := playerResponse["videoDetails"].(map[string]any); ok {
+		if title, ok := vd["title"].(string); ok {
+			ytcfg.Title = title
+		}
+		if author, ok := vd["author"].(string); ok {
+			ytcfg.Author = author
+		}
+		if channelID, ok := vd["channelId"].(string); ok {
+			ytcfg.ChannelID = channelID
+		}
+		if desc, ok := vd["shortDescription"].(string); ok {
+			ytcfg.Description = desc
+		}
+		if thumb, ok := vd["thumbnail"].(map[string]any); ok {
+			if thumbs, ok := thumb["thumbnails"].([]any); ok && len(thumbs) > 0 {
+				if last, ok := thumbs[len(thumbs)-1].(map[string]any); ok {
+					if url, ok := last["url"].(string); ok {
+						ytcfg.ThumbnailURL = url
 					}
 				}
-				break
 			}
 		}
 	}
