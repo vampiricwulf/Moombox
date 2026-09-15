@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -20,9 +21,8 @@ func wsOriginFixture(t *testing.T, networkAccess string, trusted []string) *http
 		},
 	}, "")
 	hub := NewWebSocketHub(testWSLogger{})
-	hub.OriginCheck = func(r *http.Request) bool {
-		ok, _ := originAllowed(store, r, r.Header.Get("Origin"))
-		return ok
+	hub.OriginCheck = func(r *http.Request) (bool, string) {
+		return originAllowed(store, r, r.Header.Get("Origin"))
 	}
 	srv := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
 	t.Cleanup(func() {
@@ -150,6 +150,48 @@ func TestWebSocketUpgradeFailsClosedWithNoOriginCheck(t *testing.T) {
 			t.Fatalf("status %d, want 101 — no Origin header means no Origin check at all", got)
 		}
 	})
+}
+
+// TestWebSocketUpgradeRefusalLogsTheEffectiveHost pins fix-round-1 item 7
+// (Task 3 review Finding 1): the refusal line must name the host the
+// decision actually compared — the effective host (X-Forwarded-Host from a
+// trusted proxy) — not the raw r.Host. On exactly the trusted-proxy
+// deployment this task exists to fix, r.Host is a red herring for an
+// operator diagnosing a 403; the CSRF twin's refusal line already names
+// comparedHost, not r.Host (middleware.go).
+//
+// THE MUTANT: log r.Host instead of OriginCheck's returned comparedHost — the
+// logged host reverts to "internal:774" and the assertion fails.
+func TestWebSocketUpgradeRefusalLogsTheEffectiveHost(t *testing.T) {
+	store := config.NewStore(&config.MoomboxConfig{
+		Network: config.NetworkConfig{
+			NetworkAccess:  "external",
+			TrustedProxies: []string{"127.0.0.1"},
+		},
+	}, "")
+	logger := &recordingLogger{}
+	hub := NewWebSocketHub(logger)
+	hub.OriginCheck = func(r *http.Request) (bool, string) {
+		return originAllowed(store, r, r.Header.Get("Origin"))
+	}
+	srv := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	t.Cleanup(func() {
+		srv.Close()
+		hub.Close()
+	})
+
+	got := upgradeStatus(t, srv, "internal:774", "http://attacker.example",
+		map[string]string{"X-Forwarded-Host": "dash.example"})
+	if got != http.StatusForbidden {
+		t.Fatalf("status %d, want 403 — attacker.example does not match the forwarded host", got)
+	}
+
+	if len(logger.warns) != 1 {
+		t.Fatalf("logged %v, want exactly one refusal line", logger.warns)
+	}
+	if !strings.Contains(logger.warns[0], "host=dash.example") {
+		t.Fatalf("logged %q, want it to name the forwarded host dash.example, not r.Host (internal:774)", logger.warns[0])
+	}
 }
 
 // TestWebSocketUpgradeReachesTheCertificateSANWidening pins fix-round-1 item 4

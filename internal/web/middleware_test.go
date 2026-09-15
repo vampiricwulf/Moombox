@@ -1130,8 +1130,13 @@ func TestCompressionReusesGzipWriters(t *testing.T) {
 }
 
 // recordingLogger captures Warn lines so a test can assert the refusal line
-// exists and names the pair that was compared.
+// exists and names the pair that was compared. Debug/Info/Error are no-ops so
+// the same fixture also satisfies WebSocketHub's four-method logger
+// (websocket_origin_test.go's refusal-log test).
 type recordingLogger struct{ warns []string }
+
+func (l *recordingLogger) Debug(msg string, args ...any) {}
+func (l *recordingLogger) Info(msg string, args ...any)  {}
 
 func (l *recordingLogger) Warn(msg string, args ...any) {
 	line := msg
@@ -1140,6 +1145,8 @@ func (l *recordingLogger) Warn(msg string, args ...any) {
 	}
 	l.warns = append(l.warns, line)
 }
+
+func (l *recordingLogger) Error(msg string, args ...any) {}
 
 // TestCSRFOriginComparison pins WHICH authority the Origin is compared
 // against, through the real middleware.

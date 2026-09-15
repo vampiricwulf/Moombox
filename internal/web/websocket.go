@@ -73,7 +73,12 @@ type WebSocketHub struct {
 	// nil falls back to the raw peer address.
 	ClientIP func(*http.Request) string
 
-	// OriginCheck decides whether an upgrade's Origin header is acceptable.
+	// OriginCheck decides whether an upgrade's Origin header is acceptable,
+	// and returns the authority it was compared against so the refusal log
+	// line can name the pair the decision actually used (fix-round-1 item 7 —
+	// on a trusted-proxy deployment, r.Host can differ from the effective
+	// host originAllowed compared, which made the raw-r.Host line misleading
+	// on exactly the deployment this check exists for).
 	// Set by NewServer to the SAME decision CORSMiddleware and CSRFMiddleware
 	// make (originAllowed, internal/web/middleware.go): X-Forwarded-Host from a
 	// trusted proxy, port-exact, certificate-attested on external/public.
@@ -83,7 +88,7 @@ type WebSocketHub struct {
 	// unaffected either way — non-browser clients send none. NewServer always
 	// wires the real check; only a WebSocketHub built outside it (test
 	// harnesses today) can leave this nil.
-	OriginCheck func(r *http.Request) bool
+	OriginCheck func(r *http.Request) (allowed bool, comparedHost string)
 
 	// Log buffer for initial state (ring buffer)
 	logBufMu sync.RWMutex
@@ -164,13 +169,21 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// An EMPTY Origin stays acceptable — non-browser clients send none, and
 	// the library allowed them too. A nil OriginCheck fails CLOSED (fix-round-1
 	// item 3): only a WebSocketHub built without NewServer reaches this, and a
-	// silently-open upgrade is a worse default than a spuriously-refused one.
-	if origin := r.Header.Get("Origin"); origin != "" && (hub.OriginCheck == nil || !hub.OriginCheck(r)) {
-		hub.logger.Warn("websocket upgrade rejected: origin refused",
-			"origin", clipForLog(origin),
-			"host", clipForLog(r.Host))
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
+	// silently-open upgrade is a worse default than a spuriously-refused one —
+	// comparedHost then falls back to r.Host, the only authority available.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		comparedHost := r.Host
+		allowed := false
+		if hub.OriginCheck != nil {
+			allowed, comparedHost = hub.OriginCheck(r)
+		}
+		if !allowed {
+			hub.logger.Warn("websocket upgrade rejected: origin refused",
+				"origin", clipForLog(origin),
+				"host", clipForLog(comparedHost))
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{

@@ -103,9 +103,8 @@ func NewServer(store *config.Store, logger interface {
 	// ...and the same Origin decision: before this the upgrade read r.Host
 	// only and wildcarded the port, so a Host-rewriting reverse proxy loaded
 	// the dashboard and then had every socket refused (Arc 5 arc-close F6).
-	s.ws.OriginCheck = func(r *http.Request) bool {
-		ok, _ := originAllowed(store, r, r.Header.Get("Origin"))
-		return ok
+	s.ws.OriginCheck = func(r *http.Request) (bool, string) {
+		return originAllowed(store, r, r.Header.Get("Origin"))
 	}
 
 	// Apply middleware (order matters).
