@@ -251,19 +251,38 @@ func TestResolveChatOutcomeNeverReturnsNilOnATimeout(t *testing.T) {
 // above green (review Mutants A, A2, D). The tests below drive the real
 // production call sites instead.
 
-// instantChatSource is a ChatSource whose Start returns immediately with a
-// fixed (possibly non-nil) err and a fixed message count — used to drive
-// ExecuteTwitch end to end without a live network connection.
+// instantChatSource is a ChatSource whose Start returns a fixed (possibly
+// non-nil) err and a fixed message count — used to drive ExecuteTwitch end to
+// end without a live network connection. IsRunning() is hardcoded false,
+// mirroring the real production race this pins: `running` reads false in the
+// window between a downloader's own shutdown defer clearing it and the
+// wrapper goroutine's chatRec.record(Start's return value) actually running.
+//
+// Start's short sleep is deliberate, not filler: the httptest playlist below
+// resolves in a few ms, so an instant (0-latency) Start already has its
+// outcome recorded — and chatDone already closed — long before ExecuteTwitch
+// reaches the write site, which made the ordering fix's call sites
+// UNPINNED (fix round 1 re-review, Item 1/N1): re-gating the
+// resolveChatOutcome call on twitchChatDl.IsRunning() (the original defect
+// shape — IsRunning() false skips the wait and reads chatRec directly) left
+// the whole package green, because the verdict had always already landed by
+// read time. The sleep keeps Start's goroutine mid-flight (IsRunning() still
+// hardcoded false, so the re-gate mutant takes the no-wait branch) when the
+// write site runs, so a read that isn't ordered by chatDone observes a stale
+// nil instead of the real error.
 type instantChatSource struct {
 	err   error
 	count int
 }
 
-func (f *instantChatSource) Start(context.Context) error { return f.err }
-func (f *instantChatSource) Stop()                       {}
-func (f *instantChatSource) MarkStreamEnded()            {}
-func (f *instantChatSource) MessageCount() int           { return f.count }
-func (f *instantChatSource) IsRunning() bool             { return false }
+func (f *instantChatSource) Start(context.Context) error {
+	time.Sleep(150 * time.Millisecond) // outcome lands AFTER the write site runs
+	return f.err
+}
+func (f *instantChatSource) Stop()             {}
+func (f *instantChatSource) MarkStreamEnded()  {}
+func (f *instantChatSource) MessageCount() int { return f.count }
+func (f *instantChatSource) IsRunning() bool   { return false }
 
 // TestExecuteTwitchWritesIncompleteForANonFinishedChatOutcome pins write site
 // 2 (internal/worker/orchestrator_twitch.go, ExecuteTwitch).

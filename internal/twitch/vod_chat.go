@@ -382,9 +382,12 @@ func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reaso
 	vcd.flush()
 	vcd.saveResumeState(contentOffset)
 	// The orchestrator now records this error as chat_status = "incomplete"
-	// (recordChatOutcome, internal/worker/orchestrator_chat.go), but that is
-	// a machine-readable VERDICT, not a diagnosis — this Warn is still the
-	// only trace anywhere that names WHERE paging stopped and why.
+	// (recordChatOutcome, internal/worker/orchestrator_chat.go) — its own Warn
+	// there logs this same offset/cursor/reason again, via this error's
+	// string — but that record only lands if the job reaches finalization.
+	// This Warn is still the only trace EMITTED AT THE MOMENT the stall
+	// happens: a killed process, or a job that never finalizes, leaves only
+	// this line.
 	vcd.logger.Warn("[TwitchVodChat] paging stalled; resume state kept",
 		"reason", reason,
 		"offset", contentOffset,
