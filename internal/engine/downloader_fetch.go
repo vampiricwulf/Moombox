@@ -136,6 +136,47 @@ func reportSuccess(tag string) {
 	}
 }
 
+// readBody reads resp.Body, returns at most capBytes, and pre-allocates the
+// result when the server declared a usable Content-Length.
+//
+// Segment and chunk bodies run 200 KB - 5 MB. io.ReadAll starts at 512 bytes
+// and grows by ~1.25x, so an unsized read of a 4 MB segment copies the body
+// through ~20 reallocations — about twice the final size in garbage — on
+// every one of the thousands of segments a long recording fetches.
+//
+// The +1 capacity is load-bearing, not slack: net/http returns a connection
+// to the idle pool only once the body has been read to its OWN io.EOF, and a
+// read that stops exactly at Content-Length never triggers the Read that
+// observes it (the same trap the 206 path's drain documents in fetchChunk).
+// The extra byte gives that final Read somewhere to land without regrowing
+// the buffer, so the sized path stays at one allocation AND keeps keep-alive
+// reuse.
+//
+// A body with no declared length (chunked, or transparently decompressed) or
+// one declaring at least capBytes falls back to today's bounded io.ReadAll.
+func readBody(resp *http.Response, capBytes int64) ([]byte, error) {
+	n := resp.ContentLength
+	if n <= 0 || n >= capBytes {
+		return io.ReadAll(io.LimitReader(resp.Body, capBytes))
+	}
+	buf := make([]byte, 0, n+1) // n+1 <= capBytes, so the cap still holds
+	for len(buf) < cap(buf) {
+		m, err := resp.Body.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+m]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return buf, err
+		}
+	}
+	// The body outran its own Content-Length (net/http itself caps at the
+	// declared length, so this is a hand-built response or a future
+	// transport): finish it on the bounded path rather than truncating.
+	rest, err := io.ReadAll(io.LimitReader(resp.Body, capBytes-int64(len(buf))))
+	return append(buf, rest...), err
+}
+
 // fetchSegment downloads a single segment (or playlist) by URL.
 func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
@@ -177,7 +218,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBodyBytes))
+	data, err := readBody(resp, maxSegmentBodyBytes)
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -579,7 +620,7 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 	// Bound the 206 read to the requested range size — a correct server sends
 	// exactly end-start+1 bytes, and a broken one must not be able to balloon
 	// memory past it (mirrors the maxIgnoredRangeBodyBytes cap on the 200 path).
-	data, err := io.ReadAll(io.LimitReader(resp.Body, end-start+1))
+	data, err := readBody(resp, end-start+1)
 	if err == nil {
 		// LimitReader returns EOF the instant its counter hits 0, WITHOUT the
 		// trailing Read that lets net/http observe the body's own io.EOF — so
