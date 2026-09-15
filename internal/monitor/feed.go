@@ -28,6 +28,13 @@ const (
 	// Six hours is short enough that joining a channel's membership starts
 	// working the same day without a restart.
 	membershipMemoTTL = 6 * time.Hour
+	// membershipLivenessMaxTries bounds how many membership fetches one cycle
+	// will spend chasing the liveness floor when they keep failing. The floor
+	// wants a fetch that RETURNS, so an errored one hands the attempt to
+	// another channel — but without a ceiling, a cycle in which every fetch
+	// fails would walk the entire channel list, which is the per-cycle load
+	// the memo exists to remove. Two: the nominee, plus one stand-in.
+	membershipLivenessMaxTries = 2
 )
 
 // feedStagger spaces consecutive channel feed fetches. Decapi and Twitch
@@ -96,14 +103,31 @@ type MembershipVideo struct {
 }
 
 // MembershipFetchFunc fetches the members-only videos listed on a channel's
-// authenticated /membership tab. hasAccess reports whether the signed-in
-// account actually HAS membership access: a member whose tab currently lists
-// nothing returns (nil, true, nil), a non-member (nil, false, nil). The two are
-// indistinguishable from the video list alone, and the non-member memo
-// (membershipMemoTTL) must never latch onto a member. An error leaves both
-// questions unanswered and writes no memo.
-// Typically wired to youtube.Service.FetchMembershipVideos.
-type MembershipFetchFunc func(ctx context.Context, channelID string) (videos []MembershipVideo, hasAccess bool, err error)
+// authenticated /membership tab.
+//
+// confirmedNonMember is the ONLY thing the non-member memo (membershipMemoTTL)
+// may act on, and it is deliberately narrow: true means YouTube, on a session
+// it RECOGNISED, showed this channel no membership tab. Everything else is
+// false, because everything else is a question that was not answered:
+//
+//   - a member, whether or not their tab currently lists any videos (an empty
+//     members tab and a non-member's page have identical video lists, so the
+//     list can never be the source of this bit);
+//   - a session YouTube did not recognise, or one it answered ambiguously —
+//     a logged-out session is served the same "you are not a member" page for
+//     EVERY channel, and memoizing that would suppress members-only discovery
+//     everywhere for membershipMemoTTL on nothing but an expired cookie;
+//   - any fetch that returned an error, which answers neither question.
+//
+// So false means "do not memoize", and false is the zero value: a caller that
+// forgets this bit degrades to today's fetch-every-cycle behaviour rather than
+// to a six-hour blackout. An error must still leave the memo untouched — the
+// monitor enforces that itself rather than trusting the fetcher.
+//
+// Typically wired to youtube.Service.FetchMembershipVideos through an adapter
+// that folds in the session verdict (see cmd/moombox's
+// membershipConfirmedNonMember).
+type MembershipFetchFunc func(ctx context.Context, channelID string) (videos []MembershipVideo, confirmedNonMember bool, err error)
 
 // RSSFetchFunc fetches a channel's raw YouTube RSS feed body. Mirrors
 // MembershipFetchFunc: a named type so FeedMonitor.FetchRSS and test fixtures
@@ -175,18 +199,34 @@ type FeedMonitor struct {
 	// enabled whenever FetchMembership is set".
 	MembershipEnabled func() bool
 
-	// nonMemberUntil memoizes the channels whose /membership tab answered "not
-	// a member": the horizon (cycle now + membershipMemoTTL) before which the
-	// authenticated fetch is skipped. Keyed by channel ID and pruned to the
-	// configured list every cycle by armMembershipLiveness, so it is bounded by
-	// the channel count. Guarded by fm.mu.
+	// nonMemberUntil memoizes the channels YouTube CONFIRMED the account is
+	// not a member of: the horizon (cycle now + membershipMemoTTL) before
+	// which the authenticated fetch is skipped. Keyed by channel ID and pruned
+	// to the configured list every cycle by armMembershipLiveness, so it is
+	// bounded by the channel count. Guarded by fm.mu.
 	nonMemberUntil map[string]time.Time
-	// membershipLivenessID is the ONE memoized channel this cycle fetches
-	// anyway, set by armMembershipLiveness and consumed by the first
-	// membershipFetchAllowed that matches it. Empty means "no nomination
-	// needed" — some channel is being fetched on its own account. Guarded by
-	// fm.mu.
+	// membershipFetchErrored holds the channels whose LAST membership fetch
+	// returned an error, cleared the moment one returns. Such a channel is
+	// still fetched every cycle (an error writes no memo), but that fetch
+	// answers nothing, so armMembershipLiveness must not count it as this
+	// cycle's liveness observation — otherwise one permanently broken channel
+	// suppresses every other channel's fetch forever. Guarded by fm.mu.
+	membershipFetchErrored map[string]struct{}
+	// membershipLivenessNeeded says this cycle still owes the session a
+	// membership fetch that RETURNS, because every channel it would otherwise
+	// have fetched is inside its non-member horizon. Set by
+	// armMembershipLiveness, cleared by the first fetch that comes back.
+	// Guarded by fm.mu.
+	membershipLivenessNeeded bool
+	// membershipLivenessID is the channel PREFERRED to carry that fetch — the
+	// memoized one with the earliest horizon, which is what makes the duty
+	// rotate. Empty means "any memoized channel will do", which is the state
+	// after the preferred one's fetch failed. Guarded by fm.mu.
 	membershipLivenessID string
+	// membershipLivenessTries is how many more membership fetches this cycle
+	// may spend satisfying the floor (membershipLivenessMaxTries at the top of
+	// each cycle). Guarded by fm.mu.
+	membershipLivenessTries int
 
 	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
 	// for tests. Nil uses the real fetch — see rssFetch.
@@ -542,19 +582,23 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 		// defer cancel() inside the closure so a panic in FetchMembership can't
 		// leak the timeout timer, while still releasing it the moment the fetch
 		// returns (not held for the rest of checkChannel).
-		vids, hasAccess, mErr := func() ([]MembershipVideo, bool, error) {
+		vids, nonMember, mErr := func() ([]MembershipVideo, bool, error) {
 			mctx, cancel := context.WithTimeout(ctx, feedFetchTimeout)
 			defer cancel()
 			return fm.FetchMembership(mctx, chID)
 		}()
 		if mErr != nil {
 			// A failed fetch answers neither question, so it writes no memo —
-			// the same rule routeLivenessVerdict applies to a verdict we never
-			// got (monitor_callbacks.go:865-872).
+			// the same rule cmd/moombox's routeLivenessVerdict applies to a
+			// verdict we never got. nonMember is ignored here on purpose:
+			// MembershipFetchFunc says an error leaves it unanswered, and the
+			// memo is too costly to be wrong about on a fetcher's good
+			// behaviour.
+			fm.recordMembershipFetchError(chID)
 			fm.logger.Debug("membership discovery failed", "channel", ch.Name, "err", mErr)
 		} else {
 			membVideos = vids
-			fm.recordMembershipAccess(chID, hasAccess, cycleNow)
+			fm.recordMembershipSuccess(chID, nonMember, cycleNow)
 		}
 	}
 
@@ -682,18 +726,32 @@ func (fm *FeedMonitor) membershipActive() bool {
 }
 
 // armMembershipLiveness prepares this cycle's membership decisions: it prunes
-// nonMemberUntil to the configured channels and, when EVERY channel is inside
-// its non-member horizon, nominates the one with the earliest horizon to be
-// fetched anyway.
+// the per-channel bookkeeping to the configured channels and, when every
+// channel it would otherwise fetch is inside its non-member horizon, nominates
+// the one with the earliest horizon to be fetched anyway.
 //
-// The nomination is what keeps the memo honest about credentials. The
-// authenticated membership fetch is also the system's PREFERRED YouTube
-// liveness probe: the production adapter routes the SessionAuthState it
-// returns to (*cookies.RefreshService).ObserveLiveness
-// (cmd/moombox/monitor_callbacks.go:1015), and that only happens when the
-// fetch actually runs. A memo that skipped every channel would silently stop
-// observing the session — the operator's cookies could die with both
-// dashboards clean.
+// WHAT THE NOMINATION GUARANTEES, exactly: while any membership fetch can
+// still complete, every cycle makes at least one that RETURNS — and at most
+// membershipLivenessMaxTries attempts chasing it. It does NOT guarantee a
+// liveness VERDICT. The fetch feeds one — cmd/moombox's FetchMembership
+// adapter hands the SessionAuthState to
+// (*cookies.RefreshService).ObserveLiveness — but the routeLivenessVerdict
+// that gets it there forwards only LoggedIn/LoggedOut, so a page carrying no
+// login marker observes nothing even though the fetch succeeded. That residue
+// is the tier-2 FallbackLiveness probe's job: it runs precisely when no
+// conclusive observation has landed recently (livenessObservedRecently in
+// internal/cookies/refresh_liveness.go; wired to ProbeAccountLiveness in
+// cmd/moombox/services.go). This floor is the cheap first tier, not the whole
+// guarantee.
+//
+// What it does rule out is the silent failure the memo would otherwise create:
+// skipping EVERY channel, cycle after cycle, so the tier-1 signal disappears
+// while both dashboards stay clean.
+//
+// A channel whose last fetch errored is not counted as "fetched on its own
+// account" here. Its fetch still happens (an error writes no memo, so it never
+// becomes memoized) but it answers nothing, and letting it stand in would let
+// one permanently broken channel suppress every other channel's fetch forever.
 //
 // Called once per cycle from doCheck. This is a SECOND fm.now() read per
 // cycle, distinct from checkChannel's one-`now` rule (spec §7): it dates no
@@ -703,7 +761,9 @@ func (fm *FeedMonitor) armMembershipLiveness(channels []config.ChannelConfig, no
 	defer fm.mu.Unlock()
 
 	fm.membershipLivenessID = ""
-	if len(fm.nonMemberUntil) == 0 {
+	fm.membershipLivenessNeeded = false
+	fm.membershipLivenessTries = membershipLivenessMaxTries
+	if len(fm.nonMemberUntil) == 0 && len(fm.membershipFetchErrored) == 0 {
 		return
 	}
 
@@ -716,6 +776,14 @@ func (fm *FeedMonitor) armMembershipLiveness(channels []config.ChannelConfig, no
 			delete(fm.nonMemberUntil, id)
 		}
 	}
+	for id := range fm.membershipFetchErrored {
+		if _, ok := configured[id]; !ok {
+			delete(fm.membershipFetchErrored, id)
+		}
+	}
+	if len(fm.nonMemberUntil) == 0 {
+		return // nothing is being skipped, so there is nothing to stand in for
+	}
 
 	var earliestID string
 	var earliest time.Time
@@ -723,20 +791,31 @@ func (fm *FeedMonitor) armMembershipLiveness(channels []config.ChannelConfig, no
 		id := channels[i].ID
 		until, memoized := fm.nonMemberUntil[id]
 		if !memoized || !now.Before(until) {
-			return // some channel is fetched on its own account; no nomination
+			if _, errored := fm.membershipFetchErrored[id]; errored {
+				continue // it will be fetched, but it will not answer
+			}
+			return // fetched on its own account; no nomination needed
 		}
 		if earliestID == "" || until.Before(earliest) {
 			earliestID, earliest = id, until
 		}
 	}
+	if earliestID == "" {
+		return
+	}
 	fm.membershipLivenessID = earliestID
+	fm.membershipLivenessNeeded = true
 }
 
 // membershipFetchAllowed reports whether this cycle fetches chID's
 // authenticated /membership tab: yes when the channel is not memoized as a
-// non-member (or its horizon has passed), and yes for the one channel
-// armMembershipLiveness nominated. The nomination is consumed on the first
-// match so a second memoized channel in the same cycle still skips.
+// non-member (or its horizon has passed), and yes while this cycle still owes
+// the session a fetch that returns and chID is the channel nominated to carry
+// it (or any memoized channel, once the nominee's own fetch has failed).
+//
+// It does NOT consume the nomination. Only a fetch that comes back satisfies
+// the floor, and this runs before the fetch — consuming here would let one
+// transient error cost the whole cycle's liveness signal.
 func (fm *FeedMonitor) membershipFetchAllowed(chID string, now time.Time) bool {
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
@@ -745,21 +824,29 @@ func (fm *FeedMonitor) membershipFetchAllowed(chID string, now time.Time) bool {
 	if !memoized || !now.Before(until) {
 		return true
 	}
-	if chID != fm.membershipLivenessID {
+	if !fm.membershipLivenessNeeded {
 		return false
 	}
-	fm.membershipLivenessID = ""
-	return true
+	return fm.membershipLivenessID == "" || fm.membershipLivenessID == chID
 }
 
-// recordMembershipAccess stores this cycle's membership verdict for chID. A
-// member is never memoized — their tab is the only place a members-only live
-// stream is ever listed, and it can go from empty to live between two cycles.
-func (fm *FeedMonitor) recordMembershipAccess(chID string, hasAccess bool, now time.Time) {
+// recordMembershipSuccess stores the verdict of a membership fetch that came
+// back for chID, and retires this cycle's liveness obligation: the fetch
+// returned, which is all the floor promises.
+//
+// A member is never memoized — their tab is the only place a members-only live
+// stream is ever listed, and it can go from empty to live between two cycles —
+// and neither is a channel whose "not a member" page came back on a session
+// YouTube did not recognise (see MembershipFetchFunc).
+func (fm *FeedMonitor) recordMembershipSuccess(chID string, confirmedNonMember bool, now time.Time) {
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
-	if hasAccess {
+	delete(fm.membershipFetchErrored, chID)
+	fm.membershipLivenessNeeded = false
+	fm.membershipLivenessID = ""
+
+	if !confirmedNonMember {
 		delete(fm.nonMemberUntil, chID)
 		return
 	}
@@ -767,6 +854,53 @@ func (fm *FeedMonitor) recordMembershipAccess(chID string, hasAccess bool, now t
 		fm.nonMemberUntil = make(map[string]time.Time)
 	}
 	fm.nonMemberUntil[chID] = now.Add(membershipMemoTTL)
+}
+
+// recordMembershipFetchError notes that chID's membership fetch did not come
+// back. It writes NO memo — an error answers neither "is this account a
+// member" nor "is this session alive" — and it leaves this cycle still owing
+// the session a fetch that returns, dropping the nomination's preference so
+// the next memoized channel can carry it instead. The attempt budget
+// (membershipLivenessMaxTries) is what stops a cycle in which everything fails
+// from walking the whole channel list.
+func (fm *FeedMonitor) recordMembershipFetchError(chID string) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
+	if fm.membershipFetchErrored == nil {
+		fm.membershipFetchErrored = make(map[string]struct{})
+	}
+	fm.membershipFetchErrored[chID] = struct{}{}
+
+	if chID == fm.membershipLivenessID {
+		// The preferred channel failed; any memoized one will do now. Leaving
+		// the preference pinned would strand the floor on a channel this cycle
+		// has already passed.
+		fm.membershipLivenessID = ""
+	}
+	fm.membershipLivenessTries--
+	fm.membershipLivenessNeeded = fm.membershipLivenessTries > 0
+}
+
+// ResetMembershipMemo drops every non-member memo and reports how many it
+// dropped, so the next cycle re-fetches every channel's /membership tab.
+//
+// Wired to a YouTube auth repair (cmd/moombox's OnAuthRecovered). The memo
+// suppresses the ONLY discovery path there is for members-only content, so an
+// operator who has just fixed their credentials must not have to wait out
+// membershipMemoTTL to see members-only streams again — belt to the
+// confirmedNonMember braces, which already keep an unrecognised session from
+// writing a memo at all.
+//
+// The fetch-errored set is deliberately left alone: re-authenticating repairs
+// no transport failure, and that set only ever relaxes the nomination.
+func (fm *FeedMonitor) ResetMembershipMemo() int {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
+	n := len(fm.nonMemberUntil)
+	clear(fm.nonMemberUntil)
+	return n
 }
 
 // atomFeed represents the Atom XML feed structure.
