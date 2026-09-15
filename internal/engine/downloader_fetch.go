@@ -153,29 +153,43 @@ func reportFetchFailure(parent context.Context, tag string) {
 }
 
 // readBody reads resp.Body, returns at most capBytes, and pre-allocates the
-// result when the server declared a usable Content-Length.
+// result when the server declared a usable Content-Length: 0 < ContentLength
+// <= capBytes (a declared length equal to the cap — the common 206-chunk
+// case, where ContentLength == end-start+1 == the requested range size —
+// takes the sized path too, not just a strictly smaller one).
 //
 // Segment and chunk bodies run 200 KB - 5 MB. io.ReadAll starts at 512 bytes
 // and grows by ~1.25x, so an unsized read of a 4 MB segment copies the body
 // through ~20 reallocations — about twice the final size in garbage — on
 // every one of the thousands of segments a long recording fetches.
 //
-// The +1 capacity is load-bearing, not slack: net/http returns a connection
-// to the idle pool only once the body has been read to its OWN io.EOF, and a
-// read that stops exactly at Content-Length never triggers the Read that
-// observes it (the same trap the 206 path's drain documents in fetchChunk).
-// The extra byte gives that final Read somewhere to land without regrowing
-// the buffer, so the sized path stays at one allocation AND keeps keep-alive
-// reuse.
+// The sized path probes one byte past the declared length (clamped so the
+// probe itself never exceeds capBytes, which matters when the declaration
+// equals the cap) before trusting it outright. Fix round 1 tested the
+// hypothesis that a read landing exactly on Content-Length defeats
+// connection reuse: it does not (see TestFetchSegmentReusesConnection) —
+// net/http's body wrapper already surfaces io.EOF on the same Read call
+// that drains a body to its own declared Content-Length. What the extra
+// byte buys instead is correctness when Content-Length UNDERSTATES the real
+// body: a scenario reachable only through a hand-built *http.Response (in
+// production, net/http itself never hands out more bytes than the header
+// declared), where it distinguishes "the body ended exactly where declared"
+// (the probe hits EOF early) from "there's more" (the probe fills
+// completely) — in the latter case the remainder is read on the bounded
+// path below, up to capBytes.
 //
 // A body with no declared length (chunked, or transparently decompressed) or
-// one declaring at least capBytes falls back to today's bounded io.ReadAll.
+// one declaring more than capBytes falls back to today's bounded io.ReadAll.
 func readBody(resp *http.Response, capBytes int64) ([]byte, error) {
 	n := resp.ContentLength
-	if n <= 0 || n >= capBytes {
+	if n <= 0 || n > capBytes {
 		return io.ReadAll(io.LimitReader(resp.Body, capBytes))
 	}
-	buf := make([]byte, 0, n+1) // n+1 <= capBytes, so the cap still holds
+	probeCap := n + 1
+	if probeCap > capBytes {
+		probeCap = capBytes // n == capBytes: the probe must not exceed the ceiling
+	}
+	buf := make([]byte, 0, probeCap)
 	for len(buf) < cap(buf) {
 		m, err := resp.Body.Read(buf[len(buf):cap(buf)])
 		buf = buf[:len(buf)+m]
@@ -186,10 +200,14 @@ func readBody(resp *http.Response, capBytes int64) ([]byte, error) {
 			return buf, err
 		}
 	}
-	// The body outran its own Content-Length (net/http itself caps at the
-	// declared length, so this is a hand-built response or a future
-	// transport): finish it on the bounded path rather than truncating.
-	rest, err := io.ReadAll(io.LimitReader(resp.Body, capBytes-int64(len(buf))))
+	remaining := capBytes - int64(len(buf))
+	if remaining <= 0 {
+		// n == capBytes and the probe already filled to the ceiling.
+		return buf, nil
+	}
+	// The body outran its declared Content-Length: finish reading on the
+	// bounded path so the real data (up to capBytes) is still returned.
+	rest, err := io.ReadAll(io.LimitReader(resp.Body, remaining))
 	return append(buf, rest...), err
 }
 
