@@ -277,7 +277,15 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// browsers — Firefox uses cookies.sqlite (no DPAPI involved) and
 	// already has its own SQLite-direct path. DECISIONS #6.
 	if err != nil && browser != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
-		s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
+		// Gated on isWindows(): off Windows the fallback below is a no-op —
+		// it says so once, at Debug, and always has since dpapiExtractAsNetscape
+		// short-circuits on it — so "attempting" is not true there and would be
+		// a spurious Warn on every failed refresh on a Linux host that merely
+		// left cookies.dpapi_fallback on. The call itself stays unconditional
+		// so that Debug explanation still fires.
+		if isWindows() {
+			s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
+		}
 		// H7: the configured browser OVERRIDE, not the resolved/auto-detected
 		// `browser` above — an operator who explicitly named a browser in
 		// settings gets DPAPI restricted to it; auto-detect leaves every

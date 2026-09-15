@@ -70,8 +70,23 @@ func dpapiAnyContains(lines []string, sub string) bool {
 // and restores the real ones on cleanup. byPath maps a synthetic
 // BrowserProfile.Path to the ([]dpapi.ChromeCookie, error) that profile's
 // read should produce — never real filesystem or SQLite I/O.
+//
+// It also forces runtimeGOOS to "windows" for the test's duration. Every
+// caller below exercises dpapiExtractAsNetscape's PROFILE-SELECTION logic —
+// scoring, browser-type filtering, tie-breaking — which only runs past the
+// Windows-only platform guard at the top of that function (T4-34). Without
+// this, the whole suite depended on being run ON a Windows machine to reach
+// any of that logic at all, and failed outright on Linux CI once the guard
+// was added — the guard reading dpapi.ErrNotSupported instead of whatever
+// the test staged. Forcing it here, once, keeps every one of these
+// deterministic on any host, matching how they already fake the profiles
+// and cookie rows instead of depending on this machine's real GOOS.
 func stubDpapiProfiles(t *testing.T, profiles []dpapi.BrowserProfile, byPath map[string][]dpapi.ChromeCookie) {
 	t.Helper()
+	realGOOS := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = realGOOS })
+	runtimeGOOS = func() string { return "windows" }
+
 	prevFind, prevRead := dpapiFindBrowserProfiles, dpapiReadChromeCookiesStats
 	dpapiFindBrowserProfiles = func() []dpapi.BrowserProfile { return profiles }
 	dpapiReadChromeCookiesStats = func(profilePath, originFilter string) ([]dpapi.ChromeCookie, dpapi.ChromeReadStats, error) {
