@@ -116,3 +116,29 @@ func TestDoRetryRequestWithoutADeadlineUsesEveryAttempt(t *testing.T) {
 		t.Errorf("server saw %d requests, want 4 — every attempt must run when there is no deadline", n)
 	}
 }
+
+// minimalPotProvider implements PotTokenProvider with exactly the method the
+// player API calls. It is the compile-time pin for ruling R1: while the
+// interface still declared GeneratePlayerPoToken, this type did not satisfy
+// it, and the assignment below did not build.
+//
+// Mutant named: re-adding a method to PotTokenProvider that no call site in
+// this package uses breaks this file rather than quietly widening what every
+// provider must implement.
+type minimalPotProvider struct{ binding string }
+
+func (m *minimalPotProvider) GeneratePoTokenString(ctx context.Context, contentBinding string, bypassCache bool) (string, error) {
+	m.binding = contentBinding
+	return "pot-" + contentBinding, nil
+}
+
+func TestPotTokenProviderNeedsOnlyGeneratePoTokenString(t *testing.T) {
+	var provider PotTokenProvider = &minimalPotProvider{}
+	got, err := provider.GeneratePoTokenString(context.Background(), "dQw4w9WgXcQ", false)
+	if err != nil {
+		t.Fatalf("GeneratePoTokenString: %v", err)
+	}
+	if got != "pot-dQw4w9WgXcQ" {
+		t.Errorf("token = %q, want %q", got, "pot-dQw4w9WgXcQ")
+	}
+}

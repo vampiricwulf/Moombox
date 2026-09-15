@@ -867,7 +867,13 @@ Expired entries are cleaned up in two ways:
 
 Moombox mints two populations of PO token, and they follow different rules because upstream treats them differently.
 
-**Player-API tokens** (used by `fetchWithClient` / `fetchWithEmbedded`) bind to the **video ID** — yt-dlp binds `PoTokenContext.PLAYER` to the video ID unconditionally (`pot/utils.py`) — and are minted via the sidecar's cached minter (`GeneratePoTokenString`) with normal session caching — that minter is now built from the homepage (ytcfg, ytAtN) pair, with `/att/get` only as its fallback. Caching is deliberate: player calls fire on every probe and refresh (several per live job per hour, plus monitor polls), so fresh-minting each one would cost a multi-second BotGuard pass on the hot path. The mint still gates on visitor data being present — not as the binding (it no longer derives from it) but as the "session established" precondition it always was. The challenge-sourced variant (`GeneratePlayerPoToken`, watch-page ytAtN attestation) exists but is dormant: it exceeds what yt-dlp does, and stays parked unless premieres 403 despite the yt-dlp-parity bindings.
+**Player-API tokens** (used by `fetchWithClient` / `fetchWithEmbedded`) bind to the **video ID** — yt-dlp binds `PoTokenContext.PLAYER` to the video ID unconditionally (`pot/utils.py`) — and are minted via the sidecar's cached minter (`GeneratePoTokenString`) with normal session caching — that minter is now built from the homepage (ytcfg, ytAtN) pair, with `/att/get` only as its fallback. Caching is deliberate: player calls fire on every probe and refresh (several per live job per hour, plus monitor polls), so fresh-minting each one would cost a multi-second BotGuard pass on the hot path. The mint still gates on visitor data being present — not as the binding (it no longer derives from it) but as the "session established" precondition it always was.
+A challenge-sourced variant — the watch page's own ytAtN attestation, threaded into a fresh mint — is
+NOT wired: it exceeded what yt-dlp does and had no caller, so the Go-side entry point was deleted
+(owner ruling R1, 2026-09-15). The sidecar protocol that would carry it is untouched, and
+`generatePoTokenChallenge` still takes the challenge through to `generateAndMint`, so restoring the
+path is one call. `extractAttestationChallenge` keeps running and keeps logging its reason string,
+which is the diagnostic premiere 403s would be read from.
 
 **GVS (segment-URL) tokens** are minted under a deliberately cache-hostile policy — moonarchive parity, added 2026-08-14 (attestation POT coherence) after a premiere broadcast 403'd every segment for its full runtime because the minting session had no tie to the watch-page session that resolved the stream.
 
