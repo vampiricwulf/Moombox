@@ -559,12 +559,14 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		if !isVod {
 			chatDl.MarkStreamEnded()
 		}
-		o.waitForChat(chatDl, chatDone, chatWaitTimeout)
-
-		// The verdict is what the downloader DID, not what it counted.
-		// chat.ChatDownloader returns nil on every exit today, so this is the
-		// same answer it always gave — and it stays right if that changes.
-		o.recordChatOutcome(jobCtx, chatDl.MessageCount(), chatRec.verdict())
+		// resolveChatOutcome waits for the goroutine's completion signal
+		// before reading chatRec — reading the verdict first can observe a
+		// stale nil while the real outcome is still landing (fix round 1,
+		// Important 3) — and turns an unconfirmed completion (the wait timed
+		// out) into an explicit incomplete rather than letting a nil verdict
+		// read as "finished".
+		outcome := o.resolveChatOutcome(chatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		o.recordChatOutcome(jobCtx, chatDl.MessageCount(), outcome)
 	}
 
 	// Check cancellation between download and mux — preserve staging for resume

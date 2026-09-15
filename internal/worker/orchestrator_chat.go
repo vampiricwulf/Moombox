@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"time"
@@ -107,29 +108,59 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	return dl
 }
 
-// waitForChat waits for chat to finish with a timeout.
-func (o *DownloadOrchestrator) waitForChat(chatDl *chat.ChatDownloader, chatDone chan struct{}, timeout time.Duration) {
-	if chatDone == nil {
-		return
+// errChatWaitTimedOut is the outcome resolveChatOutcome returns when the chat
+// goroutine's completion was never confirmed within the wait window plus its
+// cleanup grace: a downloader that is (or might still be) running when the
+// job finalizes has not completed, whatever its own eventual terminal error
+// would have been — so this must never read as "finished"/"unavailable".
+var errChatWaitTimedOut = errors.New("chat downloader did not confirm completion before the job finalized")
+
+// resolveChatOutcome waits for the chat goroutine's completion signal (done)
+// before reading rec's recorded outcome, and returns errChatWaitTimedOut
+// instead of a possibly-stale nil if that signal never arrives.
+//
+// Fix round 1, Important 3: both orchestrators' chat goroutines run
+// `rec.record(dl.Start(ctx))` and only then `defer close(done)` (LIFO defers:
+// the recover-and-record statement executes first, the deferred close(done)
+// last), so rec.record always happens-before done closes — which is exactly
+// what makes "wait for done, THEN read rec" a safe read. Reading rec first,
+// or gating the wait on dl.IsRunning(), both race a flag that a downloader's
+// OWN shutdown defer clears strictly BEFORE the wrapper goroutine's record()
+// runs (twitch.ChatDownloader/twitch.VodChatDownloader/chat.ChatDownloader all
+// clear "running" on their way out of Start, ahead of returning to the
+// wrapper) — exactly the window a stalled Twitch VOD chat could land in,
+// writing "finished" over a stall and losing the real outcome for good, since
+// nothing re-reads rec after this call returns.
+//
+// timeout bounds the first wait; on expiry dl is Stop()'d (if still running)
+// and grace gives its goroutine a last chance to record and close done. If
+// done still hasn't closed after that, the capture's completion is
+// unconfirmed — by definition not "finished" — so this returns
+// errChatWaitTimedOut rather than whatever rec happens to hold (typically
+// nil, since the goroutine that would record it is presumably still stuck).
+func (o *DownloadOrchestrator) resolveChatOutcome(dl ChatSource, rec *chatOutcome, done chan struct{}, timeout, grace time.Duration) error {
+	if done == nil {
+		return rec.verdict()
 	}
 
 	timer := time.NewTimer(timeout)
 	select {
-	case <-chatDone:
+	case <-done:
 		timer.Stop()
-		// Chat finished naturally
+		return rec.verdict()
 	case <-timer.C:
-		// Timeout — force stop
-		if chatDl.IsRunning() {
-			chatDl.Stop()
-		}
-		// Wait a bit more for cleanup
-		cleanupTimer := time.NewTimer(2 * time.Second)
-		select {
-		case <-chatDone:
-			cleanupTimer.Stop()
-		case <-cleanupTimer.C:
-		}
+	}
+
+	if dl != nil && dl.IsRunning() {
+		dl.Stop()
+	}
+	cleanupTimer := time.NewTimer(grace)
+	select {
+	case <-done:
+		cleanupTimer.Stop()
+		return rec.verdict()
+	case <-cleanupTimer.C:
+		return errChatWaitTimedOut
 	}
 }
 

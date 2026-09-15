@@ -363,27 +363,28 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 // cursorless edge — is never natural completion. Reaching the post-loop
 // removeResumeState()/"download complete" path on a stall would delete the
 // sidecar and mark an irrecoverably truncated archive as finished (fix
-// round R4); the orchestrator (internal/worker) does not itself inspect
-// this error or touch the sidecar either way, so preserving it here is the
-// only thing standing between a stall and silent data loss. A later
+// round R4); the orchestrator (internal/worker) now consumes this error too
+// — chatStatusForOutcome (internal/worker/orchestrator_chat.go) turns it into
+// chat_status = "incomplete" on the job row — but preserving the sidecar
+// here is still the only thing that makes the stall RECOVERABLE: a later
 // /resume reconstructs a downloader against the same outputPath, which
 // loadResumeState() reads to continue from contentOffset.
 //
-// That promise holds only WHILE THE STAGING DIRECTORY DOES. outputPath is
+// That recovery holds only WHILE THE STAGING DIRECTORY DOES. outputPath is
 // <staging>/chat.json (internal/worker/stream_processor_twitch.go), so the
 // sidecar lives in staging too, and a job that finalizes deletes staging
 // wholesale (os.RemoveAll in processJob, internal/worker/worker.go). Past
-// that point there is nothing left to resume from and the stall survives
-// only as the Warn below and a chat count short of the VOD — which is why
-// the Warn is not optional.
+// that point there is nothing left to resume from, and the stall survives
+// as the Warn below, a chat count short of the VOD, and the incomplete
+// chat_status row that tells an operator the archive stopped short — which
+// is why the Warn is not optional.
 func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reason string) error {
 	vcd.flush()
 	vcd.saveResumeState(contentOffset)
-	// Fix round R4 follow-up: the orchestrator discards Start's returned
-	// error entirely (see the doc comment above), so this Warn is the only
-	// trace a production stall leaves anywhere — without it, an operator
-	// sees a VOD chat archive quietly stop growing with nothing in the log
-	// explaining why.
+	// The orchestrator now records this error as chat_status = "incomplete"
+	// (recordChatOutcome, internal/worker/orchestrator_chat.go), but that is
+	// a machine-readable VERDICT, not a diagnosis — this Warn is still the
+	// only trace anywhere that names WHERE paging stopped and why.
 	vcd.logger.Warn("[TwitchVodChat] paging stalled; resume state kept",
 		"reason", reason,
 		"offset", contentOffset,

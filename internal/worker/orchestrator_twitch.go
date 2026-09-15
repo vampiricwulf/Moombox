@@ -857,23 +857,21 @@ sessionLoop:
 	// Per audit reports/worker.md F5: skip MarkStreamEnded if chat was already
 	// Stop()'d above (connectivity-loss path) — racing with the goroutine's
 	// shutdown can panic or deadlock inside the chat downloader.
-	if twitchChatDl != nil && twitchChatDl.IsRunning() {
-		twitchChatDl.MarkStreamEnded()
-		if chatDone != nil {
-			chatEndTimer := time.NewTimer(chatWaitTimeout)
-			select {
-			case <-chatDone:
-				chatEndTimer.Stop()
-			case <-chatEndTimer.C:
-				twitchChatDl.Stop()
-			}
-		}
-	}
 	if twitchChatDl != nil {
-		// The verdict is what the downloader DID, not what it counted: a VOD
-		// whose cursor paging stalled returns an error with a SHORT archive on
-		// disk, and the count alone used to call that finished.
-		o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), chatRec.verdict())
+		if twitchChatDl.IsRunning() {
+			twitchChatDl.MarkStreamEnded()
+		}
+		// resolveChatOutcome waits on chatDone UNCONDITIONALLY — not gated on
+		// IsRunning() the way this used to be. running is cleared by a defer
+		// INSIDE Start, strictly before the wrapper goroutine calls
+		// chatRec.record(), so an IsRunning()-gated wait could observe
+		// running==false and skip straight to a verdict that had not landed
+		// yet (fix round 1, Important 3) — exactly the window a stalled
+		// Twitch VOD chat could fall into, writing "finished" over a stall. A
+		// wait that times out returns an explicit incomplete rather than
+		// letting a stale nil verdict read as "finished".
+		outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
 	}
 
 	// Mux the final part with the live-tracked quality/timestamps (with its chat
