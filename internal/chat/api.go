@@ -18,6 +18,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // ErrAuthRequired is returned from FetchLiveChat / FetchChatReplay when the
@@ -50,7 +51,21 @@ const (
 	maxChatResponseBytes = 5 << 20
 )
 
-var ytInitialDataRegex = regexp.MustCompile(`(?s)var ytInitialData = ({.+?});</script>`)
+// ytInitialDataAnchors are assignment-PREFIX anchors for the ytInitialData
+// blob. Each ends ON the opening brace; the object's extent comes from the
+// balanced scan, never from the regex.
+//
+// This replaces a lazy `var ytInitialData = ({.+?});</script>`, which had
+// three problems: it required exactly one space around `=`, it required a
+// `;</script>` terminator the page need not supply, and the lazy body stopped
+// at the first `};</script>` anywhere on the page. The two spellings here are
+// the ones internal/youtube's locator has always accepted; a BARE
+// `ytInitialData = {` is deliberately NOT one, because the watch page embeds
+// attacker-authored video metadata and a shortDescription can spell it.
+var ytInitialDataAnchors = []*regexp.Regexp{
+	regexp.MustCompile(`var ytInitialData\s*=\s*\{`),
+	regexp.MustCompile(`window\["ytInitialData"\]\s*=\s*\{`),
+}
 
 // ChatApiResponse contains the parsed response from a chat API call.
 type ChatApiResponse struct {
@@ -200,7 +215,7 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 		return "", false, err
 	}
 
-	return ExtractChatContinuation(string(body))
+	return ExtractChatContinuation(body)
 }
 
 // FetchLiveChat fetches live chat messages using the given continuation.
@@ -277,18 +292,25 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 	return api.parseResponse(data)
 }
 
-// ExtractChatContinuation extracts a chat continuation token from watch page HTML.
-func ExtractChatContinuation(html string) (string, bool, error) {
-	// FindStringSubmatch avoids copying the entire (up-to-10 MB) watch page into
-	// a []byte just to run the regex; only the small captured group is copied
-	// to []byte below for json.Unmarshal.
-	m := ytInitialDataRegex.FindStringSubmatch(html)
-	if m == nil {
+// ExtractChatContinuation extracts a chat continuation token from watch page
+// HTML.
+//
+// The page is []byte, not string: the caller holds the response body (capped
+// at maxWatchPageBytes, 10 MB) and copying it to run a regex over it was the
+// single largest allocation on this path. The blob is located by an anchored
+// assignment prefix plus a balanced scan over every candidate
+// (utils.FindJSONObjectCandidate), so a forged `var ytInitialData = {}` ahead
+// of the real assignment is skipped instead of ending the search. Shape
+// mirrors internal/youtube's extractChatContinuation, which is the same
+// extraction with a typed envelope in place of this map walk.
+func ExtractChatContinuation(page []byte) (string, bool, error) {
+	raw, ok := utils.FindJSONObjectCandidate(page, ytInitialDataAnchors, utils.IsNonEmptyJSONObject)
+	if !ok {
 		return "", false, fmt.Errorf("ytInitialData not found")
 	}
 
 	var data map[string]any
-	if err := json.Unmarshal([]byte(m[1]), &data); err != nil {
+	if err := json.Unmarshal(raw, &data); err != nil {
 		return "", false, fmt.Errorf("parse ytInitialData: %w", err)
 	}
 

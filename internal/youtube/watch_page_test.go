@@ -679,6 +679,21 @@ func TestExtractChatContinuationShapes(t *testing.T) {
 				`}};</script>` + head + body(`{"continuations":[{"reloadContinuationData":{"continuation":"REAL"}}]}`) + `;</script>`,
 			wantToken: "REAL",
 		},
+		{
+			// The twin of TestPlayerResponseSkipsAForgedCandidate for the
+			// ytInitialData locator: a page-authored `var ytInitialData = {}`
+			// ahead of the real assignment matches the anchor and scans
+			// cleanly, but decodes to an empty object. Taking the first match
+			// returned it, and the empty envelope then read as "no
+			// liveChatRenderer found" — a silent denial of chat capture.
+			//
+			// Mutant: a first-match locator (the pre-change
+			// `ytInitialDataStartRe.FindIndex(data)`) returns `{}` here and
+			// this row fails with "no liveChatRenderer found".
+			name:      "a forged empty ytInitialData ahead of the real one loses",
+			page:      `<p>var ytInitialData = {} </p>` + head + body(`{"continuations":[{"reloadContinuationData":{"continuation":"STOK"}}]}`) + `;</script>`,
+			wantToken: "STOK",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tok, replay, err := extractChatContinuation([]byte(tc.page))
