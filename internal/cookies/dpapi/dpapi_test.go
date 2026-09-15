@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -72,6 +73,48 @@ func TestDecryptV10Cookie_LegacyPrefix(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "v10/v11 prefix") {
 		t.Errorf("error message should mention v10/v11 prefix, got: %v", err)
+	}
+}
+
+// TestDecryptV10CookieClassifiesTheBlobBeforeTheKey pins the wrapper's error
+// PRECEDENCE, not just its errors: what a row is — App-Bound, legacy,
+// truncated — is a property of the blob alone and must be reported even when
+// the master key handed in is unusable. ChromeReadStats.recordDecryptFailure
+// buckets by sentinel, so a key-shaped error standing in for a v20 row would
+// move the whole profile's rows from AppBound to Other and take the operator's
+// one actionable message ("use the auto-cookie browser setup instead") with it.
+//
+// Mutant: building the AEAD before the blob is classified (dropping the
+// classifyV10Blob call from decryptV10Cookie, so newCookieAEAD runs first)
+// returns a bare aes.NewCipher error here and fails this.
+func TestDecryptV10CookieClassifiesTheBlobBeforeTheKey(t *testing.T) {
+	// 17 bytes is not an AES key length — newCookieAEAD rejects it.
+	badKey := make([]byte, 17)
+
+	_, err := decryptV10Cookie(badKey, []byte(chromeV20Prefix+"whatever-the-service-holds"), false)
+	if err == nil {
+		t.Fatal("a v20 blob must not decrypt")
+	}
+	if !errors.Is(err, ErrAppBoundEncryption) {
+		t.Errorf("error is not classifiable as ErrAppBoundEncryption: %v", err)
+	}
+}
+
+// TestDecryptV10CookieClassifiesALegacyBlobBeforeTheKey is the same pin for the
+// default arm of the prefix switch: a pre-2020 DPAPI blob is legacy whatever
+// the key is.
+//
+// Mutant: the same one — with classifyV10Blob dropped from decryptV10Cookie,
+// newCookieAEAD's error arrives instead and fails this.
+func TestDecryptV10CookieClassifiesALegacyBlobBeforeTheKey(t *testing.T) {
+	badKey := make([]byte, 17)
+
+	_, err := decryptV10Cookie(badKey, append([]byte{0x01, 0x00, 0x00, 0x00}, "legacy-dpapi-blob"...), false)
+	if err == nil {
+		t.Fatal("a legacy blob must not decrypt")
+	}
+	if !errors.Is(err, ErrLegacyEncryption) {
+		t.Errorf("error is not classifiable as ErrLegacyEncryption: %v", err)
 	}
 }
 

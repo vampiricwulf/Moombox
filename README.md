@@ -348,7 +348,7 @@ authenticating proxy keeps working.
 
 Moombox includes a built-in first-time setup wizard — no manual configuration is necessary. All settings can be changed at any time from the **Settings** page in the web dashboard or TUI.
 
-For advanced users, a [`config.example.toml`](config.example.toml) reference is included. Moombox looks for `config.toml` in the current directory, `./config/`, or `~/.config/moombox/`.
+For advanced users, a [`config.example.toml`](config.example.toml) reference is included. Moombox looks for `config.toml` in the current directory, `./config/`, or `~/.config/moombox/` — and saves back to whichever file it loaded. If no config file exists anywhere, one is created at the path you passed to `--config` (or in the current directory).
 
 ### Key Settings
 

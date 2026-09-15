@@ -110,7 +110,10 @@ func Defaults() *MoomboxConfig {
 }
 
 // Load reads configuration from a TOML file, searching multiple locations.
-// If customPath is empty, it searches: cwd -> ./config/ -> ~/.config/moombox/
+// If customPath is empty, it searches: cwd -> ./config/ -> ~/.config/moombox/.
+// The file that answers is recorded in cfg.LoadedFrom — callers must save back
+// to it rather than to the path they asked for (see the field's doc). When no
+// file is found, LoadedFrom is "" and the caller's own path stays the target.
 func Load(customPath string) (*MoomboxConfig, error) {
 	paths := []string{}
 	if customPath != "" {
@@ -190,6 +193,7 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 	}
 
 	cfg.ConfigLoaded = true
+	cfg.LoadedFrom = path
 	Normalize(cfg)
 	return cfg, nil
 }

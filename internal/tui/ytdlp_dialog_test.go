@@ -223,3 +223,46 @@ func ryOffered(t *testing.T, app *App) bool {
 	}
 	return menu
 }
+
+// TestYtdlpDialogFlagsAnUnrecognisedFile: the overlay renders the same verdict
+// the dashboard's card does. Without it an unparseable plugin file shows
+// "Installed: yes" with no port row and nothing to explain either.
+//
+// Mutant: dropping the Unparseable row from statusRows fails this.
+func TestYtdlpDialogFlagsAnUnrecognisedFile(t *testing.T) {
+	app := NewApp()
+	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
+		return ytdlpplugin.Info{
+			Installed:   true,
+			Unparseable: true,
+			PluginDir:   "/plug",
+			CurrentPort: 774,
+			// The shape Status really produces: ExtractedPath is filled
+			// whenever the plugin dir is known, and Installed can only become
+			// true inside that block — so this row is present in 100% of real
+			// occurrences, and a fixture without it hides a label collision.
+			ExtractedPath: "/plug/moombox",
+		}, nil
+	}
+	_, cmd := app.dispatchAction("R Y", nil)
+	app.Update(runCmd(t, cmd))
+
+	v := app.ytdlpDlg.View()
+	if !strings.Contains(v, "not recognized") {
+		t.Errorf("the overlay does not report the unrecognised file:\n%s", v)
+	}
+	if !strings.Contains(v, "I reinstalls") {
+		t.Errorf("the overlay does not say which key fixes it:\n%s", v)
+	}
+	// One label per row. The path row is on screen alongside this one in
+	// every real occurrence, so a shared label would read as a render bug.
+	//
+	// Mutant: labelling either row with the other's name makes one count 2
+	// and the other 0, and fails this.
+	if n := strings.Count(v, "Plugin state:"); n != 1 {
+		t.Errorf("the unrecognised-file row's label appears %d times, want exactly 1:\n%s", n, v)
+	}
+	if n := strings.Count(v, "Plugin path:"); n != 1 {
+		t.Errorf("the plugin-path row's label appears %d times, want exactly 1:\n%s", n, v)
+	}
+}

@@ -82,12 +82,17 @@ func (n *nopLogger) Info(_ string, _ ...any)  {}
 func (n *nopLogger) Warn(_ string, _ ...any)  {}
 func (n *nopLogger) Error(_ string, _ ...any) {}
 
-func getAllJobsSafe(db *database.Database) []*database.Job {
-	jobs, err := db.GetAllJobs()
-	if err != nil {
-		return []*database.Job{}
+// storePathFor is the file every later save must target: the one config.Load
+// actually read, and — only when nothing was found anywhere — the path that was
+// asked for (the -config flag, or the cwd default main.go computes). So a
+// config found in ./config/ is written back to ./config/ instead of being
+// forked into a fresh ./config.toml that shadows it on the next boot, while a
+// -config path that does not exist yet is still CREATED where it was named.
+func storePathFor(flagPath string, cfg *config.MoomboxConfig) string {
+	if cfg.LoadedFrom != "" {
+		return cfg.LoadedFrom
 	}
-	return jobs
+	return flagPath
 }
 
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.

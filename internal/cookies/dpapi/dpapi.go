@@ -295,10 +295,46 @@ func readChromeMetaVersion(db *sql.DB) (int64, bool) {
 // for the profile the row was read from: at meta.version >= 24 the
 // decrypted plaintext is `sha256(domain) || value` and the digest has to be
 // dropped before the value is usable.
+//
+// Builds the AEAD per call; the per-profile reader uses decryptV10CookieWith
+// so one key schedule serves every row.
+//
+// classifyV10Blob runs BEFORE newCookieAEAD on purpose. What a row is —
+// App-Bound, legacy, truncated — is a property of the blob alone, so an
+// unusable master key must not stand in for it: recordDecryptFailure buckets
+// by sentinel, and a bare aes.NewCipher error would move every row of the
+// profile into Other and lose the one actionable message the operator gets.
 func decryptV10Cookie(masterKey, encrypted []byte, hashPrefix bool) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
+	if _, err := classifyV10Blob(encrypted); err != nil {
+		return "", err
+	}
+	gcm, err := newCookieAEAD(masterKey)
+	if err != nil {
+		return "", err
+	}
+	return decryptV10CookieWith(gcm, encrypted, hashPrefix)
+}
+
+// chromeNonceLen / chromeTagLen are the AES-GCM parameters every Chrome
+// v10/v11 cookie value uses: a 12-byte nonce between the prefix and the
+// ciphertext, and a 16-byte tag at the end.
+const (
+	chromeNonceLen = 12
+	chromeTagLen   = 16
+)
+
+// classifyV10Blob reads the version prefix off a Chrome encrypted_value and
+// confirms the value is long enough to hold a nonce and a tag, returning the
+// prefix the caller slices past. Both decrypt entry points call it, so the
+// key-free half of the decision is made in exactly one place and the wrapper
+// can make it before it has a key at all (see decryptV10Cookie).
+//
+// The v10-vs-v11 branch is purely informational — both carry the same layout.
+// The errors are the sentinels ChromeReadStats.recordDecryptFailure counts by.
+func classifyV10Blob(encrypted []byte) (string, error) {
 	prefix := ""
 	switch {
 	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV10Prefix:
@@ -311,23 +347,45 @@ func decryptV10Cookie(masterKey, encrypted []byte, hashPrefix bool) (string, err
 		return "", fmt.Errorf("%w (legacy DPAPI cookies are not supported)", ErrLegacyEncryption)
 	}
 
-	const nonceLen = 12
-	const tagLen = 16
-	if len(encrypted) < len(prefix)+nonceLen+tagLen {
+	if len(encrypted) < len(prefix)+chromeNonceLen+chromeTagLen {
 		return "", fmt.Errorf("%w: v10/v11 ciphertext too short: %d bytes (want >= %d)",
-			ErrUnusablePlaintext, len(encrypted), len(prefix)+nonceLen+tagLen)
+			ErrUnusablePlaintext, len(encrypted), len(prefix)+chromeNonceLen+chromeTagLen)
 	}
-	nonce := encrypted[len(prefix) : len(prefix)+nonceLen]
-	ciphertextWithTag := encrypted[len(prefix)+nonceLen:]
+	return prefix, nil
+}
 
+// newCookieAEAD builds the AES-GCM AEAD every v10/v11 cookie value in one
+// profile is opened with. Hoisted out of decryptV10Cookie so the per-profile
+// reader can build it ONCE: a signed-in Chrome profile holds thousands of cookie
+// rows, and each row used to expand the AES key schedule and construct a fresh
+// GCM. The AEAD is immutable and safe to reuse across Open calls.
+func newCookieAEAD(masterKey []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(masterKey)
 	if err != nil {
-		return "", fmt.Errorf("aes.NewCipher: %w", err)
+		return nil, fmt.Errorf("aes.NewCipher: %w", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("cipher.NewGCM: %w", err)
+		return nil, fmt.Errorf("cipher.NewGCM: %w", err)
 	}
+	return gcm, nil
+}
+
+// decryptV10CookieWith is decryptV10Cookie over an AEAD the caller already
+// built — the form the per-profile reader uses so one key schedule serves every
+// row. Same rules, same errors; see decryptV10Cookie's doc for the format.
+func decryptV10CookieWith(gcm cipher.AEAD, encrypted []byte, hashPrefix bool) (string, error) {
+	if len(encrypted) == 0 {
+		return "", nil
+	}
+	prefix, err := classifyV10Blob(encrypted)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := encrypted[len(prefix) : len(prefix)+chromeNonceLen]
+	ciphertextWithTag := encrypted[len(prefix)+chromeNonceLen:]
+
 	plaintext, err := gcm.Open(nil, nonce, ciphertextWithTag, nil)
 	if err != nil {
 		// AES-GCM authenticates, so a failure here is not "corrupt data" —

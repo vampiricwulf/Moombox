@@ -1,10 +1,12 @@
 package chat
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -1052,6 +1054,131 @@ func (cd *ChatDownloader) writeFullChatFile() {
 	}
 }
 
+// chatFileAdoptionSummary is everything adoptExistingChatFile needs out of a
+// chat file already on disk: the header epoch its offsets were computed
+// against, how many messages it holds, and their IDs for the dedup.
+type chatFileAdoptionSummary struct {
+	streamStartTime string
+	messages        int
+	ids             []string
+}
+
+// chatFileReadBuffer sizes the reader the summary streams a chat file through.
+// json.Decoder refills 512 bytes at a time on its own, which is ~100k syscalls
+// for a 50 MB file; one buffered read per 64 KB is why the bufio wrapper is
+// here. Mirrors internal/twitch's chatPartReadBuffer.
+const chatFileReadBuffer = 64 * 1024
+
+// readChatFileAdoptionSummary streams path and reports what adoption needs.
+//
+// STREAMED, not unmarshalled — the Twitch twin (readChatPartFileSummary in
+// internal/twitch/chat.go) does the same thing for the same reason. A marathon
+// waiting room's chat.json runs to tens of megabytes and this runs at Start for
+// every live/upcoming job that finds one; peak memory is one message plus the
+// decoder's buffer and the ID list, instead of the whole file twice (raw bytes
+// plus every decoded message body). Counting still means reading every byte —
+// that is inherent to the format, and the header's messageCount is exactly the
+// number adoption refuses to trust.
+//
+// Field order is not assumed: the walk steps over every key it does not want,
+// including a future one. An error means the file could not be read as one of
+// ours — INCLUDING a well-formed messages array followed by a broken tail,
+// which json.Unmarshal rejected too and which the append path must never splice
+// into. A missing file returns an os.IsNotExist error, which the caller reads as
+// "fresh start" rather than as damage. A top-level value that is not an object
+// (a bare `null`, say) is damage here where Unmarshal silently produced an empty
+// result — preserving those bytes is the safer of the two. In the other
+// direction, the fields this walk does not want are no longer type-validated:
+// a wrongly-typed `videoId`, or a `timestampUsec` written as a number, is
+// skipped as "some scalar" where Unmarshal called the file damage. That is
+// deliberate rather than merely tolerated — adoption reads only the count, the
+// IDs and streamStartTime, all three of which are still type-checked here, and
+// the header is rewritten on the first flush either way, so refusing the file
+// over a field nobody reads would throw away real history for nothing.
+func readChatFileAdoptionSummary(path string) (chatFileAdoptionSummary, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return chatFileAdoptionSummary{}, err
+	}
+	defer f.Close()
+
+	dec := json.NewDecoder(bufio.NewReaderSize(f, chatFileReadBuffer))
+	opening, err := dec.Token()
+	if err != nil {
+		return chatFileAdoptionSummary{}, fmt.Errorf("parse chat file: %w", err)
+	}
+	if delim, isDelim := opening.(json.Delim); !isDelim || delim != '{' {
+		return chatFileAdoptionSummary{}, fmt.Errorf("parse chat file: top level is not a JSON object")
+	}
+
+	var summary chatFileAdoptionSummary
+	for {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return chatFileAdoptionSummary{}, fmt.Errorf("parse chat file: %w", err)
+		}
+		if delim, isDelim := keyTok.(json.Delim); isDelim && delim == '}' {
+			break
+		}
+		key, isKey := keyTok.(string)
+		if !isKey {
+			return chatFileAdoptionSummary{}, fmt.Errorf("parse chat file: unexpected token %v", keyTok)
+		}
+		switch key {
+		case "streamStartTime":
+			if err := dec.Decode(&summary.streamStartTime); err != nil {
+				return chatFileAdoptionSummary{}, fmt.Errorf("parse chat file: streamStartTime: %w", err)
+			}
+		case "messages":
+			if err := decodeChatFileMessageIDs(dec, &summary); err != nil {
+				return chatFileAdoptionSummary{}, err
+			}
+		default:
+			if err := utils.SkipJSONValue(dec); err != nil {
+				return chatFileAdoptionSummary{}, fmt.Errorf("parse chat file: %w", err)
+			}
+		}
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return chatFileAdoptionSummary{}, fmt.Errorf("parse chat file: trailing data after the top-level object")
+	}
+	return summary, nil
+}
+
+// decodeChatFileMessageIDs consumes the messages array, counting its entries and
+// keeping every ID in order — the dedup is seeded with all of them, and its own
+// cap decides what survives. `"messages": null` is an empty file, not damage.
+func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummary) error {
+	opening, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("parse chat messages: %w", err)
+	}
+	if opening == nil {
+		return nil
+	}
+	if delim, isDelim := opening.(json.Delim); !isDelim || delim != '[' {
+		return fmt.Errorf("parse chat messages: not an array")
+	}
+	for dec.More() {
+		// id only: the decoder skips every other field without materialising
+		// it, so a 2 KB message costs nothing but the scan.
+		var msg struct {
+			ID string `json:"id"`
+		}
+		if err := dec.Decode(&msg); err != nil {
+			return fmt.Errorf("parse chat messages: %w", err)
+		}
+		summary.messages++
+		if msg.ID != "" {
+			summary.ids = append(summary.ids, msg.ID)
+		}
+	}
+	if _, err := dec.Token(); err != nil { // the array's ']'
+		return fmt.Errorf("parse chat messages: %w", err)
+	}
+	return nil
+}
+
 // readExistingChatData attempts to read the previously-flushed chat file on
 // disk in full (header included) — adoptExistingChatFile needs the header's
 // streamStartTime as well as the messages. The error is returned (rather
@@ -1088,16 +1215,16 @@ func (cd *ChatDownloader) readExistingMessages(path string) ([]ChatMessage, erro
 //
 // Three cases:
 //   - The file is missing: 0, and the run starts fresh exactly as before.
-//   - It parses and holds messages: messageCount becomes the length of the
-//     messages ARRAY — deliberately, not the header's messageCount, which may
-//     be stale or wrong. The array is the data; a header that over-counts would
-//     otherwise propagate forever, whereas taking the array length self-heals
-//     the header on the very first flush (incrementalAppend writes
-//     cd.messageCount into it, and the tail's updateChatFileHeader rewrites it
-//     even when no new message arrived). The dedup is seeded with the file's
-//     IDs so an overlapping poll cannot duplicate them, flushedToDisk is set
-//     and the in-memory buffer cleared — so the first flush takes the
-//     incremental-append path.
+//   - It parses and holds messages: messageCount becomes the number of entries
+//     the streamed count found in the messages ARRAY — deliberately, not the
+//     header's messageCount, which may be stale or wrong. The array is the
+//     data; a header that over-counts would otherwise propagate forever,
+//     whereas taking the counted length self-heals the header on the very
+//     first flush (incrementalAppend writes cd.messageCount into it, and the
+//     tail's updateChatFileHeader rewrites it even when no new message
+//     arrived). The dedup is seeded with the file's IDs so an overlapping poll
+//     cannot duplicate them, flushedToDisk is set and the in-memory buffer
+//     cleared — so the first flush takes the incremental-append path.
 //   - It does NOT parse: reportIOError (the caller sees the failure, and the
 //     latched ioErrorOccurred keeps this run's resume sidecar), then the
 //     unreadable bytes are moved aside to <OutputFile>.corrupt. Overwriting
@@ -1117,7 +1244,7 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 	if outputFile == "" {
 		return 0
 	}
-	existingData, err := cd.readExistingChatData(outputFile)
+	summary, err := readChatFileAdoptionSummary(outputFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0 // nothing on disk — fresh start
@@ -1129,35 +1256,35 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 		}
 		return 0
 	}
-	existing := existingData.Messages
-	if len(existing) == 0 {
+	if summary.messages == 0 {
 		return 0
 	}
 	// The adopted file's header is the epoch every one of its offsets was
 	// already computed against — take it over this run's own options so an
 	// appended message lands on the same clock as the ones already on disk.
-	if existingData.StreamStartTime != "" {
-		if t, perr := time.Parse(time.RFC3339, existingData.StreamStartTime); perr == nil {
+	if summary.streamStartTime != "" {
+		if t, perr := time.Parse(time.RFC3339, summary.streamStartTime); perr == nil {
 			if t.UnixMilli() != cd.streamStartMs {
-				cd.logDebug("chat: adopting the file's epoch", "videoID", cd.opts.VideoID, "fileEpoch", existingData.StreamStartTime)
+				cd.logDebug("chat: adopting the file's epoch", "videoID", cd.opts.VideoID, "fileEpoch", summary.streamStartTime)
 				cd.streamStartMs = t.UnixMilli()
 			}
 		} else {
-			cd.logDebug("chat: ignoring an unparseable file epoch", "videoID", cd.opts.VideoID, "fileEpoch", existingData.StreamStartTime)
+			cd.logDebug("chat: ignoring an unparseable file epoch", "videoID", cd.opts.VideoID, "fileEpoch", summary.streamStartTime)
 		}
 	}
 
 	cd.mu.Lock()
-	cd.messageCount = len(existing)
+	cd.messageCount = summary.messages
 	cd.messages = nil // already on disk
 	cd.flushedToDisk = true
 	adopted := cd.messageCount
 	cd.mu.Unlock()
 
-	for _, msg := range existing {
-		if msg.ID != "" {
-			cd.dedup.Add(msg.ID)
-		}
+	// Seeded only after the whole file has been read: a parse error partway
+	// through must leave the dedup untouched, or the fresh start this function
+	// falls back to would silently skip the messages it had already seen.
+	for _, id := range summary.ids {
+		cd.dedup.Add(id)
 	}
 	return adopted
 }

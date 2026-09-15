@@ -112,6 +112,15 @@ func assignLauncherJob(job uintptr, p *os.Process) {
 	}
 }
 
+// launcherWarnf is where this file's update-restart warnings go: stderr, in the
+// same `warning: ...` shape as the Job Object failures above. A package
+// variable so a test can read what was warned without capturing the process's
+// real stderr — the launcher has no logger, it runs before and outside the
+// child's logging stack.
+var launcherWarnf = func(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
 // cleanupOrphans removes any stale `~` files left over from a prior
 // session. Runs once at launcher startup, before the supervised child
 // is spawned. The .exe~ may exist if a prior launcher exited before
@@ -141,18 +150,50 @@ func cleanupOrphans(exePath string) {
 // only signal that the NEXT child is the first boot of a fresh update.
 func handleUpdateRestart(exePath string) bool {
 	oldPath := exePath + ".old"
-	if _, statErr := os.Stat(oldPath); statErr == nil {
-		os.Rename(oldPath, exePath+"~")
-		return true
+	if _, statErr := os.Stat(oldPath); statErr != nil {
+		return false
 	}
-	return false
+	if err := os.Rename(oldPath, exePath+"~"); err != nil {
+		// REPORTED, not discarded. A stale ~ file on its own does NOT fail
+		// this: Go's os.Rename on Windows is MoveFileEx with
+		// MOVEFILE_REPLACE_EXISTING, so an ordinary ~ file is silently
+		// replaced. The rename fails only when the ~ name is held by something
+		// Windows will not let it replace — on the second update of one
+		// launcher lifetime that file is this launcher's own mapped image,
+		// which denies delete-sharing, and which the child's CleanupOldBinary
+		// could not delete for the same reason. The .old that then stays behind
+		// is the version that was running a moment ago, and
+		// rollbackArtifactPath prefers it for exactly that reason. This line is
+		// how the operator learns the name shuffle did not happen.
+		launcherWarnf("warning: could not rename %s to %s (%v) — the previous binary stays at .old and remains the rollback target\n",
+			oldPath, exePath+"~", err)
+	}
+	// True either way: a .old existed, so this restart follows a BINARY update
+	// and the launcher's one-shot post-update failure window must arm
+	// (launcher.go firstAfterUpdate). A failed rename changes which file is the
+	// artifact, never whether there was an update.
+	return true
 }
 
-// rollbackArtifactPath is where the previous version's binary survives
-// after an update on this platform (the ~ file handleUpdateRestart
-// created). Referenced in recovery instructions when the first
-// post-update boot fails.
+// rollbackArtifactPath is where the previous version's binary survives after an
+// update on this platform, in preference order:
+//
+//   - `.old`, when handleUpdateRestart could NOT rename it away (the ~ name was
+//     still held by this launcher's mapped image). It is then the version that
+//     was running a moment ago; the ~ file is the one BEFORE it, so restoring ~
+//     would roll back two versions and the restored child's CleanupOldBinary
+//     would delete the real previous binary on its way up.
+//   - `~` otherwise — the successful-rename case, i.e. every first update of a
+//     launcher lifetime and therefore the ordinary path. Also what a caller
+//     gets when neither file exists, so preserveUpdateRollback's written
+//     instructions keep naming the ~ file exactly as they always have.
+//
+// Referenced in recovery instructions when the first post-update boot fails.
 func rollbackArtifactPath(exePath string) string {
+	oldPath := exePath + ".old"
+	if _, err := os.Stat(oldPath); err == nil {
+		return oldPath
+	}
 	return exePath + "~"
 }
 

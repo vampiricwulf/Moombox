@@ -101,14 +101,26 @@ var (
 // and reported, because "nothing came out" has several causes that need
 // different responses and used to be indistinguishable.
 //
-// On non-Windows hosts, dpapi.FindBrowserProfiles returns an empty slice
-// and dpapi.ReadChromeCookiesStats returns ErrNotSupported, so this
-// function returns the "no profiles found" error without crashing.
+// On non-Windows hosts this returns dpapi.ErrNotSupported immediately, with one
+// Debug line: the fallback reads Chromium's DPAPI-protected master key, which
+// exists only on Windows, so cookies.dpapi_fallback is inapplicable rather than
+// broken there.
 func dpapiExtractAsNetscape(logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 }, configuredBrowserType string) (string, error) {
+	if runtimeGOOS() != "windows" {
+		// Said ONCE, at Debug. Falling through produced "no Chromium-family
+		// profiles found under LOCALAPPDATA" — a Windows-shaped sentence about
+		// a directory this host does not have — which the caller then logged at
+		// Warn.
+		if logger != nil {
+			logger.Debug("DPAPI fallback is Windows-only; cookies.dpapi_fallback is ignored on this host")
+		}
+		return "", dpapi.ErrNotSupported
+	}
+
 	allProfiles := dpapiFindBrowserProfiles()
 	if len(allProfiles) == 0 {
 		return "", fmt.Errorf("DPAPI fallback: no Chromium-family profiles found under LOCALAPPDATA")

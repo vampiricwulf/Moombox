@@ -15,9 +15,9 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
-// TestYtdlpStatusRouteReportsNullPortWhenNotInstalled drives the seven-key
+// TestYtdlpStatusRouteReportsNullPortWhenNotInstalled drives the eight-key
 // wire contract through the actual handler, not just the helper: settings.js's
-// loadYtdlpPluginStatus reads all seven, and `installedPort` must arrive as a
+// loadYtdlpPluginStatus reads all eight, and `installedPort` must arrive as a
 // JSON null (never 0) when no plugin file parsed — a 0 would read as a real
 // port to anything stricter than a truthiness test.
 //
@@ -51,7 +51,7 @@ func TestYtdlpStatusRouteReportsNullPortWhenNotInstalled(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "pluginDir", "portMismatch"}
+	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "pluginDir", "portMismatch", "unparseable"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("JSON keys = %v, want %v", got, want)
 	}

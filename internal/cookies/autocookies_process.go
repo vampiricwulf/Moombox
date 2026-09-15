@@ -42,11 +42,13 @@ var killProcessTree = func(proc *os.Process) {
 }
 
 // killProcessTreeUnix is the non-Windows arm, split out of the closure above so
-// a test on ANY platform can execute it: isWindows() reads runtime.GOOS through
-// a plain function rather than a seam, so on the Windows machine this project
-// is developed on the else branch is otherwise unreachable. The one-line wiring
-// above is reviewed by eye — the same coverage posture startChromiumSetup
-// states in prose for its own trackedSetupJob call.
+// a test on ANY platform can execute it directly — calling it by name needs no
+// GOOS at all. isWindows() itself IS stubbable: it reads the runtimeGOOS var
+// (autocookies_detect.go), which TestDpapiFallbackWarnIsGatedOnWindows swaps to
+// drive the non-Windows arm of another caller, so the else branch is reachable
+// on the Windows machine this project is developed on. What stays reviewed by
+// eye is the one-line wiring in the closure above — the same coverage posture
+// startChromiumSetup states in prose for its own trackedSetupJob call.
 //
 // ON LINUX THE TREE IS THE GROUP. configureCmdSysProcAttr sets Setpgid on every
 // browser this package launches, so the child leads a group whose id is its own

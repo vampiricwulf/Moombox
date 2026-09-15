@@ -357,10 +357,16 @@ func attemptAutoRollback(exePath string, exitCode int) bool {
 	if _, err := os.Stat(backup); err != nil {
 		return false
 	}
-	// os.Rename cannot replace an existing file on Windows, so the broken
-	// binary must be removed first. The child has exited (its image is
-	// unmapped); brief retries ride out an AV scanner still holding the
-	// freshly-downloaded file.
+	// Remove the broken binary first, then rename over the empty name. NOT
+	// because os.Rename cannot replace an existing file on Windows — it is
+	// MoveFileEx with MOVEFILE_REPLACE_EXISTING and ordinarily would — but
+	// because replacing a destination needs delete access to it, which any
+	// process holding that file without FILE_SHARE_DELETE denies. Taking the
+	// hit on the remove instead makes it RETRYABLE: the child has exited (its
+	// image is unmapped), so the holder is an AV scanner still on the
+	// freshly-downloaded file, and brief retries ride it out. A remove that
+	// never succeeds returns false below, which is the failure path
+	// preserveUpdateRollback's manual instructions cover.
 	var rmErr error
 	for range 3 {
 		if rmErr = os.Remove(exePath); rmErr == nil {

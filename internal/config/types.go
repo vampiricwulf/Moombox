@@ -20,6 +20,15 @@ type MoomboxConfig struct {
 	// ConfigLoaded is true when the config was read from an existing file on
 	// disk (vs falling back to defaults). Not serialized.
 	ConfigLoaded bool `toml:"-" json:"-"`
+	// LoadedFrom is the file Load actually read this config out of, or "" when
+	// nothing was found and Defaults() answered. NOT the path that was asked
+	// for: Load searches the cwd, ./config/ and ~/.config/moombox/ after the
+	// -config flag, and the location that answers is the one every later save
+	// has to write back to. Saving anywhere else forks the user's configuration
+	// into a second file that then shadows the original on the next boot (the
+	// first save is often the boot-time NeedsAutoPersist flush, so the fork
+	// happens without anyone touching a setting). In-memory signal only.
+	LoadedFrom string `toml:"-" json:"-"`
 	// NeedsAutoPersist signals that loadFromFile detected one or more
 	// new top-level sections missing from the user's TOML (e.g., [memory]
 	// added in 2.6.21). The struct is already populated with defaults

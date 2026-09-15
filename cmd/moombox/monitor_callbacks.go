@@ -1596,18 +1596,8 @@ func (s *runState) wireMonitorCallbacks() {
 	// frontend drops the row immediately. This replaces the prior full-list
 	// rebroadcast (jobs_update) which raced against the preceding
 	// status=Cancelled job_update and left stale rows visible in the UI.
-	// Per-job log buffers are pruned via the active-IDs set derived from the
-	// post-delete snapshot (the deleted ID drops out naturally).
 	s.unsubWSJobDeleted = s.db.OnJobDeleted(func(ev *database.JobDeleted) {
-		jobs := getAllJobsSafe(s.db)
-		activeIDs := make(map[string]struct{}, len(jobs))
-		for _, j := range jobs {
-			activeIDs[j.ID] = struct{}{}
-		}
-		// Only the DATABASE per-job log pipeline is live (RouteLogToJobs);
-		// the logger's parallel buffers are unwired and permanently empty.
-		s.db.PruneJobLogs(activeIDs)
-		s.wsHub.BroadcastJobDeleted(ev.JobID)
+		s.onJobDeleted(ev.JobID)
 	})
 
 	s.unsubWSJobsChange = s.db.OnJobsChange(func(jobs []*database.Job) {
@@ -1676,6 +1666,20 @@ func (s *runState) wireMonitorCallbacks() {
 			notifications.SendOptions{Event: "connectivity_restored"},
 		)
 	})
+}
+
+// onJobDeleted is the OnJobDeleted subscriber's body: drop exactly the deleted
+// job's log buffer and tell the dashboards the row is gone.
+//
+// ClearJobLogs, not the activeIDs + PruneJobLogs walk this used to do. That old
+// walk read the whole jobs table per delete to answer a question it already
+// had the answer to — and called a helper that returned an EMPTY slice when
+// the read failed (deleted along with the walk), which made "prune everything
+// not in this list" wipe every per-job buffer in the process. routes/jobs.go's
+// own delete handler has always used ClearJobLogs.
+func (s *runState) onJobDeleted(jobID string) {
+	s.db.ClearJobLogs(jobID)
+	s.wsHub.BroadcastJobDeleted(jobID)
 }
 
 // outageAlert builds the Outage Alert notification for a connectivity

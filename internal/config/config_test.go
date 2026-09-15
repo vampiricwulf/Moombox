@@ -1179,3 +1179,95 @@ max_video_resolution = 720
 		t.Errorf("MaxVideoResolution = %d, want 720 (the section around the retired key must still decode)", cfg.Downloader.MaxVideoResolution)
 	}
 }
+
+// isolateHomeConfig points os.UserHomeDir() at an empty temp directory for the
+// duration of the test. Load's search list ends with
+// <home>/.config/moombox/config.toml (config.go), so a developer who keeps a
+// real config there has a fourth candidate no t.TempDir/t.Chdir can reach —
+// and any Load test that must see NOTHING on disk then finds it and fails on
+// their machine and nowhere else. USERPROFILE is what os.UserHomeDir reads on
+// Windows and HOME what it reads everywhere else; both are set so the test
+// behaves identically on either.
+func isolateHomeConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
+// TestLoadRecordsTheFileItRead pins the fix for a config saved to a different
+// file than it was loaded from. Load searches cwd, ./config/ and
+// ~/.config/moombox/ after the -config flag (see its doc), and the caller has
+// no other way to learn which one answered.
+//
+// Mutant: dropping `cfg.LoadedFrom = path` from loadFromFile leaves it empty
+// and fails this.
+func TestLoadRecordsTheFileItRead(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "config")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(nested, "config.toml")
+	if err := os.WriteFile(want, []byte("[network]\nport = 8123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir) // no cwd config.toml, so the ./config/ fallback answers
+	// The home candidate is searched LAST, so it cannot outrank the ./config/
+	// fixture above — but isolating it holds that margin explicitly instead of
+	// resting on the search order, and keeps both Load tests env-independent
+	// by one rule.
+	isolateHomeConfig(t)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Network.Port != 8123 {
+		t.Fatalf("fixture not loaded: port = %d", cfg.Network.Port)
+	}
+	if cfg.LoadedFrom != want {
+		t.Errorf("LoadedFrom = %q, want %q — a later save has to target the file that was read", cfg.LoadedFrom, want)
+	}
+}
+
+// TestLoadWithNothingOnDiskLeavesLoadedFromEmpty pins the other half: with no
+// file anywhere, there is no load target, so the caller keeps the path it asked
+// for and creates the file there.
+//
+// Mutant: setting LoadedFrom to the searched-for path in the defaults branch
+// fails this (and would make main.go create the file in the wrong place).
+func TestLoadWithNothingOnDiskLeavesLoadedFromEmpty(t *testing.T) {
+	t.Chdir(t.TempDir())
+	// This is the one that genuinely breaks without it: with no fixture
+	// anywhere, a real ~/.config/moombox/config.toml is the only candidate
+	// left and Load would report it as loaded.
+	isolateHomeConfig(t)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "absent", "config.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ConfigLoaded {
+		t.Fatal("no file exists — ConfigLoaded must stay false")
+	}
+	if cfg.LoadedFrom != "" {
+		t.Errorf("LoadedFrom = %q, want empty", cfg.LoadedFrom)
+	}
+}
+
+// TestNormalizeRewritesPortZero is why main.go carries no port-0 auto-pick
+// branch: validation turns 0 into the default before anything binds, so a
+// `network.port = 0` config never reaches the server as 0.
+//
+// Mutant: dropping the `< 1` half of the range check in validateOrNormalize
+// lets 0 through and fails this — and would silently resurrect the need for the
+// deleted branch.
+func TestNormalizeRewritesPortZero(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.Port = 0
+	Normalize(cfg)
+	if cfg.Network.Port != 774 {
+		t.Errorf("network.port 0 normalised to %d, want the 774 default", cfg.Network.Port)
+	}
+}

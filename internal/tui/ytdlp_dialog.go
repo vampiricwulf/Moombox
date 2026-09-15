@@ -161,8 +161,9 @@ func (m *YtdlpDialogModel) View() string {
 	return centerBox(box, m.width, m.height)
 }
 
-// statusRows is the loaded body: the four facts that are always true and the
-// three that only exist in some states.
+// statusRows is the loaded body: the three facts that are always on screen
+// (Installed, Plugin dir, Moombox port) and the four that only exist in some
+// states (Plugin points, Plugin state, Port mismatch, Plugin path).
 func (m *YtdlpDialogModel) statusRows() string {
 	installed := "not installed"
 	if m.info.Installed {
@@ -184,6 +185,20 @@ func (m *YtdlpDialogModel) statusRows() string {
 	if m.info.InstalledPort != nil {
 		b.WriteString(ytdlpRow("Plugin points:", fmt.Sprintf("%d", *m.info.InstalledPort)))
 	}
+	if m.info.Unparseable {
+		// Same shape as the mismatch row below — YellowStyle, label column, one
+		// short value that fits the 66-column content box — because it is the
+		// same kind of fact: something about the file on disk is wrong and I is
+		// what fixes it.
+		//
+		// Its own label, NOT the path row's: Status fills ExtractedPath
+		// whenever the plugin dir is known, and Installed can only become true
+		// inside that same block, so the path row is on screen in every real
+		// occurrence of this state. Two rows reading "Plugin file:" would be a
+		// render bug to anyone reading them.
+		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Plugin state:", "not recognized — I reinstalls it")))
+		b.WriteString("\n")
+	}
 	if m.info.PortMismatch {
 		// Short on purpose: the label column plus this value has to fit the
 		// 66-column content box, or the sentence wraps with a dangling second
@@ -192,7 +207,9 @@ func (m *YtdlpDialogModel) statusRows() string {
 		b.WriteString("\n")
 	}
 	if m.info.ExtractedPath != "" {
-		b.WriteString(ytdlpRow("Plugin file:", m.info.ExtractedPath))
+		// "path", not "file": ExtractedPath is the plugin DIRECTORY the manual
+		// --plugin-dirs invocation takes, not the .py the rows above are about.
+		b.WriteString(ytdlpRow("Plugin path:", m.info.ExtractedPath))
 	}
 	return b.String()
 }

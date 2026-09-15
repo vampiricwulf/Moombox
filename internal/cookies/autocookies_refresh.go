@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies/dpapi"
 )
 
 // RefreshCookies performs a headless browser visit to refresh cookies and
@@ -275,7 +277,15 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// browsers — Firefox uses cookies.sqlite (no DPAPI involved) and
 	// already has its own SQLite-direct path. DECISIONS #6.
 	if err != nil && browser != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
-		s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
+		// Gated on isWindows(): off Windows the fallback below is a no-op —
+		// it says so once, at Debug, and always has since dpapiExtractAsNetscape
+		// short-circuits on it — so "attempting" is not true there and would be
+		// a spurious Warn on every failed refresh on a Linux host that merely
+		// left cookies.dpapi_fallback on. The call itself stays unconditional
+		// so that Debug explanation still fires.
+		if isWindows() {
+			s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
+		}
 		// H7: the configured browser OVERRIDE, not the resolved/auto-detected
 		// `browser` above — an operator who explicitly named a browser in
 		// settings gets DPAPI restricted to it; auto-detect leaves every
@@ -293,8 +303,13 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		}
 		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger, cfgBrowserType)
 		if fallbackErr != nil {
-			s.logger.Warn("DPAPI fallback also failed; surfacing original CDP error",
-				"dpapi_err", fallbackErr)
+			// ErrNotSupported is not a failure: the fallback does not exist on
+			// this platform and has already said so once, at Debug. Everything
+			// else is a real attempt that did not work.
+			if !errors.Is(fallbackErr, dpapi.ErrNotSupported) {
+				s.logger.Warn("DPAPI fallback also failed; surfacing original CDP error",
+					"dpapi_err", fallbackErr)
+			}
 			// fall through with the original CDP err
 		} else {
 			s.logger.Info("DPAPI fallback succeeded; using user's signed-in browser cookies")
@@ -356,6 +371,12 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// previousCookies is kept verbatim so an import that turns out to have
 	// damaged a platform can hand that platform's rows back untouched.
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
+		// Sets, exactly as FinishSetup's twin does (autocookies_setup.go): the
+		// policy on lastError says every exit that returns an error from a
+		// cookie pass records what it concluded, and these three returned while
+		// leaving the field both dashboards render blank — so a refresh failing
+		// every 30 minutes looked like a healthy install with stale cookies.
+		s.setError("could not create the directory for cookies.txt: " + err.Error())
 		return refreshAborted(), err
 	}
 	var previousCookies string
@@ -472,11 +493,21 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		}
 	}
 	if err := writeCookieFile(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
+		// Same wording and the same short Docker hint as FinishSetup's write
+		// exit: the write ends in a rename, and a rename cannot replace a
+		// single-file bind mount. This goes to a status line both dashboards
+		// render, so it stays one sentence.
+		s.setError("could not write cookies.txt: " + err.Error() +
+			" — if this is Docker, mount the data directory rather than cookies.txt itself")
 		return refreshAborted(), err
 	}
 
 	// Reload jar
 	if err := s.jar.Load(s.cookiePath); err != nil {
+		// The worst of the three to leave silent: the cookies were fetched AND
+		// written, so the file on disk is fine and nothing about the state looks
+		// wrong — the pass simply reported nothing.
+		s.setError("cookies.txt was written but could not be loaded: " + err.Error())
 		return refreshAborted(), err
 	}
 

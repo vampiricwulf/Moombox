@@ -446,13 +446,22 @@ Configuration is TOML, parsed via `BurntSushi/toml`. The full config type is `Mo
 
 ### File Search Order
 
-When loading configuration (via `Load(customPath)`), files are checked in order:
+When loading configuration (via `Load(customPath)` in `internal/config/config.go`), files are checked in
+order:
 
 1. `--config` flag path (if provided)
 2. `<cwd>/config.toml`
 3. `<cwd>/config/config.toml`
 4. `~/.config/moombox/config.toml`
 5. If none found: use `Defaults()` with no file loaded (`ConfigLoaded = false`)
+
+**Saves go back to the file that answered.** The location that was read is recorded in `LoadedFrom`
+(`internal/config/types.go`), and `cmd/moombox/services.go` points the run's config path at it before
+building the store — so a config found in `./config/` is written back to `./config/` rather than forked
+into a fresh `./config.toml` that would shadow it on the next boot (the first write is often the
+boot-time `NeedsAutoPersist` flush, so the fork used to happen without anyone touching a setting). When
+NOTHING is found, the path that was asked for stays the target and the file is created there —
+`storePathFor` in `cmd/moombox/helpers.go` is that rule.
 
 ### Configuration Sections
 
@@ -747,7 +756,10 @@ A file holding SAPISID with LOGIN_INFO cleared is a CONFIGURED platform with BRO
 - `GenerateAuthorizationHeader(origin)`: SAPISIDHASH + SAPISID1PHASH + SAPISID3PHASH, each `SHA1(timestamp + " " + sid + " " + origin)` with one timestamp shared across all three (`makeSidAuthorization`). Returns "" for any origin outside `allowedSAPISIDHASHOrigins`, which is defence in depth — Google's auth uses the origin as a shared secret, so a caller must never be handed a valid hash bound to an attacker-supplied one.
 - `YouTubeIdentity()`: SHA-256 over `SAPISID + NUL + LOGIN_INFO`, "" when either is missing — SAPISID falling back to `__Secure-3PAPISID`, with that fallback inlined rather than delegated to `GetSapisid` so both reads happen under ONE `RLock` (the two must be kept in sync by hand). An opaque equality token for "which Google account is this" — never a credential, never displayed. LOGIN_INFO is the load-bearing half: SAPISID identifies a SESSION, not an account, so a fingerprint over it alone would be blind to an account switch. The rotating `__Secure-*PSIDTS`/`SIDCC` names are excluded because they would fire on every refresh cycle.
 - `TwitchIdentity()`: SHA-256 over `auth-token + NUL + login`, both read under ONE `RLock` for the reason `GetTwitchCredentials` documents. `""` means **no Twitch credentials at all** — deliberately NOT `YouTubeIdentity`'s "either half missing" rule. The question here is "is this the same credential PAIR a downgrade was observed under", and a token with no `login` beside it is one of the four downgrade routes rather than an unanswerable state: folding it to `""` would make the operator's fix, adding the `login` row, compare equal to the breakage it replaced. A token rotation therefore reads as a change, which is the cheap direction — one re-check and one IRC reconnect that the credentials pass.
-- `Reload()`: re-reads from the same file path; a no-op when the jar came from no file.
+- `Reload()`: re-reads from the same file path; a no-op when the jar came from no file. Since the
+  2026-09-15 sweep (Arc 3), `Load` (`internal/cookies/jar.go`) memoises the file's `(size, mtime)` pair
+  only when the stats before and after the read agree, the file is ≥ 2 s old and no concurrent install
+  landed after it; a later `Load` whose stat matches the recorded pair skips the re-parse.
 
 **Thread safety:** All methods are protected by `sync.RWMutex`. Nil-receiver-safe where a caller may legitimately hold none (`HasAnyYouTubeAuthCookie`, `HasAnyTwitchAuthCookie`, `ExpiredAuthCookiesFor`, `AuthCookieHorizonFor`, `TwitchLoginExpiry`, `YouTubeIdentity`, `TwitchIdentity`).
 

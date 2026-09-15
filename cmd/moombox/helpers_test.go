@@ -327,3 +327,47 @@ func TestCookieFilePath(t *testing.T) {
 		t.Errorf("cookieFilePath fallback %q should mention the missing cookie file setting", got)
 	}
 }
+
+// TestStorePathForSavesWhereLoadHappened pins the one rule the config store,
+// the boot-time auto-persist and the TUI's two config.Save calls all depend on:
+// the save target is the file Load actually read.
+//
+// Mutant: returning flagPath unconditionally (today's services.go) fails the
+// "fallback location" row — which is the bug: the first save forks the config
+// into ./config.toml and that file then shadows the real one.
+func TestStorePathForSavesWhereLoadHappened(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagPath string
+		loaded   string
+		want     string
+	}{
+		{
+			name:     "loaded from a fallback location",
+			flagPath: `C:\moombox\config.toml`,
+			loaded:   `C:\moombox\config\config.toml`,
+			want:     `C:\moombox\config\config.toml`,
+		},
+		{
+			name:     "loaded from the path that was asked for",
+			flagPath: `C:\moombox\config.toml`,
+			loaded:   `C:\moombox\config.toml`,
+			want:     `C:\moombox\config.toml`,
+		},
+		{
+			name:     "nothing on disk: create it where it was asked for",
+			flagPath: `C:\moombox\custom.toml`,
+			loaded:   "",
+			want:     `C:\moombox\custom.toml`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.LoadedFrom = tt.loaded
+			if got := storePathFor(tt.flagPath, cfg); got != tt.want {
+				t.Errorf("storePathFor = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
