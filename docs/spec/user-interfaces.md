@@ -203,7 +203,7 @@ The chord system is a three-state finite automaton:
 
 #### Single Source of Truth
 
-`buildMenuItems()` in `app.go` is the **single source of truth** for all chords. It returns a slice of `ActionMenuItem` structs, each defining:
+`buildMenuItems()` in `internal/tui/app_actions.go` is the **single source of truth** for all chords. It returns a slice of `ActionMenuItem` structs, each defining:
 
 - `Chord` — the key combination (e.g., `"A A"`, `"R C"`, `"F"`)
 - `Label` — full description (e.g., `"Add Video"`)
@@ -213,7 +213,7 @@ The chord system is a three-state finite automaton:
 - `NeedsConfirm` — whether the action requires a third confirmation keypress
 - `JobFilter` — optional predicate that filters which jobs the action applies to
 
-`dispatchAction(chord, job)` in `app.go` is the **unified handler** that executes the action for any chord. Adding a new chord requires exactly two changes: one entry in `buildMenuItems()` and one case in `dispatchAction()`.
+`dispatchAction(chord, job)` in `internal/tui/app_actions.go` is the **unified handler** that executes the action for any chord. Adding a new chord requires exactly two changes: one entry in `buildMenuItems()` and one case in `dispatchAction()`.
 
 #### Prefix Keys
 
@@ -236,7 +236,7 @@ The chord system is a three-state finite automaton:
 | `A I` | Reinitialize Job | Yes | No | Status is Error, Cancelled, or COOKIES? |
 | `A M` | Mux Job | Yes | Yes | Status is Cancelled or Error, and segment files are present |
 | `A C` | Cancel Job | Yes | Yes | Status is not Finished, Cancelled, or Error |
-| `A D` | Delete Job | Yes | Yes | Any job |
+| `A D` | Delete Job | Yes | Yes | Status is Finished, Error, Cancelled, or COOKIES? — the Web's `DELETE_STATUSES` (`web/public/modules/utils.js`), so neither UI offers Delete for a running job |
 | `A W` | Toggle Watched | Yes | No | Status is Finished |
 | `A T` | Trim Video | Yes | No | Status is Finished and has output file |
 | `A K` | Manage Client Tokens | No | No | Client tokens callback configured |
@@ -279,7 +279,10 @@ The chord system is a three-state finite automaton:
 | `` ` `` | Open Settings dialog |
 | `?` | Open Help overlay |
 | `/` | Tasks panel: open the filter query box, which speaks the dashboard's filter language — free text plus `status:`/`channel:`/`platform:` tokens, `-` negation, `a\|b` OR groups, quoted values. Free text is a case-insensitive substring of the title, channel name or video ID (both UIs). `Enter` applies and closes; losing panel focus closes the box but keeps the applied query. Log panel: enter search mode. `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
-| `Esc` | Clear the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together. |
+| `Esc` | Clear, in this order: the batch selection, then the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together — then any armed chord. |
+| `Space` | Tasks panel: toggle the focused row's batch selection. The status bar shows the count, and every batch-capable chord (`A R`, `A I`, `A C`, `A D`, `A W`) then acts on the selection instead of the cursor row, re-applying its own status filter to it. |
+| `Ctrl+U` / `Ctrl+D` | Half-page scroll in the focused panel's viewport (Details, Logs) and in the Help and Release Notes overlays. |
+| `End` | Log panel: resume auto-scroll (jump to the newest line and follow it again). |
 | `c` | Clear the log view (log panel focused only). Drops history, the filtered view, and any active search; the level filter is kept. |
 
 **Quit chord:**
