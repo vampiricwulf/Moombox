@@ -1087,7 +1087,14 @@ const chatFileReadBuffer = 64 * 1024
 // into. A missing file returns an os.IsNotExist error, which the caller reads as
 // "fresh start" rather than as damage. A top-level value that is not an object
 // (a bare `null`, say) is damage here where Unmarshal silently produced an empty
-// result — preserving those bytes is the safer of the two.
+// result — preserving those bytes is the safer of the two. In the other
+// direction, the fields this walk does not want are no longer type-validated:
+// a wrongly-typed `videoId`, or a `timestampUsec` written as a number, is
+// skipped as "some scalar" where Unmarshal called the file damage. That is
+// deliberate rather than merely tolerated — adoption reads only the count, the
+// IDs and streamStartTime, all three of which are still type-checked here, and
+// the header is rewritten on the first flush either way, so refusing the file
+// over a field nobody reads would throw away real history for nothing.
 func readChatFileAdoptionSummary(path string) (chatFileAdoptionSummary, error) {
 	f, err := os.Open(path)
 	if err != nil {

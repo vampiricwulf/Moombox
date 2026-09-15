@@ -1,10 +1,10 @@
 package chat
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -25,7 +25,7 @@ func writeBigChatFile(t *testing.T, path string, n int) int64 {
 	filler := strings.Repeat("x", 2048)
 	for i := range n {
 		data.Messages = append(data.Messages, ChatMessage{
-			ID:            "msg-" + itoa(i),
+			ID:            "msg-" + strconv.Itoa(i),
 			TimestampUsec: "1757894400000000",
 			AuthorName:    "someone",
 			Message:       []MessagePart{{Type: "text", Text: filler}},
@@ -39,11 +39,6 @@ func writeBigChatFile(t *testing.T, path string, n int) int64 {
 		t.Fatal(err)
 	}
 	return st.Size()
-}
-
-func itoa(i int) string {
-	b, _ := json.Marshal(i)
-	return string(b)
 }
 
 // TestAdoptionSummaryIsStreamed: adoption needs three things out of the file on
@@ -74,7 +69,7 @@ func TestAdoptionSummaryIsStreamed(t *testing.T) {
 	if len(summary.ids) != n {
 		t.Errorf("ids = %d, want %d — every ID seeds the dedup", len(summary.ids), n)
 	}
-	if summary.ids[0] != "msg-0" || summary.ids[n-1] != "msg-"+itoa(n-1) {
+	if summary.ids[0] != "msg-0" || summary.ids[n-1] != "msg-"+strconv.Itoa(n-1) {
 		t.Errorf("ids are out of order: first %q last %q", summary.ids[0], summary.ids[n-1])
 	}
 	if summary.streamStartTime != "2026-09-15T00:00:00Z" {
@@ -89,19 +84,41 @@ func TestAdoptionSummaryIsStreamed(t *testing.T) {
 	}
 }
 
-// TestAdoptionSummaryRejectsABrokenTail: a well-formed messages array followed
-// by garbage cannot be appended to, so it must be reported as damage — the
-// caller then preserves the bytes as <chat.json>.corrupt instead of adopting.
+// TestAdoptionSummaryRejectsABrokenTail: a chat file whose messages array is
+// well-formed but whose document is not cannot be appended to, so it must be
+// reported as damage — the caller then preserves the bytes as
+// <chat.json>.corrupt instead of adopting them.
 //
-// Mutant: dropping the trailing FinishJSONValue/EOF check adopts a file the
-// append path would splice at the wrong bracket.
+// The two cases fail at different guards, which is why both are here; the
+// Twitch twin carries the same pair (internal/twitch/chat_adopt_existing_test.go).
 func TestAdoptionSummaryRejectsABrokenTail(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "chat.json")
-	body := `{"videoId":"v","messages":[{"id":"m1"}],"messageCount":` + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name    string
+		content string
+	}{
+		// Mutant: returning nil instead of the error from the key-walk's
+		// dec.Token() / utils.SkipJSONValue adopts a file that simply stops
+		// mid-header, with whatever count the walk had reached by then.
+		{"truncated mid-key", `{"videoId":"v","messages":[{"id":"m1"}],"messageCount":` + "\n"},
+		// Mutant: dropping the trailing !errors.Is(err, io.EOF) check after the
+		// top-level '}' adopts this file — it reads as messages:1, ids:[m1],
+		// err nil — and the append path would then splice new messages at a ']'
+		// chosen from bytes that are not ours. This case is the ONLY one that
+		// reaches that check: the key-walk exits on the top-level '}', so
+		// nothing before it ever looks at the junk.
+		{"complete object then junk", `{"videoId":"v","messages":[{"id":"m1"}],"messageCount":1} nope`},
 	}
-	if _, err := readChatFileAdoptionSummary(path); err == nil {
-		t.Error("a truncated tail must not read as an adoptable file")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "chat.json")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			summary, err := readChatFileAdoptionSummary(path)
+			if err == nil {
+				t.Errorf("a broken tail must not read as an adoptable file — got messages:%d ids:%v",
+					summary.messages, summary.ids)
+			}
+		})
 	}
 }
