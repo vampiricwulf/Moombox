@@ -142,6 +142,7 @@ test("the WARN filter renders only ERROR and WARN lines, with the count suffix",
     "2026-09-05 12:00:03 DEBUG segment 1234 written",
     "2026-09-05 12:00:04 ERROR mux failed",
   ]) h.app.addLog(line);
+  h.flushRaf(); // fast-path appends are now batched to the next animation frame (T2-21)
 
   // Unfiltered, the fast append path draws one line per entry.
   assert.equal(viewer.children.length, 5);
