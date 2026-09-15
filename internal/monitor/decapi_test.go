@@ -343,3 +343,74 @@ func TestDecapi_TerminalMemoReleasesWhenHistoryIsCleared(t *testing.T) {
 		t.Fatalf("probes = %d, want 2 — clearing the history row must re-open the video on the next cycle", probes)
 	}
 }
+
+// TestDecapi_TerminalMemoCoversTheOutOfWindowArm pins T2-12's remaining hole.
+// The memo's gate used to require HasProcessed, and the §13 out-of-window skip
+// writes no history row: with include_non_live_content=true, a terminal VOD
+// older than the archive window left `reprobe` false forever, so every 15 s
+// cycle re-ran BOTH anonymous requests — the classifying player probe and the
+// §9 date fetch — on exactly the dormant channels the memo exists to quiet.
+//
+// Memoizing that skip is sound because it is monotone: the cutoff only moves
+// forward, so a video already behind it can never come back inside on its own.
+// The two things that CAN change the answer are a new video (a different ID is
+// a miss) and a wider window, which is why the window the decision was made
+// against is memoized alongside it.
+//
+// Mutants this fails on:
+//   - dropping the outsideWindow arm (memo gated on reprobe alone): cycle 2
+//     probes and date-fetches again, every cycle, forever.
+//   - ignoring windowDays: cycle 3 keeps skipping after the operator widened
+//     the window, and a VOD that is now in scope is never archived.
+func TestDecapi_TerminalMemoCoversTheOutOfWindowArm(t *testing.T) {
+	db := newTestDB(t)
+	probes, dates := 0, 0
+	// Dateless, like every production status probe (§9) — so the date fetch
+	// below is the second request the memo has to suppress.
+	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		probes++
+		return &VideoProbeResult{StreamStatus: "vod", Title: "old vod"}, nil
+	})
+	published := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	dm.ProbeDate = func(ctx context.Context, videoID string) (string, string, error) {
+		dates++
+		return published, "day", nil
+	}
+	found := recordDecapiVideoFound(dm)
+
+	// include_non_live_content keeps the vod arm from writing a history row,
+	// which is what leaves this sighting outside the old memo's reach.
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
+	body := decapiBody("vidDecWin12", "old vod")
+
+	if err := dm.processResponse(context.Background(), body, ch); err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+	if probes != 1 || dates != 1 {
+		t.Fatalf("cycle 1: probes=%d dates=%d, want 1/1 — the first sighting has to classify and date the video", probes, dates)
+	}
+	if len(*found) != 0 {
+		t.Fatalf("a 30-day-old VOD was jobbed against the 3-day default window: %v", *found)
+	}
+
+	if err := dm.processResponse(context.Background(), body, ch); err != nil {
+		t.Fatalf("cycle 2: %v", err)
+	}
+	if probes != 1 || dates != 1 {
+		t.Fatalf("cycle 2: probes=%d dates=%d, want 1/1 — an unchanged terminal VOD already judged outside the window must cost no request at all", probes, dates)
+	}
+
+	// The operator widens the window. The memo recorded the window it judged
+	// against, so this is a miss and the video is re-probed exactly once.
+	widened := 90
+	ch.ArchiveWindowDays = &widened
+	if err := dm.processResponse(context.Background(), body, ch); err != nil {
+		t.Fatalf("cycle 3: %v", err)
+	}
+	if probes != 2 || dates != 2 {
+		t.Fatalf("cycle 3: probes=%d dates=%d, want 2/2 — widening the archive window must re-open the video", probes, dates)
+	}
+	if len(*found) != 1 || (*found)[0].videoID != "vidDecWin12" {
+		t.Fatalf("found = %v, want [vidDecWin12] — 30 days is inside a 90-day window", *found)
+	}
+}

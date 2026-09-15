@@ -48,10 +48,30 @@ type rateLimitState struct {
 }
 
 // decapiTerminalMemo is one channel's last DECAPI answer: the newest video ID
-// the endpoint reported and the classification the probe gave it.
+// the endpoint reported, the classification the probe gave it, and — when the
+// sighting ended on the §13 window skip — the window it was judged against.
+//
+// outsideWindow exists because the two ways a terminal sighting can end leave
+// DIFFERENT traces. A skip that writes a history row is picked up on the next
+// cycle by HasProcessed; the window skip writes none (it is not "we have dealt
+// with this video", it is "this video is not in scope"), so for an
+// include_non_live_content channel `reprobe` stays false forever and the memo
+// could never engage. That is the dormant-channel case the memo was built for,
+// costing two anonymous requests every 15 s: the classifying probe and the §9
+// date fetch.
+//
+// Trusting it is sound because the judgement is MONOTONE — the cutoff only
+// moves forward, so a video already behind it cannot come back inside on its
+// own. Only two things can change the answer, and both are checked: a new
+// newest video (a different videoID is a miss) and a wider archive window,
+// hence windowDays. It is recorded ONLY for a sighting with a real date: a
+// dateless result is "treated as outside" because the window is unverifiable,
+// which is a statement about this cycle's date fetch, not about the video.
 type decapiTerminalMemo struct {
-	videoID string
-	status  string
+	videoID       string
+	status        string
+	outsideWindow bool
+	windowDays    int
 }
 
 // decapiTerminalStatus reports whether a classification can no longer change.
@@ -638,17 +658,27 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		dm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
 	}
 
+	// The cycle's archive window, read ONCE: the memo gate below and the §13
+	// check further down must judge against the same number, or a config
+	// change landing mid-channel could make the memo disagree with the skip
+	// that wrote it.
+	windowDays := dm.archiveWindowDays(ch)
+
 	// Terminal memo (T2-12): DECAPI reports the channel's NEWEST video, so a
 	// dormant channel returns the same finished VOD every cycle — with the
 	// 15 s interval floor that is ~240 anonymous player probes/hour/channel
-	// for an answer that cannot change. Skip only when all three hold: the ID
-	// is the one we classified last, that classification was terminal, and
-	// history still says the video was processed.
+	// for an answer that cannot change. Skip only when the ID is the one we
+	// classified last, that classification was terminal, AND the reason it
+	// stopped being our business still holds: either history says it was
+	// processed, or it was judged outside this same archive window (see
+	// decapiTerminalMemo — the window skip writes no history row, so on an
+	// include_non_live_content channel that second arm is the only one that
+	// ever engages).
 	//
 	// The HasProcessed read above is deliberately NOT memoized. Clearing an
 	// orphaned history row is the documented way to put a video back in play
 	// (database_extras.go:48-56), and it has to work on the very next cycle.
-	if reprobe && dm.terminalMemoHit(ch.ID, videoID) {
+	if dm.terminalMemoHit(ch.ID, videoID, reprobe, windowDays) {
 		dm.logger.Debug("decapi: newest video unchanged and terminal; skipping re-probe",
 			"videoID", videoID, "channel", ch.Name)
 		return nil
@@ -710,10 +740,20 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 					"videoID", videoID, "err", err)
 			}
 		}
-		cutoff := time.Now().UTC().Add(-time.Duration(dm.archiveWindowDays(ch)) * 24 * time.Hour).Format(time.RFC3339)
+		cutoff := time.Now().UTC().Add(-time.Duration(windowDays) * 24 * time.Hour).Format(time.RFC3339)
 		if result.PublishedAt == "" || result.PublishedAt < cutoff {
 			dm.logger.Info("decapi: newest video is outside the archive window; skipping",
 				"videoID", videoID, "published", result.PublishedAt)
+			if result.PublishedAt != "" {
+				// A DATED verdict is durable — the cutoff only moves forward
+				// — so the memo can carry it and spare the next cycle both
+				// requests. A dateless one is not memoized: "treated as
+				// outside" there means this cycle could not verify the
+				// window (no ProbeDate wired, or the fetch failed), and
+				// latching that would let one transient failure freeze the
+				// channel until its newest video changes.
+				dm.noteTerminalMemoOutsideWindow(ch.ID, videoID, windowDays)
+			}
 			return nil
 		}
 	}
@@ -745,13 +785,25 @@ func (dm *DecapiMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 }
 
 // terminalMemoHit reports whether videoID is the exact video this channel's
-// last completed probe classified as terminal. A different ID — the channel
+// last completed probe classified as terminal AND there is a live reason to
+// trust that classification again this cycle. A different ID — the channel
 // published something new — is a miss, and the fresh probe overwrites the memo.
-func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string) bool {
+//
+// The live reason is one of two, and neither is redundant:
+//
+//   - reprobe: history says the video was dealt with, read fresh every cycle
+//     so that clearing an orphaned row re-opens it immediately.
+//   - the memoized window skip, valid only while the window is the one the
+//     skip was judged against — so widening monitors.archive_window_days (or
+//     a channel's override) re-probes once and then settles again.
+func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool, windowDays int) bool {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	m, ok := dm.terminalMemo[channelID]
-	return ok && m.videoID == videoID && decapiTerminalStatus(m.status)
+	if !ok || m.videoID != videoID || !decapiTerminalStatus(m.status) {
+		return false
+	}
+	return reprobe || (m.outsideWindow && m.windowDays == windowDays)
 }
 
 // recordTerminalMemo stores this cycle's classification for the channel,
@@ -765,6 +817,27 @@ func (dm *DecapiMonitor) recordTerminalMemo(channelID, videoID, status string) {
 		dm.terminalMemo = make(map[string]decapiTerminalMemo)
 	}
 	dm.terminalMemo[channelID] = decapiTerminalMemo{videoID: videoID, status: status}
+}
+
+// noteTerminalMemoOutsideWindow records that the memo recordTerminalMemo just
+// wrote for channelID ended on the §13 window skip, judged against windowDays.
+//
+// Written as a second, narrow update rather than as extra arguments to
+// recordTerminalMemo because the two facts are learned at different points:
+// the classification the moment the probe returns, the window verdict only
+// after the §9 date fetch has had its say. The videoID guard makes the pairing
+// explicit — if anything replaced the memo in between, the window fact belongs
+// to a video that is no longer the newest one and is dropped.
+func (dm *DecapiMonitor) noteTerminalMemoOutsideWindow(channelID, videoID string, windowDays int) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	m, ok := dm.terminalMemo[channelID]
+	if !ok || m.videoID != videoID {
+		return
+	}
+	m.outsideWindow = true
+	m.windowDays = windowDays
+	dm.terminalMemo[channelID] = m
 }
 
 // getYouTubeChannels returns a copy of the YouTube channel list under
