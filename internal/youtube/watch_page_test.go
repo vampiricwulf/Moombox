@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -112,7 +113,7 @@ func TestExtractAttestationChallenge(t *testing.T) {
 	atn, _ := json.Marshal(string(rPayload))
 	page := `<html><script>window.ytAtN({R: ` + string(atn) + `, other: 1});</script></html>`
 
-	got, reason := extractAttestationChallenge(page)
+	got, reason := extractAttestationChallenge([]byte(page))
 	if got == "" {
 		t.Fatalf("expected challenge, got empty (reason=%s)", reason)
 	}
@@ -134,7 +135,7 @@ func TestExtractAttestationChallenge(t *testing.T) {
 		"R_not_json":        `<html><script>window.ytAtN({R: "not json"});</script></html>`,
 		"missing_challenge": `<html><script>window.ytAtN({R: "{\"noChallenge\":1}"});</script></html>`,
 	} {
-		if got, _ := extractAttestationChallenge(html); got != "" {
+		if got, _ := extractAttestationChallenge([]byte(html)); got != "" {
 			t.Errorf("%s: expected empty, got %q", name, got)
 		}
 	}
@@ -152,7 +153,7 @@ func TestExtractAttestationChallengeRejectsHostileOrigin(t *testing.T) {
 		`\"interpreterUrl\":{\"privateDoNotAccessOrElseTrustedResourceUrlWrappedValue\":\"//evil.tld/p.js\"}}}'})`
 	page := `<html><script>var ytInitialPlayerResponse = {"shortDescription":"` + hostile + `"};</script></html>`
 
-	got, reason := extractAttestationChallenge(page)
+	got, reason := extractAttestationChallenge([]byte(page))
 	if got != "" {
 		t.Fatalf("hostile challenge was accepted: %s", got)
 	}
@@ -266,7 +267,7 @@ func TestExtractAttestationChallengeBalancedScan(t *testing.T) {
 	rJSON, _ := json.Marshal(inner)
 	page := `<html><script>window.ytAtN({R: ` + string(rJSON) + `});</script></html>`
 
-	got, reason := extractAttestationChallenge(page)
+	got, reason := extractAttestationChallenge([]byte(page))
 	if got == "" {
 		t.Fatalf("balanced scan failed on `})` payload (reason=%s)", reason)
 	}
@@ -278,7 +279,7 @@ func TestExtractAttestationChallengeBalancedScan(t *testing.T) {
 		t.Errorf("program mangled: %v", back["program"])
 	}
 
-	if got, reason := extractAttestationChallenge(`<script>window.ytAtN({R: "unclosed`); got != "" || reason != atnUnbalanced {
+	if got, reason := extractAttestationChallenge([]byte(`<script>window.ytAtN({R: "unclosed`)); got != "" || reason != atnUnbalanced {
 		t.Errorf("unclosed literal: got %q reason %q, want empty/%s", got, reason, atnUnbalanced)
 	}
 }
@@ -293,7 +294,7 @@ func TestExtractAttestationChallengeRefusesInlineInterpreter(t *testing.T) {
 	rJSON, _ := json.Marshal(inner)
 	page := `<html><script>window.ytAtN({R: ` + string(rJSON) + `});</script></html>`
 
-	got, reason := extractAttestationChallenge(page)
+	got, reason := extractAttestationChallenge([]byte(page))
 	if got != "" {
 		t.Fatalf("inline-interpreter challenge accepted: %s", got)
 	}
@@ -407,7 +408,7 @@ func TestPlayerResponseSurvivesBraceSemicolonInDescription(t *testing.T) {
 	const desc = "code sample: if (x) {y();};  thanks for watching"
 	page := synthPlayerPage(t, desc)
 
-	ytcfg, pr := extractYtcfgAndPlayerResponse(page)
+	ytcfg, pr := extractYtcfgAndPlayerResponse([]byte(page))
 	if pr == nil {
 		t.Fatal("playerResponse is nil — a `};` inside shortDescription truncated the object")
 	}
@@ -432,7 +433,7 @@ func TestPlayerResponseScannerHonoursEscapedQuotes(t *testing.T) {
 	const desc = `a " quote then } brace`
 	page := synthPlayerPage(t, desc)
 
-	_, pr := extractYtcfgAndPlayerResponse(page)
+	_, pr := extractYtcfgAndPlayerResponse([]byte(page))
 	if pr == nil {
 		t.Fatal("playerResponse is nil — the scan mis-handled the escaped quote")
 	}
@@ -491,12 +492,146 @@ func TestPlayerResponseExtractionMatchesTheLegacyPatterns(t *testing.T) {
 			if !ok {
 				t.Fatalf("fixture is not a before-image: the legacy patterns did not parse it")
 			}
-			got, ok := extractPlayerResponse(page)
+			got, ok := extractPlayerResponse([]byte(page))
 			if !ok {
 				t.Fatalf("the anchored scan found no object where the legacy patterns did")
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("anchored extraction differs from the legacy extraction\n got: %#v\nwant: %#v", got, want)
+			}
+		})
+	}
+}
+
+// synthChatPage renders a watch page whose ytInitialData carries `filler`
+// video renderers ahead of the conversationBar, so the cost of walking the
+// document is realistic rather than notional. 500 items is ~148 KB.
+func synthChatPage(filler int) []byte {
+	var b strings.Builder
+	b.WriteString(`<!DOCTYPE html><html><head><script nonce="q">var ytInitialData = {"filler":[`)
+	for i := range filler {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"videoRenderer":{"videoId":"abcdefghij%d","title":{"runs":[{"text":"Some fairly long video title number %d that pads the payload"}]},"thumbnail":{"thumbnails":[{"url":"https://i.ytimg.com/vi/abcdefghij%d/hqdefault.jpg","width":480,"height":360}]},"ownerText":{"runs":[{"text":"Channel Name %d"}]}}}`, i, i, i, i)
+	}
+	b.WriteString(`],"contents":{"twoColumnWatchNextResults":{"conversationBar":{"liveChatRenderer":` +
+		`{"isReplay":false,"continuations":[{"reloadContinuationData":{"continuation":"CONTINUATION_TOKEN_XYZ"}}]}}}}};</script></head><body></body></html>`)
+	return []byte(b.String())
+}
+
+func BenchmarkExtractChatContinuation(b *testing.B) {
+	page := synthChatPage(500)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, _, err := extractChatContinuation(page); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// chatContinuationAllocCeiling bounds extractChatContinuation's allocations.
+//
+// Measured 2026-09-15 on this exact fixture (go1.27.1/amd64): the
+// map[string]any decode of the whole ytInitialData blob costs 32,593
+// allocs/op at 500 filler items (148 KB) and 325,477 at 5,000 (1.5 MB) — it
+// is linear in page size, and a real watch page is several times this one.
+// The typed json.RawMessage envelope costs 6 at both sizes, independent of
+// page size. The ceiling sits at 16 so ordinary
+// encoding/json or Go-version drift does not flap it, while still being
+// three orders of magnitude below the shape it replaces.
+//
+// Mutant named: any re-introduction of a whole-document map[string]any (or a
+// json.RawMessage captured at `contents` rather than at liveChatRenderer,
+// which copies the document) blows straight through 16.
+const chatContinuationAllocCeiling = 16
+
+func TestExtractChatContinuationAllocationCeiling(t *testing.T) {
+	page := synthChatPage(500)
+	if got := testing.AllocsPerRun(20, func() {
+		if _, _, err := extractChatContinuation(page); err != nil {
+			t.Fatal(err)
+		}
+	}); got > chatContinuationAllocCeiling {
+		t.Errorf("extractChatContinuation allocated %.0f per call, ceiling %d", got, chatContinuationAllocCeiling)
+	}
+}
+
+// TestExtractChatContinuationShapes pins the behaviour the envelope must
+// preserve, including the two shapes the old `var ytInitialData = (…);</script>`
+// regex could not read.
+//
+// Mutant named: an envelope that keys the continuation list off only
+// reloadContinuationData loses the replay row; a locator that keeps the
+// `;</script>` terminator fails the "trailing script" row; a locator that
+// keeps the `var ` prefix fails the "window property" row.
+func TestExtractChatContinuationShapes(t *testing.T) {
+	const head = `<script>var ytInitialData = `
+	body := func(inner string) string {
+		return `{"contents":{"twoColumnWatchNextResults":{"conversationBar":{"liveChatRenderer":` + inner + `}}}}`
+	}
+	for _, tc := range []struct {
+		name       string
+		page       string
+		wantToken  string
+		wantReplay bool
+		wantErr    string
+	}{
+		{
+			name:      "reload continuation",
+			page:      head + body(`{"isReplay":false,"continuations":[{"reloadContinuationData":{"continuation":"TOK"}}]}`) + `;</script>`,
+			wantToken: "TOK",
+		},
+		{
+			name:       "replay continuation",
+			page:       head + body(`{"isReplay":true,"continuations":[{"liveChatReplayContinuationData":{"continuation":"RTOK"}}]}`) + `;</script>`,
+			wantToken:  "RTOK",
+			wantReplay: true,
+		},
+		{
+			name:      "trailing script content, no terminator",
+			page:      head + body(`{"continuations":[{"invalidationContinuationData":{"continuation":"ITOK"}}]}`) + `;var other = 1;</script>`,
+			wantToken: "ITOK",
+		},
+		{
+			name:      "window property form",
+			page:      `<script>window["ytInitialData"] = ` + body(`{"continuations":[{"timedContinuationData":{"continuation":"TTOK"}}]}`) + `;</script>`,
+			wantToken: "TTOK",
+		},
+		{
+			name:    "no ytInitialData at all",
+			page:    `<html><body>nothing here</body></html>`,
+			wantErr: "ytInitialData not found",
+		},
+		{
+			name:    "no liveChatRenderer",
+			page:    head + `{"contents":{"twoColumnWatchNextResults":{"conversationBar":{}}}}` + `;</script>`,
+			wantErr: "no liveChatRenderer found",
+		},
+		{
+			name:    "renderer with an empty continuation list",
+			page:    head + body(`{"isReplay":false,"continuations":[]}`) + `;</script>`,
+			wantErr: "no continuations found",
+		},
+		{
+			name:    "continuations carrying no token",
+			page:    head + body(`{"continuations":[{"someOtherData":{"x":1}}]}`) + `;</script>`,
+			wantErr: "no continuation token found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tok, replay, err := extractChatContinuation([]byte(tc.page))
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tok != tc.wantToken || replay != tc.wantReplay {
+				t.Errorf("got (%q, %v), want (%q, %v)", tok, replay, tc.wantToken, tc.wantReplay)
 			}
 		})
 	}
