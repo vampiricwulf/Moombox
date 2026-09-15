@@ -7,6 +7,8 @@ package jobfilter
 import (
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -230,9 +232,9 @@ func matchTerm(t Token, job *database.Job) bool {
 	var result bool
 	switch t.Kind {
 	case KindText:
-		result = strings.Contains(strings.ToLower(job.Title), t.lower) ||
-			strings.Contains(strings.ToLower(job.ChannelName), t.lower) ||
-			strings.Contains(strings.ToLower(job.VideoID), t.lower)
+		result = containsFoldLower(job.Title, t.lower) ||
+			containsFoldLower(job.ChannelName, t.lower) ||
+			containsFoldLower(job.VideoID, t.lower)
 	case KindStatus:
 		if statuses, ok := BucketStatuses[StatusBucket(t.Value)]; ok {
 			result = slices.Contains(statuses, job.Status)
@@ -250,6 +252,69 @@ func matchTerm(t Token, job *database.Job) bool {
 		return !result
 	}
 	return result
+}
+
+// containsFoldLower reports whether sub occurs in the lower-cased form of s.
+// sub must ALREADY be lower-cased — Token.lower is, and it is the only thing
+// this is called with.
+//
+// Exactly equivalent to strings.Contains(strings.ToLower(s), sub), which is
+// what it replaces, but it lowers one rune at a time as it scans instead of
+// building a lower-cased copy of every job field. The TUI runs Match over
+// every job on every keystroke and on every list rebuild, so those copies were
+// one allocation per job per match.
+//
+// unicode.ToLower, NOT unicode.SimpleFold: the JS twin
+// (web/public/modules/filter-engine.js matchTerm) compares
+// String.prototype.toLowerCase values, and the two relations differ —
+// SimpleFold puts U+017F LATIN SMALL LETTER LONG S in the same orbit as 's',
+// so a fold-based search would match "ſun" for the query "sun" where neither
+// twin matches anything today. ToLower is a per-rune mapping in Go, so
+// scanning rune by rune reproduces strings.ToLower exactly, invalid UTF-8
+// included: a bad byte decodes as U+FFFD, which is the rune strings.ToLower
+// writes for it.
+func containsFoldLower(s, sub string) bool {
+	if sub == "" {
+		return true
+	}
+	first, _ := utf8.DecodeRuneInString(sub)
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if lowerRune(r) == first && hasPrefixFoldLower(s[i:], sub) {
+			return true
+		}
+		i += size
+	}
+	return false
+}
+
+// hasPrefixFoldLower reports whether the lower-cased form of s starts with sub
+// (already lower-cased).
+func hasPrefixFoldLower(s, sub string) bool {
+	for len(sub) > 0 {
+		if len(s) == 0 {
+			return false
+		}
+		sr, ssize := utf8.DecodeRuneInString(s)
+		br, bsize := utf8.DecodeRuneInString(sub)
+		if lowerRune(sr) != br {
+			return false
+		}
+		s, sub = s[ssize:], sub[bsize:]
+	}
+	return true
+}
+
+// lowerRune is unicode.ToLower with the ASCII fast path strings.ToLower also
+// takes — the case of every Latin title and every query typed into the / box.
+func lowerRune(r rune) rune {
+	if r < utf8.RuneSelf {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}
+	return unicode.ToLower(r)
 }
 
 // Match reports whether job passes every token (AND across tokens, OR within

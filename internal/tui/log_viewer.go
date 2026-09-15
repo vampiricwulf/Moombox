@@ -45,14 +45,23 @@ func (l LogLevel) Next() LogLevel {
 
 // LogViewerModel manages the log panel.
 type LogViewerModel struct {
-	lines      []string
-	filtered   []string
-	viewport   viewport.Model
-	autoScroll bool
-	width      int
-	height     int
-	focused    bool
-	level      LogLevel
+	lines    []string
+	filtered []string
+	// levels[i] is extractLogLevel(lines[i]) and filteredLevels[i] is the
+	// level of filtered[i]. A line's level cannot change, so it is parsed
+	// exactly once — when the line arrives — instead of once per visible line
+	// per frame in styleLogLine (the viewport's StyleLineFunc, which runs for
+	// every visible row on every render) and once per line per rebuild in the
+	// level filter. appendLine/capLines are the only writers of lines+levels,
+	// so the two cannot fall out of step.
+	levels         []string
+	filteredLevels []string
+	viewport       viewport.Model
+	autoScroll     bool
+	width          int
+	height         int
+	focused        bool
+	level          LogLevel
 
 	// Search state
 	searching   bool            // true when search input is visible
@@ -100,15 +109,29 @@ func NewLogViewerModel() *LogViewerModel {
 	return m
 }
 
+// appendLine records one line and its parsed level. The only writer of the
+// two slices, together with capLines.
+func (m *LogViewerModel) appendLine(line string) {
+	m.lines = append(m.lines, line)
+	m.levels = append(m.levels, extractLogLevel(line))
+}
+
+// capLines trims both slices to maxLogLines, identically.
+func (m *LogViewerModel) capLines() {
+	if len(m.lines) <= maxLogLines {
+		return
+	}
+	// slices.Clone prevents the re-slice from aliasing the old backing
+	// array, which would otherwise retain MBs of string headers over the
+	// 24/7 runtime target.
+	m.lines = slices.Clone(m.lines[len(m.lines)-maxLogLines:])
+	m.levels = slices.Clone(m.levels[len(m.levels)-maxLogLines:])
+}
+
 // AddLine appends a single log line.
 func (m *LogViewerModel) AddLine(line string) {
-	m.lines = append(m.lines, line)
-	if len(m.lines) > maxLogLines {
-		// slices.Clone prevents the re-slice from aliasing the old backing
-		// array, which would otherwise retain MBs of string headers over the
-		// 24/7 runtime target.
-		m.lines = slices.Clone(m.lines[len(m.lines)-maxLogLines:])
-	}
+	m.appendLine(line)
+	m.capLines()
 	m.rebuildFiltered()
 	if m.autoScroll {
 		m.viewport.GotoBottom()
@@ -118,11 +141,10 @@ func (m *LogViewerModel) AddLine(line string) {
 // AddLines appends a batch of log lines efficiently (single rebuildFiltered call).
 // Matches TS behavior where batch is concat'd and capped in one operation.
 func (m *LogViewerModel) AddLines(batch []string) {
-	m.lines = append(m.lines, batch...)
-	if len(m.lines) > maxLogLines {
-		// See AddLine — slices.Clone to avoid backing-array aliasing.
-		m.lines = slices.Clone(m.lines[len(m.lines)-maxLogLines:])
+	for _, line := range batch {
+		m.appendLine(line)
 	}
+	m.capLines()
 	m.rebuildFiltered()
 	if m.autoScroll {
 		m.viewport.GotoBottom()
@@ -133,6 +155,7 @@ func (m *LogViewerModel) AddLines(batch []string) {
 // level filter is kept — it is a preference, not content.
 func (m *LogViewerModel) Clear() {
 	m.lines = nil
+	m.levels = nil
 	m.searching = false
 	m.searchInput.SetValue("")
 	m.searchQuery = ""
@@ -231,14 +254,17 @@ func (m *LogViewerModel) CycleLevel() {
 func (m *LogViewerModel) rebuildFiltered() {
 	if m.level == LogLevelAll {
 		m.filtered = append(m.filtered[:0], m.lines...)
+		m.filteredLevels = append(m.filteredLevels[:0], m.levels...)
 		m.updateViewportContent()
 		return
 	}
 
 	m.filtered = m.filtered[:0]
-	for _, line := range m.lines {
-		if m.matchLevel(line) {
+	m.filteredLevels = m.filteredLevels[:0]
+	for i, line := range m.lines {
+		if m.matchLevel(m.levels[i]) {
 			m.filtered = append(m.filtered, line)
+			m.filteredLevels = append(m.filteredLevels, m.levels[i])
 		}
 	}
 	m.updateViewportContent()
@@ -270,13 +296,13 @@ func (m *LogViewerModel) styleLogLine(idx int) lipgloss.Style {
 	if idx < 0 || idx >= len(m.filtered) {
 		return lipgloss.NewStyle()
 	}
-	return lipgloss.NewStyle().Foreground(logLineColor(m.filtered[idx]))
+	return lipgloss.NewStyle().Foreground(logLevelColor(m.filteredLevels[idx]))
 }
 
-func (m *LogViewerModel) matchLevel(line string) bool {
-	// Level threshold: show logs at or above the selected level
-	// Lines without a level marker always pass (match TS: unmatched lines always shown)
-	lineLevel := extractLogLevel(line)
+// matchLevel reports whether a line at the given (already parsed) level passes
+// the threshold. Lines without a level marker always pass (match TS:
+// unmatched lines always shown).
+func (m *LogViewerModel) matchLevel(lineLevel string) bool {
 	if lineLevel == "" {
 		return true // no level marker → always show
 	}
@@ -452,8 +478,7 @@ func (m *LogViewerModel) UpdateSearchInput(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-func logLineColor(line string) color.Color {
-	level := extractLogLevel(line)
+func logLevelColor(level string) color.Color {
 	switch level {
 	case "ERROR":
 		return ColorLogError
