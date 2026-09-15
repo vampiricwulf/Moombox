@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 
 	"github.com/coder/websocket"
 
@@ -557,19 +556,58 @@ func parseBadges(s string) []string {
 }
 
 // parseEmoteTags parses IRC emote tags like "id:start-end,start-end/id:start-end".
-// Twitch's IRC emote-tag offsets count UTF-16 code units (mirroring JavaScript's
-// string indexing), NOT Go runes. For characters outside the Basic Multilingual
-// Plane (U+10000+, e.g. the 🎉 emoji) a single rune is two UTF-16 code units, so
-// indexing message runes by the Twitch offsets drifts by one per non-BMP char
-// already seen. The VOD path (api.go) already uses utf16Len for the same reason.
+//
+// TWO INDEX SPACES, and the whole point of this function is the conversion
+// between them.
+//
+// The WIRE offsets count Unicode CODE POINTS of the PRIVMSG text — inclusive,
+// zero-based. Not bytes, and NOT UTF-16 code units: this file asserted UTF-16
+// from 2026-04-22 (commit 5031cd2b) until this arc, and the claim was wrong.
+// It was re-measured 2026-09-15 over the raw IRC lines of 18 real archives: of
+// 120 ranges preceded by a non-BMP character, 120 slice to a whole-word token
+// by code point and 0 by UTF-16. Every reference client agrees —
+// references/chatterino7/src/providers/twitch/TwitchIrc.cpp (codepointToUtf16Idx),
+// gempir/go-twitch-irc ([]rune slicing), robotty/twitch-irc-rs
+// (chars().skip().take()).
+//
+// The EMITTED Start/End count UTF-16 code units, because the only consumer is
+// JavaScript: player.js renders the span with String.prototype.substring
+// (web/public/modules/player.js, _appendTwitchMessage), and the VOD path emits
+// UTF-16 already (utf16Len, api.go). Emitting the wire offsets unchanged would
+// make the two producers disagree about what a chat file's offsets mean.
+//
+// So: read by code point, write by UTF-16, and Name comes from the code-point
+// slice. For messages with no non-BMP character the two spaces coincide and
+// nothing moves.
+//
+// A range that is inverted or runs past the end of the message is NOT a fatal
+// input: the raw wire Start/End are passed through with an empty Name, exactly
+// as before, so a malformed tag costs one unrendered emote rather than the
+// session. The `start <= end` half of the guard is load-bearing — without it
+// an inverted range slices backwards and panics inside the read loop.
 func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 	if emotesStr == "" {
 		return nil
 	}
 
-	var refs []TwitchEmoteRef
-	msgUnits := utf16.Encode([]rune(message))
+	runes := []rune(message)
+	// cpToUnit[i] is the UTF-16 index at which code point i begins. The extra
+	// entry at len(runes) holds the message's total UTF-16 length, which is
+	// what makes End computable as cpToUnit[end+1]-1 with no special case for
+	// a range that ends on the last code point.
+	cpToUnit := make([]int, len(runes)+1)
+	units := 0
+	for i, r := range runes {
+		cpToUnit[i] = units
+		if r >= 0x10000 {
+			units += 2 // surrogate pair
+		} else {
+			units++
+		}
+	}
+	cpToUnit[len(runes)] = units
 
+	var refs []TwitchEmoteRef
 	for group := range strings.SplitSeq(emotesStr, "/") {
 		emoteID, positions, ok := strings.Cut(group, ":")
 		if !ok {
@@ -587,17 +625,13 @@ func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 				continue
 			}
 
-			name := ""
-			if start >= 0 && end < len(msgUnits) {
-				name = string(utf16.Decode(msgUnits[start : end+1]))
+			ref := TwitchEmoteRef{ID: emoteID, Start: start, End: end}
+			if start >= 0 && start <= end && end < len(runes) {
+				ref.Name = string(runes[start : end+1])
+				ref.Start = cpToUnit[start]
+				ref.End = cpToUnit[end+1] - 1
 			}
-
-			refs = append(refs, TwitchEmoteRef{
-				ID:    emoteID,
-				Name:  name,
-				Start: start,
-				End:   end,
-			})
+			refs = append(refs, ref)
 		}
 	}
 

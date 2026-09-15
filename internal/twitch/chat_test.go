@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -231,35 +232,104 @@ func TestParseEmoteTags(t *testing.T) {
 }
 
 func TestParseEmoteTagsOutOfBounds(t *testing.T) {
-	// Emote position extends beyond message length — name should be empty
+	// Emote position extends beyond message length — name should be empty and
+	// the raw wire offsets survive untouched.
 	refs := parseEmoteTags("25:0-99", "short")
-	if refs == nil {
-		t.Fatal("expected non-nil refs")
-	}
 	if len(refs) != 1 {
 		t.Fatalf("expected 1 ref, got %d", len(refs))
 	}
-	// Start 0, End 99, message "short" has 5 runes — end >= len so name is empty
 	if refs[0].Name != "" {
 		t.Errorf("expected empty name for out-of-bounds emote, got %q", refs[0].Name)
 	}
+	if refs[0].Start != 0 || refs[0].End != 99 {
+		t.Errorf("out-of-bounds ref = (%d,%d), want the raw wire offsets (0,99)",
+			refs[0].Start, refs[0].End)
+	}
 }
 
-// TestParseEmoteTagsNonBMP covers the case where the message contains a
-// character outside the Basic Multilingual Plane (e.g. 🎉 U+1F389) before
-// the emote position. Twitch sends UTF-16 code-unit offsets — the non-BMP
-// character counts as 2 code units, one Go rune. Rune-indexed slicing
-// would pull the emote name off by one per non-BMP character already seen.
-// Regression test for audit reports/twitch.md issue #3.
-func TestParseEmoteTagsNonBMP(t *testing.T) {
-	// "🎉 Kappa" — 🎉 is at UTF-16 [0..1], space at [2], "Kappa" at [3..7].
-	// Twitch sends emote position 3-7 (UTF-16) for "Kappa".
-	refs := parseEmoteTags("25:3-7", "🎉 Kappa")
+// TestParseEmoteTagsInvertedRange pins a range whose end precedes its start.
+//
+// Mutant: dropping the `start <= end` half of the bounds guard. The old code
+// guarded only `start >= 0 && end < len(msgUnits)`, so "25:4-2" on "Kappa"
+// evaluated msgUnits[4:3] and PANICKED — inside the IRC read loop, which would
+// take the whole chat session down on one malformed tag.
+func TestParseEmoteTagsInvertedRange(t *testing.T) {
+	refs := parseEmoteTags("25:4-2", "Kappa")
 	if len(refs) != 1 {
 		t.Fatalf("expected 1 ref, got %d", len(refs))
 	}
-	if refs[0].Name != "Kappa" {
-		t.Errorf("expected Name=\"Kappa\", got %q (UTF-16 vs rune index drift)", refs[0].Name)
+	if refs[0].Name != "" || refs[0].Start != 4 || refs[0].End != 2 {
+		t.Errorf("inverted ref = {Name:%q Start:%d End:%d}, want {\"\" 4 2}",
+			refs[0].Name, refs[0].Start, refs[0].End)
+	}
+}
+
+// TestParseEmoteTagsNonBMP pins THE wire fact: Twitch's emote-tag offsets count
+// Unicode CODE POINTS, and the Start/End we emit are UTF-16 code units because
+// player.js slices with String.prototype.substring and the VOD path (api.go,
+// utf16Len) already emits UTF-16.
+//
+// Verified 2026-09-15 over the raw IRC lines of 18 real Twitch chat archives:
+// of 120 emote ranges preceded by a non-BMP character, 120 are whole-word
+// tokens under code-point slicing and 0 under UTF-16 slicing. chatterino7
+// (codepointToUtf16Idx), gempir/go-twitch-irc ([]rune slicing) and
+// robotty/twitch-irc-rs (chars().skip().take()) all index by code point.
+//
+// Mutants this kills:
+//   - raw pass-through ("Twitch sends UTF-16 already"): Start would be 2, not 3.
+//   - UTF-16-indexed slicing (the behaviour before this arc, commit 5031cd2b):
+//     Name would be " Kapp" and Start 2.
+//   - forgetting the End sentinel (End = cpToUnit[end], not cpToUnit[end+1]-1):
+//     End would be 6, clipping the last character off every emote span.
+func TestParseEmoteTagsNonBMP(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		emotesStr string
+		message   string
+		want      TwitchEmoteRef
+	}{
+		{
+			// "🎉 Kappa": 🎉 is code point 0 (UTF-16 [0..1]), space code point 1
+			// (UTF-16 [2]), "Kappa" code points 2..6 (UTF-16 [3..7]).
+			name:      "emoji then emote",
+			emotesStr: "25:2-6",
+			message:   "🎉 Kappa",
+			want:      TwitchEmoteRef{ID: "25", Name: "Kappa", Start: 3, End: 7},
+		},
+		{
+			// A real captured line: wire text "🤘 shachiOrcaWail", range 2-15.
+			name:      "real wire range",
+			emotesStr: "301428:2-15",
+			message:   "🤘 shachiOrcaWail",
+			want:      TwitchEmoteRef{ID: "301428", Name: "shachiOrcaWail", Start: 3, End: 16},
+		},
+		{
+			// Two non-BMP characters before the emote: the drift is per code
+			// point, so a single-character fudge factor cannot pass this.
+			name:      "two emoji then emote",
+			emotesStr: "25:4-8",
+			message:   "🤘🤝 xKappa",
+			want:      TwitchEmoteRef{ID: "25", Name: "Kappa", Start: 6, End: 10},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refs := parseEmoteTags(tc.emotesStr, tc.message)
+			if len(refs) != 1 {
+				t.Fatalf("expected 1 ref, got %d", len(refs))
+			}
+			if refs[0] != tc.want {
+				t.Errorf("parseEmoteTags(%q, %q) = %+v, want %+v",
+					tc.emotesStr, tc.message, refs[0], tc.want)
+			}
+			// The emitted span must be sliceable by JavaScript's own
+			// substring(start, end+1) — which is what player.js does.
+			units := utf16.Encode([]rune(tc.message))
+			if got := string(utf16.Decode(units[refs[0].Start : refs[0].End+1])); got != tc.want.Name {
+				t.Errorf("UTF-16 slice [%d:%d] = %q, want %q — the emitted span does not "+
+					"select the emote in player.js's index space",
+					refs[0].Start, refs[0].End+1, got, tc.want.Name)
+			}
+		})
 	}
 }
 
