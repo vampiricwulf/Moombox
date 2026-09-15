@@ -371,6 +371,17 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reason string) error {
 	vcd.flush()
 	vcd.saveResumeState(contentOffset)
+	// Fix round R4 follow-up: the orchestrator discards Start's returned
+	// error entirely (see the doc comment above), so this Warn is the only
+	// trace a production stall leaves anywhere — without it, an operator
+	// sees a VOD chat archive quietly stop growing with nothing in the log
+	// explaining why.
+	vcd.logger.Warn("[TwitchVodChat] paging stalled; resume state kept",
+		"reason", reason,
+		"offset", contentOffset,
+		"cursor", cursor,
+		"messages", vcd.MessageCount(),
+	)
 	return fmt.Errorf("vod chat paging stalled at offset %v cursor %q: %s", contentOffset, cursor, reason)
 }
 

@@ -228,6 +228,14 @@ func TestVodChatResumeStartsFromTheSavedOffset(t *testing.T) {
 // "ran past the script" error would eventually end the run through the
 // consecutive-error budget, which is why one assertion is on the REQUEST
 // COUNT, not merely on termination.
+//
+// Fix round R4 follow-up (round 2): the orchestrator discards Start's
+// returned error entirely (internal/worker/orchestrator_twitch.go), so a
+// production stall leaves NO trace unless pagingStalled itself logs one.
+// The downloader logger is a renderingLogger (api_gql_log_hygiene_test.go)
+// instead of the no-op testLogger so that trace can be asserted on.
+//
+// Mutant: deleting the Warn call inside pagingStalled.
 func TestVodChatStopsOnAStuckCursor(t *testing.T) {
 	var mu sync.Mutex
 	var requests int
@@ -250,10 +258,11 @@ func TestVodChatStopsOnAStuckCursor(t *testing.T) {
 	})}
 
 	out := filepath.Join(t.TempDir(), "vod.chat.json")
+	rl := &renderingLogger{}
 	vcd := NewVodChatDownloader(NewAPI(&testLogger{}), VodChatOptions{
 		VodID:      "v1",
 		OutputPath: out,
-	}, &testLogger{})
+	}, rl)
 	if err := vcd.Start(context.Background()); err == nil {
 		t.Fatal("Start returned nil, want an error — a stuck cursor is a stall, not completion " +
 			"(mutant: still breaking the loop and returning nil)")
@@ -269,6 +278,13 @@ func TestVodChatStopsOnAStuckCursor(t *testing.T) {
 		t.Errorf("resume sidecar missing after a stalled stuck-cursor run: %v — "+
 			"want it preserved so a later /resume retries from here "+
 			"(mutant: removeResumeState() still runs on this path)", err)
+	}
+	if !strings.Contains(rl.allLines(), "WARN [TwitchVodChat] paging stalled; resume state kept") ||
+		!strings.Contains(rl.allLines(), "reason=cursor did not advance") {
+		t.Errorf("no Warn logged for the stall (got log lines: %q) — a stuck cursor "+
+			"in production would leave no trace at all, since the orchestrator discards "+
+			"Start's returned error (mutant: the Warn call inside pagingStalled was deleted)",
+			rl.allLines())
 	}
 }
 
