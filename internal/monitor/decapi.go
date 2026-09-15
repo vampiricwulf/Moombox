@@ -531,14 +531,14 @@ func (dm *DecapiMonitor) fetchLatestVideo(ctx context.Context, ch *config.Channe
 		}
 		// Drain so the connection can be reused (closing an unread body
 		// discards the TCP connection — costly during a sustained 429 storm).
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		drainBounded(resp.Body)
 		return "", fmt.Errorf("rate limited (429)")
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		// Non-2xx — server reachable but unhappy; leave tracker alone.
 		// Drain a bounded amount before close to keep the connection reusable.
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		drainBounded(resp.Body)
 		return "", fmt.Errorf("decapi http %d", resp.StatusCode)
 	}
 	reportMonitorResult("monitor/decapi", false)

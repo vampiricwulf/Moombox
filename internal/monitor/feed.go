@@ -35,6 +35,12 @@ const (
 	// fails would walk the entire channel list, which is the per-cycle load
 	// the memo exists to remove. Two: the nominee, plus one stand-in.
 	membershipLivenessMaxTries = 2
+	// monitorDrainLimit bounds how much of a non-200 response body is read
+	// before Close. Draining returns the connection to the idle pool instead
+	// of discarding it (costly during a sustained outage), but an unbounded
+	// drain reads an arbitrarily large error page — a 5xx HTML page, a
+	// captive-portal interstitial — purely to throw it away.
+	monitorDrainLimit = 4096
 )
 
 // feedStagger spaces consecutive channel feed fetches. Decapi and Twitch
@@ -708,12 +714,19 @@ func (fm *FeedMonitor) fetchFeed(ctx context.Context, ch *config.ChannelConfig) 
 	if resp.StatusCode != http.StatusOK {
 		// 4xx/5xx isn't necessarily a connectivity problem (rate-limiting or a
 		// dead channel ID), but isn't a success either — leave the tracker alone.
-		io.Copy(io.Discard, resp.Body) // drain for connection reuse
+		drainBounded(resp.Body) // bounded drain for connection reuse
 		return nil, fmt.Errorf("feed http %d", resp.StatusCode)
 	}
 	reportMonitorResult("monitor/feed", false)
 
 	return io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
+}
+
+// drainBounded reads and discards at most monitorDrainLimit bytes of r so the
+// underlying connection returns to the idle pool. Shared by the feed and
+// DECAPI fetchers, which are the two monitor paths that close on a non-200.
+func drainBounded(r io.Reader) {
+	io.Copy(io.Discard, io.LimitReader(r, monitorDrainLimit))
 }
 
 // membershipActive reports whether members-only discovery should run this cycle

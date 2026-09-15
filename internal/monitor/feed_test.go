@@ -729,3 +729,36 @@ func TestFeed_ResetMembershipMemoRefetchesEveryChannel(t *testing.T) {
 		t.Fatalf("cycle 3 fetches = %v, want all three — a credential repair must not have to wait out membershipMemoTTL", order)
 	}
 }
+
+// countingReader serves n bytes and reports how many were actually read.
+type countingReader struct{ remaining, read int }
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	if c.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), c.remaining)
+	c.remaining -= n
+	c.read += n
+	return n, nil
+}
+
+// TestDrainBoundedStopsAtTheLimit pins T4-35's feed half: a non-200 body is
+// drained only far enough to keep the connection reusable, never in full.
+//
+// Mutant: the bare io.Copy(io.Discard, resp.Body) the feed fetcher used reads
+// the whole 1 MB error page to throw it away.
+func TestDrainBoundedStopsAtTheLimit(t *testing.T) {
+	big := &countingReader{remaining: 1 << 20}
+	drainBounded(big)
+	if big.read != monitorDrainLimit {
+		t.Fatalf("drained %d bytes of a 1MB body, want exactly %d", big.read, monitorDrainLimit)
+	}
+
+	// A body shorter than the limit still drains completely and returns.
+	small := &countingReader{remaining: 17}
+	drainBounded(small)
+	if small.read != 17 {
+		t.Fatalf("drained %d bytes of a 17-byte body, want 17", small.read)
+	}
+}
