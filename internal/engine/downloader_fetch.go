@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -431,6 +432,13 @@ func (d *SegmentDownloader) noteHeadSeqFromProbe(n int) {
 	}
 }
 
+// errNoHeadSeqUsable marks a probe that got an HTTP RESPONSE the fallback
+// probe could plausibly improve on: no X-Head-Seqnum header, or one that
+// does not parse. A TRANSPORT error — no response at all (DNS, refused,
+// reset, timeout) — is deliberately NOT this: during an outage every probe
+// fails the same way, so a fallback only doubles the doomed round-trips.
+var errNoHeadSeqUsable = errors.New("no usable X-Head-Seqnum header")
+
 // probeHeadSequence discovers the current live head segment using a high sequence GET probe.
 // YouTube returns the X-Head-Seqnum header on GET requests to a non-existent segment.
 //
@@ -439,24 +447,30 @@ func (d *SegmentDownloader) noteHeadSeqFromProbe(n int) {
 //  1. First attempt: probe at sequence 999,999,999. This is well past any
 //     real live segment number and YouTube has historically responded with
 //     X-Head-Seqnum so we discover the live edge in one round-trip.
-//  2. Fallback: if the first probe returns no X-Head-Seqnum (server changed
-//     behavior, rejected the absurdly high number, or returned an opaque
-//     error page) AND we already have a usable currentSeq, retry at
-//     currentSeq+1000 — close enough to be plausible while still being
-//     ahead of the head.
+//  2. Fallback: if the first probe ANSWERED but carried no usable
+//     X-Head-Seqnum (server changed behavior, rejected the absurdly high
+//     number, or returned an opaque error page) AND we already have a usable
+//     currentSeq, retry at currentSeq+1000 — close enough to be plausible
+//     while still being ahead of the head. A transport error (no response at
+//     all) skips the fallback: the second probe would fail the same way.
 //
 // The fallback only fires when currentSeq > 0 because pre-first-segment
 // downloads have no anchor to extrapolate from.
 func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) {
-	if seq, err := d.probeHeadAt(ctx, 999999999); err == nil {
+	seq, err := d.probeHeadAt(ctx, 999999999)
+	if err == nil {
 		return seq, nil
-	} else if cur := int(d.currentSeq.Load()); cur > 0 {
-		// Fallback to a sane near-future probe. Do not propagate the first
-		// error — we'll surface the fallback's outcome instead.
-		return d.probeHeadAt(ctx, cur+1000)
-	} else {
-		return -1, err
 	}
+	// Fallback only when the edge ANSWERED and the answer was unusable. A
+	// transport error means the network is down or the host is unreachable,
+	// and a second probe to the same host fails identically — during an
+	// outage that doubled every probe cycle's round-trips for nothing.
+	// Do not propagate the first error past the fallback — surface the
+	// fallback's own outcome instead.
+	if cur := int(d.currentSeq.Load()); cur > 0 && errors.Is(err, errNoHeadSeqUsable) {
+		return d.probeHeadAt(ctx, cur+1000)
+	}
+	return -1, err
 }
 
 // probeHeadAt issues a single head-discovery GET at the given probe sequence
@@ -489,12 +503,12 @@ func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int,
 
 	headSeqStr := resp.Header.Get("X-Head-Seqnum")
 	if headSeqStr == "" {
-		return -1, fmt.Errorf("no X-Head-Seqnum header")
+		return -1, errNoHeadSeqUsable
 	}
 
 	headSeq, err := strconv.Atoi(headSeqStr)
 	if err != nil {
-		return -1, fmt.Errorf("parse X-Head-Seqnum: %w", err)
+		return -1, fmt.Errorf("%w: parse %q: %v", errNoHeadSeqUsable, headSeqStr, err)
 	}
 
 	return headSeq, nil
