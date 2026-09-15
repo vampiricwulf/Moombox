@@ -558,13 +558,27 @@ func TestExtractChatContinuationAllocationCeiling(t *testing.T) {
 }
 
 // TestExtractChatContinuationShapes pins the behaviour the envelope must
-// preserve, including the two shapes the old `var ytInitialData = (…);</script>`
-// regex could not read.
+// preserve, including the shapes the old `var ytInitialData = (…);</script>`
+// regex could not read and the partial-decode cases the map[string]any walk
+// survived.
 //
-// Mutant named: an envelope that keys the continuation list off only
+// Mutants named: an envelope that keys the continuation list off only
 // reloadContinuationData loses the replay row; a locator that keeps the
 // `;</script>` terminator fails the "trailing script" row; a locator that
-// keeps the `var ` prefix fails the "window property" row.
+// keeps the `var ` prefix fails the "window property" row; a locator that
+// also accepts a BARE `ytInitialData = {` fails the "forged" row.
+//
+// The four partial-decode rows are the ones that cost a real capture if they
+// regress. encoding/json records the first type error and KEEPS decoding, so
+// each of them yields err != nil AND a usable token. Returning the error
+// there — `if err := json.Unmarshal(rendererRaw, &renderer); err != nil`, or
+// hoisting the envelope's error return above the rendererRaw guard — hands
+// both consumers an empty token, and orchestrator_chat.go and
+// stream_processor_youtube.go both skip chat archiving on an empty token. So
+// a YouTube type drift the map walk shrugged off would silently stop chat
+// capture. The "renderer absent AND a type error" row is the other side: with
+// no token to keep, the parse error IS the answer, and deleting that inner
+// block must not survive.
 func TestExtractChatContinuationShapes(t *testing.T) {
 	const head = `<script>var ytInitialData = `
 	body := func(inner string) string {
@@ -576,6 +590,10 @@ func TestExtractChatContinuationShapes(t *testing.T) {
 		wantToken  string
 		wantReplay bool
 		wantErr    string
+		// wantErrPrefix is for the rows whose error wraps encoding/json's
+		// own message, which names generated struct types and is not worth
+		// pinning verbatim.
+		wantErrPrefix string
 	}{
 		{
 			name:      "reload continuation",
@@ -618,12 +636,64 @@ func TestExtractChatContinuationShapes(t *testing.T) {
 			page:    head + body(`{"continuations":[{"someOtherData":{"x":1}}]}`) + `;</script>`,
 			wantErr: "no continuation token found",
 		},
+		{
+			// The envelope's OWN decode errors (a duplicate `contents` whose
+			// first occurrence is a number) and the renderer still comes out
+			// of it, because encoding/json keeps going past the type error.
+			name: "type error in the envelope, renderer decoded anyway",
+			page: head + `{"contents":5,"contents":{"twoColumnWatchNextResults":{"conversationBar":{"liveChatRenderer":` +
+				`{"isReplay":false,"continuations":[{"reloadContinuationData":{"continuation":"ATOK"}}]}}}}}` + `;</script>`,
+			wantToken: "ATOK",
+		},
+		{
+			// isReplay drifts to a string. The flag is lost (as it was under
+			// the map walk's failed type assertion) but the TOKEN is not.
+			name:      "isReplay is a string, token still returned",
+			page:      head + body(`{"isReplay":"true","continuations":[{"reloadContinuationData":{"continuation":"BTOK"}}]}`) + `;</script>`,
+			wantToken: "BTOK",
+		},
+		{
+			name:      "a non-object continuation element ahead of a good one",
+			page:      head + body(`{"continuations":[5,{"reloadContinuationData":{"continuation":"CTOK"}}]}`) + `;</script>`,
+			wantToken: "CTOK",
+		},
+		{
+			name:      "a numeric continuation ahead of a good one",
+			page:      head + body(`{"continuations":[{"reloadContinuationData":{"continuation":5}},{"reloadContinuationData":{"continuation":"DTOK"}}]}`) + `;</script>`,
+			wantToken: "DTOK",
+		},
+		{
+			// No token to keep, so here the decode error IS the answer.
+			name:          "renderer absent and the envelope decode errored",
+			page:          head + `{"contents":5}` + `;</script>`,
+			wantErrPrefix: "parse ytInitialData: ",
+		},
+		{
+			// A shortDescription spelling a bare `ytInitialData = {` ahead of
+			// the real assignment must not be taken for the document. The
+			// forged blob carries a token so a locator that fell for it would
+			// return FTOK instead of failing visibly.
+			name: "forged ytInitialData in a description loses to the real one",
+			page: `<script>var ytInitialPlayerResponse = {"videoDetails":{"shortDescription":` +
+				`"ytInitialData = {\"contents\":{\"twoColumnWatchNextResults\":{\"conversationBar\":{\"liveChatRenderer\":{\"continuations\":[{\"reloadContinuationData\":{\"continuation\":\"FTOK\"}}]}}}}}"` +
+				`}};</script>` + head + body(`{"continuations":[{"reloadContinuationData":{"continuation":"REAL"}}]}`) + `;</script>`,
+			wantToken: "REAL",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tok, replay, err := extractChatContinuation([]byte(tc.page))
 			if tc.wantErr != "" {
 				if err == nil || err.Error() != tc.wantErr {
 					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if tc.wantErrPrefix != "" {
+				if err == nil || !strings.HasPrefix(err.Error(), tc.wantErrPrefix) {
+					t.Fatalf("err = %v, want one prefixed %q", err, tc.wantErrPrefix)
+				}
+				if tok != "" {
+					t.Errorf("token = %q, want empty alongside the error", tok)
 				}
 				return
 			}

@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -159,7 +160,10 @@ func (s *Service) Init(ctx context.Context) {
 	if m := visitorDataRegex.FindStringSubmatch(html); m != nil {
 		s.vdMu.Lock()
 		if s.visitorData == "" {
-			s.visitorData = m[1]
+			// Clone: m[1] is a substring of the whole homepage body, and
+			// this field outlives the fetch on a long-lived Service — the
+			// same aliasing leak extractYtcfgAndPlayerResponse guards.
+			s.visitorData = strings.Clone(m[1])
 			s.visitorDataSetAt = time.Now()
 			s.logger.Debug("[YouTube] Visitor data extracted", "prefix", m[1][:min(30, len(m[1]))])
 		}

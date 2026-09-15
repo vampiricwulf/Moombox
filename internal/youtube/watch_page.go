@@ -515,8 +515,7 @@ func watchPageSessionAuth(page []byte) SessionAuthState {
 // for a watch page and unsafe for the liveness probe — and each is pinned
 // directly rather than inferred from the other.
 
-// livenessVerdict is watchPageSessionAuth over raw bytes with the ytcfg
-// fallback removed.
+// livenessVerdict is watchPageSessionAuth with the ytcfg fallback removed.
 //
 // That fallback ("a shell carrying ytcfg.set but no login key is anonymous")
 // is sound for watch pages, which may legitimately omit the key. It is NOT
@@ -605,16 +604,24 @@ type chatContinuationData struct {
 // so the returned token does not alias the page's backing array.
 //
 // The blob is located by extractYtInitialData (channel_membership.go), the
-// same brace-depth scan the membership path uses — which also drops the old
-// regex's requirement that the assignment be spelled `var ytInitialData = `
-// and be terminated by `;</script>`.
+// same brace-depth scan the membership path uses — which drops the old
+// regex's `;</script>` terminator while keeping its two anchored assignment
+// spellings, so page-authored text cannot present itself as the blob.
 //
-// A decode error is reported ONLY when the renderer did not come out of it:
-// encoding/json records the first type error and keeps decoding, so a
-// mismatch in an unrelated subtree must not lose a token we did read. That is
-// what the map[string]any walk this replaces did implicitly, and the point of
-// replacing it is cost, not behaviour: at 500 filler renderers the map decode
-// cost 32,593 allocations to read one string, and it is linear in page size.
+// A decode error is reported ONLY when no token came out of the decode, and
+// that rule governs BOTH passes. encoding/json records the first type error
+// and keeps decoding, so `"isReplay":"true"`, a non-object element in
+// continuations, or a numeric `continuation` on the first element all leave
+// err != nil AND a perfectly good token on a later field. The map[string]any
+// walk this replaces returned the token in every one of those cases (its type
+// assertions simply yielded the zero value and it read on), and both consumers
+// — orchestrator_chat.go and stream_processor_youtube.go — skip chat
+// archiving on an empty token, so surfacing the error instead would silently
+// stop chat capture on a YouTube type drift the old shape survived.
+//
+// The point of the replacement is cost, not behaviour: at 500 filler
+// renderers the map decode cost 32,593 allocations to read one string, and it
+// is linear in page size.
 func extractChatContinuation(page []byte) (string, bool, error) {
 	raw, ok := extractYtInitialData(page)
 	if !ok {
@@ -631,13 +638,11 @@ func extractChatContinuation(page []byte) (string, bool, error) {
 		return "", false, fmt.Errorf("no liveChatRenderer found")
 	}
 
+	// Read the token FIRST and explain a failure only afterwards — a partial
+	// type error elsewhere in the renderer must not cost us a token that
+	// decoded fine. See the rule in the doc comment.
 	var renderer liveChatRendererEnvelope
-	if err := json.Unmarshal(rendererRaw, &renderer); err != nil {
-		return "", false, fmt.Errorf("parse ytInitialData: %w", err)
-	}
-	if len(renderer.Continuations) == 0 {
-		return "", false, fmt.Errorf("no continuations found")
-	}
+	rendererErr := json.Unmarshal(rendererRaw, &renderer)
 
 	for _, cont := range renderer.Continuations {
 		for _, data := range [...]*chatContinuationData{cont.Reload, cont.Invalidation, cont.Timed, cont.Replay} {
@@ -647,6 +652,12 @@ func extractChatContinuation(page []byte) (string, bool, error) {
 		}
 	}
 
+	if rendererErr != nil {
+		return "", false, fmt.Errorf("parse ytInitialData: %w", rendererErr)
+	}
+	if len(renderer.Continuations) == 0 {
+		return "", false, fmt.Errorf("no continuations found")
+	}
 	return "", false, fmt.Errorf("no continuation token found")
 }
 
