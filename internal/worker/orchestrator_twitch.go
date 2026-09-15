@@ -345,6 +345,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// restart doesn't tear chat down — shutdown/user-cancel paths Stop() it
 	// explicitly.
 	var chatDone chan struct{}
+	// chatRec carries Start's terminal error to the verdict below — a Twitch
+	// VOD whose cursor paging stalls returns one, with a SHORT archive on disk.
+	// Declared out here because startChat may run several times (the relaunch
+	// after a connectivity outage) and the LAST run's outcome is the job's.
+	var chatRec chatOutcome
 	startChat := func() {
 		// Wire OnProgress for DB updates via SetOnProgress — avoids the race
 		// surface on public-field reassignment (audit reports/worker.md F3).
@@ -360,10 +365,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			defer close(done)
 			defer func() {
 				if r := recover(); r != nil {
+					// A panic is an outcome too: a downloader that died
+					// mid-capture has not finished, and recording nothing here
+					// would leave a previous run's verdict standing.
+					chatRec.record(fmt.Errorf("panic in Twitch chat downloader: %v", r))
 					o.logger.Error("panic in Twitch chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
 				}
 			}()
-			twitchChatDl.Start(parentCtx)
+			chatRec.record(twitchChatDl.Start(parentCtx))
 		}()
 	}
 	if twitchChatDl != nil {
@@ -848,29 +857,21 @@ sessionLoop:
 	// Per audit reports/worker.md F5: skip MarkStreamEnded if chat was already
 	// Stop()'d above (connectivity-loss path) — racing with the goroutine's
 	// shutdown can panic or deadlock inside the chat downloader.
-	if twitchChatDl != nil && twitchChatDl.IsRunning() {
-		twitchChatDl.MarkStreamEnded()
-		if chatDone != nil {
-			chatEndTimer := time.NewTimer(chatWaitTimeout)
-			select {
-			case <-chatDone:
-				chatEndTimer.Stop()
-			case <-chatEndTimer.C:
-				twitchChatDl.Stop()
-			}
-		}
-	}
 	if twitchChatDl != nil {
-		// Update chat status
-		chatCount := twitchChatDl.MessageCount()
-		chatStatus := "finished"
-		if chatCount == 0 {
-			chatStatus = "unavailable"
+		if twitchChatDl.IsRunning() {
+			twitchChatDl.MarkStreamEnded()
 		}
-		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-			"chat_status":         chatStatus,
-			"total_chat_messages": chatCount,
-		})
+		// resolveChatOutcome waits on chatDone UNCONDITIONALLY — not gated on
+		// IsRunning() the way this used to be. running is cleared by a defer
+		// INSIDE Start, strictly before the wrapper goroutine calls
+		// chatRec.record(), so an IsRunning()-gated wait could observe
+		// running==false and skip straight to a verdict that had not landed
+		// yet (fix round 1, Important 3) — exactly the window a stalled
+		// Twitch VOD chat could fall into, writing "finished" over a stall. A
+		// wait that times out returns an explicit incomplete rather than
+		// letting a stale nil verdict read as "finished".
+		outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
 	}
 
 	// Mux the final part with the live-tracked quality/timestamps (with its chat

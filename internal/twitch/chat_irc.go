@@ -204,10 +204,14 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	// socket, not a verdict on the credentials — see noteHandshakeOutcome, which
 	// owns both halves of that rule. Skipped entirely when WE ended the session
 	// — a caller cancel or a Stop/MarkStreamEnded is not a refusal, and neither
-	// is the immediate return below when the downloader was never started.
+	// is the immediate return below when the downloader was never started — and
+	// skipped when TWITCH ended it with a RECONNECT, which is a verdict on an
+	// edge and not on our credentials.
 	welcomed := false
 	heardFromServer := false
 	sawLoginFailure := false
+	// Set by the RECONNECT branch in the read loop below.
+	serverReconnected := false
 	if authenticated {
 		defer func() {
 			// reauthPending: WE cancelled this session to present new
@@ -215,7 +219,17 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			// login. Without it, a Reauthenticate landing between the CAP ACK
 			// and the 001 would latch the anonymous fallback and demote the
 			// very session it was trying to upgrade.
-			if ctx.Err() != nil || !cd.IsRunning() || cd.reauthPending.Load() {
+			//
+			// serverReconnected is there for the same reason from the other
+			// side: a directive that beats the 001 leaves the session with
+			// heardFromServer true and welcomed false, which is literally the
+			// refusal shape, on a session Twitch asked us to leave before it
+			// had ruled on anything. Now that the sentinel keeps chat alive
+			// past a directive (see errServerReconnect), latching here would
+			// run the REST of the job anonymously — authRefused is cleared
+			// only by Reauthenticate — and report a downgrade that never
+			// happened.
+			if ctx.Err() != nil || !cd.IsRunning() || cd.reauthPending.Load() || serverReconnected {
 				return
 			}
 			cd.noteHandshakeOutcome(welcomed, heardFromServer, sawLoginFailure)
@@ -569,12 +583,25 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 				continue
 			}
 
-			// Twitch occasionally issues RECONNECT to request clients
-			// drop and reconnect. Return nil so the outer loop does a
-			// clean reconnect without incrementing the error counter.
+			// Twitch occasionally issues RECONNECT to ask clients to drop and
+			// reconnect. The SENTINEL, not nil: nil is Start's clean-exit
+			// value, so returning it ended chat capture for the rest of the
+			// job. Logged at the loop rather than here, so one directive still
+			// writes exactly one line — see errServerReconnect.
 			if strings.HasPrefix(line, "RECONNECT") {
-				cd.logger.Info("twitch IRC RECONNECT received; reconnecting", "channel", cd.channelLogin)
-				return nil
+				// Read by the noteHandshakeOutcome defer above: a directive
+				// that arrives before the 001 must not read as a refused
+				// login, because Twitch ruled on an edge, not on us.
+				serverReconnected = true
+				// Force-closed with NO close handshake, before the sentinel is
+				// returned: Twitch has already told us to leave, so waiting on
+				// a peer that may not answer buys nothing, and the deferred
+				// conn.Close() registered at the top of this function would
+				// otherwise block for its full 5s peer-ack timeout on every
+				// RECONNECT — a real chat gap this avoids. See
+				// errServerReconnect.
+				conn.CloseNow()
+				return errServerReconnect
 			}
 
 			msg := cd.parseLine(line)

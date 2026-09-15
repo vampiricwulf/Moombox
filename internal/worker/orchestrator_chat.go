@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/chat"
@@ -106,29 +108,66 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	return dl
 }
 
-// waitForChat waits for chat to finish with a timeout.
-func (o *DownloadOrchestrator) waitForChat(chatDl *chat.ChatDownloader, chatDone chan struct{}, timeout time.Duration) {
-	if chatDone == nil {
-		return
+// errChatWaitTimedOut is the outcome resolveChatOutcome returns once its first
+// wait has timed out and the downloader recorded no error of its own: a
+// downloader that was still running when the job finalized has not completed,
+// whatever its own eventual terminal error would have been — so this must
+// never read as "finished"/"unavailable".
+var errChatWaitTimedOut = errors.New("chat downloader was still running when the job finalized")
+
+// resolveChatOutcome waits for the chat goroutine's completion signal (done)
+// before reading rec's recorded outcome, and returns errChatWaitTimedOut
+// instead of a possibly-stale nil if that signal never arrives.
+//
+// Fix round 1, Important 3: both orchestrators' chat goroutines run
+// `rec.record(dl.Start(ctx))` and only then `defer close(done)` (LIFO defers:
+// the recover-and-record statement executes first, the deferred close(done)
+// last), so rec.record always happens-before done closes — which is exactly
+// what makes "wait for done, THEN read rec" a safe read. Reading rec first,
+// or gating the wait on dl.IsRunning(), both race a flag that a downloader's
+// OWN shutdown defer clears strictly BEFORE the wrapper goroutine's record()
+// runs (twitch.ChatDownloader/twitch.VodChatDownloader/chat.ChatDownloader all
+// clear "running" on their way out of Start, ahead of returning to the
+// wrapper) — exactly the window a stalled Twitch VOD chat could land in,
+// writing "finished" over a stall and losing the real outcome for good, since
+// nothing re-reads rec after this call returns.
+//
+// timeout bounds the first wait; on expiry dl is Stop()'d (if still running)
+// and grace gives its goroutine a last chance to record and close done. Once
+// that first wait has expired the result is NEVER nil, whether done closes
+// inside the grace or not: the chat was still running when the job finalized,
+// which is by definition not "finished". The goroutine's own error is
+// reported when it recorded one (it is the more specific diagnosis);
+// otherwise errChatWaitTimedOut stands in. Returning a recorded nil here
+// instead would undo the whole rule, because every real downloader's
+// Stop()-exit returns nil — a VOD chat still paging when its video finished
+// would read "finished" on a short archive, silently.
+func (o *DownloadOrchestrator) resolveChatOutcome(dl ChatSource, rec *chatOutcome, done chan struct{}, timeout, grace time.Duration) error {
+	if done == nil {
+		return rec.verdict()
 	}
 
 	timer := time.NewTimer(timeout)
 	select {
-	case <-chatDone:
+	case <-done:
 		timer.Stop()
-		// Chat finished naturally
+		return rec.verdict()
 	case <-timer.C:
-		// Timeout — force stop
-		if chatDl.IsRunning() {
-			chatDl.Stop()
+	}
+
+	if dl != nil && dl.IsRunning() {
+		dl.Stop()
+	}
+	cleanupTimer := time.NewTimer(grace)
+	select {
+	case <-done:
+		cleanupTimer.Stop()
+		if v := rec.verdict(); v != nil {
+			return v
 		}
-		// Wait a bit more for cleanup
-		cleanupTimer := time.NewTimer(2 * time.Second)
-		select {
-		case <-chatDone:
-			cleanupTimer.Stop()
-		case <-cleanupTimer.C:
-		}
+		return errChatWaitTimedOut
+	case <-cleanupTimer.C:
+		return errChatWaitTimedOut
 	}
 }
 
@@ -145,4 +184,105 @@ func (o *DownloadOrchestrator) cleanup(chatDl *chat.ChatDownloader, chatDone cha
 			}
 		}
 	}
+}
+
+// chatStatusIncomplete is the chat_status of a capture that ENDED WITHOUT
+// COMPLETING: the downloader returned an error — a Twitch VOD paging stall, an
+// IRC session that exhausted its reconnect budget, a panic — instead of running
+// out of chat to fetch.
+//
+// One machine value, and the value IS the label: both UIs render chat_status
+// verbatim (the Web details badge maps it to `warning`, the TUI's
+// chatStatusColor to ColorWarning), exactly as they do for "finished",
+// "downloading", "pending" and "unavailable". No display-string field restates
+// it. "error" was not reused: nothing writes it, and it reads as a hard failure
+// rather than an archive that stopped short.
+const chatStatusIncomplete = "incomplete"
+
+// chatOutcome carries a chat downloader's terminal error from the goroutine it
+// ran on to the orchestrator that derives chat_status from it.
+//
+// A mutex rather than a bare field because the Twitch orchestrator RELAUNCHES
+// chat after a connectivity outage: a second goroutine can be recording while
+// the first is still unwinding, and the reader is a third. The LAST run's
+// outcome wins — a job whose chat recovered after an outage is not incomplete.
+type chatOutcome struct {
+	mu  sync.Mutex
+	err error
+}
+
+// record stores one run's terminal error (nil for a clean exit).
+func (c *chatOutcome) record(err error) {
+	c.mu.Lock()
+	c.err = err
+	c.mu.Unlock()
+}
+
+// verdict returns the last recorded outcome, or nil if no run has ended.
+func (c *chatOutcome) verdict() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+// chatStatusForOutcome derives a job's terminal chat_status from what the chat
+// downloader DID, not from its message count alone.
+//
+// The outcome comes FIRST, and that ordering is the whole fix. A Twitch VOD
+// whose cursor paging stalls returns an error from pagingStalled
+// (internal/twitch/vod_chat.go) with a SHORT archive and a preserved resume
+// sidecar on disk; ranked by count that reads "finished", so both UIs showed a
+// truncated archive as complete and nothing prompted the operator to act. An
+// error means the capture stopped, not that it ran out of chat — including when
+// it stopped before the first message, which is why "unavailable" (a genuinely
+// empty chat) is only reached on a clean exit.
+func chatStatusForOutcome(messageCount int, outcome error) string {
+	switch {
+	case outcome != nil:
+		return chatStatusIncomplete
+	case messageCount == 0:
+		return "unavailable"
+	default:
+		return "finished"
+	}
+}
+
+// recordChatOutcome writes the job's terminal chat_status and message count and
+// remembers the status on the JobContext, where chatFileStatus reads it so the
+// mux path's chat-file copy cannot overwrite the verdict.
+func (o *DownloadOrchestrator) recordChatOutcome(jobCtx *JobContext, messageCount int, outcome error) {
+	status := chatStatusForOutcome(messageCount, outcome)
+	jobCtx.ChatStatus = status
+	if outcome != nil {
+		// The line that ties the verdict to the job row: pagingStalled's own
+		// Warn (internal/twitch/vod_chat.go) already says where and why it
+		// stopped, and this error's string carries that same offset/cursor/
+		// reason here; what this line adds is that the row now carries the
+		// fact. For a wait that timed out (errChatWaitTimedOut) it is the
+		// only Warn there is.
+		o.logger.Warn("chat capture did not complete; recording it as incomplete",
+			"jobID", jobCtx.Job.ID, "err", outcome, "messages", messageCount)
+	}
+	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+		"chat_status":         status,
+		"total_chat_messages": messageCount,
+	})
+}
+
+// chatFileStatus is the chat_status the mux path records when it copies a chat
+// file beside the video.
+//
+// Archiving a file means "finished" — that was the whole rule before — UNLESS
+// the downloader already reported an INCOMPLETE capture, in which case the file
+// being copied is the short one and writing "finished" over that verdict is
+// exactly the bug. Every other verdict keeps the old behaviour, "unavailable"
+// included: a resumed job whose session added no messages still archived the
+// history it inherited. A nil context is never passed today — the standalone
+// Mux action builds a real JobContext (buildJobContext, worker.go) with no
+// chat verdict on it — so the nil guard is purely defensive.
+func chatFileStatus(jobCtx *JobContext) string {
+	if jobCtx != nil && jobCtx.ChatStatus == chatStatusIncomplete {
+		return chatStatusIncomplete
+	}
+	return "finished"
 }

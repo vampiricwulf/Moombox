@@ -163,6 +163,36 @@ var errReauthRequested = errors.New("IRC session cancelled to present refreshed 
 // elapsed.
 var errKeepaliveTimeout = errors.New("twitch IRC keepalive: no response")
 
+// errServerReconnect ends an IRC session because TWITCH asked for it: the
+// server sent a RECONNECT line, which it does routinely when it takes a chat
+// edge out of service.
+//
+// Like errKeepaliveTimeout it IS compared against, with errors.Is, and that
+// comparison is the whole reason it exists. Before it, the read loop answered
+// the directive with nil — and nil is Start's CLEAN-EXIT value. The loop
+// returned, the orchestrator's chat goroutine closed its done channel, and
+// nothing relaunched chat for the rest of the job: the orchestrator relaunches
+// only when a connectivity outage is declared over. A routine maintenance
+// message therefore ended chat capture on a live stream with no error anywhere
+// to say so.
+//
+// Deliberately the keepalive's shape and not a second mechanism: this is OUR
+// reconnect, so it is logged once at the loop, charged nothing against
+// reconnectAttempts, and given no backoff of its own. Charging it would be
+// worse here than for a keepalive verdict — a server rotating its edges can
+// issue several directives in one marathon stream, none of them after the five
+// minutes of uptime that clears the counter, so ten would exhaust maxReconnects
+// and abandon chat for messages Twitch asked us to come back for. It does NOT
+// set the reauth path's `immediate`: a budget carried from EARLIER, real
+// failures is still a reason to wait, and the loop head applies it unchanged.
+//
+// The socket is force-closed with CloseNow (no close handshake) right before
+// this sentinel is returned: Twitch has already told us to leave, so waiting
+// on a peer that may not answer buys nothing, and it would otherwise cost the
+// ordinary close handshake's full peer-ack timeout — a real chat gap on every
+// RECONNECT.
+var errServerReconnect = errors.New("twitch IRC: server requested a reconnect")
+
 // errChatPartMalformed marks a part file whose BYTES were read in full and are
 // not chat JSON this package can use — a truncated write, a half-flushed
 // array, something else entirely at the path.
@@ -1407,6 +1437,22 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			cd.flush()
 			cd.logger.Warn("twitch IRC keepalive gave up on the connection; reconnecting without charging the reconnect budget",
 				"err", err, "channel", cd.channelLogin, "uptime", sessionUptime)
+			continue
+		}
+
+		// Twitch asked for this one. Same accounting as the keepalive verdict
+		// above, and for a stronger reason: a server rotating its chat edges
+		// can issue several RECONNECTs in one marathon stream, none of them
+		// after the five minutes of uptime that clears the counter, so charging
+		// them would walk the budget to zero and abandon chat for messages
+		// Twitch asked us to come back for. Flush first, exactly as every other
+		// path that re-dials does — at budget 0 the loop head's backoff block
+		// does not run, and that block is where a reconnect normally saves
+		// state.
+		if errors.Is(err, errServerReconnect) {
+			cd.flush()
+			cd.logger.Info("twitch IRC: server requested a reconnect; reconnecting without charging the reconnect budget",
+				"channel", cd.channelLogin, "uptime", sessionUptime)
 			continue
 		}
 

@@ -369,7 +369,7 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	if anyPartChat && segments[0].ChatFile != "" {
 		updates["chat_file"] = segments[0].ChatFile
 		updates["chat_filename"] = filepath.Join(filepath.Dir(relBase), filepath.Base(segments[0].ChatFile))
-		updates["chat_status"] = "finished"
+		updates["chat_status"] = chatFileStatus(jobCtx)
 	}
 
 	// Copy assets
@@ -509,7 +509,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		} else {
 			updates["chat_file"] = chatDst
 			updates["chat_filename"] = relBase + ".chat.json"
-			updates["chat_status"] = "finished"
+			updates["chat_status"] = chatFileStatus(jobCtx)
 		}
 	}
 

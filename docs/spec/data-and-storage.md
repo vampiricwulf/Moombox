@@ -223,7 +223,7 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 | video_height | INTEGER | NULL | Pixels |
 | video_fps | INTEGER | NULL | |
 | file_size | INTEGER | NULL | Bytes (int64 in Go) |
-| chat_status | TEXT | NULL | |
+| chat_status | TEXT | NULL | `pending` / `downloading` / `finished` / `unavailable` / `incomplete`; the terminal value comes from the downloader's OUTCOME (`chatStatusForOutcome`, `internal/worker/orchestrator_chat.go`), not its message count — `incomplete` means the capture stopped short |
 | total_chat_messages | INTEGER | NULL | |
 | chat_filename | TEXT | NULL | Basename |
 | chat_file | TEXT | NULL | Absolute path (added v2) |

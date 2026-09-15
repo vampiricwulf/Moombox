@@ -383,6 +383,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	if chatDl == nil && jobCtx.Config.DownloadChat {
 		chatDl = o.setupChatDownloader(ctx, jobCtx, videoInfo)
 	}
+	// chatRec carries Start's terminal error to the verdict below. Declared
+	// out here because it outlives the goroutine.
+	var chatRec chatOutcome
 	if chatDl != nil {
 		chatDone = make(chan struct{})
 		chatDl.SetOnProgress(func(p chat.ChatProgress) {
@@ -392,10 +395,14 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			defer close(chatDone)
 			defer func() {
 				if r := recover(); r != nil {
+					// A panic is an outcome too: a downloader that died
+					// mid-capture has not finished, and recording nothing here
+					// would leave a previous run's verdict standing.
+					chatRec.record(fmt.Errorf("panic in YouTube chat downloader: %v", r))
 					o.logger.Error("panic in YouTube chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
 				}
 			}()
-			chatDl.Start(ctx)
+			chatRec.record(chatDl.Start(ctx))
 		}()
 	}
 
@@ -552,18 +559,14 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		if !isVod {
 			chatDl.MarkStreamEnded()
 		}
-		o.waitForChat(chatDl, chatDone, chatWaitTimeout)
-
-		// Update chat status on job
-		chatCount := chatDl.MessageCount()
-		chatStatus := "finished"
-		if chatCount == 0 {
-			chatStatus = "unavailable"
-		}
-		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-			"chat_status":         chatStatus,
-			"total_chat_messages": chatCount,
-		})
+		// resolveChatOutcome waits for the goroutine's completion signal
+		// before reading chatRec — reading the verdict first can observe a
+		// stale nil while the real outcome is still landing (fix round 1,
+		// Important 3) — and turns an unconfirmed completion (the wait timed
+		// out) into an explicit incomplete rather than letting a nil verdict
+		// read as "finished".
+		outcome := o.resolveChatOutcome(chatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		o.recordChatOutcome(jobCtx, chatDl.MessageCount(), outcome)
 	}
 
 	// Check cancellation between download and mux — preserve staging for resume
