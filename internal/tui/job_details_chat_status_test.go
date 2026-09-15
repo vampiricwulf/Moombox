@@ -90,4 +90,44 @@ func TestFinishedJobShowsAnIncompleteChatVerdict(t *testing.T) {
 				"is for the one verdict that asks for action, not for every finished job", row.value)
 		}
 	})
+
+	// The ACTIVE job's Chat row comes from the Progress section, which is a
+	// DIFFERENT call site from the terminal row above — and it is reachable:
+	// recordChatOutcome (internal/worker) writes the verdict off the chat
+	// goroutine's own exit, independent of the video capture, so a Twitch IRC
+	// session that exhausts its reconnect budget mid-stream shows "incomplete"
+	// here while the download runs on.
+	//
+	// Mutant this kills: a refactor that special-cases the terminal path and
+	// leaves the Progress site on some other colour rule — e.g. the shared
+	// StatusColor, which knows job statuses and not chat ones, so "incomplete"
+	// falls to its default ColorWhite. The colour unit test and the terminal
+	// subtest both stay green under that; this one does not.
+	t.Run("an active job shows the same row", func(t *testing.T) {
+		m := NewJobDetailsModel()
+		m.SetSize(80, 24)
+		m.SetJob(&database.Job{
+			ID:                "j2",
+			Title:             "A live stream",
+			Platform:          "twitch",
+			Status:            database.StatusDownloading,
+			ChatStatus:        "incomplete",
+			TotalChatMessages: &count,
+		})
+
+		row := chatRow(m)
+		if row == nil {
+			t.Fatal("a running job whose chat gave up has no Chat row — the Progress section " +
+				"shows one for every other chat status")
+		}
+		if row.value != "incomplete (4211 messages)" {
+			t.Errorf("Chat row value = %q, want %q — the same text the terminal row and the Web "+
+				"badge render", row.value, "incomplete (4211 messages)")
+		}
+		if row.color != ColorWarning {
+			t.Errorf("Chat row color = %v, want ColorWarning (%v) — a chat that stopped short "+
+				"must not read as a healthy one just because the video is still downloading",
+				row.color, ColorWarning)
+		}
+	})
 }

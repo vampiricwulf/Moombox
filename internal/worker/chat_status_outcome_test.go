@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -87,7 +88,7 @@ func TestChatFileStatusDoesNotOverwriteAnIncompleteVerdict(t *testing.T) {
 		{"no verdict recorded", &JobContext{}, "finished"},
 		{"unavailable verdict still yields to an archived file", &JobContext{ChatStatus: "unavailable"}, "finished"},
 		{"finished verdict", &JobContext{ChatStatus: "finished"}, "finished"},
-		{"no context at all (standalone Mux action)", nil, "finished"},
+		{"nil context (defensive; no caller passes one today)", nil, "finished"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := chatFileStatus(tc.jobCtx); got != tc.want {
@@ -239,6 +240,86 @@ func TestResolveChatOutcomeNeverReturnsNilOnATimeout(t *testing.T) {
 	}
 	if !dl.stopped.Load() {
 		t.Error("resolveChatOutcome did not Stop() the still-running downloader once the wait timed out")
+	}
+}
+
+// stopUnwoundChatSource is a ChatSource whose Start blocks until Stop() is
+// called and then returns nil — the contract every REAL downloader honours on
+// its Stop()-exit path: the Twitch VOD downloader logs "stopped before
+// completion; resume state preserved" and returns nil
+// (internal/twitch/vod_chat.go), the Twitch IRC session returns nil once
+// IsRunning() goes false (internal/twitch/chat.go), and the YouTube chat
+// downloader returns nil from its wasCancelledOrShutdown path
+// (internal/chat/downloader.go).
+type stopUnwoundChatSource struct {
+	started  chan struct{}
+	release  chan struct{}
+	running  atomic.Bool
+	stopOnce sync.Once
+}
+
+func (s *stopUnwoundChatSource) Start(context.Context) error {
+	s.running.Store(true)
+	close(s.started)
+	<-s.release
+	s.running.Store(false)
+	return nil
+}
+func (s *stopUnwoundChatSource) Stop()             { s.stopOnce.Do(func() { close(s.release) }) }
+func (s *stopUnwoundChatSource) MarkStreamEnded()  {}
+func (s *stopUnwoundChatSource) MessageCount() int { return 5000 }
+func (s *stopUnwoundChatSource) IsRunning() bool   { return s.running.Load() }
+
+// TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut pins the OTHER half
+// of the ruling "a wait TIMEOUT never writes finished": the half that survives
+// a downloader whose Stop() works.
+//
+// TestResolveChatOutcomeNeverReturnsNilOnATimeout above covers the wedged
+// downloader — the one whose goroutine never records at all, so BOTH waits
+// expire. This one covers the case that actually happens in the field: a
+// Twitch VOD (or a YouTube replay) still paging chat when the video download
+// finishes. The orchestrator waits chatWaitTimeout, Stop()s the downloader,
+// and the downloader unwinds promptly and returns NIL — as every real
+// downloader's Stop()-exit does. The chat was still running when the job
+// finalized, so the row must not read "finished".
+//
+// Mutant: today's bare `return rec.verdict()` in the grace arm — the recorded
+// nil flows straight through and chatStatusForOutcome(5000, nil) derives
+// "finished" for a short archive, silently, with no Warn (recordChatOutcome
+// logs only for a non-nil outcome).
+func TestResolveChatOutcomeNeverReturnsNilOnceTheWaitTimedOut(t *testing.T) {
+	o := &DownloadOrchestrator{logger: discardLogger{}}
+	var rec chatOutcome
+	done := make(chan struct{})
+	dl := &stopUnwoundChatSource{started: make(chan struct{}), release: make(chan struct{})}
+
+	go func() {
+		defer close(done)
+		rec.record(dl.Start(context.Background()))
+	}()
+	<-dl.started
+
+	const grace = 2 * time.Second
+	start := time.Now()
+	got := o.resolveChatOutcome(dl, &rec, done, 20*time.Millisecond, grace)
+	elapsed := time.Since(start)
+
+	if got == nil {
+		t.Fatal("resolveChatOutcome returned nil after its first wait timed out and Stop() unwound " +
+			"the downloader — the chat WAS still running when the job finalized, and " +
+			"chatStatusForOutcome(5000, nil) writes \"finished\" over exactly that case")
+	}
+	if !errors.Is(got, errChatWaitTimedOut) {
+		t.Errorf("resolveChatOutcome = %v, want errChatWaitTimedOut — the downloader recorded no "+
+			"error of its own, so the timeout is the only thing left to report", got)
+	}
+	if status := chatStatusForOutcome(dl.MessageCount(), got); status != chatStatusIncomplete {
+		t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, chatStatusIncomplete)
+	}
+	if elapsed >= grace {
+		t.Errorf("resolveChatOutcome took %v, i.e. the whole grace window — this test is meant to "+
+			"exercise the grace select's <-done arm (Stop() unwound promptly), not its timer arm",
+			elapsed)
 	}
 }
 

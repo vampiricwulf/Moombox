@@ -108,12 +108,12 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	return dl
 }
 
-// errChatWaitTimedOut is the outcome resolveChatOutcome returns when the chat
-// goroutine's completion was never confirmed within the wait window plus its
-// cleanup grace: a downloader that is (or might still be) running when the
-// job finalizes has not completed, whatever its own eventual terminal error
-// would have been — so this must never read as "finished"/"unavailable".
-var errChatWaitTimedOut = errors.New("chat downloader did not confirm completion before the job finalized")
+// errChatWaitTimedOut is the outcome resolveChatOutcome returns once its first
+// wait has timed out and the downloader recorded no error of its own: a
+// downloader that was still running when the job finalized has not completed,
+// whatever its own eventual terminal error would have been — so this must
+// never read as "finished"/"unavailable".
+var errChatWaitTimedOut = errors.New("chat downloader was still running when the job finalized")
 
 // resolveChatOutcome waits for the chat goroutine's completion signal (done)
 // before reading rec's recorded outcome, and returns errChatWaitTimedOut
@@ -133,11 +133,15 @@ var errChatWaitTimedOut = errors.New("chat downloader did not confirm completion
 // nothing re-reads rec after this call returns.
 //
 // timeout bounds the first wait; on expiry dl is Stop()'d (if still running)
-// and grace gives its goroutine a last chance to record and close done. If
-// done still hasn't closed after that, the capture's completion is
-// unconfirmed — by definition not "finished" — so this returns
-// errChatWaitTimedOut rather than whatever rec happens to hold (typically
-// nil, since the goroutine that would record it is presumably still stuck).
+// and grace gives its goroutine a last chance to record and close done. Once
+// that first wait has expired the result is NEVER nil, whether done closes
+// inside the grace or not: the chat was still running when the job finalized,
+// which is by definition not "finished". The goroutine's own error is
+// reported when it recorded one (it is the more specific diagnosis);
+// otherwise errChatWaitTimedOut stands in. Returning a recorded nil here
+// instead would undo the whole rule, because every real downloader's
+// Stop()-exit returns nil — a VOD chat still paging when its video finished
+// would read "finished" on a short archive, silently.
 func (o *DownloadOrchestrator) resolveChatOutcome(dl ChatSource, rec *chatOutcome, done chan struct{}, timeout, grace time.Duration) error {
 	if done == nil {
 		return rec.verdict()
@@ -158,7 +162,10 @@ func (o *DownloadOrchestrator) resolveChatOutcome(dl ChatSource, rec *chatOutcom
 	select {
 	case <-done:
 		cleanupTimer.Stop()
-		return rec.verdict()
+		if v := rec.verdict(); v != nil {
+			return v
+		}
+		return errChatWaitTimedOut
 	case <-cleanupTimer.C:
 		return errChatWaitTimedOut
 	}
@@ -247,9 +254,12 @@ func (o *DownloadOrchestrator) recordChatOutcome(jobCtx *JobContext, messageCoun
 	status := chatStatusForOutcome(messageCount, outcome)
 	jobCtx.ChatStatus = status
 	if outcome != nil {
-		// The only line that names WHY the archive is short. pagingStalled's
-		// own Warn says where it stopped; this one says that the job row now
-		// carries that fact.
+		// The line that ties the verdict to the job row: pagingStalled's own
+		// Warn (internal/twitch/vod_chat.go) already says where and why it
+		// stopped, and this error's string carries that same offset/cursor/
+		// reason here; what this line adds is that the row now carries the
+		// fact. For a wait that timed out (errChatWaitTimedOut) it is the
+		// only Warn there is.
 		o.logger.Warn("chat capture did not complete; recording it as incomplete",
 			"jobID", jobCtx.Job.ID, "err", outcome, "messages", messageCount)
 	}
@@ -267,8 +277,9 @@ func (o *DownloadOrchestrator) recordChatOutcome(jobCtx *JobContext, messageCoun
 // being copied is the short one and writing "finished" over that verdict is
 // exactly the bug. Every other verdict keeps the old behaviour, "unavailable"
 // included: a resumed job whose session added no messages still archived the
-// history it inherited. A nil context is the standalone Mux action, which never
-// started chat.
+// history it inherited. A nil context is never passed today — the standalone
+// Mux action builds a real JobContext (buildJobContext, worker.go) with no
+// chat verdict on it — so the nil guard is purely defensive.
 func chatFileStatus(jobCtx *JobContext) string {
 	if jobCtx != nil && jobCtx.ChatStatus == chatStatusIncomplete {
 		return chatStatusIncomplete

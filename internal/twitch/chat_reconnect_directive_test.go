@@ -27,7 +27,14 @@ import (
 // and then parks.
 type reconnectDirectiveServer struct {
 	server *httptest.Server
-	mu     sync.Mutex
+	// stop releases every parked handler at teardown. httptest.Server.Close
+	// cannot: it forgets HIJACKED connections, and the r.Context() a websocket
+	// handler parks on is cancelled only when conn.serve returns — which it
+	// cannot do while that handler is still parked. Without this, each session
+	// leaves one goroutine and one loopback socket behind for the life of the
+	// test binary (13 after these two tests, 130 under -count=10).
+	stop chan struct{}
+	mu   sync.Mutex
 	// conns counts connections that finished the handshake AND were sent the
 	// directive, which is how the budget test below measures sessions without
 	// reading Start's internals.
@@ -42,13 +49,16 @@ func (s *reconnectDirectiveServer) sessions() int {
 
 func startReconnectDirectiveServer(t *testing.T) *reconnectDirectiveServer {
 	t.Helper()
-	s := &reconnectDirectiveServer{}
+	s := &reconnectDirectiveServer{stop: make(chan struct{})}
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
-		defer conn.Close(websocket.StatusNormalClosure, "")
+		// CloseNow rather than the close handshake: at teardown the client is
+		// already gone, and Close would wait out its five-second peer-ack
+		// timeout once per parked session.
+		defer conn.CloseNow()
 
 		for range 4 { // PASS, NICK, CAP REQ, JOIN
 			if _, _, readErr := conn.Read(r.Context()); readErr != nil {
@@ -66,14 +76,71 @@ func startReconnectDirectiveServer(t *testing.T) *reconnectDirectiveServer {
 		s.mu.Lock()
 		s.conns++
 		s.mu.Unlock()
-		<-r.Context().Done()
+		select {
+		case <-r.Context().Done():
+		case <-s.stop:
+		}
 	}))
 	t.Cleanup(s.server.Close)
+	// Registered after server.Close so it RUNS first (t.Cleanup is LIFO): the
+	// parked handlers have to be released before the server waits on them.
+	t.Cleanup(func() { close(s.stop) })
 
 	prev := constants.TwitchURLs.IRCWS
 	constants.TwitchURLs.IRCWS = "ws" + strings.TrimPrefix(s.server.URL, "http")
 	t.Cleanup(func() { constants.TwitchURLs.IRCWS = prev })
 	return s
+}
+
+// TestIRCServerReconnectBeforeTheWelcomeIsNotAnAuthDowngrade is the other half
+// of what the sentinel changed.
+//
+// noteHandshakeOutcome's trigger is "a credentialed session that HEARD from
+// Twitch and never saw RPL_WELCOME (001)". A RECONNECT arriving before the
+// welcome satisfies both halves literally, and Twitch has ruled on nothing:
+// it took a chat edge out of service, which says as much about our login as
+// a dropped socket does. Before the sentinel this was academic — the session
+// returned nil and chat ended anyway, so the latch was moot. Now chat
+// correctly survives the directive, and without a guard it survives
+// ANONYMOUSLY for the rest of the job (authRefused is cleared only by
+// Reauthenticate), losing subscriber-only messages and badges and telling the
+// operator its credentials were rejected when they never were.
+//
+// Mutant this kills: dropping `|| serverReconnected` from the
+// noteHandshakeOutcome defer's early-return guard in runIRCSession. The latch
+// is then set, AuthDowngradeLoginUnacknowledged is reported, the "continuing
+// anonymously" Warn is logged, and the next session dials with the anonymous
+// pair — each of the four assertions below names one of those.
+func TestIRCServerReconnectBeforeTheWelcomeIsNotAnAuthDowngrade(t *testing.T) {
+	// Session 1 is told to leave before it is welcomed; session 2 is welcomed
+	// normally, and is what proves the credentials are still being presented.
+	rep := startIRCReplier(t, []string{"RECONNECT"}, []string{welcomeLine})
+	logger := &recordingLogger{}
+	reports := &downgradeRecorder{}
+	cd := newDowngradeTestChatDownloader(t,
+		staticCredentials("token-one", "archiveraccount"), logger, reports.record)
+
+	runLiveIRCSession(t, cd)
+	if pass, nick := handshakeLines(t, rep.nextSession(t)); pass != "PASS oauth:token-one" || nick != "NICK archiveraccount" {
+		t.Fatalf("session 1 handshake = %q / %q, want the authenticated pair — this test only "+
+			"says anything if the session Twitch reconnected was a credentialed one", pass, nick)
+	}
+
+	if cd.authRefused.Load() {
+		t.Error("a server RECONNECT that arrived before RPL_WELCOME latched the anonymous " +
+			"fallback — Twitch took an edge out of service, it did not refuse the login")
+	}
+	reports.assertReportedExactly(t)
+	if got := logger.fallbackWarnings(); len(got) != 0 {
+		t.Errorf("fallback warnings = %q, want none — nothing about this session was degraded", got)
+	}
+
+	runLiveIRCSession(t, cd)
+	if pass, nick := handshakeLines(t, rep.nextSession(t)); pass != "PASS oauth:token-one" || nick != "NICK archiveraccount" {
+		t.Errorf("session 2 handshake = %q / %q, want the authenticated pair — the latch is "+
+			"cleared only by Reauthenticate, so a false one costs the job every subscriber-only "+
+			"message and badge from here on", pass, nick)
+	}
 }
 
 // TestIRCServerReconnectIsNotACleanExit is the session half of O1.
