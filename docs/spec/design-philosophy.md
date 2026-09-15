@@ -57,7 +57,7 @@ Moombox runs 24/7 on the user's personal machine, not a server farm. It shares r
 
 What this means in practice:
 - **Signal-driven concurrency over polling.** The database batch update system sleeps until signaled — it performs zero IO when nothing is changing. This is preferred everywhere: don't poll on a timer when you can wait for a signal.
-- **Goja VMs auto-evict when idle.** Cipher VMs hold multi-MB JavaScript runtimes in memory. These are expensive to keep around. Cipher VMs use a 3-VM LRU cache, so at most three player.js runtimes exist simultaneously. The fallback BotGuard goja-VM (when the sidecar is unavailable) evicts itself via `time.AfterFunc` when its TTL expires.
+- **Goja VMs auto-evict when idle.** Cipher VMs hold multi-MB JavaScript runtimes in memory. These are expensive to keep around. Cipher VMs use a 10-VM LRU cache, so at most ten player.js runtimes exist simultaneously. The fallback BotGuard goja-VM (when the sidecar is unavailable) evicts itself via `time.AfterFunc` when its TTL expires.
 - **BotGuard sidecar is one long-running subprocess, not per-request.** The Node + JSDOM sidecar starts once at Moombox launch and serves every PO-token request from the same V8 instance. Per-request subprocess spawning would cost 200-500ms cold-start per token; the long-running model amortises that to a one-time startup cost. The subprocess is pinned to a Windows Job Object so it dies with Moombox even on hard parent crashes.
 - **Database batch coalescing.** Updates within a 100ms window are flushed in a single transaction rather than individually. This reduces disk IO by orders of magnitude during active downloads (when many progress updates fire per second) while adding negligible latency.
 - **WebSocket broadcasts rely on upstream rate-limiting.** Job update broadcasts are not throttled in the hub — the only high-frequency caller (`OnJobChange` via `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by a 16 ms gate in `internal/worker/progress.go`, and the other callers are event-driven. An earlier per-job throttle in the hub raced against `BroadcastJobDeleted` (which is not throttled) and could resurrect deleted rows.
@@ -141,7 +141,7 @@ Example: YouTube's cipher uses obfuscated JavaScript with dynamic function names
 Some things are inherently complex and cannot be simplified without losing correctness or capability:
 
 - **Concurrent segment downloading** with catch-up parallelism, quality monitoring, and graceful degradation on quality loss.
-- **Cipher solving** with AST parsing, regex fallback, disk caching, and a 3-VM LRU memory cache with mutex-serialized compilation to prevent thundering herd.
+- **Cipher solving** with AST parsing, regex fallback, disk caching, and a 10-VM LRU memory cache with mutex-serialized compilation to prevent thundering herd.
 - **Multi-client auth fallback chains** across 6 Innertube clients with different capabilities, auth levels, and failure modes.
 - **BotGuard/PO token generation** involving challenge fetching, JavaScript VM execution, snapshot creation, and triple-layer caching.
 - **Download orchestration** managing the lifecycle of video downloaders, audio downloaders, chat downloaders, quality monitors, verification loops, and FFmpeg muxing — all running concurrently with proper cancellation propagation.
@@ -152,7 +152,7 @@ In these cases, the code is complex because the solution is genuinely complex. A
 
 A package can be gnarly internally. Its public API should be simple. Complexity that leaks across package boundaries is a design defect.
 
-The cipher package is a good example. Internally, it parses JavaScript ASTs, falls back to regex extraction, manages a 3-VM LRU cache with mutex serialization, and handles disk caching with TTL-based eviction. Externally, it exposes a function that takes a player URL and ciphered parameters and returns deciphered parameters. The consumer does not need to know about VMs, ASTs, or caches.
+The cipher package is a good example. Internally, it parses JavaScript ASTs, falls back to regex extraction, manages a 10-VM LRU cache with mutex serialization, and handles disk caching with TTL-based eviction. Externally, it exposes a function that takes a player URL and ciphered parameters and returns deciphered parameters. The consumer does not need to know about VMs, ASTs, or caches.
 
 Similarly, the BotGuard package internally manages Goja VMs, challenge endpoints, minter caching, and inflight deduplication. Externally, it provides a method to get a PO token. The YouTube service calls it without caring about the implementation.
 
@@ -235,7 +235,7 @@ In these cases, the polling interval is tuned to balance responsiveness against 
 JavaScript runtimes are the most expensive objects in the application. Two subsystems run JS:
 
 - **BotGuard** runs primarily under an embedded Node.js + JSDOM sidecar (real V8) — one long-running subprocess for the lifetime of Moombox. The sidecar's V8 heap is the largest single JS allocation in the system but it sits in a separate process so it does not compete with Go's GC for the main heap. PotProvider keeps a triple-layer in-process cache (session tokens 6h TTL, single goja-fallback minter VM with proactive refresh + auto-eviction, inflight dedup) on top of the sidecar's own internal minter cache. When the sidecar is disabled or unhealthy, the goja-VM fallback path keeps token generation working at reduced fidelity (websafe-fallback only).
-- **Cipher** uses a 3-VM Goja LRU cache keyed by player.js URL. When a fourth unique player.js is encountered, the least-recently-used VM is evicted. Compilation of new VMs is mutex-serialized to prevent thundering herd (multiple goroutines all trying to compile the same player.js simultaneously).
+- **Cipher** uses a 10-VM Goja LRU cache keyed by player.js URL. When an eleventh unique player.js is encountered, the least-recently-used VM is evicted. Compilation of new VMs is mutex-serialized to prevent thundering herd (multiple goroutines all trying to compile the same player.js simultaneously).
 
 ### Bounded Buffers
 

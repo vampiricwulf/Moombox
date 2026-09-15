@@ -105,7 +105,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 `bgutils.NewPotProvider()` creates the BotGuard PO token provider with its triple-layer cache: session cache (6h TTL), minter cache (single-minter design, dynamic TTL from BotGuard response), and inflight dedup (concurrent requests share a single generation via channel synchronization). Immediately after, when `cfg.Bgutils.UseSidecar` is true (default), `sidecar.New(...)` constructs a `Sidecar` and `Start(ctx)` launches the embedded Node.js subprocess: extract `node.exe.gz` + `sidecar.tar.gz` from `go:embed` to `%LOCALAPPDATA%/Moombox/sidecar/`, apply user-only DACL, spawn `node src/server.js` pinned to a Windows Job Object, ping/pong handshake. On success, `potProvider.SetSidecar(s)` attaches it; `PotProvider.generateAndMint` then prefers the sidecar path and falls through to the goja-only path on any sidecar error so PO-token generation never goes completely dark. Failure to start the sidecar is non-fatal — Moombox logs a warning and continues with goja-fallback. On Linux the per-platform blob (`node-linux-amd64.gz` or `node-linux-arm64.gz`) is selected at runtime; the extraction directory is platform-appropriate (e.g. `~/.local/share/moombox/sidecar/` on Linux).
 
 ### 9. Cipher Solver
-`cipher.NewSolver(cacheDir, log)` creates the YouTube signature cipher solver. Cache directory is `%TEMP%/yt-cipher`. Manages a 3-VM LRU cache keyed by `player.js` URL. Wired to `ytService.PlayerAPI.SetCipherSolver()` so format URL decryption is transparent. Uses full AST parsing with regex fallback for extraction.
+`cipher.NewSolver(cacheDir, log)` creates the YouTube signature cipher solver. Cache directory is `%TEMP%/yt-cipher`. Manages a 10-VM LRU cache keyed by `player.js` URL. Wired to `ytService.PlayerAPI.SetCipherSolver()` so format URL decryption is transparent. Uses full AST parsing with regex fallback for extraction.
 
 ### 10. Notification Manager
 `notifications.NewManager(cfg, log)` creates the notification dispatcher. Currently supports Discord webhooks. Sends notifications for: stream found, stream live, download starting, download finished, download error, auth required, trim created, update available.
@@ -191,7 +191,7 @@ internal/twitch    (10 files, ~3,200)  -- Service, GQL API, auth, HLS, IRC chat,
 internal/bgutils   (~10 files, ~1,800)  -- PO token: PotProvider + WebPoClient (sidecar primary, goja fallback)
 internal/bgutils/sidecar (5 files,~700) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
 internal/bgutils/embed   (1 file)       -- go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
-internal/cipher     (9 files, ~1,500)  -- YouTube signature cipher: AST + regex, 3-VM LRU
+internal/cipher     (9 files, ~1,500)  -- YouTube signature cipher: AST + regex, 10-VM LRU
 internal/engine    (12 files, ~2,850)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
 internal/chat       (3 files, ~1,400)  -- YouTube live chat downloader (polling + batching)
 internal/worker    (23 files, ~6,500)  -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
@@ -600,11 +600,11 @@ The PO token system uses three in-process cache layers to minimize expensive Bot
 
 Each cache layer uses `time.AfterFunc` for automatic eviction on TTL expiry. The session cache key is the content binding string. The minter cache key is the challenge hash.
 
-### Cipher 3-VM LRU
+### Cipher 10-VM LRU
 
 YouTube signature decryption requires executing JavaScript from `player.js`. This is expensive (multi-MB Goja VM):
 
-- Maximum 3 VMs cached simultaneously (memory-constrained)
+- Maximum 10 VMs cached simultaneously (`solverCacheSize`; ~30-50 MB each, so ~500 MB worst case)
 - Keyed by `player.js` URL (changes when YouTube deploys new player versions)
 - Mutex-serialized compilation: only one goroutine compiles a given player.js at a time, others wait
 - Extraction: full AST parsing of the JavaScript to find cipher functions, with regex fallback if AST fails
