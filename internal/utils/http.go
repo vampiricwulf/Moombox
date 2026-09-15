@@ -76,8 +76,8 @@ func reportConnResult(failed bool) {
 // IMPORTANT: The caller receives a cancel function that MUST be called after
 // the response body has been fully read. The timeout context is kept alive
 // so the caller can read resp.Body without "context canceled" errors.
-func FetchWithTimeout(ctx context.Context, url string, timeout time.Duration, headers map[string]string) (*http.Response, context.CancelFunc, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+func FetchWithTimeout(parent context.Context, url string, timeout time.Duration, headers map[string]string) (*http.Response, context.CancelFunc, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -91,7 +91,24 @@ func FetchWithTimeout(ctx context.Context, url string, timeout time.Duration, he
 
 	resp, err := utilsHTTPClient.Do(req)
 	if err != nil {
-		reportConnResult(true)
+		// A request the CALLER abandoned (shutdown, a superseded probe, a
+		// cancelled job) says nothing about the network — recording it
+		// drags the connectivity oracle toward "offline" on every clean
+		// stop. The check is against the caller's context on purpose: the
+		// derived one above carries this helper's own timeout, and a
+		// request that genuinely ran out of time IS network evidence.
+		//
+		// A parent that carries its OWN deadline is deliberately treated
+		// the same as a cancellation: a caller-imposed budget running out
+		// is a caller abort, not transport evidence, and the oracle
+		// converges from the engine sites and its own probes regardless.
+		// The two real callers that hand this helper a deadline parent are
+		// worker/strategies.go's refreshCtx (via GetVideoInfo into
+		// internal/youtube/watch_page.go) and monitor/feed.go's
+		// walkCtx/archiveCtx.
+		if parent.Err() == nil {
+			reportConnResult(true)
+		}
 		cancel()
 		return nil, nil, err
 	}

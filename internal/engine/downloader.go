@@ -58,7 +58,6 @@ const (
 	ParallelDownloads    = 6  // Bounded parallel downloads during catch-up
 	DefaultRetryDelayCap = 60 // seconds
 	HeadProbeInterval    = 5 * time.Second
-	SegmentTimeout       = 30 * time.Second
 	// DefaultMaxTimeout is the fallback for DownloaderOptions.MaxTimeout (the
 	// operator-configurable config.MaximumTimeout): how long the DASH loop keeps
 	// waiting/verifying for the next segment before force-finalizing, even when
@@ -108,6 +107,14 @@ const (
 	// not memory — workers simply wait for the head segment to land.
 	catchUpBufferBytes = 256 << 20
 )
+
+// SegmentTimeout bounds a single segment/chunk/probe fetch's derived
+// context (fetchSegment, fetchChunk, ProbeSegmentAvailable each run
+// context.WithTimeout(parent, SegmentTimeout)). A package var rather than a
+// const purely so a test can shrink it under t.Cleanup-restored assignment
+// to exercise a genuine derived-context timeout without an actual 30s wait;
+// production code never mutates it.
+var SegmentTimeout = 30 * time.Second
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
 // from the central UA constants so version bumps stay in lockstep with the
@@ -271,31 +278,6 @@ type DownloadGap struct {
 	Stream string
 }
 
-// HealthUpdate is a periodic snapshot of downloader-level metrics. Audit
-// reports/engine.md #31 — surfaces aggregate health to the UI / TUI for
-// the long-running live-stream case where per-segment OnProgress lines
-// don't show momentum at a glance. Emitted from the same call sites as
-// OnProgress (no separate ticker), so the cadence is "every segment
-// or progress flush".
-type HealthUpdate struct {
-	// ThroughputBps is the average bytes-per-second since the
-	// downloader started accumulating bytes. Zero when no bytes
-	// have flowed yet.
-	ThroughputBps int64
-	// ETA is the projected remaining duration to the configured EndSeq
-	// (DASH/HLS) or TotalBytes (direct VOD). Zero when the endpoint is
-	// unbounded (live-without-segment-cap).
-	ETA time.Duration
-	// RetryCount is the cumulative non-terminal retry count (4xx/5xx
-	// transient errors that the segment fetcher backed off through).
-	RetryCount int
-	// LastError is the most recent non-terminal error message, or
-	// empty when no retries have happened recently. Provided for at-a-
-	// glance diagnostics — a stable RetryCount plus a populated
-	// LastError signals "transient errors but recovering".
-	LastError string
-}
-
 // DownloaderLogger is the interface for downloader logging.
 type DownloaderLogger interface {
 	Debug(msg string, args ...any)
@@ -447,23 +429,19 @@ type SegmentDownloader struct {
 	// catchUpBufferBytes" — production code never sets this.
 	catchUpBufferBytesOverride int
 
-	// startedAt + transientRetries + lastTransientErr feed HealthUpdate
-	// snapshots. transientRetries / lastTransientErrMu are read-mostly
-	// in the segment fetcher (each non-terminal error is one increment
-	// + one store), so a plain mutex is fine.
-	startedAt        atomicTime
-	transientRetries atomic.Int64
-	lastTransientErr atomic.Pointer[string]
+	// onResumeSaved is a TEST SEAM, like delays and
+	// catchUpBufferBytesOverride: production code never sets it. When
+	// non-nil, saveResume calls it with the LastSeq it just persisted, after
+	// the sidecar rename succeeded. It is the only way a test can count
+	// sidecar WRITES — a clean end sets streamEnded and the loop's defer
+	// then ClearResume()s the file out from under any on-disk assertion.
+	onResumeSaved func(lastSeq int)
 
 	// Callbacks
 	OnStart    func(seq int, resuming bool)
 	OnProgress func(p DownloadProgress)
 	OnGap      func(g DownloadGap)
 	OnFinish   func()
-	// OnHealthUpdate is called with an aggregate-metrics snapshot
-	// alongside each OnProgress emission. Audit reports/engine.md #31.
-	// Optional; nil to opt out.
-	OnHealthUpdate func(h HealthUpdate)
 	// OnCipherFailure is called once on first 403 before any bytes
 	// written (likely cipher rotation). The callback should
 	// invalidate any cached cipher solver and OPTIONALLY return a
@@ -522,38 +500,6 @@ func (d *SegmentDownloader) getPoToken() string {
 		return *p
 	}
 	return d.opts.PoToken
-}
-
-// emitHealthUpdate fires OnHealthUpdate with a snapshot of the current
-// rolling metrics. Called from every site that fires OnProgress so the
-// UI gets aggregate health on the same cadence. Audit reports/engine.md
-// #31. Nil-callback safe.
-func (d *SegmentDownloader) emitHealthUpdate(p DownloadProgress) {
-	if d.OnHealthUpdate == nil {
-		return
-	}
-	var h HealthUpdate
-	bytes := d.bytesWritten.Load()
-	if started := d.startedAt.Load(); !started.IsZero() && bytes > 0 {
-		elapsed := time.Since(started).Seconds()
-		if elapsed > 0 {
-			h.ThroughputBps = int64(float64(bytes) / elapsed)
-		}
-		// ETA: use Total/Percent for segment-based downloads, or
-		// TotalBytes/Bytes for direct VOD chunked downloads.
-		if p.Total > 0 && p.Seq > 0 && p.Total > p.Seq {
-			perSeq := elapsed / float64(p.Seq)
-			h.ETA = time.Duration(perSeq*float64(p.Total-p.Seq)) * time.Second
-		} else if p.TotalBytes > 0 && bytes > 0 && p.TotalBytes > bytes {
-			perByte := elapsed / float64(bytes)
-			h.ETA = time.Duration(perByte*float64(p.TotalBytes-bytes)) * time.Second
-		}
-	}
-	h.RetryCount = int(d.transientRetries.Load())
-	if msg := d.lastTransientErr.Load(); msg != nil {
-		h.LastError = *msg
-	}
-	d.OnHealthUpdate(h)
 }
 
 // emitActivity reports the current wait reason to OnActivity. Nil-callback safe.
@@ -897,10 +843,6 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	if d.OnStart != nil {
 		d.OnStart(int(d.currentSeq.Load()), resuming)
 	}
-
-	// Mark the start time so HealthUpdate can derive throughput / ETA.
-	// Audit reports/engine.md #31.
-	d.startedAt.StoreNow()
 
 	// Run download loop
 	if d.opts.IsDirectURL {

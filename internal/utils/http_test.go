@@ -190,3 +190,97 @@ type recordingReporter struct {
 
 func (r *recordingReporter) ReportSuccess(string) { r.successes.Add(1) }
 func (r *recordingReporter) ReportFailure(string) { r.failures.Add(1) }
+
+// TestFetchWithTimeoutCallerCancelIsNotAFailure pins T4-35 for the shared
+// helper: the connectivity oracle must not learn "the network is down" from
+// a shutdown or a superseded probe cancelling its own fetch.
+//
+// Mutant this kills: reporting unconditionally (failures becomes 1).
+func TestFetchWithTimeoutCallerCancelIsNotAFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	rec := &recordingReporter{}
+	SetConnectivityReporter(rec)
+	t.Cleanup(func() { SetConnectivityReporter(nil) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	if _, _, err := FetchWithTimeout(ctx, srv.URL, 5*time.Second, nil); err == nil {
+		t.Fatal("FetchWithTimeout on a cancelled context returned nil error")
+	}
+	cancel()
+
+	if got := rec.failures.Load(); got != 0 {
+		t.Errorf("failures = %d, want 0 — a caller cancel was recorded as a network failure", got)
+	}
+}
+
+// TestFetchWithTimeoutTransportErrorIsAFailure is the other half: a real
+// transport failure with a healthy caller must still be reported.
+//
+// Mutant this kills: a guard that suppresses every error outright (failures
+// drops to 0). It does NOT discriminate a parent guard from one written
+// against the DERIVED context: the connection reset here happens instantly,
+// long before either context's deadline, so both are still alive and a
+// derived-context guard reports identically to the correct one.
+// TestFetchWithTimeoutDerivedTimeoutIsAFailure below is what kills that
+// mutant.
+func TestFetchWithTimeoutTransportErrorIsAFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("test server does not support hijacking")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	rec := &recordingReporter{}
+	SetConnectivityReporter(rec)
+	t.Cleanup(func() { SetConnectivityReporter(nil) })
+
+	if _, _, err := FetchWithTimeout(t.Context(), srv.URL, 5*time.Second, nil); err == nil {
+		t.Fatal("FetchWithTimeout against a hang-up server returned nil error")
+	}
+	if got := rec.failures.Load(); got != 1 {
+		t.Errorf("failures = %d, want 1 — a transport error with a healthy caller IS network evidence", got)
+	}
+}
+
+// TestFetchWithTimeoutDerivedTimeoutIsAFailure is the discriminator the two
+// tests above cannot be: it is the only scenario where the parent
+// (t.Context()) stays alive but the DERIVED context — trimmed here to 20ms
+// — is the one that expires, against a server that never answers. A
+// request that genuinely ran out of time with a healthy caller IS network
+// evidence and must still be reported.
+//
+// Mutant this kills: guarding on the DERIVED context instead of the parent
+// — failures would stay 0, exactly backwards from what a guard against
+// caller-cancellation is supposed to catch.
+func TestFetchWithTimeoutDerivedTimeoutIsAFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	rec := &recordingReporter{}
+	SetConnectivityReporter(rec)
+	t.Cleanup(func() { SetConnectivityReporter(nil) })
+
+	if _, _, err := FetchWithTimeout(t.Context(), srv.URL, 20*time.Millisecond, nil); err == nil {
+		t.Fatal("FetchWithTimeout against a server that never answers returned nil error")
+	}
+	if got := rec.failures.Load(); got != 1 {
+		t.Errorf("failures = %d, want 1 — a derived-context timeout with a healthy caller IS network evidence", got)
+	}
+}

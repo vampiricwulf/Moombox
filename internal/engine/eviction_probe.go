@@ -112,8 +112,8 @@ func probeWithRetry(ctx context.Context, probe func(ctx context.Context, seq int
 // normal download has already finished (successfully or not). The one
 // exception is noteHeadSeqFromResponse, which is harmless and correct here
 // too — GVS attaches X-Head-Seqnum to every response, success or error.
-func (d *SegmentDownloader) ProbeSegmentAvailable(ctx context.Context, seq int) (bool, []byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
+func (d *SegmentDownloader) ProbeSegmentAvailable(parent context.Context, seq int) (bool, []byte, error) {
+	ctx, cancel := context.WithTimeout(parent, SegmentTimeout)
 	defer cancel()
 
 	segURL := applyPoTokenQuery(d.buildSegmentURL(seq), d.getPoToken())
@@ -126,7 +126,7 @@ func (d *SegmentDownloader) ProbeSegmentAvailable(ctx context.Context, seq int) 
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return false, nil, err
 	}
 	reportSuccess("engine/fetch")

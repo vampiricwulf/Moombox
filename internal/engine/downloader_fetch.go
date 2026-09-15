@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -136,9 +137,83 @@ func reportSuccess(tag string) {
 	}
 }
 
+// reportFetchFailure records a connectivity failure unless the CALLER's
+// context is already done. A cancelled download (shutdown, user cancel,
+// quality split, superseded refresh) kills its in-flight requests by design,
+// and counting those as network failures drags the connectivity oracle
+// toward "offline" on every clean stop. Every fetch below derives a
+// per-request context from its caller's, so the guard must ask the parent:
+// the derived one carries the request deadline, and a request that genuinely
+// timed out IS evidence.
+func reportFetchFailure(parent context.Context, tag string) {
+	if parent.Err() != nil {
+		return
+	}
+	reportFailure(tag)
+}
+
+// readBody reads resp.Body, returns at most capBytes, and pre-allocates the
+// result when the server declared a usable Content-Length: 0 < ContentLength
+// <= capBytes (a declared length equal to the cap — the common 206-chunk
+// case, where ContentLength == end-start+1 == the requested range size —
+// takes the sized path too, not just a strictly smaller one).
+//
+// Segment and chunk bodies run 200 KB - 5 MB. io.ReadAll starts at 512 bytes
+// and grows by ~1.25x, so an unsized read of a 4 MB segment copies the body
+// through ~20 reallocations — about twice the final size in garbage — on
+// every one of the thousands of segments a long recording fetches.
+//
+// The sized path probes one byte past the declared length (clamped so the
+// probe itself never exceeds capBytes, which matters when the declaration
+// equals the cap) before trusting it outright. Fix round 1 tested the
+// hypothesis that a read landing exactly on Content-Length defeats
+// connection reuse: it does not (see TestFetchSegmentReusesConnection) —
+// net/http's body wrapper already surfaces io.EOF on the same Read call
+// that drains a body to its own declared Content-Length. What the extra
+// byte buys instead is correctness when Content-Length UNDERSTATES the real
+// body: a scenario reachable only through a hand-built *http.Response (in
+// production, net/http itself never hands out more bytes than the header
+// declared), where it distinguishes "the body ended exactly where declared"
+// (the probe hits EOF early) from "there's more" (the probe fills
+// completely) — in the latter case the remainder is read on the bounded
+// path below, up to capBytes.
+//
+// A body with no declared length (chunked, or transparently decompressed) or
+// one declaring more than capBytes falls back to today's bounded io.ReadAll.
+func readBody(resp *http.Response, capBytes int64) ([]byte, error) {
+	n := resp.ContentLength
+	if n <= 0 || n > capBytes {
+		return io.ReadAll(io.LimitReader(resp.Body, capBytes))
+	}
+	probeCap := n + 1
+	if probeCap > capBytes {
+		probeCap = capBytes // n == capBytes: the probe must not exceed the ceiling
+	}
+	buf := make([]byte, 0, probeCap)
+	for len(buf) < cap(buf) {
+		m, err := resp.Body.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+m]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return buf, err
+		}
+	}
+	remaining := capBytes - int64(len(buf))
+	if remaining <= 0 {
+		// n == capBytes and the probe already filled to the ceiling.
+		return buf, nil
+	}
+	// The body outran its declared Content-Length: finish reading on the
+	// bounded path so the real data (up to capBytes) is still returned.
+	rest, err := io.ReadAll(io.LimitReader(resp.Body, remaining))
+	return append(buf, rest...), err
+}
+
 // fetchSegment downloads a single segment (or playlist) by URL.
-func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
+func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(parent, SegmentTimeout)
 	defer cancel()
 
 	// Apply GVS PO token to segment URL (query mode: ?pot=token)
@@ -152,7 +227,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return nil, 0, err
 	}
 	reportSuccess("engine/fetch")
@@ -177,7 +252,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBodyBytes))
+	data, err := readBody(resp, maxSegmentBodyBytes)
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -185,7 +260,13 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 	return data, resp.StatusCode, nil
 }
 
-// fetchSegmentWithRetry attempts to fetch a segment with retries and exponential backoff.
+// fetchSegmentWithRetry attempts to fetch a segment with retries and two
+// different backoff ramps, neither of them exponential across the whole
+// function: the 403-with-refresh path doubles (singleGoneRetry << attempt —
+// 500ms/1s/2s/4s, sized to outlive credentialRefreshCooldown), while every
+// other transient failure waits a LINEAR 5s x (attempt+1) — 5s, 10s, 15s, 20s
+// over the default MaxSegmentRetries=5, with the final attempt's sleep
+// skipped because no fetch follows it.
 // Returns:
 //   - (data, nil): success.
 //   - (nil, ErrSegmentPermanent): segment is gone for good (403/410). Don't retry.
@@ -390,6 +471,13 @@ func (d *SegmentDownloader) noteHeadSeqFromProbe(n int) {
 	}
 }
 
+// errNoHeadSeqUsable marks a probe that got an HTTP RESPONSE the fallback
+// probe could plausibly improve on: no X-Head-Seqnum header, or one that
+// does not parse. A TRANSPORT error — no response at all (DNS, refused,
+// reset, timeout) — is deliberately NOT this: during an outage every probe
+// fails the same way, so a fallback only doubles the doomed round-trips.
+var errNoHeadSeqUsable = errors.New("no usable X-Head-Seqnum header")
+
 // probeHeadSequence discovers the current live head segment using a high sequence GET probe.
 // YouTube returns the X-Head-Seqnum header on GET requests to a non-existent segment.
 //
@@ -398,32 +486,38 @@ func (d *SegmentDownloader) noteHeadSeqFromProbe(n int) {
 //  1. First attempt: probe at sequence 999,999,999. This is well past any
 //     real live segment number and YouTube has historically responded with
 //     X-Head-Seqnum so we discover the live edge in one round-trip.
-//  2. Fallback: if the first probe returns no X-Head-Seqnum (server changed
-//     behavior, rejected the absurdly high number, or returned an opaque
-//     error page) AND we already have a usable currentSeq, retry at
-//     currentSeq+1000 — close enough to be plausible while still being
-//     ahead of the head.
+//  2. Fallback: if the first probe ANSWERED but carried no usable
+//     X-Head-Seqnum (server changed behavior, rejected the absurdly high
+//     number, or returned an opaque error page) AND we already have a usable
+//     currentSeq, retry at currentSeq+1000 — close enough to be plausible
+//     while still being ahead of the head. A transport error (no response at
+//     all) skips the fallback: the second probe would fail the same way.
 //
 // The fallback only fires when currentSeq > 0 because pre-first-segment
 // downloads have no anchor to extrapolate from.
 func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) {
-	if seq, err := d.probeHeadAt(ctx, 999999999); err == nil {
+	seq, err := d.probeHeadAt(ctx, 999999999)
+	if err == nil {
 		return seq, nil
-	} else if cur := int(d.currentSeq.Load()); cur > 0 {
-		// Fallback to a sane near-future probe. Do not propagate the first
-		// error — we'll surface the fallback's outcome instead.
-		return d.probeHeadAt(ctx, cur+1000)
-	} else {
-		return -1, err
 	}
+	// Fallback only when the edge ANSWERED and the answer was unusable. A
+	// transport error means the network is down or the host is unreachable,
+	// and a second probe to the same host fails identically — during an
+	// outage that doubled every probe cycle's round-trips for nothing.
+	// Do not propagate the first error past the fallback — surface the
+	// fallback's own outcome instead.
+	if cur := int(d.currentSeq.Load()); cur > 0 && errors.Is(err, errNoHeadSeqUsable) {
+		return d.probeHeadAt(ctx, cur+1000)
+	}
+	return -1, err
 }
 
 // probeHeadAt issues a single head-discovery GET at the given probe sequence
 // and parses the X-Head-Seqnum response header.
-func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int, error) {
+func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (int, error) {
 	probeURL := d.buildSegmentURL(probeSeq)
 	probeURL = applyPoTokenQuery(probeURL, d.getPoToken())
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
@@ -434,7 +528,7 @@ func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int,
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return -1, err
 	}
 	reportSuccess("engine/fetch")
@@ -448,12 +542,12 @@ func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int,
 
 	headSeqStr := resp.Header.Get("X-Head-Seqnum")
 	if headSeqStr == "" {
-		return -1, fmt.Errorf("no X-Head-Seqnum header")
+		return -1, errNoHeadSeqUsable
 	}
 
 	headSeq, err := strconv.Atoi(headSeqStr)
 	if err != nil {
-		return -1, fmt.Errorf("parse X-Head-Seqnum: %w", err)
+		return -1, fmt.Errorf("%w: parse %q: %v", errNoHeadSeqUsable, headSeqStr, err)
 	}
 
 	return headSeq, nil
@@ -467,8 +561,8 @@ func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int,
 // behavior unconditionally io.Copy'd the body to io.Discard first, which on
 // a non-Range-supporting CDN meant pulling a multi-GB VOD just to throw it
 // away (audit reports/engine.md Finding 14).
-func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
@@ -480,7 +574,7 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return 0
 	}
 	reportSuccess("engine/fetch")
@@ -545,8 +639,8 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 }
 
 // fetchChunk downloads a single byte range from the direct URL.
-func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
+func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(parent, SegmentTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
@@ -558,7 +652,7 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		reportFailure("engine/fetch")
+		reportFetchFailure(parent, "engine/fetch")
 		return nil, 0, err
 	}
 	reportSuccess("engine/fetch")
@@ -579,14 +673,18 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 	// Bound the 206 read to the requested range size — a correct server sends
 	// exactly end-start+1 bytes, and a broken one must not be able to balloon
 	// memory past it (mirrors the maxIgnoredRangeBodyBytes cap on the 200 path).
-	data, err := io.ReadAll(io.LimitReader(resp.Body, end-start+1))
+	data, err := readBody(resp, end-start+1)
 	if err == nil {
-		// LimitReader returns EOF the instant its counter hits 0, WITHOUT the
-		// trailing Read that lets net/http observe the body's own io.EOF — so
-		// the connection is marked non-reusable and a fresh TCP+TLS handshake
-		// is paid per 5MB chunk (thousands over a large VOD) under HTTP/1.1.
-		// A bounded drain triggers that EOF-observing read (a correct server
-		// has 0 bytes left) so the socket returns to the idle pool.
+		// A correct server declares Content-Length == end-start+1, so
+		// readBody takes its sized path and observes the body's own io.EOF
+		// itself while reading (see readBody's doc above +
+		// TestFetchSegmentReusesConnection) — the connection already
+		// returns to the idle pool without further help. This drain is
+		// belt-and-braces for the unsized fallback: when Content-Length is
+		// absent or declares more than end-start+1, readBody falls through
+		// to the bounded io.ReadAll(io.LimitReader(...)) path, which can
+		// return before net/http has observed the body's own EOF and would
+		// leave the connection non-reusable without this drain.
 		io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 	}
 	return data, resp.StatusCode, err

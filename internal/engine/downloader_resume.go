@@ -190,6 +190,10 @@ func (d *SegmentDownloader) saveResume() {
 	if err := os.Rename(tmpFile, d.opts.ResumeFile); err != nil {
 		d.logger.Warn("[Downloader] Failed to rename resume file", "from", tmpFile, "to", d.opts.ResumeFile, "error", err)
 		os.Remove(tmpFile)
+		return
+	}
+	if d.onResumeSaved != nil {
+		d.onResumeSaved(state.LastSeq)
 	}
 }
 
