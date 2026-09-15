@@ -34,6 +34,17 @@ const (
 	PlatformTwitch  Platform = "twitch"
 )
 
+// cookieJarStatSettle is how long a file must have been untouched before its
+// (size, mtime) pair may be memoised — git's "racily clean" rule, for the
+// same reason. cookies.txt has writers that write it twice inside one
+// filesystem timestamp tick: the verify-and-roll-back pass writes the new set,
+// verifies it, and restores the previous one, and a restore that differs only
+// in expiry digits has the SAME byte length. Trusting the pair in that window
+// would leave the jar holding credentials the file no longer contains. The
+// cost of the rule is one extra read of a ~10 KB file during the two seconds
+// after a write — which is what every pass does today.
+const cookieJarStatSettle = 2 * time.Second
+
 // cookieEntry is one cookie's stored state: the value plus the two fields the
 // jar needs to reason about identity and lifetime.
 //
@@ -74,7 +85,15 @@ type CookieJar struct {
 	youtube  map[string]cookieEntry // name -> entry
 	twitch   map[string]cookieEntry // name -> entry
 	filePath string
-	logger   cookieJarLogger // optional; set via SetLogger
+	// loadedSize/loadedMod describe the file Load last parsed; loadedMemo
+	// says whether that pair may be trusted. All three are written only by
+	// Load, under j.mu, and left untouched by loadFrom: a caller-supplied
+	// buffer changes what the in-memory maps hold but not what is on disk,
+	// so the last real read's (size, mtime) fact stays valid.
+	loadedSize int64
+	loadedMod  time.Time
+	loadedMemo bool
+	logger     cookieJarLogger // optional; set via SetLogger
 }
 
 // Essential YouTube cookies needed for authentication.
@@ -189,7 +208,29 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 //
 // The jar loads what the file says. Expiry is a diagnostic
 // (ExpiredAuthCookiesFor / AuthCookieHorizonFor), not a gate.
+//
+// Load re-reads the file only when it has actually changed. A stat whose
+// (size, mtime) match the pair recorded by the last successful parse — and
+// only when that pair was outside cookieJarStatSettle — returns immediately;
+// everything else reads and parses as before. Both YouTube extraction entry
+// points SyncCookies (internal/youtube/service.go and player_api_strategy.go),
+// so the file was read and parsed twice per extraction, forever, for an
+// answer that had not changed.
 func (j *CookieJar) Load(filePath string) error {
+	// Stat FIRST: a file that has been deleted must fall through to the
+	// read below and clear the jar, not be served from a memo.
+	if st, statErr := os.Stat(filePath); statErr == nil && st.Mode().IsRegular() {
+		j.mu.RLock()
+		unchanged := j.loadedMemo &&
+			j.filePath == filePath &&
+			j.loadedSize == st.Size() &&
+			j.loadedMod.Equal(st.ModTime())
+		j.mu.RUnlock()
+		if unchanged {
+			return nil
+		}
+	}
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -198,6 +239,7 @@ func (j *CookieJar) Load(filePath string) error {
 			j.filePath = filePath
 			j.youtube = make(map[string]cookieEntry)
 			j.twitch = make(map[string]cookieEntry)
+			j.loadedMemo = false
 			j.mu.Unlock()
 			return nil
 		}
@@ -205,6 +247,19 @@ func (j *CookieJar) Load(filePath string) error {
 	}
 
 	j.loadFrom(data, filePath)
+
+	// Stat AFTER the read, not before: a write that landed while we were
+	// reading leaves an mtime newer than the bytes we hold, and the settle
+	// check then refuses to memoise it.
+	if st, statErr := os.Stat(filePath); statErr == nil && st.Mode().IsRegular() {
+		j.mu.Lock()
+		if j.filePath == filePath {
+			j.loadedSize = st.Size()
+			j.loadedMod = st.ModTime()
+			j.loadedMemo = time.Since(st.ModTime()) >= cookieJarStatSettle
+		}
+		j.mu.Unlock()
+	}
 	return nil
 }
 
@@ -340,6 +395,14 @@ func (j *CookieJar) loadFrom(data []byte, filePath string) {
 	j.filePath = filePath
 	j.youtube = youtube
 	j.twitch = twitch
+	// loadedSize/loadedMod/loadedMemo are deliberately left alone here. They
+	// describe the (size, mtime) pair Load last actually stat'd for filePath,
+	// which is still an accurate fact about the file on disk even though this
+	// call replaced the in-memory maps from a caller-supplied buffer instead
+	// of a read. Clearing the memo here would mean a Load immediately after a
+	// loadFrom always re-reads a file that has not changed since Load's last
+	// pass — the opposite of what the short-circuit exists for. Load itself
+	// re-records the pair after every real read, which keeps it honest.
 	j.mu.Unlock()
 }
 
