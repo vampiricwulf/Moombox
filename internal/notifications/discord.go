@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
@@ -29,6 +31,14 @@ const (
 	// 30s sleep. Two large Retry-After waits would exceed it — a webhook
 	// still rate-limited after one honored wait gives up instead.
 	discordMaxSleepTotal = 30 * time.Second
+	// discordErrBodyBytes bounds how much of a rejected webhook's response
+	// body is quoted back in the error. Discord's 4xx bodies are small JSON
+	// objects naming what it refused ({"message": "Unknown Webhook", "code":
+	// 10015}); without them an operator sees only "discord webhook returned
+	// 400" and has nothing to act on. An error PAGE, though, can be
+	// arbitrarily large, and this error reaches log files and SendTest's HTTP
+	// response.
+	discordErrBodyBytes = 256
 )
 
 // discordRetryBackoff is the inter-attempt sleep schedule for transport
@@ -120,7 +130,7 @@ func (d *DiscordWebhook) sendOnce(title, description string, color int, fields [
 	if err != nil {
 		return err
 	}
-	status, retryAfter, err := d.post(body)
+	status, retryAfter, snippet, err := d.post(body)
 	switch {
 	case err != nil:
 		return fmt.Errorf("discord webhook request: %w", err)
@@ -129,7 +139,7 @@ func (d *DiscordWebhook) sendOnce(title, description string, color int, fields [
 	case status == http.StatusTooManyRequests:
 		return fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
 	default:
-		return fmt.Errorf("discord webhook returned %d", status)
+		return discordStatusErr(status, snippet)
 	}
 }
 
@@ -149,7 +159,7 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	var lastErr error
 	var slept time.Duration
 	for attempt := 1; ; attempt++ {
-		status, retryAfter, err := d.post(body)
+		status, retryAfter, snippet, err := d.post(body)
 
 		var delay time.Duration
 		switch {
@@ -172,10 +182,10 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 			lastErr = fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
 			delay = time.Duration(secs * float64(time.Second))
 		case status >= 500:
-			lastErr = fmt.Errorf("discord webhook returned %d", status)
+			lastErr = discordStatusErr(status, snippet)
 			delay = discordRetryBackoff[min(attempt-1, len(discordRetryBackoff)-1)]
 		default:
-			return fmt.Errorf("discord webhook returned %d", status)
+			return discordStatusErr(status, snippet)
 		}
 
 		if attempt == discordMaxAttempts {
@@ -192,15 +202,45 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	}
 }
 
+// discordErrSnippet renders a response-body prefix as a single-line, printable
+// error fragment. The body is REMOTE input that lands in log lines and in
+// SendTest's HTTP response, so newlines (which would forge a log line), other
+// control characters, and the replacement rune a truncated multi-byte tail
+// decodes to all collapse to spaces; runs of whitespace collapse to one.
+func discordErrSnippet(b []byte) string {
+	var sb strings.Builder
+	sb.Grow(len(b))
+	for _, r := range string(b) {
+		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+			sb.WriteByte(' ')
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return strings.Join(strings.Fields(sb.String()), " ")
+}
+
+// discordStatusErr renders a non-2xx webhook response, quoting the body prefix
+// when Discord sent one. Used by every site that reports a status — 4xx and
+// 5xx alike: the 5xx text is what an operator sees after the retry budget is
+// spent, which is precisely when the reason matters.
+func discordStatusErr(status int, snippet string) error {
+	if snippet == "" {
+		return fmt.Errorf("discord webhook returned %d", status)
+	}
+	return fmt.Errorf("discord webhook returned %d: %s", status, snippet)
+}
+
 // post performs one webhook POST attempt, returning the HTTP status (0 on
-// transport error) and the Retry-After header value.
-func (d *DiscordWebhook) post(body []byte) (status int, retryAfter string, err error) {
+// transport error), the Retry-After header value, and — for a >=400 status —
+// a sanitised prefix of the response body.
+func (d *DiscordWebhook) post(body []byte) (status int, retryAfter, snippet string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), discordTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(body))
 	if err != nil {
-		return 0, "", fmt.Errorf("create discord request: %w", err)
+		return 0, "", "", fmt.Errorf("create discord request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -213,13 +253,18 @@ func (d *DiscordWebhook) post(body []byte) (status int, retryAfter string, err e
 		// through here).
 		var uerr *url.Error
 		if errors.As(err, &uerr) {
-			return 0, "", fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
+			return 0, "", "", fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
 		}
-		return 0, "", err
+		return 0, "", "", err
 	}
 	defer func() {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
-	return resp.StatusCode, resp.Header.Get("Retry-After"), nil
+	if resp.StatusCode >= 400 {
+		// Read the reason BEFORE the deferred drain throws the rest away.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, discordErrBodyBytes))
+		snippet = discordErrSnippet(b)
+	}
+	return resp.StatusCode, resp.Header.Get("Retry-After"), snippet, nil
 }

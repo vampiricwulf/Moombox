@@ -239,3 +239,71 @@ func TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter(t *testing.T) {
 		})
 	}
 }
+
+// TestDiscordWebhook4xxErrorQuotesTheBody pins T4-35: a rejected webhook must
+// say WHY. Discord's 4xx bodies name the offending field
+// ({"embeds": ["Must be 10 or fewer in length."]}); without them an operator
+// sees only "discord webhook returned 400", which is unactionable.
+//
+// Mutants this fails on:
+//   - draining the body into io.Discard without capturing it: no quote.
+//   - quoting it raw: the embedded newline survives, and a remote body that
+//     can forge a log line is a log-injection vector.
+func TestDiscordWebhook4xxErrorQuotesTheBody(t *testing.T) {
+	shrinkBackoff(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusBadRequest)
+		io.WriteString(rw, "{\"embeds\":\n[\"Must be 10 or fewer in length.\"]}")
+	}))
+	t.Cleanup(srv.Close)
+
+	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	if err == nil {
+		t.Fatal("400: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Must be 10 or fewer in length.") {
+		t.Errorf("error = %q, want the response body quoted", err)
+	}
+	if strings.ContainsAny(err.Error(), "\r\n") {
+		t.Errorf("error = %q, must be a single line — a remote body must not forge a log line", err)
+	}
+}
+
+// TestDiscordWebhookErrorBodyIsBounded pins the cap: the quote is a hint, not
+// a transcript, and an error page can be arbitrarily large.
+//
+// Mutant: io.ReadAll without the LimitReader puts the whole page in the error
+// (and in every log line and HTTP response it reaches).
+func TestDiscordWebhookErrorBodyIsBounded(t *testing.T) {
+	shrinkBackoff(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusForbidden)
+		io.WriteString(rw, strings.Repeat("a", 8192))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	if err == nil {
+		t.Fatal("403: want error, got nil")
+	}
+	if n := len(err.Error()); n > discordErrBodyBytes+64 {
+		t.Errorf("error is %d bytes, want <= %d — the body quote must be bounded", n, discordErrBodyBytes+64)
+	}
+}
+
+// TestDiscordErrSnippet pins the sanitiser directly: control characters
+// collapse to single spaces, runs collapse, and the result is trimmed.
+func TestDiscordErrSnippet(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"  plain  ", "plain"},
+		{"line one\nline two", "line one line two"},
+		{"a\r\n\tb", "a b"},
+		{"{\"message\": \"Unknown Webhook\", \"code\": 10015}", `{"message": "Unknown Webhook", "code": 10015}`},
+	}
+	for _, tc := range cases {
+		if got := discordErrSnippet([]byte(tc.in)); got != tc.want {
+			t.Errorf("discordErrSnippet(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
