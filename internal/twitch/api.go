@@ -911,12 +911,24 @@ func BuildUsherVodURL(vodID string, token *TwitchAccessToken) string {
 	)
 }
 
-// GetVodComments fetches VOD chat comments at a given offset.
-func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSeconds float64, authToken string) ([]VodCommentEdge, bool, error) {
-	query := newPersistedQuery("VideoCommentsByOffsetOrCursor", constants.TwitchGQLHashes.VideoCommentsByOffsetOrCursor, map[string]any{
-		"videoID":              vodID,
-		"contentOffsetSeconds": contentOffsetSeconds,
-	})
+// GetVodComments fetches one page of VOD chat comments.
+//
+// The operation is VideoCommentsByOffsetOrCursor and the OR is the point: a
+// non-empty cursor selects the page AFTER the edge it came from, and
+// contentOffsetSeconds selects the page containing a moment. They are mutually
+// exclusive — sending both leaves it to Twitch's resolver which one wins — so
+// the cursor takes precedence here and the offset is used only to ENTER a VOD
+// (a fresh start, or a resume from the sidecar's LastOffsetSeconds).
+//
+// The persisted-query hash is unchanged: both forms are the same operation.
+func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSeconds float64, cursor, authToken string) ([]VodCommentEdge, bool, error) {
+	vars := map[string]any{"videoID": vodID}
+	if cursor != "" {
+		vars["cursor"] = cursor
+	} else {
+		vars["contentOffsetSeconds"] = contentOffsetSeconds
+	}
+	query := newPersistedQuery("VideoCommentsByOffsetOrCursor", constants.TwitchGQLHashes.VideoCommentsByOffsetOrCursor, vars)
 
 	respData, err := a.gqlRequest(ctx, "VideoCommentsByOffsetOrCursor", query, authToken)
 	if err != nil {
@@ -928,7 +940,8 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 			Video struct {
 				Comments struct {
 					Edges []struct {
-						Node struct {
+						Cursor string `json:"cursor"`
+						Node   struct {
 							ID                   string  `json:"id"`
 							ContentOffsetSeconds float64 `json:"contentOffsetSeconds"`
 							Commenter            *struct {
@@ -999,6 +1012,7 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 
 		edge := VodCommentEdge{
 			ID:                   node.ID,
+			Cursor:               e.Cursor,
 			ContentOffsetSeconds: node.ContentOffsetSeconds,
 			MessageText:          strings.Join(msgParts, ""),
 			Emotes:               emotes,

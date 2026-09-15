@@ -6,8 +6,9 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
-	"unicode/utf16"
 
 	"github.com/coder/websocket"
 
@@ -133,6 +134,19 @@ func ircIsLoginFailureNotice(line string) bool {
 		strings.Contains(params, "Login unsuccessful")
 }
 
+// ircFrameWriter sends one IRC line as a single websocket text frame, bounded
+// by ctx.
+//
+// It is a type so ChatDownloader.keepaliveWrite can name it without chat.go
+// having to import the websocket package for one field.
+type ircFrameWriter func(ctx context.Context, conn *websocket.Conn, line string) error
+
+// writeIRCFrame is the production keepaliveWrite, and the only implementation
+// outside tests.
+func writeIRCFrame(ctx context.Context, conn *websocket.Conn, line string) error {
+	return conn.Write(ctx, websocket.MessageText, []byte(line))
+}
+
 // runIRCSession runs a single IRC connection session.
 func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	cd.logger.Info("connecting to twitch IRC", "channel", cd.channelLogin)
@@ -254,6 +268,196 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		}
 	}()
 
+	// Client-initiated keepalive. ircReadDeadline alone leaves a HALF-OPEN
+	// socket — one the OS still believes is connected — parked for six
+	// minutes, and Twitch IRC has NO replay: every message in that window is
+	// simply absent from the archive. So this session speaks first, the way
+	// chatterino7 does
+	// (references/chatterino7/src/providers/twitch/IrcConnection2.cpp).
+	//
+	// A goroutine rather than a shorter per-read deadline, and that is a
+	// property of the library rather than a preference: coder/websocket
+	// installs a read context as a context.AfterFunc that CLOSES the
+	// connection when it fires (setupReadTimeout, conn.go), so a 15-second
+	// read deadline would kill the socket on every quiet fifteen seconds.
+	// Writes are serialized inside the library, so this goroutine's PING
+	// cannot interleave with the read loop's PONG.
+	//
+	// Both clocks below are ELAPSED MONOTONIC durations since sessionStart,
+	// not wall-clock instants. The inbound stamp has to cross goroutines
+	// through an atomic int64, and a time.Time that makes that trip loses its
+	// monotonic reading (time.Unix carries none), so a comparison against one
+	// silently falls back to the WALL clock — two different frames of
+	// reference for one question, and a system clock step part-way through a
+	// stream would skew the answer. Elapsed durations give one frame of
+	// reference and are immune to the step.
+	//
+	// What they do NOT give is resolution: Windows delivers monotonic readings
+	// at roughly the same ~0.5 ms granularity as its wall clock, so a PING and
+	// the PONG answering it microseconds later still carry the SAME value.
+	// Treating an indistinguishable frame as an answer is the `>=` below, and
+	// that is what keeps a healthy connection alive.
+	sessionStart := time.Now()
+	var lastInbound atomic.Int64 // time.Since(sessionStart), in nanoseconds
+	keepaliveFailed := make(chan struct{})
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				cd.logger.Error("chat keepalive panic", "panic", r)
+			}
+		}()
+		ticker := time.NewTicker(cd.delays.keepaliveCheck)
+		defer ticker.Stop()
+		// declareDead is the ONE way this goroutine ends a session: publish the
+		// verdict the read loop turns into errKeepaliveTimeout, unblock that
+		// read, and only then say why. Its callers below are the same fact —
+		// the IRC layer is not serving us — reached by different evidence.
+		//
+		// The ORDER inside is the guarantee, not a style choice. Everything
+		// that ends this session also CLOSES the socket, and the read loop
+		// wakes from a closed socket instantly: its next iterations are a
+		// context.WithTimeout and an immediate net.ErrClosed read, so it can
+		// burn all chatMaxConsecutiveErrs of them in the time it takes to
+		// format one log line. It would then return "too many IRC errors",
+		// which is NOT errors.Is-able to errKeepaliveTimeout — and the
+		// reconnect would be charged to the budget after all, inverting the
+		// one guarantee this whole mechanism exists to make. So the channel
+		// closes first, the cancel second, the Warn last.
+		//
+		// sync.Once because two arms can reach this — the ticker's verdict and
+		// the write timer's — and a second close(keepaliveFailed) would panic.
+		var deadOnce sync.Once
+		declareDead := func(reason string) {
+			deadOnce.Do(func() {
+				close(keepaliveFailed)
+				sessionCancel()
+				cd.logger.Warn("twitch IRC keepalive failed; reconnecting",
+					"channel", cd.channelLogin, "reason", reason, "pongWait", cd.delays.keepalivePongWait)
+			})
+		}
+		// pingSentAt is when the outstanding PING was written, or -1 when none
+		// is outstanding. -1 rather than 0 because 0 is a legal elapsed value.
+		pingSentAt := time.Duration(-1)
+		for {
+			select {
+			case <-keepaliveDone:
+				return
+			case <-sessionCtx.Done():
+				return
+			case <-ticker.C:
+				// time.Since rather than the tick's own timestamp: a tick
+				// delivered late reports when it was SCHEDULED to fire, which
+				// understates how long we have actually been waiting — and
+				// waiting is the entire measurement here.
+				elapsed := time.Since(sessionStart)
+				last := time.Duration(lastInbound.Load())
+				if pingSentAt >= 0 {
+					// ANY inbound frame answers — a PONG, a chat line, a
+					// server PING. The question is whether the IRC layer is
+					// still serving us, not whether it used the right verb.
+					//
+					// >= rather than >: two events the clock cannot separate
+					// are not evidence of silence, and the safe reading of an
+					// ambiguous frame is that the connection is alive. A false
+					// "dead" costs a reconnect and the chat in flight; a false
+					// "alive" costs one more check tick.
+					if last >= pingSentAt {
+						pingSentAt = -1
+						continue
+					}
+					if elapsed-pingSentAt < cd.delays.keepalivePongWait {
+						continue
+					}
+					declareDead("no inbound frame after the keepalive PING")
+					return
+				}
+				if elapsed-last < cd.delays.keepaliveIdle {
+					continue
+				}
+				// Read BEFORE the write and armed only after it, for two
+				// reasons — and NOT for a third that it looks like.
+				//
+				// It keeps the write's OWN duration inside the pong window: a
+				// socket slow to accept thirteen bytes is part of what is being
+				// measured, not an allowance on top of it.
+				//
+				// And the reply is recorded by a DIFFERENT goroutine, so on a
+				// fast link the PONG can be read and stored while this one is
+				// still descheduled after the write returns; a stamp taken
+				// afterwards would sit later than the very frame that answers
+				// it.
+				//
+				// What this ordering does NOT do is make the comparison safe on
+				// its own. The `>=` above is what does that: Windows delivers
+				// monotonic readings at roughly the same ~0.5 ms granularity as
+				// its wall clock, so a PING and a PONG landing in one tick stay
+				// indistinguishable however they are stamped.
+				sentAt := time.Since(sessionStart)
+				// The write is bounded by a timer WE own rather than by a
+				// deadline on the context handed to the library, and that is
+				// the whole of the ordering rule above applied to this arm.
+				// coder/websocket installs a write deadline as
+				// context.AfterFunc(ctx, func(){ clearWriteTimeout(); close() })
+				// (conn.go:171-181), and that close tears down the underlying
+				// net.Conn on ANOTHER goroutine — so a plain WithTimeout kills
+				// the socket before Write returns, and the read loop is already
+				// spinning on net.ErrClosed while we still have not published
+				// the verdict. It would exhaust chatMaxConsecutiveErrs and
+				// return "too many IRC errors" instead, which charges the
+				// reconnect budget.
+				//
+				// So the timer declares the verdict FIRST and cancels SECOND;
+				// the cancel is what closes the connection, and by then the
+				// read loop's keepaliveFailed check — which sits before
+				// consecutiveErrors++ — cannot lose the race.
+				//
+				// An unbounded write is not an option: on a half-open socket
+				// with a full send buffer it parks forever and the session
+				// silently falls back to the six-minute ircReadDeadline, which
+				// is the failure this keepalive exists to catch.
+				writeCtx, writeCancel := context.WithCancel(sessionCtx)
+				writeTimer := time.AfterFunc(cd.delays.keepalivePongWait, func() {
+					defer func() {
+						if r := recover(); r != nil {
+							cd.logger.Error("chat keepalive write-timeout panic", "panic", r)
+						}
+					}()
+					declareDead("the keepalive PING could not be written in time")
+					writeCancel()
+				})
+				err := cd.keepaliveWrite(writeCtx, conn, ircKeepalivePing)
+				// Stop BEFORE our own cancel. A write that returned has already
+				// had the library clear its deadline hook, so cancelling then
+				// closes nothing; a write still in flight is only ever
+				// cancelled by the timer, which published the verdict first.
+				stopped := writeTimer.Stop()
+				writeCancel()
+				if !stopped {
+					// The timer won. The verdict is published (or is being
+					// published by that goroutine, which owns the same
+					// sync.Once), and this session is over whatever the write
+					// finally returned.
+					return
+				}
+				if err != nil {
+					// Unless WE are the reason: Stop, MarkStreamEnded and
+					// Reauthenticate all cancel sessionCtx, and that reaches
+					// this goroutine as a write error too. A shutdown is not
+					// Twitch going quiet, and calling it one would hand the
+					// read loop a verdict on a session nobody is judging.
+					if sessionCtx.Err() != nil {
+						return
+					}
+					declareDead("the keepalive PING could not be written")
+					return
+				}
+				pingSentAt = sentAt
+			}
+		}
+	}()
+
 	consecutiveErrors := 0
 
 	for cd.IsRunning() {
@@ -263,12 +467,16 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		default:
 		}
 
-		// Read with a per-read deadline so a silent socket (e.g. NAT
-		// dropping the connection mid-stream) triggers a reconnect
-		// instead of blocking until the parent context cancels. Twitch
-		// IRC sends a PING every ~5 minutes; readDeadline covers two
-		// missed PINGs before we give up on the session. Derived from
-		// sessionCtx so Stop/MarkStreamEnded unblock the read at once.
+		// Read with a per-read deadline so a silent socket (e.g. NAT dropping
+		// the connection mid-stream) cannot block until the parent context
+		// cancels. This is the OUTER bound and nothing more: Twitch sends a
+		// server PING about every 5 minutes, so six is one missed heartbeat
+		// plus slack. What actually detects a half-open socket is the
+		// keepalive above, within ircKeepaliveIdle + one ircKeepaliveCheck
+		// tick + ircKeepalivePongWait. Derived from sessionCtx so
+		// Stop/MarkStreamEnded unblock the read at once — and note that
+		// coder/websocket CLOSES the connection when this context fires, which
+		// is why the keepalive is a goroutine and not a shorter deadline here.
 		readCtx, readCancel := context.WithTimeout(sessionCtx, ircReadDeadline)
 		_, data, err := conn.Read(readCtx)
 		readCancel()
@@ -284,6 +492,17 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			if cd.reauthPending.Load() {
 				return errReauthRequested
 			}
+			// The keepalive cancelled this session because Twitch stopped
+			// answering. Returning the error (rather than counting a read
+			// failure) is what makes Start's loop reconnect at once instead of
+			// spinning chatMaxConsecutiveErrs reads against a cancelled
+			// context — and wrapping errKeepaliveTimeout is what stops that
+			// reconnect being charged to the budget. See the sentinel's doc.
+			select {
+			case <-keepaliveFailed:
+				return fmt.Errorf("%w within %v", errKeepaliveTimeout, cd.delays.keepalivePongWait)
+			default:
+			}
 			consecutiveErrors++
 			if consecutiveErrors >= chatMaxConsecutiveErrs {
 				// Return error to trigger reconnect
@@ -292,6 +511,11 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			continue
 		}
 		consecutiveErrors = 0
+		// Every inbound FRAME, before any of it is interpreted: the keepalive's
+		// question is whether Twitch is still talking to us at all. Elapsed
+		// monotonic nanoseconds, in the same frame of reference the keepalive
+		// reads them in — see sessionStart.
+		lastInbound.Store(int64(time.Since(sessionStart)))
 
 		lines := strings.SplitSeq(string(data), "\r\n")
 		for line := range lines {
@@ -421,6 +645,12 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 		messageText = strings.TrimPrefix(messageText, ":")
 	}
 
+	// Unwrap /me BEFORE the emote tags are read. The offsets index the
+	// unwrapped text — measured 2026-09-15 on real ACTION lines — so parsing
+	// against the wrapped form lands every emote eight code points early and
+	// renders the word "ACTION" as part of the message.
+	messageText, isAction := stripActionWrapper(messageText)
+
 	// Author name fallback chain
 	authorName := tags["display-name"]
 	if authorName == "" {
@@ -443,6 +673,7 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 		Emotes:       parseEmoteTags(tags["emotes"], messageText),
 		Bits:         bits,
 		MessageType:  msgType,
+		IsAction:     isAction,
 		Raw:          rawLine,
 	}
 
@@ -556,20 +787,74 @@ func parseBadges(s string) []string {
 	return strings.Split(s, ",")
 }
 
+// stripActionWrapper unwraps the CTCP form Twitch sends a /me message in:
+// \x01ACTION <text>\x01. It returns the text and whether it was wrapped.
+//
+// PRIVMSG only, and only as a whole-value wrapper: the prefix must be at the
+// very start, and the trailing \x01 is removed only when the prefix matched.
+// A chat line that merely mentions the marker mid-text is an ordinary message,
+// and a USERNOTICE body is never wrapped at all.
+func stripActionWrapper(text string) (string, bool) {
+	rest, ok := strings.CutPrefix(text, "\x01ACTION ")
+	if !ok {
+		return text, false
+	}
+	return strings.TrimSuffix(rest, "\x01"), true
+}
+
 // parseEmoteTags parses IRC emote tags like "id:start-end,start-end/id:start-end".
-// Twitch's IRC emote-tag offsets count UTF-16 code units (mirroring JavaScript's
-// string indexing), NOT Go runes. For characters outside the Basic Multilingual
-// Plane (U+10000+, e.g. the 🎉 emoji) a single rune is two UTF-16 code units, so
-// indexing message runes by the Twitch offsets drifts by one per non-BMP char
-// already seen. The VOD path (api.go) already uses utf16Len for the same reason.
+//
+// TWO INDEX SPACES, and the whole point of this function is the conversion
+// between them.
+//
+// The WIRE offsets count Unicode CODE POINTS of the PRIVMSG text — inclusive,
+// zero-based. Not bytes, and NOT UTF-16 code units: this file asserted UTF-16
+// from 2026-04-22 (commit 5031cd2b) until this arc, and the claim was wrong.
+// It was re-measured 2026-09-15 over the raw IRC lines of 18 real archives: of
+// 120 ranges preceded by a non-BMP character, 120 slice to a whole-word token
+// by code point and 0 by UTF-16. Every reference client agrees —
+// references/chatterino7/src/providers/twitch/TwitchIrc.cpp (codepointToUtf16Idx),
+// gempir/go-twitch-irc ([]rune slicing), robotty/twitch-irc-rs
+// (chars().skip().take()).
+//
+// The EMITTED Start/End count UTF-16 code units, because the only consumer is
+// JavaScript: player.js renders the span with String.prototype.substring
+// (web/public/modules/player.js, _appendTwitchMessage), and the VOD path emits
+// UTF-16 already (utf16Len, api.go). Emitting the wire offsets unchanged would
+// make the two producers disagree about what a chat file's offsets mean.
+//
+// So: read by code point, write by UTF-16, and Name comes from the code-point
+// slice. For messages with no non-BMP character the two spaces coincide and
+// nothing moves.
+//
+// A range that is inverted or runs past the end of the message is NOT a fatal
+// input: the raw wire Start/End are passed through with an empty Name, exactly
+// as before, so a malformed tag costs one unrendered emote rather than the
+// session. The `start <= end` half of the guard is load-bearing — without it
+// an inverted range slices backwards and panics inside the read loop.
 func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 	if emotesStr == "" {
 		return nil
 	}
 
-	var refs []TwitchEmoteRef
-	msgUnits := utf16.Encode([]rune(message))
+	runes := []rune(message)
+	// cpToUnit[i] is the UTF-16 index at which code point i begins. The extra
+	// entry at len(runes) holds the message's total UTF-16 length, which is
+	// what makes End computable as cpToUnit[end+1]-1 with no special case for
+	// a range that ends on the last code point.
+	cpToUnit := make([]int, len(runes)+1)
+	units := 0
+	for i, r := range runes {
+		cpToUnit[i] = units
+		if r >= 0x10000 {
+			units += 2 // surrogate pair
+		} else {
+			units++
+		}
+	}
+	cpToUnit[len(runes)] = units
 
+	var refs []TwitchEmoteRef
 	for group := range strings.SplitSeq(emotesStr, "/") {
 		emoteID, positions, ok := strings.Cut(group, ":")
 		if !ok {
@@ -587,17 +872,13 @@ func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 				continue
 			}
 
-			name := ""
-			if start >= 0 && end < len(msgUnits) {
-				name = string(utf16.Decode(msgUnits[start : end+1]))
+			ref := TwitchEmoteRef{ID: emoteID, Start: start, End: end}
+			if start >= 0 && start <= end && end < len(runes) {
+				ref.Name = string(runes[start : end+1])
+				ref.Start = cpToUnit[start]
+				ref.End = cpToUnit[end+1] - 1
 			}
-
-			refs = append(refs, TwitchEmoteRef{
-				ID:    emoteID,
-				Name:  name,
-				Start: start,
-				End:   end,
-			})
+			refs = append(refs, ref)
 		}
 	}
 

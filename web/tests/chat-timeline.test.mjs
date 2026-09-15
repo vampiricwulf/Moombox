@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeOffsetMs, computeChatBiasMs, partitionChatByVideo, indexAfter, mergePartChats,
-  formatChatHeader, dividerLabelFor, deriveMissingOffsets,
+  formatChatHeader, dividerLabelFor, deriveMissingOffsets, correctLegacyTwitchEmotes,
 } from "../public/modules/chat-timeline.js";
 
 test("normalizeOffsetMs: numbers, json.Number strings, garbage", () => {
@@ -245,4 +245,125 @@ test("deriveMissingOffsets: a numeric timestampUsec works too", () => {
   const messages = [{ id: "a", offsetMs: 0, timestampUsec: Number(usecAt(3000)) }];
   deriveMissingOffsets(messages, EPOCH);
   assert.equal(messages[0].offsetMs, 3000);
+});
+
+// ── Legacy Twitch emote-offset correction ───────────────────────────────────
+
+const SOH = "\u0001";
+
+/**
+ * The message text every fixture below shares: 8 code points, 9 UTF-16 units.
+ * "Kappa" sits at code points 2..6 and at UTF-16 units 3..7.
+ *
+ * The trailing "!" is LOAD-BEARING. Without it an already-correct span (3..7)
+ * would end at the LAST code point, and the corrector's bounds guard
+ * (`en >= cps.length`) would skip the emote before any gate was consulted —
+ * so every "left untouched" assertion here would pass with the gates deleted.
+ */
+const TEXT = "🎉 Kappa!";
+
+/** One live-IRC message: `raw` is what marks it IRC-recorded rather than VOD. */
+const ircMsg = (message, emotes) => ({
+  offsetMs: 0, authorName: "u", message, emotes,
+  raw: `@emotes=x :u!u@u.tmi.twitch.tv PRIVMSG #c :${message}`,
+});
+
+test("correctLegacyTwitchEmotes: a marked file is left exactly as written", () => {
+  // Mutant: deleting the `emoteOffsets === "utf16"` gate and correcting on the
+  // strength of `raw` alone. Every IRC message has `raw`, so that mutant
+  // re-shifts every span in every NEW file — this one to
+  // { name: "appa!", start: 4, end: 8 }.
+  const data = {
+    platform: "twitch", emoteOffsets: "utf16",
+    messages: [ircMsg(TEXT, [{ id: "25", name: "Kappa", start: 3, end: 7 }])],
+  };
+  correctLegacyTwitchEmotes(data);
+  assert.deepEqual(data.messages[0].emotes, [{ id: "25", name: "Kappa", start: 3, end: 7 }]);
+  assert.equal(data.messages[0].message, TEXT);
+});
+
+test("correctLegacyTwitchEmotes: an unmarked IRC message is mapped code point → UTF-16", () => {
+  // The legacy producer stored the WIRE (code-point) offsets and a name sliced
+  // out of them in UTF-16 space, i.e. " Kapp". Both have to be repaired.
+  // Mutant: mapping start but not end (end = cpToUnit[end]) clips the span to
+  // "Kapp"; mutant: leaving `name` alone renders the garbled " Kapp" as the
+  // emote's alt text.
+  const data = {
+    platform: "twitch",
+    messages: [ircMsg(TEXT, [{ id: "25", name: " Kapp", start: 2, end: 6 }])],
+  };
+  correctLegacyTwitchEmotes(data);
+  assert.deepEqual(data.messages[0].emotes, [{ id: "25", name: "Kappa", start: 3, end: 7 }]);
+  assert.equal(data.messages[0].message.substring(3, 8), "Kappa");
+});
+
+test("correctLegacyTwitchEmotes: an unmarked VOD comment is untouched", () => {
+  // No `raw` = it came from the GQL VOD path, which emitted UTF-16 all along.
+  // Mutant: deleting the per-message `raw` gate corrects every message in an
+  // unmarked file, shifting this already-UTF-16 span to
+  // { name: "appa!", start: 4, end: 8 } — every VOD archive's emotes move.
+  const vod = { offsetMs: 0, authorName: "u", message: TEXT,
+    emotes: [{ id: "25", name: "Kappa", start: 3, end: 7 }] };
+  const data = { platform: "twitch", messages: [vod] };
+  correctLegacyTwitchEmotes(data);
+  assert.deepEqual(data.messages[0].emotes, [{ id: "25", name: "Kappa", start: 3, end: 7 }]);
+});
+
+test("correctLegacyTwitchEmotes: an unmarked /me is unwrapped and re-indexed", () => {
+  // Legacy stored the wrapped text with offsets that index the STRIPPED text.
+  // Mutant: building the code-point table from the WRAPPED text (re-indexing
+  // before the unwrap) reads 2..6 out of "\x01ACTION …" and yields
+  // { name: "CTION", start: 2, end: 6 }.
+  const data = {
+    platform: "twitch",
+    messages: [ircMsg(`${SOH}ACTION ${TEXT}${SOH}`, [{ id: "25", name: "x", start: 2, end: 6 }])],
+  };
+  correctLegacyTwitchEmotes(data);
+  assert.equal(data.messages[0].message, TEXT);
+  assert.equal(data.messages[0].isAction, true);
+  assert.deepEqual(data.messages[0].emotes, [{ id: "25", name: "Kappa", start: 3, end: 7 }]);
+});
+
+test("correctLegacyTwitchEmotes: out-of-range and inverted spans are left alone", () => {
+  // The Go producer passes a malformed wire range through untouched; the
+  // corrector must not invent a span for it. TEXT (not an ASCII string) is the
+  // fixture on purpose: over ASCII the code-point map is the identity, so a
+  // dropped guard would move nothing and this would pin nothing.
+  // Mutant: dropping `en >= cps.length` gives the first emote
+  // { name: "🎉 Kappa!", start: 0, end: NaN } — cpToUnit[100] is undefined — and
+  // _appendTwitchMessage then swallows the rest of the line. Mutant: dropping
+  // `s > en` moves the inverted span to { start: 5, end: 3 }.
+  const data = {
+    platform: "twitch",
+    messages: [ircMsg(TEXT, [
+      { id: "25", name: "", start: 0, end: 99 },
+      { id: "26", name: "", start: 4, end: 2 },
+    ])],
+  };
+  correctLegacyTwitchEmotes(data);
+  assert.deepEqual(data.messages[0].emotes, [
+    { id: "25", name: "", start: 0, end: 99 },
+    { id: "26", name: "", start: 4, end: 2 },
+  ]);
+});
+
+test("correctLegacyTwitchEmotes: a non-Twitch file is not its business", () => {
+  // Gate 1 (the FILE's platform) is read before the messages are walked at all.
+  // The message is deliberately given a Twitch IRC shape — `raw` plus a legacy
+  // code-point span — so that the platform gate is the only thing stopping it.
+  // Mutant: deleting `data.platform !== "twitch"` → { name: "Kappa", start: 3,
+  // end: 7 }.
+  const data = {
+    platform: "youtube",
+    messages: [ircMsg(TEXT, [{ id: "25", name: " Kapp", start: 2, end: 6 }])],
+  };
+  correctLegacyTwitchEmotes(data);
+  assert.deepEqual(data.messages[0].emotes, [{ id: "25", name: " Kapp", start: 2, end: 6 }]);
+
+  // A realistically shaped YouTube message — `message` is an array of runs and
+  // only TwitchChatMessage carries `raw` — is stopped by BOTH gates, which is
+  // why the synthetic fixture above is what pins the platform one.
+  const yt = { messages: [{ offsetMs: 0, message: [{ text: "hi" }] }] };
+  correctLegacyTwitchEmotes(yt);
+  assert.deepEqual(yt.messages[0].message, [{ text: "hi" }]);
 });

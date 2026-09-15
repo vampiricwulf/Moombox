@@ -15,12 +15,35 @@ import (
 
 const emoteTimeout = 8 * time.Second
 
+// emoteCacheTTL bounds how long a channel's third-party emote set is served
+// from cache. Moombox runs for weeks at a time and 7TV/BTTV/FFZ sets change
+// daily, so a cache with no expiry archives a channel's chat against the emote
+// set it had the first time the daemon saw it.
+//
+// A day is long enough that the three APIs are hit once per channel per day
+// even for a channel that is live every day, and short enough that a new emote
+// shows up in the next archive rather than the next restart.
+const emoteCacheTTL = 24 * time.Hour
+
+// emoteCacheEntry is one channel's resolved set plus WHEN it was resolved.
+// The timestamp is the whole reason this is a struct rather than the bare
+// pointer it used to be.
+type emoteCacheEntry struct {
+	data      *TwitchEmoteData
+	fetchedAt time.Time
+}
+
 // EmoteResolver fetches and caches third-party emotes for Twitch channels.
 type EmoteResolver struct {
 	mu         sync.Mutex
-	cache      map[string]*TwitchEmoteData // channelLogin (lowered) -> emotes
-	cacheOrder []string                    // insertion order for LRU eviction
-	inflight   map[string]chan struct{}    // dedup concurrent fetches for same key
+	cache      map[string]emoteCacheEntry // channelLogin (lowered) -> entry
+	cacheOrder []string                   // insertion order for LRU eviction
+	inflight   map[string]chan struct{}   // dedup concurrent fetches for same key
+
+	// now is the clock the TTL is measured against. A field so a test can
+	// cross a 24-hour boundary without waiting for one; production never
+	// assigns it.
+	now func() time.Time
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -38,15 +61,42 @@ func NewEmoteResolver(logger interface {
 	Error(msg string, args ...any)
 }) *EmoteResolver {
 	return &EmoteResolver{
-		cache:    make(map[string]*TwitchEmoteData),
+		cache:    make(map[string]emoteCacheEntry),
 		inflight: make(map[string]chan struct{}),
+		now:      time.Now,
 		logger:   logger,
 	}
 }
 
+// evictIfFullLocked drops the oldest entry when the cache is at its 200-channel
+// ceiling. Caller holds er.mu.
+func (er *EmoteResolver) evictIfFullLocked() {
+	const maxEmoteCacheEntries = 200
+	if len(er.cache) < maxEmoteCacheEntries || len(er.cacheOrder) == 0 {
+		return
+	}
+	oldest := er.cacheOrder[0]
+	er.cacheOrder = er.cacheOrder[1:]
+	delete(er.cache, oldest)
+}
+
 // Resolve fetches all third-party emotes for a channel.
-// Results are cached per channel login (lowercased). The channelID is used for API calls,
-// while channelLogin is used as the cache key (matching TypeScript behavior).
+//
+// Results are cached per channel login (lowercased); the channelID is used for
+// the API calls. Two rules beyond the plain LRU, and both exist because this
+// process runs for weeks (T1-11):
+//
+//   - A FAILURE IS NOT A RESULT. The set is cached only when at least one of
+//     the three providers answered — including answering with no emotes, which
+//     is the honest state of many channels. Three providers failing together
+//     (one outage, one flaky minute) used to be written to the cache and served
+//     for the rest of the process lifetime.
+//   - AN ANSWER GOES STALE. An entry older than emoteCacheTTL is refetched on
+//     the next Resolve. If that refetch fails outright the STALE set is served
+//     and kept: an emote set from yesterday beats none.
+//
+// Returns nil only when nothing is cached and no provider answered, so the
+// caller's own cache (resolveEmotesCached, chat_recording.go) can retry later.
 func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
 	// Determine cache key: prefer channelLogin, fall back to channelID
 	cacheKey := channelID
@@ -55,6 +105,7 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 	}
 
 	er.mu.Lock()
+	var stale *TwitchEmoteData
 	if cached, ok := er.cache[cacheKey]; ok {
 		// LRU: move to end of order list
 		for i, k := range er.cacheOrder {
@@ -64,8 +115,13 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 				break
 			}
 		}
-		er.mu.Unlock()
-		return cached
+		if er.now().Sub(cached.fetchedAt) < emoteCacheTTL {
+			er.mu.Unlock()
+			return cached.data
+		}
+		// Expired: keep it in hand as the fallback for a refetch that fails,
+		// and leave it in the map so a concurrent caller keeps being served.
+		stale = cached.data
 	}
 	// Dedup: if another goroutine is already fetching this key, wait for it.
 	// Respect ctx so a cancelled download doesn't sit here waiting on a
@@ -75,15 +131,18 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 		select {
 		case <-wait:
 		case <-ctx.Done():
-			return nil
+			return stale
 		}
 		// Now it should be in cache (unless ctx cancelled and fetcher hadn't
 		// populated yet — in which case cache miss is fine, Twitch emote
 		// resolution is best-effort).
 		er.mu.Lock()
-		cached := er.cache[cacheKey]
+		cached, ok := er.cache[cacheKey]
 		er.mu.Unlock()
-		return cached
+		if ok {
+			return cached.data
+		}
+		return stale
 	}
 	// Mark this key as inflight
 	done := make(chan struct{})
@@ -94,9 +153,8 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 
 	// Fetch all providers in parallel
 	var wg sync.WaitGroup
-	var bttvResult []EmoteInfo
-	var ffzResult []EmoteInfo
-	var sevenTVResult []EmoteInfo
+	var bttvResult, ffzResult, sevenTVResult []EmoteInfo
+	var bttvOK, ffzOK, sevenTVOK bool
 
 	wg.Add(3)
 
@@ -107,7 +165,7 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 				er.logger.Error("BTTV emote fetch panic", "panic", r)
 			}
 		}()
-		bttvResult = er.fetchBTTV(ctx, channelID)
+		bttvResult, bttvOK = er.fetchBTTV(ctx, channelID)
 	}()
 
 	go func() {
@@ -117,7 +175,7 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 				er.logger.Error("FFZ emote fetch panic", "panic", r)
 			}
 		}()
-		ffzResult = er.fetchFFZ(ctx, channelID)
+		ffzResult, ffzOK = er.fetchFFZ(ctx, channelID)
 	}()
 
 	go func() {
@@ -127,7 +185,7 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 				er.logger.Error("7TV emote fetch panic", "panic", r)
 			}
 		}()
-		sevenTVResult = er.fetch7TV(ctx, channelID)
+		sevenTVResult, sevenTVOK = er.fetch7TV(ctx, channelID)
 	}()
 
 	wg.Wait()
@@ -137,23 +195,36 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 		FFZ:     ffzResult,
 		SevenTV: sevenTVResult,
 	}
+	answered := bttvOK || ffzOK || sevenTVOK
 
 	er.mu.Lock()
-	// Limit cache size — LRU eviction (oldest first by insertion order)
-	if len(er.cache) >= 200 && len(er.cacheOrder) > 0 {
-		// Evict the oldest entry
-		oldest := er.cacheOrder[0]
-		er.cacheOrder = er.cacheOrder[1:]
-		delete(er.cache, oldest)
+	if answered {
+		// Refreshing an EXPIRED entry must not evict anything and must not
+		// append a second order entry: the key is already in both, and the LRU
+		// promotion above already moved it to the end.
+		if _, existing := er.cache[cacheKey]; !existing {
+			er.evictIfFullLocked()
+			er.cacheOrder = append(er.cacheOrder, cacheKey)
+		}
+		er.cache[cacheKey] = emoteCacheEntry{data: data, fetchedAt: er.now()}
 	}
-	er.cache[cacheKey] = data
-	er.cacheOrder = append(er.cacheOrder, cacheKey)
 	delete(er.inflight, cacheKey)
 	er.mu.Unlock()
 	// Release er.mu before close(done) so any waiting goroutines wake up
 	// and re-acquire er.mu cleanly without contending against the still-
 	// held lock. Minor throughput win under high concurrent resolve rates.
 	close(done)
+
+	if !answered {
+		if stale != nil {
+			er.logger.Warn("emote refresh failed; serving the cached set",
+				"channelID", channelID)
+			return stale
+		}
+		er.logger.Warn("every third-party emote provider failed; not caching",
+			"channelID", channelID)
+		return nil
+	}
 
 	total := len(bttvResult) + len(ffzResult) + len(sevenTVResult)
 	if total > 0 {
@@ -170,12 +241,16 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 // Clear empties the emote cache (e.g., on shutdown).
 func (er *EmoteResolver) Clear() {
 	er.mu.Lock()
-	er.cache = make(map[string]*TwitchEmoteData)
+	er.cache = make(map[string]emoteCacheEntry)
 	er.cacheOrder = nil
 	er.mu.Unlock()
 }
 
-func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) []EmoteInfo {
+// fetchBTTV returns the channel's BTTV emotes and whether BTTV ANSWERED.
+// The bool is not "found emotes": a channel with no BTTV emotes is a real,
+// cacheable answer, and only a provider that could not be reached or read is a
+// failure (see Resolve).
+func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) ([]EmoteInfo, bool) {
 	url := fmt.Sprintf("%s/%s", constants.TwitchEmoteAPIs.BTTVChannel, channelID)
 
 	ctx, cancel := context.WithTimeout(ctx, emoteTimeout)
@@ -187,7 +262,7 @@ func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) []Emot
 		// invisible at the default log level, so missing emotes looked like
 		// a Moombox bug. Audit-finding twitch.md #36.
 		er.logger.Warn("bttv fetch failed", "err", err, "channelID", channelID)
-		return nil
+		return nil, false
 	}
 
 	var resp struct {
@@ -203,7 +278,7 @@ func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) []Emot
 
 	if err := json.Unmarshal(data, &resp); err != nil {
 		er.logger.Warn("bttv parse failed", "err", err, "channelID", channelID)
-		return nil
+		return nil, false
 	}
 
 	emotes := make([]EmoteInfo, 0, len(resp.ChannelEmotes)+len(resp.SharedEmotes))
@@ -222,10 +297,14 @@ func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) []Emot
 		})
 	}
 
-	return emotes
+	return emotes, true
 }
 
-func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) []EmoteInfo {
+// fetchFFZ returns the channel's FFZ emotes and whether FFZ ANSWERED.
+// The bool is not "found emotes": a channel with no FFZ emotes is a real,
+// cacheable answer, and only a provider that could not be reached or read is a
+// failure (see Resolve).
+func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) ([]EmoteInfo, bool) {
 	url := fmt.Sprintf("%s/%s", constants.TwitchEmoteAPIs.FFZChannel, channelID)
 
 	ctx, cancel := context.WithTimeout(ctx, emoteTimeout)
@@ -235,7 +314,7 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) []Emote
 	if err != nil {
 		// Audit-finding twitch.md #36 — see fetchBTTV.
 		er.logger.Warn("ffz fetch failed", "err", err, "channelID", channelID)
-		return nil
+		return nil, false
 	}
 
 	var resp struct {
@@ -250,7 +329,7 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) []Emote
 
 	if err := json.Unmarshal(data, &resp); err != nil {
 		er.logger.Warn("ffz parse failed", "err", err, "channelID", channelID)
-		return nil
+		return nil, false
 	}
 
 	var emotes []EmoteInfo
@@ -276,10 +355,14 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) []Emote
 		}
 	}
 
-	return emotes
+	return emotes, true
 }
 
-func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) []EmoteInfo {
+// fetch7TV returns the channel's 7TV emotes and whether 7TV ANSWERED.
+// The bool is not "found emotes": a channel with no 7TV emotes is a real,
+// cacheable answer, and only a provider that could not be reached or read is a
+// failure (see Resolve).
+func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) ([]EmoteInfo, bool) {
 	url := fmt.Sprintf("%s/%s", constants.TwitchEmoteAPIs.SevenTVUser, channelID)
 
 	ctx, cancel := context.WithTimeout(ctx, emoteTimeout)
@@ -289,7 +372,7 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) []Emote
 	if err != nil {
 		// Audit-finding twitch.md #36 — see fetchBTTV.
 		er.logger.Warn("7tv fetch failed", "err", err, "channelID", channelID)
-		return nil
+		return nil, false
 	}
 
 	var resp struct {
@@ -312,7 +395,7 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) []Emote
 
 	if err := json.Unmarshal(data, &resp); err != nil {
 		er.logger.Warn("7tv parse failed", "err", err, "channelID", channelID)
-		return nil
+		return nil, false
 	}
 
 	var emotes []EmoteInfo
@@ -357,7 +440,7 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) []Emote
 		}
 	}
 
-	return emotes
+	return emotes, true
 }
 
 func fetchJSON(ctx context.Context, url string) ([]byte, error) {

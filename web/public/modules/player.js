@@ -12,6 +12,7 @@ import {
   partitionChatByVideo,
   formatChatHeader,
   dividerLabelFor,
+  correctLegacyTwitchEmotes,
 } from "./chat-timeline.js";
 import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 import { letterboxStage, rowsFor, sameStage, nextGeometry, NICO_GEO_SETTLE_MS } from "./nico-geometry.js";
@@ -1005,13 +1006,19 @@ export class PlayerController {
           const r = await fetch(`/api/jobs/${jobId}/segments/${s.segmentIndex}/chat`);
           if (!r.ok) return null;
           const data = await r.json();
-          // Per part, against the PART's own header epoch — before
-          // mergePartChats shifts it onto the global timeline (one file, one
-          // epoch). Skipped for the Twitch parts this path normally serves:
-          // a Twitch part's offsets are already video-relative and its header
-          // epoch is the recording start, so nothing here may touch them. It
-          // earns its keep on a legacy YouTube part that has a header epoch.
-          if (data && data.platform !== "twitch") deriveMissingOffsets(data.messages, data.streamStartTime);
+          // Per part, against the PART's own header — before mergePartChats
+          // shifts it onto the global timeline (one file, one epoch, and the
+          // merge keeps no header scalars at all).
+          //
+          // YouTube: recover the offset of a message the producer left without
+          // one, from the header epoch. Twitch parts are skipped there — their
+          // offsets are already video-relative and their header epoch is the
+          // recording start — and get the other repair instead: a part written
+          // before the emote-offset fix carries code-point spans and wrapped
+          // /me text, which correctLegacyTwitchEmotes maps into the UTF-16
+          // space _appendTwitchMessage slices in.
+          if (data && data.platform === "twitch") correctLegacyTwitchEmotes(data);
+          else if (data) deriveMissingOffsets(data.messages, data.streamStartTime);
           const off = segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
           return { startOffsetSec: off ? off.startOffset : 0, data };
         } catch {
@@ -1031,8 +1038,10 @@ export class PlayerController {
     // and no hasOffset) is recovered from the header epoch before the caller
     // applies the bias and sorts (T-F12); one that already carries a real
     // offset is authoritative and untouched. Twitch files are skipped
-    // outright — their offsets are already video-relative (F1).
-    if (data && data.platform !== "twitch") deriveMissingOffsets(data.messages, data.streamStartTime);
+    // outright — their offsets are already video-relative (F1) — and take the
+    // legacy emote-offset repair instead (see the per-part branch above).
+    if (data && data.platform === "twitch") correctLegacyTwitchEmotes(data);
+    else if (data) deriveMissingOffsets(data.messages, data.streamStartTime);
     return data;
   }
 

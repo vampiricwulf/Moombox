@@ -18,7 +18,6 @@ import (
 const (
 	vodChatMaxConsecutiveErrors = 5
 	vodChatFlushInterval        = 5 * time.Second
-	vodChatResumeMaxRecentIDs   = 1000
 )
 
 // VodChatDownloader downloads chat messages from a Twitch VOD.
@@ -149,6 +148,12 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 	vcd.logger.Info("starting VOD chat download", "vodID", vcd.vodID)
 
 	var contentOffset float64
+	// cursor is empty for the FIRST request of a run (a fresh start or a
+	// resume, both of which enter by offset) and holds the previous page's
+	// last edge cursor thereafter. It is deliberately not persisted: a Twitch
+	// cursor is opaque and undocumented as durable, and a stale one answers
+	// with an empty page that this loop reads as the end of the VOD.
+	var cursor string
 	consecutiveErrors := 0
 
 	// Try loading resume state
@@ -176,7 +181,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		default:
 		}
 
-		edges, hasNext, err := vcd.api.GetVodComments(ctx, vcd.vodID, contentOffset, vcd.currentAuthToken())
+		edges, hasNext, err := vcd.api.GetVodComments(ctx, vcd.vodID, contentOffset, cursor, vcd.currentAuthToken())
 		if err != nil {
 			consecutiveErrors++
 			if consecutiveErrors >= vodChatMaxConsecutiveErrors {
@@ -236,10 +241,19 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			vcd.reportProgress(contentOffset)
 		}
 
-		// Server returned no results — end of VOD comments
+		// Zero edges.
 		if len(edges) == 0 {
-			vcd.logger.Info("[TwitchVodChat] Reached end of VOD comments")
-			break
+			if !hasNext {
+				// Genuine end of VOD comments.
+				vcd.logger.Info("[TwitchVodChat] Reached end of VOD comments")
+				break
+			}
+			// Twitch claims more pages exist (hasNextPage=true) yet sent none
+			// — a stall, not completion (fix round R4). Returning an error
+			// instead of breaking keeps the resume sidecar so a later
+			// /resume retries from here, rather than the archive being
+			// silently marked complete and truncated.
+			return vcd.pagingStalled(contentOffset, cursor, "page carried zero edges with hasNextPage=true")
 		}
 
 		// If this page was entirely duplicates AND the server has no more
@@ -255,19 +269,42 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			break
 		}
 
-		// Advance offset to the last edge's offset so the next page
-		// moves forward in time even when the current page was entirely
-		// duplicates (newCount==0 with hasNext==true).
-		if len(edges) > 0 {
-			newOffset := edges[len(edges)-1].ContentOffsetSeconds
-			// Guard against a pathological server response that never
-			// advances the offset — break to avoid an infinite loop.
-			if newCount == 0 && newOffset <= contentOffset {
-				vcd.logger.Warn("[TwitchVodChat] offset did not advance on all-duplicate page; stopping",
-					"offset", contentOffset)
-				break
+		// Advance by the LAST edge's cursor, not by its offset.
+		// contentOffsetSeconds is an integer second, and a second of a busy
+		// VOD holds more than one page of comments — so an offset-based next
+		// request asks for the page just read, sees only duplicates, and used
+		// to break here with the rest of the VOD's chat unarchived (T1-3).
+		//
+		// contentOffset keeps tracking the last edge's offset because it is
+		// what the resume sidecar and the progress line are written from; it
+		// is no longer what the next request is built from.
+		//
+		// Reaching here means hasNext is true (the two breaks above already
+		// handled the false case), so every branch below is a paging
+		// decision — never a completion signal (fix round R4).
+		last := edges[len(edges)-1]
+		switch {
+		case last.Cursor == "":
+			// A schema surprise, not completion: Twitch still says more
+			// pages exist. Fall back to the pre-T1-3 offset paging rather
+			// than stopping here; if the offset itself fails to advance
+			// either, that IS a genuine stall (below).
+			newOffset := last.ContentOffsetSeconds
+			if newOffset <= contentOffset {
+				return vcd.pagingStalled(contentOffset, cursor,
+					"page carried no cursor and the offset fallback did not advance")
 			}
+			vcd.logger.Warn("[TwitchVodChat] page carried no cursor; falling back to offset paging",
+				"offset", newOffset)
+			cursor = ""
 			contentOffset = newOffset
+		case last.Cursor == cursor:
+			// A server that answers a cursor with the page that cursor came
+			// from would otherwise spin forever — a genuine stall.
+			return vcd.pagingStalled(contentOffset, cursor, "cursor did not advance")
+		default:
+			cursor = last.Cursor
+			contentOffset = last.ContentOffsetSeconds
 		}
 
 		// Periodic flush every 5 seconds
@@ -315,6 +352,45 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 	vcd.removeResumeState()
 	vcd.logger.Info("VOD chat download complete", "vodID", vcd.vodID, "messages", vcd.totalCount.Load())
 	return nil
+}
+
+// pagingStalled flushes buffered messages and preserves the resume sidecar,
+// then returns an error naming why VOD chat paging could not continue.
+//
+// Callers MUST return this value directly rather than break the loop: a
+// paging stall — a repeated cursor, a page with no edges despite
+// hasNextPage=true, or the offset fallback failing to advance past a
+// cursorless edge — is never natural completion. Reaching the post-loop
+// removeResumeState()/"download complete" path on a stall would delete the
+// sidecar and mark an irrecoverably truncated archive as finished (fix
+// round R4); the orchestrator (internal/worker) does not itself inspect
+// this error or touch the sidecar either way, so preserving it here is the
+// only thing standing between a stall and silent data loss. A later
+// /resume reconstructs a downloader against the same outputPath, which
+// loadResumeState() reads to continue from contentOffset.
+//
+// That promise holds only WHILE THE STAGING DIRECTORY DOES. outputPath is
+// <staging>/chat.json (internal/worker/stream_processor_twitch.go), so the
+// sidecar lives in staging too, and a job that finalizes deletes staging
+// wholesale (os.RemoveAll in processJob, internal/worker/worker.go). Past
+// that point there is nothing left to resume from and the stall survives
+// only as the Warn below and a chat count short of the VOD — which is why
+// the Warn is not optional.
+func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reason string) error {
+	vcd.flush()
+	vcd.saveResumeState(contentOffset)
+	// Fix round R4 follow-up: the orchestrator discards Start's returned
+	// error entirely (see the doc comment above), so this Warn is the only
+	// trace a production stall leaves anywhere — without it, an operator
+	// sees a VOD chat archive quietly stop growing with nothing in the log
+	// explaining why.
+	vcd.logger.Warn("[TwitchVodChat] paging stalled; resume state kept",
+		"reason", reason,
+		"offset", contentOffset,
+		"cursor", cursor,
+		"messages", vcd.MessageCount(),
+	)
+	return fmt.Errorf("vod chat paging stalled at offset %v cursor %q: %s", contentOffset, cursor, reason)
 }
 
 func (vcd *VodChatDownloader) flush() {
@@ -385,6 +461,7 @@ func (vcd *VodChatDownloader) writeFullFile(msgs []TwitchChatMessage) error {
 		StreamID:           vcd.vodID,
 		DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
 		MessageCount:       int(vcd.totalCount.Load()),
+		EmoteOffsets:       chatEmoteOffsetsUTF16,
 		Messages:           msgs,
 	}
 	return utils.WriteChatFileAtomic(vcd.outputPath, &chatData)
@@ -426,7 +503,7 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 		return
 	}
 	// Deterministic insertion-order snapshot capped to bound the resume file.
-	recentIDs := vcd.dedup.Snapshot(vodChatResumeMaxRecentIDs)
+	recentIDs := vcd.dedup.Snapshot(chatResumeIDCap)
 
 	state := ChatResumeState{
 		MessageCount:      int(vcd.totalCount.Load()),
