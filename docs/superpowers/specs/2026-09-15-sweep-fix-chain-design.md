@@ -418,7 +418,8 @@ they disagree with the text above.
    smaller cap re-compile constantly. `.claude/skills/moombox-upstream-porting/SKILL.md` and
    `docs/spec/platform-services.md` both state 10 as of Arc 3.
 
-5. **§10.1 — the case-(b) premise was wrong and was corrected inside Arc 7.** The design assumed that a
+5. **§10.1 — the case-(b) premise was wrong and was corrected inside Arc 7.** The design's second-update
+   path (§10.1) and the Arc 7 brief that implemented it assumed that a
    second update in one launcher lifetime fails `os.Rename(.old → ~)` because a `~` file is already
    there. It does not: Go's `os.Rename` on Windows is `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`,
    which replaces a plain `~` file. The rename fails only when something denies delete-sharing on that
@@ -429,11 +430,11 @@ they disagree with the text above.
    denies exactly the same sharing mode. The FIX (report the failure, prefer a surviving `.old` as the
    rollback artifact) is unaffected — it is right for the real failure mode too.
 
-6. **Arcs 5 and 6 — the node-suite test counts in those plans were written against a 159 baseline.**
-   Arc 1 raised `node --test web/tests/*.test.mjs` to 169 before either arc ran, so every absolute
-   count quoted in their task steps was stale by 10 on arrival. Ruling taken at the time: the counts
+6. **Arc 5 — the node-suite test counts in its plan were written against a 159 baseline.**
+   Arc 1 raised `node --test web/tests/*.test.mjs` to 169 before it ran, so every absolute
+   count quoted in its task steps was stale by 10 on arrival. Ruling taken at the time: the counts
    are informational, and implementers report the count they actually observe. The gate is the suite
-   passing, never a number. Those plans are deleted, so this entry is the surviving record.
+   passing, never a number. That plan is deleted, so this entry is the surviving record.
 
 7. **Arc 6 — commit `fedf98c5` carries TWO tasks.** A pathspec-less `git commit` swept Task 5's
    already-staged `internal/jobfilter` files into Task 4's commit, whose subject names only T2-20d. The
@@ -442,3 +443,8 @@ they disagree with the text above.
    hashes are cited across the ledgers and review packages, and the merge commit body records the
    pairing. The process rule this produced is now in the global constraints: implementers commit with
    `git commit -m … -- <their files>`, pathspec on the commit too.
+
+8. **§6.1 — `scanBalancedObject` moved to `utils.ScanBalancedJSONObject`
+   (`internal/utils/jsoncandidates.go`) at chain close.** Neither `scanBalancedObject` nor the
+   `watch_page.go:928` line citing it exists after `6c7beb18`; `watch_page.go` no longer declares the
+   scanner.

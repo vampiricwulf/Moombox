@@ -83,6 +83,9 @@ func ScanBalancedJSONObject(s []byte) ([]byte, bool) {
 // set a page where every candidate fails pays for each one twice — on a
 // multi-megabyte payload. The map is allocated lazily, so the ordinary page
 // (first candidate accepted) allocates nothing here.
+//
+// Each anchor must match at least the opening brace (a zero-width match is a
+// contract violation) and `accept` is required (nil panics).
 func FindJSONObjectCandidate(page []byte, anchors []*regexp.Regexp, accept func(obj []byte) bool) ([]byte, bool) {
 	var rejected map[int]struct{}
 	for _, re := range anchors {
@@ -113,8 +116,9 @@ func FindJSONObjectCandidate(page []byte, anchors []*regexp.Regexp, accept func(
 	return nil, false
 }
 
-// IsNonEmptyJSONObject is the default accept for FindJSONObjectCandidate: the
-// literal must be real JSON and must carry something between its braces.
+// IsNonEmptyJSONObject is the accept predicate the two raw-literal consumers
+// pass to FindJSONObjectCandidate — there is no default: the literal must be
+// real JSON and must carry something between its braces.
 //
 // json.Valid is a scan, not a decode — it allocates nothing and does not build
 // the map or envelope the caller is about to build anyway — so a caller that
@@ -123,6 +127,9 @@ func FindJSONObjectCandidate(page []byte, anchors []*regexp.Regexp, accept func(
 // well, so without it a forged empty object would win the search exactly as a
 // forged non-object cannot.
 func IsNonEmptyJSONObject(obj []byte) bool {
+	if len(obj) < 2 {
+		return false
+	}
 	// obj always comes from ScanBalancedJSONObject, so it is at least `{}`.
 	return len(bytes.TrimSpace(obj[1:len(obj)-1])) > 0 && json.Valid(obj)
 }

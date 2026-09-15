@@ -108,6 +108,11 @@ func TestFindJSONObjectCandidateDoesNotRescanRejectedOffsets(t *testing.T) {
 //
 // Mutant this kills: `return json.Valid(obj)` alone — the `{}` and `{  }`
 // rows then pass.
+//
+// The "" and "{" rows pin the `len(obj) < 2` guard: every real caller's obj
+// comes from ScanBalancedJSONObject and is at least `{}`, but the function is
+// exported. Mutant this kills: deleting the guard — both rows then panic on
+// the `obj[1:len(obj)-1]` slice instead of returning false.
 func TestIsNonEmptyJSONObjectRejectsTheTrivialShapes(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
@@ -119,6 +124,8 @@ func TestIsNonEmptyJSONObjectRejectsTheTrivialShapes(t *testing.T) {
 		{"{\n\t}", false},
 		{`{ x }`, false},
 		{`{"a":}`, false},
+		{``, false},
+		{`{`, false},
 	} {
 		if got := IsNonEmptyJSONObject([]byte(tc.in)); got != tc.want {
 			t.Errorf("IsNonEmptyJSONObject(%q) = %v, want %v", tc.in, got, tc.want)

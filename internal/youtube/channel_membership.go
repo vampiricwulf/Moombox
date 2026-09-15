@@ -48,9 +48,7 @@ const membershipTabIdentifier = "TAB_ID_SPONSORSHIPS"
 // balanced scan — so the worst a forged candidate achieves is to fail the
 // scan, fail the decode, or decode to an empty object. That is a denial of the
 // channel's own metadata (or of the chat continuation), never a substitution.
-// extractPlayerResponse in watch_page.go converts even that denial into a
-// non-event by skipping a failed candidate and searching on. Since the
-// 2026-09-15 chain close the locator iterates candidates through
+// Since the 2026-09-15 chain close the locator iterates candidates through
 // utils.FindJSONObjectCandidate rather than taking the first match, so a
 // forged assignment that scans but is empty or is not JSON no longer denies
 // the real document — it is skipped. The narrower anchor set stays regardless,

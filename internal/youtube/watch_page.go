@@ -606,7 +606,10 @@ type chatContinuationData struct {
 // The blob is located by extractYtInitialData (channel_membership.go), the
 // same brace-depth scan the membership path uses — which drops the old
 // regex's `;</script>` terminator while keeping its two anchored assignment
-// spellings, so page-authored text cannot present itself as the blob.
+// spellings. A page-authored assignment CAN present itself as a candidate —
+// e.g. a page-authored `var ytInitialData = {}` — but since the 2026-09-15
+// chain close every candidate is tried, so a forged or empty first candidate
+// is skipped rather than denying the real blob.
 //
 // A decode error is reported ONLY when no token came out of the decode, and
 // that rule governs BOTH passes. encoding/json records the first type error

@@ -127,10 +127,13 @@ func TestMembershipItemAge(t *testing.T) {
 
 func TestParseMembershipTab_NotAMember_HomeFallback(t *testing.T) {
 	// Non-member: /membership falls back to the Home tab being selected.
+	// Mutant: dropping the TAB_ID_SPONSORSHIPS check in parseMembershipTab
+	// (channel_membership.go, the `h.TabIdentifier == membershipTabIdentifier`
+	// clause) returns the Home tab's video ([PublicVid99], true) and fails this.
 	json := `{"contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
 		{"tabRenderer": {"title": "Home", "selected": true, "tabIdentifier": "", "content": {"richGridRenderer": {"contents": [
 			{"richItemRenderer": {"content": {"lockupViewModel": {"contentId": "PublicVid99", "metadata": {"lockupMetadataViewModel": {"title": {"content": "public"}}}}}}}
-		]}}}}}
+		]}}}}
 	]}}}`
 	videos, ok := parseMembershipTab(wrapPage(json))
 	if ok {
