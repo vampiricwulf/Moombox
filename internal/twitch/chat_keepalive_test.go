@@ -255,7 +255,8 @@ func TestIRCKeepalivePingsAndGivesUpOnASilentSocket(t *testing.T) {
 // Mutant: failing on the pong deadline regardless of what arrived (e.g.
 // comparing against the last DATA message rather than the last inbound FRAME) —
 // a channel with no chatter would then reconnect every ~75 s forever, and each
-// reconnect costs the messages in flight.
+// reconnect costs the messages in flight. Such a session cannot reach a second
+// PING, which is what the poll below waits for.
 func TestIRCKeepaliveKeepsAConnectionThatAnswers(t *testing.T) {
 	k := startKeepaliveServer(t, true)
 	cd := newKeepaliveTestDownloader(t)
@@ -264,16 +265,22 @@ func TestIRCKeepaliveKeepsAConnectionThatAnswers(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- cd.runIRCSession(ctx) }()
 
-	// Long enough for several idle windows, so a session that fails on the
-	// pong deadline has many chances to.
-	time.Sleep(400 * time.Millisecond)
+	// Wait for the condition, not for a clock. A SECOND keepalive PING can
+	// only be sent by a session that survived the first one's pong window and
+	// then went idle again, so polling to two is a stronger statement than any
+	// fixed sleep — and it does not get weaker on a loaded CI box, where a
+	// 400 ms sleep might have covered only one cycle.
+	waitFor(t, 3*time.Second, func() bool { return k.pings() >= 2 },
+		"the client did not complete two keepalive cycles against a server answering PONG")
+	// The settle check: the second cycle's pong window must pass with the
+	// session still up. Without it, a mutant that fails on the pong deadline
+	// regardless of what arrived could have declared the socket dead in the
+	// instant after the PING waitFor observed.
+	time.Sleep(3 * cd.delays.keepalivePongWait)
 	select {
 	case err := <-done:
 		t.Fatalf("the session ended while the server was answering PONG: %v", err)
 	default:
-	}
-	if got := k.pings(); got < 1 {
-		t.Errorf("the client sent %d PINGs over 400ms of silence, want at least 1", got)
 	}
 
 	cancel()

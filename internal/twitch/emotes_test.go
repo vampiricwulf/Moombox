@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
 type testLogger struct{}
@@ -182,6 +184,71 @@ func TestEmoteResolverCachesAPartialSuccess(t *testing.T) {
 	if n := calls.Load(); n != 3 {
 		t.Errorf("second Resolve brought the total to %d requests, want 3 — an emote-less "+
 			"channel must still be cached", n)
+	}
+}
+
+// TestEmoteResolverCachesWhenOnlyOneProviderAnswers is the MIXED case between
+// the two tests above: BTTV answers, FFZ and 7TV are unreachable. Both of
+// those are real field states — a single provider having a bad ten minutes is
+// far commoner than all three going down together — and the rule Resolve
+// applies is "ANY provider answered", not "all three did".
+//
+// Mutants this kills:
+//   - gating the cache write on every provider having answered
+//     (bttvOK && ffzOK && sevenTVOK): the second Resolve would refetch and the
+//     total would be 6, so a channel would be re-fetched from three APIs on
+//     every part of every job for as long as one provider stayed down.
+//   - refetching on the second Resolve for any other reason — the count is
+//     asserted, not merely the returned value.
+//   - returning the DOWN providers' empty slices as though they were answers:
+//     the BTTV assertion holds the half that did answer, and the FFZ/SevenTV
+//     assertions hold that nothing was invented for the halves that did not.
+func TestEmoteResolverCachesWhenOnlyOneProviderAnswers(t *testing.T) {
+	er := NewEmoteResolver(&testLogger{})
+	var calls atomic.Int64
+	prev := twitchHTTPClient
+	t.Cleanup(func() { twitchHTTPClient = prev })
+	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if !strings.HasPrefix(req.URL.String(), constants.TwitchEmoteAPIs.BTTVChannel) {
+			// FFZ and 7TV: the transport itself fails, which is the one thing
+			// fetchFFZ/fetch7TV report as "did not answer" (a 200 with no
+			// emotes is an answer).
+			return nil, fmt.Errorf("emote provider unreachable")
+		}
+		h := make(http.Header)
+		h.Set("Content-Type", "application/json")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     h,
+			Body:       io.NopCloser(strings.NewReader(`{"channelEmotes":[{"id":"e1","code":"catJAM"}],"sharedEmotes":[]}`)),
+			Request:    req,
+		}, nil
+	})}
+
+	got := er.Resolve(context.Background(), "chan-1", "chan-1")
+	if got == nil {
+		t.Fatal("Resolve returned nil although BTTV answered — one answering provider is a real, " +
+			"cacheable answer")
+	}
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("first Resolve made %d requests, want 3", n)
+	}
+	if len(got.BTTV) != 1 || got.BTTV[0].Code != "catJAM" {
+		t.Errorf("BTTV = %+v, want the single emote the answering provider sent", got.BTTV)
+	}
+	if len(got.FFZ) != 0 || len(got.SevenTV) != 0 {
+		t.Errorf("FFZ = %+v, SevenTV = %+v, want both empty — neither provider answered, and an "+
+			"unreachable provider must not contribute emotes", got.FFZ, got.SevenTV)
+	}
+
+	again := er.Resolve(context.Background(), "chan-1", "chan-1")
+	if n := calls.Load(); n != 3 {
+		t.Errorf("second Resolve brought the total to %d requests, want 3 — a partial answer must "+
+			"be cached (mutant: caching only when all three providers answered)", n)
+	}
+	if again == nil || len(again.BTTV) != 1 || len(again.FFZ) != 0 || len(again.SevenTV) != 0 {
+		t.Errorf("the second Resolve returned %+v, want the cached BTTV-only set from the first", again)
 	}
 }
 

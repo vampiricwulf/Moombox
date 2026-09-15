@@ -294,8 +294,20 @@ func TestVodChatStopsOnAStuckCursor(t *testing.T) {
 // fixes. That must not be read as completion: the loop falls back to paging
 // by the last edge's OFFSET (the pre-T1-3 behaviour) and keeps going.
 //
-// Mutant: treating the empty cursor as completion (breaking here) — the run
-// would stop at 4 archived comments instead of continuing to the third page.
+// The fallback is a DETOUR, not a mode switch: the page it fetches by offset
+// is cursor-bearing again, and the pager must go straight back to cursor
+// paging from it. The script therefore runs four pages — cursor, no-cursor,
+// offset-fetched-with-cursors, cursor — and the request sequence is asserted
+// in full.
+//
+// Mutants this kills:
+//   - treating the empty cursor as completion (breaking here): the run would
+//     stop at 4 archived comments instead of reaching the fourth page.
+//   - LATCHING offset paging after the first fallback — clearing the cursor
+//     once and never consulting last.Cursor again. Verified: the fourth
+//     request becomes offset:300 rather than cursor:cur2-1, which the request
+//     sequence names outright, and the stub's terminal answer to an unexpected
+//     offset drops the count to 6.
 func TestVodChatFallsBackToOffsetPastAnEmptyCursor(t *testing.T) {
 	var mu sync.Mutex
 	var asked []string
@@ -329,24 +341,40 @@ func TestVodChatFallsBackToOffsetPastAnEmptyCursor(t *testing.T) {
 
 		switch {
 		case q.Variables.Cursor != nil && *q.Variables.Cursor != "":
+			cursor := *q.Variables.Cursor
 			mu.Lock()
-			asked = append(asked, "cursor:"+*q.Variables.Cursor)
+			asked = append(asked, "cursor:"+cursor)
 			mu.Unlock()
-			// Page 0's cursor request: answer with the schema-surprise page —
-			// more edges, no cursor on any of them, hasNext still true.
-			return reply(1, vodCommentPageSpec{count: 2, offset: 200, hasNext: true, noCursor: true})
+			if strings.HasPrefix(cursor, "cur0-") {
+				// Page 0's cursor request: answer with the schema-surprise
+				// page — more edges, no cursor on any of them, hasNext still
+				// true.
+				return reply(1, vodCommentPageSpec{count: 2, offset: 200, hasNext: true, noCursor: true})
+			}
+			// A cursor from the page the OFFSET fallback fetched. Being asked
+			// this at all is the point of the fourth page: a pager that
+			// latched onto offsets never gets here.
+			return reply(3, vodCommentPageSpec{count: 2, offset: 400, hasNext: false})
 		case q.Variables.ContentOffsetSeconds != nil:
 			offset := *q.Variables.ContentOffsetSeconds
 			mu.Lock()
 			asked = append(asked, fmt.Sprintf("offset:%v", offset))
 			mu.Unlock()
-			if offset == 0 {
+			switch offset {
+			case 0:
 				// Fresh start: normal cursor-bearing page.
 				return reply(0, vodCommentPageSpec{count: 2, offset: 100, hasNext: true})
+			case 200:
+				// The offset fallback's request, past the no-cursor page. It
+				// is cursor-bearing again and still claims more pages, so the
+				// run must RESUME cursor paging from its last edge.
+				return reply(2, vodCommentPageSpec{count: 2, offset: 300, hasNext: true})
 			}
-			// The offset fallback's request, past the no-cursor page: one
-			// more normal page, then done.
-			return reply(2, vodCommentPageSpec{count: 2, offset: 300, hasNext: false})
+			// Any other offset means the run never left offset paging after
+			// the fallback. Answer with a terminal empty page so the mutant
+			// ends instead of asking offset:300 forever, and let the
+			// request-sequence assertion below be what names it.
+			return reply(3, vodCommentPageSpec{count: 0, offset: 400, hasNext: false})
 		default:
 			return nil, fmt.Errorf("stub: the request carried neither an offset nor a cursor")
 		}
@@ -359,11 +387,14 @@ func TestVodChatFallsBackToOffsetPastAnEmptyCursor(t *testing.T) {
 	if err := vcd.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if got := vcd.MessageCount(); got != 6 {
-		t.Errorf("archived %d comments, want 6 — the empty-cursor page was read as completion "+
+	if got := vcd.MessageCount(); got != 8 {
+		t.Errorf("archived %d comments, want 8 — the empty-cursor page was read as completion "+
 			"instead of falling back to offset paging", got)
 	}
-	want := []string{"offset:0", "cursor:cur0-1", "offset:200"}
+	// The fourth entry is the assertion that matters here: cursor paging
+	// RESUMED after the offset detour (mutant: a run that stays on offsets
+	// once it has fallen back would ask offset:300 instead).
+	want := []string{"offset:0", "cursor:cur0-1", "offset:200", "cursor:cur2-1"}
 	mu.Lock()
 	gotAsked := append([]string(nil), asked...)
 	mu.Unlock()

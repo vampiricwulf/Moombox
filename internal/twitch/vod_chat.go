@@ -368,6 +368,14 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 // only thing standing between a stall and silent data loss. A later
 // /resume reconstructs a downloader against the same outputPath, which
 // loadResumeState() reads to continue from contentOffset.
+//
+// That promise holds only WHILE THE STAGING DIRECTORY DOES. outputPath is
+// <staging>/chat.json (internal/worker/stream_processor_twitch.go), so the
+// sidecar lives in staging too, and a job that finalizes deletes staging
+// wholesale (os.RemoveAll in processJob, internal/worker/worker.go). Past
+// that point there is nothing left to resume from and the stall survives
+// only as the Warn below and a chat count short of the VOD — which is why
+// the Warn is not optional.
 func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reason string) error {
 	vcd.flush()
 	vcd.saveResumeState(contentOffset)

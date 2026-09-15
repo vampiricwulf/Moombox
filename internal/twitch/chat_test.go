@@ -290,9 +290,13 @@ func TestParseEmoteTagsInvertedRange(t *testing.T) {
 //     the same value; "non-BMP emote mid-message" is the only span here that
 //     does not end the message, and it reports End 5 instead of 3.
 //
-// The sentinel entry itself is pinned by the fixtures that DO end on the last
-// code point: dropping the +1 from make([]int, len(runes)+1) panics on the
-// cpToUnit[len(runes)] store rather than returning a wrong answer.
+// The sentinel entry itself needs no particular fixture. The store
+// `cpToUnit[len(runes)] = units` is UNCONDITIONAL — it runs after the fill
+// loop, before any range is read — so every call with a non-empty emote tag
+// executes it, and every fixture in this file pins it, the ASCII table in
+// TestParseEmoteTags included. Dropping the +1 from make([]int, len(runes)+1)
+// therefore makes that store an out-of-range panic on the first such call,
+// rather than a wrong answer some fixture has to be shaped to catch.
 func TestParseEmoteTagsNonBMP(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -647,6 +651,21 @@ func TestParseLineUnknownCommand(t *testing.T) {
 //     the message length is one too long.
 //   - stripping on any message that merely CONTAINS the marker: the third case
 //     below sends "\x01ACTION" mid-text and must come through untouched.
+//
+// The last three rows are the wrapper's EDGES. stripActionWrapper is a
+// CutPrefix plus a TrimSuffix, and each of the three is a place a tidier
+// rewrite would quietly change behaviour:
+//   - an unclosed wrapper (the prefix arrived, the trailing SOH did not) is
+//     still an action carrying its text. Mutant: an implementation that
+//     REQUIRES the closing SOH — a truncated line would then render with a
+//     literal "ACTION " head instead of as a /me.
+//   - an empty body (prefix immediately followed by the closing SOH) is still
+//     an action, with empty text. Mutant: one that requires a non-empty body,
+//     or that decides IsAction from the TrimSuffix result — the archive would
+//     record a bare "" chat line rather than an empty action.
+//   - ACTION with NO space after it is not a wrapper at all. Mutant: matching
+//     the prefix without its trailing space — the head of any message that
+//     happens to start with those bytes would be eaten.
 func TestParsePrivmsgStripsActionWrapper(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{
 		ChannelLogin: "testchan",
@@ -691,6 +710,33 @@ func TestParsePrivmsgStripsActionWrapper(t *testing.T) {
 			tags:       "id=m4;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer",
 			body:       "look: " + soh + "ACTION is the CTCP form",
 			wantText:   "look: " + soh + "ACTION is the CTCP form",
+			wantAction: false,
+		},
+		{
+			// A truncated wire line: the prefix identifies the form, so the
+			// missing closing SOH does not un-make the action.
+			name:       "an unclosed wrapper is still an action",
+			tags:       "id=m5;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer",
+			body:       soh + "ACTION Kappa",
+			wantText:   "Kappa",
+			wantAction: true,
+		},
+		{
+			// "/me " with nothing after it: empty text AND an action. The two
+			// facts are independent.
+			name:       "an empty action body keeps IsAction",
+			tags:       "id=m6;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer",
+			body:       soh + "ACTION " + soh,
+			wantText:   "",
+			wantAction: true,
+		},
+		{
+			// No space after ACTION, so the prefix does not match and the
+			// whole value — both SOH bytes included — is the message.
+			name:       "ACTION without the space is not a wrapper",
+			tags:       "id=m7;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer",
+			body:       soh + "ACTIONKappa" + soh,
+			wantText:   soh + "ACTIONKappa" + soh,
 			wantAction: false,
 		},
 	} {

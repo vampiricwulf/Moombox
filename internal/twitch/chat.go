@@ -152,10 +152,15 @@ var errReauthRequested = errors.New("IRC session cancelled to present refreshed 
 // always ABOVE the threshold, and chat retried forever; adding a faster
 // detector must not turn a recoverable network into a surrendered one.
 //
-// So this is OUR reconnect, exactly like the reauth path: logged, delayed by
-// whatever backoff the budget already carries, and charged nothing. It is
-// wrapped rather than returned bare so the operator-facing text can name the
-// window that elapsed.
+// So this is OUR reconnect, exactly like the reauth path: logged, charged
+// nothing, and given no backoff of its own. At budget 0 — the ordinary case
+// here, precisely because a keepalive verdict never charges — Start's
+// `continue` re-dials at once, and the ~70 s the verdict itself took is the
+// only wait there is. A budget carried from EARLIER, real failures is applied
+// unchanged by the loop head: those failures are still a reason to slow down,
+// and this path neither adds to them nor clears them. It is wrapped rather
+// than returned bare so the operator-facing text can name the window that
+// elapsed.
 var errKeepaliveTimeout = errors.New("twitch IRC keepalive: no response")
 
 // errChatPartMalformed marks a part file whose BYTES were read in full and are
@@ -1419,17 +1424,24 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		//
 		// NOT the reauth path's `immediate`, though: that one exists because a
 		// repaired credential must reach the wire now. Here the far side is
-		// unresponsive, so the ordinary backoff — whatever the budget already
-		// carries — is exactly right, and a session that has been failing this
-		// way still waits between attempts.
+		// unresponsive, so whatever the budget already carries is exactly
+		// right — and at budget 0, which is where a run of keepalive verdicts
+		// leaves it, that is no backoff at all: the `continue` below re-dials
+		// immediately and the ~70 s the verdict took is the only wait. A
+		// budget carried from EARLIER, real failures is applied unchanged by
+		// the loop head, so a session that has genuinely been failing does
+		// still wait between attempts.
 		if errors.Is(err, errKeepaliveTimeout) {
 			// Flush first, exactly as the backoff path above and the reauth
-			// path do. This `continue` skips the backoff block, and that block
-			// is where a reconnect normally saves state; without the flush the
-			// tail of this session's chat would sit in memory until the next
-			// session's flusher tick — and the session we just lost is
-			// precisely the one whose last messages are least likely to be
-			// recoverable.
+			// path do. At budget 0 — where a keepalive verdict leaves it —
+			// the loop head's backoff block does not run at all, and that
+			// block is where a reconnect normally saves state; without the
+			// flush here the tail of this session's chat would sit in memory
+			// until the next session's flusher tick, and the session we just
+			// lost is precisely the one whose last messages are least likely
+			// to be recoverable. A budget carried from earlier real failures
+			// does reach that block and flush again — one redundant flush of
+			// an empty buffer, not a second behaviour.
 			cd.flush()
 			cd.logger.Warn("twitch IRC keepalive gave up on the connection; reconnecting without charging the reconnect budget",
 				"err", err, "channel", cd.channelLogin, "uptime", sessionUptime)
