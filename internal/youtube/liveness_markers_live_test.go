@@ -58,7 +58,7 @@ func TestLiveLoginMarkersPresent(t *testing.T) {
 				"The arc acts ONLY on LoggedOut. If this page cannot produce it, "+
 				"pick a different page before building Tasks 3-6.", name, got)
 		}
-		if got := watchPageSessionAuth(string(body)); got != SessionAuthLoggedOut {
+		if got := watchPageSessionAuth(body); got != SessionAuthLoggedOut {
 			t.Errorf("%s: anonymous watchPageSessionAuth = %q, want LoggedOut.", name, got)
 		}
 	}

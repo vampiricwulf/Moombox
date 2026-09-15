@@ -21,17 +21,18 @@ var pathNParamRe = regexp.MustCompile(`/n/([a-zA-Z0-9_-]{10,})/`)
 var apiClient = httpx.Client(30 * time.Second)
 
 // PotTokenProvider generates PO tokens for Innertube player requests.
-// Defined here to avoid an import cycle with the bgutils package; *bgutils.PotProvider
-// satisfies this interface.
+// Defined here to avoid an import cycle with the bgutils package;
+// *bgutils.PotProvider satisfies this interface.
+//
+// One method, because one is what the player API uses: both fetch paths mint
+// with the video ID as the content binding (yt-dlp's PoTokenContext.PLAYER ->
+// (video_id, VIDEO_ID) rule) through the provider's ordinary session cache. A
+// challenge-sourced variant used to be declared here; it never had a caller,
+// and it was deleted rather than left as an obligation on every implementer
+// (owner ruling R1, 2026-09-15). The sidecar protocol that would carry a
+// challenge is untouched.
 type PotTokenProvider interface {
 	GeneratePoTokenString(ctx context.Context, contentBinding string, bypassCache bool) (string, error)
-	// GeneratePlayerPoToken mints a PLAYER-context PO token bound to
-	// videoID (yt-dlp PoTokenContext.PLAYER -> (video_id, VIDEO_ID)),
-	// minted from the watch page's attestation challenge when one is
-	// available ("" otherwise). Normal provider-side caching applies —
-	// this is NOT a fresh-mint-per-call path. See
-	// bgutils.PotProvider.GeneratePlayerPoToken.
-	GeneratePlayerPoToken(ctx context.Context, videoID, challenge string) (string, error)
 }
 
 // PlayerAPI handles interactions with YouTube's Innertube player API.

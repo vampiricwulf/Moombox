@@ -53,7 +53,7 @@ Moombox follows a strict priority hierarchy for all design decisions. When two c
 
 2. **Reliability** — The application must not crash, must not silently lose data, and must recover from transient failures automatically. Every goroutine has inline `defer/recover`. Network errors trigger exponential backoff with jitter. Stream-end detection uses a verification loop (up to 6 checks at 5-minute intervals) rather than trusting a single API response. Cookie auth loss triggers automatic refresh attempts.
 
-3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (3-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's 16ms gate caps progress writes at ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
+3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (10-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's 16ms gate caps progress writes at ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
 
 4. **Simple Deployment & UX** — Single binary, no containers, no service managers. FFmpeg is the only runtime dependency. A first-run wizard handles initial setup. Sensible defaults mean the app works out of the box for the common case. Configuration changes that require restart are handled via exit code 42 and the launcher respawns automatically.
 
@@ -113,7 +113,7 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 6. **YouTube Service** — PlayerAPI + Auth + format selector, fetches homepage for visitor data and API key
 7. **Twitch Service** — GQL API + Auth + EmoteResolver
 8. **PotProvider + Sidecar** — BotGuard/PO token generation. Primary path via embedded Node.js + JSDOM + bgutils-js subprocess (real integrity tokens); goja-only fallback when sidecar disabled or unhealthy. Triple in-process cache (session, minter, inflight).
-9. **CipherSolver** — YouTube signature/n-parameter decryption, 3-VM LRU, disk cache
+9. **CipherSolver** — YouTube signature/n-parameter decryption, 10-VM LRU, disk cache
 10. **NotificationManager** — Discord webhook dispatch
 11. **DownloadWorker** — Job queue (100 lifecycle + N VOD download slots), backlog scheduler, stream processor, orchestrator
 12. **TrimService** — FFmpeg-based clip extraction from finished recordings
@@ -145,7 +145,7 @@ internal/
     sidecar/       <- Node + JSDOM + bgutils-js subprocess manager: extraction,
                   -- Job Object pinning, JSON-RPC mux (primary PO-token path)
     embed/         <- go:embed of node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
-  cipher/          <- Signature + n-param decryption: AST + regex, 3-VM LRU, disk cache
+  cipher/          <- Signature + n-param decryption: AST + regex, 10-VM LRU, disk cache
   engine/          <- SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer
   chat/            <- YouTube live chat downloader (polling + batching + resume)
   worker/          <- DownloadWorker, DownloadOrchestrator, StreamProcessor, JobQueue,
@@ -361,7 +361,7 @@ Each client's formats are tagged with an auth level: AuthLevelAndroidVR(0), Auth
 
 **Watch page parsing:** The watch page HTML is fetched with the WEB user agent and cookies. It yields: `ytcfg` (visitor data, API key, player.js URL, client versions), inline player response (can contain formats directly), and initial chat continuation tokens (for live chat download).
 
-**Cipher decryption:** YouTube obfuscates streaming URLs with a signature cipher and an n-parameter throttle. Without decryption, URLs return 403 or are throttled to unusable speeds. The cipher solver downloads `player.js` from YouTube's CDN, extracts the transformation function chain via AST parsing of the JavaScript (identifying the function by structural patterns in the obfuscated code). If AST parsing fails, it falls back to regex pattern matching against known obfuscation patterns. The extracted JavaScript is compiled into Goja VMs and cached. Two-tier cache: memory (3-VM LRU keyed by player URL) for instant reuse, and disk (14-day TTL) to avoid re-downloading player.js. The solver also extracts `signatureTimestamp` (STS) from player.js — this value must be sent in Innertube API requests or the returned formats will have invalid URLs.
+**Cipher decryption:** YouTube obfuscates streaming URLs with a signature cipher and an n-parameter throttle. Without decryption, URLs return 403 or are throttled to unusable speeds. The cipher solver downloads `player.js` from YouTube's CDN, extracts the transformation function chain via AST parsing of the JavaScript (identifying the function by structural patterns in the obfuscated code). If AST parsing fails, it falls back to regex pattern matching against known obfuscation patterns. The extracted JavaScript is compiled into Goja VMs and cached. Two-tier cache: memory (10-VM LRU keyed by player URL) for instant reuse, and disk (14-day TTL) to avoid re-downloading player.js. The solver also extracts `signatureTimestamp` (STS) from player.js — this value must be sent in Innertube API requests or the returned formats will have invalid URLs.
 
 **N-parameter decryption:** Separate from signature cipher but using the same extraction infrastructure. The `n` parameter in YouTube URLs controls throttling — the obfuscated value triggers aggressive rate limiting. The n-parameter function is extracted from player.js, compiled to a Goja VM, and used to transform the parameter. Same caching as signature cipher.
 
@@ -421,7 +421,7 @@ Dual extraction approach for YouTube's obfuscated `player.js`:
 1. **AST parsing** (primary) — Parses the JavaScript, finds the signature transformation function chain and n-parameter function by structural patterns
 2. **Regex fallback** — Pattern-matches known obfuscation patterns when AST parsing fails
 
-Results are compiled into Goja VMs. Memory cache: 3-VM LRU keyed by player.js URL. Disk cache: raw extracted JavaScript with 14-day TTL. The compile mutex serializes compilation to prevent thundering herd when multiple goroutines need the same player.
+Results are compiled into Goja VMs. Memory cache: 10-VM LRU keyed by player.js URL. Disk cache: raw extracted JavaScript with 14-day TTL. The compile mutex serializes compilation to prevent thundering herd when multiple goroutines need the same player.
 
 ### YouTube Live Chat
 

@@ -26,7 +26,31 @@ const membershipTabIdentifier = "TAB_ID_SPONSORSHIPS"
 // up to the opening brace, then balance-scan from there. A non-greedy regex
 // over the whole object under- or over-matches on the megabyte-scale channel
 // payload, so brace-scanning is the robust choice.
-var ytInitialDataStartRe = regexp.MustCompile(`ytInitialData(?:"\])?\s*=\s*\{`)
+//
+// Both ASSIGNMENT forms are spelled out and a bare `ytInitialData = {` is NOT
+// accepted. That matters on the watch page, where this now locates the chat
+// continuation blob: the page embeds attacker-authored video metadata, and a
+// shortDescription reading `ytInitialData = {…}` would otherwise be taken for
+// the document whenever it precedes the real assignment. The old regex was
+// safe by accident — it required a `;</script>` terminator, which a
+// description cannot forge because YouTube escapes `<` as \u003c inside JSON
+// strings — and brace-scanning gave that terminator up, so the anchor has to
+// carry the weight instead. Same reasoning, same shape, as
+// playerResponseAnchors in watch_page.go, minus its bare third form.
+//
+// Preceding the real assignment is NOT the hard part, and nothing here relies
+// on it being: the channel page's own meta description tags are emitted ahead
+// of `var ytInitialData = `, exactly as they are ahead of
+// `var ytInitialPlayerResponse = ` on a watch page. What a forger cannot do is
+// spell a valid NON-EMPTY JSON object from page-authored text — HTML attribute
+// escaping turns `"` into `&quot;`, and inside a JSON string `\"` breaks the
+// balanced scan — so the worst a forged candidate achieves is to fail the
+// scan, fail the decode, or decode to an empty object. That is a denial of the
+// channel's own metadata (or of the chat continuation), never a substitution.
+// extractPlayerResponse in watch_page.go now converts even that denial into a
+// non-event by skipping a failed candidate and searching on; this locator
+// still takes the first match, which is why it keeps the narrower anchor set.
+var ytInitialDataStartRe = regexp.MustCompile(`(?:var ytInitialData|window\["ytInitialData"\])\s*=\s*\{`)
 
 // MembershipVideo is a members-only video discovered from a channel's
 // /membership tab. Stream status (live/upcoming/vod) is resolved downstream by

@@ -52,7 +52,7 @@ The sidecar's V8 path is the **primary** cipher (ejs) and BotGuard (bgutils-js) 
 | ejs Component | Sidecar File | Fallback (Goja) | What It Covers |
 |---------------|-------------|----------------|----------------|
 | Cipher algorithm | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/extractor.go` | Regex extraction of solver candidates from player.js |
-| N-challenge | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/solver.go` | Compiles full player.js in Goja VM, 3-slot LRU cache |
+| N-challenge | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/solver.go` | Compiles full player.js in Goja VM, 10-slot LRU cache (`solverCacheSize`) |
 | Transform functions | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/decrypt.go` | Decrypts signature and n-parameter |
 
 The sidecar runs ejs in V8 (Node.js). The `internal/cipher/` goja implementation is the fallback path when `use_sidecar = false` or the sidecar process is down. Vendored source pinned to commit SHA in `bgutil-sidecar/vendor/ejs/VERSION`.
@@ -104,7 +104,7 @@ Changes often cascade:
 - **Python → Go**: Translate dict comprehensions, regex groups, dynamic typing to idiomatic Go with proper error handling
 - **Python regex**: Go `regexp` doesn't support lookahead/lookbehind — rewrite patterns
 - **Goja VM constraints**: No WebAssembly, no native crypto — shimmed via `internal/goja/` (minimal DOM, TextEncoder, timers)
-- **VM memory**: BotGuard and cipher VMs hold multi-MB runtimes. Auto-evict when idle. Cipher capped at 3 cached VMs.
+- **VM memory**: BotGuard and cipher VMs hold multi-MB JavaScript runtimes. Auto-evict when idle. Cipher caps the LRU at 10 VMs (`solverCacheSize`, `internal/cipher/solver.go`) — ~30-50 MB each, so ~500 MB worst case. It was 3 until 2026-04; multi-channel monitoring routinely holds 4+ active player URLs and the smaller cap caused constant re-compiles.
 - **No CGo**: All solutions must be pure Go
 
 ## Common Mistakes

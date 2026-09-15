@@ -34,6 +34,25 @@ const (
 	PlatformTwitch  Platform = "twitch"
 )
 
+// cookieJarStatSettle is how long a file must have been untouched before its
+// (size, mtime) pair may be memoised — git's "racily clean" rule, for the
+// same reason. cookies.txt has writers that write it twice inside one
+// filesystem timestamp tick: the verify-and-roll-back pass writes the new set,
+// verifies it, and restores the previous one, and a restore that differs only
+// in expiry digits has the SAME byte length. Trusting the pair in that window
+// would leave the jar holding credentials the file no longer contains. The
+// cost of the rule is one extra read of a ~10 KB file during the two seconds
+// after a write — which is what every pass does today.
+//
+// The margin has to cover more than bare mtime granularity: the rewrite
+// lands via utils.ReplaceFile, whose Windows retry loop (an antivirus or
+// indexer briefly holding the temp file open) can stretch one logical write
+// across roughly 1.1s of wall-clock time, and the file that lands keeps the
+// TEMP file's mtime, not the rename's. 2s clears both sub-second mtime
+// granularity (NTFS, ext4) and that retry span; a mount with coarser-than-1s
+// mtime granularity, or a slower retry ceiling, would need a larger value.
+const cookieJarStatSettle = 2 * time.Second
+
 // cookieEntry is one cookie's stored state: the value plus the two fields the
 // jar needs to reason about identity and lifetime.
 //
@@ -74,7 +93,28 @@ type CookieJar struct {
 	youtube  map[string]cookieEntry // name -> entry
 	twitch   map[string]cookieEntry // name -> entry
 	filePath string
-	logger   cookieJarLogger // optional; set via SetLogger
+	// loadedSize/loadedMod describe the file Load last parsed; loadedMemo
+	// says whether that pair may be trusted. All three are written only by
+	// Load, under j.mu — parseInto (the shared parser) never touches them,
+	// and loadFrom (the caller-buffer entry point) only ever clears
+	// loadedMemo, since a caller-supplied buffer says nothing about what is
+	// currently on disk. See Load, loadFrom and parseInto.
+	loadedSize int64
+	loadedMod  time.Time
+	loadedMemo bool
+	// loadGen counts every successful parseInto install (from Load or
+	// loadFrom), bumped under the same lock that swaps the maps. Two
+	// concurrent Loads on the same jar — internal/youtube/auth.go's
+	// per-extraction Load racing internal/cookies' refresh-pass Load — can
+	// install in one order (G1 then G2) and finish their post-read stat
+	// blocks in the OTHER order (G2 then G1): G1's own pre/post stat still
+	// agree with EACH OTHER even though G2 has since overwritten the maps
+	// with different content, so G1 would otherwise memoise a pair that
+	// describes bytes the maps no longer hold. Load captures the generation
+	// its OWN parseInto call produced and only memoises when j.loadGen is
+	// still that value — nobody installed after it.
+	loadGen int
+	logger  cookieJarLogger // optional; set via SetLogger
 }
 
 // Essential YouTube cookies needed for authentication.
@@ -189,38 +229,175 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 //
 // The jar loads what the file says. Expiry is a diagnostic
 // (ExpiredAuthCookiesFor / AuthCookieHorizonFor), not a gate.
+//
+// Load re-reads the file only when it has actually changed. A stat whose
+// (size, mtime) match the pair recorded by the last successful parse — and
+// only when that pair was outside cookieJarStatSettle — returns immediately;
+// everything else reads and parses as before. Both YouTube extraction entry
+// points SyncCookies (internal/youtube/service.go and player_api_strategy.go),
+// so the file was read and parsed twice per extraction, forever, for an
+// answer that had not changed.
 func (j *CookieJar) Load(filePath string) error {
-	data, err := os.ReadFile(filePath)
+	// Stat FIRST: a file that has been deleted must fall through to the
+	// read below and clear the jar, not be served from a memo. preSt/preOK
+	// are carried past the read, so the post-read stat below can be checked
+	// against them instead of trusted alone — see the comment there.
+	preSt, preErr := os.Stat(filePath)
+	preOK := preErr == nil && preSt.Mode().IsRegular()
+	if preOK {
+		j.mu.RLock()
+		unchanged := j.loadedMemo &&
+			j.filePath == filePath &&
+			j.loadedSize == preSt.Size() &&
+			j.loadedMod.Equal(preSt.ModTime())
+		j.mu.RUnlock()
+		if unchanged {
+			return nil
+		}
+	}
+
+	data, err := cookieJarReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No cookies file is OK; clear state so callers see an empty jar.
+			// loadGen is bumped here too — this clear IS an install (of empty
+			// maps), and skipping the bump would let a concurrent Load that
+			// captured an earlier generation wrongly believe, in its own
+			// post-block below, that nothing has installed since it did.
 			j.mu.Lock()
 			j.filePath = filePath
 			j.youtube = make(map[string]cookieEntry)
 			j.twitch = make(map[string]cookieEntry)
+			j.loadedMemo = false
+			j.loadGen++
 			j.mu.Unlock()
 			return nil
 		}
 		return fmt.Errorf("failed to read cookie file: %w", err)
 	}
 
-	j.loadFrom(data, filePath)
+	// gen is the generation THIS call's install produced. The post-read block
+	// below only memoises when j.loadGen is still gen — see the comment there
+	// and on the loadGen field.
+	gen := j.parseInto(data, filePath)
+	cookieJarAfterParse() // test seam; see the var and the loadGen check below
+
+	// Stat AFTER the read too — and require it to AGREE with the stat taken
+	// BEFORE the read, not trust the post-read stat alone. A rewrite that
+	// lands in the gap between cookieJarReadFile returning and this stat (the
+	// goroutine paged out, or simply descheduled on a saturated 24/7 box; the
+	// gap need not be long, only unlucky) would otherwise still pass the
+	// settle check on ITS OWN mtime, memoising a (size, mtime) pair that
+	// describes bytes the maps above never actually held — every later Load
+	// would then short-circuit on a file it never truly read, hiding the
+	// rewrite until the next write recreates the gap (up to the 30-minute
+	// RefreshService cadence). Before this memo existed, that same race harmlessly
+	// self-healed on the very next Load; requiring pre- and post-read
+	// agreement here restores that property instead of trading it away.
+	//
+	// j.loadGen == gen guards a SECOND, independent race: two concurrent
+	// Loads (or a Load racing a loadFrom) on the same jar can install in one
+	// order and reach this post-block in the other. internal/youtube/auth.go
+	// calls SyncCookies (and so Load) once per extraction; the refresh pass
+	// (internal/cookies/refresh_pass.go, refresh_youtube.go) calls Load from
+	// its own goroutine. If G1 installs first and G2 installs second (last),
+	// G1's OWN preSt/postSt still agree with each other — G1's read really
+	// was internally consistent — so without this check G1 would memoise a
+	// pair that now describes bytes G2 installed, not the bytes G1 read. The
+	// gen check catches exactly that: by the time G1 reaches this block,
+	// j.loadGen has moved past the value G1's own parseInto call returned, so
+	// G1 correctly declines. Pinned by
+	// TestLoadDeclinesTheMemoAfterALaterInstall, which lands G2's install in
+	// that exact window through the cookieJarAfterParse seam —
+	// cookieJarReadFile cannot reach it, since that seam fires before
+	// parseInto rather than between parseInto and this stat.
+	if postSt, postErr := os.Stat(filePath); postErr == nil && postSt.Mode().IsRegular() {
+		j.mu.Lock()
+		if j.filePath == filePath {
+			j.loadedSize = postSt.Size()
+			j.loadedMod = postSt.ModTime()
+			j.loadedMemo = j.loadGen == gen &&
+				preOK &&
+				preSt.Size() == postSt.Size() &&
+				preSt.ModTime().Equal(postSt.ModTime()) &&
+				time.Since(postSt.ModTime()) >= cookieJarStatSettle
+		}
+		j.mu.Unlock()
+	} else {
+		// The file vanished (or stopped being a regular file) between the
+		// read above and this stat. The maps parseInto just installed hold
+		// its last-known content, but there is no (size, mtime) pair left to
+		// describe it: an earlier loadedMemo=true and ITS pair must not
+		// survive to vouch for a file that is no longer there, or the next
+		// Load would short-circuit on a stat that can never come true again
+		// and serve stale content forever. Gated on the same generation
+		// check as the success branch above, so this cannot clobber a
+		// DIFFERENT, later Load that has already installed and legitimately
+		// memoised its own (newer) content while this one was still
+		// resolving its now-failed stat.
+		j.mu.Lock()
+		if j.filePath == filePath && j.loadGen == gen {
+			j.loadedMemo = false
+		}
+		j.mu.Unlock()
+	}
 	return nil
 }
 
-// loadFrom is Load's parser, over bytes a caller already holds. Split out of
-// Load — behaviour identical, the ONLY caller that does not come through Load
-// is netscapeCookiesHoldACredential — so that a caller with the Netscape text
-// in memory can ask the jar's own predicates about it without inventing a
-// second parser or round-tripping through a temp file. The domain routing, the
-// name admission and the total order on duplicate domains are subtle enough
-// that a second reading of the same text would drift; there is one.
+// cookieJarReadFile is the file read Load performs between its two stats.
+// Seam for the tests, so a rewrite can be injected into the gap Load's
+// pre/post-stat agreement check exists to catch; production never reassigns
+// it.
+var cookieJarReadFile = os.ReadFile
+
+// cookieJarAfterParse fires in Load immediately after its own parseInto call
+// and before its post-read stat. Seam for the tests, so a SECOND install (a
+// concurrent Load, or a loadFrom on the same jar) can be landed in exactly
+// the window Load's `j.loadGen == gen` check exists to catch — the window
+// cookieJarReadFile cannot reach, because that seam fires before parseInto
+// rather than after it. Production never reassigns it, and a nil-body func is
+// free: the call compiles to an indirect jump with nothing to do.
+var cookieJarAfterParse = func() {}
+
+// loadFrom installs data as the jar's parsed state, for a caller that
+// already holds bytes rather than a path to read — netscapeCookiesHoldACredential
+// and autocookies' throwaway probe jars, plus any caller with the Netscape
+// text in memory who wants the jar's own predicates over it without
+// inventing a second parser or round-tripping through a temp file.
 //
 // filePath is recorded as the jar's origin exactly as Load records it. Pass ""
 // for a jar that came from no file: GetFilePath then answers "" and Reload
 // becomes a no-op, which is the honest answer for a throwaway jar built out of
 // a buffer.
+//
+// loadFrom clears the reload memo (loadedMemo) after parsing: a
+// caller-supplied buffer says nothing about what is currently on disk, so
+// nothing this call does can vouch for the (loadedSize, loadedMod) pair
+// already on the jar. Load does NOT call loadFrom for exactly that reason —
+// it calls parseInto directly and records its own memo from stats it takes
+// around its own read; see Load.
 func (j *CookieJar) loadFrom(data []byte, filePath string) {
+	j.parseInto(data, filePath) // return value unused: loadFrom always clears the memo below regardless
+	j.mu.Lock()
+	j.loadedMemo = false
+	j.mu.Unlock()
+}
+
+// parseInto is the parser shared by Load and loadFrom, over bytes a caller
+// already holds. The domain routing, the name admission and the total order
+// on duplicate domains are subtle enough that a second reading of the same
+// text would drift; there is one.
+//
+// filePath is recorded as the jar's origin exactly as Load records it.
+//
+// parseInto never touches loadedSize/loadedMod/loadedMemo — Load and
+// loadFrom each do their own memo bookkeeping around their calls to this
+// method; see both. It DOES bump and return loadGen, unconditionally, as
+// part of installing the maps: that counter is how Load's post-read block
+// tells whether some OTHER install (a concurrent Load or loadFrom on the
+// same jar) landed after this one, and must not be skippable by a caller
+// that does not care about the memo.
+func (j *CookieJar) parseInto(data []byte, filePath string) int {
 	// Snapshot logger once; the field is protected by the mutex.
 	j.mu.RLock()
 	logger := j.logger
@@ -336,11 +513,18 @@ func (j *CookieJar) loadFrom(data []byte, filePath string) {
 		dest[name] = cookieEntry{value: value, domain: domain, expiry: expiry}
 	}
 
+	// loadedSize/loadedMod/loadedMemo are untouched here by design — see the
+	// doc comment above. loadGen IS bumped, unconditionally: it marks that
+	// AN install happened, independent of whether this particular caller
+	// wants the memo bookkeeping that goes with one.
 	j.mu.Lock()
 	j.filePath = filePath
 	j.youtube = youtube
 	j.twitch = twitch
+	j.loadGen++
+	gen := j.loadGen
 	j.mu.Unlock()
+	return gen
 }
 
 // compareCookieDomains is a total order over the domains two rows sharing one

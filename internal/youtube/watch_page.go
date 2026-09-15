@@ -41,17 +41,27 @@ var (
 	// Matches encryptedHostFlags in flat JSON objects. May fail if nested objects
 	// precede the field (YouTube's embed page config is typically flat here).
 	encryptedHostFlagsRegex = regexp.MustCompile(`"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":\{[^}]*"encryptedHostFlags":"([^"]+)"`)
-	// Multiple patterns for extracting player response — YouTube occasionally
-	// changes the variable name or assignment format.
-	playerResponsePatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?s)var ytInitialPlayerResponse\s*=\s*({.+?});`),
-		regexp.MustCompile(`(?s)window\["ytInitialPlayerResponse"\]\s*=\s*({.+?});`),
-		regexp.MustCompile(`(?s)ytInitialPlayerResponse\s*=\s*({.+?});`),
+	// Assignment-PREFIX anchors for ytInitialPlayerResponse. Each pattern
+	// ends ON the opening brace; the object's extent then comes from
+	// scanBalancedObject, never from the regex.
+	//
+	// These used to end in a lazy `({.+?});`, which stops at the first `};`
+	// anywhere in the page. A shortDescription carrying `};` (a code sample,
+	// an emoticon) therefore yielded unbalanced JSON — and because all three
+	// patterns shared the flaw, all three failed identically, leaving
+	// PlayerResponse nil. That silently costs the watch page's
+	// ScheduledStartTime (the reschedule source) and its format pool, with
+	// nothing in the log to distinguish it from "the page had no player
+	// response". Same failure and same fix as ytAtNOpenRe below.
+	//
+	// Order is load-bearing and unchanged: the `var` form, then the
+	// window-property form (whose `"]` means the bare anchor cannot match
+	// it), then the bare form.
+	playerResponseAnchors = []*regexp.Regexp{
+		regexp.MustCompile(`var ytInitialPlayerResponse\s*=\s*\{`),
+		regexp.MustCompile(`window\["ytInitialPlayerResponse"\]\s*=\s*\{`),
+		regexp.MustCompile(`ytInitialPlayerResponse\s*=\s*\{`),
 	}
-	// ytInitialDataRegex extracts the ytInitialData JSON blob used for chat
-	// continuation token extraction. Mirrors the same regex used by
-	// internal/chat/api.go for its standalone watch-page fetch path.
-	ytInitialDataRegex = regexp.MustCompile(`(?s)var ytInitialData = ({.+?});</script>`)
 	// ytAtNOpenRe locates the opening of a window.ytAtN(...) call. Only the
 	// call prefix is matched here; the object literal's extent is found by
 	// scanning balanced braces (scanBalancedObject) rather than by a
@@ -141,7 +151,7 @@ const (
 // page every interval — keeping HTML on the result struct produced a ~5 MB/min
 // leak (every poll's HTML pinned in the heap, observed in pprof). All
 // downstream needs (ytcfg fields, player response, chat continuation) are
-// extracted at parse time so the body string can be GC'd as soon as
+// extracted at parse time so the response body can be GC'd as soon as
 // FetchWatchPage returns.
 type WatchPageResult struct {
 	Ytcfg *YtcfgData
@@ -222,12 +232,14 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
 	}
 
-	html := string(body)
-	sessionAuth := watchPageSessionAuth(html)
+	// No string(body) here: every extractor below reads the page as bytes,
+	// so the ~1-5 MB copy this used to make on every watch-page fetch —
+	// monitor polls and quality probes included — is gone.
+	sessionAuth := watchPageSessionAuth(body)
 
-	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(html)
-	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(html)
-	attestationChallenge, attestationReason := extractAttestationChallenge(html)
+	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(body)
+	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(body)
+	attestationChallenge, attestationReason := extractAttestationChallenge(body)
 
 	return &WatchPageResult{
 		Ytcfg:                ytcfg,
@@ -241,8 +253,8 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	}, nil
 }
 
-// Login-verdict markers, shared by the string and []byte detectors so the
-// two can never drift. Two ytcfg spellings have been observed for the same
+// Login-verdict markers, shared by the watch-page and liveness detectors so
+// the two can never drift. Two ytcfg spellings have been observed for the same
 // flag; either counts.
 //
 // The keys are the quoted NAME only — the colon is deliberately not part of
@@ -275,18 +287,12 @@ const (
 // the honest answer.
 const sessionAuthMaxSpaceSkip = 8
 
-// sessionAuthBody is the two shapes a fetched page arrives in. The value
-// reader is generic over both so the string and []byte detectors read a value
-// through ONE piece of logic: this used to be duplicated, and the whole
-// hazard the file guards against is those two drifting apart.
-type sessionAuthBody interface{ ~string | ~[]byte }
-
 // sessionAuthWordAt reports whether word sits at b[i:] as a complete token —
 // i.e. not merely as the prefix of a longer identifier, so `truthy` does not
 // read as `true`. Byte-by-byte rather than a slice conversion so no []byte
 // ever becomes a string here; see TestLivenessVerdictDoesNotAllocate, which is
-// now the only byte-side allocation pin.
-func sessionAuthWordAt[T sessionAuthBody](b T, i int, word string) bool {
+// the allocation pin that depends on it.
+func sessionAuthWordAt(b []byte, i int, word string) bool {
 	if i < 0 || i+len(word) > len(b) {
 		return false
 	}
@@ -317,7 +323,7 @@ func isSessionAuthSpace(c byte) bool {
 // whitespace, walking at most sessionAuthMaxSpaceSkip bytes. Both sides of the
 // colon go through this one function so the two can never acquire different
 // tolerances.
-func sessionAuthSkipSpace[T sessionAuthBody](b T, i int) int {
+func sessionAuthSkipSpace(b []byte, i int) int {
 	for end := i + sessionAuthMaxSpaceSkip; i < len(b) && i < end && isSessionAuthSpace(b[i]); i++ {
 	}
 	return i
@@ -333,7 +339,7 @@ func sessionAuthSkipSpace[T sessionAuthBody](b T, i int) int {
 // a colon whose value cannot be read — that is a marker we found and failed to
 // understand, and the established rule is that it stops the search rather than
 // licensing a weaker signal (see watchPageSessionAuth).
-func sessionAuthMarkerAt[T sessionAuthBody](b T, i int) (SessionAuthState, bool) {
+func sessionAuthMarkerAt(b []byte, i int) (SessionAuthState, bool) {
 	j := sessionAuthSkipSpace(b, i)
 	if j >= len(b) || b[j] != ':' {
 		return SessionAuthUnknown, false
@@ -341,9 +347,9 @@ func sessionAuthMarkerAt[T sessionAuthBody](b T, i int) (SessionAuthState, bool)
 	return sessionAuthValue(b, j+1), true
 }
 
-// sessionAuthMarkerInString finds the first occurrence of `key` in html that is
-// actually a marker and returns its verdict. ok=false means the page carries no
-// such marker, whatever else it carries.
+// sessionAuthMarkerIn finds the first occurrence of `key` in b that is
+// actually a marker and returns its verdict. ok=false means the page carries
+// no such marker, whatever else it carries.
 //
 // The scan continues past an occurrence that is not a marker — a bare
 // `"LOGGED_IN"` in some unrelated list, say — rather than giving up on it,
@@ -355,33 +361,10 @@ func sessionAuthMarkerAt[T sessionAuthBody](b T, i int) (SessionAuthState, bool)
 // Total work stays linear in the page: each iteration resumes past the
 // previous match, so the Index scans partition the body.
 //
-// Twinned with sessionAuthMarkerInBytes below. The two differ ONLY in
-// strings.Index vs bytes.Index — the watch-page path holds a string, the
-// liveness path holds a ~1MB page it must not copy to read one flag — and
-// everything that decides a verdict is shared through sessionAuthMarkerAt.
-func sessionAuthMarkerInString(html, key string) (SessionAuthState, bool) {
-	for from := 0; from <= len(html)-len(key); {
-		i := strings.Index(html[from:], key)
-		if i < 0 {
-			return SessionAuthUnknown, false
-		}
-		past := from + i + len(key)
-		if st, ok := sessionAuthMarkerAt(html, past); ok {
-			return st, true
-		}
-		from = past
-	}
-	return SessionAuthUnknown, false
-}
-
-// sessionAuthMarkerInBytes is sessionAuthMarkerInString over raw bytes. Keep
-// the two in step; TestMarkerLookupTwinsAgree enforces it on the twins
-// themselves.
-//
 // The []byte(key) conversion is hoisted out of the loop and never escapes
 // (bytes.Index does not retain it), which is what keeps the zero-allocation
 // pins in session_auth_test.go holding.
-func sessionAuthMarkerInBytes(b []byte, key string) (SessionAuthState, bool) {
+func sessionAuthMarkerIn(b []byte, key string) (SessionAuthState, bool) {
 	needle := []byte(key)
 	for from := 0; from <= len(b)-len(needle); {
 		i := bytes.Index(b[from:], needle)
@@ -443,7 +426,7 @@ func sessionAuthMarkerInBytes(b []byte, key string) (SessionAuthState, bool) {
 // true forms only grew), so no authenticated download loses its datasyncID
 // binding. And a marker that drifts into an unrecognised shape now goes
 // quiet rather than alarming — a missed failure, the acceptable direction.
-func sessionAuthValue[T sessionAuthBody](b T, start int) SessionAuthState {
+func sessionAuthValue(b []byte, start int) SessionAuthState {
 	i := sessionAuthSkipSpace(b, start)
 	if i >= len(b) {
 		return SessionAuthUnknown
@@ -472,7 +455,7 @@ func sessionAuthValue[T sessionAuthBody](b T, start int) SessionAuthState {
 // sessionAuthClosedBy reports whether b[i] is the closing quote q. A value
 // whose quote never closes — the page was truncated there, or the opening
 // quote was not a quote at all — is unreadable, not false.
-func sessionAuthClosedBy[T sessionAuthBody](b T, i int, q byte) bool {
+func sessionAuthClosedBy(b []byte, i int, q byte) bool {
 	return i < len(b) && b[i] == q
 }
 
@@ -503,40 +486,36 @@ func sessionAuthClosedBy[T sessionAuthBody](b T, i int, q byte) bool {
 // because this runs on every watch-page fetch including quality-monitor
 // polling. A key that occurs several times without being a marker resumes the
 // scan past each hit, so the total stays linear in the page either way.
-func watchPageSessionAuth(html string) SessionAuthState {
-	if st, ok := sessionAuthMarkerInString(html, sessionAuthKey); ok {
+func watchPageSessionAuth(page []byte) SessionAuthState {
+	if st, ok := sessionAuthMarkerIn(page, sessionAuthKey); ok {
 		return st
 	}
-	if st, ok := sessionAuthMarkerInString(html, sessionAuthCamelKey); ok {
+	if st, ok := sessionAuthMarkerIn(page, sessionAuthCamelKey); ok {
 		return st
 	}
 	// No login key, but a real watch-page shell: YouTube answered as a page
 	// it would have stamped the key onto, so an anonymous session is the
 	// sound reading.
-	if strings.Contains(html, sessionAuthYtcfgMark) {
+	if bytes.Contains(page, []byte(sessionAuthYtcfgMark)) {
 		return SessionAuthLoggedOut
 	}
 	return SessionAuthUnknown
 }
 
-// There used to be a sessionAuthFromBytes here: watchPageSessionAuth over raw
-// response bytes, ytcfg fallback and all. It existed because callers holding a
-// ~1MB page as []byte must not pay a string copy to read one flag, and its
-// only production caller was livenessVerdict below, which delegated to it
-// behind a Contains guard.
+// There used to be a string twin of the marker scan here
+// (sessionAuthMarkerInString), plus a TestMarkerLookupTwinsAgree that pinned
+// it against the byte-side one. Both are gone: FetchWatchPage now hands the
+// raw response bytes to every extractor rather than copying the ~1-5 MB page
+// into a string, so the string side had no production caller left, and a twin
+// kept alive only by the test that compares it to the live one is duplication
+// pretending to be coverage.
 //
-// That guard had to go when the marker keys dropped their colon (see
-// livenessVerdict), and with the delegation went the last caller. It was
-// deleted rather than kept as a tested twin: the byte-side path is still
-// exercised — livenessVerdict IS the byte-side reader the membership probe
-// calls — and the duplication that genuinely needs pinning is now
-// sessionAuthMarkerInString against sessionAuthMarkerInBytes, which
-// TestMarkerLookupTwinsAgree pins directly instead of inferring it two layers
-// up. Nothing needs a byte-side ytcfg fallback; watchPageSessionAuth is the
-// only consumer of that branch and it holds a string.
+// What remains is ONE reader. watchPageSessionAuth and livenessVerdict below
+// differ in exactly one thing — the ytcfg-bootstrap fallback, which is sound
+// for a watch page and unsafe for the liveness probe — and each is pinned
+// directly rather than inferred from the other.
 
-// livenessVerdict is watchPageSessionAuth over raw bytes with the ytcfg
-// fallback removed.
+// livenessVerdict is watchPageSessionAuth with the ytcfg fallback removed.
 //
 // That fallback ("a shell carrying ytcfg.set but no login key is anonymous")
 // is sound for watch pages, which may legitimately omit the key. It is NOT
@@ -569,13 +548,50 @@ func watchPageSessionAuth(html string) SessionAuthState {
 // marker itself cannot make that mistake, and it also drops a whole redundant
 // scan of the page.
 func livenessVerdict(b []byte) SessionAuthState {
-	if st, ok := sessionAuthMarkerInBytes(b, sessionAuthKey); ok {
+	if st, ok := sessionAuthMarkerIn(b, sessionAuthKey); ok {
 		return st
 	}
-	if st, ok := sessionAuthMarkerInBytes(b, sessionAuthCamelKey); ok {
+	if st, ok := sessionAuthMarkerIn(b, sessionAuthCamelKey); ok {
 		return st
 	}
 	return SessionAuthUnknown
+}
+
+// watchNextChatEnvelope decodes ONLY the path from ytInitialData down to the
+// live-chat renderer. Everything else in the document — the megabytes of
+// video renderers, the sidebar, the engagement panels — is skipped by
+// encoding/json without being materialised.
+//
+// The renderer itself stays a json.RawMessage so its two load-bearing fields
+// are decoded from a kilobyte-sized slice in a second pass. Capturing higher
+// up (at `contents`, say) would defeat the point: RawMessage.UnmarshalJSON
+// COPIES the bytes it captures, and at `contents` that is most of the page.
+// Same shape, same reasoning, as membershipTabHeader in channel_membership.go.
+type watchNextChatEnvelope struct {
+	Contents struct {
+		TwoColumnWatchNextResults struct {
+			ConversationBar struct {
+				LiveChatRenderer json.RawMessage `json:"liveChatRenderer"`
+			} `json:"conversationBar"`
+		} `json:"twoColumnWatchNextResults"`
+	} `json:"contents"`
+}
+
+// liveChatRendererEnvelope is the renderer's two load-bearing fields. The
+// four continuation shapes are tried per element in the order the live chat
+// API emits them; a renderer carrying several keeps today's winner.
+type liveChatRendererEnvelope struct {
+	IsReplay      bool `json:"isReplay"`
+	Continuations []struct {
+		Reload       *chatContinuationData `json:"reloadContinuationData"`
+		Invalidation *chatContinuationData `json:"invalidationContinuationData"`
+		Timed        *chatContinuationData `json:"timedContinuationData"`
+		Replay       *chatContinuationData `json:"liveChatReplayContinuationData"`
+	} `json:"continuations"`
+}
+
+type chatContinuationData struct {
+	Continuation string `json:"continuation"`
 }
 
 // extractChatContinuation pulls the live-chat continuation token (and its
@@ -584,54 +600,64 @@ func livenessVerdict(b []byte) SessionAuthState {
 // streams with chat disabled, etc.) — callers treat that as "no chat" rather
 // than a hard failure. Shape mirrors chat.ExtractChatContinuation; duplicated
 // here so the youtube package owns its own extraction and watch_page.go can
-// drop the raw HTML before returning. json.Unmarshal allocates fresh strings,
-// so the returned token does not alias the html backing array.
-func extractChatContinuation(html string) (string, bool, error) {
-	m := ytInitialDataRegex.FindStringSubmatch(html)
-	if m == nil {
+// drop the raw page before returning. json.Unmarshal allocates fresh strings,
+// so the returned token does not alias the page's backing array.
+//
+// The blob is located by extractYtInitialData (channel_membership.go), the
+// same brace-depth scan the membership path uses — which drops the old
+// regex's `;</script>` terminator while keeping its two anchored assignment
+// spellings, so page-authored text cannot present itself as the blob.
+//
+// A decode error is reported ONLY when no token came out of the decode, and
+// that rule governs BOTH passes. encoding/json records the first type error
+// and keeps decoding, so `"isReplay":"true"`, a non-object element in
+// continuations, or a numeric `continuation` on the first element all leave
+// err != nil AND a perfectly good token on a later field. The map[string]any
+// walk this replaces returned the token in every one of those cases (its type
+// assertions simply yielded the zero value and it read on), and both consumers
+// — orchestrator_chat.go and stream_processor_youtube.go — skip chat
+// archiving on an empty token, so surfacing the error instead would silently
+// stop chat capture on a YouTube type drift the old shape survived.
+//
+// The point of the replacement is cost, not behaviour: at 500 filler
+// renderers the map decode cost 32,593 allocations to read one string, and it
+// is linear in page size.
+func extractChatContinuation(page []byte) (string, bool, error) {
+	raw, ok := extractYtInitialData(page)
+	if !ok {
 		return "", false, fmt.Errorf("ytInitialData not found")
 	}
 
-	var data map[string]any
-	if err := json.Unmarshal([]byte(m[1]), &data); err != nil {
-		return "", false, fmt.Errorf("parse ytInitialData: %w", err)
-	}
-
-	contents, _ := data["contents"].(map[string]any)
-	twoCol, _ := contents["twoColumnWatchNextResults"].(map[string]any)
-	convBar, _ := twoCol["conversationBar"].(map[string]any)
-	chatRenderer, _ := convBar["liveChatRenderer"].(map[string]any)
-	if chatRenderer == nil {
+	var env watchNextChatEnvelope
+	err := json.Unmarshal(raw, &env)
+	rendererRaw := env.Contents.TwoColumnWatchNextResults.ConversationBar.LiveChatRenderer
+	if len(rendererRaw) == 0 || string(rendererRaw) == "null" {
+		if err != nil {
+			return "", false, fmt.Errorf("parse ytInitialData: %w", err)
+		}
 		return "", false, fmt.Errorf("no liveChatRenderer found")
 	}
 
-	isReplay, _ := chatRenderer["isReplay"].(bool)
+	// Read the token FIRST and explain a failure only afterwards — a partial
+	// type error elsewhere in the renderer must not cost us a token that
+	// decoded fine. See the rule in the doc comment.
+	var renderer liveChatRendererEnvelope
+	rendererErr := json.Unmarshal(rendererRaw, &renderer)
 
-	conts, _ := chatRenderer["continuations"].([]any)
-	if len(conts) == 0 {
-		return "", false, fmt.Errorf("no continuations found")
-	}
-
-	contKeys := []string{
-		"reloadContinuationData",
-		"invalidationContinuationData",
-		"timedContinuationData",
-		"liveChatReplayContinuationData",
-	}
-	for _, cont := range conts {
-		contMap, _ := cont.(map[string]any)
-		if contMap == nil {
-			continue
-		}
-		for _, key := range contKeys {
-			if contData, ok := contMap[key].(map[string]any); ok {
-				if token, ok := contData["continuation"].(string); ok && token != "" {
-					return token, isReplay, nil
-				}
+	for _, cont := range renderer.Continuations {
+		for _, data := range [...]*chatContinuationData{cont.Reload, cont.Invalidation, cont.Timed, cont.Replay} {
+			if data != nil && data.Continuation != "" {
+				return data.Continuation, renderer.IsReplay, nil
 			}
 		}
 	}
 
+	if rendererErr != nil {
+		return "", false, fmt.Errorf("parse ytInitialData: %w", rendererErr)
+	}
+	if len(renderer.Continuations) == 0 {
+		return "", false, fmt.Errorf("no continuations found")
+	}
 	return "", false, fmt.Errorf("no continuation token found")
 }
 
@@ -653,38 +679,91 @@ func normalizePlayerJSURL(raw string) string {
 	return strings.Clone(u)
 }
 
-func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
+// extractPlayerResponse returns the decoded ytInitialPlayerResponse object.
+//
+// Per anchor: match the assignment prefix, brace-scan the literal from the
+// `{` the match ends on, unmarshal. The first anchor that yields a balanced
+// literal decoding to a NON-EMPTY object wins; anything short of that falls
+// through, which is the control flow the lazy patterns had.
+//
+// Every occurrence of an anchor is tried, not just the first. First-occurrence
+// was never the safety property an earlier version of this comment claimed:
+// on a real watch page today the `name="description"` meta tag (byte ~704510)
+// and `og:description` (~706468) both precede `var ytInitialPlayerResponse = `
+// (~714427), so page-authored text genuinely does come first. What limits
+// forgery is that such text cannot yield a valid non-empty JSON object — HTML
+// attribute escaping turns `"` into `&quot;`, and inside a JSON string `\"`
+// breaks the scan — so a forged candidate can only fail the scan, fail the
+// decode, or decode to an empty object. Stopping at the first match turned
+// that harmless inability into a denial of the real player response (and with
+// it the watch page's ScheduledStartTime and format pool); skipping the failed
+// candidate and searching on turns it back into nothing at all. The empty-map
+// rejection is part of that: `{}` decodes fine, so without it a forged `{}`
+// would still win.
+func extractPlayerResponse(page []byte) (map[string]any, bool) {
+	for _, re := range playerResponseAnchors {
+		for start := 0; start < len(page); {
+			loc := re.FindIndex(page[start:])
+			if loc == nil {
+				break
+			}
+			matchEnd := start + loc[1]
+			// Resume the search one byte past THIS match's start, so a
+			// rejected candidate cannot be re-found and the scan below is
+			// free to run off the end of a forged literal.
+			start += loc[0] + 1
+			// The match ends ON the opening brace, so rescan from it.
+			obj, ok := scanBalancedObject(page[matchEnd-1:])
+			if !ok {
+				continue
+			}
+			var pr map[string]any
+			if json.Unmarshal(obj, &pr) != nil {
+				continue
+			}
+			if len(pr) == 0 {
+				continue
+			}
+			return pr, true
+		}
+	}
+	return nil, false
+}
+
+func extractYtcfgAndPlayerResponse(page []byte) (*YtcfgData, map[string]any) {
 	ytcfg := &YtcfgData{}
 
 	// Extract player URL
-	if m := jsURLRegex.FindStringSubmatch(html); m != nil {
-		ytcfg.PlayerURL = normalizePlayerJSURL(m[1])
+	if m := jsURLRegex.FindSubmatch(page); m != nil {
+		ytcfg.PlayerURL = normalizePlayerJSURL(string(m[1]))
 	}
 
-	// Extract visitor data. strings.Clone breaks the substring→backing-array
-	// alias: regexp.FindStringSubmatch returns substrings of `html` (the full
-	// ~5 MB watch-page response). Without Clone, storing m[1] anywhere
-	// persistent (Service.visitorData, sessionCache keys, etc.) pins the
-	// entire HTML in memory. Per-poll leak observed at ~5 MB/min in pprof.
-	if m := visitorDataRegex.FindStringSubmatch(html); m != nil {
-		ytcfg.VisitorData = strings.Clone(m[1])
+	// Extract visitor data. string(m[1]) is the copy that breaks the
+	// substring→backing-array alias: regexp submatches over `page` are
+	// slices of the full ~5 MB watch-page response, and storing one
+	// anywhere persistent (Service.visitorData, sessionCache keys, …)
+	// would pin the entire page in memory. Per-poll leak observed at
+	// ~5 MB/min in pprof. On the string side this needed an explicit
+	// strings.Clone; converting a []byte submatch always copies.
+	if m := visitorDataRegex.FindSubmatch(page); m != nil {
+		ytcfg.VisitorData = string(m[1])
 	}
 
 	// Extract session index
-	if m := sessionIndexRegex.FindStringSubmatch(html); m != nil {
-		if idx, err := strconv.Atoi(m[1]); err == nil {
+	if m := sessionIndexRegex.FindSubmatch(page); m != nil {
+		if idx, err := strconv.Atoi(string(m[1])); err == nil {
 			ytcfg.SessionIndex = &idx
 		}
 	}
 
-	// Extract delegated session ID (Clone — see VisitorData comment).
-	if m := delegatedSessionRegex.FindStringSubmatch(html); m != nil {
-		ytcfg.DelegatedSessionID = strings.Clone(m[1])
+	// Extract delegated session ID (copied — see VisitorData comment).
+	if m := delegatedSessionRegex.FindSubmatch(page); m != nil {
+		ytcfg.DelegatedSessionID = string(m[1])
 	}
 
-	// Extract datasync ID (Clone — see VisitorData comment).
-	if m := dataSyncIDRegex.FindStringSubmatch(html); m != nil {
-		ytcfg.DataSyncID = strings.Clone(m[1])
+	// Extract datasync ID (copied — see VisitorData comment).
+	if m := dataSyncIDRegex.FindSubmatch(page); m != nil {
+		ytcfg.DataSyncID = string(m[1])
 	}
 
 	// Detect the experiment that switches GVS PO-token binding to the video
@@ -692,38 +771,30 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
 	// player configs is sufficient — yt-dlp parses each config's
 	// serializedExperimentFlags and takes the last value, but YouTube ships
 	// the same value across all of them.
-	ytcfg.GvsBindToVideoID = gvsBindVideoIDRegex.MatchString(html)
+	ytcfg.GvsBindToVideoID = gvsBindVideoIDRegex.Match(page)
 
-	// Extract ytInitialPlayerResponse (try multiple patterns)
-	var playerResponse map[string]any
-	for _, re := range playerResponsePatterns {
-		if m := re.FindStringSubmatch(html); m != nil {
-			if err := json.Unmarshal([]byte(m[1]), &playerResponse); err == nil {
-				// Extract video metadata from response
-				if vd, ok := playerResponse["videoDetails"].(map[string]any); ok {
-					if title, ok := vd["title"].(string); ok {
-						ytcfg.Title = title
-					}
-					if author, ok := vd["author"].(string); ok {
-						ytcfg.Author = author
-					}
-					if channelID, ok := vd["channelId"].(string); ok {
-						ytcfg.ChannelID = channelID
-					}
-					if desc, ok := vd["shortDescription"].(string); ok {
-						ytcfg.Description = desc
-					}
-					if thumb, ok := vd["thumbnail"].(map[string]any); ok {
-						if thumbs, ok := thumb["thumbnails"].([]any); ok && len(thumbs) > 0 {
-							if last, ok := thumbs[len(thumbs)-1].(map[string]any); ok {
-								if url, ok := last["url"].(string); ok {
-									ytcfg.ThumbnailURL = url
-								}
-							}
-						}
+	// Extract ytInitialPlayerResponse (anchor + balanced scan, see above)
+	playerResponse, _ := extractPlayerResponse(page)
+	if vd, ok := playerResponse["videoDetails"].(map[string]any); ok {
+		if title, ok := vd["title"].(string); ok {
+			ytcfg.Title = title
+		}
+		if author, ok := vd["author"].(string); ok {
+			ytcfg.Author = author
+		}
+		if channelID, ok := vd["channelId"].(string); ok {
+			ytcfg.ChannelID = channelID
+		}
+		if desc, ok := vd["shortDescription"].(string); ok {
+			ytcfg.Description = desc
+		}
+		if thumb, ok := vd["thumbnail"].(map[string]any); ok {
+			if thumbs, ok := thumb["thumbnails"].([]any); ok && len(thumbs) > 0 {
+				if last, ok := thumbs[len(thumbs)-1].(map[string]any); ok {
+					if url, ok := last["url"].(string); ok {
+						ytcfg.ThumbnailURL = url
 					}
 				}
-				break
 			}
 		}
 	}
@@ -782,18 +853,20 @@ func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, erro
 // key holds a JSON string; inside that is bgChallenge. Returns compact JSON
 // of bgChallenge, or "" on any miss/parse failure — absence is a normal
 // result (the POT sidecar falls back to /att/get), never an error.
-func extractAttestationChallenge(html string) (challenge, reason string) {
-	loc := ytAtNOpenRe.FindStringIndex(html)
+func extractAttestationChallenge(page []byte) (challenge, reason string) {
+	loc := ytAtNOpenRe.FindIndex(page)
 	if loc == nil {
 		return "", atnNoCall
 	}
 	// The regex ends on the literal '{'; rescan from there so the object's
 	// true extent comes from brace balancing, not from the first `})`.
-	obj, ok := scanBalancedObject(html[loc[1]-1:])
+	obj, ok := scanBalancedObject(page[loc[1]-1:])
 	if !ok {
 		return "", atnUnbalanced
 	}
-	jsonStr, err := utils.JSToJSON(obj, nil, false)
+	// One small copy: the ytAtN literal is kilobytes, and utils.JSToJSON
+	// parses a string.
+	jsonStr, err := utils.JSToJSON(string(obj), nil, false)
 	if err != nil {
 		return "", atnJSConvert
 	}
@@ -925,9 +998,13 @@ func canonicalizeChallenge(raw json.RawMessage) (canonical, reason string) {
 // scanBalancedObject returns the complete `{...}` literal starting at s[0],
 // tracking JS string state so braces inside quoted payloads never affect the
 // depth count. Returns ok=false when the literal never closes.
-func scanBalancedObject(s string) (string, bool) {
+//
+// []byte rather than string because every caller now holds the raw response
+// body: FetchWatchPage stopped copying the ~1-5 MB page into a string for
+// the sake of four extractors that only read it.
+func scanBalancedObject(s []byte) ([]byte, bool) {
 	if len(s) == 0 || s[0] != '{' {
-		return "", false
+		return nil, false
 	}
 	depth := 0
 	var quote byte
@@ -957,5 +1034,5 @@ func scanBalancedObject(s string) (string, bool) {
 			}
 		}
 	}
-	return "", false
+	return nil, false
 }
