@@ -48,7 +48,11 @@ var navigationKeys = helpSection{
 	keys: []helpKey{
 		{"↑/↓", "Select / Scroll"},
 		{"PgUp/PgDn", "Page scroll (Logs)"},
+		{"Ctrl+U/Ctrl+D", "Half-page scroll (Details · Logs)"},
+		{"End", "Resume auto-scroll (Logs)"},
 		{"Enter", "Expand/collapse archives"},
+		{"Space", "Select task for batch actions (Tasks)"},
+		{"Esc", "Clear batch selection · filter · armed chord"},
 		{"/", "Filter query (Tasks) · Find text (Logs)"},
 		{"", "Filter: status:live channel:\"name\" platform:youtube"},
 		{"", "        -negate  a|b (either)  \"quoted phrase\""},
