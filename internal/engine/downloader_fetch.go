@@ -260,7 +260,13 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 	return data, resp.StatusCode, nil
 }
 
-// fetchSegmentWithRetry attempts to fetch a segment with retries and exponential backoff.
+// fetchSegmentWithRetry attempts to fetch a segment with retries and two
+// different backoff ramps, neither of them exponential across the whole
+// function: the 403-with-refresh path doubles (singleGoneRetry << attempt —
+// 500ms/1s/2s/4s, sized to outlive credentialRefreshCooldown), while every
+// other transient failure waits a LINEAR 5s x (attempt+1) — 5s, 10s, 15s, 20s
+// over the default MaxSegmentRetries=5, with the final attempt's sleep
+// skipped because no fetch follows it.
 // Returns:
 //   - (data, nil): success.
 //   - (nil, ErrSegmentPermanent): segment is gone for good (403/410). Don't retry.
