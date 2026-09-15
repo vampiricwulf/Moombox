@@ -58,7 +58,6 @@ const (
 	ParallelDownloads    = 6  // Bounded parallel downloads during catch-up
 	DefaultRetryDelayCap = 60 // seconds
 	HeadProbeInterval    = 5 * time.Second
-	SegmentTimeout       = 30 * time.Second
 	// DefaultMaxTimeout is the fallback for DownloaderOptions.MaxTimeout (the
 	// operator-configurable config.MaximumTimeout): how long the DASH loop keeps
 	// waiting/verifying for the next segment before force-finalizing, even when
@@ -108,6 +107,15 @@ const (
 	// not memory — workers simply wait for the head segment to land.
 	catchUpBufferBytes = 256 << 20
 )
+
+// SegmentTimeout bounds a single segment/chunk/probe fetch's derived
+// context (fetchSegment, probeHeadAt, probeFileSize, fetchChunk,
+// ProbeSegmentAvailable each run context.WithTimeout(parent,
+// SegmentTimeout)). A package var rather than a const purely so a test can
+// shrink it under t.Cleanup-restored assignment to exercise a genuine
+// derived-context timeout without an actual 30s wait; production code never
+// mutates it.
+var SegmentTimeout = 30 * time.Second
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
 // from the central UA constants so version bumps stay in lockstep with the
