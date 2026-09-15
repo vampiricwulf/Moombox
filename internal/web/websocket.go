@@ -98,11 +98,17 @@ type wsClient struct {
 	drops atomic.Uint64
 	// lastLagLog is the UnixNano of the last "WS client lagging" line.
 	lastLagLog atomic.Int64
-	// needsResync is set by a drop and CLAIMED by the next enqueue, which
-	// then sends the full initial-state snapshot in place of an incremental
-	// frame. Claimed with CompareAndSwap before the snapshot is built, so a
-	// racing drop can only ever cause an EXTRA snapshot, never a missed one.
+	// needsResync is set by a drop and CLAIMED by a later enqueue (or by the
+	// ping tick, see flushResync), which then sends the full initial-state
+	// snapshot in place of an incremental frame. Claimed with CompareAndSwap
+	// before the snapshot is built, so a racing drop can only ever cause an
+	// EXTRA snapshot, never a missed one.
 	needsResync atomic.Bool
+	// lastResync is the UnixNano of the last CLAIM (not the last delivery):
+	// stamped where needsResync is cleared, so a snapshot that fails to build
+	// or gets evicted still costs the interval. Seeded at connect from the
+	// initial state the client is handed there.
+	lastResync atomic.Int64
 }
 
 // NewWebSocketHub creates a new WebSocket hub.
@@ -177,6 +183,10 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial state immediately
 	hub.sendInitialState(client)
+	// That snapshot IS a resync, so start the rate-limit clock here: a tab
+	// that falls behind in its first second gets its next full snapshot one
+	// wsResyncMinInterval from now, not stacked straight on top of this one.
+	client.lastResync.Store(time.Now().UnixNano())
 
 	// Start server-initiated ping goroutine to keep connection alive
 	go hub.pingPump(client)
@@ -217,6 +227,15 @@ func (hub *WebSocketHub) writePump(client *wsClient) {
 // wsLagLogInterval bounds how often ONE client's drops may produce a log line.
 const wsLagLogInterval = 30 * time.Second
 
+// wsResyncMinInterval bounds how often ONE client may be handed a full
+// initial-state snapshot in place of an incremental frame. A client that
+// never drains drops — and so re-arms — on EVERY frame, and a snapshot costs
+// a GetAllJobs plus a whole-state marshal; without this bound a single slow
+// tab would provoke one of those per broadcast, i.e. tens per second while a
+// download is running. One second is far below any human-visible ghost-row
+// lifetime and far above the broadcast rate it is there to decouple from.
+const wsResyncMinInterval = 1 * time.Second
+
 // noteLag emits at most one "WS client lagging" line per client per
 // wsLagLogInterval. The DROP COUNT is incremented by the caller — the two
 // call sites disagree about whether the dropped frame still needs a resync,
@@ -228,9 +247,9 @@ const wsLagLogInterval = 30 * time.Second
 // each line back to every client — including the full queue that just dropped,
 // which dropped again and warned again. One lagging client could hold that loop
 // up for a 10 s stalled write, writing the log file and every per-job buffer on
-// each turn. Debug rather than Warn because the resync above already recovers
-// the frame, and at most one line per client per 30 s because that bound is
-// what actually breaks the loop.
+// each turn. Debug rather than Warn because the resync restores the client's
+// STATE for everything initial_state carries, and at most one line per client
+// per 30 s because that bound is what actually breaks the loop.
 func (hub *WebSocketHub) noteLag(client *wsClient) {
 	now := time.Now().UnixNano()
 	last := client.lastLagLog.Load()
@@ -253,31 +272,107 @@ func (hub *WebSocketHub) logDropTotal(client *wsClient) {
 	}
 }
 
-// queueOrDrop pushes a marshalled frame into a client's write queue.
-// On a full queue the OLDEST queued frame is dropped (it's stale state
-// for a client that's already behind) and the new frame replaces it.
-// Returns false when the client is gone (channel closed by
-// removeClient). Audit reports/web.md C-7.
+// resyncSnapshot claims this client's pending resync and builds the snapshot
+// that replaces the frame the caller was about to send. Returns nil when
+// there is nothing armed, when wsResyncMinInterval gates the claim, or when
+// the snapshot cannot be built — in every one of those cases the caller sends
+// its original incremental frame instead.
+//
+// It carries its OWN recover, and deliberately not the silent one the enqueue
+// step below has: this is where hub.InitialState runs, an application closure
+// that reads the database. Under the enqueue's catch-all a panic in there
+// would be swallowed with no log line at all, and the frame would vanish
+// before either select without even counting a drop — one bad provider and
+// every broadcast to every client disappears in silence.
+//
+// A failed build does NOT re-arm the flag. initialStateBytes reports a marshal
+// failure through the app logger, whose subscriber broadcasts that line
+// straight back to this same client; re-arming would make that line claim the
+// flag, rebuild, fail, log again — an unbounded loop doing a full GetAllJobs
+// per turn, and reachable for real (a NaN in any job float64 makes
+// json.Marshal fail permanently). Leaving it cleared costs the client the
+// ghost row it would have kept anyway before this mechanism existed, and
+// leaves the single Error as the operator's signal.
+func (hub *WebSocketHub) resyncSnapshot(client *wsClient) (snap []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			// snap stays nil — the caller falls back to its incremental frame.
+			hub.logger.Error("panic building the resync snapshot", "panic", r)
+		}
+	}()
+
+	if !client.needsResync.Load() {
+		return nil // the common case: one atomic load per frame
+	}
+	now := time.Now().UnixNano()
+	// Interval check BEFORE the CompareAndSwap. Claiming first and checking
+	// afterwards would clear the flag inside a window it is not allowed to
+	// act in, and a concurrent call that IS past the interval would then find
+	// nothing armed — the resync lost rather than delayed.
+	if now-client.lastResync.Load() < int64(wsResyncMinInterval) {
+		return nil
+	}
+	if !client.needsResync.CompareAndSwap(true, false) {
+		return nil // another goroutine claimed it
+	}
+	// Stamp at the CLAIM, unconditionally: a build that returns nil, and a
+	// snapshot the queue later evicts, must both still cost the interval.
+	// Stamping on delivery instead would never advance for the one client
+	// that needs the bound most — the one whose queue is always full.
+	client.lastResync.Store(now)
+	return hub.initialStateBytes()
+}
+
+// flushResync hands a client a pending snapshot without waiting for the next
+// broadcast. The flag is otherwise only ever CONSUMED by an enqueue, so on a
+// quiet hub — a job_deleted drops a frame, the frame right after it falls
+// inside wsResyncMinInterval and goes out incremental, and then nothing is
+// broadcast for minutes — the ghost row this whole mechanism exists to retire
+// would outlive it. Called from the ping tick, which bounds that to one
+// wsPingInterval.
+func (hub *WebSocketHub) flushResync(client *wsClient) {
+	if snap := hub.resyncSnapshot(client); snap != nil {
+		hub.enqueue(client, snap, true)
+	}
+}
+
+// queueOrDrop pushes a marshalled frame into a client's write queue, first
+// giving a pending resync the chance to REPLACE it with a full initial-state
+// snapshot. Replace, not precede: the snapshot restates everything
+// initial_state carries (jobs, logs, check timers, connectivity, backfill,
+// hideFinishedAgeDays), so substituting it loses nothing for those types. The
+// two broadcast types it does NOT carry, disk_status and update_available,
+// are recovered on the next reconnect or the next daily check rather than
+// immediately — acceptable against a ghost row that never goes away.
+//
+// Returns false when the client is gone (channel closed by removeClient).
+// Audit reports/web.md C-7.
 func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
+	resync := false
+	if snap := hub.resyncSnapshot(client); snap != nil {
+		msg = snap
+		resync = true
+	}
+	return hub.enqueue(client, msg, resync)
+}
+
+// enqueue pushes one frame into a client's write queue. On a full queue the
+// OLDEST queued frame is dropped (it's stale state for a client that's
+// already behind) and the new frame replaces it. `resync` says the frame
+// being pushed is a full-state snapshot, which changes what an eviction
+// means — see the comment on the drop.
+//
+// The recover here is narrow BY DESIGN: it exists for exactly one thing, the
+// send-on-closed-channel race with removeClient, and stays silent because
+// that race is expected. Nothing that can fail in an interesting way — the
+// snapshot build above, in particular — belongs underneath it.
+func (hub *WebSocketHub) enqueue(client *wsClient, msg []byte, resync bool) bool {
 	defer func() {
 		// Recover from a send-on-closed-channel race with removeClient.
 		if r := recover(); r != nil {
 			// Already removed — caller doesn't need to retry.
 		}
 	}()
-
-	// Claim a pending resync BEFORE building anything: CompareAndSwap means a
-	// drop racing this call re-arms the flag and costs at most one extra
-	// snapshot, where clearing it afterwards could swallow that drop entirely.
-	resync := client.needsResync.CompareAndSwap(true, false)
-	if resync {
-		if snap := hub.initialStateBytes(); snap != nil {
-			msg = snap
-		} else {
-			client.needsResync.Store(true) // try again on the next frame
-			resync = false
-		}
-	}
 
 	select {
 	case client.writes <- msg:
@@ -293,9 +388,9 @@ func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
 		if !resync {
 			// A frame the client never saw is gone and nothing queued after it
 			// restates it. When we ARE carrying a snapshot, the frame we just
-			// evicted is older than that snapshot and therefore superseded —
-			// re-arming there would hand a permanently-full queue a fresh
-			// full-state marshal on every single broadcast.
+			// evicted is almost always older than that snapshot (a whole queue
+			// can turn over during a GetAllJobs build, so "almost"), and
+			// re-arming here would fight wsResyncMinInterval for no gain.
 			client.needsResync.Store(true)
 		}
 		hub.noteLag(client)
@@ -471,6 +566,12 @@ func (hub *WebSocketHub) pingPump(client *wsClient) {
 				hub.mu.Unlock()
 				client.conn.Close(websocket.StatusGoingAway, "ping timeout")
 				return
+			}
+			// The live client is the one place a pending resync can be flushed
+			// without a broadcast to ride on. One atomic load per client per
+			// wsPingInterval when nothing is pending, which is the normal case.
+			if client.needsResync.Load() {
+				hub.flushResync(client)
 			}
 		}
 	}
