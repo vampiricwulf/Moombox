@@ -1225,6 +1225,14 @@ const rowContent = (h, i) => {
     (n.tagName === "IMG" ? `[${n.alt}]` : n.textContent));
 };
 
+/**
+ * 8 code points, 9 UTF-16 units; "Kappa" at code points 2..6, UTF-16 units
+ * 3..7. The trailing "!" keeps an already-correct span off the last code
+ * point, where the corrector's `en >= cps.length` guard would skip it and hide
+ * whether the gates are there at all (see chat-timeline.test.mjs).
+ */
+const EMOTE_TEXT = "🎉 Kappa!";
+
 const ircChatMsg = (message, emotes) => ({
   offsetMs: 1000, authorName: "u", message, emotes,
   raw: `@emotes=x :u!u@u.tmi.twitch.tv PRIVMSG #c :${message}`,
@@ -1236,14 +1244,14 @@ test("a marked chat file's Twitch emote spans are rendered exactly as written", 
     watchState: {},
     chat: {
       platform: "twitch", emoteOffsets: "utf16",
-      messages: [ircChatMsg("🎉 Kappa", [{ id: "25", name: "Kappa", start: 3, end: 7 }])],
+      messages: [ircChatMsg(EMOTE_TEXT, [{ id: "25", name: "Kappa", start: 3, end: 7 }])],
     },
     storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
   });
   await h.selectJob("j1");
-  // Mutant: correcting a marked file anyway would shift the span to [5..9] and
-  // the row would read "🎉 Ka" + [ppa].
-  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]"]);
+  // Mutant: correcting a marked file anyway shifts the span to [4..8] and the
+  // row reads "🎉 K" + [appa!].
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]", "!"]);
 });
 
 test("an unmarked legacy IRC message is re-indexed before it is rendered", { skip }, async () => {
@@ -1254,13 +1262,13 @@ test("an unmarked legacy IRC message is re-indexed before it is rendered", { ski
       // No emoteOffsets: written before 2026-09-15. The stored span is the raw
       // code-point range and the stored name is the garbled UTF-16 slice.
       platform: "twitch",
-      messages: [ircChatMsg("🎉 Kappa", [{ id: "25", name: " Kapp", start: 2, end: 6 }])],
+      messages: [ircChatMsg(EMOTE_TEXT, [{ id: "25", name: " Kapp", start: 2, end: 6 }])],
     },
     storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
   });
   await h.selectJob("j1");
-  // Mutant: no correction at all renders "🎉" + [ Kapp] + "a".
-  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]"]);
+  // Mutant: no correction at all renders "🎉" + [ Kapp] + "a!".
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]", "!"]);
 });
 
 test("an unmarked VOD comment (no raw line) is rendered untouched", { skip }, async () => {
@@ -1269,22 +1277,22 @@ test("an unmarked VOD comment (no raw line) is rendered untouched", { skip }, as
     watchState: {},
     chat: {
       platform: "twitch",
-      messages: [{ offsetMs: 1000, authorName: "u", message: "🎉 Kappa",
+      messages: [{ offsetMs: 1000, authorName: "u", message: EMOTE_TEXT,
         emotes: [{ id: "25", name: "Kappa", start: 3, end: 7 }] }],
     },
     storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
   });
   await h.selectJob("j1");
-  // Mutant: correcting every message in an unmarked file would shift this
-  // already-UTF-16 span to [5..9] and render "🎉 Ka" + [ppa].
-  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]"]);
+  // Mutant: correcting every message in an unmarked file shifts this
+  // already-UTF-16 span to [4..8] and renders "🎉 K" + [appa!].
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]", "!"]);
 });
 
 test("a multi-part job corrects each part against its own header, before the merge", { skip }, async () => {
   // mergePartChats keeps platform/streamStartTime/emotes/messages and nothing
   // else, so a per-file scalar has to be consumed per part. Mutant: correcting
   // after the merge reads the merged object's (absent) marker and re-shifts the
-  // marked part too — row 1 would render "🎉 Ka" + [ppa].
+  // marked part too — row 1 renders "🎉 K" + [appa!].
   //
   // The job is built inline rather than through segmented() (:183-190): that
   // helper's segments carry no chatFile, so the per-part fetch path would not
@@ -1301,14 +1309,14 @@ test("a multi-part job corrects each part against its own header, before the mer
     watchState: {},
     segmentChatById: {
       "j1/0": { platform: "twitch",
-        messages: [ircChatMsg("🎉 Kappa", [{ id: "25", name: " Kapp", start: 2, end: 6 }])] },
+        messages: [ircChatMsg(EMOTE_TEXT, [{ id: "25", name: " Kapp", start: 2, end: 6 }])] },
       "j1/1": { platform: "twitch", emoteOffsets: "utf16",
-        messages: [ircChatMsg("🎉 Kappa", [{ id: "25", name: "Kappa", start: 3, end: 7 }])] },
+        messages: [ircChatMsg(EMOTE_TEXT, [{ id: "25", name: "Kappa", start: 3, end: 7 }])] },
     },
     storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
   });
   await h.selectJob("j1");
   assert.equal(h.sidebar().children.length, 2);
-  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]"]);
-  assert.deepEqual(rowContent(h, 1), ["🎉 ", "[Kappa]"]);
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]", "!"]);
+  assert.deepEqual(rowContent(h, 1), ["🎉 ", "[Kappa]", "!"]);
 });

@@ -181,7 +181,7 @@ const TWITCH_SOH = "\u0001";
  * Unicode CODE POINTS — as if they were UTF-16 code units, and left /me
  * messages wrapped in \x01ACTION …\x01. Files written since carry the header
  * scalar `emoteOffsets: "utf16"` (Go: TwitchChatData.EmoteOffsets), so its
- * A\ENCE is the era marker and this function is the era's reader.
+ * ABSENCE is the era marker and this function is the era's reader.
  *
  * Three gates, each load-bearing:
  * - `platform === "twitch"`: a YouTube chat file has no such offsets.
@@ -207,6 +207,8 @@ export function correctLegacyTwitchEmotes(data) {
       text = text.slice(TWITCH_ACTION_PREFIX.length);
       if (text.endsWith(TWITCH_SOH)) text = text.slice(0, -1);
       m.message = text;
+      // Parity with the Go writer's TwitchChatMessage.IsAction, which is the
+      // file format's truth; no renderer in web/ reads it yet.
       m.isAction = true;
     }
     const emotes = m.emotes;

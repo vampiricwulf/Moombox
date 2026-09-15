@@ -121,3 +121,41 @@ func TestMarkedChatFileStaysAppendableAndReadable(t *testing.T) {
 		t.Errorf("summary.recentIDs = %v, want [m1 m2]", summary.recentIDs)
 	}
 }
+
+// TestRecordingBaseSurvivesAnEarlierUnknownHeaderScalar pins
+// chatFileRecordingBaseMs against a key it does not know, positioned BEFORE
+// the one it wants.
+//
+// TestMarkedChatFileStaysAppendableAndReadable cannot pin this on its own:
+// TwitchChatData serialises EmoteOffsets AFTER RecordingStartTime, so that
+// scan returns on the key it wants before it ever reaches the new one. What
+// the scanner actually walks is the FILE's field order, so the header here is
+// hand-written with "emoteOffsets" first.
+//
+// Mutant: a scanner written against a fixed allow-list of known header keys
+// that bails on anything else. "emoteOffsets" is the first key such a list
+// would not have, and a bail means ok=false — every resumed part would lose
+// its recording base and rebase its offsets onto the restart.
+func TestRecordingBaseSurvivesAnEarlierUnknownHeaderScalar(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat.json")
+	const header = `{
+  "platform": "twitch",
+  "emoteOffsets": "utf16",
+  "recordingStartTime": "2023-11-14T22:13:20Z",
+  "messageCount": 0,
+  "messages": []
+}`
+	if err := os.WriteFile(path, []byte(header), 0o644); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+
+	got, ok, err := chatFileRecordingBaseMs(path)
+	if err != nil {
+		t.Fatalf("chatFileRecordingBaseMs: %v", err)
+	}
+	const want = int64(1700000000000)
+	if !ok || got != want {
+		t.Errorf("chatFileRecordingBaseMs = (%d, %v), want (%d, true) — a header scalar "+
+			"ahead of recordingStartTime ended the scan", got, ok, want)
+	}
+}
