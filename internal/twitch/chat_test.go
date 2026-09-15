@@ -279,8 +279,20 @@ func TestParseEmoteTagsInvertedRange(t *testing.T) {
 //   - raw pass-through ("Twitch sends UTF-16 already"): Start would be 2, not 3.
 //   - UTF-16-indexed slicing (the behaviour before this arc, commit 5031cd2b):
 //     Name would be " Kapp" and Start 2.
-//   - forgetting the End sentinel (End = cpToUnit[end], not cpToUnit[end+1]-1):
-//     End would be 6, clipping the last character off every emote span.
+//   - End = cpToUnit[end] instead of cpToUnit[end+1]-1. The two expressions
+//     are EQUAL whenever the span's last code point is BMP, so the first three
+//     fixtures cannot see this one at all; it clips only a span that ends on a
+//     non-BMP code point, which is why "non-BMP emote at end" exists. There it
+//     reports End 6 instead of 7 and the utf16.Decode check below then decodes
+//     a lone high surrogate.
+//   - End derived from the sentinel (cpToUnit[len(runes)]-1) rather than from
+//     cpToUnit[end+1]. Every other fixture puts the emote last, where those are
+//     the same value; "non-BMP emote mid-message" is the only span here that
+//     does not end the message, and it reports End 5 instead of 3.
+//
+// The sentinel entry itself is pinned by the fixtures that DO end on the last
+// code point: dropping the +1 from make([]int, len(runes)+1) panics on the
+// cpToUnit[len(runes)] store rather than returning a wrong answer.
 func TestParseEmoteTagsNonBMP(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -310,6 +322,24 @@ func TestParseEmoteTagsNonBMP(t *testing.T) {
 			emotesStr: "25:4-8",
 			message:   "🤘🤝 xKappa",
 			want:      TwitchEmoteRef{ID: "25", Name: "Kappa", Start: 6, End: 10},
+		},
+		{
+			// The emote IS the non-BMP character, and it ends the message:
+			// "Kappa 🎉" is code points 0..6 with 🎉 at code point 6, UTF-16
+			// [6..7]. End must be 7 — the SECOND unit of the surrogate pair.
+			name:      "non-BMP emote at end",
+			emotesStr: "25:6-6",
+			message:   "Kappa 🎉",
+			want:      TwitchEmoteRef{ID: "25", Name: "🎉", Start: 6, End: 7},
+		},
+		{
+			// A non-BMP emote with text on BOTH sides: "a 🎉 b" is code points
+			// 0..4 with 🎉 at code point 2, UTF-16 [2..3]. The only span in this
+			// table that does not run to the end of the message.
+			name:      "non-BMP emote mid-message",
+			emotesStr: "25:2-2",
+			message:   "a 🎉 b",
+			want:      TwitchEmoteRef{ID: "25", Name: "🎉", Start: 2, End: 3},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
