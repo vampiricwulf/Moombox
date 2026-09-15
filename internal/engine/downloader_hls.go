@@ -183,6 +183,50 @@ func hlsReloadDelay(lastSegDur, targetDur float64, hadNewSegments bool, elapsed,
 	return remain
 }
 
+// endVerdict is what ONE CheckStreamStatus consult tells the live HLS loop.
+// runHlsLoop asks the stream-end question at three exit sites — the playlist
+// 404/410 branch, the consecutive-FETCH-failure escalation and the
+// consecutive-PARSE-failure escalation — and all three classify the answer
+// identically. They differ only in what an ABSENT verdict means to the
+// evidence the site already holds, which is why this helper classifies and
+// the call sites decide.
+type endVerdict int
+
+const (
+	// verdictNoCheck: no CheckStreamStatus is wired, so nothing can
+	// contradict the site's own evidence.
+	verdictNoCheck endVerdict = iota
+	// verdictUnknown: the check was asked and ERRORED. Not a verdict — a
+	// Twitch GQL flap and a failed YouTube probe are both routine, and
+	// latching on one is what turned a live recording into a truncated
+	// Finished job (sweep T1-2).
+	verdictUnknown
+	// verdictEnded: the broadcast is confirmed over.
+	verdictEnded
+	// verdictLive: the broadcast is confirmed still running.
+	verdictLive
+)
+
+// consultStreamEnd asks CheckStreamStatus once and classifies the answer,
+// logging the DASH loop's wording (downloader_dash.go) when the check fails.
+// It decides nothing on its own: each call site maps the verdict onto its
+// own exit.
+func (d *SegmentDownloader) consultStreamEnd(ctx context.Context) endVerdict {
+	if d.opts.CheckStreamStatus == nil {
+		return verdictNoCheck
+	}
+	ended, checkErr := d.opts.CheckStreamStatus(ctx)
+	switch {
+	case checkErr != nil:
+		d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
+		return verdictUnknown
+	case ended:
+		return verdictEnded
+	default:
+		return verdictLive
+	}
+}
+
 // runHlsLoop is the main HLS download loop.
 func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// Save resume state on exit so interrupted downloads can continue on restart.
@@ -295,20 +339,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				// returns ErrQualityLost for the orchestrator's variant
 				// refresh. Latching on a failed check is what turned a live
 				// recording into a truncated Finished job (sweep T1-2).
-				verdictKnown := true
-				if d.opts.CheckStreamStatus != nil {
-					ended, checkErr := d.opts.CheckStreamStatus(ctx)
-					switch {
-					case checkErr != nil:
-						d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
-						verdictKnown = false
-					case !ended:
-						return ErrQualityLost
-					}
-				}
-				if verdictKnown {
+				// verdictNoCheck finalizes alongside verdictEnded: the
+				// variant is gone and nothing is wired to contradict that.
+				switch d.consultStreamEnd(ctx) {
+				case verdictEnded, verdictNoCheck:
 					d.streamEnded.Store(true)
 					return nil
+				case verdictLive:
+					return ErrQualityLost
 				}
 				// Verdict unknown: fall through to the shared retry budget.
 				// If it runs out with the verdict still unknown, the loop
@@ -327,20 +365,26 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					consecutiveErrors = 0
 					continue
 				}
-				// Before giving up, check if stream is still live (quality may have changed)
-				if d.opts.CheckStreamStatus != nil {
-					ended, checkErr := d.opts.CheckStreamStatus(ctx)
-					switch {
-					case checkErr != nil:
-						// Not a verdict (see the 404 site). This exit returns
-						// an error either way, so there is nothing to defer
-						// TO — but "assuming ended" described a finalize this
-						// path never performs, and the operator reading the
-						// log needs to know the status is UNKNOWN.
-						d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
-					case !ended:
-						return ErrQualityLost
-					}
+				// Before giving up, consult the stream's status one last
+				// time. A CONFIRMED "ended" finalizes cleanly here exactly as
+				// it does at the 404/410 site above: the same signal must not
+				// mean two different things depending on which round it
+				// arrives on. Returning the fetch failure on a confirmed end
+				// left streamEnded false, so the loop's defer re-saved the
+				// resume sidecar instead of clearing it and the orchestrator
+				// logged an ERROR for a recording that was complete.
+				// verdictUnknown and verdictNoCheck keep the fetch failure:
+				// nothing says the broadcast is over, and the sidecar must
+				// survive for a later Resume. On a 404/410 round whose own
+				// consult deferred, this is the iteration's SECOND consult —
+				// no longer redundant, because it is the one that can still
+				// finalize cleanly on the round the loop gives up.
+				switch d.consultStreamEnd(ctx) {
+				case verdictEnded:
+					d.streamEnded.Store(true)
+					return nil
+				case verdictLive:
+					return ErrQualityLost
 				}
 				return fmt.Errorf("HLS playlist fetch failed after %d consecutive errors: %w", consecutiveErrors, err)
 			}
@@ -382,15 +426,13 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					consecutiveErrors = 0
 					continue
 				}
-				if d.opts.CheckStreamStatus != nil {
-					ended, checkErr := d.opts.CheckStreamStatus(ctx)
-					switch {
-					case checkErr != nil:
-						// Not a verdict either — see the identical reasoning at the fetch-failure site above.
-						d.logger.Warn("stream status check failed; deferring end verdict", "err", checkErr)
-					case !ended:
-						return ErrQualityLost
-					}
+				// See site B.
+				switch d.consultStreamEnd(ctx) {
+				case verdictEnded:
+					d.streamEnded.Store(true)
+					return nil
+				case verdictLive:
+					return ErrQualityLost
 				}
 				return fmt.Errorf("failed to parse HLS playlist after %d consecutive errors", consecutiveErrors)
 			}
