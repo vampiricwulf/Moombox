@@ -237,6 +237,11 @@ func TestYtdlpDialogFlagsAnUnrecognisedFile(t *testing.T) {
 			Unparseable: true,
 			PluginDir:   "/plug",
 			CurrentPort: 774,
+			// The shape Status really produces: ExtractedPath is filled
+			// whenever the plugin dir is known, and Installed can only become
+			// true inside that block — so this row is present in 100% of real
+			// occurrences, and a fixture without it hides a label collision.
+			ExtractedPath: "/plug/moombox",
 		}, nil
 	}
 	_, cmd := app.dispatchAction("R Y", nil)
@@ -248,5 +253,16 @@ func TestYtdlpDialogFlagsAnUnrecognisedFile(t *testing.T) {
 	}
 	if !strings.Contains(v, "I reinstalls") {
 		t.Errorf("the overlay does not say which key fixes it:\n%s", v)
+	}
+	// One label per row. The path row is on screen alongside this one in
+	// every real occurrence, so a shared label would read as a render bug.
+	//
+	// Mutant: labelling either row with the other's name makes one count 2
+	// and the other 0, and fails this.
+	if n := strings.Count(v, "Plugin state:"); n != 1 {
+		t.Errorf("the unrecognised-file row's label appears %d times, want exactly 1:\n%s", n, v)
+	}
+	if n := strings.Count(v, "Plugin path:"); n != 1 {
+		t.Errorf("the plugin-path row's label appears %d times, want exactly 1:\n%s", n, v)
 	}
 }
