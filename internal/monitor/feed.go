@@ -28,12 +28,18 @@ const (
 	// Six hours is short enough that joining a channel's membership starts
 	// working the same day without a restart.
 	membershipMemoTTL = 6 * time.Hour
-	// membershipLivenessMaxTries bounds how many membership fetches one cycle
-	// will spend chasing the liveness floor when they keep failing. The floor
-	// wants a fetch that RETURNS, so an errored one hands the attempt to
-	// another channel — but without a ceiling, a cycle in which every fetch
-	// fails would walk the entire channel list, which is the per-cycle load
-	// the memo exists to remove. Two: the nominee, plus one stand-in.
+	// membershipLivenessMaxTries bounds how many NOMINATION-DRIVEN membership
+	// fetches one cycle will spend chasing the liveness floor when they keep
+	// failing. The floor wants a fetch that RETURNS, so an errored one hands
+	// the attempt to another channel — but without a ceiling, a cycle in which
+	// every fetch fails would walk the entire channel list, which is the
+	// per-cycle load the memo exists to remove. Two: the nominee, plus one
+	// stand-in.
+	//
+	// Only fetches the nomination bought are charged. A channel outside its
+	// non-member horizon is fetched regardless, so letting its failure spend
+	// the budget would let broken channels starve the nominee — see
+	// recordMembershipFetchError.
 	membershipLivenessMaxTries = 2
 	// monitorDrainLimit bounds how much of a non-200 response body is read
 	// before Close. Draining returns the connection to the idle pool instead
@@ -229,9 +235,10 @@ type FeedMonitor struct {
 	// rotate. Empty means "any memoized channel will do", which is the state
 	// after the preferred one's fetch failed. Guarded by fm.mu.
 	membershipLivenessID string
-	// membershipLivenessTries is how many more membership fetches this cycle
-	// may spend satisfying the floor (membershipLivenessMaxTries at the top of
-	// each cycle). Guarded by fm.mu.
+	// membershipLivenessTries is how many more NOMINATION-DRIVEN membership
+	// fetches this cycle may spend satisfying the floor
+	// (membershipLivenessMaxTries at the top of each cycle). A channel fetched
+	// on its own account never draws on it. Guarded by fm.mu.
 	membershipLivenessTries int
 
 	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
@@ -600,7 +607,7 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 			// MembershipFetchFunc says an error leaves it unanswered, and the
 			// memo is too costly to be wrong about on a fetcher's good
 			// behaviour.
-			fm.recordMembershipFetchError(chID)
+			fm.recordMembershipFetchError(chID, cycleNow)
 			fm.logger.Debug("membership discovery failed", "channel", ch.Name, "err", mErr)
 		} else {
 			membVideos = vids
@@ -871,12 +878,25 @@ func (fm *FeedMonitor) recordMembershipSuccess(chID string, confirmedNonMember b
 
 // recordMembershipFetchError notes that chID's membership fetch did not come
 // back. It writes NO memo — an error answers neither "is this account a
-// member" nor "is this session alive" — and it leaves this cycle still owing
-// the session a fetch that returns, dropping the nomination's preference so
-// the next memoized channel can carry it instead. The attempt budget
-// (membershipLivenessMaxTries) is what stops a cycle in which everything fails
-// from walking the whole channel list.
-func (fm *FeedMonitor) recordMembershipFetchError(chID string) {
+// member" nor "is this session alive".
+//
+// Whether it touches the cycle's liveness obligation depends on WHY the fetch
+// happened, which `now` against the memo answers: a channel inside its
+// non-member horizon was fetched because the nomination asked for it, so its
+// failure is the nomination's failure — the preference is dropped, another
+// memoized channel can carry it, and the attempt is charged against
+// membershipLivenessMaxTries so a cycle in which everything fails cannot walk
+// the whole channel list.
+//
+// A channel OUTSIDE its horizon (or never memoized at all) was going to be
+// fetched whatever the memo said. Its failure costs the floor nothing and must
+// leave the budget alone in both directions: charging it lets a couple of
+// permanently broken channels at the head of the list exhaust the budget
+// before the nominee is reached — the cycle then observes nothing at all,
+// which is the very outcome the floor exists to prevent — and re-arming on it
+// buys a second authenticated ~1 MB fetch of a channel the memo says to skip,
+// after the nominee has already answered.
+func (fm *FeedMonitor) recordMembershipFetchError(chID string, now time.Time) {
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
@@ -884,6 +904,14 @@ func (fm *FeedMonitor) recordMembershipFetchError(chID string) {
 		fm.membershipFetchErrored = make(map[string]struct{})
 	}
 	fm.membershipFetchErrored[chID] = struct{}{}
+
+	// The same test membershipFetchAllowed made before the fetch, and it reads
+	// the same answer: a failed fetch writes no memo, and a cycle walks its
+	// channels one at a time, so nothing can have moved in between.
+	until, memoized := fm.nonMemberUntil[chID]
+	if !memoized || !now.Before(until) {
+		return // fetched on its own account; not the nomination's to spend
+	}
 
 	if chID == fm.membershipLivenessID {
 		// The preferred channel failed; any memoized one will do now. Leaving

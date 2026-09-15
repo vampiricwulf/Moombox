@@ -762,3 +762,107 @@ func TestDrainBoundedStopsAtTheLimit(t *testing.T) {
 		t.Fatalf("drained %d bytes of a 17-byte body, want 17", small.read)
 	}
 }
+
+// TestFeed_MembershipBrokenChannelsAheadOfTheNomineeDoNotStarveIt is the
+// narrow form of the liveness-floor defect, and the reason the try budget is
+// spent only on fetches the NOMINATION bought.
+//
+// UCx1 and UCx2 are permanently broken and sit at the HEAD of the channel
+// list. They are never memoized (an error writes no memo), so they are fetched
+// every cycle whatever the nomination says — their failures cost the floor
+// nothing, because the floor never asked for them. Charging them against
+// membershipLivenessMaxTries exhausts the budget before the nominee is
+// reached, and membershipFetchAllowed then refuses the one channel that could
+// actually have answered. Two broken channels would switch the tier-1 liveness
+// signal off for the whole install, indefinitely — exactly the guarantee
+// armMembershipLiveness' comment makes, broken by the budget meant to protect
+// it.
+//
+// Mutant: decrementing membershipLivenessTries unconditionally in
+// recordMembershipFetchError — cycles 2+ then attempt only [UCx1 UCx2] and
+// return nothing at all.
+func TestFeed_MembershipBrokenChannelsAheadOfTheNomineeDoNotStarveIt(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var returned []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			if strings.HasPrefix(channelID, "UCx") {
+				return nil, false, fmt.Errorf("membership tab http 500")
+			}
+			returned = append(returned, channelID) // only fetches that ANSWER
+			return nil, true, nil
+		}),
+	)
+	setChannels(fm, chYT("UCx1"), chYT("UCx2"), chYT("UC1"), chYT("UC2"))
+
+	fm.doCheck(context.Background()) // cycle 1: nothing memoized, so both answer
+	if len(returned) != 2 {
+		t.Fatalf("cycle 1 answered = %v, want both non-members", returned)
+	}
+
+	// Every later cycle must still get an answer out of somebody, and the duty
+	// must keep rotating rather than pinning to one channel.
+	wantStandIn := []string{"UC1", "UC2", "UC1"}
+	for i, want := range wantStandIn {
+		cycle := i + 2
+		clock = clock.Add(10 * time.Minute)
+		returned = nil
+		fm.doCheck(context.Background())
+
+		if len(returned) != 1 {
+			t.Fatalf("cycle %d answered = %v, want exactly 1 — two broken channels at the head of the list must not starve the nominee", cycle, returned)
+		}
+		if returned[0] != want {
+			t.Fatalf("cycle %d answered = %v, want %s — the nomination goes to the earliest horizon and rotates", cycle, returned, want)
+		}
+	}
+}
+
+// TestFeed_AnUnrelatedErrorAfterTheNomineeAnsweredBuysNoExtraFetch is the same
+// gate seen from the other side. Once the nominated fetch has come back the
+// cycle owes the session nothing more, and a later failure somewhere else is
+// not a reason to spend another authenticated ~1 MB page load on a channel the
+// memo says to skip.
+//
+// UCx sits BETWEEN the nominee and a second memoized channel, which is what
+// makes the ordering matter: its error lands after UC1 has already answered
+// and before UC2 is considered.
+//
+// Mutant: recomputing membershipLivenessNeeded from the try budget on every
+// error rather than only on nomination-driven ones — UC2 is then fetched too.
+func TestFeed_AnUnrelatedErrorAfterTheNomineeAnsweredBuysNoExtraFetch(t *testing.T) {
+	shrinkFeedStagger(t)
+	db := newTestDB(t)
+	clock := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var order []string
+	fm := newTestFeedMonitor(t, db,
+		withRSS(rssWith()),
+		withProbe(stubProbeErrored()),
+		withClock(&clock),
+		withMembership(func(ctx context.Context, channelID string) ([]MembershipVideo, bool, error) {
+			order = append(order, channelID)
+			if channelID == "UCx" {
+				return nil, false, fmt.Errorf("membership tab http 500")
+			}
+			return nil, true, nil
+		}),
+	)
+	setChannels(fm, chYT("UC1"), chYT("UCx"), chYT("UC2"))
+
+	fm.doCheck(context.Background()) // cycle 1: memoizes UC1 and UC2
+
+	clock = clock.Add(10 * time.Minute)
+	order = nil
+	fm.doCheck(context.Background())
+
+	// UC1 is the nominee and answers; UCx is never memoized so it is always
+	// fetched and always fails; UC2 must stay skipped.
+	if len(order) != 2 || order[0] != "UC1" || order[1] != "UCx" {
+		t.Fatalf("cycle 2 fetches = %v, want [UC1 UCx] — the floor was satisfied by UC1, so UCx's failure buys nothing and UC2 stays memoized", order)
+	}
+}
