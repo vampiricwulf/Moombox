@@ -397,31 +397,22 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}()
 	}
 
-	// Expose actual bound port for TUI and other components (matches TS:
-	// process.env.MOOMBOX_PORT). When the user configured `network.port =
-	// 0` (auto-pick), persist the OS-assigned port back to disk so the
-	// next launch reuses it (predictable port across restarts; users can
-	// discover the port from the config file). Audit cmd-moombox.md Q2.
+	// Expose the port the listener actually bound. It is not always the
+	// configured one: Start probes the next ten ports when the preferred one is
+	// in use (internal/web/server.go), and the TUI, the yt-dlp plugin writer and
+	// the update notification all have to say the real number.
+	//
+	// In memory only. The auto-pick write-back that used to live here was
+	// unreachable: it fired on `configuredPort == 0`, and validateOrNormalize
+	// rewrites 0 to the 774 default before anything binds
+	// (internal/config/config.go, TestNormalizeRewritesPortZero). A probed port
+	// is this run's accident rather than the user's setting, so persisting it
+	// would silently rewrite their config file.
 	if actualPort := webServer.ActualPort(); actualPort > 0 {
-		var configuredPort int
-		s.configStore.Read(func(c *config.MoomboxConfig) {
-			configuredPort = c.Network.Port
-		})
 		mu := s.configStore.RWMutex()
 		mu.Lock()
 		cfg.Network.Port = actualPort
 		mu.Unlock()
-		// Only write back when the user requested auto-pick (0). Don't
-		// rewrite a configured fixed port the user explicitly set.
-		if configuredPort == 0 {
-			if err := s.configStore.SaveLocked(); err != nil {
-				log.Warn("could not persist actualPort to config",
-					slog.Int("port", actualPort), slog.String("err", err.Error()))
-			} else {
-				log.Info("persisted auto-assigned port to config",
-					slog.Int("port", actualPort))
-			}
-		}
 	}
 
 	// First-successful-boot milestone: the database opened (initServices)

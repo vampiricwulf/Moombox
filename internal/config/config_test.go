@@ -1231,3 +1231,19 @@ func TestLoadWithNothingOnDiskLeavesLoadedFromEmpty(t *testing.T) {
 		t.Errorf("LoadedFrom = %q, want empty", cfg.LoadedFrom)
 	}
 }
+
+// TestNormalizeRewritesPortZero is why main.go carries no port-0 auto-pick
+// branch: validation turns 0 into the default before anything binds, so a
+// `network.port = 0` config never reaches the server as 0.
+//
+// Mutant: dropping the `< 1` half of the range check in validateOrNormalize
+// lets 0 through and fails this — and would silently resurrect the need for the
+// deleted branch.
+func TestNormalizeRewritesPortZero(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.Port = 0
+	Normalize(cfg)
+	if cfg.Network.Port != 774 {
+		t.Errorf("network.port 0 normalised to %d, want the 774 default", cfg.Network.Port)
+	}
+}
