@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,16 +24,25 @@ type vodCommentPageSpec struct {
 	count   int
 	offset  float64
 	hasNext bool
+	// noCursor renders every edge's "cursor" field as "" — a schema surprise
+	// (fix round R4) distinct from the burst second above: Twitch says more
+	// pages exist (hasNextPage=true) but the edges carry nothing to page by.
+	noCursor bool
 }
 
 // vodCommentsReply renders the real VideoCommentsByOffsetOrCursor response
 // shape around one page. Edge i of page p gets id "c<p>-<i>" and cursor
-// "cur<p>-<i>"; the fake server serves page p+1 when asked for "cur<p>-<last>".
+// "cur<p>-<i>" (or "" when p.noCursor); the fake server serves page p+1 when
+// asked for "cur<p>-<last>".
 func vodCommentsReply(page int, p vodCommentPageSpec) string {
 	edges := make([]map[string]any, 0, p.count)
 	for i := range p.count {
+		cursor := fmt.Sprintf("cur%d-%d", page, i)
+		if p.noCursor {
+			cursor = ""
+		}
 		edges = append(edges, map[string]any{
-			"cursor": fmt.Sprintf("cur%d-%d", page, i),
+			"cursor": cursor,
 			"node": map[string]any{
 				"id":                   fmt.Sprintf("c%d-%d", page, i),
 				"contentOffsetSeconds": p.offset,
@@ -207,10 +217,17 @@ func TestVodChatResumeStartsFromTheSavedOffset(t *testing.T) {
 // pager retires. A server that answers every cursor with the same page and
 // hasNextPage=true would otherwise spin forever.
 //
+// Fix round R4: a stuck cursor is a PAGING STALL, not completion — Twitch
+// still claims more pages exist. Start must now return an error (so the
+// caller never treats this VOD's chat as finished) and the resume sidecar
+// must survive (so a later /resume retries from here) — previously this
+// path broke the loop, returned nil, and removeResumeState() deleted the
+// sidecar, exactly the silent-truncation class of bug T1-3/R4 exist to stop.
+//
 // Mutant: deleting the guard with nothing in its place. The fake server's
 // "ran past the script" error would eventually end the run through the
-// consecutive-error budget, which is why the assertion is on the REQUEST COUNT,
-// not merely on termination.
+// consecutive-error budget, which is why one assertion is on the REQUEST
+// COUNT, not merely on termination.
 func TestVodChatStopsOnAStuckCursor(t *testing.T) {
 	var mu sync.Mutex
 	var requests int
@@ -232,12 +249,14 @@ func TestVodChatStopsOnAStuckCursor(t *testing.T) {
 		}, nil
 	})}
 
+	out := filepath.Join(t.TempDir(), "vod.chat.json")
 	vcd := NewVodChatDownloader(NewAPI(&testLogger{}), VodChatOptions{
 		VodID:      "v1",
-		OutputPath: filepath.Join(t.TempDir(), "vod.chat.json"),
+		OutputPath: out,
 	}, &testLogger{})
-	if err := vcd.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
+	if err := vcd.Start(context.Background()); err == nil {
+		t.Fatal("Start returned nil, want an error — a stuck cursor is a stall, not completion " +
+			"(mutant: still breaking the loop and returning nil)")
 	}
 	mu.Lock()
 	got := requests
@@ -245,5 +264,147 @@ func TestVodChatStopsOnAStuckCursor(t *testing.T) {
 	if got != 2 {
 		t.Errorf("made %d requests against a stuck cursor, want 2 (the page, then the repeat "+
 			"that proves the cursor did not move)", got)
+	}
+	if _, err := os.Stat(out + ".resume.json"); err != nil {
+		t.Errorf("resume sidecar missing after a stalled stuck-cursor run: %v — "+
+			"want it preserved so a later /resume retries from here "+
+			"(mutant: removeResumeState() still runs on this path)", err)
+	}
+}
+
+// TestVodChatFallsBackToOffsetPastAnEmptyCursor is fix round R4(a): Twitch
+// can claim more pages exist (hasNextPage=true) while sending an edge with no
+// cursor at all — a schema surprise distinct from the burst-second case T1-3
+// fixes. That must not be read as completion: the loop falls back to paging
+// by the last edge's OFFSET (the pre-T1-3 behaviour) and keeps going.
+//
+// Mutant: treating the empty cursor as completion (breaking here) — the run
+// would stop at 4 archived comments instead of continuing to the third page.
+func TestVodChatFallsBackToOffsetPastAnEmptyCursor(t *testing.T) {
+	var mu sync.Mutex
+	var asked []string
+	prev := twitchHTTPClient
+	t.Cleanup(func() { twitchHTTPClient = prev })
+	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		raw, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var q struct {
+			Variables struct {
+				ContentOffsetSeconds *float64 `json:"contentOffsetSeconds"`
+				Cursor               *string  `json:"cursor"`
+			} `json:"variables"`
+		}
+		if err := json.Unmarshal(raw, &q); err != nil {
+			return nil, fmt.Errorf("stub could not parse the request body: %w", err)
+		}
+
+		h := make(http.Header)
+		h.Set("Content-Type", "application/json")
+		reply := func(page int, p vodCommentPageSpec) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     h,
+				Body:       io.NopCloser(bytes.NewReader([]byte(vodCommentsReply(page, p)))),
+				Request:    req,
+			}, nil
+		}
+
+		switch {
+		case q.Variables.Cursor != nil && *q.Variables.Cursor != "":
+			mu.Lock()
+			asked = append(asked, "cursor:"+*q.Variables.Cursor)
+			mu.Unlock()
+			// Page 0's cursor request: answer with the schema-surprise page —
+			// more edges, no cursor on any of them, hasNext still true.
+			return reply(1, vodCommentPageSpec{count: 2, offset: 200, hasNext: true, noCursor: true})
+		case q.Variables.ContentOffsetSeconds != nil:
+			offset := *q.Variables.ContentOffsetSeconds
+			mu.Lock()
+			asked = append(asked, fmt.Sprintf("offset:%v", offset))
+			mu.Unlock()
+			if offset == 0 {
+				// Fresh start: normal cursor-bearing page.
+				return reply(0, vodCommentPageSpec{count: 2, offset: 100, hasNext: true})
+			}
+			// The offset fallback's request, past the no-cursor page: one
+			// more normal page, then done.
+			return reply(2, vodCommentPageSpec{count: 2, offset: 300, hasNext: false})
+		default:
+			return nil, fmt.Errorf("stub: the request carried neither an offset nor a cursor")
+		}
+	})}
+
+	vcd := NewVodChatDownloader(NewAPI(&testLogger{}), VodChatOptions{
+		VodID:      "v1",
+		OutputPath: filepath.Join(t.TempDir(), "vod.chat.json"),
+	}, &testLogger{})
+	if err := vcd.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := vcd.MessageCount(); got != 6 {
+		t.Errorf("archived %d comments, want 6 — the empty-cursor page was read as completion "+
+			"instead of falling back to offset paging", got)
+	}
+	want := []string{"offset:0", "cursor:cur0-1", "offset:200"}
+	mu.Lock()
+	gotAsked := append([]string(nil), asked...)
+	mu.Unlock()
+	if !slices.Equal(gotAsked, want) {
+		t.Errorf("pages were asked for as %v, want %v", gotAsked, want)
+	}
+}
+
+// TestVodChatStopsOnZeroEdgesWithMorePagesClaimed is fix round R4(b)'s third
+// case: Twitch answers hasNextPage=true with NO edges at all. Reading that as
+// "end of VOD" (the pre-fix-round behaviour, shared with the empty-page
+// natural-end case) would silently truncate the archive despite Twitch
+// saying there is more; it must be treated as a stall like a stuck cursor.
+//
+// Mutant: the unconditional len(edges)==0 → break-as-complete this replaces.
+func TestVodChatStopsOnZeroEdgesWithMorePagesClaimed(t *testing.T) {
+	var mu sync.Mutex
+	var requests int
+	prev := twitchHTTPClient
+	t.Cleanup(func() { twitchHTTPClient = prev })
+	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		h := make(http.Header)
+		h.Set("Content-Type", "application/json")
+		if n == 1 {
+			// First page: normal, with more claimed.
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     h,
+				Body: io.NopCloser(bytes.NewReader([]byte(
+					vodCommentsReply(0, vodCommentPageSpec{count: 2, offset: 100, hasNext: true})))),
+				Request: req,
+			}, nil
+		}
+		// Second page onward: zero edges, but Twitch still claims more exist.
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     h,
+			Body: io.NopCloser(bytes.NewReader([]byte(
+				vodCommentsReply(1, vodCommentPageSpec{count: 0, offset: 100, hasNext: true})))),
+			Request: req,
+		}, nil
+	})}
+
+	out := filepath.Join(t.TempDir(), "vod.chat.json")
+	vcd := NewVodChatDownloader(NewAPI(&testLogger{}), VodChatOptions{
+		VodID:      "v1",
+		OutputPath: out,
+	}, &testLogger{})
+	if err := vcd.Start(context.Background()); err == nil {
+		t.Fatal("Start returned nil, want an error — zero edges with hasNextPage=true is a stall, " +
+			"not completion (mutant: unconditional break-as-complete on len(edges)==0)")
+	}
+	if _, err := os.Stat(out + ".resume.json"); err != nil {
+		t.Errorf("resume sidecar missing after a stalled zero-edges run: %v — want it preserved", err)
 	}
 }
