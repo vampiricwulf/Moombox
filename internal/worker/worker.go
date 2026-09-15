@@ -121,6 +121,16 @@ type JobContext struct {
 	// (interruptionSignal's methods and buildMayResume are all nil-safe, so
 	// this is never a required field).
 	Interruption *interruptionSignal
+	// ChatStatus is the terminal chat_status this job's chat downloader EARNED
+	// — written by recordChatOutcome once the downloader has exited, and empty
+	// for a job that ran none (including the standalone Mux action, which
+	// builds a JobContext without ever starting chat). The mux path reads it
+	// through chatFileStatus so copying a chat FILE cannot re-report a capture
+	// that stopped short as finished. Set long after every value-copy of
+	// JobContext in the download paths (segCtx := *jobCtx and friends) has been
+	// made, and only ever read through the pointer the orchestrator hands to
+	// muxAndFinalize.
+	ChatStatus string
 }
 
 // JobConfig holds per-job configuration derived from the global config.

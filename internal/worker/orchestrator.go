@@ -383,6 +383,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	if chatDl == nil && jobCtx.Config.DownloadChat {
 		chatDl = o.setupChatDownloader(ctx, jobCtx, videoInfo)
 	}
+	// chatRec carries Start's terminal error to the verdict below. Declared
+	// out here because it outlives the goroutine.
+	var chatRec chatOutcome
 	if chatDl != nil {
 		chatDone = make(chan struct{})
 		chatDl.SetOnProgress(func(p chat.ChatProgress) {
@@ -392,10 +395,14 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			defer close(chatDone)
 			defer func() {
 				if r := recover(); r != nil {
+					// A panic is an outcome too: a downloader that died
+					// mid-capture has not finished, and recording nothing here
+					// would leave a previous run's verdict standing.
+					chatRec.record(fmt.Errorf("panic in YouTube chat downloader: %v", r))
 					o.logger.Error("panic in YouTube chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
 				}
 			}()
-			chatDl.Start(ctx)
+			chatRec.record(chatDl.Start(ctx))
 		}()
 	}
 
@@ -554,16 +561,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}
 		o.waitForChat(chatDl, chatDone, chatWaitTimeout)
 
-		// Update chat status on job
-		chatCount := chatDl.MessageCount()
-		chatStatus := "finished"
-		if chatCount == 0 {
-			chatStatus = "unavailable"
-		}
-		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-			"chat_status":         chatStatus,
-			"total_chat_messages": chatCount,
-		})
+		// The verdict is what the downloader DID, not what it counted.
+		// chat.ChatDownloader returns nil on every exit today, so this is the
+		// same answer it always gave — and it stays right if that changes.
+		o.recordChatOutcome(jobCtx, chatDl.MessageCount(), chatRec.verdict())
 	}
 
 	// Check cancellation between download and mux — preserve staging for resume
