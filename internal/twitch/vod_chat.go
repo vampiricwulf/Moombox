@@ -18,7 +18,6 @@ import (
 const (
 	vodChatMaxConsecutiveErrors = 5
 	vodChatFlushInterval        = 5 * time.Second
-	vodChatResumeMaxRecentIDs   = 1000
 )
 
 // VodChatDownloader downloads chat messages from a Twitch VOD.
@@ -444,7 +443,7 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 		return
 	}
 	// Deterministic insertion-order snapshot capped to bound the resume file.
-	recentIDs := vcd.dedup.Snapshot(vodChatResumeMaxRecentIDs)
+	recentIDs := vcd.dedup.Snapshot(chatResumeIDCap)
 
 	state := ChatResumeState{
 		MessageCount:      int(vcd.totalCount.Load()),

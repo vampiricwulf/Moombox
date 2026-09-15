@@ -51,6 +51,13 @@ const (
 	// indistinguishable at replay from a legacy file, and would be "corrected"
 	// a second time.
 	chatEmoteOffsetsUTF16 = "utf16"
+	// chatResumeIDCap bounds the dedup IDs a resume sidecar carries. ONE
+	// constant for both chat downloaders: the VOD path has always capped at
+	// 1000 and the IRC path snapshotted its whole 5000-entry set, which is a
+	// ~200 KB marshal + fsync + rename every second on a busy channel
+	// (chatSaveInterval). The window a reconnect replay can overlap is
+	// seconds, so the newest 1000 is the whole of what the cap has to cover.
+	chatResumeIDCap = 1000
 )
 
 // The fixed vocabulary of Twitch auth-downgrade reasons: one value per route
@@ -564,7 +571,8 @@ func (cd *ChatDownloader) saveResumeState() {
 	// concurrent RollFile must not pair one part's counts with the other
 	// part's sidecar.
 	cd.mu.Lock()
-	recentIDs := cd.dedup.Snapshot(0)
+	// Newest-first window, not the whole set — see chatResumeIDCap.
+	recentIDs := cd.dedup.Snapshot(chatResumeIDCap)
 	state := ChatResumeState{
 		MessageCount:    cd.fileCount,
 		TotalCount:      cd.totalCount,
