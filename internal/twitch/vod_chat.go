@@ -385,6 +385,7 @@ func (vcd *VodChatDownloader) writeFullFile(msgs []TwitchChatMessage) error {
 		StreamID:           vcd.vodID,
 		DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
 		MessageCount:       int(vcd.totalCount.Load()),
+		EmoteOffsets:       chatEmoteOffsetsUTF16,
 		Messages:           msgs,
 	}
 	return utils.WriteChatFileAtomic(vcd.outputPath, &chatData)

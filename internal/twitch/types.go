@@ -95,6 +95,25 @@ type TwitchChatData struct {
 	RecordingStartTime string `json:"recordingStartTime,omitempty"`
 	DownloadedAt       string `json:"downloadedAt"`
 	MessageCount       int    `json:"messageCount"`
+	// EmoteOffsets names the index space TwitchEmoteRef.Start/End count in.
+	// "utf16" is the only value any writer here produces, and its ABSENCE is
+	// what the player reads as "written before 2026-09-15, when the live IRC
+	// path mistook Twitch's code-point offsets for UTF-16 units" — an unmarked
+	// file's IRC messages are corrected at load (correctLegacyTwitchEmotes,
+	// web/public/modules/chat-timeline.js).
+	//
+	// It is a HEADER SCALAR and must stay one, before "emotes"/"messages":
+	// chatFileRecordingBaseMs stops its scan at the first composite value, and
+	// AppendChatMessages splices at the file's last ']'.
+	//
+	// KNOWN WINDOW: only the two full-file writers set it, so a part file
+	// created before this change and APPENDED to after it keeps an unmarked
+	// header while its new messages already carry UTF-16 offsets. Those few
+	// messages are over-shifted at replay. Rewriting a marathon part's whole
+	// file on resume, or carrying a second "keep emitting legacy offsets"
+	// parser mode, both cost more than the defect; the window closes at the
+	// next part roll or at job end.
+	EmoteOffsets string `json:"emoteOffsets,omitempty"`
 	// Emotes must serialize BEFORE Messages: AppendChatMessages locates the
 	// messages array via "last ] in the file tail", so the messages array has
 	// to stay the final field. With emotes trailing, any append after emote

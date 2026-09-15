@@ -1,5 +1,6 @@
 /**
- * Chat ↔ video timeline math. Pure — no DOM, no fetch — so it is covered by
+ * Chat-file load-time normalization: timeline math, plus the legacy Twitch
+ * emote-offset repair. Pure — no DOM, no fetch — so it is covered by
  * web/tests/chat-timeline.test.mjs.
  *
  * Offset semantics (verified against the Go producers, review 2026-09-03):
@@ -167,4 +168,71 @@ export function mergePartChats(parts) {
     }
   }
   return merged;
+}
+
+/** The CTCP wrapper Twitch sends a /me message in: \x01ACTION <text>\x01. */
+const TWITCH_ACTION_PREFIX = "\u0001ACTION ";
+const TWITCH_SOH = "\u0001";
+
+/**
+ * Repair a Twitch chat file written before 2026-09-15, in place.
+ *
+ * Until then the live IRC producer read Twitch's emote offsets — which count
+ * Unicode CODE POINTS — as if they were UTF-16 code units, and left /me
+ * messages wrapped in \x01ACTION …\x01. Files written since carry the header
+ * scalar `emoteOffsets: "utf16"` (Go: TwitchChatData.EmoteOffsets), so its
+ * A\ENCE is the era marker and this function is the era's reader.
+ *
+ * Three gates, each load-bearing:
+ * - `platform === "twitch"`: a YouTube chat file has no such offsets.
+ * - `emoteOffsets !== "utf16"`: a marked file is already right, and correcting
+ *   it a second time would shift every span the other way.
+ * - per message, `raw`: only the IRC path records the verbatim wire line, so it
+ *   is how a legacy file's IRC messages are told from its VOD comments — the
+ *   VOD path (api.go utf16Len) emitted UTF-16 from the start and must not move.
+ *
+ * Run ONCE per file at load, before any rendering and before mergePartChats
+ * (which keeps no header scalars, so a multi-part job has to correct each part
+ * against its own header).
+ *
+ * Returns the same object, mutated in place.
+ * @param {{platform?:string, emoteOffsets?:string, messages?:Array}} data
+ */
+export function correctLegacyTwitchEmotes(data) {
+  if (!data || data.platform !== "twitch" || data.emoteOffsets === "utf16") return data;
+  for (const m of data.messages || []) {
+    if (!m || !m.raw) continue;
+    let text = typeof m.message === "string" ? m.message : "";
+    if (text.startsWith(TWITCH_ACTION_PREFIX)) {
+      text = text.slice(TWITCH_ACTION_PREFIX.length);
+      if (text.endsWith(TWITCH_SOH)) text = text.slice(0, -1);
+      m.message = text;
+      m.isAction = true;
+    }
+    const emotes = m.emotes;
+    if (!Array.isArray(emotes) || emotes.length === 0) continue;
+    // cpToUnit[i] is the UTF-16 index at which code point i begins; the
+    // sentinel at the end holds the total length, so `end` maps without a
+    // special case for a span that reaches the last character.
+    const cps = [...text];
+    const cpToUnit = new Array(cps.length + 1);
+    let units = 0;
+    for (let i = 0; i < cps.length; i++) {
+      cpToUnit[i] = units;
+      units += cps[i].length; // 1, or 2 for a surrogate pair
+    }
+    cpToUnit[cps.length] = units;
+    for (const e of emotes) {
+      const s = Number(e.start);
+      const en = Number(e.end);
+      // Same bounds rule as the Go producer: a malformed wire range keeps the
+      // offsets it was sent with and renders as plain text.
+      if (!Number.isInteger(s) || !Number.isInteger(en)) continue;
+      if (s < 0 || s > en || en >= cps.length) continue;
+      e.name = cps.slice(s, en + 1).join("");
+      e.start = cpToUnit[s];
+      e.end = cpToUnit[en + 1] - 1;
+    }
+  }
+  return data;
 }

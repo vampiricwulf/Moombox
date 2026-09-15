@@ -45,6 +45,12 @@ const (
 	// (internal/chat/downloader.go corruptChatSuffix) — one recovery
 	// convention across both platforms.
 	chatCorruptSuffix = ".corrupt"
+	// chatEmoteOffsetsUTF16 is the only value TwitchChatData.EmoteOffsets ever
+	// carries. One constant with two writers — the IRC full-file write and the
+	// VOD one — because a file written with the marker misspelled is
+	// indistinguishable at replay from a legacy file, and would be "corrected"
+	// a second time.
+	chatEmoteOffsetsUTF16 = "utf16"
 )
 
 // The fixed vocabulary of Twitch auth-downgrade reasons: one value per route

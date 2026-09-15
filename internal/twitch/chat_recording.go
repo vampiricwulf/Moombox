@@ -128,6 +128,7 @@ func (cd *ChatDownloader) writeFullChatFileTo(path string, msgs []TwitchChatMess
 		StreamStartTime:    cd.streamStartTime,
 		DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
 		MessageCount:       count,
+		EmoteOffsets:       chatEmoteOffsetsUTF16,
 		Messages:           msgs,
 	}
 	if startMs > 0 {

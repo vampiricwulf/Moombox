@@ -1215,3 +1215,100 @@ test("a Twitch part's chat is never re-derived either", { skip }, async () => {
   assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [0, 60000],
     "both parts keep their part-relative 0; only mergePartChats' shift applies");
 });
+
+// ── Legacy Twitch emote replay (Arc 1, T1-1) ────────────────────────────────
+
+/** The alt text and surrounding text of one sidebar row's content span. */
+const rowContent = (h, i) => {
+  const span = h.sidebar().children[i].lastChild;
+  return Array.from(span.childNodes).map((n) =>
+    (n.tagName === "IMG" ? `[${n.alt}]` : n.textContent));
+};
+
+const ircChatMsg = (message, emotes) => ({
+  offsetMs: 1000, authorName: "u", message, emotes,
+  raw: `@emotes=x :u!u@u.tmi.twitch.tv PRIVMSG #c :${message}`,
+});
+
+test("a marked chat file's Twitch emote spans are rendered exactly as written", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: {
+      platform: "twitch", emoteOffsets: "utf16",
+      messages: [ircChatMsg("🎉 Kappa", [{ id: "25", name: "Kappa", start: 3, end: 7 }])],
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  // Mutant: correcting a marked file anyway would shift the span to [5..9] and
+  // the row would read "🎉 Ka" + [ppa].
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]"]);
+});
+
+test("an unmarked legacy IRC message is re-indexed before it is rendered", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: {
+      // No emoteOffsets: written before 2026-09-15. The stored span is the raw
+      // code-point range and the stored name is the garbled UTF-16 slice.
+      platform: "twitch",
+      messages: [ircChatMsg("🎉 Kappa", [{ id: "25", name: " Kapp", start: 2, end: 6 }])],
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  // Mutant: no correction at all renders "🎉" + [ Kapp] + "a".
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]"]);
+});
+
+test("an unmarked VOD comment (no raw line) is rendered untouched", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: {
+      platform: "twitch",
+      messages: [{ offsetMs: 1000, authorName: "u", message: "🎉 Kappa",
+        emotes: [{ id: "25", name: "Kappa", start: 3, end: 7 }] }],
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  // Mutant: correcting every message in an unmarked file would shift this
+  // already-UTF-16 span to [5..9] and render "🎉 Ka" + [ppa].
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]"]);
+});
+
+test("a multi-part job corrects each part against its own header, before the merge", { skip }, async () => {
+  // mergePartChats keeps platform/streamStartTime/emotes/messages and nothing
+  // else, so a per-file scalar has to be consumed per part. Mutant: correcting
+  // after the merge reads the merged object's (absent) marker and re-shifts the
+  // marked part too — row 1 would render "🎉 Ka" + [ppa].
+  //
+  // The job is built inline rather than through segmented() (:183-190): that
+  // helper's segments carry no chatFile, so the per-part fetch path would not
+  // fire at all. This mirrors the job in "a multi-part job's chat comes from
+  // the per-part files" (:664-671).
+  const job = finished("j1", {
+    segments: [
+      { segmentIndex: 0, durationSeconds: 60, quality: "720p", chatFile: "p0.chat.json" },
+      { segmentIndex: 1, durationSeconds: 60, quality: "720p", chatFile: "p1.chat.json" },
+    ],
+  });
+  const h = harness.makePlayer({
+    jobs: [job],
+    watchState: {},
+    segmentChatById: {
+      "j1/0": { platform: "twitch",
+        messages: [ircChatMsg("🎉 Kappa", [{ id: "25", name: " Kapp", start: 2, end: 6 }])] },
+      "j1/1": { platform: "twitch", emoteOffsets: "utf16",
+        messages: [ircChatMsg("🎉 Kappa", [{ id: "25", name: "Kappa", start: 3, end: 7 }])] },
+    },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  assert.equal(h.sidebar().children.length, 2);
+  assert.deepEqual(rowContent(h, 0), ["🎉 ", "[Kappa]"]);
+  assert.deepEqual(rowContent(h, 1), ["🎉 ", "[Kappa]"]);
+});
