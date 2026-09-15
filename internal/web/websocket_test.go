@@ -2,6 +2,7 @@ package web
 
 import (
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -98,5 +99,77 @@ func TestWebSocketHubClientCount(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
 	if hub.ClientCount() != 0 {
 		t.Errorf("expected 0 clients, got %d", hub.ClientCount())
+	}
+}
+
+// countingWSLogger counts calls per level so a test can assert on the VOLUME of
+// logging, not only its content.
+type countingWSLogger struct {
+	mu                        sync.Mutex
+	debug, info, warn, errors int
+}
+
+func (l *countingWSLogger) Debug(msg string, args ...any) { l.mu.Lock(); l.debug++; l.mu.Unlock() }
+func (l *countingWSLogger) Info(msg string, args ...any)  { l.mu.Lock(); l.info++; l.mu.Unlock() }
+func (l *countingWSLogger) Warn(msg string, args ...any)  { l.mu.Lock(); l.warn++; l.mu.Unlock() }
+func (l *countingWSLogger) Error(msg string, args ...any) { l.mu.Lock(); l.errors++; l.mu.Unlock() }
+
+func (l *countingWSLogger) counts() (debug, warn int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.debug, l.warn
+}
+
+// TestQueueOrDropLogsAtMostOncePerLaggingClient pins the fix for the drop-
+// warning feedback loop: queueOrDrop Warned on every drop, that line reached
+// the app logger, the logger's subscriber rebroadcast it to the same full
+// queue, which dropped and Warned again (sweep T1-9).
+//
+// THE MUTANT: put `hub.logger.Warn("dropped oldest WS frame; client lagging")`
+// back in queueOrDrop — warn goes 0 → 100 and the loop is back.
+func TestQueueOrDropLogsAtMostOncePerLaggingClient(t *testing.T) {
+	log := &countingWSLogger{}
+	hub := NewWebSocketHub(log)
+	client := &wsClient{writes: make(chan []byte, wsWriteQueueSize)}
+
+	// The first wsWriteQueueSize frames fit; every one after that drops one.
+	for range wsWriteQueueSize + 100 {
+		hub.queueOrDrop(client, []byte(`{"type":"log"}`))
+	}
+
+	debug, warn := log.counts()
+	if warn != 0 {
+		t.Errorf("Warn called %d times; a dropped frame must not reach the app logger at Warn — "+
+			"that line is broadcast straight back into the same full queue", warn)
+	}
+	if debug != 1 {
+		t.Errorf("Debug called %d times, want exactly 1 in one 30s window", debug)
+	}
+	if got := client.drops.Load(); got != 100 {
+		t.Errorf("drops = %d, want 100 — every dropped frame must still be COUNTED even though "+
+			"only one of them is logged", got)
+	}
+}
+
+// TestLogDropTotalReportsOnceAtTeardown: the lifetime total is the number an
+// operator needs, and it is reported exactly once, from the one teardown point
+// every removal path reaches.
+//
+// THE MUTANT: drop the `n > 0` guard — the first assertion fails and every
+// healthy disconnect logs a zero.
+func TestLogDropTotalReportsOnceAtTeardown(t *testing.T) {
+	log := &countingWSLogger{}
+	hub := NewWebSocketHub(log)
+	client := &wsClient{writes: make(chan []byte, 1)}
+
+	hub.logDropTotal(client)
+	if debug, _ := log.counts(); debug != 0 {
+		t.Errorf("Debug called %d times for a client that dropped nothing, want 0", debug)
+	}
+
+	client.drops.Store(7)
+	hub.logDropTotal(client)
+	if debug, _ := log.counts(); debug != 1 {
+		t.Errorf("Debug called %d times after a lagging client went away, want exactly 1", debug)
 	}
 }

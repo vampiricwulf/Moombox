@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -90,6 +91,13 @@ type wsClient struct {
 	// without depending on ctx cancellation timing. Audit reports/web.md
 	// C-7.
 	writes chan []byte
+
+	// drops counts frames this client will never receive. Incremented on
+	// every queue-overflow drop; see noteDrop for why the LINE is rate
+	// limited while the count is not.
+	drops atomic.Uint64
+	// lastLagLog is the UnixNano of the last "WS client lagging" line.
+	lastLagLog atomic.Int64
 }
 
 // NewWebSocketHub creates a new WebSocket hub.
@@ -201,6 +209,42 @@ func (hub *WebSocketHub) writePump(client *wsClient) {
 	}
 }
 
+// wsLagLogInterval bounds how often ONE client's drops may produce a log line.
+const wsLagLogInterval = 30 * time.Second
+
+// noteDrop records a frame this client will never receive.
+//
+// The counter is free; the LINE is not. queueOrDrop used to Warn on every drop,
+// and the app logger's subscriber (cmd/moombox/monitor_callbacks.go) broadcasts
+// each line back to every client — including the full queue that just dropped,
+// which dropped again and warned again. One lagging client could hold that loop
+// up for a 10 s stalled write, writing the log file and every per-job buffer on
+// each turn (sweep T1-9). Debug rather than Warn because a dropped frame is
+// recovered by the resync, and at most one line per client per 30 s because
+// that bound is what actually breaks the loop.
+func (hub *WebSocketHub) noteDrop(client *wsClient) {
+	total := client.drops.Add(1)
+	now := time.Now().UnixNano()
+	last := client.lastLagLog.Load()
+	if now-last < int64(wsLagLogInterval) {
+		return
+	}
+	if !client.lastLagLog.CompareAndSwap(last, now) {
+		return // another goroutine just logged for this client
+	}
+	hub.logger.Debug("WS client lagging", "drops", total)
+}
+
+// logDropTotal reports one client's lifetime drop count as it goes away.
+// Called from readPump's deferred cleanup, which is the ONE teardown point
+// every removal path reaches: removeClient, pingPump and Close all cancel
+// client.ctx, which unblocks Conn.Read and runs that defer exactly once.
+func (hub *WebSocketHub) logDropTotal(client *wsClient) {
+	if n := client.drops.Load(); n > 0 {
+		hub.logger.Debug("WS client disconnected after dropping frames", "drops", n)
+	}
+}
+
 // queueOrDrop pushes a marshalled frame into a client's write queue.
 // On a full queue the OLDEST queued frame is dropped (it's stale state
 // for a client that's already behind) and the new frame replaces it.
@@ -217,20 +261,21 @@ func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
 	case client.writes <- msg:
 		return true
 	default:
-		// Drop oldest, then push the new frame. If we lose another race,
-		// the new frame is dropped silently (caller sees true).
-		select {
-		case <-client.writes:
-			hub.logger.Warn("dropped oldest WS frame; client lagging")
-		default:
-		}
-		select {
-		case client.writes <- msg:
-			return true
-		default:
-			hub.logger.Warn("dropped WS frame; client write queue full")
-			return true
-		}
+	}
+
+	// Drop oldest, then push the new frame. If we lose another race,
+	// the new frame is dropped silently (caller sees true).
+	select {
+	case <-client.writes:
+		hub.noteDrop(client)
+	default:
+	}
+	select {
+	case client.writes <- msg:
+		return true
+	default:
+		hub.noteDrop(client)
+		return true
 	}
 }
 
@@ -383,6 +428,10 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 		if r := recover(); r != nil {
 			hub.logger.Error("panic in WebSocket readPump", "panic", r)
 		}
+		// The one teardown point every removal path reaches: removeClient,
+		// pingPump and Close all cancel client.ctx, which unblocks the Read
+		// below and runs this defer exactly once.
+		hub.logDropTotal(client)
 		client.cancel() // Cancel the detached context to stop pingPump
 		hub.mu.Lock()
 		if !hub.closed {
