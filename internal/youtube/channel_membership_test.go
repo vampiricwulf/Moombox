@@ -333,7 +333,7 @@ func TestFetchMembershipVideosReturnsVerdict(t *testing.T) {
 			defer srv.Close()
 
 			s := newMembershipProbeService(t, srv.URL, halfClearedCookieFile)
-			videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UC_probe_channel")
+			videos, verdict, _, err := s.FetchMembershipVideos(context.Background(), "UC_probe_channel")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -366,7 +366,7 @@ func TestFetchMembershipVideosProbesAHalfClearedSession(t *testing.T) {
 	if s.HasAuthCookies() {
 		t.Fatal("precondition: the complete-set predicate must reject a half-cleared session")
 	}
-	_, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	_, verdict, _, err := s.FetchMembershipVideos(context.Background(), "UCabc")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestFetchMembershipVideosSkipsWhenNeverConfigured(t *testing.T) {
 	defer srv.Close()
 
 	s := newMembershipProbeService(t, srv.URL, unconfiguredCookieFile)
-	videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	videos, verdict, _, err := s.FetchMembershipVideos(context.Background(), "UCabc")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestFetchMembershipVideosTransportFailureIsNotAVerdict(t *testing.T) {
 	defer srv.Close()
 
 	s := newMembershipProbeService(t, srv.URL, halfClearedCookieFile)
-	videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	videos, verdict, _, err := s.FetchMembershipVideos(context.Background(), "UCabc")
 	if err == nil {
 		t.Fatal("expected an error for a 502")
 	}
@@ -449,7 +449,7 @@ func TestFetchMembershipVideosRejectsAnOffOriginAnswer(t *testing.T) {
 	defer origin.Close()
 
 	s := newMembershipProbeService(t, origin.URL, halfClearedCookieFile)
-	videos, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	videos, verdict, _, err := s.FetchMembershipVideos(context.Background(), "UCabc")
 	if err == nil {
 		t.Fatal("expected an error for an answer from another host")
 	}
@@ -489,7 +489,7 @@ func TestFetchMembershipVideosSurvivesACookieStrippingBounce(t *testing.T) {
 	defer wall.Close()
 
 	s := newMembershipProbeService(t, origin.URL, halfClearedCookieFile)
-	_, verdict, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+	_, verdict, _, err := s.FetchMembershipVideos(context.Background(), "UCabc")
 
 	if !sawFinalHop {
 		t.Fatal("the chain never bounced back to the origin; this test is not set up as intended")
@@ -521,5 +521,54 @@ func TestServiceHasAnyAuthCookieSeesAHalfClearedSession(t *testing.T) {
 	none := newMembershipProbeService(t, "http://unused.invalid", unconfiguredCookieFile)
 	if none.HasAnyAuthCookie() {
 		t.Error("HasAnyAuthCookie() = true for an install that was never signed in")
+	}
+}
+
+// emptyMemberTabJSON is a MEMBER whose membership tab currently lists nothing:
+// the sponsorships tab IS selected, but it holds no video renderers. This is
+// the page that makes hasAccess load-bearing — its video list is identical to
+// a non-member's.
+const emptyMemberTabJSON = `{"contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
+	{"tabRenderer": {"selected": true, "tabIdentifier": "TAB_ID_SPONSORSHIPS", "content": {"richGridRenderer": {"contents": []}}}}
+]}}}`
+
+// TestFetchMembershipVideosReportsAccessSeparatelyFromTheVideoList pins the
+// bit the feed monitor's non-member memo hangs on. A member whose tab happens
+// to list nothing and a non-member both return zero videos, so the list cannot
+// tell them apart — and memoizing a member as a non-member would delay
+// members-only LIVE discovery by up to membershipMemoTTL, which is exactly the
+// archive miss membership discovery exists to prevent.
+//
+// Mutant: returning `len(videos) > 0` as hasAccess passes the non-member case
+// and fails the empty-member case.
+func TestFetchMembershipVideosReportsAccessSeparatelyFromTheVideoList(t *testing.T) {
+	cases := []struct {
+		name          string
+		initialData   string
+		wantHasAccess bool
+	}{
+		{"member with an empty tab", emptyMemberTabJSON, true},
+		{"non-member home fallback", homeFallbackJSON, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Write(membershipHTML(true, tc.initialData))
+			}))
+			defer srv.Close()
+
+			s := newMembershipProbeService(t, srv.URL, halfClearedCookieFile)
+			videos, _, hasAccess, err := s.FetchMembershipVideos(context.Background(), "UCabc")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(videos) != 0 {
+				t.Fatalf("videos = %d, want 0 — this fixture is the ambiguous case", len(videos))
+			}
+			if hasAccess != tc.wantHasAccess {
+				t.Errorf("hasAccess = %v, want %v — the video list cannot answer this question", hasAccess, tc.wantHasAccess)
+			}
+		})
 	}
 }

@@ -220,9 +220,12 @@ type ProcessYouTubeVideoResult struct {
 	Title         string // possibly updated title from metadata
 	ChannelName   string // possibly updated channel name from metadata
 	// StreamStatus is the probe's classification ("live", "upcoming", "vod",
-	// "post_live", "not_a_stream"); empty when no probe ran (the nil-probe
-	// passthrough) or the probe did not complete. DECAPI reads it to pick a
-	// JobDisposition (spec §10's creator table).
+	// "post_live", "not_a_stream"). It is populated whenever a probe COMPLETED
+	// — including the two arms that then decline to process the video — and is
+	// empty only when no probe ran (the nil-probe passthrough) or the probe
+	// errored or was suppressed by the cooldown. DECAPI reads it to pick a
+	// JobDisposition (spec §10's creator table) and, since T2-12, to memoize a
+	// terminal classification it must not pay for again next cycle.
 	StreamStatus string
 	// PublishedAt is the probe's authoritative publish date (RFC3339); empty
 	// whenever StreamStatus is — and for broadcast probes, which supply no
@@ -457,7 +460,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 			if p.AddToHistory != nil {
 				p.AddToHistory(p.VideoID)
 			}
-			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
+			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus}
 		}
 		logInfo(fmt.Sprintf("[Monitor] Including non-stream content (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
 
@@ -474,7 +477,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 			if p.AddToHistory != nil {
 				p.AddToHistory(p.VideoID)
 			}
-			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
+			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus}
 		}
 		logInfo(fmt.Sprintf("[Monitor] Including ended stream (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
 	}

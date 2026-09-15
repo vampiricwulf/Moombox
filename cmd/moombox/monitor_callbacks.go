@@ -206,6 +206,22 @@ func reauthenticateTwitchChats(platform string, broadcast func() int) int {
 	return broadcast()
 }
 
+// clearYouTubeMembershipMemo drops the feed monitor's non-member memos on a
+// YOUTUBE auth repair, returning how many it dropped. Same shape as
+// reauthenticateTwitchChats above, and for the same two reasons: the platform
+// gate, and a nil func so a runState built without a feed monitor degrades to
+// "nothing to clear" instead of panicking at the exact moment an operator
+// repairs their credentials.
+//
+// The gate is not cosmetic. The memo is YouTube-only, and a Twitch repair says
+// nothing about whether a YouTube account is a member of anything.
+func clearYouTubeMembershipMemo(platform string, clear func() int) int {
+	if platform != "youtube" || clear == nil {
+		return 0
+	}
+	return clear()
+}
+
 // wireCredentialRepairCallbacks installs the two RefreshService callbacks that
 // fire when a platform's credentials become usable again.
 //
@@ -226,10 +242,10 @@ func reauthenticateTwitchChats(platform string, broadcast func() int) int {
 // stays as it was: the recovery sweep passes no identity and so holds back
 // membership parks, the credential sweep passes one and so can move them.
 //
-// broadcast is DownloadWorker.ReauthenticateTwitchChats in production, taken
-// as a func so this method can be driven directly — wireMonitorCallbacks
-// cannot be.
-func (s *runState) wireCredentialRepairCallbacks(broadcast func() int) {
+// broadcast is DownloadWorker.ReauthenticateTwitchChats in production, and
+// clearMembershipMemo is FeedMonitor.ResetMembershipMemo, both taken as funcs
+// so this method can be driven directly — wireMonitorCallbacks cannot be.
+func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMembershipMemo func() int) {
 	// reauth is the half both edges share. reauthenticateTwitchChats filters
 	// the platform and is nil-safe, so this is safe to call from either.
 	//
@@ -261,6 +277,17 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int) {
 	// they failed and which this transition therefore cannot fix.
 	s.cookieRefresh.OnAuthRecovered = func(platform string) {
 		reauth(platform)
+		// A YouTube session that has just come back from not-authenticated
+		// may have left non-member memos behind, and each one suppresses the
+		// only path by which members-only content is discovered at all. The
+		// confirmedNonMember gate means an unrecognised session writes no memo
+		// in the first place, so this is the belt-and-braces half: it also
+		// covers a memo recorded from a page YouTube stamped as logged in
+		// while the session was already on its way out.
+		if n := clearYouTubeMembershipMemo(platform, clearMembershipMemo); n > 0 {
+			s.log.Info("auth recovered — cleared membership non-member memos",
+				"platform", platform, "channels", n)
+		}
 		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
 		if resumed > 0 {
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
@@ -296,6 +323,30 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int) {
 	// covers the swap-while-healthy case for them too.
 	s.cookieRefresh.OnCredentialsChanged = func(platform, identity string) {
 		reauth(platform)
+		// The same clear as the recovery edge, and this is the edge that
+		// actually needs it. A swap from a Google account that is a member of
+		// nothing to one that IS a member moves the fingerprint without any
+		// auth transition at all, so OnAuthRecovered never fires — yet every
+		// memo the old account wrote is now wrong about the new one, and each
+		// is suppressing the only path members-only content is discovered by.
+		//
+		// This edge also fires on the first authenticated observation of every
+		// process, which costs nothing here: the memo lives in memory and is
+		// empty at that point, so the clear reports 0 and logs nothing.
+		//
+		// It also fires wider than a real account swap, on purpose:
+		// CookieJar.YouTubeIdentity is deliberately biased toward sensitivity
+		// (internal/cookies/jar.go), so a same-account LOGIN_INFO rotation
+		// reads as a change and clears the memo too. The bill for that false
+		// positive is one feed cycle in which every configured channel's
+		// /membership tab is fetched authenticated again — bounded, paid once
+		// per rotation, and never worse than the pre-memo steady state. The
+		// opposite error, missing a real swap, leaves every members-only
+		// stream on the new account undiscoverable for six hours.
+		if n := clearYouTubeMembershipMemo(platform, clearMembershipMemo); n > 0 {
+			s.log.Info("account identity observed — cleared membership non-member memos",
+				"platform", platform, "channels", n)
+		}
 		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
 		if resumed > 0 {
 			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
@@ -871,6 +922,30 @@ func routeLivenessVerdict(observe func(platform string, loggedIn bool), verdict 
 	}
 }
 
+// membershipConfirmedNonMember collapses the membership probe's two
+// independent answers into the single bit the feed monitor's non-member memo
+// is allowed to act on: YouTube, on a session it RECOGNISED, showed this
+// channel no membership tab.
+//
+// The verdict gate is the whole of the decision. A dead or half-cleared
+// session is served the very same page a genuine non-member gets — a channel
+// Home fallback with no selected sponsorships tab, which parseMembershipTab
+// reports as hasAccess=false with a nil error (the fixture in
+// internal/youtube: TestFetchMembershipVideosProbesAHalfClearedSession reads
+// SessionAuthLoggedOut off exactly that page). Memoizing on hasAccess alone
+// would therefore mark EVERY channel a non-member for monitor's
+// membershipMemoTTL the moment cookies expire, suppressing members-only
+// discovery everywhere — and, because the memo outlives the repair, a fresh
+// cookie import would not bring it back for up to six hours.
+//
+// So: an unanswered question is never stored as "no". Split out of the
+// FetchMembership closure for the same reason routeLivenessVerdict was — the
+// mapping is the whole of the decision, and the closure around it needs a
+// monitor, the service graph and the network to exist.
+func membershipConfirmedNonMember(verdict youtube.SessionAuthState, hasAccess bool) bool {
+	return verdict == youtube.SessionAuthLoggedIn && !hasAccess
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -927,10 +1002,13 @@ func (s *runState) wireMonitorCallbacks() {
 
 	// Both credential-repair edges, wired together because they mean the same
 	// thing to a live chat session and different things to everything else.
-	// The broadcast is injected rather than read off s.dlWorker inside, so a
-	// test can count it; the method value is safe on a nil worker
-	// (ReauthenticateTwitchChats is nil-receiver-guarded — Task 5).
-	s.wireCredentialRepairCallbacks(s.dlWorker.ReauthenticateTwitchChats)
+	// Both effects are injected rather than read off s inside, so a test can
+	// count them. The broadcast's method value is safe on a nil worker
+	// (ReauthenticateTwitchChats is nil-receiver-guarded — Task 5); the memo
+	// clear's receiver is not guarded and does not need to be, because
+	// buildServices has already constructed s.feedMon and this same function
+	// dereferences it unconditionally a few dozen lines below.
+	s.wireCredentialRepairCallbacks(s.dlWorker.ReauthenticateTwitchChats, s.feedMon.ResetMembershipMemo)
 
 	// ProbeVideo callback for monitors (metadata check before job creation).
 	// Uses the caller-supplied ctx so monitor shutdown cancels in-flight
@@ -989,11 +1067,14 @@ func (s *runState) wireMonitorCallbacks() {
 	// VideoInfo). MembershipEnabled re-reads the config flag AND cookie state
 	// live each cycle, so toggling the setting or acquiring cookies takes effect
 	// on the next cycle with no restart.
-	s.feedMon.FetchMembership = func(ctx context.Context, channelID string) ([]monitor.MembershipVideo, error) {
-		vids, verdict, err := s.ytService.FetchMembershipVideos(ctx, channelID)
+	s.feedMon.FetchMembership = func(ctx context.Context, channelID string) ([]monitor.MembershipVideo, bool, error) {
+		vids, verdict, hasAccess, err := s.ytService.FetchMembershipVideos(ctx, channelID)
 		// The login verdict is a credential-health signal, not a discovery
-		// result, so MembershipFetchFunc keeps its two-value shape and the
-		// adapter absorbs the third here.
+		// result, so MembershipFetchFunc absorbs it here rather than carrying
+		// it — but not before folding it into the one bit the monitor's
+		// non-member memo may act on. The verdict and hasAccess answer
+		// different questions and only their conjunction is safe to memoize;
+		// see membershipConfirmedNonMember.
 		//
 		// Routed BEFORE the error return on purpose. Whether the tab scan
 		// produced videos is a different question from whether YouTube
@@ -1004,18 +1085,25 @@ func (s *runState) wireMonitorCallbacks() {
 		// fetch would still reach the health signal rather than being dropped
 		// by an early return nobody re-read.
 		//
-		// This closure runs once per configured channel per feed cycle, so a
-		// dead session arrives as N identical verdicts. ObserveLiveness owns
-		// the de-duplication — see livenessRefireWindow in internal/cookies.
+		// This closure runs once per configured channel per feed cycle, minus
+		// the channels the non-member memo skips — and the monitor nominates
+		// one of those skipped channels each cycle precisely so this line
+		// keeps firing. The exact bound is NOT "at least one call per cycle":
+		// armMembershipLiveness' doc comment (internal/monitor/feed.go) states
+		// what is actually promised, including the case where every memoized
+		// channel has recently errored and a cycle can end with no call that
+		// returned. A dead session still arrives as several identical
+		// verdicts; ObserveLiveness owns the de-duplication — see
+		// livenessRefireWindow in internal/cookies.
 		routeLivenessVerdict(s.cookieRefresh.ObserveLiveness, verdict)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		out := make([]monitor.MembershipVideo, len(vids))
 		for i, v := range vids {
 			out[i] = monitor.MembershipVideo{VideoID: v.VideoID, Title: v.Title, Age: v.Age}
 		}
-		return out, nil
+		return out, membershipConfirmedNonMember(verdict, hasAccess), nil
 	}
 	s.feedMon.MembershipEnabled = func() bool {
 		enabled := true
