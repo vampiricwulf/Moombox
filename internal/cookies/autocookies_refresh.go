@@ -356,6 +356,12 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// previousCookies is kept verbatim so an import that turns out to have
 	// damaged a platform can hand that platform's rows back untouched.
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
+		// Sets, exactly as FinishSetup's twin does (autocookies_setup.go): the
+		// policy on lastError says every exit that returns an error from a
+		// cookie pass records what it concluded, and these three returned while
+		// leaving the field both dashboards render blank — so a refresh failing
+		// every 30 minutes looked like a healthy install with stale cookies.
+		s.setError("could not create the directory for cookies.txt: " + err.Error())
 		return refreshAborted(), err
 	}
 	var previousCookies string
@@ -472,11 +478,21 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		}
 	}
 	if err := writeCookieFile(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
+		// Same wording and the same short Docker hint as FinishSetup's write
+		// exit: the write ends in a rename, and a rename cannot replace a
+		// single-file bind mount. This goes to a status line both dashboards
+		// render, so it stays one sentence.
+		s.setError("could not write cookies.txt: " + err.Error() +
+			" — if this is Docker, mount the data directory rather than cookies.txt itself")
 		return refreshAborted(), err
 	}
 
 	// Reload jar
 	if err := s.jar.Load(s.cookiePath); err != nil {
+		// The worst of the three to leave silent: the cookies were fetched AND
+		// written, so the file on disk is fine and nothing about the state looks
+		// wrong — the pass simply reported nothing.
+		s.setError("cookies.txt was written but could not be loaded: " + err.Error())
 		return refreshAborted(), err
 	}
 

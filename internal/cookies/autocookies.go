@@ -267,8 +267,11 @@ type AutoCookieService struct {
 	//   - setError — the single SET, and the only place a message enters this
 	//     field. Callers: FinishSetup's empty-profile, read-failure, merge-abort,
 	//     mkdir, write and jar-load exits; the refresh's import failure, merge
-	//     abort, credential-loss and verification-failure exits. Each of those is
-	//     a conclusion the pass reached.
+	//     abort, mkdir, write, jar-load, credential-loss and verification-failure
+	//     exits. Each of those is a conclusion the pass reached. (The refresh's
+	//     mkdir, write and jar-load exits were the last three silent ones; they
+	//     are the sweep's T1-8 and are pinned by
+	//     autocookies_refresh_lasterror_test.go.)
 	//
 	//     THE LAST THREE OF FINISHSETUP'S WERE MISSING until Arc 8 Task 12a fix
 	//     round 1, and the shape of the miss is worth keeping written down
