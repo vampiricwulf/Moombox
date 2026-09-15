@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -253,6 +254,75 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		}
 	}()
 
+	// Client-initiated keepalive. ircReadDeadline alone leaves a HALF-OPEN
+	// socket — one the OS still believes is connected — parked for six
+	// minutes, and Twitch IRC has NO replay: every message in that window is
+	// simply absent from the archive. So this session speaks first, the way
+	// chatterino7 does
+	// (references/chatterino7/src/providers/twitch/IrcConnection2.cpp).
+	//
+	// A goroutine rather than a shorter per-read deadline, and that is a
+	// property of the library rather than a preference: coder/websocket
+	// installs a read context as a context.AfterFunc that CLOSES the
+	// connection when it fires (setupReadTimeout, conn.go), so a 15-second
+	// read deadline would kill the socket on every quiet fifteen seconds.
+	// Writes are serialized inside the library, so this goroutine's PING
+	// cannot interleave with the read loop's PONG.
+	var lastInbound atomic.Int64
+	lastInbound.Store(time.Now().UnixNano())
+	keepaliveFailed := make(chan struct{})
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				cd.logger.Error("chat keepalive panic", "panic", r)
+			}
+		}()
+		ticker := time.NewTicker(cd.delays.keepaliveCheck)
+		defer ticker.Stop()
+		// pingSent is the zero time when no PING is outstanding.
+		var pingSent time.Time
+		for {
+			select {
+			case <-keepaliveDone:
+				return
+			case <-sessionCtx.Done():
+				return
+			case now := <-ticker.C:
+				last := time.Unix(0, lastInbound.Load())
+				if !pingSent.IsZero() {
+					// ANY inbound frame answers — a PONG, a chat line, a
+					// server PING. The question is whether the IRC layer is
+					// still serving us, not whether it used the right verb.
+					if last.After(pingSent) {
+						pingSent = time.Time{}
+						continue
+					}
+					if now.Sub(pingSent) < cd.delays.keepalivePongWait {
+						continue
+					}
+					cd.logger.Warn("twitch IRC went silent after a keepalive PING; reconnecting",
+						"channel", cd.channelLogin, "pongWait", cd.delays.keepalivePongWait)
+					close(keepaliveFailed)
+					// Unblock the read loop, which reads keepaliveFailed and
+					// returns the error Start's reconnect path acts on.
+					sessionCancel()
+					return
+				}
+				if now.Sub(last) < cd.delays.keepaliveIdle {
+					continue
+				}
+				if err := conn.Write(sessionCtx, websocket.MessageText, []byte(ircKeepalivePing)); err != nil {
+					// The read loop is about to see the same failure; leaving
+					// it to the one error path keeps one verdict per session.
+					return
+				}
+				pingSent = now
+			}
+		}
+	}()
+
 	consecutiveErrors := 0
 
 	for cd.IsRunning() {
@@ -262,12 +332,16 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		default:
 		}
 
-		// Read with a per-read deadline so a silent socket (e.g. NAT
-		// dropping the connection mid-stream) triggers a reconnect
-		// instead of blocking until the parent context cancels. Twitch
-		// IRC sends a PING every ~5 minutes; readDeadline covers two
-		// missed PINGs before we give up on the session. Derived from
-		// sessionCtx so Stop/MarkStreamEnded unblock the read at once.
+		// Read with a per-read deadline so a silent socket (e.g. NAT dropping
+		// the connection mid-stream) cannot block until the parent context
+		// cancels. This is the OUTER bound and nothing more: Twitch sends a
+		// server PING about every 5 minutes, so six is one missed heartbeat
+		// plus slack. What actually detects a half-open socket is the
+		// keepalive above, within ircKeepaliveIdle + one ircKeepaliveCheck
+		// tick + ircKeepalivePongWait. Derived from sessionCtx so
+		// Stop/MarkStreamEnded unblock the read at once — and note that
+		// coder/websocket CLOSES the connection when this context fires, which
+		// is why the keepalive is a goroutine and not a shorter deadline here.
 		readCtx, readCancel := context.WithTimeout(sessionCtx, ircReadDeadline)
 		_, data, err := conn.Read(readCtx)
 		readCancel()
@@ -283,6 +357,16 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			if cd.reauthPending.Load() {
 				return errReauthRequested
 			}
+			// The keepalive cancelled this session because Twitch stopped
+			// answering. Returning the error (rather than counting a read
+			// failure) is what makes Start's loop reconnect at once instead of
+			// spinning chatMaxConsecutiveErrs reads against a cancelled
+			// context.
+			select {
+			case <-keepaliveFailed:
+				return fmt.Errorf("twitch IRC keepalive: no response within %v", cd.delays.keepalivePongWait)
+			default:
+			}
 			consecutiveErrors++
 			if consecutiveErrors >= chatMaxConsecutiveErrs {
 				// Return error to trigger reconnect
@@ -291,6 +375,9 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			continue
 		}
 		consecutiveErrors = 0
+		// Every inbound FRAME, before any of it is interpreted: the keepalive's
+		// question is whether Twitch is still talking to us at all.
+		lastInbound.Store(time.Now().UnixNano())
 
 		lines := strings.SplitSeq(string(data), "\r\n")
 		for line := range lines {

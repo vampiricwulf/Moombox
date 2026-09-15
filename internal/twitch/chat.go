@@ -25,6 +25,28 @@ const (
 	// PING every ~5 min; this gives us one missed heartbeat plus slack
 	// before we treat the socket as dead and trigger the reconnect path.
 	ircReadDeadline = 6 * time.Minute
+	// ircKeepaliveIdle is how long the session tolerates hearing NOTHING from
+	// Twitch before it speaks first. Twitch's own server PING is every ~5 min,
+	// so 45 s of silence is not by itself alarming — it is simply the point at
+	// which asking is cheaper than waiting.
+	ircKeepaliveIdle = 45 * time.Second
+	// ircKeepalivePongWait is how long Twitch has to produce ANY inbound frame
+	// after our PING before the socket is declared dead. A live connection
+	// answers in milliseconds; this is generous enough to survive a stalled
+	// second on a congested link.
+	ircKeepalivePongWait = 10 * time.Second
+	// ircKeepaliveCheck is how often the two windows above are evaluated. It
+	// bounds the detection overshoot: a dead socket is noticed within
+	// ircKeepaliveIdle + ircKeepaliveCheck + ircKeepalivePongWait ≈ 70 s,
+	// against ircReadDeadline's 6 minutes. Twitch IRC has no replay, so every
+	// second of that difference is chat that would have been lost outright.
+	ircKeepaliveCheck = 15 * time.Second
+	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
+	// rather than a WebSocket ping frame: a WS pong proves the socket is open,
+	// while this proves the IRC layer behind it is still serving us.
+	// chatterino7 pings the same way
+	// (references/chatterino7/src/providers/twitch/IrcConnection2.cpp).
+	ircKeepalivePing = "PING :moombox"
 	// chatHeaderScanLimit bounds the prefix chatFileRecordingBaseMs reads out
 	// of an existing part file. TwitchChatData's header is a handful of short
 	// scalars written before the messages array — that field order is already
@@ -230,6 +252,12 @@ type ChatDownloader struct {
 	// ircReadDeadline) reacts immediately instead of minutes later.
 	sessionCancel context.CancelFunc
 
+	// delays is every keepalive wait runIRCSession sleeps on;
+	// defaultChatDelays() in production, a scaled copy in tests (see delays.go).
+	// Assigned once at construction and never written again, so the session
+	// goroutine reads it without the mutex.
+	delays chatDelays
+
 	// onProgress is read from addMessage under onProgressMu; callers must
 	// use SetOnProgress rather than direct field assignment to avoid a
 	// data race if the callback is reassigned after Start (audit
@@ -314,6 +342,7 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		streamStartTime: opts.StreamStartTime,
 		streamStartMs:   streamStartMs,
 		dedup:           utils.NewOrderedDedup[string](),
+		delays:          defaultChatDelays(),
 		emoteResolver:   opts.EmoteResolver,
 		logger:          logger,
 	}
