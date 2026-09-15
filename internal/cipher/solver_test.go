@@ -270,3 +270,20 @@ _result.n = function(input) {
 		t.Errorf("subsequent n call: expected 'foo_ok', got %q", nResult)
 	}
 }
+
+// TestSolverCacheSizeMatchesTheDocs is the anti-drift pin for ledger item
+// T4-34. The cap was raised from 3 to 10 in 2026-04; five documents and the
+// upstream-porting skill went on saying 3, which understates the worst-case
+// VM residency by 3x (~500 MB against the ~150 MB a reader would price).
+//
+// Mutant named: changing solverCacheSize without touching the docs fails
+// here with both numbers on screen, which is the only moment anyone is
+// holding the context needed to fix the prose.
+func TestSolverCacheSizeMatchesTheDocs(t *testing.T) {
+	const documented = 10
+	if solverCacheSize != documented {
+		t.Fatalf("solverCacheSize = %d, but docs/spec/{architecture,platform-services,design-philosophy,vision-and-purpose}.md "+
+			"and .claude/skills/moombox-upstream-porting/SKILL.md document %d — update the prose in the same commit",
+			solverCacheSize, documented)
+	}
+}

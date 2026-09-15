@@ -12,7 +12,7 @@ These are hard rules that govern all platform service integrations:
 - **Format priority is lexicographic across five dimensions.** For video: resolution (higher wins) > FPS (prefer60fps setting) > codec score (higher wins) > bitrate (lower wins, indicating better compression) > auth level (lower preferred). For audio: codec score (higher wins) > bitrate (higher wins) > auth level (lower preferred). This ordering is absolute and implemented in `SelectBestFormats`.
 - **Twitch uses GQL API with SHA256 persisted query hashing (version 1).** All structured queries (stream metadata, video metadata, VOD comments) use persisted queries with hardcoded SHA256 hashes. Access token queries use inline GraphQL. The Client-ID header (`kimne78kx3ncx6brgo4mv6wki5h1ko`) is required on every GQL request.
 - **BotGuard has a triple cache with auto-eviction.** Session cache (6-hour TTL, keyed by contentBinding), minter cache (dynamic TTL from Google's API, keyed by contentBinding, auto-evicted via `time.AfterFunc`), and inflight dedup (concurrent requests for the same key wait on a shared channel). Minters hold live Goja VMs that must be explicitly shut down on eviction.
-- **Cipher has a 3-VM LRU with AST + regex fallback.** Memory cache holds at most 3 compiled solver VMs keyed by SHA256 of the player URL. Disk cache (`~/.cache/yt-cipher/player_cache/`) has a 14-day TTL. Compilation is mutex-serialized to prevent thundering herd. The Goja VM inside each Solvers struct is mutex-protected because Goja is not thread-safe.
+- **Cipher has a 10-VM LRU with AST + regex fallback.** Memory cache holds at most 10 compiled solver VMs keyed by SHA256 of the player URL (`solverCacheSize`). Disk cache (`~/.cache/yt-cipher/player_cache/`) has a 14-day TTL. Compilation is mutex-serialized to prevent thundering herd. The Goja VM inside each Solvers struct is mutex-protected because Goja is not thread-safe.
 - **All API keys and client configurations live in `internal/constants/`.** No API keys, client IDs, hashes, or endpoint URLs are hardcoded outside that package. Any new platform integration must add its constants there.
 - **Chat dedup uses recent IDs with deterministic eviction.** Both YouTube (`internal/chat/`) and Twitch (`internal/twitch/chat.go`) maintain a map of seen message IDs plus an ordered slice tracking insertion order. YouTube prunes aggressively: when the set exceeds 5000 entries, the oldest entries are removed immediately. Twitch uses lazy pruning: the set grows to 10,000 entries (2x the 5000 constant) before culling back to 5000. Both match JavaScript `Set` insertion-order semantics from the original TypeScript codebase.
 - **All HTTP responses are size-limited.** GQL and API responses are capped at 5 MB via `io.LimitReader`. Challenge and integrity token responses are capped at 1 MB. This prevents unbounded memory allocation from malformed responses.
@@ -178,6 +178,7 @@ Both `fetchWithClient` and `fetchWithCookielessClient` (used by VISIONOS and AND
 - **Non-retryable errors**: Any other HTTP status (e.g., 403, 404) returns immediately
 - **Backoff**: Exponential, factor 2, starting at 1 second: 1s, 2s, 4s
 - **Context-aware**: Checks `ctx.Err()` before each retry. Uses `utils.Sleep` which respects cancellation.
+- **Deadline-bounded**: `doRetryRequest` in `internal/youtube/player_api_strategy.go` skips a sleep that would not leave `delay + 1 s` before the caller's deadline and returns the last real error — the HTTP status the caller is actually being told no by — instead of `context.DeadlineExceeded`, because the ladder alone is 7 s against mid-download 403 credential recovery's 10 s floor.
 
 #### Cookieless Client Specifics
 
@@ -209,12 +210,19 @@ Parsing (`parseMembershipTab`):
 | `sessionIndex` | `"SESSION_INDEX":"?(\d+)"?` | Multi-account index. |
 | `delegatedSessionID` | `"DELEGATED_SESSION_ID":"([^"]+)"` | Brand account session ID. |
 | `dataSyncID` | `"datasyncId":"([^"]+)"` | Data sync identifier. |
-| `ytInitialPlayerResponse` | Three patterns (see below) | Inline player API response embedded in the page. |
+| `ytInitialPlayerResponse` | Three anchors + brace scan (see below) | Inline player API response embedded in the page. |
 
-The `ytInitialPlayerResponse` is extracted using three regex patterns tried in order:
-1. `var ytInitialPlayerResponse\s*=\s*({.+?});`
-2. `window["ytInitialPlayerResponse"]\s*=\s*({.+?});`
-3. `ytInitialPlayerResponse\s*=\s*({.+?});`
+The `ytInitialPlayerResponse` is located by an assignment-PREFIX anchor and then brace-scanned
+(`extractPlayerResponse`, `internal/youtube/watch_page.go`), never captured by a non-greedy regex.
+The anchors are tried in order:
+1. `var ytInitialPlayerResponse\s*=\s*\{`
+2. `window["ytInitialPlayerResponse"]\s*=\s*\{`
+3. `ytInitialPlayerResponse\s*=\s*\{`
+
+Each match ends on the opening brace; `scanBalancedObject` then walks the literal tracking JS string
+state, so a `};` inside `shortDescription` cannot truncate it. The lazy `({.+?});` form this replaces
+stopped at the first `};` in the page and failed identically on all three patterns, losing the watch
+page's `ScheduledStartTime` and format pool with nothing in the log.
 
 When found, it is JSON-parsed and the embedded `videoDetails` fields (title, author, channelId, description, thumbnail) are stored in `YtcfgData` for use as metadata fallbacks.
 
@@ -869,14 +877,20 @@ Expired entries are cleaned up in two ways:
 
 Moombox mints two populations of PO token, and they follow different rules because upstream treats them differently.
 
-**Player-API tokens** (used by `fetchWithClient` / `fetchWithEmbedded`) bind to the **video ID** — yt-dlp binds `PoTokenContext.PLAYER` to the video ID unconditionally (`pot/utils.py`) — and are minted via the sidecar's cached minter (`GeneratePoTokenString`) with normal session caching — that minter is now built from the homepage (ytcfg, ytAtN) pair, with `/att/get` only as its fallback. Caching is deliberate: player calls fire on every probe and refresh (several per live job per hour, plus monitor polls), so fresh-minting each one would cost a multi-second BotGuard pass on the hot path. The mint still gates on visitor data being present — not as the binding (it no longer derives from it) but as the "session established" precondition it always was. The challenge-sourced variant (`GeneratePlayerPoToken`, watch-page ytAtN attestation) exists but is dormant: it exceeds what yt-dlp does, and stays parked unless premieres 403 despite the yt-dlp-parity bindings.
+**Player-API tokens** (used by `fetchWithClient` / `fetchWithEmbedded`) bind to the **video ID** — yt-dlp binds `PoTokenContext.PLAYER` to the video ID unconditionally (`pot/utils.py`) — and are minted via the sidecar's cached minter (`GeneratePoTokenString`) with normal session caching — that minter is now built from the homepage (ytcfg, ytAtN) pair, with `/att/get` only as its fallback. Caching is deliberate: player calls fire on every probe and refresh (several per live job per hour, plus monitor polls), so fresh-minting each one would cost a multi-second BotGuard pass on the hot path. The mint still gates on visitor data being present — not as the binding (it no longer derives from it) but as the "session established" precondition it always was.
+A challenge-sourced variant — the watch page's own ytAtN attestation, threaded into a fresh mint — is
+NOT wired: it exceeded what yt-dlp does and had no caller, so the Go-side entry point was deleted
+(owner ruling R1, 2026-09-15). The sidecar protocol that would carry it is untouched, and
+`generatePoTokenChallenge` still takes the challenge through to `generateAndMint`, so restoring the
+path is one call. `extractAttestationChallenge` keeps running and keeps logging its reason string,
+which is the diagnostic premiere 403s would be read from.
 
 **GVS (segment-URL) tokens** are minted under a deliberately cache-hostile policy — moonarchive parity, added 2026-08-14 (attestation POT coherence) after a premiere broadcast 403'd every segment for its full runtime because the minting session had no tie to the watch-page session that resolved the stream.
 
-`PotProvider.GenerateGvsPoToken(ctx, binding, challenge) (GvsMint, error)` is called once per download start by each segment-download strategy (`internal/worker/strategy_youtube_dash.go`, `strategy_youtube_manifestless_dash.go`, `strategy_youtube_hls.go`):
+`PotProvider.GenerateGvsPoToken(ctx, binding, challenge) (GvsMint, error)` implements the policy below, but no production code calls it — it is exercised only by `internal/bgutils`'s own tests. Each segment-download strategy instead mints its once-per-download-start GVS token through the ordinary cached path, `PotProvider.GeneratePoTokenString` (`internal/bgutils/pot_provider.go:371`) — the same call the player-API path above uses — at `internal/worker/strategy_youtube_dash.go:118`, `strategy_youtube_hls.go:60`, and `strategy_youtube_manifestless_dash.go:215`. The one production route to a fresh GVS mint is the mid-download 403 credential refresh at `internal/worker/strategies.go:436`, which calls `GeneratePoTokenString` with `bypassCache=true`; `generateAndMint`'s bypass branch then mints through the sidecar's own `GenerateGvsPoToken` (`internal/bgutils/sidecar/sidecar.go:428`), a distinct method from `PotProvider`'s of the same name:
 
 - **Binding**: resolved by `youtube.GvsContentBinding` (`internal/youtube/pot_binding.go`), a port of yt-dlp's `get_webpo_content_binding`, and carried on `VideoInfo.GvsBinding`/`GvsBindingKind` so every strategy asks once and cannot drift. The rule, in order: the **video ID** when the page's player configs carry `html5_generate_content_po_token=true` (the experiment under which YouTube switches GVS binding to the video ID — active as of 2026-08-15, verified against a live watch page); otherwise the **datasync ID** for an authenticated session; otherwise **visitor data**. A last-resort video-ID/channel-ID fallback covers a session where none of those survived extraction, so a mint is never bound to an empty string. Moombox hardcoded the video ID until 2026-08-15; that was correct only while the experiment stays on, and a session with it off needs datasync binding or earns silent 403s.
-- **Challenge**: the sidecar's own **homepage (ytcfg, ytAtN) pair** when it can build one (see below), else `videoInfo.AttestationChallenge` extracted from the watch page's `window.ytAtN(...)` blob, else the sidecar's `/att/get` fetch. Each step down is logged with a distinct reason and is never worse than the step it replaced.
+- **Challenge**: the sidecar's own **homepage (ytcfg, ytAtN) pair** when it can build one (see below), else a challenge the caller supplies — this route has never had a supplier for that parameter, independent of owner ruling R1 (2026-09-15), which deleted the unrelated player-API-side challenge entry point described above — else the sidecar's `/att/get` fetch. Each step down is logged with a distinct reason and is never worse than the step it replaced.
 - **Cache policy**: bypasses the session cache entirely (no read, no write) — every call mints fresh, and the sidecar is told `freshMinter: true` so it regenerates its BotGuard minter for this call rather than reuse an already-cached one. The fresh minter **replaces** the sidecar's cached minter, so subsequent player-API mints passively pick up the more session-coherent one. Concurrent GVS mints share the sidecar's single in-flight regeneration (`minterPromise`); no provider-side inflight entry is added — per-binding minting off a shared minter is cheap, and adding provider-level dedup here would hand a stale (non-fresh) result to whichever caller lost the race.
 - **Fallback**: sidecar unavailable → runs the existing goja mint-and-cache flow with the challenge ignored, reported as `minterSource=goja-fallback`.
 - **Result**: `GvsMint{PoToken, MinterSource, MinterFresh, ViaSidecar}` — the fields the provenance log line below reports. `MinterSource` is `"homepage"` (the sidecar's own ytcfg+ytAtN pair — the expected value), `"challenge"` (built from the page's own challenge), `"att_get"` (sidecar fetched its own), or `"goja-fallback"`.
@@ -903,11 +917,11 @@ Two shapes the live homepage actually emits broke the first implementation and a
 
 #### Watch-page challenge extraction (`internal/youtube/watch_page.go`)
 
-`extractAttestationChallenge(html)` locates `window.ytAtN(` and then walks the argument with a **string-aware balanced-brace scan** (`scanBalancedObject`) rather than a non-greedy regex. moonarchive's `INITIAL_ATTESTATION_PATTERN` uses the regex form, but a `})` sequence anywhere inside the opaque payload truncates that match into an unbalanced fragment that then fails to parse — indistinguishable from "the page had no challenge". The captured literal runs through `JSToJSON` (a faithful Go port of yt-dlp's `js_to_json`, `internal/utils/jsjson.go`), is unmarshaled, and its `R` key — itself a JSON string, delivered with `\xNN` escapes on real pages — is unmarshaled again to pull out the top-level `bgChallenge`, re-marshaled compact as the challenge payload.
+`extractAttestationChallenge(page)` locates `window.ytAtN(` and then walks the argument with a **string-aware balanced-brace scan** (`scanBalancedObject`) rather than a non-greedy regex. moonarchive's `INITIAL_ATTESTATION_PATTERN` uses the regex form, but a `})` sequence anywhere inside the opaque payload truncates that match into an unbalanced fragment that then fails to parse — indistinguishable from "the page had no challenge". The captured literal runs through `JSToJSON` (a faithful Go port of yt-dlp's `js_to_json`, `internal/utils/jsjson.go`), is unmarshaled, and its `R` key — itself a JSON string, delivered with `\xNN` escapes on real pages — is unmarshaled again to pull out the top-level `bgChallenge`, re-marshaled compact as the challenge payload.
 
 Every failure resolves to `""` with a **distinct reason** (the `atn*` constants, surfaced as `WatchPageResult.AttestationReason` and logged as `reason=`): no call on the page, unbalanced argument, JS-to-JSON failure, outer parse failure, no `R` key, `R` not JSON, no `bgChallenge`, bad challenge shape, no `interpreterUrl`, or disallowed interpreter host. A single catch-all reason would let a silently-broken extractor masquerade as a genuine absence, which is precisely the confusion this subsystem exists to eliminate. Absence is never an error — the sidecar's `/att/get` fallback handles it.
 
-The value rides on `WatchPageResult.AttestationChallenge` → `VideoInfo.AttestationChallenge` via `withAttestation`, applied at every return path of both `GetVideoInfoAuthenticated` and `GetVideoInfoPublic` (including the ANDROID_VR / web_embedded / web_creator / watch-page-fallback routes that skip `mergeWatchPageMetadata`), which also resolves the GVS binding at the same point. The live quality-monitor refresh loop re-extracts every few minutes, so a re-mint after a downloader restart uses the freshest available challenge.
+The value stops at `WatchPageResult.AttestationChallenge`, whose only readers are the two "no attestation challenge from watch page" Debug lines that report `AttestationReason` — the `VideoInfo` field it used to ride on was write-only and went with the rest of the challenge path (owner ruling R1, 2026-09-15). `withAttestation` still runs at every return path of both `GetVideoInfoAuthenticated` and `GetVideoInfoPublic` (including the ANDROID_VR / web_embedded / web_creator / watch-page-fallback routes that skip `mergeWatchPageMetadata`), where it resolves the GVS binding and the session verdict. The live quality-monitor refresh loop re-extracts every few minutes, so the reason string stays current.
 
 #### Interpreter-origin gate (security boundary)
 
@@ -987,7 +1001,7 @@ YouTube protects stream URLs with two encryption layers:
 #### Memory Cache (LRU)
 - **Type**: `map[string]*Solvers` with a `[]string` order slice.
 - **Key**: `SHA256(playerURL)`.
-- **Max size**: 3 entries (`solverCacheSize`).
+- **Max size**: 10 entries (`solverCacheSize`).
 - **Eviction**: LRU -- oldest entry (by insertion order) is removed when inserting beyond capacity.
 - **Content**: Compiled `Solvers` struct containing `Sig` and `N` function closures over a Goja VM.
 
@@ -1186,7 +1200,7 @@ Resume state is saved after each disk flush. On restart, the downloader loads th
 | YouTube STS | Memory map | None | 150 entries | Random eviction when full | SHA256(playerURL) |
 | Twitch Emotes | Memory LRU | Unbounded (no expiry) | 200 channels | Oldest by insertion order | lowercased channelLogin |
 | Cipher (Disk) | Disk files | 14 days | Unbounded | File age check on read; startup sweep | SHA256(playerURL) |
-| Cipher (Memory) | Memory LRU | Unbounded (no expiry) | 3 solvers | Oldest by insertion order | SHA256(playerURL) |
+| Cipher (Memory) | Memory LRU | Unbounded (no expiry) | 10 solvers | Oldest by insertion order | SHA256(playerURL) |
 | BotGuard Session | Memory map | 6 hours | Unbounded | TTL check at start of each generation | contentBinding |
 | BotGuard Minter | Memory map (single-minter design) | Dynamic (from API) | 1 entry | TTL via `time.AfterFunc`; proactive refresh 5min before expiry | `defaultMinterKey` |
 | BotGuard Inflight | Memory map | Request scope | Per-request | Removed on completion | contentBinding |

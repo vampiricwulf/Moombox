@@ -179,39 +179,15 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 	return pp.generatePoTokenChallenge(ctx, contentBinding, bypassCache, "")
 }
 
-// GeneratePlayerPoToken generates a PO token for the Innertube PLAYER
-// request, bound to videoID rather than visitor data — matching yt-dlp's
-// PoTokenContext.PLAYER -> (video_id, VIDEO_ID) content-binding mapping
-// (yt_dlp/extractor/youtube/pot/utils.py) and moonarchive's single
-// challenge-sourced, videoID-bound token reused across both the player call
-// and GVS. Unlike GenerateGvsPoToken this is NOT a fresh-minter-per-call
-// path: player calls happen on every probe/refresh (every live job
-// re-fetches every few minutes, plus monitor polls), so forcing a fresh
-// multi-second BotGuard run per call would be a severe regression. Normal
-// session + minter caching applies (see GeneratePoToken); challenge (the
-// watch page's WatchPageResult.AttestationChallenge, or "" when
-// unavailable) is threaded through to the sidecar and only consulted WHEN
-// the cache actually needs to build a new minter, so it rides along "for
-// free" on the existing cache economics instead of costing an extra mint.
-func (pp *PotProvider) GeneratePlayerPoToken(ctx context.Context, videoID, challenge string) (string, error) {
-	if videoID == "" {
-		return "", fmt.Errorf("bgutils: GeneratePlayerPoToken requires a non-empty videoID")
-	}
-	session, err := pp.generatePoTokenChallenge(ctx, videoID, false, challenge)
-	if err != nil {
-		return "", err
-	}
-	return session.PoToken, nil
-}
-
-// generatePoTokenChallenge is the shared core behind GeneratePoToken and
-// GeneratePlayerPoToken. challenge is threaded through to the sidecar mint
-// call (generateAndMint) so that IF a fresh minter must be built — no live
-// session or process-wide cached minter satisfies this call — it is built
-// from the watch page's own BotGuard attestation challenge instead of the
-// sidecar's /att/get fallback. challenge has no effect when a cached minter
-// already satisfies the request, which is the common case and exactly why
-// GeneratePlayerPoToken can afford to supply it on every call.
+// generatePoTokenChallenge is the core behind GeneratePoToken. challenge is
+// threaded through to the sidecar mint call (generateAndMint) so that IF a
+// fresh minter must be built — no live session or process-wide cached minter
+// satisfies this call — it can be built from a supplied BotGuard attestation
+// challenge instead of the sidecar's /att/get fallback. No caller supplies one
+// today: the watch-page-sourced variant was deleted by owner ruling R1
+// (2026-09-15) because it never had a caller either. The parameter and the
+// sidecar protocol behind it are kept deliberately, unchanged, so restoring
+// that path is a one-line call rather than a re-derivation.
 func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBinding string, bypassCache bool, challenge string) (*SessionData, error) {
 	if contentBinding == "" {
 		// Generate visitor-data-like value: base64("{timestamp}-{random}")

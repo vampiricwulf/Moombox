@@ -63,7 +63,7 @@ func TestWatchPageSessionAuth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := watchPageSessionAuth(tt.html); got != tt.want {
+			if got := watchPageSessionAuth([]byte(tt.html)); got != tt.want {
 				t.Errorf("watchPageSessionAuth = %q, want %q", got, tt.want)
 			}
 		})
@@ -144,7 +144,7 @@ func TestSessionAuthValueForms(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := watchPageSessionAuth(tt.body); got != tt.want {
+			if got := watchPageSessionAuth([]byte(tt.body)); got != tt.want {
 				t.Errorf("watchPageSessionAuth(%q) = %q, want %q", tt.body, got, tt.want)
 			}
 			if got := livenessVerdict([]byte(tt.body)); got != tt.want {
@@ -188,7 +188,7 @@ func TestUnreadableValueDoesNotFallThrough(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := watchPageSessionAuth(tt.body); got != SessionAuthUnknown {
+			if got := watchPageSessionAuth([]byte(tt.body)); got != SessionAuthUnknown {
 				t.Errorf("watchPageSessionAuth = %q, want Unknown — an unreadable marker fell through to a weaker signal", got)
 			}
 			if got := livenessVerdict([]byte(tt.body)); got != SessionAuthUnknown {
@@ -217,7 +217,7 @@ func TestUnreadableValueDoesNotFallThrough(t *testing.T) {
 func TestSpacedKeyOnAWatchPageIsNotReadAsAnonymous(t *testing.T) {
 	page := `<script nonce="x">ytcfg.set({"LOGGED_IN" : true,"VISITOR_DATA":"x"});</script>`
 
-	if got := watchPageSessionAuth(page); got != SessionAuthLoggedIn {
+	if got := watchPageSessionAuth([]byte(page)); got != SessionAuthLoggedIn {
 		t.Errorf("watchPageSessionAuth = %q, want LoggedIn — a space before the colon made an "+
 			"authenticated watch page read off the ytcfg bootstrap instead of its own marker", got)
 	}
@@ -248,7 +248,7 @@ func TestSpacedKeyOnAWatchPageIsNotReadAsAnonymous(t *testing.T) {
 func TestABareKeyOccurrenceDoesNotHideTheRealMarker(t *testing.T) {
 	body := `{"fields":["LOGGED_IN","VISITOR_DATA"],"cfg":{"LOGGED_IN":true}}`
 
-	if got := watchPageSessionAuth(body); got != SessionAuthLoggedIn {
+	if got := watchPageSessionAuth([]byte(body)); got != SessionAuthLoggedIn {
 		t.Errorf("watchPageSessionAuth = %q, want LoggedIn — the scan stopped at a non-marker occurrence of the key", got)
 	}
 	if got := livenessVerdict([]byte(body)); got != SessionAuthLoggedIn {
@@ -335,59 +335,6 @@ func TestWithAttestationSessionAuthDrivesBinding(t *testing.T) {
 	}
 }
 
-// TestMarkerLookupTwinsAgree pins the string and []byte marker scans to
-// identical behaviour.
-//
-// They exist separately only because one calls strings.Index and the other
-// bytes.Index — the watch-page path holds a string, the liveness path holds a
-// ~1MB page it must not copy to read one flag. Everything that decides a
-// verdict is shared through sessionAuthMarkerAt, but the SCAN is written
-// twice, and that is the half that can silently drift: a page read as
-// logged-in on one path and dead on the other is the failure this whole file
-// is about.
-//
-// This replaces TestSessionAuthFromBytesMatchesStringVersion, which compared
-// watchPageSessionAuth against a sessionAuthFromBytes that no longer exists.
-// That test inferred the twins agreed from two callers agreeing; this asserts
-// it of the twins themselves, which is both tighter and one layer closer to
-// the duplication.
-func TestMarkerLookupTwinsAgree(t *testing.T) {
-	cases := []string{
-		`<html>ytcfg.set({"LOGGED_IN":true});</html>`,
-		`<html>ytcfg.set({"LOGGED_IN":false});</html>`,
-		`<html>{"isLoggedIn":true}</html>`,
-		`<html>{"isLoggedIn":false}</html>`,
-		`<html>ytcfg.set({"OTHER":1});</html>`,
-		`<html>consent interstitial, no ytcfg at all</html>`,
-		``,
-		// Value forms. The two detectors now share one value reader, so
-		// these cannot drift by construction — asserted anyway, because
-		// "cannot drift by construction" is a claim about today's code and
-		// this test is what makes it hold tomorrow.
-		`<html>ytcfg.set({"LOGGED_IN": true});</html>`,
-		`<html>ytcfg.set({"LOGGED_IN": "false"});</html>`,
-		`<html>ytcfg.set({"LOGGED_IN":'true'});</html>`,
-		`<html>ytcfg.set({"LOGGED_IN":1});</html>`,
-		`<html>ytcfg.set({"LOGGED_IN":`,
-		// Key-read forms. The colon is no longer part of the key literal, so
-		// the scans do more than one Index each and have more room to diverge
-		// than they did.
-		`<html>ytcfg.set({"LOGGED_IN" : true});</html>`,
-		`<html>{"fields":["LOGGED_IN"],"cfg":{"LOGGED_IN":true}}</html>`,
-		`<html>{"LOGGED_IN"}</html>`,
-	}
-	for _, key := range []string{sessionAuthKey, sessionAuthCamelKey} {
-		for _, html := range cases {
-			wantState, wantOK := sessionAuthMarkerInString(html, key)
-			gotState, gotOK := sessionAuthMarkerInBytes([]byte(html), key)
-			if gotState != wantState || gotOK != wantOK {
-				t.Errorf("key %s, body %q: bytes = (%q, %v), string = (%q, %v)",
-					key, html, gotState, gotOK, wantState, wantOK)
-			}
-		}
-	}
-}
-
 // TestLivenessVerdictDoesNotOverClaim is the property the membership probe
 // depends on: an unrecognisable page must be Unknown, never LoggedOut.
 // Asserting death on a consent wall would alarm an operator whose cookies are
@@ -418,7 +365,7 @@ func TestLivenessVerdictDoesNotOverClaim(t *testing.T) {
 // because that is now the only detector carrying the ytcfg branch.
 func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 	shell := []byte(`<html>ytcfg.set({"OTHER":1});</html>`)
-	if got := watchPageSessionAuth(string(shell)); got != SessionAuthLoggedOut {
+	if got := watchPageSessionAuth(shell); got != SessionAuthLoggedOut {
 		t.Fatalf("precondition: watchPageSessionAuth = %q, want LoggedOut", got)
 	}
 	if got := livenessVerdict(shell); got != SessionAuthUnknown {
@@ -448,7 +395,7 @@ func TestLivenessVerdictRefusesTheYtcfgFallback(t *testing.T) {
 // here means one of them stopped holding:
 //
 //   - Every converted marker is short. The two login keys reach bytes.Index
-//     through sessionAuthMarkerInBytes' `key string` PARAMETER, so their
+//     through sessionAuthMarkerIn's `key string` PARAMETER, so their
 //     conversion is the NON-constant case and has a real size ceiling — see
 //     below. `"LOGGED_IN"` and `"isLoggedIn"` are 11 and 12 bytes. (A
 //     conversion made directly from a compile-time constant, as

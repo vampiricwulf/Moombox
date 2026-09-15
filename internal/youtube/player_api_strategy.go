@@ -16,7 +16,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// withAttestation stamps the watch page's attestation challenge and the GVS
+// withAttestation stamps the watch page's session verdict and the GVS
 // PO-token content binding onto the VideoInfo being returned. Applied at
 // every GetVideoInfo* return site explicitly — NOT via
 // mergeWatchPageMetadata, which several early returns skip or call with a nil
@@ -25,12 +25,16 @@ import (
 // The binding is resolved here, at the one point that holds all three inputs
 // (the experiment flag and datasync ID from ytcfg, the login state from the
 // page), so download strategies never re-derive it and cannot drift apart.
+//
+// It no longer stamps the page's attestation challenge: that VideoInfo field
+// was write-only and went with the rest of the challenge path (owner ruling
+// R1, 2026-09-15). The name is kept because every return site names it, and
+// it is where a re-wired challenge would be stamped again.
 func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *VideoInfo {
 	if info == nil {
 		return info
 	}
 	if wp != nil {
-		info.AttestationChallenge = wp.AttestationChallenge
 		// Carry YouTube's own login verdict onto the result. It costs a
 		// string copy and it is the only thing that can tell a dead cookie
 		// file apart from a live session that simply lacks a membership.
@@ -67,10 +71,9 @@ func (p *PlayerAPI) ProbeVideoDate(ctx context.Context, videoID, visitorData str
 	if visitorData != "" {
 		ytcfg.VisitorData = visitorData
 	}
-	// No watch page fetched on this probe-only path, so no attestation
-	// challenge is available; GeneratePlayerPoToken falls back to the
-	// sidecar's own /att/get flow when it needs a fresh minter.
-	info, err := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, 0, "")
+	// No watch page fetched on this probe-only path, so no ytcfg beyond the
+	// visitor data the caller cached.
+	info, err := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, 0)
 	if err != nil {
 		return "", "", err
 	}
@@ -86,7 +89,7 @@ func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, 
 	if visitorData != "" {
 		ytcfg.VisitorData = visitorData
 	}
-	return p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0, "")
+	return p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0)
 }
 
 // captureVisitorData forwards watch-page visitor data to the service cache
@@ -152,7 +155,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// DASH contributor: TV below remains the playability/status authority,
 	// because web_embedded reports "unavailable" for any embedding-disabled
 	// channel and must never drive classification.
-	authEmb, authEmbErr := p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, wp.AttestationChallenge, false)
+	authEmb, authEmbErr := p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, false)
 	if authEmbErr != nil {
 		p.logger.Debug("[PlayerApi] web_embedded (authed cascade) failed", slog.String("error", authEmbErr.Error()))
 	} else {
@@ -160,7 +163,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Try TV client
-	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, sts, wp.AttestationChallenge)
+	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, sts)
 	if err != nil {
 		// HTTP error (not a playability error) — log warning and continue to try
 		// WEB_CREATOR / VISIONOS / ANDROID_VR instead of returning immediately.
@@ -182,13 +185,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Try web_safari client for DASH manifest (preferred over web)
-	webResult, webErr := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts, wp.AttestationChallenge)
+	webResult, webErr := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts)
 	webLabel := "web_safari"
 	webAuthLevel := AuthLevelWebSafari // preferred over standard web
 	if webErr != nil {
 		p.logger.Warn("[PlayerApi] web_safari client failed, trying web fallback", slog.String("error", webErr.Error()))
 		// Fall back to standard web client
-		webResult, webErr = p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts, wp.AttestationChallenge)
+		webResult, webErr = p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts)
 		webLabel = "web"
 		webAuthLevel = AuthLevelWeb
 		if webErr != nil {
@@ -294,7 +297,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			p.logger.Info("[PlayerApi] Age-restricted content detected, reusing cascade web_embedded result", "videoID", videoID)
 		} else {
 			p.logger.Info("[PlayerApi] Age-restricted content detected, retrying web_embedded with encryptedHostFlags", "videoID", videoID)
-			embResult, embErr = p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, wp.AttestationChallenge, true)
+			embResult, embErr = p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, true)
 		}
 
 		if embErr != nil {
@@ -320,7 +323,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		result.PlayabilityError == PlayabilityLoginRequired ||
 		len(result.Formats) == 0 {
 
-		wcResult, wcErr := p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts, wp.AttestationChallenge)
+		wcResult, wcErr := p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts)
 		if wcErr != nil {
 			p.logger.Warn("[PlayerApi] WEB_CREATOR failed, will try other clients", slog.String("error", wcErr.Error()))
 			// Fall through to ANDROID_VR / watch page below
@@ -422,7 +425,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
-	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, wp.Ytcfg, stsPublic, wp.AttestationChallenge)
+	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, wp.Ytcfg, stsPublic)
 	if err != nil {
 		if wpParsed != nil {
 			wpParsed.Formats = deduplicateFormats(formatPool)
@@ -440,7 +443,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// Try web_embedded for age-restricted content (public path)
 	if result.PlayabilityError == PlayabilityAgeRestricted {
 		p.logger.Info("[PlayerApi] Age-restricted content detected (public), trying web_embedded", "videoID", videoID)
-		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, wp.Ytcfg, stsPublic, wp.AttestationChallenge, true)
+		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, wp.Ytcfg, stsPublic, true)
 		if embErr != nil {
 			p.logger.Warn("[PlayerApi] web_embedded failed", slog.String("error", embErr.Error()))
 		} else if embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
@@ -538,7 +541,7 @@ func (p *PlayerAPI) extractSTS(ctx context.Context, playerURL string) int {
 	return n
 }
 
-func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client constants.YouTubeClientConfig, ytcfg *YtcfgData, sts int, challenge string) (*VideoInfo, error) {
+func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client constants.YouTubeClientConfig, ytcfg *YtcfgData, sts int) (*VideoInfo, error) {
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 	headers := p.auth.GenerateAPIHeaders(client, ytcfg)
 
@@ -748,7 +751,7 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 // authenticated extractions ever come back short a client, pass true here
 // first. The age-restriction bypass already passes true, so that path (where
 // web_embedded is load-bearing rather than supplementary) is unaffected.
-func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int, challenge string, fetchEmbedPage bool) (*VideoInfo, error) {
+func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int, fetchEmbedPage bool) (*VideoInfo, error) {
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 
 	// Fetch embed page for encryptedHostFlags
@@ -818,11 +821,29 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED")
 }
 
+// playerRetryBackoffBase is the first retry delay; attempt n waits
+// base<<(n-1), i.e. 1 s, 2 s, 4 s. A var rather than a const purely so tests
+// can scale the ladder down instead of sleeping for real seconds; production
+// never writes it.
+var playerRetryBackoffBase = time.Second
+
 // doRetryRequest performs an HTTP POST with retry logic (up to 4 attempts with
 // exponential backoff). Retries on transport errors, partial body reads,
 // 5xx/429 responses, and JSON unmarshal failures — all of which have been
 // observed as transient CDN issues that would otherwise unnecessarily push
 // callers through their full fallback chain.
+//
+// The backoff is bounded by the CALLER's deadline. Mid-download 403 credential
+// recovery runs under min(45 s, MaxTimeout/3) — as little as 10 s at the
+// configured floor — and the ladder alone is 7 s, so an unconditional sleep
+// could spend the whole budget and then report context.DeadlineExceeded,
+// throwing away the HTTP status that is the actual reason the caller is being
+// told no. A sleep that would not leave the deadline room for the attempt it
+// precedes is not taken at all; the last real error is returned instead. The
+// guard reserves a full playerRetryBackoffBase beyond the sleep itself for
+// that attempt's HTTP round trip — a bare "does the sleep fit" check would
+// still let the *request* race the deadline in the narrow window right after
+// a sleep that just barely fit.
 func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []byte, headers map[string]string, ytcfg *YtcfgData, clientLabel string) (*VideoInfo, error) {
 	var playerURL string
 	if ytcfg != nil {
@@ -836,8 +857,17 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 		}
 		if attempt > 0 {
 			// Exponential backoff: 1s, 2s, 4s (matching p-retry default factor=2, minTimeout=1000)
-			delay := 1 << (attempt - 1)
-			if err := utils.Sleep(ctx, time.Duration(delay)*time.Second); err != nil {
+			delay := playerRetryBackoffBase << (attempt - 1)
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay+playerRetryBackoffBase {
+				// Every retry branch below sets lastErr before continuing, so
+				// attempt > 0 always has one to return.
+				p.logger.Debug("[PlayerApi] retry budget exhausted, returning the last error",
+					slog.String("client", clientLabel),
+					slog.Int("attempt", attempt+1),
+					slog.Duration("wouldSleep", delay))
+				return nil, lastErr
+			}
+			if err := utils.Sleep(ctx, delay); err != nil {
 				return nil, err
 			}
 		}
