@@ -1066,7 +1066,7 @@ func decodeChatPartFile(r io.Reader) (chatPartFileSummary, error) {
 			return chatPartFileSummary{}, fmt.Errorf("parse chat file: unexpected token %v", keyTok)
 		}
 		if key != "messages" {
-			if err := skipJSONValue(dec); err != nil {
+			if err := utils.SkipJSONValue(dec); err != nil {
 				return chatPartFileSummary{}, fmt.Errorf("parse chat file: %w", err)
 			}
 			continue
@@ -1080,7 +1080,7 @@ func decodeChatPartFile(r io.Reader) (chatPartFileSummary, error) {
 
 	// The rest of the document has to be well-formed too — see the doc above
 	// on why a broken tail must not be adopted.
-	if err := finishJSONValue(dec, 1); err != nil {
+	if err := utils.FinishJSONValue(dec, 1); err != nil {
 		return chatPartFileSummary{}, fmt.Errorf("parse chat file: %w", err)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
@@ -1132,44 +1132,6 @@ func decodeChatMessageIDs(dec *json.Decoder) (chatPartFileSummary, error) {
 		summary.recentIDs = summary.recentIDs[len(summary.recentIDs)-chatDedupMax:]
 	}
 	return summary, nil
-}
-
-// skipJSONValue consumes exactly one JSON value from dec: a scalar in one
-// token, a composite by walking to its matching close. Used to step over the
-// header's fields — and an enriched file's "emotes" object — on the way to
-// the messages array.
-func skipJSONValue(dec *json.Decoder) error {
-	tok, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, isDelim := tok.(json.Delim)
-	if !isDelim {
-		return nil
-	}
-	if delim != '{' && delim != '[' {
-		return fmt.Errorf("unexpected %q where a value was expected", delim)
-	}
-	return finishJSONValue(dec, 1)
-}
-
-// finishJSONValue walks tokens until the given open-composite depth closes.
-func finishJSONValue(dec *json.Decoder, depth int) error {
-	for depth > 0 {
-		tok, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if delim, isDelim := tok.(json.Delim); isDelim {
-			switch delim {
-			case '{', '[':
-				depth++
-			case '}', ']':
-				depth--
-			}
-		}
-	}
-	return nil
 }
 
 // clearResumeState deletes the resume state file on successful completion.
