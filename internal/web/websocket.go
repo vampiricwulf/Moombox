@@ -93,11 +93,16 @@ type wsClient struct {
 	writes chan []byte
 
 	// drops counts frames this client will never receive. Incremented on
-	// every queue-overflow drop; see noteDrop for why the LINE is rate
+	// every queue-overflow drop; see noteLag for why the LINE is rate
 	// limited while the count is not.
 	drops atomic.Uint64
 	// lastLagLog is the UnixNano of the last "WS client lagging" line.
 	lastLagLog atomic.Int64
+	// needsResync is set by a drop and CLAIMED by the next enqueue, which
+	// then sends the full initial-state snapshot in place of an incremental
+	// frame. Claimed with CompareAndSwap before the snapshot is built, so a
+	// racing drop can only ever cause an EXTRA snapshot, never a missed one.
+	needsResync atomic.Bool
 }
 
 // NewWebSocketHub creates a new WebSocket hub.
@@ -212,18 +217,21 @@ func (hub *WebSocketHub) writePump(client *wsClient) {
 // wsLagLogInterval bounds how often ONE client's drops may produce a log line.
 const wsLagLogInterval = 30 * time.Second
 
-// noteDrop records a frame this client will never receive.
+// noteLag emits at most one "WS client lagging" line per client per
+// wsLagLogInterval. The DROP COUNT is incremented by the caller — the two
+// call sites disagree about whether the dropped frame still needs a resync,
+// and a helper that hid that decision would be the easiest place to get it
+// wrong.
 //
-// The counter is free; the LINE is not. queueOrDrop used to Warn on every drop,
-// and the app logger's subscriber (cmd/moombox/monitor_callbacks.go) broadcasts
+// The rate limit is the T1-9 fix: queueOrDrop used to Warn on every drop, and
+// the app logger's subscriber (cmd/moombox/monitor_callbacks.go) broadcasts
 // each line back to every client — including the full queue that just dropped,
 // which dropped again and warned again. One lagging client could hold that loop
 // up for a 10 s stalled write, writing the log file and every per-job buffer on
-// each turn (sweep T1-9). Debug rather than Warn because a dropped frame is
-// recovered by the resync, and at most one line per client per 30 s because
-// that bound is what actually breaks the loop.
-func (hub *WebSocketHub) noteDrop(client *wsClient) {
-	total := client.drops.Add(1)
+// each turn. Debug rather than Warn because the resync above already recovers
+// the frame, and at most one line per client per 30 s because that bound is
+// what actually breaks the loop.
+func (hub *WebSocketHub) noteLag(client *wsClient) {
 	now := time.Now().UnixNano()
 	last := client.lastLagLog.Load()
 	if now-last < int64(wsLagLogInterval) {
@@ -232,7 +240,7 @@ func (hub *WebSocketHub) noteDrop(client *wsClient) {
 	if !client.lastLagLog.CompareAndSwap(last, now) {
 		return // another goroutine just logged for this client
 	}
-	hub.logger.Debug("WS client lagging", "drops", total)
+	hub.logger.Debug("WS client lagging", "drops", client.drops.Load())
 }
 
 // logDropTotal reports one client's lifetime drop count as it goes away.
@@ -257,6 +265,20 @@ func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
 			// Already removed — caller doesn't need to retry.
 		}
 	}()
+
+	// Claim a pending resync BEFORE building anything: CompareAndSwap means a
+	// drop racing this call re-arms the flag and costs at most one extra
+	// snapshot, where clearing it afterwards could swallow that drop entirely.
+	resync := client.needsResync.CompareAndSwap(true, false)
+	if resync {
+		if snap := hub.initialStateBytes(); snap != nil {
+			msg = snap
+		} else {
+			client.needsResync.Store(true) // try again on the next frame
+			resync = false
+		}
+	}
+
 	select {
 	case client.writes <- msg:
 		return true
@@ -267,14 +289,25 @@ func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
 	// the new frame is dropped silently (caller sees true).
 	select {
 	case <-client.writes:
-		hub.noteDrop(client)
+		client.drops.Add(1)
+		if !resync {
+			// A frame the client never saw is gone and nothing queued after it
+			// restates it. When we ARE carrying a snapshot, the frame we just
+			// evicted is older than that snapshot and therefore superseded —
+			// re-arming there would hand a permanently-full queue a fresh
+			// full-state marshal on every single broadcast.
+			client.needsResync.Store(true)
+		}
+		hub.noteLag(client)
 	default:
 	}
 	select {
 	case client.writes <- msg:
 		return true
 	default:
-		hub.noteDrop(client)
+		client.drops.Add(1)
+		client.needsResync.Store(true)
+		hub.noteLag(client)
 		return true
 	}
 }
@@ -349,11 +382,24 @@ func (hub *WebSocketHub) allowedOriginPatterns(r *http.Request) []string {
 	return patterns
 }
 
-func (hub *WebSocketHub) sendInitialState(client *wsClient) {
+// initialStateBytes marshals the snapshot a freshly-connected client receives.
+// Returns nil when it cannot be marshalled. Shared with queueOrDrop's resync
+// path so a re-synced client is handed byte-for-byte what a new connection
+// gets — one payload shape, one client-side handler.
+//
+// Locking: takes only logBufMu, and callers must hold neither hub.mu nor
+// logBufMu. queueOrDrop reaches this from inside Broadcast, i.e. from inside a
+// database subscriber; that is safe because Database dispatches subscribers
+// AFTER releasing db.mu, Broadcast releases hub.mu before its enqueue loop,
+// BroadcastLog releases logBufMu before broadcasting, and the backfill producer
+// releases backfillMu before its Broadcast. Do not move any of those unlocks
+// inside a broadcast.
+func (hub *WebSocketHub) initialStateBytes() []byte {
 	var data map[string]any
 	if hub.InitialState != nil {
 		data = hub.InitialState()
-	} else {
+	}
+	if data == nil {
 		data = make(map[string]any)
 	}
 
@@ -366,16 +412,23 @@ func (hub *WebSocketHub) sendInitialState(client *wsClient) {
 		hub.logBufMu.RUnlock()
 	}
 
-	msg := WSMessage{Type: "initial_state", Payload: data}
-	msgBytes, err := json.Marshal(msg)
+	msgBytes, err := json.Marshal(WSMessage{Type: "initial_state", Payload: data})
 	if err != nil {
 		hub.logger.Error("failed to marshal initial state", "err", err)
+		return nil
+	}
+	return msgBytes
+}
+
+func (hub *WebSocketHub) sendInitialState(client *wsClient) {
+	msgBytes := hub.initialStateBytes()
+	if msgBytes == nil {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
 	defer cancel()
-	if err = client.conn.Write(ctx, websocket.MessageText, msgBytes); err != nil {
+	if err := client.conn.Write(ctx, websocket.MessageText, msgBytes); err != nil {
 		// Client failed to receive initial state — remove and close
 		hub.mu.Lock()
 		delete(hub.clients, client)

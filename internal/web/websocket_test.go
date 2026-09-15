@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"strings"
 	"sync"
 	"testing"
@@ -171,5 +172,46 @@ func TestLogDropTotalReportsOnceAtTeardown(t *testing.T) {
 	hub.logDropTotal(client)
 	if debug, _ := log.counts(); debug != 1 {
 		t.Errorf("Debug called %d times after a lagging client went away, want exactly 1", debug)
+	}
+}
+
+// TestQueueOrDropResyncsAfterADrop: drop-oldest throws away frames that nothing
+// later supersedes — job_deleted, jobs_update, config_update — so a lagging tab
+// keeps a ghost row until it reconnects. The first frame after a drop is
+// therefore the full initial-state snapshot instead (sweep T3-26).
+//
+// THE MUTANT: delete the needsResync claim at the top of queueOrDrop — the
+// first assertion sees the incremental frame and the ghost row survives.
+func TestQueueOrDropResyncsAfterADrop(t *testing.T) {
+	log := &countingWSLogger{}
+	hub := NewWebSocketHub(log)
+	hub.InitialState = func() map[string]any {
+		return map[string]any{"jobs": []any{"snapshot-marker"}}
+	}
+	client := &wsClient{writes: make(chan []byte, wsWriteQueueSize)}
+
+	// One frame more than fits: exactly one drop.
+	for range wsWriteQueueSize + 1 {
+		hub.queueOrDrop(client, []byte(`{"type":"job_update"}`))
+	}
+	if client.drops.Load() != 1 {
+		t.Fatalf("fixture: drops = %d, want exactly 1", client.drops.Load())
+	}
+	for len(client.writes) > 0 { // the client catches up
+		<-client.writes
+	}
+
+	hub.queueOrDrop(client, []byte(`{"type":"log","payload":"after"}`))
+	got := <-client.writes
+	if !bytes.Contains(got, []byte(`"initial_state"`)) || !bytes.Contains(got, []byte("snapshot-marker")) {
+		t.Fatalf("first frame after a drop = %s; want the initial_state snapshot — without it the "+
+			"client keeps whatever row the dropped job_deleted was retiring", got)
+	}
+
+	hub.queueOrDrop(client, []byte(`{"type":"log","payload":"later"}`))
+	next := <-client.writes
+	if !bytes.Contains(next, []byte("later")) {
+		t.Fatalf("second frame = %s; want the frame itself — the resync flag must clear, or every "+
+			"later frame is replaced by a full snapshot for the rest of the connection", next)
 	}
 }
