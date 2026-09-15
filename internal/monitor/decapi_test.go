@@ -233,3 +233,113 @@ func TestDecapi_ProbeBudgetIsIndependentOfTheRequestTimeout(t *testing.T) {
 		t.Fatal("cancelling the cycle context did not cancel the probe context — the probe budget must derive from the cycle context, not context.Background()")
 	}
 }
+
+// TestDecapi_TerminalMemoSkipsTheUnchangedNewestVideo pins T2-12's first
+// case: a channel whose newest video is a processed, terminal VOD must not be
+// re-probed every cycle.
+//
+// Mutant: dropping the memo check restores two probes — ~240 anonymous player
+// calls/hour/channel for an answer that cannot change.
+func TestDecapi_TerminalMemoSkipsTheUnchangedNewestVideo(t *testing.T) {
+	db := newTestDB(t)
+	probes := 0
+	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		probes++
+		return &VideoProbeResult{StreamStatus: "vod", Title: "finished vod"}, nil
+	})
+
+	// include_non_live_content is off, so the vod arm skips AND writes the
+	// history row that makes the next sighting a re-probe.
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+	body := decapiBody("vidDecMem07", "finished vod")
+	for cycle := range 2 {
+		if err := dm.processResponse(context.Background(), body, ch); err != nil {
+			t.Fatalf("cycle %d: processResponse: %v", cycle, err)
+		}
+	}
+	if probes != 1 {
+		t.Fatalf("probes = %d, want 1 — the second cycle must skip a processed terminal VOD it already classified", probes)
+	}
+}
+
+// TestDecapi_TerminalMemoProbesANewVideoID pins the reset half: publishing
+// something new must re-open the channel immediately.
+//
+// Mutant: memoizing per CHANNEL without comparing the video ID blinds the
+// channel forever — the headline monitor bug through a third door.
+func TestDecapi_TerminalMemoProbesANewVideoID(t *testing.T) {
+	db := newTestDB(t)
+	var probed []string
+	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		probed = append(probed, videoID)
+		return &VideoProbeResult{StreamStatus: "vod", Title: "finished vod"}, nil
+	})
+
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+	if err := dm.processResponse(context.Background(), decapiBody("vidDecOld08", "old vod"), ch); err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+	if err := dm.processResponse(context.Background(), decapiBody("vidDecNew09", "new vod"), ch); err != nil {
+		t.Fatalf("cycle 2: %v", err)
+	}
+	if len(probed) != 2 || probed[0] != "vidDecOld08" || probed[1] != "vidDecNew09" {
+		t.Fatalf("probed = %v, want [vidDecOld08 vidDecNew09] — a new newest video must reset the memo", probed)
+	}
+}
+
+// TestDecapi_TerminalMemoDoesNotLatchOnUpcoming pins the terminal predicate:
+// an upcoming stream's classification changes (upcoming -> live -> vod), so
+// memoizing it would mean never noticing it went live.
+//
+// Mutant: treating any classification as terminal probes once and stops.
+func TestDecapi_TerminalMemoDoesNotLatchOnUpcoming(t *testing.T) {
+	db := newTestDB(t)
+	probes := 0
+	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		probes++
+		return &VideoProbeResult{StreamStatus: "upcoming", Title: "premiere"}, nil
+	})
+	recordDecapiVideoFound(dm)
+
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+	body := decapiBody("vidDecUpc10", "premiere")
+	for cycle := range 2 {
+		if err := dm.processResponse(context.Background(), body, ch); err != nil {
+			t.Fatalf("cycle %d: processResponse: %v", cycle, err)
+		}
+	}
+	if probes != 2 {
+		t.Fatalf("probes = %d, want 2 — an upcoming classification is not terminal", probes)
+	}
+}
+
+// TestDecapi_TerminalMemoReleasesWhenHistoryIsCleared pins the third conjunct.
+// Clearing an orphaned history row is the documented way to put a video back
+// in play (internal/database/database_extras.go:48-56), so the memo must be
+// gated on a LIVE HasProcessed read, never on a remembered one.
+//
+// Mutant: caching the processed flag alongside the memo makes the operator's
+// remedy silently do nothing.
+func TestDecapi_TerminalMemoReleasesWhenHistoryIsCleared(t *testing.T) {
+	db := newTestDB(t)
+	probes := 0
+	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+		probes++
+		return &VideoProbeResult{StreamStatus: "vod", Title: "finished vod"}, nil
+	})
+
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+	body := decapiBody("vidDecClr11", "finished vod")
+	if err := dm.processResponse(context.Background(), body, ch); err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+	if n, err := db.DeleteHistoryEntries([]string{"vidDecClr11"}); err != nil || n != 1 {
+		t.Fatalf("DeleteHistoryEntries = (%d, %v), want (1, nil)", n, err)
+	}
+	if err := dm.processResponse(context.Background(), body, ch); err != nil {
+		t.Fatalf("cycle 2: %v", err)
+	}
+	if probes != 2 {
+		t.Fatalf("probes = %d, want 2 — clearing the history row must re-open the video on the next cycle", probes)
+	}
+}

@@ -47,6 +47,21 @@ type rateLimitState struct {
 	resetAt   time.Time
 }
 
+// decapiTerminalMemo is one channel's last DECAPI answer: the newest video ID
+// the endpoint reported and the classification the probe gave it.
+type decapiTerminalMemo struct {
+	videoID string
+	status  string
+}
+
+// decapiTerminalStatus reports whether a classification can no longer change.
+// Only "vod" and "not_a_stream" qualify: "upcoming" becomes "live" becomes
+// "vod", and "post_live" is the transitional state that becomes "vod". This is
+// the same terminal set the feed walk refuses to re-probe (walk.go:95-107).
+func decapiTerminalStatus(status string) bool {
+	return status == "vod" || status == "not_a_stream"
+}
+
 // DecapiMonitor polls DECAPI for latest videos from YouTube channels.
 type DecapiMonitor struct {
 	mu          sync.Mutex
@@ -58,12 +73,16 @@ type DecapiMonitor struct {
 	pendingKick bool
 	// warnedSlow rate-limits the oversubscribed warning; atomic because
 	// scheduleNext touches it outside the monitor mutex.
-	warnedSlow  atomic.Bool
-	timer       *time.Timer
-	ctx         context.Context
-	cancel      context.CancelFunc
-	rateLimit   rateLimitState
-	NextCheckAt int64 // epoch ms; -1 = check in progress, 0 = no channels
+	warnedSlow atomic.Bool
+	timer      *time.Timer
+	ctx        context.Context
+	cancel     context.CancelFunc
+	rateLimit  rateLimitState
+	// terminalMemo remembers, per channel, the newest video ID DECAPI reported
+	// and what the probe made of it. Guarded by mu; keyed by channel ID, so it
+	// is bounded by the configured channel list and pruned by PruneHealth.
+	terminalMemo map[string]decapiTerminalMemo
+	NextCheckAt  int64 // epoch ms; -1 = check in progress, 0 = no channels
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -94,13 +113,22 @@ type DecapiMonitor struct {
 // Health returns the per-channel health snapshot for /api/status.
 func (dm *DecapiMonitor) Health() []ChannelHealth { return dm.health.snapshot() }
 
-// PruneHealth drops health entries for channels no longer configured.
+// PruneHealth drops health entries — and terminal memos — for channels no
+// longer configured.
 func (dm *DecapiMonitor) PruneHealth() {
 	active := make(map[string]struct{})
 	for _, ch := range dm.getYouTubeChannels() {
 		active[ch.ID] = struct{}{}
 	}
 	dm.health.prune(active)
+
+	dm.mu.Lock()
+	for id := range dm.terminalMemo {
+		if _, ok := active[id]; !ok {
+			delete(dm.terminalMemo, id)
+		}
+	}
+	dm.mu.Unlock()
 }
 
 // SetOnChannelUnhealthy installs the callback fired when a channel crosses
@@ -610,6 +638,22 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		dm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
 	}
 
+	// Terminal memo (T2-12): DECAPI reports the channel's NEWEST video, so a
+	// dormant channel returns the same finished VOD every cycle — with the
+	// 15 s interval floor that is ~240 anonymous player probes/hour/channel
+	// for an answer that cannot change. Skip only when all three hold: the ID
+	// is the one we classified last, that classification was terminal, and
+	// history still says the video was processed.
+	//
+	// The HasProcessed read above is deliberately NOT memoized. Clearing an
+	// orphaned history row is the documented way to put a video back in play
+	// (database_extras.go:48-56), and it has to work on the very next cycle.
+	if reprobe && dm.terminalMemoHit(ch.ID, videoID) {
+		dm.logger.Debug("decapi: newest video unchanged and terminal; skipping re-probe",
+			"videoID", videoID, "channel", ch.Name)
+		return nil
+	}
+
 	if reprobe {
 		dm.logger.Debug("decapi match found (re-probe)",
 			"videoID", videoID,
@@ -635,6 +679,10 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		IsReprobe:    reprobe,
 		Logger:       dm.logger,
 	})
+	// Record what the probe made of this ID so the next cycle can skip a
+	// classification that cannot change. An errored or cooled-down probe
+	// leaves StreamStatus empty, which is never terminal.
+	dm.recordTerminalMemo(ch.ID, videoID, result.StreamStatus)
 	// Window check (§13): "the newest video on the channel" is not the same
 	// as "recent" — on a dormant channel it can be a year old, and jobbing it
 	// is the headline bug through a second door. Vod-family results job only
@@ -694,6 +742,29 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 // §13 window check on vod-family probe results.
 func (dm *DecapiMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 	return resolveArchiveWindowDays(dm.configStore, ch)
+}
+
+// terminalMemoHit reports whether videoID is the exact video this channel's
+// last completed probe classified as terminal. A different ID — the channel
+// published something new — is a miss, and the fresh probe overwrites the memo.
+func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string) bool {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	m, ok := dm.terminalMemo[channelID]
+	return ok && m.videoID == videoID && decapiTerminalStatus(m.status)
+}
+
+// recordTerminalMemo stores this cycle's classification for the channel,
+// replacing any previous one. An empty status (probe errored, cooldown
+// suppressed it, or no probe is wired) is recorded as-is and is not terminal,
+// so the next cycle probes again.
+func (dm *DecapiMonitor) recordTerminalMemo(channelID, videoID, status string) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	if dm.terminalMemo == nil {
+		dm.terminalMemo = make(map[string]decapiTerminalMemo)
+	}
+	dm.terminalMemo[channelID] = decapiTerminalMemo{videoID: videoID, status: status}
 }
 
 // getYouTubeChannels returns a copy of the YouTube channel list under
