@@ -38,6 +38,20 @@ type JobDetailsModel struct {
 	// without rebuilding all rows.
 	progressOverlay *ProgressData
 
+	// lastProgress / lastProgressSec are the gate SetProgress checks: the
+	// pointer the last rebuild ran on, and the wall-clock second it ran in.
+	// The progress store allocates a FRESH *ProgressData on every database
+	// write, so an unchanged pointer means nothing about this job has moved;
+	// the only rows that can still change are wall-clock-derived, and they
+	// only need the second to be current.
+	//
+	// The invariant the gate rests on: whenever lastProgress == p, the last
+	// call that got past the gate set progressOverlay = p, and the only other
+	// writer of progressOverlay is SetJob's job-switch reset — which clears
+	// lastProgress with it.
+	lastProgress    *ProgressData
+	lastProgressSec int64
+
 	// Version display
 	version    string
 	updateInfo *UpdateStatusMsg
@@ -103,6 +117,7 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 	// overlay and snap the scrolling title back to position 0 constantly.
 	if prevID != newID {
 		m.progressOverlay = nil
+		m.lastProgress = nil // rearm the SetProgress gate with the overlay
 	}
 	m.buildRows()
 	m.updateViewportContent()
@@ -132,8 +147,20 @@ func (m *JobDetailsModel) HasProgress() bool {
 
 // SetProgress updates the progress overlay from the progress store.
 // Rebuilds rows so that segment counts, Duration, Starts In, and chat messages
-// are recomputed from live data every 100ms (matches TS re-render behavior).
+// are recomputed from live data every tick (matches TS re-render behavior).
+//
+// Identical pointer in the same second = identical rows, so the rebuild is
+// skipped. This does not slow anything down: the tick still runs at 16ms and
+// every store write still rebuilds on arrival (a new pointer) — the ~50 of 60
+// ticks that carry no new data simply cost nothing now.
 func (m *JobDetailsModel) SetProgress(p *ProgressData) {
+	sec := time.Now().Unix()
+	if p == m.lastProgress && sec == m.lastProgressSec {
+		return
+	}
+	m.lastProgress = p
+	m.lastProgressSec = sec
+
 	m.progressOverlay = p
 	yOffset := m.viewport.YOffset()
 	m.buildRows()
