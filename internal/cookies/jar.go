@@ -43,6 +43,14 @@ const (
 // would leave the jar holding credentials the file no longer contains. The
 // cost of the rule is one extra read of a ~10 KB file during the two seconds
 // after a write — which is what every pass does today.
+//
+// The margin has to cover more than bare mtime granularity: the rewrite
+// lands via utils.ReplaceFile, whose Windows retry loop (an antivirus or
+// indexer briefly holding the temp file open) can stretch one logical write
+// across roughly 1.1s of wall-clock time, and the file that lands keeps the
+// TEMP file's mtime, not the rename's. 2s clears both sub-second mtime
+// granularity (NTFS, ext4) and that retry span; a mount with coarser-than-1s
+// mtime granularity, or a slower retry ceiling, would need a larger value.
 const cookieJarStatSettle = 2 * time.Second
 
 // cookieEntry is one cookie's stored state: the value plus the two fields the
@@ -87,9 +95,10 @@ type CookieJar struct {
 	filePath string
 	// loadedSize/loadedMod describe the file Load last parsed; loadedMemo
 	// says whether that pair may be trusted. All three are written only by
-	// Load, under j.mu, and left untouched by loadFrom: a caller-supplied
-	// buffer changes what the in-memory maps hold but not what is on disk,
-	// so the last real read's (size, mtime) fact stays valid.
+	// Load, under j.mu — parseInto (the shared parser) never touches them,
+	// and loadFrom (the caller-buffer entry point) only ever clears
+	// loadedMemo, since a caller-supplied buffer says nothing about what is
+	// currently on disk. See Load, loadFrom and parseInto.
 	loadedSize int64
 	loadedMod  time.Time
 	loadedMemo bool
@@ -218,20 +227,24 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 // answer that had not changed.
 func (j *CookieJar) Load(filePath string) error {
 	// Stat FIRST: a file that has been deleted must fall through to the
-	// read below and clear the jar, not be served from a memo.
-	if st, statErr := os.Stat(filePath); statErr == nil && st.Mode().IsRegular() {
+	// read below and clear the jar, not be served from a memo. preSt/preOK
+	// are carried past the read, so the post-read stat below can be checked
+	// against them instead of trusted alone — see the comment there.
+	preSt, preErr := os.Stat(filePath)
+	preOK := preErr == nil && preSt.Mode().IsRegular()
+	if preOK {
 		j.mu.RLock()
 		unchanged := j.loadedMemo &&
 			j.filePath == filePath &&
-			j.loadedSize == st.Size() &&
-			j.loadedMod.Equal(st.ModTime())
+			j.loadedSize == preSt.Size() &&
+			j.loadedMod.Equal(preSt.ModTime())
 		j.mu.RUnlock()
 		if unchanged {
 			return nil
 		}
 	}
 
-	data, err := os.ReadFile(filePath)
+	data, err := cookieJarReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No cookies file is OK; clear state so callers see an empty jar.
@@ -246,36 +259,76 @@ func (j *CookieJar) Load(filePath string) error {
 		return fmt.Errorf("failed to read cookie file: %w", err)
 	}
 
-	j.loadFrom(data, filePath)
+	j.parseInto(data, filePath)
 
-	// Stat AFTER the read, not before: a write that landed while we were
-	// reading leaves an mtime newer than the bytes we hold, and the settle
-	// check then refuses to memoise it.
-	if st, statErr := os.Stat(filePath); statErr == nil && st.Mode().IsRegular() {
+	// Stat AFTER the read too — and require it to AGREE with the stat taken
+	// BEFORE the read, not trust the post-read stat alone. A rewrite that
+	// lands in the gap between cookieJarReadFile returning and this stat (the
+	// goroutine paged out, or simply descheduled on a saturated 24/7 box; the
+	// gap need not be long, only unlucky) would otherwise still pass the
+	// settle check on ITS OWN mtime, memoising a (size, mtime) pair that
+	// describes bytes the maps above never actually held — every later Load
+	// would then short-circuit on a file it never truly read, hiding the
+	// rewrite until the next write recreates the gap (up to the 30-minute
+	// RefreshService cadence). Before this memo existed, that same race harmlessly
+	// self-healed on the very next Load; requiring pre- and post-read
+	// agreement here restores that property instead of trading it away.
+	if postSt, postErr := os.Stat(filePath); postErr == nil && postSt.Mode().IsRegular() {
 		j.mu.Lock()
 		if j.filePath == filePath {
-			j.loadedSize = st.Size()
-			j.loadedMod = st.ModTime()
-			j.loadedMemo = time.Since(st.ModTime()) >= cookieJarStatSettle
+			j.loadedSize = postSt.Size()
+			j.loadedMod = postSt.ModTime()
+			j.loadedMemo = preOK &&
+				preSt.Size() == postSt.Size() &&
+				preSt.ModTime().Equal(postSt.ModTime()) &&
+				time.Since(postSt.ModTime()) >= cookieJarStatSettle
 		}
 		j.mu.Unlock()
 	}
 	return nil
 }
 
-// loadFrom is Load's parser, over bytes a caller already holds. Split out of
-// Load — behaviour identical, the ONLY caller that does not come through Load
-// is netscapeCookiesHoldACredential — so that a caller with the Netscape text
-// in memory can ask the jar's own predicates about it without inventing a
-// second parser or round-tripping through a temp file. The domain routing, the
-// name admission and the total order on duplicate domains are subtle enough
-// that a second reading of the same text would drift; there is one.
+// cookieJarReadFile is the file read Load performs between its two stats.
+// Seam for the tests, so a rewrite can be injected into the gap Load's
+// pre/post-stat agreement check exists to catch; production never reassigns
+// it.
+var cookieJarReadFile = os.ReadFile
+
+// loadFrom installs data as the jar's parsed state, for a caller that
+// already holds bytes rather than a path to read — netscapeCookiesHoldACredential
+// and autocookies' throwaway probe jars, plus any caller with the Netscape
+// text in memory who wants the jar's own predicates over it without
+// inventing a second parser or round-tripping through a temp file.
 //
 // filePath is recorded as the jar's origin exactly as Load records it. Pass ""
 // for a jar that came from no file: GetFilePath then answers "" and Reload
 // becomes a no-op, which is the honest answer for a throwaway jar built out of
 // a buffer.
+//
+// loadFrom clears the reload memo (loadedMemo) after parsing: a
+// caller-supplied buffer says nothing about what is currently on disk, so
+// nothing this call does can vouch for the (loadedSize, loadedMod) pair
+// already on the jar. Load does NOT call loadFrom for exactly that reason —
+// it calls parseInto directly and records its own memo from stats it takes
+// around its own read; see Load.
 func (j *CookieJar) loadFrom(data []byte, filePath string) {
+	j.parseInto(data, filePath)
+	j.mu.Lock()
+	j.loadedMemo = false
+	j.mu.Unlock()
+}
+
+// parseInto is the parser shared by Load and loadFrom, over bytes a caller
+// already holds. The domain routing, the name admission and the total order
+// on duplicate domains are subtle enough that a second reading of the same
+// text would drift; there is one.
+//
+// filePath is recorded as the jar's origin exactly as Load records it.
+//
+// parseInto never touches the reload memo (loadedSize/loadedMod/loadedMemo)
+// — Load and loadFrom each do their own memo bookkeeping around their calls
+// to this method; see both.
+func (j *CookieJar) parseInto(data []byte, filePath string) {
 	// Snapshot logger once; the field is protected by the mutex.
 	j.mu.RLock()
 	logger := j.logger
@@ -391,18 +444,12 @@ func (j *CookieJar) loadFrom(data []byte, filePath string) {
 		dest[name] = cookieEntry{value: value, domain: domain, expiry: expiry}
 	}
 
+	// loadedSize/loadedMod/loadedMemo are untouched here by design — see the
+	// doc comment above.
 	j.mu.Lock()
 	j.filePath = filePath
 	j.youtube = youtube
 	j.twitch = twitch
-	// loadedSize/loadedMod/loadedMemo are deliberately left alone here. They
-	// describe the (size, mtime) pair Load last actually stat'd for filePath,
-	// which is still an accurate fact about the file on disk even though this
-	// call replaced the in-memory maps from a caller-supplied buffer instead
-	// of a read. Clearing the memo here would mean a Load immediately after a
-	// loadFrom always re-reads a file that has not changed since Load's last
-	// pass — the opposite of what the short-circuit exists for. Load itself
-	// re-records the pair after every real read, which keeps it honest.
 	j.mu.Unlock()
 }
 
