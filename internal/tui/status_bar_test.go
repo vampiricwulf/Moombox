@@ -196,14 +196,14 @@ func TestStatusBarHealthyAuthYieldsToAlerts(t *testing.T) {
 	healthy := NewStatusBarModel()
 	healthy.SetActivePlatforms(true, true)
 	healthy.SetCookieStatus(CookieStatusOK, CookieStatusOK)
-	if got := healthy.renderCookieStatus(tierEssential); got != "" {
+	if got := healthy.renderCookieStatus(tierEssential, healthy.tallyJobs()); got != "" {
 		t.Errorf("healthy auth at tierEssential = %q, want dropped", got)
 	}
 
 	alerting := NewStatusBarModel()
 	alerting.SetActivePlatforms(true, true)
 	alerting.SetCookieStatus(CookieStatusRelogin, CookieStatusOK)
-	if got := alerting.renderCookieStatus(tierEssential); !strings.Contains(stripANSI(got), "YT") {
+	if got := alerting.renderCookieStatus(tierEssential, alerting.tallyJobs()); !strings.Contains(stripANSI(got), "YT") {
 		t.Errorf("re-login at tierEssential = %q, want it to survive", got)
 	}
 }
@@ -272,7 +272,7 @@ func TestInactiveYouTubeReloginNamesNoChord(t *testing.T) {
 	if got := m.ReloginPlatform(); got != "" {
 		t.Errorf("ReloginPlatform() = %q for an inactive platform, want \"\"", got)
 	}
-	if full := stripANSI(m.renderCookieStatus(tierFull)); strings.Contains(full, "R L") {
+	if full := stripANSI(m.renderCookieStatus(tierFull, m.tallyJobs())); strings.Contains(full, "R L") {
 		t.Errorf("the bar names a remedy for an alarm it does not show: %q", full)
 	}
 
@@ -283,7 +283,7 @@ func TestInactiveYouTubeReloginNamesNoChord(t *testing.T) {
 	if got := mtw.ReloginPlatform(); got != "" {
 		t.Errorf("ReloginPlatform() = %q for an inactive platform, want \"\"", got)
 	}
-	if full := stripANSI(mtw.renderCookieStatus(tierFull)); strings.Contains(full, "R L") {
+	if full := stripANSI(mtw.renderCookieStatus(tierFull, mtw.tallyJobs())); strings.Contains(full, "R L") {
 		t.Errorf("the bar names a remedy for an alarm it does not show: %q", full)
 	}
 }
@@ -312,29 +312,34 @@ func TestReloginBadgeNamesTheChordThatAnswersIt(t *testing.T) {
 		return m
 	}
 
-	full := stripANSI(flagged(CookieStatusRelogin, CookieStatusOK).renderCookieStatus(tierFull))
+	m1 := flagged(CookieStatusRelogin, CookieStatusOK)
+	full := stripANSI(m1.renderCookieStatus(tierFull, m1.tallyJobs()))
 	if !strings.Contains(full, "R L") {
 		t.Errorf("the re-login badge names no chord at tierFull: %q", full)
 	}
 
-	both := stripANSI(flagged(CookieStatusRelogin, CookieStatusRelogin).renderCookieStatus(tierFull))
+	m2 := flagged(CookieStatusRelogin, CookieStatusRelogin)
+	both := stripANSI(m2.renderCookieStatus(tierFull, m2.tallyJobs()))
 	if got := strings.Count(both, "R L"); got != 1 {
 		t.Errorf("the chord is named %d times with both platforms flagged, want 1: %q", got, both)
 	}
 
-	compact := stripANSI(flagged(CookieStatusRelogin, CookieStatusOK).renderCookieStatus(tierCompact))
+	m3 := flagged(CookieStatusRelogin, CookieStatusOK)
+	compact := stripANSI(m3.renderCookieStatus(tierCompact, m3.tallyJobs()))
 	if strings.Contains(compact, "R L") {
 		t.Errorf("the hint survived past tierFull, which breaks the monotonic ladder: %q", compact)
 	}
 
-	healthy := stripANSI(flagged(CookieStatusOK, CookieStatusOK).renderCookieStatus(tierFull))
+	m4 := flagged(CookieStatusOK, CookieStatusOK)
+	healthy := stripANSI(m4.renderCookieStatus(tierFull, m4.tallyJobs()))
 	if strings.Contains(healthy, "R L") {
 		t.Errorf("a healthy bar advertises a cookie login: %q", healthy)
 	}
 
 	// The alert itself must still outlive the hint — the hint is the part that
 	// is allowed to go, not the badge.
-	tight := stripANSI(flagged(CookieStatusRelogin, CookieStatusOK).renderCookieStatus(tierTight))
+	m5 := flagged(CookieStatusRelogin, CookieStatusOK)
+	tight := stripANSI(m5.renderCookieStatus(tierTight, m5.tallyJobs()))
 	if !strings.Contains(tight, "YT") {
 		t.Errorf("the re-login alert was dropped along with its hint: %q", tight)
 	}
