@@ -161,8 +161,9 @@ func (m *YtdlpDialogModel) View() string {
 	return centerBox(box, m.width, m.height)
 }
 
-// statusRows is the loaded body: the four facts that are always true and the
-// four that only exist in some states.
+// statusRows is the loaded body: the three facts that are always on screen
+// (Installed, Plugin dir, Moombox port) and the four that only exist in some
+// states (Plugin points, Plugin state, Port mismatch, Plugin path).
 func (m *YtdlpDialogModel) statusRows() string {
 	installed := "not installed"
 	if m.info.Installed {

@@ -758,8 +758,8 @@ A file holding SAPISID with LOGIN_INFO cleared is a CONFIGURED platform with BRO
 - `TwitchIdentity()`: SHA-256 over `auth-token + NUL + login`, both read under ONE `RLock` for the reason `GetTwitchCredentials` documents. `""` means **no Twitch credentials at all** — deliberately NOT `YouTubeIdentity`'s "either half missing" rule. The question here is "is this the same credential PAIR a downgrade was observed under", and a token with no `login` beside it is one of the four downgrade routes rather than an unanswerable state: folding it to `""` would make the operator's fix, adding the `login` row, compare equal to the breakage it replaced. A token rotation therefore reads as a change, which is the cheap direction — one re-check and one IRC reconnect that the credentials pass.
 - `Reload()`: re-reads from the same file path; a no-op when the jar came from no file. Since the
   2026-09-15 sweep (Arc 3), `Load` (`internal/cookies/jar.go`) memoises the file's `(size, mtime)` pair
-  and skips the re-parse when the stats before and after the read agree, the file is ≥ 2 s old, and no
-  concurrent install landed after it.
+  only when the stats before and after the read agree, the file is ≥ 2 s old and no concurrent install
+  landed after it; a later `Load` whose stat matches the recorded pair skips the re-parse.
 
 **Thread safety:** All methods are protected by `sync.RWMutex`. Nil-receiver-safe where a caller may legitimately hold none (`HasAnyYouTubeAuthCookie`, `HasAnyTwitchAuthCookie`, `ExpiredAuthCookiesFor`, `AuthCookieHorizonFor`, `TwitchLoginExpiry`, `YouTubeIdentity`, `TwitchIdentity`).
 

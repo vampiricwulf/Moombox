@@ -1180,6 +1180,21 @@ max_video_resolution = 720
 	}
 }
 
+// isolateHomeConfig points os.UserHomeDir() at an empty temp directory for the
+// duration of the test. Load's search list ends with
+// <home>/.config/moombox/config.toml (config.go), so a developer who keeps a
+// real config there has a fourth candidate no t.TempDir/t.Chdir can reach —
+// and any Load test that must see NOTHING on disk then finds it and fails on
+// their machine and nowhere else. USERPROFILE is what os.UserHomeDir reads on
+// Windows and HOME what it reads everywhere else; both are set so the test
+// behaves identically on either.
+func isolateHomeConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
 // TestLoadRecordsTheFileItRead pins the fix for a config saved to a different
 // file than it was loaded from. Load searches cwd, ./config/ and
 // ~/.config/moombox/ after the -config flag (see its doc), and the caller has
@@ -1198,6 +1213,11 @@ func TestLoadRecordsTheFileItRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(dir) // no cwd config.toml, so the ./config/ fallback answers
+	// The home candidate is searched LAST, so it cannot outrank the ./config/
+	// fixture above — but isolating it holds that margin explicitly instead of
+	// resting on the search order, and keeps both Load tests env-independent
+	// by one rule.
+	isolateHomeConfig(t)
 
 	cfg, err := Load("")
 	if err != nil {
@@ -1219,6 +1239,10 @@ func TestLoadRecordsTheFileItRead(t *testing.T) {
 // fails this (and would make main.go create the file in the wrong place).
 func TestLoadWithNothingOnDiskLeavesLoadedFromEmpty(t *testing.T) {
 	t.Chdir(t.TempDir())
+	// This is the one that genuinely breaks without it: with no fixture
+	// anywhere, a real ~/.config/moombox/config.toml is the only candidate
+	// left and Load would report it as loaded.
+	isolateHomeConfig(t)
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "absent", "config.toml"))
 	if err != nil {

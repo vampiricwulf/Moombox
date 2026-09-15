@@ -60,11 +60,13 @@ func TestHandleUpdateRestartFirstUpdateIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestHandleUpdateRestartReportsARenameItCouldNotDo pins case (b): a ~ file is
-// already there (in the field it is the launcher's own mapped image, which the
-// child's CleanupOldBinary cannot delete), so the rename fails. The failure has
-// to be reported, and the function must still report a binary update so the
-// launcher's one-shot rollback window still arms.
+// TestHandleUpdateRestartReportsARenameItCouldNotDo pins case (b): the ~ name
+// is held by a file Windows will not let MoveFileEx replace — in the field the
+// launcher's own mapped image, which denies delete-sharing and which the
+// child's CleanupOldBinary could not delete for that same reason — so the
+// rename fails. Merely HAVING a ~ file there does not; see the body comment
+// below. The failure has to be reported, and the function must still report a
+// binary update so the launcher's one-shot rollback window still arms.
 //
 // Mutant: dropping the launcherWarnf call (today's `os.Rename(...)` with the
 // error discarded) leaves warnings empty and fails this.
@@ -101,6 +103,18 @@ func TestHandleUpdateRestartReportsARenameItCouldNotDo(t *testing.T) {
 	}
 	if !strings.Contains((*warnings)[0], ".old") {
 		t.Errorf("the warning must name the file that stayed behind, got %q", (*warnings)[0])
+	}
+	// And the destination, so the operator can see WHICH name the shuffle
+	// could not take — the ~ file is also what the rollback instructions name.
+	// It reaches them twice over: the format names it, and os.Rename's
+	// *os.LinkError carries both paths, so dropping only the %s still passes.
+	//
+	// Mutant: a terser warning that names the .old and nothing else
+	// (`launcherWarnf("...could not rename %s...", oldPath)` — no destination,
+	// no error) fails this, which is the shape that would actually leave the
+	// operator without the name.
+	if !strings.Contains((*warnings)[0], exePath+"~") {
+		t.Errorf("the warning must name the ~ destination the rename could not take, got %q", (*warnings)[0])
 	}
 	if got, want := rollbackArtifactPath(exePath), exePath+".old"; got != want {
 		t.Errorf("rollbackArtifactPath = %q, want %q — the surviving .old is one version back, ~ is two", got, want)

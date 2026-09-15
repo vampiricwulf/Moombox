@@ -154,11 +154,15 @@ func handleUpdateRestart(exePath string) bool {
 		return false
 	}
 	if err := os.Rename(oldPath, exePath+"~"); err != nil {
-		// REPORTED, not discarded. The rename fails when a ~ file is already
-		// there, and on the second update of one launcher lifetime that file is
-		// this launcher's own mapped image — the child's CleanupOldBinary
-		// cannot delete a mapped image, so it stays. The .old that then stays
-		// behind is the version that was running a moment ago, and
+		// REPORTED, not discarded. A stale ~ file on its own does NOT fail
+		// this: Go's os.Rename on Windows is MoveFileEx with
+		// MOVEFILE_REPLACE_EXISTING, so an ordinary ~ file is silently
+		// replaced. The rename fails only when the ~ name is held by something
+		// Windows will not let it replace — on the second update of one
+		// launcher lifetime that file is this launcher's own mapped image,
+		// which denies delete-sharing, and which the child's CleanupOldBinary
+		// could not delete for the same reason. The .old that then stays behind
+		// is the version that was running a moment ago, and
 		// rollbackArtifactPath prefers it for exactly that reason. This line is
 		// how the operator learns the name shuffle did not happen.
 		launcherWarnf("warning: could not rename %s to %s (%v) — the previous binary stays at .old and remains the rollback target\n",

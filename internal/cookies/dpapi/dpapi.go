@@ -298,15 +298,60 @@ func readChromeMetaVersion(db *sql.DB) (int64, bool) {
 //
 // Builds the AEAD per call; the per-profile reader uses decryptV10CookieWith
 // so one key schedule serves every row.
+//
+// classifyV10Blob runs BEFORE newCookieAEAD on purpose. What a row is —
+// App-Bound, legacy, truncated — is a property of the blob alone, so an
+// unusable master key must not stand in for it: recordDecryptFailure buckets
+// by sentinel, and a bare aes.NewCipher error would move every row of the
+// profile into Other and lose the one actionable message the operator gets.
 func decryptV10Cookie(masterKey, encrypted []byte, hashPrefix bool) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
+	}
+	if _, err := classifyV10Blob(encrypted); err != nil {
+		return "", err
 	}
 	gcm, err := newCookieAEAD(masterKey)
 	if err != nil {
 		return "", err
 	}
 	return decryptV10CookieWith(gcm, encrypted, hashPrefix)
+}
+
+// chromeNonceLen / chromeTagLen are the AES-GCM parameters every Chrome
+// v10/v11 cookie value uses: a 12-byte nonce between the prefix and the
+// ciphertext, and a 16-byte tag at the end.
+const (
+	chromeNonceLen = 12
+	chromeTagLen   = 16
+)
+
+// classifyV10Blob reads the version prefix off a Chrome encrypted_value and
+// confirms the value is long enough to hold a nonce and a tag, returning the
+// prefix the caller slices past. Both decrypt entry points call it, so the
+// key-free half of the decision is made in exactly one place and the wrapper
+// can make it before it has a key at all (see decryptV10Cookie).
+//
+// The v10-vs-v11 branch is purely informational — both carry the same layout.
+// The errors are the sentinels ChromeReadStats.recordDecryptFailure counts by.
+func classifyV10Blob(encrypted []byte) (string, error) {
+	prefix := ""
+	switch {
+	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV10Prefix:
+		prefix = chromeV10Prefix
+	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV11Prefix:
+		prefix = chromeV11Prefix
+	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV20Prefix:
+		return "", fmt.Errorf("%w — the DPAPI fallback cannot decrypt it; use the auto-cookie browser setup instead", ErrAppBoundEncryption)
+	default:
+		return "", fmt.Errorf("%w (legacy DPAPI cookies are not supported)", ErrLegacyEncryption)
+	}
+
+	if len(encrypted) < len(prefix)+chromeNonceLen+chromeTagLen {
+		return "", fmt.Errorf("%w: v10/v11 ciphertext too short: %d bytes (want >= %d)",
+			ErrUnusablePlaintext, len(encrypted), len(prefix)+chromeNonceLen+chromeTagLen)
+	}
+	return prefix, nil
 }
 
 // newCookieAEAD builds the AES-GCM AEAD every v10/v11 cookie value in one
@@ -333,26 +378,13 @@ func decryptV10CookieWith(gcm cipher.AEAD, encrypted []byte, hashPrefix bool) (s
 	if len(encrypted) == 0 {
 		return "", nil
 	}
-	prefix := ""
-	switch {
-	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV10Prefix:
-		prefix = chromeV10Prefix
-	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV11Prefix:
-		prefix = chromeV11Prefix
-	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV20Prefix:
-		return "", fmt.Errorf("%w — the DPAPI fallback cannot decrypt it; use the auto-cookie browser setup instead", ErrAppBoundEncryption)
-	default:
-		return "", fmt.Errorf("%w (legacy DPAPI cookies are not supported)", ErrLegacyEncryption)
+	prefix, err := classifyV10Blob(encrypted)
+	if err != nil {
+		return "", err
 	}
 
-	const nonceLen = 12
-	const tagLen = 16
-	if len(encrypted) < len(prefix)+nonceLen+tagLen {
-		return "", fmt.Errorf("%w: v10/v11 ciphertext too short: %d bytes (want >= %d)",
-			ErrUnusablePlaintext, len(encrypted), len(prefix)+nonceLen+tagLen)
-	}
-	nonce := encrypted[len(prefix) : len(prefix)+nonceLen]
-	ciphertextWithTag := encrypted[len(prefix)+nonceLen:]
+	nonce := encrypted[len(prefix) : len(prefix)+chromeNonceLen]
+	ciphertextWithTag := encrypted[len(prefix)+chromeNonceLen:]
 
 	plaintext, err := gcm.Open(nil, nonce, ciphertextWithTag, nil)
 	if err != nil {
