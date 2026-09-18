@@ -822,16 +822,6 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	}
 }
 
-// hlsVodBufferBytes caps the RAM the VOD reorder buffer holds while the
-// head-of-order segment retries. The map this replaced had no bound at all
-// (sweep-2 ENGINE-2): fetchSegmentWithRetry sleeps 5+10+15+20 s plus up to
-// five idle deadlines, and the other workers spent that window racing the
-// rest of the playlist into RAM — 0.6-2.5 GB on a 100 Mbit/s link at the
-// default 12 workers and ~7.5 MB Twitch VOD segments, capped only by VOD
-// size. Same ceiling as the DASH catch-up twin, which has had one since Arc
-// 3. A package var so tests can shrink it; production never reassigns it.
-var hlsVodBufferBytes = catchUpBufferBytes
-
 // runHlsVodParallel downloads all VOD HLS segments in parallel with bounded concurrency.
 // Uses a worker pool pattern: segmentWorkers() workers pull from a work channel,
 // avoiding N goroutines sitting in memory for large VODs.
@@ -862,14 +852,24 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	// would never complete and the entire worker pool would leak.
 	done := make(chan struct{})
 	defer close(done)
-	// Byte-bounded reorder buffer. admit() blocks a non-head segment once
-	// resident bytes reach the ceiling and ALWAYS admits the head, so
-	// nothing can wedge: the consumer's next write always has its segment
-	// available, and setHead() below wakes the blocked workers as the window
-	// slides. Failures stay nil GAP SENTINELS handled by the consumer — this
-	// path never calls markFailed, whose "nothing flushes past a permanent
-	// hole" rule is a catch-up invariant, not a VOD one.
-	rb := newReorderBuffer(hlsVodBufferBytes, 0)
+	// Byte-bounded reorder buffer — see hlsVodBufferBytesOverride for the
+	// ceiling and why it exists. admit() blocks a non-head segment once
+	// resident bytes reach the ceiling and ALWAYS admits the head, so the
+	// consumer's next write always has its segment available and setHead()
+	// below wakes the blocked workers as the window slides.
+	//
+	// That is what keeps it LIVE, but only because every dequeued index
+	// reaches the buffer one way or another: a fetched segment — or a nil
+	// GAP SENTINEL from a failed fetch, which the consumer skips — via
+	// admit(), and an index abandoned at teardown via markFailed() in the
+	// worker's drain branch below. Miss one and the consumer waits forever
+	// for an index that never arrives, with the workers parked above it
+	// beyond the reach of ctx (sweep-2 Task 6 review, finding 1).
+	bufLimit := catchUpBufferBytes
+	if d.hlsVodBufferBytesOverride > 0 {
+		bufLimit = d.hlsVodBufferBytesOverride
+	}
+	rb := newReorderBuffer(bufLimit, 0)
 	// release() frees every blocked worker if the consumer returns early
 	// (a write error): nothing will ever read from the buffer again.
 	defer rb.release()
@@ -880,12 +880,14 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	// sentinel is load-bearing: every dequeued index must produce exactly
 	// one result, or the consumer's nextIdx wedges PERMANENTLY on the
 	// missing index — nothing after it is ever written, and the workers
-	// stall against a ceiling that will never free. (Before
-	// hlsVodBufferBytes bounded the buffer, the same wedge also raced the
-	// ENTIRE remaining VOD into RAM; the ceiling caps the memory, not the
-	// wedge.) The per-item recover exists for the same reason: a worker
-	// panic that only logged (the previous shape) dropped its in-flight
-	// item's result and re-opened exactly that hole.
+	// stall against a ceiling that will never free. (Before the buffer had a
+	// byte ceiling at all, the same wedge also raced the ENTIRE remaining VOD
+	// into RAM; the ceiling caps the memory, not the wedge. The worker's
+	// teardown branch below is the one dequeued index that legitimately
+	// emits no entry, which is why it markFailed()s instead.) The per-item
+	// recover exists for the same reason: a worker panic that only logged
+	// (the previous shape) dropped its in-flight item's result and re-opened
+	// exactly that hole.
 	fetchItem := func(item segWork) (data []byte) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -927,6 +929,15 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 			}()
 			for item := range work {
 				if d.isCancelled() || ctx.Err() != nil {
+					// Teardown: this index emits no result, so the
+					// consumer's head can never pass it. Record it so every
+					// worker parked on the ceiling ABOVE it drops out
+					// instead of waiting for room that will never come —
+					// otherwise wg.Wait and results never complete and Start
+					// hangs, beyond the reach of ctx. Segments BELOW it still
+					// flush: head is exempt and admit only drops seq >
+					// minFailedSeq.
+					rb.markFailed(item.idx)
 					continue // drain channel
 				}
 				// admit blocks while the buffer is full and this is not the
@@ -977,13 +988,14 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	}()
 
 	// Stream write: out-of-order segments land in a byte-bounded reorder
-	// buffer (see hlsVodBufferBytes) and are written in ascending order as
-	// they arrive. Every index produces exactly one entry — segment data or a
-	// nil GAP SENTINEL from a failed worker — so the consumer never wedges on
-	// a missing index, and the ceiling stops the remaining workers from
-	// holding the rest of the VOD in RAM while the head retries. gapStart
-	// coalesces consecutive missing indices into one OnGap range and persists
-	// across the outer loop.
+	// buffer (see hlsVodBufferBytesOverride) and are written in ascending
+	// order as they arrive. Every dequeued index reaches the buffer exactly
+	// once — segment data, a nil GAP SENTINEL from a failed worker, or a
+	// markFailed from the teardown drain — so the consumer never waits on an
+	// index that is not coming, and the ceiling stops the remaining workers
+	// from holding the rest of the VOD in RAM while the head retries.
+	// gapStart coalesces consecutive missing indices into one OnGap range and
+	// persists across the outer loop.
 	nextIdx := 0
 	gapStart := -1
 

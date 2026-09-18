@@ -493,6 +493,23 @@ type SegmentDownloader struct {
 	// catchUpBufferBytes" — production code never sets this.
 	catchUpBufferBytesOverride int
 
+	// hlsVodBufferBytesOverride is the same seam for the HLS VOD reorder
+	// buffer (runHlsVodParallel) — deliberately the same shape as
+	// catchUpBufferBytesOverride above rather than a package var, so the two
+	// twins read alike and tests that shrink either one stay parallelisable.
+	// Zero (the default) means "use catchUpBufferBytes"; production code
+	// never sets this.
+	//
+	// The ceiling it shrinks is sweep-2 ENGINE-2: that reorder buffer was a
+	// plain map with no bound at all, so while fetchSegmentWithRetry worked
+	// through its 5+10+15+20 s ladder (plus up to five idle deadlines) on the
+	// head-of-order segment, the other workers spent that window racing the
+	// rest of the playlist into RAM — 0.6-2.5 GB on a 100 Mbit/s link at the
+	// default 12 workers and ~7.5 MB Twitch VOD segments, capped only by the
+	// size of the VOD. Same ceiling as the DASH catch-up twin, which has had
+	// one since Arc 3.
+	hlsVodBufferBytesOverride int
+
 	// onResumeSaved is a TEST SEAM, like delays and
 	// catchUpBufferBytesOverride: production code never sets it. When
 	// non-nil, saveResume calls it with the LastSeq it just persisted, after
