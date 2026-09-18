@@ -218,7 +218,27 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
-		// Range honoured — the body continues where the file stops.
+		// Range honoured — but ONLY if the body really starts where we asked.
+		// This is the one path that meets a 206 with no known total size, so
+		// an origin answering from a different offset just makes the file
+		// grow, and neither validateDownloadedMP4 nor the mux notices: the
+		// job reports Finished over a spliced archive (sweep-2 B-I1).
+		start, ok := parseContentRangeStart(resp.Header)
+		switch {
+		case ok && start == offset:
+			// The body continues where the file stops.
+		case ok && start == 0 && offset > 0:
+			// Same shape as the 200 below — the origin restarted from the
+			// top and labelled it honestly, so the staged bytes must go.
+			if derr := d.discardStagedMedia("206 Content-Range starts at byte 0, not the resume offset"); derr != nil {
+				return derr
+			}
+		default:
+			// Nothing written yet, so the staged bytes and the sidecar both
+			// survive for the next attempt.
+			return fmt.Errorf("origin answered Range %d with Content-Range start %d (header %q)",
+				offset, start, resp.Header.Get("Content-Range"))
+		}
 	case http.StatusOK:
 		if offset > 0 {
 			if derr := d.discardStagedMedia("server answered 200 to the resume Range — the body starts at byte 0"); derr != nil {
@@ -226,6 +246,16 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 			}
 		}
 	default:
+		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && offset > 0 {
+			// The resume offset is at or past EOF: the staged file already
+			// holds everything the origin has. The chunked loop reads 416 the
+			// same way (past end of file) and so did the pre-arc fallback,
+			// which sent no Range and simply re-fetched the whole file.
+			d.logger.Info("[Downloader] Resume offset is at or past EOF — staged file is already complete",
+				"offset", offset)
+			d.ClearResume()
+			return nil
+		}
 		// Read partial body for diagnostics
 		bodySnippet := make([]byte, 1024)
 		n, _ := resp.Body.Read(bodySnippet)
@@ -271,5 +301,12 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 		}
 	}
 
+	// Fully downloaded — clear the resume sidecar, exactly as the chunked
+	// path does on its own completion. Both hand-offs into this function
+	// return straight to Start, so the chunked path's ClearResume is never
+	// reached from here; without this a crash between "download complete" and
+	// "mux" would leave a stale sidecar that truncates the COMPLETE file back
+	// to its offset on the next run (sweep-2 B-M1).
+	d.ClearResume()
 	return nil
 }

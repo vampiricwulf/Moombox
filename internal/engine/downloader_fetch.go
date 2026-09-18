@@ -689,6 +689,39 @@ func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (i
 	return headSeq, nil
 }
 
+// parseContentRangeStart extracts the first-byte position a 206 says its body
+// begins at. RFC 9110 §14.4 spells the header `bytes <start>-<end>/<total>`,
+// with `*` allowed for the total; `bytes */<total>` is the unsatisfied-range
+// form a 416 carries and has no start at all, so it returns ok=false — as do
+// an absent, non-`bytes` or unparsable header.
+//
+// The callers need it because a 206 whose body does NOT start where they asked
+// writes the wrong bytes at a plausible length (sweep-2 B-I1/D-R1): on the
+// chunked path the read is bounded to end-start+1 so the file keeps its shape
+// and corrupts in place, and in the streaming fallback — which runs with no
+// known total size — the file simply grows. Neither is visible downstream.
+// What an UNVERIFIABLE 206 means is left to each caller: the fallback refuses
+// one, fetchChunk keeps trusting it.
+func parseContentRangeStart(h http.Header) (int64, bool) {
+	unit, spec, found := strings.Cut(strings.TrimSpace(h.Get("Content-Range")), " ")
+	if !found || !strings.EqualFold(unit, "bytes") {
+		return 0, false
+	}
+	rangeSpec, _, found := strings.Cut(strings.TrimSpace(spec), "/")
+	if !found {
+		return 0, false
+	}
+	startStr, _, found := strings.Cut(rangeSpec, "-")
+	if !found {
+		return 0, false // the "*" of an unsatisfied range has no dash
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(startStr), 10, 64)
+	if err != nil || start < 0 {
+		return 0, false
+	}
+	return start, true
+}
+
 // probeFileSize discovers the total file size using a Range: bytes=0-0 request.
 // Returns 0 if the server doesn't support Range requests or the size is unknown.
 //
@@ -748,7 +781,11 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 // streaming fallback — so a single transient failure used to cost a resumed
 // VOD its staged bytes and its sidecar (sweep-2 ENGINE-6). Three attempts
 // with a 2 s/4 s backoff (delays.genericRetry, so tests scale it) cost a
-// genuinely non-Range server six seconds, once per download.
+// genuinely non-Range server six seconds of backoff, or up to ~36 s if every
+// probe hangs to its own 10 s cap (probeFileSize's context.WithTimeout),
+// once per download. It also triples the body sacrificed to a non-Range
+// origin — measured at ~1 MB across the three probes, against ~330 KB for
+// one — which is nothing beside the multi-GB VOD that follows.
 func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) int64 {
 	const attempts = 3
 	for i := range attempts {
@@ -836,6 +873,18 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	}
 	if resp.StatusCode != http.StatusPartialContent {
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	// A 206 that begins somewhere other than where we asked puts the WRONG
+	// bytes at the right length: the read below is bounded to end-start+1
+	// either way, so the file keeps its size and nothing downstream can see
+	// the corruption (sweep-2 D-R1). Returning an error hands it to
+	// fetchChunkWithRetry, which treats it exactly as it treats a short read.
+	// An origin that omits Content-Range entirely keeps today's behaviour:
+	// the header is mandatory on a 206, but refusing one on that ground alone
+	// would break a working origin over a header this path does not need.
+	if gotStart, ok := parseContentRangeStart(resp.Header); ok && gotStart != start {
+		return nil, resp.StatusCode, fmt.Errorf("origin answered Range %d with Content-Range start %d", start, gotStart)
 	}
 
 	// Bound the 206 read to the requested range size — a correct server sends

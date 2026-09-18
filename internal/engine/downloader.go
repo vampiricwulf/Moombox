@@ -151,7 +151,10 @@ const (
 // that ends a body trickling just fast enough to keep resetting this bound.
 // A package var rather than a const purely so a test can shrink it under
 // t.Cleanup-restored assignment and exercise a genuine deadline without an
-// actual 30s wait; production code never mutates it.
+// actual 30s wait; production code never mutates it. That assignment is why
+// no test in this package may call t.Parallel(): several shrink this var, and
+// a parallel test reading it while another writes it is a data race (-race
+// is clean today only because no engine test is parallel).
 var SegmentTimeout = 30 * time.Second
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
