@@ -62,9 +62,14 @@ func SelectBestFormatsWithLogger(formats []Format, maxResolution int, prefer60fp
 // constants are ORIGINAL_LANG_VALUE = 10 and DEFAULT_LANG_VALUE = 5, with
 // 'descriptive' at -10 and everything else at -1.
 //
-// The DRC penalty is Moombox's own and is applied as a TIE-BREAK inside a
-// track, never across tracks: a loudness-normalised rendition is a processed
-// copy of the same audio, so given both we archive the untouched one.
+// The DRC penalty is upstream's too, and sits in the same relative position:
+// yt-dlp folds it into the `quality` rung (`q(quality) - bool(isDrc) / 2`,
+// _video.py:3467), and `quality` falls between `lang` and `acodec`/`br` in the
+// default sort (utils/_utils.py:5357) — exactly where this applies it. Only
+// the encoding differs: doubled rungs and a -1 here, a -0.5 there. It is a
+// TIE-BREAK inside a track, never across tracks: a loudness-normalised
+// rendition is a processed copy of the same audio, so given both we archive
+// the untouched one.
 func audioTrackScore(f *Format) int {
 	name := strings.ToLower(f.AudioTrackName)
 	score := -1

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -457,7 +456,7 @@ func TestParseFormats_DefersCipherDecryption(t *testing.T) {
 		},
 	}
 
-	got := pa.parseFormats(context.Background(), streamingData)
+	got, _ := pa.parseFormats(context.Background(), streamingData)
 
 	if len(got) != 2 {
 		t.Fatalf("expected 2 formats, got %d", len(got))
@@ -516,7 +515,7 @@ func TestParseFormats_DefaultsSigKey(t *testing.T) {
 		},
 	}
 
-	got := pa.parseFormats(context.Background(), streamingData)
+	got, _ := pa.parseFormats(context.Background(), streamingData)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 format, got %d", len(got))
 	}
@@ -984,7 +983,7 @@ func TestParseFormatsSkipsDRMAndKeepsTrackIdentity(t *testing.T) {
 		{"itag": 140, "url": "https://tv/a-drc", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "isDrc": true, "audioTrack": {"id": "en.4", "displayName": "English original", "audioIsDefault": true}}
 	]}`)
 
-	formats := p.parseFormats(context.Background(), sd)
+	formats, _ := p.parseFormats(context.Background(), sd)
 
 	for _, f := range formats {
 		if f.Itag == 137 {
@@ -1035,7 +1034,8 @@ func TestParseFormatsWarnsOnceForSkippedDRM(t *testing.T) {
 		{"itag": 136, "url": "https://tv/v-clean", "mimeType": "video/mp4; codecs=\"avc1.4d401f\""}
 	]}`)
 
-	if got := len(p.parseFormats(context.Background(), sd)); got != 1 {
+	kept, _ := p.parseFormats(context.Background(), sd)
+	if got := len(kept); got != 1 {
 		t.Fatalf("parseFormats kept %d formats, want only the clean one", got)
 	}
 	if len(lg.warns) != 1 {
@@ -1050,38 +1050,201 @@ func TestParseFormatsWarnsOnceForSkippedDRM(t *testing.T) {
 }
 
 // TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity pins get_stream_id
-// (_video.py:3396-3397). Keying on itag alone silently discards every dubbed
-// track but the first-listed one — the more reachable half of the row,
-// because both entries come from the SAME client at the SAME auth level.
+// (_video.py:3396-3397) through the collapsed output. The 3-part key is what
+// keeps every rendition ALIVE long enough to be ranked: the auth-level
+// tie-break only applies WITHIN one stream identity, so a dubbed or DRC
+// rendition from a lower-auth client must not evict the original that only a
+// higher-auth client returned. Here the es.3 dub and the DRC twin come from
+// tv (auth 1) and the English original from web (auth 5) — the arrangement
+// that makes each part of the key observable after the collapse.
 //
 // Mutants this kills:
-//   - keying on itag alone       → only one itag-140 survives
-//   - dropping isDrc from the key → the DRC rendition evicts the clean one
-//   - dropping audioTrackID      → the ja dub evicts the en original
+//   - keying on itag alone        → the tv es.3 dub wins the auth tie-break
+//     before anything ranks the tracks, and the original never reaches the
+//     collapse
+//   - dropping audioTrackID       → es.3 and en.4 collide; tv's dub wins
+//   - dropping isDrc from the key → tv's DRC twin evicts the clean original
 func TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity(t *testing.T) {
-	lvl := AuthLevelTVAuth
-	mk := func(track string, drc bool, url string) Format {
+	tv, web := AuthLevelTVAuth, AuthLevelWeb
+	mk := func(track, name string, def, drc bool, lvl *int, source, url string) Format {
 		return Format{Itag: 140, URL: url, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"",
-			AudioTrackID: track, IsDrc: drc, Source: "tv_auth", AuthLevel: &lvl}
+			AudioTrackID: track, AudioTrackName: name, AudioIsDefault: def, IsDrc: drc,
+			Source: source, AuthLevel: lvl}
 	}
 	pool := []Format{
-		mk("en.4", false, "https://x/en"),
-		mk("ja.3", false, "https://x/ja"),
-		mk("en.4", true, "https://x/en-drc"),
+		mk("es.3", "Spanish", true, false, &tv, "tv_auth", "https://x/es"),
+		mk("en.4", "English original", false, true, &tv, "tv_auth", "https://x/en-drc"),
+		mk("en.4", "English original", false, false, &web, "web", "https://x/en"),
 	}
 
 	got := deduplicateFormats(pool)
-	if len(got) != 3 {
-		t.Fatalf("dedup kept %d of 3 distinct streams: %+v", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("itag 140 must reach the consumers once, got %d rows: %+v", len(got), got)
 	}
-	seen := map[string]bool{}
+	if got[0].URL != "https://x/en" || got[0].IsDrc {
+		t.Errorf("itag 140 resolved to %q (track %q, drc=%v), want the clean en.4 original https://x/en",
+			got[0].URL, got[0].AudioTrackID, got[0].IsDrc)
+	}
+}
+
+// dubbedPool is the real-shaped auto-dubbed response the collapse tests read:
+// two video itags plus itag 140 in four renditions (a dubbed default, a
+// descriptive track, the English original and the original's DRC twin) and
+// itag 251 in two, all from ONE client at ONE auth level — which is how
+// YouTube actually serves an auto-dubbed video. The dub carries the higher
+// bitrate on purpose: it is what wins every itag-keyed lookup downstream when
+// nothing ranks the tracks.
+func dubbedPool() []Format {
+	lvl := AuthLevelTVAuth
+	mk := func(itag int, mime, track, name string, def, drc bool, bitrate int, url string) Format {
+		return Format{Itag: itag, URL: url, MimeType: mime, Bitrate: bitrate,
+			AudioTrackID: track, AudioTrackName: name, AudioIsDefault: def, IsDrc: drc,
+			Source: "tv_auth", AuthLevel: &lvl}
+	}
+	const aac = "audio/mp4; codecs=\"mp4a.40.2\""
+	const opus = "audio/webm; codecs=\"opus\""
+	w, h := 1920, 1080
+	return []Format{
+		{Itag: 137, URL: "https://r1/v137", MimeType: "video/mp4; codecs=\"avc1.640028\"",
+			Bitrate: 4000000, Width: &w, Height: &h, Source: "tv_auth", AuthLevel: &lvl},
+		mk(140, aac, "es.3", "Spanish", true, false, 131000, "https://r1/a140-es"),
+		mk(140, aac, "en.10", "English descriptive", false, false, 130000, "https://r1/a140-en-desc"),
+		mk(140, aac, "en.4", "English original", false, false, 129000, "https://r1/a140-en"),
+		mk(140, aac, "en.4", "English original", false, true, 130500, "https://r1/a140-en-drc"),
+		mk(251, opus, "en.4", "English original", false, false, 141000, "https://r1/a251-en"),
+		mk(251, opus, "es.3", "Spanish", true, false, 144000, "https://r1/a251-es"),
+	}
+}
+
+// TestDeduplicateFormatsCollapsesEachItagToThePreferredRendition pins the
+// invariant every itag-keyed consumer depends on: after dedup, ONE rendition
+// per itag reaches VideoInfo.Formats, and it is the one the audio-track
+// preference would choose. internal/worker looks formats up by itag alone —
+// SelectBestDashStream picks by bandwidth among same-itag entries, and
+// resolveFormatURLByItag returns the FIRST entry of that itag at setup and on
+// every 403 credential refresh — so a pool holding several renditions of one
+// itag lets the live path archive the dub, or splice a second language into a
+// file already half written. Upstream keeps all of them and carries the
+// identity into its format ids; Moombox collapses instead, because its
+// consumers key on the itag.
+//
+// Mutants this kills:
+//   - no collapse at all               → 4 itag-140 rows survive
+//   - collapse keeps the first-listed  → the en.10 descriptive rendition wins
+//     itag 140 (the 3-part sort orders the renditions by track id, so
+//     "first" is en.10, not the dub)
+//   - collapse ranks by bandwidth, as SelectBestDashStream does → the es.3
+//     dub wins itag 140 and itag 251, which is the downstream bug itself
+//
+// The DRC rung is NOT pinned here — the 3-part sort already places a clean
+// rendition ahead of its twin, so a tie keeps the clean one anyway. It is
+// pinned in TestSelectBestAudioPrefersTheOriginalNonDRCTrack, which is where
+// audioTrackScore's DRC penalty is observable.
+func TestDeduplicateFormatsCollapsesEachItagToThePreferredRendition(t *testing.T) {
+	got := deduplicateFormats(dubbedPool())
+
+	perItag := map[int][]Format{}
+	var order []int
 	for _, f := range got {
-		seen[f.AudioTrackID+"/"+fmt.Sprint(f.IsDrc)] = true
-	}
-	for _, want := range []string{"en.4/false", "ja.3/false", "en.4/true"} {
-		if !seen[want] {
-			t.Errorf("dedup dropped the %s rendition: %+v", want, got)
+		if _, seen := perItag[f.Itag]; !seen {
+			order = append(order, f.Itag)
 		}
+		perItag[f.Itag] = append(perItag[f.Itag], f)
+	}
+	for _, itag := range order {
+		if n := len(perItag[itag]); n != 1 {
+			t.Errorf("itag %d reaches the consumers as %d renditions, want exactly 1: %+v", itag, n, perItag[itag])
+		}
+	}
+	for itag, wantURL := range map[int]string{140: "https://r1/a140-en", 251: "https://r1/a251-en"} {
+		if len(perItag[itag]) == 0 {
+			t.Fatalf("itag %d vanished: %+v", itag, got)
+		}
+		// The FIRST entry of the itag is what resolveFormatURLByItag returns,
+		// so the preferred rendition has to be that one.
+		if first := perItag[itag][0]; first.URL != wantURL {
+			t.Errorf("itag %d resolves to %q (track %q, drc=%v), want the clean original %q",
+				itag, first.URL, first.AudioTrackName, first.IsDrc, wantURL)
+		}
+	}
+	if len(perItag[137]) != 1 || perItag[137][0].URL != "https://r1/v137" {
+		t.Errorf("the video itag must pass through untouched: %+v", perItag[137])
+	}
+}
+
+// TestDeduplicateFormatsLeavesAnOrdinaryPoolUnchanged is the differential pin
+// for the collapse: a response with no audioTrack and no isDrc anywhere — every
+// ordinary video — must come out of dedup exactly as it did before the collapse
+// existed. One row per itag, the lowest auth level winning each itag, sorted by
+// itag ascending. The collapse can only ever fire where the 3-part key already
+// produced two rows for one itag, which needs a track id or a DRC flag.
+//
+// Mutants this kills:
+//   - the collapsed rows emitted in map order → the itag order breaks
+//   - the collapse running before the auth tie-break → the WEB row wins itag 140
+//   - the collapse dropping a distinct itag    → fewer than 3 rows
+func TestDeduplicateFormatsLeavesAnOrdinaryPoolUnchanged(t *testing.T) {
+	tv, web, vr := AuthLevelTVAuth, AuthLevelWeb, AuthLevelAndroidVR
+	pool := []Format{
+		{Itag: 248, URL: "https://web/v248", MimeType: "video/webm; codecs=\"vp9\"", Source: "web", AuthLevel: &web},
+		{Itag: 140, URL: "https://web/a140", MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Source: "web", AuthLevel: &web},
+		{Itag: 140, URL: "https://tv/a140", MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Source: "tv_auth", AuthLevel: &tv},
+		{Itag: 137, URL: "https://vr/v137", MimeType: "video/mp4; codecs=\"avc1.640028\"", Source: "android_vr", AuthLevel: &vr},
+		{Itag: 137, URL: "https://web/v137", MimeType: "video/mp4; codecs=\"avc1.640028\"", Source: "web", AuthLevel: &web},
+	}
+
+	got := deduplicateFormats(pool)
+
+	want := []struct {
+		itag int
+		url  string
+	}{{137, "https://web/v137"}, {140, "https://tv/a140"}, {248, "https://web/v248"}}
+	if len(got) != len(want) {
+		t.Fatalf("dedup returned %d rows, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].Itag != w.itag || got[i].URL != w.url {
+			t.Errorf("row %d = itag %d %q, want itag %d %q (the pre-collapse output, row for row)",
+				i, got[i].Itag, got[i].URL, w.itag, w.url)
+		}
+	}
+}
+
+// TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsDRM pins the
+// classification input. Dropping DRM formats at parse changed what
+// classifyStream is told: a finished broadcast whose formats are ALL DRM now
+// reports zero formats, and `!hasFormats && lbd != nil` returns upcoming. The
+// authenticated cascade absorbs that (an empty pool falls through to the next
+// client), but ProbeVideoStatusAuthenticated is ONE tv fetch with no fallback
+// and it is what the waiting-room poller reads — so the account the yt-dlp
+// #12563 experiment hits would wait forever on a stream that already ended.
+// The response HAD formats; classification must be told so.
+//
+// Mutants this kills:
+//   - classifying on the post-filter count (len(formats) > 0) → upcoming
+func TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsDRM(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	data := decodePlayerJSON(t, `{
+		"playabilityStatus": {"status": "OK"},
+		"videoDetails": {"videoId": "DRMonlyVid1", "title": "Ended Broadcast", "author": "Ch", "isLiveContent": true},
+		"microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {
+			"isLiveNow": false, "startTimestamp": "2026-09-16T10:00:00+00:00", "endTimestamp": "2026-09-16T12:30:00+00:00"}}},
+		"streamingData": {"adaptiveFormats": [
+			{"itag": 137, "url": "https://tv/v", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "drmFamilies": ["WIDEVINE"]},
+			{"itag": 140, "url": "https://tv/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "drmFamilies": ["WIDEVINE"]}
+		]}
+	}`)
+
+	info, err := p.parsePlayerResponse(context.Background(), data, "", nil, "DRMonlyVid1")
+	if err != nil {
+		t.Fatalf("parsePlayerResponse: %v", err)
+	}
+	if len(info.Formats) != 0 {
+		t.Fatalf("the DRM formats must still be dropped, got %+v", info.Formats)
+	}
+	if info.StreamStatus != StreamPostLive || !info.IsPostLiveDVR || info.IsUpcoming {
+		t.Errorf("status = %q (postLiveDVR=%v upcoming=%v), want post_live — a DRM-only response still HAD formats",
+			info.StreamStatus, info.IsPostLiveDVR, info.IsUpcoming)
 	}
 }
 

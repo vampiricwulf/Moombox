@@ -298,9 +298,11 @@ func TestAuthLevelOf(t *testing.T) {
 // LANGUAGE is a worse outcome than archiving a slightly worse encoder.
 //
 // Mutants this kills:
-//   - no track score at all             → the first-listed ja dub wins
-//   - the score applied after bitrate   → the higher-bitrate dub wins
-//   - descriptive not penalised         → the descriptive track wins
+//   - no track score at all             → the highest-bitrate en.9 descriptive
+//     track wins, because bitrate is then the first thing that separates them
+//   - the score applied after bitrate   → the same en.9 descriptive track wins
+//   - descriptive not penalised         → the rank assertion below fails
+//   - default not preferred over unlabelled → the rank assertion below fails
 //   - DRC not penalised                 → the DRC twin wins
 func TestSelectBestAudioPrefersTheOriginalNonDRCTrack(t *testing.T) {
 	mk := func(id, name string, def, drc bool, bitrate int, url string) Format {
@@ -333,5 +335,15 @@ func TestSelectBestAudioPrefersTheOriginalNonDRCTrack(t *testing.T) {
 	if audioTrackScore(&desc) >= audioTrackScore(&plain) {
 		t.Errorf("descriptive scored %d, unlabelled scored %d — descriptive must rank lower",
 			audioTrackScore(&desc), audioTrackScore(&plain))
+	}
+
+	// DEFAULT_LANG_VALUE needs the same treatment for the same reason: the
+	// fixture's ja.3 default only ever loses to the original, so collapsing
+	// the default rung into the unlabelled one changes no selection above.
+	// Mutant: `case f.AudioIsDefault: score = 5` → `score = -1`.
+	def := mk("ja.3", "Japanese", true, false, 200000, "https://x/ja-default")
+	if audioTrackScore(&def) <= audioTrackScore(&plain) {
+		t.Errorf("YouTube's default track scored %d, unlabelled scored %d — the default must rank higher",
+			audioTrackScore(&def), audioTrackScore(&plain))
 	}
 }

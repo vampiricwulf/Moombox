@@ -76,10 +76,15 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// carry EncryptedSig populated and a raw `url=` value in URL; the
 	// strategy resolves them via cipher.ResolveFormatURL right before
 	// constructing SegmentDownloaders.
-	formats := p.parseFormats(ctx, streamingData)
+	formats, drmSkipped := p.parseFormats(ctx, streamingData)
 
-	// Stream classification
-	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0)
+	// Stream classification. hasFormats asks whether the response CARRIED
+	// formats, not whether any survived the parse: a response whose formats
+	// are all DRM still proves the broadcast has media, and classifying on the
+	// post-filter count turns a finished stream into `upcoming` — a stall the
+	// single-client ProbeVideoStatusAuthenticated path never recovers from,
+	// for exactly the accounts the tv-client DRM experiment hits.
+	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0 || drmSkipped > 0)
 
 	// Metadata
 	title := getStr(videoDetails, "title")
@@ -325,9 +330,14 @@ func (s *extractionState) firstDRMReport() bool {
 //
 // ctx carries the extraction's scratch state (see extractionState): the
 // DRM-skip warning is reported once per extraction, not once per response.
-func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]any) []Format {
+//
+// The second return is how many entries this response lost to the DRM drop.
+// Callers need it because "this response carried no formats" and "every format
+// it carried was DRM" are different facts: classification reads the first, and
+// only the unfiltered count can tell it apart from an empty streamingData.
+func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]any) ([]Format, int) {
 	if streamingData == nil {
-		return nil
+		return nil, 0
 	}
 
 	var formats []Format
@@ -440,7 +450,39 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			"count", drmSkipped,
 			"note", "a YouTube account experiment applies DRM to all videos on the tv client — yt-dlp issue #12563")
 	}
-	return formats
+	// Beside the DRM count, the other thing this response loses on the way to
+	// the consumers: the alternate audio renditions deduplicateFormats will
+	// collapse away, one per itag beyond the preferred one. Nothing downstream
+	// can see them once the pool is built, so the diagnosis is recorded here.
+	// Silent on an ordinary response, which carries no track fields at all.
+	if collapsible := countCollapsibleRenditions(formats); collapsible > 0 {
+		p.logger.Debug("[PlayerApi] response carries alternate audio renditions",
+			"collapsed", collapsible,
+			"note", "dubbed and DRC renditions; the pool keeps one per itag — the original-language, non-DRC one")
+	}
+	return formats, drmSkipped
+}
+
+// countCollapsibleRenditions counts the track-carrying entries that will lose
+// their itag to a preferred sibling: for each itag, every rendition beyond the
+// first. Only entries with a track id or a DRC flag are counted, so an
+// ordinary response — where an itag can still appear in both adaptiveFormats
+// and formats — reports nothing.
+func countCollapsibleRenditions(formats []Format) int {
+	seen := map[int]bool{}
+	collapsible := 0
+	for i := range formats {
+		f := &formats[i]
+		if f.AudioTrackID == "" && !f.IsDrc {
+			continue
+		}
+		if seen[f.Itag] {
+			collapsible++
+			continue
+		}
+		seen[f.Itag] = true
+	}
+	return collapsible
 }
 
 // decryptNParam decrypts the n-parameter in a URL to avoid throttling.
@@ -744,6 +786,23 @@ type formatKey struct {
 	isDrc        bool
 }
 
+// deduplicateFormats reduces the collected pools to the format list the rest
+// of Moombox sees. It runs upstream's identity first — one entry per
+// (itag, audioTrack.id, isDrc), lowest auth level winning a stream that
+// several clients returned — and then COLLAPSES each itag to the single
+// rendition the audio-track preference would pick.
+//
+// That collapse is this port's one deliberate divergence from yt-dlp, which
+// keeps every rendition and carries the identity into its format ids
+// ("140-drc", _video.py:3450-3456). Moombox's consumers look formats up by
+// itag alone — SelectBestDashStream picks among same-itag entries by
+// bandwidth, and resolveFormatURLByItag returns the first entry of an itag at
+// setup and on every 403 credential refresh — so leaving several renditions of
+// one itag in the pool lets the live path archive a dub, or splice a second
+// language into a file that is already half written. Collapsing here means
+// every itag-keyed lookup resolves to exactly the rendition the selector
+// prefers, on the VOD path, the manifestless DASH path and the 403 refresh
+// alike, without any consumer needing to learn the 3-part identity.
 func deduplicateFormats(pool []Format) []Format {
 	byStream := make(map[formatKey]Format)
 	for _, f := range pool {
@@ -779,6 +838,43 @@ func deduplicateFormats(pool []Format) []Format {
 		}
 		return cmp.Compare(boolOrder(a.IsDrc), boolOrder(b.IsDrc))
 	})
+	return collapseToPreferredRendition(result)
+}
+
+// collapseToPreferredRendition keeps one rendition per itag: the highest
+// audioTrackScore (which already ranks a clean rendition above its DRC twin),
+// then the existing lowest-auth-level tie-break. streams arrives sorted by the
+// whole 3-part key, so the winners come out in ascending itag order — the same
+// order, row for row, that the pre-collapse dedup produced for every response
+// without an audioTrack or an isDrc flag.
+//
+// Video itags are untouched: they carry no track fields, so one itag can only
+// hold one stream and the loop hands it straight back.
+func collapseToPreferredRendition(streams []Format) []Format {
+	preferred := make(map[int]Format, len(streams))
+	order := make([]int, 0, len(streams))
+	for _, f := range streams {
+		best, seen := preferred[f.Itag]
+		if !seen {
+			preferred[f.Itag] = f
+			order = append(order, f.Itag)
+			continue
+		}
+		if fScore, bestScore := audioTrackScore(&f), audioTrackScore(&best); fScore != bestScore {
+			if fScore > bestScore {
+				preferred[f.Itag] = f
+			}
+			continue
+		}
+		if authLevelOf(&f) < authLevelOf(&best) {
+			preferred[f.Itag] = f
+		}
+	}
+
+	result := make([]Format, 0, len(order))
+	for _, itag := range order {
+		result = append(result, preferred[itag])
+	}
 	return result
 }
 
