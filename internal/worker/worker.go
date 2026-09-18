@@ -548,6 +548,48 @@ func (w *DownloadWorker) acquireDownloadSlot(ctx context.Context, jobID string, 
 	return w.queue.AcquireDownloadSlot(ctx, jobID)
 }
 
+// twitchEndConfirmDelay is the gap between the two GetStreamInfo samples that
+// must agree before a Twitch broadcast is declared over (owner decision O-C).
+// A package var so tests can shrink it; production never reassigns it.
+var twitchEndConfirmDelay = 5 * time.Second
+
+// confirmTwitchLiveness answers "is this broadcast still live?" from TWO
+// samples ~twitchEndConfirmDelay apart, and only when they agree that it is
+// not. One sample was enough to finalize a live recording as Finished
+// mid-broadcast (sweep-2 ENGINE-3): GetStreamInfo's `Stream == nil` covers a
+// real offline AND the documented StreamMetadata flap that twitch_hint.go
+// exists to dodge, and every consult site in the HLS loop reads this answer.
+//
+// The cost is paid only on the answer that ends a recording: a live first
+// sample returns immediately, so a healthy stream pays nothing. An error from
+// either sample is returned as-is, which the engine classifies as
+// verdictUnknown and defers on — a failed check is not a verdict. A
+// cancellation in the gap is likewise an error, never an "ended".
+//
+// sample is a function rather than the service so the rule is testable
+// without a Twitch client.
+func confirmTwitchLiveness(ctx context.Context, sample func() (*twitch.TwitchStreamInfo, error)) (*twitch.TwitchStreamInfo, error) {
+	first, err := sample()
+	if err != nil {
+		return nil, err
+	}
+	if first != nil && first.IsLive {
+		return first, nil
+	}
+	if err := utils.Sleep(ctx, twitchEndConfirmDelay); err != nil {
+		return nil, err
+	}
+	return sample()
+}
+
+// confirmTwitchStreamInfo binds confirmTwitchLiveness to this worker's Twitch
+// service for one channel login.
+func (w *DownloadWorker) confirmTwitchStreamInfo(ctx context.Context, login string) (*twitch.TwitchStreamInfo, error) {
+	return confirmTwitchLiveness(ctx, func() (*twitch.TwitchStreamInfo, error) {
+		return w.tw.GetStreamInfo(ctx, login)
+	})
+}
+
 func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	defer func() {
 		w.queue.Complete(jobID)
@@ -675,14 +717,14 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		if !result.IsVod && result.TwitchStreamInfo != nil && w.tw != nil {
 			login := result.TwitchStreamInfo.ChannelLogin
 			variant.CheckStreamFn = func(innerCtx context.Context) (bool, error) {
-				info, err := w.tw.GetStreamInfo(innerCtx, login)
+				info, err := w.confirmTwitchStreamInfo(innerCtx, login)
 				if err != nil {
 					return false, err
 				}
 				return info != nil && info.IsLive, nil
 			}
 			variant.RecheckStreamFn = func(innerCtx context.Context) (*twitch.TwitchStreamInfo, error) {
-				return w.tw.GetStreamInfo(innerCtx, login)
+				return w.confirmTwitchStreamInfo(innerCtx, login)
 			}
 			variant.FetchVariantsFn = func(innerCtx context.Context) ([]twitch.TwitchHLSVariant, error) {
 				// The anonymous-playback verdict is discarded HERE and only

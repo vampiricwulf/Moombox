@@ -350,9 +350,12 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				}
 				// Verdict unknown: fall through to the shared retry budget.
 				// If it runs out with the verdict still unknown, the loop
-				// exits with its "N consecutive errors" error — the job
-				// finalizes whatever was captured with streamEnded FALSE, so
-				// the resume sidecar survives for a later Resume.
+				// exits with its "N consecutive errors" error. On YouTube the
+				// orchestrator finalizes what was captured and the sidecar
+				// survives for a later Resume; on Twitch the orchestrator
+				// re-verifies and, absent a confirmed end, returns the error
+				// so the job lands in Error with its staging and sidecar
+				// intact (see ExecuteTwitch's unconfirmedEndErr).
 			}
 			consecutiveErrors++
 			if consecutiveErrors > 5 {

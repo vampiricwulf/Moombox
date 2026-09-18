@@ -475,6 +475,15 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// consumes it on entry.
 	outageFinalize := false
 
+	// unconfirmedEndErr latches the HLS loop's unknown-verdict exit: the
+	// download failed while nothing said the broadcast was over. Finalizing
+	// there marked the job Finished and processJob then deleted the staging
+	// dir — with the resume sidecar in it (sweep-2 ENGINE-7). Returning the
+	// error instead leaves the job in Error with staging intact, which is
+	// what a Retry or a monitor re-enqueue needs. Not "resumable": /resume
+	// refuses every non-YouTube job.
+	var unconfirmedEndErr error
+
 	// Session loop: each iteration is one connectivity session. Connectivity
 	// loss cancels the inner download via the session context; the outage
 	// handler at the bottom waits for restoration and resumes the SAME job
@@ -672,9 +681,20 @@ sessionLoop:
 				continue
 			}
 
-			// Normal stop — Twitch doesn't need stream-end verification like YouTube
+			// Normal stop. A nil error is the loop's clean end. A non-nil one
+			// is the unknown-verdict exit: re-verify once (the closure takes
+			// two samples ~5 s apart) and only fall through to finalize when
+			// the broadcast is CONFIRMED over.
 			if dlErr != nil && ctx.Err() == nil {
 				o.logger.Error("Twitch HLS download error", "err", dlErr, "jobID", jobCtx.Job.ID)
+				if !isVod && variant.CheckStreamFn != nil {
+					stillLive, checkErr := variant.CheckStreamFn(ctx)
+					if checkErr != nil || stillLive {
+						o.logger.Warn("Twitch download ended without a confirmed stream end — keeping staging for recovery",
+							"jobID", jobCtx.Job.ID, "stillLive", stillLive, "checkErr", checkErr)
+						unconfirmedEndErr = dlErr
+					}
+				}
 			}
 			break
 		}
@@ -854,6 +874,21 @@ sessionLoop:
 			twitchChatDl.Stop()
 		}
 		// IMPORTANT: Fall through to muxing logic below.
+	}
+
+	// Unknown-verdict exit: stop chat, record its verdict so the row is
+	// honest, and return the download error. processJob's setJobError path
+	// returns before os.RemoveAll(jobCtx.StagingDir), so staging AND the
+	// resume sidecar survive.
+	if unconfirmedEndErr != nil && ctx.Err() == nil {
+		if twitchChatDl != nil {
+			if twitchChatDl.IsRunning() {
+				twitchChatDl.Stop()
+			}
+			outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, 2*time.Second, 2*time.Second)
+			o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
+		}
+		return unconfirmedEndErr
 	}
 
 	// After the fall-through from connectivity loss, use a fresh context for muxing

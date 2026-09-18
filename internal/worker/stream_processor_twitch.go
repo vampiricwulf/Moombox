@@ -461,7 +461,13 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}
 
 	if streamInfo == nil {
-		fetched, err := sp.tw.GetStreamInfo(ctx, login)
+		// Two samples, same rule as the download closures (owner decision
+		// O-C): a transient StreamMetadata slot failure now reaches us as an
+		// error, and erroring the job on one of those would strand a row the
+		// Twitch recovery only picks up when it carries TwitchOfflineErrMsg.
+		fetched, err := confirmTwitchLiveness(ctx, func() (*twitch.TwitchStreamInfo, error) {
+			return sp.tw.GetStreamInfo(ctx, login)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("twitch stream info: %w", err)
 		}
