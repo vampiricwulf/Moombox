@@ -1,6 +1,10 @@
 package youtube
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -862,4 +866,89 @@ func playerWith(lbd map[string]any, uploadDate string) map[string]any {
 		m["uploadDate"] = uploadDate
 	}
 	return m
+}
+
+// decodePlayerJSON is a small helper for the parse tests: the parser takes the
+// already-decoded map YouTube's body unmarshals into.
+func decodePlayerJSON(t *testing.T, s string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatalf("fixture is not JSON: %v", err)
+	}
+	return m
+}
+
+// TestParsePlayerResponseRejectsASubstituteVideo pins yt-dlp's
+// _invalid_player_response (_video.py:3022-3025). A blocked source IP is
+// served a DIFFERENT video's player response; accepting it hands this job the
+// substitute's status and formats, and the waiting-room probe then archives
+// the wrong video under this job's ID.
+//
+// Mutants this kills:
+//   - the comparison dropped entirely      → err is nil
+//   - the mismatch only logged, not raised → err is nil
+//   - the error not naming both IDs        → the two Contains checks fail
+func TestParsePlayerResponseRejectsASubstituteVideo(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	data := decodePlayerJSON(t, `{
+        "playabilityStatus": {"status": "OK"},
+        "videoDetails": {"videoId": "OTHERvideo1", "title": "Substitute Video", "author": "Other Ch"},
+        "streamingData": {"adaptiveFormats": [
+            {"itag": 137, "url": "https://example.com/v", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080},
+            {"itag": 140, "url": "https://example.com/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+        ]}
+    }`)
+
+	info, err := p.parsePlayerResponse(context.Background(), data, "", nil, "REQUESTEDvid")
+	if err == nil {
+		t.Fatalf("parsePlayerResponse accepted a substitute video: %+v", info)
+	}
+	var mm *VideoIDMismatchError
+	if !errors.As(err, &mm) {
+		t.Fatalf("err = %T (%v), want *VideoIDMismatchError", err, err)
+	}
+	if mm.Requested != "REQUESTEDvid" || mm.Got != "OTHERvideo1" {
+		t.Errorf("mismatch = %+v, want Requested REQUESTEDvid / Got OTHERvideo1", mm)
+	}
+	if !strings.Contains(err.Error(), "REQUESTEDvid") || !strings.Contains(err.Error(), "OTHERvideo1") {
+		t.Errorf("error text %q names neither both IDs", err.Error())
+	}
+	if info != nil {
+		t.Errorf("a rejected response still returned info: %+v", info)
+	}
+}
+
+// TestParsePlayerResponseKeepsAResponseWithNoVideoID pins the DELIBERATE
+// divergence from upstream. yt-dlp treats an ABSENT videoDetails.videoId as a
+// mismatch (None != video_id). Moombox must not: TV is this cascade's
+// playability AUTHORITY and some of its refusals arrive as a playabilityStatus
+// with no videoDetails at all, and rejecting those would throw away the verdict
+// every downstream error string is built from.
+//
+// Mutants this kills:
+//   - implementing upstream's literal rule (absent == mismatch) → err non-nil
+//   - skipping the check when requestedVideoID is non-empty but the response
+//     carries a DIFFERENT non-empty id                          → caught above
+func TestParsePlayerResponseKeepsAResponseWithNoVideoID(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+
+	noDetails := decodePlayerJSON(t, `{"playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access"}}`)
+	info, err := p.parsePlayerResponse(context.Background(), noDetails, "", nil, "REQUESTEDvid")
+	if err != nil {
+		t.Fatalf("a members-only verdict with no videoDetails was rejected: %v", err)
+	}
+	if info.PlayabilityError != PlayabilityMembersOnly {
+		t.Errorf("PlayabilityError = %q, want members_only — the verdict must survive", info.PlayabilityError)
+	}
+
+	emptyID := decodePlayerJSON(t, `{"playabilityStatus": {"status": "OK"}, "videoDetails": {"videoId": "", "title": "t"}}`)
+	if _, err := p.parsePlayerResponse(context.Background(), emptyID, "", nil, "REQUESTEDvid"); err != nil {
+		t.Fatalf("an empty videoId was treated as a mismatch: %v", err)
+	}
+
+	matching := decodePlayerJSON(t, `{"playabilityStatus": {"status": "OK"}, "videoDetails": {"videoId": "REQUESTEDvid", "title": "t"}}`)
+	if _, err := p.parsePlayerResponse(context.Background(), matching, "", nil, "REQUESTEDvid"); err != nil {
+		t.Fatalf("a matching videoId was rejected: %v", err)
+	}
 }

@@ -31,6 +31,13 @@ const (
 // :543/:564) so errors.As matches the inner net error; only HTTP status
 // failures are flattened to the string "<client> API error: HTTP <code>"
 // (:552/:556), handled by the string fallback below.
+//
+// A youtube.VideoIDMismatchError (and ErrAllClientsMismatched) falls to the
+// asymmetric default, classNetwork: the waiting-room loop keeps waiting rather
+// than counting toward its give-up budget. That is the RIGHT answer here —
+// while YouTube is serving substitutes we know nothing about the real video,
+// and the cost model says a missed classification must only ever delay giving
+// up, never wrongly error a waiting stream.
 func classifyProbeErr(err error) probeErrClass {
 	if err == nil {
 		return classServer

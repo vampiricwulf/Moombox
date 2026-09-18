@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,53 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
+
+// fetchWatchPage is FetchWatchPage behind a package var, purely so the cascade
+// tests can exercise the whole client chain without a real watch-page round
+// trip (the playerRetryBackoffBase seam below exists for the same reason).
+// Production never writes it.
+var fetchWatchPage = FetchWatchPage
+
+// mismatchTally counts the client player responses one extraction rejected
+// because YouTube answered about a different video. Upstream skips such a
+// client with a warning and fails the whole extraction only when NOTHING
+// survived (_video.py:3180-3188); the tally is how this cascade reproduces
+// that "and nothing else survived" condition.
+type mismatchTally struct {
+	attempts   int
+	mismatched int
+}
+
+// note records one client attempt and passes its result through unchanged, so
+// call sites read `result, err := tally.note(p.fetchWithClient(...))`.
+func (t *mismatchTally) note(info *VideoInfo, err error) (*VideoInfo, error) {
+	t.attempts++
+	var mm *VideoIDMismatchError
+	if errors.As(err, &mm) {
+		t.mismatched++
+	}
+	return info, err
+}
+
+// allMismatched reports the IP-block shape: at least one client was tried and
+// every single one answered about a different video.
+func (t *mismatchTally) allMismatched() bool {
+	return t.attempts > 0 && t.attempts == t.mismatched
+}
+
+// finishExtraction is the single exit both cascades take. It applies
+// withAttestation and raises the IP-block verdict when every client answered
+// about a different video AND the watch page produced nothing usable either.
+// wpParsed is the survivor test: upstream keeps the watch page's own player
+// response in `prs` and only raises when `prs` is empty.
+func (p *PlayerAPI) finishExtraction(info *VideoInfo, wp *WatchPageResult, videoID string, tally *mismatchTally, wpParsed *VideoInfo) (*VideoInfo, error) {
+	if tally.allMismatched() && wpParsed == nil {
+		p.logger.Warn("[PlayerApi] every Innertube client answered about a different video",
+			"videoID", videoID, "clients", tally.attempts)
+		return nil, ErrAllClientsMismatched
+	}
+	return withAttestation(info, wp, videoID), nil
+}
 
 // withAttestation stamps the watch page's session verdict and the GVS
 // PO-token content binding onto the VideoInfo being returned. Applied at
@@ -109,7 +157,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	if err := p.auth.SyncCookies(); err != nil {
 		p.logger.Warn("[PlayerApi] SyncCookies failed", slog.String("error", err.Error()))
 	}
-	wp, err := FetchWatchPage(ctx, videoID, p.auth.GetCookieHeader())
+	wp, err := fetchWatchPage(ctx, videoID, p.auth.GetCookieHeader())
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Could not fetch watch page", slog.String("error", err.Error()))
 		wp = &WatchPageResult{Ytcfg: DefaultYtcfg()}
@@ -133,6 +181,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	p.captureVisitorData(ytcfg)
 
 	formatPool := []Format{}
+	tally := &mismatchTally{}
 
 	// Extract STS (signatureTimestamp) from player JS for format decryption
 	sts := p.extractSTS(ctx, ytcfg.PlayerURL)
@@ -140,8 +189,15 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// Parse watch page player response
 	var wpParsed *VideoInfo
 	if wp.PlayerResponse != nil {
-		wpParsed, _ = p.parsePlayerResponse(ctx, wp.PlayerResponse, ytcfg.PlayerURL, ytcfg)
-		if wpParsed != nil {
+		var wpErr error
+		wpParsed, wpErr = p.parsePlayerResponse(ctx, wp.PlayerResponse, ytcfg.PlayerURL, ytcfg, videoID)
+		if wpErr != nil {
+			// Today the only error this can be is a video-ID mismatch: the page
+			// itself was served for another video, which upstream also drops
+			// (_video.py:3038). Nothing downstream may use it.
+			p.logger.Warn("[PlayerApi] watch-page player response rejected", slog.String("error", wpErr.Error()))
+			wpParsed = nil
+		} else if wpParsed != nil {
 			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPageAuth)
 		}
 	}
@@ -155,7 +211,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// DASH contributor: TV below remains the playability/status authority,
 	// because web_embedded reports "unavailable" for any embedding-disabled
 	// channel and must never drive classification.
-	authEmb, authEmbErr := p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, false)
+	authEmb, authEmbErr := tally.note(p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, false))
 	if authEmbErr != nil {
 		p.logger.Debug("[PlayerApi] web_embedded (authed cascade) failed", slog.String("error", authEmbErr.Error()))
 	} else {
@@ -163,7 +219,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Try TV client
-	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, sts)
+	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, sts))
 	if err != nil {
 		// HTTP error (not a playability error) — log warning and continue to try
 		// WEB_CREATOR / VISIONOS / ANDROID_VR instead of returning immediately.
@@ -185,13 +241,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	}
 
 	// Try web_safari client for DASH manifest (preferred over web)
-	webResult, webErr := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts)
+	webResult, webErr := tally.note(p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts))
 	webLabel := "web_safari"
 	webAuthLevel := AuthLevelWebSafari // preferred over standard web
 	if webErr != nil {
 		p.logger.Warn("[PlayerApi] web_safari client failed, trying web fallback", slog.String("error", webErr.Error()))
 		// Fall back to standard web client
-		webResult, webErr = p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts)
+		webResult, webErr = tally.note(p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts))
 		webLabel = "web"
 		webAuthLevel = AuthLevelWeb
 		if webErr != nil {
@@ -260,7 +316,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		result.PlayabilityError != PlayabilityAgeRestricted &&
 		result.PlayabilityError != PlayabilityLoginRequired {
 
-		vrResult, vrErr := p.fetchWithAndroidVR(ctx, videoID, ytcfg.VisitorData)
+		vrResult, vrErr := tally.note(p.fetchWithAndroidVR(ctx, videoID, ytcfg.VisitorData))
 		if vrErr != nil {
 			p.logger.Debug("[PlayerApi] ANDROID_VR DASH fallback failed",
 				slog.String("error", vrErr.Error()))
@@ -297,7 +353,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			p.logger.Info("[PlayerApi] Age-restricted content detected, reusing cascade web_embedded result", "videoID", videoID)
 		} else {
 			p.logger.Info("[PlayerApi] Age-restricted content detected, retrying web_embedded with encryptedHostFlags", "videoID", videoID)
-			embResult, embErr = p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, true)
+			embResult, embErr = tally.note(p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, true))
 		}
 
 		if embErr != nil {
@@ -312,7 +368,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			}
 			mergeWatchPageMetadata(embResult, wpParsed)
 			embResult.Formats = deduplicateFormats(formatPool)
-			return withAttestation(embResult, wp, videoID), nil
+			return p.finishExtraction(embResult, wp, videoID, tally, wpParsed)
 		} else if embResult != authEmb {
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 		}
@@ -323,7 +379,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		result.PlayabilityError == PlayabilityLoginRequired ||
 		len(result.Formats) == 0 {
 
-		wcResult, wcErr := p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts)
+		wcResult, wcErr := tally.note(p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts))
 		if wcErr != nil {
 			p.logger.Warn("[PlayerApi] WEB_CREATOR failed, will try other clients", slog.String("error", wcErr.Error()))
 			// Fall through to ANDROID_VR / watch page below
@@ -353,10 +409,10 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			!hasAdequateFormats(wcResult) {
 
 			if wcResult.PlayabilityError != PlayabilityMembersOnly {
-				if cfResult := p.tryCookielessFallbacks(ctx, videoID, ytcfg.VisitorData, &formatPool); cfResult != nil {
+				if cfResult := p.tryCookielessFallbacks(ctx, videoID, ytcfg.VisitorData, &formatPool, tally); cfResult != nil {
 					mergeWatchPageMetadata(cfResult, wpParsed)
 					cfResult.Formats = deduplicateFormats(formatPool)
-					return withAttestation(cfResult, wp, videoID), nil
+					return p.finishExtraction(cfResult, wp, videoID, tally, wpParsed)
 				}
 			}
 
@@ -377,7 +433,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 					"formats", len(wpParsed.Formats),
 					"streamStatus", wpParsed.StreamStatus,
 					"playability", string(wpParsed.PlayabilityError))
-				return withAttestation(wpParsed, wp, videoID), nil
+				return p.finishExtraction(wpParsed, wp, videoID, tally, wpParsed)
 			}
 		}
 
@@ -385,15 +441,15 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			mergeWatchPageMetadata(wcResult, wpParsed)
 		}
 		wcResult.Formats = deduplicateFormats(formatPool)
-		return withAttestation(wcResult, wp, videoID), nil
+		return p.finishExtraction(wcResult, wp, videoID, tally, wpParsed)
 	}
 
-	return withAttestation(finalizeVideoInfo(result, wpParsed, formatPool), wp, videoID), nil
+	return p.finishExtraction(finalizeVideoInfo(result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
 }
 
 // GetVideoInfoPublic fetches video info without authentication.
 func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*VideoInfo, error) {
-	wp, err := FetchWatchPage(ctx, videoID, "")
+	wp, err := fetchWatchPage(ctx, videoID, "")
 	if err != nil {
 		// Not fatal (the Innertube clients below carry the extraction), but
 		// silence here previously hid consent-wall and network failures on
@@ -413,25 +469,47 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	p.captureVisitorData(wp.Ytcfg)
 
 	formatPool := []Format{}
+	tally := &mismatchTally{}
 
 	// Extract STS for public path too
 	stsPublic := p.extractSTS(ctx, wp.Ytcfg.PlayerURL)
 
 	var wpParsed *VideoInfo
 	if wp.PlayerResponse != nil {
-		wpParsed, _ = p.parsePlayerResponse(ctx, wp.PlayerResponse, wp.Ytcfg.PlayerURL, wp.Ytcfg)
-		if wpParsed != nil {
+		var wpErr error
+		wpParsed, wpErr = p.parsePlayerResponse(ctx, wp.PlayerResponse, wp.Ytcfg.PlayerURL, wp.Ytcfg, videoID)
+		if wpErr != nil {
+			// Today the only error this can be is a video-ID mismatch: the page
+			// itself was served for another video, which upstream also drops
+			// (_video.py:3038). Nothing downstream may use it.
+			p.logger.Warn("[PlayerApi] watch-page player response rejected", slog.String("error", wpErr.Error()))
+			wpParsed = nil
+		} else if wpParsed != nil {
 			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPagePublic)
 		}
 	}
 
-	result, err := p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, wp.Ytcfg, stsPublic)
+	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, wp.Ytcfg, stsPublic))
 	if err != nil {
-		if wpParsed != nil {
+		var mm *VideoIDMismatchError
+		switch {
+		case errors.As(err, &mm):
+			// A substituted response is a SKIP, not the end of the extraction:
+			// upstream drops that client and keeps walking the list
+			// (_video.py:3122-3123). Returning here would deny the cookieless
+			// clients — or the watch page — their chance to answer about the
+			// RIGHT video, and would report one client's substitution as the
+			// whole extraction's failure. The authenticated cascade already
+			// treats a TV failure this way (empty result, carry on).
+			p.logger.Warn("[PlayerApi] TV client (public) answered about a different video, skipping it",
+				"videoID", videoID, "got", mm.Got)
+			result = &VideoInfo{}
+		case wpParsed != nil:
 			wpParsed.Formats = deduplicateFormats(formatPool)
-			return withAttestation(wpParsed, wp, videoID), nil
+			return p.finishExtraction(wpParsed, wp, videoID, tally, wpParsed)
+		default:
+			return nil, err
 		}
-		return nil, err
 	}
 	collectFormats(&formatPool, result.Formats, "tv_public", AuthLevelTVPublic)
 	p.logger.Debug("[PlayerApi] TV client result (public)",
@@ -443,7 +521,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// Try web_embedded for age-restricted content (public path)
 	if result.PlayabilityError == PlayabilityAgeRestricted {
 		p.logger.Info("[PlayerApi] Age-restricted content detected (public), trying web_embedded", "videoID", videoID)
-		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, wp.Ytcfg, stsPublic, true)
+		embResult, embErr := tally.note(p.fetchWithEmbedded(ctx, videoID, wp.Ytcfg, stsPublic, true))
 		if embErr != nil {
 			p.logger.Warn("[PlayerApi] web_embedded failed", slog.String("error", embErr.Error()))
 		} else if embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
@@ -451,7 +529,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 			mergeWatchPageMetadata(embResult, wpParsed)
 			embResult.Formats = deduplicateFormats(formatPool)
-			return withAttestation(embResult, wp, videoID), nil
+			return p.finishExtraction(embResult, wp, videoID, tally, wpParsed)
 		} else {
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 		}
@@ -460,15 +538,15 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	if result.PlayabilityError == PlayabilityLoginRequired || len(result.Formats) == 0 || !hasAdequateFormats(result) {
 		// VISIONOS first, ANDROID_VR second — same rationale as the
 		// authenticated path's cookieless fallback chain.
-		if cfResult := p.tryCookielessFallbacks(ctx, videoID, wp.Ytcfg.VisitorData, &formatPool); cfResult != nil {
+		if cfResult := p.tryCookielessFallbacks(ctx, videoID, wp.Ytcfg.VisitorData, &formatPool, tally); cfResult != nil {
 			mergeWatchPageMetadata(cfResult, wpParsed)
 			cfResult.Formats = deduplicateFormats(formatPool)
-			return withAttestation(cfResult, wp, videoID), nil
+			return p.finishExtraction(cfResult, wp, videoID, tally, wpParsed)
 		}
 
 		if wpParsed != nil {
 			wpParsed.Formats = deduplicateFormats(formatPool)
-			return withAttestation(wpParsed, wp, videoID), nil
+			return p.finishExtraction(wpParsed, wp, videoID, tally, wpParsed)
 		}
 	}
 
@@ -482,7 +560,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		result.PlayabilityError != PlayabilityMembersOnly &&
 		result.PlayabilityError != PlayabilityAgeRestricted &&
 		result.PlayabilityError != PlayabilityLoginRequired {
-		vrResult, vrErr := p.fetchWithAndroidVR(ctx, videoID, wp.Ytcfg.VisitorData)
+		vrResult, vrErr := tally.note(p.fetchWithAndroidVR(ctx, videoID, wp.Ytcfg.VisitorData))
 		if vrErr != nil {
 			p.logger.Debug("[PlayerApi] ANDROID_VR DASH fallback (public) failed",
 				slog.String("error", vrErr.Error()))
@@ -494,7 +572,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
-	return withAttestation(finalizeVideoInfo(result, wpParsed, formatPool), wp, videoID), nil
+	return p.finishExtraction(finalizeVideoInfo(result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
 }
 
 // finalizeVideoInfo applies the not_a_stream override + merge + dedup tail
@@ -599,7 +677,7 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 		return nil, fmt.Errorf("marshal request body: %w", err)
 	}
 
-	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "Innertube")
+	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "Innertube", videoID)
 }
 
 // fetchWithCookielessClient performs a bare player request for the cookieless
@@ -644,7 +722,7 @@ func (p *PlayerAPI) fetchWithCookielessClient(ctx context.Context, videoID, visi
 		headers["X-Goog-Visitor-Id"] = visitorData
 	}
 
-	return p.doRetryRequest(ctx, apiURL, body, headers, nil, client.ClientName)
+	return p.doRetryRequest(ctx, apiURL, body, headers, nil, client.ClientName, videoID)
 }
 
 func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visitorData string) (*VideoInfo, error) {
@@ -674,7 +752,11 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 // addressability and needs no manifest. The DASH manifest survives only as
 // the fallback for pools WITHOUT usable split adaptive URLs, and that is the
 // single case worth another request.
-func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitorData string, formatPool *[]Format) *VideoInfo {
+//
+// tally counts the video-ID mismatches this chain contributes, so a
+// cascade in which EVERY client was served a substitute can be reported
+// as the IP block it is rather than as "no formats".
+func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitorData string, formatPool *[]Format, tally *mismatchTally) *VideoInfo {
 	var chosen *VideoInfo
 	for _, fb := range []struct {
 		client constants.YouTubeClientConfig
@@ -684,7 +766,7 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 		{constants.VisionOSClient, "visionos", AuthLevelVisionOS},
 		{constants.AndroidVRClient, "android_vr", AuthLevelAndroidVR},
 	} {
-		fbResult, fbErr := p.fetchWithCookielessClient(ctx, videoID, visitorData, fb.client)
+		fbResult, fbErr := tally.note(p.fetchWithCookielessClient(ctx, videoID, visitorData, fb.client))
 		if fbErr != nil {
 			p.logger.Debug("[PlayerApi] cookieless fallback failed",
 				slog.String("client", fb.label), slog.String("error", fbErr.Error()))
@@ -818,7 +900,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		return nil, fmt.Errorf("marshal request body: %w", err)
 	}
 
-	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED")
+	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED", videoID)
 }
 
 // playerRetryBackoffBase is the first retry delay; attempt n waits
@@ -844,7 +926,10 @@ var playerRetryBackoffBase = time.Second
 // that attempt's HTTP round trip — a bare "does the sleep fit" check would
 // still let the *request* race the deadline in the narrow window right after
 // a sleep that just barely fit.
-func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []byte, headers map[string]string, ytcfg *YtcfgData, clientLabel string) (*VideoInfo, error) {
+//
+// videoID is the video that was ASKED for; parsePlayerResponse rejects a
+// response about any other one (yt-dlp's _invalid_player_response).
+func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []byte, headers map[string]string, ytcfg *YtcfgData, clientLabel string, videoID string) (*VideoInfo, error) {
 	var playerURL string
 	if ytcfg != nil {
 		playerURL = ytcfg.PlayerURL
@@ -920,7 +1005,7 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 				slog.String("error", err.Error()))
 			continue
 		}
-		return p.parsePlayerResponse(ctx, data, playerURL, ytcfg)
+		return p.parsePlayerResponse(ctx, data, playerURL, ytcfg, videoID)
 	}
 	return nil, lastErr
 }

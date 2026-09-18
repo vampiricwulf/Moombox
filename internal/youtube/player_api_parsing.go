@@ -3,6 +3,8 @@ package youtube
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"slices"
@@ -13,8 +15,48 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 )
 
-func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any, playerURL string, ytcfg *YtcfgData) (*VideoInfo, error) {
+// VideoIDMismatchError reports a player response whose videoDetails.videoId is
+// not the video that was asked for. yt-dlp calls this an "invalid player
+// response" (_video.py:3022-3025) and its only attested cause is a blocked or
+// rate-limited source IP being served a SUBSTITUTE video
+// (TeamNewPipe/NewPipe#8713). It is returned rather than logged because the
+// cascade's error handling is what skips the client.
+type VideoIDMismatchError struct {
+	Requested string
+	Got       string
+}
+
+func (e *VideoIDMismatchError) Error() string {
+	return fmt.Sprintf("player response is for video %q, not %q (YouTube served a substitute — the source IP may be rate-limited or blocked)",
+		e.Got, e.Requested)
+}
+
+// ErrAllClientsMismatched is upstream's terminal verdict when nothing survived
+// the check: `raise ExtractorError('All player responses are invalid. Your IP
+// is likely being blocked by Youtube')` (_video.py:3186-3188).
+var ErrAllClientsMismatched = errors.New("every Innertube client returned a player response for a different video — this IP is likely being blocked by YouTube")
+
+func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any, playerURL string, ytcfg *YtcfgData, requestedVideoID string) (*VideoInfo, error) {
 	videoDetails, _ := data["videoDetails"].(map[string]any)
+
+	// yt-dlp's _invalid_player_response (_video.py:3022-3025, applied at :3038
+	// and :3122): "YouTube may return a different video player response than
+	// expected." Taking a substitute's response would hand this job the
+	// substitute's status AND formats — the waiting-room probe reads a VOD
+	// substitute as "became VOD" and the orchestrator archives the wrong video.
+	//
+	// DELIBERATE DIVERGENCE: upstream treats an ABSENT videoDetails.videoId as
+	// a mismatch too (None != video_id). Moombox does not. TV is this
+	// cascade's playability AUTHORITY and several of its refusals arrive as a
+	// playabilityStatus with no videoDetails at all; rejecting those would
+	// discard the verdict every downstream error string is built from. Only a
+	// NON-EMPTY id that differs is a substitute.
+	if requestedVideoID != "" {
+		if got := getStr(videoDetails, "videoId"); got != "" && got != requestedVideoID {
+			return nil, &VideoIDMismatchError{Requested: requestedVideoID, Got: got}
+		}
+	}
+
 	streamingData, _ := data["streamingData"].(map[string]any)
 	playabilityStatus, _ := data["playabilityStatus"].(map[string]any)
 	microformat, _ := getNestedMap(data, "microformat", "playerMicroformatRenderer")

@@ -2,10 +2,13 @@ package youtube
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // TestCaptureVisitorData pins the watch-page → service visitor-data hand-off
@@ -113,7 +116,7 @@ func TestTryCookielessFallbacks(t *testing.T) {
 		swap(t, tr)
 
 		var pool []Format
-		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
 		if res == nil {
 			t.Fatal("expected a result from visionos")
 		}
@@ -135,7 +138,7 @@ func TestTryCookielessFallbacks(t *testing.T) {
 		swap(t, tr)
 
 		var pool []Format
-		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
 		if res == nil {
 			t.Fatal("expected a result from android_vr")
 		}
@@ -158,7 +161,7 @@ func TestTryCookielessFallbacks(t *testing.T) {
 		swap(t, tr)
 
 		var pool []Format
-		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
 		if res != nil {
 			t.Fatalf("expected nil result, got %+v", res)
 		}
@@ -226,7 +229,7 @@ func TestCookielessFallbackDashOnlyWhenNeeded(t *testing.T) {
 
 		var pool []Format
 		res := NewPlayerAPI(nil, noopLogger{}).
-			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
 		if res == nil {
 			t.Fatal("expected a result")
 		}
@@ -250,7 +253,7 @@ func TestCookielessFallbackDashOnlyWhenNeeded(t *testing.T) {
 
 		var pool []Format
 		res := NewPlayerAPI(nil, noopLogger{}).
-			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
 		if res == nil {
 			t.Fatal("expected a result")
 		}
@@ -274,7 +277,7 @@ func TestCookielessFallbackDashOnlyWhenNeeded(t *testing.T) {
 
 		var pool []Format
 		res := NewPlayerAPI(nil, noopLogger{}).
-			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool)
+			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
 		if res == nil {
 			t.Fatal("expected the android_vr result")
 		}
@@ -283,6 +286,129 @@ func TestCookielessFallbackDashOnlyWhenNeeded(t *testing.T) {
 		}
 		if *pool[0].AuthLevel != AuthLevelVisionOS || *pool[1].AuthLevel != AuthLevelAndroidVR {
 			t.Error("both clients' formats should be pooled at their own tiers")
+		}
+	})
+}
+
+// substituteBody is what a blocked IP gets: a well-formed 200 about ANOTHER
+// video. The itags differ from adequateOKBody's so a leak into the pool is
+// visible.
+const substituteBody = `{
+    "playabilityStatus": {"status": "OK"},
+    "videoDetails": {"videoId": "OTHERvideo1", "title": "Substitute Video", "author": "Other Ch"},
+    "streamingData": {"adaptiveFormats": [
+        {"itag": 248, "url": "https://substitute/v", "mimeType": "video/webm; codecs=\"vp9\"", "width": 1920, "height": 1080},
+        {"itag": 251, "url": "https://substitute/a", "mimeType": "audio/webm; codecs=\"opus\""}
+    ]}
+}`
+
+// newCascadeTestAPI builds a PlayerAPI with a real (empty) cookie jar. The
+// cascade entry points reach Auth.GenerateAPIHeaders, which dereferences the
+// jar, so a nil Auth would panic before the first request is ever made.
+func newCascadeTestAPI() *PlayerAPI {
+	return NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), noopLogger{})
+}
+
+// stubWatchPage points the cascades at an empty watch page so the tests
+// exercise the CLIENT chain without a real HTTP round trip.
+func stubWatchPage(t *testing.T) {
+	t.Helper()
+	orig := fetchWatchPage
+	fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
+		return &WatchPageResult{Ytcfg: DefaultYtcfg()}, nil
+	}
+	t.Cleanup(func() { fetchWatchPage = orig })
+}
+
+// TestCascadeSkipsASubstitutingClient: TV is served the substitute, VISIONOS
+// answers correctly, and the result must be VISIONOS's — with none of the
+// substitute's formats in the pool.
+//
+// Mutants this kills:
+//   - the mismatch check removed        → title is "Substitute Video"
+//   - the mismatch not erroring the call → itags 248/251 appear in the pool
+//   - the cascade stopping at the first mismatch → GetVideoInfoPublic errors
+func TestCascadeSkipsASubstitutingClient(t *testing.T) {
+	stubWatchPage(t)
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"7":   {http.StatusOK, substituteBody}, // TV_DOWNGRADED
+		"101": {http.StatusOK, adequateOKBody}, // VISIONOS
+		"28":  {http.StatusOK, adequateOKBody}, // ANDROID_VR
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	info, err := newCascadeTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+	if err != nil {
+		t.Fatalf("GetVideoInfoPublic: %v", err)
+	}
+	if info.Title == "Substitute Video" {
+		t.Fatal("the cascade adopted the substitute video's metadata")
+	}
+	for _, f := range info.Formats {
+		if f.Itag == 248 || f.Itag == 251 {
+			t.Errorf("a substitute format reached the pool: itag %d from %s", f.Itag, f.Source)
+		}
+	}
+}
+
+// TestEveryClientSubstitutedIsReportedAsAnIPBlock mirrors upstream's
+// "All player responses are invalid. Your IP is likely being blocked by
+// Youtube" (_video.py:3186-3188). Reporting "no formats" instead would send
+// the operator hunting for a format problem that does not exist.
+//
+// Mutants this kills:
+//   - finishExtraction not raising          → err is nil
+//   - allMismatched using > instead of ==   → err is nil
+//   - raising even though the watch page
+//     produced a usable response            → covered by the second subtest
+func TestEveryClientSubstitutedIsReportedAsAnIPBlock(t *testing.T) {
+	all := map[string]struct {
+		status int
+		body   string
+	}{
+		"7": {http.StatusOK, substituteBody}, "101": {http.StatusOK, substituteBody},
+		"28": {http.StatusOK, substituteBody}, "56": {http.StatusOK, substituteBody},
+	}
+
+	t.Run("no watch page survivor", func(t *testing.T) {
+		stubWatchPage(t)
+		tr := &clientKeyedTransport{responses: all}
+		orig := apiClient
+		apiClient = &http.Client{Transport: tr}
+		t.Cleanup(func() { apiClient = orig })
+
+		_, err := newCascadeTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		if !errors.Is(err, ErrAllClientsMismatched) {
+			t.Fatalf("err = %v, want ErrAllClientsMismatched", err)
+		}
+	})
+
+	t.Run("a valid watch page survives", func(t *testing.T) {
+		origFetch := fetchWatchPage
+		fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
+			return &WatchPageResult{
+				Ytcfg:          DefaultYtcfg(),
+				PlayerResponse: decodePlayerJSON(t, adequateOKBody),
+			}, nil
+		}
+		t.Cleanup(func() { fetchWatchPage = origFetch })
+
+		tr := &clientKeyedTransport{responses: all}
+		orig := apiClient
+		apiClient = &http.Client{Transport: tr}
+		t.Cleanup(func() { apiClient = orig })
+
+		info, err := newCascadeTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		if err != nil {
+			t.Fatalf("a usable watch page must survive a full client sweep: %v", err)
+		}
+		if info == nil || len(info.Formats) == 0 {
+			t.Fatalf("info = %+v, want the watch page's formats", info)
 		}
 	})
 }
