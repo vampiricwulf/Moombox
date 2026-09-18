@@ -90,7 +90,9 @@ func ParseHLSMasterPlaylist(content string) []TwitchHLSVariant {
 // videoCodecFamily normalizes an HLS CODECS attribute to the video family it
 // carries: "av01", "hevc", "avc1", or "" when the list holds no recognised
 // video codec (an audio-only rendition, or a playlist that sends no CODECS at
-// all — every playlist Twitch serves without the enhanced-broadcast opt-in).
+// all). Twitch usher playlists DO carry CODECS without the enhanced-broadcast
+// opt-in — a pre-enhanced playlist simply lists only H.264 renditions, so
+// every source in it reports "avc1".
 //
 // The list is scanned in order rather than read at index 0: the video entry is
 // not always first, and an audio-only rendition's single mp4a entry must not be
@@ -113,10 +115,12 @@ func videoCodecFamily(codecs string) string {
 
 // codecRank orders the video families an enhanced broadcast can offer.
 //
-// An ABSENT family ranks 0, below avc1's 1, and that is what makes the whole
-// feature byte-compatible: on a playlist with no CODECS attribute every
-// candidate ranks 0, every comparison in selectSourceVariant ties, and the
-// incumbent — the first source in playlist order — wins exactly as before.
+// This is what makes the whole feature byte-compatible: a pre-enhanced playlist
+// lists only H.264 renditions, so every source ties at "avc1" and
+// selectSourceVariant's `> codecRank("avc1")` guard keeps playlist order — the
+// incumbent, the first source in playlist order, wins exactly as before. An
+// ABSENT family ranks 0, below avc1's 1, so a CODECS-less playlist (an older
+// capture, a fixture) ties the same way one rank lower.
 func codecRank(family string) int {
 	switch family {
 	case "av01":
@@ -140,8 +144,19 @@ func pixelArea(v *TwitchHLSVariant) int { return v.Width * v.Height }
 // before enhanced broadcasts, and the only rule that ever applied, because a
 // pre-enhanced Twitch playlist holds exactly one VIDEO="chunked" rendition. It
 // is displaced only by a strictly BETTER video family, or by a larger frame at
-// the same family once that family is already better than H.264. Nothing about
-// bandwidth or resolution alone can reorder a playlist that carries no CODECS.
+// the same family once that family is already better than H.264. A pre-enhanced
+// playlist lists only H.264 renditions, so every source ties at "avc1" and the
+// `> codecRank("avc1")` guard keeps playlist order: nothing about bandwidth or
+// resolution alone can reorder it.
+//
+// This step runs AFTER SelectBestVariant's resolution cap, and that cap
+// compares the LONG edge — max(Height, Width) <= max_video_resolution. Under
+// the shipped default of 2160 (the downloader section's max_video_resolution) a
+// 2560x1440 or 3840x2160 enhanced source is therefore dropped from the
+// candidate list before this function ever sees it, and the H.264 transcode is
+// what gets archived. An operator must raise that key to >= 2560 for a 1440p
+// enhanced source, or >= 3840 for a 4K one. Pinned by
+// TestSelectBestVariantEnhancedSourceUnderTheDefaultCap.
 func selectSourceVariant(variants []TwitchHLSVariant) *TwitchHLSVariant {
 	best := -1
 	for i := range variants {

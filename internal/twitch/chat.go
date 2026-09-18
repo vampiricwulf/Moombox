@@ -53,8 +53,11 @@ const (
 	// window: restoreResumeState seeds fileCount/totalCount straight from
 	// that stale sidecar and sets flushedToDisk, which makes Start skip
 	// adoptExistingPartFile — the only path that re-counts the file — so the
-	// deficit persists in that part's header count and the job's chat total
-	// until the next part roll. No message is lost; the file itself is
+	// deficit persists in that part's header count until the next part roll,
+	// AND in the job's chat total for the life of the job: totalCount is
+	// cumulative, survives RollFile by design, is never re-derived, and is
+	// what MessageCount() reports as the job's total_chat_messages. No
+	// message is lost; the file itself is
 	// written every flush regardless. The DEFERRED final save on stop
 	// (Start's exit path) is deliberately NOT throttled.
 	ircResumeSaveFloor = 5 * time.Second

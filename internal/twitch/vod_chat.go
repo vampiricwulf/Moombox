@@ -202,6 +202,18 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 
 		edges, hasNext, err := vcd.api.GetVodComments(ctx, vcd.vodID, contentOffset, cursor, vcd.currentAuthToken())
 		if err != nil {
+			// A cancelled session is not a fetch error. Stop() fires
+			// sessionCancel while a page is in flight, so this arm saw
+			// context.Canceled on EVERY mid-page stop and reported a
+			// deliberate shutdown as a failure — counted against
+			// vodChatMaxConsecutiveErrors and written at WARN, the default
+			// log level. Finish exactly as the ctx.Done arm above does
+			// (flush, sidecar, one Info line) so the outcome is still
+			// `incomplete` with a consistent resume offset.
+			if ctx.Err() != nil {
+				vcd.finishInterrupted(contentOffset)
+				return ctx.Err()
+			}
 			consecutiveErrors++
 			if consecutiveErrors >= vodChatMaxConsecutiveErrors {
 				vcd.flush()

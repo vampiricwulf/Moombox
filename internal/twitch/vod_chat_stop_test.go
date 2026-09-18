@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,13 +36,23 @@ func installBlockingGQLStub(t *testing.T) chan struct{} {
 //
 // Mutant: dropping the sessionCancel call from Stop() — Start never returns and
 // this test fails on its own 5 s deadline instead of hanging the suite.
+//
+// It also pins the log hygiene of that cancel: a deliberate Stop is not a fetch
+// error, and Warn is the default level, so the cancelled page must produce no
+// "vod chat fetch error" line — only finishInterrupted's one Info line, which
+// is what leaves the outcome `incomplete` with a consistent sidecar offset.
+//
+// Mutant: removing the `if ctx.Err() != nil` guard at the top of the error
+// branch in Start — the cancellation is counted as consecutiveErrors=1 and
+// logged, so the Warn count becomes 1.
 func TestVodChatStopAbortsTheInFlightPage(t *testing.T) {
 	entered := installBlockingGQLStub(t)
 	out := filepath.Join(t.TempDir(), "chat.json")
+	rl := &renderingLogger{}
 	vcd := NewVodChatDownloader(NewAPI(&testLogger{}), VodChatOptions{
 		VodID:      "v1",
 		OutputPath: out,
-	}, &testLogger{})
+	}, rl)
 
 	done := make(chan error, 1)
 	go func() {
@@ -62,10 +73,23 @@ func TestVodChatStopAbortsTheInFlightPage(t *testing.T) {
 	vcd.Stop()
 
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Start returned %v, want nil or context.Canceled — a deliberate Stop is "+
+				"not a download failure", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return within 5 s of Stop() — the in-flight page was not " +
 			"cancelled, so it outlives the orchestrator's 2 s grace and the staging removal")
+	}
+
+	if n := rl.countLinesContaining("vod chat fetch error"); n != 0 {
+		t.Errorf("the cancelled page produced %d \"vod chat fetch error\" WARN line(s), want 0 — "+
+			"a Stop that lands mid-page is a shutdown, not a fetch failure:\n%s", n, rl.allLines())
+	}
+	if n := rl.countLinesContaining("VOD chat download stopped before completion"); n != 1 {
+		t.Errorf("finishInterrupted logged %d times, want exactly 1 — the quiet-cancel guard "+
+			"must still flush and preserve the resume offset:\n%s", n, rl.allLines())
 	}
 }
 

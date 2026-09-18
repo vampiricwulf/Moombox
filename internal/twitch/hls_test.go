@@ -385,9 +385,47 @@ https://example.com/720p30.m3u8`
 	}
 }
 
+// TestSelectBestVariantEnhancedSourceUnderTheDefaultCap is what the SHIPPED
+// default does to the opt-in. The resolution cap (SelectBestVariant step 3)
+// runs BEFORE the codec-aware source step and compares the LONG edge, so under
+// downloader.max_video_resolution's default of 2160 a 2560x1440 enhanced
+// source is dropped from the candidate list before selectSourceVariant ever
+// sees it and the H.264 1080p source is archived. An operator must raise the
+// key to >= 2560 (1440p) or >= 3840 (4K) to receive an enhanced rendition.
+//
+// Mutants: applying the cap AFTER the source step (2160 then returns the 1440p
+// HEVC source); comparing v.Height instead of max(v.Height, v.Width) (1440 <=
+// 2160, so the HEVC source survives the cap and wins at the default).
+func TestSelectBestVariantEnhancedSourceUnderTheDefaultCap(t *testing.T) {
+	variants := ParseHLSMasterPlaylist(enhancedMasterPlaylist)
+
+	got := SelectBestVariant(variants, "best", 2160)
+	if got == nil {
+		t.Fatal("SelectBestVariant returned nil at the default cap")
+	}
+	if got.VideoCodec != "avc1" || got.Width != 1920 || got.Height != 1080 {
+		t.Errorf("at max_video_resolution=2160 selected %dx%d (%s), want the 1920x1080 avc1 "+
+			"source — the enhanced source's 2560 LONG EDGE is over the default cap, and the "+
+			"cap runs before the codec step", got.Width, got.Height, got.VideoCodec)
+	}
+
+	got = SelectBestVariant(variants, "best", 2560)
+	if got == nil {
+		t.Fatal("SelectBestVariant returned nil at a 2560 cap")
+	}
+	if got.VideoCodec != "hevc" || got.Width != 2560 || got.Height != 1440 {
+		t.Errorf("at max_video_resolution=2560 selected %dx%d (%s), want the 2560x1440 hevc "+
+			"source — raising the cap to the long edge is what admits an enhanced rendition",
+			got.Width, got.Height, got.VideoCodec)
+	}
+}
+
 // TestSelectBestVariantIsUnchangedWithoutCodecs is the byte-identity pin: a
-// playlist with no CODECS attribute — every playlist Twitch serves without the
-// new usher parameters — must select exactly what it selected before this task.
+// pre-enhanced playlist lists only H.264 renditions, so every source ties at
+// `avc1` and the `> codecRank("avc1")` guard keeps playlist order — the
+// selection is exactly what it was before this task. The CODECS-less fixture
+// below is the degenerate end of the same rule (every source ties at the
+// absent family); the second one is the shape Twitch actually serves.
 //
 // Mutant: ranking an absent codec family above avc1, or letting pixel area
 // reorder equal-rank sources — either one changes the answer here.
@@ -427,6 +465,30 @@ https://example.com/chunked-larger.m3u8`
 		t.Errorf("selected %q, want the FIRST source variant in playlist order — with no "+
 			"CODECS attribute neither a larger frame nor a higher bandwidth may displace it",
 			got.URL)
+	}
+
+	// The REAL pre-enhanced shape: Twitch usher playlists carry CODECS today
+	// (internal/engine/manifest_test.go's Twitch fixture, and the live gate's
+	// avc1 x5), so byte identity rests on the avc1 TIE, not on an absent
+	// family. Here both sources are avc1 and the LATER one carries both the
+	// larger frame and the higher bandwidth; only the `cand > codecRank("avc1")`
+	// guard keeps the incumbent.
+	//
+	// Mutant: dropping that guard from selectSourceVariant's tie-break — two
+	// avc1 sources then reorder by pixel area and the larger, later one wins.
+	const legacyWithCodecs = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1280x720,CODECS="avc1.4D401F,mp4a.40.2",FRAME-RATE=60.000,VIDEO="chunked"
+https://example.com/avc1-first.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=1920x1080,CODECS="avc1.64002A,mp4a.40.2",FRAME-RATE=60.000,VIDEO="chunked"
+https://example.com/avc1-larger.m3u8`
+	got = SelectBestVariant(ParseHLSMasterPlaylist(legacyWithCodecs), "best", 0)
+	if got == nil {
+		t.Fatal("SelectBestVariant returned nil for the two-avc1 playlist")
+	}
+	if got.URL != "https://example.com/avc1-first.m3u8" {
+		t.Errorf("selected %q, want the FIRST source variant in playlist order — two H.264 "+
+			"sources tie at avc1, and neither a larger frame nor a higher bandwidth may "+
+			"displace the incumbent at that rank", got.URL)
 	}
 }
 

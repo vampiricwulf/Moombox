@@ -36,8 +36,9 @@ type TwitchHLSVariant struct {
 	// Codecs is the raw CODECS attribute (RFC 6381 ids, comma-separated) and
 	// VideoCodec the normalized family derived from it: "av01", "hevc",
 	// "avc1", or "" when the playlist carries no CODECS or the variant has no
-	// video track. Populated only once the usher request opts in to enhanced
-	// broadcasts — see BuildUsherLiveURL.
+	// video track. A pre-enhanced playlist lists only H.264 renditions, so
+	// every source in one reports "avc1"; the enhanced-broadcast opt-in (see
+	// BuildUsherLiveURL) is what can add an "hevc" or "av01" source beside it.
 	Codecs     string `json:"codecs,omitempty"`
 	VideoCodec string `json:"videoCodec,omitempty"`
 	IsSource   bool   `json:"isSource"`
