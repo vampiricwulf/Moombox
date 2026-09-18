@@ -112,7 +112,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 
 ### 11. Download Worker
 `worker.NewDownloadWorker()` creates the main job processing engine. Internally creates:
-- `JobQueue` with configurable max parallel VOD downloads (default 10; broadcasts are never throttled by the pool) and 100 lifecycle slots
+- `JobQueue` with configurable max parallel VOD downloads (default 10; broadcasts are never throttled by the pool) and 100 lifecycle slots, claimed at the download decision rather than at dequeue
 - `Scheduler` that admits backlog (`Queued`) jobs at most `archive_slots` at a time per channel — the only path out of `Queued`
 - `StreamProcessor` for probing stream status and waiting for live
 - `DownloadOrchestrator` for the full download lifecycle
@@ -238,13 +238,16 @@ Worker.EnqueueJob      WebSocket broadcast
 JobQueue.Enqueue (priority: Live=1, Upcoming/Downloading=0, Error=-1)
     |
     v
-JobQueue.Dequeue (blocks until lifecycle slot available, max 100)
+JobQueue.Dequeue (highest-priority pending job; no lifecycle gate)
     |
     v
 StreamProcessor.Process (probe status, wait for live, start early chat)
     |
     v
-JobQueue.AcquireDownloadSlot (blocks until download slot available, max 2)
+JobQueue.AcquireLifecycleSlot (blocks until a lifecycle slot is free, max 100)
+    |
+    v
+JobQueue.AcquireDownloadSlot (VODs only; blocks until a slot is free, default max 10)
     |
     v
 DownloadOrchestrator.ExecuteWithChat (strategy selection, parallel download + chat)
@@ -343,8 +346,8 @@ The `DownloadOrchestrator` manages the complete download lifecycle for a single 
    - VOD: `runVodDownloadWithRefresh()` — wraps `runDownloaders()` (one-shot via `errgroup`) in a bounded re-extraction loop for YouTube jobs that finalize behind head (see below)
    - Live: `runLiveStreamDownload()` (loop with stream-end verification and quality monitoring); returns the final `*DownloadResult`, since a quality refresh/split reassigns the downloader pair inside the loop and the caller's original pointer would otherwise go stale
 10. After download completes: finalize progress, sync total sequence counts
-11. Signal chat to finish, wait up to 2 minutes for chat completion
-12. Release download slot (muxing is CPU-bound, not a download)
+11. Signal chat to finish and wait for it. A live job waits `chatWaitTimeout` (2 minutes) — a live chat stops when the broadcast does. A VOD goes through `resolveVodChatOutcome` in `internal/worker/orchestrator_chat.go`, which releases the download slot FIRST and only then waits `vodChatWaitTimeout`: the video's own length, floored at 30 minutes and capped at 6 hours (owner decision O-A), because a VOD's comment pager is still paging long after the video finished downloading
+12. Release download slot (muxing is CPU-bound, not a download) — already released, and therefore a no-op, for a VOD that came through the chat wait above
 13. Mux and finalize (FFmpeg combines video + audio + metadata, ffprobe extracts dimensions/duration)
 14. Post-download trim if job has `StartTime`/`EndTime` set
 15. Clean up staging directory
@@ -370,7 +373,7 @@ else:
 4. When quality changes mid-stream:
    - Ignores if segment is shorter than 10 seconds (`minSegmentDuration`)
    - Cancels current downloaders
-   - Muxes the current segment in a background goroutine (using `context.Background()`)
+   - Muxes the current segment in a background goroutine parented by the orchestrator's mux root (`launchBackgroundSegmentMux` in `internal/worker/quality_split_common.go`), not `context.Background()`
    - Records segment metadata in database
    - Re-fetches video info with new format selection
    - Creates new downloaders at the new quality
@@ -408,20 +411,25 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 - Polls the HLS playlist URL periodically
 - Downloads new segments as they appear
 - Follows the live edge (media sequence numbers); no parallel catch-up path — a stalled poller simply requests the next playlist snapshot, which already reflects whatever segments the CDN still has
-- End verdict: the loop asks `CheckStreamStatus` at three playlist-failure sites — a playlist 404/410, the consecutive-fetch-failure escalation and the consecutive-parse-failure escalation — and one shared helper, `consultStreamEnd` in `internal/engine/downloader_hls.go`, classifies the answer for all three. A confirmed `ended` finalizes cleanly from ANY of them (`streamEnded` set, so the loop's exit defer clears the resume sidecar); a confirmed "still live" returns `ErrQualityLost` for the orchestrator's variant refresh. They differ only when no verdict comes back: a check ERROR at the 404/410 site defers — the 404 rejoins the consecutive-error retry budget and the next reload re-asks — while the two escalation sites have already spent that budget, so they exit with their fetch/parse failure and leave `streamEnded` unset, keeping the resume sidecar for a later Resume. An unwired check finalizes at the 404/410 site (the variant is gone and nothing can say otherwise) and keeps the failure at the escalations. Three further consults — consecutive stuck skips, init-segment-fetch exhaustion and the stale window — are not routed through the helper; each latches only on a confirmed `ended`. Same rule as the DASH gone-burst verification above (`internal/engine/downloader_hls.go`)
+- VOD mode (`runHlsVodParallel` in `internal/engine/downloader_hls.go`) is the opposite shape: a fixed worker pool fetches the whole playlist in parallel and a byte-bounded reorder buffer writes the segments in ascending order as they land. The ceiling is the same 256 MB `catchUpBufferBytes` (`internal/engine/downloader.go`) the DASH catch-up path uses, and it is what stops the other workers holding the rest of the VOD in RAM while the head-of-order segment works through its retry ladder — a worker waits for room instead of buffering past it, and the head is always admitted so the flush position cannot deadlock. Failed segments become nil gap sentinels so the consumer never wedges on an index that is not coming
+- End verdict: the loop asks `CheckStreamStatus` at three playlist-failure sites — a playlist 404/410, the consecutive-fetch-failure escalation and the consecutive-parse-failure escalation — and one shared helper, `consultStreamEnd` in `internal/engine/downloader_hls.go`, classifies the answer for all three. A confirmed `ended` finalizes cleanly from ANY of them (`streamEnded` set, so the loop's exit defer clears the resume sidecar); a confirmed "still live" returns `ErrQualityLost` for the orchestrator's variant refresh. They differ only when no verdict comes back: a check ERROR at the 404/410 site defers — the 404 rejoins the consecutive-error retry budget and the next reload re-asks — while the two escalation sites have already spent that budget, so they exit with their fetch/parse failure and leave `streamEnded` unset. An unwired check finalizes at the 404/410 site (the variant is gone and nothing can say otherwise) and keeps the failure at the escalations. Three further consults — consecutive stuck skips, init-segment-fetch exhaustion and the stale window — are not routed through the helper; each latches only on a confirmed `ended`. Same rule as the DASH gone-burst verification above (`internal/engine/downloader_hls.go`). What an unset `streamEnded` then MEANS differs by platform: on YouTube the orchestrator finalizes what was captured and the resume sidecar survives for a later Resume; on Twitch that exit used to finalize the job Finished, after which the staging dir — and the sidecar in it — was deleted, so `ExecuteTwitch` in `internal/worker/orchestrator_twitch.go` now re-verifies the broadcast once and, absent a confirmed end, returns the download error so the job lands in Error with its staging intact. That verdict comes from two `GetStreamInfo` samples ~5 s apart (`confirmTwitchLiveness` in `internal/worker/worker.go`), so one transient StreamMetadata flap can no longer end a live recording at any of the six consult sites above.
 
 **VOD direct download mode (`runDirectDownload`):**
 - Probes total file size via `Range: bytes=0-0` HEAD request
 - Downloads in 5MB chunks (`DownloadChunkSize`) using Range requests
 - Per-chunk retry (up to 3 attempts, `MaxChunkRetries`)
-- Falls back to streaming download if server doesn't support Range
+- Falls back to streaming download if server doesn't support Range — one response for the whole file, bounded by the read-progress deadline alone
+- Saves a resume sidecar every 50 MB (`directResumeInterval` in `internal/engine/downloader_direct.go`) on both the chunked and the streaming path; before Arc E the whole-file path wrote none at all, so an interrupted VOD restarted from byte 0 however far it had got
 - Progress reported as percentage
 
 **Resume capability:**
 - `.resume.json` file stores: `lastSeq`, `bytesWritten`, `timestamp`, `baseUrl`, `streamId`
 - On resume: validates IDENTITY via `resumeIdentityMismatch` (explicit StreamID first, then YouTube URL fingerprinting; opaque no-identity URLs are trusted — see data-and-storage.md), then file size vs saved bytes
 - DB-level fallback: if resume file is lost but database has `last_video_seq`/`last_audio_seq`, uses file size as byte position
-- File is truncated to known-good position before appending; Twitch live (`StopOnGap`) never truncates staged data on a bad sidecar — it gap-splits instead
+- The media file is fsync'd before every sidecar save (`syncMediaFile` in `internal/engine/downloader_resume.go`) and the sidecar itself is written fsync+rename, so neither durable position can lead the durable bytes after a power loss; a failed media fsync skips that one save rather than recording a position it cannot back
+- With a usable sidecar the file is truncated to the saved byte position and the missing tail appended. With NO usable sidecar the engine never truncates non-empty staged media: `StopOnGap` callers (Twitch live) get `ErrGapDetected` and gap-split instead, and every other caller gets `ErrStagedMediaPresent` so the orchestrator decides
+- The one caller that genuinely requires a file starting at sequence 0 — the manifest-free DASH restart, via `DiscardStaged` — cannot refuse, so it preserves instead: `preserveStagedRecording` in `internal/engine/downloader.go` renames the headed recording ASIDE as `<file>.restart-<unix ts>` (its sidecar follows as `.restart-<unix ts>.resume.json`) and opens the fresh file beside it. Only bytes carrying no container header are discarded
+- An aside is recovered at finalize and never merged: it overlaps the fresh recording from sequence 0, so `muxStagedAsides` in `internal/worker/orchestrator_mux.go` muxes each one into its OWN sibling file beside the archive (`{name}.restart-<ts>.mp4`) and records no segment row. Until it is muxed it counts as an unmuxed part, which keeps the whole staging dir from being swept, and the orphan sweep (`internal/worker/orphans.go`) lists any it finds under that dir's asides
 
 **Key constants:**
 | Constant | Value | Purpose |
@@ -429,7 +437,8 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 | `CatchupThreshold` | 10 | Segments behind `stayBehindSegments` (30) before parallel catch-up engages |
 | `MaxSegmentRetries` | 5 | Per-segment retry limit |
 | `ParallelDownloads` | 6 | Fallback catch-up worker count when a caller leaves `DownloaderOptions.SegmentWorkers` unset (0). Live downloads are always given the operator's `downloader.segment_workers` (default 12) by the worker layer, so this constant is effectively only a test/library default now. |
-| `SegmentTimeout` | 30s | HTTP timeout per segment request |
+| `SegmentTimeout` | 30s | Read-progress (idle) deadline on one segment/chunk fetch — cancelled only after this long with NO bytes arriving, so a slow-but-moving transfer runs as long as it keeps progressing. Also the whole-file streaming fallback's only bound |
+| `segmentHardCeiling` | 15min | Absolute lifetime of one segment/chunk fetch, layered under the idle deadline so a body trickling just fast enough to keep resetting it still ends. Bounds `fetchSegment`/`fetchChunk` only |
 | `DefaultMaxTimeout` | 10min | Fallback for `maximum_timeout` (force-finalize when no segment arrives for this long, even if YouTube reports live) |
 | `streamStatusCheckInterval` | 30s | No-segment gap that triggers a stream-status check (re-checked at most once per interval) |
 | `HeadProbeInterval` | 5s | Interval for HEAD probes to discover head seq |
@@ -464,7 +473,7 @@ The `QualityMonitor` runs alongside a live stream download and detects resolutio
 
 When a quality change is detected and the current segment has been running for at least 10 seconds, the orchestrator:
 1. Cancels current downloaders
-2. Muxes the current segment in a `context.Background()` goroutine
+2. Muxes the current segment in a goroutine parented by the orchestrator's mux root (`muxRoot` in `internal/worker/quality_split_common.go`), not `context.Background()`
 3. Records the segment in the `segments` database table
 4. Re-fetches video info and creates new downloaders at the new quality
 5. Updates the monitor baseline to the new quality
@@ -474,9 +483,10 @@ When a quality change is detected and the current segment has been running for a
 The `JobQueue` implements a two-tier concurrency model:
 
 **Lifecycle tier (100 slots):**
-- Gates how many jobs can be in the process/wait/download pipeline simultaneously
-- A job holds a lifecycle slot from `Dequeue()` to `Complete()`
-- This means up to 100 jobs can be probing, waiting for live, downloading, or muxing at once
+- Gates how many jobs can be in the DOWNLOAD half of the pipeline simultaneously — downloading plus muxing, which is exactly what `LifecycleCount()` reports
+- The slot is claimed at the download decision, not at dequeue: `processJob` calls `AcquireLifecycleSlot` in `internal/worker/queue.go` only once `StreamProcessor.Process` has answered "should download", and every exit path from there releases it through the deferred `Complete` (owner decision O-F)
+- Stream probing and the wait for a stream to go live therefore run slot-free. They used to hold a slot for the whole wait — hours to days for an `Upcoming` job or a manually-added offline Twitch channel — and at 100 waiters a newly live stream was never started at all
+- A wait that outlasts `lifecycleWaitWarnAfter` in `internal/worker/queue.go` (30 s) logs one line, once per wait, naming the job and the slots held: at the cap the symptom is a capture that simply does not start, and until that line existed nothing explained it
 
 **Download tier (configurable, default 10 slots):**
 - Gates how many VOD jobs can be actively downloading segments in parallel — VODs ONLY. Broadcasts pass through ungated (`acquireDownloadSlot` with `isVod=false` is a no-op): a missed slot on a VOD delays a file that already exists, a missed slot on a live broadcast loses footage. Peak concurrent downloads is therefore (live broadcasts) + `num_parallel_downloads`
@@ -493,7 +503,8 @@ The `JobQueue` implements a two-tier concurrency model:
 
 **Queue operations:**
 - `Enqueue(jobID, status)`: Adds to pending queue. O(1) duplicate detection via `pendingSet`. Backlog limit of 100 pending jobs; drops with warning if full.
-- `Dequeue(ctx) -> (jobID, jobCtx, ok)`: Blocks until a lifecycle slot is free and a pending job exists. Returns a per-job cancellable context.
+- `Dequeue(ctx) -> (jobID, jobCtx, ok)`: Blocks until a pending job exists — there is no lifecycle gate here. Returns a per-job cancellable context.
+- `AcquireLifecycleSlot(ctx, jobID) -> bool`: Blocks until one of the 100 lifecycle slots is free, then claims it for the job. Returns false if context cancelled. Warns once per wait past 30 s.
 - `AcquireDownloadSlot(ctx, jobID) -> bool`: Blocks until a download slot is free. Returns false if context cancelled.
 - `ReleaseDownloadSlot(jobID)`: Frees the download slot. Signals waiting jobs.
 - `Complete(jobID)`: Frees lifecycle slot and download slot (if held). Cancels the per-job context.
@@ -501,9 +512,10 @@ The `JobQueue` implements a two-tier concurrency model:
 - `WasCancelled(jobID) -> bool`: Returns and clears the cancellation flag. Used to distinguish user cancellation from shutdown.
 
 **Signaling:**
-- `notify` channel (capacity 1): signals that a pending job or lifecycle slot is available
+- `notify` channel (capacity 1): signals that a pending job is available
+- `lifeNotify` channel (capacity 1): signals that a lifecycle slot is free
 - `dlNotify` channel (capacity 1): signals that a download slot is available
-- Both use non-blocking sends to avoid producer blocking
+- All three use non-blocking sends to avoid producer blocking; each successful acquirer re-signals while capacity remains, so a burst of releases collapsing into one signal cannot leave a waiter asleep beside a free slot
 
 ### Backlog Scheduler
 
@@ -534,7 +546,7 @@ The download worker uses a goroutine-per-job model:
 ```
 DownloadWorker.Start(ctx):
     for {
-        jobID, jobCtx := queue.Dequeue(ctx)     // blocks until lifecycle slot
+        jobID, jobCtx := queue.Dequeue(ctx)     // blocks until a job is pending
         go processJob(jobCtx, jobID)              // one goroutine per job
     }
 ```
@@ -641,9 +653,9 @@ go func() {
 - Prevents a bug in job creation from crashing the monitor's polling goroutine
 
 **Background mux goroutines:**
-- Quality-split segment muxing runs in `context.Background()` goroutines
+- Quality- and gap-split segment muxing runs under the orchestrator's mux root, not `context.Background()`
 - Each has its own panic recovery
-- This ensures muxing completes even if the parent context is cancelled (shutdown)
+- The root outlives the JOB's context, so a user cancel never orphans a half-written output; but `Stop` cancels the root itself (`CancelMuxes` in `internal/worker/quality_split_common.go`) once its 10-second wait for in-flight jobs runs out, so a shutdown kills FFmpeg rather than leaving it writing into a staging dir the restarted child re-muxes with `-y`. A mux cancelled that way leaves its row `Muxing` with staging intact, and the next start re-muxes it
 
 **Download worker:**
 - Each `processJob` goroutine has panic recovery
@@ -717,10 +729,24 @@ func isTerminalStatus(status database.JobStatus) bool {
 }
 ```
 
-Note: `Muxing` is **not** terminal. If muxing was interrupted by shutdown
-(the muxer process was killed mid-encode), `enqueueExistingJobs` resets
-the job's status back to `Downloading` on next launch so the orchestrator
-re-runs the mux step. Mux is idempotent — partial output is overwritten.
+Note: `Muxing` is **not** terminal. If muxing was interrupted by shutdown (the
+muxer process was killed mid-encode), `enqueueExistingJobs` in
+`internal/worker/worker.go` re-muxes the job from what is already staged —
+`MuxJob` hands it to the Mux action's own path, `muxFromStaging` in
+`internal/worker/orchestrator_mux.go`, under the same download slot a queued
+job takes, and reclaims staging once the archive file exists. Two rows are the
+exception and still reset to `Downloading`: one whose staging holds nothing
+muxable, and one flagged `incomplete_tail`, whose recording is known to be
+short and still needs the post-live VOD-refresh loop that only the download
+path runs.
+
+Muxing is NOT idempotent against the recording itself, which is what the
+previous reset assumed: re-processing re-probed the stream as post-live, the
+manifest-free strategy seeded sequence 0, and the engine truncated the
+complete staged file. The engine now refuses that outright —
+`ErrStagedMediaPresent` in `internal/engine/downloader.go` — so no path
+truncates non-empty staged media unless the caller explicitly asked to
+discard it.
 
 ## Error Hierarchy
 
@@ -848,7 +874,8 @@ Key methods:
 Key methods:
 - `NewJobQueue(maxDownloads) -> *JobQueue`: Constructor (maxLifecycle fixed at 100).
 - `Enqueue(jobID, status)`: Non-blocking add to pending queue.
-- `Dequeue(ctx) -> (string, context.Context, bool)`: Blocking dequeue with lifecycle slot.
+- `Dequeue(ctx) -> (string, context.Context, bool)`: Blocking dequeue of the highest-priority pending job. No lifecycle gate.
+- `AcquireLifecycleSlot(ctx, jobID) -> bool`: Blocking lifecycle-slot acquisition, taken at the download decision.
 - `AcquireDownloadSlot(ctx, jobID) -> bool`: Blocking download slot acquisition.
 - `ReleaseDownloadSlot(jobID)`: Non-blocking slot release.
 - `Complete(jobID)`: Free all slots, cancel context.
@@ -856,7 +883,7 @@ Key methods:
 - `WasCancelled(jobID) -> bool`: Check and clear cancellation flag.
 - `SetMaxDownloads(n)`: Runtime update.
 - `ActiveCount() -> int`: Current download slots in use.
-- `LifecycleCount() -> int`: Current lifecycle slots in use.
+- `LifecycleCount() -> int`: Jobs holding a lifecycle slot — downloading + muxing.
 - `PendingCount() -> int`: Jobs waiting in queue.
 - `IsProcessing(jobID) -> bool`: Check if job is active.
 

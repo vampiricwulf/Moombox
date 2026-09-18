@@ -239,7 +239,7 @@ Quality splits occur when the `QualityMonitor` (probing every 30 seconds) detect
 
 Twitch live recordings are additionally **gap-split**: Twitch has no DVR, so segments that leave the playlist window are unrecoverable. The engine appends while HLS sequence numbers stay continuous (a fast daemon restart or network blip resumes seamlessly with zero loss) and stops at any true discontinuity (`ErrGapDetected`); the orchestrator then muxes the current capture as a finished, internally-gapless part (`{name} - partN.mp4`) and continues at the live edge in a new part. The live IRC chat file rolls at every part boundary with offsets rebased to that part's start, and each part's chat is copied beside its video (`{name} - partN.chat.json`, recorded in `segments.chat_file`). Connectivity outages pause the job rather than finalizing it — one job per broadcast: when the connection returns and the same broadcast (stream_start_time identity) is still live, the same job resumes; the job finalizes only when the stream ends or the broadcast changes. A job that finalizes with exactly one part is renamed back to the plain template name. Both MPEG-TS and fMP4/CMAF delivery are supported: on fMP4 playlists the engine writes the `#EXT-X-MAP` init segment at the head of each part file (recognizing token-rotated init URIs by content hash), and a genuine mid-part init change (transcode restart) or an fMP4→TS reversion part-splits via `ErrInitSegmentChanged` — handled like a gap split, minus the lost-data notification.
 
-Muxing runs on `context.Background()` goroutines so it completes even if the parent context is cancelled (user quits during download). This ensures that partially downloaded content is still muxed into a usable file rather than being abandoned as raw segments.
+Muxing runs on goroutines parented by the orchestrator's mux root rather than by the job's own context, so it completes even if that job is cancelled (user quits during download) — partially downloaded content is still muxed into a usable file rather than abandoned as raw segments. The root is not `context.Background()`, though: shutdown cancels it once the worker's ten-second wait for in-flight jobs runs out, so a daemon exit kills FFmpeg instead of leaving it writing into a staging dir the restarted child re-muxes over. Those rows stay `Muxing` with their staging deliberately intact, and the next start re-muxes them from it.
 
 **SegmentDownloader** has three modes:
 - **DASH sequential** — Increments segment number, fetches `{base_url}/sq/{n}`, handles 404 with exponential backoff. Saves resume state every 50 sequential segments. Verification is time-based: once the gap since the last segment crosses 30s, calls `checkStreamStatus()` (re-checked at most once per 30s) to verify whether the stream is still live. If the stream ended, exits cleanly; if still live, keeps waiting. A configurable `maximum_timeout` (default 600s, YouTube only) force-finalizes the recording if no segment arrives for that long even while YouTube still reports the stream live (its status can lag or stick); the clock resets whenever a segment lands, and offline time pauses it.
@@ -250,21 +250,21 @@ Muxing runs on `context.Background()` goroutines so it completes even if the par
 
 **Resume state** (`.resume.json` sidecar) stores `lastSeq`, `bytesWritten`, `timestamp`, and `baseUrl`. On startup, the downloader checks for a resume file, validates it, and resumes from the last checkpoint rather than starting over.
 
-**JobQueue** implements dual-layer concurrency: 100 lifecycle slots (`maxLifecycle`) gate how many jobs can be in the probe/wait/download pipeline simultaneously, while a configurable download semaphore (`maxDownloads`, default 10) gates how many VOD jobs can be actively downloading segments. The pool gates VODs ONLY: a broadcast is never made to wait for a slot — missing a slot on a VOD delays a file that already exists, while missing it on a live broadcast loses footage — so peak concurrent downloads is (live broadcasts) + `num_parallel_downloads`. This design means stream probing, waiting-for-live, and auth negotiation do not consume download slots — only active segment downloading does. The download slot is acquired when the orchestrator begins segment downloads and released when it finishes (before muxing).
+**JobQueue** implements dual-layer concurrency: 100 lifecycle slots (`maxLifecycle`) gate how many jobs can be in the DOWNLOAD half of the pipeline simultaneously — downloading plus muxing — while a configurable download semaphore (`maxDownloads`, default 10) gates how many VOD jobs can be actively downloading segments. The pool gates VODs ONLY: a broadcast is never made to wait for a slot — missing a slot on a VOD delays a file that already exists, while missing it on a live broadcast loses footage — so peak concurrent downloads is (live broadcasts) + `num_parallel_downloads`. This design means stream probing, waiting-for-live, and auth negotiation do not consume download slots — only active segment downloading does. The download slot is acquired when the orchestrator begins segment downloads and released when it finishes (before muxing). The LIFECYCLE slot is claimed at the download decision rather than at dequeue, so a job still probing or waiting for its stream to go live holds neither: an `Upcoming` job or a manually-added offline Twitch channel used to occupy one for its whole wait — hours to days — and at 100 such waiters a newly live stream was never started at all.
 
 The worker also owns the **backlog Scheduler**: a single admission goroutine that is the only path out of `Queued`. Woken by backlog-job creation and job completion (with a heartbeat safety net), it admits per channel at most `archive_slots` minus that channel's in-flight backlog jobs, newest published first — writing `Upcoming` durably before enqueueing so a crash between the two steps self-heals on restart. `ShouldProcess(Queued)` is false by design, so neither startup recovery nor the heartbeat poller ever touches a `Queued` row.
 
 Priority ordering: Live=1 (highest), Upcoming/Downloading=0, Error=-1 (lowest). Live streams are always processed before upcoming or retried jobs. The pending queue caps at 100 entries; jobs beyond that are dropped with a warning log. Duplicate detection uses both the pending set and the processing map — a job that is already pending or actively processing is not re-enqueued.
 
 **processJob flow** (DownloadWorker.processJob, runs in a goroutine per job):
-1. Acquire lifecycle slot (blocks if 100 slots are in use)
-2. Fetch job from database, verify it is still in a processable state
-3. Call StreamProcessor.Process() — probes, waits for live, handles auth
-4. If result says "should download": acquire download slot, run DownloadOrchestrator.Execute()
+1. Fetch job from database, verify it is still in a processable state
+2. Call StreamProcessor.Process() — probes, waits for live, handles auth, holding no slot
+3. If result says "should download": acquire the lifecycle slot (blocks if all 100 are in use), then the download slot
+4. Run DownloadOrchestrator.Execute()
 5. Release download slot after orchestrator returns
 6. Update job status to Finished or Error
 7. Send notification (download complete / error)
-8. Release lifecycle slot
+8. Release the lifecycle slot — a deferred `Complete` on every exit path, so a job that declined to download or errored out still gives back whatever it took
 
 The worker also runs a 60-second heartbeat poll (`heartbeatInterval`) as a safety net to catch any jobs that were missed by signal-driven notification. Normal job discovery is signal-driven via the `notifyJob` channel — when `EnqueueJob()` is called, it sends a non-blocking signal to wake the worker's dispatch loop.
 
@@ -272,7 +272,7 @@ The worker also runs a 60-second heartbeat poll (`heartbeatInterval`) as a safet
 
 | Component | Pattern | Parameters |
 |-----------|---------|------------|
-| Worker | Dual semaphore | 100 lifecycle slots + 2 download slots (configurable) |
+| Worker | Dual semaphore | 100 lifecycle slots (downloading + muxing) + 10 download slots (VODs only, configurable) |
 | WebSocket | No hub throttle | Rate bounded upstream by ProgressTracker (~60 Hz/job) |
 | Database | Signal-driven batch coalesce | 100ms window, zero idle I/O |
 | TUI | Non-blocking sends | Drop counters for diagnostics |
