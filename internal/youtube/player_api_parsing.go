@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
@@ -279,10 +280,13 @@ type extractionStateKey struct{}
 // per-extraction value all of them already thread; the alternative is a new
 // parameter on eight call sites that do nothing with it.
 //
-// A cascade runs its clients sequentially — no fetch is in a goroutine — so
-// plain fields need no lock.
+// The flag is atomic although a cascade runs its clients sequentially today:
+// the guarantee "no fetch is in a goroutine" is one a later arc can quietly
+// invalidate by parallelising the client sweep, and an unsynchronised write
+// would then be a data race that -race only catches if that path happens to be
+// exercised. One word buys the class away.
 type extractionState struct {
-	drmWarned bool
+	drmWarned atomic.Bool
 }
 
 // withExtractionState opens one extraction's scratch. Called once at the head
@@ -303,14 +307,7 @@ func extractionStateFrom(ctx context.Context) *extractionState {
 // warning, recording that it now has. Nil (no cascade) reports every time,
 // which is the plain per-call behaviour a direct parseFormats caller expects.
 func (s *extractionState) firstDRMReport() bool {
-	if s == nil {
-		return true
-	}
-	if s.drmWarned {
-		return false
-	}
-	s.drmWarned = true
-	return true
+	return s == nil || s.drmWarned.CompareAndSwap(false, true)
 }
 
 // parseFormats extracts format metadata + raw stream URLs from a
@@ -360,7 +357,7 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			}
 
 			// DRM formats are dropped rather than ranked. yt-dlp reports them
-			// as skipped (_video.py:3418-3426 — an account-level experiment
+			// as skipped (_video.py:3418-3428 — an account-level experiment
 			// applies DRM to ALL videos on the tv client, issue #12563) and
 			// YoutubeDL.py:2930 filters them out, because muxing encrypted
 			// samples produces an unplayable archive. Dropping here rather
@@ -439,7 +436,7 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 	}
 	if drmSkipped > 0 && extractionStateFrom(ctx).firstDRMReport() {
 		// Warn, not Debug: upstream reports this with report_warning
-		// (_video.py:3427, only_once=True), and a silently DRM-stripped format
+		// (_video.py:3428, only_once=True), and a silently DRM-stripped format
 		// pool is exactly the state an operator needs told about — it is the
 		// difference between "this video has no 1080p" and "this ACCOUNT gets
 		// no 1080p". The count is per response; the LINE is once per
@@ -582,10 +579,11 @@ func isUpcomingFromPlayability(statusCode, reasonLower string) bool {
 }
 
 // ageGateReasons are yt-dlp's AGE_GATE_REASONS reason substrings
-// (_video.py:2899-2901). They are the load-bearing half of the match:
-// upstream's status entries in the same tuple are lower-case and are
-// substring-matched against the raw upper-case `status`, so upstream in
-// practice detects an age gate through the REASON text.
+// (_video.py:2900-2903, the reason substrings on 2901). They are the
+// load-bearing half of the match: upstream's status entries in the same tuple
+// are lower-case and are substring-matched against the raw upper-case
+// `status`, so upstream in practice detects an age gate through the REASON
+// text.
 var ageGateReasons = []string{"confirm your age", "age-restricted", "inappropriate"}
 
 // isAgeGateReason reports whether a playability reason (already lower-cased)
@@ -601,8 +599,13 @@ func isAgeGateReason(reasonLower string) bool {
 
 // hasDesktopLegacyAgeGate mirrors upstream's first test,
 // `traverse_obj(player_response, ('playabilityStatus',
-// 'desktopLegacyAgeGateReason'))` (_video.py:2894-2895) — a TRUTHINESS test,
+// 'desktopLegacyAgeGateReason'))` (_video.py:2896-2897) — a TRUTHINESS test,
 // so a key present but zero/empty/false is not an age gate.
+//
+// Every shape encoding/json can produce for an `any` is spelled out, including
+// the two containers: Python calls an empty dict or list falsy, so a
+// `desktopLegacyAgeGateReason` of `{}` or `[]` is NOT a gate. Only an
+// unreachable type reaches the default arm.
 func hasDesktopLegacyAgeGate(status map[string]any) bool {
 	switch v := status["desktopLegacyAgeGateReason"].(type) {
 	case nil:
@@ -613,6 +616,10 @@ func hasDesktopLegacyAgeGate(status map[string]any) bool {
 		return v != ""
 	case float64:
 		return v != 0
+	case map[string]any:
+		return len(v) > 0
+	case []any:
+		return len(v) > 0
 	default:
 		return true
 	}
@@ -640,16 +647,26 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 		return PlayabilityOK, ""
 	}
 
-	// Age gates, ported from _is_agegated (_video.py:2893-2904). This runs
+	// Age gates, ported from _is_agegated (_video.py:2894-2904). This runs
 	// BEFORE the status switch because the shapes it catches are spread across
 	// three different status codes (AGE_CHECK_REQUIRED, UNPLAYABLE,
 	// LOGIN_REQUIRED) — and AFTER the upcoming check, because a waiting room
 	// is not an error and must never be classified as one.
 	//
-	// It cannot steal a members-only verdict: none of the three substrings
-	// appears in YouTube's membership reason text, which says "Join this
-	// channel to get access to members-only content".
-	if hasDesktopLegacyAgeGate(status) || isAgeGateReason(reasonLower) {
+	// `status == "OK"` is excluded for that same reason: a response YouTube
+	// says is PLAYABLE is not an error either, and every shape this block
+	// exists to catch is non-OK. Without the exclusion an OK response that
+	// merely carries desktopLegacyAgeGateReason or an age-flavoured reason
+	// would classify age_restricted, and checkPlayability
+	// (internal/worker/stream_processor.go) aborts the job on every non-ok
+	// verdict — with the notification SUPPRESSED for age_restricted. Upstream
+	// cannot hit this: its _is_agegated only ever appends clients
+	// (_video.py:3157-3175), it never overrides a playability verdict.
+	//
+	// It cannot steal a members-only verdict either: none of the three
+	// substrings appears in YouTube's membership reason text, which says "Join
+	// this channel to get access to members-only content".
+	if statusCode != "OK" && (hasDesktopLegacyAgeGate(status) || isAgeGateReason(reasonLower)) {
 		return PlayabilityAgeRestricted, reason
 	}
 

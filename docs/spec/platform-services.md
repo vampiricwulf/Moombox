@@ -300,8 +300,8 @@ The `parsePlayabilityStatus` function classifies the video's accessibility:
 | `OK` | -- | `ok` |
 | `LIVE_STREAM_OFFLINE` | -- | `ok` (upcoming, not an error) |
 | `UNPLAYABLE` + "live event will begin" | -- | `ok` (upcoming) |
-| any status | `desktopLegacyAgeGateReason` is truthy | `age_restricted` |
-| any status | reason contains "confirm your age" / "age-restricted" / "inappropriate" | `age_restricted` |
+| any status but `OK` | `desktopLegacyAgeGateReason` is truthy | `age_restricted` |
+| any status but `OK` | reason contains "confirm your age" / "age-restricted" / "inappropriate" | `age_restricted` |
 | `AGE_VERIFICATION_REQUIRED`, `AGE_CHECK_REQUIRED` | -- | `age_restricted` |
 | `LOGIN_REQUIRED` + "member"/"join" in reason | -- | `members_only` |
 | `LOGIN_REQUIRED` | -- | `login_required` |
@@ -312,7 +312,7 @@ The `parsePlayabilityStatus` function classifies the video's accessibility:
 | `ERROR` + "private"/"unavailable" | -- | `unavailable` |
 | Anything else | -- | `unknown` |
 
-The two age rows sit above the status switch because the shapes they catch are spread across `AGE_CHECK_REQUIRED`, `UNPLAYABLE` and `LOGIN_REQUIRED`, and below the upcoming rows because a waiting room is not an error. They port yt-dlp's `_is_agegated` (`_video.py:2893-2904`); the reason substrings are the load-bearing half, since upstream's lower-case status entries are substring-matched against the raw upper-case `status` and so only ever match through the reason. The verdict matters because the web_embedded age bypass gates literally on `age_restricted`.
+The two age rows sit above the status switch because the shapes they catch are spread across `AGE_CHECK_REQUIRED`, `UNPLAYABLE` and `LOGIN_REQUIRED`. They sit below the upcoming rows because a waiting room is not an error, and they exclude `OK` for the same reason: a response YouTube says is playable is not an error either, and `checkPlayability` aborts the job on every non-`ok` verdict — with the notification suppressed for `age_restricted`, so an `OK` response reclassified this way would end a downloadable stream in silence. Both exclusions are conditions in the code, not merely row order, so the table reads the same whichever way it is scanned. They port yt-dlp's `_is_agegated` (`_video.py:2894-2904`), whose own consumers only ever append clients (`_video.py:3157-3175`) rather than override a playability verdict; the reason substrings are the load-bearing half, since upstream's lower-case status entries are substring-matched against the raw upper-case `status` and so only ever match through the reason. The verdict matters because the web_embedded age bypass gates literally on `age_restricted`.
 
 ### N-Parameter Decryption
 

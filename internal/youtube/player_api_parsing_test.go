@@ -965,7 +965,7 @@ func TestParsePlayerResponseKeepsAResponseWithNoVideoID(t *testing.T) {
 
 // TestParseFormatsSkipsDRMAndKeepsTrackIdentity pins both halves of upstream's
 // format identity. DRM formats are dropped at parse — yt-dlp reports them as
-// skipped (_video.py:3418-3426, the tv-client DRM experiment, issue #12563)
+// skipped (_video.py:3418-3428, the tv-client DRM experiment, issue #12563)
 // and YoutubeDL.py:2930 filters them out — because muxing encrypted samples
 // produces an unplayable archive. The three track fields are kept because
 // they are two thirds of upstream's stream identity.
@@ -1012,7 +1012,8 @@ func TestParseFormatsSkipsDRMAndKeepsTrackIdentity(t *testing.T) {
 
 // TestParseFormatsWarnsOnceForSkippedDRM pins the LEVEL and the CARDINALITY of
 // the DRM-skip report. Upstream reports it with
-// `self.report_warning(msg, video_id, only_once=True)` (_video.py:3419-3427),
+// `self.report_warning(msg, video_id, only_once=True)` (_video.py:3420-3428,
+// the call itself on 3428),
 // and a silently DRM-stripped pool is the difference between "this video has
 // no 1080p" and "this ACCOUNT gets no 1080p" — the operator has to see it at
 // the default level, once, with the count.
@@ -1263,7 +1264,7 @@ const drmOKBody = `{
 
 // TestDRMWarnIsOncePerExtractionNotPerResponse pins the DRM-skip report to
 // upstream's cardinality: `report_warning(..., only_once=True)`
-// (_video.py:3419-3427) fires ONCE per run, not once per player response. This
+// (_video.py:3420-3428) fires ONCE per run, not once per player response. This
 // cascade parses several responses per extraction, and for an account in the
 // tv-client DRM experiment nearly all of them carry DRM formats — a per-
 // response Warn turns one diagnosis into a repeating wall at the default log
@@ -1333,8 +1334,8 @@ func TestDRMWarnIsOncePerExtractionNotPerResponse(t *testing.T) {
 }
 
 // TestParsePlayabilityStatusRecognisesEveryAgeGateShape ports yt-dlp's
-// _is_agegated (_video.py:2893-2904). The bypass gate downstream
-// (player_api_strategy.go:294 and :444) matches PlayabilityAgeRestricted
+// _is_agegated (_video.py:2894-2904). The bypass gate downstream
+// (player_api_strategy.go:382 and :557) matches PlayabilityAgeRestricted
 // LITERALLY, so an "unknown" verdict never reaches the web_embedded age path
 // at all.
 //
@@ -1346,15 +1347,24 @@ func TestDRMWarnIsOncePerExtractionNotPerResponse(t *testing.T) {
 //   - the AGE_CHECK_REQUIRED arm dropped        → the reason-less row reports "unknown"
 //   - the reason substrings dropped             → the inappropriate/confirm rows report "unknown"
 //   - desktopLegacyAgeGateReason not consulted  → that row reports "unknown"
+//   - the `statusCode != "OK"` guard dropped, letting the age block preempt
+//     the OK arm                                → the two OK rows report "age_restricted",
+//     i.e. a playable response aborts the job
+//   - hasDesktopLegacyAgeGate's default arm calling an empty container truthy
+//     → the empty-map/empty-list rows report "age_restricted"
+//   - the age match hoisted above the upcoming check → the synthetic ordering
+//     row reports "age_restricted"
 //
-// The last four rows are regression guards rather than mutant-killers: moving
-// the age match above the upcoming check or above the members-only arm changes
-// none of them, because none of the three substrings occurs in YouTube's
-// membership ("Join this channel to get access to members-only content") or
-// waiting-room reason text. That disjointness is exactly what makes the
-// placement safe, and these rows are what would fail if a future edit widened
-// the substring list far enough to overlap either message (a list carrying
-// "content", for one) or YouTube reworded them.
+// The brief's other ordering half — "the age match placed above the
+// members-only arm" — describes the SHIPPED code and so can never be a mutant:
+// the members-only tests live inside `case "LOGIN_REQUIRED"` / `case
+// "UNPLAYABLE"`, already below the age block. The four regression rows at the
+// end are guards rather than mutant-killers for that half: none of the three
+// substrings occurs in YouTube's membership ("Join this channel to get access
+// to members-only content") or waiting-room text, and that disjointness is
+// what makes the placement safe. They are what would fail if a future edit
+// widened the substring list far enough to overlap either message (a list
+// carrying "content", for one) or YouTube reworded them.
 func TestParsePlayabilityStatusRecognisesEveryAgeGateShape(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1373,6 +1383,27 @@ func TestParsePlayabilityStatusRecognisesEveryAgeGateShape(t *testing.T) {
 		{"UNPLAYABLE age-restricted", `{"status": "UNPLAYABLE", "reason": "This video is age-restricted and can only be watched on YouTube."}`, PlayabilityAgeRestricted},
 		{"LOGIN_REQUIRED confirm your age", `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age"}`, PlayabilityAgeRestricted},
 		{"desktopLegacyAgeGateReason", `{"status": "UNPLAYABLE", "reason": "", "desktopLegacyAgeGateReason": 1}`, PlayabilityAgeRestricted},
+
+		// A response YouTube itself marks PLAYABLE is not an error, whatever
+		// age markers ride along with it. checkPlayability
+		// (internal/worker/stream_processor.go) aborts the job for every
+		// non-ok verdict, and the age_restricted arm suppresses the
+		// notification — so reclassifying an OK response ends a downloadable
+		// stream in silence. Upstream never creates the conflict: _is_agegated
+		// only ever APPENDS clients (_video.py:3157-3175), it does not
+		// override a playability verdict.
+		{"OK with a legacy age gate stays ok", `{"status": "OK", "desktopLegacyAgeGateReason": 1}`, PlayabilityOK},
+		{"OK with an age-flavoured reason stays ok", `{"status": "OK", "reason": "This video may be inappropriate for some users."}`, PlayabilityOK},
+
+		// An empty container is FALSY in Python, so upstream's truthiness test
+		// does not see an age gate here either.
+		{"empty-map legacy gate is not a gate", `{"status": "UNPLAYABLE", "reason": "Playback on other websites has been disabled", "desktopLegacyAgeGateReason": {}}`, PlayabilityUnknown},
+		{"empty-list legacy gate is not a gate", `{"status": "UNPLAYABLE", "reason": "Playback on other websites has been disabled", "desktopLegacyAgeGateReason": []}`, PlayabilityUnknown},
+
+		// Synthetic — NOT a YouTube-observed reason. It pins the evaluation
+		// ORDER contract rather than a wire shape: a waiting room is never an
+		// error, even if its reason text ever carried an age substring.
+		{"upcoming wins over an age substring (synthetic)", `{"status": "LIVE_STREAM_OFFLINE", "reason": "This live event may be inappropriate for some users"}`, PlayabilityOK},
 
 		// Regressions the new match must NOT cause.
 		{"members only stays members only", `{"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access to members-only content"}`, PlayabilityMembersOnly},
