@@ -121,12 +121,17 @@ const (
 	catchUpBufferBytes = 256 << 20
 )
 
-// SegmentTimeout bounds a single segment/chunk/probe fetch's derived
-// context (fetchSegment, fetchChunk, ProbeSegmentAvailable each run
-// context.WithTimeout(parent, SegmentTimeout)). A package var rather than a
-// const purely so a test can shrink it under t.Cleanup-restored assignment
-// to exercise a genuine derived-context timeout without an actual 30s wait;
-// production code never mutates it.
+// SegmentTimeout is the READ-PROGRESS (idle) deadline on a single segment or
+// chunk fetch: the fetch is cancelled only after this long with no bytes
+// arriving, so a slow-but-moving transfer runs as long as it keeps
+// progressing (sweep-2 ENGINE-4). Consumers: fetchSegment and fetchChunk in
+// downloader_fetch.go, via withReadProgressDeadline + idleBody.
+// ProbeSegmentAvailable (eviction_probe.go) reuses the same value as a plain
+// TOTAL context.WithTimeout — its body is capped at
+// probeSegmentMaxBodyBytes, so there is no slow-transfer case to protect.
+// A package var rather than a const purely so a test can shrink it under
+// t.Cleanup-restored assignment and exercise a genuine deadline without an
+// actual 30s wait; production code never mutates it.
 var SegmentTimeout = 30 * time.Second
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
