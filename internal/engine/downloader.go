@@ -146,6 +146,9 @@ const (
 // ProbeSegmentAvailable (eviction_probe.go) reuses the same value as a plain
 // TOTAL context.WithTimeout — its body is capped at
 // probeSegmentMaxBodyBytes, so there is no slow-transfer case to protect.
+// fetchSegment and fetchChunk — and only those two — additionally run under
+// segmentHardCeiling (downloader_fetch.go), the 15-minute absolute lifetime
+// that ends a body trickling just fast enough to keep resetting this bound.
 // A package var rather than a const purely so a test can shrink it under
 // t.Cleanup-restored assignment and exercise a genuine deadline without an
 // actual 30s wait; production code never mutates it.

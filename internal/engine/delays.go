@@ -11,6 +11,12 @@ import "time"
 // nothing outside the package sees it. The first-segment hunt
 // (firstSegmentHuntDelay), the direct-download backoffs (downloader_fetch.go)
 // and the eviction probe keep their own constants: no test waits on them.
+//
+// fetchHardCeiling is the one member that is not a sleep: it is a per-fetch
+// deadline, and it lives here for the same reason the sleeps do — a test that
+// has to reach a 15-minute bound needs a knob, and this struct is the knob
+// this package already has. The idle half of that pair (SegmentTimeout) is a
+// package var instead, because the probes share it.
 type delays struct {
 	singleGoneRetry        time.Duration // singleGoneRetryDelay — one 410/404 while behind head
 	interruptionStallRetry time.Duration // interruptionStallRetryDelay — the may-resume stall arm
@@ -22,6 +28,7 @@ type delays struct {
 	atEdgeBackoffUnit      time.Duration // the second the 429 backoff and same-head retry count in
 	hlsReloadUnit          time.Duration // the second hlsReloadDelay scales playlist durations by
 	hlsResumeSave          time.Duration // hlsResumeSaveInterval — live-loop resume sidecar floor
+	fetchHardCeiling       time.Duration // segmentHardCeiling — one segment/chunk fetch's absolute lifetime
 }
 
 // defaultDelays returns production timing.
@@ -37,5 +44,6 @@ func defaultDelays() delays {
 		atEdgeBackoffUnit:      time.Second,
 		hlsReloadUnit:          time.Second,
 		hlsResumeSave:          hlsResumeSaveInterval,
+		fetchHardCeiling:       segmentHardCeiling,
 	}
 }
