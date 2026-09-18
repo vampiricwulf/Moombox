@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // ErrQualityLost signals that the stream is still live but the selected
@@ -52,6 +53,18 @@ var ErrGapDetected = errors.New("unrecoverable gap in live stream")
 // StopOnGap callers get ErrGapDetected instead: they have a richer recovery
 // (close this file as a finished part, continue in a fresh one).
 var ErrStagedMediaPresent = errors.New("staged media present with no usable resume state")
+
+// ErrTruncateBlocked signals that a staged recording could not be shrunk to
+// its fsync'd resume offset: an antivirus scanner or the search indexer still
+// holds the file open, or the volume went read-only. NOTHING WAS LOST — the
+// media and its sidecar are exactly as they were, so the job stays resumable
+// and the run should end now rather than be re-verified for half an hour.
+//
+// It never travels alone. A plain resume returns it wrapping the refusal; a
+// StopOnGap caller gets it joined with ErrGapDetected, which still splits to a
+// fresh part but must NOT raise the "segments expired from the CDN"
+// notification, because no segment expired.
+var ErrTruncateBlocked = errors.New("truncate for resume blocked")
 
 // ErrInitSegmentChanged signals that the HLS playlist's #EXT-X-MAP init
 // segment changed CONTENT mid-part (e.g. a Twitch transcode restart on the
@@ -200,10 +213,13 @@ type DownloaderOptions struct {
 	// The one production setter is the manifest-free DASH strategy's
 	// post-live restart: those segments carry their ftyp+moov init inline at
 	// sq=0 only, so a finished stream genuinely must begin again at 0 and
-	// the partial file cannot be appended to. Deliberate discards that
+	// the partial file cannot be appended to. Even there it is conditional —
+	// prepareManifestlessStaging sets it only once nothing muxable is left at
+	// OutputFile, moving a headed recording aside first — so the promise the
+	// guard makes above is never quietly un-made. Deliberate discards that
 	// REMOVE the media before constructing the downloader (the quality-split
-	// short-segment rule) never need this — the guard only looks at bytes
-	// that are still there.
+	// short-segment rule) never need this flag at all: the guard only looks
+	// at bytes that are still there.
 	DiscardStaged bool
 	// MaxTimeout bounds how long the DASH loop keeps retrying/verifying while
 	// waiting for the next segment before it force-finalizes the recording —
@@ -822,16 +838,22 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 				d.logger.Info("[Downloader] Truncating file for resume",
 					"from", info.Size(), "to", state.BytesWritten)
 			}
-			if truncErr := truncateForResume(d.opts.OutputFile, state.BytesWritten); truncErr != nil {
+			if truncErr := truncateForResume(ctx, d.opts.OutputFile, state.BytesWritten); truncErr != nil {
 				if d.opts.StopOnGap {
 					// Same contract as the no-truncate guard above: a failed
 					// truncate must not fall back to O_TRUNC and destroy the
 					// staged recording (transient sharing violations from AV
 					// scans hit exactly this window on Windows). Split
 					// instead — the caller muxes the file as a finished part.
+					// That part keeps whatever bytes lie past the fsync'd
+					// offset, so its last fragment may be torn; FFmpeg drops a
+					// partial trailing fragment, and a torn tail beats a
+					// destroyed recording. ErrTruncateBlocked rides along so
+					// the orchestrator splits WITHOUT telling the operator
+					// that segments were lost to the CDN — none were.
 					d.logger.Warn("[Downloader] Truncate-for-resume failed — splitting instead of starting fresh",
 						"file", d.opts.OutputFile, "err", truncErr)
-					return ErrGapDetected
+					return fmt.Errorf("%w: %w: %v", ErrGapDetected, ErrTruncateBlocked, truncErr)
 				}
 				// ENGINE-5: the old branch here logged a Warn, cleared the
 				// resume state and opened the file O_TRUNC — losing hours of
@@ -841,7 +863,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 				// and the sidecar intact for a later Resume.
 				d.logger.Error("[Downloader] Truncate-for-resume failed after retries",
 					"file", d.opts.OutputFile, "err", truncErr)
-				return fmt.Errorf("truncate for resume: %w", truncErr)
+				return fmt.Errorf("%w: %w", ErrTruncateBlocked, truncErr)
 			}
 		}
 	} else {
@@ -853,8 +875,8 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		return fmt.Errorf("open output file: %w", err)
 	}
 	// Closure (not `defer d.outputFile.Close()`): the direct-download
-	// streaming-fallback reset reopens d.outputFile, and a method-value defer
-	// would close the stale handle and leak the new one.
+	// discard (discardStagedMedia) reopens d.outputFile, and a method-value
+	// defer would close the stale handle and leak the new one.
 	defer func() { d.outputFile.Close() }()
 
 	// Download init segment first (only if not resuming and not HLS).
@@ -898,31 +920,57 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	return d.runDashLoop(ctx)
 }
 
-// truncateForResume shrinks a staged recording to its fsync'd resume offset,
-// retrying through the Windows AV/indexer window that briefly holds a freshly
-// written file open. Same ladder as utils.ReplaceFile's rename retry (8
-// attempts, 10 ms doubling to 400 ms, just over a second in total); it is
-// spelled out here rather than reused because that helper renames and this
-// one truncates.
-func truncateForResume(path string, size int64) error {
-	delay := 10 * time.Millisecond
+// truncateForResume shrinks a staged recording to its fsync'd resume offset.
+// On Windows an antivirus scanner or the search indexer briefly holds a
+// freshly written recording open and the truncate is refused with
+// ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION although nothing is wrong
+// with the file; ONLY those refusals are retried, with a growing pause of 10,
+// 20, 40, 80, 160, 320 and 640 ms — 1270 ms across eight attempts. Every other
+// error (a missing file, a directory in its place, a read-only volume, a POSIX
+// EACCES) is permanent and is returned on the FIRST attempt, and the ladder
+// gives up the moment ctx is done rather than sleeping a shutdown out.
+//
+// Same shape and same constants as utils.ReplaceFile's rename retry, spelled
+// out here rather than reused because that helper renames and this one
+// truncates. Either way the caller is left with the staged media and its
+// sidecar untouched, so the job stays resumable.
+func truncateForResume(ctx context.Context, path string, size int64) error {
+	delay := truncateResumeFirstDelay
 	for attempt := 1; ; attempt++ {
 		err := truncateFile(path, size)
-		if err == nil || attempt >= 8 {
+		if err == nil || attempt >= truncateResumeAttempts || !isTransientTruncateError(err) {
 			return err
 		}
-		truncateRetrySleep(delay)
-		if delay < 400*time.Millisecond {
+		if truncateRetrySleep(ctx, delay) != nil {
+			// Shutting down mid-ladder: surface the refusal now. Nothing is
+			// lost by stopping early — the file is exactly as it was.
+			return err
+		}
+		if delay < truncateResumeMaxDelay {
 			delay *= 2
 		}
 	}
 }
 
-// Seams for the tests: the truncate itself and the pause. Production never
-// reassigns them (mirrors utils.ReplaceFile's renameFile/replaceFileSleep).
+const (
+	// truncateResumeAttempts bounds the ladder; with the pauses below the
+	// worst case waits 1270 ms — long enough to outlast a scanner's hold on a
+	// just-written file, short enough not to stall a restart.
+	truncateResumeAttempts   = 8
+	truncateResumeFirstDelay = 10 * time.Millisecond
+	// truncateResumeMaxDelay caps the doubling. The last delay below it still
+	// doubles, so the final pause is 640 ms — the same overshoot
+	// utils.ReplaceFile's identical `< replaceFileMaxDelay` test produces.
+	truncateResumeMaxDelay = 400 * time.Millisecond
+)
+
+// Seams for the tests: the truncate itself, the platform classifier and the
+// pause. Production never reassigns them (mirrors utils.ReplaceFile's
+// renameFile / isTransientReplaceError / replaceFileSleep).
 var (
-	truncateFile       = os.Truncate
-	truncateRetrySleep = time.Sleep
+	truncateFile             = os.Truncate
+	isTransientTruncateError = transientTruncateError
+	truncateRetrySleep       = utils.Sleep
 )
 
 // Cancel cancels the download.

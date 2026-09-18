@@ -524,6 +524,9 @@ sessionLoop:
 			// (mux the current part, seed the successor at CurrentSeq) except
 			// nothing was lost, so no gap notification is sent.
 			isInitChange := errors.Is(dlErr, engine.ErrInitSegmentChanged)
+			// A gap split that actually lost segments is the only one the
+			// operator is notified about — see gapSplitLostData.
+			gapLostData := gapSplitLostData(dlErr)
 
 			// FetchVariantsFn guard: only live jobs have it wired. A VOD can
 			// still surface ErrQualityLost (playlist 404 with the VOD-shaped
@@ -549,7 +552,7 @@ sessionLoop:
 						// captures the rest of the tail.
 						o.logger.Warn("Twitch variant refresh failed after gap/init change; continuing tail on current variant",
 							"err", fetchErr, "jobID", jobCtx.Job.ID)
-						if isGap {
+						if gapLostData {
 							o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
 						}
 						nextSeq := videoDl.CurrentSeq()
@@ -606,9 +609,18 @@ sessionLoop:
 					// the stuck sequence once more with an empty file and
 					// skips it via the same rule if it still fails — either
 					// way the gap is recorded exactly once, by the successor.
-					o.logger.Warn("Twitch gap split — starting new part",
-						"closedPart", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
-					o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
+					if gapLostData {
+						o.logger.Warn("Twitch gap split — starting new part",
+							"closedPart", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
+						o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
+					} else {
+						// engine.ErrTruncateBlocked: the resume truncate was
+						// refused, so the engine split rather than destroy the
+						// staged part. Its own message, and no notification —
+						// nothing expired from the CDN.
+						o.logger.Warn("Twitch split after a blocked resume truncate — starting new part; no segments were lost",
+							"closedPart", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
+					}
 
 					nextSeq := videoDl.CurrentSeq()
 					if !advanceToNewPart(true, segmentEndTime) {
@@ -1032,6 +1044,20 @@ func (o *DownloadOrchestrator) discoverResumeSegment(jobCtx *JobContext) (int, s
 		return 0, jobCtx.StagingDir
 	}
 	return next, filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", next))
+}
+
+// gapSplitLostData reports whether a gap split actually lost data, i.e.
+// whether the operator should be told about it. engine.ErrGapDetected is the
+// engine's one "close this part and continue in a fresh one" signal, and it
+// now carries a second case that loses nothing: engine.ErrTruncateBlocked, a
+// resume truncate an antivirus scanner or the search indexer refused.
+// Splitting is still the right recovery there — it is what keeps the staged
+// recording instead of truncating it — but no segment expired from the CDN,
+// so the "segments were lost" notification would be a lie. Same precedent as
+// ErrInitSegmentChanged, which splits without a notification for the same
+// reason (fix round 1, Minor 4).
+func gapSplitLostData(err error) bool {
+	return errors.Is(err, engine.ErrGapDetected) && !errors.Is(err, engine.ErrTruncateBlocked)
 }
 
 // waitForOnline blocks until the connectivity monitor reports online, or ctx

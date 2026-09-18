@@ -2,7 +2,11 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -279,12 +283,16 @@ func DownloadManifestlessDash(
 		// OnCipherFailure site. Both closures share this one local so
 		// neither can observe a later mutation of the videoStream pointer.
 		videoItagChosen := videoStream.Itag
+		// Decided (and acted on) BEFORE the downloader exists: the helper may
+		// move an existing recording aside, which is what makes handing the
+		// engine a true DiscardStaged safe. See its doc comment.
+		discardVideoStaged := prepareManifestlessStaging(result.VideoPath, videoInfo.StreamStatus, forceVideoSeq, job.Logger)
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             videoStream.BaseURL,
 			OutputFile:          result.VideoPath,
 			StartSeq:            videoStartSeq,
 			ForceStartSeq:       forceVideoSeq,
-			DiscardStaged:       manifestlessDiscardStaged(videoInfo.StreamStatus, forceVideoSeq),
+			DiscardStaged:       discardVideoStaged,
 			InitURL:             videoInitURL,
 			InitFromSegment:     videoInitURL != "",
 			PoToken:             pot,
@@ -339,12 +347,14 @@ func DownloadManifestlessDash(
 		// DownloaderOptions literal) so OnCredentialRefresh and the later
 		// OnCipherFailure share one immutable snapshot of the chosen itag.
 		audioItagChosen := audioStream.Itag
+		// See the video block's identical call.
+		discardAudioStaged := prepareManifestlessStaging(result.AudioPath, videoInfo.StreamStatus, forceAudioSeq, job.Logger)
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             audioStream.BaseURL,
 			OutputFile:          result.AudioPath,
 			StartSeq:            audioStartSeq,
 			ForceStartSeq:       forceAudioSeq,
-			DiscardStaged:       manifestlessDiscardStaged(videoInfo.StreamStatus, forceAudioSeq),
+			DiscardStaged:       discardAudioStaged,
 			InitURL:             audioInitURL,
 			InitFromSegment:     audioInitURL != "",
 			PoToken:             pot,
@@ -406,6 +416,82 @@ func dbResumeSeq(streamStatus youtube.StreamStatus, lastSeq *int) int {
 // at an orchestrator-provided seq owns its own fresh file.
 func manifestlessDiscardStaged(streamStatus youtube.StreamStatus, forcedStartSeq bool) bool {
 	return streamStatus != youtube.StreamLive && !forcedStartSeq
+}
+
+// prepareManifestlessStaging decides the engine.DownloaderOptions.DiscardStaged
+// value for one stream of a manifest-free DASH part, and makes sure that value
+// can never destroy a muxable recording.
+//
+// manifestlessDiscardStaged says whether this is the deliberate non-live sq=0
+// restart at all — necessary, but NOT sufficient. A Downloading or
+// incomplete_tail row re-entered over its old staging dir also probes
+// post-live and also force-starts nothing, and the file sitting there may be a
+// complete multi-hour recording whose sidecar is corrupt, was cleared by the
+// previous clean finalize, or aged past the engine's maxResumeStateAge during
+// exactly the long outage the no-truncate guard was written for (fix round 1,
+// Important 1). So the opt-in is granted only when there is nothing worth
+// keeping:
+//
+//   - staging absent or empty — the ordinary fresh start, unchanged;
+//   - staging non-empty but carrying no container header — bytes no muxer can
+//     open (a part that force-started mid-stream, or a torn head). Disposable;
+//   - staging non-empty AND headed — NEVER discarded. The recording is moved
+//     aside as <file>.restart-<unix ts>, with its sidecar, and the fresh file
+//     starts beside it, so the operator can still mux what was captured. A
+//     YouTube part has no gap-split machinery to hand it to the way Twitch
+//     does, so an aside file is the cheapest preservation that still gives the
+//     strategy the restart-at-sq-0 it genuinely needs.
+//
+// A rename that fails leaves DiscardStaged false, so the engine's guard
+// refuses the start rather than truncating what could not be moved.
+func prepareManifestlessStaging(path string, streamStatus youtube.StreamStatus, forcedStartSeq bool, log logger) bool {
+	if !manifestlessDiscardStaged(streamStatus, forcedStartSeq) {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 {
+		return true
+	}
+	if !stagedRecordingHeaded(path) {
+		log.Warn("manifest-free restart: staged bytes carry no container header, discarding",
+			"file", path, "bytes", info.Size())
+		return true
+	}
+	aside := fmt.Sprintf("%s.restart-%d", path, time.Now().Unix())
+	if err := os.Rename(path, aside); err != nil {
+		log.Error("manifest-free restart: could not move the staged recording aside, refusing to discard it",
+			"file", path, "err", err)
+		return false
+	}
+	if err := os.Rename(path+".resume.json", aside+".resume.json"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Warn("manifest-free restart: staged recording moved aside without its resume state",
+			"file", path, "err", err)
+	}
+	log.Warn("manifest-free restart: staged recording moved aside — mux it from this path if the re-download falls short",
+		"from", path, "to", aside, "bytes", info.Size())
+	return true
+}
+
+// stagedRecordingHeaded reports whether path begins with a container header a
+// muxer can open: an MP4/M4A 'ftyp' box, or the Matroska/WebM EBML magic. A
+// manifest-free DASH capture that began at sq=0 has one — those segments carry
+// their ftyp+moov init inline — while a capture that force-started mid-stream
+// is a bare moof+mdat run that FFmpeg cannot demux on its own. Unreadable or
+// too short counts as not headed: there is nothing to preserve either way.
+func stagedRecordingHeaded(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var hdr [8]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return false
+	}
+	if string(hdr[4:8]) == "ftyp" {
+		return true
+	}
+	return hdr[0] == 0x1A && hdr[1] == 0x45 && hdr[2] == 0xDF && hdr[3] == 0xA3
 }
 
 // manifestlessSq0URL returns the sq=0 segment URL for a query-style manifest-

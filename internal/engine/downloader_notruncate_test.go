@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // stagedFile writes n bytes of staged "recording" to a fresh temp file and
@@ -109,6 +111,25 @@ func TestStartDirectURLKeepsLegacyTruncate(t *testing.T) {
 	}
 }
 
+// errSharingViolation stands in for the scanner/indexer refusal the ladder
+// exists to ride out. The tests drive the classifier seam rather than a real
+// OS errno so one fixture describes both platforms.
+var errSharingViolation = errors.New("the process cannot access the file because it is being used by another process")
+
+// installTruncateSeams points the ladder at a scripted truncate, a no-op pause
+// and a classifier that treats errSharingViolation (and nothing else) as
+// transient. Restores everything at the end of the test.
+func installTruncateSeams(t *testing.T, trunc func(string, int64) error) {
+	t.Helper()
+	prevTrunc, prevSleep, prevClass := truncateFile, truncateRetrySleep, isTransientTruncateError
+	t.Cleanup(func() {
+		truncateFile, truncateRetrySleep, isTransientTruncateError = prevTrunc, prevSleep, prevClass
+	})
+	truncateFile = trunc
+	truncateRetrySleep = func(context.Context, time.Duration) error { return nil }
+	isTransientTruncateError = func(err error) bool { return errors.Is(err, errSharingViolation) }
+}
+
 // TestTruncateForResumeRetriesThenFails pins the retry ladder that replaces
 // ENGINE-5's silent `starting fresh` fallback: the truncate is re-attempted
 // through the Windows AV/indexer sharing-violation window, and the last error
@@ -119,21 +140,16 @@ func TestStartDirectURLKeepsLegacyTruncate(t *testing.T) {
 func TestTruncateForResumeRetriesThenFails(t *testing.T) {
 	path := stagedFile(t, 1024)
 
-	prevSleep := truncateRetrySleep
-	prevTrunc := truncateFile
-	t.Cleanup(func() { truncateRetrySleep = prevSleep; truncateFile = prevTrunc })
-	truncateRetrySleep = func(time.Duration) {}
-
 	attempts := 0
-	truncateFile = func(name string, size int64) error {
+	installTruncateSeams(t, func(name string, size int64) error {
 		attempts++
 		if attempts < 3 {
-			return errors.New("The process cannot access the file because it is being used by another process.")
+			return errSharingViolation
 		}
 		return os.Truncate(name, size)
-	}
+	})
 
-	if err := truncateForResume(path, 512); err != nil {
+	if err := truncateForResume(context.Background(), path, 512); err != nil {
 		t.Fatalf("truncateForResume = %v, want nil once the window clears", err)
 	}
 	if attempts != 3 {
@@ -141,6 +157,63 @@ func TestTruncateForResumeRetriesThenFails(t *testing.T) {
 	}
 	if got := sizeOf(t, path); got != 512 {
 		t.Fatalf("file is %d bytes, want 512", got)
+	}
+}
+
+// TestTruncateForResumeReturnsPermanentErrorImmediately pins the classifier
+// the ladder claims to share with utils.ReplaceFile: only the scanner/indexer
+// refusal is waited out. A missing file, a directory in its place or a
+// read-only volume is permanent, and sleeping the full 1270 ms before saying
+// so delays every caller — including the Twitch split path — for nothing.
+//
+// Mutant: dropping the `|| !isTransientTruncateError(err)` term — attempts
+// climbs to the ladder's full 8.
+func TestTruncateForResumeReturnsPermanentErrorImmediately(t *testing.T) {
+	permanent := errors.New("read-only file system")
+
+	attempts := 0
+	installTruncateSeams(t, func(string, int64) error {
+		attempts++
+		return permanent
+	})
+
+	err := truncateForResume(context.Background(), stagedFile(t, 16), 8)
+	if !errors.Is(err, permanent) {
+		t.Fatalf("truncateForResume = %v, want the permanent error", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (a permanent error must not be retried)", attempts)
+	}
+}
+
+// TestTruncateForResumeStopsOnContextCancel pins the shutdown behaviour: a
+// cancelled context ends the ladder at once and surfaces the last refusal,
+// instead of sleeping out the remaining seven pauses inside Start while the
+// process is trying to exit.
+//
+// Mutant: ignoring truncateRetrySleep's error — attempts runs to 8.
+func TestTruncateForResumeStopsOnContextCancel(t *testing.T) {
+	attempts := 0
+	prevTrunc, prevSleep, prevClass := truncateFile, truncateRetrySleep, isTransientTruncateError
+	t.Cleanup(func() {
+		truncateFile, truncateRetrySleep, isTransientTruncateError = prevTrunc, prevSleep, prevClass
+	})
+	// The REAL pause, so the cancelled context is what stops the ladder.
+	truncateRetrySleep = utils.Sleep
+	isTransientTruncateError = func(err error) bool { return errors.Is(err, errSharingViolation) }
+	truncateFile = func(string, int64) error {
+		attempts++
+		return errSharingViolation
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := truncateForResume(ctx, stagedFile(t, 16), 8); !errors.Is(err, errSharingViolation) {
+		t.Fatalf("truncateForResume = %v, want the last refusal surfaced", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (a dead context must end the ladder, not wait it out)", attempts)
 	}
 }
 
@@ -156,29 +229,11 @@ func TestTruncateForResumeRetriesThenFails(t *testing.T) {
 func TestStartResumeTruncateFailureKeepsStagedMedia(t *testing.T) {
 	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
 	path := stagedFile(t, 1<<20)
-	resumePath := path + ".resume.json"
-	sidecar, err := json.Marshal(ResumeState{
-		LastSeq:      41,
-		BytesWritten: 512 << 10,
-		Timestamp:    time.Now().Unix(),
-		BaseURL:      streamURL,
-	})
-	if err != nil {
-		t.Fatalf("marshal resume state: %v", err)
-	}
-	if err := os.WriteFile(resumePath, sidecar, 0o644); err != nil {
-		t.Fatalf("write resume sidecar: %v", err)
-	}
+	writeResumeSidecar(t, path, streamURL, 512<<10)
 
-	prevSleep := truncateRetrySleep
-	prevTrunc := truncateFile
-	t.Cleanup(func() { truncateRetrySleep = prevSleep; truncateFile = prevTrunc })
-	truncateRetrySleep = func(time.Duration) {}
-	// A sharing violation that never clears — AV holding the handle, or a
-	// read-only volume. The ladder exhausts and the error must surface.
-	truncateFile = func(string, int64) error {
-		return errors.New("The process cannot access the file because it is being used by another process.")
-	}
+	// A sharing violation that never clears — AV holding the handle. The
+	// ladder exhausts and the error must surface.
+	installTruncateSeams(t, func(string, int64) error { return errSharingViolation })
 
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    streamURL,
@@ -190,13 +245,70 @@ func TestStartResumeTruncateFailureKeepsStagedMedia(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	startErr := d.Start(ctx)
-	if startErr == nil || !strings.Contains(startErr.Error(), "truncate for resume") {
-		t.Fatalf("Start = %v, want a wrapped truncate-for-resume failure", startErr)
+	if !errors.Is(startErr, ErrTruncateBlocked) {
+		t.Fatalf("Start = %v, want ErrTruncateBlocked", startErr)
+	}
+	if !strings.Contains(startErr.Error(), "truncate for resume") {
+		t.Fatalf("Start = %v, want the message to name the truncate", startErr)
 	}
 	if got := sizeOf(t, path); got != 1<<20 {
 		t.Fatalf("staged file is %d bytes, want 1048576 (a failed truncate must never fall through to O_TRUNC)", got)
 	}
-	if _, statErr := os.Stat(resumePath); statErr != nil {
+	if _, statErr := os.Stat(path + ".resume.json"); statErr != nil {
 		t.Fatalf("resume sidecar gone (%v) — the job must stay resumable", statErr)
+	}
+}
+
+// writeResumeSidecar drops a valid-looking sidecar beside path so Start takes
+// the resume branch and reaches the truncate.
+func writeResumeSidecar(t *testing.T, path, baseURL string, bytesWritten int64) {
+	t.Helper()
+	blob, err := json.Marshal(ResumeState{
+		LastSeq:      41,
+		BytesWritten: bytesWritten,
+		Timestamp:    time.Now().Unix(),
+		BaseURL:      baseURL,
+	})
+	if err != nil {
+		t.Fatalf("marshal resume state: %v", err)
+	}
+	if err := os.WriteFile(path+".resume.json", blob, 0o644); err != nil {
+		t.Fatalf("write resume sidecar: %v", err)
+	}
+}
+
+// TestStartResumeTruncateFailureSplitsWithoutClaimingDataLoss pins the Twitch
+// half of door (b): a StopOnGap caller still splits (ErrGapDetected, so the
+// current file is muxed as a finished part), but the error ALSO carries
+// ErrTruncateBlocked so the orchestrator can tell the operator the truth —
+// nothing expired from the CDN, a truncate was simply refused.
+//
+// Mutant: returning a bare ErrGapDetected — the Twitch loop sends a
+// "segments were lost" notification for a split that lost nothing.
+func TestStartResumeTruncateFailureSplitsWithoutClaimingDataLoss(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	path := stagedFile(t, 1<<20)
+	writeResumeSidecar(t, path, streamURL, 512<<10)
+	installTruncateSeams(t, func(string, int64) error { return errSharingViolation })
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    streamURL,
+		OutputFile: path,
+		StopOnGap:  true,
+		MaxRetries: 1,
+	})
+	d.delays = fastDelays()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := d.Start(ctx)
+	if !errors.Is(err, ErrGapDetected) {
+		t.Fatalf("Start = %v, want ErrGapDetected so the part is muxed and a fresh one begins", err)
+	}
+	if !errors.Is(err, ErrTruncateBlocked) {
+		t.Fatalf("Start = %v, want ErrTruncateBlocked alongside the split so no data-loss notification is sent", err)
+	}
+	if got := sizeOf(t, path); got != 1<<20 {
+		t.Fatalf("staged file is %d bytes, want 1048576 (the split must not truncate either)", got)
 	}
 }

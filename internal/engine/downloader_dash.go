@@ -544,10 +544,11 @@ func (d *SegmentDownloader) behindHeadTailPending() bool {
 // truncation (segments unavailable, MaxTimeout exhausted) visible instead
 // of masquerading as a clean finish. Returns true when finalizing behind
 // head so callers can keep the resume sidecar: post-live jobs have no
-// other resume mechanism (dbResumeSeq returns 0 for non-live), and a
-// cleared sidecar would make a later retry O_TRUNC the file and restart
-// from scratch — while a KEPT sidecar lets the retry append exactly the
-// missing tail once YouTube finishes processing.
+// other resume mechanism (dbResumeSeq returns 0 for non-live), and without
+// a sidecar a later retry hits the no-truncate guard and refuses to start
+// at all (ErrStagedMediaPresent) rather than appending — while a KEPT
+// sidecar lets the retry append exactly the missing tail once YouTube
+// finishes processing.
 func (d *SegmentDownloader) warnIfFinalizingBehindHead() bool {
 	head := int(d.headSeq.Load())
 	cur := int(d.currentSeq.Load())
