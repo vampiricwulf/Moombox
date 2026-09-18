@@ -1172,6 +1172,59 @@ export class MoomboxApp {
         break;
       }
 
+      case "job_progress": {
+        // The ~60 Hz frame (sweep 2 row #40 / O-O): only the columns a
+        // progress tick writes. MERGE it onto the row already held — the frame
+        // carries twelve fields and the row has fifty, and job_update is now
+        // the only frame that restates the rest (title, channel, thumbnail,
+        // description, output paths, gaps) as well as the client-computed
+        // hasStaging / hasSegments flags.
+        const patch = p;
+        if (!patch?.id) break;
+        const idx = this.jobs.findIndex((j) => j.id === patch.id);
+        // Unknown id: drop it, never upsert. Pushing a twelve-field frame in as
+        // a new job would put an untitled, thumbnail-less row in the list; the
+        // job_update that announces a job carries the whole row, and a resync
+        // restates it. It is also what stops a tick that raced a delete from
+        // resurrecting the row the way job_update's upsert branch would.
+        if (idx === -1) break;
+
+        const oldStatus = this.jobs[idx].status;
+        const merged = { ...this.jobs[idx], ...patch };
+        // Replaced, not mutated in place, exactly as job_update does it:
+        // nothing holds a reference to an element of this.jobs — every reader
+        // looks the row up by id at the moment it needs it.
+        this.jobs[idx] = merged;
+
+        // The server does not send a status-changing progress frame
+        // (isProgressOnlyChange excludes "status"); `status` rides the frame so
+        // this can be CHECKED rather than assumed. Not dead code: the read-back
+        // is under the write lock but the broadcast is not (UpdateJobFields
+        // unlocks before notifying), so a tick that raced a transition can
+        // carry the new status ahead of its own job_update — which would then
+        // see no change and skip the re-sort. A transition re-sorts the list
+        // and can cross the archive threshold, so it takes the same path
+        // job_update gives it.
+        if (merged.status !== oldStatus) {
+          this.renderJobs();
+          this._evaluateArchiveBoundary();
+          this._syncParkedBadge();
+        } else {
+          this.updateJobCard(merged);
+          this.stats.updateActiveIndicator(this.jobs);
+        }
+        // Update details dialog if this job is selected
+        if (this.selectedJobId === merged.id) {
+          this.details.updateJobDetails(merged);
+        }
+        // Nothing else on the fast path: a park is a status change, so
+        // _syncParkedBadge() belongs to the branch above, and jobs age by TIME,
+        // which the 60s sweep interval already covers — archive evaluation
+        // stays off the per-tick path for exactly the reason the job_update
+        // handler states.
+        break;
+      }
+
       case "config_update":
         if (!p) break;
         if (typeof p.hideFinishedAgeDays === "number") {
