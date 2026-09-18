@@ -178,6 +178,25 @@ func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData) {
 	}
 }
 
+// tvSaysWaitingRoom reports the one verdict owner decision O-I short-circuits
+// on: the TV authority says the stream is UPCOMING and playability is fine.
+//
+// An upcoming stream has no formats BY DEFINITION, so the three clients the
+// cascade consults to go find some (WEB_CREATOR, VISIONOS, ANDROID_VR — the
+// last of them twice) cannot succeed, and a waiting room re-runs them every
+// 30 s for its whole duration. PlayabilityOK is required because an upcoming
+// MEMBERS-ONLY or login-required stream is precisely what the chain exists
+// for.
+//
+// This does NOT touch the protected "android_vr retained" ruling: that ruling
+// keeps android_vr in the client roster against upstream dropping it, and it
+// stays there for every other verdict. The cost of the rule is bounded and
+// was accepted: up to one 30 s poll of delay in the rare case a cookieless
+// client sees the stream live before TV does.
+func tvSaysWaitingRoom(result *VideoInfo) bool {
+	return result != nil && result.StreamStatus == StreamUpcoming && result.PlayabilityError == PlayabilityOK
+}
+
 // GetVideoInfoAuthenticated fetches video info using the full multi-client strategy.
 func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// One extraction's scratch state, shared by every player response this
@@ -272,6 +291,11 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			"playability", string(result.PlayabilityError))
 	}
 
+	// Owner decision O-I, read once here so every gate below agrees. It is
+	// derived from the TV result because TV is this path's playability/status
+	// AUTHORITY — the same result the log line above names.
+	waitingRoom := tvSaysWaitingRoom(result)
+
 	// Try web_safari client for DASH manifest (preferred over web)
 	webResult, webErr := tally.note(p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts))
 	webLabel := "web_safari"
@@ -341,7 +365,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// webResult is nil when both web fetches failed — that means "no DASH
 	// from web", so the fallback applies a fortiori (and dereferencing
 	// webResult unguarded would panic).
-	if result.DashManifestURL == "" &&
+	//
+	// vrPrefetch survives this block so the cookieless chain below reuses
+	// whatever this fetch produced rather than asking android_vr the same
+	// question twice in one extraction (owner decision O-I).
+	var vrPrefetch *cookielessPrefetch
+	if !waitingRoom &&
+		result.DashManifestURL == "" &&
 		(webErr != nil || webResult.DashManifestURL == "") &&
 		(result.StreamStatus == StreamLive || result.StreamStatus == StreamUpcoming) &&
 		result.PlayabilityError != PlayabilityMembersOnly &&
@@ -349,6 +379,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		result.PlayabilityError != PlayabilityLoginRequired {
 
 		vrResult, vrErr := tally.note(p.fetchWithAndroidVR(ctx, videoID, ytcfg.VisitorData))
+		vrPrefetch = &cookielessPrefetch{clientName: constants.AndroidVRClient.ClientName, result: vrResult, err: vrErr}
 		if vrErr != nil {
 			p.logger.Debug("[PlayerApi] ANDROID_VR DASH fallback failed",
 				slog.String("error", vrErr.Error()))
@@ -366,6 +397,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			// Its formats still fill genuine gaps, they just no longer
 			// evict a matching WEB/TV entry.
 			collectFormats(&formatPool, vrResult.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
+			vrPrefetch.pooled = true
 		}
 	}
 
@@ -406,10 +438,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		}
 	}
 
-	// If TV fails, try WEB_CREATOR
-	if result.PlayabilityError == PlayabilityMembersOnly ||
+	// If TV fails, try WEB_CREATOR. Skipped outright on a waiting-room verdict
+	// (owner decision O-I): len(result.Formats) == 0 is TRUE for every
+	// upcoming stream, which is what used to drag the whole fallback chain
+	// into every 30 s poll.
+	if !waitingRoom && (result.PlayabilityError == PlayabilityMembersOnly ||
 		result.PlayabilityError == PlayabilityLoginRequired ||
-		len(result.Formats) == 0 {
+		len(result.Formats) == 0) {
 
 		wcResult, wcErr := tally.note(p.fetchWithClient(ctx, videoID, constants.WebCreatorClient, ytcfg, sts))
 		if wcErr != nil {
@@ -441,7 +476,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			!hasAdequateFormats(wcResult) {
 
 			if wcResult.PlayabilityError != PlayabilityMembersOnly {
-				if cfResult := p.tryCookielessFallbacks(ctx, videoID, ytcfg.VisitorData, &formatPool, tally); cfResult != nil {
+				if cfResult := p.tryCookielessFallbacks(ctx, videoID, ytcfg.VisitorData, &formatPool, tally, vrPrefetch); cfResult != nil {
 					mergeWatchPageMetadata(cfResult, wpParsed)
 					cfResult.Formats = deduplicateFormats(formatPool)
 					return p.finishExtraction(cfResult, wp, videoID, tally, wpParsed)
@@ -553,6 +588,10 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		"streamStatus", result.StreamStatus,
 		"playability", string(result.PlayabilityError))
 
+	// The same waiting-room verdict the authenticated cascade reads (owner
+	// decision O-I), from the same authority: TV.
+	waitingRoom := tvSaysWaitingRoom(result)
+
 	// Try web_embedded for age-restricted content (public path)
 	if result.PlayabilityError == PlayabilityAgeRestricted {
 		p.logger.Info("[PlayerApi] Age-restricted content detected (public), trying web_embedded", "videoID", videoID)
@@ -570,10 +609,15 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
-	if result.PlayabilityError == PlayabilityLoginRequired || len(result.Formats) == 0 || !hasAdequateFormats(result) {
+	// Skipped whole on a waiting-room verdict (owner decision O-I): all three
+	// of these conditions hold for every upcoming stream, and none of the
+	// clients below can find formats that do not exist yet.
+	if !waitingRoom && (result.PlayabilityError == PlayabilityLoginRequired || len(result.Formats) == 0 || !hasAdequateFormats(result)) {
 		// VISIONOS first, ANDROID_VR second — same rationale as the
-		// authenticated path's cookieless fallback chain.
-		if cfResult := p.tryCookielessFallbacks(ctx, videoID, wp.Ytcfg.VisitorData, &formatPool, tally); cfResult != nil {
+		// authenticated path's cookieless fallback chain. No prefetch to hand
+		// in: on this path the ANDROID_VR DASH enrichment runs AFTER the
+		// chain, not before it.
+		if cfResult := p.tryCookielessFallbacks(ctx, videoID, wp.Ytcfg.VisitorData, &formatPool, tally, nil); cfResult != nil {
 			mergeWatchPageMetadata(cfResult, wpParsed)
 			cfResult.Formats = deduplicateFormats(formatPool)
 			return p.finishExtraction(cfResult, wp, videoID, tally, wpParsed)
@@ -590,7 +634,10 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// dropping it: selective enforcement, no cookieless live-DASH substitute).
 	// Public live streams hit by the YouTube account-based experiment that
 	// strips dashManifestUrl from the cookied/TV path also land here.
-	if result.DashManifestURL == "" &&
+	// Skipped on the same waiting-room verdict as the chain above: an upcoming
+	// stream has no manifest to source either (owner decision O-I).
+	if !waitingRoom &&
+		result.DashManifestURL == "" &&
 		(result.StreamStatus == StreamLive || result.StreamStatus == StreamUpcoming) &&
 		result.PlayabilityError != PlayabilityMembersOnly &&
 		result.PlayabilityError != PlayabilityAgeRestricted &&
@@ -764,6 +811,27 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 	return p.fetchWithCookielessClient(ctx, videoID, visitorData, constants.AndroidVRClient)
 }
 
+// cookielessPrefetch carries a cookieless client result the CALLER already
+// fetched, so the chain reuses it instead of paying a second round trip for
+// the same client in the same extraction. Owner decision O-I's
+// no-behaviour-change half: the ANDROID_VR DASH fallback above already fetched
+// android_vr, and on an upcoming stream VISIONOS fails hasAdequateFormats, so
+// the chain never broke before reaching android_vr a second time.
+//
+// A FAILED prefetch is reused as well: the caller's attempt and this chain's
+// would be the same request in the same extraction, so retrying it here only
+// buys a second copy of the same error.
+//
+// pooled says the caller ALREADY collected result.Formats into the pool. The
+// chain must not collect them again: dedup would keep one either way, but a
+// pool that carries known duplicates makes every later count a lie.
+type cookielessPrefetch struct {
+	clientName string
+	result     *VideoInfo
+	err        error
+	pooled     bool
+}
+
 // tryCookielessFallbacks runs the cookieless fallback chain — VISIONOS, then
 // ANDROID_VR — collecting every fetched format into the pool at its tier.
 // Returns the first result with OK playability and adequate formats, or nil
@@ -790,8 +858,10 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 //
 // tally counts the video-ID mismatches this chain contributes, so a
 // cascade in which EVERY client was served a substitute can be reported
-// as the IP block it is rather than as "no formats".
-func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitorData string, formatPool *[]Format, tally *mismatchTally) *VideoInfo {
+// as the IP block it is rather than as "no formats". prefetched, when
+// non-nil, supplies one client's result instead of fetching it — its attempt
+// was already counted in the tally by the caller that made it.
+func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitorData string, formatPool *[]Format, tally *mismatchTally, prefetched *cookielessPrefetch) *VideoInfo {
 	var chosen *VideoInfo
 	for _, fb := range []struct {
 		client constants.YouTubeClientConfig
@@ -801,13 +871,28 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 		{constants.VisionOSClient, "visionos", AuthLevelVisionOS},
 		{constants.AndroidVRClient, "android_vr", AuthLevelAndroidVR},
 	} {
-		fbResult, fbErr := tally.note(p.fetchWithCookielessClient(ctx, videoID, visitorData, fb.client))
+		var fbResult *VideoInfo
+		var fbErr error
+		alreadyPooled := false
+		if prefetched != nil && prefetched.clientName == fb.client.ClientName {
+			fbResult, fbErr, alreadyPooled = prefetched.result, prefetched.err, prefetched.pooled
+		} else {
+			fbResult, fbErr = tally.note(p.fetchWithCookielessClient(ctx, videoID, visitorData, fb.client))
+		}
 		if fbErr != nil {
 			p.logger.Debug("[PlayerApi] cookieless fallback failed",
 				slog.String("client", fb.label), slog.String("error", fbErr.Error()))
 			continue
 		}
-		collectFormats(formatPool, fbResult.Formats, fb.label, fb.level)
+		if fbResult == nil {
+			// Only reachable through a prefetch: a caller may hand in a nil
+			// result with a nil error (no attempt made). Every fetch path
+			// above returns one or the other.
+			continue
+		}
+		if !alreadyPooled {
+			collectFormats(formatPool, fbResult.Formats, fb.label, fb.level)
+		}
 		p.logger.Debug("[PlayerApi] cookieless fallback result",
 			"client", fb.label,
 			"formats", len(fbResult.Formats),

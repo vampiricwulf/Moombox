@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
@@ -117,7 +118,7 @@ func TestTryCookielessFallbacks(t *testing.T) {
 		swap(t, tr)
 
 		var pool []Format
-		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{}, nil)
 		if res == nil {
 			t.Fatal("expected a result from visionos")
 		}
@@ -139,7 +140,7 @@ func TestTryCookielessFallbacks(t *testing.T) {
 		swap(t, tr)
 
 		var pool []Format
-		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{}, nil)
 		if res == nil {
 			t.Fatal("expected a result from android_vr")
 		}
@@ -162,7 +163,7 @@ func TestTryCookielessFallbacks(t *testing.T) {
 		swap(t, tr)
 
 		var pool []Format
-		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
+		res := newAPI().tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{}, nil)
 		if res != nil {
 			t.Fatalf("expected nil result, got %+v", res)
 		}
@@ -230,7 +231,7 @@ func TestCookielessFallbackDashOnlyWhenNeeded(t *testing.T) {
 
 		var pool []Format
 		res := NewPlayerAPI(nil, noopLogger{}).
-			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
+			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{}, nil)
 		if res == nil {
 			t.Fatal("expected a result")
 		}
@@ -254,7 +255,7 @@ func TestCookielessFallbackDashOnlyWhenNeeded(t *testing.T) {
 
 		var pool []Format
 		res := NewPlayerAPI(nil, noopLogger{}).
-			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
+			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{}, nil)
 		if res == nil {
 			t.Fatal("expected a result")
 		}
@@ -278,7 +279,7 @@ func TestCookielessFallbackDashOnlyWhenNeeded(t *testing.T) {
 
 		var pool []Format
 		res := NewPlayerAPI(nil, noopLogger{}).
-			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{})
+			tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{}, nil)
 		if res == nil {
 			t.Fatal("expected the android_vr result")
 		}
@@ -557,4 +558,240 @@ func TestEveryClientSubstitutedIsReportedAsAnIPBlock(t *testing.T) {
 			t.Fatalf("info = %+v, want the watch page's formats", info)
 		}
 	})
+}
+
+// upcomingTVBody is what TV answers during a waiting room: a healthy
+// playability verdict, no formats, isUpcoming set.
+const upcomingTVBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a", "isUpcoming": true, "isLiveContent": true},
+	"streamingData": {}
+}`
+
+// TestUpcomingPollSkipsTheFormatHuntingFallbacks is owner decision O-I. An
+// upcoming stream has no formats BY DEFINITION, so the three clients the
+// cascade consults to go find some cannot succeed — yet on every 30 s
+// waiting-room poll it fetched WEB_CREATOR, VISIONOS and ANDROID_VR, the last
+// of them TWICE.
+//
+// android_vr stays in the roster everywhere else; this rule is about one
+// verdict, StreamUpcoming with PlayabilityOK from the TV authority.
+//
+// Mutants this kills:
+//   - the short-circuit dropped        → 62/101/28 appear in the call list
+//   - the short-circuit not requiring
+//     PlayabilityOK                    → covered by the members-only subtest
+func TestUpcomingPollSkipsTheFormatHuntingFallbacks(t *testing.T) {
+	stubWatchPage(t)
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"7":   {http.StatusOK, upcomingTVBody},
+		"56":  {http.StatusOK, upcomingTVBody},
+		"62":  {http.StatusOK, adequateOKBody},
+		"101": {http.StatusOK, adequateOKBody},
+		"28":  {http.StatusOK, adequateOKBody},
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+	if err != nil {
+		t.Fatalf("GetVideoInfoPublic: %v", err)
+	}
+	if info.StreamStatus != StreamUpcoming {
+		t.Fatalf("StreamStatus = %q, want upcoming", info.StreamStatus)
+	}
+	for _, c := range tr.calls {
+		if c == "62" || c == "101" || c == "28" {
+			t.Errorf("format-hunting client %s was called on an upcoming TV verdict: calls=%v", c, tr.calls)
+		}
+	}
+}
+
+// TestUpcomingPollSkipsTheFormatHuntingFallbacksAuthenticated is the same rule
+// on the cascade that actually pays for it. With every client answering the
+// way a real waiting room does — OK playability, isUpcoming, no formats — the
+// old order was WEB_EMBEDDED, TV, WEB, ANDROID_VR (DASH enrichment),
+// WEB_CREATOR, VISIONOS, ANDROID_VR AGAIN: 7 player calls every 30 s for the
+// whole window, because VISIONOS fails hasAdequateFormats on an upcoming
+// stream so the cookieless chain never broke before its second client.
+//
+// Mutants this kills:
+//   - the short-circuit dropped on either gate → 28/62 reappear in the call
+//     list (the ANDROID_VR gate and the WEB_CREATOR gate each own part of the
+//     tail, so dropping only one still fails the exact-sequence compare)
+//   - tvSaysWaitingRoom reading a client other than the TV authority → the
+//     sequence changes shape
+func TestUpcomingPollSkipsTheFormatHuntingFallbacksAuthenticated(t *testing.T) {
+	stubWatchPage(t)
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"56":  {http.StatusOK, upcomingTVBody}, // WEB_EMBEDDED
+		"7":   {http.StatusOK, upcomingTVBody}, // TV_DOWNGRADED — the authority
+		"1":   {http.StatusOK, upcomingTVBody}, // WEB_SAFARI
+		"62":  {http.StatusOK, upcomingTVBody}, // WEB_CREATOR
+		"101": {http.StatusOK, upcomingTVBody}, // VISIONOS
+		"28":  {http.StatusOK, upcomingTVBody}, // ANDROID_VR
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	info, err := newRetryTestAPI().GetVideoInfoAuthenticated(context.Background(), "test1234567")
+	if err != nil {
+		t.Fatalf("GetVideoInfoAuthenticated: %v", err)
+	}
+	if info.StreamStatus != StreamUpcoming {
+		t.Fatalf("StreamStatus = %q, want upcoming", info.StreamStatus)
+	}
+	if got, want := strings.Join(tr.calls, ","), "56,7,1"; got != want {
+		t.Errorf("calls = [%s], want [%s] — a waiting-room poll must not go format hunting", got, want)
+	}
+}
+
+// TestUpcomingWithAWalledVerdictStillRunsTheFallbacks: the short-circuit is
+// gated on PlayabilityOK, because an upcoming MEMBERS-ONLY stream is exactly
+// the case the fallback chain exists for.
+//
+// Mutant this kills: short-circuiting on StreamUpcoming alone → no fallback
+// client is called and a members-only waiting room loses its chain.
+func TestUpcomingWithAWalledVerdictStillRunsTheFallbacks(t *testing.T) {
+	stubWatchPage(t)
+	const walled = `{
+		"playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you are not a bot"},
+		"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a", "isUpcoming": true, "isLiveContent": true},
+		"streamingData": {}
+	}`
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"7":   {http.StatusOK, walled},
+		"101": {http.StatusOK, adequateOKBody},
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	if _, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567"); err != nil {
+		t.Fatalf("GetVideoInfoPublic: %v", err)
+	}
+	var sawVisionOS bool
+	for _, c := range tr.calls {
+		if c == "101" {
+			sawVisionOS = true
+		}
+	}
+	if !sawVisionOS {
+		t.Errorf("a login-required upcoming stream skipped the cookieless chain: calls=%v", tr.calls)
+	}
+}
+
+// TestCookielessFallbacksReuseAPrefetchedClient is O-I's no-behaviour-change
+// half: the caller that already fetched ANDROID_VR for its DASH manifest hands
+// the result in rather than paying for it twice. Here the prefetch FAILED, and
+// a failed prefetch is reused too — the same cascade must not retry it.
+//
+// Mutants this kills:
+//   - the prefetch ignored          → calls == [101 28], two round trips
+func TestCookielessFallbacksReuseAPrefetchedClient(t *testing.T) {
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"101": {http.StatusOK, audioOnlyOKBody}, // inadequate, so the chain goes on
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	p := NewPlayerAPI(nil, noopLogger{})
+	var pool []Format
+	prefetchedVR, prefetchedErr := p.fetchWithCookielessClient(context.Background(), "test1234567", "vd", constants.AndroidVRClient)
+	// Simulate the :263 caller: it pooled what it fetched.
+	vrFormats := 0
+	if prefetchedVR != nil {
+		collectFormats(&pool, prefetchedVR.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
+		vrFormats = len(prefetchedVR.Formats)
+	}
+	before := len(tr.calls)
+
+	tally := &mismatchTally{}
+	p.tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, tally,
+		&cookielessPrefetch{clientName: constants.AndroidVRClient.ClientName, result: prefetchedVR, err: prefetchedErr, pooled: true})
+
+	for _, c := range tr.calls[before:] {
+		if c == "28" {
+			t.Errorf("ANDROID_VR was fetched again although a result was handed in: calls=%v", tr.calls)
+		}
+	}
+	vrInPool := 0
+	for _, f := range pool {
+		if f.Source == "android_vr" || f.Source == "android_vr_dash_fallback" {
+			vrInPool++
+		}
+	}
+	if vrInPool != vrFormats {
+		t.Errorf("android_vr formats in the pool = %d, want %d — a pooled prefetch must not be collected twice", vrInPool, vrFormats)
+	}
+}
+
+// TestCookielessFallbacksDoNotRecollectAPooledPrefetch is the SUCCESSFUL-
+// prefetch half of the same rule, which the failed-prefetch test above cannot
+// reach: the handed-in result carries formats the caller already pooled, so
+// the chain must adopt it as its own answer without collecting those formats
+// a second time.
+//
+// Mutants this kills:
+//   - the prefetch ignored     → "28" appears after the hand-in
+//   - `pooled` ignored (the
+//     alreadyPooled guard
+//     dropped)                 → the pool carries 4 android_vr formats, not 2
+func TestCookielessFallbacksDoNotRecollectAPooledPrefetch(t *testing.T) {
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"101": {http.StatusOK, audioOnlyOKBody}, // inadequate, so the chain goes on
+		"28":  {http.StatusOK, adequateOKBody},
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	p := NewPlayerAPI(nil, noopLogger{})
+	var pool []Format
+	prefetchedVR, prefetchedErr := p.fetchWithCookielessClient(context.Background(), "test1234567", "vd", constants.AndroidVRClient)
+	if prefetchedErr != nil {
+		t.Fatalf("prefetch: %v", prefetchedErr)
+	}
+	collectFormats(&pool, prefetchedVR.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
+	vrFormats := len(prefetchedVR.Formats)
+	before := len(tr.calls)
+
+	chosen := p.tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{},
+		&cookielessPrefetch{clientName: constants.AndroidVRClient.ClientName, result: prefetchedVR, err: nil, pooled: true})
+
+	if chosen != prefetchedVR {
+		t.Errorf("chosen = %+v, want the handed-in ANDROID_VR result", chosen)
+	}
+	for _, c := range tr.calls[before:] {
+		if c == "28" {
+			t.Errorf("ANDROID_VR was fetched again although a result was handed in: calls=%v", tr.calls)
+		}
+	}
+	vrInPool := 0
+	for _, f := range pool {
+		if f.Source == "android_vr" || f.Source == "android_vr_dash_fallback" {
+			vrInPool++
+		}
+	}
+	if vrInPool != vrFormats {
+		t.Errorf("android_vr formats in the pool = %d, want %d — a pooled prefetch must not be collected twice", vrInPool, vrFormats)
+	}
 }
