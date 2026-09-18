@@ -98,6 +98,64 @@ func TestChatFileStatusDoesNotOverwriteAnIncompleteVerdict(t *testing.T) {
 	}
 }
 
+// TestChatFileStatusReadsTheKeptResumeSidecarAsTheVerdict pins the close-wave
+// fix for the restart/Mux path, which carries NO chat verdict on its context
+// (buildJobContext never runs a chat downloader). A Twitch VOD killed inside
+// the O-A chat wait sits in Muxing with its pager's resume sidecar still in
+// staging; the restart mux used to write "finished" over that truncated
+// capture and cleanupStagingAfterMux then deleted the sidecar with the dir.
+// Every pager removes chat.json.resume.json ONLY on a clean completion
+// (internal/twitch/vod_chat.go, internal/twitch/chat.go,
+// internal/chat/downloader.go), so one still beside chat.json IS the verdict.
+//
+// A RECORDED verdict still wins: the sidecar is only consulted when the
+// context carries none, so a resumed job that archived inherited history
+// still reports "finished".
+//
+// Mutant: the bare `return "finished"` for an empty verdict (the shape this
+// wave replaced) — every row below that wants "incomplete" reads "finished".
+func TestChatFileStatusReadsTheKeptResumeSidecarAsTheVerdict(t *testing.T) {
+	// staged builds a staging dir holding chat.json plus whichever sidecar
+	// paths the row asks for, relative to the dir.
+	staged := func(t *testing.T, sidecars ...string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "chat.json"), []byte(`[]`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, rel := range sidecars {
+			p := filepath.Join(dir, rel)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(`{"offset":12}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	for _, tc := range []struct {
+		name     string
+		sidecars []string
+		verdict  string
+		want     string
+	}{
+		{"pager sidecar beside chat.json, no verdict", []string{"chat.json.resume.json"}, "", chatStatusIncomplete},
+		{"pager sidecar in a part dir, no verdict", []string{filepath.Join("seg_1", "chat.json.resume.json")}, "", chatStatusIncomplete},
+		{"no sidecar, no verdict", nil, "", "finished"},
+		{"sidecar present but the run recorded its own verdict", []string{"chat.json.resume.json"}, "unavailable", "finished"},
+		{"sidecar present and the verdict is already incomplete", []string{"chat.json.resume.json"}, chatStatusIncomplete, chatStatusIncomplete},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobCtx := &JobContext{StagingDir: staged(t, tc.sidecars...), ChatStatus: tc.verdict}
+			if got := chatFileStatus(jobCtx); got != tc.want {
+				t.Errorf("chatFileStatus(staging=%v, verdict=%q) = %q, want %q — a kept resume "+
+					"sidecar is the pager saying it did not finish", tc.sidecars, tc.verdict, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRecordChatOutcomeWritesTheRowAndRemembersItOnTheContext is the wiring:
 // the verdict has to reach BOTH the job row (which is what the two UIs read)
 // and the JobContext (which is what stops the mux path overwriting it).

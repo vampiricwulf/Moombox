@@ -950,11 +950,15 @@ func hasUnmuxedPartsForJob(db *database.Database, jobID, stagingDir string) bool
 	// the dir.
 	//
 	// The orphan scanner deliberately does NOT go through this door: it
-	// consults hasUnmuxedSegmentParts and applies its own, age-limited aside
-	// shield (internal/worker/orphans.go, jobNeedsStaging), because a
-	// week-old aside is one FFmpeg could not read rather than one waiting to
-	// be recovered. Here — moments after a mux, with the operator's next
-	// action still ahead — preservation is unconditional.
+	// consults hasUnmuxedSegmentParts and applies its own aside shield
+	// (internal/worker/orphans.go, jobNeedsStaging). That shield is
+	// UNCONDITIONAL — no age rule, unlike the tail and chat shields beside it
+	// — because finalize muxes every READABLE aside into its own sibling
+	// file, so one still in staging is one FFmpeg could not read: the only
+	// copy of footage that exists nowhere else, not something that goes stale
+	// after a week. The split exists so the sweep can name the asides it
+	// found (OrphanedEntry.Asides) while the two expiring shields keep their
+	// own rule.
 	if len(stagedAsideRecordings(stagingDir)) > 0 {
 		return true
 	}

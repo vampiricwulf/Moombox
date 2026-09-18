@@ -397,12 +397,57 @@ func (o *DownloadOrchestrator) recordChatOutcome(jobCtx *JobContext, messageCoun
 // being copied is the short one and writing "finished" over that verdict is
 // exactly the bug. Every other verdict keeps the old behaviour, "unavailable"
 // included: a resumed job whose session added no messages still archived the
-// history it inherited. A nil context is never passed today — the standalone
-// Mux action builds a real JobContext (buildJobContext, worker.go) with no
-// chat verdict on it — so the nil guard is purely defensive.
+// history it inherited.
+//
+// A context with NO verdict on it is the restart/Mux path: the standalone Mux
+// action builds a real JobContext (buildJobContext, worker.go) and never runs
+// a chat downloader, so nothing recorded one. That path reaches a VOD killed
+// inside the O-A chat wait — a Muxing row whose pager still had pages left —
+// and "finished" there both mislabels the archive and lets
+// cleanupStagingAfterMux delete the pager's resume sidecar with the dir. The
+// sidecar IS the verdict in that case (chatResumeSidecarPresent). A nil
+// context is never passed today, so the nil guard is purely defensive.
 func chatFileStatus(jobCtx *JobContext) string {
-	if jobCtx != nil && jobCtx.ChatStatus == chatStatusIncomplete {
+	if jobCtx == nil {
+		return "finished"
+	}
+	if jobCtx.ChatStatus == chatStatusIncomplete {
+		return chatStatusIncomplete
+	}
+	if jobCtx.ChatStatus == "" && chatResumeSidecarPresent(jobCtx.StagingDir) {
 		return chatStatusIncomplete
 	}
 	return "finished"
+}
+
+// chatResumeSidecarName is the file a chat pager writes beside chat.json to
+// carry the offset (and recent-ID window) it would continue from. All three
+// pagers spell it the same way and all three delete it ONLY on a clean
+// completion: internal/twitch/vod_chat.go (resumeStatePath), internal/twitch/
+// chat.go (chatResumePath) and internal/chat/downloader.go (ResumeFile).
+const chatResumeSidecarName = "chat.json.resume.json"
+
+// chatResumeSidecarPresent reports whether a chat pager left its resume
+// sidecar behind in a job's staging tree — one that was never removed, which
+// means the capture in chat.json stops short of the stream.
+//
+// Both the root and each part dir are checked: a quality/gap-split job keeps
+// each part's chat beside that part's media in seg_N/, which is where that
+// part's pager would have left its sidecar (finalizeMultiSegmentJob reads the
+// same verdict for segments[0].ChatFile). Directories the sweep already skips
+// — a merge tombstone, a non-numeric seg_ name — are skipped here too, since
+// stagedSegDirs is what decides.
+func chatResumeSidecarPresent(stagingDir string) bool {
+	if stagingDir == "" {
+		return false
+	}
+	if fileExists(filepath.Join(stagingDir, chatResumeSidecarName)) {
+		return true
+	}
+	for _, sd := range stagedSegDirs(stagingDir) {
+		if fileExists(filepath.Join(sd.dir, chatResumeSidecarName)) {
+			return true
+		}
+	}
+	return false
 }

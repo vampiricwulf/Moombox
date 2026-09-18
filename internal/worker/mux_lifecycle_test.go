@@ -193,7 +193,7 @@ func TestTruncatedMuxErrorsInsteadOfFinishing(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	w, db := testWorkerSetup(t)
 
-	staging, _ := muxFixtureJob(t, w, db, "j-trunc")
+	staging, outputDir := muxFixtureJob(t, w, db, "j-trunc")
 	media := filepath.Join(staging, "video.mp4")
 	writeMuxFixture(t, ffmpegPath, media, 90)
 	truncateFixture(t, media, 120000)
@@ -212,6 +212,215 @@ func TestTruncatedMuxErrorsInsteadOfFinishing(t *testing.T) {
 	}
 	if _, err := os.Stat(media); err != nil {
 		t.Errorf("staging media was removed after a short mux: %v", err)
+	}
+	// Close-wave B3: the truncated copy must not survive under the archive's
+	// own name. It was left there with output_file empty, so the operator
+	// could neither play it nor find it in the UI, the orphan sweep offered
+	// it as an unowned file, and a later Mux action wrote its retry beside a
+	// bad file wearing the archive's name.
+	//
+	// Mutant: returning the shortfall error without removing the output — the
+	// .mp4 below is still in the output dir.
+	if left := mp4sIn(t, outputDir); len(left) != 0 {
+		t.Errorf("a short mux left %v in the output dir — the archive name must be free for the re-mux", left)
+	}
+}
+
+// TestTruncatedPartMuxLeavesNoPartFile is B3's twin on the PART path
+// (muxSegment): the same `-c copy` shortfall, one part file. muxSegment
+// already returns before AddSegment, so the row never appears — but the
+// truncated "{name} - partN.mp4" stayed in the output dir, unreferenced by
+// any segment row and indistinguishable from the real part a re-mux writes.
+//
+// Driven directly rather than through a split capture: the site's only input
+// is a staged recording and a probe, and both are on disk here.
+//
+// Mutant: returning the shortfall error without removing the part file.
+func TestTruncatedPartMuxLeavesNoPartFile(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-trunc-part")
+	media := filepath.Join(staging, "video.mp4")
+	writeMuxFixture(t, ffmpegPath, media, 90)
+	truncateFixture(t, media, 120000)
+
+	job, _ := db.GetJob("j-trunc-part")
+	jobCtx := w.buildJobContext(job)
+	seg, err := w.orchestrator.muxSegment(context.Background(), jobCtx, 0, 0, time.Now().Unix(),
+		QualityInfo{Label: "720p"}, &DownloadResult{HasVideo: true, VideoPath: media})
+	if err == nil {
+		t.Fatalf("muxSegment on a truncated input = (%v, nil), want a shortfall error", seg)
+	}
+	if seg != nil {
+		t.Errorf("muxSegment returned a segment %+v alongside its shortfall error", seg)
+	}
+	if left := mp4sIn(t, outputDir); len(left) != 0 {
+		t.Errorf("a short part mux left %v in the output dir — an unreferenced truncated part "+
+			"the operator cannot tell from the real one", left)
+	}
+	if _, err := os.Stat(media); err != nil {
+		t.Errorf("staging media was removed after a short part mux: %v", err)
+	}
+}
+
+// TestRestartMuxOutOfAChatWaitKeepsTheChatCapture is the close review's
+// Important finding end to end: a Twitch VOD whose video finished while its
+// chat pager still had pages left sits in Muxing for the length of the O-A
+// chat wait (up to 6 h). A daemon restart in that window routes the row
+// through MuxJob, which builds a JobContext with NO chat verdict on it — and
+// the mux used to write chat_status = "finished" over the truncated capture,
+// after which cleanupStagingAfterMux deleted the staging dir with the pager's
+// chat.json.resume.json in it. The tail was unrecoverable and unbadged.
+//
+// The sidecar is the signal: every pager deletes it only on a clean
+// completion. With it read as the verdict the row is badged incomplete and
+// the existing preserveForChat branch prunes staging to the chat capture.
+//
+// Mutant: chatFileStatus without the sidecar term — the row reads "finished"
+// and the whole staging dir (sidecar included) is gone.
+func TestRestartMuxOutOfAChatWaitKeepsTheChatCapture(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+
+	staging, _ := muxFixtureJob(t, w, db, "j-chatwait")
+	media := filepath.Join(staging, "video.mp4")
+	writeMuxFixture(t, ffmpegPath, media, 90)
+	chat := filepath.Join(staging, "chat.json")
+	if err := os.WriteFile(chat, []byte(`[{"message":"partial capture"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(staging, "chat.json.resume.json")
+	if err := os.WriteFile(sidecar, []byte(`{"contentOffsetSeconds":12}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.MuxJob("j-chatwait"); err != nil {
+		t.Fatalf("MuxJob: %v", err)
+	}
+	w.Stop()
+
+	fresh, _ := db.GetJob("j-chatwait")
+	if fresh == nil || fresh.Status != database.StatusFinished {
+		t.Fatalf("job after a restart mux = %v, want Finished (error=%q)", statusOf(fresh), errorOf(fresh))
+	}
+	if fresh.ChatStatus != chatStatusIncomplete {
+		t.Errorf("chat_status = %q after restart-muxing a job whose pager left its resume sidecar, "+
+			"want %q — the capture was cut short and the row is the only place that says so",
+			fresh.ChatStatus, chatStatusIncomplete)
+	}
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Errorf("the chat resume sidecar was deleted by the restart mux (stat err = %v) — it is "+
+			"the only thing a re-run can page on from", err)
+	}
+	if _, err := os.Stat(chat); err != nil {
+		t.Errorf("the partial chat.json was deleted by the restart mux (stat err = %v) — a resumed "+
+			"pager APPENDS to it", err)
+	}
+	// Pruned to the chat capture, not kept whole: the media is already in the
+	// archive, so keeping it would cost the archive's size again for a week.
+	if _, err := os.Stat(media); !os.IsNotExist(err) {
+		t.Errorf("the muxed staging media survived the chat-incomplete keep (stat err = %v) — only "+
+			"the chat capture is kept", err)
+	}
+}
+
+// TestCancelledAsideMuxLeavesNoPartialSibling pins close-review Minor 2. An
+// aside mux cut off by a shutdown leaves FFmpeg's partial output beside the
+// archive: cleanupFailedMux preserves a partial on ctx cancel (the right call
+// for the MAIN mux, where the partial is all the operator has), but an
+// aside's partial has no salvage value — the aside itself is still in
+// staging, waiting for the next run. Worse, the leftover is INVISIBLE: the
+// orphan sweep owns it by stem, so no UI offers it, and asideOutputPath's
+// collision counter writes the retry to "-2" rather than over it.
+//
+// Mutant: dropping os.Remove(out) from the MuxCopy error arm — the moov-less
+// sibling is still on disk.
+func TestCancelledAsideMuxLeavesNoPartialSibling(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	staging, outputDir := t.TempDir(), t.TempDir()
+	aside := filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
+	writeSlowAsideFixture(t, ffmpegPath, aside)
+
+	o := NewDownloadOrchestrator(nil, nil, ffmpegPath, discardLogger{}, nil, nil, nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sibling := filepath.Join(outputDir, "Title"+engine.StagedRestartSuffix+"1700000000.mp4")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.muxStagedAsides(ctx, &JobContext{
+			Job: &database.Job{ID: "j-aside-cancel"}, StagingDir: staging,
+		}, outputDir, "Title")
+	}()
+
+	// Cancel the moment FFmpeg has opened its output — that is the whole
+	// window this finding lives in, and the fixture is sized so the copy is
+	// still running hundreds of milliseconds later.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if _, err := os.Stat(sibling); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("FFmpeg never created the aside's output file — nothing to cancel mid-copy")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if _, err := os.Stat(aside); os.IsNotExist(err) {
+		t.Fatal("the aside mux ran to completion before the cancellation landed — this test needs " +
+			"to cut a copy in flight; the fixture is too small for this machine")
+	}
+	if _, err := os.Stat(sibling); !os.IsNotExist(err) {
+		t.Errorf("a cancelled aside mux left %s behind (stat err = %v) — a moov-less file under the "+
+			"archive's own stem that no UI can offer and the next finalize writes '-2' around", sibling, err)
+	}
+}
+
+// TestStagedRestartAsidesSkipsTheLiveRecording pins the aside-only scan the
+// orphan sweep runs (close review Minor 10 / Task 8 B6): jobNeedsStaging and
+// scanStagingOrphans ask for asides on every pass and nothing else, so the
+// scan must not pay for discoverStagingMedia's Stat of every candidate media
+// name — and must not REPORT the live recording, which is ordinary staging
+// content, not captured-and-never-muxed footage.
+//
+// Mutant: dropping this scan's own engine.IsStagedRestartPath filter (the
+// shape it would take if it simply reported what ReadDir returned) — the live
+// video.mp4 comes back as an aside, and through stagedAsideRecordings that
+// shields every finished job's staging dir from the sweep forever. The
+// end-to-end twin of that mutant is the control row in
+// TestStagedAsideKeepsStagingFromCleanup.
+func TestStagedRestartAsidesSkipsTheLiveRecording(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "video.mp4")
+	newer := filepath.Join(dir, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
+	older := filepath.Join(dir, "video.mp4"+engine.StagedRestartSuffix+"1600000000")
+	for _, p := range []string{live, newer, older, newer + ".resume.json"} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+
+	got := stagedRestartAsides(dir)
+	want := []string{older, newer}
+	if len(got) != len(want) {
+		t.Fatalf("stagedRestartAsides = %v, want %v (asides only, oldest first)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stagedRestartAsides = %v, want %v (asides only, oldest first — the live "+
+				"recording and the sidecar twin are not asides)", got, want)
+		}
+	}
+	if len(stagedRestartAsides(filepath.Join(dir, "does-not-exist"))) != 0 {
+		t.Error("stagedRestartAsides on an unreadable dir returned entries, want none")
 	}
 }
 
@@ -648,6 +857,43 @@ func writeAsideFixture(t *testing.T, ffmpegPath, path string, seconds int) {
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatalf("move the aside fixture into place: %v", err)
 	}
+}
+
+// writeSlowAsideFixture renders an aside big enough that `-c copy` is still
+// writing it hundreds of milliseconds after FFmpeg opens its output, which is
+// what makes a mid-copy cancellation reachable from a test. PCM audio rather
+// than video: 25 minutes of it is ~129 MB written in a fraction of a second,
+// where the same size of encoded video would cost minutes to generate.
+func writeSlowAsideFixture(t *testing.T, ffmpegPath, path string) {
+	t.Helper()
+	tmp := filepath.Join(t.TempDir(), "aside.mp4")
+	cmd := exec.Command(ffmpegPath, "-nostdin", "-y",
+		"-f", "lavfi", "-i", "sine=frequency=1000:duration=1500",
+		"-c:a", "pcm_s16le", tmp)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate the slow aside fixture: %v\n%s", err, out)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatalf("move the slow aside fixture into place: %v", err)
+	}
+}
+
+// mp4sIn lists the .mp4 files directly in dir. Used where the assertion is
+// "the archive name is free", which must not depend on how the filename
+// template resolved.
+func mp4sIn(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read output dir %s: %v", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".mp4") {
+			out = append(out, e.Name())
+		}
+	}
+	return out
 }
 
 // truncateFixture cuts a fixture off mid-mdat: ffprobe still reports the full

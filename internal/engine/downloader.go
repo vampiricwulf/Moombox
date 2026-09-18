@@ -935,7 +935,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 					// that segments were lost to the CDN — none were.
 					d.logger.Warn("[Downloader] Truncate-for-resume failed — splitting instead of starting fresh",
 						"file", d.opts.OutputFile, "err", truncErr)
-					return fmt.Errorf("%w: %w: %v", ErrGapDetected, ErrTruncateBlocked, truncErr)
+					return fmt.Errorf("%w: %w: %w", ErrGapDetected, ErrTruncateBlocked, truncErr)
 				}
 				// ENGINE-5: the old branch here logged a Warn, cleared the
 				// resume state and opened the file O_TRUNC — losing hours of
@@ -1040,6 +1040,12 @@ func StagedRestartSidecar(aside string) string { return aside + resumeFileSuffix
 // required to be digits so an ordinary file that merely contains ".restart-"
 // is never mistaken for one of ours.
 func IsStagedRestartPath(name string) bool {
+	// Belt and braces: the digits rule below already excludes the twin, whose
+	// name ends in the sidecar suffix rather than in the timestamp, so no
+	// input can make this line the deciding one (Task 8's mutant 12a survives
+	// its removal by construction). It stays because reading "…and not its
+	// sidecar twin" in the doc above and finding nothing that says so is how
+	// a later edit to the timestamp rule quietly starts muxing JSON files.
 	if strings.HasSuffix(name, resumeFileSuffix) {
 		return false
 	}

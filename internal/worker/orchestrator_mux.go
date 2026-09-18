@@ -109,10 +109,14 @@ func muxedOutputIsShort(inputSec, outputSec float64) bool {
 // lives in deleted on the way out. An error leaves the job in Error with the
 // numbers in its message and staging untouched (both cleanup paths only run
 // after a mux that returned nil), so the Mux action can re-run the copy once
-// the input is repaired. The flag path is deliberately NOT used here:
-// incomplete_tail means "the DOWNLOAD is missing segments" and steers Retry
-// into re-downloading, which fixes nothing when the bytes are already on disk
-// and it is the copy that stopped early.
+// the input is repaired. Both call sites discard the rejected output first
+// (discardShortMuxOutput) — the footage is in the INPUT, and leaving a short
+// file under the archive's name is what the re-mux has to write over.
+//
+// The flag path is deliberately NOT used here: incomplete_tail means "the
+// DOWNLOAD is missing segments" and steers Retry into re-downloading, which
+// fixes nothing when the bytes are already on disk and it is the copy that
+// stopped early.
 func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID string, outputSec float64, inputs ...string) error {
 	var longest float64
 	for _, in := range inputs {
@@ -128,8 +132,25 @@ func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID st
 	}
 	o.logger.Error("muxed output is shorter than its input — the copy stopped at a bad fragment",
 		"jobID", jobID, "inputSeconds", longest, "outputSeconds", outputSec)
-	return fmt.Errorf("mux produced %.0fs from a %.0fs input (%.0fs missing) — the copy stopped at a bad fragment; staging is preserved, re-run the Mux action",
+	return fmt.Errorf("mux produced %.0fs from a %.0fs input (%.0fs missing) — the copy stopped at a bad fragment; the short output was removed and staging is preserved, re-run the Mux action",
 		outputSec, longest, longest-outputSec)
+}
+
+// discardShortMuxOutput deletes the output a shortfall verdict just rejected.
+//
+// The alternative is what shipped with ENGINE-9: the truncated .mp4 stayed in
+// the output directory wearing the archive's own name while the row went to
+// Error with output_file empty, so no UI could play or delete it, the orphan
+// sweep offered it as an unowned file, and the Mux action's retry landed
+// beside a bad file rather than over it. The footage is not lost by this —
+// the INPUT is what holds it, and staging is preserved for exactly that
+// reason. Best-effort: a removal that fails leaves the old situation, which
+// the error message already describes.
+func (o *DownloadOrchestrator) discardShortMuxOutput(jobID, outputFile string) {
+	if err := os.Remove(outputFile); err != nil && !os.IsNotExist(err) {
+		o.logger.Warn("could not remove the short muxed output; it stays under the archive's name",
+			"output", outputFile, "err", err, "jobID", jobID)
+	}
 }
 
 // stagedRecordingParts returns the recordings inside ONE staging dir in
@@ -145,20 +166,7 @@ func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID st
 // The sidecar twin (<file>.restart-<ts>.resume.json) is excluded by
 // engine.IsStagedRestartPath: muxing a JSON file is not a recovery.
 func stagedRecordingParts(dir string) []string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var parts []string
-	for _, e := range entries {
-		if e.IsDir() || !engine.IsStagedRestartPath(e.Name()) {
-			continue
-		}
-		parts = append(parts, filepath.Join(dir, e.Name()))
-	}
-	sort.SliceStable(parts, func(i, j int) bool {
-		return stagedRestartStamp(parts[i]) < stagedRestartStamp(parts[j])
-	})
+	parts := stagedRestartAsides(dir)
 	if media := discoverStagingMedia(dir); media != nil {
 		live := media.VideoPath
 		if live == "" {
@@ -169,6 +177,34 @@ func stagedRecordingParts(dir string) []string {
 		}
 	}
 	return parts
+}
+
+// stagedRestartAsides returns the set-aside recordings in ONE dir, oldest
+// stamp first — stagedRecordingParts without the live recording, and so
+// without discoverStagingMedia's Stat of every candidate media name.
+//
+// Split out because the orphan sweep asks for asides and nothing else, for
+// every job, on every pass (jobNeedsStaging and scanStagingOrphans in
+// internal/worker/orphans.go, via stagedAsideRecordings): one ReadDir per dir
+// is the whole cost, and a result that never contains the live recording is
+// also the correct ANSWER there — an ordinary staging file is not
+// captured-and-never-muxed footage.
+func stagedRestartAsides(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var asides []string
+	for _, e := range entries {
+		if e.IsDir() || !engine.IsStagedRestartPath(e.Name()) {
+			continue
+		}
+		asides = append(asides, filepath.Join(dir, e.Name()))
+	}
+	sort.SliceStable(asides, func(i, j int) bool {
+		return stagedRestartStamp(asides[i]) < stagedRestartStamp(asides[j])
+	})
+	return asides
 }
 
 // stagedRestartStamp is the unix timestamp the engine stamped into an aside's
@@ -198,11 +234,7 @@ func stagedAsideRecordings(stagingDir string) []string {
 		dirs = append(dirs, sd.dir)
 	}
 	for _, dir := range dirs {
-		for _, p := range stagedRecordingParts(dir) {
-			if engine.IsStagedRestartPath(filepath.Base(p)) {
-				out = append(out, p)
-			}
-		}
+		out = append(out, stagedRestartAsides(dir)...)
 	}
 	return out
 }
@@ -313,6 +345,16 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 			continue
 		}
 		if err := o.mux().MuxCopy(ctx, g.video, g.audio, out); err != nil {
+			// Take the partial with it. engine.cleanupFailedMux deliberately
+			// PRESERVES a partial output when the failure was a ctx cancel —
+			// right for the main mux, where the partial is all the operator
+			// has — but an aside's partial has no salvage value: the aside
+			// itself is still in staging and the next finalize re-muxes it.
+			// Left behind, it is a moov-less file wearing the archive's own
+			// stem, which the output sweep OWNS (engine.RestartSiblingStem)
+			// and so never offers for deletion, while asideOutputPath's
+			// counter writes the successful retry to "-2" beside it.
+			os.Remove(out)
 			o.logger.Error("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
 				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 			continue
@@ -452,6 +494,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// the archive.
 	if probeData != nil {
 		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
+			o.discardShortMuxOutput(jobCtx.Job.ID, outputFile)
 			return err
 		}
 	}
@@ -1036,9 +1079,12 @@ func (o *DownloadOrchestrator) muxSegment(
 	// ENGINE-9, part edition: a part whose copy stopped early must not be
 	// persisted as a finished segment. Returning the error before AddSegment
 	// leaves the index unrecorded, which is what keeps its staging dir alive
-	// (hasUnmuxedPartsForJob) for a re-mux.
+	// (hasUnmuxedPartsForJob) for a re-mux — and the short part file is
+	// removed with it, so the re-mux writes the real part at that name rather
+	// than beside an unreferenced truncated twin of it.
 	if probeData != nil {
 		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
+			o.discardShortMuxOutput(jobCtx.Job.ID, outputPath)
 			return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 		}
 	}

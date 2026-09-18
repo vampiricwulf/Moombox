@@ -879,7 +879,9 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	// bytes at the right length: the read below is bounded to end-start+1
 	// either way, so the file keeps its size and nothing downstream can see
 	// the corruption (sweep-2 D-R1). Returning an error hands it to
-	// fetchChunkWithRetry, which treats it exactly as it treats a short read.
+	// fetchChunkWithRetry, which treats it exactly as it treats a short read
+	// that ERRORS — an honest short body is no error at all and is accepted
+	// as it stands.
 	// An origin that omits Content-Range entirely keeps today's behaviour:
 	// the header is mandatory on a 206, but refusing one on that ground alone
 	// would break a working origin over a header this path does not need.
