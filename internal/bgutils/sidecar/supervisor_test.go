@@ -25,8 +25,8 @@ func (silentLogger) Error(string, ...any) {}
 // process), so none of them calls t.Parallel().
 func resetHealth(t *testing.T) {
 	t.Helper()
-	sharedHealth.Store(nil)
-	t.Cleanup(func() { sharedHealth.Store(nil) })
+	ResetHealthForTesting()
+	t.Cleanup(ResetHealthForTesting)
 }
 
 // TestSupervisorRestartsOnTheBackoffLadder is the whole point of the row: a
@@ -224,7 +224,7 @@ func TestCurrentHealthIsEmptyUntilPublished(t *testing.T) {
 // below — otherwise the handle would be clean and the mutant would survive.
 //
 // Mutant this kills: Restart calling Start without zeroing s.cmd (or without
-// resetting stopOnce) → err mentions "already started".
+// resetting the teardown guard) → err mentions "already started".
 func TestRestartResetsTheStartGuard(t *testing.T) {
 	s := New(Config{Logger: silentLogger{}, CacheDir: string([]byte{0})})
 
@@ -283,5 +283,37 @@ func TestMarkUnhealthyNotifiesTheSupervisor(t *testing.T) {
 	}
 	if s.IsHealthy() {
 		t.Error("IsHealthy() is true after markUnhealthy")
+	}
+}
+
+// TestSubscribeHealthFansOutAndUnsubscribes: the TUI is PUSH-driven (it draws
+// on messages, it does not poll a package global), so the health store has to
+// call it. The immediate first call matters as much as the updates — a TUI
+// that starts after the sidecar died would otherwise show a healthy bar until
+// the next transition, which for a permanently dead sidecar is never.
+//
+// Mutants this kills:
+//   - no immediate call on subscribe    → got[0] is missing, len(got) == 1
+//   - PublishHealth not fanning out     → len(got) == 1
+//   - unsubscribe not removing the fn   → len(got) == 3
+func TestSubscribeHealthFansOutAndUnsubscribes(t *testing.T) {
+	resetHealth(t)
+	PublishHealth(Health{Healthy: false, Reason: "stdout EOF"})
+
+	var got []Health
+	unsub := SubscribeHealth(func(h Health) { got = append(got, h) })
+
+	PublishHealth(Health{Healthy: true, Restarts: 1})
+	unsub()
+	PublishHealth(Health{Healthy: false, Reason: "again"})
+
+	if len(got) != 2 {
+		t.Fatalf("callback ran %d times (%+v), want 2: the current value then one update", len(got), got)
+	}
+	if got[0].Healthy || got[0].Reason != "stdout EOF" {
+		t.Errorf("first call = %+v, want the snapshot that already existed", got[0])
+	}
+	if !got[1].Healthy || got[1].Restarts != 1 {
+		t.Errorf("second call = %+v, want the published update", got[1])
 	}
 }

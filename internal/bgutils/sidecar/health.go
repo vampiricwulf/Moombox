@@ -1,6 +1,7 @@
 package sidecar
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -33,9 +34,76 @@ type Health struct {
 // sidecar-disabled config never draws an alert.
 var sharedHealth atomic.Pointer[Health]
 
-// PublishHealth records the current sidecar health for both UIs.
+// healthSubs are the PUSH consumers — today exactly one, cmd/moombox's TUI
+// wiring, which turns each call into an app.Send. The Web dashboard polls
+// CurrentHealth from /api/status instead and is not in this list.
+var (
+	healthSubsMu sync.Mutex
+	healthSubs   []*func(Health)
+)
+
+// PublishHealth records the current sidecar health for both UIs and pushes it
+// to every SubscribeHealth consumer.
 func PublishHealth(h Health) {
 	sharedHealth.Store(&h)
+
+	healthSubsMu.Lock()
+	subs := make([]*func(Health), len(healthSubs))
+	copy(subs, healthSubs)
+	healthSubsMu.Unlock()
+
+	// Fan out off the lock: a subscriber that unsubscribes from inside its own
+	// callback (the TUI's exit path can) would otherwise deadlock.
+	for _, p := range subs {
+		callHealthSub(p, h)
+	}
+}
+
+// SubscribeHealth registers fn for every health change and calls it IMMEDIATELY
+// with the current snapshot (when one exists), so a subscriber that starts
+// after the sidecar died still draws the alert. Returns an unsubscribe func;
+// mirrors connectivity's OnStateChange, which cmd/moombox unsubscribes the
+// same way at TUI exit.
+//
+// fn runs on the publisher's goroutine (the supervisor loop, or startup) and
+// must not block. A panic in it is recovered so one bad subscriber cannot take
+// the supervisor down.
+func SubscribeHealth(fn func(Health)) (unsubscribe func()) {
+	p := &fn
+	healthSubsMu.Lock()
+	healthSubs = append(healthSubs, p)
+	healthSubsMu.Unlock()
+
+	if h, ok := CurrentHealth(); ok {
+		callHealthSub(p, h)
+	}
+
+	return func() {
+		healthSubsMu.Lock()
+		defer healthSubsMu.Unlock()
+		for i, q := range healthSubs {
+			if q == p {
+				healthSubs = append(healthSubs[:i], healthSubs[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+func callHealthSub(p *func(Health), h Health) {
+	defer func() { _ = recover() }()
+	(*p)(h)
+}
+
+// ResetHealthForTesting clears the package-level snapshot AND every
+// subscriber. Exported because internal/web/routes needs it: the snapshot is
+// process-wide state, and a route test that left one published would change
+// what the next test sees. Production never calls it.
+func ResetHealthForTesting() {
+	sharedHealth.Store(nil)
+	healthSubsMu.Lock()
+	healthSubs = nil
+	healthSubsMu.Unlock()
 }
 
 // CurrentHealth returns the last published snapshot. ok is false until the

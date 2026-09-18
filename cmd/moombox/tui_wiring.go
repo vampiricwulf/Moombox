@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -924,6 +925,15 @@ func (s *runState) runTUI() {
 		app.Send(tui.ConnectivityMsg{Online: online})
 	})
 
+	// Wire BotGuard sidecar liveness to the TUI (program.Send, like
+	// connectivity above). SubscribeHealth calls back immediately with the
+	// current snapshot, so a TUI started after a dead sidecar still draws the
+	// alert; a process with the sidecar disabled published nothing and gets no
+	// callback at all, which is why the bar stays quiet there.
+	unsubSidecarTUI := sidecar.SubscribeHealth(func(h sidecar.Health) {
+		app.Send(tui.SidecarStatusMsg{Healthy: h.Healthy})
+	})
+
 	// Suppress stdout logging while TUI runs — BubbleTea owns the alternate
 	// screen, and raw log writes corrupt the display. The TUI log panel
 	// receives logs via Subscribe() instead.
@@ -947,6 +957,7 @@ func (s *runState) runTUI() {
 	unsubTUITrimsChanged()
 	unsubTUIJobsChange()
 	unsubConnTUI()
+	unsubSidecarTUI()
 
 	// Report dropped messages (helps diagnose missed TUI updates)
 	if n := tuiDroppedJobs.Load(); n > 0 {

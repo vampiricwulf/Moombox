@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -130,6 +131,14 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string) bool {
 		err := s.cfg.Restart(startCtx)
 		cancel()
 		if err != nil {
+			// ErrStopped is not transient: shutdown.go called Stop, the handle
+			// is terminal, and climbing the ladder against it would keep this
+			// goroutine alive until the process context happens to end.
+			if errors.Is(err, ErrStopped) {
+				s.cfg.Logger.Debug("BotGuard sidecar supervisor stopping: the sidecar was shut down",
+					"attempt", attempt+1, "deadReason", reason)
+				return false
+			}
 			s.cfg.Logger.Warn("BotGuard sidecar restart failed",
 				"attempt", attempt+1, "err", err, "deadReason", reason)
 			continue

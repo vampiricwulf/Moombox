@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
@@ -1532,6 +1533,20 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 		}
 		if deps.GetChannelHealth != nil {
 			resp["channelHealth"] = deps.GetChannelHealth()
+		}
+
+		// BotGuard sidecar liveness. ABSENT (not false) when nothing was ever
+		// published — that is what `[bgutils] use_sidecar = false` looks like,
+		// and a correct config must not paint a warning. Read from the package
+		// snapshot rather than a StatusRouteDeps closure for the same reason
+		// SharedDiskStatus is read that way: the producer is cmd/moombox and
+		// the consumers are both UIs.
+		if h, ok := sidecar.CurrentHealth(); ok {
+			resp["botguardSidecar"] = map[string]any{
+				"healthy":  h.Healthy,
+				"reason":   h.Reason,
+				"restarts": h.Restarts,
+			}
 		}
 
 		jsonResponse(rw, resp)

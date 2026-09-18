@@ -361,6 +361,14 @@ type ConnectivityMsg struct {
 	Online bool
 }
 
+// SidecarStatusMsg is sent when the BotGuard sidecar's liveness changes.
+// A plain bool by design: internal/tui must not import internal/bgutils, so
+// cmd/moombox's wiring projects sidecar.Health onto this and nothing else
+// crosses the boundary.
+type SidecarStatusMsg struct {
+	Healthy bool
+}
+
 // chordState tracks the two-key chord system state machine.
 type chordState struct {
 	prefix     string    // "a", "r", "o", "q" or ""
