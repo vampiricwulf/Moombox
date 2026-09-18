@@ -243,18 +243,24 @@ func vodChatWaitTimeout(job *database.Job) time.Duration {
 // below the mux stay where it is (it still covers the live path, and every
 // path that reaches the mux without coming through here).
 //
+// The bound comes off the FRESH row, not the captured job struct. jobCtx.Job
+// is the pointer processJob took before stream processing, and the Twitch VOD
+// path (processTwitchVod, stream_processor_twitch.go) writes length_seconds to
+// the row ONLY — it never syncs the in-memory struct the way the YouTube path
+// does (updateJobMetadata, stream_processor.go). Bounding on the captured
+// pointer therefore left the duration term dead on Twitch, TWITCH-3's own
+// platform: every first-run VOD, however long, got the floor.
+//
 // The first wait is context-aware, because the bound is now long enough to
-// matter: a Stop() (or a user cancel) mid-wait collapses it to zero, so
-// resolveChatOutcome goes straight to its Stop()+grace path — and that path's
-// rule, "never nil once the first wait expired", records a chat that was
-// still paging at shutdown as incomplete rather than letting a Stop()-exit's
-// nil verdict read as "finished". An ALREADY-cancelled context is left alone:
-// ExecuteTwitch's outage-finalize path arrives here with ctx.Err() != nil by
-// design, and collapsing its wait would change a verdict this decision is not
-// about.
+// matter: a Stop() (or a user cancel) collapses it to zero — whether it lands
+// mid-wait or was already in effect on entry, as on ExecuteTwitch's
+// outage-finalize path, which arrives here with the chat already Stop()'d and
+// nothing left to wait hours for. resolveChatOutcome then goes straight to its
+// Stop()+grace path, and that path's rule, "never nil once the first wait
+// expired", records a chat that was still paging when the job was stopped as
+// incomplete rather than letting a Stop()-exit's nil verdict read as
+// "finished" — which is the honest verdict for a capture cut short.
 func (o *DownloadOrchestrator) resolveVodChatOutcome(ctx context.Context, dl ChatSource, rec *chatOutcome, done chan struct{}, job *database.Job) error {
-	wait := vodChatWaitTimeout(job)
-
 	jobID := ""
 	if job != nil {
 		jobID = job.ID
@@ -262,20 +268,34 @@ func (o *DownloadOrchestrator) resolveVodChatOutcome(ctx context.Context, dl Cha
 	if o.queue != nil && jobID != "" {
 		o.queue.ReleaseDownloadSlot(jobID)
 	}
+
+	// The row is the truth for length_seconds (see the doc above); a read
+	// error falls back to whatever the captured struct carries.
+	bounded := job
+	if o.db != nil && jobID != "" {
+		if fresh, err := o.db.GetJob(jobID); err == nil && fresh != nil {
+			bounded = fresh
+		}
+	}
+	wait := vodChatWaitTimeout(bounded)
 	o.logger.Debug("waiting for VOD chat to finish paging", "jobID", jobID, "bound", wait)
 
-	if ctx != nil && done != nil && ctx.Err() == nil {
-		timer := time.NewTimer(wait)
-		select {
-		case <-done:
-			// resolveChatOutcome's own select takes the closed channel
-			// immediately below; the bound is left intact for it.
-			timer.Stop()
-		case <-ctx.Done():
+	if ctx != nil && done != nil {
+		if ctx.Err() != nil {
 			wait = 0
-			timer.Stop()
-		case <-timer.C:
-			wait = 0
+		} else {
+			timer := time.NewTimer(wait)
+			select {
+			case <-done:
+				// resolveChatOutcome's own select takes the closed channel
+				// immediately below; the bound is left intact for it.
+				timer.Stop()
+			case <-ctx.Done():
+				wait = 0
+				timer.Stop()
+			case <-timer.C:
+				wait = 0
+			}
 		}
 	}
 	return o.resolveChatOutcome(dl, rec, done, wait, 2*time.Second)

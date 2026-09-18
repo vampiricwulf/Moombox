@@ -90,8 +90,11 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	if job == nil || job.Status != database.StatusFinished {
 		return false
 	}
-	return (job.IncompleteTail && !incompleteStagingExpired(cfg, job)) ||
-		(job.ChatStatus == chatStatusIncomplete && !incompleteStagingExpired(cfg, job)) ||
+	// One age rule, read once, so that the doc's claim above — both
+	// incomplete shields expire together — is visible in the expression.
+	notExpired := !incompleteStagingExpired(cfg, job)
+	return (job.IncompleteTail && notExpired) ||
+		(job.ChatStatus == chatStatusIncomplete && notExpired) ||
 		hasUnmuxedPartsForJob(db, job.ID, jobStagingDir)
 }
 

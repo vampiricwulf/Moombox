@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -26,6 +27,10 @@ import (
 //   - dropping the floor: a 3-minute VOD with 40k comments is cut at 3 minutes.
 //   - dropping the ceiling: an absurd length_seconds holds the job open for
 //     days.
+//   - either comparison flipped to its non-strict twin (`>=`/`<=`, or a `<`
+//     that keeps the longer value): the four boundary rows below — exactly the
+//     floor, one second over it, exactly the ceiling, one second over it —
+//     are what catch that.
 func TestVodChatWaitTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -33,8 +38,15 @@ func TestVodChatWaitTimeout(t *testing.T) {
 		want time.Duration
 	}{
 		{"no length falls back to the floor", &database.Job{}, vodChatWaitFloor},
+		{"nil job falls back to the floor", nil, vodChatWaitFloor},
+		{"zero length falls back to the floor", &database.Job{LengthSeconds: ptrInt(0)}, vodChatWaitFloor},
+		{"negative length falls back to the floor", &database.Job{LengthSeconds: ptrInt(-5)}, vodChatWaitFloor},
 		{"short VOD gets the floor", &database.Job{LengthSeconds: ptrInt(180)}, vodChatWaitFloor},
+		{"exactly the floor", &database.Job{LengthSeconds: ptrInt(30 * 60)}, vodChatWaitFloor},
+		{"one second over the floor", &database.Job{LengthSeconds: ptrInt(30*60 + 1)}, vodChatWaitFloor + time.Second},
 		{"long VOD gets its own duration", &database.Job{LengthSeconds: ptrInt(4 * 3600)}, 4 * time.Hour},
+		{"exactly the ceiling", &database.Job{LengthSeconds: ptrInt(6 * 3600)}, vodChatWaitCeiling},
+		{"one second over the ceiling", &database.Job{LengthSeconds: ptrInt(6*3600 + 1)}, vodChatWaitCeiling},
 		{"absurd length is capped", &database.Job{LengthSeconds: ptrInt(90 * 3600)}, vodChatWaitCeiling},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -173,6 +185,112 @@ func TestVodChatWaitStopsPromptlyOnCancel(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("resolveVodChatOutcome did not return after its context was cancelled — a Stop() " +
 			"must not be parked behind the VOD bound")
+	}
+}
+
+// TestVodChatWaitBoundReadsTheFreshRow pins the input to the bound, not just
+// its arithmetic. jobCtx.Job is the pointer processJob captured BEFORE stream
+// processing, and the Twitch VOD path writes length_seconds to the ROW only —
+// so a bound computed from the captured struct is the floor for every
+// first-run Twitch VOD, the platform this whole row is about.
+//
+// Mutant: bounding on the captured struct (`wait := vodChatWaitTimeout(job)`)
+// — the logged bound is 30m instead of the row's 4h.
+func TestVodChatWaitBoundReadsTheFreshRow(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	if _, err := db.AddJob(&database.Job{
+		ID: "tw_fresh_len", VideoID: "fresh_len", URL: "https://twitch.tv/videos/4",
+		Platform: "twitch", Status: database.StatusMuxing, LengthSeconds: ptrInt(4 * 3600),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cl := &captureLogger{}
+	o := &DownloadOrchestrator{db: db, logger: cl}
+	var rec chatOutcome
+	done := make(chan struct{})
+	close(done) // the chat is already finished; only the bound is under test
+
+	// What production passes: the struct as captured before stream processing,
+	// with no length on it.
+	captured := &database.Job{ID: "tw_fresh_len", Platform: "twitch"}
+	if err := o.resolveVodChatOutcome(context.Background(), nil, &rec, done, captured); err != nil {
+		t.Fatalf("resolveVodChatOutcome = %v, want nil for a chat that already finished", err)
+	}
+
+	got, ok := loggedDuration(cl, "waiting for VOD chat to finish paging", "bound")
+	if !ok {
+		t.Fatal("resolveVodChatOutcome logged no bound for the VOD chat wait")
+	}
+	if got != 4*time.Hour {
+		t.Errorf("bound = %s, want 4h0m0s — the bound must come off the fresh row, not the "+
+			"struct processJob captured before stream processing", got)
+	}
+}
+
+// loggedDuration finds the duration logged under key in the first captured
+// message with the given text.
+func loggedDuration(cl *captureLogger, msg, key string) (time.Duration, bool) {
+	for _, entry := range cl.msgs {
+		if len(entry) == 0 || entry[0] != msg {
+			continue
+		}
+		for i := 1; i+1 < len(entry); i += 2 {
+			if entry[i] == key {
+				d, ok := entry[i+1].(time.Duration)
+				return d, ok
+			}
+		}
+	}
+	return 0, false
+}
+
+// TestVodChatWaitStopsPromptlyWhenAlreadyCancelled is the entry-time twin of
+// TestVodChatWaitStopsPromptlyOnCancel. ExecuteTwitch's outage-finalize path
+// reaches the chat wait with its context ALREADY cancelled and the chat
+// already Stop()'d; a bound measured in hours has nothing to wait for there.
+//
+// Mutant: the `ctx.Err() == nil` guard the first round used around the whole
+// pre-wait — a dead context then skipped the collapse entirely and handed
+// resolveChatOutcome the full 30-minute floor, and this test hits its
+// deadline.
+func TestVodChatWaitStopsPromptlyWhenAlreadyCancelled(t *testing.T) {
+	o := &DownloadOrchestrator{logger: discardLogger{}}
+	var rec chatOutcome
+	done := make(chan struct{})
+	dl := &stopUnwoundChatSource{started: make(chan struct{}), release: make(chan struct{})}
+
+	go func() {
+		defer close(done)
+		rec.record(dl.Start(context.Background()))
+	}()
+	<-dl.started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // dead on entry
+
+	result := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		result <- o.resolveVodChatOutcome(ctx, dl, &rec, done, &database.Job{ID: "vod3"})
+	}()
+
+	select {
+	case got := <-result:
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("resolveVodChatOutcome took %s on a context that was dead on entry — the "+
+				"bound must collapse, not run", elapsed)
+		}
+		if got == nil {
+			t.Fatal("resolveVodChatOutcome returned nil for a chat that was still paging when " +
+				"the job was stopped")
+		}
+		if status := chatStatusForOutcome(dl.MessageCount(), got); status != chatStatusIncomplete {
+			t.Errorf("chatStatusForOutcome(%d, %v) = %q, want %q", dl.MessageCount(), got, status, chatStatusIncomplete)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("resolveVodChatOutcome did not return for a context that was already cancelled " +
+			"on entry")
 	}
 }
 
@@ -334,6 +452,89 @@ func TestStagingKeptForIncompleteChatExpires(t *testing.T) {
 	}
 }
 
+// TestStagingKeptForIncompleteChatKeepsOnlyTheChatCapture pins what the keep
+// actually costs. The sidecar that makes a truncated chat recoverable is
+// <staging>/chat.json.resume.json, beside the chat.json a resumed pager
+// appends to; everything else in the dir is media the mux already wrote into
+// the output file. Shielding the whole dir for
+// incomplete_staging_expiry_days (7) would hold tens of GB per long VOD to
+// protect two small JSON files.
+//
+// Mutant: keepOnlyChatCapture left as a no-op (or the call dropped from
+// worker.go's preserveForChat branch) — the muxed-away media parts are still
+// there a week later, and this test fails on the leftovers.
+func TestStagingKeptForIncompleteChatKeepsOnlyTheChatCapture(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{
+		"video.ts",
+		"video.ts.resume.json", // a MEDIA resume sidecar: its media is muxed, it goes
+		"audio.m4a",
+		"thumbnail.jpg",
+		"chat.json",
+		"chat.json.resume.json",
+		"chat.json.lostbatch.json",
+		filepath.Join("seg_0", "video.ts"),
+		filepath.Join("seg_0", "chat.json"),
+		filepath.Join("seg_0", "chat.json.resume.json"),
+		filepath.Join("seg_1", "video.ts"),
+	} {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := keepOnlyChatCapture(dir); err != nil {
+		t.Fatalf("keepOnlyChatCapture: %v", err)
+	}
+
+	want := map[string]bool{
+		"chat.json":                                     true,
+		"chat.json.resume.json":                         true,
+		"chat.json.lostbatch.json":                      true,
+		filepath.Join("seg_0", "chat.json"):             true,
+		filepath.Join("seg_0", "chat.json.resume.json"): true,
+	}
+	got := map[string]bool{}
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
+		}
+		got[rel] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	for name := range want {
+		if !got[name] {
+			t.Errorf("%s was deleted — a resumed pager appends to chat.json and continues from "+
+				"its sidecar, so both must survive the keep", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("%s survived the keep — only the chat capture is worth a week of disk", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "seg_1")); !os.IsNotExist(err) {
+		t.Error("seg_1 held nothing but muxed media and should have been removed with its contents")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the staging dir itself must survive: %v", err)
+	}
+}
+
 // TestWorkerFinishKeepsStagingForAnIncompleteChat pins the finalize half of
 // merge M5 by source inspection — the same technique
 // TestOrchestratorGoRoutesItsChatStatusWriteThroughRecordChatOutcome uses for
@@ -344,7 +545,9 @@ func TestStagingKeptForIncompleteChatExpires(t *testing.T) {
 //
 // Mutant: dropping the preserveForChat branch — the job finishes, staging is
 // removed with the resume sidecar in it, and the chat truncation the row
-// reports becomes permanent.
+// reports becomes permanent. Second mutant: dropping the keepOnlyChatCapture
+// call from that branch — the keep silently goes back to costing the whole
+// dir for a week.
 func TestWorkerFinishKeepsStagingForAnIncompleteChat(t *testing.T) {
 	src, err := os.ReadFile("worker.go")
 	if err != nil {
@@ -359,5 +562,16 @@ func TestWorkerFinishKeepsStagingForAnIncompleteChat(t *testing.T) {
 	if !strings.Contains(text, "} else if preserveForChat {") {
 		t.Error("worker.go's staging cleanup no longer has a preserveForChat branch between the " +
 			"incomplete_tail branch and os.RemoveAll")
+	}
+	if !strings.Contains(text, "keepOnlyChatCapture(jobCtx.StagingDir)") {
+		t.Error("worker.go's preserveForChat branch no longer prunes the staging dir down to the " +
+			"chat capture — the muxed-away media would be shielded for a week too")
+	}
+	// The operator-facing half: no route retries a Finished chat-incomplete
+	// job today (/retry refuses the state, /resume refuses non-YouTube and
+	// non-incomplete_tail Finished jobs), so the line must not name one.
+	if strings.Contains(text, "the chat resume sidecar stays for a later Retry") {
+		t.Error("worker.go's chat-keep Warn still promises a \"later Retry\" — no handler allows " +
+			"that for a Finished chat-incomplete job")
 	}
 }

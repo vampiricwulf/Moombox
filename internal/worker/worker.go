@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -784,7 +785,8 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		// sidecar in staging; deleting the dir turns a recoverable truncation
 		// into a permanent one (sweep-2 TWITCH-3, verifier merge M5). Same
 		// shape as the incomplete_tail preservation above it, and the orphan
-		// scanner mirrors it in jobNeedsStaging.
+		// scanner mirrors it in jobNeedsStaging — but only the chat files are
+		// kept, not the muxed-away media (see keepOnlyChatCapture).
 		preserveForChat := fresh != nil && fresh.ChatStatus == chatStatusIncomplete
 		if w.hasUnmuxedParts(job.ID, jobCtx.StagingDir) {
 			w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
@@ -793,7 +795,16 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			w.logger.Warn("preserving staging dir: recording tail incomplete; Retry will resume from the sidecar",
 				"path", jobCtx.StagingDir, "jobID", job.ID)
 		} else if preserveForChat {
-			w.logger.Warn("preserving staging dir: chat capture incomplete; the chat resume sidecar stays for a later Retry",
+			// Keep the chat capture, drop everything else: the media in here
+			// is already muxed into the output file, so shielding the whole
+			// dir for downloader.incomplete_staging_expiry_days (7 by
+			// default) to protect one JSON sidecar would cost tens of GB per
+			// long VOD.
+			if err := keepOnlyChatCapture(jobCtx.StagingDir); err != nil {
+				w.logger.Warn("failed to prune staging dir down to the chat capture",
+					"path", jobCtx.StagingDir, "jobID", job.ID, "err", err)
+			}
+			w.logger.Warn("preserving staging dir: chat capture incomplete; the chat resume sidecar is kept for a re-run",
 				"path", jobCtx.StagingDir, "jobID", job.ID)
 		} else if err := os.RemoveAll(jobCtx.StagingDir); err != nil {
 			w.logger.Warn("failed to remove staging directory", "path", jobCtx.StagingDir, "err", err)
@@ -801,6 +812,85 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			w.logger.Debug("removed staging directory", "path", jobCtx.StagingDir)
 		}
 	}
+}
+
+// keepOnlyChatCapture deletes everything under a preserved staging dir except
+// the chat capture, and is what makes the chat-incomplete keep cheap. What a
+// re-run needs is chat.json — a resumed pager APPENDS to it
+// (utils.AppendChatMessages, via internal/twitch/vod_chat.go's flush), so
+// deleting it would replace hours of captured comments with the tail — and
+// the sidecar beside it, chat.json.resume.json, which carries the content
+// offset and the recent-ID window loadResumeState continues from. Everything
+// else in the dir is raw media that the mux has already written into the
+// output file; keeping it would cost tens of GB for a week
+// (downloader.incomplete_staging_expiry_days, default 7) to protect two small
+// JSON files.
+//
+// The names are matched at ANY depth, because a quality- or gap-split job
+// keeps each part's chat beside that part's media in seg_N/. Directories left
+// empty are removed, but the staging dir itself always stays: its existence
+// is what jobNeedsStaging and the orphan scanner reason about. Removal
+// failures are collected, not fatal — the first is returned for the caller to
+// log, and anything that could not be removed simply stays.
+func keepOnlyChatCapture(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	var firstErr error
+	note := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	// prune reports whether anything survived under path, so a directory that
+	// held only media can be removed on the way back up.
+	var prune func(path string) bool
+	prune = func(path string) bool {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			// Unreadable: keep it rather than guess at what is inside.
+			note(err)
+			return true
+		}
+		survived := false
+		for _, e := range entries {
+			child := filepath.Join(path, e.Name())
+			if e.IsDir() {
+				if prune(child) {
+					survived = true
+					continue
+				}
+				if err := os.Remove(child); err != nil {
+					note(err)
+					survived = true
+				}
+				continue
+			}
+			if isChatCaptureFile(e.Name()) {
+				survived = true
+				continue
+			}
+			if err := os.Remove(child); err != nil {
+				note(err)
+				survived = true
+			}
+		}
+		return survived
+	}
+	prune(dir)
+	return firstErr
+}
+
+// isChatCaptureFile reports whether a staging file belongs to the chat
+// capture: chat.json itself, or anything the chat writers put beside it under
+// that name — chat.json.resume.json (the resume sidecar,
+// internal/twitch/vod_chat.go and internal/chat/downloader.go) and
+// chat.json.lostbatch.json (a batch spilled when a write failed,
+// internal/twitch/chat_recording.go). Media resume sidecars are NOT matched:
+// they are named after their media file (video.ts.resume.json), which this
+// prune is deleting because it has already been muxed.
+func isChatCaptureFile(name string) bool {
+	return name == "chat.json" || strings.HasPrefix(name, "chat.json.")
 }
 
 // hasUnmuxedParts reports whether any quality/gap-split part still has
