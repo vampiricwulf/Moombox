@@ -210,3 +210,47 @@ func (db *Database) DeleteAllClientTokens() error {
 	_, err := db.db.ExecContext(db.getCtx(), `DELETE FROM client_tokens`)
 	return err
 }
+
+// trimColumns is the trims projection every trim read selects, written once so
+// a new column cannot be added to one query's SELECT and forgotten in the
+// other's Scan (sweep-2 Task 11 fix round 1, Minor 5). scanTrims below is the
+// matching half: the two belong together and must stay adjacent.
+const trimColumns = `id, job_id, start_time, end_time, filename, created_at, duration, file_size`
+
+// scanTrims drains a trimColumns query into records. A row that will not scan
+// is logged and skipped rather than failing the read outright: the orphan
+// scanner and the trim list both prefer an incomplete answer to none. what
+// names the caller in that log line, and logArgs carries whatever else it can
+// say about the read.
+func (db *Database) scanTrims(rows *sql.Rows, what string, logArgs ...any) ([]TrimRecord, error) {
+	defer rows.Close()
+
+	var trims []TrimRecord
+	for rows.Next() {
+		var tr TrimRecord
+		if err := rows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
+			&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err != nil {
+			if db.logger != nil {
+				db.logger.Warn(what+": scan error", append([]any{"err", err}, logArgs...)...)
+			}
+			continue
+		}
+		trims = append(trims, tr)
+	}
+	return trims, rows.Err()
+}
+
+// GetAllTrims returns every trim record in the database, ordered by job. The
+// orphan scanner needs the complete set to decide which files on disk are
+// referenced, and asking per job made that an N+1 query on every sweep
+// (sweep-2 ENGINE-17).
+func (db *Database) GetAllTrims() ([]TrimRecord, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(), `SELECT `+trimColumns+` FROM trims ORDER BY job_id`)
+	if err != nil {
+		return nil, err
+	}
+	return db.scanTrims(rows, "GetAllTrims")
+}

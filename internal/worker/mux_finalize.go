@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // workerHTTPClient downloads thumbnails / VODs / assets up to ~2GB,
@@ -50,7 +51,10 @@ func DownloadFile(ctx context.Context, url, outputPath string) error {
 		return err
 	}
 
-	return os.Rename(tmpPath, outputPath)
+	// utils.ReplaceFile, not os.Rename: the file was written a moment ago, and
+	// on Windows a scanner or indexer still holding it turns the last step of
+	// this atomic write into a spurious failure (sweep-2 TOOL-2).
+	return utils.ReplaceFile(tmpPath, outputPath)
 }
 
 // DownloadFileMinSize downloads a file but discards it if smaller than minSize bytes.
@@ -94,7 +98,9 @@ func DownloadFileMinSize(ctx context.Context, url, outputPath string, minSize in
 		return fmt.Errorf("file too small: %d bytes (min %d)", n, minSize)
 	}
 
-	return os.Rename(tmpPath, outputPath)
+	// Same as DownloadFile above: the freshly written temp file is exactly
+	// what a Windows scanner holds open (sweep-2 TOOL-2).
+	return utils.ReplaceFile(tmpPath, outputPath)
 }
 
 // DownloadThumbnail downloads a thumbnail to the staging directory.

@@ -132,7 +132,10 @@ func (m *Muxer) buildTrimSegmentArgs(seg TrimSegmentInput, outputPath string, ta
 	if seg.StartTime > 0 {
 		args = append(args, "-ss", fmt.Sprintf("%.3f", seg.StartTime))
 	}
-	args = append(args, "-i", seg.InputPath)
+	// Both path arguments go through ffmpegPathArg (sweep-2 ENGINE-12): the
+	// input is a staged recording and the output is the user-composed archive
+	// path, the same shapes buildArgs guards.
+	args = append(args, "-i", ffmpegPathArg(seg.InputPath))
 
 	// Duration
 	if seg.Duration > 0 {
@@ -153,7 +156,7 @@ func (m *Muxer) buildTrimSegmentArgs(seg TrimSegmentInput, outputPath string, ta
 		args = append(args, "-c:a", "aac")
 	}
 
-	args = append(args, "-movflags", "faststart", outputPath)
+	args = append(args, "-movflags", "faststart", ffmpegPathArg(outputPath))
 	return args
 }
 
@@ -173,15 +176,7 @@ func (m *Muxer) concatIntermediates(ctx context.Context, intermediates []string,
 	}
 
 	// Concat with codec copy (all intermediates are same codec/resolution/FPS)
-	concatArgs := []string{
-		"-y",
-		"-f", "concat",
-		"-safe", "0",
-		"-i", concatListPath,
-		"-c", "copy",
-		"-movflags", "faststart",
-		outputPath,
-	}
+	concatArgs := m.buildConcatArgs(concatListPath, outputPath)
 
 	m.logger.Debug("ffmpeg concat", "args", strings.Join(concatArgs, " "))
 	if err := m.runFFmpeg(ctx, concatArgs); err != nil {
@@ -189,6 +184,28 @@ func (m *Muxer) concatIntermediates(ctx context.Context, intermediates []string,
 	}
 
 	return nil
+}
+
+// buildConcatArgs builds the concat-demuxer argv. Split out of
+// concatIntermediates so the argv is assertable without running FFmpeg, like
+// buildArgs and buildTrimSegmentArgs.
+//
+// outputPath goes through ffmpegPathArg (sweep-2 ENGINE-12) — it is the
+// user-composed archive path. concatListPath deliberately does NOT: it is
+// always <os.MkdirTemp dir>/concat.txt, ours and short, and the list's own
+// ENTRIES must stay unprefixed regardless, because buildConcatList rewrites
+// backslashes to forward slashes for the demuxer and a prefixed entry would
+// come out as //?/C:/… and fail to parse.
+func (m *Muxer) buildConcatArgs(concatListPath, outputPath string) []string {
+	return []string{
+		"-y",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", concatListPath,
+		"-c", "copy",
+		"-movflags", "faststart",
+		ffmpegPathArg(outputPath),
+	}
 }
 
 // ConcatCopy concatenates inputs into outputPath using FFmpeg's concat

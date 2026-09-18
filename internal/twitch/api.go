@@ -48,8 +48,10 @@ var ErrChannelNotFound = errors.New("twitch channel not found (renamed, banned, 
 // a GQL error or null data). Distinct from ErrChannelNotFound so the
 // monitor's health tracker counts it as an ordinary recoverable streak
 // error, not a definitive renamed/banned channel. The single GetStreamInfo
-// swallows it to (nil, nil) — same as the historical offline behavior for
-// that shape — so worker callers are unaffected.
+// now PROPAGATES it (owner decision O-C): the worker confirms an end from two
+// samples, so a transient slot failure must reach it as an error rather than
+// as "offline" — collapsing it to (nil, nil) is what let one flap finalize a
+// live recording mid-broadcast. See collapseStreamInfoError.
 var errStreamSlotUnavailable = errors.New("twitch stream metadata slot unavailable")
 
 // twitchHTTPClient is a shared HTTP client for all Twitch GQL + Helix
@@ -480,12 +482,22 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 		return nil, fmt.Errorf("unexpected batch response length: %d", len(results))
 	}
 
-	info, err := a.parseStreamInfo(channelLogin, results[0], results[1])
-	if errors.Is(err, ErrChannelNotFound) || errors.Is(err, errStreamSlotUnavailable) {
-		// Preserve the historical single-call contract: both a not-found
-		// login and a transient error/empty StreamMetadata slot read as
-		// offline (nil, nil). Only the batch path (monitor health) sees the
-		// distinct sentinels.
+	return collapseStreamInfoError(a.parseStreamInfo(channelLogin, results[0], results[1]))
+}
+
+// collapseStreamInfoError applies the single-call contract to parseStreamInfo's
+// result. ErrChannelNotFound still reads as offline — every caller
+// (processTwitchLive, waitForTwitchLive, the manual-add route) relies on that,
+// and a login that does not resolve IS a settled answer.
+//
+// errStreamSlotUnavailable no longer does (owner decision O-C, sweep-2
+// ENGINE-3/TWITCH-2). A per-element GQL error or null data is a TRANSIENT
+// partial-batch failure, and collapsing it into "offline" is what let ONE
+// sample finalize a live recording as Finished mid-broadcast: the worker's
+// CheckStreamFn read (nil, nil) as "the stream ended". Propagated as an
+// error it becomes a deferred verdict at every consult site instead.
+func collapseStreamInfoError(info *TwitchStreamInfo, err error) (*TwitchStreamInfo, error) {
+	if errors.Is(err, ErrChannelNotFound) {
 		return nil, nil
 	}
 	return info, err

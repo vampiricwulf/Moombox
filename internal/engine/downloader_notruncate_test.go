@@ -1,0 +1,774 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
+)
+
+// stagedFile writes n bytes of staged "recording" to a fresh temp file and
+// returns its path. Every row below starts from a non-empty staged file with
+// NO resume sidecar beside it — the exact shape ENGINE-1/ENGINE-5 destroy.
+func stagedFile(t *testing.T, n int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "video_stream")
+	if err := os.WriteFile(path, make([]byte, n), 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+	return path
+}
+
+func sizeOf(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
+}
+
+// TestStartRefusesToTruncateStagedMedia pins the shared no-truncate guard:
+// a segmented download that finds staged bytes it cannot resume must return
+// ErrStagedMediaPresent with the file untouched, never open it O_TRUNC.
+//
+// Mutant: restoring the bare `flags |= os.O_TRUNC` else-branch in Start (i.e.
+// deleting the guard) — Start returns nil and the staged file is 0 bytes.
+func TestStartRefusesToTruncateStagedMedia(t *testing.T) {
+	path := stagedFile(t, 1<<20)
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "http://127.0.0.1:1/videoplayback?itag=140",
+		OutputFile: path,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := d.Start(ctx)
+	if !errors.Is(err, ErrStagedMediaPresent) {
+		t.Fatalf("Start = %v, want ErrStagedMediaPresent", err)
+	}
+	if got := sizeOf(t, path); got != 1<<20 {
+		t.Fatalf("staged file is %d bytes after Start, want 1048576 (the guard must not truncate)", got)
+	}
+}
+
+// TestStartDiscardStagedMediaOptIn pins the escape hatch: a caller that has
+// explicitly decided the staged bytes are disposable still gets the fresh
+// O_TRUNC file it asked for.
+//
+// Mutant: dropping the `!d.opts.DiscardStaged` term from the guard — Start
+// returns ErrStagedMediaPresent and the manifest-free post-live restart,
+// which MUST begin at sq=0, can never run.
+func TestStartDiscardStagedMediaOptIn(t *testing.T) {
+	path := stagedFile(t, 4096)
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       "http://127.0.0.1:1/videoplayback?itag=140",
+		OutputFile:    path,
+		DiscardStaged: true,
+		MaxRetries:    1,
+	})
+	d.delays = fastDelays()
+
+	// The open mode is decided before the first fetch, so the download's own
+	// failure against a dead address is irrelevant — only the file is.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); errors.Is(err, ErrStagedMediaPresent) {
+		t.Fatalf("Start = %v, want the guard to stand down for an explicit discard", err)
+	}
+	if got := sizeOf(t, path); got != 0 {
+		t.Fatalf("staged file is %d bytes after an explicit discard, want 0", got)
+	}
+}
+
+// TestStartDirectURLKeepsLegacyTruncate pins the guard's scope: whole-file
+// direct downloads are NOT segmented staged media and keep their pre-arc
+// restart-from-byte-0 behaviour (their partial loss is bounded by the 50 MB
+// sidecar cadence — really bounded, since Task 10 made saveResume write for
+// the direct path at all — and Task 4 removes the truncation they actually
+// hit).
+//
+// Mutant: widening the guard to IsDirectURL — a half-downloaded VOD whose
+// sidecar was lost errors instead of restarting.
+func TestStartDirectURLKeepsLegacyTruncate(t *testing.T) {
+	path := stagedFile(t, 4096)
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:     "http://127.0.0.1:1/videoplayback?itag=140",
+		OutputFile:  path,
+		IsDirectURL: true,
+		MaxRetries:  1,
+	})
+	d.delays = fastDelays()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); errors.Is(err, ErrStagedMediaPresent) {
+		t.Fatalf("Start = %v, want the guard to ignore IsDirectURL downloads", err)
+	}
+}
+
+// errSharingViolation stands in for the scanner/indexer refusal the ladder
+// exists to ride out. The tests drive the classifier seam rather than a real
+// OS errno so one fixture describes both platforms.
+var errSharingViolation = errors.New("the process cannot access the file because it is being used by another process")
+
+// installLadderSeams installs the half of the ladder both file operations
+// share: a no-op pause and a classifier that treats errSharingViolation (and
+// nothing else) as transient. Restored at the end of the test.
+func installLadderSeams(t *testing.T) {
+	t.Helper()
+	prevSleep, prevClass := truncateRetrySleep, isTransientTruncateError
+	t.Cleanup(func() { truncateRetrySleep, isTransientTruncateError = prevSleep, prevClass })
+	truncateRetrySleep = func(context.Context, time.Duration) error { return nil }
+	isTransientTruncateError = func(err error) bool { return errors.Is(err, errSharingViolation) }
+}
+
+// installTruncateSeams points the ladder at a scripted truncate.
+func installTruncateSeams(t *testing.T, trunc func(string, int64) error) {
+	t.Helper()
+	installLadderSeams(t)
+	prev := truncateFile
+	t.Cleanup(func() { truncateFile = prev })
+	truncateFile = trunc
+}
+
+// installRenameSeam points the ladder at a scripted rename — the same ladder,
+// the other file operation.
+func installRenameSeam(t *testing.T, rename func(string, string) error) {
+	t.Helper()
+	installLadderSeams(t)
+	prev := renameFile
+	t.Cleanup(func() { renameFile = prev })
+	renameFile = rename
+}
+
+// TestTruncateForResumeRetriesThenFails pins the retry ladder that replaces
+// ENGINE-5's silent `starting fresh` fallback: the truncate is re-attempted
+// through the Windows AV/indexer sharing-violation window, and the last error
+// is RETURNED rather than swallowed into an O_TRUNC.
+//
+// Mutant: making truncateForResume a single os.Truncate call — attempts is 1
+// and a window that clears on the third try is never seen.
+func TestTruncateForResumeRetriesThenFails(t *testing.T) {
+	path := stagedFile(t, 1024)
+
+	attempts := 0
+	installTruncateSeams(t, func(name string, size int64) error {
+		attempts++
+		if attempts < 3 {
+			return errSharingViolation
+		}
+		return os.Truncate(name, size)
+	})
+
+	if err := truncateForResume(context.Background(), path, 512); err != nil {
+		t.Fatalf("truncateForResume = %v, want nil once the window clears", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3 (the ladder must retry, not give up on the first refusal)", attempts)
+	}
+	if got := sizeOf(t, path); got != 512 {
+		t.Fatalf("file is %d bytes, want 512", got)
+	}
+}
+
+// TestTruncateForResumeReturnsPermanentErrorImmediately pins the classifier
+// the ladder claims to share with utils.ReplaceFile: only the scanner/indexer
+// refusal is waited out. A missing file, a directory in its place or a
+// read-only volume is permanent, and sleeping the full 1270 ms before saying
+// so delays every caller — including the Twitch split path — for nothing.
+//
+// Mutant: dropping the `|| !isTransientTruncateError(err)` term — attempts
+// climbs to the ladder's full 8.
+func TestTruncateForResumeReturnsPermanentErrorImmediately(t *testing.T) {
+	permanent := errors.New("read-only file system")
+
+	attempts := 0
+	installTruncateSeams(t, func(string, int64) error {
+		attempts++
+		return permanent
+	})
+
+	err := truncateForResume(context.Background(), stagedFile(t, 16), 8)
+	if !errors.Is(err, permanent) {
+		t.Fatalf("truncateForResume = %v, want the permanent error", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (a permanent error must not be retried)", attempts)
+	}
+}
+
+// TestTruncateForResumeStopsOnContextCancel pins the shutdown behaviour: a
+// cancelled context ends the ladder at once and surfaces the last refusal,
+// instead of sleeping out the remaining seven pauses inside Start while the
+// process is trying to exit.
+//
+// Mutant: ignoring truncateRetrySleep's error — attempts runs to 8.
+func TestTruncateForResumeStopsOnContextCancel(t *testing.T) {
+	attempts := 0
+	prevTrunc, prevSleep, prevClass := truncateFile, truncateRetrySleep, isTransientTruncateError
+	t.Cleanup(func() {
+		truncateFile, truncateRetrySleep, isTransientTruncateError = prevTrunc, prevSleep, prevClass
+	})
+	// The REAL pause, so the cancelled context is what stops the ladder.
+	truncateRetrySleep = utils.Sleep
+	isTransientTruncateError = func(err error) bool { return errors.Is(err, errSharingViolation) }
+	truncateFile = func(string, int64) error {
+		attempts++
+		return errSharingViolation
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := truncateForResume(ctx, stagedFile(t, 16), 8); !errors.Is(err, errSharingViolation) {
+		t.Fatalf("truncateForResume = %v, want the last refusal surfaced", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (a dead context must end the ladder, not wait it out)", attempts)
+	}
+}
+
+// TestStartResumeTruncateFailureKeepsStagedMedia closes door (b) at the
+// behavioural level: when the resume truncate cannot be performed even after
+// the retry ladder, Start RETURNS the error. The staged recording and its
+// sidecar are both left exactly as they were, so the job stays resumable.
+//
+// Mutant: restoring ENGINE-5's fallthrough (`resuming = false; flags =
+// os.O_CREATE|os.O_WRONLY|os.O_TRUNC; state = nil; …`) after the failed
+// truncate — Start proceeds, the 1 MiB staged file is reopened O_TRUNC and
+// this test reports 0 bytes on disk.
+func TestStartResumeTruncateFailureKeepsStagedMedia(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	path := stagedFile(t, 1<<20)
+	writeResumeSidecar(t, path, streamURL, 41, 512<<10, 0)
+
+	// A sharing violation that never clears — AV holding the handle. The
+	// ladder exhausts and the error must surface.
+	installTruncateSeams(t, func(string, int64) error { return errSharingViolation })
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    streamURL,
+		OutputFile: path,
+		MaxRetries: 1,
+	})
+	d.delays = fastDelays()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	startErr := d.Start(ctx)
+	if !errors.Is(startErr, ErrTruncateBlocked) {
+		t.Fatalf("Start = %v, want ErrTruncateBlocked", startErr)
+	}
+	if !strings.Contains(startErr.Error(), "truncate for resume") {
+		t.Fatalf("Start = %v, want the message to name the truncate", startErr)
+	}
+	if got := sizeOf(t, path); got != 1<<20 {
+		t.Fatalf("staged file is %d bytes, want 1048576 (a failed truncate must never fall through to O_TRUNC)", got)
+	}
+	if _, statErr := os.Stat(path + ".resume.json"); statErr != nil {
+		t.Fatalf("resume sidecar gone (%v) — the job must stay resumable", statErr)
+	}
+}
+
+// writeResumeSidecar drops a sidecar beside path with the given age, so Start
+// either takes the resume branch (a fresh one) or rejects it (an aged one).
+func writeResumeSidecar(t *testing.T, path, baseURL string, lastSeq int, bytesWritten int64, age time.Duration) {
+	t.Helper()
+	blob, err := json.Marshal(ResumeState{
+		LastSeq:      lastSeq,
+		BytesWritten: bytesWritten,
+		Timestamp:    time.Now().Add(-age).Unix(),
+		BaseURL:      baseURL,
+	})
+	if err != nil {
+		t.Fatalf("marshal resume state: %v", err)
+	}
+	if err := os.WriteFile(path+".resume.json", blob, 0o644); err != nil {
+		t.Fatalf("write resume sidecar: %v", err)
+	}
+}
+
+// TestStartResumeTruncateFailureSplitsWithoutClaimingDataLoss pins the Twitch
+// half of door (b): a StopOnGap caller still splits (ErrGapDetected, so the
+// current file is muxed as a finished part), but the error ALSO carries
+// ErrTruncateBlocked so the orchestrator can tell the operator the truth —
+// nothing expired from the CDN, a truncate was simply refused.
+//
+// Mutant: returning a bare ErrGapDetected — the Twitch loop sends a
+// "segments were lost" notification for a split that lost nothing.
+func TestStartResumeTruncateFailureSplitsWithoutClaimingDataLoss(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	path := stagedFile(t, 1<<20)
+	writeResumeSidecar(t, path, streamURL, 41, 512<<10, 0)
+	installTruncateSeams(t, func(string, int64) error { return errSharingViolation })
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    streamURL,
+		OutputFile: path,
+		StopOnGap:  true,
+		MaxRetries: 1,
+	})
+	d.delays = fastDelays()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := d.Start(ctx)
+	if !errors.Is(err, ErrGapDetected) {
+		t.Fatalf("Start = %v, want ErrGapDetected so the part is muxed and a fresh one begins", err)
+	}
+	if !errors.Is(err, ErrTruncateBlocked) {
+		t.Fatalf("Start = %v, want ErrTruncateBlocked alongside the split so no data-loss notification is sent", err)
+	}
+	if got := sizeOf(t, path); got != 1<<20 {
+		t.Fatalf("staged file is %d bytes, want 1048576 (the split must not truncate either)", got)
+	}
+}
+
+// headedStagedFile writes n bytes of staged recording that a muxer can open —
+// an MP4 box length followed by 'ftyp', exactly what a manifest-free capture
+// beginning at sq=0 puts on disk — and returns its path.
+func headedStagedFile(t *testing.T, n int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "video_stream")
+	body := make([]byte, n)
+	copy(body, []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p'})
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+	return path
+}
+
+// asideFiles returns the <path>.restart-<ts> media file and its sidecar, each
+// "" when absent. More than one of either is a failure: every restart must
+// reuse one aside, not accumulate copies.
+func asideFiles(t *testing.T, path string) (media, sidecar string) {
+	t.Helper()
+	all, err := filepath.Glob(path + StagedRestartSuffix + "*")
+	if err != nil {
+		t.Fatalf("glob aside files: %v", err)
+	}
+	for _, m := range all {
+		if strings.HasSuffix(m, resumeFileSuffix) {
+			if sidecar != "" {
+				t.Fatalf("more than one aside sidecar: %v", all)
+			}
+			sidecar = m
+			continue
+		}
+		if media != "" {
+			t.Fatalf("more than one aside recording: %v", all)
+		}
+		media = m
+	}
+	return media, sidecar
+}
+
+// startAgainstDeadAddress runs Start against an address nothing answers, with
+// a short deadline. Every row below cares only about what Start decided about
+// the files BEFORE the first fetch, so the download's own failure is expected
+// and the deadline only has to outlast the open sequence.
+func startAgainstDeadAddress(t *testing.T, d *SegmentDownloader) error {
+	t.Helper()
+	d.delays = fastDelays()
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	return d.Start(ctx)
+}
+
+// TestStartDiscardStagedResumesFromUsableSidecar is fix round 2's regression
+// row (R1). DiscardStaged says "this caller needs a file that starts at the
+// beginning of the stream" — it does NOT say "destroy what is there". A USABLE
+// sidecar outranks it completely: Start resumes, keeps the recording, keeps
+// the sidecar, and appends the missing tail. This is the documented
+// incomplete-tail recovery (an incomplete_tail restart, a /resume of an
+// interrupted post-live VOD, enqueueExistingJobs re-entering a Downloading
+// post-live row), and round 1 broke it by acting on size+header alone in the
+// worker, before `resuming` was known.
+//
+// Mutant: acting regardless of `resuming` (round 1's behaviour — hoist the
+// preserve above the !resuming test) — the recording and its valid sidecar are
+// renamed aside, the file restarts empty at sq=0 and the tail is re-downloaded
+// instead of appended.
+func TestStartDiscardStagedResumesFromUsableSidecar(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	const staged = 1 << 20
+	path := headedStagedFile(t, staged)
+	writeResumeSidecar(t, path, streamURL, 4100, staged, 0)
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       streamURL,
+		OutputFile:    path,
+		DiscardStaged: true,
+		MaxRetries:    1,
+	})
+	if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
+		t.Fatalf("Start = %v, want a resume, not a guard trip", err)
+	}
+
+	if media, sidecar := asideFiles(t, path); media != "" || sidecar != "" {
+		t.Fatalf("aside files created (%q, %q) — a usable sidecar must be resumed, never set aside", media, sidecar)
+	}
+	if got := sizeOf(t, path); got != staged {
+		t.Fatalf("staged file is %d bytes, want %d (the resume appends, it does not restart)", got, staged)
+	}
+	if _, err := os.Stat(path + resumeFileSuffix); err != nil {
+		t.Fatalf("resume sidecar gone (%v) — it is what makes the tail appendable", err)
+	}
+	if got := d.CurrentSeq(); got != 4101 {
+		t.Fatalf("CurrentSeq = %d, want 4101 (LastSeq+1 from the sidecar)", got)
+	}
+}
+
+// TestStartDiscardStagedPreservesOnlyHeadedRecordings pins what DiscardStaged
+// does once the engine has established it CANNOT resume. A recording a muxer
+// can open is set aside with its sidecar and the fresh file starts beside it;
+// bytes no muxer can open are discarded, because there is nothing to preserve.
+//
+// Mutants: dropping the rename (rows 1-2 lose the recording to O_TRUNC);
+// treating every non-empty file as headed (row 3 grows an aside for unmuxable
+// bytes, and every restart accumulates another copy).
+func TestStartDiscardStagedPreservesOnlyHeadedRecordings(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	const staged = 1 << 20
+
+	for _, tc := range []struct {
+		name      string
+		seed      func(t *testing.T) string
+		wantAside bool
+	}{
+		{
+			name: "corrupt sidecar sets the recording aside",
+			seed: func(t *testing.T) string {
+				path := headedStagedFile(t, staged)
+				if err := os.WriteFile(path+resumeFileSuffix, []byte("{not json"), 0o644); err != nil {
+					t.Fatalf("write sidecar: %v", err)
+				}
+				return path
+			},
+			wantAside: true,
+		},
+		{
+			name: "sidecar aged past maxResumeStateAge sets the recording aside",
+			seed: func(t *testing.T) string {
+				path := headedStagedFile(t, staged)
+				writeResumeSidecar(t, path, streamURL, 4100, staged, maxResumeStateAge+24*time.Hour)
+				return path
+			},
+			wantAside: true,
+		},
+		{
+			name: "unrecognisable staging is discarded",
+			seed: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "video_stream")
+				// A bare fragment: 'moof' where a complete file carries 'ftyp'.
+				body := make([]byte, 4096)
+				copy(body, []byte{0x00, 0x00, 0x01, 0x00, 'm', 'o', 'o', 'f'})
+				if err := os.WriteFile(path, body, 0o644); err != nil {
+					t.Fatalf("write staged file: %v", err)
+				}
+				return path
+			},
+			wantAside: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tc.seed(t)
+			before := sizeOf(t, path)
+
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL:       streamURL,
+				OutputFile:    path,
+				DiscardStaged: true,
+				MaxRetries:    1,
+			})
+			if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
+				t.Fatalf("Start = %v, want DiscardStaged to proceed", err)
+			}
+
+			media, sidecar := asideFiles(t, path)
+			if !tc.wantAside {
+				if media != "" || sidecar != "" {
+					t.Fatalf("aside files created (%q, %q) for bytes no muxer can open", media, sidecar)
+				}
+			} else {
+				if media == "" {
+					t.Fatalf("no %s* beside %s — the headed recording was destroyed", path+StagedRestartSuffix, path)
+				}
+				if got := sizeOf(t, media); got != before {
+					t.Fatalf("aside recording is %d bytes, want %d", got, before)
+				}
+				if sidecar == "" {
+					t.Fatalf("aside sidecar missing — it belongs with the recording it describes")
+				}
+				if _, err := os.Stat(path + resumeFileSuffix); err == nil {
+					t.Fatalf("the unusable sidecar is still beside the fresh file — it must travel with the aside")
+				}
+			}
+			if got := sizeOf(t, path); got != 0 {
+				t.Fatalf("the fresh file is %d bytes, want 0 (DiscardStaged must still start at the stream's beginning)", got)
+			}
+			if got := d.CurrentSeq(); got != 0 {
+				t.Fatalf("CurrentSeq = %d, want 0", got)
+			}
+		})
+	}
+}
+
+// TestRenameStagedFileRetriesTransientRefusals is fix round 3's Concern 2: the
+// aside rename must ride out the same refusal the truncate beside it rides
+// out. A scanner or indexer holding the recording without FILE_SHARE_DELETE
+// makes os.Rename fail with ERROR_SHARING_VIOLATION although nothing is wrong
+// with either path, and failing the run on that first refusal — while
+// truncateForResume waits 1270 ms for the identical error — was an arbitrary
+// difference that cost a spurious failed run.
+//
+// Mutant: a bare os.Rename with no ladder — attempts is 1 and the run fails
+// on a hold that would have cleared.
+func TestRenameStagedFileRetriesTransientRefusals(t *testing.T) {
+	from := filepath.Join(t.TempDir(), "video_stream")
+	to := from + StagedRestartSuffix + "1700000000"
+	if err := os.WriteFile(from, []byte("recording"), 0o644); err != nil {
+		t.Fatalf("seed staged file: %v", err)
+	}
+
+	attempts := 0
+	installRenameSeam(t, func(a, b string) error {
+		attempts++
+		if attempts < 4 {
+			return errSharingViolation
+		}
+		return os.Rename(a, b)
+	})
+
+	if err := renameStagedFile(context.Background(), from, to); err != nil {
+		t.Fatalf("renameStagedFile = %v, want nil once the hold clears", err)
+	}
+	if attempts != 4 {
+		t.Fatalf("attempts = %d, want 4 (three refusals then success)", attempts)
+	}
+	if _, err := os.Stat(to); err != nil {
+		t.Fatalf("aside %s missing (%v)", to, err)
+	}
+}
+
+// TestRenameStagedFileReturnsPermanentErrorImmediately pins the other half of
+// the ladder's contract, identical to the truncate twin: a read-only volume or
+// a missing source is not a hold that clears, so waiting 1270 ms before saying
+// so only delays the job error.
+//
+// Mutant: retrying regardless of the classifier — attempts climbs to 8.
+func TestRenameStagedFileReturnsPermanentErrorImmediately(t *testing.T) {
+	permanent := errors.New("read-only file system")
+
+	attempts := 0
+	installRenameSeam(t, func(string, string) error {
+		attempts++
+		return permanent
+	})
+
+	if err := renameStagedFile(context.Background(), "from", "to"); !errors.Is(err, permanent) {
+		t.Fatalf("renameStagedFile = %v, want the permanent error", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (a permanent error must not be retried)", attempts)
+	}
+}
+
+// TestRenameStagedFileStopsOnContextCancel pins the shutdown behaviour with
+// the REAL pause: a dead context ends the ladder at once instead of sleeping
+// out the remaining seven pauses inside Start while the process is exiting.
+//
+// Mutant: ignoring truncateRetrySleep's error — attempts runs to 8 and the
+// call takes the full ladder.
+func TestRenameStagedFileStopsOnContextCancel(t *testing.T) {
+	attempts := 0
+	prevRename, prevSleep, prevClass := renameFile, truncateRetrySleep, isTransientTruncateError
+	t.Cleanup(func() {
+		renameFile, truncateRetrySleep, isTransientTruncateError = prevRename, prevSleep, prevClass
+	})
+	truncateRetrySleep = utils.Sleep
+	isTransientTruncateError = func(err error) bool { return errors.Is(err, errSharingViolation) }
+	renameFile = func(string, string) error {
+		attempts++
+		return errSharingViolation
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	if err := renameStagedFile(ctx, "from", "to"); !errors.Is(err, errSharingViolation) {
+		t.Fatalf("renameStagedFile = %v, want the last refusal surfaced", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("took %v, want under 100ms (a dead context must end the ladder, not wait it out)", elapsed)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+// TestStartRidesOutATransientRenameRefusal is Concern 2 end to end: the run
+// that used to fail at elapsed=0s with ErrStagedMediaPresent now waits the
+// hold out, sets the recording aside and starts fresh beside it.
+//
+// Mutant: a bare os.Rename in preserveStagedRecording — Start returns
+// ErrStagedMediaPresent and the job fails for a hold that cleared on the
+// third attempt.
+func TestStartRidesOutATransientRenameRefusal(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	const staged = 1 << 20
+	path := headedStagedFile(t, staged)
+	if err := os.WriteFile(path+resumeFileSuffix, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	attempts := 0
+	installRenameSeam(t, func(a, b string) error {
+		attempts++
+		if attempts < 3 {
+			return errSharingViolation
+		}
+		return os.Rename(a, b)
+	})
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       streamURL,
+		OutputFile:    path,
+		DiscardStaged: true,
+		MaxRetries:    1,
+	})
+	if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
+		t.Fatalf("Start = %v, want the transient refusal ridden out, not a failed run", err)
+	}
+	media, _ := asideFiles(t, path)
+	if media == "" {
+		t.Fatalf("no %s* beside %s — the recording was not set aside", path+StagedRestartSuffix, path)
+	}
+	if got := sizeOf(t, media); got != staged {
+		t.Fatalf("aside recording is %d bytes, want %d", got, staged)
+	}
+	if attempts < 3 {
+		t.Fatalf("attempts = %d, want at least 3 (the ladder must have retried)", attempts)
+	}
+}
+
+// TestStartPreservesStagingItCannotClassify is fix round 3's Note 1: the
+// header check cannot tell "unreadable" from "no known magic", and only one of
+// those two guesses is recoverable. A recording the engine could not READ — a
+// share-mode-0 holder, an EIO on a network staging dir, or a file shorter than
+// the eight bytes the check needs — must be preserved, never discarded: the
+// alternative is O_TRUNC over a multi-hour recording the engine merely failed
+// to peek at.
+//
+// Mutant: returning false when the file cannot be read (the round-2
+// behaviour) — no aside is created and the recording is destroyed.
+func TestStartPreservesStagingItCannotClassify(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+
+	for _, tc := range []struct {
+		name string
+		// seed returns the staged path; its bytes are deliberately
+		// unrecognisable, so ONLY the cannot-classify rule can preserve them.
+		seed func(t *testing.T) string
+	}{
+		{
+			name: "unreadable staging",
+			seed: func(t *testing.T) string {
+				path := stagedFile(t, 1<<20) // zeros: readable and unrecognisable
+				prev := openStagedFile
+				t.Cleanup(func() { openStagedFile = prev })
+				openStagedFile = func(string) (*os.File, error) { return nil, errSharingViolation }
+				return path
+			},
+		},
+		{
+			name: "too short to classify",
+			seed: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "video_stream")
+				if err := os.WriteFile(path, []byte{0x00, 0x00, 0x00}, 0o644); err != nil {
+					t.Fatalf("write staged file: %v", err)
+				}
+				return path
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tc.seed(t)
+			before := sizeOf(t, path)
+
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL:       streamURL,
+				OutputFile:    path,
+				DiscardStaged: true,
+				MaxRetries:    1,
+			})
+			if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
+				t.Fatalf("Start = %v, want DiscardStaged to proceed", err)
+			}
+
+			media, _ := asideFiles(t, path)
+			if media == "" {
+				t.Fatalf("no %s* beside %s — staging the engine could not classify was destroyed",
+					path+StagedRestartSuffix, path)
+			}
+			if got := sizeOf(t, media); got != before {
+				t.Fatalf("aside recording is %d bytes, want %d", got, before)
+			}
+			if got := sizeOf(t, path); got != 0 {
+				t.Fatalf("the fresh file is %d bytes, want 0", got)
+			}
+		})
+	}
+}
+
+// TestPreserveClearsAStaleSidecarThatCannotFollow pins the partial-rename
+// state: when the recording moves aside but its sidecar cannot, leaving the
+// sidecar beside the fresh file is a trap — a LATER Start could match those
+// stale offsets against the regrown file and resume-append at the old
+// recording's sequence. The sidecar is unusable by definition here, so it is
+// removed and the fresh start is unambiguous.
+//
+// Mutant: logging the failed sidecar rename and carrying on (the round-2
+// behaviour) — the stale sidecar survives beside a fresh, growing file.
+func TestPreserveClearsAStaleSidecarThatCannotFollow(t *testing.T) {
+	const staged = 1 << 20
+	path := headedStagedFile(t, staged)
+	if err := os.WriteFile(path+resumeFileSuffix, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	installRenameSeam(t, func(a, b string) error {
+		if strings.HasSuffix(a, resumeFileSuffix) {
+			return errors.New("read-only file system") // permanent: no ladder, no move
+		}
+		return os.Rename(a, b)
+	})
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       "http://127.0.0.1:1/videoplayback?itag=140",
+		OutputFile:    path,
+		DiscardStaged: true,
+	})
+	if err := d.preserveStagedRecording(context.Background(), staged); err != nil {
+		t.Fatalf("preserveStagedRecording = %v, want the stale sidecar cleared, not a failed run", err)
+	}
+
+	media, sidecar := asideFiles(t, path)
+	if media == "" {
+		t.Fatal("the recording was not set aside")
+	}
+	if sidecar != "" {
+		t.Fatalf("aside sidecar %s exists, but its rename was supposed to fail", sidecar)
+	}
+	if _, err := os.Stat(path + resumeFileSuffix); err == nil {
+		t.Fatalf("the stale sidecar is still beside the fresh file — a later Start would resume against it")
+	}
+}

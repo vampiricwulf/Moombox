@@ -125,3 +125,35 @@ func TestPartitionManifestlessFormatsExcludesContentLength(t *testing.T) {
 		t.Fatalf("audio pool = %+v, want exactly the OTF itag 140", audio)
 	}
 }
+
+// TestManifestlessDiscardStagedOnlyForNonLiveRestart pins the ONE caller that
+// opts into engine.DownloaderOptions.DiscardStaged: a manifest-free post-live
+// capture whose segments carry ftyp+moov only at sq=0 must be allowed to
+// restart from 0 over staged bytes; a LIVE capture, and any part that
+// force-starts at an orchestrator-provided seq, must not.
+//
+// This is the whole of the worker's part. What DiscardStaged then does to the
+// bytes on disk — resume from a usable sidecar, set a headed recording aside,
+// or discard unrecognisable bytes — belongs to the engine and is pinned by
+// TestStartDiscardStaged* in internal/engine (fix round 2, R1).
+//
+// Mutant: setting DiscardStaged unconditionally — a live manifest-free
+// recording is restarted from sq=0 on every re-entry.
+func TestManifestlessDiscardStagedOnlyForNonLiveRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status youtube.StreamStatus
+		forced bool
+		want   bool
+	}{
+		{"post-live restart discards", youtube.StreamPostLive, false, true},
+		{"live restart never discards", youtube.StreamLive, false, false},
+		{"forced start seq never discards", youtube.StreamPostLive, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := manifestlessDiscardStaged(tc.status, tc.forced); got != tc.want {
+				t.Errorf("manifestlessDiscardStaged(%v, %v) = %v, want %v", tc.status, tc.forced, got, tc.want)
+			}
+		})
+	}
+}

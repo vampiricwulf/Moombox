@@ -615,15 +615,24 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 	}
 }
 
-// StashTwitchStreamInfo records a freshly-fetched Twitch stream info under
-// the given jobID. The next processTwitchLive call for that jobID will use
-// this info instead of re-querying Twitch — eliminating the duplicate GQL
+// StashTwitchStreamInfo records a freshly-fetched Twitch stream info under its
+// own channel. The next job to ask whether THAT CHANNEL is live — a fresh
+// processTwitchLive, or a manually added job parked in waitForTwitchLive —
+// uses this info instead of re-querying Twitch, eliminating the duplicate GQL
 // call that exposed the worker to transient StreamMetadata flaps.
+//
+// The key comes off the info rather than from the caller so a producer cannot
+// file a hint under something no consumer looks up, which is exactly what a
+// jobID parameter did (sweep-2 Task 11 fix round 1, Important 3). An info with
+// no channel on it is not stashed: there is no key for it.
 //
 // Take-once: the hint is removed on consumption. If never consumed, it
 // expires after twitchHintTTL.
-func (sp *StreamProcessor) StashTwitchStreamInfo(jobID string, info *twitch.TwitchStreamInfo) {
-	sp.twitchHints.stash(jobID, info)
+func (sp *StreamProcessor) StashTwitchStreamInfo(info *twitch.TwitchStreamInfo) {
+	if info == nil || info.ChannelLogin == "" {
+		return
+	}
+	sp.twitchHints.stash(twitchHintKey(info.ChannelLogin), info)
 }
 
 // TwitchHintStats returns a snapshot of hit/miss counters for the take-once

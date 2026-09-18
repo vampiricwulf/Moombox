@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,12 +20,26 @@ type twitchHintEntry struct {
 	stashedAt time.Time
 }
 
-// twitchHintCache is a take-once map keyed by jobID, used by the monitor's
+// twitchHintKey is the cache key a stash and a take must agree on: the Twitch
+// channel login, case-folded and namespaced.
+//
+// The CHANNEL, not the job (sweep-2 Task 11 fix round 1, Important 3). Keyed
+// by job ID the cache could only ever answer the monitor's own brand-new row —
+// the one shape that has just fetched the info anyway — while the job that
+// actually waits on a poll loop, a manually added `tw_manual_<login>_<ns>`
+// row, could never match a producer's `tw_<streamID>` key. A broadcast is
+// identified to every one of these paths by its channel, so that is the key.
+// The namespace prefix keeps it from ever colliding with a job ID, which the
+// cache was keyed by before.
+func twitchHintKey(login string) string { return "login:" + strings.ToLower(login) }
+
+// twitchHintCache is a take-once map keyed by twitchHintKey, used by the monitor's
 // OnStreamFound (and OnStreamRecover) callback to forward its already-fetched
-// stream info to the worker's processTwitchLive. Eliminates a redundant
-// GetStreamInfo call that exposed the worker to transient Twitch GQL flaps
-// where StreamMetadata briefly returned Stream=nil between two consecutive
-// requests for the same channel.
+// stream info to whichever job is about to ask the same question about that
+// channel — processTwitchLive, or a manually added job parked in
+// waitForTwitchLive. Eliminates a redundant GetStreamInfo call that exposed
+// the worker to transient Twitch GQL flaps where StreamMetadata briefly
+// returned Stream=nil between two consecutive requests for the same channel.
 //
 // Take-once semantics ensure the same hint can't accidentally be consumed by
 // multiple processing attempts; user-driven Reinit always falls back to a
@@ -60,9 +75,9 @@ func (c *twitchHintCache) Stats() TwitchHintStats {
 	return TwitchHintStats{Hits: c.hits.Load(), Misses: c.misses.Load()}
 }
 
-// stash records a fresh TwitchStreamInfo for the given jobID. Safe to call
-// on a nil receiver (test harnesses may not wire one up).
-func (c *twitchHintCache) stash(jobID string, info *twitch.TwitchStreamInfo) {
+// stash records a fresh TwitchStreamInfo under key (a twitchHintKey). Safe to
+// call on a nil receiver (test harnesses may not wire one up).
+func (c *twitchHintCache) stash(key string, info *twitch.TwitchStreamInfo) {
 	if c == nil || info == nil {
 		return
 	}
@@ -71,23 +86,23 @@ func (c *twitchHintCache) stash(jobID string, info *twitch.TwitchStreamInfo) {
 	if c.entries == nil {
 		c.entries = map[string]twitchHintEntry{}
 	}
-	c.entries[jobID] = twitchHintEntry{info: info, stashedAt: time.Now()}
+	c.entries[key] = twitchHintEntry{info: info, stashedAt: time.Now()}
 }
 
-// take consumes and returns the hint for jobID, or nil if absent or expired.
+// take consumes and returns the hint for key, or nil if absent or expired.
 // Always removes the entry whether expired or fresh — take-once.
-func (c *twitchHintCache) take(jobID string) *twitch.TwitchStreamInfo {
+func (c *twitchHintCache) take(key string) *twitch.TwitchStreamInfo {
 	if c == nil {
 		return nil
 	}
 	c.mu.Lock()
-	entry, ok := c.entries[jobID]
+	entry, ok := c.entries[key]
 	if !ok {
 		c.mu.Unlock()
 		c.misses.Add(1)
 		return nil
 	}
-	delete(c.entries, jobID)
+	delete(c.entries, key)
 	c.mu.Unlock()
 	if time.Since(entry.stashedAt) > twitchHintTTL {
 		c.misses.Add(1)

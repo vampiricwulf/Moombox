@@ -321,6 +321,10 @@ func newInterruptedTestDownloader(t *testing.T) *engine.SegmentDownloader {
 		},
 	})
 	d.MayResume = func() bool { return true } // never resolves itself -- only the ceiling ends this run
+	// O-Q: run the production retry ladder at 1/20 scale. Without this the
+	// test waits out singleGoneRetryDelay's real 500 ms x the 403 attempt
+	// budget, which is 10 s of the suite's wall time for one boundary.
+	d.SetFastDelaysForTests(20)
 
 	done := make(chan error, 1)
 	go func() { done <- d.Start(context.Background()) }()
@@ -330,7 +334,7 @@ func newInterruptedTestDownloader(t *testing.T) *engine.SegmentDownloader {
 		if err != nil {
 			t.Fatalf("Start = %v, want nil (ceiling-forced finalize)", err)
 		}
-	case <-time.After(20 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return once the InterruptionTimeout ceiling expired -- test setup could not reproduce a Tier-2 finalize")
 	}
 

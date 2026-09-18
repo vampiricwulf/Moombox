@@ -23,6 +23,7 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 		atEdgeBackoffUnit:      time.Second,
 		hlsReloadUnit:          time.Second,
 		hlsResumeSave:          hlsResumeSaveInterval,
+		fetchHardCeiling:       segmentHardCeiling,
 	}
 	if got := defaultDelays(); got != want {
 		t.Fatalf("defaultDelays() = %+v, want %+v", got, want)
@@ -37,6 +38,7 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 		"hlsStuckRetry":          {want.hlsStuckRetry, 2 * time.Second},
 		"connectivityPoll":       {want.connectivityPoll, 5 * time.Second},
 		"hlsResumeSave":          {want.hlsResumeSave, 15 * time.Second},
+		"fetchHardCeiling":       {want.fetchHardCeiling, 15 * time.Minute},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %v, want %v (production timing must not move in this arc)", name, pair[0], pair[1])
@@ -51,6 +53,39 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 		if v.Field(i).Int() == 0 {
 			t.Errorf("delays.%s has no default", v.Type().Field(i).Name)
 		}
+	}
+}
+
+// TestSetFastDelaysForTests pins O-Q's exported seam: internal/worker's
+// interruption test pays the production retry ladder because the delays seam
+// is unexported and unreachable from there (TOOL-6, 10.1 s of the suite).
+//
+// Mutant: making the setter a no-op — the scaled values equal the production
+// ones and the boundary test regains its ten seconds.
+func TestSetFastDelaysForTests(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{OutputFile: t.TempDir() + "/o.ts"})
+	d.SetFastDelaysForTests(fastScale)
+	if d.delays != fastDelays() {
+		t.Fatalf("delays = %+v, want fastDelays() = %+v", d.delays, fastDelays())
+	}
+	if d.delays == defaultDelays() {
+		t.Fatal("SetFastDelaysForTests left the production values in place")
+	}
+	// Every member moves, including the one that is a deadline rather than a
+	// sleep: a setter that forgets a field leaves the test loop running one
+	// production wait, which is exactly the cost O-Q exists to remove.
+	v := reflect.ValueOf(d.delays)
+	p := reflect.ValueOf(defaultDelays())
+	for i := 0; i < v.NumField(); i++ {
+		if v.Field(i).Int() != p.Field(i).Int()/fastScale {
+			t.Errorf("delays.%s = %v, want the production value / %d",
+				v.Type().Field(i).Name, time.Duration(v.Field(i).Int()), fastScale)
+		}
+	}
+	// A nonsense scale is ignored rather than dividing by zero.
+	d.SetFastDelaysForTests(0)
+	if d.delays != fastDelays() {
+		t.Error("SetFastDelaysForTests(0) changed the delays — a scale of 0 or less must be ignored")
 	}
 }
 
@@ -73,6 +108,7 @@ func fastDelays() delays {
 		atEdgeBackoffUnit:      d.atEdgeBackoffUnit / fastScale,
 		hlsReloadUnit:          d.hlsReloadUnit / fastScale,
 		hlsResumeSave:          d.hlsResumeSave / fastScale,
+		fetchHardCeiling:       d.fetchHardCeiling / fastScale,
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/chat"
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -245,6 +246,125 @@ func (o *DownloadOrchestrator) cleanup(chatDl *chat.ChatDownloader, chatDone cha
 // rather than an archive that stopped short.
 const chatStatusIncomplete = "incomplete"
 
+const (
+	// vodChatWaitFloor and vodChatWaitCeiling bracket how long a finished VOD
+	// download waits for its chat source to finish paging (owner decision
+	// O-A). Live jobs keep chatWaitTimeout: a live chat stops when the
+	// broadcast does, so two minutes of drain is the right shape there.
+	//
+	// A VOD's chat is different. Twitch pages VOD comments a screenful per
+	// GQL round trip while the video downloads at link speed, so a chat-heavy
+	// VOD on a fast link predictably still has minutes of paging left when
+	// the video completes — and the two-minute cut then Stop()'d it, recorded
+	// "incomplete", and deleted the preserved sidecar with staging
+	// (sweep-2 TWITCH-3). The allowance scales with the video's own length
+	// because the comment count does; the floor covers a short VOD with dense
+	// chat and the ceiling stops a stalled pager holding a job open forever.
+	vodChatWaitFloor   = 30 * time.Minute
+	vodChatWaitCeiling = 6 * time.Hour
+)
+
+// vodChatWaitTimeout is the first-wait bound resolveChatOutcome is given for a
+// VOD job. The download slot is released before this wait begins — the job is
+// no longer downloading, and holding a slot through it would starve the pool.
+func vodChatWaitTimeout(job *database.Job) time.Duration {
+	wait := vodChatWaitFloor
+	if job != nil && job.LengthSeconds != nil && *job.LengthSeconds > 0 {
+		if length := time.Duration(*job.LengthSeconds) * time.Second; length > wait {
+			wait = length
+		}
+	}
+	return min(wait, vodChatWaitCeiling)
+}
+
+// resolveVodChatOutcome is the finalize-path chat wait for a VOD job: the
+// whole of owner decision O-A in one place, so the two orchestrators cannot
+// drift and so the ORDER — release, then wait — is a property of this
+// function rather than of two call sites.
+//
+// The slot is given up FIRST, exactly once. The video is finished; a wait
+// that can run for hours must not keep the next VOD queued behind a download
+// that has stopped downloading. ReleaseDownloadSlot is keyed by the queue's
+// holdingDlSlot map and so is idempotent, which is what lets the release
+// below the mux stay where it is (it still covers the live path, and every
+// path that reaches the mux without coming through here).
+//
+// The bound comes off the FRESH row, not the captured job struct. jobCtx.Job
+// is the pointer processJob took before stream processing, and the Twitch VOD
+// path (processTwitchVod, stream_processor_twitch.go) writes length_seconds to
+// the row ONLY — it never syncs the in-memory struct the way the YouTube path
+// does (updateJobMetadata, stream_processor.go). Bounding on the captured
+// pointer therefore left the duration term dead on Twitch, TWITCH-3's own
+// platform: every first-run VOD, however long, got the floor.
+//
+// The first wait is context-aware, because the bound is now long enough to
+// matter: a Stop() (or a user cancel) collapses it to zero — whether it lands
+// mid-wait or was already in effect on entry, as on ExecuteTwitch's
+// outage-finalize path, which arrives here with the chat already Stop()'d and
+// nothing left to wait hours for. resolveChatOutcome then goes straight to its
+// Stop()+grace path, and that path's rule, "never nil once the first wait
+// expired", records a chat that was still paging when the job was stopped as
+// incomplete rather than letting a Stop()-exit's nil verdict read as
+// "finished" — which is the honest verdict for a capture cut short.
+func (o *DownloadOrchestrator) resolveVodChatOutcome(ctx context.Context, dl ChatSource, rec *chatOutcome, done chan struct{}, job *database.Job) error {
+	jobID := ""
+	if job != nil {
+		jobID = job.ID
+	}
+	if o.queue != nil && jobID != "" {
+		o.queue.ReleaseDownloadSlot(jobID)
+	}
+
+	// The row is the truth for length_seconds (see the doc above); a read
+	// error falls back to whatever the captured struct carries.
+	bounded := job
+	if o.db != nil && jobID != "" {
+		if fresh, err := o.db.GetJob(jobID); err == nil && fresh != nil {
+			bounded = fresh
+		}
+	}
+	wait := vodChatWaitTimeout(bounded)
+	o.logger.Debug("waiting for VOD chat to finish paging", "jobID", jobID, "bound", wait)
+
+	if ctx != nil && done != nil {
+		// collapse ends the bound — UNLESS the chat goroutine has already
+		// signalled completion, in which case the bound is left intact so
+		// resolveChatOutcome's own select takes the closed channel below and
+		// returns the pager's verdict.
+		//
+		// The non-blocking read is what makes that deterministic. wait = 0
+		// there instead would leave resolveChatOutcome's first select with
+		// BOTH arms ready — a closed done and a zero timer — and Go picks a
+		// ready arm uniformly at random: a VOD whose chat had genuinely
+		// finished recorded "incomplete" on half its runs, firing the M5
+		// staging keep and the warning badge on a complete archive
+		// (round-2 re-review: 200 of 400 runs). A closed done always wins now;
+		// only a pager that is still paging gets the cut-short verdict.
+		collapse := func() {
+			select {
+			case <-done:
+			default:
+				wait = 0
+			}
+		}
+		if ctx.Err() != nil {
+			collapse()
+		} else {
+			timer := time.NewTimer(wait)
+			select {
+			case <-done:
+				timer.Stop()
+			case <-ctx.Done():
+				timer.Stop()
+				collapse()
+			case <-timer.C:
+				collapse()
+			}
+		}
+	}
+	return o.resolveChatOutcome(dl, rec, done, wait, 2*time.Second)
+}
+
 // chatOutcome carries a chat downloader's terminal error from the goroutine it
 // ran on to the orchestrator that derives chat_status from it.
 //
@@ -323,12 +443,57 @@ func (o *DownloadOrchestrator) recordChatOutcome(jobCtx *JobContext, messageCoun
 // being copied is the short one and writing "finished" over that verdict is
 // exactly the bug. Every other verdict keeps the old behaviour, "unavailable"
 // included: a resumed job whose session added no messages still archived the
-// history it inherited. A nil context is never passed today — the standalone
-// Mux action builds a real JobContext (buildJobContext, worker.go) with no
-// chat verdict on it — so the nil guard is purely defensive.
+// history it inherited.
+//
+// A context with NO verdict on it is the restart/Mux path: the standalone Mux
+// action builds a real JobContext (buildJobContext, worker.go) and never runs
+// a chat downloader, so nothing recorded one. That path reaches a VOD killed
+// inside the O-A chat wait — a Muxing row whose pager still had pages left —
+// and "finished" there both mislabels the archive and lets
+// cleanupStagingAfterMux delete the pager's resume sidecar with the dir. The
+// sidecar IS the verdict in that case (chatResumeSidecarPresent). A nil
+// context is never passed today, so the nil guard is purely defensive.
 func chatFileStatus(jobCtx *JobContext) string {
-	if jobCtx != nil && jobCtx.ChatStatus == chatStatusIncomplete {
+	if jobCtx == nil {
+		return "finished"
+	}
+	if jobCtx.ChatStatus == chatStatusIncomplete {
+		return chatStatusIncomplete
+	}
+	if jobCtx.ChatStatus == "" && chatResumeSidecarPresent(jobCtx.StagingDir) {
 		return chatStatusIncomplete
 	}
 	return "finished"
+}
+
+// chatResumeSidecarName is the file a chat pager writes beside chat.json to
+// carry the offset (and recent-ID window) it would continue from. All three
+// pagers spell it the same way and all three delete it ONLY on a clean
+// completion: internal/twitch/vod_chat.go (resumeStatePath), internal/twitch/
+// chat.go (chatResumePath) and internal/chat/downloader.go (ResumeFile).
+const chatResumeSidecarName = "chat.json.resume.json"
+
+// chatResumeSidecarPresent reports whether a chat pager left its resume
+// sidecar behind in a job's staging tree — one that was never removed, which
+// means the capture in chat.json stops short of the stream.
+//
+// Both the root and each part dir are checked: a quality/gap-split job keeps
+// each part's chat beside that part's media in seg_N/, which is where that
+// part's pager would have left its sidecar (finalizeMultiSegmentJob reads the
+// same verdict for segments[0].ChatFile). Directories the sweep already skips
+// — a merge tombstone, a non-numeric seg_ name — are skipped here too, since
+// stagedSegDirs is what decides.
+func chatResumeSidecarPresent(stagingDir string) bool {
+	if stagingDir == "" {
+		return false
+	}
+	if fileExists(filepath.Join(stagingDir, chatResumeSidecarName)) {
+		return true
+	}
+	for _, sd := range stagedSegDirs(stagingDir) {
+		if fileExists(filepath.Join(sd.dir, chatResumeSidecarName)) {
+			return true
+		}
+	}
+	return false
 }

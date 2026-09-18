@@ -74,6 +74,17 @@ type DownloadOrchestrator struct {
 	// broadcasts through the worker's accessor. nil is inert.
 	twitchChats *twitchChatRegistry
 	logger      logger
+	// muxRootCtx parents every mux that must OUTLIVE its job's own context —
+	// the background part muxes, the connectivity-outage finalize and the
+	// off-queue restart mux, all of which used context.Background() and were
+	// therefore unreachable from DownloadWorker.Stop. muxRootCancel is what
+	// Stop cuts (owner decision O-E): the 10 s shutdown backstop "fires
+	// routinely" while a part mux drains, and on Windows the orphaned FFmpeg
+	// then lives on in the LAUNCHER's kill-on-close job object while the
+	// respawned child re-muxes the same output with -y. Partial part files are
+	// re-muxed on restart, so cancelling costs nothing.
+	muxRootCtx    context.Context
+	muxRootCancel context.CancelFunc
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.
@@ -82,17 +93,20 @@ type DownloadOrchestrator struct {
 // (*GojaResolver) is kept for GetSts, InvalidateSolver, and other
 // goja-internal operations.
 func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.GojaResolver, routedCs cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager, conn Connectivity) *DownloadOrchestrator {
+	muxRootCtx, muxRootCancel := context.WithCancel(context.Background())
 	return &DownloadOrchestrator{
-		muxer:        engine.NewMuxer(ffmpegPath, logger),
-		ffmpegPath:   ffmpegPath,
-		db:           db,
-		queue:        queue,
-		cipherSolver: cs,
-		routedCipher: routedCs,
-		potProvider:  pp,
-		notifier:     nm,
-		conn:         conn,
-		logger:       logger,
+		muxer:         engine.NewMuxer(ffmpegPath, logger),
+		ffmpegPath:    ffmpegPath,
+		db:            db,
+		queue:         queue,
+		cipherSolver:  cs,
+		routedCipher:  routedCs,
+		potProvider:   pp,
+		notifier:      nm,
+		conn:          conn,
+		logger:        logger,
+		muxRootCtx:    muxRootCtx,
+		muxRootCancel: muxRootCancel,
 	}
 }
 
@@ -565,7 +579,19 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// Important 3) — and turns an unconfirmed completion (the wait timed
 		// out) into an explicit incomplete rather than letting a nil verdict
 		// read as "finished".
-		outcome := o.resolveChatOutcome(chatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		//
+		// Owner decision O-A: a VOD waits for its chat to finish paging on a
+		// bound scaled to the video's own length, with the download slot
+		// released first (resolveVodChatOutcome does both) so the pool is not
+		// held through a wait that is no longer downloading anything. A live
+		// chat ends when the broadcast does, so the live path keeps the
+		// two-minute cut.
+		var outcome error
+		if isVod {
+			outcome = o.resolveVodChatOutcome(ctx, chatDl, &chatRec, chatDone, jobCtx.Job)
+		} else {
+			outcome = o.resolveChatOutcome(chatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		}
 		o.recordChatOutcome(jobCtx, chatDl.MessageCount(), outcome)
 	}
 

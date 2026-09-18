@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // ErrQualityLost signals that the stream is still live but the selected
@@ -39,6 +41,31 @@ var ErrSegmentRetriesExhausted = errors.New("segment retries exhausted")
 // Without StopOnGap the loop skips past the gap and keeps appending
 // (YouTube-style behavior, where the file knowingly contains a jump).
 var ErrGapDetected = errors.New("unrecoverable gap in live stream")
+
+// ErrStagedMediaPresent signals that Start found non-empty staged media at
+// OutputFile that it could neither resume from (no usable sidecar, no DB
+// position) nor was told to discard. Destroying it was the previous
+// behaviour: an implicit `O_TRUNC` over a complete multi-hour recording
+// (sweep-2 ENGINE-1/ENGINE-5). The rule is now the one the StopOnGap path
+// always had — never truncate non-empty staged media unless the CALLER
+// explicitly asked to discard it — with the decision handed back to the
+// orchestrator, which can mux what is staged instead.
+//
+// StopOnGap callers get ErrGapDetected instead: they have a richer recovery
+// (close this file as a finished part, continue in a fresh one).
+var ErrStagedMediaPresent = errors.New("staged media present with no usable resume state")
+
+// ErrTruncateBlocked signals that a staged recording could not be shrunk to
+// its fsync'd resume offset: an antivirus scanner or the search indexer still
+// holds the file open, or the volume went read-only. NOTHING WAS LOST — the
+// media and its sidecar are exactly as they were, so the job stays resumable
+// and the run should end now rather than be re-verified for half an hour.
+//
+// It never travels alone. A plain resume returns it wrapping the refusal; a
+// StopOnGap caller gets it joined with ErrGapDetected, which still splits to a
+// fresh part but must NOT raise the "segments expired from the CDN"
+// notification, because no segment expired.
+var ErrTruncateBlocked = errors.New("truncate for resume blocked")
 
 // ErrInitSegmentChanged signals that the HLS playlist's #EXT-X-MAP init
 // segment changed CONTENT mid-part (e.g. a Twitch transcode restart on the
@@ -108,12 +135,33 @@ const (
 	catchUpBufferBytes = 256 << 20
 )
 
-// SegmentTimeout bounds a single segment/chunk/probe fetch's derived
-// context (fetchSegment, fetchChunk, ProbeSegmentAvailable each run
-// context.WithTimeout(parent, SegmentTimeout)). A package var rather than a
-// const purely so a test can shrink it under t.Cleanup-restored assignment
-// to exercise a genuine derived-context timeout without an actual 30s wait;
-// production code never mutates it.
+// SegmentTimeout is the READ-PROGRESS (idle) deadline on a single segment or
+// chunk fetch: the fetch is cancelled only after this long with no bytes
+// arriving, so a slow-but-moving transfer runs as long as it keeps
+// progressing (sweep-2 ENGINE-4). Consumers: fetchSegment and fetchChunk in
+// downloader_fetch.go, via withReadProgressDeadline + idleBody, and
+// runDirectDownloadFallback (downloader_direct.go), which streams a whole VOD
+// in ONE response through the same pair — it is that transfer's only bound
+// now that the client-level Timeout is gone (sweep-2 ENGINE-6).
+// ProbeSegmentAvailable (eviction_probe.go) reuses the same value as a plain
+// TOTAL context.WithTimeout — its body is capped at
+// probeSegmentMaxBodyBytes, so there is no slow-transfer case to protect.
+// fetchSegment and fetchChunk — and only those two — additionally run under
+// segmentHardCeiling (downloader_fetch.go), the 15-minute absolute lifetime
+// that ends a body trickling just fast enough to keep resetting this bound.
+// A package var rather than a const purely so a test can shrink it under
+// t.Cleanup-restored assignment and exercise a genuine deadline without an
+// actual 30s wait; production code never mutates it. The rule that assignment
+// imposes is narrow: a test that MUTATES this var (or any other package-level
+// seam, e.g. syncMediaFile or ffmpegPathOS) must stay serial, because a
+// parallel test reading it while another writes it is a data race. It is NOT a
+// ban on t.Parallel() in this package — many tests here are parallel (the DASH
+// integration, interruption, catch-up and eviction-probe suites) and must stay
+// so; no count is quoted here because it would go stale. The
+// canonical statement of the rule sits on the mutating test itself, at
+// downloader_fetch_cancel_test.go's
+// TestFetchSegmentDerivedTimeoutIsAConnectivityFailure ("Do not add
+// t.Parallel(): shrinks the package-global SegmentTimeout").
 var SegmentTimeout = 30 * time.Second
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
@@ -174,6 +222,29 @@ type DownloaderOptions struct {
 	// every output file stays internally gapless. Leave false for platforms
 	// with seekable/backfillable streams (YouTube) and for VODs.
 	StopOnGap bool
+	// DiscardStaged tells Start that this caller needs a file that begins at
+	// the start of the stream, so the no-truncate guard (ErrStagedMediaPresent)
+	// stands down and the file is opened O_TRUNC. It never means "destroy
+	// whatever is there": the full rule is
+	//
+	//   - a USABLE resume sidecar always wins. Start resumes, appends the
+	//     missing tail, and this flag is irrelevant — the guard block is not
+	//     even reached;
+	//   - otherwise, if staging holds a HEADED recording (an ftyp box or the
+	//     EBML magic, i.e. something a muxer can open), it is preserved as
+	//     <OutputFile>.restart-<unix ts> — with its sidecar — and the fresh
+	//     file starts beside it;
+	//   - otherwise (staging empty, or non-empty but unrecognisable) it is
+	//     discarded, which is the ordinary fresh start.
+	//
+	// The one production setter is the manifest-free DASH strategy's
+	// post-live restart: those segments carry their ftyp+moov init inline at
+	// sq=0 only, so a finished stream that cannot resume genuinely must begin
+	// again at 0 and the partial file cannot be appended to. Deliberate
+	// discards that REMOVE the media before constructing the downloader (the
+	// quality-split short-segment rule) never need this flag at all: the
+	// guard only looks at bytes that are still there.
+	DiscardStaged bool
 	// MaxTimeout bounds how long the DASH loop keeps retrying/verifying while
 	// waiting for the next segment before it force-finalizes the recording —
 	// even if YouTube still reports the stream live (its status can lag or
@@ -368,6 +439,14 @@ type SegmentDownloader struct {
 	hlsInitURI     string
 	hlsInitHash    string
 
+	// mediaSyncWarned latches the one Warn for a failed media fsync (owner
+	// decision O-G, saveResume) so a volume that has gone read-only mid-
+	// recording does not write a log line every cadence tick for hours.
+	// saveResume and every media write run on the download-loop goroutine —
+	// the same ownership hlsInitWritten above relies on — so a plain bool
+	// needs no atomic.
+	mediaSyncWarned bool
+
 	// streamEndVerified latches an "ended" verdict from CheckStreamStatus
 	// within one continuous gone-burst so the behind-head retry loop in
 	// handleGoneError doesn't re-probe the API every iteration. Reset when
@@ -428,6 +507,33 @@ type SegmentDownloader struct {
 	// on real production-scale transfers. Zero (the default) means "use
 	// catchUpBufferBytes" — production code never sets this.
 	catchUpBufferBytesOverride int
+
+	// hlsVodBufferBytesOverride is the same seam for the HLS VOD reorder
+	// buffer (runHlsVodParallel) — deliberately the same shape as
+	// catchUpBufferBytesOverride above rather than a package var, so the two
+	// twins read alike and tests that shrink either one stay parallelisable.
+	// Zero (the default) means "use catchUpBufferBytes"; production code
+	// never sets this.
+	//
+	// The ceiling it shrinks is sweep-2 ENGINE-2: that reorder buffer was a
+	// plain map with no bound at all, so while fetchSegmentWithRetry worked
+	// through its 5+10+15+20 s ladder (plus up to five idle deadlines) on the
+	// head-of-order segment, the other workers spent that window racing the
+	// rest of the playlist into RAM — 0.6-2.5 GB on a 100 Mbit/s link at the
+	// default 12 workers and ~7.5 MB Twitch VOD segments, capped only by the
+	// size of the VOD. Same ceiling as the DASH catch-up twin, which has had
+	// one since Arc 3.
+	hlsVodBufferBytesOverride int
+
+	// directResumeIntervalOverride is the same seam again for the whole-file
+	// download's sidecar cadence (directResumeInterval, 50 MB — see both call
+	// sites in downloader_direct.go). Zero (the default) means "use
+	// directResumeInterval"; production code never sets this. A test that had
+	// to move 100 MB through an httptest server to observe two checkpoints
+	// would cost seconds and hundreds of megabytes of RAM to pin a rule that
+	// is about the cadence, not the constant — which is itself pinned, by
+	// TestDirectResumeIntervalIsFiftyMegabytes.
+	directResumeIntervalOverride int64
 
 	// onResumeSaved is a TEST SEAM, like delays and
 	// catchUpBufferBytesOverride: production code never sets it. When
@@ -657,7 +763,7 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 		opts.EndSeq = -1
 	}
 	if opts.ResumeFile == "" {
-		opts.ResumeFile = opts.OutputFile + ".resume.json"
+		opts.ResumeFile = opts.OutputFile + resumeFileSuffix
 	}
 
 	logger := opts.Logger
@@ -755,20 +861,52 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		}
 	}
 
-	// StopOnGap no-truncate guard: staged data with no usable resume state
-	// (corrupt/stale/identity-rejected sidecar — e.g. power loss corrupted
-	// the write, or the state aged past maxResumeStateAge during a long
-	// outage on a continuing broadcast). Truncating would destroy a
-	// recording that finalize-time recovery can still mux as a part — hand
-	// the decision to the caller instead: the gap-split path closes this
-	// file as a finished part and continues in a fresh one. Deliberate
-	// discards (the quality-split short-segment rule) remove the staged
-	// media before constructing the downloader, so they don't trip this.
-	if !resuming && d.opts.StopOnGap {
+	// Shared no-truncate guard (sweep-2 ENGINE-1/5/6, verifier merge M2).
+	// Reached ONLY when the engine could not resume — a corrupt/stale/
+	// identity-rejected sidecar, a restart that re-probed the stream as
+	// post-live and re-seeded seq 0, a sidecar the natural end already
+	// cleared. A usable sidecar never lands here: `resuming` is already true
+	// above, the file is truncated to the fsync'd offset and the missing tail
+	// is appended, which is the documented incomplete-tail recovery.
+	//
+	// With no resume available, the bytes on disk must still not be destroyed
+	// silently — finalize-time recovery can mux them. What happens next is
+	// the caller's declared intent:
+	//
+	//   - no DiscardStaged: refuse. StopOnGap callers have the richer answer
+	//     (close this file as a finished part and continue in a fresh one),
+	//     so they keep ErrGapDetected; everyone else gets
+	//     ErrStagedMediaPresent and the orchestrator decides.
+	//   - DiscardStaged: this caller REQUIRES a file that begins at the start
+	//     of the stream (the manifest-free sq=0 restart), so it cannot refuse
+	//     — but it can preserve. A headed recording is set aside and the
+	//     fresh file starts beside it; unrecognisable bytes are discarded.
+	//
+	// IsDirectURL is out of scope for both: a whole-file VOD download is not
+	// segmented staged media and its partial is always re-fetchable from the
+	// same static URL, so restarting it costs bandwidth, not footage. What it
+	// costs is now genuinely bounded by the 50 MB sidecar cadence, which the
+	// direct paths did not actually write until Task 10 — saveResume's
+	// `currentSeq > 0` guard returned early on every whole-file download, so
+	// the clause this comment leaned on was aspirational and an interrupted
+	// VOD restarted from byte 0 however far it had got (directResumeInterval,
+	// downloader_direct.go, now saves on both the chunked and the streaming
+	// path).
+	if !resuming && !d.opts.IsDirectURL {
 		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
-			d.logger.Warn("[Downloader] Staged data present but resume state unusable — splitting instead of truncating",
-				"file", d.opts.OutputFile, "size", info.Size())
-			return ErrGapDetected
+			if !d.opts.DiscardStaged {
+				if d.opts.StopOnGap {
+					d.logger.Warn("[Downloader] Staged data present but resume state unusable — splitting instead of truncating",
+						"file", d.opts.OutputFile, "size", info.Size())
+					return ErrGapDetected
+				}
+				d.logger.Error("[Downloader] Staged data present but resume state unusable — refusing to truncate",
+					"file", d.opts.OutputFile, "size", info.Size())
+				return fmt.Errorf("%w: %s holds %d bytes", ErrStagedMediaPresent, d.opts.OutputFile, info.Size())
+			}
+			if preserveErr := d.preserveStagedRecording(ctx, info.Size()); preserveErr != nil {
+				return preserveErr
+			}
 		}
 	}
 
@@ -782,31 +920,32 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 				d.logger.Info("[Downloader] Truncating file for resume",
 					"from", info.Size(), "to", state.BytesWritten)
 			}
-			if truncErr := os.Truncate(d.opts.OutputFile, state.BytesWritten); truncErr != nil {
+			if truncErr := truncateForResume(ctx, d.opts.OutputFile, state.BytesWritten); truncErr != nil {
 				if d.opts.StopOnGap {
 					// Same contract as the no-truncate guard above: a failed
 					// truncate must not fall back to O_TRUNC and destroy the
 					// staged recording (transient sharing violations from AV
 					// scans hit exactly this window on Windows). Split
 					// instead — the caller muxes the file as a finished part.
+					// That part keeps whatever bytes lie past the fsync'd
+					// offset, so its last fragment may be torn; FFmpeg drops a
+					// partial trailing fragment, and a torn tail beats a
+					// destroyed recording. ErrTruncateBlocked rides along so
+					// the orchestrator splits WITHOUT telling the operator
+					// that segments were lost to the CDN — none were.
 					d.logger.Warn("[Downloader] Truncate-for-resume failed — splitting instead of starting fresh",
 						"file", d.opts.OutputFile, "err", truncErr)
-					return ErrGapDetected
+					return fmt.Errorf("%w: %w: %w", ErrGapDetected, ErrTruncateBlocked, truncErr)
 				}
-				d.logger.Warn("[Downloader] Failed to truncate for resume, starting fresh", "err", truncErr)
-				resuming = false
-				flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-				state = nil
-				// The restore above already installed the sidecar's byte count
-				// and fMP4 init state; the file is about to be O_TRUNC'd
-				// empty, so none of that is true anymore. Stale init fields
-				// are the dangerous half: hlsInitWritten=true on an empty
-				// file makes the per-segment fast path skip ever writing an
-				// init — a headerless, unmuxable file reported as success.
-				d.bytesWritten.Store(0)
-				d.hlsInitWritten = false
-				d.hlsInitURI = ""
-				d.hlsInitHash = ""
+				// ENGINE-5: the old branch here logged a Warn, cleared the
+				// resume state and opened the file O_TRUNC — losing hours of
+				// footage to a transient sharing violation. The retry ladder
+				// above has already ridden out that window; anything left is
+				// a real filesystem failure, and returning it keeps staging
+				// and the sidecar intact for a later Resume.
+				d.logger.Error("[Downloader] Truncate-for-resume failed after retries",
+					"file", d.opts.OutputFile, "err", truncErr)
+				return fmt.Errorf("%w: %w", ErrTruncateBlocked, truncErr)
 			}
 		}
 	} else {
@@ -818,8 +957,8 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		return fmt.Errorf("open output file: %w", err)
 	}
 	// Closure (not `defer d.outputFile.Close()`): the direct-download
-	// streaming-fallback reset reopens d.outputFile, and a method-value defer
-	// would close the stale handle and leak the new one.
+	// discard (discardStagedMedia) reopens d.outputFile, and a method-value
+	// defer would close the stale handle and leak the new one.
 	defer func() { d.outputFile.Close() }()
 
 	// Download init segment first (only if not resuming and not HLS).
@@ -862,6 +1001,284 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	}
 	return d.runDashLoop(ctx)
 }
+
+// StagedRestartSuffix marks a recording Start set aside instead of truncating
+// it: <OutputFile>.restart-<unix ts>, with its sidecar alongside as
+// <OutputFile>.restart-<unix ts>.resume.json.
+//
+// Exported because it is a cross-package contract, not an implementation
+// detail: package worker keys on it in two places — the orchestrator registers
+// an aside as an unmuxed part, and the orphan sweep recognises one so it is
+// neither deleted nor mistaken for a live staging file. Both must match on
+// this const rather than a hardcoded literal, or the two halves drift.
+//
+// A path carrying this suffix is the RECORDING only when it does not also end
+// in resumeFileSuffix — the sidecar twin shares the timestamped stem.
+const StagedRestartSuffix = ".restart-"
+
+// resumeFileSuffix is the sidecar's name relative to its media file, used both
+// by NewSegmentDownloader's default and by the aside rename above so the two
+// can never drift apart.
+const resumeFileSuffix = ".resume.json"
+
+// StagedRestartSidecar returns the resume sidecar that travels with an aside.
+//
+// Exported for the same reason IsStagedRestartPath is: package worker deletes
+// an aside once it has been recovered into its own output file, and the twin
+// has to go with it — a sidecar left beside nothing is a stale offset map. The
+// suffix itself stays unexported so the pair can only ever be spelled here.
+func StagedRestartSidecar(aside string) string { return aside + resumeFileSuffix }
+
+// IsStagedRestartPath reports whether name is a recording set aside by the
+// no-truncate guard — <file>.restart-<unix ts> — and not its sidecar twin,
+// which shares that timestamped stem as <file>.restart-<unix ts>.resume.json.
+//
+// Exported because resumeFileSuffix is not: package worker's staging scan
+// (internal/worker/orchestrator_mux.go, stagedRecordingParts) has to tell the
+// recording from its twin, and hardcoding either literal there is exactly the
+// drift StagedRestartSuffix's doc comment exists to prevent. The timestamp is
+// required to be digits so an ordinary file that merely contains ".restart-"
+// is never mistaken for one of ours.
+func IsStagedRestartPath(name string) bool {
+	// Belt and braces: the digits rule below already excludes the twin, whose
+	// name ends in the sidecar suffix rather than in the timestamp, so no
+	// input can make this line the deciding one (Task 8's mutant 12a survives
+	// its removal by construction). It stays because reading "…and not its
+	// sidecar twin" in the doc above and finding nothing that says so is how
+	// a later edit to the timestamp rule quietly starts muxing JSON files.
+	if strings.HasSuffix(name, resumeFileSuffix) {
+		return false
+	}
+	i := strings.LastIndex(name, StagedRestartSuffix)
+	if i < 0 {
+		return false
+	}
+	return allDigits(name[i+len(StagedRestartSuffix):])
+}
+
+// RestartSiblingStem reports whether base is a RECOVERED set-aside recording —
+// the sibling output file the worker muxes beside a job's archive, named
+// <stem>.restart-<unix ts>[-N].<ext> — and returns the <stem> whose archive it
+// belongs to.
+//
+// The twin predicate IsStagedRestartPath matches the RAW recording in staging,
+// whose name ENDS at the timestamp; this one matches the muxed output, where
+// the timestamp is an infix before the container extension and may carry the
+// worker's collision counter. Both live here, beside the const they share, for
+// the reason StagedRestartSuffix's doc comment gives: package worker's orphan
+// sweep has to tell a recovered sibling from an ordinary output file so it is
+// never offered for deletion, and hardcoding the literal there is exactly the
+// drift this pair exists to prevent.
+//
+// base is a file's base name, not a path.
+func RestartSiblingStem(base string) (string, bool) {
+	body := base
+	if dot := strings.LastIndex(base, "."); dot >= 0 {
+		body = base[:dot] // strip the container extension
+	}
+	i := strings.LastIndex(body, StagedRestartSuffix)
+	if i < 0 {
+		return "", false
+	}
+	stamp := body[i+len(StagedRestartSuffix):]
+	// <ts> or <ts>-<counter>; both halves are digits, so an ordinary file that
+	// merely contains ".restart-" is never mistaken for one of ours.
+	if ts, counter, split := strings.Cut(stamp, "-"); split {
+		if !allDigits(ts) || !allDigits(counter) {
+			return "", false
+		}
+	} else if !allDigits(stamp) {
+		return "", false
+	}
+	return body[:i], true
+}
+
+// allDigits reports whether s is a non-empty run of ASCII digits — the stamp
+// rule both restart predicates above hang on.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// preserveStagedRecording is the DiscardStaged half of the no-truncate guard.
+// The caller has declared it needs a file that begins at the start of the
+// stream, and the engine has already established it cannot resume, so the
+// bytes on disk cannot simply be appended to. They are still not destroyed:
+// anything that might be muxable is renamed to <OutputFile>.restart-<unix ts>
+// (its sidecar too) and the fresh file is opened beside it. Only bytes the
+// engine has positively READ and found unrecognisable — a bare moof+mdat run
+// from a part that force-started mid-stream — fall through to the O_TRUNC
+// below, because there is genuinely nothing there to preserve.
+//
+// Both renames ride the same transient ladder as truncateForResume: the
+// scanner/indexer hold that refuses a truncate refuses a rename the same way
+// (a holder without FILE_SHARE_DELETE), and failing the run at the first
+// refusal while the truncate twenty lines below rides it out for 1270 ms would
+// be an arbitrary difference (fix round 3, Concern 2).
+//
+// A rename that fails permanently is NOT downgraded to a truncate: the guard's
+// whole promise is that nothing is destroyed implicitly, so the error surfaces
+// and the job stays resumable with everything where it was.
+func (d *SegmentDownloader) preserveStagedRecording(ctx context.Context, size int64) error {
+	if !stagedRecordingWorthPreserving(d.opts.OutputFile) {
+		d.logger.Warn("[Downloader] Staged bytes carry no container header — discarding for a fresh start",
+			"file", d.opts.OutputFile, "size", size)
+		return nil
+	}
+	aside := fmt.Sprintf("%s%s%d", d.opts.OutputFile, StagedRestartSuffix, time.Now().Unix())
+	if err := renameStagedFile(ctx, d.opts.OutputFile, aside); err != nil {
+		d.logger.Error("[Downloader] Could not set the staged recording aside — refusing to truncate it",
+			"file", d.opts.OutputFile, "aside", aside, "err", err)
+		return fmt.Errorf("%w: %s holds %d bytes and could not be set aside: %w",
+			ErrStagedMediaPresent, d.opts.OutputFile, size, err)
+	}
+	if err := d.moveResumeStateAside(ctx, aside); err != nil {
+		return err
+	}
+	d.logger.Warn("[Downloader] Staged recording set aside for a fresh start — mux it from this path if the restart falls short; a first segment that was only partly written may not be muxable on its own",
+		"from", d.opts.OutputFile, "to", aside, "bytes", size)
+	return nil
+}
+
+// moveResumeStateAside sends the sidecar after the recording it describes.
+// When the recording moved but the sidecar cannot follow, leaving it beside
+// the fresh file would be a TRAP rather than a nuisance: this Start already
+// rejected it, but a LATER Start could match the same stale offsets against
+// the regrown file and resume-append at the old recording's sequence. The
+// sidecar is unusable by definition here — that is why this branch was
+// reached — so deleting it loses nothing and is the cheapest way to make the
+// fresh start unambiguous. Only when it can be neither moved nor deleted does
+// the run fail, rather than proceed with a live trap on disk.
+func (d *SegmentDownloader) moveResumeStateAside(ctx context.Context, aside string) error {
+	err := renameStagedFile(ctx, d.opts.ResumeFile, aside+resumeFileSuffix)
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	if rmErr := retryTransientFileOp(ctx, func() error { return os.Remove(d.opts.ResumeFile) }); rmErr != nil && !os.IsNotExist(rmErr) {
+		d.logger.Error("[Downloader] Staged recording set aside but its stale resume state could not be cleared — refusing to start over it",
+			"file", d.opts.ResumeFile, "renameErr", err, "removeErr", rmErr)
+		return fmt.Errorf("%w: stale resume state %s could not be moved or removed: %w",
+			ErrStagedMediaPresent, d.opts.ResumeFile, rmErr)
+	}
+	d.logger.Warn("[Downloader] Staged recording set aside without its resume state; the stale sidecar was removed so the fresh start cannot resume against it",
+		"file", d.opts.ResumeFile, "err", err)
+	return nil
+}
+
+// stagedRecordingWorthPreserving reports whether the bytes at path must be
+// preserved rather than truncated away. It answers "yes" in two cases:
+//
+//   - the file begins with a container header a muxer can open — an MP4/M4A
+//     'ftyp' box, or the Matroska/WebM EBML magic. A capture that began at the
+//     start of the stream has one, because a manifest-free DASH sq=0 segment
+//     carries its ftyp+moov init inline;
+//   - the header could not be read AT ALL. A share-mode-0 holder, an EIO on a
+//     network staging dir or a file shorter than the eight bytes the check
+//     needs all land here, and "cannot tell" must not read as "worthless": the
+//     alternative is destroying a multi-hour recording the engine merely
+//     failed to peek at (fix round 3, Note 1). The cost of guessing wrong is a
+//     small aside file; the cost of the other guess is the recording.
+//
+// It answers "no" only for bytes it positively read and did not recognise — a
+// bare moof+mdat run from a part that force-started mid-stream, which FFmpeg
+// cannot demux on its own.
+func stagedRecordingWorthPreserving(path string) bool {
+	f, err := openStagedFile(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	var hdr [8]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return true
+	}
+	if string(hdr[4:8]) == "ftyp" {
+		return true
+	}
+	return hdr[0] == 0x1A && hdr[1] == 0x45 && hdr[2] == 0xDF && hdr[3] == 0xA3
+}
+
+// truncateForResume shrinks a staged recording to its fsync'd resume offset.
+// On Windows an antivirus scanner or the search indexer briefly holds a
+// freshly written recording open and the truncate is refused with
+// ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION although nothing is wrong
+// with the file; ONLY those refusals are retried. Every other error (a missing
+// file, a directory in its place, a read-only volume, a POSIX EACCES) is
+// permanent and is returned on the FIRST attempt.
+//
+// Same shape and same constants as utils.ReplaceFile's rename retry, spelled
+// out here rather than reused because that helper replaces a target and these
+// callers truncate or rename to a fresh path. Either way the caller is left
+// with the staged media and its sidecar untouched, so the job stays resumable.
+func truncateForResume(ctx context.Context, path string, size int64) error {
+	return retryTransientFileOp(ctx, func() error { return truncateFile(path, size) })
+}
+
+// renameStagedFile moves a staged recording (or its sidecar) aside through the
+// same ladder. The refusal it rides out is the same one truncateForResume
+// rides out — a scanner or indexer holding the file without FILE_SHARE_DELETE
+// makes os.Rename fail with ERROR_SHARING_VIOLATION while nothing is wrong
+// with either path.
+func renameStagedFile(ctx context.Context, from, to string) error {
+	return retryTransientFileOp(ctx, func() error { return renameFile(from, to) })
+}
+
+// retryTransientFileOp is the ladder itself: run op, and on a refusal the
+// platform classifier calls transient, pause and try again — 10, 20, 40, 80,
+// 160, 320 and 640 ms, 1270 ms across eight attempts. A permanent error and a
+// dead ctx both return immediately with the last error, so a caller never
+// waits out a shutdown or a read-only volume.
+func retryTransientFileOp(ctx context.Context, op func() error) error {
+	delay := truncateResumeFirstDelay
+	for attempt := 1; ; attempt++ {
+		err := op()
+		if err == nil || attempt >= truncateResumeAttempts || !isTransientTruncateError(err) {
+			return err
+		}
+		if truncateRetrySleep(ctx, delay) != nil {
+			// Shutting down mid-ladder: surface the refusal now. Nothing is
+			// lost by stopping early — the file is exactly as it was.
+			return err
+		}
+		if delay < truncateResumeMaxDelay {
+			delay *= 2
+		}
+	}
+}
+
+const (
+	// truncateResumeAttempts bounds the ladder; with the pauses below the
+	// worst case waits 1270 ms — long enough to outlast a scanner's hold on a
+	// just-written file, short enough not to stall a restart.
+	truncateResumeAttempts   = 8
+	truncateResumeFirstDelay = 10 * time.Millisecond
+	// truncateResumeMaxDelay caps the doubling. The last delay below it still
+	// doubles, so the final pause is 640 ms — the same overshoot
+	// utils.ReplaceFile's identical `< replaceFileMaxDelay` test produces.
+	truncateResumeMaxDelay = 400 * time.Millisecond
+)
+
+// Seams for the tests: the two file operations the ladder runs, the platform
+// classifier, the pause, and the open behind the header check. Production
+// never reassigns them (mirrors utils.ReplaceFile's renameFile /
+// isTransientReplaceError / replaceFileSleep).
+var (
+	truncateFile             = os.Truncate
+	renameFile               = os.Rename
+	isTransientTruncateError = transientTruncateError
+	truncateRetrySleep       = utils.Sleep
+	// openStagedFile exists so the "cannot read the staged file at all" branch
+	// — a share-mode-0 holder, an EIO on a network staging dir — is reachable
+	// in a test without a platform-specific fixture.
+	openStagedFile = os.Open
+)
 
 // Cancel cancels the download.
 func (d *SegmentDownloader) Cancel() {

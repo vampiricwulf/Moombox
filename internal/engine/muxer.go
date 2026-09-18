@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 // TrimOptions configures trimming and encoding during muxing.
@@ -55,6 +57,48 @@ func NewMuxer(ffmpegPath string, logger interface {
 // FFprobePath returns the resolved ffprobe binary path.
 func (m *Muxer) FFprobePath() string {
 	return m.ffprobePath
+}
+
+// ffmpegPathOS is runtime.GOOS, overridable in tests so the Windows branch of
+// ffmpegPathArg is exercised on every platform. Production never reassigns it.
+var ffmpegPathOS = runtime.GOOS
+
+// ffmpegPathArg prepares a file path for FFmpeg's or ffprobe's argv. A
+// composed output path — output dir + channel subdir + a 200-rune title +
+// " - partN.chat.json" — can exceed Windows' 260-character MAX_PATH. Go opens
+// such a path through the \\?\ extended-length prefix automatically; FFmpeg
+// receives the raw string and fails on a host without the LongPathsEnabled
+// policy (sweep-2 ENGINE-12). Only paths that actually need the prefix get it,
+// so the ordinary case is byte-identical to before and carries no risk from
+// FFmpeg's own path parsing.
+//
+// Both halves of "actually need" have to be measured the way Windows measures
+// them, or that containment claim is false:
+//
+//   - MAX_PATH counts UTF-16 CODE UNITS. len(p) counts UTF-8 bytes — three per
+//     CJK rune, four per emoji — so a 140-unit Japanese title (380 bytes) or a
+//     220-unit emoji one (420 bytes) used to be rewritten for nothing. For a
+//     VTuber-stream archiver those are the characteristic filenames, not
+//     exotic inputs.
+//   - the string FFmpeg has to open is the RESOLVED path, so the length is
+//     measured after filepath.Abs. A relative argument still comes back
+//     byte-identical when it resolves to something short.
+func ffmpegPathArg(p string) string {
+	if ffmpegPathOS != "windows" || p == "" || strings.HasPrefix(p, `\\?\`) {
+		return p
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	if len(utf16.Encode([]rune(abs))) < 260 {
+		return p
+	}
+	if strings.HasPrefix(abs, `\\`) {
+		// A UNC path takes the \\?\UNC\ form, not \\?\\\server.
+		return `\\?\UNC\` + strings.TrimPrefix(abs, `\\`)
+	}
+	return `\\?\` + abs
 }
 
 // deriveFFprobePath returns the ffprobe path corresponding to the given ffmpeg path.
@@ -148,15 +192,18 @@ func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOpt
 	if opts != nil && opts.TrimStartOffset > 0 {
 		args = append(args, "-ss", fmt.Sprintf("%.3f", opts.TrimStartOffset))
 	}
+	// Every path argument goes through ffmpegPathArg: FFmpeg opens the inputs
+	// before it ever touches the output, so a long input path fails first
+	// (sweep-2 ENGINE-12). Short paths come back byte-identical.
 	if videoPath != "" {
-		args = append(args, "-i", videoPath)
+		args = append(args, "-i", ffmpegPathArg(videoPath))
 	}
 
 	if audioPath != "" {
 		if opts != nil && opts.TrimStartOffset > 0 {
 			args = append(args, "-ss", fmt.Sprintf("%.3f", opts.TrimStartOffset))
 		}
-		args = append(args, "-i", audioPath)
+		args = append(args, "-i", ffmpegPathArg(audioPath))
 	}
 
 	// Duration limit
@@ -173,7 +220,7 @@ func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOpt
 
 	// Output options
 	args = append(args, "-movflags", "faststart")
-	args = append(args, outputPath)
+	args = append(args, ffmpegPathArg(outputPath))
 
 	return args
 }

@@ -415,15 +415,19 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// dropped); gap splits always mux — that data is irreplaceable. When the
 	// reused dir IS the current dir, the chat deliberately keeps its file:
 	// rolling onto the same path would rewrite it from scratch.
-	advanceToNewPart := func(muxCurrent bool, segmentEndTime int64) bool {
+	//
+	// Returns the reason the advance failed — os.MkdirAll is the only one —
+	// so the caller can latch it. A part advance that cannot create its next
+	// staging dir must never let the job finalize Finished (sweep-2 R2).
+	advanceToNewPart := func(muxCurrent bool, segmentEndTime int64) error {
 		nextIdx := segmentIndex
 		if muxCurrent {
 			nextIdx = segmentIndex + 1
 		}
 		nextDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", nextIdx))
 		if err := os.MkdirAll(nextDir, 0o755); err != nil {
-			o.logger.Error("failed to create part staging dir", "err", err, "jobID", jobCtx.Job.ID)
-			return false
+			o.logger.Error("failed to create part staging dir", "err", err, "dir", nextDir, "jobID", jobCtx.Job.ID)
+			return fmt.Errorf("create part staging dir %s: %w", nextDir, err)
 		}
 		var closedChat string
 		var enrich func(context.Context)
@@ -464,7 +468,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		curStagingDir = nextDir
 		segmentStartTime = time.Now().Unix()
 		partResumed = false // the next span is watched from birth
-		return true
+		return nil
 	}
 
 	// outageFinalize marks "finalize what was captured" exits: the broadcast
@@ -475,6 +479,54 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// consumes it on entry.
 	outageFinalize := false
 
+	// unconfirmedEndErr latches the HLS loop's unknown-verdict exit: the
+	// download failed while nothing said the broadcast was over. Finalizing
+	// there marked the job Finished and processJob then deleted the staging
+	// dir — with the resume sidecar in it (sweep-2 ENGINE-7). Returning the
+	// error instead leaves the job in Error with staging intact, which is
+	// what a Retry or a monitor re-enqueue needs. Not "resumable": /resume
+	// refuses every non-YouTube job.
+	var unconfirmedEndErr error
+
+	// latchIfUnconfirmed takes that latch unless the broadcast is CONFIRMED
+	// over, and reports whether it did. Every inner-loop exit that leaves on
+	// a failure routes through this one rule (owner decision O-C, sweep-2
+	// R2): the consult is the worker's two-sample CheckStreamFn closure, so
+	// "still live" and "the check itself failed" both mean the verdict is
+	// unknown and the job must land in Error with its staging and resume
+	// sidecar intact. Only a confirmed end falls through to finalize.
+	//
+	// The guards keep the sites honest: a VOD has no live verdict to ask
+	// for, an unwired CheckStreamFn can contradict nothing, a nil cause is
+	// not a failure, and a dead ctx means we are shutting down rather than
+	// judging a broadcast.
+	latchIfUnconfirmed := func(ctx context.Context, cause error) bool {
+		if isVod || variant.CheckStreamFn == nil || cause == nil || ctx.Err() != nil {
+			return false
+		}
+		stillLive, checkErr := variant.CheckStreamFn(ctx)
+		if checkErr == nil && !stillLive {
+			return false
+		}
+		o.logger.Warn("Twitch download ended without a confirmed stream end — keeping staging for recovery",
+			"jobID", jobCtx.Job.ID, "stillLive", stillLive, "checkErr", checkErr)
+		unconfirmedEndErr = cause
+		return true
+	}
+
+	// latchPartFailure routes a failed part advance to the same
+	// Error-with-staging exit. os.MkdirAll is advanceToNewPart's only failure
+	// mode, so the staging this capture needs in order to continue is
+	// unusable — the job must not be advertised Finished whatever the
+	// broadcast is doing. No re-verify: this is a local I/O failure, not a
+	// statement about the stream, so it would be a GQL call spent on a
+	// question nobody asked.
+	latchPartFailure := func(err error) {
+		o.logger.Error("Twitch part advance failed — keeping staging, finishing in Error",
+			"err", err, "jobID", jobCtx.Job.ID)
+		unconfirmedEndErr = fmt.Errorf("advance to new part: %w", err)
+	}
+
 	// Session loop: each iteration is one connectivity session. Connectivity
 	// loss cancels the inner download via the session context; the outage
 	// handler at the bottom waits for restoration and resumes the SAME job
@@ -482,6 +534,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// ends, the broadcast changes, or a terminal interrupt arrives.
 sessionLoop:
 	for {
+		// Each session decides its own verdict. A latch taken in a session
+		// that then RESUMED after a connectivity outage is stale: the check
+		// that failed did so because the monitor cancelled the session from
+		// inside the re-verify's own 5-35 s window, and the resumed session
+		// may run to a clean, confirmed end. Carrying it forward marked a
+		// completed capture Error and skipped its final mux (fix round 1).
+		unconfirmedEndErr = nil
+
 		// Quality- and gap-aware download loop
 		for ctx.Err() == nil {
 
@@ -524,6 +584,9 @@ sessionLoop:
 			// (mux the current part, seed the successor at CurrentSeq) except
 			// nothing was lost, so no gap notification is sent.
 			isInitChange := errors.Is(dlErr, engine.ErrInitSegmentChanged)
+			// A gap split that actually lost segments is the only one the
+			// operator is notified about — see gapSplitLostData.
+			gapLostData := gapSplitLostData(dlErr)
 
 			// FetchVariantsFn guard: only live jobs have it wired. A VOD can
 			// still surface ErrQualityLost (playlist 404 with the VOD-shaped
@@ -549,11 +612,12 @@ sessionLoop:
 						// captures the rest of the tail.
 						o.logger.Warn("Twitch variant refresh failed after gap/init change; continuing tail on current variant",
 							"err", fetchErr, "jobID", jobCtx.Job.ID)
-						if isGap {
+						if gapLostData {
 							o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
 						}
 						nextSeq := videoDl.CurrentSeq()
-						if !advanceToNewPart(true, segmentEndTime) {
+						if err := advanceToNewPart(true, segmentEndTime); err != nil {
+							latchPartFailure(err)
 							break
 						}
 						videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
@@ -561,7 +625,30 @@ sessionLoop:
 						drainQualityCh()
 						continue
 					}
-					o.logger.Error("failed to refresh Twitch variants", "err", fetchErr, "jobID", jobCtx.Job.ID)
+					// A master-playlist refresh failing here says NOTHING about
+					// whether the broadcast is over — a usher 5xx, a rate
+					// limit and an access-token blip all look the same as the
+					// 404 an ended stream returns. And the round that brought
+					// us here was ErrQualityLost, which post-O-C means the
+					// engine's consult had just CONFIRMED the broadcast live.
+					// Finalizing on that was sweep-2 R2: the row went
+					// Finished mid-broadcast and the monitor, seeing a
+					// finished job for that stream ID, never re-archived the
+					// rest. Re-verify and only fall through when the end is
+					// confirmed.
+					//
+					// downloadErr is what ended the inner loop and brought us
+					// into this branch — usually ErrQualityLost, but nil when
+					// the quality monitor (not an error) triggered the
+					// refresh. Logged beside fetchErr because the pair is the
+					// whole story of why this job is about to stop, and
+					// neither half is logged anywhere else on this path.
+					o.logger.Error("failed to refresh Twitch variants",
+						"err", fetchErr, "downloadErr", dlErr, "jobID", jobCtx.Job.ID)
+					if !latchIfUnconfirmed(ctx, fmt.Errorf("refresh Twitch variants: %w", fetchErr)) {
+						o.logger.Info("Twitch broadcast confirmed over after the failed variant refresh; finalizing captured parts",
+							"jobID", jobCtx.Job.ID)
+					}
 					break
 				}
 				newQuality := qualityInfoFromVariant(newVariant)
@@ -583,7 +670,8 @@ sessionLoop:
 					}
 
 					nextSeq := videoDl.CurrentSeq()
-					if !advanceToNewPart(true, segmentEndTime) {
+					if err := advanceToNewPart(true, segmentEndTime); err != nil {
+						latchPartFailure(err)
 						break
 					}
 					currentQuality = newQuality
@@ -606,12 +694,22 @@ sessionLoop:
 					// the stuck sequence once more with an empty file and
 					// skips it via the same rule if it still fails — either
 					// way the gap is recorded exactly once, by the successor.
-					o.logger.Warn("Twitch gap split — starting new part",
-						"closedPart", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
-					o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
+					if gapLostData {
+						o.logger.Warn("Twitch gap split — starting new part",
+							"closedPart", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
+						o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
+					} else {
+						// engine.ErrTruncateBlocked: the resume truncate was
+						// refused, so the engine split rather than destroy the
+						// staged part. Its own message, and no notification —
+						// nothing expired from the CDN.
+						o.logger.Warn("Twitch split after a blocked resume truncate — starting new part; no segments were lost",
+							"closedPart", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
+					}
 
 					nextSeq := videoDl.CurrentSeq()
-					if !advanceToNewPart(true, segmentEndTime) {
+					if err := advanceToNewPart(true, segmentEndTime); err != nil {
+						latchPartFailure(err)
 						break
 					}
 					currentQuality = newQuality
@@ -649,7 +747,8 @@ sessionLoop:
 						"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
 						"jobID", jobCtx.Job.ID)
 				}
-				if !advanceToNewPart(!shortSegment, segmentEndTime) {
+				if err := advanceToNewPart(!shortSegment, segmentEndTime); err != nil {
+					latchPartFailure(err)
 					break
 				}
 				currentQuality = newQuality
@@ -660,9 +759,13 @@ sessionLoop:
 				continue
 			}
 
-			// Normal stop — Twitch doesn't need stream-end verification like YouTube
+			// Normal stop. A nil error is the loop's clean end. A non-nil one
+			// is the unknown-verdict exit: re-verify once (the closure takes
+			// two samples ~5 s apart) and only fall through to finalize when
+			// the broadcast is CONFIRMED over.
 			if dlErr != nil && ctx.Err() == nil {
 				o.logger.Error("Twitch HLS download error", "err", dlErr, "jobID", jobCtx.Job.ID)
+				latchIfUnconfirmed(ctx, dlErr)
 			}
 			break
 		}
@@ -776,7 +879,8 @@ sessionLoop:
 		if newQuality.Changed(currentQuality) {
 			// Quality moved while we were gone — mixed-codec appends are
 			// never safe, so close the current part now.
-			if !advanceToNewPart(true, time.Now().Unix()) {
+			if err := advanceToNewPart(true, time.Now().Unix()); err != nil {
+				latchPartFailure(err)
 				break sessionLoop
 			}
 			currentQuality = newQuality
@@ -801,6 +905,33 @@ sessionLoop:
 	}
 
 	tracker.Finalize()
+
+	// Unknown-verdict exit: stop chat, record its verdict so the row is
+	// honest, and return the download error. processJob's setJobError path
+	// returns before os.RemoveAll(jobCtx.StagingDir), so staging AND the
+	// resume sidecar survive.
+	//
+	// It sits AHEAD of the `status: Muxing` write below because this job is
+	// on its way to Error and never muxes its final part — advertising it as
+	// Muxing first would be a lie the UI shows (fix round 1). The background
+	// part muxes still have to land, so their Wait happens here too.
+	//
+	// The chat wait is deliberately short and asymmetric with the finalize
+	// path's (which drains via MarkStreamEnded on a chatWaitTimeout bound):
+	// chat was Stop()'d, the file on disk is complete through its last flush,
+	// and the job is going to Error with staging intact, so waiting out
+	// chatWaitTimeout buys nothing. A Retry re-runs the whole capture.
+	if unconfirmedEndErr != nil && ctx.Err() == nil {
+		segmentMuxWg.Wait()
+		if twitchChatDl != nil {
+			if twitchChatDl.IsRunning() {
+				twitchChatDl.Stop()
+			}
+			outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, 2*time.Second, 2*time.Second)
+			o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
+		}
+		return unconfirmedEndErr
+	}
 
 	// Stream is no longer downloading. Flip status to Muxing now so the
 	// UI reflects reality during background-mux Wait + the final-segment
@@ -844,10 +975,14 @@ sessionLoop:
 		// IMPORTANT: Fall through to muxing logic below.
 	}
 
-	// After the fall-through from connectivity loss, use a fresh context for muxing
+	// After the fall-through from connectivity loss, use the mux root for
+	// muxing: the job's own context is cancelled, but a shutdown must still be
+	// able to reach this FFmpeg (owner decision O-E). context.Background()
+	// here used to survive the child's exit and keep writing into a staging
+	// dir the respawned child re-muxes with -y.
 	muxCtx := ctx
 	if outageFinalize {
-		muxCtx = context.Background()
+		muxCtx = o.muxRoot()
 	}
 
 	// Signal chat to finish BEFORE muxing the final part: the drain flushes
@@ -870,7 +1005,20 @@ sessionLoop:
 		// Twitch VOD chat could fall into, writing "finished" over a stall. A
 		// wait that times out returns an explicit incomplete rather than
 		// letting a stale nil verdict read as "finished".
-		outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		//
+		// Owner decision O-A: a VOD waits for its chat to finish paging on a
+		// bound scaled to the video's own length, with the download slot
+		// released first (resolveVodChatOutcome does both) so the pool is not
+		// held through a wait that is no longer downloading anything — this
+		// site sits AHEAD of the final part's mux, so the hold would be
+		// longer still. A live chat ends when the broadcast does, so the live
+		// path keeps the two-minute cut.
+		var outcome error
+		if isVod {
+			outcome = o.resolveVodChatOutcome(ctx, twitchChatDl, &chatRec, chatDone, jobCtx.Job)
+		} else {
+			outcome = o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		}
 		o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
 	}
 
@@ -1032,6 +1180,20 @@ func (o *DownloadOrchestrator) discoverResumeSegment(jobCtx *JobContext) (int, s
 		return 0, jobCtx.StagingDir
 	}
 	return next, filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", next))
+}
+
+// gapSplitLostData reports whether a gap split actually lost data, i.e.
+// whether the operator should be told about it. engine.ErrGapDetected is the
+// engine's one "close this part and continue in a fresh one" signal, and it
+// now carries a second case that loses nothing: engine.ErrTruncateBlocked, a
+// resume truncate an antivirus scanner or the search indexer refused.
+// Splitting is still the right recovery there — it is what keeps the staged
+// recording instead of truncating it — but no segment expired from the CDN,
+// so the "segments were lost" notification would be a lie. Same precedent as
+// ErrInitSegmentChanged, which splits without a notification for the same
+// reason (fix round 1, Minor 4).
+func gapSplitLostData(err error) bool {
+	return errors.Is(err, engine.ErrGapDetected) && !errors.Is(err, engine.ErrTruncateBlocked)
 }
 
 // waitForOnline blocks until the connectivity monitor reports online, or ctx

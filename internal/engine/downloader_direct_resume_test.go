@@ -80,6 +80,10 @@ func TestDirectResume_FallbackResetsAvoidsDoubledFile(t *testing.T) {
 		OutputFile:  outFile,
 		IsDirectURL: true,
 	})
+	// This server never honours Range, so the probe exhausts its full retry
+	// ladder (sweep-2 ENGINE-6) before the fallback runs. Scale the backoff
+	// so the test pays 0.3 s for that instead of production's 6 s.
+	d.delays = fastDelays()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	if err := d.Start(ctx); err != nil {

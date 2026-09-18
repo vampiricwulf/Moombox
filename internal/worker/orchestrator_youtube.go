@@ -16,6 +16,23 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
+// stagingPreservedRefusal reports the engine refusals that end a download run
+// with the staged recording AND its resume sidecar untouched: the no-truncate
+// guard (engine.ErrStagedMediaPresent) and a resume truncate the retry ladder
+// could not push through (engine.ErrTruncateBlocked). Both are decided before
+// the first segment is fetched and both depend only on what is on disk, so
+// re-running the same downloader would refuse identically.
+//
+// Without this the live loop reads them as an ordinary "downloaders stopped",
+// re-verifies a stream YouTube still reports live, and burns
+// maxConsecutiveLiveChecks × streamEndVerifyInterval — half an hour — before
+// force-ending the job, with the real reason visible only in the engine log.
+// Returning the error instead fails the job fast with everything on disk
+// preserved, which is exactly what a later Resume needs.
+func stagingPreservedRefusal(err error) bool {
+	return errors.Is(err, engine.ErrStagedMediaPresent) || errors.Is(err, engine.ErrTruncateBlocked)
+}
+
 // runLiveStreamDownload runs downloaders with stream-end verification loop (A2, B4).
 // Supports quality monitoring: when the available quality changes mid-stream,
 // the current download segment is muxed and a new download starts at the new quality.
@@ -242,6 +259,16 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 		if ctx.Err() != nil {
 			return result, waitedForResume.value(), ctx.Err()
+		}
+
+		// A refusal that left the staged recording intact can never make
+		// progress on a retry inside this run — surface it now rather than
+		// letting it fall through to the "stream may have ended" path below
+		// (fix round 1, Minor 6).
+		if stagingPreservedRefusal(downloadErr) {
+			o.logger.Error("download refused to start over staged media — staging and resume state kept",
+				"err", downloadErr, "jobID", jobCtx.Job.ID)
+			return result, waitedForResume.value(), downloadErr
 		}
 
 		// Check for reactive quality loss (download loop returned ErrQualityLost)

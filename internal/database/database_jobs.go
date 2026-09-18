@@ -537,29 +537,13 @@ func (db *Database) GetTrimsForJob(jobID string) ([]TrimRecord, error) {
 }
 
 func (db *Database) getTrimsUnlocked(jobID string) ([]TrimRecord, error) {
-	rows, err := db.db.QueryContext(db.getCtx(), `SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size
-		FROM trims WHERE job_id = ?`, jobID)
+	rows, err := db.db.QueryContext(db.getCtx(), `SELECT `+trimColumns+` FROM trims WHERE job_id = ?`, jobID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var trims []TrimRecord
-	for rows.Next() {
-		var tr TrimRecord
-		if err := rows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
-			&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err != nil {
-			if db.logger != nil {
-				db.logger.Warn("getTrimsUnlocked: scan error", "jobID", jobID, "err", err)
-			}
-			continue
-		}
-		trims = append(trims, tr)
-	}
-	if err := rows.Err(); err != nil {
-		return trims, err
-	}
-	return trims, nil
+	// Projection and scan are shared with GetAllTrims (database_extras.go):
+	// same columns, same order, one place to change them.
+	return db.scanTrims(rows, "getTrimsUnlocked", "jobID", jobID)
 }
 
 // AddSegment adds a part record for a multi-part (quality/gap split) job.

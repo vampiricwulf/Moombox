@@ -39,16 +39,16 @@ const engineMaxIdleConnsPerHost = 64
 // sockets, and keep them alive for 90 s (matches http.DefaultTransport's
 // value).
 //
-// Timeout: context-based cancellation at every callsite is the primary
-// deadline mechanism (each request has its own ctx with SegmentTimeout /
-// ChunkTimeout wired). The client-level Timeout is a safety net for the
-// pathological "ctx never fires AND server keeps the socket open forever"
-// case; 5 minutes is generous enough for multi-MB segments on slow
-// connections without becoming a hang vector.
-// Built via httpx.NewTransport so the keep-alive tuning stays in sync
-// with the rest of the codebase.
+// Timeout: none. Every call site carries its own deadline — fetchSegment and
+// fetchChunk a read-progress (idle) deadline under a segmentHardCeiling
+// ceiling, the probes an explicit context.WithTimeout, the streaming fallback
+// the idle deadline alone — and a client-level Timeout covers the whole body, so
+// it would re-impose the total deadline sweep-2 ENGINE-4 removed and cap the
+// streaming fallback's VOD size at whatever fits in five minutes
+// (ENGINE-6). Built via httpx.NewTransport so the keep-alive tuning stays in
+// sync with the rest of the codebase.
 var engineHTTPClient = httpx.ClientWithTransport(
-	5*time.Minute,
+	0,
 	httpx.NewTransport(httpx.TransportOptions{
 		MaxIdleConnsPerHost: engineMaxIdleConnsPerHost,
 	}),
@@ -211,9 +211,140 @@ func readBody(resp *http.Response, capBytes int64) ([]byte, error) {
 	return append(buf, rest...), err
 }
 
+// errFetchIdle is the CAUSE a fetch's derived context carries when the
+// read-progress deadline cancelled it, as opposed to the caller cancelling.
+// The distinction matters twice: reportFetchFailure must still count a stall
+// as network evidence, and a clean shutdown must not be reported as one.
+var errFetchIdle = errors.New("no data received within the idle deadline")
+
+// errFetchCeiling is the CAUSE the hard ceiling below cancels a fetch with.
+// Separate from errFetchIdle because the two describe opposite failures — one
+// CDN went silent, the other throttled us to death — and a log that cannot
+// tell them apart cannot tell an operator which one they have. Both are
+// transient as far as fetchSegmentWithRetry is concerned: neither is evidence
+// that the segment is gone, so both take the ordinary retry ladder.
+var errFetchCeiling = errors.New("fetch exceeded its hard ceiling")
+
+// segmentHardCeiling is the absolute lifetime of ONE segment or chunk fetch,
+// layered UNDER the read-progress deadline: SegmentTimeout ends a fetch that
+// stopped delivering, and this ends one that delivers forever. Without it a
+// body trickling a byte every few seconds resets the idle timer indefinitely
+// and wedges a segment worker for the life of a 24/7 recording, never
+// producing the error the retry ladder needs (sweep-2 Task 3 review, Probe 3:
+// a 1-byte-per-idle/2 body ran past 25x the idle bound and stopped only on
+// parent cancel).
+//
+// 15 minutes clears the case the read-progress deadline exists for with a
+// wide margin — the ENGINE-4 repro is a 7.5 MB Twitch VOD segment at 10 KB/s,
+// which is 12.5 minutes — while still capping the pathological trickle. It
+// bounds fetchSegment and fetchChunk only: ProbeSegmentAvailable has its own
+// total bound, and runDirectDownloadFallback streams a whole multi-GB VOD in
+// one response, where any total bound is the wrong shape.
+const segmentHardCeiling = 15 * time.Minute
+
+// idleBody wraps a response body so that every Read delivering bytes pushes
+// the fetch's deadline out again. SegmentTimeout used to be a TOTAL deadline
+// on the derived context (sweep-2 ENGINE-4): a 7.5 MB Twitch VOD segment then
+// needed 250 KB/s to survive, so twelve default workers imposed a 24 Mbit/s
+// link floor below which every segment timed out, retried five times and left
+// a permanent gap. moonarchive uses per-read timeouts of 2x the target
+// duration for the same reason. The 30 s value is unchanged — it is now what
+// it always read like, an IDLE bound.
+type idleBody struct {
+	rc    io.ReadCloser
+	timer *time.Timer
+	idle  time.Duration
+	read  int64
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if n > 0 {
+		b.read += int64(n)
+		// Reset on an already-fired AfterFunc timer simply schedules it
+		// again; if it has fired the context is already cancelled and this
+		// Read's error path takes over, so there is nothing to undo.
+		b.timer.Reset(b.idle)
+	}
+	return n, err
+}
+
+// received reports how many bytes this body has delivered, for the ceiling
+// error's message — "exceeded its hard ceiling of 15m0s having received 41
+// bytes" tells an operator they are being throttled rather than ignored.
+// Only the fetch's own goroutine ever touches the counter (the deadline
+// timers only cancel a context), and a nil receiver reports 0 so a failure
+// that happened before there was a response body needs no special case.
+func (b *idleBody) received() int64 {
+	if b == nil {
+		return 0
+	}
+	return b.read
+}
+
+func (b *idleBody) Close() error {
+	b.timer.Stop()
+	return b.rc.Close()
+}
+
+// withReadProgressDeadline derives a context that is cancelled with
+// errFetchIdle once `idle` elapses with no progress. The returned timer is
+// handed to idleBody so body reads can push it out; the connect-and-headers
+// phase runs under the same single arming, which is exactly the old
+// behaviour for a server that never answers.
+func withReadProgressDeadline(parent context.Context, idle time.Duration) (context.Context, *time.Timer, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	timer := time.AfterFunc(idle, func() { cancel(errFetchIdle) })
+	return ctx, timer, func() { timer.Stop(); cancel(nil) }
+}
+
+// withFetchDeadlines derives the pair of bounds a segment or chunk fetch runs
+// under: the hard ceiling outermost (a plain WithTimeoutCause, so
+// context.Cause reads errFetchCeiling exactly the way the idle path reads
+// errFetchIdle) and the read-progress deadline inside it. Returning one
+// CancelFunc that releases both keeps the call sites to a single defer.
+//
+// runDirectDownloadFallback deliberately does NOT use this: it streams a
+// whole VOD in one response and calls withReadProgressDeadline directly.
+func withFetchDeadlines(parent context.Context, idle, ceiling time.Duration) (context.Context, *time.Timer, context.CancelFunc) {
+	hard, hardCancel := context.WithTimeoutCause(parent, ceiling, errFetchCeiling)
+	ctx, timer, cancel := withReadProgressDeadline(hard, idle)
+	return ctx, timer, func() { cancel(); hardCancel() }
+}
+
+// idleFetchError re-labels a context error that the read-progress deadline
+// caused, so callers and logs see a stall rather than a bare cancellation.
+// Any other error passes through untouched. Shared with
+// runDirectDownloadFallback, which has no ceiling.
+func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(context.Cause(ctx), errFetchIdle) {
+		return fmt.Errorf("stalled: %w for %s", errFetchIdle, idle)
+	}
+	return err
+}
+
+// fetchDeadlineError re-labels a context error that EITHER per-fetch deadline
+// caused. The ceiling branch names the bound and how far the transfer got;
+// everything else — an idle stall, a caller cancel, a transport failure —
+// falls through to idleFetchError unchanged. body is nil when the fetch died
+// before there was one, which is why received() tolerates a nil receiver.
+func fetchDeadlineError(ctx context.Context, idle, ceiling time.Duration, body *idleBody, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(context.Cause(ctx), errFetchCeiling) {
+		return fmt.Errorf("%w of %s having received %d bytes", errFetchCeiling, ceiling, body.received())
+	}
+	return idleFetchError(ctx, idle, err)
+}
+
 // fetchSegment downloads a single segment (or playlist) by URL.
 func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(parent, SegmentTimeout)
+	idle, ceiling := SegmentTimeout, d.delays.fetchHardCeiling
+	ctx, idleTimer, cancel := withFetchDeadlines(parent, idle, ceiling)
 	defer cancel()
 
 	// Apply GVS PO token to segment URL (query mode: ?pot=token)
@@ -228,9 +359,14 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return nil, 0, err
+		return nil, 0, fetchDeadlineError(ctx, idle, ceiling, nil, err)
 	}
 	reportSuccess("engine/fetch")
+	// Wrap BEFORE the deferred Close: `defer resp.Body.Close()` binds the
+	// receiver at defer time, so wrapping afterwards would close the raw body
+	// and leak the timer.
+	body := &idleBody{rc: resp.Body, timer: idleTimer, idle: idle}
+	resp.Body = body
 	defer resp.Body.Close()
 
 	// Harvest the live-head sequence YouTube attaches to GVS segment
@@ -254,7 +390,7 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 
 	data, err := readBody(resp, maxSegmentBodyBytes)
 	if err != nil {
-		return nil, resp.StatusCode, err
+		return nil, resp.StatusCode, fetchDeadlineError(ctx, idle, ceiling, body, err)
 	}
 
 	return data, resp.StatusCode, nil
@@ -553,6 +689,39 @@ func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (i
 	return headSeq, nil
 }
 
+// parseContentRangeStart extracts the first-byte position a 206 says its body
+// begins at. RFC 9110 §14.4 spells the header `bytes <start>-<end>/<total>`,
+// with `*` allowed for the total; `bytes */<total>` is the unsatisfied-range
+// form a 416 carries and has no start at all, so it returns ok=false — as do
+// an absent, non-`bytes` or unparsable header.
+//
+// The callers need it because a 206 whose body does NOT start where they asked
+// writes the wrong bytes at a plausible length (sweep-2 B-I1/D-R1): on the
+// chunked path the read is bounded to end-start+1 so the file keeps its shape
+// and corrupts in place, and in the streaming fallback — which runs with no
+// known total size — the file simply grows. Neither is visible downstream.
+// What an UNVERIFIABLE 206 means is left to each caller: the fallback refuses
+// one, fetchChunk keeps trusting it.
+func parseContentRangeStart(h http.Header) (int64, bool) {
+	unit, spec, found := strings.Cut(strings.TrimSpace(h.Get("Content-Range")), " ")
+	if !found || !strings.EqualFold(unit, "bytes") {
+		return 0, false
+	}
+	rangeSpec, _, found := strings.Cut(strings.TrimSpace(spec), "/")
+	if !found {
+		return 0, false
+	}
+	startStr, _, found := strings.Cut(rangeSpec, "-")
+	if !found {
+		return 0, false // the "*" of an unsatisfied range has no dash
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(startStr), 10, 64)
+	if err != nil || start < 0 {
+		return 0, false
+	}
+	return start, true
+}
+
 // probeFileSize discovers the total file size using a Range: bytes=0-0 request.
 // Returns 0 if the server doesn't support Range requests or the size is unknown.
 //
@@ -588,8 +757,10 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 	}
 
 	// 1-byte body; safe to drain so the connection can be reused for the
-	// real chunked download that follows.
-	io.Copy(io.Discard, resp.Body)
+	// real chunked download that follows — but bounded like every other
+	// drain here (sweep-2 ENGINE-14): a server that answers a 1-byte range
+	// with megabytes must not be pulled in full just to reclaim a socket.
+	io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 
 	// Parse Content-Range: bytes 0-0/TOTAL
 	contentRange := resp.Header.Get("Content-Range")
@@ -601,6 +772,36 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 		}
 	}
 
+	return 0
+}
+
+// probeFileSizeWithRetry re-asks for the file size before the caller gives up
+// on Range support. probeFileSize returns 0 for BOTH "this server does not do
+// Range" and "that one request failed", and the caller's answer to 0 is the
+// streaming fallback — so a single transient failure used to cost a resumed
+// VOD its staged bytes and its sidecar (sweep-2 ENGINE-6). Three attempts
+// with a 2 s/4 s backoff (delays.genericRetry, so tests scale it) cost a
+// genuinely non-Range server six seconds of backoff, or up to ~36 s if every
+// probe hangs to its own 10 s cap (probeFileSize's context.WithTimeout),
+// once per download. It also triples the body sacrificed to a non-Range
+// origin — measured at ~1 MB across the three probes, against ~330 KB for
+// one — which is nothing beside the multi-GB VOD that follows.
+func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) int64 {
+	const attempts = 3
+	for i := range attempts {
+		if size := d.probeFileSize(ctx); size > 0 {
+			return size
+		}
+		if d.isCancelled() || ctx.Err() != nil {
+			return 0
+		}
+		if i < attempts-1 {
+			d.logger.Debug("[Downloader] Range probe returned no size; retrying", "attempt", i+1)
+			if err := utils.Sleep(ctx, d.delays.genericRetry<<i); err != nil {
+				return 0
+			}
+		}
+	}
 	return 0
 }
 
@@ -640,7 +841,8 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 
 // fetchChunk downloads a single byte range from the direct URL.
 func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64) ([]byte, int, error) {
-	ctx, cancel := context.WithTimeout(parent, SegmentTimeout)
+	idle, ceiling := SegmentTimeout, d.delays.fetchHardCeiling
+	ctx, idleTimer, cancel := withFetchDeadlines(parent, idle, ceiling)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
@@ -653,9 +855,12 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return nil, 0, err
+		return nil, 0, fetchDeadlineError(ctx, idle, ceiling, nil, err)
 	}
 	reportSuccess("engine/fetch")
+	// Wrap BEFORE the deferred Close, for the reason fetchSegment states.
+	body := &idleBody{rc: resp.Body, timer: idleTimer, idle: idle}
+	resp.Body = body
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
@@ -664,10 +869,24 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	if resp.StatusCode == http.StatusOK {
 		// Server ignored Range header -- cap read to avoid unbounded memory usage
 		data, err := io.ReadAll(io.LimitReader(resp.Body, maxIgnoredRangeBodyBytes))
-		return data, resp.StatusCode, err
+		return data, resp.StatusCode, fetchDeadlineError(ctx, idle, ceiling, body, err)
 	}
 	if resp.StatusCode != http.StatusPartialContent {
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	// A 206 that begins somewhere other than where we asked puts the WRONG
+	// bytes at the right length: the read below is bounded to end-start+1
+	// either way, so the file keeps its size and nothing downstream can see
+	// the corruption (sweep-2 D-R1). Returning an error hands it to
+	// fetchChunkWithRetry, which treats it exactly as it treats a short read
+	// that ERRORS — an honest short body is no error at all and is accepted
+	// as it stands.
+	// An origin that omits Content-Range entirely keeps today's behaviour:
+	// the header is mandatory on a 206, but refusing one on that ground alone
+	// would break a working origin over a header this path does not need.
+	if gotStart, ok := parseContentRangeStart(resp.Header); ok && gotStart != start {
+		return nil, resp.StatusCode, fmt.Errorf("origin answered Range %d with Content-Range start %d", start, gotStart)
 	}
 
 	// Bound the 206 read to the requested range size — a correct server sends
@@ -687,5 +906,5 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 		// leave the connection non-reusable without this drain.
 		io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 	}
-	return data, resp.StatusCode, err
+	return data, resp.StatusCode, fetchDeadlineError(ctx, idle, ceiling, body, err)
 }

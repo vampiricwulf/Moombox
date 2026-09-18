@@ -44,19 +44,38 @@ func validateDownloadedMP4(path string) error {
 	return nil
 }
 
+// directResumeInterval is how many bytes a whole-file download writes between
+// resume checkpoints — ten 5 MB chunks. An interrupted multi-GB VOD then
+// resumes from its last checkpoint instead of re-downloading from byte 0, and
+// the cadence keeps the save (which now fsyncs the media first, owner decision
+// O-G) off the hot path: once per 50 MB is nothing beside the transfer itself.
+//
+// BOTH whole-file paths save on it — the chunked loop and the streaming
+// fallback — deliberately through the one constant rather than a second
+// cadence of the fallback's own.
+const directResumeInterval = 10 * DownloadChunkSize
+
+// directResumeIntervalBytes is directResumeInterval, or the test override when
+// one is set (see SegmentDownloader.directResumeIntervalOverride).
+func (d *SegmentDownloader) directResumeIntervalBytes() int64 {
+	if d.directResumeIntervalOverride > 0 {
+		return d.directResumeIntervalOverride
+	}
+	return directResumeInterval
+}
+
 // runDirectDownload downloads a complete file from a direct URL (for VODs).
 // Uses 5MB chunked Range requests with per-chunk retry and percentage progress.
 // Falls back to streaming download if the server doesn't support Range requests.
 func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
-	// Probe total file size via Range: bytes=0-0
-	totalSize := d.probeFileSize(ctx)
+	// Probe total file size via Range: bytes=0-0, retried so one transient
+	// failure cannot route a resumable download into the streaming fallback.
+	totalSize := d.probeFileSizeWithRetry(ctx)
 
 	if totalSize <= 0 {
-		// Server doesn't support Range requests (or the probe transiently
-		// failed) -- fall back to a streaming download from byte 0.
-		if err := d.resetForStreamingFallback(); err != nil {
-			return err
-		}
+		// The server really does not support Range requests — stream it.
+		// No reset here: the fallback resumes from d.bytesWritten with its
+		// own Range header and discards only if the server ignores it.
 		return d.runDirectDownloadFallback(ctx)
 	}
 
@@ -69,10 +88,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	// can never splice a torn tail. Fresh runs start at 0 (bytesWritten==0).
 	offset := d.bytesWritten.Load()
 	lastSavedOffset := offset
-	// Persist progress every ~10 chunks so an interrupted multi-GB VOD
-	// resumes instead of re-downloading from byte 0. saveResume fsyncs the
-	// sidecar (durability); the ~50MB cadence keeps it off the hot path.
-	const directResumeInterval = 10 * DownloadChunkSize
+	resumeInterval := d.directResumeIntervalBytes()
 	lastProgressTime := time.Time{}
 
 	for offset < totalSize {
@@ -98,14 +114,13 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		// file's leading bytes into the middle of the output (doubled/corrupt),
 		// and it's capped at maxIgnoredRangeBodyBytes so it's also truncated.
 		// The probe returned a size, so this is an inconsistent/interleaved
-		// backend — abandon the chunked approach and restart cleanly via the
-		// streaming fallback rather than write byte-0 data at offset>0.
+		// backend — abandon the chunked approach and hand over to the
+		// streaming fallback rather than write byte-0 data at offset>0. No
+		// reset here either: the fallback re-asks with its own Range from
+		// this same offset, and only a second 200 forces the discard.
 		if statusCode == http.StatusOK {
 			d.logger.Warn("[Downloader] direct chunk got 200 (Range ignored) mid-download; restarting via streaming",
 				"offset", offset)
-			if rerr := d.resetForStreamingFallback(); rerr != nil {
-				return rerr
-			}
 			return d.runDirectDownloadFallback(ctx)
 		}
 
@@ -122,7 +137,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		d.bytesWritten.Store(offset)
 
 		// Persist resume progress periodically (see directResumeInterval).
-		if offset-lastSavedOffset >= directResumeInterval {
+		if offset-lastSavedOffset >= resumeInterval {
 			d.saveResume()
 			lastSavedOffset = offset
 		}
@@ -156,23 +171,27 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	return nil
 }
 
-// resetForStreamingFallback prepares the output for a from-byte-0 streaming
-// download. The streaming fallback can't resume from an offset, so if we
-// entered on a resume (file opened O_APPEND, truncated to bytesWritten>0) or
-// mid-chunked-download, it must start clean or it would append a second copy
-// after the existing bytes. Reopen O_TRUNC rather than d.outputFile.Truncate:
-// Windows refuses ftruncate on an O_APPEND handle ("Access is denied"), and
-// reopening also drops the append flag so writes land from byte 0. Start's
-// deferred Close reads d.outputFile at exit, so reassigning it is safe. No-op
-// when nothing has been written yet.
-func (d *SegmentDownloader) resetForStreamingFallback() error {
+// discardStagedMedia is the ONLY place staged media is destroyed on purpose.
+// It reopens OutputFile O_TRUNC — not d.outputFile.Truncate, because Windows
+// refuses ftruncate on an O_APPEND handle ("Access is denied") and reopening
+// also drops the append flag so writes land from byte 0 — zeroes the byte
+// counter and clears the resume sidecar. Start's deferred Close reads
+// d.outputFile at exit, so reassigning it is safe. No-op when nothing has
+// been written yet.
+//
+// reason is logged: every discard must be attributable, because the guard in
+// Start (ErrStagedMediaPresent) exists precisely so that nothing else can do
+// this silently.
+func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 	if d.bytesWritten.Load() == 0 {
 		return nil
 	}
+	d.logger.Warn("[Downloader] Discarding staged media", "file", d.opts.OutputFile,
+		"bytes", d.bytesWritten.Load(), "reason", reason)
 	d.outputFile.Close()
 	f, err := os.OpenFile(d.opts.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("reset for streaming fallback: %w", err)
+		return fmt.Errorf("discard staged media: %w", err)
 	}
 	d.outputFile = f
 	d.bytesWritten.Store(0)
@@ -180,21 +199,80 @@ func (d *SegmentDownloader) resetForStreamingFallback() error {
 	return nil
 }
 
-// runDirectDownloadFallback is the streaming fallback when Range requests are not supported.
-func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error {
+// runDirectDownloadFallback streams the file when Range chunking is not
+// available. It still SENDS a Range from the resume offset: the fallback used
+// to open at byte 0 unconditionally, so a transient probe failure on a
+// resumed VOD threw the staged bytes away (sweep-2 ENGINE-6). Only a server
+// that answers 200 to that Range — i.e. one that is sending from byte 0 —
+// forces a discard, and that discard is explicit.
+//
+// The whole transfer runs under the same read-progress (idle) deadline the
+// segment and chunk fetches use. It is the only bound this GET has: the
+// client-level Timeout that used to cap it went away with ENGINE-4, and a
+// total deadline is the wrong shape anyway for a multi-GB VOD streamed in one
+// response.
+func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) error {
+	idle := SegmentTimeout
+	ctx, idleTimer, cancel := withReadProgressDeadline(parent, idle)
+	defer cancel()
+
+	offset := d.bytesWritten.Load()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	d.setCommonHeaders(req, uaAndroid)
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("download: %w", err)
+		return idleFetchError(ctx, idle, fmt.Errorf("download: %w", err))
 	}
+	resp.Body = &idleBody{rc: resp.Body, timer: idleTimer, idle: idle}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		// Range honoured — but ONLY if the body really starts where we asked.
+		// This is the one path that meets a 206 with no known total size, so
+		// an origin answering from a different offset just makes the file
+		// grow, and neither validateDownloadedMP4 nor the mux notices: the
+		// job reports Finished over a spliced archive (sweep-2 B-I1).
+		start, ok := parseContentRangeStart(resp.Header)
+		switch {
+		case ok && start == offset:
+			// The body continues where the file stops.
+		case ok && start == 0 && offset > 0:
+			// Same shape as the 200 below — the origin restarted from the
+			// top and labelled it honestly, so the staged bytes must go.
+			if derr := d.discardStagedMedia("206 Content-Range starts at byte 0, not the resume offset"); derr != nil {
+				return derr
+			}
+		default:
+			// Nothing written yet, so the staged bytes and the sidecar both
+			// survive for the next attempt.
+			return fmt.Errorf("origin answered Range %d with Content-Range start %d (header %q)",
+				offset, start, resp.Header.Get("Content-Range"))
+		}
+	case http.StatusOK:
+		if offset > 0 {
+			if derr := d.discardStagedMedia("server answered 200 to the resume Range — the body starts at byte 0"); derr != nil {
+				return derr
+			}
+		}
+	default:
+		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && offset > 0 {
+			// The resume offset is at or past EOF: the staged file already
+			// holds everything the origin has. The chunked loop reads 416 the
+			// same way (past end of file) and so did the pre-arc fallback,
+			// which sent no Range and simply re-fetched the whole file.
+			d.logger.Info("[Downloader] Resume offset is at or past EOF — staged file is already complete",
+				"offset", offset)
+			d.ClearResume()
+			return nil
+		}
 		// Read partial body for diagnostics
 		bodySnippet := make([]byte, 1024)
 		n, _ := resp.Body.Read(bodySnippet)
@@ -208,9 +286,19 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 
 	buf := make([]byte, 64*1024) // 64KB buffer
 	var lastProgressTime time.Time
+	// Read AFTER the switch above: a discard there reset the counter to zero,
+	// and the checkpoint cadence measures from wherever this transfer starts.
+	// Without these saves the fallback streamed gigabytes with nothing on disk
+	// describing them, so an interruption cost the whole partial — the chunked
+	// loop's 50 MB cadence, applied to the path that has no chunks.
+	lastSavedOffset := d.bytesWritten.Load()
+	resumeInterval := d.directResumeIntervalBytes()
 	for {
-		if d.isCancelled() || ctx.Err() != nil {
-			return d.cancelErr(ctx)
+		// The CALLER's context, not the derived one: an idle stall is a
+		// network failure the read below surfaces as such, while a cancel
+		// from above is a shutdown and must stay one.
+		if d.isCancelled() || parent.Err() != nil {
+			return d.cancelErr(parent)
 		}
 
 		n, readErr := resp.Body.Read(buf)
@@ -220,7 +308,13 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 			if writeErr != nil {
 				return fmt.Errorf("write: %w", writeErr)
 			}
-			d.bytesWritten.Add(int64(written))
+			stagedBytes := d.bytesWritten.Add(int64(written))
+
+			// Same cadence as the chunked loop (directResumeInterval).
+			if stagedBytes-lastSavedOffset >= resumeInterval {
+				d.saveResume()
+				lastSavedOffset = stagedBytes
+			}
 
 			if d.OnProgress != nil && time.Since(lastProgressTime) >= ProgressThrottle {
 				lastProgressTime = time.Now()
@@ -233,9 +327,16 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 			break
 		}
 		if readErr != nil {
-			return fmt.Errorf("read: %w", readErr)
+			return idleFetchError(ctx, idle, fmt.Errorf("read: %w", readErr))
 		}
 	}
 
+	// Fully downloaded — clear the resume sidecar, exactly as the chunked
+	// path does on its own completion. Both hand-offs into this function
+	// return straight to Start, so the chunked path's ClearResume is never
+	// reached from here; without this a crash between "download complete" and
+	// "mux" would leave a stale sidecar that truncates the COMPLETE file back
+	// to its offset on the next run (sweep-2 B-M1).
+	d.ClearResume()
 	return nil
 }

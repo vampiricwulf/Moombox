@@ -284,6 +284,7 @@ func DownloadManifestlessDash(
 			OutputFile:          result.VideoPath,
 			StartSeq:            videoStartSeq,
 			ForceStartSeq:       forceVideoSeq,
+			DiscardStaged:       manifestlessDiscardStaged(videoInfo.StreamStatus, forceVideoSeq),
 			InitURL:             videoInitURL,
 			InitFromSegment:     videoInitURL != "",
 			PoToken:             pot,
@@ -343,6 +344,7 @@ func DownloadManifestlessDash(
 			OutputFile:          result.AudioPath,
 			StartSeq:            audioStartSeq,
 			ForceStartSeq:       forceAudioSeq,
+			DiscardStaged:       manifestlessDiscardStaged(videoInfo.StreamStatus, forceAudioSeq),
 			InitURL:             audioInitURL,
 			InitFromSegment:     audioInitURL != "",
 			PoToken:             pot,
@@ -392,6 +394,25 @@ func dbResumeSeq(streamStatus youtube.StreamStatus, lastSeq *int) int {
 		return *lastSeq
 	}
 	return 0
+}
+
+// manifestlessDiscardStaged reports whether this strategy's downloader needs a
+// file that begins at the start of the stream. It is the mirror image of
+// dbResumeSeq's rule: a non-live manifest-free capture deliberately begins
+// again at sq=0 (segments carry their ftyp+moov init inline only there, so a
+// partial file cannot be appended to), which means the engine's no-truncate
+// guard must stand down for exactly that case. A LIVE capture resumes from
+// the DB seq or the sidecar and must never discard; a part that force-starts
+// at an orchestrator-provided seq owns its own fresh file.
+//
+// It is a pure predicate on purpose. Whether anything is actually thrown away
+// is not a question this package can answer — only Start knows whether the
+// resume sidecar is usable, and a usable one makes this flag irrelevant. The
+// engine therefore owns the action: see engine.DownloaderOptions.DiscardStaged,
+// which preserves a headed recording as <file>.restart-<ts> rather than
+// truncating it (fix round 2, R1).
+func manifestlessDiscardStaged(streamStatus youtube.StreamStatus, forcedStartSeq bool) bool {
+	return streamStatus != youtube.StreamLive && !forcedStartSeq
 }
 
 // manifestlessSq0URL returns the sq=0 segment URL for a query-style manifest-
