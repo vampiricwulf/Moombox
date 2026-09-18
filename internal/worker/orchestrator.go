@@ -565,7 +565,19 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// Important 3) — and turns an unconfirmed completion (the wait timed
 		// out) into an explicit incomplete rather than letting a nil verdict
 		// read as "finished".
-		outcome := o.resolveChatOutcome(chatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		//
+		// Owner decision O-A: a VOD waits for its chat to finish paging on a
+		// bound scaled to the video's own length, with the download slot
+		// released first (resolveVodChatOutcome does both) so the pool is not
+		// held through a wait that is no longer downloading anything. A live
+		// chat ends when the broadcast does, so the live path keeps the
+		// two-minute cut.
+		var outcome error
+		if isVod {
+			outcome = o.resolveVodChatOutcome(ctx, chatDl, &chatRec, chatDone, jobCtx.Job)
+		} else {
+			outcome = o.resolveChatOutcome(chatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		}
 		o.recordChatOutcome(jobCtx, chatDl.MessageCount(), outcome)
 	}
 

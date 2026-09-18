@@ -917,7 +917,20 @@ sessionLoop:
 		// Twitch VOD chat could fall into, writing "finished" over a stall. A
 		// wait that times out returns an explicit incomplete rather than
 		// letting a stale nil verdict read as "finished".
-		outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		//
+		// Owner decision O-A: a VOD waits for its chat to finish paging on a
+		// bound scaled to the video's own length, with the download slot
+		// released first (resolveVodChatOutcome does both) so the pool is not
+		// held through a wait that is no longer downloading anything — this
+		// site sits AHEAD of the final part's mux, so the hold would be
+		// longer still. A live chat ends when the broadcast does, so the live
+		// path keeps the two-minute cut.
+		var outcome error
+		if isVod {
+			outcome = o.resolveVodChatOutcome(ctx, twitchChatDl, &chatRec, chatDone, jobCtx.Job)
+		} else {
+			outcome = o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+		}
 		o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
 	}
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/chat"
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -198,6 +199,87 @@ func (o *DownloadOrchestrator) cleanup(chatDl *chat.ChatDownloader, chatDone cha
 // it. "error" was not reused: nothing writes it, and it reads as a hard failure
 // rather than an archive that stopped short.
 const chatStatusIncomplete = "incomplete"
+
+const (
+	// vodChatWaitFloor and vodChatWaitCeiling bracket how long a finished VOD
+	// download waits for its chat source to finish paging (owner decision
+	// O-A). Live jobs keep chatWaitTimeout: a live chat stops when the
+	// broadcast does, so two minutes of drain is the right shape there.
+	//
+	// A VOD's chat is different. Twitch pages VOD comments a screenful per
+	// GQL round trip while the video downloads at link speed, so a chat-heavy
+	// VOD on a fast link predictably still has minutes of paging left when
+	// the video completes — and the two-minute cut then Stop()'d it, recorded
+	// "incomplete", and deleted the preserved sidecar with staging
+	// (sweep-2 TWITCH-3). The allowance scales with the video's own length
+	// because the comment count does; the floor covers a short VOD with dense
+	// chat and the ceiling stops a stalled pager holding a job open forever.
+	vodChatWaitFloor   = 30 * time.Minute
+	vodChatWaitCeiling = 6 * time.Hour
+)
+
+// vodChatWaitTimeout is the first-wait bound resolveChatOutcome is given for a
+// VOD job. The download slot is released before this wait begins — the job is
+// no longer downloading, and holding a slot through it would starve the pool.
+func vodChatWaitTimeout(job *database.Job) time.Duration {
+	wait := vodChatWaitFloor
+	if job != nil && job.LengthSeconds != nil && *job.LengthSeconds > 0 {
+		if length := time.Duration(*job.LengthSeconds) * time.Second; length > wait {
+			wait = length
+		}
+	}
+	return min(wait, vodChatWaitCeiling)
+}
+
+// resolveVodChatOutcome is the finalize-path chat wait for a VOD job: the
+// whole of owner decision O-A in one place, so the two orchestrators cannot
+// drift and so the ORDER — release, then wait — is a property of this
+// function rather than of two call sites.
+//
+// The slot is given up FIRST, exactly once. The video is finished; a wait
+// that can run for hours must not keep the next VOD queued behind a download
+// that has stopped downloading. ReleaseDownloadSlot is keyed by the queue's
+// holdingDlSlot map and so is idempotent, which is what lets the release
+// below the mux stay where it is (it still covers the live path, and every
+// path that reaches the mux without coming through here).
+//
+// The first wait is context-aware, because the bound is now long enough to
+// matter: a Stop() (or a user cancel) mid-wait collapses it to zero, so
+// resolveChatOutcome goes straight to its Stop()+grace path — and that path's
+// rule, "never nil once the first wait expired", records a chat that was
+// still paging at shutdown as incomplete rather than letting a Stop()-exit's
+// nil verdict read as "finished". An ALREADY-cancelled context is left alone:
+// ExecuteTwitch's outage-finalize path arrives here with ctx.Err() != nil by
+// design, and collapsing its wait would change a verdict this decision is not
+// about.
+func (o *DownloadOrchestrator) resolveVodChatOutcome(ctx context.Context, dl ChatSource, rec *chatOutcome, done chan struct{}, job *database.Job) error {
+	wait := vodChatWaitTimeout(job)
+
+	jobID := ""
+	if job != nil {
+		jobID = job.ID
+	}
+	if o.queue != nil && jobID != "" {
+		o.queue.ReleaseDownloadSlot(jobID)
+	}
+	o.logger.Debug("waiting for VOD chat to finish paging", "jobID", jobID, "bound", wait)
+
+	if ctx != nil && done != nil && ctx.Err() == nil {
+		timer := time.NewTimer(wait)
+		select {
+		case <-done:
+			// resolveChatOutcome's own select takes the closed channel
+			// immediately below; the bound is left intact for it.
+			timer.Stop()
+		case <-ctx.Done():
+			wait = 0
+			timer.Stop()
+		case <-timer.C:
+			wait = 0
+		}
+	}
+	return o.resolveChatOutcome(dl, rec, done, wait, 2*time.Second)
+}
 
 // chatOutcome carries a chat downloader's terminal error from the goroutine it
 // ran on to the orchestrator that derives chat_status from it.

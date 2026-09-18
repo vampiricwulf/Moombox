@@ -76,9 +76,12 @@ var activeJobStatuses = map[database.JobStatus]bool{
 // deliberately preserved rather than cleaned up, and so must NOT be offered
 // (or allowed) as a deletable orphan. Mirrors the exact carve-out applied at
 // job-finish time (see (*DownloadWorker) finishDownload's cleanup block in
-// worker.go): a Finished job's staging only survives cleanup for two
-// reasons — it's flagged IncompleteTail (tail is Resume-able) or it still
-// has an unmuxed captured part (recoverable via the Mux action).
+// worker.go): a Finished job's staging only survives cleanup for three
+// reasons — it's flagged IncompleteTail (tail is Resume-able), its chat
+// capture ended incomplete (the chat resume sidecar in staging is what a
+// later Retry pages on from), or it still has an unmuxed captured part
+// (recoverable via the Mux action). The two incomplete shields expire on the
+// same age rule; the unmuxed-part shield never does.
 //
 // This predicate must stay precise: any OTHER Finished job's staging is a
 // genuine orphan (e.g. a stale dir left by an old/removed job) and must
@@ -88,6 +91,7 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 		return false
 	}
 	return (job.IncompleteTail && !incompleteStagingExpired(cfg, job)) ||
+		(job.ChatStatus == chatStatusIncomplete && !incompleteStagingExpired(cfg, job)) ||
 		hasUnmuxedPartsForJob(db, job.ID, jobStagingDir)
 }
 

@@ -780,11 +780,20 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	if jobCtx.StagingDir != "" {
 		fresh, _ := w.db.GetJob(job.ID)
 		preserveForTail := fresh != nil && fresh.IncompleteTail
+		// A chat capture that ended without completing leaves its resume
+		// sidecar in staging; deleting the dir turns a recoverable truncation
+		// into a permanent one (sweep-2 TWITCH-3, verifier merge M5). Same
+		// shape as the incomplete_tail preservation above it, and the orphan
+		// scanner mirrors it in jobNeedsStaging.
+		preserveForChat := fresh != nil && fresh.ChatStatus == chatStatusIncomplete
 		if w.hasUnmuxedParts(job.ID, jobCtx.StagingDir) {
 			w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
 				"path", jobCtx.StagingDir, "jobID", job.ID)
 		} else if preserveForTail {
 			w.logger.Warn("preserving staging dir: recording tail incomplete; Retry will resume from the sidecar",
+				"path", jobCtx.StagingDir, "jobID", job.ID)
+		} else if preserveForChat {
+			w.logger.Warn("preserving staging dir: chat capture incomplete; the chat resume sidecar stays for a later Retry",
 				"path", jobCtx.StagingDir, "jobID", job.ID)
 		} else if err := os.RemoveAll(jobCtx.StagingDir); err != nil {
 			w.logger.Warn("failed to remove staging directory", "path", jobCtx.StagingDir, "err", err)
