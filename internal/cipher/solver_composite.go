@@ -3,6 +3,7 @@ package cipher
 import (
 	"context"
 	"errors"
+	"sync"
 )
 
 // ErrSidecarUnavailable is returned by the composite solver when sig is
@@ -10,6 +11,16 @@ import (
 // ErrSigUnavailable (player-specific extraction failure) so callers /
 // tests can tell "sig not configured" from "this player can't be sig'd."
 var ErrSidecarUnavailable = errors.New("cipher: sidecar solver not configured")
+
+// SidecarSwappable is the composite solver's own interface: a Solver whose
+// sidecar half can be replaced while the process runs. The BotGuard sidecar
+// supervisor installs a freshly BUILT sidecar solver after every restart —
+// the old one carries per-player "already sent" state that describes the dead
+// child's memory, so it must be discarded rather than reused.
+type SidecarSwappable interface {
+	Solver
+	SetSidecar(sidecar Solver)
+}
 
 // compositeSolver routes cipher requests across two underlying solvers
 // per the policy in docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md
@@ -25,31 +36,50 @@ var ErrSidecarUnavailable = errors.New("cipher: sidecar solver not configured")
 // One of sidecar or goja may be nil. A nil sidecar means sig fails
 // with ErrSidecarUnavailable; a nil goja means n has no fallback.
 type compositeSolver struct {
-	sidecar Solver
-	goja    Solver
+	// mu guards sidecarSolver only. goja is fixed at construction.
+	mu            sync.RWMutex
+	sidecarSolver Solver
+	goja          Solver
 }
 
 // NewCompositeSolver wraps two underlying solvers with the routing
 // policy. Pass nil for sidecar when the BotGuard sidecar is disabled
-// or failed to start.
-func NewCompositeSolver(sidecar, goja Solver) Solver {
+// or failed to start — the supervisor can install one later.
+func NewCompositeSolver(sidecar, goja Solver) SidecarSwappable {
 	return newCompositeSolverWith(sidecar, goja)
 }
 
 func newCompositeSolverWith(sidecar, goja Solver) *compositeSolver {
-	return &compositeSolver{sidecar: sidecar, goja: goja}
+	return &compositeSolver{sidecarSolver: sidecar, goja: goja}
+}
+
+// SetSidecar installs (or, with nil, removes) the sidecar half. Safe to call
+// while other goroutines are solving.
+func (c *compositeSolver) SetSidecar(sidecar Solver) {
+	c.mu.Lock()
+	c.sidecarSolver = sidecar
+	c.mu.Unlock()
+}
+
+// sidecar returns the current sidecar half. Every method takes ONE snapshot
+// per call so a swap mid-call cannot make one method use two solvers.
+func (c *compositeSolver) sidecar() Solver {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.sidecarSolver
 }
 
 func (c *compositeSolver) Sig(ctx context.Context, playerID, encryptedSig string) (string, error) {
-	if c.sidecar == nil {
+	sc := c.sidecar()
+	if sc == nil {
 		return "", ErrSidecarUnavailable
 	}
-	return c.sidecar.Sig(ctx, playerID, encryptedSig)
+	return sc.Sig(ctx, playerID, encryptedSig)
 }
 
 func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (string, error) {
-	if c.sidecar != nil {
-		out, err := c.sidecar.N(ctx, playerID, encryptedN)
+	if sc := c.sidecar(); sc != nil {
+		out, err := sc.N(ctx, playerID, encryptedN)
 		if err == nil {
 			return out, nil
 		}
@@ -91,8 +121,9 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 	sigResults := map[string]string{}
 	nResults := map[string]string{}
 
-	if c.sidecar != nil {
-		sr, nr, err := c.sidecar.Batch(ctx, playerID, sigs, ns)
+	sc := c.sidecar()
+	if sc != nil {
+		sr, nr, err := sc.Batch(ctx, playerID, sigs, ns)
 		if err == nil {
 			// sidecarSolver.Batch already validated completeness; trust it.
 			return sr, nr, nil
@@ -125,5 +156,7 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 	return sigResults, nResults, nil
 }
 
-// Compile-time check: compositeSolver satisfies cipher.Solver.
+// Compile-time checks: compositeSolver satisfies cipher.Solver and the
+// swappable variant the BotGuard sidecar supervisor installs restarts through.
 var _ Solver = (*compositeSolver)(nil)
+var _ SidecarSwappable = (*compositeSolver)(nil)

@@ -68,7 +68,15 @@ type Config struct {
 	RequestTimeout time.Duration
 	V8HardLimitMB  int
 	ExposeGC       bool
-	Logger         Logger
+	// OnUnhealthy, when non-nil, is called ONCE each time the sidecar goes
+	// from healthy to unhealthy for a reason other than Stop — stdout EOF
+	// after a crash or a V8 OOM-abort, or a readPump panic. It runs ON THE
+	// readPump GOROUTINE with the health flag already flipped and the pending
+	// requests already drained, so it MUST NOT block: the Supervisor wired to
+	// it does a non-blocking channel send and nothing else. A panic in the
+	// callback is recovered and logged rather than taking the pump down.
+	OnUnhealthy func(reason string)
+	Logger      Logger
 }
 
 // Sidecar manages one Node subprocess running the BotGuard JS sidecar.
@@ -339,6 +347,47 @@ func (s *Sidecar) Stop() error {
 		s.pumpsDone.Wait()
 	})
 	return firstErr
+}
+
+// Restart brings a dead sidecar back ON THE SAME HANDLE: it stops whatever is
+// left of the old child, resets the per-process state, and runs Start again.
+//
+// The handle's identity is preserved deliberately. cmd/moombox stores one
+// *Sidecar on its run state for shutdown and hands the same pointer to
+// PotProvider, so swapping in a fresh instance would leave both pointing at a
+// corpse — the shutdown path would stop the dead one and leak the live one.
+// What DOES have to be rebuilt is the cipher sidecar solver: its per-player
+// "already sent" map describes the memory of the child that just died. That
+// rebuild belongs to the caller (Supervisor.SetOnUp).
+//
+// Callers must serialise Restart against itself; the Supervisor is the only
+// production caller and its loop is single-threaded. Concurrent RPC callers
+// are safe: healthy is false for the whole window, call() short-circuits on
+// it, and writeRequest refuses a nil stdin.
+func (s *Sidecar) Restart(ctx context.Context) error {
+	// Stop is idempotent and, when a child existed, waits for both pumps —
+	// so after it returns nothing else touches the fields reset below.
+	_ = s.Stop()
+
+	s.writeMu.Lock()
+	s.cmd = nil
+	s.stdin = nil
+	s.stdout = nil
+	s.stderr = nil
+	s.job = nil
+	s.readyOnce = sync.Once{}
+	s.readyCh = nil
+	s.readyErr = nil
+	s.stopOnce = sync.Once{}
+	s.stopping.Store(false)
+	s.healthy.Store(false)
+	s.writeMu.Unlock()
+
+	s.pendingMu.Lock()
+	s.pending = make(map[uint64]chan rpcResponse)
+	s.pendingMu.Unlock()
+
+	return s.Start(ctx)
 }
 
 // IsHealthy reports whether the sidecar is currently usable. False after
@@ -670,6 +719,12 @@ func (s *Sidecar) writeRequest(req rpcRequest) error {
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if s.stdin == nil {
+		// Between a crash and the supervisor's Restart there is no pipe. A
+		// caller that passed the healthy check microseconds before
+		// markUnhealthy flipped it must get an error, not a nil dereference.
+		return errors.New("sidecar: not running")
+	}
 	if _, err := s.stdin.Write(data); err != nil {
 		return fmt.Errorf("stdin write: %w", err)
 	}
@@ -823,13 +878,28 @@ func isHarmlessJSDOMStderr(line string) bool {
 }
 
 // markUnhealthy flips the healthy flag and drains pending requests with an
-// error so callers blocked on a response wake up promptly.
+// error so callers blocked on a response wake up promptly, then hands the
+// reason to OnUnhealthy so a supervisor can bring the child back.
 func (s *Sidecar) markUnhealthy(reason string) {
 	if !s.healthy.CompareAndSwap(true, false) {
 		return
 	}
 	s.cfg.Logger.Warn("sidecar marked unhealthy", "reason", reason)
 	s.drainPending(reason)
+	if s.cfg.OnUnhealthy != nil {
+		s.callOnUnhealthy(reason)
+	}
+}
+
+// callOnUnhealthy isolates the callback from readPump: a panic in a
+// supervisor's notify path must not kill the goroutine draining stdout.
+func (s *Sidecar) callOnUnhealthy(reason string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.cfg.Logger.Error("sidecar: OnUnhealthy panic", "panic", fmt.Sprint(r))
+		}
+	}()
+	s.cfg.OnUnhealthy(reason)
 }
 
 func (s *Sidecar) drainPending(reason string) {

@@ -614,7 +614,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// launches reuse the cached extraction (sub-second).
 	//
 	// Set [bgutils] use_sidecar = false in config.toml to disable.
+	//
+	// The sidecar is SUPERVISED. Started once and never restarted, a crashed
+	// or OOM-aborted child latched unhealthy for the rest of a 24/7 run,
+	// taking every signature-ciphered format (sig is sidecar-only) and every
+	// real PO token with it.
+	var bgSupervisor *sidecar.Supervisor
 	if cfg.Bgutils.UseSidecar {
+		// `sup` is assigned BEFORE Start, and Start is what creates the
+		// readPump goroutine that fires OnUnhealthy — so the closure below
+		// never reads a nil pointer and never races the write (goroutine
+		// creation is the happens-before edge).
+		var sup *sidecar.Supervisor
 		bgSidecar := sidecar.New(sidecar.Config{
 			Logger:        log,
 			V8HardLimitMB: cfg.Memory.SidecarHardLimitMB,
@@ -622,16 +633,36 @@ func (s *runState) initServices(logLevelOverride string) error {
 			// enforces the soft sidecar limit. Always on when the sidecar
 			// is enabled — the cost is a function global no caller invokes
 			// unless we ask for it.
-			ExposeGC: true,
+			ExposeGC:    true,
+			OnUnhealthy: func(reason string) { sup.Notify(reason) },
 		})
+		sup = sidecar.NewSupervisor(sidecar.SupervisorConfig{
+			Restart: bgSidecar.Restart,
+			Logger:  log,
+		})
+		bgSupervisor = sup
+		// Stored UNCONDITIONALLY, unlike before: the supervisor can bring the
+		// child up minutes after a failed first start, and shutdown.go's Stop
+		// must reach whatever is running by then. Stop on a never-started
+		// handle is a no-op, and main.go's memory log already gates on
+		// IsHealthy().
+		s.bgSidecar = bgSidecar
+
 		sCtx, sCancel := context.WithTimeout(s.ctx, 60*time.Second)
 		startErr := bgSidecar.Start(sCtx)
 		sCancel()
 		if startErr != nil {
-			log.Warn("BotGuard sidecar failed to start; falling back to goja", slog.String("error", startErr.Error()))
+			log.Warn("BotGuard sidecar failed to start; using goja until the supervisor gets it up",
+				slog.String("error", startErr.Error()))
+			sidecar.PublishHealth(sidecar.Health{Healthy: false, Reason: startErr.Error(), Since: time.Now()})
+			// A first start that never succeeded cannot reach markUnhealthy
+			// (the CAS needs healthy==true), so the supervisor is told by
+			// hand. Same outcome for the operator either way: PO tokens and
+			// sig are unavailable until a child comes up.
+			sup.Notify("initial start failed: " + startErr.Error())
 		} else {
-			s.bgSidecar = bgSidecar
 			potProvider.SetSidecar(bgSidecar)
+			sidecar.PublishHealth(sidecar.Health{Healthy: true, Since: time.Now()})
 			log.Info("BotGuard sidecar ready", slog.String("cacheDir", bgSidecar.CacheDir()))
 		}
 	} else {
@@ -666,7 +697,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	}
 
 	var sidecarCipher cipher.Solver
-	if s.bgSidecar != nil {
+	if s.bgSidecar != nil && s.bgSidecar.IsHealthy() {
 		sidecarCipher = cipher.NewSidecarSolver(s.bgSidecar, gojaSolver)
 	}
 	cipherSolver := cipher.NewCompositeSolver(sidecarCipher, gojaSolver)
@@ -682,6 +713,31 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
 	ytService.PlayerAPI.SetPotProvider(potProvider)
+
+	// Re-wire both consumers every time the supervisor brings the child back.
+	// PotProvider holds the same handle, so SetSidecar is idempotent there —
+	// but it is also what installs it after a FAILED first start. The cipher
+	// sidecar solver is REBUILT rather than reused: its per-player "already
+	// sent" map describes the memory of the child that just died.
+	if bgSupervisor != nil {
+		bgSup := bgSupervisor
+		sc := s.bgSidecar
+		bgSup.SetOnUp(func() {
+			potProvider.SetSidecar(sc)
+			cipherSolver.SetSidecar(cipher.NewSidecarSolver(sc, gojaSolver))
+		})
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("BotGuard sidecar supervisor panic", slog.Any("panic", r))
+				}
+			}()
+			// Returns on s.ctx cancellation. A Restart already in flight at
+			// shutdown is harmless: the child is pinned to the parent (Job
+			// Object on Windows, PR_SET_PDEATHSIG on Linux) and dies with us.
+			bgSup.Run(s.ctx)
+		}()
+	}
 
 	// =========================================================================
 	// 9. Notification manager
