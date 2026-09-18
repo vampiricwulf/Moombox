@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -34,7 +35,34 @@ const (
 	// survive for a human to look at, not that every failed parse accumulates
 	// its own artifact in staging.
 	corruptChatSuffix = ".corrupt"
+	// liveChatPollDefault is the live endpoint's own fallback poll interval —
+	// what computePollDelay uses when YouTube sends no usable TimeoutMs. It is
+	// also the FLOOR under repeated stale-continuation recovery: a recovery
+	// that produces a token the next poll reports complete is not progress,
+	// and must not be allowed to cost less than an ordinary poll.
+	liveChatPollDefault = 5 * time.Second
+	// maxStaleRecoveryDelay caps that floor's doubling.
+	maxStaleRecoveryDelay = 5 * time.Minute
 )
+
+// liveChatPollDefaultForTesting / maxStaleRecoveryDelayForTesting are the
+// values staleRecoveryDelay actually reads. Vars rather than consts purely so
+// tests can scale the ladder down instead of sleeping for real minutes — the
+// playerRetryBackoffBase seam in internal/youtube exists for the same reason.
+// Production never writes them.
+var (
+	liveChatPollDefaultForTesting   = liveChatPollDefault
+	maxStaleRecoveryDelayForTesting = maxStaleRecoveryDelay
+)
+
+// errStaleRecoveryExhausted is the terminal error Start reports when
+// runChatLoop gave up after maxStaleContinuationAttempts consecutive
+// stale-continuation recoveries. The broadcast was still live when this run
+// stopped polling, so messages can still be missing — and the worker derives
+// chat_status straight from Start's return (chatStatusForOutcome,
+// internal/worker/orchestrator_chat.go: any non-nil outcome is "incomplete").
+// Returning nil here would show a capture that gave up as "finished".
+var errStaleRecoveryExhausted = errors.New("chat: gave up after repeated stale-continuation recoveries")
 
 // ChatDownloaderOptions configures a ChatDownloader.
 type ChatDownloaderOptions struct {
@@ -87,10 +115,25 @@ type ChatDownloader struct {
 	ioErrorOccurred bool
 	cancelCtx       context.CancelFunc // for aborting sleep on stop/markStreamEnded
 	done            chan struct{}      // closed when Start() completes; nil if never started
+	// staleExhausted records that runChatLoop left because the
+	// consecutive-recovery cap fired. Read by Start on its way out, where it
+	// becomes errStaleRecoveryExhausted. Guarded by mu — written on the loop
+	// goroutine, and Start's own early-return arm is on another.
+	staleExhausted bool
+	// replay is the LIVE-vs-REPLAY endpoint choice. It starts at
+	// opts.IsReplay but is mutable, because a broadcast that ends mid-run
+	// flips its watch page to isReplay:true and starts serving replay tokens;
+	// continuing to post those to get_live_chat is what spun the recovery
+	// loop. opts.IsReplay is never read again after construction.
+	replay atomic.Bool
 
 	// testRecoveryOverride allows tests to inject a recovery function instead of
 	// calling recoverStaleContinuation. Only set in tests; nil in production.
 	testRecoveryOverride func(ctx context.Context) bool
+
+	// testFetchOverride replaces the network fetch in runChatLoop. Tests only,
+	// exactly like testRecoveryOverride above it; production leaves it nil.
+	testFetchOverride func(ctx context.Context) (*ChatApiResponse, error)
 
 	// testBackoffOverride, when > 0, replaces the computed exponential-backoff
 	// duration in handleFetchError so tests don't have to sleep for real
@@ -153,10 +196,12 @@ func (cd *ChatDownloader) logDebug(msg string, args ...any) {
 }
 
 // logInfo routes an operator-visible diagnostic through the optional Logger.
-// No-op when Logger is nil. Reserved for the entry-time decisions that DISCARD
-// something on disk — today, the mode rule refusing a live run's sidecar — so
-// an operator reading a resumed job's log sees them without switching to
-// debug. Everything else stays on logDebug.
+// No-op when Logger is nil. Reserved for the decisions an operator cannot
+// reconstruct from the archive afterwards: the ones that DISCARD something on
+// disk (the mode rule refusing a live run's sidecar), that change which
+// endpoint the run is talking to (adoptFreshContinuation's flip), or that stop
+// the capture short (the stale-recovery cap) — so a job's log shows them
+// without switching to debug. Everything else stays on logDebug.
 func (cd *ChatDownloader) logInfo(msg string, args ...any) {
 	if cd.Logger != nil {
 		cd.Logger.Info(msg, args...)
@@ -201,7 +246,7 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 		}
 	}
 
-	return &ChatDownloader{
+	cd := &ChatDownloader{
 		opts:           opts,
 		api:            api,
 		dedup:          utils.NewOrderedDedup[string](),
@@ -210,6 +255,45 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 		resumeFileAuto: resumeFileAuto,
 		lastMessageAt:  time.Now(),
 	}
+	cd.replay.Store(opts.IsReplay)
+	return cd
+}
+
+// isReplay reports which chat endpoint this run is currently using. Read this,
+// never opts.IsReplay: the mode can change mid-run (see adoptFreshContinuation).
+func (cd *ChatDownloader) isReplay() bool { return cd.replay.Load() }
+
+// adoptFreshContinuation installs a token recovered from the watch page and
+// follows the PAGE's verdict about which endpoint it belongs to.
+//
+// A live broadcast that has just ended flips its watch page to isReplay:true
+// and starts serving a replay token. Posting that to get_live_chat is what
+// makes the recovery loop spin: the live endpoint answers 200 with no
+// continuation, runChatLoop calls handleEndOfStream again, the page hands out
+// the same replay token, and nothing in that circuit ever sleeps.
+func (cd *ChatDownloader) adoptFreshContinuation(token string, isReplay bool) {
+	cd.continuation = token
+	if isReplay == cd.isReplay() {
+		return
+	}
+	cd.replay.Store(isReplay)
+	cd.logInfo("chat: watch page switched the chat endpoint",
+		"videoID", cd.opts.VideoID, "replay", isReplay)
+}
+
+// staleRecoveryDelay is the floor under REPEATED stale-continuation recovery.
+// n is how many consecutive recoveries have happened, counting this one, so
+// n == 1 (the first, which is usually a genuinely expired mid-stream token)
+// waits one ordinary poll and each one after that doubles to the ceiling.
+func staleRecoveryDelay(n int) time.Duration {
+	d := liveChatPollDefaultForTesting
+	for range max(n-1, 0) {
+		d *= 2
+		if d >= maxStaleRecoveryDelayForTesting {
+			return maxStaleRecoveryDelayForTesting
+		}
+	}
+	return d
 }
 
 // Start begins the chat download process.
@@ -255,6 +339,11 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 // count and dedup IDs, but for a live/upcoming run it does not supply the
 // continuation when the caller already has a fresh one — see the resume
 // block's own comment below.
+//
+// THE OUTCOME. Start returns nil for every exit that is not a give-up. The one
+// exception is errStaleRecoveryExhausted: the consecutive-recovery cap firing
+// on a still-live broadcast, which the worker turns into chat_status
+// "incomplete" because messages can still be missing.
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	if cd.running {
@@ -272,6 +361,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.running = true
 	cd.cancelFlag = false
 	cd.streamEnded = false
+	// A fresh run carries no give-up verdict from a prior run on this same
+	// instance, for the same reason liveContinuationOpen is re-armed below.
+	cd.staleExhausted = false
 	// A fresh run starts with no resume signal, not whatever a PRIOR run on
 	// this same instance last left behind (e.g. a completed run that ended
 	// with the signal open, then this same *ChatDownloader gets Start()
@@ -476,6 +568,12 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.OnFinish()
 	}
 
+	cd.mu.Lock()
+	exhausted := cd.staleExhausted
+	cd.mu.Unlock()
+	if exhausted {
+		return errStaleRecoveryExhausted
+	}
 	return nil
 }
 
@@ -624,7 +722,7 @@ func (cd *ChatDownloader) SetLiveContinuationOpenForTesting(open bool) {
 // the loop is about to leave on shouldStop(), and nothing on its way out
 // would close the signal again.
 func (cd *ChatDownloader) noteLivePollResult(hasContinuation bool) {
-	if cd.opts.IsReplay || !hasContinuation {
+	if cd.isReplay() || !hasContinuation {
 		return
 	}
 	cd.mu.Lock()
@@ -652,6 +750,7 @@ func (cd *ChatDownloader) wasCancelledOrShutdown(ctx context.Context) bool {
 
 func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 	consecutiveErrors := 0
+	staleRecoveries := 0
 	switchedToAllChat := resuming // Skip All Chat switch when resuming — continuation is already mid-stream
 	// lastWriteAt is loop-local — only the loop reads/writes it for the
 	// writeInterval throttle (audit chat.md U1).
@@ -705,10 +804,51 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			if !cd.handleEndOfStream(ctx) {
 				break
 			}
+			staleRecoveries++
+			// A recovered token the very NEXT poll reports complete is not a
+			// recovery — it is the same stale state arriving under a new name.
+			// Without a floor this circuit re-fetched the ~5 MB watch page and
+			// re-polled with zero delay until Stop (measured: 2,543 page
+			// fetches and 2,544 polls in 300 ms). Count it as a failed attempt
+			// and sleep the ladder, so repeated "successful" recoveries back
+			// off exactly like repeated failed ones do inside
+			// recoverStaleContinuation. The FIRST one is not delayed: a
+			// genuinely expired mid-stream token must be replaced at once, and
+			// staleRecoveries is reset by any poll that actually produces a
+			// continuation.
+			//
+			// WHICH ANSWER YOUTUBE GIVES does not change any of this. The
+			// storm needs the live endpoint to answer a replay token with
+			// 200-and-no-continuation, which is what lands here; if it
+			// answered 4xx instead the fetch would take handleFetchError's
+			// already-bounded 5s×n path and never reach this branch. The
+			// floor and the endpoint flip are both correct either way.
+			if staleRecoveries > 1 {
+				cd.sleep(ctx, staleRecoveryDelay(staleRecoveries-1))
+				if cd.shouldStop() || ctx.Err() != nil {
+					break
+				}
+			}
+			if staleRecoveries >= maxStaleContinuationAttempts {
+				// maxStaleContinuationAttempts never applied before: every
+				// recovery "succeeded" on its first call, and contRetries is
+				// per-call. This is the outer cap it was written to be — and
+				// it is a give-up, not a completion, so it is recorded as one
+				// (errStaleRecoveryExhausted) rather than looping in silence.
+				cd.logInfo("chat: giving up after repeated stale-continuation recoveries",
+					"videoID", cd.opts.VideoID, "recoveries", staleRecoveries)
+				cd.mu.Lock()
+				cd.staleExhausted = true
+				cd.mu.Unlock()
+				break
+			}
 			switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
 			continue
 		}
 
+		// A poll that produced a real continuation is progress: the streak
+		// that the floor above measures starts over.
+		staleRecoveries = 0
 		cd.continuation = resp.NextContinuation
 		cd.noteLivePollResult(true)
 		if delay := cd.computePollDelay(resp); delay > 0 {
@@ -725,9 +865,13 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 }
 
 // fetchOne performs a single chat fetch, routing to the replay or live
-// endpoint based on opts.IsReplay.
+// endpoint based on the CURRENT mode (isReplay), which a mid-run watch-page
+// flip can change — not the fixed opts.IsReplay.
 func (cd *ChatDownloader) fetchOne(ctx context.Context) (*ChatApiResponse, error) {
-	if cd.opts.IsReplay {
+	if cd.testFetchOverride != nil {
+		return cd.testFetchOverride(ctx)
+	}
+	if cd.isReplay() {
 		return cd.api.FetchChatReplay(ctx, cd.continuation)
 	}
 	return cd.api.FetchLiveChat(ctx, cd.continuation)
@@ -873,9 +1017,9 @@ func (cd *ChatDownloader) maybeFlush(lastWriteAt *time.Time, newInBatch int) {
 // maxStaleContinuationAttempts cap was exhausted or the loop was asked to
 // stop. Sleeps *between* attempts (not before the first), matching C15.
 func (cd *ChatDownloader) recoverStaleContinuation(ctx context.Context) bool {
-	fresh, _, freshErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
+	fresh, freshIsReplay, freshErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
 	if freshErr == nil && fresh != "" {
-		cd.continuation = fresh
+		cd.adoptFreshContinuation(fresh, freshIsReplay)
 		return true
 	}
 
@@ -886,9 +1030,9 @@ func (cd *ChatDownloader) recoverStaleContinuation(ctx context.Context) bool {
 		if cd.shouldStop() {
 			return false
 		}
-		retry, _, retryErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
+		retry, retryIsReplay, retryErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
 		if retryErr == nil && retry != "" {
-			cd.continuation = retry
+			cd.adoptFreshContinuation(retry, retryIsReplay)
 			return true
 		}
 		contRetries++
@@ -916,20 +1060,24 @@ func (cd *ChatDownloader) handleEndOfStream(ctx context.Context) bool {
 }
 
 // computePollDelay returns how long to wait before the next chat fetch,
-// respecting YouTube's TimeoutMs hint when positive and falling back to 5s
-// (live) or 0 (replay) otherwise. A non-positive TimeoutMs is deliberately
-// *not* treated as "poll immediately" — YouTube has historically shipped 0
-// as a backpressure signal ("nothing to give you") and hammering the API
-// would be wasteful (audit chat.md R4). parseResponse initialises TimeoutMs
-// to -1 so an absent field is distinguishable from an explicit zero, and
-// both fall through to the live default here.
+// respecting YouTube's TimeoutMs hint when positive and falling back to
+// liveChatPollDefault (live) or 0 (replay) otherwise. This is the HEALTHY
+// cadence and the stale-recovery floor never touches it: a poll that produced
+// a continuation is progress, and progress is never made to wait.
+//
+// A non-positive TimeoutMs is deliberately *not* treated as "poll
+// immediately" — YouTube has historically shipped 0 as a backpressure signal
+// ("nothing to give you") and hammering the API would be wasteful (audit
+// chat.md R4). parseResponse initialises TimeoutMs to -1 so an absent field
+// is distinguishable from an explicit zero, and both fall through to the live
+// default here.
 func (cd *ChatDownloader) computePollDelay(resp *ChatApiResponse) time.Duration {
 	waitMs := resp.TimeoutMs
 	if waitMs <= 0 {
-		if cd.opts.IsReplay {
+		if cd.isReplay() {
 			return 0
 		}
-		waitMs = 5000
+		waitMs = int(liveChatPollDefault / time.Millisecond)
 	}
 	return time.Duration(waitMs) * time.Millisecond
 }
