@@ -31,6 +31,43 @@ type delays struct {
 	fetchHardCeiling       time.Duration // segmentHardCeiling — one segment/chunk fetch's absolute lifetime
 }
 
+// SetFastDelaysForTests divides every retry and backoff wait by scale. It
+// exists for tests in OTHER packages: internal/worker's
+// TestFinalizeIncompleteTailInterruption drives a real SegmentDownloader
+// through a Tier-2 finalize and paid the production retry ladder — 10.1 s,
+// a quarter of the whole suite's wall time — because this struct is
+// unexported and its in-package fastDelays() helper unreachable from there
+// (sweep-2 TOOL-6, owner decision O-Q).
+//
+// Every member moves by the one factor, fetchHardCeiling included, so
+// escalation counts and orderings stay exactly production's — a field left
+// behind would keep one production wait in the loop, which is the cost this
+// seam exists to remove.
+//
+// Production never calls this: NewSegmentDownloader installs defaultDelays()
+// and nothing else writes the field, so the shipped timings are unchanged.
+// A production caller is a review finding. A scale of 0 or less is ignored.
+func (d *SegmentDownloader) SetFastDelaysForTests(scale int) {
+	if scale <= 0 {
+		return
+	}
+	n := time.Duration(scale)
+	p := defaultDelays()
+	d.delays = delays{
+		singleGoneRetry:        p.singleGoneRetry / n,
+		interruptionStallRetry: p.interruptionStallRetry / n,
+		transientFailureRetry:  p.transientFailureRetry / n,
+		genericRetry:           p.genericRetry / n,
+		hlsPlaylistRetry:       p.hlsPlaylistRetry / n,
+		hlsStuckRetry:          p.hlsStuckRetry / n,
+		connectivityPoll:       p.connectivityPoll / n,
+		atEdgeBackoffUnit:      p.atEdgeBackoffUnit / n,
+		hlsReloadUnit:          p.hlsReloadUnit / n,
+		hlsResumeSave:          p.hlsResumeSave / n,
+		fetchHardCeiling:       p.fetchHardCeiling / n,
+	}
+}
+
 // defaultDelays returns production timing.
 func defaultDelays() delays {
 	return delays{

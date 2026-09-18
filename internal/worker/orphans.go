@@ -36,6 +36,12 @@ type OrphanedEntry struct {
 	JobID     string `json:"jobId,omitempty"`     // Associated job ID (if found)
 	JobTitle  string `json:"jobTitle,omitempty"`  // Job title (if found)
 	JobStatus string `json:"jobStatus,omitempty"` // Job status (if found)
+	// Asides names the set-aside recordings (engine.StagedRestartSuffix) a
+	// staging dir still holds — media the engine preserved rather than
+	// truncated, which no mux has consumed. Such a dir is only ever offered
+	// once its preservation window has lapsed, and naming the files is what
+	// tells the operator this is captured footage rather than scratch space.
+	Asides []string `json:"asides,omitempty"`
 }
 
 // ScanOrphanedFiles scans staging and output directories for orphaned files.
@@ -76,12 +82,13 @@ var activeJobStatuses = map[database.JobStatus]bool{
 // deliberately preserved rather than cleaned up, and so must NOT be offered
 // (or allowed) as a deletable orphan. Mirrors the exact carve-out applied at
 // job-finish time (see (*DownloadWorker) finishDownload's cleanup block in
-// worker.go): a Finished job's staging only survives cleanup for three
+// worker.go): a Finished job's staging only survives cleanup for four
 // reasons — it's flagged IncompleteTail (tail is Resume-able), its chat
 // capture ended incomplete (the chat resume sidecar in staging is what a
-// later Retry pages on from), or it still has an unmuxed captured part
-// (recoverable via the Mux action). The two incomplete shields expire on the
-// same age rule; the unmuxed-part shield never does.
+// later Retry pages on from), it still holds a recording the engine set
+// aside rather than truncated (engine.StagedRestartSuffix), or it still has
+// an unmuxed captured part (recoverable via the Mux action). The first three
+// shields expire on the same age rule; the unmuxed-part shield never does.
 //
 // This predicate must stay precise: any OTHER Finished job's staging is a
 // genuine orphan (e.g. a stale dir left by an old/removed job) and must
@@ -90,12 +97,21 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	if job == nil || job.Status != database.StatusFinished {
 		return false
 	}
-	// One age rule, read once, so that the doc's claim above — both
-	// incomplete shields expire together — is visible in the expression.
+	// One age rule, read once, so that the doc's claim above — the three
+	// expiring shields expire together — is visible in the expression.
 	notExpired := !incompleteStagingExpired(cfg, job)
+	// The aside shield is the third one on that rule (sweep-2 Task 11, extra
+	// item b). Finalize muxes every readable set-aside recording into its own
+	// sibling file and deletes it, so one still sitting in staging after the
+	// window has lapsed is one FFmpeg could not read — not footage waiting on
+	// a routine recovery — and the dir it pins is real disk. The unmuxed-PART
+	// shield below still never expires: that media the Mux action can recover
+	// at any time.
+	asideShield := notExpired && len(stagedAsideRecordings(jobStagingDir)) > 0
 	return (job.IncompleteTail && notExpired) ||
 		(job.ChatStatus == chatStatusIncomplete && notExpired) ||
-		hasUnmuxedPartsForJob(db, job.ID, jobStagingDir)
+		asideShield ||
+		hasUnmuxedSegmentParts(db, job.ID, jobStagingDir)
 }
 
 // incompleteStagingExpired reports whether an incomplete_tail job's staging
@@ -343,7 +359,8 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 				continue
 			}
 			if jobNeedsStaging(db, cfg, job, absPath) {
-				// Finished but deliberately preserved (IncompleteTail or an
+				// Finished but deliberately preserved (IncompleteTail, an
+				// incomplete chat capture, a set-aside recording, or an
 				// unmuxed part) — not a genuine orphan, skip.
 				continue
 			}
@@ -363,6 +380,15 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 			Type:     "staging",
 			Size:     size,
 			Modified: modified.UTC().Format(time.RFC3339),
+		}
+
+		// Name any set-aside recording the dir still holds. Reaching here
+		// means its shield has lapsed (or the job row is gone entirely), so
+		// this offer is real — and the difference between "scratch space" and
+		// "footage FFmpeg could not read" is exactly what the operator needs
+		// before clicking delete.
+		for _, aside := range stagedAsideRecordings(absPath) {
+			entry.Asides = append(entry.Asides, filepath.Base(aside))
 		}
 
 		if job != nil {
@@ -500,26 +526,20 @@ func scanTrimOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orphan
 		return nil, nil
 	}
 
-	// Collect all known trim filenames from DB
-	jobs, err := db.GetAllJobs()
+	// One query, not one per job (sweep-2 ENGINE-17).
+	trims, err := db.GetAllTrims()
 	if err != nil {
 		return nil, err
 	}
 
-	knownTrimFiles := make(map[string]bool)
-	for _, job := range jobs {
-		trims, err := db.GetTrimsForJob(job.ID)
-		if err != nil {
-			continue
+	knownTrimFiles := make(map[string]bool, len(trims))
+	for _, tr := range trims {
+		// Resolve trim path: relative to output dir
+		trimAbs := tr.Filename
+		if !filepath.IsAbs(trimAbs) {
+			trimAbs = filepath.Join(absOutputDir, trimAbs)
 		}
-		for _, tr := range trims {
-			// Resolve trim path: relative to output dir
-			trimAbs := tr.Filename
-			if !filepath.IsAbs(trimAbs) {
-				trimAbs = filepath.Join(absOutputDir, trimAbs)
-			}
-			knownTrimFiles[normalizePath(trimAbs)] = true
-		}
+		knownTrimFiles[normalizePath(trimAbs)] = true
 	}
 
 	var entries []OrphanedEntry

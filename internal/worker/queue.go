@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -55,7 +56,20 @@ type JobQueue struct {
 	dlNotify         chan struct{} // signaling for download slot availability
 	lifeNotify       chan struct{} // signaling for lifecycle slot availability
 	logger           logger        // optional logger for warnings
+	// lifecycleWarnAfter is how long AcquireLifecycleSlot may block before it
+	// says so. A field rather than a const so a test can reach the branch
+	// without waiting out the real threshold; production installs
+	// lifecycleWaitWarnAfter and nothing else writes it.
+	lifecycleWarnAfter time.Duration
 }
+
+// lifecycleWaitWarnAfter is how long a job may sit behind the lifecycle cap
+// before the queue logs it. At the cap the symptom is a capture that simply
+// does not start, and until this existed there was no line, no status and no
+// counter anyone reads to explain it (sweep-2 Task 9 review, Important 1).
+// Long enough that ordinary slot churn is silent; short enough that a wedged
+// pool is named while the stream is still live.
+const lifecycleWaitWarnAfter = 30 * time.Second
 
 // NewJobQueue creates a new job queue.
 func NewJobQueue(maxDownloads int) *JobQueue {
@@ -63,18 +77,19 @@ func NewJobQueue(maxDownloads int) *JobQueue {
 		maxDownloads = 10
 	}
 	return &JobQueue{
-		maxDownloads:     maxDownloads,
-		maxLifecycle:     100,
-		pendingSet:       make(map[string]struct{}),
-		processing:       make(map[string]context.CancelFunc),
-		done:             make(map[string]chan struct{}),
-		holdingDlSlot:    make(map[string]bool),
-		holdingLifecycle: make(map[string]bool),
-		droppedLogged:    make(map[string]struct{}),
-		cancelled:        make(map[string]bool),
-		notify:           make(chan struct{}, 1),
-		dlNotify:         make(chan struct{}, 1),
-		lifeNotify:       make(chan struct{}, 1),
+		maxDownloads:       maxDownloads,
+		maxLifecycle:       100,
+		pendingSet:         make(map[string]struct{}),
+		processing:         make(map[string]context.CancelFunc),
+		done:               make(map[string]chan struct{}),
+		holdingDlSlot:      make(map[string]bool),
+		holdingLifecycle:   make(map[string]bool),
+		droppedLogged:      make(map[string]struct{}),
+		cancelled:          make(map[string]bool),
+		notify:             make(chan struct{}, 1),
+		dlNotify:           make(chan struct{}, 1),
+		lifeNotify:         make(chan struct{}, 1),
+		lifecycleWarnAfter: lifecycleWaitWarnAfter,
 	}
 }
 
@@ -113,7 +128,8 @@ func (q *JobQueue) Enqueue(jobID string, status database.JobStatus) {
 	}
 
 	// The job got in: forget the earlier drop so a LATER drop episode is
-	// logged again, and so the map cannot grow without bound.
+	// logged again, and so the map holds at most one entry per job currently
+	// being dropped.
 	delete(q.droppedLogged, jobID)
 	q.pending = append(q.pending, pendingJob{ID: jobID, Priority: calculatePriority(status)})
 	q.pendingSet[jobID] = struct{}{}
@@ -179,8 +195,20 @@ func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) 
 // will actually download (owner decision O-F), so the cap now bounds
 // CONCURRENT DOWNLOADS rather than concurrent waits — a limit no realistic
 // install approaches, which is the point: the wait phase is unbounded except
-// by per-job goroutine cost. Returns false if ctx is cancelled first.
+// by per-job goroutine cost. Returns false if ctx is cancelled first — which
+// is what makes Stop prompt: a parked job must not hold shutdown open.
+//
+// A wait that outlasts lifecycleWarnAfter logs ONE line naming the job and how
+// many slots are held. Once per wait, not once per wakeup: at the cap every
+// release wakes every waiter, and a line each would bury the first one.
 func (q *JobQueue) AcquireLifecycleSlot(ctx context.Context, jobID string) bool {
+	var warnTimer *time.Timer
+	var warnC <-chan time.Time
+	defer func() {
+		if warnTimer != nil {
+			warnTimer.Stop()
+		}
+	}()
 	for {
 		q.mu.Lock()
 		if q.activeLifecycle < q.maxLifecycle {
@@ -200,12 +228,24 @@ func (q *JobQueue) AcquireLifecycleSlot(ctx context.Context, jobID string) bool 
 			}
 			return true
 		}
+		held, limit, warnAfter, lg := q.activeLifecycle, q.maxLifecycle, q.lifecycleWarnAfter, q.logger
 		q.mu.Unlock()
+
+		if warnTimer == nil && warnAfter > 0 {
+			warnTimer = time.NewTimer(warnAfter)
+			warnC = warnTimer.C
+		}
 
 		select {
 		case <-ctx.Done():
 			return false
 		case <-q.lifeNotify:
+		case <-warnC:
+			warnC = nil // one line per wait
+			if lg != nil {
+				lg.Warn("waiting for a lifecycle slot; the download cannot start until one frees",
+					"jobID", jobID, "held", held, "limit", limit, "waited", warnAfter.String())
+			}
 		}
 	}
 }
@@ -291,6 +331,13 @@ func (q *JobQueue) Complete(jobID string) {
 	// two Completes every error path fires cannot over-release.
 	q.releaseLifecycleSlotLocked(jobID)
 
+	// Outside the processing branch for the same reason: a job with a
+	// droppedLogged entry was never admitted to pending, so it was never
+	// dequeued and has no processing row — inside the branch the delete could
+	// not run at all (Task 9 review, Minor 4). Enqueue's success tail is the
+	// usual cleaner; this is the belt to its braces.
+	delete(q.droppedLogged, jobID)
+
 	if cancel, ok := q.processing[jobID]; ok {
 		cancel()
 		delete(q.processing, jobID)
@@ -299,7 +346,6 @@ func (q *JobQueue) Complete(jobID string) {
 		// misclassify the job's next run (WasCancelled normally consumes it,
 		// but error paths can finish a run without ever reading it).
 		delete(q.cancelled, jobID)
-		delete(q.droppedLogged, jobID)
 
 		// Signal that the processing goroutine has returned.
 		ch := q.done[jobID]
@@ -319,7 +365,8 @@ func (q *JobQueue) Complete(jobID string) {
 		}
 	}
 
-	// Signal that a lifecycle slot is free
+	// Wake a parked Dequeue so it re-checks the backlog (the lifecycle slot is
+	// released above, and Dequeue no longer waits on it).
 	select {
 	case q.notify <- struct{}{}:
 	default:

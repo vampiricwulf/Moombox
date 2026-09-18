@@ -380,6 +380,89 @@ func TestStagedAsideKeepsStagingFromCleanup(t *testing.T) {
 	})
 }
 
+// TestFinalizeMuxesEachAsideToItsOwnFile pins extra item (a): the recovery
+// surface an aside never had. Task 8 taught the worker to PRESERVE a set-aside
+// recording, which left it pinning its staging dir forever with nothing to do
+// about it — the fresh capture restarts at sq=0 and OVERLAPS the aside, so it
+// cannot simply be concatenated into the archive. Finalize therefore muxes
+// each aside into its OWN file beside the archive: the data is preserved
+// exactly once, the staging dir is free to go, and the operator is told the
+// name.
+//
+// Three conditions, one assertion each:
+//  1. the sibling exists (mutant: skipping the aside mux — the aside is
+//     deleted with staging, which is data loss);
+//  2. it is NOT a segment row (mutant: registering it as one — the part list
+//     would replay the recording's opening);
+//  3. staging goes, because nothing unmuxed is left in it (mutant: sweeping
+//     the dir while the aside is still there — the sub-test below).
+func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+
+	staging, _ := muxFixtureJob(t, w, db, "j-aside-mux")
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 30)
+	aside := filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
+	writeAsideFixture(t, ffmpegPath, aside, 10)
+	twin := aside + ".resume.json"
+	if err := os.WriteFile(twin, []byte(`{"stale":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.MuxJob("j-aside-mux"); err != nil {
+		t.Fatalf("MuxJob: %v", err)
+	}
+	w.Stop()
+
+	fresh, _ := db.GetJob("j-aside-mux")
+	if fresh == nil || fresh.Status != database.StatusFinished {
+		t.Fatalf("job after a mux with an aside beside it = %v, want Finished (error=%q)", statusOf(fresh), errorOf(fresh))
+	}
+	if _, err := os.Stat(fresh.OutputFile); err != nil {
+		t.Fatalf("the main output is missing: %v", err)
+	}
+	sibling := strings.TrimSuffix(fresh.OutputFile, ".mp4") + engine.StagedRestartSuffix + "1700000000.mp4"
+	if _, err := os.Stat(sibling); err != nil {
+		t.Errorf("no %s beside the archive (stat err = %v) — the set-aside recording was never muxed, "+
+			"so staging cleanup takes it with the dir", sibling, err)
+	}
+	if segs, err := db.GetSegments("j-aside-mux"); err != nil {
+		t.Fatalf("GetSegments: %v", err)
+	} else if len(segs) != 0 {
+		t.Errorf("the aside produced %d segment row(s) — it overlaps the opening of the main "+
+			"recording, so listing it as a part would replay it", len(segs))
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("staging dir survived a finalize that consumed its aside (stat err = %v)", err)
+	}
+
+	t.Run("an aside that cannot be demuxed keeps its own staging shield", func(t *testing.T) {
+		w2, db2 := testWorkerSetup(t)
+		staging2, _ := muxFixtureJob(t, w2, db2, "j-aside-bad")
+		writeMuxFixture(t, ffmpegPath, filepath.Join(staging2, "video.mp4"), 10)
+		bad := filepath.Join(staging2, "video.mp4"+engine.StagedRestartSuffix+"1700000001")
+		if err := os.WriteFile(bad, []byte("not a container"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := w2.MuxJob("j-aside-bad"); err != nil {
+			t.Fatalf("MuxJob: %v", err)
+		}
+		w2.Stop()
+
+		after, _ := db2.GetJob("j-aside-bad")
+		if after == nil || after.Status != database.StatusFinished {
+			t.Fatalf("an unreadable aside must not fail the job: %v (error=%q)", statusOf(after), errorOf(after))
+		}
+		if _, err := os.Stat(bad); err != nil {
+			t.Errorf("the unreadable aside was deleted: %v — a mux that failed must not consume it", err)
+		}
+		if _, err := os.Stat(staging2); err != nil {
+			t.Errorf("staging was swept while an unmuxed aside was still in it: %v", err)
+		}
+	})
+}
+
 // --- helpers ---------------------------------------------------------------
 
 // muxFixtureJob inserts a Muxing row whose output lands in the test's own temp
@@ -411,6 +494,19 @@ func writeMuxFixture(t *testing.T, ffmpegPath, path string, seconds int) {
 		"-movflags", "+faststart", path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate fixture %s: %v\n%s", path, err, out)
+	}
+}
+
+// writeAsideFixture renders the same fixture under a name with no media
+// extension — an aside is <file>.restart-<unix ts>, which FFmpeg cannot pick
+// an output format for, so it is written as .mp4 and moved into place the way
+// the engine's no-truncate guard renames it.
+func writeAsideFixture(t *testing.T, ffmpegPath, path string, seconds int) {
+	t.Helper()
+	tmp := filepath.Join(t.TempDir(), "aside.mp4")
+	writeMuxFixture(t, ffmpegPath, tmp, seconds)
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatalf("move the aside fixture into place: %v", err)
 	}
 }
 

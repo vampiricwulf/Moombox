@@ -621,6 +621,23 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}, nil
 }
 
+// takeLiveHint consumes a monitor-stashed TwitchStreamInfo for jobID when it
+// says the channel is live. The Twitch monitor batch-polls every configured
+// channel and stashes its result for the job it belongs to, so a manually
+// added job waiting on a channel the monitor also watches had two GQL streams
+// answering one question (sweep-2 ENGINE-18). Take-once, so a hint consumed
+// here is not re-read by processTwitchLive.
+func takeLiveHint(c *twitchHintCache, jobID string) *twitch.TwitchStreamInfo {
+	if c == nil {
+		return nil
+	}
+	info := c.take(jobID)
+	if info == nil || !info.IsLive {
+		return nil
+	}
+	return info
+}
+
 // waitForTwitchLive polls a Twitch channel until it goes live or is cancelled.
 // Returns (streamInfo, nil) when live, (nil, nil) when cancelled, (nil, err) on fatal error.
 func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.Job, login string) (*twitch.TwitchStreamInfo, error) {
@@ -659,6 +676,16 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 		sp.db.UpdateJobFields(job.ID, map[string]any{
 			"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
 		})
+
+		// The monitor may have answered this very question while we slept: it
+		// batch-polls every configured channel and stashes the result for the
+		// job it belongs to (sweep-2 ENGINE-18). Consuming it here costs no
+		// round trip and skips the one below.
+		if hint := takeLiveHint(sp.twitchHints, job.ID); hint != nil {
+			sp.logger.Info("twitch channel is now live (monitor hint)", "channel", login)
+			sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
+			return hint, nil
+		}
 
 		// When the oracle reports offline, still probe occasionally (floor) so a
 		// wrongly-offline oracle can't strand a waiting stream. Safe because

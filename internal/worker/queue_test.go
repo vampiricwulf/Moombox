@@ -41,6 +41,23 @@ func TestNewJobQueue(t *testing.T) {
 			if q.dlNotify == nil {
 				t.Error("NewJobQueue: dlNotify channel should be initialized")
 			}
+			// The lifecycle half had no constructor guard at all: a nil
+			// lifeNotify never delivers, so a job parked in
+			// AcquireLifecycleSlot would never be woken by a release (Task 9
+			// review, Important 2 — mutant m12).
+			if q.lifeNotify == nil {
+				t.Error("NewJobQueue: lifeNotify channel should be initialized")
+			}
+			if q.holdingLifecycle == nil {
+				t.Error("NewJobQueue: holdingLifecycle map should be initialized")
+			}
+			if q.droppedLogged == nil {
+				t.Error("NewJobQueue: droppedLogged map should be initialized")
+			}
+			if q.lifecycleWarnAfter <= 0 {
+				t.Errorf("NewJobQueue: lifecycleWarnAfter = %v, want a positive threshold — a wait with no "+
+					"threshold never logs", q.lifecycleWarnAfter)
+			}
 		})
 	}
 }

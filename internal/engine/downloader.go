@@ -1019,6 +1019,14 @@ const StagedRestartSuffix = ".restart-"
 // can never drift apart.
 const resumeFileSuffix = ".resume.json"
 
+// StagedRestartSidecar returns the resume sidecar that travels with an aside.
+//
+// Exported for the same reason IsStagedRestartPath is: package worker deletes
+// an aside once it has been recovered into its own output file, and the twin
+// has to go with it — a sidecar left beside nothing is a stale offset map. The
+// suffix itself stays unexported so the pair can only ever be spelled here.
+func StagedRestartSidecar(aside string) string { return aside + resumeFileSuffix }
+
 // IsStagedRestartPath reports whether name is a recording set aside by the
 // no-truncate guard — <file>.restart-<unix ts> — and not its sidecar twin,
 // which shares that timestamped stem as <file>.restart-<unix ts>.resume.json.

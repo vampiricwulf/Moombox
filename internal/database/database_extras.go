@@ -210,3 +210,33 @@ func (db *Database) DeleteAllClientTokens() error {
 	_, err := db.db.ExecContext(db.getCtx(), `DELETE FROM client_tokens`)
 	return err
 }
+
+// GetAllTrims returns every trim record in the database, ordered by job. The
+// orphan scanner needs the complete set to decide which files on disk are
+// referenced, and asking per job made that an N+1 query on every sweep
+// (sweep-2 ENGINE-17).
+func (db *Database) GetAllTrims() ([]TrimRecord, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(), `SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size
+		FROM trims ORDER BY job_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var trims []TrimRecord
+	for rows.Next() {
+		var tr TrimRecord
+		if err := rows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
+			&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err != nil {
+			if db.logger != nil {
+				db.logger.Warn("GetAllTrims: scan error", "err", err)
+			}
+			continue
+		}
+		trims = append(trims, tr)
+	}
+	return trims, rows.Err()
+}

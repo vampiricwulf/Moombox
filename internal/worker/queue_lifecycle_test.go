@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -121,9 +122,17 @@ func TestAcquireLifecycleSlotGatesDownloads(t *testing.T) {
 	q.maxLifecycle = 2
 	ctx := context.Background()
 
+	// Bounded on purpose: under the mutant that restores the Dequeue gate the
+	// third dequeue blocks forever, and an unbounded setup turns that kill
+	// into a timeout panic dump instead of a named failure (Task 9 review,
+	// Minor 2).
+	setup, setupCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer setupCancel()
 	for i := range 3 {
 		q.Enqueue(jobIDf(i), database.StatusLive)
-		q.Dequeue(ctx)
+		if _, _, ok := q.Dequeue(setup); !ok {
+			t.Fatalf("setup dequeue %d = false — the queue gated the dequeue on a lifecycle slot", i)
+		}
 	}
 	if !q.AcquireLifecycleSlot(ctx, jobIDf(0)) || !q.AcquireLifecycleSlot(ctx, jobIDf(1)) {
 		t.Fatal("the first two AcquireLifecycleSlot calls must succeed")
@@ -225,6 +234,130 @@ func TestEnqueueDropLogsOncePerJob(t *testing.T) {
 				len(counter.warns), counter.warns)
 		}
 	})
+}
+
+// TestLifecycleWaitWarnsWhenItBlocks pins sweep-2 Task 11's extra item (c)
+// (Task 9 review, Important 1): at the cap a live capture waited with no log
+// line at all — a hundred slots held, a job parked indefinitely, and nothing
+// anywhere to say which job or how many were in front of it. One Warn per
+// wait, once the wait passes the threshold, naming the job and the held
+// count; and the wait still ends promptly on ctx, so Stop is not delayed
+// behind it.
+//
+// Mutants: dropping the Warn (the first select times out); re-arming the
+// threshold timer on every wakeup, so a wedged pool logs once per release
+// instead of once per wait (the second select fires); removing the ctx arm
+// from the acquire's select (the cancelled acquire never returns).
+func TestLifecycleWaitWarnsWhenItBlocks(t *testing.T) {
+	q := NewJobQueue(10)
+	q.maxLifecycle = 1
+	q.lifecycleWarnAfter = 20 * time.Millisecond
+	lg := newWarnChanLogger()
+	q.SetLogger(lg)
+
+	if !q.AcquireLifecycleSlot(context.Background(), "holder") {
+		t.Fatal("the first AcquireLifecycleSlot must succeed")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	parked := make(chan bool, 1)
+	go func() { parked <- q.AcquireLifecycleSlot(ctx, "parked-job") }()
+
+	select {
+	case line := <-lg.warns:
+		joined := fmt.Sprint(line...)
+		for _, want := range []string{"parked-job", "1"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("the blocked-acquire Warn %q does not name %q — the operator needs the job and the held count", joined, want)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no Warn after the wait threshold — a job parked behind the lifecycle cap is invisible")
+	}
+
+	// Once per wait, not once per wakeup: nudge the waiter awake with a
+	// spurious signal and confirm it does not log the same wait again.
+	select {
+	case q.lifeNotify <- struct{}{}:
+	default:
+	}
+	select {
+	case line := <-lg.warns:
+		t.Errorf("a second Warn for the same wait: %v — one line per wait, or a wedged pool is a log flood", line)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case ok := <-parked:
+		if ok {
+			t.Error("AcquireLifecycleSlot = true after its context was cancelled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("AcquireLifecycleSlot ignored its cancelled context — Stop would block behind the wait")
+	}
+	q.Complete("holder")
+}
+
+// TestAcquireLifecycleSlotCascadingWakeup mirrors
+// TestAcquireDownloadSlotCascadingWakeup for the lifecycle pool, which is a
+// line-for-line copy of that mechanism and shipped with neither of its guards
+// (sweep-2 Task 9 review, Important 2). lifeNotify has capacity 1, so two
+// releases in quick succession collapse into one signal; without the
+// acquirer's cascade forward one of two parked waiters would sleep beside a
+// free slot until the NEXT release.
+//
+// Mutants: deleting the lifeNotify send from releaseLifecycleSlotLocked (m11 —
+// neither waiter is ever woken); NewJobQueue leaving lifeNotify nil (m12 — a
+// nil channel never delivers, same symptom); removing the stillFree cascade
+// forward (the second waiter is stranded).
+func TestAcquireLifecycleSlotCascadingWakeup(t *testing.T) {
+	q := NewJobQueue(10)
+	q.maxLifecycle = 2
+	ctx := context.Background()
+
+	if !q.AcquireLifecycleSlot(ctx, "a") || !q.AcquireLifecycleSlot(ctx, "b") {
+		t.Fatal("initial acquires failed")
+	}
+
+	acquired := make(chan string, 2)
+	for _, id := range []string{"w1", "w2"} {
+		go func(id string) {
+			if q.AcquireLifecycleSlot(ctx, id) {
+				acquired <- id
+			}
+		}(id)
+	}
+	// Let both waiters park on lifeNotify before releasing.
+	time.Sleep(50 * time.Millisecond)
+
+	q.Complete("a")
+	q.Complete("b")
+
+	for i := range 2 {
+		select {
+		case <-acquired:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("waiter %d never acquired a free slot (lost wakeup)", i+1)
+		}
+	}
+}
+
+// warnChanLogger forwards Warn lines to a buffered channel, so a test can wait
+// for one the acquiring goroutine emits instead of racing it on a slice.
+type warnChanLogger struct{ warns chan []any }
+
+func newWarnChanLogger() *warnChanLogger { return &warnChanLogger{warns: make(chan []any, 8)} }
+
+func (l *warnChanLogger) Debug(string, ...any) {}
+func (l *warnChanLogger) Info(string, ...any)  {}
+func (l *warnChanLogger) Error(string, ...any) {}
+func (l *warnChanLogger) Warn(msg string, args ...any) {
+	select {
+	case l.warns <- append([]any{msg}, args...):
+	default:
+	}
 }
 
 // --- structural pin -------------------------------------------------------

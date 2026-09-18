@@ -207,6 +207,107 @@ func stagedAsideRecordings(stagingDir string) []string {
 	return out
 }
 
+// asideGroup is one restart's worth of set-aside recordings: the video and
+// audio halves the engine set aside together (a DASH capture runs one
+// SegmentDownloader per stream and both stamp the same second), or whichever
+// single file a single-stream capture left behind.
+type asideGroup struct {
+	stamp string   // the literal timestamp text, reused in the output name
+	video string   // "" when the restart set aside audio only
+	audio string   // "" for HLS/VOD captures and video-only DASH
+	files []string // every file in the group, in the order the scan found them
+}
+
+// groupStagedAsides folds a flat list of asides into one group per (staging
+// dir, timestamp), classifying each file by the stem the engine stamped —
+// the same names discoverStagingMedia recognises. Input order is preserved,
+// so groups come back oldest recording first.
+func groupStagedAsides(asides []string) []asideGroup {
+	var order []string
+	byKey := map[string]*asideGroup{}
+	for _, p := range asides {
+		base := filepath.Base(p)
+		i := strings.LastIndex(base, engine.StagedRestartSuffix)
+		if i < 0 {
+			continue // engine.IsStagedRestartPath already vouched for the name
+		}
+		stem, stamp := base[:i], base[i+len(engine.StagedRestartSuffix):]
+		key := filepath.Dir(p) + "\x00" + stamp
+		g := byKey[key]
+		if g == nil {
+			g = &asideGroup{stamp: stamp}
+			byKey[key] = g
+			order = append(order, key)
+		}
+		g.files = append(g.files, p)
+		if stem == "audio_stream" || stem == "audio.m4a" {
+			g.audio = p
+		} else {
+			g.video = p
+		}
+	}
+	out := make([]asideGroup, 0, len(order))
+	for _, k := range order {
+		out = append(out, *byKey[k])
+	}
+	return out
+}
+
+// asideOutputPath is where one group's recovered file lands: the archive's own
+// name with the aside's suffix on it, so the two sort together in the output
+// directory. Two groups can only collide when a root and a seg_N restart share
+// a second; the counter keeps both files rather than overwriting one.
+func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool) string {
+	base := filepath.Join(outputDir, filenameBase+engine.StagedRestartSuffix+stamp)
+	candidate := base + ".mp4"
+	for n := 2; n <= 100 && (used[normalizePath(candidate)] || fileExists(candidate)); n++ {
+		candidate = fmt.Sprintf("%s-%d.mp4", base, n)
+	}
+	used[normalizePath(candidate)] = true
+	return candidate
+}
+
+// muxStagedAsides muxes every recording the engine set aside into its own file
+// beside the job's archive, then deletes it and its resume twin.
+//
+// An aside is a headed recording the no-truncate guard could not resume
+// (engine.StagedRestartSuffix). The fresh capture that replaced it restarted
+// at sq=0, so the two OVERLAP: concatenating them into the archive would
+// replay the opening, and registering the recovered file as a part would put
+// that replay in the job's part list. It is therefore a SIBLING — no segment
+// row, surfaced by name in the Warn below, which is the only place an operator
+// learns it exists.
+//
+// Best-effort by design. A mux that fails leaves the aside exactly where it
+// was, where hasUnmuxedPartsForJob keeps the whole staging dir from being
+// swept and a later Mux action retries; it never fails the job, whose own
+// recording muxed fine.
+func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobContext, outputDir, filenameBase string) {
+	groups := groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir))
+	if len(groups) == 0 {
+		return
+	}
+	used := map[string]bool{}
+	for _, g := range groups {
+		out := asideOutputPath(outputDir, filenameBase, g.stamp, used)
+		if err := o.mux().MuxCopy(ctx, g.video, g.audio, out); err != nil {
+			o.logger.Error("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
+				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
+			continue
+		}
+		o.logger.Warn("a set-aside recording was muxed to its own file beside the archive; it overlaps the start of the main recording, so it is NOT one of the job's parts",
+			"output", out, "aside", strings.Join(g.files, " | "), "jobID", jobCtx.Job.ID)
+		for _, p := range g.files {
+			if err := os.Remove(p); err != nil {
+				o.logger.Warn("could not remove a recovered set-aside recording", "aside", p, "err", err, "jobID", jobCtx.Job.ID)
+			}
+			if err := os.Remove(engine.StagedRestartSidecar(p)); err != nil && !os.IsNotExist(err) {
+				o.logger.Warn("could not remove a recovered aside's resume sidecar", "sidecar", engine.StagedRestartSidecar(p), "err", err, "jobID", jobCtx.Job.ID)
+			}
+		}
+	}
+}
+
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
 	o.logger.Info("muxing", "jobID", jobCtx.Job.ID)
 
@@ -287,6 +388,15 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// thumbnail) use just the filename, not the full template path. outputDir
 	// already includes any subdirectory from the template.
 	filenameBase = filepath.Base(filenameBase)
+
+	// Recover anything the no-truncate guard set aside into its own sibling
+	// file. Before the main mux on purpose: the aside is footage this job
+	// captured, and a main mux that fails (ENGINE-9's short-output check, a
+	// missing FFmpeg) must not be what decides whether it is ever readable.
+	// The multi-segment shape reaches its own call in finalizeMultiSegmentJob,
+	// which this function has already returned into by here — exactly one call
+	// per finalize.
+	o.muxStagedAsides(ctx, jobCtx, outputDir, filenameBase)
 
 	videoPath := result.VideoPath
 	audioPath := result.AudioPath
@@ -450,6 +560,11 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	}
 	filenameBase = filepath.Base(filenameBase)
 	relBase := jobCtx.Filename
+
+	// The multi-segment half of the aside recovery (see muxStagedAsides).
+	// muxAndFinalize returns into this function before its own call, so a job
+	// muxes its asides exactly once whichever shape it finalizes in.
+	o.muxStagedAsides(ctx, jobCtx, outputDir, filenameBase)
 
 	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
 	// the stream never came back) shouldn't keep a " - part1" suffix — single

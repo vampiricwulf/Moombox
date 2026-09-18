@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 	"time"
 
@@ -149,4 +152,78 @@ func TestProcessorStashAndTake(t *testing.T) {
 	if got := sp.twitchHints.take("tw_abc"); got != nil {
 		t.Errorf("second take after stash: want nil, got %+v", got)
 	}
+}
+
+// TestWaitForTwitchLiveConsumesHint pins ENGINE-18 (report #53): a manually
+// added offline channel polled GQL every 15-20 s while the monitor
+// batch-polled the same channel and stashed a hint for the very same job —
+// two GQL streams for one answer.
+//
+// Mutant: dropping the take() from the wait loop — the stash is never
+// consumed and the poll still pays a GetStreamInfo round trip.
+func TestWaitForTwitchLiveConsumesHint(t *testing.T) {
+	c := newTwitchHintCache()
+	c.stash("job1", &twitch.TwitchStreamInfo{IsLive: true, StreamID: "s1"})
+
+	got := takeLiveHint(c, "job1")
+	if got == nil || got.StreamID != "s1" {
+		t.Fatalf("takeLiveHint = %v, want the stashed live info", got)
+	}
+	if again := takeLiveHint(c, "job1"); again != nil {
+		t.Error("takeLiveHint returned the same hint twice — take-once semantics are broken")
+	}
+	c.stash("job2", &twitch.TwitchStreamInfo{IsLive: false})
+	if got := takeLiveHint(c, "job2"); got != nil {
+		t.Error("takeLiveHint returned a non-live hint — the wait must keep polling")
+	}
+
+	// The wait loop itself needs a live Twitch API and a 15-20 s sleep to
+	// drive, so the CALL SITE is read from the syntax tree — the package's
+	// technique for undrivable sites (queue_lifecycle_test.go,
+	// stream_processor_early_chat_test.go). This is the arm the brief's mutant
+	// (dropping the take() from the wait loop) fires: the helper still passes
+	// every assertion above while the poll goes on paying its own round trip.
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, "stream_processor_twitch.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse stream_processor_twitch.go: %v", err)
+	}
+	var wait *ast.FuncDecl
+	for _, decl := range parsed.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "waitForTwitchLive" {
+			wait = fn
+		}
+	}
+	if wait == nil {
+		t.Fatal("no waitForTwitchLive declaration in stream_processor_twitch.go")
+	}
+	takes := funcCallPositions(wait, "takeLiveHint")
+	if len(takes) != 1 {
+		t.Fatalf("waitForTwitchLive calls takeLiveHint %d time(s), want exactly 1 — the monitor's "+
+			"stashed answer must be consumed by the wait, not left for a second GQL stream", len(takes))
+	}
+	probes := methodCallPositions(wait, "GetStreamInfo")
+	if len(probes) != 1 || takes[0] > probes[0] {
+		t.Errorf("takeLiveHint is at line %d and GetStreamInfo at %v — the hint must be consumed "+
+			"BEFORE the poll, or it saves nothing",
+			fset.Position(takes[0]).Line, probes)
+	}
+}
+
+// funcCallPositions returns the position of every call to the plain (non-method)
+// function named name inside n. methodCallPositions matches a selector, and
+// takeLiveHint is a package-level function.
+func funcCallPositions(n ast.Node, name string) []token.Pos {
+	var out []token.Pos
+	ast.Inspect(n, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == name {
+			out = append(out, call.Pos())
+		}
+		return true
+	})
+	return out
 }

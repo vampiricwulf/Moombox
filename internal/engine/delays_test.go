@@ -56,6 +56,39 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 	}
 }
 
+// TestSetFastDelaysForTests pins O-Q's exported seam: internal/worker's
+// interruption test pays the production retry ladder because the delays seam
+// is unexported and unreachable from there (TOOL-6, 10.1 s of the suite).
+//
+// Mutant: making the setter a no-op — the scaled values equal the production
+// ones and the boundary test regains its ten seconds.
+func TestSetFastDelaysForTests(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{OutputFile: t.TempDir() + "/o.ts"})
+	d.SetFastDelaysForTests(fastScale)
+	if d.delays != fastDelays() {
+		t.Fatalf("delays = %+v, want fastDelays() = %+v", d.delays, fastDelays())
+	}
+	if d.delays == defaultDelays() {
+		t.Fatal("SetFastDelaysForTests left the production values in place")
+	}
+	// Every member moves, including the one that is a deadline rather than a
+	// sleep: a setter that forgets a field leaves the test loop running one
+	// production wait, which is exactly the cost O-Q exists to remove.
+	v := reflect.ValueOf(d.delays)
+	p := reflect.ValueOf(defaultDelays())
+	for i := 0; i < v.NumField(); i++ {
+		if v.Field(i).Int() != p.Field(i).Int()/fastScale {
+			t.Errorf("delays.%s = %v, want the production value / %d",
+				v.Type().Field(i).Name, time.Duration(v.Field(i).Int()), fastScale)
+		}
+	}
+	// A nonsense scale is ignored rather than dividing by zero.
+	d.SetFastDelaysForTests(0)
+	if d.delays != fastDelays() {
+		t.Error("SetFastDelaysForTests(0) changed the delays — a scale of 0 or less must be ignored")
+	}
+}
+
 // fastScale is how much faster the test loops run than production. One
 // factor for every wait, so escalation counts (ten singleGone retries before
 // the stall arm, say) and orderings are exactly production's.

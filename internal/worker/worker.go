@@ -946,12 +946,26 @@ func hasUnmuxedPartsForJob(db *database.Database, jobID, stagingDir string) bool
 	// captured media that no mux has ever consumed — an unmuxed part in every
 	// sense this predicate is consulted for. It has no seg_N dir and no
 	// segment row of its own, so without this term the scan below reports
-	// "nothing unmuxed here" and both staging cleanups — plus the orphan
-	// scanner, which shares this function through jobNeedsStaging — delete it
-	// along with the dir.
+	// "nothing unmuxed here" and the staging cleanup deletes it along with
+	// the dir.
+	//
+	// The orphan scanner deliberately does NOT go through this door: it
+	// consults hasUnmuxedSegmentParts and applies its own, age-limited aside
+	// shield (internal/worker/orphans.go, jobNeedsStaging), because a
+	// week-old aside is one FFmpeg could not read rather than one waiting to
+	// be recovered. Here — moments after a mux, with the operator's next
+	// action still ahead — preservation is unconditional.
 	if len(stagedAsideRecordings(stagingDir)) > 0 {
 		return true
 	}
+	return hasUnmuxedSegmentParts(db, jobID, stagingDir)
+}
+
+// hasUnmuxedSegmentParts is hasUnmuxedPartsForJob without the aside term: a
+// quality/gap-split part whose staging dir still holds recognized media that
+// has no segment row. Split out so the orphan scanner can apply its own rule
+// to asides without losing this one (sweep-2 Task 11, extra item b).
+func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) bool {
 	segDirs := stagedSegDirs(stagingDir)
 	if len(segDirs) == 0 {
 		return false // no part splits — single-file cleanup is safe
