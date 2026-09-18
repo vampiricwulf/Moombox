@@ -33,7 +33,15 @@ type TwitchHLSVariant struct {
 	Height     int     `json:"height,omitempty"`
 	FPS        float64 `json:"fps,omitempty"`
 	VideoGroup string  `json:"videoGroup,omitempty"`
-	IsSource   bool    `json:"isSource"`
+	// Codecs is the raw CODECS attribute (RFC 6381 ids, comma-separated) and
+	// VideoCodec the normalized family derived from it: "av01", "hevc",
+	// "avc1", or "" when the playlist carries no CODECS or the variant has no
+	// video track. A pre-enhanced playlist lists only H.264 renditions, so
+	// every source in one reports "avc1"; the enhanced-broadcast opt-in (see
+	// BuildUsherLiveURL) is what can add an "hevc" or "av01" source beside it.
+	Codecs     string `json:"codecs,omitempty"`
+	VideoCodec string `json:"videoCodec,omitempty"`
+	IsSource   bool   `json:"isSource"`
 }
 
 // TwitchVodInfo contains VOD metadata from Twitch GQL.
@@ -161,6 +169,12 @@ type VodCommentEdge struct {
 // until the first RollFile). States written before part-splitting existed
 // lack TotalCount — readers fall back to MessageCount, which was cumulative
 // by definition when there was only ever one file.
+//
+// Timestamp is epoch MILLISECONDS on BOTH paths. It exists only so a human
+// reading a sidecar can see when it was written — nothing loads it — and until
+// sweep 2 the IRC writer used milliseconds while the VOD writer used seconds,
+// so two files in the same staging tree disagreed about the unit by a factor
+// of a thousand (TWITCH-8).
 type ChatResumeState struct {
 	MessageCount      int      `json:"messageCount"`
 	TotalCount        int      `json:"totalCount,omitempty"`

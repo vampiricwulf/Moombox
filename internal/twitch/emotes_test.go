@@ -282,3 +282,72 @@ func TestEmoteResolverRefetchesAfterTheTTL(t *testing.T) {
 		t.Errorf("a failed refetch returned %+v, want the stale set served rather than dropped", got)
 	}
 }
+
+// TestEmoteResolverTreatsA404AsAnAnswerWithNoEmotes is TWITCH-4 (report row
+// #28). A channel registered with none of the three providers answers 404 on
+// all three — measured with curl on 2026-09-15: id 141981764 (twitchdev, a
+// real channel) answers BTTV 404 / FFZ 404 / 7TV 404. That is the honest state
+// of many channels, not a failure, so it must be CACHED: before this fix every
+// part roll and stream end of every job on such a channel re-fired three
+// requests and wrote four Warn lines, forever.
+//
+// Mutants each assertion kills:
+//   - Resolve returning nil        -> fetchJSON keeps returning a plain error for 404.
+//   - the request count going to 6 -> a 404 still reads as "did not answer", so nothing is cached.
+//   - a "fetch failed" Warn        -> the 404 arm was added after the Warn instead of before it.
+func TestEmoteResolverTreatsA404AsAnAnswerWithNoEmotes(t *testing.T) {
+	log := &renderingLogger{}
+	er := NewEmoteResolver(log)
+	calls := installEmoteFetchStub(t, http.StatusNotFound, `not found`)
+
+	got := er.Resolve(context.Background(), "141981764", "twitchdev")
+	if got == nil {
+		t.Fatal("Resolve returned nil although all three providers ANSWERED with 404 — " +
+			"a channel registered with none of them is a real, cacheable answer")
+	}
+	if len(got.BTTV) != 0 || len(got.FFZ) != 0 || len(got.SevenTV) != 0 {
+		t.Errorf("Resolve = %+v, want all three sets empty", got)
+	}
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("the first Resolve made %d requests, want 3", n)
+	}
+
+	if again := er.Resolve(context.Background(), "141981764", "twitchdev"); again == nil {
+		t.Error("the second Resolve returned nil — the zero-emote answer must have been cached")
+	}
+	if n := calls.Load(); n != 3 {
+		t.Errorf("the second Resolve brought the total to %d requests, want 3 — an all-404 "+
+			"channel must be cached exactly once", n)
+	}
+	if n := log.countLinesContaining("every third-party emote provider failed"); n != 0 {
+		t.Errorf("%d 'every provider failed' Warn line(s) for an all-404 channel, want 0", n)
+	}
+	if n := log.countLinesContaining("fetch failed"); n != 0 {
+		t.Errorf("%d '<provider> fetch failed' Warn line(s) for a 404, want 0 — a 404 is an "+
+			"answer, and the Warn flood it caused is half of what this row is about", n)
+	}
+}
+
+// TestEmoteResolverKeepsA5xxANonAnswer is the other half of TWITCH-4: ONLY 404
+// became an answer. A provider outage must still leave the set uncached so the
+// next Resolve retries (the 2026-09-15 curl run saw 7TV answer 500 for a
+// nonexistent id, so the two shapes really do arrive together).
+//
+// Mutant: widening the new arm to every non-200 — Resolve then returns a
+// non-nil empty set and the second call makes no requests at all.
+func TestEmoteResolverKeepsA5xxANonAnswer(t *testing.T) {
+	er := NewEmoteResolver(&testLogger{})
+	calls := installEmoteFetchStub(t, http.StatusInternalServerError, `upstream down`)
+
+	if got := er.Resolve(context.Background(), "chan-5xx", "chan-5xx"); got != nil {
+		t.Fatalf("Resolve = %+v, want nil — three 5xx answers are three failures", got)
+	}
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("the first Resolve made %d requests, want 3", n)
+	}
+	er.Resolve(context.Background(), "chan-5xx", "chan-5xx")
+	if n := calls.Load(); n != 6 {
+		t.Errorf("the second Resolve brought the total to %d requests, want 6 — a total "+
+			"failure must not be cached", n)
+	}
+}

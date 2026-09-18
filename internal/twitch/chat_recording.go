@@ -63,8 +63,9 @@ func (cd *ChatDownloader) flushLocked() {
 	// Prune dedup set to prevent unbounded memory growth
 	cd.pruneDedup()
 
-	// Save resume state after each flush (matches TS periodicSave -> saveResumeState)
-	cd.saveResumeState()
+	// Save resume state after a flush, no more often than
+	// delays.resumeSaveFloor (owner ruling; see ircResumeSaveFloor).
+	cd.saveResumeStateThrottled()
 }
 
 // writeBatch persists one batch of messages to path: full atomic write for a
@@ -188,6 +189,9 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 	cd.outputPath = newOutputPath
 	cd.fileCount = 0
 	cd.flushedToDisk = false
+	// The new part has no sidecar yet, so the floor must not carry across
+	// the boundary: its first flush has to write one.
+	cd.lastResumeSave = time.Time{}
 	if newBaseMs > 0 {
 		cd.recordingStartMs.Store(newBaseMs)
 	}
