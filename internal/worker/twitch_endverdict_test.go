@@ -3,6 +3,9 @@ package worker
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -517,42 +520,203 @@ func TestAdvanceToNewPartFailureLandsInError(t *testing.T) {
 	}
 }
 
-// TestAdvanceToNewPartCallSitesAllLatch pins the three part-advance breaks a
+// identCall returns n as a call to the plain (non-method) function fnName, or
+// nil. advanceToNewPart and latchPartFailure are both closures called by bare
+// identifier, so *ast.Ident is the only shape either takes.
+func identCall(n ast.Node, fnName string) *ast.CallExpr {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	if !ok || id.Name != fnName {
+		return nil
+	}
+	return call
+}
+
+// blockLatchesThenBreaks reports whether body calls latchPartFailure at
+// statement level and whether its LAST statement is a break (labelled or not).
+func blockLatchesThenBreaks(body *ast.BlockStmt) (latches, breaks bool) {
+	if body == nil || len(body.List) == 0 {
+		return false, false
+	}
+	for _, stmt := range body.List {
+		exprStmt, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			continue
+		}
+		if identCall(exprStmt.X, "latchPartFailure") != nil {
+			latches = true
+		}
+	}
+	br, ok := body.List[len(body.List)-1].(*ast.BranchStmt)
+	return latches, ok && br.Tok == token.BREAK
+}
+
+// TestAdvanceToNewPartCallSitesAllLatch pins the four part-advance breaks a
 // harness cannot reach (the gap/init "continue the tail" sub-path, the
-// init-segment-change split and the gap split) plus the post-outage one, by
-// source inspection — the same technique
-// TestYouTubeVodChatWaitRoutesThroughResolveVodChatOutcome uses for a site
-// that cannot be driven with a fake. Every call site must take the
-// `if err := advanceToNewPart(...); err != nil { latchPartFailure(err); ... }`
-// shape, so a future break added beside them cannot silently finalize a job
-// whose staging is unusable.
+// init-segment-change split, the gap split and the post-outage one) alongside
+// the quality-split one TestAdvanceToNewPartFailureLandsInError drives.
 //
-// Mutant: reverting any one call site to a bare `break` on failure — the
-// three counts stop agreeing.
+// It reads the SYNTAX TREE, not the text: the round-2 version counted strings
+// and could be made to false-pass by dropping a latch and adding a comment
+// that quoted `latchPartFailure(err)` — a comment is not a call, so the tree
+// cannot be fooled that way — while a behaviour-identical reformat made it
+// false-fail. go/ast for a site that cannot be driven with a fake is the
+// package's existing technique (stream_processor_early_chat_test.go).
+//
+// The shape every site must take:
+//
+//	if err := advanceToNewPart(…); err != nil {
+//		latchPartFailure(err)
+//		break            // or: break sessionLoop
+//	}
+//
+// A call anywhere else, a body that does not latch, or a body that falls
+// through instead of breaking all mean a job whose staging could not be
+// extended can still be advertised Finished.
+//
+// Mutants:
+//   - dropping latchPartFailure at any one site: the "does not latch" arm
+//     fires, naming that site's line.
+//   - adding a comment that quotes latchPartFailure(err) beside it: the pin
+//     still fails, which is exactly the false-pass the string version had.
+//   - reformatting a site (a multi-line call, a renamed error variable): the
+//     pin still passes — the tree is the same.
+//   - adding or removing a call site: the count assertion fires, so a new
+//     exit cannot be added without a decision about its latch.
 func TestAdvanceToNewPartCallSitesAllLatch(t *testing.T) {
-	src, err := os.ReadFile("orchestrator_twitch.go")
+	const file = "orchestrator_twitch.go"
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
 	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+		t.Fatalf("parse %s: %v", file, err)
 	}
-	text := string(src)
 
-	// The declaration reads "advanceToNewPart := func(", so this counts call
-	// sites only.
-	calls := strings.Count(text, "advanceToNewPart(")
-	guarded := strings.Count(text, "if err := advanceToNewPart(")
-	latches := strings.Count(text, "latchPartFailure(err)")
+	// Pass 1: every if-statement whose init calls advanceToNewPart.
+	guarded := map[token.Pos]bool{}
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || ifStmt.Init == nil {
+			return true
+		}
+		assign, ok := ifStmt.Init.(*ast.AssignStmt)
+		if !ok || len(assign.Rhs) != 1 {
+			return true
+		}
+		call := identCall(assign.Rhs[0], "advanceToNewPart")
+		if call == nil {
+			return true
+		}
+		guarded[call.Pos()] = true
+		where := fset.Position(call.Pos())
+		latches, breaks := blockLatchesThenBreaks(ifStmt.Body)
+		if !latches {
+			t.Errorf("%s: the advanceToNewPart failure branch does not call latchPartFailure — a "+
+				"job whose staging could not be extended finalizes Finished instead of Error", where)
+		}
+		if !breaks {
+			t.Errorf("%s: the advanceToNewPart failure branch does not end in a break — the loop "+
+				"would carry on against a part dir that does not exist", where)
+		}
+		return true
+	})
 
-	if calls < 5 {
-		t.Fatalf("advanceToNewPart call sites = %d, want at least the 5 known ones — this test is "+
-			"reading the wrong thing", calls)
+	// Pass 2: every call to advanceToNewPart anywhere, so a site in some
+	// other position is a finding rather than something the pin never saw.
+	var sites []token.Position
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		call := identCall(n, "advanceToNewPart")
+		if call == nil {
+			return true
+		}
+		where := fset.Position(call.Pos())
+		sites = append(sites, where)
+		if !guarded[call.Pos()] {
+			t.Errorf("%s: this advanceToNewPart call is not the init of an `if err := …; err != nil` "+
+				"statement, so its failure cannot be latched", where)
+		}
+		return true
+	})
+
+	if len(sites) != 5 {
+		t.Errorf("found %d advanceToNewPart call sites (%v), want exactly 5 — a new one needs its "+
+			"own latch decision, and a vanished one means this pin is reading the wrong thing",
+			len(sites), sites)
 	}
-	if guarded != calls {
-		t.Errorf("%d of %d advanceToNewPart call sites take the `if err := …; err != nil` shape — "+
-			"one that does not cannot report the MkdirAll cause", guarded, calls)
+}
+
+// fieldCaptureLogger records every log call's message and key/value args. The
+// orchestrator logs from background mux goroutines too, so it locks.
+type fieldCaptureLogger struct {
+	mu    sync.Mutex
+	lines [][]any
+}
+
+func (l *fieldCaptureLogger) log(msg string, args []any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, append([]any{msg}, args...))
+}
+
+func (l *fieldCaptureLogger) Debug(msg string, args ...any) { l.log(msg, args) }
+func (l *fieldCaptureLogger) Info(msg string, args ...any)  { l.log(msg, args) }
+func (l *fieldCaptureLogger) Warn(msg string, args ...any)  { l.log(msg, args) }
+func (l *fieldCaptureLogger) Error(msg string, args ...any) { l.log(msg, args) }
+
+// field returns the value logged under key on the first line whose message is
+// msg, and whether that line was logged at all.
+func (l *fieldCaptureLogger) field(msg, key string) (any, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.lines {
+		if len(line) == 0 || line[0] != msg {
+			continue
+		}
+		for i := 1; i+1 < len(line); i += 2 {
+			if line[i] == key {
+				return line[i+1], true
+			}
+		}
+		return nil, true
 	}
-	if latches != calls {
-		t.Errorf("latchPartFailure(err) appears %d times for %d advanceToNewPart call sites — a "+
-			"site that breaks without latching finalizes the job Finished on unusable staging",
-			latches, calls)
+	return nil, false
+}
+
+// TestVariantRefreshFailureLogsTheInnerLoopError is sweep-2 residual R7: the
+// refresh-failure line logged only fetchErr, so an operator reading a job that
+// stopped there saw the master-playlist failure and nothing about what ended
+// the inner loop — and nothing else on that path logs dlErr either (the engine
+// returns ErrQualityLost without logging it).
+//
+// Mutant: dropping the "downloadErr" field from that line — the value lookup
+// reports the field missing while the line itself is still present, which is
+// what separates this from a wording change.
+func TestVariantRefreshFailureLogsTheInnerLoopError(t *testing.T) {
+	h := newEndVerdictHarness(t, "tw_refresh_log")
+	log := &fieldCaptureLogger{}
+	h.o.logger = log
+	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
+		h.checks.Add(1)
+		return true, nil
+	}
+	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+		return nil, errUsher
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_ = h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
+
+	got, logged := log.field("failed to refresh Twitch variants", "downloadErr")
+	if !logged {
+		t.Fatal("the refresh failure was never logged — this test is watching the wrong line")
+	}
+	inner, ok := got.(error)
+	if !ok || !errors.Is(inner, engine.ErrQualityLost) {
+		t.Errorf("downloadErr = %v, want the error that ended the inner loop (%v) — the operator "+
+			"needs both halves, and neither is logged anywhere else on this path",
+			got, engine.ErrQualityLost)
 	}
 }

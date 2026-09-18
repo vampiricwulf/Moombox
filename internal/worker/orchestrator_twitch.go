@@ -636,7 +636,15 @@ sessionLoop:
 					// finished job for that stream ID, never re-archived the
 					// rest. Re-verify and only fall through when the end is
 					// confirmed.
-					o.logger.Error("failed to refresh Twitch variants", "err", fetchErr, "jobID", jobCtx.Job.ID)
+					//
+					// downloadErr is what ended the inner loop and brought us
+					// into this branch — usually ErrQualityLost, but nil when
+					// the quality monitor (not an error) triggered the
+					// refresh. Logged beside fetchErr because the pair is the
+					// whole story of why this job is about to stop, and
+					// neither half is logged anywhere else on this path.
+					o.logger.Error("failed to refresh Twitch variants",
+						"err", fetchErr, "downloadErr", dlErr, "jobID", jobCtx.Job.ID)
 					if !latchIfUnconfirmed(ctx, fmt.Errorf("refresh Twitch variants: %w", fetchErr)) {
 						o.logger.Info("Twitch broadcast confirmed over after the failed variant refresh; finalizing captured parts",
 							"jobID", jobCtx.Job.ID)
