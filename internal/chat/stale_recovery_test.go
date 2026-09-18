@@ -46,8 +46,8 @@ func TestStaleRecoveryDelayLadder(t *testing.T) {
 // the loop recovers again, immediately, forever.
 //
 // Mutants this kills:
-//   - the isReplay return still discarded  → isReplay() stays false
-//   - the flag flipped unconditionally     → the second call flips it back
+//   - the isReplay return still discarded          → isReplay() stays false
+//   - a one-way latch (if isReplay { Store(true) }) → the second call never flips back
 func TestAdoptFreshContinuationHonoursTheReplayFlip(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v", IsReplay: false, IsLiveOrUpcoming: true})
 	if cd.isReplay() {
