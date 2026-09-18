@@ -40,6 +40,19 @@ var ErrSegmentRetriesExhausted = errors.New("segment retries exhausted")
 // (YouTube-style behavior, where the file knowingly contains a jump).
 var ErrGapDetected = errors.New("unrecoverable gap in live stream")
 
+// ErrStagedMediaPresent signals that Start found non-empty staged media at
+// OutputFile that it could neither resume from (no usable sidecar, no DB
+// position) nor was told to discard. Destroying it was the previous
+// behaviour: an implicit `O_TRUNC` over a complete multi-hour recording
+// (sweep-2 ENGINE-1/ENGINE-5). The rule is now the one the StopOnGap path
+// always had — never truncate non-empty staged media unless the CALLER
+// explicitly asked to discard it — with the decision handed back to the
+// orchestrator, which can mux what is staged instead.
+//
+// StopOnGap callers get ErrGapDetected instead: they have a richer recovery
+// (close this file as a finished part, continue in a fresh one).
+var ErrStagedMediaPresent = errors.New("staged media present with no usable resume state")
+
 // ErrInitSegmentChanged signals that the HLS playlist's #EXT-X-MAP init
 // segment changed CONTENT mid-part (e.g. a Twitch transcode restart on the
 // fMP4/CMAF delivery path). Appending fragments that reference a different
@@ -174,6 +187,19 @@ type DownloaderOptions struct {
 	// every output file stays internally gapless. Leave false for platforms
 	// with seekable/backfillable streams (YouTube) and for VODs.
 	StopOnGap bool
+	// DiscardStaged tells Start that any bytes already at OutputFile are
+	// disposable, so the no-truncate guard (ErrStagedMediaPresent) stands
+	// down and the file is opened O_TRUNC. This is the ONLY way a caller
+	// destroys staged media: every implicit truncate is now a guard trip.
+	//
+	// The one production setter is the manifest-free DASH strategy's
+	// post-live restart: those segments carry their ftyp+moov init inline at
+	// sq=0 only, so a finished stream genuinely must begin again at 0 and
+	// the partial file cannot be appended to. Deliberate discards that
+	// REMOVE the media before constructing the downloader (the quality-split
+	// short-segment rule) never need this — the guard only looks at bytes
+	// that are still there.
+	DiscardStaged bool
 	// MaxTimeout bounds how long the DASH loop keeps retrying/verifying while
 	// waiting for the next segment before it force-finalizes the recording —
 	// even if YouTube still reports the stream live (its status can lag or
@@ -755,20 +781,29 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		}
 	}
 
-	// StopOnGap no-truncate guard: staged data with no usable resume state
-	// (corrupt/stale/identity-rejected sidecar — e.g. power loss corrupted
-	// the write, or the state aged past maxResumeStateAge during a long
-	// outage on a continuing broadcast). Truncating would destroy a
-	// recording that finalize-time recovery can still mux as a part — hand
-	// the decision to the caller instead: the gap-split path closes this
-	// file as a finished part and continues in a fresh one. Deliberate
-	// discards (the quality-split short-segment rule) remove the staged
-	// media before constructing the downloader, so they don't trip this.
-	if !resuming && d.opts.StopOnGap {
+	// Shared no-truncate guard (sweep-2 ENGINE-1/5/6, verifier merge M2).
+	// Staged data with no usable resume state — a corrupt/stale/identity-
+	// rejected sidecar, a restart that re-probed the stream as post-live and
+	// re-seeded seq 0, a sidecar the natural end already cleared — must never
+	// be truncated. Truncating destroys a recording that finalize-time
+	// recovery can still mux; the decision belongs to the caller.
+	//
+	// StopOnGap callers have the richer answer (close this file as a finished
+	// part and continue in a fresh one), so they keep ErrGapDetected.
+	// IsDirectURL is out of scope here: a whole-file VOD download is not
+	// segmented staged media, its partial is bounded by the 50 MB sidecar
+	// cadence, and the truncation it actually suffered (the streaming
+	// fallback) is removed at its own call site instead.
+	if !resuming && !d.opts.DiscardStaged && !d.opts.IsDirectURL {
 		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
-			d.logger.Warn("[Downloader] Staged data present but resume state unusable — splitting instead of truncating",
+			if d.opts.StopOnGap {
+				d.logger.Warn("[Downloader] Staged data present but resume state unusable — splitting instead of truncating",
+					"file", d.opts.OutputFile, "size", info.Size())
+				return ErrGapDetected
+			}
+			d.logger.Error("[Downloader] Staged data present but resume state unusable — refusing to truncate",
 				"file", d.opts.OutputFile, "size", info.Size())
-			return ErrGapDetected
+			return fmt.Errorf("%w: %s holds %d bytes", ErrStagedMediaPresent, d.opts.OutputFile, info.Size())
 		}
 	}
 
@@ -782,7 +817,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 				d.logger.Info("[Downloader] Truncating file for resume",
 					"from", info.Size(), "to", state.BytesWritten)
 			}
-			if truncErr := os.Truncate(d.opts.OutputFile, state.BytesWritten); truncErr != nil {
+			if truncErr := truncateForResume(d.opts.OutputFile, state.BytesWritten); truncErr != nil {
 				if d.opts.StopOnGap {
 					// Same contract as the no-truncate guard above: a failed
 					// truncate must not fall back to O_TRUNC and destroy the
@@ -793,20 +828,15 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 						"file", d.opts.OutputFile, "err", truncErr)
 					return ErrGapDetected
 				}
-				d.logger.Warn("[Downloader] Failed to truncate for resume, starting fresh", "err", truncErr)
-				resuming = false
-				flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-				state = nil
-				// The restore above already installed the sidecar's byte count
-				// and fMP4 init state; the file is about to be O_TRUNC'd
-				// empty, so none of that is true anymore. Stale init fields
-				// are the dangerous half: hlsInitWritten=true on an empty
-				// file makes the per-segment fast path skip ever writing an
-				// init — a headerless, unmuxable file reported as success.
-				d.bytesWritten.Store(0)
-				d.hlsInitWritten = false
-				d.hlsInitURI = ""
-				d.hlsInitHash = ""
+				// ENGINE-5: the old branch here logged a Warn, cleared the
+				// resume state and opened the file O_TRUNC — losing hours of
+				// footage to a transient sharing violation. The retry ladder
+				// above has already ridden out that window; anything left is
+				// a real filesystem failure, and returning it keeps staging
+				// and the sidecar intact for a later Resume.
+				d.logger.Error("[Downloader] Truncate-for-resume failed after retries",
+					"file", d.opts.OutputFile, "err", truncErr)
+				return fmt.Errorf("truncate for resume: %w", truncErr)
 			}
 		}
 	} else {
@@ -862,6 +892,33 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	}
 	return d.runDashLoop(ctx)
 }
+
+// truncateForResume shrinks a staged recording to its fsync'd resume offset,
+// retrying through the Windows AV/indexer window that briefly holds a freshly
+// written file open. Same ladder as utils.ReplaceFile's rename retry (8
+// attempts, 10 ms doubling to 400 ms, just over a second in total); it is
+// spelled out here rather than reused because that helper renames and this
+// one truncates.
+func truncateForResume(path string, size int64) error {
+	delay := 10 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		err := truncateFile(path, size)
+		if err == nil || attempt >= 8 {
+			return err
+		}
+		truncateRetrySleep(delay)
+		if delay < 400*time.Millisecond {
+			delay *= 2
+		}
+	}
+}
+
+// Seams for the tests: the truncate itself and the pause. Production never
+// reassigns them (mirrors utils.ReplaceFile's renameFile/replaceFileSleep).
+var (
+	truncateFile       = os.Truncate
+	truncateRetrySleep = time.Sleep
+)
 
 // Cancel cancels the download.
 func (d *SegmentDownloader) Cancel() {

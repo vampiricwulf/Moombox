@@ -54,7 +54,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	if totalSize <= 0 {
 		// Server doesn't support Range requests (or the probe transiently
 		// failed) -- fall back to a streaming download from byte 0.
-		if err := d.resetForStreamingFallback(); err != nil {
+		if err := d.discardStagedMedia("Range probe returned no size"); err != nil {
 			return err
 		}
 		return d.runDirectDownloadFallback(ctx)
@@ -103,7 +103,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		if statusCode == http.StatusOK {
 			d.logger.Warn("[Downloader] direct chunk got 200 (Range ignored) mid-download; restarting via streaming",
 				"offset", offset)
-			if rerr := d.resetForStreamingFallback(); rerr != nil {
+			if rerr := d.discardStagedMedia("server ignored the Range mid-download"); rerr != nil {
 				return rerr
 			}
 			return d.runDirectDownloadFallback(ctx)
@@ -156,23 +156,27 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	return nil
 }
 
-// resetForStreamingFallback prepares the output for a from-byte-0 streaming
-// download. The streaming fallback can't resume from an offset, so if we
-// entered on a resume (file opened O_APPEND, truncated to bytesWritten>0) or
-// mid-chunked-download, it must start clean or it would append a second copy
-// after the existing bytes. Reopen O_TRUNC rather than d.outputFile.Truncate:
-// Windows refuses ftruncate on an O_APPEND handle ("Access is denied"), and
-// reopening also drops the append flag so writes land from byte 0. Start's
-// deferred Close reads d.outputFile at exit, so reassigning it is safe. No-op
-// when nothing has been written yet.
-func (d *SegmentDownloader) resetForStreamingFallback() error {
+// discardStagedMedia is the ONLY place staged media is destroyed on purpose.
+// It reopens OutputFile O_TRUNC — not d.outputFile.Truncate, because Windows
+// refuses ftruncate on an O_APPEND handle ("Access is denied") and reopening
+// also drops the append flag so writes land from byte 0 — zeroes the byte
+// counter and clears the resume sidecar. Start's deferred Close reads
+// d.outputFile at exit, so reassigning it is safe. No-op when nothing has
+// been written yet.
+//
+// reason is logged: every discard must be attributable, because the guard in
+// Start (ErrStagedMediaPresent) exists precisely so that nothing else can do
+// this silently.
+func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 	if d.bytesWritten.Load() == 0 {
 		return nil
 	}
+	d.logger.Warn("[Downloader] Discarding staged media", "file", d.opts.OutputFile,
+		"bytes", d.bytesWritten.Load(), "reason", reason)
 	d.outputFile.Close()
 	f, err := os.OpenFile(d.opts.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("reset for streaming fallback: %w", err)
+		return fmt.Errorf("discard staged media: %w", err)
 	}
 	d.outputFile = f
 	d.bytesWritten.Store(0)
