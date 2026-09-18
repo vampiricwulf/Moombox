@@ -5,6 +5,8 @@ import (
 	"os"
 	"regexp"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // streamIdentityPathRe extracts (videoID, itag) from a path-style YouTube
@@ -187,7 +189,12 @@ func (d *SegmentDownloader) saveResume() {
 		os.Remove(tmpFile)
 		return
 	}
-	if err := os.Rename(tmpFile, d.opts.ResumeFile); err != nil {
+	// utils.ReplaceFile, not os.Rename: on Windows a scanner or indexer holds
+	// the sidecar it just saw written and refuses the replace for a moment
+	// (sweep-2 TOOL-2). Losing a save here loses the resume position the
+	// no-truncate guard depends on, so the refusal is ridden out rather than
+	// logged away.
+	if err := utils.ReplaceFile(tmpFile, d.opts.ResumeFile); err != nil {
 		d.logger.Warn("[Downloader] Failed to rename resume file", "from", tmpFile, "to", d.opts.ResumeFile, "error", err)
 		os.Remove(tmpFile)
 		return

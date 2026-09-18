@@ -967,10 +967,14 @@ sessionLoop:
 		// IMPORTANT: Fall through to muxing logic below.
 	}
 
-	// After the fall-through from connectivity loss, use a fresh context for muxing
+	// After the fall-through from connectivity loss, use the mux root for
+	// muxing: the job's own context is cancelled, but a shutdown must still be
+	// able to reach this FFmpeg (owner decision O-E). context.Background()
+	// here used to survive the child's exit and keep writing into a staging
+	// dir the respawned child re-muxes with -y.
 	muxCtx := ctx
 	if outageFinalize {
-		muxCtx = context.Background()
+		muxCtx = o.muxRoot()
 	}
 
 	// Signal chat to finish BEFORE muxing the final part: the drain flushes

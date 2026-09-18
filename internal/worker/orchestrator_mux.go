@@ -13,7 +13,9 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // partBaseRe extracts the shared base from a part filename
@@ -68,6 +70,141 @@ func (o *DownloadOrchestrator) resolveFreshFilename(jobCtx *JobContext) (string,
 		resolved = jobCtx.Filename
 	}
 	return resolved, freshJob
+}
+
+const (
+	// muxShortfallTolerance is how much shorter than its input a muxed output
+	// may be before it is treated as truncated. Two Twitch VOD segments'
+	// worth (10 s each) — the coarsest segment duration in play — so ordinary
+	// container-metadata rounding never trips it.
+	muxShortfallTolerance = 20 * time.Second
+	// muxDurationCheckFloor is the shortest input the check judges at all. A
+	// fragmented raw stream's container metadata is unreliable and often
+	// reports a fraction of the real length, so only a plausibly long input
+	// is compared; anything shorter is skipped rather than guessed at.
+	muxDurationCheckFloor = 60 * time.Second
+)
+
+// muxedOutputIsShort reports whether a muxed output is short enough to mean
+// FFmpeg's `-c copy` stopped at the first undemuxable fragment. It exits 0
+// when that happens, so a truncated .mp4 used to finish as a clean job with
+// nothing comparing it against what went in (sweep-2 ENGINE-9).
+//
+// Both durations are seconds as ffprobe reports them. The check is
+// deliberately one-sided and conservative: an input the probe could not read
+// (0) or one too short to judge is never flagged, and an output LONGER than
+// its input never is either.
+func muxedOutputIsShort(inputSec, outputSec float64) bool {
+	if inputSec < muxDurationCheckFloor.Seconds() || outputSec <= 0 {
+		return false
+	}
+	return inputSec-outputSec > muxShortfallTolerance.Seconds()
+}
+
+// verifyMuxedDuration probes the longest input beside the already-probed
+// output and returns an error naming both durations when the output is short.
+//
+// Failing the mux is the point: the alternative this replaces was a Finished
+// row over a third of a recording, with the staging the missing part still
+// lives in deleted on the way out. An error leaves the job in Error with the
+// numbers in its message and staging untouched (both cleanup paths only run
+// after a mux that returned nil), so the Mux action can re-run the copy once
+// the input is repaired. The flag path is deliberately NOT used here:
+// incomplete_tail means "the DOWNLOAD is missing segments" and steers Retry
+// into re-downloading, which fixes nothing when the bytes are already on disk
+// and it is the copy that stopped early.
+func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID string, outputSec float64, inputs ...string) error {
+	var longest float64
+	for _, in := range inputs {
+		if in == "" {
+			continue
+		}
+		if probe := o.runFFprobe(ctx, in); probe != nil && probe.DurationSec > longest {
+			longest = probe.DurationSec
+		}
+	}
+	if !muxedOutputIsShort(longest, outputSec) {
+		return nil
+	}
+	o.logger.Error("muxed output is shorter than its input — the copy stopped at a bad fragment",
+		"jobID", jobID, "inputSeconds", longest, "outputSeconds", outputSec)
+	return fmt.Errorf("mux produced %.0fs from a %.0fs input (%.0fs missing) — the copy stopped at a bad fragment; staging is preserved, re-run the Mux action",
+		outputSec, longest, longest-outputSec)
+}
+
+// stagedRecordingParts returns the recordings inside ONE staging dir in
+// RECORDING ORDER: first every <file>.restart-<ts> the engine set aside when
+// a restart could not resume (oldest timestamp first — that is the order they
+// were captured in), then the dir's live recording.
+//
+// The engine preserves rather than truncates a headed recording it cannot
+// resume (engine.StagedRestartSuffix), and until this list existed nothing in
+// the worker could see those files: they are not what discoverStagingMedia
+// recognises, so they were invisible to the mux, to the part scan, and to
+// every cleanup — which meant a fresh capture finishing cleanly deleted them.
+// The sidecar twin (<file>.restart-<ts>.resume.json) is excluded by
+// engine.IsStagedRestartPath: muxing a JSON file is not a recovery.
+func stagedRecordingParts(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var parts []string
+	for _, e := range entries {
+		if e.IsDir() || !engine.IsStagedRestartPath(e.Name()) {
+			continue
+		}
+		parts = append(parts, filepath.Join(dir, e.Name()))
+	}
+	sort.SliceStable(parts, func(i, j int) bool {
+		return stagedRestartStamp(parts[i]) < stagedRestartStamp(parts[j])
+	})
+	if media := discoverStagingMedia(dir); media != nil {
+		live := media.VideoPath
+		if live == "" {
+			live = media.AudioPath
+		}
+		if live != "" {
+			parts = append(parts, live)
+		}
+	}
+	return parts
+}
+
+// stagedRestartStamp is the unix timestamp the engine stamped into an aside's
+// name, or 0 for anything else (which sorts such a name first — a name
+// engine.IsStagedRestartPath already vouched for cannot reach that branch).
+func stagedRestartStamp(path string) int64 {
+	name := filepath.Base(path)
+	i := strings.LastIndex(name, engine.StagedRestartSuffix)
+	if i < 0 {
+		return 0
+	}
+	stamp, err := strconv.ParseInt(name[i+len(engine.StagedRestartSuffix):], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return stamp
+}
+
+// stagedAsideRecordings returns every set-aside recording under a job's
+// staging tree — the root and each seg_N part dir — in recording order.
+// Empty for the overwhelmingly common case of a staging dir the engine never
+// had to set anything aside in.
+func stagedAsideRecordings(stagingDir string) []string {
+	var out []string
+	dirs := []string{stagingDir}
+	for _, sd := range stagedSegDirs(stagingDir) {
+		dirs = append(dirs, sd.dir)
+	}
+	for _, dir := range dirs {
+		for _, p := range stagedRecordingParts(dir) {
+			if engine.IsStagedRestartPath(filepath.Base(p)) {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
@@ -176,6 +313,16 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 
 	// B5: Run ffprobe to extract actual video metadata
 	probeData := o.runFFprobe(ctx, outputFile)
+
+	// ENGINE-9: before anything writes Finished over this row, check that the
+	// copy actually carried the recording across. A short output errors out
+	// here with staging intact rather than finishing clean over a fraction of
+	// the archive.
+	if probeData != nil {
+		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
+			return err
+		}
+	}
 
 	// Get file info
 	info, err := os.Stat(outputFile)
@@ -452,10 +599,10 @@ func (o *DownloadOrchestrator) renameSinglePartToPlain(seg database.Segment, out
 	if seg.FilePath == "" || seg.FilePath == plainVideo {
 		return seg
 	}
-	if err := os.Rename(seg.FilePath, plainVideo); err != nil {
+	if err := utils.ReplaceFile(seg.FilePath, plainVideo); err != nil {
 		// Recovery re-entry: a crash between a prior run's successful rename
 		// and its DB commit leaves the file already at plainVideo while the row
-		// still points at the suffixed name. Here os.Rename fails (source gone)
+		// still points at the suffixed name. Here the rename fails (source gone)
 		// but the destination exists and holds the real media — treat that as
 		// success and fall through to repair the row, so output_file doesn't
 		// resolve to the missing suffixed path (which the orphan scanner would
@@ -473,7 +620,7 @@ func (o *DownloadOrchestrator) renameSinglePartToPlain(seg database.Segment, out
 
 	if seg.ChatFile != "" {
 		plainChat := filepath.Join(outputDir, filenameBase+".chat.json")
-		if err := os.Rename(seg.ChatFile, plainChat); err != nil {
+		if err := utils.ReplaceFile(seg.ChatFile, plainChat); err != nil {
 			// Same recovery re-entry as the video above: if the chat is already
 			// at the plain path (a prior run renamed it pre-crash), adopt it.
 			if _, dstErr := os.Stat(plainChat); dstErr == nil {
@@ -748,6 +895,16 @@ func (o *DownloadOrchestrator) muxSegment(
 
 	// FFprobe for metadata
 	probeData := o.runFFprobe(ctx, outputPath)
+
+	// ENGINE-9, part edition: a part whose copy stopped early must not be
+	// persisted as a finished segment. Returning the error before AddSegment
+	// leaves the index unrecorded, which is what keeps its staging dir alive
+	// (hasUnmuxedPartsForJob) for a re-mux.
+	if probeData != nil {
+		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
+			return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
+		}
+	}
 
 	// Resolve the unixStart sentinel (see the doc comment): derive the start
 	// from the probed duration, clamped so it never precedes the job's

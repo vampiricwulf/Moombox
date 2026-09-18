@@ -563,7 +563,11 @@ func TestWorkerFinishKeepsStagingForAnIncompleteChat(t *testing.T) {
 		t.Error("worker.go's staging cleanup no longer has a preserveForChat branch between the " +
 			"incomplete_tail branch and os.RemoveAll")
 	}
-	if !strings.Contains(text, "keepOnlyChatCapture(jobCtx.StagingDir)") {
+	// The call moved with the block: Task 8 lifted processJob's cleanup into
+	// cleanupStagingAfterMux so the off-queue restart mux runs the same
+	// carve-outs, which renamed the argument from jobCtx.StagingDir to the
+	// function's own stagingDir parameter. Same branch, same call.
+	if !strings.Contains(text, "keepOnlyChatCapture(stagingDir)") {
 		t.Error("worker.go's preserveForChat branch no longer prunes the staging dir down to the " +
 			"chat capture — the muxed-away media would be shielded for a week too")
 	}

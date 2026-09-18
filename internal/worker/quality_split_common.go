@@ -62,17 +62,42 @@ func (o *DownloadOrchestrator) awaitDownloadOrQualityChange(
 	}
 }
 
+// muxRoot is the parent context for muxes that outlive their job's context.
+// Falls back to Background for an orchestrator built by struct literal (the
+// standalone Mux action's helpers and the package's own tests), so nothing
+// ever hands a nil context to context.WithTimeout.
+func (o *DownloadOrchestrator) muxRoot() context.Context {
+	if o.muxRootCtx == nil {
+		return context.Background()
+	}
+	return o.muxRootCtx
+}
+
+// CancelMuxes cancels every in-flight background and final mux. Called by
+// DownloadWorker.Stop once the in-flight wait has run out (owner decision
+// O-E) so FFmpeg dies with the child rather than outliving it. Nothing else
+// calls it: a job finishing normally must never cut a sibling's mux.
+func (o *DownloadOrchestrator) CancelMuxes() {
+	if o.muxRootCancel != nil {
+		o.muxRootCancel()
+	}
+}
+
 // launchBackgroundSegmentMux runs o.muxSegment for a completed part
 // (quality or gap split) in a goroutine with panic recovery and a detached
 // 2-hour context. Increments wg so the caller can wait for all background
 // muxes at end of stream.
 //
-// Detached context rationale: user-cancel must not orphan a partial output
-// mid-FFmpeg. The ceiling is generous (codec-copy of a multi-GB segment on
-// slow disk/USB/NAS with antivirus scanning can legitimately exceed tens of
-// minutes) but bounded so a truly stuck FFmpeg can't pin shutdown
-// indefinitely (defer wg.Wait() in the caller means worker.Stop()'s 10s
-// grace otherwise can't override the wait).
+// Context rationale: the mux hangs off the ORCHESTRATOR's mux root, not the
+// job's context — user-cancel must not orphan a partial output mid-FFmpeg —
+// but no longer off context.Background(): Stop cuts the root once its
+// in-flight wait runs out (owner decision O-E), so a shutdown kills this
+// FFmpeg instead of leaving it writing into a staging dir the respawned child
+// re-muxes with -y. The 2-hour ceiling is generous (codec-copy of a multi-GB
+// segment on slow disk/USB/NAS with antivirus scanning can legitimately
+// exceed tens of minutes) but bounded so a truly stuck FFmpeg can't pin
+// shutdown indefinitely (defer wg.Wait() in the caller means worker.Stop()'s
+// 10s grace otherwise can't override the wait).
 //
 // preMux, when non-nil, runs inside the goroutine before the mux — Twitch
 // uses it to inject emotes into the part's rolled chat file (first part
@@ -102,7 +127,7 @@ func (o *DownloadOrchestrator) launchBackgroundSegmentMux(
 			}
 		}()
 		defer wg.Done()
-		muxCtx, muxCancel := context.WithTimeout(context.Background(), 2*time.Hour)
+		muxCtx, muxCancel := context.WithTimeout(o.muxRoot(), 2*time.Hour)
 		defer muxCancel()
 		if preMux != nil {
 			preMux(muxCtx)

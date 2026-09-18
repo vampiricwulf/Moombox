@@ -989,6 +989,36 @@ const StagedRestartSuffix = ".restart-"
 // can never drift apart.
 const resumeFileSuffix = ".resume.json"
 
+// IsStagedRestartPath reports whether name is a recording set aside by the
+// no-truncate guard — <file>.restart-<unix ts> — and not its sidecar twin,
+// which shares that timestamped stem as <file>.restart-<unix ts>.resume.json.
+//
+// Exported because resumeFileSuffix is not: package worker's staging scan
+// (internal/worker/orchestrator_mux.go, stagedRecordingParts) has to tell the
+// recording from its twin, and hardcoding either literal there is exactly the
+// drift StagedRestartSuffix's doc comment exists to prevent. The timestamp is
+// required to be digits so an ordinary file that merely contains ".restart-"
+// is never mistaken for one of ours.
+func IsStagedRestartPath(name string) bool {
+	if strings.HasSuffix(name, resumeFileSuffix) {
+		return false
+	}
+	i := strings.LastIndex(name, StagedRestartSuffix)
+	if i < 0 {
+		return false
+	}
+	stamp := name[i+len(StagedRestartSuffix):]
+	if stamp == "" {
+		return false
+	}
+	for _, r := range stamp {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // preserveStagedRecording is the DiscardStaged half of the no-truncate guard.
 // The caller has declared it needs a file that begins at the start of the
 // stream, and the engine has already established it cannot resume, so the

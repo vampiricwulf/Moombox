@@ -773,44 +773,66 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
-	// Clean up staging directory after successful download + mux — UNLESS a
-	// part's captured media is still unmuxed (both the stream-end mux and the
-	// finalize backstop failed for it). Deleting it then would silently drop
-	// footage from a job now marked Finished; preserve it so the Mux action
-	// can recover it.
-	if jobCtx.StagingDir != "" {
-		fresh, _ := w.db.GetJob(job.ID)
-		preserveForTail := fresh != nil && fresh.IncompleteTail
-		// A chat capture that ended without completing leaves its resume
-		// sidecar in staging; deleting the dir turns a recoverable truncation
-		// into a permanent one (sweep-2 TWITCH-3, verifier merge M5). Same
-		// shape as the incomplete_tail preservation above it, and the orphan
-		// scanner mirrors it in jobNeedsStaging — but only the chat files are
-		// kept, not the muxed-away media (see keepOnlyChatCapture).
-		preserveForChat := fresh != nil && fresh.ChatStatus == chatStatusIncomplete
-		if w.hasUnmuxedParts(job.ID, jobCtx.StagingDir) {
-			w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
-				"path", jobCtx.StagingDir, "jobID", job.ID)
-		} else if preserveForTail {
-			w.logger.Warn("preserving staging dir: recording tail incomplete; Retry will resume from the sidecar",
-				"path", jobCtx.StagingDir, "jobID", job.ID)
-		} else if preserveForChat {
-			// Keep the chat capture, drop everything else: the media in here
-			// is already muxed into the output file, so shielding the whole
-			// dir for downloader.incomplete_staging_expiry_days (7 by
-			// default) to protect one JSON sidecar would cost tens of GB per
-			// long VOD.
-			if err := keepOnlyChatCapture(jobCtx.StagingDir); err != nil {
-				w.logger.Warn("failed to prune staging dir down to the chat capture",
-					"path", jobCtx.StagingDir, "jobID", job.ID, "err", err)
-			}
-			w.logger.Warn("preserving staging dir: chat capture incomplete; the chat resume sidecar is kept for a re-run",
-				"path", jobCtx.StagingDir, "jobID", job.ID)
-		} else if err := os.RemoveAll(jobCtx.StagingDir); err != nil {
-			w.logger.Warn("failed to remove staging directory", "path", jobCtx.StagingDir, "err", err)
-		} else {
-			w.logger.Debug("removed staging directory", "path", jobCtx.StagingDir)
+	w.cleanupStagingAfterMux(job.ID, jobCtx.StagingDir)
+}
+
+// cleanupStagingAfterMux removes a job's staging directory now that its
+// recording is muxed into the archive — UNLESS a part's captured media is
+// still unmuxed (both the stream-end mux and the finalize backstop failed for
+// it). Deleting it then would silently drop footage from a job now marked
+// Finished; preserve it so the Mux action can recover it.
+//
+// Shared by the queue path (processJob, its only caller until now) and the
+// off-queue restart/Mux path (MuxJob): that path skips processJob entirely, so
+// a job that restart-muxed to Finished kept its full raw recording in staging
+// forever, roughly doubling the disk cost of that archive with no warning and
+// nothing to reclaim it (sweep-2 Task 2 review, finding 1). One function
+// rather than two copies, so the carve-outs cannot drift apart.
+func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
+	if stagingDir == "" {
+		return
+	}
+	fresh, _ := w.db.GetJob(jobID)
+	preserveForTail := fresh != nil && fresh.IncompleteTail
+	// A chat capture that ended without completing leaves its resume
+	// sidecar in staging; deleting the dir turns a recoverable truncation
+	// into a permanent one (sweep-2 TWITCH-3, verifier merge M5). Same
+	// shape as the incomplete_tail preservation above it, and the orphan
+	// scanner mirrors it in jobNeedsStaging — but only the chat files are
+	// kept, not the muxed-away media (see keepOnlyChatCapture).
+	preserveForChat := fresh != nil && fresh.ChatStatus == chatStatusIncomplete
+	if asides := stagedAsideRecordings(stagingDir); len(asides) > 0 {
+		// A recording the engine could not resume was set aside rather than
+		// truncated (engine.StagedRestartSuffix), and nothing in the mux
+		// pipeline has consumed it: the fresh capture that replaced it is not
+		// guaranteed to be as long (post-live segments are not always
+		// re-servable), so deleting it here would destroy the longer copy on
+		// the strength of a shorter one finishing cleanly. Named in recording
+		// order so an operator muxing them by hand knows which came first.
+		w.logger.Warn("preserving staging dir: a set-aside recording was never merged into the archive; these are in recording order, oldest first",
+			"asides", strings.Join(asides, " | "), "path", stagingDir, "jobID", jobID)
+	} else if w.hasUnmuxedParts(jobID, stagingDir) {
+		w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
+			"path", stagingDir, "jobID", jobID)
+	} else if preserveForTail {
+		w.logger.Warn("preserving staging dir: recording tail incomplete; Retry will resume from the sidecar",
+			"path", stagingDir, "jobID", jobID)
+	} else if preserveForChat {
+		// Keep the chat capture, drop everything else: the media in here
+		// is already muxed into the output file, so shielding the whole
+		// dir for downloader.incomplete_staging_expiry_days (7 by
+		// default) to protect one JSON sidecar would cost tens of GB per
+		// long VOD.
+		if err := keepOnlyChatCapture(stagingDir); err != nil {
+			w.logger.Warn("failed to prune staging dir down to the chat capture",
+				"path", stagingDir, "jobID", jobID, "err", err)
 		}
+		w.logger.Warn("preserving staging dir: chat capture incomplete; the chat resume sidecar is kept for a re-run",
+			"path", stagingDir, "jobID", jobID)
+	} else if err := os.RemoveAll(stagingDir); err != nil {
+		w.logger.Warn("failed to remove staging directory", "path", stagingDir, "err", err)
+	} else {
+		w.logger.Debug("removed staging directory", "path", stagingDir)
 	}
 }
 
@@ -907,6 +929,16 @@ func (w *DownloadWorker) hasUnmuxedParts(jobID, stagingDir string) bool {
 // out so the orphan scanner (internal/worker/orphans.go) can reuse the exact
 // same check — it only has a *database.Database, not a *DownloadWorker.
 func hasUnmuxedPartsForJob(db *database.Database, jobID, stagingDir string) bool {
+	// A recording the no-truncate guard set aside (<file>.restart-<ts>) is
+	// captured media that no mux has ever consumed — an unmuxed part in every
+	// sense this predicate is consulted for. It has no seg_N dir and no
+	// segment row of its own, so without this term the scan below reports
+	// "nothing unmuxed here" and both staging cleanups — plus the orphan
+	// scanner, which shares this function through jobNeedsStaging — delete it
+	// along with the dir.
+	if len(stagedAsideRecordings(stagingDir)) > 0 {
+		return true
+	}
 	segDirs := stagedSegDirs(stagingDir)
 	if len(segDirs) == 0 {
 		return false // no part splits — single-file cleanup is safe
@@ -1346,8 +1378,15 @@ func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	return data, resp.StatusCode, err
 }
 
+// muxCancelGrace is how long Stop waits for FFmpeg to die after the mux root
+// is cancelled, before giving up and exiting anyway.
+const muxCancelGrace = 2 * time.Second
+
 // Stop signals the worker to stop processing new jobs and waits for in-flight
 // jobs to finish (up to 10 seconds) so downloads aren't interrupted mid-write.
+// Muxes still running after that wait are cancelled rather than orphaned
+// (owner decision O-E) — their rows stay Muxing and the restarted child
+// re-muxes them from the staging that is deliberately left in place.
 func (w *DownloadWorker) Stop() {
 	w.logger.Info("download worker stopping")
 	if w.streamProc != nil {
@@ -1369,7 +1408,21 @@ func (w *DownloadWorker) Stop() {
 	case <-done:
 		w.logger.Info("download worker: all in-flight jobs finished")
 	case <-time.After(10 * time.Second):
-		w.logger.Warn("download worker: timed out waiting for in-flight jobs")
+		// Owner decision O-E: the jobs still running at this point are almost
+		// always draining a mux, and exiting now would leave FFmpeg writing
+		// into a staging dir the restarted child re-muxes with -y. Cancel the
+		// mux root so those processes die with us; their partial part files
+		// are re-muxed on restart.
+		w.logger.Warn("download worker: timed out waiting for in-flight jobs; cancelling in-flight muxes")
+		if w.orchestrator != nil {
+			w.orchestrator.CancelMuxes()
+		}
+		select {
+		case <-done:
+			w.logger.Info("download worker: in-flight jobs finished after mux cancellation")
+		case <-time.After(muxCancelGrace):
+			w.logger.Warn("download worker: in-flight jobs still running after mux cancellation")
+		}
 	}
 }
 
@@ -1657,15 +1710,44 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		}
 
 		jobCtx := w.buildJobContext(job)
-		ctx := context.Background()
+		// Owner decision O-E: the orchestrator's mux root, never
+		// context.Background() — a Stop reaches this FFmpeg instead of leaving
+		// it writing into a staging dir the restarted child re-muxes with -y.
+		ctx := w.orchestrator.muxRoot()
+
+		// This mux takes the same download slot a queued job takes: a boot
+		// that finds N interrupted Muxing rows would otherwise start N
+		// FFmpegs at once, which num_parallel_downloads exists to prevent.
+		// The wait ends on the mux root's cancellation, so a shutdown does not
+		// sit here holding the process open.
+		if !w.queue.AcquireDownloadSlot(ctx, jobID) {
+			w.logger.Info("MuxJob: shutdown while waiting for a mux slot; the row stays Muxing for the next start", "jobID", jobID)
+			return
+		}
+		defer w.queue.ReleaseDownloadSlot(jobID)
 
 		if err := w.orchestrator.muxFromStaging(ctx, jobCtx); err != nil {
+			if ctx.Err() != nil {
+				// Cancelled by Stop, not a failure: leave the row Muxing with
+				// its staging intact so the restarted child re-muxes it
+				// (muxOnRestart only routes a Muxing row — writing Error here
+				// would strand the recording).
+				w.logger.Info("MuxJob: cancelled by shutdown; the row stays Muxing for the next start", "jobID", jobID)
+				return
+			}
 			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
 			w.db.UpdateJobFields(jobID, map[string]any{
 				"status": database.StatusError,
 				"error":  err.Error(),
 			})
+			return
 		}
+
+		// The recording is in the archive now: reclaim staging exactly the way
+		// the queued path does, carve-outs included. Without this the
+		// off-queue route kept every restart-muxed job's raw recording forever
+		// (sweep-2 Task 2 review, finding 1).
+		w.cleanupStagingAfterMux(jobID, jobCtx.StagingDir)
 	})
 
 	return nil

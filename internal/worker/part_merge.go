@@ -60,7 +60,12 @@ func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx 
 		concat:      m.ConcatCopy,
 		replace:     o.db.ReplaceJobSegments,
 		updateFile:  o.db.UpdateSegmentFile,
-		rename:      os.Rename,
+		// utils.ReplaceFile, not os.Rename: this rename lands the merged
+		// recording on an archive filename, and on Windows a scanner still
+		// holding the concat output it just watched being written refuses it
+		// for a moment (sweep-2 TOOL-2). A refusal here costs the pretty name
+		// and forces the undo path, for no reason at all.
+		rename: utils.ReplaceFile,
 	}
 	return pm.merge(ctx, jobCtx.Job.ID, jobCtx.StagingDir, segments)
 }
