@@ -248,7 +248,7 @@ func (db *Database) migrate() error {
 	// via FileSchemaVersion); this closes the same hole for the daemon.
 	if version > schemaVersion {
 		return fmt.Errorf(
-			"database schema v%d is newer than this binary supports (v%d) — you appear to have downgraded after an update migrated the database; restore the newer binary (moombox.exe.old from the update swap, if still present) or upgrade again",
+			"database schema v%d is newer than this binary supports (v%d) — you appear to have downgraded after an update migrated the database; restore the newer binary (an automatic rollback keeps it beside this executable as moombox.exe.failed and names the exact path in the moombox.exe.update-failed marker; a manual downgrade leaves moombox.exe.old from the update swap) or upgrade again",
 			version, schemaVersion)
 	}
 

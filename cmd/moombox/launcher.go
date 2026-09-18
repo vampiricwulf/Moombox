@@ -248,7 +248,16 @@ func launchAndSupervise() {
 			// gone (the boot reached the milestone sweep before dying) or
 			// the restore fails, fall back to preserving what's left with
 			// manual instructions.
-			if attemptAutoRollback(exePath, code) {
+			//
+			// A deterministic startup error (exitCodeStartupError) skips the
+			// rollback entirely: the environment, not the binary, is what
+			// failed. The artifact is still PRESERVED with instructions —
+			// this branch does not call deferDeleteOldLauncher — so a manual
+			// rollback stays one rename away, and because the next boot runs
+			// the SAME version the .update-pending breadcrumb names,
+			// shouldSkipPendingVersion is false and the release is not
+			// marked skipped.
+			if classifyPostUpdateExit(code) == postUpdateRollback && attemptAutoRollback(exePath, code) {
 				crashRespawnCode = 0
 				consecutiveCrashes = 0
 				continue
@@ -331,22 +340,56 @@ func crashBackoff(n int) time.Duration {
 // past it has proven the binary starts.
 const postUpdateFailureWindow = 2 * time.Minute
 
+// postUpdateVerdict is what the launcher does with a non-zero exit from the
+// first boot of a freshly-applied update.
+type postUpdateVerdict int
+
+const (
+	// postUpdateRollback restores the previous binary and respawns it.
+	postUpdateRollback postUpdateVerdict = iota
+	// postUpdatePreserve keeps the rollback artifact on disk with written
+	// instructions and propagates the exit code without respawning.
+	postUpdatePreserve
+)
+
+// classifyPostUpdateExit decides how a failed first-post-update boot is
+// treated. Only exitCodeStartupError is spared the rollback: it names a
+// deterministic environment failure the new binary is not responsible for,
+// and rolling back would hide the real cause behind a version downgrade
+// while marking a perfectly good release skipped (CORE-23).
+func classifyPostUpdateExit(code int) postUpdateVerdict {
+	if code == exitCodeStartupError {
+		return postUpdatePreserve
+	}
+	return postUpdateRollback
+}
+
+// failedBinarySuffix names the binary a failed first-post-update boot leaves
+// behind. The rollback used to DELETE it on the grounds that it is
+// bit-identical to the published GitHub asset — but when the failure is a
+// refused DB downgrade, the older binary the rollback restores then prints
+// "restore the newer binary … if still present" about a file the rollback
+// had just removed, and the install is down until a manual re-download
+// (CORE-1). Keeping it costs ~90 MB until the next healthy boot sweeps it
+// (internal/updater.CleanupOldBinary).
+const failedBinarySuffix = ".failed"
+
 // attemptAutoRollback restores the previous binary after a failed first
-// post-update boot: the broken binary at exePath is removed (it is
-// bit-identical to the published GitHub asset, so nothing diagnostic is
-// lost), the preserved rollback artifact is renamed back to the plain
-// name, and a marker documents what happened — the next child boot
-// announces it, and (via the .update-pending breadcrumb ApplyUpdate
-// writes) marks the failed version skipped so automatic checks stop
-// offering a release that just proved broken.
+// post-update boot: the broken binary at exePath is KEPT, renamed to
+// <exe>.failed so the DB downgrade guard's "restore the newer binary"
+// advice names a file that exists, the preserved rollback artifact is
+// renamed back to the plain name, and a marker documents what happened
+// — the next child boot announces it, and (via the .update-pending
+// breadcrumb ApplyUpdate writes) marks the failed version skipped so
+// automatic checks stop offering a release that just proved broken.
 //
 // Returns false without touching anything when no rollback artifact
 // exists (the boot survived long enough to reach the milestone sweep
-// before dying) and on the remove failure path; the caller then falls
-// back to preserveUpdateRollback's manual instructions. A rename failure
-// AFTER the remove succeeded is the one unrecoverable shape (the plain
-// name is empty) — the preserve fallback's instructions still point at
-// the intact artifact, so recovery stays one manual rename.
+// before dying) and on the move-aside failure path; the caller then
+// falls back to preserveUpdateRollback's manual instructions. A restore
+// failure AFTER the move aside succeeded is the one unrecoverable shape
+// (the plain name is empty) — the preserve fallback's instructions still
+// point at the intact artifact, so recovery stays one manual rename.
 //
 // Windows note: the artifact (the ~ file) is this launcher's own mapped
 // image — renaming a mapped image is legal (it is how the update swap
@@ -357,25 +400,29 @@ func attemptAutoRollback(exePath string, exitCode int) bool {
 	if _, err := os.Stat(backup); err != nil {
 		return false
 	}
-	// Remove the broken binary first, then rename over the empty name. NOT
+	// Move the broken binary aside first, then rename over the freed name. NOT
 	// because os.Rename cannot replace an existing file on Windows — it is
 	// MoveFileEx with MOVEFILE_REPLACE_EXISTING and ordinarily would — but
 	// because replacing a destination needs delete access to it, which any
 	// process holding that file without FILE_SHARE_DELETE denies. Taking the
-	// hit on the remove instead makes it RETRYABLE: the child has exited (its
+	// hit on moving it aside instead makes it RETRYABLE (a rename needs the same
+	// DELETE access to the source that a remove does): the child has exited (its
 	// image is unmapped), so the holder is an AV scanner still on the
-	// freshly-downloaded file, and brief retries ride it out. A remove that
+	// freshly-downloaded file, and brief retries ride it out. A move that
 	// never succeeds returns false below, which is the failure path
-	// preserveUpdateRollback's manual instructions cover.
-	var rmErr error
+	// preserveUpdateRollback's manual instructions cover. A pre-existing
+	// .failed from an earlier failed update is replaced, not an obstacle:
+	// MOVEFILE_REPLACE_EXISTING on Windows, replace semantics on POSIX.
+	failedPath := exePath + failedBinarySuffix
+	var mvErr error
 	for range 3 {
-		if rmErr = os.Remove(exePath); rmErr == nil {
+		if mvErr = os.Rename(exePath, failedPath); mvErr == nil {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	if rmErr != nil {
-		fmt.Fprintf(os.Stderr, "auto-rollback: could not remove failed binary: %v\n", rmErr)
+	if mvErr != nil {
+		fmt.Fprintf(os.Stderr, "auto-rollback: could not move failed binary aside: %v\n", mvErr)
 		return false
 	}
 	if err := os.Rename(backup, exePath); err != nil {
@@ -395,11 +442,13 @@ func writeAutoRollbackMarker(exePath string, exitCode int) {
 	msg := fmt.Sprintf(
 		"Moombox: the first launch after a self-update failed (exit code %d) at %s.\n"+
 			"Moombox AUTOMATICALLY ROLLED BACK to the previous binary and restarted it.\n"+
-			"The failed release was removed from disk (it is re-downloadable from GitHub).\n"+
+			"The failed release was KEPT at:\n  %s\n"+
+			"(If the restored binary refuses to start — a database the newer version\n"+
+			"already migrated is one such case — rename that file back over %s.)\n"+
 			"Automatic update checks will skip the failed version where supported; use a\n"+
 			"manual \"Check for updates\" to retry it deliberately.\n"+
 			"Delete this marker file once acknowledged.\n",
-		exitCode, time.Now().Format(time.RFC3339))
+		exitCode, time.Now().Format(time.RFC3339), exePath+failedBinarySuffix, exePath)
 	markerPath := exePath + ".update-failed"
 	if err := os.WriteFile(markerPath, []byte(msg), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", markerPath, err)

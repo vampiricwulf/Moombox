@@ -100,3 +100,103 @@ func TestRollbackArtifactPathPrefersTheOldFile(t *testing.T) {
 		t.Errorf("rollbackArtifactPath = %q, want %q — a surviving .old is the freshest previous binary", got, want)
 	}
 }
+
+// A failed first-post-update boot must KEEP the broken binary as
+// <exe>.failed instead of deleting it: the DB downgrade guard the restored
+// (older) binary then hits tells the operator to restore the newer binary,
+// and before this the rollback had just deleted the only copy (CORE-1).
+//
+// Mutant: restoring `os.Remove(exePath)` in attemptAutoRollback — the
+// .failed file is absent and the marker no longer names it.
+func TestAutoRollbackKeepsTheFailedBinary(t *testing.T) {
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "moombox-test.exe")
+	if err := os.WriteFile(exePath, []byte("BROKEN"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rollbackArtifactPath(exePath), []byte("PREVIOUS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if !attemptAutoRollback(exePath, 1) {
+		t.Fatal("attemptAutoRollback must succeed when the artifact exists")
+	}
+
+	restored, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatalf("the previous binary must be back at the plain name: %v", err)
+	}
+	if string(restored) != "PREVIOUS" {
+		t.Errorf("plain name holds %q, want the restored previous binary", restored)
+	}
+	failed, err := os.ReadFile(exePath + failedBinarySuffix)
+	if err != nil {
+		t.Fatalf("the broken binary must survive as %s: %v", failedBinarySuffix, err)
+	}
+	if string(failed) != "BROKEN" {
+		t.Errorf("%s holds %q, want the broken binary", failedBinarySuffix, failed)
+	}
+	marker, err := os.ReadFile(exePath + ".update-failed")
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if !strings.Contains(string(marker), exePath+failedBinarySuffix) {
+		t.Errorf("the marker must name the kept binary by path, got:\n%s", marker)
+	}
+}
+
+// A second failed update replaces the first .failed artifact rather than
+// failing the rollback — os.Rename replaces an existing destination on both
+// platforms.
+//
+// Mutant: guarding the rename with an os.Stat "already exists" bail-out —
+// the artifact still holds BROKEN-1.
+func TestAutoRollbackReplacesAnOlderFailedArtifact(t *testing.T) {
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "moombox-test.exe")
+	for _, f := range []struct{ path, body string }{
+		{exePath, "BROKEN-2"},
+		{exePath + failedBinarySuffix, "BROKEN-1"},
+		{rollbackArtifactPath(exePath), "PREVIOUS"},
+	} {
+		if err := os.WriteFile(f.path, []byte(f.body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !attemptAutoRollback(exePath, 1) {
+		t.Fatal("attemptAutoRollback must succeed")
+	}
+	failed, err := os.ReadFile(exePath + failedBinarySuffix)
+	if err != nil {
+		t.Fatalf("read %s: %v", failedBinarySuffix, err)
+	}
+	if string(failed) != "BROKEN-2" {
+		t.Errorf("%s holds %q, want the newest broken binary", failedBinarySuffix, failed)
+	}
+}
+
+// A deterministic startup error is the operator's environment (bad config,
+// bad flags, a refused migration), not proof the new binary is broken — so
+// it must never auto-roll-back and never mark the release skipped. Before
+// this, whether such an exit counted as "the update failed" depended on
+// whether the operator pressed Enter at waitForKeypress inside the 2-minute
+// window (CORE-23). classifyPostUpdateExit is that decision, extracted so it
+// can be asserted without spawning a launcher.
+//
+// Mutant: returning postUpdateRollback for exitCodeStartupError — the
+// "startup error" row reports rollback.
+func TestStartupErrorIsNeverAFailedUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		want postUpdateVerdict
+	}{
+		{"startup error", exitCodeStartupError, postUpdatePreserve},
+		{"panic-shaped crash", 2, postUpdateRollback},
+		{"generic failure", 1, postUpdateRollback},
+	} {
+		if got := classifyPostUpdateExit(tc.code); got != tc.want {
+			t.Errorf("%s: classifyPostUpdateExit(%d) = %v, want %v", tc.name, tc.code, got, tc.want)
+		}
+	}
+}

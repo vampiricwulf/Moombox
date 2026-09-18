@@ -318,19 +318,19 @@ func TestDownloadFileSmallBinaryIntact(t *testing.T) {
 // --- CleanupOldBinary ---
 
 // TestCleanupOldBinaryRemovesStaleArtifacts covers all four suffixes
-// the helper sweeps (.old, .new, .new.sig, .sig). The .update-broken
-// marker is intentionally preserved.
+// the helper sweeps (.old, .new, .new.sig, .failed). The .update-broken
+// marker and the operator's own .sig are intentionally preserved.
 func TestCleanupOldBinaryRemovesStaleArtifacts(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(srv.Close)
 	u, exePath := newTestUpdater(t, "1.0.0", srv, nil)
 
-	stale := []string{exePath + ".old", exePath + ".new", exePath + ".new.sig", exePath + ".sig"}
+	stale := []string{exePath + ".old", exePath + ".new", exePath + ".new.sig", exePath + ".failed"}
 	if runtime.GOOS == "windows" {
 		stale = append(stale, exePath+"~")
 	}
-	preserved := exePath + ".update-broken"
-	for _, p := range append(stale, preserved) {
+	preserved := []string{exePath + ".update-broken", exePath + ".sig"}
+	for _, p := range append(append([]string{}, stale...), preserved...) {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			t.Fatalf("seed %s: %v", p, err)
 		}
@@ -343,8 +343,10 @@ func TestCleanupOldBinaryRemovesStaleArtifacts(t *testing.T) {
 			t.Errorf("stale file not removed: %s", p)
 		}
 	}
-	if _, err := os.Stat(preserved); err != nil {
-		t.Errorf("preserved marker was deleted: %v", err)
+	for _, p := range preserved {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("preserved file was deleted: %s: %v", p, err)
+		}
 	}
 }
 
@@ -642,5 +644,38 @@ func TestAssetsForPlatformUnknown(t *testing.T) {
 	}
 	if _, ok := assetsForPlatform("linux", "mips"); ok {
 		t.Error("expected !ok for unsupported arch")
+	}
+}
+
+// CleanupOldBinary sweeps the artifacts Moombox itself writes, plus the
+// binary a failed update left behind — and NOT <exe>.sig, which Moombox
+// never writes (VerifyCurrentSignature uses os.CreateTemp, ApplyUpdate uses
+// ".new.sig") but which is exactly the published release-asset name a manual
+// verifier leaves beside the exe (CORE-13).
+//
+// Mutant: keeping ".sig" in the suffix list — the .sig assertion fails.
+// Mutant: dropping ".failed" from the list — the .failed assertion fails.
+func TestCleanupOldBinarySweepsFailedAndSparesSig(t *testing.T) {
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "moombox-test.exe")
+	if err := os.WriteFile(exePath, []byte("running"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{".old", ".new", ".new.sig", ".sig", ".failed"} {
+		if err := os.WriteFile(exePath+suffix, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	u := &Updater{exePath: exePath, currentVersion: "9.9.9", logger: silentTestLogger{}}
+	u.CleanupOldBinary()
+
+	for _, suffix := range []string{".old", ".new", ".new.sig", ".failed"} {
+		if _, err := os.Stat(exePath + suffix); err == nil {
+			t.Errorf("%s must be swept", suffix)
+		}
+	}
+	if _, err := os.Stat(exePath + ".sig"); err != nil {
+		t.Errorf(".sig is a manual verifier's artifact and must survive: %v", err)
 	}
 }

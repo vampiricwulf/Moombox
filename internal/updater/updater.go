@@ -498,8 +498,15 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 
 // CleanupOldBinary removes stale files left over from previous updates:
 // .old (previous binary), .new (interrupted download), .new.sig (interrupted
-// verification), and .sig (VerifyCurrentSignature intermediate that may be
-// left behind if ApplyUpdate was interrupted between its write and rename).
+// verification), and .failed (the binary an automatic rollback moved aside —
+// see attemptAutoRollback in cmd/moombox/launcher.go; it is kept only until
+// a boot proves healthy, which is exactly this call).
+//
+// <exe>.sig is deliberately NOT swept. Moombox never writes it
+// (VerifyCurrentSignature downloads to an os.CreateTemp file, ApplyUpdate
+// writes ".new.sig"), but it is exactly the published release-asset name in
+// releaseAssetMap that an operator verifying a manual download leaves beside
+// the binary — sweeping it destroyed their artifact on every boot (CORE-13).
 //
 // On Windows, also sweeps `~` (orphaned by the launcher's deferred cleanup
 // or by a prior installation that lacked the launcher startup sweep). The
@@ -510,7 +517,7 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 // intentionally NOT cleaned here — they are evidence for the user that
 // manual recovery may be needed and should be deleted explicitly.
 func (u *Updater) CleanupOldBinary() {
-	suffixes := []string{".old", ".new", ".new.sig", ".sig"}
+	suffixes := []string{".old", ".new", ".new.sig", ".failed"}
 	if runtime.GOOS == "windows" {
 		suffixes = append(suffixes, "~")
 	}
