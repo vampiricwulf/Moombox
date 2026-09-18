@@ -116,18 +116,34 @@ func TestStartDirectURLKeepsLegacyTruncate(t *testing.T) {
 // OS errno so one fixture describes both platforms.
 var errSharingViolation = errors.New("the process cannot access the file because it is being used by another process")
 
-// installTruncateSeams points the ladder at a scripted truncate, a no-op pause
-// and a classifier that treats errSharingViolation (and nothing else) as
-// transient. Restores everything at the end of the test.
-func installTruncateSeams(t *testing.T, trunc func(string, int64) error) {
+// installLadderSeams installs the half of the ladder both file operations
+// share: a no-op pause and a classifier that treats errSharingViolation (and
+// nothing else) as transient. Restored at the end of the test.
+func installLadderSeams(t *testing.T) {
 	t.Helper()
-	prevTrunc, prevSleep, prevClass := truncateFile, truncateRetrySleep, isTransientTruncateError
-	t.Cleanup(func() {
-		truncateFile, truncateRetrySleep, isTransientTruncateError = prevTrunc, prevSleep, prevClass
-	})
-	truncateFile = trunc
+	prevSleep, prevClass := truncateRetrySleep, isTransientTruncateError
+	t.Cleanup(func() { truncateRetrySleep, isTransientTruncateError = prevSleep, prevClass })
 	truncateRetrySleep = func(context.Context, time.Duration) error { return nil }
 	isTransientTruncateError = func(err error) bool { return errors.Is(err, errSharingViolation) }
+}
+
+// installTruncateSeams points the ladder at a scripted truncate.
+func installTruncateSeams(t *testing.T, trunc func(string, int64) error) {
+	t.Helper()
+	installLadderSeams(t)
+	prev := truncateFile
+	t.Cleanup(func() { truncateFile = prev })
+	truncateFile = trunc
+}
+
+// installRenameSeam points the ladder at a scripted rename — the same ladder,
+// the other file operation.
+func installRenameSeam(t *testing.T, rename func(string, string) error) {
+	t.Helper()
+	installLadderSeams(t)
+	prev := renameFile
+	t.Cleanup(func() { renameFile = prev })
+	renameFile = rename
 }
 
 // TestTruncateForResumeRetriesThenFails pins the retry ladder that replaces
@@ -332,7 +348,7 @@ func headedStagedFile(t *testing.T, n int) string {
 // reuse one aside, not accumulate copies.
 func asideFiles(t *testing.T, path string) (media, sidecar string) {
 	t.Helper()
-	all, err := filepath.Glob(path + stagedRestartSuffix + "*")
+	all, err := filepath.Glob(path + StagedRestartSuffix + "*")
 	if err != nil {
 		t.Fatalf("glob aside files: %v", err)
 	}
@@ -481,7 +497,7 @@ func TestStartDiscardStagedPreservesOnlyHeadedRecordings(t *testing.T) {
 				}
 			} else {
 				if media == "" {
-					t.Fatalf("no %s* beside %s — the headed recording was destroyed", path+stagedRestartSuffix, path)
+					t.Fatalf("no %s* beside %s — the headed recording was destroyed", path+StagedRestartSuffix, path)
 				}
 				if got := sizeOf(t, media); got != before {
 					t.Fatalf("aside recording is %d bytes, want %d", got, before)
@@ -500,5 +516,257 @@ func TestStartDiscardStagedPreservesOnlyHeadedRecordings(t *testing.T) {
 				t.Fatalf("CurrentSeq = %d, want 0", got)
 			}
 		})
+	}
+}
+
+// TestRenameStagedFileRetriesTransientRefusals is fix round 3's Concern 2: the
+// aside rename must ride out the same refusal the truncate beside it rides
+// out. A scanner or indexer holding the recording without FILE_SHARE_DELETE
+// makes os.Rename fail with ERROR_SHARING_VIOLATION although nothing is wrong
+// with either path, and failing the run on that first refusal — while
+// truncateForResume waits 1270 ms for the identical error — was an arbitrary
+// difference that cost a spurious failed run.
+//
+// Mutant: a bare os.Rename with no ladder — attempts is 1 and the run fails
+// on a hold that would have cleared.
+func TestRenameStagedFileRetriesTransientRefusals(t *testing.T) {
+	from := filepath.Join(t.TempDir(), "video_stream")
+	to := from + StagedRestartSuffix + "1700000000"
+	if err := os.WriteFile(from, []byte("recording"), 0o644); err != nil {
+		t.Fatalf("seed staged file: %v", err)
+	}
+
+	attempts := 0
+	installRenameSeam(t, func(a, b string) error {
+		attempts++
+		if attempts < 4 {
+			return errSharingViolation
+		}
+		return os.Rename(a, b)
+	})
+
+	if err := renameStagedFile(context.Background(), from, to); err != nil {
+		t.Fatalf("renameStagedFile = %v, want nil once the hold clears", err)
+	}
+	if attempts != 4 {
+		t.Fatalf("attempts = %d, want 4 (three refusals then success)", attempts)
+	}
+	if _, err := os.Stat(to); err != nil {
+		t.Fatalf("aside %s missing (%v)", to, err)
+	}
+}
+
+// TestRenameStagedFileReturnsPermanentErrorImmediately pins the other half of
+// the ladder's contract, identical to the truncate twin: a read-only volume or
+// a missing source is not a hold that clears, so waiting 1270 ms before saying
+// so only delays the job error.
+//
+// Mutant: retrying regardless of the classifier — attempts climbs to 8.
+func TestRenameStagedFileReturnsPermanentErrorImmediately(t *testing.T) {
+	permanent := errors.New("read-only file system")
+
+	attempts := 0
+	installRenameSeam(t, func(string, string) error {
+		attempts++
+		return permanent
+	})
+
+	if err := renameStagedFile(context.Background(), "from", "to"); !errors.Is(err, permanent) {
+		t.Fatalf("renameStagedFile = %v, want the permanent error", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (a permanent error must not be retried)", attempts)
+	}
+}
+
+// TestRenameStagedFileStopsOnContextCancel pins the shutdown behaviour with
+// the REAL pause: a dead context ends the ladder at once instead of sleeping
+// out the remaining seven pauses inside Start while the process is exiting.
+//
+// Mutant: ignoring truncateRetrySleep's error — attempts runs to 8 and the
+// call takes the full ladder.
+func TestRenameStagedFileStopsOnContextCancel(t *testing.T) {
+	attempts := 0
+	prevRename, prevSleep, prevClass := renameFile, truncateRetrySleep, isTransientTruncateError
+	t.Cleanup(func() {
+		renameFile, truncateRetrySleep, isTransientTruncateError = prevRename, prevSleep, prevClass
+	})
+	truncateRetrySleep = utils.Sleep
+	isTransientTruncateError = func(err error) bool { return errors.Is(err, errSharingViolation) }
+	renameFile = func(string, string) error {
+		attempts++
+		return errSharingViolation
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	if err := renameStagedFile(ctx, "from", "to"); !errors.Is(err, errSharingViolation) {
+		t.Fatalf("renameStagedFile = %v, want the last refusal surfaced", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("took %v, want under 100ms (a dead context must end the ladder, not wait it out)", elapsed)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+// TestStartRidesOutATransientRenameRefusal is Concern 2 end to end: the run
+// that used to fail at elapsed=0s with ErrStagedMediaPresent now waits the
+// hold out, sets the recording aside and starts fresh beside it.
+//
+// Mutant: a bare os.Rename in preserveStagedRecording — Start returns
+// ErrStagedMediaPresent and the job fails for a hold that cleared on the
+// third attempt.
+func TestStartRidesOutATransientRenameRefusal(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	const staged = 1 << 20
+	path := headedStagedFile(t, staged)
+	if err := os.WriteFile(path+resumeFileSuffix, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	attempts := 0
+	installRenameSeam(t, func(a, b string) error {
+		attempts++
+		if attempts < 3 {
+			return errSharingViolation
+		}
+		return os.Rename(a, b)
+	})
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       streamURL,
+		OutputFile:    path,
+		DiscardStaged: true,
+		MaxRetries:    1,
+	})
+	if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
+		t.Fatalf("Start = %v, want the transient refusal ridden out, not a failed run", err)
+	}
+	media, _ := asideFiles(t, path)
+	if media == "" {
+		t.Fatalf("no %s* beside %s — the recording was not set aside", path+StagedRestartSuffix, path)
+	}
+	if got := sizeOf(t, media); got != staged {
+		t.Fatalf("aside recording is %d bytes, want %d", got, staged)
+	}
+	if attempts < 3 {
+		t.Fatalf("attempts = %d, want at least 3 (the ladder must have retried)", attempts)
+	}
+}
+
+// TestStartPreservesStagingItCannotClassify is fix round 3's Note 1: the
+// header check cannot tell "unreadable" from "no known magic", and only one of
+// those two guesses is recoverable. A recording the engine could not READ — a
+// share-mode-0 holder, an EIO on a network staging dir, or a file shorter than
+// the eight bytes the check needs — must be preserved, never discarded: the
+// alternative is O_TRUNC over a multi-hour recording the engine merely failed
+// to peek at.
+//
+// Mutant: returning false when the file cannot be read (the round-2
+// behaviour) — no aside is created and the recording is destroyed.
+func TestStartPreservesStagingItCannotClassify(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+
+	for _, tc := range []struct {
+		name string
+		// seed returns the staged path; its bytes are deliberately
+		// unrecognisable, so ONLY the cannot-classify rule can preserve them.
+		seed func(t *testing.T) string
+	}{
+		{
+			name: "unreadable staging",
+			seed: func(t *testing.T) string {
+				path := stagedFile(t, 1<<20) // zeros: readable and unrecognisable
+				prev := openStagedFile
+				t.Cleanup(func() { openStagedFile = prev })
+				openStagedFile = func(string) (*os.File, error) { return nil, errSharingViolation }
+				return path
+			},
+		},
+		{
+			name: "too short to classify",
+			seed: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "video_stream")
+				if err := os.WriteFile(path, []byte{0x00, 0x00, 0x00}, 0o644); err != nil {
+					t.Fatalf("write staged file: %v", err)
+				}
+				return path
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tc.seed(t)
+			before := sizeOf(t, path)
+
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL:       streamURL,
+				OutputFile:    path,
+				DiscardStaged: true,
+				MaxRetries:    1,
+			})
+			if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
+				t.Fatalf("Start = %v, want DiscardStaged to proceed", err)
+			}
+
+			media, _ := asideFiles(t, path)
+			if media == "" {
+				t.Fatalf("no %s* beside %s — staging the engine could not classify was destroyed",
+					path+StagedRestartSuffix, path)
+			}
+			if got := sizeOf(t, media); got != before {
+				t.Fatalf("aside recording is %d bytes, want %d", got, before)
+			}
+			if got := sizeOf(t, path); got != 0 {
+				t.Fatalf("the fresh file is %d bytes, want 0", got)
+			}
+		})
+	}
+}
+
+// TestPreserveClearsAStaleSidecarThatCannotFollow pins the partial-rename
+// state: when the recording moves aside but its sidecar cannot, leaving the
+// sidecar beside the fresh file is a trap — a LATER Start could match those
+// stale offsets against the regrown file and resume-append at the old
+// recording's sequence. The sidecar is unusable by definition here, so it is
+// removed and the fresh start is unambiguous.
+//
+// Mutant: logging the failed sidecar rename and carrying on (the round-2
+// behaviour) — the stale sidecar survives beside a fresh, growing file.
+func TestPreserveClearsAStaleSidecarThatCannotFollow(t *testing.T) {
+	const staged = 1 << 20
+	path := headedStagedFile(t, staged)
+	if err := os.WriteFile(path+resumeFileSuffix, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	installRenameSeam(t, func(a, b string) error {
+		if strings.HasSuffix(a, resumeFileSuffix) {
+			return errors.New("read-only file system") // permanent: no ladder, no move
+		}
+		return os.Rename(a, b)
+	})
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       "http://127.0.0.1:1/videoplayback?itag=140",
+		OutputFile:    path,
+		DiscardStaged: true,
+	})
+	if err := d.preserveStagedRecording(context.Background(), staged); err != nil {
+		t.Fatalf("preserveStagedRecording = %v, want the stale sidecar cleared, not a failed run", err)
+	}
+
+	media, sidecar := asideFiles(t, path)
+	if media == "" {
+		t.Fatal("the recording was not set aside")
+	}
+	if sidecar != "" {
+		t.Fatalf("aside sidecar %s exists, but its rename was supposed to fail", sidecar)
+	}
+	if _, err := os.Stat(path + resumeFileSuffix); err == nil {
+		t.Fatalf("the stale sidecar is still beside the fresh file — a later Start would resume against it")
 	}
 }

@@ -855,7 +855,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 					"file", d.opts.OutputFile, "size", info.Size())
 				return fmt.Errorf("%w: %s holds %d bytes", ErrStagedMediaPresent, d.opts.OutputFile, info.Size())
 			}
-			if preserveErr := d.preserveStagedRecording(info.Size()); preserveErr != nil {
+			if preserveErr := d.preserveStagedRecording(ctx, info.Size()); preserveErr != nil {
 				return preserveErr
 			}
 		}
@@ -953,12 +953,19 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	return d.runDashLoop(ctx)
 }
 
-// stagedRestartSuffix marks a recording Start set aside instead of truncating
+// StagedRestartSuffix marks a recording Start set aside instead of truncating
 // it: <OutputFile>.restart-<unix ts>, with its sidecar alongside as
-// <OutputFile>.restart-<unix ts>.resume.json. The suffix is a contract, not an
-// implementation detail — the worker's unmuxed-part registration and the
-// orphan sweep both key on it.
-const stagedRestartSuffix = ".restart-"
+// <OutputFile>.restart-<unix ts>.resume.json.
+//
+// Exported because it is a cross-package contract, not an implementation
+// detail: package worker keys on it in two places — the orchestrator registers
+// an aside as an unmuxed part, and the orphan sweep recognises one so it is
+// neither deleted nor mistaken for a live staging file. Both must match on
+// this const rather than a hardcoded literal, or the two halves drift.
+//
+// A path carrying this suffix is the RECORDING only when it does not also end
+// in resumeFileSuffix — the sidecar twin shares the timestamped stem.
+const StagedRestartSuffix = ".restart-"
 
 // resumeFileSuffix is the sidecar's name relative to its media file, used both
 // by NewSegmentDownloader's default and by the aside rename above so the two
@@ -969,56 +976,93 @@ const resumeFileSuffix = ".resume.json"
 // The caller has declared it needs a file that begins at the start of the
 // stream, and the engine has already established it cannot resume, so the
 // bytes on disk cannot simply be appended to. They are still not destroyed:
-// anything a muxer can open is renamed to <OutputFile>.restart-<unix ts> (its
-// sidecar too) and the fresh file is opened beside it. Unrecognisable bytes —
-// a bare moof+mdat run from a part that force-started mid-stream, or fewer
-// than eight bytes — are left to the O_TRUNC below, because there is nothing
-// there to preserve.
+// anything that might be muxable is renamed to <OutputFile>.restart-<unix ts>
+// (its sidecar too) and the fresh file is opened beside it. Only bytes the
+// engine has positively READ and found unrecognisable — a bare moof+mdat run
+// from a part that force-started mid-stream — fall through to the O_TRUNC
+// below, because there is genuinely nothing there to preserve.
 //
-// A rename that fails is NOT downgraded to a truncate: the guard's whole
-// promise is that nothing is destroyed implicitly, so the error surfaces and
-// the job stays resumable with everything where it was.
-func (d *SegmentDownloader) preserveStagedRecording(size int64) error {
-	if !stagedRecordingHeaded(d.opts.OutputFile) {
+// Both renames ride the same transient ladder as truncateForResume: the
+// scanner/indexer hold that refuses a truncate refuses a rename the same way
+// (a holder without FILE_SHARE_DELETE), and failing the run at the first
+// refusal while the truncate twenty lines below rides it out for 1270 ms would
+// be an arbitrary difference (fix round 3, Concern 2).
+//
+// A rename that fails permanently is NOT downgraded to a truncate: the guard's
+// whole promise is that nothing is destroyed implicitly, so the error surfaces
+// and the job stays resumable with everything where it was.
+func (d *SegmentDownloader) preserveStagedRecording(ctx context.Context, size int64) error {
+	if !stagedRecordingWorthPreserving(d.opts.OutputFile) {
 		d.logger.Warn("[Downloader] Staged bytes carry no container header — discarding for a fresh start",
 			"file", d.opts.OutputFile, "size", size)
 		return nil
 	}
-	aside := fmt.Sprintf("%s%s%d", d.opts.OutputFile, stagedRestartSuffix, time.Now().Unix())
-	if err := os.Rename(d.opts.OutputFile, aside); err != nil {
+	aside := fmt.Sprintf("%s%s%d", d.opts.OutputFile, StagedRestartSuffix, time.Now().Unix())
+	if err := renameStagedFile(ctx, d.opts.OutputFile, aside); err != nil {
 		d.logger.Error("[Downloader] Could not set the staged recording aside — refusing to truncate it",
 			"file", d.opts.OutputFile, "aside", aside, "err", err)
 		return fmt.Errorf("%w: %s holds %d bytes and could not be set aside: %w",
 			ErrStagedMediaPresent, d.opts.OutputFile, size, err)
 	}
-	// The sidecar belongs with the recording it describes. Best effort: it is
-	// unusable by definition here (that is why this branch was reached), and a
-	// job that never wrote one is the common case.
-	if err := os.Rename(d.opts.ResumeFile, aside+resumeFileSuffix); err != nil && !os.IsNotExist(err) {
-		d.logger.Warn("[Downloader] Staged recording set aside without its resume state",
-			"file", d.opts.ResumeFile, "err", err)
+	if err := d.moveResumeStateAside(ctx, aside); err != nil {
+		return err
 	}
 	d.logger.Warn("[Downloader] Staged recording set aside for a fresh start — mux it from this path if the restart falls short; a first segment that was only partly written may not be muxable on its own",
 		"from", d.opts.OutputFile, "to", aside, "bytes", size)
 	return nil
 }
 
-// stagedRecordingHeaded reports whether path begins with a container header a
-// muxer can open: an MP4/M4A 'ftyp' box, or the Matroska/WebM EBML magic. A
-// capture that began at the start of the stream has one — a manifest-free DASH
-// sq=0 segment carries its ftyp+moov init inline — while a part that
-// force-started mid-stream is a bare moof+mdat run FFmpeg cannot demux on its
-// own. Unreadable, or shorter than the eight bytes the check needs, counts as
-// not headed: there is nothing worth preserving either way.
-func stagedRecordingHeaded(path string) bool {
-	f, err := os.Open(path)
+// moveResumeStateAside sends the sidecar after the recording it describes.
+// When the recording moved but the sidecar cannot follow, leaving it beside
+// the fresh file would be a TRAP rather than a nuisance: this Start already
+// rejected it, but a LATER Start could match the same stale offsets against
+// the regrown file and resume-append at the old recording's sequence. The
+// sidecar is unusable by definition here — that is why this branch was
+// reached — so deleting it loses nothing and is the cheapest way to make the
+// fresh start unambiguous. Only when it can be neither moved nor deleted does
+// the run fail, rather than proceed with a live trap on disk.
+func (d *SegmentDownloader) moveResumeStateAside(ctx context.Context, aside string) error {
+	err := renameStagedFile(ctx, d.opts.ResumeFile, aside+resumeFileSuffix)
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	if rmErr := retryTransientFileOp(ctx, func() error { return os.Remove(d.opts.ResumeFile) }); rmErr != nil && !os.IsNotExist(rmErr) {
+		d.logger.Error("[Downloader] Staged recording set aside but its stale resume state could not be cleared — refusing to start over it",
+			"file", d.opts.ResumeFile, "renameErr", err, "removeErr", rmErr)
+		return fmt.Errorf("%w: stale resume state %s could not be moved or removed: %w",
+			ErrStagedMediaPresent, d.opts.ResumeFile, rmErr)
+	}
+	d.logger.Warn("[Downloader] Staged recording set aside without its resume state; the stale sidecar was removed so the fresh start cannot resume against it",
+		"file", d.opts.ResumeFile, "err", err)
+	return nil
+}
+
+// stagedRecordingWorthPreserving reports whether the bytes at path must be
+// preserved rather than truncated away. It answers "yes" in two cases:
+//
+//   - the file begins with a container header a muxer can open — an MP4/M4A
+//     'ftyp' box, or the Matroska/WebM EBML magic. A capture that began at the
+//     start of the stream has one, because a manifest-free DASH sq=0 segment
+//     carries its ftyp+moov init inline;
+//   - the header could not be read AT ALL. A share-mode-0 holder, an EIO on a
+//     network staging dir or a file shorter than the eight bytes the check
+//     needs all land here, and "cannot tell" must not read as "worthless": the
+//     alternative is destroying a multi-hour recording the engine merely
+//     failed to peek at (fix round 3, Note 1). The cost of guessing wrong is a
+//     small aside file; the cost of the other guess is the recording.
+//
+// It answers "no" only for bytes it positively read and did not recognise — a
+// bare moof+mdat run from a part that force-started mid-stream, which FFmpeg
+// cannot demux on its own.
+func stagedRecordingWorthPreserving(path string) bool {
+	f, err := openStagedFile(path)
 	if err != nil {
-		return false
+		return true
 	}
 	defer f.Close()
 	var hdr [8]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
-		return false
+		return true
 	}
 	if string(hdr[4:8]) == "ftyp" {
 		return true
@@ -1030,20 +1074,36 @@ func stagedRecordingHeaded(path string) bool {
 // On Windows an antivirus scanner or the search indexer briefly holds a
 // freshly written recording open and the truncate is refused with
 // ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION although nothing is wrong
-// with the file; ONLY those refusals are retried, with a growing pause of 10,
-// 20, 40, 80, 160, 320 and 640 ms — 1270 ms across eight attempts. Every other
-// error (a missing file, a directory in its place, a read-only volume, a POSIX
-// EACCES) is permanent and is returned on the FIRST attempt, and the ladder
-// gives up the moment ctx is done rather than sleeping a shutdown out.
+// with the file; ONLY those refusals are retried. Every other error (a missing
+// file, a directory in its place, a read-only volume, a POSIX EACCES) is
+// permanent and is returned on the FIRST attempt.
 //
 // Same shape and same constants as utils.ReplaceFile's rename retry, spelled
-// out here rather than reused because that helper renames and this one
-// truncates. Either way the caller is left with the staged media and its
-// sidecar untouched, so the job stays resumable.
+// out here rather than reused because that helper replaces a target and these
+// callers truncate or rename to a fresh path. Either way the caller is left
+// with the staged media and its sidecar untouched, so the job stays resumable.
 func truncateForResume(ctx context.Context, path string, size int64) error {
+	return retryTransientFileOp(ctx, func() error { return truncateFile(path, size) })
+}
+
+// renameStagedFile moves a staged recording (or its sidecar) aside through the
+// same ladder. The refusal it rides out is the same one truncateForResume
+// rides out — a scanner or indexer holding the file without FILE_SHARE_DELETE
+// makes os.Rename fail with ERROR_SHARING_VIOLATION while nothing is wrong
+// with either path.
+func renameStagedFile(ctx context.Context, from, to string) error {
+	return retryTransientFileOp(ctx, func() error { return renameFile(from, to) })
+}
+
+// retryTransientFileOp is the ladder itself: run op, and on a refusal the
+// platform classifier calls transient, pause and try again — 10, 20, 40, 80,
+// 160, 320 and 640 ms, 1270 ms across eight attempts. A permanent error and a
+// dead ctx both return immediately with the last error, so a caller never
+// waits out a shutdown or a read-only volume.
+func retryTransientFileOp(ctx context.Context, op func() error) error {
 	delay := truncateResumeFirstDelay
 	for attempt := 1; ; attempt++ {
-		err := truncateFile(path, size)
+		err := op()
 		if err == nil || attempt >= truncateResumeAttempts || !isTransientTruncateError(err) {
 			return err
 		}
@@ -1070,13 +1130,19 @@ const (
 	truncateResumeMaxDelay = 400 * time.Millisecond
 )
 
-// Seams for the tests: the truncate itself, the platform classifier and the
-// pause. Production never reassigns them (mirrors utils.ReplaceFile's
-// renameFile / isTransientReplaceError / replaceFileSleep).
+// Seams for the tests: the two file operations the ladder runs, the platform
+// classifier, the pause, and the open behind the header check. Production
+// never reassigns them (mirrors utils.ReplaceFile's renameFile /
+// isTransientReplaceError / replaceFileSleep).
 var (
 	truncateFile             = os.Truncate
+	renameFile               = os.Rename
 	isTransientTruncateError = transientTruncateError
 	truncateRetrySleep       = utils.Sleep
+	// openStagedFile exists so the "cannot read the staged file at all" branch
+	// — a share-mode-0 holder, an EIO on a network staging dir — is reachable
+	// in a test without a platform-specific fixture.
+	openStagedFile = os.Open
 )
 
 // Cancel cancels the download.
