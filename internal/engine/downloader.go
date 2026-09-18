@@ -138,7 +138,10 @@ const (
 // chunk fetch: the fetch is cancelled only after this long with no bytes
 // arriving, so a slow-but-moving transfer runs as long as it keeps
 // progressing (sweep-2 ENGINE-4). Consumers: fetchSegment and fetchChunk in
-// downloader_fetch.go, via withReadProgressDeadline + idleBody.
+// downloader_fetch.go, via withReadProgressDeadline + idleBody, and
+// runDirectDownloadFallback (downloader_direct.go), which streams a whole VOD
+// in ONE response through the same pair — it is that transfer's only bound
+// now that the client-level Timeout is gone (sweep-2 ENGINE-6).
 // ProbeSegmentAvailable (eviction_probe.go) reuses the same value as a plain
 // TOTAL context.WithTimeout — its body is capped at
 // probeSegmentMaxBodyBytes, so there is no slow-transfer case to protect.

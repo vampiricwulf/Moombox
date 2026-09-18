@@ -652,8 +652,10 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 	}
 
 	// 1-byte body; safe to drain so the connection can be reused for the
-	// real chunked download that follows.
-	io.Copy(io.Discard, resp.Body)
+	// real chunked download that follows — but bounded like every other
+	// drain here (sweep-2 ENGINE-14): a server that answers a 1-byte range
+	// with megabytes must not be pulled in full just to reclaim a socket.
+	io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 
 	// Parse Content-Range: bytes 0-0/TOTAL
 	contentRange := resp.Header.Get("Content-Range")
@@ -665,6 +667,32 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 		}
 	}
 
+	return 0
+}
+
+// probeFileSizeWithRetry re-asks for the file size before the caller gives up
+// on Range support. probeFileSize returns 0 for BOTH "this server does not do
+// Range" and "that one request failed", and the caller's answer to 0 is the
+// streaming fallback — so a single transient failure used to cost a resumed
+// VOD its staged bytes and its sidecar (sweep-2 ENGINE-6). Three attempts
+// with a 2 s/4 s backoff (delays.genericRetry, so tests scale it) cost a
+// genuinely non-Range server six seconds, once per download.
+func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) int64 {
+	const attempts = 3
+	for i := range attempts {
+		if size := d.probeFileSize(ctx); size > 0 {
+			return size
+		}
+		if d.isCancelled() || ctx.Err() != nil {
+			return 0
+		}
+		if i < attempts-1 {
+			d.logger.Debug("[Downloader] Range probe returned no size; retrying", "attempt", i+1)
+			if err := utils.Sleep(ctx, d.delays.genericRetry<<i); err != nil {
+				return 0
+			}
+		}
+	}
 	return 0
 }
 

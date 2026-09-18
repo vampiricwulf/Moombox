@@ -48,15 +48,14 @@ func validateDownloadedMP4(path string) error {
 // Uses 5MB chunked Range requests with per-chunk retry and percentage progress.
 // Falls back to streaming download if the server doesn't support Range requests.
 func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
-	// Probe total file size via Range: bytes=0-0
-	totalSize := d.probeFileSize(ctx)
+	// Probe total file size via Range: bytes=0-0, retried so one transient
+	// failure cannot route a resumable download into the streaming fallback.
+	totalSize := d.probeFileSizeWithRetry(ctx)
 
 	if totalSize <= 0 {
-		// Server doesn't support Range requests (or the probe transiently
-		// failed) -- fall back to a streaming download from byte 0.
-		if err := d.discardStagedMedia("Range probe returned no size"); err != nil {
-			return err
-		}
+		// The server really does not support Range requests — stream it.
+		// No reset here: the fallback resumes from d.bytesWritten with its
+		// own Range header and discards only if the server ignores it.
 		return d.runDirectDownloadFallback(ctx)
 	}
 
@@ -98,14 +97,13 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		// file's leading bytes into the middle of the output (doubled/corrupt),
 		// and it's capped at maxIgnoredRangeBodyBytes so it's also truncated.
 		// The probe returned a size, so this is an inconsistent/interleaved
-		// backend — abandon the chunked approach and restart cleanly via the
-		// streaming fallback rather than write byte-0 data at offset>0.
+		// backend — abandon the chunked approach and hand over to the
+		// streaming fallback rather than write byte-0 data at offset>0. No
+		// reset here either: the fallback re-asks with its own Range from
+		// this same offset, and only a second 200 forces the discard.
 		if statusCode == http.StatusOK {
 			d.logger.Warn("[Downloader] direct chunk got 200 (Range ignored) mid-download; restarting via streaming",
 				"offset", offset)
-			if rerr := d.discardStagedMedia("server ignored the Range mid-download"); rerr != nil {
-				return rerr
-			}
 			return d.runDirectDownloadFallback(ctx)
 		}
 
@@ -184,21 +182,50 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 	return nil
 }
 
-// runDirectDownloadFallback is the streaming fallback when Range requests are not supported.
-func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error {
+// runDirectDownloadFallback streams the file when Range chunking is not
+// available. It still SENDS a Range from the resume offset: the fallback used
+// to open at byte 0 unconditionally, so a transient probe failure on a
+// resumed VOD threw the staged bytes away (sweep-2 ENGINE-6). Only a server
+// that answers 200 to that Range — i.e. one that is sending from byte 0 —
+// forces a discard, and that discard is explicit.
+//
+// The whole transfer runs under the same read-progress (idle) deadline the
+// segment and chunk fetches use. It is the only bound this GET has: the
+// client-level Timeout that used to cap it went away with ENGINE-4, and a
+// total deadline is the wrong shape anyway for a multi-GB VOD streamed in one
+// response.
+func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) error {
+	idle := SegmentTimeout
+	ctx, idleTimer, cancel := withReadProgressDeadline(parent, idle)
+	defer cancel()
+
+	offset := d.bytesWritten.Load()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	d.setCommonHeaders(req, uaAndroid)
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("download: %w", err)
+		return idleFetchError(ctx, idle, fmt.Errorf("download: %w", err))
 	}
+	resp.Body = &idleBody{rc: resp.Body, timer: idleTimer, idle: idle}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		// Range honoured — the body continues where the file stops.
+	case http.StatusOK:
+		if offset > 0 {
+			if derr := d.discardStagedMedia("server answered 200 to the resume Range — the body starts at byte 0"); derr != nil {
+				return derr
+			}
+		}
+	default:
 		// Read partial body for diagnostics
 		bodySnippet := make([]byte, 1024)
 		n, _ := resp.Body.Read(bodySnippet)
@@ -213,8 +240,11 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 	buf := make([]byte, 64*1024) // 64KB buffer
 	var lastProgressTime time.Time
 	for {
-		if d.isCancelled() || ctx.Err() != nil {
-			return d.cancelErr(ctx)
+		// The CALLER's context, not the derived one: an idle stall is a
+		// network failure the read below surfaces as such, while a cancel
+		// from above is a shutdown and must stay one.
+		if d.isCancelled() || parent.Err() != nil {
+			return d.cancelErr(parent)
 		}
 
 		n, readErr := resp.Body.Read(buf)
@@ -237,7 +267,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 			break
 		}
 		if readErr != nil {
-			return fmt.Errorf("read: %w", readErr)
+			return idleFetchError(ctx, idle, fmt.Errorf("read: %w", readErr))
 		}
 	}
 
