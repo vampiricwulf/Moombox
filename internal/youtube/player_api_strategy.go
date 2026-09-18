@@ -101,11 +101,17 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 	return withAttestation(info, wp, videoID), nil
 }
 
-// withAttestation stamps the watch page's session verdict and the GVS
-// PO-token content binding onto the VideoInfo being returned. Applied at
-// every GetVideoInfo* return site explicitly — NOT via
+// withAttestation stamps the watch page's session verdict, its chat facts and
+// the GVS PO-token content binding onto the VideoInfo being returned. Applied
+// at every GetVideoInfo* return site explicitly — NOT via
 // mergeWatchPageMetadata, which several early returns skip or call with a nil
 // source.
+//
+// The chat facts ride along here for the same reason the binding does: this is
+// the one function holding BOTH the info and the page, and FetchWatchPage
+// already extracted the continuation, the replay flag and the visitor data on
+// its way through. Throwing them away is what made every chat start fetch that
+// 1-5 MB page a second time (report #56 / YOUTUBE-10).
 //
 // The binding is resolved here, at the one point that holds all three inputs
 // (the experiment flag and datasync ID from ytcfg, the login state from the
@@ -120,6 +126,18 @@ func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *Vide
 		return info
 	}
 	if wp != nil {
+		// Carry the chat facts the page already yielded, so setupChatDownloader
+		// and tryStartEarlyChat do not fetch this 1-5 MB page again moments
+		// from now (report #56 / YOUTUBE-10).
+		info.Chat = ChatSource{
+			FetchedAt:    time.Now(),
+			Continuation: wp.ChatContinuation,
+			IsReplay:     wp.ChatIsReplay,
+			Err:          wp.ChatErr,
+		}
+		if wp.Ytcfg != nil {
+			info.Chat.VisitorData = wp.Ytcfg.VisitorData
+		}
 		// Carry YouTube's own login verdict onto the result. It costs a
 		// string copy and it is the only thing that can tell a dead cookie
 		// file apart from a live session that simply lacks a membership.

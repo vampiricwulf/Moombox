@@ -470,30 +470,29 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 // flag has no reader left, which is harmless — the orchestrator never wires
 // OnFinish itself.
 func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.Job, info *youtube.VideoInfo, onProgress func(chat.ChatProgress)) (*chat.ChatDownloader, *atomic.Bool) {
-	// Fetch watch page to get chat continuation token. One-shot call, so a
-	// snapshot is correct here; the chat downloader below gets a live getter.
+	// The cookie header is only needed for the FALLBACK watch-page fetch.
+	// One-shot call, so a snapshot is correct here; the chat downloader below
+	// gets a live getter.
 	cookieHeader := ""
 	if sp.yt != nil && sp.yt.Auth != nil {
 		cookieHeader = sp.yt.Auth.GetCookieHeader()
 	}
 
-	watchResult, err := youtube.FetchWatchPage(ctx, job.VideoID, cookieHeader)
+	// This site is usually called with a ProbeVideoStatus info (ANDROID_VR, no
+	// watch page), whose Chat is the zero value — so it normally falls back and
+	// behaves exactly as before. When the caller does hold a freshly parsed
+	// page (a full fetch's VideoInfo), the carried source saves the second
+	// 1-5 MB download.
+	src, err := chatSourceFor(ctx, info, job.VideoID, cookieHeader)
 	if err != nil {
 		sp.logger.Debug("failed to fetch watch page for early chat", "err", err, "videoID", job.VideoID)
 		return nil, nil
 	}
-
-	continuation := watchResult.ChatContinuation
-	isReplay := watchResult.ChatIsReplay
-	if continuation == "" {
-		sp.logger.Debug("no chat continuation for early chat", "videoID", job.VideoID, "err", watchResult.ChatErr)
+	if src.Continuation == "" {
+		sp.logger.Debug("no chat continuation for early chat", "videoID", job.VideoID, "err", src.Err)
 		return nil, nil
 	}
-
-	visitorData := ""
-	if watchResult.Ytcfg != nil {
-		visitorData = watchResult.Ytcfg.VisitorData
-	}
+	continuation, isReplay, visitorData := src.Continuation, src.IsReplay, src.VisitorData
 
 	// Create staging dir for early chat output (matches TypeScript behavior)
 	var stagingBase string

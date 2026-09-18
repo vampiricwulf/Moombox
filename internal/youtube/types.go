@@ -1,7 +1,10 @@
 // Package youtube provides YouTube Innertube API integration.
 package youtube
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // StreamStatus indicates the current state of a YouTube video.
 type StreamStatus string
@@ -86,6 +89,10 @@ type VideoInfo struct {
 	// cause instead of always to "your cookies expired".
 	SessionAuth SessionAuthState `json:"-"`
 
+	// Chat carries what the watch page already said about live chat, so chat
+	// setup does not fetch that page a second time. In-process hand-off only.
+	Chat ChatSource `json:"-"`
+
 	// FormatDiag records what this info's format list LOST on the way here
 	// (see FormatDiag). Diagnostic only — nothing downloads differently
 	// because of it — but it is what distinguishes "this client was forced
@@ -113,6 +120,43 @@ type VideoInfo struct {
 	// "day" (microformat uploadDate/publishDate fallback). Empty when
 	// PublishedAt is empty.
 	PublishedPrecision string `json:"publishedPrecision,omitempty"`
+}
+
+// ChatSource carries the chat-setup facts the WATCH PAGE this VideoInfo was
+// extracted from already yielded. FetchWatchPage extracts them on every call
+// and the strategies used to discard them, so both chat-start sites paid for a
+// SECOND 1-5 MB authenticated page moments after the first.
+//
+// The zero value means "no page was parsed for this info" — which is exactly
+// what a cookieless ANDROID_VR probe returns — and a consumer must fall back
+// to FetchWatchPage then.
+type ChatSource struct {
+	// FetchedAt is when the page was fetched. A continuation is short-lived,
+	// so a consumer checks Usable rather than trusting the token forever.
+	FetchedAt time.Time
+	// Continuation is the chat continuation token. Empty means the page had
+	// no chat.
+	Continuation string
+	// IsReplay says which chat endpoint the token belongs to.
+	IsReplay bool
+	// Err is why extraction failed, for the consumer's debug log. Non-nil with
+	// an empty Continuation means "no chat available" with context.
+	Err error
+	// VisitorData is the page's own visitor data, which the chat poller sends
+	// as X-Goog-Visitor-Id.
+	VisitorData string
+}
+
+// chatSourceMaxAge bounds how long a carried continuation is trusted. Short,
+// because the token is short-lived; generous enough to cover the gap between
+// GetVideoInfo and the orchestrator actually starting chat. Past it the
+// consumer re-fetches, which is the old behaviour.
+const chatSourceMaxAge = 2 * time.Minute
+
+// Usable reports whether this source is recent enough to start a chat
+// downloader from without re-fetching the watch page.
+func (c ChatSource) Usable() bool {
+	return c.Continuation != "" && !c.FetchedAt.IsZero() && time.Since(c.FetchedAt) <= chatSourceMaxAge
 }
 
 // FormatDiag records why a client's format list came out the size it did.

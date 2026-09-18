@@ -132,3 +132,30 @@ func TestIsNonEmptyJSONObjectRejectsTheTrivialShapes(t *testing.T) {
 		}
 	}
 }
+
+// TestIsNonEmptyJSONBodyDoesNotValidate pins the split behind row #60. The
+// emptiness half is load-bearing on its own — `{}` scans and decodes
+// perfectly well, so without it a forged empty object wins the search exactly
+// as a forged non-object cannot — but the json.Valid scan is a SECOND full
+// pass over a multi-megabyte literal whose caller is about to decode it
+// anyway.
+//
+// Mutants this kills:
+//   - IsNonEmptyJSONBody still calling json.Valid → the malformed case fails
+//   - the emptiness check dropped                  → the "{}" case fails
+func TestIsNonEmptyJSONBodyDoesNotValidate(t *testing.T) {
+	if IsNonEmptyJSONBody([]byte(`{}`)) {
+		t.Error("an empty object was accepted")
+	}
+	if IsNonEmptyJSONBody([]byte(`{`)) {
+		t.Error("a one-byte fragment was accepted")
+	}
+	if !IsNonEmptyJSONBody([]byte(`{"a":1}`)) {
+		t.Error("a real object was rejected")
+	}
+	// Deliberately malformed: the caller's typed decode is what rejects this
+	// now, so this predicate must NOT.
+	if !IsNonEmptyJSONBody([]byte(`{"a":}`)) {
+		t.Error("IsNonEmptyJSONBody validated the body — that is the decode's job now")
+	}
+}

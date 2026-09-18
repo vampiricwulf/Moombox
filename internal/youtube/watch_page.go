@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -613,8 +614,8 @@ type chatContinuationData struct {
 // drop the raw page before returning. json.Unmarshal allocates fresh strings,
 // so the returned token does not alias the page's backing array.
 //
-// The blob is located by extractYtInitialData (channel_membership.go), the
-// same brace-depth scan the membership path uses — which drops the old
+// The blob is located by extractYtInitialDataInto (channel_membership.go),
+// the same brace-depth scan the membership path uses — which drops the old
 // regex's `;</script>` terminator while keeping its two anchored assignment
 // spellings. A page-authored assignment CAN present itself as a candidate —
 // e.g. a page-authored `var ytInitialData = {}` — but since the 2026-09-15
@@ -636,13 +637,35 @@ type chatContinuationData struct {
 // renderers the map decode cost 32,593 allocations to read one string, and it
 // is linear in page size.
 func extractChatContinuation(page []byte) (string, bool, error) {
-	raw, ok := extractYtInitialData(page)
-	if !ok {
+	// The envelope decode IS the candidate acceptance now (report #60 /
+	// YOUTUBE-15). json.Valid answered the same question with a second full
+	// pass over the multi-megabyte literal — a third, really, since
+	// json.Unmarshal validates the whole input itself before decoding
+	// anything.
+	//
+	// A SYNTAX error is precisely what json.Valid rejected, so it is what
+	// rejects a candidate here. A TYPE error is NOT: encoding/json records the
+	// first one and keeps decoding, and the four partial-decode rows of
+	// TestExtractChatContinuationShapes — plus the "renderer absent and the
+	// envelope decode errored" row, which needs the error, not a skip — are
+	// exactly the candidates the old acceptance let through. Rejecting them
+	// here would search on past the real document and lose both the token and
+	// the diagnosis.
+	var env watchNextChatEnvelope
+	var err error
+	if !extractYtInitialDataInto(page, func(obj []byte) bool {
+		var cand watchNextChatEnvelope
+		decodeErr := json.Unmarshal(obj, &cand)
+		var syntaxErr *json.SyntaxError
+		if errors.As(decodeErr, &syntaxErr) {
+			return false
+		}
+		env, err = cand, decodeErr
+		return true
+	}) {
 		return "", false, fmt.Errorf("ytInitialData not found")
 	}
 
-	var env watchNextChatEnvelope
-	err := json.Unmarshal(raw, &env)
 	rendererRaw := env.Contents.TwoColumnWatchNextResults.ConversationBar.LiveChatRenderer
 	if len(rendererRaw) == 0 || string(rendererRaw) == "null" {
 		if err != nil {

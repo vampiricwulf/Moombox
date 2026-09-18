@@ -133,3 +133,25 @@ func IsNonEmptyJSONObject(obj []byte) bool {
 	// obj always comes from ScanBalancedJSONObject, so it is at least `{}`.
 	return len(bytes.TrimSpace(obj[1:len(obj)-1])) > 0 && json.Valid(obj)
 }
+
+// IsNonEmptyJSONBody is IsNonEmptyJSONObject without the json.Valid scan: it
+// checks ONLY that the literal has something between its braces.
+//
+// For a caller that decodes the literal into a typed envelope immediately
+// afterwards, the decode IS the validity test — json.Unmarshal runs the very
+// same check over the whole input before it decodes anything — and json.Valid
+// is therefore a second full pass over a multi-megabyte literal (measured at
+// ~3 ms of an 18 ms chat-continuation extraction on a 4.7 MB page).
+// extractPlayerResponse has always worked this way. The emptiness half stays:
+// `{}` scans and decodes perfectly well, so without it a forged empty object
+// would win the search exactly as a forged non-object cannot.
+//
+// A caller that does NOT decode afterwards must keep using
+// IsNonEmptyJSONObject.
+func IsNonEmptyJSONBody(obj []byte) bool {
+	if len(obj) < 2 {
+		return false
+	}
+	// obj always comes from ScanBalancedJSONObject, so it is at least `{}`.
+	return len(bytes.TrimSpace(obj[1:len(obj)-1])) > 0
+}
