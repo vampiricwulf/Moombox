@@ -926,10 +926,23 @@ func (s *runState) runTUI() {
 	})
 
 	// Wire BotGuard sidecar liveness to the TUI (program.Send, like
-	// connectivity above). SubscribeHealth calls back immediately with the
-	// current snapshot, so a TUI started after a dead sidecar still draws the
-	// alert; a process with the sidecar disabled published nothing and gets no
-	// callback at all, which is why the bar stays quiet there.
+	// connectivity above).
+	//
+	// The snapshot that ALREADY exists is seeded into the model first, and not
+	// through the subscription's immediate callback: app.Send is a no-op until
+	// tui.Run stores the program a few lines below, and initServices has
+	// published this health long before now (on a failed first start, and
+	// again from the supervisor a moment later). Without the seed the dominant
+	// failure — a sidecar that cannot start at all — would draw nothing at
+	// all, because the only later publish is the Healthy:true of a restart
+	// that never comes. A process with the sidecar disabled published nothing,
+	// CurrentHealth reports !ok, and the bar stays quiet, which is right.
+	if h, ok := sidecar.CurrentHealth(); ok {
+		app.SetSidecarDown(!h.Healthy)
+	}
+	// Then the subscription for every later transition. Its immediate callback
+	// re-sends the snapshot just seeded; that Send is dropped, which is
+	// harmless — it carries the same value.
 	unsubSidecarTUI := sidecar.SubscribeHealth(func(h sidecar.Health) {
 		app.Send(tui.SidecarStatusMsg{Healthy: h.Healthy})
 	})

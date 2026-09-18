@@ -732,6 +732,17 @@ func (a *App) SetInternalToken(token string) {
 	a.internalToken = token
 }
 
+// SetSidecarDown seeds the status bar's BotGuard sidecar alert before Run.
+//
+// The subscription in cmd/moombox carries every later transition through
+// SidecarStatusMsg, but its immediate first snapshot lands before tui.Run has
+// stored the program, and Send is a no-op until then. The state that already
+// exists at TUI start therefore has to come in through the model, like every
+// other pre-run Set* on this type.
+func (a *App) SetSidecarDown(down bool) {
+	a.statusBar.sidecarDown = down
+}
+
 // SetConfig provides the config reference for the settings panel.
 func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.cfg = cfg

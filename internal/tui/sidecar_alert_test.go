@@ -64,3 +64,40 @@ func TestSidecarStatusMsgReachesTheBar(t *testing.T) {
 		t.Error("SidecarStatusMsg{Healthy:true} did not clear the status bar flag")
 	}
 }
+
+// TestSetSidecarDownSeedsTheBarBeforeRun pins the OTHER half of the wiring:
+// the state that already exists when the TUI starts.
+//
+// cmd/moombox publishes the sidecar's health during initServices — on a failed
+// first start, and again from the supervisor within microseconds — long before
+// main reaches runTUI. SubscribeHealth calls back immediately with that
+// snapshot, but Send is a documented no-op until tui.Run stores the program,
+// so that callback is thrown away: in the dominant case (a sidecar that cannot
+// start at all) the only later publish is the Healthy:true of a restart that
+// never happens, and the bar would stay quiet forever. The first assertion
+// below is that no-op, asserted rather than assumed, because it is the whole
+// reason the seeding setter exists.
+//
+// Mutants this kills:
+//   - SetSidecarDown made a no-op (the seed dropped) → the bar stays quiet
+//   - SetSidecarDown writing the raw bool instead of the down-ness → the
+//     healthy case draws the alert
+func TestSetSidecarDownSeedsTheBarBeforeRun(t *testing.T) {
+	a := NewApp()
+
+	a.Send(SidecarStatusMsg{Healthy: false})
+	if a.statusBar.sidecarDown {
+		t.Fatal("Send before Run reached the model — if that ever becomes true, this seeding path is unnecessary and the subscription alone would do")
+	}
+
+	a.SetSidecarDown(true)
+	a.statusBar.SetWidth(200)
+	if got := stripANSI(a.statusBar.View()); !strings.Contains(got, "SIDECAR DOWN") {
+		t.Errorf("a sidecar-down seeded before Run never reached the bar: %q", got)
+	}
+
+	a.SetSidecarDown(false)
+	if got := stripANSI(a.statusBar.View()); strings.Contains(got, "SIDECAR DOWN") {
+		t.Errorf("seeding a healthy sidecar drew the alert anyway: %q", got)
+	}
+}

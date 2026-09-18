@@ -155,8 +155,9 @@ func (s *Supervisor) nextRung() int {
 }
 
 // restartLoop retries Restart on the ladder until it succeeds, beginning at
-// startAttempt (the rung Run carried in). Returns false only when ctx ended or
-// the handle is terminally stopped — the two cases Run must stop on.
+// startAttempt (the rung Run carried in). Returns false when ctx ended, and
+// when the sidecar was stopped for good (Restart reported ErrStopped) — the
+// two cases Run must stop on. Every other error is transient and climbs a rung.
 func (s *Supervisor) restartLoop(ctx context.Context, reason string, startAttempt int) bool {
 	for attempt := startAttempt; ; attempt++ {
 		rung := s.cfg.Backoff[min(attempt, len(s.cfg.Backoff)-1)]

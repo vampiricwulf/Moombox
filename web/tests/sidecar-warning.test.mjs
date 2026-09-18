@@ -59,3 +59,34 @@ test("a healthy sidecar raises nothing, and so does a payload without the key", 
   // -> a sidecar-disabled install shows a permanent warning.
   assert.deepEqual(warningLabels(absent.document), []);
 });
+
+test("the warning clears on recovery, on the same dashboard", { skip }, async () => {
+  // One app instance on purpose. The two tests above each build their own, so
+  // between them they never exercise a TRANSITION — and a sticky
+  // implementation (`if (this.sidecarHealthy !== false) this.sidecarHealthy = …`)
+  // passes both while leaving a recovered install showing a permanent alert.
+  // Recovery is the half the spec names explicitly: the supervisor's restart
+  // is only visible as the warning going away.
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/status": { version: "test", botguardSidecar: { healthy: false, reason: "stdout EOF", restarts: 0 } },
+    },
+  });
+
+  await h.app.loadStatus();
+  assert.deepEqual(warningLabels(h.document), ["PO tokens: sidecar down"]);
+
+  // The supervisor got it back: same dashboard, same route, new payload.
+  h.http.on("GET /api/status", { version: "test", botguardSidecar: { healthy: true, reason: "", restarts: 1 } });
+  await h.app.loadStatus();
+
+  // Mutant: sidecarHealthy assigned only while it is not already false
+  // -> the label is still there after the restart succeeded.
+  assert.deepEqual(warningLabels(h.document), []);
+
+  // And the mobile icon goes with it — its own branch, its own mutant
+  // (the `else` that clears title/dataset dropped).
+  const icon = h.document.getElementById("status-warnings-icon");
+  assert.ok(!icon.classList.contains("active"), "the mobile warning icon stayed active after recovery");
+  assert.equal(icon.title, "");
+});

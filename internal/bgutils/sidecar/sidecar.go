@@ -132,9 +132,12 @@ type Sidecar struct {
 	// stateMu guards the two fields Stop must reach WITHOUT waiting for
 	// lifecycleMu. That is what lets a Stop cancel a Restart already inside
 	// Start instead of queueing behind its whole StartupTimeout budget.
-	stateMu       sync.Mutex
-	stopped       bool               // Stop() was called; terminal
-	restartCancel context.CancelFunc // cancels the in-flight Restart, if any
+	stateMu sync.Mutex
+	stopped bool // Stop() was called; terminal
+	// Cancels the RUNNING Restart, if any — registered under lifecycleMu and
+	// cleared before it is released, so a Restart merely queued for that lock
+	// can never displace the one Stop has to cancel.
+	restartCancel context.CancelFunc
 
 	// start is a test seam for the one transition a unit test cannot run (it
 	// spawns Node). Production leaves it as startLocked.
@@ -197,6 +200,14 @@ func (s *Sidecar) Start(ctx context.Context) error {
 // on the mutex, and worse, it would latch the terminal stopped flag and make
 // every future supervisor restart a no-op.
 func (s *Sidecar) startLocked(ctx context.Context) error {
+	// The terminal latch, not just the live child. teardownLocked ends by
+	// clearing s.cmd, so the guard below alone would let a Start after a real
+	// Stop extract, spawn and hand-shake a Node child that nothing supervises
+	// and nothing reaps. Restart already latches before it reaches here, so
+	// this costs one atomic read on the one path that can still be wrong.
+	if s.isStopped() {
+		return ErrStopped
+	}
 	if s.cmd != nil {
 		return errors.New("sidecar: already started")
 	}
@@ -444,6 +455,24 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 	rctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Cheap entry check off the lifecycle mutex: a Restart that arrives after
+	// shutdown gives up without queueing behind anything.
+	if s.isStopped() {
+		return ErrStopped
+	}
+
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	// Register the cancel only once THIS Restart is the one running. Doing it
+	// before the lock let a second, queued Restart overwrite the running one's
+	// cancel, and its deferred clear (which ran after the unlock, LIFO) then
+	// wiped the survivor's — leaving Stop with nothing to cancel and a whole
+	// startup budget to wait out on lifecycleMu.
+	//
+	// The latch is re-read inside the same stateMu section that registers, so
+	// this is atomic against Stop's latch-then-read: either Stop sees this
+	// cancel, or this sees Stop's latch and never reaches start.
 	s.stateMu.Lock()
 	if s.stopped {
 		s.stateMu.Unlock()
@@ -451,20 +480,14 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 	}
 	s.restartCancel = cancel
 	s.stateMu.Unlock()
+	// Registered AFTER defer s.lifecycleMu.Unlock(), so LIFO runs it FIRST:
+	// the slot is cleared while this Restart still holds the lifecycle lock,
+	// before any queued Restart can put its own cancel there.
 	defer func() {
 		s.stateMu.Lock()
 		s.restartCancel = nil
 		s.stateMu.Unlock()
 	}()
-
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-
-	// Stop takes stateMu first and lifecycleMu second, so it can have latched
-	// and finished its teardown between the two locks above.
-	if s.isStopped() {
-		return ErrStopped
-	}
 
 	// teardownLocked is idempotent and, when a child existed, waits for both
 	// pumps — so afterwards nothing else touches the fields reset below.
@@ -488,6 +511,14 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 	s.pendingMu.Unlock()
 
 	if err := s.start(rctx); err != nil {
+		// Stop cancelled rctx: the start did not fail, it was called off. The
+		// raw context error would read as a transient failure to the
+		// supervisor — a spurious "restart failed" Warn on an ordinary
+		// shutdown, and one more ladder rung burnt against a handle that can
+		// never come back.
+		if s.isStopped() {
+			return ErrStopped
+		}
 		return err
 	}
 

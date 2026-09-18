@@ -159,3 +159,177 @@ func TestSupervisorStopsRetryingAStoppedSidecar(t *testing.T) {
 		t.Errorf("Restart attempts = %d, want 1 — ErrStopped is terminal", attempts)
 	}
 }
+
+// TestStartAfterStopIsRefused: Stop is terminal, and teardownLocked ends by
+// clearing s.cmd — so startLocked's `s.cmd != nil` guard alone would let a
+// Start arriving after a real Stop extract the blobs, spawn a Node child and
+// hand-shake it, with no supervisor left to reap it. Consulting the latch is
+// what closes that door, and it costs nothing: Restart already latches before
+// it reaches this seam.
+//
+// Told apart by error IDENTITY against a deliberately unusable cache dir:
+// ErrStopped means startLocked returned before it touched the disk at all,
+// anything else means it ran the whole start path anyway.
+//
+// Mutant this kills: the isStopped() check dropped from startLocked → the
+// error is the cache-dir failure, not ErrStopped.
+func TestStartAfterStopIsRefused(t *testing.T) {
+	s := New(Config{Logger: silentLogger{}, CacheDir: string([]byte{0})})
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop on a never-started sidecar = %v, want nil", err)
+	}
+	if err := s.Start(context.Background()); !errors.Is(err, ErrStopped) {
+		t.Fatalf("Start after Stop = %v, want ErrStopped", err)
+	}
+	if s.IsHealthy() {
+		t.Error("IsHealthy() is true after a refused Start")
+	}
+}
+
+// TestAQueuedRestartCannotStealStopsCancel: the cancel Stop reaches for must
+// belong to the Restart that is RUNNING. Registering it before lifecycleMu is
+// taken means a second, queued Restart overwrites the running one's — and then
+// Stop cancels a restart that is only waiting for a mutex while the one
+// actually inside start keeps the lock for its whole startup budget. Stop then
+// queues behind it, which is precisely the minute-long shutdown stall the
+// split-lock design exists to avoid.
+//
+// The settle window below is a mutant-side aid only: there is no observable
+// "queued on lifecycleMu" signal, so R2 is given time to reach that point. If
+// it somehow has not, this test passes for the wrong reason — it can never
+// fail for one, because the fixed code's Stop does not depend on the timing at
+// all.
+//
+// Mutant this kills: the restartCancel registration moved back above
+// s.lifecycleMu.Lock() → Stop blocks behind R1's start and the 2 s bound fires.
+func TestAQueuedRestartCannotStealStopsCancel(t *testing.T) {
+	s := New(Config{Logger: silentLogger{}})
+
+	entered := make(chan struct{})
+	var enteredOnce sync.Once
+	s.start = func(ctx context.Context) error {
+		enteredOnce.Do(func() { close(entered) })
+		// What a real startLocked does here: block on the ready handshake,
+		// which is derived from the context it was handed.
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	// Bounded parents so a MUTANT run unwinds instead of wedging the test
+	// binary: once R2 has displaced R1's entry, nothing else can cancel R1.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel1()
+	r1 := make(chan error, 1)
+	go func() { r1 <- s.Restart(ctx1) }()
+	<-entered // R1 now holds lifecycleMu and is inside start
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	r2 := make(chan error, 1)
+	go func() { r2 <- s.Restart(ctx2) }()
+	time.Sleep(100 * time.Millisecond) // see the settle note above
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- s.Stop() }()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop blocked behind the running Restart: a queued Restart had displaced the cancel Stop reaches for")
+	}
+
+	for _, c := range []struct {
+		name string
+		ch   chan error
+	}{{"the running Restart", r1}, {"the queued Restart", r2}} {
+		select {
+		case err := <-c.ch:
+			if !errors.Is(err, ErrStopped) {
+				t.Errorf("%s = %v, want ErrStopped", c.name, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("%s never returned after Stop", c.name)
+		}
+	}
+}
+
+// TestAStopCancelledRestartReportsErrStopped: a restart that Stop cancelled is
+// not a transient failure to retry — the handle is terminal. Reporting the raw
+// context error instead makes the supervisor log "BotGuard sidecar restart
+// failed" on a perfectly ordinary shutdown and burn one more ladder rung
+// against a handle that can never come back.
+//
+// Driven through a real Supervisor rather than by reading Restart's return,
+// because the rung and the Warn are the consequences that matter.
+//
+// Mutant this kills: `return err` instead of the isStopped() re-check after
+// start → attempts == 2 and one spurious Warn.
+func TestAStopCancelledRestartReportsErrStopped(t *testing.T) {
+	resetHealth(t)
+
+	s := New(Config{Logger: silentLogger{}})
+	entered := make(chan struct{})
+	var enteredOnce sync.Once
+	s.start = func(ctx context.Context) error {
+		enteredOnce.Do(func() { close(entered) })
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	log := &warnCountingLogger{}
+	var attempts int // touched only on the Run goroutine; read after it ends
+	sup := NewSupervisor(SupervisorConfig{
+		Logger: log,
+		Restart: func(ctx context.Context) error {
+			attempts++
+			return s.Restart(ctx)
+		},
+	})
+	sup.sleep = func(context.Context, time.Duration) {}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); sup.Run(ctx) }()
+	sup.Notify("stdout EOF")
+	<-entered
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop during an in-flight restart = %v, want nil", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the supervisor kept climbing the ladder after Stop cancelled its restart")
+	}
+	if attempts != 1 {
+		t.Errorf("Restart attempts = %d, want 1 — a Stop-cancelled restart is terminal, not transient", attempts)
+	}
+	if n := log.warnCount(); n != 0 {
+		t.Errorf("the supervisor logged %d Warn(s) during shutdown, want 0 — a cancelled restart is not a failure", n)
+	}
+}
+
+// warnCountingLogger is silentLogger with a counted Warn: the spurious
+// "restart failed" Warn during shutdown is half of what Finding 7 is about,
+// and silentLogger cannot see it.
+type warnCountingLogger struct {
+	mu    sync.Mutex
+	warns int
+}
+
+func (l *warnCountingLogger) Debug(string, ...any) {}
+func (l *warnCountingLogger) Info(string, ...any)  {}
+func (l *warnCountingLogger) Error(string, ...any) {}
+func (l *warnCountingLogger) Warn(string, ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns++
+}
+
+func (l *warnCountingLogger) warnCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.warns
+}

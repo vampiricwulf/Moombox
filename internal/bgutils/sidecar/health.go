@@ -90,6 +90,13 @@ func SubscribeHealth(fn func(Health)) (unsubscribe func()) {
 	}
 }
 
+// callHealthSub isolates one subscriber from the publisher. The silence is
+// DELIBERATE: this package has no logger of its own (Sidecar and Supervisor
+// each carry the caller's), and the subscribers are one-line projections —
+// cmd/moombox's app.Send and the status setter beside it — so the only panic
+// reachable here is a nil program pointer or a nil callback, neither of which
+// a log line would help anyone diagnose. What matters is that a bad subscriber
+// cannot take the supervisor loop or a startup path down with it.
 func callHealthSub(p *func(Health), h Health) {
 	defer func() { _ = recover() }()
 	(*p)(h)
