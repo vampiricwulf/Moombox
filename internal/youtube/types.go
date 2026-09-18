@@ -137,6 +137,22 @@ type Format struct {
 	Source          string `json:"source,omitempty"`
 	AuthLevel       *int   `json:"authLevel,omitempty"`
 
+	// AudioTrackID is `audioTrack.id` — the per-language identity of a dubbed
+	// audio rendition ("en.4", "ja.3"). Two thirds of upstream's stream
+	// identity live here and in IsDrc: a dubbed video lists SEVERAL itag-140
+	// entries from the same client that differ only by this field.
+	AudioTrackID string `json:"audioTrackId,omitempty"`
+	// AudioTrackName is `audioTrack.displayName`. The only place upstream can
+	// read "original" or "descriptive" from, so it is what ranks the tracks.
+	AudioTrackName string `json:"audioTrackName,omitempty"`
+	// AudioIsDefault mirrors `audioTrack.audioIsDefault` — YouTube's own pick
+	// for this viewer, upstream's DEFAULT_LANG_VALUE.
+	AudioIsDefault bool `json:"audioIsDefault,omitempty"`
+	// IsDrc marks a Dynamic Range Compression (loudness-normalised) rendition.
+	// A separate STREAM upstream, not a variant of the clean one, so it must
+	// not evict its twin — and the clean one is preferred when both exist.
+	IsDrc bool `json:"isDrc,omitempty"`
+
 	// EncryptedSig is the `s` field from a signatureCipher entry, captured
 	// at parse-time and decrypted on demand by cipher.ResolveFormatURL.
 	// Empty when the format originated from a direct URL response (no sig

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -950,5 +951,88 @@ func TestParsePlayerResponseKeepsAResponseWithNoVideoID(t *testing.T) {
 	matching := decodePlayerJSON(t, `{"playabilityStatus": {"status": "OK"}, "videoDetails": {"videoId": "REQUESTEDvid", "title": "t"}}`)
 	if _, err := p.parsePlayerResponse(context.Background(), matching, "", nil, "REQUESTEDvid"); err != nil {
 		t.Fatalf("a matching videoId was rejected: %v", err)
+	}
+}
+
+// TestParseFormatsSkipsDRMAndKeepsTrackIdentity pins both halves of upstream's
+// format identity. DRM formats are dropped at parse — yt-dlp reports them as
+// skipped (_video.py:3418-3426, the tv-client DRM experiment, issue #12563)
+// and YoutubeDL.py:2930 filters them out — because muxing encrypted samples
+// produces an unplayable archive. The three track fields are kept because
+// they are two thirds of upstream's stream identity.
+//
+// Mutants this kills:
+//   - drmFamilies ignored        → the DRM itag 137 survives
+//   - audioTrack not parsed      → AudioTrackID is ""
+//   - isDrc not parsed           → IsDrc is false for the DRC entry
+func TestParseFormatsSkipsDRMAndKeepsTrackIdentity(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	sd := decodePlayerJSON(t, `{"adaptiveFormats": [
+		{"itag": 137, "url": "https://tv/v-drm", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080, "drmFamilies": ["WIDEVINE"]},
+		{"itag": 136, "url": "https://tv/v-clean", "mimeType": "video/mp4; codecs=\"avc1.4d401f\"", "width": 1280, "height": 720},
+		{"itag": 140, "url": "https://tv/a-orig", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "audioTrack": {"id": "en.4", "displayName": "English original", "audioIsDefault": true}},
+		{"itag": 140, "url": "https://tv/a-drc", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "isDrc": true, "audioTrack": {"id": "en.4", "displayName": "English original", "audioIsDefault": true}}
+	]}`)
+
+	formats := p.parseFormats(sd)
+
+	for _, f := range formats {
+		if f.Itag == 137 {
+			t.Errorf("a DRM-protected format survived parse: %+v", f)
+		}
+	}
+	var orig, drc *Format
+	for i := range formats {
+		switch {
+		case formats[i].Itag == 140 && formats[i].IsDrc:
+			drc = &formats[i]
+		case formats[i].Itag == 140:
+			orig = &formats[i]
+		}
+	}
+	if orig == nil || drc == nil {
+		t.Fatalf("want both itag-140 renditions, got %+v", formats)
+	}
+	if orig.AudioTrackID != "en.4" || orig.AudioTrackName != "English original" || !orig.AudioIsDefault {
+		t.Errorf("track fields = %+v, want id en.4 / name \"English original\" / default true", orig)
+	}
+	if drc.IsDrc != true {
+		t.Errorf("the isDrc rendition parsed with IsDrc=false: %+v", drc)
+	}
+}
+
+// TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity pins get_stream_id
+// (_video.py:3396-3397). Keying on itag alone silently discards every dubbed
+// track but the first-listed one — the more reachable half of the row,
+// because both entries come from the SAME client at the SAME auth level.
+//
+// Mutants this kills:
+//   - keying on itag alone       → only one itag-140 survives
+//   - dropping isDrc from the key → the DRC rendition evicts the clean one
+//   - dropping audioTrackID      → the ja dub evicts the en original
+func TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity(t *testing.T) {
+	lvl := AuthLevelTVAuth
+	mk := func(track string, drc bool, url string) Format {
+		return Format{Itag: 140, URL: url, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"",
+			AudioTrackID: track, IsDrc: drc, Source: "tv_auth", AuthLevel: &lvl}
+	}
+	pool := []Format{
+		mk("en.4", false, "https://x/en"),
+		mk("ja.3", false, "https://x/ja"),
+		mk("en.4", true, "https://x/en-drc"),
+	}
+
+	got := deduplicateFormats(pool)
+	if len(got) != 3 {
+		t.Fatalf("dedup kept %d of 3 distinct streams: %+v", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, f := range got {
+		seen[f.AudioTrackID+"/"+fmt.Sprint(f.IsDrc)] = true
+	}
+	for _, want := range []string{"en.4/false", "ja.3/false", "en.4/true"} {
+		if !seen[want] {
+			t.Errorf("dedup dropped the %s rendition: %+v", want, got)
+		}
 	}
 }

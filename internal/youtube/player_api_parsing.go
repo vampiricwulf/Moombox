@@ -277,6 +277,7 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 	}
 
 	var formats []Format
+	drmSkipped := 0
 	// adaptiveFormats is iterated first so that when an itag appears in both
 	// arrays the DASH/adaptive entry lands in the pool first and wins the
 	// same-auth-level tiebreak in deduplicateFormats. adaptiveFormats carry
@@ -291,6 +292,18 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 		for _, item := range arr {
 			f, ok := item.(map[string]any)
 			if !ok {
+				continue
+			}
+
+			// DRM formats are dropped rather than ranked. yt-dlp reports them
+			// as skipped (_video.py:3418-3426 — an account-level experiment
+			// applies DRM to ALL videos on the tv client, issue #12563) and
+			// YoutubeDL.py:2930 filters them out, because muxing encrypted
+			// samples produces an unplayable archive. Dropping here rather
+			// than in the selector means a clean same-itag format from
+			// another client still wins the dedup tie it used to LOSE.
+			if drm, ok := f["drmFamilies"].([]any); ok && len(drm) > 0 {
+				drmSkipped++
 				continue
 			}
 
@@ -350,8 +363,20 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 				format.TargetDurationSec = td
 			}
 
+			if at, ok := f["audioTrack"].(map[string]any); ok {
+				format.AudioTrackID = getStr(at, "id")
+				format.AudioTrackName = getStr(at, "displayName")
+				format.AudioIsDefault = getBool(at, "audioIsDefault")
+			}
+			format.IsDrc = getBool(f, "isDrc")
+
 			formats = append(formats, format)
 		}
+	}
+	if drmSkipped > 0 {
+		p.logger.Debug("[PlayerApi] skipped DRM-protected formats",
+			"count", drmSkipped,
+			"note", "a YouTube account experiment applies DRM to all videos on the tv client — yt-dlp issue #12563")
 	}
 	return formats
 }
@@ -599,32 +624,61 @@ func collectFormats(pool *[]Format, formats []Format, source string, authLevel i
 	}
 }
 
+// formatKey is yt-dlp's get_stream_id (_video.py:3396-3397): itag alone is not
+// an identity. A dubbed video lists several itag-140 entries from ONE client
+// differing only by audioTrack.id, and the DRC rendition of a track is a
+// separate stream, not a variant — keying on itag alone kept whichever was
+// listed first and silently discarded the rest.
+type formatKey struct {
+	itag         int
+	audioTrackID string
+	isDrc        bool
+}
+
 func deduplicateFormats(pool []Format) []Format {
-	byItag := make(map[int]Format)
+	byStream := make(map[formatKey]Format)
 	for _, f := range pool {
 		if f.URL == "" {
 			continue
 		}
-		existing, exists := byItag[f.Itag]
+		key := formatKey{itag: f.Itag, audioTrackID: f.AudioTrackID, isDrc: f.IsDrc}
+		existing, exists := byStream[key]
 		if !exists {
-			byItag[f.Itag] = f
+			byStream[key] = f
 			continue
 		}
 		fAuth := authLevelOf(&f)
 		eAuth := authLevelOf(&existing)
 		if fAuth < eAuth {
-			byItag[f.Itag] = f
+			byStream[key] = f
 		}
 	}
 
-	result := make([]Format, 0, len(byItag))
-	for _, f := range byItag {
+	result := make([]Format, 0, len(byStream))
+	for _, f := range byStream {
 		result = append(result, f)
 	}
+	// Ordered by the whole key so the output is deterministic across map
+	// iterations — the itag-only sort stopped being total the moment one itag
+	// could appear more than once.
 	slices.SortFunc(result, func(a, b Format) int {
-		return cmp.Compare(a.Itag, b.Itag)
+		if c := cmp.Compare(a.Itag, b.Itag); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.AudioTrackID, b.AudioTrackID); c != 0 {
+			return c
+		}
+		return cmp.Compare(boolOrder(a.IsDrc), boolOrder(b.IsDrc))
 	})
 	return result
+}
+
+// boolOrder gives false < true, so the clean rendition sorts before its DRC twin.
+func boolOrder(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // --- JSON helper functions ---
@@ -662,6 +716,14 @@ func getInt(m map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+func getBool(m map[string]any, key string) bool {
+	if m == nil {
+		return false
+	}
+	b, _ := m[key].(bool)
+	return b
 }
 
 func getNestedMap(m map[string]any, keys ...string) (map[string]any, bool) {

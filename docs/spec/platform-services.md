@@ -9,7 +9,7 @@ This document provides a comprehensive, implementation-level reference for every
 These are hard rules that govern all platform service integrations:
 
 - **YouTube uses multi-client Innertube fallback.** The authenticated request order is: WEB_EMBEDDED (format/DASH contributor) then TV_DOWNGRADED (best format coverage, and the playability authority) then WEB (DASH manifest) then WEB_CREATOR (member content) then the cookieless chain VISIONOS → ANDROID_VR (last resort). The public request order drops WEB_CREATOR. WEB_EMBEDDED, TV_DOWNGRADED and WEB are always tried; WEB_CREATOR and the cookieless chain are conditional fallbacks (tried only when earlier clients return members-only, login-required, or no formats).
-- **Format priority is lexicographic across five dimensions.** For video: resolution (higher wins) > FPS (prefer60fps setting) > codec score (higher wins) > bitrate (lower wins, indicating better compression) > auth level (lower preferred). For audio: codec score (higher wins) > bitrate (higher wins) > auth level (lower preferred). This ordering is absolute and implemented in `SelectBestFormats`.
+- **Format priority is lexicographic across five dimensions.** For video: resolution (higher wins) > FPS (prefer60fps setting) > codec score (higher wins) > bitrate (lower wins, indicating better compression) > auth level (lower preferred). For audio: audio track identity (`audioTrackScore` — original > default > unlabelled > descriptive, the clean rendition ahead of its DRC twin) > codec score (higher wins) > bitrate (higher wins) > auth level (lower preferred). This ordering is absolute and implemented in `SelectBestFormats`.
 - **Twitch uses GQL API with SHA256 persisted query hashing (version 1).** All structured queries (stream metadata, video metadata, VOD comments) use persisted queries with hardcoded SHA256 hashes. Access token queries use inline GraphQL. The Client-ID header (`kimne78kx3ncx6brgo4mv6wki5h1ko`) is required on every GQL request.
 - **BotGuard has a triple cache with auto-eviction.** Session cache (6-hour TTL, keyed by contentBinding), minter cache (dynamic TTL from Google's API, keyed by contentBinding, auto-evicted via `time.AfterFunc`), and inflight dedup (concurrent requests for the same key wait on a shared channel). Minters hold live Goja VMs that must be explicitly shut down on eviction.
 - **Cipher has a 10-VM LRU with AST + regex fallback.** Memory cache holds at most 10 compiled solver VMs keyed by SHA256 of the player URL (`solverCacheSize`). Disk cache (`~/.cache/yt-cipher/player_cache/`) has a 14-day TTL. Compilation is mutex-serialized to prevent thundering herd. The Goja VM inside each Solvers struct is mutex-protected because Goja is not thread-safe.
@@ -147,7 +147,7 @@ All client configs are defined in `internal/constants/constants.go`:
 8. **ANDROID_VR DASH-only enrichment** -- If, after WEB_EMBEDDED+TV+WEB, no client returned a `DashManifestURL` and the stream is live or upcoming AND not members-only / age-restricted / login-required, fetch ANDROID_VR (cookieless). On success, adopt its `DashManifestURL` and merge its formats into the pool with auth-level dedup. This is a workaround for the YouTube account-based experiment that strips `dashManifestUrl` from cookied clients (yt-dlp issue #15274). ANDROID_VR remains the client here because VISIONOS returns no live `dashManifestUrl` and anonymous TV / WEB / WEB_EMBEDDED refuse live streams outright. Note this step only matters for pools without split adaptive URLs — anything with them takes the manifest-free path and never reads the manifest.
 8. **Stream classification override** -- If TV says `not_a_stream` but the watch page disagrees, override the stream status while keeping TV's formats if they are adequate (have both video and audio).
 9. **Merge metadata** -- Fill in missing fields (title, channel, description, thumbnails, timestamps) from the watch page response.
-10. **Deduplicate formats** -- Across all collected format pools, deduplicate by itag. When the same itag appears from multiple clients, keep the one with the lowest auth level.
+10. **Deduplicate formats** -- Across all collected format pools, deduplicate by yt-dlp's stream identity `(itag, audioTrack.id, isDrc)` (`get_stream_id`, `_video.py:3396-3397`) — NOT by itag alone: one client lists several itag-140 entries for a dubbed video that differ only by track, and a DRC rendition is a separate stream rather than a variant. When the same stream appears from multiple clients, keep the one with the lowest auth level. DRM-protected formats (`drmFamilies`) never reach the pool: they are dropped in `parseFormats` with one counted Debug line per response, because an account-level experiment applies DRM to every video on the tv client (yt-dlp issue #12563) and muxing encrypted samples yields an unplayable archive.
 
 #### Public Fallback Flow
 
@@ -256,7 +256,8 @@ For each video format (identified by `mimeType` containing "video") with a non-e
 
 For each audio format (identified by `mimeType` containing "audio") with a non-empty URL:
 
-1. **Codec score**: Higher wins. Scores:
+1. **Audio track identity**: Decided before codec and bitrate — `audioTrackScore` ports yt-dlp's `get_language_code_and_preference` (original > YouTube's default > unlabelled > descriptive), and within one track the clean rendition beats its `isDrc` (loudness-normalised) twin.
+2. **Codec score**: Higher wins. Scores:
 
 | Pattern | Score |
 |---------|-------|
@@ -265,8 +266,8 @@ For each audio format (identified by `mimeType` containing "audio") with a non-e
 | `^mp4a\.40\.2` (AAC-LC) | 2 |
 | `^mp4a` (generic AAC) | 1 |
 
-2. **Bitrate tiebreaker**: **Higher** bitrate wins (audio quality scales with bitrate).
-3. **Auth level tiebreaker**: Lower auth level wins.
+3. **Bitrate tiebreaker**: **Higher** bitrate wins (audio quality scales with bitrate).
+4. **Auth level tiebreaker**: Lower auth level wins.
 
 #### Manual Override
 

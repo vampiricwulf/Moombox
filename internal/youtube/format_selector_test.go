@@ -290,3 +290,48 @@ func TestAuthLevelOf(t *testing.T) {
 		t.Errorf("expected 999 for nil auth level, got %d", authLevelOf(f2))
 	}
 }
+
+// TestSelectBestAudioPrefersTheOriginalNonDRCTrack pins upstream's language
+// preference (_video.py:3277-3291): original (10) > default (5) > unlabelled
+// (-1) > descriptive (-10), with the clean rendition beating its DRC twin.
+// Track identity is decided BEFORE codec and bitrate: archiving the wrong
+// LANGUAGE is a worse outcome than archiving a slightly worse encoder.
+//
+// Mutants this kills:
+//   - no track score at all             → the first-listed ja dub wins
+//   - the score applied after bitrate   → the higher-bitrate dub wins
+//   - descriptive not penalised         → the descriptive track wins
+//   - DRC not penalised                 → the DRC twin wins
+func TestSelectBestAudioPrefersTheOriginalNonDRCTrack(t *testing.T) {
+	mk := func(id, name string, def, drc bool, bitrate int, url string) Format {
+		return Format{Itag: 140, URL: url, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"",
+			Bitrate: bitrate, AudioTrackID: id, AudioTrackName: name, AudioIsDefault: def, IsDrc: drc}
+	}
+	formats := []Format{
+		mk("ja.3", "Japanese", true, false, 200000, "https://x/ja-default"),
+		mk("en.9", "English descriptive", false, false, 300000, "https://x/en-desc"),
+		mk("en.4", "English original", false, true, 256000, "https://x/en-orig-drc"),
+		mk("en.4", "English original", false, false, 128000, "https://x/en-orig"),
+	}
+
+	got := SelectBestFormats(formats, 1080, true)
+	if got.Audio == nil {
+		t.Fatal("no audio format selected")
+	}
+	if got.Audio.URL != "https://x/en-orig" {
+		t.Errorf("selected %q (track %q, drc=%v), want the clean original https://x/en-orig",
+			got.Audio.URL, got.Audio.AudioTrackName, got.Audio.IsDrc)
+	}
+
+	// The descriptive penalty needs an assertion of its own: in the pool above
+	// an unpenalised descriptive track still scores -1, below the original, so
+	// the selection alone cannot see the -10. Pin the rank directly — a
+	// descriptive track must lose even to an UNLABELLED one, which is the only
+	// comparison that distinguishes -10 from -1.
+	desc := mk("en.9", "English descriptive", false, false, 300000, "https://x/en-desc")
+	plain := mk("de.1", "German", false, false, 64000, "https://x/de")
+	if audioTrackScore(&desc) >= audioTrackScore(&plain) {
+		t.Errorf("descriptive scored %d, unlabelled scored %d — descriptive must rank lower",
+			audioTrackScore(&desc), audioTrackScore(&plain))
+	}
+}
