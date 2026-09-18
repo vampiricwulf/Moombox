@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -302,13 +303,6 @@ const substituteBody = `{
     ]}
 }`
 
-// newCascadeTestAPI builds a PlayerAPI with a real (empty) cookie jar. The
-// cascade entry points reach Auth.GenerateAPIHeaders, which dereferences the
-// jar, so a nil Auth would panic before the first request is ever made.
-func newCascadeTestAPI() *PlayerAPI {
-	return NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), noopLogger{})
-}
-
 // stubWatchPage points the cascades at an empty watch page so the tests
 // exercise the CLIENT chain without a real HTTP round trip.
 func stubWatchPage(t *testing.T) {
@@ -328,6 +322,8 @@ func stubWatchPage(t *testing.T) {
 //   - the mismatch check removed        → title is "Substitute Video"
 //   - the mismatch not erroring the call → itags 248/251 appear in the pool
 //   - the cascade stopping at the first mismatch → GetVideoInfoPublic errors
+//   - ipBlockShape dropping its `survived == 0` half (`mismatched > 0` alone)
+//     → the verdict fires although VISIONOS answered about the right video
 func TestCascadeSkipsASubstitutingClient(t *testing.T) {
 	stubWatchPage(t)
 	tr := &clientKeyedTransport{responses: map[string]struct {
@@ -342,7 +338,7 @@ func TestCascadeSkipsASubstitutingClient(t *testing.T) {
 	apiClient = &http.Client{Transport: tr}
 	t.Cleanup(func() { apiClient = orig })
 
-	info, err := newCascadeTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+	info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
 	if err != nil {
 		t.Fatalf("GetVideoInfoPublic: %v", err)
 	}
@@ -356,16 +352,87 @@ func TestCascadeSkipsASubstitutingClient(t *testing.T) {
 	}
 }
 
-// TestEveryClientSubstitutedIsReportedAsAnIPBlock mirrors upstream's
-// "All player responses are invalid. Your IP is likely being blocked by
-// Youtube" (_video.py:3186-3188). Reporting "no formats" instead would send
-// the operator hunting for a format problem that does not exist.
+// TestMismatchTallyIPBlockShape pins upstream's raise condition directly,
+// `if skipped_clients: ... if not prs: raise` (_video.py:3181-3187), where the
+// cascade tests can only reach it through whichever branch a given transport
+// happens to take. Both halves are load-bearing and each has its own mutant.
 //
 // Mutants this kills:
-//   - finishExtraction not raising          → err is nil
-//   - allMismatched using > instead of ==   → err is nil
-//   - raising even though the watch page
-//     produced a usable response            → covered by the second subtest
+//   - `attempts == mismatched` (the pre-round rule) → row "substitute plus
+//     other-reason failures" goes false, and a real IP block reaches the
+//     worker as the diagnosis-free "unhandled status: "
+//   - `mismatched > 0` alone → row "substitute plus a survivor" goes true,
+//     so a cascade that DID get a good answer is called an IP block
+//   - `survived == 0` alone → row "no substitute, only failures" goes true,
+//     raising the verdict on flakiness with no substitution signal at all
+//   - note() counting an other-reason failure as a survivor → row one goes
+//     false (that client contributes nothing to upstream's `prs` either)
+func TestMismatchTallyIPBlockShape(t *testing.T) {
+	sub := &VideoIDMismatchError{Requested: "test1234567", Got: "OTHERvideo1"}
+	other := errors.New("Innertube API error: HTTP 404")
+
+	for _, tc := range []struct {
+		name    string
+		results []error // one entry per client attempt; nil means "usable"
+		want    bool
+	}{
+		{"nothing attempted", nil, false},
+		{"substitute plus other-reason failures", []error{sub, other, other}, true},
+		{"every client substituted", []error{sub, sub}, true},
+		{"substitute plus a survivor", []error{sub, nil}, false},
+		{"no substitute, only failures", []error{other, other}, false},
+		{"everything fine", []error{nil, nil}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tally := &mismatchTally{}
+			for _, err := range tc.results {
+				tally.note(nil, err)
+			}
+			if got := tally.ipBlockShape(); got != tc.want {
+				t.Errorf("ipBlockShape() = %v, want %v (attempts %d, mismatched %d, survived %d)",
+					got, tc.want, tally.attempts, tally.mismatched, tally.survived)
+			}
+		})
+	}
+
+	t.Run("the first substitute id is carried for the verdict log", func(t *testing.T) {
+		tally := &mismatchTally{}
+		tally.note(nil, other)
+		tally.note(nil, sub)
+		tally.note(nil, &VideoIDMismatchError{Requested: "test1234567", Got: "LATERvideo1"})
+		if tally.got != "OTHERvideo1" {
+			t.Errorf("got = %q, want the FIRST substitute id", tally.got)
+		}
+	})
+}
+
+// warnCapturingLogger records every Warn call so a test can assert on the
+// fields a log line carries. Debug/Info/Error are discarded — only the
+// verdict's Warn is under test.
+type warnCapturingLogger struct{ warns []string }
+
+func (l *warnCapturingLogger) Debug(string, ...any) {}
+func (l *warnCapturingLogger) Info(string, ...any)  {}
+func (l *warnCapturingLogger) Error(string, ...any) {}
+func (l *warnCapturingLogger) Warn(msg string, args ...any) {
+	l.warns = append(l.warns, fmt.Sprintf("%s %v", msg, args))
+}
+
+// TestEveryClientSubstitutedIsReportedAsAnIPBlock mirrors upstream's
+// "All player responses are invalid. Your IP is likely being blocked by
+// Youtube" (_video.py:3181-3187). Reporting "no formats" instead would send
+// the operator hunting for a format problem that does not exist — and the
+// worker renders that empty result as the diagnosis-free "unhandled status: ".
+//
+// Mutants this kills:
+//   - finishExtraction not raising                     → err is nil
+//   - ipBlockShape reverted to `attempts == mismatched` → the mixed subtest
+//     below gets a nil error and an empty VideoInfo instead of the verdict
+//   - ipBlockShape dropping `mismatched > 0`            → the no-substitute
+//     subtest raises the verdict on flakiness alone
+//   - the verdict's Warn losing the "substitute" field  → the log subtest
+//   - raising even though the watch page produced a usable response
+//     → covered by the "a valid watch page survives" subtest
 func TestEveryClientSubstitutedIsReportedAsAnIPBlock(t *testing.T) {
 	all := map[string]struct {
 		status int
@@ -374,17 +441,96 @@ func TestEveryClientSubstitutedIsReportedAsAnIPBlock(t *testing.T) {
 		"7": {http.StatusOK, substituteBody}, "101": {http.StatusOK, substituteBody},
 		"28": {http.StatusOK, substituteBody}, "56": {http.StatusOK, substituteBody},
 	}
-
-	t.Run("no watch page survivor", func(t *testing.T) {
-		stubWatchPage(t)
-		tr := &clientKeyedTransport{responses: all}
+	swapTransport := func(t *testing.T, tr *clientKeyedTransport) {
+		t.Helper()
 		orig := apiClient
 		apiClient = &http.Client{Transport: tr}
 		t.Cleanup(func() { apiClient = orig })
+	}
 
-		_, err := newCascadeTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+	t.Run("no watch page survivor", func(t *testing.T) {
+		stubWatchPage(t)
+		swapTransport(t, &clientKeyedTransport{responses: all})
+
+		_, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
 		if !errors.Is(err, ErrAllClientsMismatched) {
 			t.Fatalf("err = %v, want ErrAllClientsMismatched", err)
+		}
+	})
+
+	// One substitute plus transport/status failures on the rest is upstream's
+	// `if skipped_clients: ... if not prs: raise` exactly: a failing client
+	// hits `continue` (_video.py:3119-3121) and adds nothing to `prs`, so it
+	// cannot veto the verdict. The pre-round rule (attempts == mismatched) let
+	// it veto, and the operator got StreamProcessResult.Error = "unhandled
+	// status: " — a dead end naming no cause at all.
+	t.Run("one substitute, every other client failing", func(t *testing.T) {
+		stubWatchPage(t)
+		// Only TV answers; 101/28 fall to the transport's 404 default, which
+		// doRetryRequest turns into a non-mismatch "API error: HTTP 404".
+		swapTransport(t, &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{
+			"7": {http.StatusOK, substituteBody},
+		}})
+
+		info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		if !errors.Is(err, ErrAllClientsMismatched) {
+			t.Fatalf("err = %v (info %+v), want ErrAllClientsMismatched — one positive substitution signal and no survivor is an IP block", err, info)
+		}
+	})
+
+	// The mirror image: no substitute anywhere, every client simply failed.
+	// The verdict must NOT fire on absence of evidence, and this path must
+	// come back byte-identical to the pre-round behaviour — the TV client's
+	// own HTTP error, verbatim, with no info.
+	t.Run("no substitute at all, every client failing", func(t *testing.T) {
+		stubWatchPage(t)
+		swapTransport(t, &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{}})
+
+		info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		if errors.Is(err, ErrAllClientsMismatched) {
+			t.Fatalf("flakiness alone raised the IP-block verdict: %v", err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+			t.Fatalf("err = %v, want the TV client's own HTTP error (pre-round shape)", err)
+		}
+		if info != nil {
+			t.Errorf("info = %+v, want nil alongside that error", info)
+		}
+	})
+
+	// F4: at the default log level every per-client mismatch is Debug, so if
+	// the verdict's own Warn does not name the substitute the operator has no
+	// way to learn which video YouTube served. Upstream's warning names it
+	// (_video.py:3182-3184).
+	t.Run("the verdict names the substitute", func(t *testing.T) {
+		stubWatchPage(t)
+		swapTransport(t, &clientKeyedTransport{responses: all})
+
+		lg := &warnCapturingLogger{}
+		p := NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), lg)
+		if _, err := p.GetVideoInfoPublic(context.Background(), "test1234567"); !errors.Is(err, ErrAllClientsMismatched) {
+			t.Fatalf("err = %v, want ErrAllClientsMismatched", err)
+		}
+		var verdict string
+		for _, w := range lg.warns {
+			if strings.Contains(w, "none survived") {
+				verdict = w
+			}
+		}
+		if verdict == "" {
+			t.Fatalf("no verdict Warn logged; warns = %q", lg.warns)
+		}
+		if !strings.Contains(verdict, "OTHERvideo1") {
+			t.Errorf("verdict Warn %q does not name the substitute id", verdict)
+		}
+		if !strings.Contains(verdict, "test1234567") {
+			t.Errorf("verdict Warn %q does not name the requested video", verdict)
 		}
 	})
 
@@ -403,7 +549,7 @@ func TestEveryClientSubstitutedIsReportedAsAnIPBlock(t *testing.T) {
 		apiClient = &http.Client{Transport: tr}
 		t.Cleanup(func() { apiClient = orig })
 
-		info, err := newCascadeTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
 		if err != nil {
 			t.Fatalf("a usable watch page must survive a full client sweep: %v", err)
 		}

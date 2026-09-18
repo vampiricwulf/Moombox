@@ -17,7 +17,7 @@ import (
 
 // VideoIDMismatchError reports a player response whose videoDetails.videoId is
 // not the video that was asked for. yt-dlp calls this an "invalid player
-// response" (_video.py:3022-3025) and its only attested cause is a blocked or
+// response" (_video.py:3022-3026) and its only attested cause is a blocked or
 // rate-limited source IP being served a SUBSTITUTE video
 // (TeamNewPipe/NewPipe#8713). It is returned rather than logged because the
 // cascade's error handling is what skips the client.
@@ -33,28 +33,34 @@ func (e *VideoIDMismatchError) Error() string {
 
 // ErrAllClientsMismatched is upstream's terminal verdict when nothing survived
 // the check: `raise ExtractorError('All player responses are invalid. Your IP
-// is likely being blocked by Youtube')` (_video.py:3186-3188).
+// is likely being blocked by Youtube')` (_video.py:3181-3187).
 var ErrAllClientsMismatched = errors.New("every Innertube client returned a player response for a different video — this IP is likely being blocked by YouTube")
 
 func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any, playerURL string, ytcfg *YtcfgData, requestedVideoID string) (*VideoInfo, error) {
 	videoDetails, _ := data["videoDetails"].(map[string]any)
 
-	// yt-dlp's _invalid_player_response (_video.py:3022-3025, applied at :3038
-	// and :3122): "YouTube may return a different video player response than
-	// expected." Taking a substitute's response would hand this job the
-	// substitute's status AND formats — the waiting-room probe reads a VOD
-	// substitute as "became VOD" and the orchestrator archives the wrong video.
+	// yt-dlp's _invalid_player_response (_video.py:3022-3026, applied to the
+	// watch page's own response at :3038 and per client at :3122): "YouTube
+	// may return a different video player response than expected." Taking a
+	// substitute's response would hand this job the substitute's status AND
+	// formats — the waiting-room probe reads a VOD substitute as "became VOD"
+	// and the orchestrator archives the wrong video.
 	//
-	// DELIBERATE DIVERGENCE: upstream treats an ABSENT videoDetails.videoId as
-	// a mismatch too (None != video_id). Moombox does not. TV is this
-	// cascade's playability AUTHORITY and several of its refusals arrive as a
-	// playabilityStatus with no videoDetails at all; rejecting those would
-	// discard the verdict every downstream error string is built from. Only a
-	// NON-EMPTY id that differs is a substitute.
-	if requestedVideoID != "" {
-		if got := getStr(videoDetails, "videoId"); got != "" && got != requestedVideoID {
-			return nil, &VideoIDMismatchError{Requested: requestedVideoID, Got: got}
-		}
+	// An ABSENT or EMPTY videoId is ACCEPTED, and that MATCHES upstream rather
+	// than diverging from it: _invalid_player_response returns the *id*, not a
+	// bool, and both call sites test that return for TRUTHINESS —
+	// `if pr_id := self._invalid_player_response(pr, video_id):` (:3122) and
+	// `if initial_pr and not self._invalid_player_response(...)` (:3038) — so
+	// a None or "" id leaves the response in `prs`. Go has no truthiness, so
+	// the rule is spelled out here: only a NON-EMPTY id that differs is a
+	// substitute.
+	//
+	// It is load-bearing, not incidental. TV is this cascade's playability
+	// AUTHORITY and several of its refusals arrive as a playabilityStatus with
+	// no videoDetails at all; rejecting those would discard the verdict every
+	// downstream error string is built from.
+	if got := getStr(videoDetails, "videoId"); got != "" && got != requestedVideoID {
+		return nil, &VideoIDMismatchError{Requested: requestedVideoID, Got: got}
 	}
 
 	streamingData, _ := data["streamingData"].(map[string]any)
@@ -374,7 +380,12 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 		}
 	}
 	if drmSkipped > 0 {
-		p.logger.Debug("[PlayerApi] skipped DRM-protected formats",
+		// Warn, not Debug: upstream reports this with report_warning
+		// (_video.py:3427, only_once=True), and a silently DRM-stripped format
+		// pool is exactly the state an operator needs told about — it is the
+		// difference between "this video has no 1080p" and "this ACCOUNT gets
+		// no 1080p". Still one counted line per response, never one per format.
+		p.logger.Warn("[PlayerApi] skipped DRM-protected formats",
 			"count", drmSkipped,
 			"note", "a YouTube account experiment applies DRM to all videos on the tv client — yt-dlp issue #12563")
 	}

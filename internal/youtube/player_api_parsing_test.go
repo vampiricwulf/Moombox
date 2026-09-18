@@ -920,17 +920,23 @@ func TestParsePlayerResponseRejectsASubstituteVideo(t *testing.T) {
 	}
 }
 
-// TestParsePlayerResponseKeepsAResponseWithNoVideoID pins the DELIBERATE
-// divergence from upstream. yt-dlp treats an ABSENT videoDetails.videoId as a
-// mismatch (None != video_id). Moombox must not: TV is this cascade's
-// playability AUTHORITY and some of its refusals arrive as a playabilityStatus
-// with no videoDetails at all, and rejecting those would throw away the verdict
-// every downstream error string is built from.
+// TestParsePlayerResponseKeepsAResponseWithNoVideoID pins upstream's EFFECTIVE
+// rule, which Moombox matches. _invalid_player_response returns the id rather
+// than a bool (_video.py:3022-3026) and both call sites test that return for
+// truthiness (:3038, :3122), so an absent or empty videoId keeps the response
+// upstream too. Go has no truthiness, so the guard spells it out.
+//
+// It is load-bearing: TV is this cascade's playability AUTHORITY and some of
+// its refusals arrive as a playabilityStatus with no videoDetails at all, so
+// the members-only verdict every downstream error string is built from travels
+// on exactly the shape this test pins.
 //
 // Mutants this kills:
-//   - implementing upstream's literal rule (absent == mismatch) → err non-nil
-//   - skipping the check when requestedVideoID is non-empty but the response
-//     carries a DIFFERENT non-empty id                          → caught above
+//   - "absent-is-mismatch" — the literal `got != requestedVideoID` a future
+//     porter might write believing it re-aligns with upstream → err non-nil
+//     here, and the members-only verdict path breaks with it
+//   - skipping the check when the response carries a DIFFERENT non-empty id
+//     → caught by TestParsePlayerResponseRejectsASubstituteVideo above
 func TestParsePlayerResponseKeepsAResponseWithNoVideoID(t *testing.T) {
 	p := NewPlayerAPI(nil, noopLogger{})
 
@@ -998,6 +1004,40 @@ func TestParseFormatsSkipsDRMAndKeepsTrackIdentity(t *testing.T) {
 	}
 	if drc.IsDrc != true {
 		t.Errorf("the isDrc rendition parsed with IsDrc=false: %+v", drc)
+	}
+}
+
+// TestParseFormatsWarnsOnceForSkippedDRM pins the LEVEL and the CARDINALITY of
+// the DRM-skip report. Upstream reports it with
+// `self.report_warning(msg, video_id, only_once=True)` (_video.py:3419-3427),
+// and a silently DRM-stripped pool is the difference between "this video has
+// no 1080p" and "this ACCOUNT gets no 1080p" — the operator has to see it at
+// the default level, once, with the count.
+//
+// Mutants this kills:
+//   - the line demoted back to Debug  → no Warn captured
+//   - one line per dropped format     → two Warns instead of one
+//   - the count dropped from the line → the count assertion fails
+func TestParseFormatsWarnsOnceForSkippedDRM(t *testing.T) {
+	lg := &warnCapturingLogger{}
+	p := NewPlayerAPI(nil, lg)
+	sd := decodePlayerJSON(t, `{"adaptiveFormats": [
+		{"itag": 137, "url": "https://tv/v-drm", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "drmFamilies": ["WIDEVINE"]},
+		{"itag": 248, "url": "https://tv/v-drm2", "mimeType": "video/webm; codecs=\"vp9\"", "drmFamilies": ["PLAYREADY"]},
+		{"itag": 136, "url": "https://tv/v-clean", "mimeType": "video/mp4; codecs=\"avc1.4d401f\""}
+	]}`)
+
+	if got := len(p.parseFormats(sd)); got != 1 {
+		t.Fatalf("parseFormats kept %d formats, want only the clean one", got)
+	}
+	if len(lg.warns) != 1 {
+		t.Fatalf("warns = %q, want exactly one DRM line for the whole response", lg.warns)
+	}
+	if !strings.Contains(lg.warns[0], "DRM") {
+		t.Errorf("the Warn %q does not say what was skipped", lg.warns[0])
+	}
+	if !strings.Contains(lg.warns[0], "2") {
+		t.Errorf("the Warn %q does not name the count of skipped formats", lg.warns[0])
 	}
 }
 

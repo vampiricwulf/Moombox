@@ -21,6 +21,10 @@ func scaleRetryBackoff(t *testing.T, base time.Duration) {
 	t.Cleanup(func() { playerRetryBackoffBase = previous })
 }
 
+// newRetryTestAPI builds a PlayerAPI with a real (empty, in-memory) cookie
+// jar. The retry path and the cascade entry points both reach
+// Auth.GenerateAPIHeaders, which dereferences the jar, so a nil Auth would
+// panic before the first request is ever made.
 func newRetryTestAPI() *PlayerAPI {
 	return NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), noopLogger{})
 }

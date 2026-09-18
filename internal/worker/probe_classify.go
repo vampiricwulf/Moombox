@@ -38,6 +38,13 @@ const (
 // while YouTube is serving substitutes we know nothing about the real video,
 // and the cost model says a missed classification must only ever delay giving
 // up, never wrongly error a waiting stream.
+//
+// The same classNetwork branch also returns reportFailure, so the waiting-room
+// loop tells the connectivity oracle the NETWORK failed (reportProbeResult
+// -> connReporter.ReportFailure) for what is really a YouTube-side
+// substitution. Accepted: the oracle runs its own active probes, and the probe
+// throttling that report buys is the right behaviour while YouTube is serving
+// substitutes anyway.
 func classifyProbeErr(err error) probeErrClass {
 	if err == nil {
 		return classServer

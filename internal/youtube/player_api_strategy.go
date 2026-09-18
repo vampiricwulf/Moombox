@@ -23,42 +23,69 @@ import (
 // Production never writes it.
 var fetchWatchPage = FetchWatchPage
 
-// mismatchTally counts the client player responses one extraction rejected
-// because YouTube answered about a different video. Upstream skips such a
-// client with a warning and fails the whole extraction only when NOTHING
-// survived (_video.py:3180-3188); the tally is how this cascade reproduces
-// that "and nothing else survived" condition.
+// mismatchTally records, across one extraction, how many client player
+// responses were rejected because YouTube answered about a different video and
+// how many came back usable. Upstream skips a substituting client with a
+// warning and fails the whole extraction only when NOTHING survived
+// (_video.py:3181-3187); the tally is how this cascade reproduces both halves
+// of that condition.
 type mismatchTally struct {
 	attempts   int
 	mismatched int
+	survived   int
+	got        string // the first substitute id seen, for the verdict's log line
 }
 
 // note records one client attempt and passes its result through unchanged, so
 // call sites read `result, err := tally.note(p.fetchWithClient(...))`.
+//
+// A client that failed for some OTHER reason — transport, HTTP status — counts
+// as neither a substitute nor a survivor. That is upstream's shape: such a
+// client raises, hits `continue` (_video.py:3119-3121) and contributes nothing
+// to `prs` either, so it must not veto the verdict.
 func (t *mismatchTally) note(info *VideoInfo, err error) (*VideoInfo, error) {
 	t.attempts++
 	var mm *VideoIDMismatchError
-	if errors.As(err, &mm) {
+	switch {
+	case errors.As(err, &mm):
 		t.mismatched++
+		if t.got == "" {
+			t.got = mm.Got
+		}
+	case err == nil:
+		t.survived++
 	}
 	return info, err
 }
 
-// allMismatched reports the IP-block shape: at least one client was tried and
-// every single one answered about a different video.
-func (t *mismatchTally) allMismatched() bool {
-	return t.attempts > 0 && t.attempts == t.mismatched
+// ipBlockShape is upstream's `if skipped_clients: ... if not prs: raise`
+// (_video.py:3181-3187): at least one client was served a substitute AND
+// nothing survived.
+//
+// Both halves matter. Requiring `mismatched > 0` means the verdict only ever
+// fires on a POSITIVE substitution signal, never on a flaky network alone.
+// NOT requiring "every attempt mismatched" is the other half: a client that
+// failed for another reason produces no usable response either, so letting it
+// veto the verdict would turn a real IP block into an empty VideoInfo the
+// worker renders as "unhandled status: " — a diagnosis-free dead end.
+func (t *mismatchTally) ipBlockShape() bool {
+	return t.mismatched > 0 && t.survived == 0
 }
 
 // finishExtraction is the single exit both cascades take. It applies
-// withAttestation and raises the IP-block verdict when every client answered
-// about a different video AND the watch page produced nothing usable either.
-// wpParsed is the survivor test: upstream keeps the watch page's own player
-// response in `prs` and only raises when `prs` is empty.
+// withAttestation and raises the IP-block verdict when a client was served a
+// substitute, no client survived, and the watch page produced nothing usable
+// either. wpParsed is that last survivor test: upstream keeps the watch page's
+// own player response in `prs` and only raises when `prs` is empty.
 func (p *PlayerAPI) finishExtraction(info *VideoInfo, wp *WatchPageResult, videoID string, tally *mismatchTally, wpParsed *VideoInfo) (*VideoInfo, error) {
-	if tally.allMismatched() && wpParsed == nil {
-		p.logger.Warn("[PlayerApi] every Innertube client answered about a different video",
-			"videoID", videoID, "clients", tally.attempts)
+	if tally.ipBlockShape() && wpParsed == nil {
+		// Name the substitute, as upstream's warning does
+		// (_video.py:3182-3184). Every per-client mismatch below is logged at
+		// Debug, so without this field an operator at the default level sees
+		// the verdict and cannot learn WHICH video YouTube served instead.
+		p.logger.Warn("[PlayerApi] Innertube clients were served a different video and none survived",
+			"videoID", videoID, "substitute", tally.got,
+			"clients", tally.attempts, "mismatched", tally.mismatched)
 		return nil, ErrAllClientsMismatched
 	}
 	return withAttestation(info, wp, videoID), nil
