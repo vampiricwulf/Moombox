@@ -658,6 +658,20 @@ type youtubeProbeClient interface {
 	ProbeVideoStatus(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
 	ProbeVideoStatusAuthenticated(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
 	GetVideoInfo(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+	// HasAuthCookies gates the cookied recovery hop and labels the Debug
+	// line: the TV probe sends whatever the jar holds and never checks, so
+	// without this the probe would spend a bot-walled call per tick on a
+	// cookieless install and claim credentials it never sent.
+	HasAuthCookies() bool
+}
+
+// probeIsSelectable reports whether a probe answer carries something the
+// quality monitor can actually select from: a DASH manifest to parse, or a
+// split-adaptive pool to pick in memory. Anything else — nil, an error shell,
+// a playability wall, a whole-file-only pool — means the tick has no quality
+// to compare and must fall through to the full cascade.
+func probeIsSelectable(info *youtube.VideoInfo) bool {
+	return info != nil && (info.DashManifestURL != "" || HasManifestlessDashFormats(info.Formats))
 }
 
 // probeVideoInfo fetches the VideoInfo one quality-monitor tick selects from.
@@ -674,70 +688,139 @@ type youtubeProbeClient interface {
 // (ProbeVideoStatusAuthenticated — one player call, no watch page, no STS, no
 // POT; android_vr would 401 on members-only content).
 //
-// The full cascade remains as a ONE-SHOT fallback for either kind, fired only
-// when the cheap probe produced neither a DASH manifest nor a split-adaptive
-// pool — i.e. nothing the monitor could select from. That single retry is what
-// makes the cheap authenticated probe safe: if TV-with-cookies at sts = 0 ever
-// stops carrying adaptiveFormats for some shape, the tick still resolves,
-// exactly as it does today, at the old cost.
+// O-H's second clause — "auth-walled/RECOVERY streams" — is the cookied hop:
+// when the cookieless probe comes back with nothing selectable and this
+// install HAS cookies, one TV-with-cookies call is tried before the cascade.
+// That is the branch the verifier called dominant (requiresAuth is true only
+// while our cookies do NOT grant access, which is rare mid-download), so
+// without the hop the decision would have saved almost nothing in the field.
+// It is gated on HasAuthCookies because a cookieless TV call is bot-walled
+// ("Sign in to confirm you're not a bot", Step 0's live evidence) and would be
+// a wasted call every tick.
+//
+// The full cascade remains as a ONE-SHOT fallback behind every branch, fired
+// when nothing cheaper produced a DASH manifest or a split-adaptive pool —
+// including when a probe ERRORS. That last part is the "never make recovery
+// worse" ruling: the cascade pools three to seven clients and routinely
+// answers when one of them 403s, so one failing player call must not end the
+// tick (QualityMonitor.Run only logs a probe error at Debug and skips, so an
+// auth-walled stream whose TV client started failing would have lost quality
+// monitoring for the rest of the broadcast, silently). A
+// *youtube.VideoIDMismatchError is an ordinary error here (Task 3 Step 9) and
+// takes the same route. The single exception is a cancelled context: the
+// cascade cannot succeed during a shutdown race, so nothing is bought there.
+//
+// At most ONE cascade per tick, always — never a loop, never a retry ladder.
+// The worst case a tick can cost is therefore probe + hop + cascade, i.e. two
+// player calls on top of what it cost before O-H, and only for a cookied
+// install whose stream answers nothing at every hop.
 //
 // The monitor only needs the format pool in memory; nothing on this path
 // consumes the watch-page metadata the cascade used to refresh (O-H's
 // acknowledged, visible change: less log volume and a smaller request
 // signature toward YouTube).
 //
-// lg is variadic so the routing test can call this with the three arguments
-// that DEFINE the routing and no logger stub; production passes exactly one.
-// It carries the Debug line that names the branch each tick took — the only
-// way an operator can tell a tick that resolved on one player call from one
-// that still paid for the cascade.
-func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, requiresAuth bool, lg ...logger) (*youtube.VideoInfo, error) {
+// lg may be nil (the routing tests pass nil); it carries the Debug line that
+// names the branch each tick took — the only way an operator can tell a tick
+// that resolved on one player call from one that still paid for the cascade.
+func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, requiresAuth bool, lg logger) (*youtube.VideoInfo, error) {
 	debug := func(msg string, args ...any) {
-		if len(lg) == 0 || isNilLogger(lg[0]) {
+		if isNilLogger(lg) {
 			return
 		}
-		lg[0].Debug(msg, args...)
+		lg.Debug(msg, args...)
 	}
 
+	cookied := yt.HasAuthCookies()
+	tvKind := "tv_downgraded"
+	if cookied {
+		tvKind += "+cookies"
+	}
+
+	// Hop 1 — the cheap probe. ANDROID_VR when nothing is walled, TV with
+	// cookies when something is (android_vr 401s on members-only content).
 	var info *youtube.VideoInfo
 	var err error
 	probeKind := "android_vr"
 	if requiresAuth {
-		probeKind = "tv_downgraded+cookies"
+		probeKind = tvKind
 		info, err = yt.ProbeVideoStatusAuthenticated(ctx, videoID)
 	} else {
 		info, err = yt.ProbeVideoStatus(ctx, videoID)
 	}
-	if err != nil {
-		return nil, err
-	}
-	// Defensive: both probes can return (nil, nil) when every client fails
-	// without surfacing a hard error (notably during a context-cancel shutdown
-	// race). Treat that as a transient probe error rather than letting the
-	// next dereference panic the monitor goroutine.
-	if info == nil {
-		return nil, fmt.Errorf("probe returned nil info without error")
-	}
-
-	splitAdaptive := HasManifestlessDashFormats(info.Formats)
-	if info.DashManifestURL != "" || splitAdaptive {
+	if err == nil && probeIsSelectable(info) {
 		debug("quality probe answered on one player call",
 			"videoID", videoID, "probe", probeKind,
-			"splitAdaptive", splitAdaptive, "dashManifest", info.DashManifestURL != "")
+			"splitAdaptive", HasManifestlessDashFormats(info.Formats),
+			"dashManifest", info.DashManifestURL != "")
 		return info, nil
 	}
+	probeErr := err
 
-	debug("quality probe fell back to the full fetch: the cheap probe returned nothing selectable",
-		"videoID", videoID, "probe", probeKind,
-		"status", info.StreamStatus, "formats", len(info.Formats))
+	// Hop 2 — the cookied recovery hop (O-H's "recovery streams"). Only for
+	// the cookieless branch: the auth-walled branch already made this exact
+	// call above.
+	if !requiresAuth && cookied && ctx.Err() == nil {
+		hopInfo, hopErr := yt.ProbeVideoStatusAuthenticated(ctx, videoID)
+		if hopErr == nil && probeIsSelectable(hopInfo) {
+			debug("quality probe answered on the cookied recovery hop",
+				"videoID", videoID, "probe", tvKind,
+				"splitAdaptive", HasManifestlessDashFormats(hopInfo.Formats),
+				"dashManifest", hopInfo.DashManifestURL != "")
+			return hopInfo, nil
+		}
+		if probeErr == nil {
+			probeErr = hopErr
+		}
+	}
+
+	// A shutdown race buys nothing: every call the cascade would make is
+	// waste on the way out. Report the probe's own error when it had one so
+	// the reason is not replaced by a bare context error.
+	if cerr := ctx.Err(); cerr != nil {
+		if probeErr != nil {
+			return nil, probeErr
+		}
+		return nil, cerr
+	}
+
+	// Hop 3 — the one-shot cascade.
+	reason := "the cheap probe returned nothing selectable"
+	if probeErr != nil {
+		reason = probeErr.Error()
+	}
+	debug("quality probe fell back to the full fetch",
+		"videoID", videoID, "probe", probeKind, "reason", reason,
+		"status", probeStatus(info), "formats", probeFormatCount(info))
 	info, err = yt.GetVideoInfo(ctx, videoID)
 	if err != nil {
 		return nil, fmt.Errorf("probe fallback to the full fetch: %w", err)
 	}
 	if info == nil {
+		// Defensive: the cascade can return (nil, nil) when fetchWatchPage
+		// and every Innertube client fail without surfacing a hard error.
+		// Treat that as a transient probe error rather than letting the next
+		// dereference panic the monitor goroutine.
 		return nil, fmt.Errorf("probe fallback returned nil info")
 	}
 	return info, nil
+}
+
+// probeStatus and probeFormatCount read a possibly-nil probe answer for the
+// fallback's Debug line — the probe may have returned (nil, nil), which is
+// exactly the case worth logging.
+func probeStatus(info *youtube.VideoInfo) youtube.StreamStatus {
+	if info == nil {
+		return ""
+	}
+	return info.StreamStatus
+}
+
+func probeFormatCount(info *youtube.VideoInfo) int {
+	if info == nil {
+		return 0
+	}
+	return len(info.Formats)
 }
 
 // buildYouTubeProbeFn creates a quality probe function for YouTube streams.
@@ -747,9 +830,12 @@ func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, 
 // requiresAuth: when true the probe uses ProbeVideoStatusAuthenticated
 // (TV_DOWNGRADED with cookies) — required for members-only, age-restricted and
 // login-required streams, where the cookieless ANDROID_VR probe 401s. When
-// false it uses ProbeVideoStatus (ANDROID_VR, cookieless, no POT). See
-// probeVideoInfo for the one-shot full-fetch fallback behind both, and owner
-// decision O-H for why the full cascade is no longer the FIRST call on either.
+// false it uses ProbeVideoStatus (ANDROID_VR, cookieless, no POT), and a
+// cookied install retries once through the TV probe before paying for the
+// cascade. See probeVideoInfo for that recovery hop, for the one-shot
+// full-fetch fallback behind every branch (an erroring probe included), and
+// for owner decision O-H — why the full cascade is no longer the FIRST call on
+// either kind.
 func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresAuth bool) func(context.Context) (*QualityInfo, error) {
 	maxRes := jobCtx.Config.MaxVideoResolution
 	videoItag := jobCtx.Config.VideoItag

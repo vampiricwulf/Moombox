@@ -11,31 +11,42 @@ import (
 // fakeProbeClient counts which of the three entry points the quality probe
 // chose. Nothing here touches the network: the row is about REQUEST SHAPE, so
 // the assertion has to be on the calls themselves.
+//
+// Every entry point returns a NON-NIL info by default in the routing tests
+// (see splitAdaptive): a fixture whose unchosen entry points answer (nil, nil)
+// makes a mis-routed call die on the nil-info arm instead of on the call
+// counts, which is the assertion the routing mutants are written against.
 type fakeProbeClient struct {
 	probe     int
 	probeAuth int
 	full      int
 
+	hasCookies bool
+
 	probeInfo     *youtube.VideoInfo
+	probeErr      error
 	probeAuthInfo *youtube.VideoInfo
+	probeAuthErr  error
 	fullInfo      *youtube.VideoInfo
 	fullErr       error
 }
 
 func (f *fakeProbeClient) ProbeVideoStatus(context.Context, string) (*youtube.VideoInfo, error) {
 	f.probe++
-	return f.probeInfo, nil
+	return f.probeInfo, f.probeErr
 }
 
 func (f *fakeProbeClient) ProbeVideoStatusAuthenticated(context.Context, string) (*youtube.VideoInfo, error) {
 	f.probeAuth++
-	return f.probeAuthInfo, nil
+	return f.probeAuthInfo, f.probeAuthErr
 }
 
 func (f *fakeProbeClient) GetVideoInfo(context.Context, string) (*youtube.VideoInfo, error) {
 	f.full++
 	return f.fullInfo, f.fullErr
 }
+
+func (f *fakeProbeClient) HasAuthCookies() bool { return f.hasCookies }
 
 // splitAdaptive is a format pool the manifest-free path can address: split
 // video + audio, no contentLength.
@@ -47,6 +58,12 @@ func splitAdaptive() []youtube.Format {
 	}
 }
 
+// selectable builds a probe answer the monitor can select from, tagged so a
+// test can tell WHICH entry point produced the info it got back.
+func selectable(title string) *youtube.VideoInfo {
+	return &youtube.VideoInfo{Title: title, Formats: splitAdaptive()}
+}
+
 // TestProbeVideoInfoUsesTheCheapAuthenticatedProbe is owner decision O-H. The
 // 30 s monitor used to run the FULL authenticated cascade — a 1-5 MB cookied
 // watch page plus 3-7 player calls — for every auth-walled stream, which at
@@ -54,14 +71,23 @@ func splitAdaptive() []youtube.Format {
 // ProbeVideoStatusAuthenticated is one TV-with-cookies call and already
 // returns the pool the probe selects from.
 //
+// Every entry point here returns a selectable answer, so a mis-route is caught
+// by the CALL COUNTS rather than by an incidental nil dereference downstream
+// (fix round 1, m4).
+//
 // Mutants this kills:
 //   - requiresAuth still routed to GetVideoInfo  → full == 1, probeAuth == 0
 //   - requiresAuth routed to the COOKIELESS probe → probe == 1 (android_vr 401s
 //     on members-only content, so this must not happen)
 func TestProbeVideoInfoUsesTheCheapAuthenticatedProbe(t *testing.T) {
-	f := &fakeProbeClient{probeAuthInfo: &youtube.VideoInfo{Formats: splitAdaptive()}}
+	f := &fakeProbeClient{
+		hasCookies:    true,
+		probeInfo:     selectable("cookieless probe"),
+		probeAuthInfo: selectable("cookied probe"),
+		fullInfo:      selectable("cascade"),
+	}
 
-	info, err := probeVideoInfo(context.Background(), f, "vid", true)
+	info, err := probeVideoInfo(context.Background(), f, "vid", true, nil)
 	if err != nil {
 		t.Fatalf("probeVideoInfo: %v", err)
 	}
@@ -72,6 +98,9 @@ func TestProbeVideoInfoUsesTheCheapAuthenticatedProbe(t *testing.T) {
 		t.Errorf("calls: probeAuth=%d probe=%d full=%d; want exactly one authenticated probe",
 			f.probeAuth, f.probe, f.full)
 	}
+	if info.Title != "cookied probe" {
+		t.Errorf("info came from %q, want the cookied probe's answer", info.Title)
+	}
 }
 
 // TestProbeVideoInfoFallsBackOnceForBothProbeKinds is the other half of O-H
@@ -80,6 +109,9 @@ func TestProbeVideoInfoUsesTheCheapAuthenticatedProbe(t *testing.T) {
 // the probe AND the whole cascade every tick. The fallback stays — it is what
 // makes the authenticated probe safe when TV-with-cookies turns out to carry
 // no adaptiveFormats — but it fires ONCE per tick, for either probe kind.
+//
+// No cookies are configured on this fixture, so the cookied recovery hop
+// (below) is not in play here: this is the cookieless install's shape.
 //
 // Mutants this kills:
 //   - the fallback gated on !requiresAuth again  → the auth subtest sees full == 0
@@ -102,7 +134,7 @@ func TestProbeVideoInfoFallsBackOnceForBothProbeKinds(t *testing.T) {
 				fullInfo:      &youtube.VideoInfo{Formats: splitAdaptive()},
 			}
 
-			info, err := probeVideoInfo(context.Background(), f, "vid", tc.requiresAuth)
+			info, err := probeVideoInfo(context.Background(), f, "vid", tc.requiresAuth, nil)
 			if err != nil {
 				t.Fatalf("probeVideoInfo: %v", err)
 			}
@@ -116,20 +148,267 @@ func TestProbeVideoInfoFallsBackOnceForBothProbeKinds(t *testing.T) {
 	}
 }
 
+// TestProbeVideoInfoTakesTheCookiedHopBeforeTheCascade is O-H's second clause —
+// "auth-walled/RECOVERY streams" — and the branch the verifier called dominant.
+// A public stream whose cookieless android_vr probe comes back with nothing
+// selectable used to pay the whole cascade (a 1-5 MB cookied watch page plus
+// three to seven player calls) on EVERY 30 s tick. When the install has
+// cookies, one TV-with-cookies call is tried first, and a stream that answers
+// there costs two player calls instead of the cascade.
+//
+// Mutants this kills:
+//   - the recovery branch goes straight to the cascade → probeAuth == 0, full == 1
+//   - the hop's answer discarded and the cascade run anyway → full == 1
+func TestProbeVideoInfoTakesTheCookiedHopBeforeTheCascade(t *testing.T) {
+	f := &fakeProbeClient{
+		hasCookies:    true,
+		probeInfo:     &youtube.VideoInfo{}, // android_vr: nothing selectable
+		probeAuthInfo: selectable("cookied hop"),
+		fullInfo:      selectable("cascade"),
+	}
+
+	info, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
+	if err != nil {
+		t.Fatalf("probeVideoInfo: %v", err)
+	}
+	if f.probe != 1 || f.probeAuth != 1 || f.full != 0 {
+		t.Errorf("calls: probe=%d probeAuth=%d full=%d; want the cookieless probe then the cookied hop, no cascade",
+			f.probe, f.probeAuth, f.full)
+	}
+	if info.Title != "cookied hop" {
+		t.Errorf("info came from %q, want the cookied hop's answer", info.Title)
+	}
+}
+
+// TestProbeVideoInfoSkipsTheCookiedHopWithoutCookies keeps the hop from
+// becoming a wasted call per tick on a cookieless install: Step 0's live
+// evidence is that TV_DOWNGRADED without cookies answers login_required
+// ("Sign in to confirm you're not a bot") and carries no formats at all.
+//
+// Mutants this kills:
+//   - the hop taken unconditionally → probeAuth == 1
+func TestProbeVideoInfoSkipsTheCookiedHopWithoutCookies(t *testing.T) {
+	f := &fakeProbeClient{
+		hasCookies:    false,
+		probeInfo:     &youtube.VideoInfo{},
+		probeAuthInfo: selectable("cookied hop"),
+		fullInfo:      selectable("cascade"),
+	}
+
+	info, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
+	if err != nil {
+		t.Fatalf("probeVideoInfo: %v", err)
+	}
+	if f.probe != 1 || f.probeAuth != 0 || f.full != 1 {
+		t.Errorf("calls: probe=%d probeAuth=%d full=%d; want the cookieless probe then the cascade",
+			f.probe, f.probeAuth, f.full)
+	}
+	if info.Title != "cascade" {
+		t.Errorf("info came from %q, want the cascade's answer", info.Title)
+	}
+}
+
+// TestProbeVideoInfoCascadesOnceWhenTheCookiedHopAlsoFails is the ceiling on
+// the hop: it buys at most one extra player call, never a second cascade, and
+// the tick still resolves exactly as it did before O-H.
+//
+// Mutants this kills:
+//   - the cascade dropped once the hop has run → full == 0
+//   - the hop retried/looped                   → probeAuth > 1
+func TestProbeVideoInfoCascadesOnceWhenTheCookiedHopAlsoFails(t *testing.T) {
+	f := &fakeProbeClient{
+		hasCookies:    true,
+		probeInfo:     &youtube.VideoInfo{},
+		probeAuthInfo: &youtube.VideoInfo{},
+		fullInfo:      selectable("cascade"),
+	}
+
+	info, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
+	if err != nil {
+		t.Fatalf("probeVideoInfo: %v", err)
+	}
+	if f.probe != 1 || f.probeAuth != 1 || f.full != 1 {
+		t.Errorf("calls: probe=%d probeAuth=%d full=%d; want one of each, cascade last",
+			f.probe, f.probeAuth, f.full)
+	}
+	if info.Title != "cascade" {
+		t.Errorf("info came from %q, want the cascade's answer", info.Title)
+	}
+}
+
+// TestProbeVideoInfoFallsBackToTheCascadeOnAProbeError is the "never make
+// recovery worse" ruling. One erroring player call must not end the tick: the
+// cascade pools three to seven clients and routinely answers when one of them
+// 403s, so a TV (or android_vr) client that starts failing would otherwise
+// silently kill quality monitoring for the rest of the broadcast — visible
+// only at Debug, since QualityMonitor.Run logs a probe error and skips.
+//
+// A *youtube.VideoIDMismatchError is an ordinary probe error here (Task 3
+// Step 9): no special handling, so it too takes the cascade, and the cascade's
+// own error still unwraps to it.
+//
+// Mutants this kills:
+//   - a probe error returned immediately → full == 0
+//   - the cascade's error returned bare   → errors.As can no longer see the
+//     mismatch through the wrap
+func TestProbeVideoInfoFallsBackToTheCascadeOnAProbeError(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		requiresAuth bool
+		probeErr     error
+		authErr      error
+	}{
+		{"cookied probe 403s", true, nil, errors.New("403")},
+		{"cookieless probe fails", false, errors.New("dial tcp: timeout"), nil},
+		{"cookied probe is served a substitute video", true, nil, &youtube.VideoIDMismatchError{Requested: "vid", Got: "other"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeProbeClient{
+				probeErr:     tc.probeErr,
+				probeAuthErr: tc.authErr,
+				fullInfo:     selectable("cascade"),
+			}
+
+			info, err := probeVideoInfo(context.Background(), f, "vid", tc.requiresAuth, nil)
+			if err != nil {
+				t.Fatalf("probeVideoInfo: %v", err)
+			}
+			if f.full != 1 {
+				t.Errorf("GetVideoInfo called %d times after a probe error, want exactly 1", f.full)
+			}
+			if info.Title != "cascade" {
+				t.Errorf("info came from %q, want the cascade's answer", info.Title)
+			}
+		})
+	}
+
+	t.Run("the cascade's own mismatch still unwraps", func(t *testing.T) {
+		f := &fakeProbeClient{
+			probeErr: errors.New("dial tcp: timeout"),
+			fullErr:  &youtube.VideoIDMismatchError{Requested: "vid", Got: "other"},
+		}
+		_, err := probeVideoInfo(context.Background(), f, "vid", false, nil)
+		var mismatch *youtube.VideoIDMismatchError
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("err = %v; want a wrapped *youtube.VideoIDMismatchError", err)
+		}
+	})
+}
+
+// TestProbeVideoInfoBuysNoCascadeOnACancelledContext keeps the shutdown race
+// cheap: when the tick's context is already done, the cascade cannot succeed
+// and every call it makes is waste on the way out.
+//
+// Mutants this kills:
+//   - the ctx guard dropped → full == 1 during shutdown
+func TestProbeVideoInfoBuysNoCascadeOnACancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	f := &fakeProbeClient{
+		hasCookies: true,
+		probeErr:   context.Canceled,
+		fullInfo:   selectable("cascade"),
+	}
+
+	if _, err := probeVideoInfo(ctx, f, "vid", false, nil); err == nil {
+		t.Fatal("a cancelled tick returned no error")
+	}
+	if f.probeAuth != 0 || f.full != 0 {
+		t.Errorf("calls: probeAuth=%d full=%d; want neither the hop nor the cascade on a cancelled context",
+			f.probeAuth, f.full)
+	}
+}
+
 // TestProbeVideoInfoSurfacesANilInfoAsAnError keeps the defensive arm that
 // exists because GetVideoInfo / ProbeVideoStatus can return (nil, nil) during
 // a context-cancel shutdown race; the next dereference would panic the
-// monitor goroutine.
+// monitor goroutine. A nil probe answer is treated as "nothing selectable" and
+// takes the cascade; only a nil answer from the cascade itself is terminal.
 //
 // Mutants this kills: the nil guard removed → panic instead of an error.
 func TestProbeVideoInfoSurfacesANilInfoAsAnError(t *testing.T) {
 	f := &fakeProbeClient{}
-	if _, err := probeVideoInfo(context.Background(), f, "vid", false); err == nil {
+	if _, err := probeVideoInfo(context.Background(), f, "vid", false, nil); err == nil {
 		t.Fatal("a nil info with no error was accepted")
 	}
 
 	g := &fakeProbeClient{probeInfo: &youtube.VideoInfo{}, fullErr: errors.New("boom")}
-	if _, err := probeVideoInfo(context.Background(), g, "vid", false); err == nil {
+	if _, err := probeVideoInfo(context.Background(), g, "vid", false, nil); err == nil {
 		t.Fatal("a failing fallback was accepted")
 	}
 }
+
+// TestProbeVideoInfoLogsTheBranchItTook is the controller's Debug ruling, and
+// the label honesty fix (round 1, m2): the TV probe is only "+cookies" when
+// cookies were actually configured — Service.ProbeVideoStatusAuthenticated
+// sends whatever the jar holds and never checks, so an unconditional label
+// claims credentials a cookieless install never sent.
+//
+// Mutants this kills:
+//   - the probe label hard-coded to "+cookies" → the cookieless case logs it
+//   - a branch that logs nothing               → no line for that branch
+func TestProbeVideoInfoLogsTheBranchItTook(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		hasCookies bool
+		wantProbe  string
+	}{
+		{"cookied install", true, "tv_downgraded+cookies"},
+		{"cookieless install", false, "tv_downgraded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lg := &recordingProbeLogger{}
+			f := &fakeProbeClient{hasCookies: tc.hasCookies, probeAuthInfo: selectable("cookied probe")}
+
+			if _, err := probeVideoInfo(context.Background(), f, "vid", true, lg); err != nil {
+				t.Fatalf("probeVideoInfo: %v", err)
+			}
+			if len(lg.lines) != 1 {
+				t.Fatalf("logged %d Debug lines, want exactly 1: %+v", len(lg.lines), lg.lines)
+			}
+			if got := lg.lines[0].value("probe"); got != tc.wantProbe {
+				t.Errorf("probe label = %q, want %q", got, tc.wantProbe)
+			}
+		})
+	}
+
+	t.Run("the cascade branch says so", func(t *testing.T) {
+		lg := &recordingProbeLogger{}
+		f := &fakeProbeClient{probeInfo: &youtube.VideoInfo{}, fullInfo: selectable("cascade")}
+
+		if _, err := probeVideoInfo(context.Background(), f, "vid", false, lg); err != nil {
+			t.Fatalf("probeVideoInfo: %v", err)
+		}
+		if len(lg.lines) != 1 || lg.lines[0].value("probe") != "android_vr" {
+			t.Fatalf("lines = %+v, want one android_vr line", lg.lines)
+		}
+	})
+}
+
+// recordingProbeLogger captures Debug lines. It satisfies the worker's
+// anonymous logger interface (the four methods); only Debug is asserted on.
+type recordingProbeLogger struct{ lines []probeLogLine }
+
+type probeLogLine struct {
+	msg  string
+	args []any
+}
+
+// value returns the string value logged for key, or "" when absent.
+func (l probeLogLine) value(key string) string {
+	for i := 0; i+1 < len(l.args); i += 2 {
+		if k, ok := l.args[i].(string); ok && k == key {
+			s, _ := l.args[i+1].(string)
+			return s
+		}
+	}
+	return ""
+}
+
+func (r *recordingProbeLogger) Debug(msg string, args ...any) {
+	r.lines = append(r.lines, probeLogLine{msg: msg, args: args})
+}
+func (r *recordingProbeLogger) Info(string, ...any)  {}
+func (r *recordingProbeLogger) Warn(string, ...any)  {}
+func (r *recordingProbeLogger) Error(string, ...any) {}
