@@ -189,11 +189,13 @@ func gqlBodySize(respData []byte) string {
 // string for ad-hoc raw queries.
 //
 // Transient failures (5xx, 429, transport errors) are retried with
-// exponential backoff (1s → 2s → 4s) up to gqlMaxRetries. 429 honors
-// `Retry-After` if present and within gqlMaxRetryDelay; otherwise the
-// backoff schedule wins. Auth failures (401/403) and 4xx responses are
-// not retried — they need a different recovery path (re-login, fix
-// caller).
+// exponential backoff (1s → 2s → 4s) up to gqlMaxRetries. A 429 honors
+// `Retry-After` when it is within gqlMaxRetryDelay (that wait replaces the
+// retry's own backoff); a `Retry-After` LONGER than the cap returns the 429 at
+// once, so the caller's cycle cadence is the backoff rather than three quick
+// retries into a throttle Twitch asked us to respect. Auth failures (401/403)
+// and other 4xx responses are not retried — they need a different recovery
+// path (re-login, fix caller).
 func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken string) (json.RawMessage, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -238,10 +240,24 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 			continue
 		}
 
-		// 429: respect Retry-After when reasonable, else fall through to
-		// the standard backoff on the next iteration.
+		// 429: respect Retry-After. Inside gqlMaxRetryDelay it becomes THIS
+		// retry's delay; beyond it, retrying is the wrong answer altogether —
+		// three requests on the 1s/2s/4s schedule walk straight into a
+		// throttle Twitch just asked us to sit out, and the caller's own cycle
+		// (the monitor's 15 s, a quality probe's 30 s) is already a better
+		// backoff than anything this loop can offer (TWITCH-9).
 		if statusCode == http.StatusTooManyRequests {
-			if ra := parseRetryAfter(hdrRetryAfter); ra > 0 && ra <= gqlMaxRetryDelay {
+			ra := parseRetryAfter(hdrRetryAfter)
+			lastErr = fmt.Errorf("gql rate limited (429) (%s): %s", opLabel(opName), gqlBodySize(respData))
+			lastStatus = statusCode
+			if ra > gqlMaxRetryDelay {
+				if a.logger != nil {
+					a.logger.Warn("twitch gql 429 asked for longer than we retry; deferring to the caller's cadence",
+						"op", opLabel(opName), "retry_after", ra.String(), "cap", gqlMaxRetryDelay.String())
+				}
+				return nil, lastErr
+			}
+			if ra > 0 {
 				if a.logger != nil {
 					a.logger.Debug("twitch gql 429 honoring Retry-After", "op", opLabel(opName), "wait", ra.String())
 				}
@@ -254,8 +270,6 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 				// stack the exponential backoff on top of it.
 				skipBackoff = true
 			}
-			lastErr = fmt.Errorf("gql rate limited (429) (%s): %s", opLabel(opName), gqlBodySize(respData))
-			lastStatus = statusCode
 			continue
 		}
 
