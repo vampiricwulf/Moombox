@@ -415,6 +415,14 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
 		fm.mu.Unlock()
 		return
 	}
+	// Same rule as runCycle's guard, for the path that arms the timer. Checked
+	// AFTER `cancel == nil` and deliberately WITHOUT touching NextCheckAt: the
+	// countdown belongs to whichever chain is live now, and a dead chain
+	// zeroing it would blank the UI's next-check time for no reason.
+	if ctx.Err() != nil {
+		fm.mu.Unlock()
+		return
+	}
 	fm.NextCheckAt = time.Now().Add(delay).UnixMilli()
 	if fm.timer != nil {
 		fm.timer.Stop()
@@ -438,6 +446,17 @@ func (fm *FeedMonitor) runCycle(ctx context.Context) {
 			fm.logger.Error("feed monitor runCycle panic", "panic", r)
 		}
 	}()
+
+	// A cancelled context means this cycle belongs to a STOPPED chain. Stop()
+	// cancels the context but leaves the AfterFunc armed, and a later Start()
+	// installs a new cancel — so the dead chain's cycle used to pass every
+	// guard, run a full doCheck, and then re-arm the SHARED timer field,
+	// cancelling the live chain's pending cycle every interval. Returning here,
+	// before the `checking` latch and before the scheduleNext defer is
+	// installed, is what stops that. Latent today (Stop runs only at shutdown).
+	if ctx.Err() != nil {
+		return
+	}
 
 	cycleStart := time.Now()
 	fm.mu.Lock()

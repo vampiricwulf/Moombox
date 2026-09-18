@@ -77,6 +77,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 				}
 			}()
 
+			// Startup admission sweep (MON-9). Nothing Wakes a process whose
+			// only backlog predates it: the wake sites are backlog CREATION and
+			// job COMPLETION, and a restart has neither, so leftover Queued rows
+			// waited for the 60 s heartbeat. sweep() is idempotent and
+			// single-threaded by construction, so running it again after a
+			// panic-restart costs one extra pass.
+			s.sweep()
+
 			for {
 				select {
 				case <-ctx.Done():

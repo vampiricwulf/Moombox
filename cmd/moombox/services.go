@@ -355,6 +355,50 @@ func cookiesLoadedFields(jar *cookies.CookieJar, now int64) []any {
 	}, jar.HorizonLogFields()...)
 }
 
+// archiveSlotsResolver builds the per-channel archive-slots resolver the
+// backlog scheduler consults on every admission sweep (spec §10): "how many
+// backlog downloads may channel X run". The per-channel archive_slots override
+// falls back to monitors.archive_slots, and the config store is re-read on
+// every call so config edits take effect without a restart — channels are few,
+// the scan is cheap.
+//
+// A DISABLED channel gets 0, by owner decision O-J: disabling PAUSES the
+// channel's queued backlog. Every discovery path already reads disabling that
+// way (the three monitors skip the channel, and internal/monitor/backfill.go
+// keeps it in `active` while never scanning it, calling that "a pause, not a
+// removal"), while this resolver kept handing out slots — so the scheduler went
+// on admitting Queued rows M at a time for a channel the operator had just
+// switched off. In-flight jobs are untouched: they have already left Queued, and
+// the count this feeds is an admission budget, not a kill switch.
+//
+// A channel with NO config entry still gets the global default. That is a
+// removed channel with leftover Queued rows, and returning 0 for it would
+// strand them with no path out of Queued at all — the opposite failure to the
+// one O-J fixes.
+func archiveSlotsResolver(store *config.Store) func(channelID string) int {
+	return func(channelID string) int {
+		slots := 0
+		store.Read(func(c *config.MoomboxConfig) {
+			slots = c.Monitors.ArchiveSlots
+			for i := range c.Channels {
+				ch := &c.Channels[i]
+				if ch.ID != channelID {
+					continue
+				}
+				if !ch.IsEnabled() {
+					slots = 0
+					return
+				}
+				if ch.ArchiveSlots != nil && *ch.ArchiveSlots > 0 {
+					slots = *ch.ArchiveSlots
+				}
+				return
+			}
+		})
+		return slots
+	}
+}
+
 // initServices runs the 16 numbered construction sections from the original
 // run() — config load, logger, updater, database, connectivity, cookies,
 // platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
@@ -758,29 +802,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	})
 	s.dlWorker = dlWorker
 
-	// Archive-slots resolver (spec §10): the backlog scheduler asks "how many
-	// backlog downloads may channel X run" on every admission sweep. The
-	// per-channel archive_slots override falls back to monitors.archive_slots,
-	// and the config store is re-read on every call so config edits take
-	// effect without restart — channels are few, the scan is cheap. A channel
-	// with no config entry (a removed channel with leftover Queued rows) gets
-	// the global default.
-	dlWorker.SetArchiveSlotsResolver(func(channelID string) int {
-		slots := 0
-		s.configStore.Read(func(c *config.MoomboxConfig) {
-			slots = c.Monitors.ArchiveSlots
-			for i := range c.Channels {
-				ch := &c.Channels[i]
-				if ch.ID == channelID {
-					if ch.ArchiveSlots != nil && *ch.ArchiveSlots > 0 {
-						slots = *ch.ArchiveSlots
-					}
-					break
-				}
-			}
-		})
-		return slots
-	})
+	dlWorker.SetArchiveSlotsResolver(archiveSlotsResolver(s.configStore))
 
 	// =========================================================================
 	// 11. Trim service

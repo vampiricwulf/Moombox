@@ -611,3 +611,29 @@ func TestBroadcastFlips_WakeScheduler(t *testing.T) {
 		t.Fatal("priority-0 live transition woke the scheduler — no slot was freed")
 	}
 }
+
+// TestScheduler_RunSweepsBeforeWaiting is MON-9. Run used to enter its
+// select immediately, so Queued backlog left over from before a restart sat
+// there until the first Wake() (a new discovery, or a job finishing) or the
+// 60 s heartbeat. Nothing wakes a freshly started process whose only backlog
+// predates it.
+//
+// Mutant: delete the s.sweep() above the inner loop -> nothing is admitted
+// inside the 2 s window (the next chance is heartbeatInterval away).
+func TestScheduler_RunSweepsBeforeWaiting(t *testing.T) {
+	s, db, log := testSchedulerSetup(t, 2)
+	chID := "UC_startup"
+	addSchedJob(t, db, &chID, "v_leftover", database.StatusQueued, 1)
+	addFeedItemRow(t, db, chID, "v_leftover", "2026-07-01T00:00:00Z")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go s.Run(ctx)
+
+	waitForCond(t, 2*time.Second, "the startup sweep to admit the leftover backlog", func() bool {
+		return log.enqueueCount() >= 1
+	})
+	if got := log.admitted(); len(got) != 1 || got[0] != "v_leftover" {
+		t.Fatalf("admitted %v, want [v_leftover] — Run must sweep once before it waits", got)
+	}
+}

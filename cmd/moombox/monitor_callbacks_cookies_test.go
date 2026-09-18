@@ -204,7 +204,7 @@ func TestResumeCookieParkedJobs(t *testing.T) {
 
 	// --- Auth recovery (no identity on offer): dead cookies wake, the
 	// membership park does not. ---
-	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, "youtube", ""); n != 2 {
+	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, nil, "youtube", ""); n != 2 {
 		t.Errorf("auth-recovery sweep resumed %d jobs, want 2 (dead + legacy)", n)
 	}
 
@@ -231,13 +231,13 @@ func TestResumeCookieParkedJobs(t *testing.T) {
 
 	// --- Same account observed: still nothing. This is what makes the
 	// mechanism safe to run on every check rather than only on an edge. ---
-	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, "youtube", "account-A"); n != 0 {
+	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, nil, "youtube", "account-A"); n != 0 {
 		t.Errorf("sweep under the SAME account resumed %d jobs, want 0", n)
 	}
 	mustStatus("yt_member", database.StatusCookies)
 
 	// --- A different account: now the membership park is eligible. ---
-	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, "youtube", "account-B"); n != 1 {
+	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, nil, "youtube", "account-B"); n != 1 {
 		t.Errorf("different-account sweep resumed %d jobs, want 1 (the membership park)", n)
 	}
 	got := mustStatus("yt_member", database.StatusUpcoming)
@@ -277,13 +277,73 @@ func TestMembershipParkSurvivesRestart(t *testing.T) {
 	})
 
 	// Restart with the SAME cookies: the first observation must be a no-op.
-	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, "youtube", "account-A"); n != 0 {
+	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, nil, "youtube", "account-A"); n != 0 {
 		t.Errorf("first observation after a same-cookies restart resumed %d jobs, want 0", n)
 	}
 
 	// Restart after an OFFLINE cookie swap: the first observation must resume.
-	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, "youtube", "account-B"); n != 1 {
+	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, nil, "youtube", "account-B"); n != 1 {
 		t.Errorf("first observation after an offline account swap resumed %d jobs, want 1 — "+
 			"this is the case a process-local edge can never see", n)
+	}
+}
+
+// TestResumeCookieParkedJobs_RespectsQueuePriority is MON-4. A cookie repair
+// used to bounce EVERY parked row straight to Upcoming, which the worker's
+// heartbeat poller then processes — so a channel's whole members-only backlog
+// was released at once, bypassing the archive-slots pacing that exists to stop
+// exactly that. CountBacklogInFlight then over-counts and blocks further
+// admission until they drain.
+//
+// Mutants:
+//   - send priority-1 rows to Upcoming -> the backlog row's status is wrong.
+//   - send priority-0 rows to Queued -> a live/upcoming job would be stranded:
+//     the scheduler only admits rows that have a channel_id and priority 1.
+//   - drop the wake call -> wakes == 0 and the resumed backlog waits up to
+//     60 s for the heartbeat.
+func TestResumeCookieParkedJobs_RespectsQueuePriority(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "priority.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	chID := "UC_park"
+	for _, j := range []*database.Job{
+		{ID: "backlog1", VideoID: "backlog1", URL: "u", Platform: "youtube",
+			Status: database.StatusCookies, ChannelID: &chID, QueuePriority: 1},
+		{ID: "broadcast1", VideoID: "broadcast1", URL: "u", Platform: "youtube",
+			Status: database.StatusCookies, ChannelID: &chID, QueuePriority: 0},
+	} {
+		if _, err := db.AddJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.UpdateJobFields("backlog1", map[string]any{"error": "parked: auth"})
+
+	var wakes int
+	resumed := resumeCookieParkedJobs(db, sweepTestLogger{}, func() { wakes++ }, "youtube", "")
+	if resumed != 2 {
+		t.Fatalf("resumed = %d, want 2", resumed)
+	}
+
+	backlog, _ := db.GetJob("backlog1")
+	if backlog.Status != database.StatusQueued {
+		t.Errorf("priority-1 row resumed to %q, want %q — going straight to Upcoming releases the whole backlog at once and bypasses archive-slots",
+			backlog.Status, database.StatusQueued)
+	}
+	broadcast, _ := db.GetJob("broadcast1")
+	if broadcast.Status != database.StatusUpcoming {
+		t.Errorf("priority-0 row resumed to %q, want %q — the scheduler never admits a priority-0 row, so Queued would strand it",
+			broadcast.Status, database.StatusUpcoming)
+	}
+	if wakes == 0 {
+		t.Error("the scheduler was not woken — the resumed backlog waits up to 60 s for the heartbeat")
+	}
+	if wakes != 1 {
+		t.Errorf("wake called %d times, want exactly 1 — Wake coalesces into a capacity-1 channel, so one signal per sweep is all it can use", wakes)
+	}
+	if backlog.ParkReason != database.ParkReasonNone || backlog.ParkIdentity != "" || backlog.Error != "" {
+		t.Errorf("the park fields were not cleared on the Queued arm: %+v", backlog)
 	}
 }
