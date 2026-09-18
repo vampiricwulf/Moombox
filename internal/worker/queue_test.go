@@ -169,34 +169,11 @@ func TestDequeue_PriorityFIFOWithinTies(t *testing.T) {
 	}
 }
 
-func TestDequeue_LifecycleGating(t *testing.T) {
-	q := NewJobQueue(10)
-	q.maxLifecycle = 1 // Override for testing
-	q.Enqueue("job1", database.StatusUpcoming)
-	q.Enqueue("job2", database.StatusUpcoming)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	// Dequeue first job (fills the single lifecycle slot)
-	id1, _, ok := q.Dequeue(ctx)
-	if !ok || id1 != "job1" {
-		t.Fatalf("first dequeue = %q, ok=%v, want job1/true", id1, ok)
-	}
-
-	if q.LifecycleCount() != 1 {
-		t.Errorf("LifecycleCount() = %d, want 1", q.LifecycleCount())
-	}
-
-	// Second dequeue should block because maxLifecycle=1
-	shortCtx, shortCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer shortCancel()
-
-	_, _, ok = q.Dequeue(shortCtx)
-	if ok {
-		t.Error("Dequeue should have blocked/returned false when lifecycle slots full")
-	}
-}
+// TestDequeue_LifecycleGating is gone: owner decision O-F moved the lifecycle
+// slot off Dequeue and onto the ShouldDownload decision, so the behaviour it
+// pinned (a second Dequeue blocking at maxLifecycle) is the bug, not the
+// contract. Its replacement is TestDequeueDoesNotTakeALifecycleSlot in
+// queue_lifecycle_test.go, which asserts the opposite invariant.
 
 func TestAcquireDownloadSlot_BlocksWhenFull(t *testing.T) {
 	q := NewJobQueue(1) // Only 1 download slot
@@ -309,6 +286,11 @@ func TestComplete_FreesLifecycleSlot(t *testing.T) {
 	q.Dequeue(ctx)
 	if q.IsProcessing("job1") != true {
 		t.Error("job1 should be processing after dequeue")
+	}
+	// The slot comes from the ShouldDownload decision now (O-F), so the test
+	// has to take it for this assertion to mean anything.
+	if !q.AcquireLifecycleSlot(ctx, "job1") {
+		t.Fatal("AcquireLifecycleSlot = false with the single slot free")
 	}
 
 	q.Complete("job1")
@@ -539,8 +521,11 @@ func TestActiveAndPendingCounts(t *testing.T) {
 
 	q.Dequeue(ctx)
 
-	if q.LifecycleCount() != 1 {
-		t.Errorf("LifecycleCount() after 1 dequeue = %d, want 1", q.LifecycleCount())
+	// Zero, not one: a dequeued job is in the WAIT phase, which runs
+	// slot-free since owner decision O-F — the lifecycle slot is claimed at
+	// the ShouldDownload decision (queue_lifecycle_test.go).
+	if q.LifecycleCount() != 0 {
+		t.Errorf("LifecycleCount() after 1 dequeue = %d, want 0", q.LifecycleCount())
 	}
 	if q.ActiveCount() != 0 {
 		t.Errorf("ActiveCount() after dequeue (no download slot) = %d, want 0", q.ActiveCount())

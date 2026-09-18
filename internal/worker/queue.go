@@ -31,24 +31,30 @@ func calculatePriority(status database.JobStatus) int {
 
 // JobQueue manages the download job queue with separate lifecycle and download concurrency.
 // Lifecycle concurrency (maxLifecycle=100) gates how many jobs can be in the
-// process/wait/download pipeline simultaneously. Download concurrency (maxDownloads) gates
-// how many jobs can be actively downloading segments at once. This matches the TS architecture
+// DOWNLOAD half of the pipeline simultaneously — it is claimed at the
+// ShouldDownload decision (owner decision O-F), not at Dequeue, so the wait
+// phase (Upcoming, a manually-added offline Twitch channel) runs slot-free.
+// Download concurrency (maxDownloads) gates how many jobs can be actively
+// downloading segments at once. This matches the TS architecture
 // where stream processing (probing, waiting for live) doesn't block download slots.
 type JobQueue struct {
-	mu              sync.Mutex
-	maxDownloads    int
-	maxLifecycle    int
-	activeLifecycle int
-	activeDownloads int
-	pending         []pendingJob
-	pendingSet      map[string]struct{} // O(1) duplicate detection for pending queue
-	processing      map[string]context.CancelFunc
-	done            map[string]chan struct{} // closed when the job's processing goroutine returns
-	holdingDlSlot   map[string]bool          // tracks which jobs hold download slots
-	cancelled       map[string]bool          // tracks user-initiated cancellations (vs shutdown)
-	notify          chan struct{}
-	dlNotify        chan struct{} // signaling for download slot availability
-	logger          logger        // optional logger for warnings
+	mu               sync.Mutex
+	maxDownloads     int
+	maxLifecycle     int
+	activeLifecycle  int
+	activeDownloads  int
+	pending          []pendingJob
+	pendingSet       map[string]struct{} // O(1) duplicate detection for pending queue
+	processing       map[string]context.CancelFunc
+	done             map[string]chan struct{} // closed when the job's processing goroutine returns
+	holdingDlSlot    map[string]bool          // tracks which jobs hold download slots
+	holdingLifecycle map[string]bool          // tracks which jobs hold lifecycle slots
+	droppedLogged    map[string]struct{}      // jobs whose backlog drop has been logged
+	cancelled        map[string]bool          // tracks user-initiated cancellations (vs shutdown)
+	notify           chan struct{}
+	dlNotify         chan struct{} // signaling for download slot availability
+	lifeNotify       chan struct{} // signaling for lifecycle slot availability
+	logger           logger        // optional logger for warnings
 }
 
 // NewJobQueue creates a new job queue.
@@ -57,15 +63,18 @@ func NewJobQueue(maxDownloads int) *JobQueue {
 		maxDownloads = 10
 	}
 	return &JobQueue{
-		maxDownloads:  maxDownloads,
-		maxLifecycle:  100,
-		pendingSet:    make(map[string]struct{}),
-		processing:    make(map[string]context.CancelFunc),
-		done:          make(map[string]chan struct{}),
-		holdingDlSlot: make(map[string]bool),
-		cancelled:     make(map[string]bool),
-		notify:        make(chan struct{}, 1),
-		dlNotify:      make(chan struct{}, 1),
+		maxDownloads:     maxDownloads,
+		maxLifecycle:     100,
+		pendingSet:       make(map[string]struct{}),
+		processing:       make(map[string]context.CancelFunc),
+		done:             make(map[string]chan struct{}),
+		holdingDlSlot:    make(map[string]bool),
+		holdingLifecycle: make(map[string]bool),
+		droppedLogged:    make(map[string]struct{}),
+		cancelled:        make(map[string]bool),
+		notify:           make(chan struct{}, 1),
+		dlNotify:         make(chan struct{}, 1),
+		lifeNotify:       make(chan struct{}, 1),
 	}
 }
 
@@ -91,12 +100,21 @@ func (q *JobQueue) Enqueue(jobID string, status database.JobStatus) {
 
 	// Backlog limit to prevent unbounded growth (matches TS queue.size >= 100)
 	if len(q.pending) >= 100 {
-		if q.logger != nil {
-			q.logger.Warn("job queue full, dropping job", "jobID", jobID, "limit", 100)
+		// Once per job, not once per offer: the 60 s heartbeat re-enqueues
+		// every ShouldProcess job forever, so the old unconditional Warn was
+		// one line per minute per dropped job (sweep-2 ENGINE-10).
+		if _, logged := q.droppedLogged[jobID]; !logged {
+			q.droppedLogged[jobID] = struct{}{}
+			if q.logger != nil {
+				q.logger.Warn("job queue full, dropping job", "jobID", jobID, "limit", 100)
+			}
 		}
 		return
 	}
 
+	// The job got in: forget the earlier drop so a LATER drop episode is
+	// logged again, and so the map cannot grow without bound.
+	delete(q.droppedLogged, jobID)
 	q.pending = append(q.pending, pendingJob{ID: jobID, Priority: calculatePriority(status)})
 	q.pendingSet[jobID] = struct{}{}
 
@@ -116,14 +134,19 @@ func (q *JobQueue) isPending(jobID string) bool {
 	return ok
 }
 
-// Dequeue returns the next job ID and a per-job cancellable context when a lifecycle slot
-// is available. Selects the highest-priority pending job (FIFO among ties).
+// Dequeue returns the next job ID and a per-job cancellable context.
+// Selects the highest-priority pending job (FIFO among ties).
 // Blocks until a job is available or the parent context is cancelled.
 // The returned context is cancelled when Cancel(jobID) is called.
 func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) {
 	for {
 		q.mu.Lock()
-		if q.activeLifecycle < q.maxLifecycle && len(q.pending) > 0 {
+		// No lifecycle gate here (owner decision O-F): the slot is claimed at
+		// the ShouldDownload decision instead. Gating the DEQUEUE meant every
+		// Upcoming job and every manually-added offline Twitch channel held
+		// one of the 100 slots for its whole wait — hours to days — and at
+		// 100 waiters a newly live stream was never started at all.
+		if len(q.pending) > 0 {
 			// Find highest priority job (FIFO among ties — first match wins)
 			bestIdx := 0
 			for i := 1; i < len(q.pending); i++ {
@@ -134,7 +157,6 @@ func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) 
 			jobID := q.pending[bestIdx].ID
 			q.pending = append(q.pending[:bestIdx], q.pending[bestIdx+1:]...)
 			delete(q.pendingSet, jobID)
-			q.activeLifecycle++
 			jobCtx, cancel := context.WithCancel(ctx)
 			q.processing[jobID] = cancel
 			q.done[jobID] = make(chan struct{})
@@ -149,6 +171,56 @@ func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) 
 		case <-q.notify:
 			continue
 		}
+	}
+}
+
+// AcquireLifecycleSlot blocks until one of the maxLifecycle slots is free,
+// then claims it for jobID. Called once stream processing has decided the job
+// will actually download (owner decision O-F), so the cap now bounds
+// CONCURRENT DOWNLOADS rather than concurrent waits — a limit no realistic
+// install approaches, which is the point: the wait phase is unbounded except
+// by per-job goroutine cost. Returns false if ctx is cancelled first.
+func (q *JobQueue) AcquireLifecycleSlot(ctx context.Context, jobID string) bool {
+	for {
+		q.mu.Lock()
+		if q.activeLifecycle < q.maxLifecycle {
+			q.activeLifecycle++
+			q.holdingLifecycle[jobID] = true
+			stillFree := q.activeLifecycle < q.maxLifecycle
+			q.mu.Unlock()
+			// Cascade the wakeup for the same reason AcquireDownloadSlot does:
+			// lifeNotify has capacity 1, so two releases in quick succession
+			// collapse into one signal and a second waiter would sleep beside
+			// a free slot until the next release.
+			if stillFree {
+				select {
+				case q.lifeNotify <- struct{}{}:
+				default:
+				}
+			}
+			return true
+		}
+		q.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-q.lifeNotify:
+		}
+	}
+}
+
+// releaseLifecycleSlotLocked frees jobID's lifecycle slot if it holds one.
+// Caller holds q.mu.
+func (q *JobQueue) releaseLifecycleSlotLocked(jobID string) {
+	if !q.holdingLifecycle[jobID] {
+		return
+	}
+	delete(q.holdingLifecycle, jobID)
+	q.activeLifecycle--
+	select {
+	case q.lifeNotify <- struct{}{}:
+	default:
 	}
 }
 
@@ -212,15 +284,22 @@ func (q *JobQueue) Complete(jobID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	// Outside the processing branch on purpose: a job that claimed a slot and
+	// then had its row deleted (or whose setJobError/handleCancellation
+	// Complete already removed the processing entry) must still give the slot
+	// back. The holdingLifecycle guard makes the repeat call a no-op, so the
+	// two Completes every error path fires cannot over-release.
+	q.releaseLifecycleSlotLocked(jobID)
+
 	if cancel, ok := q.processing[jobID]; ok {
 		cancel()
 		delete(q.processing, jobID)
-		q.activeLifecycle--
 
 		// Drop any unconsumed user-cancel flag so it can't leak or
 		// misclassify the job's next run (WasCancelled normally consumes it,
 		// but error paths can finish a run without ever reading it).
 		delete(q.cancelled, jobID)
+		delete(q.droppedLogged, jobID)
 
 		// Signal that the processing goroutine has returned.
 		ch := q.done[jobID]
@@ -315,8 +394,9 @@ func (q *JobQueue) ActiveCount() int {
 	return q.activeDownloads
 }
 
-// LifecycleCount returns the number of jobs in lifecycle processing
-// (stream processing + downloading + muxing).
+// LifecycleCount returns the number of jobs holding a lifecycle slot —
+// downloading + muxing. Stream processing and the wait for a stream to go live
+// are deliberately NOT counted (owner decision O-F): they run slot-free.
 func (q *JobQueue) LifecycleCount() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()

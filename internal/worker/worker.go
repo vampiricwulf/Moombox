@@ -678,10 +678,23 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
+	// Lifecycle slot (owner decision O-F): claimed HERE, once stream
+	// processing has decided this job downloads, and never earlier. Dequeue
+	// used to claim it, which meant every Upcoming job and every
+	// manually-added offline Twitch channel held one of the 100 for its whole
+	// wait — and a job stream processing then DECLINED (disabled channel,
+	// filter, duplicate) held one it never used. Every exit path from here on
+	// runs through the deferred queue.Complete above, which releases it.
+	if !w.queue.AcquireLifecycleSlot(ctx, jobID) {
+		// Only ctx cancellation ends that wait.
+		w.handleCancellation(job)
+		return
+	}
+
 	// Acquire download slot — for VODs, blocks until a slot is available;
-	// broadcasts pass through ungated (see acquireDownloadSlot).
-	// Lifecycle slot (from Dequeue) allows stream processing to proceed without
-	// consuming download slots; actual downloading requires a separate download slot.
+	// broadcasts pass through ungated (see acquireDownloadSlot). The lifecycle
+	// slot above bounds the whole download half; this one bounds the VOD pool
+	// inside it.
 	if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
 		// Context cancelled while waiting for download slot
 		w.handleCancellation(job)
