@@ -36,6 +36,7 @@ func TestDefaultChatDelaysMatchConstants(t *testing.T) {
 		keepaliveIdle:     ircKeepaliveIdle,
 		keepalivePongWait: ircKeepalivePongWait,
 		keepaliveCheck:    ircKeepaliveCheck,
+		resumeSaveFloor:   ircResumeSaveFloor,
 	}
 	if got := defaultChatDelays(); got != want {
 		t.Fatalf("defaultChatDelays() = %+v, want %+v", got, want)
@@ -44,6 +45,7 @@ func TestDefaultChatDelaysMatchConstants(t *testing.T) {
 		"keepaliveIdle":     {want.keepaliveIdle, 45 * time.Second},
 		"keepalivePongWait": {want.keepalivePongWait, 10 * time.Second},
 		"keepaliveCheck":    {want.keepaliveCheck, 15 * time.Second},
+		"resumeSaveFloor":   {want.resumeSaveFloor, 5 * time.Second},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %v, want %v (production timing must not move in this arc)",

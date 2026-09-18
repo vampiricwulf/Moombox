@@ -41,6 +41,18 @@ const (
 	// against ircReadDeadline's 6 minutes. Twitch IRC has no replay, so every
 	// second of that difference is chat that would have been lost outright.
 	ircKeepaliveCheck = 15 * time.Second
+	// ircResumeSaveFloor is the minimum gap between two writes of the IRC
+	// chat resume sidecar. Owner ruling (sweep-2 "IRC sidecar"), and the VOD
+	// path's shape (vodChatFlushInterval).
+	//
+	// Every flush used to be followed by a ~39 KB marshal, fsync and rename —
+	// up to once a second while chat is pending, beside the chat.json append
+	// fsync. The sidecar only ever carries the dedup window a reconnect replay
+	// can overlap, so a save that is at most five seconds behind the file
+	// costs a header undercount that self-heals on the next flush; Twitch IRC
+	// has no replay, so nothing else reads it. The DEFERRED final save on stop
+	// (Start's exit path) is deliberately NOT throttled.
+	ircResumeSaveFloor = 5 * time.Second
 	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
 	// rather than a WebSocket ping frame: a WS pong proves the socket is open,
 	// while this proves the IRC layer behind it is still serving us.
@@ -287,7 +299,12 @@ type ChatDownloader struct {
 	fileCount        int   // messages belonging to the CURRENT part file (header count)
 	lastTimestampMs  int64 // Last message timestamp (epoch ms) for resume state
 	flushedToDisk    bool
-	emoteResolver    *EmoteResolver
+	// lastResumeSave is when saveResumeStateThrottled last WROTE. Guarded by
+	// cd.mu; the zero value means "never", which always writes. A time.Time
+	// in a struct field keeps its monotonic reading, so the comparison below
+	// is immune to a wall-clock step (ruling R7b, sweep 1).
+	lastResumeSave time.Time
+	emoteResolver  *EmoteResolver
 	// emoteData caches the third-party emote resolve so multi-part jobs hit
 	// the 7TV/BTTV/FFZ APIs once, not once per part. Guarded by emoteMu,
 	// which is held across the resolve itself to single-flight concurrent
@@ -684,6 +701,27 @@ func (cd *ChatDownloader) saveResumeState() {
 	if err := store.Save(state); err != nil {
 		cd.logger.Warn("save chat resume state", "err", err)
 	}
+}
+
+// saveResumeStateThrottled writes the resume sidecar unless one was written
+// less than delays.resumeSaveFloor ago. Returns whether it wrote.
+//
+// This is the periodic path (flushLocked). The exit path in Start calls
+// saveResumeState directly and is never throttled: that save is the one a
+// restart actually reads.
+func (cd *ChatDownloader) saveResumeStateThrottled() bool {
+	cd.mu.Lock()
+	floor := cd.delays.resumeSaveFloor
+	last := cd.lastResumeSave
+	if floor > 0 && !last.IsZero() && time.Since(last) < floor {
+		cd.mu.Unlock()
+		return false
+	}
+	cd.lastResumeSave = time.Now()
+	cd.mu.Unlock()
+
+	cd.saveResumeState()
+	return true
 }
 
 // restoreResumeState applies a loaded resume snapshot to the downloader's
@@ -1465,9 +1503,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 
 func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 	cd.mu.Lock()
-	defer cd.mu.Unlock()
 
 	if !cd.dedup.Add(msg.ID) {
+		cd.mu.Unlock()
 		return
 	}
 	// Prune at 2× threshold to amortize the Keep cost across inserts.
@@ -1499,8 +1537,15 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 	if msg.TimestampMs > cd.lastTimestampMs {
 		cd.lastTimestampMs = msg.TimestampMs
 	}
+	total := cd.totalCount
+	cd.mu.Unlock()
 
-	cd.callOnProgress(cd.totalCount)
+	// OUTSIDE the lock. This callback is ProgressTracker.SetChatCount, which
+	// reaches db.UpdateJobFields under the database's FULL sync up to ~60×/s
+	// on a busy channel; reporting under cd.mu queued the flusher tick,
+	// RollFile and every MessageCount() behind an fsync (TWITCH-5). The
+	// YouTube twin has always released first — internal/chat/downloader.go.
+	cd.callOnProgress(total)
 }
 
 // MessageCount returns the total number of messages collected.
