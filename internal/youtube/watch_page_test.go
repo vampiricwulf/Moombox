@@ -759,3 +759,34 @@ func TestPlayerResponseSkipsAForgedCandidate(t *testing.T) {
 			got, "abc12345678", len(pr))
 	}
 }
+
+// TestWatchPageURLCarriesTheAgeGateBypass is row #59: without yt-dlp's
+// bpctr / has_verified pair (_video.py:3809) an age-restricted video's watch
+// page returns the age-gate shell, and with it the ScheduledStartTime source
+// and the WatchPage format tier both vanish.
+//
+// The whole query string is pinned, not just the presence of the two
+// parameters: they are APPENDED to the URL that already worked, so a rewrite
+// that reorders or drops `v=` — the only parameter YouTube actually needs —
+// must fail here too.
+//
+// Mutant this kills: the two parameters dropped → the URL check fails.
+func TestWatchPageURLCarriesTheAgeGateBypass(t *testing.T) {
+	got := watchPageURL("dQw4w9WgXcQ")
+	for _, want := range []string{"v=dQw4w9WgXcQ", "bpctr=9999999999", "has_verified=1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("watchPageURL = %q, missing %q", got, want)
+		}
+	}
+
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("watchPageURL produced an unparseable URL %q: %v", got, err)
+	}
+	if want := "https://www.youtube.com/watch"; u.Scheme+"://"+u.Host+u.Path != want {
+		t.Errorf("watch page endpoint = %q, want %q", u.Scheme+"://"+u.Host+u.Path, want)
+	}
+	if want := "v=dQw4w9WgXcQ&bpctr=9999999999&has_verified=1"; u.RawQuery != want {
+		t.Errorf("watchPageURL query = %q, want exactly %q", u.RawQuery, want)
+	}
+}

@@ -86,6 +86,13 @@ type VideoInfo struct {
 	// cause instead of always to "your cookies expired".
 	SessionAuth SessionAuthState `json:"-"`
 
+	// FormatDiag records what this info's format list LOST on the way here
+	// (see FormatDiag). Diagnostic only — nothing downloads differently
+	// because of it — but it is what distinguishes "this client was forced
+	// onto SABR" and "every format was DRM" from "streamingData was empty",
+	// all three of which used to read as "formats 0".
+	FormatDiag FormatDiag `json:"-"`
+
 	// GvsBinding is the content binding GVS (segment-URL) PO tokens for this
 	// video must carry, and GvsBindingKind names the rule that produced it
 	// ("videoID", "datasyncID", "visitorData", "channelID"). Resolved once in
@@ -106,6 +113,46 @@ type VideoInfo struct {
 	// "day" (microformat uploadDate/publishDate fallback). Empty when
 	// PublishedAt is empty.
 	PublishedPrecision string `json:"publishedPrecision,omitempty"`
+}
+
+// FormatDiag records why a client's format list came out the size it did.
+//
+// A client YouTube has forced onto SABR returns formats with neither `url`
+// nor `signatureCipher` plus a `streamingData.serverAbrStreamingUrl` — yt-dlp
+// says so out loud ("YouTube is forcing SABR streaming for this client",
+// _video.py:3527-3548). Moombox skipped those formats silently, so the death
+// of a client looked exactly like an empty response.
+//
+// The four counters are read at two different scopes, and the doc on each
+// says which:
+//
+//   - URLlessFormats and SabrForced describe the ONE response this VideoInfo
+//     was parsed from, because "which client was forced onto SABR" is a
+//     per-client fact and the per-client result log lines print them.
+//   - DRMSkipped and CollapsedRenditions describe the whole EXTRACTION: the
+//     cascade's single exit (finishExtraction) restamps them on the VideoInfo
+//     it returns, which is the object the worker reads when it has to explain
+//     why no suitable formats were found. On a VideoInfo that never went
+//     through a cascade — a probe, a direct parse — they hold that one
+//     response's figures instead.
+type FormatDiag struct {
+	// URLlessFormats counts entries skipped for carrying no fetchable URL.
+	URLlessFormats int
+	// SabrForced is true when streamingData carried serverAbrStreamingUrl.
+	SabrForced bool
+	// DRMSkipped counts entries dropped for carrying drmFamilies, SUMMED
+	// over the extraction's responses. A DRM entry never reaches the format
+	// pool, so there is no pool identity to collapse the copies several
+	// clients each returned against; the figure is entries dropped, and the
+	// per-client Debug lines are what attribute them to a client.
+	DRMSkipped int
+	// CollapsedRenditions counts the alternate audio renditions the POOL
+	// lost — dubbed and DRC entries that shared an itag with the rendition
+	// the audio-track preference kept. Counted where the collapse happens,
+	// at deduplicateFormats, and therefore AFTER the cross-client merge: a
+	// rendition three clients each returned counts once, where summing the
+	// per-response figures would count it three times.
+	CollapsedRenditions int
 }
 
 // Format contains video/audio format information from YouTube API.

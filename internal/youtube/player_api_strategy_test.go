@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -483,25 +484,38 @@ func TestEveryClientSubstitutedIsReportedAsAnIPBlock(t *testing.T) {
 	})
 
 	// The mirror image: no substitute anywhere, every client simply failed.
-	// The verdict must NOT fire on absence of evidence, and this path must
-	// come back byte-identical to the pre-round behaviour — the TV client's
-	// own HTTP error, verbatim, with no info.
+	// The verdict must NOT fire on absence of evidence.
+	//
+	// What this subtest can no longer assert is the TV client's own HTTP error
+	// coming back verbatim: row #58 (YOUTUBE-12) made the public path mirror
+	// the authenticated one, which has always logged a TV failure and carried
+	// on, so a cascade in which everything fails now ends the way the
+	// authenticated cascade ends — an empty VideoInfo, no error — instead of
+	// returning TV's status with VISIONOS and ANDROID_VR never asked. Trying
+	// them is the point of the row, and the tally still sees no substitution
+	// signal, which is what this subtest exists for.
 	t.Run("no substitute at all, every client failing", func(t *testing.T) {
 		stubWatchPage(t)
-		swapTransport(t, &clientKeyedTransport{responses: map[string]struct {
+		tr := &clientKeyedTransport{responses: map[string]struct {
 			status int
 			body   string
-		}{}})
+		}{}}
+		swapTransport(t, tr)
 
 		info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
 		if errors.Is(err, ErrAllClientsMismatched) {
 			t.Fatalf("flakiness alone raised the IP-block verdict: %v", err)
 		}
-		if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
-			t.Fatalf("err = %v, want the TV client's own HTTP error (pre-round shape)", err)
+		if err != nil {
+			t.Fatalf("err = %v, want the authenticated path's shape — log the failure and carry on", err)
 		}
-		if info != nil {
-			t.Errorf("info = %+v, want nil alongside that error", info)
+		if info == nil || len(info.Formats) != 0 {
+			t.Errorf("info = %+v, want an empty VideoInfo", info)
+		}
+		for _, want := range []string{"101", "28"} {
+			if !slices.Contains(tr.calls, want) {
+				t.Errorf("client %s was never tried (calls = %v) — row #58 exists so a TV failure no longer ends the cascade", want, tr.calls)
+			}
 		}
 	})
 
@@ -794,4 +808,346 @@ func TestCookielessFallbacksDoNotRecollectAPooledPrefetch(t *testing.T) {
 	if vrInPool != vrFormats {
 		t.Errorf("android_vr formats in the pool = %d, want %d — a pooled prefetch must not be collected twice", vrInPool, vrFormats)
 	}
+}
+
+// TestInnertubeErrorCarriesYouTubesOwnMessage: YouTube explains a 400/401/403
+// in the body ("Precondition check failed", "Request is missing required
+// authentication credential"), and the operator only ever saw "HTTP 403".
+// The "HTTP <code>" substring must SURVIVE, because worker/probe_classify.go
+// keys on it to decide whether a probe error is transient.
+//
+// Mutants this kills:
+//   - the detail not appended             → the message check fails
+//   - the "HTTP %d" prefix replaced       → the prefix check fails
+//   - a non-JSON body crashing or leaking → the second subtest fails
+//   - the detail put BEFORE the prefix    → the differential subtest fails
+func TestInnertubeErrorCarriesYouTubesOwnMessage(t *testing.T) {
+	t.Run("json error body", func(t *testing.T) {
+		got := innertubeErrorDetail([]byte(`{"error":{"code":403,"message":"Precondition check failed.","status":"FAILED_PRECONDITION"}}`))
+		if !strings.Contains(got, "FAILED_PRECONDITION") || !strings.Contains(got, "Precondition check failed.") {
+			t.Errorf("innertubeErrorDetail = %q, want YouTube's status and message", got)
+		}
+	})
+
+	t.Run("non-json body yields nothing", func(t *testing.T) {
+		if got := innertubeErrorDetail([]byte("<html>502 Bad Gateway</html>")); got != "" {
+			t.Errorf("innertubeErrorDetail on HTML = %q, want \"\"", got)
+		}
+	})
+
+	// The differential: every error string this package produces for a non-200
+	// still STARTS with the exact bytes it produced before the detail existed.
+	// probe_classify.go's fallback lowercases and substring-matches "http 4" /
+	// "http 5", and a detail placed ahead of the prefix (or a reworded prefix)
+	// would silently reclassify a terminal 404 as transient.
+	t.Run("the classifier's prefix survives byte-for-byte", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			body string
+		}{
+			{"with a detail", `{"error":{"message":"Precondition check failed.","status":"FAILED_PRECONDITION"}}`},
+			{"with an empty error object", `{"error":{}}`},
+			{"with an HTML body", "<html>404</html>"},
+			{"with an empty body", ""},
+		} {
+			for _, code := range []int{400, 401, 403, 404, 429, 500} {
+				want := fmt.Sprintf("WEB API error: HTTP %d", code)
+				got := innertubeHTTPError("WEB", code, []byte(tc.body)).Error()
+				if !strings.HasPrefix(got, want) {
+					t.Errorf("%s: innertubeHTTPError(%d) = %q, want the prefix %q — probe_classify.go keys on it",
+						tc.name, code, got, want)
+				}
+			}
+		}
+	})
+
+	t.Run("the prefix survives on the wire too", func(t *testing.T) {
+		tr := &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{
+			"28": {http.StatusForbidden, `{"error":{"message":"Precondition check failed.","status":"FAILED_PRECONDITION"}}`},
+		}}
+		orig := apiClient
+		apiClient = &http.Client{Transport: tr}
+		t.Cleanup(func() { apiClient = orig })
+
+		_, err := NewPlayerAPI(nil, noopLogger{}).ProbeVideoStatus(context.Background(), "test1234567", "vd")
+		if err == nil {
+			t.Fatal("a 403 was not reported as an error")
+		}
+		if !strings.Contains(err.Error(), "HTTP 403") {
+			t.Errorf("err = %q — probe_classify.go keys on the \"HTTP <code>\" substring", err)
+		}
+		if !strings.Contains(err.Error(), "Precondition check failed.") {
+			t.Errorf("err = %q, want YouTube's own message appended", err)
+		}
+	})
+}
+
+// TestFormatDiagCountsTheSABRSignal: a client forced onto SABR returns formats
+// with neither url nor signatureCipher plus a serverAbrStreamingUrl. Today
+// that logs as "formats 0", indistinguishable from an empty streamingData —
+// and serverAbrStreamingUrl appears nowhere in the codebase at all.
+//
+// Mutants this kills:
+//   - URL-less formats not counted   → URLlessFormats == 0
+//   - serverAbrStreamingUrl not read → SabrForced == false
+func TestFormatDiagCountsTheSABRSignal(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	data := decodePlayerJSON(t, `{
+		"playabilityStatus": {"status": "OK"},
+		"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"},
+		"streamingData": {
+			"serverAbrStreamingUrl": "https://rr1---sn-x.googlevideo.com/videoplayback?...",
+			"adaptiveFormats": [
+				{"itag": 137, "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080},
+				{"itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+			]
+		}
+	}`)
+
+	info, err := p.parsePlayerResponse(context.Background(), data, "", nil, "test1234567")
+	if err != nil {
+		t.Fatalf("parsePlayerResponse: %v", err)
+	}
+	if len(info.Formats) != 0 {
+		t.Fatalf("Formats = %+v, want none (they carry no URL)", info.Formats)
+	}
+	if info.FormatDiag.URLlessFormats != 2 {
+		t.Errorf("URLlessFormats = %d, want 2", info.FormatDiag.URLlessFormats)
+	}
+	if !info.FormatDiag.SabrForced {
+		t.Error("SabrForced = false although streamingData carried serverAbrStreamingUrl")
+	}
+}
+
+// countingPotProvider counts PLAYER PO-token mints. PotTokenProvider
+// (player_api.go) has exactly one method, so this is the whole fake.
+type countingPotProvider struct {
+	token string
+	calls int
+}
+
+func (c *countingPotProvider) GeneratePoTokenString(context.Context, string, bool) (string, error) {
+	c.calls++
+	return c.token, nil
+}
+
+// TestProbeVideoDateMintsNoPlayerToken is owner decision O-R. yt-dlp's WEB
+// PLAYER_PO_TOKEN_POLICY is required=False / recommended=False (_base.py:90),
+// so upstream mints none; Moombox minted one per PROBED video ID and parked a
+// 6 h session-cache entry that every later mint sweeps.
+//
+// Mutants this kills:
+//   - the probe still routed through fetchWithClient → minted == 1
+//   - the skip applied to real player calls too      → the second half fails
+func TestProbeVideoDateMintsNoPlayerToken(t *testing.T) {
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"1": {http.StatusOK, adequateOKBody},
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	prov := &countingPotProvider{token: "POT"}
+	p := newRetryTestAPI()
+	p.SetPotProvider(prov)
+
+	if _, _, err := p.ProbeVideoDate(context.Background(), "test1234567", "vd"); err != nil {
+		t.Fatalf("ProbeVideoDate: %v", err)
+	}
+	if prov.calls != 0 {
+		t.Errorf("ProbeVideoDate minted %d PLAYER PO tokens, want 0", prov.calls)
+	}
+
+	ytcfg := DefaultYtcfg()
+	ytcfg.VisitorData = "vd"
+	if _, err := p.fetchWithClient(context.Background(), "test1234567", constants.WebSafariClient, ytcfg, 0); err != nil {
+		t.Fatalf("fetchWithClient: %v", err)
+	}
+	if prov.calls != 1 {
+		t.Errorf("a real WEB player call minted %d tokens, want 1 — the skip is for probes only", prov.calls)
+	}
+}
+
+// TestPublicPathContinuesAfterATVFailure is row #58. The authenticated path
+// logs and carries on into WEB_CREATOR / the cookieless chain; the public path
+// returned the TV error outright whenever the watch page had no player
+// response, so an anonymous extraction gave up with clients left untried.
+//
+// Mutant this kills: the early `return nil, err` restored → err is non-nil
+// and VISIONOS is never called.
+func TestPublicPathContinuesAfterATVFailure(t *testing.T) {
+	stubWatchPage(t)
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"7":   {http.StatusNotFound, `{"error":{"message":"not found","status":"NOT_FOUND"}}`},
+		"101": {http.StatusOK, adequateOKBody},
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+	if err != nil {
+		t.Fatalf("GetVideoInfoPublic gave up after the TV failure: %v", err)
+	}
+	if info == nil || len(info.Formats) == 0 {
+		t.Fatalf("info = %+v, want VISIONOS's formats", info)
+	}
+	if !slices.Contains(tr.calls, "101") {
+		t.Errorf("calls = %v, want VISIONOS (101) among them", tr.calls)
+	}
+}
+
+// drmDubbedAudioOnlyBody is what the TV client returns for an account in the
+// DRM experiment on a dubbed video: two itag-140 renditions of one stream, a
+// DRM-protected video format, and so no usable video at all.
+const drmDubbedAudioOnlyBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"},
+	"streamingData": {"adaptiveFormats": [
+		{"itag": 140, "url": "https://tv/a-en", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "audioTrack": {"id": "en.4", "displayName": "English original", "audioIsDefault": true}},
+		{"itag": 140, "url": "https://tv/a-ja", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "audioTrack": {"id": "ja.3", "displayName": "Japanese"}},
+		{"itag": 137, "url": "https://tv/v", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080, "drmFamilies": ["WIDEVINE"]}
+	]}
+}`
+
+// drmDubbedAdequateBody is the same video from a cookieless client: the SAME
+// two renditions again, a clean video format, and one more DRM entry.
+const drmDubbedAdequateBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"},
+	"streamingData": {"adaptiveFormats": [
+		{"itag": 140, "url": "https://vis/a-en", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "audioTrack": {"id": "en.4", "displayName": "English original", "audioIsDefault": true}},
+		{"itag": 140, "url": "https://vis/a-ja", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "audioTrack": {"id": "ja.3", "displayName": "Japanese"}},
+		{"itag": 299, "url": "https://vis/v", "mimeType": "video/mp4; codecs=\"avc1.64002a\"", "width": 1920, "height": 1080},
+		{"itag": 136, "url": "https://vis/drm", "mimeType": "video/mp4; codecs=\"avc1.4d401f\"", "width": 1280, "height": 720, "drmFamilies": ["PLAYREADY"]}
+	]}
+}`
+
+// drmDubbedCascade points the public cascade at the two bodies above: TV
+// answers with audio only (so the cookieless chain runs) and VISIONOS answers
+// adequately. Both responses carry DRM and both carry the same two renditions
+// of itag 140, which is what makes the summed/collapsed distinction visible.
+func drmDubbedCascade(t *testing.T) *clientKeyedTransport {
+	t.Helper()
+	stubWatchPage(t)
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"7":   {http.StatusOK, drmDubbedAudioOnlyBody},
+		"101": {http.StatusOK, drmDubbedAdequateBody},
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+	return tr
+}
+
+// TestFormatDiagCarriesThePoolLevelCounts pins the two cascade-wide figures
+// FormatDiag hands the worker, and the DIFFERENT arithmetic each one needs.
+//
+// DRM entries never reach a pool — they are dropped at parse — so there is no
+// pool identity to collapse them against and the count is SUMMED over the
+// responses (1 from TV + 1 from VISIONOS = 2). Alternate renditions do reach
+// the pool, where dedup merges the copies several clients each returned, so
+// summing the per-response counts would report the same rendition twice; the
+// figure is taken where the collapse actually happens, at the pool (1).
+//
+// Mutants this kills:
+//   - the renditions summed per response instead of counted at the pool → 2
+//   - the DRM counts not accumulated across the cascade                 → 1
+//   - the counts left on the per-client VideoInfo, unstamped at the exit → 0
+func TestFormatDiagCarriesThePoolLevelCounts(t *testing.T) {
+	tr := drmDubbedCascade(t)
+
+	info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+	if err != nil {
+		t.Fatalf("GetVideoInfoPublic: %v", err)
+	}
+	if !slices.Contains(tr.calls, "7") || !slices.Contains(tr.calls, "101") {
+		t.Fatalf("calls = %v, want both clients — only one response was parsed", tr.calls)
+	}
+	if info.FormatDiag.DRMSkipped != 2 {
+		t.Errorf("DRMSkipped = %d, want 2 — one entry from each of the two responses, summed",
+			info.FormatDiag.DRMSkipped)
+	}
+	if info.FormatDiag.CollapsedRenditions != 1 {
+		t.Errorf("CollapsedRenditions = %d, want 1 — both clients returned the same ja.3 rendition, and the pool collapses it once",
+			info.FormatDiag.CollapsedRenditions)
+	}
+}
+
+// TestDRMSkipIsSilentOnProbesAndNamesTheClientOnce covers the two halves of
+// the DRM report's audience rule. A probe is not an extraction: the quality
+// monitor and the members-only waiting-room poll call
+// ProbeVideoStatusAuthenticated every 30 s, and an account in the tv-client
+// DRM experiment gets DRM formats in nearly every one of those responses — a
+// Warn there is a permanent wall at the default log level, so the probe path
+// reports at Debug. A real extraction keeps upstream's once-per-run Warn, and
+// names the client the way upstream's message embeds client_name.
+//
+// Mutants this kills:
+//   - the probe path warning                → the first subtest counts 1
+//   - the client name dropped from the Warn → the second subtest
+//   - the Warn moved to Debug everywhere    → the second subtest counts 0
+func TestDRMSkipIsSilentOnProbesAndNamesTheClientOnce(t *testing.T) {
+	drmWarns := func(lg *warnCapturingLogger) []string {
+		var out []string
+		for _, w := range lg.warns {
+			if strings.Contains(w, "DRM") {
+				out = append(out, w)
+			}
+		}
+		return out
+	}
+
+	t.Run("a probe-only call never warns", func(t *testing.T) {
+		tr := &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{
+			"7": {http.StatusOK, drmDubbedAudioOnlyBody},
+		}}
+		orig := apiClient
+		apiClient = &http.Client{Transport: tr}
+		t.Cleanup(func() { apiClient = orig })
+
+		lg := &warnCapturingLogger{}
+		p := NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), lg)
+
+		if _, err := p.ProbeVideoStatusAuthenticated(context.Background(), "test1234567", "vd"); err != nil {
+			t.Fatalf("ProbeVideoStatusAuthenticated: %v", err)
+		}
+		if got := drmWarns(lg); len(got) != 0 {
+			t.Errorf("a 30 s probe logged %d DRM warnings, want 0 (Debug only): %q", len(got), got)
+		}
+	})
+
+	t.Run("an extraction warns once, naming the first client", func(t *testing.T) {
+		drmDubbedCascade(t)
+
+		lg := &warnCapturingLogger{}
+		p := NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), lg)
+		if _, err := p.GetVideoInfoPublic(context.Background(), "test1234567"); err != nil {
+			t.Fatalf("GetVideoInfoPublic: %v", err)
+		}
+
+		got := drmWarns(lg)
+		if len(got) != 1 {
+			t.Fatalf("one extraction logged %d DRM warnings, want exactly 1: %q", len(got), got)
+		}
+		if !strings.Contains(got[0], constants.TVDowngradedClient.ClientName) {
+			t.Errorf("DRM warning = %q, want it to name %q — upstream's message embeds client_name",
+				got[0], constants.TVDowngradedClient.ClientName)
+		}
+	})
 }

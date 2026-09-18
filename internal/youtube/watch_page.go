@@ -195,9 +195,19 @@ func isConsentRedirect(resp *http.Response) bool {
 		strings.HasPrefix(resp.Request.URL.Host, "consent.")
 }
 
+// watchPageURL builds the watch-page URL. bpctr and has_verified are yt-dlp's
+// age-gate bypass pair (_video.py:3809, `query = {'bpctr': '9999999999',
+// 'has_verified': '1'}`): without them an age-restricted video answers with
+// the age-gate shell instead of the page, so its embedded player response —
+// the watch-page ScheduledStartTime source and the WatchPage format tier —
+// is lost for exactly the videos that need every source they can get.
+func watchPageURL(videoID string) string {
+	return fmt.Sprintf("%s?v=%s&bpctr=9999999999&has_verified=1", constants.YouTubeURLs.Watch, videoID)
+}
+
 // FetchWatchPage fetches and parses a YouTube watch page.
 func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*WatchPageResult, error) {
-	url := fmt.Sprintf("%s?v=%s", constants.YouTubeURLs.Watch, videoID)
+	url := watchPageURL(videoID)
 
 	headers := map[string]string{
 		"User-Agent":      constants.UserAgents.Web,

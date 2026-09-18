@@ -77,7 +77,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// carry EncryptedSig populated and a raw `url=` value in URL; the
 	// strategy resolves them via cipher.ResolveFormatURL right before
 	// constructing SegmentDownloaders.
-	formats, drmSkipped := p.parseFormats(ctx, streamingData)
+	formats, formatDiag := p.parseFormats(ctx, streamingData)
 
 	// Stream classification. hasFormats asks whether the response CARRIED
 	// formats, not whether any survived the parse: a response whose formats
@@ -85,7 +85,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// post-filter count turns a finished stream into `upcoming` — a stall the
 	// single-client ProbeVideoStatusAuthenticated path never recovers from,
 	// for exactly the accounts the tv-client DRM experiment hits.
-	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0 || drmSkipped > 0)
+	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0 || formatDiag.DRMSkipped > 0)
 
 	// Metadata
 	title := getStr(videoDetails, "title")
@@ -167,6 +167,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		PlayabilityReason:  playReason,
 		PublishedAt:        publishedAt,
 		PublishedPrecision: publishedPrecision,
+		FormatDiag:         formatDiag,
 	}, nil
 }
 
@@ -280,13 +281,19 @@ type extractionStateKey struct{}
 // per-extraction value all of them already thread; the alternative is a new
 // parameter on eight call sites that do nothing with it.
 //
-// The flag is atomic although a cascade runs its clients sequentially today:
-// the guarantee "no fetch is in a goroutine" is one a later arc can quietly
-// invalidate by parallelising the client sweep, and an unsynchronised write
-// would then be a data race that -race only catches if that path happens to be
-// exercised. One word buys the class away.
+// The fields are atomic although a cascade runs its clients sequentially
+// today: the guarantee "no fetch is in a goroutine" is one a later arc can
+// quietly invalidate by parallelising the client sweep, and an unsynchronised
+// write would then be a data race that -race only catches if that path happens
+// to be exercised. Three words buy the class away.
 type extractionState struct {
 	drmWarned atomic.Bool
+	// drmSkipped accumulates every response's DRM drop count, and
+	// collapsedRenditions holds the pool's own collapse count. They are what
+	// finishExtraction stamps onto the VideoInfo the cascade returns; see
+	// FormatDiag for why one is a sum and the other is not.
+	drmSkipped          atomic.Int64
+	collapsedRenditions atomic.Int64
 }
 
 // withExtractionState opens one extraction's scratch. Called once at the head
@@ -310,6 +317,85 @@ func (s *extractionState) firstDRMReport() bool {
 	return s == nil || s.drmWarned.CompareAndSwap(false, true)
 }
 
+// addDRMSkipped folds one response's DRM drop count into the extraction's
+// running total. Nil outside a cascade — a probe keeps nothing across calls.
+func (s *extractionState) addDRMSkipped(n int) {
+	if s != nil && n > 0 {
+		s.drmSkipped.Add(int64(n))
+	}
+}
+
+// noteCollapsedRenditions records the POOL's collapse count. Stored rather
+// than added: each cascade return path deduplicates the pool exactly once, so
+// the last value written is the pool that was actually returned.
+func (s *extractionState) noteCollapsedRenditions(n int) {
+	if s != nil {
+		s.collapsedRenditions.Store(int64(n))
+	}
+}
+
+// poolCounts returns the two extraction-wide FormatDiag figures. Zero outside
+// a cascade, where the caller keeps its own per-response numbers.
+func (s *extractionState) poolCounts() (drmSkipped, collapsedRenditions int) {
+	if s == nil {
+		return 0, 0
+	}
+	return int(s.drmSkipped.Load()), int(s.collapsedRenditions.Load())
+}
+
+// playerCallScopeKey is the context key for playerCallScope — its own
+// unexported type, so no other package can collide with it.
+type playerCallScopeKey struct{}
+
+// playerCallScope describes the ONE player call whose response is being
+// parsed: which client answered it, and whether the call was a probe. It rides
+// the context for the same reason extractionState does — the parse path is
+// entered from every fetchWith* helper and the context is the only value all
+// of them already thread.
+//
+// probeOnly is the audience rule for the DRM report. The quality monitor and
+// the members-only waiting-room poll probe every 30 s, and an account in the
+// tv-client DRM experiment gets DRM formats in nearly every one of those
+// responses — a Warn there is a permanent wall at the default log level for a
+// fact the operator was already told once. Probes report at Debug; real
+// extractions keep upstream's once-per-run Warn.
+type playerCallScope struct {
+	client    string
+	probeOnly bool
+}
+
+// clientName is the label the DRM report names. "unknown" covers a direct
+// parse with no fetch helper above it (several tests), which upstream cannot
+// have because every response it parses came from a named client.
+func (s playerCallScope) clientName() string {
+	if s.client == "" {
+		return "unknown"
+	}
+	return s.client
+}
+
+// withPlayerClient names the client whose response the parse below is about.
+func withPlayerClient(ctx context.Context, client string) context.Context {
+	sc := playerCallScopeFrom(ctx)
+	sc.client = client
+	return context.WithValue(ctx, playerCallScopeKey{}, sc)
+}
+
+// withProbeOnlyCall marks the call below as a probe. Applied to the context
+// handed to ONE fetch, never to a cascade's own context.
+func withProbeOnlyCall(ctx context.Context) context.Context {
+	sc := playerCallScopeFrom(ctx)
+	sc.probeOnly = true
+	return context.WithValue(ctx, playerCallScopeKey{}, sc)
+}
+
+// playerCallScopeFrom returns the scope of the call being parsed, or the zero
+// scope when the caller set none.
+func playerCallScopeFrom(ctx context.Context) playerCallScope {
+	sc, _ := ctx.Value(playerCallScopeKey{}).(playerCallScope)
+	return sc
+}
+
 // parseFormats extracts format metadata + raw stream URLs from a
 // streamingData map. Cipher decryption (sig + n) is intentionally NOT
 // performed here — strategies do it post-selection via
@@ -327,18 +413,27 @@ func (s *extractionState) firstDRMReport() bool {
 //
 // ctx carries the extraction's scratch state (see extractionState): the
 // DRM-skip warning is reported once per extraction, not once per response.
+// It also carries the call's scope (see playerCallScope) — which client
+// answered, and whether this was a probe rather than an extraction.
 //
-// The second return is how many entries this response lost to the DRM drop.
-// Callers need it because "this response carried no formats" and "every format
-// it carried was DRM" are different facts: classification reads the first, and
-// only the unfiltered count can tell it apart from an empty streamingData.
-func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]any) ([]Format, int) {
+// The second return is what this response's format list LOST (see FormatDiag).
+// Callers need the DRM half because "this response carried no formats" and
+// "every format it carried was DRM" are different facts: classification reads
+// the first, and only the unfiltered count can tell it apart from an empty
+// streamingData.
+func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]any) ([]Format, FormatDiag) {
+	var diag FormatDiag
 	if streamingData == nil {
-		return nil, 0
+		return nil, diag
 	}
 
+	// A client YouTube has forced onto SABR advertises the one URL it will
+	// serve media from and strips the per-format ones. Counting the two
+	// together is what tells that apart from an empty streamingData
+	// (_video.py:3527-3548 reports the same pair of signals).
+	diag.SabrForced = getStr(streamingData, "serverAbrStreamingUrl") != ""
+
 	var formats []Format
-	drmSkipped := 0
 	// adaptiveFormats is iterated first so that when an itag appears in both
 	// arrays the DASH/adaptive entry lands in the pool first and wins the
 	// same-auth-level tiebreak in deduplicateFormats. adaptiveFormats carry
@@ -364,7 +459,7 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			// than in the selector means a clean same-itag format from
 			// another client still wins the dedup tie it used to LOSE.
 			if drm, ok := f["drmFamilies"].([]any); ok && len(drm) > 0 {
-				drmSkipped++
+				diag.DRMSkipped++
 				continue
 			}
 
@@ -380,6 +475,7 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 				if parseErr != nil {
 					p.logger.Debug("[PlayerApi] Failed to parse signatureCipher",
 						slog.String("error", parseErr.Error()))
+					diag.URLlessFormats++
 					continue
 				}
 				formatURL = params.Get("url")
@@ -389,11 +485,15 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 					sigKey = "signature"
 				}
 				if formatURL == "" || encSig == "" {
+					diag.URLlessFormats++
 					continue
 				}
 			}
 
+			// No url and no usable signatureCipher: nothing fetchable. This is
+			// the arm a SABR-forced client lands every one of its formats on.
 			if formatURL == "" {
+				diag.URLlessFormats++
 				continue
 			}
 
@@ -434,18 +534,34 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			formats = append(formats, format)
 		}
 	}
-	if drmSkipped > 0 && extractionStateFrom(ctx).firstDRMReport() {
-		// Warn, not Debug: upstream reports this with report_warning
-		// (_video.py:3428, only_once=True), and a silently DRM-stripped format
-		// pool is exactly the state an operator needs told about — it is the
-		// difference between "this video has no 1080p" and "this ACCOUNT gets
-		// no 1080p". The count is per response; the LINE is once per
-		// extraction, as upstream's only_once is once per run — an account in
-		// the tv-client DRM experiment has DRM formats in nearly every
-		// response a cascade collects.
-		p.logger.Warn("[PlayerApi] skipped DRM-protected formats",
-			"count", drmSkipped,
-			"note", "a YouTube account experiment applies DRM to all videos on the tv client — yt-dlp issue #12563")
+	if diag.DRMSkipped > 0 {
+		st := extractionStateFrom(ctx)
+		st.addDRMSkipped(diag.DRMSkipped)
+		scope := playerCallScopeFrom(ctx)
+		const drmNote = "a YouTube account experiment applies DRM to all videos on the tv client — yt-dlp issue #12563"
+		switch {
+		case scope.probeOnly:
+			// A probe is not an extraction. The quality monitor and the
+			// members-only waiting-room poll run one of these every 30 s for
+			// the whole life of a waiting stream, so the same Warn the
+			// extraction path prints once would be a permanent wall here —
+			// for a fact the operator was already told by the extraction that
+			// set the job up. Recorded, not shouted.
+			p.logger.Debug("[PlayerApi] skipped DRM-protected formats (probe)",
+				"client", scope.clientName(), "count", diag.DRMSkipped, "note", drmNote)
+		case st.firstDRMReport():
+			// Warn, not Debug: upstream reports this with report_warning
+			// (_video.py:3420-3428, only_once=True), and a silently
+			// DRM-stripped format pool is exactly the state an operator needs
+			// told about — it is the difference between "this video has no
+			// 1080p" and "this ACCOUNT gets no 1080p". The count is per
+			// response; the LINE is once per extraction, as upstream's
+			// only_once is once per run. The client is named because
+			// upstream's message embeds client_name and because the whole
+			// point of the diagnosis is that it is the TV client doing it.
+			p.logger.Warn("[PlayerApi] skipped DRM-protected formats",
+				"client", scope.clientName(), "count", diag.DRMSkipped, "note", drmNote)
+		}
 	}
 	// Beside the DRM count, the other thing this response loses on the way to
 	// the consumers: the alternate audio renditions deduplicateFormats will
@@ -457,7 +573,7 @@ func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]a
 			"collapsed", collapsible,
 			"note", "dubbed and DRC renditions; the pool keeps one per itag — the original-language, non-DRC one")
 	}
-	return formats, drmSkipped
+	return formats, diag
 }
 
 // countCollapsibleRenditions counts the track-carrying entries that will lose
@@ -820,7 +936,14 @@ type formatKey struct {
 // every itag-keyed lookup resolves to exactly the rendition the selector
 // prefers, on the VOD path, the manifestless DASH path and the 403 refresh
 // alike, without any consumer needing to learn the 3-part identity.
-func deduplicateFormats(pool []Format) []Format {
+//
+// ctx is here for one reason: this is where the collapse actually happens, so
+// it is the only place that can count it EXACTLY. Each response's own count
+// (the Debug line in parseFormats) counts the copies every client returned, so
+// summing those over a cascade reports one rendition several times; the figure
+// recorded here is taken after the cross-client merge. finishExtraction stamps
+// it onto FormatDiag.CollapsedRenditions.
+func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 	byStream := make(map[formatKey]Format)
 	for _, f := range pool {
 		if f.URL == "" {
@@ -855,7 +978,9 @@ func deduplicateFormats(pool []Format) []Format {
 		}
 		return cmp.Compare(boolOrder(a.IsDrc), boolOrder(b.IsDrc))
 	})
-	return collapseToPreferredRendition(result)
+	collapsed := collapseToPreferredRendition(result)
+	extractionStateFrom(ctx).noteCollapsedRenditions(len(result) - len(collapsed))
+	return collapsed
 }
 
 // collapseToPreferredRendition keeps one rendition per itag: the highest

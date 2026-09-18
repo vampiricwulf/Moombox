@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
@@ -77,7 +78,16 @@ func (t *mismatchTally) ipBlockShape() bool {
 // substitute, no client survived, and the watch page produced nothing usable
 // either. wpParsed is that last survivor test: upstream keeps the watch page's
 // own player response in `prs` and only raises when `prs` is empty.
-func (p *PlayerAPI) finishExtraction(info *VideoInfo, wp *WatchPageResult, videoID string, tally *mismatchTally, wpParsed *VideoInfo) (*VideoInfo, error) {
+//
+// Being the single exit is also why the two extraction-wide FormatDiag
+// figures are stamped here: the VideoInfo handed back is whichever client won,
+// and its own parse only ever saw its own response. The worker reads these to
+// explain an extraction that produced no usable formats, so they have to
+// describe the whole cascade, not the last client in it.
+func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *WatchPageResult, videoID string, tally *mismatchTally, wpParsed *VideoInfo) (*VideoInfo, error) {
+	if info != nil {
+		info.FormatDiag.DRMSkipped, info.FormatDiag.CollapsedRenditions = extractionStateFrom(ctx).poolCounts()
+	}
 	if tally.ipBlockShape() && wpParsed == nil {
 		// Name the substitute, as upstream's warning does
 		// (_video.py:3182-3184). Every per-client mismatch below is logged at
@@ -124,9 +134,12 @@ func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *Vide
 	return info
 }
 
-// ProbeVideoStatus performs a lightweight probe using ANDROID_VR (no cookies needed).
+// ProbeVideoStatus performs a lightweight probe using ANDROID_VR (no cookies
+// needed). Marked probe-only: the live strategies re-run it on their own
+// interrupt cadence, so its DRM report belongs at Debug (ANDROID_VR is
+// cookieless and mints no PLAYER token either way, so O-R does not bite here).
 func (p *PlayerAPI) ProbeVideoStatus(ctx context.Context, videoID string, visitorData string) (*VideoInfo, error) {
-	return p.fetchWithAndroidVR(ctx, videoID, visitorData)
+	return p.fetchWithAndroidVR(withProbeOnlyCall(ctx), videoID, visitorData)
 }
 
 // ProbeVideoDate fetches ONLY a video's publish date via one anonymous
@@ -147,8 +160,9 @@ func (p *PlayerAPI) ProbeVideoDate(ctx context.Context, videoID, visitorData str
 		ytcfg.VisitorData = visitorData
 	}
 	// No watch page fetched on this probe-only path, so no ytcfg beyond the
-	// visitor data the caller cached.
-	info, err := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, 0)
+	// visitor data the caller cached. And no PLAYER PO token: owner decision
+	// O-R, see fetchWithClientProbe.
+	info, err := p.fetchWithClientProbe(ctx, videoID, constants.WebSafariClient, ytcfg, 0)
 	if err != nil {
 		return "", "", err
 	}
@@ -157,14 +171,22 @@ func (p *PlayerAPI) ProbeVideoDate(ctx context.Context, videoID, visitorData str
 
 // ProbeVideoStatusAuthenticated performs a lightweight authenticated status probe
 // using the TV_DOWNGRADED client with cookies (no watch page, no STS, no cipher).
-// Used for polling members-only upcoming streams. Pass an empty string for
-// visitorData when none has been captured yet.
+// Used for polling members-only upcoming streams, and by the worker's one-call
+// quality probe. Pass an empty string for visitorData when none has been
+// captured yet.
+//
+// On the probe variant for the DRM report's sake, not for O-R's: TV_DOWNGRADED
+// is not WEB-family, so clientAcceptsPlayerPoToken already returns false and
+// no token was ever minted here either way. What the marking changes is that
+// the tv client's DRM skip — which this exact call meets every 30 s of a
+// waiting room, on precisely the accounts the experiment hits — reports at
+// Debug instead of Warn.
 func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, visitorData string) (*VideoInfo, error) {
 	ytcfg := DefaultYtcfg()
 	if visitorData != "" {
 		ytcfg.VisitorData = visitorData
 	}
-	return p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0)
+	return p.fetchWithClientProbe(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0)
 }
 
 // captureVisitorData forwards watch-page visitor data to the service cache
@@ -241,7 +263,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	var wpParsed *VideoInfo
 	if wp.PlayerResponse != nil {
 		var wpErr error
-		wpParsed, wpErr = p.parsePlayerResponse(ctx, wp.PlayerResponse, ytcfg.PlayerURL, ytcfg, videoID)
+		wpParsed, wpErr = p.parsePlayerResponse(withPlayerClient(ctx, "watch_page"), wp.PlayerResponse, ytcfg.PlayerURL, ytcfg, videoID)
 		if wpErr != nil {
 			// Today the only error this can be is a video-ID mismatch: the page
 			// itself was served for another video, which upstream also drops
@@ -285,6 +307,11 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		p.logger.Debug("[PlayerApi] TV client result",
 			"client", constants.TVDowngradedClient.ClientName,
 			"formats", len(result.Formats),
+			// A client YouTube forced onto SABR reports "formats 0" and so
+			// does an empty streamingData; these two fields are what tells
+			// them apart in the log (row YOUTUBE-8).
+			"urllessFormats", result.FormatDiag.URLlessFormats,
+			"sabrForced", result.FormatDiag.SabrForced,
 			"dashManifestUrl", result.DashManifestURL != "",
 			"hlsManifestUrl", result.HlsManifestURL != "",
 			"streamStatus", result.StreamStatus,
@@ -314,6 +341,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		p.logger.Debug("[PlayerApi] Web client result",
 			"client", webLabel,
 			"formats", len(webResult.Formats),
+			"urllessFormats", webResult.FormatDiag.URLlessFormats,
+			"sabrForced", webResult.FormatDiag.SabrForced,
 			"dashManifestUrl", webResult.DashManifestURL != "",
 			"hlsManifestUrl", webResult.HlsManifestURL != "",
 			"streamStatus", webResult.StreamStatus,
@@ -431,8 +460,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 				collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 			}
 			mergeWatchPageMetadata(embResult, wpParsed)
-			embResult.Formats = deduplicateFormats(formatPool)
-			return p.finishExtraction(embResult, wp, videoID, tally, wpParsed)
+			embResult.Formats = deduplicateFormats(ctx, formatPool)
+			return p.finishExtraction(ctx, embResult, wp, videoID, tally, wpParsed)
 		} else if embResult != authEmb {
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 		}
@@ -457,6 +486,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		p.logger.Debug("[PlayerApi] WEB_CREATOR result",
 			"client", constants.WebCreatorClient.ClientName,
 			"formats", len(wcResult.Formats),
+			"urllessFormats", wcResult.FormatDiag.URLlessFormats,
+			"sabrForced", wcResult.FormatDiag.SabrForced,
 			"streamStatus", wcResult.StreamStatus,
 			"playability", string(wcResult.PlayabilityError))
 
@@ -478,8 +509,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			if wcResult.PlayabilityError != PlayabilityMembersOnly {
 				if cfResult := p.tryCookielessFallbacks(ctx, videoID, ytcfg.VisitorData, &formatPool, tally, vrPrefetch); cfResult != nil {
 					mergeWatchPageMetadata(cfResult, wpParsed)
-					cfResult.Formats = deduplicateFormats(formatPool)
-					return p.finishExtraction(cfResult, wp, videoID, tally, wpParsed)
+					cfResult.Formats = deduplicateFormats(ctx, formatPool)
+					return p.finishExtraction(ctx, cfResult, wp, videoID, tally, wpParsed)
 				}
 			}
 
@@ -493,25 +524,25 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			// built from THIS result. Name its source or that string has no
 			// traceable origin in the log.
 			if wpParsed != nil {
-				wpParsed.Formats = deduplicateFormats(formatPool)
+				wpParsed.Formats = deduplicateFormats(ctx, formatPool)
 				p.logger.Debug("[PlayerApi] returning watch-page parse (all clients exhausted)",
 					"client", "watch_page",
 					"videoID", videoID,
 					"formats", len(wpParsed.Formats),
 					"streamStatus", wpParsed.StreamStatus,
 					"playability", string(wpParsed.PlayabilityError))
-				return p.finishExtraction(wpParsed, wp, videoID, tally, wpParsed)
+				return p.finishExtraction(ctx, wpParsed, wp, videoID, tally, wpParsed)
 			}
 		}
 
 		if wpParsed != nil {
 			mergeWatchPageMetadata(wcResult, wpParsed)
 		}
-		wcResult.Formats = deduplicateFormats(formatPool)
-		return p.finishExtraction(wcResult, wp, videoID, tally, wpParsed)
+		wcResult.Formats = deduplicateFormats(ctx, formatPool)
+		return p.finishExtraction(ctx, wcResult, wp, videoID, tally, wpParsed)
 	}
 
-	return p.finishExtraction(finalizeVideoInfo(result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
+	return p.finishExtraction(ctx, finalizeVideoInfo(ctx, result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
 }
 
 // GetVideoInfoPublic fetches video info without authentication.
@@ -547,7 +578,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	var wpParsed *VideoInfo
 	if wp.PlayerResponse != nil {
 		var wpErr error
-		wpParsed, wpErr = p.parsePlayerResponse(ctx, wp.PlayerResponse, wp.Ytcfg.PlayerURL, wp.Ytcfg, videoID)
+		wpParsed, wpErr = p.parsePlayerResponse(withPlayerClient(ctx, "watch_page"), wp.PlayerResponse, wp.Ytcfg.PlayerURL, wp.Ytcfg, videoID)
 		if wpErr != nil {
 			// Today the only error this can be is a video-ID mismatch: the page
 			// itself was served for another video, which upstream also drops
@@ -561,32 +592,34 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 
 	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, wp.Ytcfg, stsPublic))
 	if err != nil {
+		// Every TV failure is now a SKIP, not the end of the extraction —
+		// the shape GetVideoInfoAuthenticated's own TV arm has always had:
+		// log, take an empty result, carry on into the chain. Returning the
+		// error, or the watch-page parse, denied VISIONOS and ANDROID_VR their
+		// chance to answer at all; the watch-page fallback below still applies
+		// when nothing else produces anything.
 		var mm *VideoIDMismatchError
-		switch {
-		case errors.As(err, &mm):
-			// A substituted response is a SKIP, not the end of the extraction:
-			// upstream drops that client and keeps walking the list
-			// (_video.py:3122-3123). Returning here would deny the cookieless
-			// clients — or the watch page — their chance to answer about the
-			// RIGHT video, and would report one client's substitution as the
-			// whole extraction's failure. The authenticated cascade already
-			// treats a TV failure this way (empty result, carry on).
+		if errors.As(err, &mm) {
+			// A substitution has its own line because it names the video
+			// YouTube served instead — upstream's own warning does
+			// (_video.py:3122-3123, :3182-3184), and the generic line below
+			// cannot say it.
 			p.logger.Warn("[PlayerApi] TV client (public) answered about a different video, skipping it",
 				"videoID", videoID, "got", mm.Got)
-			result = &VideoInfo{}
-		case wpParsed != nil:
-			wpParsed.Formats = deduplicateFormats(formatPool)
-			return p.finishExtraction(wpParsed, wp, videoID, tally, wpParsed)
-		default:
-			return nil, err
+		} else {
+			p.logger.Warn("[PlayerApi] TV client failed (public), will try other clients", slog.String("error", err.Error()))
 		}
+		result = &VideoInfo{}
+	} else {
+		collectFormats(&formatPool, result.Formats, "tv_public", AuthLevelTVPublic)
+		p.logger.Debug("[PlayerApi] TV client result (public)",
+			"client", constants.TVDowngradedClient.ClientName,
+			"formats", len(result.Formats),
+			"urllessFormats", result.FormatDiag.URLlessFormats,
+			"sabrForced", result.FormatDiag.SabrForced,
+			"streamStatus", result.StreamStatus,
+			"playability", string(result.PlayabilityError))
 	}
-	collectFormats(&formatPool, result.Formats, "tv_public", AuthLevelTVPublic)
-	p.logger.Debug("[PlayerApi] TV client result (public)",
-		"client", constants.TVDowngradedClient.ClientName,
-		"formats", len(result.Formats),
-		"streamStatus", result.StreamStatus,
-		"playability", string(result.PlayabilityError))
 
 	// The same waiting-room verdict the authenticated cascade reads (owner
 	// decision O-I), from the same authority: TV.
@@ -602,8 +635,8 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 			p.logger.Info("[PlayerApi] web_embedded succeeded for age-restricted content", "videoID", videoID)
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 			mergeWatchPageMetadata(embResult, wpParsed)
-			embResult.Formats = deduplicateFormats(formatPool)
-			return p.finishExtraction(embResult, wp, videoID, tally, wpParsed)
+			embResult.Formats = deduplicateFormats(ctx, formatPool)
+			return p.finishExtraction(ctx, embResult, wp, videoID, tally, wpParsed)
 		} else {
 			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
 		}
@@ -619,13 +652,13 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		// chain, not before it.
 		if cfResult := p.tryCookielessFallbacks(ctx, videoID, wp.Ytcfg.VisitorData, &formatPool, tally, nil); cfResult != nil {
 			mergeWatchPageMetadata(cfResult, wpParsed)
-			cfResult.Formats = deduplicateFormats(formatPool)
-			return p.finishExtraction(cfResult, wp, videoID, tally, wpParsed)
+			cfResult.Formats = deduplicateFormats(ctx, formatPool)
+			return p.finishExtraction(ctx, cfResult, wp, videoID, tally, wpParsed)
 		}
 
 		if wpParsed != nil {
-			wpParsed.Formats = deduplicateFormats(formatPool)
-			return p.finishExtraction(wpParsed, wp, videoID, tally, wpParsed)
+			wpParsed.Formats = deduplicateFormats(ctx, formatPool)
+			return p.finishExtraction(ctx, wpParsed, wp, videoID, tally, wpParsed)
 		}
 	}
 
@@ -654,7 +687,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
-	return p.finishExtraction(finalizeVideoInfo(result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
+	return p.finishExtraction(ctx, finalizeVideoInfo(ctx, result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
 }
 
 // finalizeVideoInfo applies the not_a_stream override + merge + dedup tail
@@ -663,7 +696,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 // the watch page's classification wins; if TV still produced adequate
 // formats they are kept, otherwise the watch-page parse is returned wholesale
 // (audit D3).
-func finalizeVideoInfo(result, wpParsed *VideoInfo, formatPool []Format) *VideoInfo {
+func finalizeVideoInfo(ctx context.Context, result, wpParsed *VideoInfo, formatPool []Format) *VideoInfo {
 	if result.StreamStatus == StreamNotAStream && wpParsed != nil && wpParsed.StreamStatus != StreamNotAStream {
 		if hasAdequateFormats(result) {
 			result.StreamStatus = wpParsed.StreamStatus
@@ -671,15 +704,15 @@ func finalizeVideoInfo(result, wpParsed *VideoInfo, formatPool []Format) *VideoI
 			result.IsUpcoming = wpParsed.IsUpcoming
 			result.IsPostLiveDVR = wpParsed.IsPostLiveDVR
 			mergeWatchPageMetadata(result, wpParsed)
-			result.Formats = deduplicateFormats(formatPool)
+			result.Formats = deduplicateFormats(ctx, formatPool)
 			return result
 		}
-		wpParsed.Formats = deduplicateFormats(formatPool)
+		wpParsed.Formats = deduplicateFormats(ctx, formatPool)
 		return wpParsed
 	}
 
 	mergeWatchPageMetadata(result, wpParsed)
-	result.Formats = deduplicateFormats(formatPool)
+	result.Formats = deduplicateFormats(ctx, formatPool)
 	return result
 }
 
@@ -701,7 +734,32 @@ func (p *PlayerAPI) extractSTS(ctx context.Context, playerURL string) int {
 	return n
 }
 
+// fetchWithClientProbe is fetchWithClient for PROBE-ONLY calls — the monitor's
+// date probes and the waiting-room status probes. Owner decision O-R: no
+// PLAYER PO token is minted.
+//
+// yt-dlp's WEB PLAYER_PO_TOKEN_POLICY is required=False, recommended=False
+// (_base.py:90), so upstream mints none for these at all. Moombox minted one
+// per probed VIDEO ID and parked a 6 h sessionCache entry that every later
+// mint sweeps O(n) — pure waste for a video that is never downloaded. Real
+// download player calls keep their token.
+//
+// The probe marking also silences the DRM report down in parseFormats: a
+// waiting-room poll runs one of these every 30 s, and the Warn the extraction
+// path prints once would be a permanent wall here.
+func (p *PlayerAPI) fetchWithClientProbe(ctx context.Context, videoID string, client constants.YouTubeClientConfig, ytcfg *YtcfgData, sts int) (*VideoInfo, error) {
+	return p.fetchWithClientOpts(ctx, videoID, client, ytcfg, sts, true)
+}
+
 func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client constants.YouTubeClientConfig, ytcfg *YtcfgData, sts int) (*VideoInfo, error) {
+	return p.fetchWithClientOpts(ctx, videoID, client, ytcfg, sts, false)
+}
+
+func (p *PlayerAPI) fetchWithClientOpts(ctx context.Context, videoID string, client constants.YouTubeClientConfig, ytcfg *YtcfgData, sts int, probeOnly bool) (*VideoInfo, error) {
+	ctx = withPlayerClient(ctx, client.ClientName)
+	if probeOnly {
+		ctx = withProbeOnlyCall(ctx)
+	}
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 	headers := p.auth.GenerateAPIHeaders(client, ytcfg)
 
@@ -746,7 +804,11 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 	// the binding.
 	//
 	// Failure is non-fatal: the request still runs without a token.
-	if p.potProvider != nil && clientAcceptsPlayerPoToken(client) && ytcfg != nil && ytcfg.VisitorData != "" {
+	//
+	// probeOnly is owner decision O-R (see fetchWithClientProbe): upstream's
+	// WEB policy is required=False, and a probed video may never be
+	// downloaded at all.
+	if !probeOnly && p.potProvider != nil && clientAcceptsPlayerPoToken(client) && ytcfg != nil && ytcfg.VisitorData != "" {
 		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, videoID, false); err == nil && poToken != "" {
 			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
 		} else if err != nil {
@@ -766,6 +828,7 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 // fallback clients (ANDROID_VR, VISIONOS): no auth headers, no STS, no PO
 // token — just the client context plus visitor data when available.
 func (p *PlayerAPI) fetchWithCookielessClient(ctx context.Context, videoID, visitorData string, client constants.YouTubeClientConfig) (*VideoInfo, error) {
+	ctx = withPlayerClient(ctx, client.ClientName)
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 
 	clientCtx := make(map[string]any, len(client.Context))
@@ -896,6 +959,8 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 		p.logger.Debug("[PlayerApi] cookieless fallback result",
 			"client", fb.label,
 			"formats", len(fbResult.Formats),
+			"urllessFormats", fbResult.FormatDiag.URLlessFormats,
+			"sabrForced", fbResult.FormatDiag.SabrForced,
 			"streamStatus", fbResult.StreamStatus,
 			"playability", string(fbResult.PlayabilityError))
 
@@ -954,6 +1019,7 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 // first. The age-restriction bypass already passes true, so that path (where
 // web_embedded is load-bearing rather than supplementary) is unaffected.
 func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int, fetchEmbedPage bool) (*VideoInfo, error) {
+	ctx = withPlayerClient(ctx, constants.WebEmbeddedClient.ClientName)
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 
 	// Fetch embed page for encryptedHostFlags
@@ -1021,6 +1087,51 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	}
 
 	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED", videoID)
+}
+
+// innertubeErrorDetailMax bounds what a failure message may quote back from
+// YouTube's body. yt-dlp peeks 512 bytes for the same purpose.
+const innertubeErrorDetailMax = 512
+
+// innertubeErrorDetail extracts YouTube's own explanation of a non-200
+// Innertube response — `{"error":{"message":"…","status":"…"}}`, e.g.
+// "Precondition check failed." / "FAILED_PRECONDITION", or "Request is missing
+// required authentication credential". Returns "" for any body that is not
+// that shape, so a CDN's HTML error page is never quoted into a log line.
+//
+// The body is DECODED rather than truncated first: chopping at 512 bytes would
+// break the JSON and lose the message this exists to surface. The bound is
+// applied to the OUTPUT instead.
+func innertubeErrorDetail(body []byte) string {
+	var e struct {
+		Error struct {
+			Message string `json:"message"`
+			Status  string `json:"status"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return ""
+	}
+	detail := strings.TrimSpace(strings.TrimPrefix(e.Error.Status+": "+e.Error.Message, ": "))
+	detail = strings.TrimSuffix(detail, ":")
+	if detail == "" {
+		return ""
+	}
+	if len(detail) > innertubeErrorDetailMax {
+		detail = detail[:innertubeErrorDetailMax]
+	}
+	return detail
+}
+
+// innertubeHTTPError formats a non-200 Innertube failure. The "<label> API
+// error: HTTP <code>" prefix is load-bearing: worker/probe_classify.go matches
+// on the "HTTP <code>" substring to decide whether a probe error is transient,
+// so YouTube's own text is APPENDED to it, never substituted for it.
+func innertubeHTTPError(clientLabel string, status int, body []byte) error {
+	if detail := innertubeErrorDetail(body); detail != "" {
+		return fmt.Errorf("%s API error: HTTP %d — %s", clientLabel, status, detail)
+	}
+	return fmt.Errorf("%s API error: HTTP %d", clientLabel, status)
 }
 
 // playerRetryBackoffBase is the first retry delay; attempt n waits
@@ -1105,11 +1216,11 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 		}
 
 		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
-			lastErr = fmt.Errorf("%s API error: HTTP %d", clientLabel, resp.StatusCode)
+			lastErr = innertubeHTTPError(clientLabel, resp.StatusCode, respBody)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("%s API error: HTTP %d", clientLabel, resp.StatusCode)
+			return nil, innertubeHTTPError(clientLabel, resp.StatusCode, respBody)
 		}
 
 		var data map[string]any

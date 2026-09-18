@@ -402,7 +402,7 @@ func TestDeduplicateFormats(t *testing.T) {
 		{Itag: 999, URL: "", AuthLevel: &webAuth}, // no URL, should be filtered
 	}
 
-	result := deduplicateFormats(pool)
+	result := deduplicateFormats(context.Background(), pool)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 deduplicated formats, got %d", len(result))
@@ -535,7 +535,7 @@ func TestDeduplicateFormats_SameAuthPrefersFirstInsertion(t *testing.T) {
 		{Itag: 137, URL: "https://example.com/muxed", AuthLevel: &webAuth, Source: "muxed"},
 	}
 
-	result := deduplicateFormats(pool)
+	result := deduplicateFormats(context.Background(), pool)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 deduplicated format, got %d", len(result))
 	}
@@ -545,7 +545,7 @@ func TestDeduplicateFormats_SameAuthPrefersFirstInsertion(t *testing.T) {
 }
 
 func TestDeduplicateFormats_EmptyPool(t *testing.T) {
-	result := deduplicateFormats(nil)
+	result := deduplicateFormats(context.Background(), nil)
 	if len(result) != 0 {
 		t.Errorf("expected 0 formats, got %d", len(result))
 	}
@@ -1078,7 +1078,7 @@ func TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity(t *testing.T) {
 		mk("en.4", "English original", false, false, &web, "web", "https://x/en"),
 	}
 
-	got := deduplicateFormats(pool)
+	got := deduplicateFormats(context.Background(), pool)
 	if len(got) != 1 {
 		t.Fatalf("itag 140 must reach the consumers once, got %d rows: %+v", len(got), got)
 	}
@@ -1142,7 +1142,7 @@ func dubbedPool() []Format {
 // pinned in TestSelectBestAudioPrefersTheOriginalNonDRCTrack, which is where
 // audioTrackScore's DRC penalty is observable.
 func TestDeduplicateFormatsCollapsesEachItagToThePreferredRendition(t *testing.T) {
-	got := deduplicateFormats(dubbedPool())
+	got := deduplicateFormats(context.Background(), dubbedPool())
 
 	perItag := map[int][]Format{}
 	var order []int
@@ -1194,7 +1194,7 @@ func TestDeduplicateFormatsLeavesAnOrdinaryPoolUnchanged(t *testing.T) {
 		{Itag: 137, URL: "https://web/v137", MimeType: "video/mp4; codecs=\"avc1.640028\"", Source: "web", AuthLevel: &web},
 	}
 
-	got := deduplicateFormats(pool)
+	got := deduplicateFormats(context.Background(), pool)
 
 	want := []struct {
 		itag int
