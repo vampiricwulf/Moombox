@@ -364,7 +364,7 @@ else:
 ```
 
 **Live stream download loop (`runLiveStreamDownload`):**
-1. Starts quality monitor (30-second probe interval) if user hasn't manually selected itags. The probe routes through `ProbeVideoStatus` (ANDROID_VR, cookieless, no POT) for public streams; members-only / age-restricted / login-required streams use the authenticated `GetVideoInfo` path. If the cookieless probe returns successfully without a `DashManifestURL` (e.g., a YouTube experiment stripped DASH from ANDROID_VR), the probe falls back once to the authenticated path so quality changes don't go undetected.
+1. Starts quality monitor (30-second probe interval) if user hasn't manually selected itags. Both probe kinds are ONE player call (`probeVideoInfo`, `internal/worker/orchestrator_youtube.go`): `ProbeVideoStatus` (ANDROID_VR, cookieless, no POT, no watch page) for public streams, and `ProbeVideoStatusAuthenticated` (TV_DOWNGRADED with cookies, no watch page, no STS, no POT) for members-only / age-restricted / login-required ones, where the cookieless probe would 401. If the cheap probe returns neither a `DashManifestURL` nor a split-adaptive format pool — nothing the monitor can select from — it falls back ONCE per tick to the full `GetVideoInfo` cascade, for either kind. Before owner decision O-H the authenticated case ran that cascade on EVERY tick (a 1-5 MB cookied watch page plus three to seven player calls, ~120 pages/hour/job), and so did any public stream whose android_vr probe came back without addressable formats.
 2. Runs segment downloaders in a goroutine
 3. Simultaneously listens for quality change signals on `qualityChangeCh`
 4. When quality changes mid-stream:

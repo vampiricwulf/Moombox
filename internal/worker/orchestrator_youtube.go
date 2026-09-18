@@ -141,11 +141,12 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		// no POT, no watch-page fetch — bypasses the visitor-data rotation
 		// that was causing a sidecar mint every 30s). Streams that
 		// genuinely need authentication (members-only, age-restricted,
-		// login-required) keep using the authenticated GetVideoInfo path
-		// since ANDROID_VR will 401 on those. Same predicate
-		// observeYouTubeStatusProbe uses to skip arming the interruption
-		// signal on these — kept as one function so the two checks cannot
-		// drift apart.
+		// login-required) route through the authenticated TV_DOWNGRADED
+		// probe instead — one cookied player call, not the full cascade
+		// (owner decision O-H) — since ANDROID_VR will 401 on those. Same
+		// predicate observeYouTubeStatusProbe uses to skip arming the
+		// interruption signal on these — kept as one function so the two
+		// checks cannot drift apart.
 		requiresAuthProbe := isAuthWalledPlayability(videoInfo.PlayabilityError)
 		probeFn := o.buildYouTubeProbeFn(jobCtx, requiresAuthProbe)
 		monitor = NewQualityMonitor(qualityMonitorInterval, currentQuality, probeFn, o.logger)
@@ -649,56 +650,116 @@ func (o *DownloadOrchestrator) refreshDownload(ctx context.Context, jobCtx *JobC
 	return DownloadDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 }
 
+// youtubeProbeClient is the narrow slice of *youtube.Service the quality probe
+// uses. Named as an interface so the probe's ROUTING — which is all owner
+// decision O-H changes — is testable without a network round trip;
+// *youtube.Service satisfies it.
+type youtubeProbeClient interface {
+	ProbeVideoStatus(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+	ProbeVideoStatusAuthenticated(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+	GetVideoInfo(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+}
+
+// probeVideoInfo fetches the VideoInfo one quality-monitor tick selects from.
+//
+// Owner decision O-H. Before it, an auth-walled stream ran the FULL
+// authenticated cascade every 30 s — a 1-5 MB cookied watch page plus three to
+// seven player calls, roughly 120 pages and 360+ player calls per hour per job
+// — and the dominant waste was the OTHER branch: a public stream whose
+// cookieless android_vr probe returned neither DASH nor split-adaptive paid
+// that probe AND the whole cascade, every tick.
+//
+// Both kinds now start cheap: ANDROID_VR when nothing is walled (cookieless,
+// no POT, no watch page), TV_DOWNGRADED-with-cookies when something is
+// (ProbeVideoStatusAuthenticated — one player call, no watch page, no STS, no
+// POT; android_vr would 401 on members-only content).
+//
+// The full cascade remains as a ONE-SHOT fallback for either kind, fired only
+// when the cheap probe produced neither a DASH manifest nor a split-adaptive
+// pool — i.e. nothing the monitor could select from. That single retry is what
+// makes the cheap authenticated probe safe: if TV-with-cookies at sts = 0 ever
+// stops carrying adaptiveFormats for some shape, the tick still resolves,
+// exactly as it does today, at the old cost.
+//
+// The monitor only needs the format pool in memory; nothing on this path
+// consumes the watch-page metadata the cascade used to refresh (O-H's
+// acknowledged, visible change: less log volume and a smaller request
+// signature toward YouTube).
+//
+// lg is variadic so the routing test can call this with the three arguments
+// that DEFINE the routing and no logger stub; production passes exactly one.
+// It carries the Debug line that names the branch each tick took — the only
+// way an operator can tell a tick that resolved on one player call from one
+// that still paid for the cascade.
+func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, requiresAuth bool, lg ...logger) (*youtube.VideoInfo, error) {
+	debug := func(msg string, args ...any) {
+		if len(lg) == 0 || isNilLogger(lg[0]) {
+			return
+		}
+		lg[0].Debug(msg, args...)
+	}
+
+	var info *youtube.VideoInfo
+	var err error
+	probeKind := "android_vr"
+	if requiresAuth {
+		probeKind = "tv_downgraded+cookies"
+		info, err = yt.ProbeVideoStatusAuthenticated(ctx, videoID)
+	} else {
+		info, err = yt.ProbeVideoStatus(ctx, videoID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Defensive: both probes can return (nil, nil) when every client fails
+	// without surfacing a hard error (notably during a context-cancel shutdown
+	// race). Treat that as a transient probe error rather than letting the
+	// next dereference panic the monitor goroutine.
+	if info == nil {
+		return nil, fmt.Errorf("probe returned nil info without error")
+	}
+
+	splitAdaptive := HasManifestlessDashFormats(info.Formats)
+	if info.DashManifestURL != "" || splitAdaptive {
+		debug("quality probe answered on one player call",
+			"videoID", videoID, "probe", probeKind,
+			"splitAdaptive", splitAdaptive, "dashManifest", info.DashManifestURL != "")
+		return info, nil
+	}
+
+	debug("quality probe fell back to the full fetch: the cheap probe returned nothing selectable",
+		"videoID", videoID, "probe", probeKind,
+		"status", info.StreamStatus, "formats", len(info.Formats))
+	info, err = yt.GetVideoInfo(ctx, videoID)
+	if err != nil {
+		return nil, fmt.Errorf("probe fallback to the full fetch: %w", err)
+	}
+	if info == nil {
+		return nil, fmt.Errorf("probe fallback returned nil info")
+	}
+	return info, nil
+}
+
 // buildYouTubeProbeFn creates a quality probe function for YouTube streams.
-// The probe re-fetches the DASH manifest and selects the best stream, returning
+// The probe re-fetches the format pool and selects the best stream, returning
 // the quality that would be selected under current preferences.
 //
-// requiresAuth: when true, the probe uses GetVideoInfo (full authenticated
-// path with cookies + POT) — required for members-only, age-restricted, and
-// login-required streams. When false, the probe uses ProbeVideoStatus
-// (ANDROID_VR, cookieless, no POT) which is much cheaper and avoids the
-// per-probe sidecar mint. Either response works: the common case is a
-// split-adaptive format pool (the manifest-free primary path — in-memory
-// selection below), with DashManifestURL as the manifest-parsing fallback.
+// requiresAuth: when true the probe uses ProbeVideoStatusAuthenticated
+// (TV_DOWNGRADED with cookies) — required for members-only, age-restricted and
+// login-required streams, where the cookieless ANDROID_VR probe 401s. When
+// false it uses ProbeVideoStatus (ANDROID_VR, cookieless, no POT). See
+// probeVideoInfo for the one-shot full-fetch fallback behind both, and owner
+// decision O-H for why the full cascade is no longer the FIRST call on either.
 func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresAuth bool) func(context.Context) (*QualityInfo, error) {
 	maxRes := jobCtx.Config.MaxVideoResolution
 	videoItag := jobCtx.Config.VideoItag
 	qualityPref := jobCtx.Job.QualityPreference
+	probeLog := newScopedLogger(o.logger, "jobID", jobCtx.Job.ID)
 
 	return func(ctx context.Context) (*QualityInfo, error) {
-		var info *youtube.VideoInfo
-		var err error
-		if requiresAuth {
-			info, err = jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
-		} else {
-			info, err = jobCtx.YT.ProbeVideoStatus(ctx, jobCtx.Job.VideoID)
-		}
+		info, err := probeVideoInfo(ctx, jobCtx.YT, jobCtx.Job.VideoID, requiresAuth, probeLog)
 		if err != nil {
 			return nil, err
-		}
-		// Defensive: GetVideoInfo / ProbeVideoStatus can return (nil, nil)
-		// when fetchWatchPage and every Innertube client fail without
-		// surfacing a hard error (notably during a context-cancel shutdown
-		// race). Treat that as a transient probe error rather than letting
-		// the next dereference panic the goroutine.
-		if info == nil {
-			return nil, fmt.Errorf("probe returned nil info without error")
-		}
-
-		// Recovery: if the cookieless probe returned neither a DASH manifest
-		// nor a usable split-adaptive format pool, fall back once to the
-		// authenticated path so quality changes don't go silently undetected.
-		// (A manifest-less response WITH adaptive formats is the normal
-		// manifest-free case and needs no fallback.) Auth-required streams
-		// already use GetVideoInfo, so the fallback is a no-op for them.
-		if info.DashManifestURL == "" && !HasManifestlessDashFormats(info.Formats) && !requiresAuth {
-			info, err = jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
-			if err != nil {
-				return nil, fmt.Errorf("probe fallback to authenticated: %w", err)
-			}
-			if info == nil {
-				return nil, fmt.Errorf("probe fallback returned nil info")
-			}
 		}
 
 		// Manifestless DASH path — the primary live path (yt-dlp
