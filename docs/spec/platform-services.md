@@ -147,7 +147,7 @@ All client configs are defined in `internal/constants/constants.go`:
 8. **ANDROID_VR DASH-only enrichment** -- If, after WEB_EMBEDDED+TV+WEB, no client returned a `DashManifestURL` and the stream is live or upcoming AND not members-only / age-restricted / login-required, fetch ANDROID_VR (cookieless). On success, adopt its `DashManifestURL` and merge its formats into the pool with auth-level dedup. This is a workaround for the YouTube account-based experiment that strips `dashManifestUrl` from cookied clients (yt-dlp issue #15274). ANDROID_VR remains the client here because VISIONOS returns no live `dashManifestUrl` and anonymous TV / WEB / WEB_EMBEDDED refuse live streams outright. Note this step only matters for pools without split adaptive URLs — anything with them takes the manifest-free path and never reads the manifest.
 8. **Stream classification override** -- If TV says `not_a_stream` but the watch page disagrees, override the stream status while keeping TV's formats if they are adequate (have both video and audio).
 9. **Merge metadata** -- Fill in missing fields (title, channel, description, thumbnails, timestamps) from the watch page response.
-10. **Deduplicate formats** -- Across all collected format pools, deduplicate by yt-dlp's stream identity `(itag, audioTrack.id, isDrc)` (`get_stream_id`, `_video.py:3396-3397`) — NOT by itag alone: one client lists several itag-140 entries for a dubbed video that differ only by track, and a DRC rendition is a separate stream rather than a variant. When the same stream appears from multiple clients, keep the one with the lowest auth level. DRM-protected formats (`drmFamilies`) never reach the pool: they are dropped in `parseFormats` with one counted Warn line per response (upstream reports the same skip with `report_warning`), because an account-level experiment applies DRM to every video on the tv client (yt-dlp issue #12563) and muxing encrypted samples yields an unplayable archive.
+10. **Deduplicate formats** -- Across all collected format pools, deduplicate by yt-dlp's stream identity `(itag, audioTrack.id, isDrc)` (`get_stream_id`, `_video.py:3396-3397`) — NOT by itag alone: one client lists several itag-140 entries for a dubbed video that differ only by track, and a DRC rendition is a separate stream rather than a variant. When the same stream appears from multiple clients, keep the one with the lowest auth level. DRM-protected formats (`drmFamilies`) never reach the pool: they are dropped in `parseFormats` with one counted Warn line per extraction (upstream reports the same skip with `report_warning(..., only_once=True)`; the count is per response, the line is deduped through the extraction state the cascade carries on its context), because an account-level experiment applies DRM to every video on the tv client (yt-dlp issue #12563) and muxing encrypted samples yields an unplayable archive.
 
 #### Public Fallback Flow
 
@@ -300,15 +300,19 @@ The `parsePlayabilityStatus` function classifies the video's accessibility:
 | `OK` | -- | `ok` |
 | `LIVE_STREAM_OFFLINE` | -- | `ok` (upcoming, not an error) |
 | `UNPLAYABLE` + "live event will begin" | -- | `ok` (upcoming) |
+| any status | `desktopLegacyAgeGateReason` is truthy | `age_restricted` |
+| any status | reason contains "confirm your age" / "age-restricted" / "inappropriate" | `age_restricted` |
+| `AGE_VERIFICATION_REQUIRED`, `AGE_CHECK_REQUIRED` | -- | `age_restricted` |
 | `LOGIN_REQUIRED` + "member"/"join" in reason | -- | `members_only` |
 | `LOGIN_REQUIRED` | -- | `login_required` |
 | `UNPLAYABLE` + "member" in reason | -- | `members_only` |
 | `UNPLAYABLE` + "private" in reason | -- | `private` |
 | `UNPLAYABLE` + "country"/"region"/"not available in your" | -- | `region_blocked` |
 | `UNPLAYABLE` + "unavailable" | -- | `unavailable` |
-| `AGE_VERIFICATION_REQUIRED` | -- | `age_restricted` |
 | `ERROR` + "private"/"unavailable" | -- | `unavailable` |
 | Anything else | -- | `unknown` |
+
+The two age rows sit above the status switch because the shapes they catch are spread across `AGE_CHECK_REQUIRED`, `UNPLAYABLE` and `LOGIN_REQUIRED`, and below the upcoming rows because a waiting room is not an error. They port yt-dlp's `_is_agegated` (`_video.py:2893-2904`); the reason substrings are the load-bearing half, since upstream's lower-case status entries are substring-matched against the raw upper-case `status` and so only ever match through the reason. The verdict matters because the web_embedded age bypass gates literally on `age_restricted`.
 
 ### N-Parameter Decryption
 

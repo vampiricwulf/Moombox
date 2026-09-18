@@ -180,6 +180,11 @@ func (p *PlayerAPI) captureVisitorData(ytcfg *YtcfgData) {
 
 // GetVideoInfoAuthenticated fetches video info using the full multi-client strategy.
 func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID string) (*VideoInfo, error) {
+	// One extraction's scratch state, shared by every player response this
+	// cascade parses (see extractionState) — it is what keeps the DRM-skip
+	// report to one line per extraction rather than one per client.
+	ctx = withExtractionState(ctx)
+
 	// Fetch watch page
 	if err := p.auth.SyncCookies(); err != nil {
 		p.logger.Warn("[PlayerApi] SyncCookies failed", slog.String("error", err.Error()))
@@ -476,6 +481,9 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 
 // GetVideoInfoPublic fetches video info without authentication.
 func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*VideoInfo, error) {
+	// One extraction's scratch state — see GetVideoInfoAuthenticated.
+	ctx = withExtractionState(ctx)
+
 	wp, err := fetchWatchPage(ctx, videoID, "")
 	if err != nil {
 		// Not fatal (the Innertube clients below carry the extraction), but

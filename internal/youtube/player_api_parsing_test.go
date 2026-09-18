@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 func TestParsePlayabilityStatus_NilStatus(t *testing.T) {
@@ -453,7 +457,7 @@ func TestParseFormats_DefersCipherDecryption(t *testing.T) {
 		},
 	}
 
-	got := pa.parseFormats(streamingData)
+	got := pa.parseFormats(context.Background(), streamingData)
 
 	if len(got) != 2 {
 		t.Fatalf("expected 2 formats, got %d", len(got))
@@ -512,7 +516,7 @@ func TestParseFormats_DefaultsSigKey(t *testing.T) {
 		},
 	}
 
-	got := pa.parseFormats(streamingData)
+	got := pa.parseFormats(context.Background(), streamingData)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 format, got %d", len(got))
 	}
@@ -980,7 +984,7 @@ func TestParseFormatsSkipsDRMAndKeepsTrackIdentity(t *testing.T) {
 		{"itag": 140, "url": "https://tv/a-drc", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "isDrc": true, "audioTrack": {"id": "en.4", "displayName": "English original", "audioIsDefault": true}}
 	]}`)
 
-	formats := p.parseFormats(sd)
+	formats := p.parseFormats(context.Background(), sd)
 
 	for _, f := range formats {
 		if f.Itag == 137 {
@@ -1014,6 +1018,10 @@ func TestParseFormatsSkipsDRMAndKeepsTrackIdentity(t *testing.T) {
 // no 1080p" and "this ACCOUNT gets no 1080p" — the operator has to see it at
 // the default level, once, with the count.
 //
+// This is the single-response half: one parse, one line, carrying that
+// response's count. TestDRMWarnIsOncePerExtractionNotPerResponse pins the
+// other half — several responses in one cascade still get one line.
+//
 // Mutants this kills:
 //   - the line demoted back to Debug  → no Warn captured
 //   - one line per dropped format     → two Warns instead of one
@@ -1027,7 +1035,7 @@ func TestParseFormatsWarnsOnceForSkippedDRM(t *testing.T) {
 		{"itag": 136, "url": "https://tv/v-clean", "mimeType": "video/mp4; codecs=\"avc1.4d401f\""}
 	]}`)
 
-	if got := len(p.parseFormats(sd)); got != 1 {
+	if got := len(p.parseFormats(context.Background(), sd)); got != 1 {
 		t.Fatalf("parseFormats kept %d formats, want only the clean one", got)
 	}
 	if len(lg.warns) != 1 {
@@ -1074,5 +1082,146 @@ func TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("dedup dropped the %s rendition: %+v", want, got)
 		}
+	}
+}
+
+// drmOKBody is an otherwise-adequate player response whose pool also carries a
+// DRM-protected rendition — the shape an account in YouTube's tv-client DRM
+// experiment gets back from MOST clients in a cascade (yt-dlp issue #12563).
+const drmOKBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"},
+	"streamingData": {"adaptiveFormats": [
+		{"itag": 299, "url": "https://example.com/v", "mimeType": "video/mp4; codecs=\"avc1.64002a\"", "width": 1920, "height": 1080},
+		{"itag": 140, "url": "https://example.com/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""},
+		{"itag": 137, "url": "https://example.com/drm", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "drmFamilies": ["WIDEVINE"]}
+	]}
+}`
+
+// TestDRMWarnIsOncePerExtractionNotPerResponse pins the DRM-skip report to
+// upstream's cardinality: `report_warning(..., only_once=True)`
+// (_video.py:3419-3427) fires ONCE per run, not once per player response. This
+// cascade parses several responses per extraction, and for an account in the
+// tv-client DRM experiment nearly all of them carry DRM formats — a per-
+// response Warn turns one diagnosis into a repeating wall at the default log
+// level.
+//
+// Both responses here really are parsed: the watch page's own player response
+// and the TV client's, which is why the transport call assertion is part of the
+// test — without it a cascade that gave up after the watch page would pass
+// vacuously.
+//
+// Mutants this kills:
+//   - the Warn left per response → two DRM lines from one cascade
+//   - the dedupe flag hoisted to a package-level var or onto PlayerAPI, i.e.
+//     made per-process instead of per-extraction → the second cascade stays
+//     silent
+func TestDRMWarnIsOncePerExtractionNotPerResponse(t *testing.T) {
+	origFetch := fetchWatchPage
+	fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
+		return &WatchPageResult{
+			Ytcfg:          DefaultYtcfg(),
+			PlayerResponse: decodePlayerJSON(t, drmOKBody),
+		}, nil
+	}
+	t.Cleanup(func() { fetchWatchPage = origFetch })
+
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"7": {http.StatusOK, drmOKBody}, // TV_DOWNGRADED
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	lg := &warnCapturingLogger{}
+	p := NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), lg)
+
+	drmWarns := func() []string {
+		var out []string
+		for _, w := range lg.warns {
+			if strings.Contains(w, "DRM") {
+				out = append(out, w)
+			}
+		}
+		return out
+	}
+
+	if _, err := p.GetVideoInfoPublic(context.Background(), "test1234567"); err != nil {
+		t.Fatalf("cascade failed before the cardinality could be judged: %v", err)
+	}
+	if !slices.Contains(tr.calls, "7") {
+		t.Fatalf("the TV client was never asked (calls = %v), so only one response was parsed", tr.calls)
+	}
+	if got := drmWarns(); len(got) != 1 {
+		t.Fatalf("one extraction logged %d DRM lines, want exactly 1: %q", len(got), got)
+	}
+
+	// A second extraction is a second run: it must report again, or an
+	// operator only ever learns about the DRM experiment once per process.
+	if _, err := p.GetVideoInfoPublic(context.Background(), "test1234567"); err != nil {
+		t.Fatalf("second cascade failed: %v", err)
+	}
+	if got := drmWarns(); len(got) != 2 {
+		t.Fatalf("two extractions logged %d DRM lines, want exactly 2: %q", len(got), got)
+	}
+}
+
+// TestParsePlayabilityStatusRecognisesEveryAgeGateShape ports yt-dlp's
+// _is_agegated (_video.py:2893-2904). The bypass gate downstream
+// (player_api_strategy.go:294 and :444) matches PlayabilityAgeRestricted
+// LITERALLY, so an "unknown" verdict never reaches the web_embedded age path
+// at all.
+//
+// The reason substrings are the load-bearing half: upstream's status entries
+// are lower-case and substring-matched against the raw upper-case `status`, so
+// upstream in practice recognises these responses through their REASON.
+//
+// Mutants this kills:
+//   - the AGE_CHECK_REQUIRED arm dropped        → the reason-less row reports "unknown"
+//   - the reason substrings dropped             → the inappropriate/confirm rows report "unknown"
+//   - desktopLegacyAgeGateReason not consulted  → that row reports "unknown"
+//
+// The last four rows are regression guards rather than mutant-killers: moving
+// the age match above the upcoming check or above the members-only arm changes
+// none of them, because none of the three substrings occurs in YouTube's
+// membership ("Join this channel to get access to members-only content") or
+// waiting-room reason text. That disjointness is exactly what makes the
+// placement safe, and these rows are what would fail if a future edit widened
+// the substring list far enough to overlap either message (a list carrying
+// "content", for one) or YouTube reworded them.
+func TestParsePlayabilityStatusRecognisesEveryAgeGateShape(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		want   PlayabilityError
+	}{
+		{"AGE_CHECK_REQUIRED", `{"status": "AGE_CHECK_REQUIRED", "reason": "Sign in to confirm your age"}`, PlayabilityAgeRestricted},
+		// Added to the brief's table: with a reason present, the substring half
+		// already catches AGE_CHECK_REQUIRED, so the status arm's own mutant
+		// ("the AGE_CHECK_REQUIRED arm dropped") survives every other row. This
+		// reason-less shape is the one that reaches the status switch, and
+		// YouTube does serve the code with no reason text on some clients.
+		{"AGE_CHECK_REQUIRED without a reason", `{"status": "AGE_CHECK_REQUIRED"}`, PlayabilityAgeRestricted},
+		{"AGE_VERIFICATION_REQUIRED", `{"status": "AGE_VERIFICATION_REQUIRED", "reason": "This video may be inappropriate for some users."}`, PlayabilityAgeRestricted},
+		{"UNPLAYABLE inappropriate", `{"status": "UNPLAYABLE", "reason": "This video may be inappropriate for some users."}`, PlayabilityAgeRestricted},
+		{"UNPLAYABLE age-restricted", `{"status": "UNPLAYABLE", "reason": "This video is age-restricted and can only be watched on YouTube."}`, PlayabilityAgeRestricted},
+		{"LOGIN_REQUIRED confirm your age", `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age"}`, PlayabilityAgeRestricted},
+		{"desktopLegacyAgeGateReason", `{"status": "UNPLAYABLE", "reason": "", "desktopLegacyAgeGateReason": 1}`, PlayabilityAgeRestricted},
+
+		// Regressions the new match must NOT cause.
+		{"members only stays members only", `{"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access to members-only content"}`, PlayabilityMembersOnly},
+		{"upcoming stays ok", `{"status": "LIVE_STREAM_OFFLINE", "reason": "Premieres in 3 hours"}`, PlayabilityOK},
+		{"private stays private", `{"status": "UNPLAYABLE", "reason": "This video is private."}`, PlayabilityPrivate},
+		{"plain unplayable stays unknown", `{"status": "UNPLAYABLE", "reason": "Playback on other websites has been disabled"}`, PlayabilityUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := parsePlayabilityStatus(decodePlayerJSON(t, tc.status))
+			if got != tc.want {
+				t.Errorf("parsePlayabilityStatus(%s) = %q, want %q", tc.status, got, tc.want)
+			}
+		})
 	}
 }

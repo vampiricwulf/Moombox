@@ -76,7 +76,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// carry EncryptedSig populated and a raw `url=` value in URL; the
 	// strategy resolves them via cipher.ResolveFormatURL right before
 	// constructing SegmentDownloaders.
-	formats := p.parseFormats(streamingData)
+	formats := p.parseFormats(ctx, streamingData)
 
 	// Stream classification
 	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0)
@@ -263,6 +263,51 @@ func microformatDate(microformat map[string]any) string {
 	return ""
 }
 
+// extractionStateKey is the context key for extractionState. Its own unexported
+// type, so no other package can collide with it.
+type extractionStateKey struct{}
+
+// extractionState is the scratch one extraction — one GetVideoInfo* cascade —
+// carries across the several player responses it parses. It rides the context
+// because the parse path (doRetryRequest → parsePlayerResponse → parseFormats)
+// is entered from every fetchWith* helper, and the context is the only
+// per-extraction value all of them already thread; the alternative is a new
+// parameter on eight call sites that do nothing with it.
+//
+// A cascade runs its clients sequentially — no fetch is in a goroutine — so
+// plain fields need no lock.
+type extractionState struct {
+	drmWarned bool
+}
+
+// withExtractionState opens one extraction's scratch. Called once at the head
+// of each cascade; every player response parsed under the returned context
+// then shares the same state.
+func withExtractionState(ctx context.Context) context.Context {
+	return context.WithValue(ctx, extractionStateKey{}, &extractionState{})
+}
+
+// extractionStateFrom returns this extraction's state, or nil when the caller
+// is not inside a cascade — a direct parse, as several tests make.
+func extractionStateFrom(ctx context.Context) *extractionState {
+	s, _ := ctx.Value(extractionStateKey{}).(*extractionState)
+	return s
+}
+
+// firstDRMReport reports whether this extraction has yet to log the DRM-skip
+// warning, recording that it now has. Nil (no cascade) reports every time,
+// which is the plain per-call behaviour a direct parseFormats caller expects.
+func (s *extractionState) firstDRMReport() bool {
+	if s == nil {
+		return true
+	}
+	if s.drmWarned {
+		return false
+	}
+	s.drmWarned = true
+	return true
+}
+
 // parseFormats extracts format metadata + raw stream URLs from a
 // streamingData map. Cipher decryption (sig + n) is intentionally NOT
 // performed here — strategies do it post-selection via
@@ -277,7 +322,10 @@ func microformatDate(microformat map[string]any) string {
 // EncryptedSig is empty. Selection still uses Format.URL != "" as
 // the "format has a URL" signal — we always set URL to something
 // fetchable-after-resolve.
-func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
+//
+// ctx carries the extraction's scratch state (see extractionState): the
+// DRM-skip warning is reported once per extraction, not once per response.
+func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]any) []Format {
 	if streamingData == nil {
 		return nil
 	}
@@ -379,12 +427,15 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 			formats = append(formats, format)
 		}
 	}
-	if drmSkipped > 0 {
+	if drmSkipped > 0 && extractionStateFrom(ctx).firstDRMReport() {
 		// Warn, not Debug: upstream reports this with report_warning
 		// (_video.py:3427, only_once=True), and a silently DRM-stripped format
 		// pool is exactly the state an operator needs told about — it is the
 		// difference between "this video has no 1080p" and "this ACCOUNT gets
-		// no 1080p". Still one counted line per response, never one per format.
+		// no 1080p". The count is per response; the LINE is once per
+		// extraction, as upstream's only_once is once per run — an account in
+		// the tv-client DRM experiment has DRM formats in nearly every
+		// response a cascade collects.
 		p.logger.Warn("[PlayerApi] skipped DRM-protected formats",
 			"count", drmSkipped,
 			"note", "a YouTube account experiment applies DRM to all videos on the tv client — yt-dlp issue #12563")
@@ -488,6 +539,43 @@ func isUpcomingFromPlayability(statusCode, reasonLower string) bool {
 		(statusCode == "UNPLAYABLE" && strings.Contains(reasonLower, "live event will begin"))
 }
 
+// ageGateReasons are yt-dlp's AGE_GATE_REASONS reason substrings
+// (_video.py:2899-2901). They are the load-bearing half of the match:
+// upstream's status entries in the same tuple are lower-case and are
+// substring-matched against the raw upper-case `status`, so upstream in
+// practice detects an age gate through the REASON text.
+var ageGateReasons = []string{"confirm your age", "age-restricted", "inappropriate"}
+
+// isAgeGateReason reports whether a playability reason (already lower-cased)
+// names an age gate.
+func isAgeGateReason(reasonLower string) bool {
+	for _, r := range ageGateReasons {
+		if strings.Contains(reasonLower, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDesktopLegacyAgeGate mirrors upstream's first test,
+// `traverse_obj(player_response, ('playabilityStatus',
+// 'desktopLegacyAgeGateReason'))` (_video.py:2894-2895) — a TRUTHINESS test,
+// so a key present but zero/empty/false is not an age gate.
+func hasDesktopLegacyAgeGate(status map[string]any) bool {
+	switch v := status["desktopLegacyAgeGateReason"].(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	case string:
+		return v != ""
+	case float64:
+		return v != 0
+	default:
+		return true
+	}
+}
+
 func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 	if status == nil {
 		return PlayabilityUnknown, ""
@@ -510,15 +598,25 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 		return PlayabilityOK, ""
 	}
 
+	// Age gates, ported from _is_agegated (_video.py:2893-2904). This runs
+	// BEFORE the status switch because the shapes it catches are spread across
+	// three different status codes (AGE_CHECK_REQUIRED, UNPLAYABLE,
+	// LOGIN_REQUIRED) — and AFTER the upcoming check, because a waiting room
+	// is not an error and must never be classified as one.
+	//
+	// It cannot steal a members-only verdict: none of the three substrings
+	// appears in YouTube's membership reason text, which says "Join this
+	// channel to get access to members-only content".
+	if hasDesktopLegacyAgeGate(status) || isAgeGateReason(reasonLower) {
+		return PlayabilityAgeRestricted, reason
+	}
+
 	switch statusCode {
 	case "OK":
 		return PlayabilityOK, ""
 	case "LOGIN_REQUIRED":
 		if strings.Contains(reasonLower, "member") || strings.Contains(reasonLower, "join") {
 			return PlayabilityMembersOnly, reason
-		}
-		if strings.Contains(reasonLower, "age") {
-			return PlayabilityAgeRestricted, reason
 		}
 		return PlayabilityLoginRequired, reason
 	case "UNPLAYABLE":
@@ -535,7 +633,7 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 			return PlayabilityUnavailable, reason
 		}
 		return PlayabilityUnknown, reason
-	case "AGE_VERIFICATION_REQUIRED":
+	case "AGE_VERIFICATION_REQUIRED", "AGE_CHECK_REQUIRED":
 		return PlayabilityAgeRestricted, reason
 	case "ERROR":
 		if strings.Contains(reasonLower, "private") || strings.Contains(reasonLower, "unavailable") {
