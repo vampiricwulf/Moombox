@@ -23,7 +23,8 @@ const (
 	maxConsecErrorsLive = 20
 	maxConsecErrorsVod  = 5
 	// maxStaleContinuationAttempts bounds the fresh-continuation retry loop.
-	// With exponential backoff 10s→5min cap, 12 attempts = ~50 min worst case.
+	// With exponential backoff 10s→5min cap, 12 attempts = ~35 min worst case
+	// (11 sleeps: 10, 20, 40, 80, 160, then 300 s six times = 2,110 s).
 	// The inner loop also exits early on cd.shouldStop() (which includes
 	// MarkStreamEnded), so in the healthy path the orchestrator trims this
 	// window further (audit chat.md R2 — was 30, tightened to 12).
@@ -43,6 +44,14 @@ const (
 	liveChatPollDefault = 5 * time.Second
 	// maxStaleRecoveryDelay caps that floor's doubling.
 	maxStaleRecoveryDelay = 5 * time.Minute
+	// replayMarkFutureSlack bounds how far ahead of the wallclock a
+	// timestampUsec may be and still move the replay high-water mark. Chat
+	// timestamps are server-issued, so this is a corruption/clock-skew bound
+	// rather than an attack surface — but the mark takes the batch MAXIMUM,
+	// so one bad record silently cost the whole post-live tail (see the
+	// advance in processBatch). An hour is far more skew than any real
+	// message carries and far less than the drop costs.
+	replayMarkFutureSlack = 1 * time.Hour
 )
 
 // liveChatPollDefaultForTesting / maxStaleRecoveryDelayForTesting are the
@@ -136,6 +145,11 @@ type ChatDownloader struct {
 	// pass adopted mid-run: the watch page hands back the reload token, i.e.
 	// the START of the archive, and the 5000-ID dedup window cannot span an
 	// archive bigger than itself.
+	//
+	// THE INVARIANT it rests on: chat is ordered in time on BOTH endpoints, so
+	// a single comparison against this mark is exact and O(1) — no set, no
+	// scan. Everything below the mark has been committed already; nothing
+	// above it has.
 	//
 	// ABSOLUTE, never the epoch-relative OffsetMs. A live record has no
 	// videoOffsetTimeMsec, so its offset is derived from cd.streamStartMs —
@@ -386,10 +400,13 @@ func staleRecoveryDelay(n int) time.Duration {
 // continuation when the caller already has a fresh one — see the resume
 // block's own comment below.
 //
-// THE OUTCOME. Start returns nil for every exit that is not a give-up. The one
-// exception is errStaleRecoveryExhausted: the consecutive-recovery cap firing
-// on a still-live broadcast, which the worker turns into chat_status
-// "incomplete" because messages can still be missing.
+// THE OUTCOME. Start returns nil for every exit that is not a give-up. There
+// are two exceptions, and the worker turns either into chat_status
+// "incomplete" because messages can still be missing:
+//   - errStaleRecoveryExhausted — a stale-continuation cap firing on a
+//     still-live broadcast, either the consecutive-recovery one in runChatLoop
+//     or recoverStaleContinuation's own retry budget.
+//   - errChatFetchExhausted — handleFetchError's consecutive-error budget.
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	if cd.running {
@@ -418,6 +435,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	// A fresh run carries no give-up verdict from a prior run on this same
 	// instance, for the same reason liveContinuationOpen is re-armed below.
 	cd.terminalErr = nil
+	// And no replay high-water mark: the mark is one RUN's "highest absolute
+	// timestamp committed so far", so carrying a prior run's would make this
+	// run's first replay pass drop everything below a boundary it never set.
+	// Re-armed here, beside terminalErr, for the same reason.
+	cd.replayHighWaterUsec, cd.hasReplayHighWater = 0, false
 	// A fresh run starts with no resume signal, not whatever a PRIOR run on
 	// this same instance last left behind (e.g. a completed run that ended
 	// with the signal open, then this same *ChatDownloader gets Start()
@@ -857,6 +879,21 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 				break // VOD/replay complete
 			}
 			if !cd.handleEndOfStream(ctx) {
+				// recoverStaleContinuation returns false in TWO shapes and
+				// only one of them is a give-up. The INNER cap —
+				// maxStaleContinuationAttempts failed fresh-token fetches,
+				// ~35 minutes of them — leaves a still-live broadcast whose
+				// chat this run stopped capturing, so it is recorded exactly
+				// as the outer cap below is. The other shape is an ordinary
+				// stop (Stop / MarkStreamEnded / a cancelled ctx) reached
+				// while the retry ladder was sleeping, and arming the verdict
+				// there would mislabel every normal end as incomplete — which
+				// is why this is not a bare setTerminalErr.
+				if !cd.shouldStop() && ctx.Err() == nil {
+					cd.logInfo("chat: giving up after the fresh-continuation retry budget",
+						"videoID", cd.opts.VideoID, "attempts", maxStaleContinuationAttempts)
+					cd.setTerminalErr(errStaleRecoveryExhausted)
+				}
 				break
 			}
 			staleRecoveries++
@@ -1048,9 +1085,9 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 		// re-serves everything the live half already committed — and the
 		// 5000-ID window (culled on every fetch) cannot span an archive
 		// bigger than itself, so on a 20k archive 6,000 of them came back as
-		// duplicate records. Chat is ordered in time on both endpoints, so
-		// one comparison against the absolute timestamp is exact and O(1)
-		// (see replayHighWaterUsec for why it must be the absolute one).
+		// duplicate records. One comparison against the absolute timestamp is
+		// exact and O(1) — see replayHighWaterUsec for the ordering invariant
+		// that makes it exact, and for why it must be the absolute one.
 		//
 		// STRICTLY below the mark, not "at or below": messages sharing the
 		// mark's millisecond are common on a busy stream and a page boundary
@@ -1089,7 +1126,19 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 		// tail the live endpoint stopped serving. A live record carries a
 		// timestamp whether or not it carries an offset, so this is set on
 		// every run, epoch or no epoch.
-		if batchHasUsec && (!cd.hasReplayHighWater || batchMaxUsec > cd.replayHighWaterUsec) {
+		//
+		// BOUNDED BY THE WALLCLOCK. The mark takes the batch MAXIMUM, so a
+		// single record with a far-future timestampUsec — a corrupt field, a
+		// skewed server clock, an int64 sentinel — would put the mark beyond
+		// every real message and make the replay pass drop the entire
+		// post-live tail it exists to recover, silently and with the row
+		// still reading "finished" (close-review Finding 2; measured at
+		// 0 of 1,400 tail messages). No chat message can be an hour in the
+		// future, so such a batch simply does not move the mark; its records
+		// are still committed above, and the ID dedup covers them.
+		if batchHasUsec &&
+			batchMaxUsec <= time.Now().Add(replayMarkFutureSlack).UnixMicro() &&
+			(!cd.hasReplayHighWater || batchMaxUsec > cd.replayHighWaterUsec) {
 			cd.replayHighWaterUsec = batchMaxUsec
 			cd.hasReplayHighWater = true
 		}

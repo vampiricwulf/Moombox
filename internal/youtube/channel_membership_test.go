@@ -12,7 +12,7 @@ import (
 )
 
 // wrapPage embeds a ytInitialData JSON literal in a minimal HTML page the way
-// YouTube serves it, so tests exercise extractYtInitialData + parseMembershipTab
+// YouTube serves it, so tests exercise extractYtInitialDataInto + parseMembershipTab
 // end to end.
 func wrapPage(jsonBody string) []byte {
 	return []byte(`<!DOCTYPE html><html><head><script nonce="x">` +
@@ -170,6 +170,36 @@ func TestParseMembershipTab_Dedup(t *testing.T) {
 	}
 	if len(videos) != 1 {
 		t.Fatalf("expected dedup to 1 video, got %d", len(videos))
+	}
+}
+
+// TestParseMembershipTab_ForgedCandidateDoesNotDenyAccess pins report #60's
+// decision at the layer that pays for it. A page can author a syntactically
+// valid `var ytInitialData = {"contents":"forged"}` ahead of the real
+// assignment: it is JSON, it is non-empty, and it BALANCES — so a predicate
+// that only checks those accepts it, the search ends there, and a genuine
+// member is told they have no access to their own membership tab.
+//
+// The envelope decode is what rejects it: `contents` is an object in
+// ytInitialTabs and a string here, so json.Unmarshal errors and the candidate
+// is skipped rather than ending the search. Only the layer below (the
+// candidate iterator) was tested; this pins the consumer.
+//
+// Mutant this kills: extractYtInitialDataInto accepting on the cheap half
+// alone (`return utils.IsNonEmptyJSONBody(obj)`, i.e. the decode dropped from
+// the acceptance) → the forged literal wins and hasAccess is false.
+func TestParseMembershipTab_ForgedCandidateDoesNotDenyAccess(t *testing.T) {
+	page := []byte(`<!DOCTYPE html><html><head>` +
+		`<script nonce="x">var ytInitialData = {"contents":"forged"};</script>` +
+		`<script nonce="y">var ytInitialData = ` + lockupMembershipJSON + `;</script>` +
+		`</head><body></body></html>`)
+
+	videos, ok := parseMembershipTab(page)
+	if !ok {
+		t.Fatal("hasAccess=false — a forged ytInitialData ahead of the real one denied a member their own tab")
+	}
+	if len(videos) != 2 {
+		t.Errorf("videos = %d, want the real document's 2", len(videos))
 	}
 }
 

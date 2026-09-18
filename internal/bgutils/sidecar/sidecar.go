@@ -261,11 +261,19 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 		return fmt.Errorf("start node: %w", err)
 	}
 
+	// Under writeMu, mirroring Restart's own reset of the same fields:
+	// writeRequest reads s.stdin under that lock, and a caller stalled
+	// between its healthy.Load() and writeRequest can span the whole restart
+	// window. The race detector cannot see it (the stall has to cross the
+	// ladder's 5 s floor), which is exactly why the lock is the fix rather
+	// than an argument that it cannot happen.
+	s.writeMu.Lock()
 	s.cmd = cmd
 	s.stdin = stdin
 	s.stdout = stdout
 	s.stderr = stderr
 	s.readyCh = make(chan struct{})
+	s.writeMu.Unlock()
 
 	// Pin the child to a Job Object so it dies when Moombox dies. On
 	// Linux processJob is a no-op — PR_SET_PDEATHSIG (configured before
@@ -280,7 +288,9 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 			job = nil
 		}
 	}
+	s.writeMu.Lock()
 	s.job = job
+	s.writeMu.Unlock()
 
 	s.pumpsDone.Add(2)
 	go s.readPump()

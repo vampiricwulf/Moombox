@@ -87,7 +87,10 @@ func readChatFileMessages(t *testing.T, path string) (records, duplicates int) {
 //
 // Mutants this kills:
 //   - the archive's end recovers the reload token again → a second traverse (recoveries > 1)
-//   - the high-water mark dropped                       → the 1,000 pre-window messages duplicate
+//   - the high-water mark dropped                       → 6,000 duplicate records, not the
+//     1,000 the culled window alone would explain: the window keeps evicting as the pass
+//     re-serves the archive from the top, so it is ahead of the replay pass throughout
+//     (measured, close-review Finding 13c)
 //   - the end of a replay pass reported as a give-up    → Start returns non-nil
 func TestReplayTraverseIsBoundedAndWritesNoDuplicates(t *testing.T) {
 	const (
@@ -181,6 +184,124 @@ func TestReplayTraverseIsBoundedAndWritesNoDuplicates(t *testing.T) {
 	}
 	if records != archive {
 		t.Errorf("chat.json holds %d records, want %d — one copy of every message", records, archive)
+	}
+}
+
+// TestReplayHighWaterMarkIgnoresAFutureTimestamp is close-review Finding 2.
+// The mark advances to the batch MAXIMUM, so ONE record carrying a
+// far-future timestampUsec — a corrupt field, a clock-skewed server, an
+// int64 sentinel — put the mark beyond every real message, and the replay
+// pass the mark exists to bound then read the ENTIRE post-live tail as
+// "below the mark" and dropped it. Silently: the row still reads `finished`.
+//
+// Chat timestamps are server-issued, so this is a robustness bound, not an
+// attack surface: no chat message can be an hour in the future, so a batch
+// whose maximum is past now+replayMarkFutureSlack never moves the mark. The
+// record itself is still committed — the ID dedup covers it.
+//
+// Mutant this kills: the wallclock bound dropped from the advance in
+// processBatch → tail captured 0 of 1400 on both rows.
+func TestReplayHighWaterMarkIgnoresAFutureTimestamp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		usec  int64
+		total int
+	}{
+		{"an int64 sentinel", 9223372036854775807, 2000},
+		{"two hours ahead of the wallclock", time.Now().Add(2 * time.Hour).UnixMicro(), 2000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const liveHalf = 600
+			archive := tc.total
+			out := filepath.Join(t.TempDir(), "chat.json")
+			cd := NewChatDownloader(ChatDownloaderOptions{
+				VideoID:             "vidPoison",
+				OutputFile:          out,
+				IsLiveOrUpcoming:    true,
+				InitialContinuation: "live-tok",
+			})
+
+			var (
+				mu       sync.Mutex
+				fetches  int
+				nextFrom int
+			)
+			cd.testRecoveryOverride = func(context.Context) bool {
+				cd.adoptFreshContinuation("replay-0", true)
+				nextFrom = 0
+				return true
+			}
+			livePolls := 0
+			cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+				if !cd.isReplay() {
+					livePolls++
+					if livePolls == 1 {
+						resp := &ChatApiResponse{NextContinuation: "live-tok-2", TimeoutMs: 1}
+						for i := range liveHalf {
+							resp.Messages = append(resp.Messages, buildArchiveMessage(i))
+						}
+						// The poisoned record, served by the live endpoint
+						// among perfectly ordinary ones.
+						poisoned := buildArchiveMessage(liveHalf)
+						poisoned.ID = "poisoned"
+						poisoned.TimestampUsec = strconv.FormatInt(tc.usec, 10)
+						resp.Messages = append(resp.Messages, poisoned)
+						return resp, nil
+					}
+					return &ChatApiResponse{IsComplete: true, TimeoutMs: -1}, nil
+				}
+				mu.Lock()
+				fetches++
+				over := fetches > 3*(archive/archivePageSize+1)
+				mu.Unlock()
+				if over {
+					cd.Stop()
+					return &ChatApiResponse{IsComplete: true, TimeoutMs: -1}, nil
+				}
+				resp := archivePage(nextFrom, archive)
+				nextFrom += archivePageSize
+				return resp, nil
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := cd.Start(ctx); err != nil {
+				t.Fatalf("Start = %v, want nil", err)
+			}
+
+			raw, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatalf("read chat file: %v", err)
+			}
+			var data ChatData
+			if err := json.Unmarshal(raw, &data); err != nil {
+				t.Fatalf("parse chat file: %v", err)
+			}
+			seen := make(map[string]struct{}, len(data.Messages))
+			duplicates, tail := 0, 0
+			for _, m := range data.Messages {
+				if _, ok := seen[m.ID]; ok {
+					duplicates++
+					continue
+				}
+				seen[m.ID] = struct{}{}
+				if n, err := strconv.Atoi(m.ID[1:]); err == nil && m.ID[0] == 'm' && n >= liveHalf {
+					tail++
+				}
+			}
+			t.Logf("records=%d duplicates=%d tail=%d/%d", len(data.Messages), duplicates, tail, archive-liveHalf)
+			if tail != archive-liveHalf {
+				t.Errorf("post-live tail captured %d of %d — one future timestamp moved the mark past every real message",
+					tail, archive-liveHalf)
+			}
+			if duplicates != 0 {
+				t.Errorf("chat.json holds %d duplicate records", duplicates)
+			}
+			if len(data.Messages) != archive+1 {
+				t.Errorf("chat.json holds %d records, want %d (the archive plus the poisoned record)",
+					len(data.Messages), archive+1)
+			}
+		})
 	}
 }
 

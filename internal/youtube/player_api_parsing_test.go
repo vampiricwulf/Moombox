@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
@@ -923,6 +924,55 @@ func TestParsePlayerResponseRejectsASubstituteVideo(t *testing.T) {
 	}
 }
 
+// TestVideoIDMismatchErrorBoundsTheSubstituteID is close-review Finding 4.
+// Got comes straight off the wire (videoDetails.videoId) and was rendered
+// unbounded: a 14,000-byte id produced a 22,129-byte Error(), which reaches
+// the job's `error` column through `full fetch failed: %w` on the confirmatory
+// fetch and the IP-block verdict's `substitute` log field. A real substitute
+// id is 11 characters.
+//
+// The FIELD stays intact — a caller comparing or logging it deliberately gets
+// the whole thing; only the rendered text is bounded, and on a RUNE boundary
+// so the %q output stays valid UTF-8.
+//
+// Mutants this kill:
+//   - the cap removed from Error()            → the length check fails
+//   - the cap applied as a byte slice         → the UTF-8 check fails
+//   - the cap applied to the Got field itself → the "field intact" check fails
+func TestVideoIDMismatchErrorBoundsTheSubstituteID(t *testing.T) {
+	huge := strings.Repeat("あ", 14000) // 42,000 bytes of three-byte runes
+	mm := &VideoIDMismatchError{Requested: "test1234567", Got: huge}
+
+	got := mm.Error()
+	if len(got) > 300 {
+		t.Errorf("Error() is %d bytes for a %d-byte substitute id, want a bounded string", len(got), len(huge))
+	}
+	// Asserted on the CAPPED ID, not on Error()'s output: %q escapes an
+	// invalid byte as \xe3, which is itself valid UTF-8, so the rendered
+	// string can never catch a byte-sliced cut.
+	if !utf8.ValidString(capSubstituteID(huge)) {
+		t.Errorf("capSubstituteID = %q is not valid UTF-8 — the cut must fall on a rune boundary", capSubstituteID(huge))
+	}
+	if strings.Contains(got, `\x`) {
+		t.Errorf("Error() = %q carries an escaped invalid byte — the cut split a rune", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("Error() = %q, want the truncation marked", got)
+	}
+	if !strings.Contains(got, "test1234567") {
+		t.Errorf("Error() = %q, want the REQUESTED id named in full", got)
+	}
+	if mm.Got != huge {
+		t.Errorf("Got was truncated in place (%d bytes) — the field is the caller's, only the text is bounded", len(mm.Got))
+	}
+
+	// An ordinary 11-character id is untouched.
+	short := (&VideoIDMismatchError{Requested: "test1234567", Got: "OTHERvideo1"}).Error()
+	if !strings.Contains(short, `"OTHERvideo1"`) || strings.Contains(short, "…") {
+		t.Errorf("Error() = %q, want a real substitute id rendered whole", short)
+	}
+}
+
 // TestParsePlayerResponseKeepsAResponseWithNoVideoID pins upstream's EFFECTIVE
 // rule, which Moombox matches. _invalid_player_response returns the id rather
 // than a bool (_video.py:3022-3026) and both call sites test that return for
@@ -1063,7 +1113,11 @@ func TestParseFormatsWarnsOnceForSkippedDRM(t *testing.T) {
 //   - keying on itag alone        → the tv es.3 dub wins the auth tie-break
 //     before anything ranks the tracks, and the original never reaches the
 //     collapse
-//   - dropping audioTrackID       → es.3 and en.4 collide; tv's dub wins
+//   - dropping audioTrackID       → the two CLEAN renditions collide (es.3 from
+//     tv, en.4 from web), tv wins that key on auth, and the collapse then ranks
+//     the surviving es.3 dub against tv's en.4 DRC twin — which the track score
+//     prefers, so itag 140 resolves to https://x/en-drc. Measured; the doc used
+//     to say the dub won (close-review Finding 13d)
 //   - dropping isDrc from the key → tv's DRC twin evicts the clean original
 func TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity(t *testing.T) {
 	tv, web := AuthLevelTVAuth, AuthLevelWeb
@@ -1137,10 +1191,12 @@ func dubbedPool() []Format {
 //   - collapse ranks by bandwidth, as SelectBestDashStream does → the es.3
 //     dub wins itag 140 and itag 251, which is the downstream bug itself
 //
-// The DRC rung is NOT pinned here — the 3-part sort already places a clean
-// rendition ahead of its twin, so a tie keeps the clean one anyway. It is
-// pinned in TestSelectBestAudioPrefersTheOriginalNonDRCTrack, which is where
-// audioTrackScore's DRC penalty is observable.
+// The DRC rung IS observable at this layer (close-review Finding 13a): the
+// collapse ranks by audioTrackScore, which scores a clean rendition 20 against
+// its DRC twin's 19, so there is no tie and the penalty decides. The sentence
+// that used to stand here claimed the opposite on both halves. The dedicated
+// pin lives in TestSelectBestAudioPrefersTheOriginalNonDRCTrack, where the
+// penalty is the only thing under test.
 func TestDeduplicateFormatsCollapsesEachItagToThePreferredRendition(t *testing.T) {
 	got := deduplicateFormats(context.Background(), dubbedPool())
 

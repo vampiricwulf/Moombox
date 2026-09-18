@@ -44,8 +44,15 @@ func chatSourceFor(ctx context.Context, info *youtube.VideoInfo, videoID, cookie
 	if err != nil {
 		return youtube.ChatSource{}, err
 	}
+	// The page's own stamp when it has one — same rule as withAttestation's
+	// (close-review Finding 10); a test seam that synthesizes a result has
+	// none, so the fetch instant here stands in.
+	fetchedAt := wp.FetchedAt
+	if fetchedAt.IsZero() {
+		fetchedAt = time.Now()
+	}
 	src := youtube.ChatSource{
-		FetchedAt:    time.Now(),
+		FetchedAt:    fetchedAt,
 		Continuation: wp.ChatContinuation,
 		IsReplay:     wp.ChatIsReplay,
 		Err:          wp.ChatErr,

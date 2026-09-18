@@ -23,10 +23,15 @@ import (
 // leaves the process: the sync happens before it, which is exactly the
 // ordering under test, and the test stays offline.
 //
-// Mutants this kills:
+// Mutant this kills:
 //   - the SyncCookies call removed from ProbeVideoStatusAuthenticated → the
 //     jar still holds the pre-rotation value
-//   - the sync moved after the player call → same, since the call is cancelled
+//
+// A mutant it does NOT kill (close-review Finding 13b): moving the sync to
+// AFTER the player call. It still runs before the function returns, and this
+// test can only read the jar once the call has returned, so both orders look
+// identical from here. The ordering is pinned by the source's own comment and
+// by review — the doc used to claim this mutant died, and it does not.
 func TestProbeVideoStatusAuthenticatedSyncsTheCookieJar(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cookies.txt")
 	const before = "# Netscape HTTP Cookie File\n" +

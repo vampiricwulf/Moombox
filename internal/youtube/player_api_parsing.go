@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 )
@@ -29,7 +30,26 @@ type VideoIDMismatchError struct {
 
 func (e *VideoIDMismatchError) Error() string {
 	return fmt.Sprintf("player response is for video %q, not %q (YouTube served a substitute — the source IP may be rate-limited or blocked)",
-		e.Got, e.Requested)
+		capSubstituteID(e.Got), e.Requested)
+}
+
+// substituteIDDisplayRunes bounds how much of a wire-supplied video id is
+// rendered. A real one is 11 characters; 32 leaves room for a shape nobody has
+// seen yet while keeping the line readable.
+const substituteIDDisplayRunes = 32
+
+// capSubstituteID bounds a video id for DISPLAY. Got comes straight off the
+// wire, so it is as long as YouTube (or whatever answered for it) cares to
+// make it: a 14,000-byte id rendered a 22-kilobyte error string, which reaches
+// the job's `error` column through `full fetch failed: %w` and the IP-block
+// verdict's log field (close-review Finding 4). The cut is on a RUNE boundary
+// so %q still produces valid UTF-8; the field itself is never modified,
+// because a caller comparing ids must see what actually arrived.
+func capSubstituteID(id string) string {
+	if utf8.RuneCountInString(id) <= substituteIDDisplayRunes {
+		return id
+	}
+	return string([]rune(id)[:substituteIDDisplayRunes]) + "…"
 }
 
 // ErrAllClientsMismatched is upstream's terminal verdict when nothing survived

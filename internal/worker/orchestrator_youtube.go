@@ -665,6 +665,21 @@ type youtubeProbeClient interface {
 	HasAuthCookies() bool
 }
 
+// isSubstitution reports whether a probe error is YouTube answering about a
+// DIFFERENT video — the substitute an IP-blocked or rate-limited source is
+// served (youtube.VideoIDMismatchError, upstream's "invalid player response").
+//
+// It is the one probe error that must NOT fall through to the cascade. Every
+// other failure is client-specific and the cascade routinely answers around
+// it; a substitution is IP-level, so all seven clients are substituted alike
+// and the cascade can only re-ask the same blocked address seven more times
+// — 9 player calls per 30 s tick for the whole episode, toward a service
+// that is already rate-limiting this install.
+func isSubstitution(err error) bool {
+	var mismatch *youtube.VideoIDMismatchError
+	return errors.As(err, &mismatch)
+}
+
 // probeIsSelectable reports whether a probe answer carries something the
 // quality monitor can actually select from: a DASH manifest to parse, or a
 // split-adaptive pool to pick in memory. Anything else — nil, an error shell,
@@ -705,10 +720,15 @@ func probeIsSelectable(info *youtube.VideoInfo) bool {
 // answers when one of them 403s, so one failing player call must not end the
 // tick (QualityMonitor.Run only logs a probe error at Debug and skips, so an
 // auth-walled stream whose TV client started failing would have lost quality
-// monitoring for the rest of the broadcast, silently). A
-// *youtube.VideoIDMismatchError is an ordinary error here (Task 3 Step 9) and
-// takes the same route. The single exception is a cancelled context: the
-// cascade cannot succeed during a shutdown race, so nothing is bought there.
+// monitoring for the rest of the broadcast, silently).
+//
+// TWO errors are exceptions. A cancelled context: the cascade cannot succeed
+// during a shutdown race, so nothing is bought there. And a substitution
+// (*youtube.VideoIDMismatchError, isSubstitution): it ends the tick at the hop
+// that saw it — no hop 2 after a hop-1 mismatch, no cascade after either —
+// because a substitute is an IP-level positive signal that the cascade can
+// only repeat seven more times against a server that is already blocking this
+// address (close-review Finding 1; it was an ordinary error here until then).
 //
 // At most ONE cascade per tick, always — never a loop, never a retry ladder.
 // The worst case a tick can cost is therefore probe + hop + cascade, i.e. two
@@ -755,7 +775,14 @@ func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, 
 			"dashManifest", info.DashManifestURL != "")
 		return info, nil
 	}
+	if isSubstitution(err) {
+		return nil, err
+	}
 	probeErr := err
+	// probeHop names the hop probeErr came from, which is NOT always the
+	// probe the tick started with: hop 2's error was attributed to hop 1's
+	// client in the fallback line ("probe android_vr reason \"hop 403\"").
+	probeHop := probeKind
 
 	// Hop 2 — the cookied recovery hop (O-H's "recovery streams"). Only for
 	// the cookieless branch: the auth-walled branch already made this exact
@@ -769,8 +796,12 @@ func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, 
 				"dashManifest", hopInfo.DashManifestURL != "")
 			return hopInfo, nil
 		}
+		if isSubstitution(hopErr) {
+			return nil, hopErr
+		}
 		if probeErr == nil {
 			probeErr = hopErr
+			probeHop = tvKind
 		}
 	}
 
@@ -790,7 +821,7 @@ func probeVideoInfo(ctx context.Context, yt youtubeProbeClient, videoID string, 
 		reason = probeErr.Error()
 	}
 	debug("quality probe fell back to the full fetch",
-		"videoID", videoID, "probe", probeKind, "reason", reason,
+		"videoID", videoID, "probe", probeKind, "hop", probeHop, "reason", reason,
 		"status", probeStatus(info), "formats", probeFormatCount(info))
 	info, err = yt.GetVideoInfo(ctx, videoID)
 	if err != nil {

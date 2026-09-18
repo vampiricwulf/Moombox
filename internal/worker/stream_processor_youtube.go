@@ -41,7 +41,7 @@ func isTerminalPlayability(p youtube.PlayabilityError) bool {
 //
 // The finished arm is the fix for the waiting-room wipe. YouTube resets a
 // waiting-room chat after a period of inactivity; the run then exhausts
-// recoverStaleContinuation's ~50-minute budget and leaves. The downloader
+// recoverStaleContinuation's ~35-minute budget and leaves. The downloader
 // stays non-nil, so a `chatDl == nil` gate never restarted it and nothing
 // captured the waiting room again until the process restarted.
 //
@@ -80,6 +80,25 @@ func runEarlyChat(finished *atomic.Bool, onPanic func(r any), run func()) {
 		}
 	}()
 	run()
+}
+
+// waitingRoomAuthFlip is the waiting-room poll's B1 decision: whether this
+// probe answer means the cookieless ANDROID_VR probe can no longer see the
+// stream and the poll must switch to the cookied TV one for the rest of the
+// wait.
+//
+// It is isAuthWalledPlayability — the SAME predicate `interruptionSignal.observe`
+// and `runLiveStreamDownload`'s requiresAuthProbe use — rather than its own
+// disjunction, because the two drifted: B1 listed members_only and
+// login_required only, so an AGE-RESTRICTED stream kept polling cookielessly
+// for the whole wait and never used the cookies from the age-verified account
+// that are the documented remedy (close-review Finding 18). One predicate is
+// what stops that happening again.
+//
+// hasCookies is passed in rather than read here so the decision is testable
+// without a network-capable *youtube.Service.
+func waitingRoomAuthFlip(info *youtube.VideoInfo, hasCookies bool) bool {
+	return info != nil && hasCookies && isAuthWalledPlayability(info.PlayabilityError)
 }
 
 func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, initialInfo *youtube.VideoInfo) (*StreamProcessResult, error) {
@@ -326,13 +345,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			chatStartedAt = time.Now()
 		}
 
-		// B1: Handle transition to members-only during upcoming
-		if !membersOnly &&
-			(probeInfo.PlayabilityError == youtube.PlayabilityMembersOnly ||
-				probeInfo.PlayabilityError == youtube.PlayabilityLoginRequired) &&
-			sp.yt.Auth.HasAuthCookies() {
-			sp.logger.Info("stream became members-only, switching to authenticated probe",
-				"videoID", job.VideoID)
+		// B1: the wall went up mid-wait — switch to the cookied probe.
+		if !membersOnly && waitingRoomAuthFlip(probeInfo, sp.yt.Auth.HasAuthCookies()) {
+			sp.logger.Info("stream is auth-walled, switching to the authenticated probe",
+				"videoID", job.VideoID, "playability", string(probeInfo.PlayabilityError))
 			membersOnly = true
 		}
 

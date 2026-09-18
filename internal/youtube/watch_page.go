@@ -156,6 +156,14 @@ const (
 // FetchWatchPage returns.
 type WatchPageResult struct {
 	Ytcfg *YtcfgData
+	// FetchedAt is when this page's bytes arrived. It is what bounds the age
+	// of the chat continuation the page carried (ChatSource.Usable): stamping
+	// that at the END of an extraction instead measured the two-minute window
+	// from up to tens of seconds later than the page's real age, which is the
+	// wrong direction — it trusts a token for longer than it should
+	// (close-review Finding 10). Zero when a caller synthesized the result
+	// after a failed fetch; consumers fall back to their own clock.
+	FetchedAt time.Time
 	// SessionAuth is YouTube's own verdict on whether this fetch was a
 	// signed-in session. The zero value is SessionAuthUnknown, which is what
 	// callers that synthesize a WatchPageResult after a failed fetch get for
@@ -248,6 +256,9 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
 	}
+	// Stamped here, at the instant the page's bytes exist — not at the end of
+	// the extraction that consumes them (close-review Finding 10).
+	fetchedAt := time.Now()
 
 	// No string(body) here: every extractor below reads the page as bytes,
 	// so the ~1-5 MB copy this used to make on every watch-page fetch —
@@ -260,6 +271,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 
 	return &WatchPageResult{
 		Ytcfg:                ytcfg,
+		FetchedAt:            fetchedAt,
 		SessionAuth:          sessionAuth,
 		PlayerResponse:       playerResponse,
 		ChatContinuation:     chatContinuation,
@@ -647,7 +659,11 @@ func extractChatContinuation(page []byte) (string, bool, error) {
 	// YOUTUBE-15). json.Valid answered the same question with a second full
 	// pass over the multi-megabyte literal — a third, really, since
 	// json.Unmarshal validates the whole input itself before decoding
-	// anything.
+	// anything. On go1.27 that guarantee is `encoding/json`'s
+	// DefaultOptionsV1 option ReportErrorsWithLegacySemantics ("the syntactic
+	// structure of the JSON input is fully validated before performing the
+	// semantic unmarshaling"), not the v1 implementation detail it used to be
+	// — named here so the next Go bump does not read this as stale.
 	//
 	// A SYNTAX error is precisely what json.Valid rejected, so it is what
 	// rejects a candidate here. A TYPE error is NOT: encoding/json records the

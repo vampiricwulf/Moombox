@@ -115,7 +115,7 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 		// Debug, so without this field an operator at the default level sees
 		// the verdict and cannot learn WHICH video YouTube served instead.
 		p.logger.Warn("[PlayerApi] Innertube clients were served a different video and none survived",
-			"videoID", videoID, "substitute", tally.got,
+			"videoID", videoID, "substitute", capSubstituteID(tally.got),
 			"clients", tally.attempts, "mismatched", tally.mismatched)
 		return nil, ErrAllClientsMismatched
 	}
@@ -178,8 +178,19 @@ func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *Vide
 		// Carry the chat facts the page already yielded, so setupChatDownloader
 		// and tryStartEarlyChat do not fetch this 1-5 MB page again moments
 		// from now (report #56 / YOUTUBE-10).
+		//
+		// The PAGE's own fetch instant, not this extraction's end: the cascade
+		// can run for tens of seconds after the page arrived, and measuring
+		// the two-minute window from here would trust the token past its real
+		// age (close-review Finding 10). A synthesized result (failed fetch)
+		// carries no stamp, so fall back to now — it has no continuation
+		// either, and Usable() rejects it on that.
+		fetchedAt := wp.FetchedAt
+		if fetchedAt.IsZero() {
+			fetchedAt = time.Now()
+		}
 		info.Chat = ChatSource{
-			FetchedAt:    time.Now(),
+			FetchedAt:    fetchedAt,
 			Continuation: wp.ChatContinuation,
 			IsReplay:     wp.ChatIsReplay,
 			Err:          wp.ChatErr,
@@ -678,7 +689,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 			// (_video.py:3122-3123, :3182-3184), and the generic line below
 			// cannot say it.
 			p.logger.Warn("[PlayerApi] TV client (public) answered about a different video, skipping it",
-				"videoID", videoID, "got", mm.Got)
+				"videoID", videoID, "got", capSubstituteID(mm.Got))
 		} else {
 			p.logger.Warn("[PlayerApi] TV client failed (public), will try other clients", slog.String("error", err.Error()))
 		}
@@ -715,15 +726,20 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
+	// vrPrefetch is the EMPTY half of the shared slot: this path's ANDROID_VR
+	// DASH enrichment runs AFTER the chain rather than before it, so there is
+	// nothing to hand in — the chain fills this record with whatever it
+	// fetched and the enrichment below reads it instead of asking android_vr
+	// the same question twice (owner decision O-I; close-review Finding 6).
+	vrPrefetch := &cookielessPrefetch{clientName: constants.AndroidVRClient.ClientName}
+
 	// Skipped whole on a waiting-room verdict (owner decision O-I): all three
 	// of these conditions hold for every upcoming stream, and none of the
 	// clients below can find formats that do not exist yet.
 	if !waitingRoom && (result.PlayabilityError == PlayabilityLoginRequired || len(result.Formats) == 0 || !hasAdequateFormats(result)) {
 		// VISIONOS first, ANDROID_VR second — same rationale as the
-		// authenticated path's cookieless fallback chain. No prefetch to hand
-		// in: on this path the ANDROID_VR DASH enrichment runs AFTER the
-		// chain, not before it.
-		if cfResult := p.tryCookielessFallbacks(ctx, videoID, wp.Ytcfg.VisitorData, &formatPool, tally, nil); cfResult != nil {
+		// authenticated path's cookieless fallback chain.
+		if cfResult := p.tryCookielessFallbacks(ctx, videoID, wp.Ytcfg.VisitorData, &formatPool, tally, vrPrefetch); cfResult != nil {
 			mergeWatchPageMetadata(cfResult, wpParsed)
 			cfResult.Formats = deduplicateFormats(ctx, formatPool)
 			return p.finishExtraction(ctx, cfResult, wp, videoID, tally, wpParsed)
@@ -748,15 +764,23 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		result.PlayabilityError != PlayabilityMembersOnly &&
 		result.PlayabilityError != PlayabilityAgeRestricted &&
 		result.PlayabilityError != PlayabilityLoginRequired {
-		vrResult, vrErr := tally.note(p.fetchWithAndroidVR(ctx, videoID, wp.Ytcfg.VisitorData))
+		// The chain above may already have asked android_vr in this same
+		// extraction; when it did, its answer is in vrPrefetch and this costs
+		// no round trip at all (close-review Finding 6).
+		vrResult, vrErr, vrPooled := vrPrefetch.result, vrPrefetch.err, vrPrefetch.pooled
+		if vrResult == nil && vrErr == nil {
+			vrResult, vrErr = tally.note(p.fetchWithAndroidVR(ctx, videoID, wp.Ytcfg.VisitorData))
+		}
 		if vrErr != nil {
 			p.logger.Debug("[PlayerApi] ANDROID_VR DASH fallback (public) failed",
 				slog.String("error", vrErr.Error()))
-		} else if vrResult.PlayabilityError == PlayabilityOK && vrResult.DashManifestURL != "" {
+		} else if vrResult != nil && vrResult.PlayabilityError == PlayabilityOK && vrResult.DashManifestURL != "" {
 			p.logger.Info("[PlayerApi] DASH manifest sourced via ANDROID_VR fallback (public)",
 				"videoID", videoID, "vrFormats", len(vrResult.Formats))
 			result.DashManifestURL = vrResult.DashManifestURL
-			collectFormats(&formatPool, vrResult.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
+			if !vrPooled {
+				collectFormats(&formatPool, vrResult.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
+			}
 		}
 	}
 
@@ -947,16 +971,27 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 	return p.fetchWithCookielessClient(ctx, videoID, visitorData, constants.AndroidVRClient)
 }
 
-// cookielessPrefetch carries a cookieless client result the CALLER already
-// fetched, so the chain reuses it instead of paying a second round trip for
-// the same client in the same extraction. Owner decision O-I's
-// no-behaviour-change half: the ANDROID_VR DASH fallback above already fetched
+// cookielessPrefetch is the ONE round trip a caller and the cookieless chain
+// share for a given client in a given extraction. Owner decision O-I's
+// no-behaviour-change half: the ANDROID_VR DASH fallback already fetched
 // android_vr, and on an upcoming stream VISIONOS fails hasAdequateFormats, so
 // the chain never broke before reaching android_vr a second time.
 //
-// A FAILED prefetch is reused as well: the caller's attempt and this chain's
-// would be the same request in the same extraction, so retrying it here only
-// buys a second copy of the same error.
+// It works in BOTH directions, because the two paths fetch in opposite orders:
+//
+//   - HAND-IN (the authenticated path): result and/or err are set, and the
+//     chain reuses them instead of paying a second round trip. A FAILED
+//     prefetch is reused too — the caller's attempt and this chain's would be
+//     the same request in the same extraction, so retrying only buys a second
+//     copy of the same error.
+//   - WRITE-BACK (the public path): the caller hands in an EMPTY record naming
+//     the client it will want, and the chain fills result/err/pooled with what
+//     it fetched. The public path's ANDROID_VR enrichment runs AFTER the chain,
+//     so without this it asked android_vr the same question twice on the
+//     degraded shape (close-review Finding 6, measured calls [7 101 28 28]).
+//
+// Both nil therefore means "not attempted", never "skip this client"
+// (close-review Finding 7).
 //
 // pooled says the caller ALREADY collected result.Formats into the pool. The
 // chain must not collect them again: dedup would keep one either way, but a
@@ -1010,10 +1045,26 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 		var fbResult *VideoInfo
 		var fbErr error
 		alreadyPooled := false
+		// slot is the caller's prefetch for THIS client, in either direction:
+		// an answer to reuse, or an empty record to fill.
+		var slot *cookielessPrefetch
 		if prefetched != nil && prefetched.clientName == fb.client.ClientName {
-			fbResult, fbErr, alreadyPooled = prefetched.result, prefetched.err, prefetched.pooled
+			slot = prefetched
+		}
+		if slot != nil && (slot.result != nil || slot.err != nil) {
+			fbResult, fbErr, alreadyPooled = slot.result, slot.err, slot.pooled
 		} else {
+			// Either no prefetch for this client, or an EMPTY one — nil result
+			// AND nil error, which is "not attempted", never a veto. Reading it
+			// as a veto silently dropped the last-resort client from the chain
+			// (close-review Finding 7).
 			fbResult, fbErr = tally.note(p.fetchWithCookielessClient(ctx, videoID, visitorData, fb.client))
+			if slot != nil {
+				// Write back, so the caller reads this answer instead of
+				// asking the same client the same question again in the same
+				// extraction (close-review Finding 6).
+				slot.result, slot.err = fbResult, fbErr
+			}
 		}
 		if fbErr != nil {
 			p.logger.Debug("[PlayerApi] cookieless fallback failed",
@@ -1021,13 +1072,15 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 			continue
 		}
 		if fbResult == nil {
-			// Only reachable through a prefetch: a caller may hand in a nil
-			// result with a nil error (no attempt made). Every fetch path
-			// above returns one or the other.
+			// Defensive: every fetch path above returns a result or an error,
+			// and an empty prefetch is now fetched rather than skipped.
 			continue
 		}
 		if !alreadyPooled {
 			collectFormats(formatPool, fbResult.Formats, fb.label, fb.level)
+			if slot != nil {
+				slot.pooled = true
+			}
 		}
 		p.logger.Debug("[PlayerApi] cookieless fallback result",
 			"client", fb.label,
@@ -1210,9 +1263,24 @@ func innertubeErrorDetail(body []byte) string {
 // the lead byte of an ANSI sequence a terminal would obey. strings.Map decodes
 // runes, so invalid UTF-8 in the message is replaced with U+FFFD on the same
 // pass and the result is always a valid string.
+//
+// C0 is not the whole set (close-review Finding 3). The C1 block carries NEL
+// (U+0085), which several log viewers break a line on exactly as they do "\n";
+// U+2028/U+2029 are LINE and PARAGRAPH SEPARATOR and do the same; and the bidi
+// overrides (U+202A-202E) and isolates (U+2066-2069) reverse the VISUAL order
+// of everything after them in a terminal or the dashboard's job row, so a
+// substitute video id or an HTTP code can be made to read as something else.
+//
+// Deliberately NOT all of unicode.Cf: U+200D (ZERO WIDTH JOINER) holds
+// multi-person emoji together and appears in ordinary localised text.
 func sanitizeErrorDetail(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+			return ' '
+		case r == 0x2028, r == 0x2029:
+			return ' '
+		case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
 			return ' '
 		}
 		return r

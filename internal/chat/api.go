@@ -322,9 +322,12 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 // old predicate ran json.Valid over the whole literal and then decoded the
 // same bytes — two full passes over a multi-megabyte page answering one
 // question, since json.Unmarshal validates its entire input before decoding
-// anything. Only the cheap half of the old predicate survives ahead of it
-// (utils.IsNonEmptyJSONBody: something between the braces, which a forged `{}`
-// fails and a decode would not).
+// anything. On go1.27 that is `encoding/json`'s DefaultOptionsV1 option
+// ReportErrorsWithLegacySemantics, which states it outright ("the syntactic
+// structure of the JSON input is fully validated before performing the
+// semantic unmarshaling"). Only the cheap half of the old predicate survives
+// ahead of it (utils.IsNonEmptyJSONBody: something between the braces, which a
+// forged `{}` fails and a decode would not).
 //
 // Decoding into a FRESH map per candidate is load-bearing: json.Unmarshal
 // merges into a map it is handed, so reusing one across candidates would let a

@@ -42,9 +42,10 @@ func TestExtractChatContinuationSkipsAForgedCandidate(t *testing.T) {
 // TestExtractChatContinuationSkipsAMalformedCandidate pins the acceptance test
 // after the decode became it (report #60 / YOUTUBE-15, the chat twin of
 // internal/youtube's extractChatContinuation). The old predicate was
-// utils.IsNonEmptyJSONObject — a json.Valid scan over a multi-megabyte literal
-// FOLLOWED by a full map decode of the same bytes, two passes answering one
-// question. The map decode alone answers it, so only the emptiness half
+// utils.IsNonEmptyJSONObject (since deleted — it had no production caller
+// left) — a json.Valid scan over a multi-megabyte literal FOLLOWED by a full
+// map decode of the same bytes, two passes answering one question. The map
+// decode alone answers it, so only the emptiness half
 // (utils.IsNonEmptyJSONBody) runs ahead of it.
 //
 // A page-authored candidate that scans balanced but is not valid JSON is

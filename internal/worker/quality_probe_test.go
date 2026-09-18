@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/youtube"
@@ -243,9 +244,8 @@ func TestProbeVideoInfoCascadesOnceWhenTheCookiedHopAlsoFails(t *testing.T) {
 // silently kill quality monitoring for the rest of the broadcast — visible
 // only at Debug, since QualityMonitor.Run logs a probe error and skips.
 //
-// A *youtube.VideoIDMismatchError is an ordinary probe error here (Task 3
-// Step 9): no special handling, so it too takes the cascade, and the cascade's
-// own error still unwraps to it.
+// The one probe error that does NOT take this route is a substitution — see
+// TestProbeVideoInfoEndsTheTickOnASubstitutedVideo.
 //
 // Mutants this kills:
 //   - a probe error returned immediately → full == 0
@@ -260,7 +260,6 @@ func TestProbeVideoInfoFallsBackToTheCascadeOnAProbeError(t *testing.T) {
 	}{
 		{"cookied probe 403s", true, nil, errors.New("403")},
 		{"cookieless probe fails", false, errors.New("dial tcp: timeout"), nil},
-		{"cookied probe is served a substitute video", true, nil, &youtube.VideoIDMismatchError{Requested: "vid", Got: "other"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeProbeClient{
@@ -293,6 +292,70 @@ func TestProbeVideoInfoFallsBackToTheCascadeOnAProbeError(t *testing.T) {
 			t.Fatalf("err = %v; want a wrapped *youtube.VideoIDMismatchError", err)
 		}
 	})
+}
+
+// TestProbeVideoInfoEndsTheTickOnASubstitutedVideo is the close-review ruling
+// on Finding 1. A *youtube.VideoIDMismatchError is not the one-client-403 case
+// the cascade fallback was ruled for: a substitute is served at the IP level,
+// every client is substituted alike, and the cascade cannot answer differently
+// — it only re-asks the same blocked IP seven more times. Left as an ordinary
+// probe error, one blocked live job paid probe + cookied hop + a seven-client
+// cascade EVERY 30 s tick (~1,080 player calls an hour) toward a service that
+// was already rate-limiting it, which is exactly the condition where extra
+// load prolongs the block.
+//
+// So a substitution ends the tick at the hop that saw it: no hop 2 after a
+// hop-1 mismatch, no cascade after either. QualityMonitor.Run logs the error
+// at Debug and keeps the previous quality, exactly as it does for the
+// cancelled-context arm, and the next tick retries from scratch.
+//
+// Mutants this kill:
+//   - the hop-1 guard removed → the auth row cascades (full == 1); the public
+//     row also pays the cookied hop (probeAuth == 1)
+//   - the hop-2 guard removed → the hop-2 row cascades (full == 1)
+//   - the guard matching on == instead of errors.As → the wrapped row cascades
+func TestProbeVideoInfoEndsTheTickOnASubstitutedVideo(t *testing.T) {
+	mismatch := &youtube.VideoIDMismatchError{Requested: "vid", Got: "OTHERvideo1"}
+
+	for _, tc := range []struct {
+		name          string
+		requiresAuth  bool
+		probeInfo     *youtube.VideoInfo
+		probeErr      error
+		authErr       error
+		wantProbe     int
+		wantProbeAuth int
+	}{
+		{"auth-walled hop 1 is substituted", true, nil, nil, mismatch, 0, 1},
+		{"cookieless hop 1 is substituted", false, nil, mismatch, nil, 1, 0},
+		// Hop 1 answers, but with nothing selectable, so the cookied hop runs
+		// and IT is the one served a substitute.
+		{"the cookied hop 2 is substituted", false, &youtube.VideoInfo{}, nil, mismatch, 1, 1},
+		{"a wrapped mismatch still ends the tick", true, nil, nil, fmt.Errorf("tv client: %w", mismatch), 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeProbeClient{
+				hasCookies:   true,
+				probeInfo:    tc.probeInfo,
+				probeErr:     tc.probeErr,
+				probeAuthErr: tc.authErr,
+				fullInfo:     selectable("cascade"),
+			}
+
+			_, err := probeVideoInfo(context.Background(), f, "vid", tc.requiresAuth, nil)
+			var mm *youtube.VideoIDMismatchError
+			if !errors.As(err, &mm) {
+				t.Fatalf("err = %v; want the substitution to be reported", err)
+			}
+			if f.full != 0 {
+				t.Errorf("GetVideoInfo called %d times after a substitution, want 0 — the cascade only re-asks the blocked IP", f.full)
+			}
+			if f.probe != tc.wantProbe || f.probeAuth != tc.wantProbeAuth {
+				t.Errorf("calls: probe=%d probeAuth=%d; want probe=%d probeAuth=%d",
+					f.probe, f.probeAuth, tc.wantProbe, tc.wantProbeAuth)
+			}
+		})
+	}
 }
 
 // TestProbeVideoInfoBuysNoCascadeOnACancelledContext keeps the shutdown race
@@ -382,6 +445,42 @@ func TestProbeVideoInfoLogsTheBranchItTook(t *testing.T) {
 		}
 		if len(lg.lines) != 1 || lg.lines[0].value("probe") != "android_vr" {
 			t.Fatalf("lines = %+v, want one android_vr line", lg.lines)
+		}
+		if got := lg.lines[0].value("hop"); got != "android_vr" {
+			t.Errorf("hop = %q, want the probe's own kind when the reason came from hop 1", got)
+		}
+	})
+
+	// Close-review Finding 8: the fallback line read
+	// `probe android_vr reason "hop 403"` when the reason came from the
+	// COOKIED hop, attributing the TV client's failure to android_vr. The
+	// `hop` field names where the reason actually came from.
+	//
+	// Mutant this kills: the `probeHop = tvKind` assignment removed → hop
+	// reads "android_vr" while the reason is the TV hop's error.
+	t.Run("the fallback names the hop the reason came from", func(t *testing.T) {
+		lg := &recordingProbeLogger{}
+		f := &fakeProbeClient{
+			hasCookies:   true,
+			probeInfo:    &youtube.VideoInfo{}, // hop 1: nothing selectable, no error
+			probeAuthErr: errors.New("hop 403"),
+			fullInfo:     selectable("cascade"),
+		}
+
+		if _, err := probeVideoInfo(context.Background(), f, "vid", false, lg); err != nil {
+			t.Fatalf("probeVideoInfo: %v", err)
+		}
+		if len(lg.lines) != 1 {
+			t.Fatalf("logged %d Debug lines, want exactly 1: %+v", len(lg.lines), lg.lines)
+		}
+		if got := lg.lines[0].value("hop"); got != "tv_downgraded+cookies" {
+			t.Errorf("hop = %q, want the cookied hop that produced the reason", got)
+		}
+		if got := lg.lines[0].value("reason"); got != "hop 403" {
+			t.Errorf("reason = %q, want the cookied hop's error", got)
+		}
+		if got := lg.lines[0].value("probe"); got != "android_vr" {
+			t.Errorf("probe = %q, want the probe the tick started with", got)
 		}
 	})
 }

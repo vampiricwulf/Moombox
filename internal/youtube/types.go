@@ -131,8 +131,12 @@ type VideoInfo struct {
 // what a cookieless ANDROID_VR probe returns — and a consumer must fall back
 // to FetchWatchPage then.
 type ChatSource struct {
-	// FetchedAt is when the page was fetched. A continuation is short-lived,
-	// so a consumer checks Usable rather than trusting the token forever.
+	// FetchedAt is when the PAGE was fetched (WatchPageResult.FetchedAt),
+	// which is what the age window has to measure: a cascade can run for tens
+	// of seconds after the page arrived, so stamping this at the extraction's
+	// end made a token look fresher than it was (close-review Finding 10). A
+	// continuation is short-lived, so a consumer checks Usable rather than
+	// trusting the token forever.
 	FetchedAt time.Time
 	// Continuation is the chat continuation token. Empty means the page had
 	// no chat.

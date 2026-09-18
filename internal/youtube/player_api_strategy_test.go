@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
@@ -812,6 +813,173 @@ func TestCookielessFallbacksDoNotRecollectAPooledPrefetch(t *testing.T) {
 	}
 }
 
+// TestCookielessFallbacksFetchAndRecordAnEmptyPrefetch is the OTHER direction
+// of the prefetch slot, and closes close-review Findings 6 and 7 together.
+//
+// Finding 7: a prefetch whose result AND error are both nil means "the caller
+// wants this client's answer but has not made the call". The chain used to
+// read that as a veto and SKIP the client outright, silently dropping the
+// last-resort client from the chain.
+//
+// Finding 6: the public path had no result to hand in (its ANDROID_VR DASH
+// enrichment runs AFTER the chain, not before it), so on the degraded shape it
+// asked android_vr the same question twice in one extraction — the exact
+// "never fetch it twice" O-I promised. An empty slot handed in is now FILLED by
+// the chain, so the enrichment reads the answer instead of paying for it.
+//
+// Mutants this kill:
+//   - the `result == nil && err == nil` arm still `continue`s → chosen is nil
+//     and "28" never appears
+//   - the write-back removed                                  → pf.result stays nil
+//   - `pooled` not recorded on the write-back                 → pf.pooled false,
+//     so the enrichment would collect the same formats a second time
+func TestCookielessFallbacksFetchAndRecordAnEmptyPrefetch(t *testing.T) {
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"101": {http.StatusOK, audioOnlyOKBody}, // inadequate, so the chain goes on
+		"28":  {http.StatusOK, adequateOKBody},
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	p := NewPlayerAPI(nil, noopLogger{})
+	var pool []Format
+	// The empty slot: the caller names the client it will want back and makes
+	// no call of its own.
+	pf := &cookielessPrefetch{clientName: constants.AndroidVRClient.ClientName}
+
+	chosen := p.tryCookielessFallbacks(context.Background(), "test1234567", "vd", &pool, &mismatchTally{}, pf)
+
+	if chosen == nil {
+		t.Fatalf("the chain skipped ANDROID_VR on an empty prefetch: calls=%v", tr.calls)
+	}
+	vrCalls := 0
+	for _, c := range tr.calls {
+		if c == "28" {
+			vrCalls++
+		}
+	}
+	if vrCalls != 1 {
+		t.Errorf("ANDROID_VR fetched %d times, want exactly 1: calls=%v", vrCalls, tr.calls)
+	}
+	if pf.result != chosen || pf.err != nil {
+		t.Errorf("prefetch = (%p, %v), want the chain's own ANDROID_VR answer written back", pf.result, pf.err)
+	}
+	if !pf.pooled {
+		t.Error("the write-back did not record that the chain pooled these formats — the caller would collect them twice")
+	}
+}
+
+// TestPublicPathFetchesAndroidVROnlyOnce is Finding 6 end to end, on the
+// degraded public shape the Task 7 review measured as calls [7 101 28 28]: the
+// TV client answers OK but inadequate (so the cookieless chain runs), neither
+// cookieless client is adequate either (so the chain returns nil), and the
+// watch page carried no player response (so there is no wpParsed to return) —
+// which drops through to the ANDROID_VR DASH enrichment that used to re-ask the
+// client the chain had just asked.
+//
+// Mutant this kills: the enrichment fetching unconditionally instead of
+// reading the filled prefetch → "28" appears twice.
+func TestPublicPathFetchesAndroidVROnlyOnce(t *testing.T) {
+	// Live, OK, audio-only — adequate enough to keep the extraction alive and
+	// inadequate enough that nothing short-circuits.
+	const liveAudioOnly = `{
+		"playabilityStatus": {"status": "OK"},
+		"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a", "isLive": true, "isLiveContent": true},
+		"streamingData": {"adaptiveFormats": [
+			{"itag": 140, "url": "https://example.com/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+		]}
+	}`
+	// The same, plus the DASH manifest the enrichment exists to source.
+	const liveAudioOnlyWithDash = `{
+		"playabilityStatus": {"status": "OK"},
+		"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a", "isLive": true, "isLiveContent": true},
+		"streamingData": {"dashManifestUrl": "https://example.com/manifest.mpd", "adaptiveFormats": [
+			{"itag": 140, "url": "https://example.com/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+		]}
+	}`
+
+	stubWatchPage(t)
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"7":   {http.StatusOK, liveAudioOnly},
+		"101": {http.StatusOK, liveAudioOnly},
+		"28":  {http.StatusOK, liveAudioOnlyWithDash},
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+	if err != nil {
+		t.Fatalf("GetVideoInfoPublic: %v", err)
+	}
+	vrCalls := 0
+	for _, c := range tr.calls {
+		if c == "28" {
+			vrCalls++
+		}
+	}
+	if vrCalls != 1 {
+		t.Errorf("ANDROID_VR fetched %d times in one extraction, want 1: calls=%v", vrCalls, tr.calls)
+	}
+	if info.DashManifestURL != "https://example.com/manifest.mpd" {
+		t.Errorf("DashManifestURL = %q, want the manifest the reused ANDROID_VR answer carried", info.DashManifestURL)
+	}
+}
+
+// TestChatSourceCarriesThePagesFetchInstant is close-review Finding 10.
+// ChatSource.FetchedAt is what ChatSource.Usable measures the two-minute
+// window from, and it was stamped at the END of the cascade — which on an
+// authenticated extraction can be tens of seconds after the page arrived. The
+// window was therefore measured from too late, i.e. a continuation was trusted
+// for LONGER than its real age, which is the one direction that costs a chat
+// start (a stale token, a failed first poll).
+//
+// Mutants this kill:
+//   - withAttestation stamping time.Now() again → the first row's timestamp
+//     check fails and the past-the-window row reports Usable
+//   - FetchWatchPage not stamping the field     → a real page's source reads
+//     as freshly fetched no matter how old it is (covered by the same rows,
+//     since the zero-value fallback is what they would hit)
+func TestChatSourceCarriesThePagesFetchInstant(t *testing.T) {
+	pageAt := time.Now().Add(-90 * time.Second)
+	info := withAttestation(&VideoInfo{}, &WatchPageResult{
+		Ytcfg:            DefaultYtcfg(),
+		FetchedAt:        pageAt,
+		ChatContinuation: "tok",
+	}, "vid123")
+	if !info.Chat.FetchedAt.Equal(pageAt) {
+		t.Errorf("Chat.FetchedAt = %v, want the PAGE's fetch instant %v", info.Chat.FetchedAt, pageAt)
+	}
+	if !info.Chat.Usable() {
+		t.Error("a 90-second-old page is inside the two-minute window and must still be usable")
+	}
+
+	// A page older than the window is not made fresh by a cascade that only
+	// just finished.
+	stale := withAttestation(&VideoInfo{}, &WatchPageResult{
+		Ytcfg:            DefaultYtcfg(),
+		FetchedAt:        time.Now().Add(-3 * time.Minute),
+		ChatContinuation: "tok",
+	}, "vid123")
+	if stale.Chat.Usable() {
+		t.Error("a three-minute-old page reported Usable — the window is measured from the extraction, not the page")
+	}
+
+	// A synthesized result (the fetch failed) carries no stamp; the fallback
+	// keeps Usable answerable rather than leaving a zero time behind.
+	synth := withAttestation(&VideoInfo{}, &WatchPageResult{Ytcfg: DefaultYtcfg(), ChatContinuation: "tok"}, "vid123")
+	if synth.Chat.FetchedAt.IsZero() {
+		t.Error("an unstamped watch page left ChatSource.FetchedAt zero")
+	}
+}
+
 // TestInnertubeErrorCarriesYouTubesOwnMessage: YouTube explains a 400/401/403
 // in the body ("Precondition check failed", "Request is missing required
 // authentication credential"), and the operator only ever saw "HTTP 403".
@@ -919,25 +1087,55 @@ func TestInnertubeErrorCarriesYouTubesOwnMessage(t *testing.T) {
 	// record and in the job's error column. A newline in it splits the log
 	// line; a NUL or an escape sequence is worse.
 	//
-	// Mutant this kills: the control-character strip removed.
+	// C0 was never the whole set (close-review Finding 3). NEL (U+0085, a C1
+	// control) and LINE/PARAGRAPH SEPARATOR (U+2028/U+2029) break a record in
+	// several viewers exactly as "\n" does, and the bidi overrides
+	// (U+202A-202E, U+2066-2069) reverse the VISUAL order of everything after
+	// them in a terminal or the dashboard's job row — so a substitute video id
+	// or a status code can be made to read as something else entirely.
+	//
+	// NOT all of Cf: U+200D (ZERO WIDTH JOINER) is what holds a multi-person
+	// emoji together, and mangling it would corrupt ordinary text.
+	//
+	// Mutants this kill:
+	//   - the control-character strip removed         → the C0 rows fail
+	//   - the strip left at `r < 0x20 || r == 0x7f`   → NEL, U+2028/9 and RLO
+	//     survive into the log line
+	//   - the strip widened to all of unicode.Cf      → the ZWJ row fails
 	t.Run("control characters are replaced", func(t *testing.T) {
+		// A ZERO WIDTH JOINER emoji sequence, built from runes so nothing in
+		// the toolchain can normalise it away: it is the control case for
+		// "the strip is the control set, not all of unicode.Cf".
+		zwjFamily := string(rune(0x1F468)) + string(rune(0x200D)) +
+			string(rune(0x1F469)) + string(rune(0x200D)) + string(rune(0x1F467))
 		// Built rather than written out, so the fixture carries the real
 		// bytes: a newline, a carriage return, a tab, a NUL, and an ESC — the
-		// lead byte of an ANSI sequence a terminal would obey.
-		msg := "line one\nline two\r\tand" + string(rune(0)) + "a nul" + string(rune(0x1b)) + "[31m"
+		// lead byte of an ANSI sequence a terminal would obey — plus the C1,
+		// separator and bidi runes that a C0-only strip let through.
+		msg := "line one\nline two\r\tand" + string(rune(0)) + "a nul" + string(rune(0x1b)) + "[31m" +
+			string(rune(0x85)) + "nel" + string(rune(0x2028)) + "ls" + string(rune(0x2029)) +
+			"ps" + string(rune(0x202e)) + "rlo" + string(rune(0x2066)) + "fsi" +
+			" keep " + zwjFamily + " together"
 		body, mErr := json.Marshal(map[string]any{"error": map[string]any{"status": "NOT_FOUND", "message": msg}})
 		if mErr != nil {
 			t.Fatalf("marshal fixture: %v", mErr)
 		}
 
 		got := innertubeErrorDetail(body)
-		for _, bad := range []string{"\n", "\r", "\t", string(rune(0)), string(rune(0x1b))} {
+		for _, bad := range []string{
+			"\n", "\r", "\t", string(rune(0)), string(rune(0x1b)),
+			string(rune(0x85)), string(rune(0x2028)), string(rune(0x2029)),
+			string(rune(0x202e)), string(rune(0x2066)),
+		} {
 			if strings.Contains(got, bad) {
 				t.Errorf("detail %q still carries %q", got, bad)
 			}
 		}
 		if !strings.Contains(got, "line one line two") {
 			t.Errorf("detail = %q, want the text itself preserved with the control characters spaced out", got)
+		}
+		if !strings.Contains(got, zwjFamily) {
+			t.Errorf("detail = %q, want the ZWJ emoji sequence intact — the strip is the control set, not all of Cf", got)
 		}
 	})
 

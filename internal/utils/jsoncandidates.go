@@ -2,7 +2,6 @@ package utils
 
 import (
 	"bytes"
-	"encoding/json"
 	"regexp"
 )
 
@@ -116,42 +115,31 @@ func FindJSONObjectCandidate(page []byte, anchors []*regexp.Regexp, accept func(
 	return nil, false
 }
 
-// IsNonEmptyJSONObject is the accept predicate for a caller that does NOT
-// decode the literal afterwards — FindJSONObjectCandidate has no default, so
-// the caller must say what a real candidate is: valid JSON carrying something
-// between its braces.
-//
-// Every candidate consumer in this tree now decodes, so each passes its own
-// decode as the acceptance and uses IsNonEmptyJSONBody for the cheap half (see
-// that function). This one is kept for a future raw-literal consumer, and
-// because it is the predicate the decode-as-acceptance shape is measured
-// against.
-//
-// The emptiness half is load-bearing on its own: `{}` scans and decodes
-// perfectly well, so without it a forged empty object would win the search
-// exactly as a forged non-object cannot.
-func IsNonEmptyJSONObject(obj []byte) bool {
-	if len(obj) < 2 {
-		return false
-	}
-	// obj always comes from ScanBalancedJSONObject, so it is at least `{}`.
-	return len(bytes.TrimSpace(obj[1:len(obj)-1])) > 0 && json.Valid(obj)
-}
-
-// IsNonEmptyJSONBody is IsNonEmptyJSONObject without the json.Valid scan: it
-// checks ONLY that the literal has something between its braces.
+// IsNonEmptyJSONBody is the cheap half of an accept predicate for
+// FindJSONObjectCandidate, which has no default: it checks ONLY that the
+// literal has something between its braces.
 //
 // For a caller that decodes the literal into a typed envelope immediately
 // afterwards, the decode IS the validity test — json.Unmarshal runs the very
 // same check over the whole input before it decodes anything — and json.Valid
 // is therefore a second full pass over a multi-megabyte literal (measured at
 // ~3 ms of an 18 ms chat-continuation extraction on a 4.7 MB page).
+//
+// On go1.27 `encoding/json` is jsonv2-backed, and the guarantee that holds is
+// DefaultOptionsV1's ReportErrorsWithLegacySemantics option: "the syntactic
+// structure of the JSON input is fully validated before performing the
+// semantic unmarshaling". Named so the next Go bump does not read the
+// paragraph above as a stale v1 implementation detail.
+//
 // extractPlayerResponse has always worked this way. The emptiness half stays:
 // `{}` scans and decodes perfectly well, so without it a forged empty object
 // would win the search exactly as a forged non-object cannot.
 //
-// A caller that does NOT decode afterwards must keep using
-// IsNonEmptyJSONObject.
+// There is no validating twin any more: IsNonEmptyJSONObject ran json.Valid as
+// well, and every candidate consumer in this tree decodes, so it had no
+// production caller and was deleted (close-review Finding 15). A future
+// raw-literal consumer that genuinely does not decode must pair this with its
+// own validity check.
 func IsNonEmptyJSONBody(obj []byte) bool {
 	if len(obj) < 2 {
 		return false

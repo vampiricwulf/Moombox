@@ -169,6 +169,75 @@ func TestStaleRecoveryCapRecordsAnIncompleteOutcome(t *testing.T) {
 	}
 }
 
+// TestInnerStaleRecoveryCapRecordsAnIncompleteOutcome is the INNER cap's half
+// of the same honesty rule, and the Task 11 review's Important 1.
+//
+// There are two stale-continuation caps. The outer one — runChatLoop's
+// staleRecoveries counter, pinned above — armed the verdict; the inner one,
+// `recoverStaleContinuation` exhausting maxStaleContinuationAttempts tries at
+// fetching a fresh token (~35 min of failed watch-page fetches), broke the
+// loop with NO verdict at all. Start then returned nil and
+// chatStatusForOutcome wrote chat_status "finished" over a live capture that
+// had given up — the exact twin of the hole handleFetchError's budget closed
+// with errChatFetchExhausted.
+//
+// The discrimination matters as much as the verdict: recoverStaleContinuation
+// also returns false when the loop is asked to STOP (Stop / MarkStreamEnded /
+// a cancelled context), and a bare setTerminalErr at the break would mislabel
+// every normal end as incomplete. The second subtest is that control.
+//
+// Mutants this kill:
+//   - the break left bare (no setTerminalErr) → the give-up subtest sees nil
+//   - the guard dropped, i.e. every false return armed → the stop subtest
+//     reports errStaleRecoveryExhausted for an ordinary shutdown
+func TestInnerStaleRecoveryCapRecordsAnIncompleteOutcome(t *testing.T) {
+	newCD := func(t *testing.T, name string) *ChatDownloader {
+		t.Helper()
+		return NewChatDownloader(ChatDownloaderOptions{
+			VideoID:             name,
+			OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
+			IsLiveOrUpcoming:    true,
+			InitialContinuation: "tok",
+		})
+	}
+
+	t.Run("exhausting the fresh-token budget is a give-up", func(t *testing.T) {
+		cd := newCD(t, "vidInnerCap")
+		// Exactly the inner cap's shape: recovery ran and could not produce a
+		// token, while the broadcast is still live.
+		cd.testRecoveryOverride = func(context.Context) bool { return false }
+		cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+			return &ChatApiResponse{IsComplete: true, TimeoutMs: -1}, nil
+		}
+
+		err := cd.Start(context.Background())
+		if err == nil {
+			t.Fatal("Start returned nil after the fresh-continuation budget gave up on a still-live " +
+				"broadcast — the worker writes chat_status \"finished\" for a nil outcome")
+		}
+		if !errors.Is(err, errStaleRecoveryExhausted) {
+			t.Errorf("Start = %v, want errStaleRecoveryExhausted", err)
+		}
+	})
+
+	t.Run("a stop during recovery is not", func(t *testing.T) {
+		cd := newCD(t, "vidInnerStop")
+		// recoverStaleContinuation's OTHER false: the loop was asked to stop
+		// while it was retrying. That is an ordinary end, not a give-up.
+		cd.testRecoveryOverride = func(context.Context) bool {
+			cd.Stop()
+			return false
+		}
+		cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+			return &ChatApiResponse{IsComplete: true, TimeoutMs: -1}, nil
+		}
+
+		if err := cd.Start(context.Background()); err != nil {
+			t.Errorf("Start = %v, want nil — a stop mid-recovery is not a give-up", err)
+		}
+	})
+}
+
 // TestHealthyLiveCadenceUnchangedByTheFloor is the differential the ruling
 // asks for: the floor must never make a HEALTHY live chat slower. The normal
 // cadence is YouTube's own timeoutMs, and the fallback when it sends none is

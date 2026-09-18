@@ -78,7 +78,10 @@ func NewSupervisor(cfg SupervisorConfig) *Supervisor {
 		cfg.StartTimeout = defaultSupervisorStartTimeout
 	}
 	if len(cfg.Backoff) == 0 {
-		cfg.Backoff = DefaultSupervisorBackoff
+		// COPIED, not aliased: DefaultSupervisorBackoff is an exported slice,
+		// so sharing its backing array would let one supervisor's ladder edit
+		// reach every other one and the package default itself.
+		cfg.Backoff = append([]time.Duration(nil), DefaultSupervisorBackoff...)
 	}
 	return &Supervisor{
 		cfg: cfg,
@@ -175,11 +178,11 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string, startAttemp
 			// goroutine alive until the process context happens to end.
 			if errors.Is(err, ErrStopped) {
 				s.cfg.Logger.Debug("BotGuard sidecar supervisor stopping: the sidecar was shut down",
-					"attempt", attempt+1, "deadReason", reason)
+					"rung", attempt+1, "deadReason", reason)
 				return false
 			}
 			s.cfg.Logger.Warn("BotGuard sidecar restart failed",
-				"attempt", attempt+1, "err", err, "deadReason", reason)
+				"rung", attempt+1, "err", err, "deadReason", reason)
 			continue
 		}
 
@@ -189,7 +192,7 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string, startAttemp
 
 		n := s.restarts.Add(1)
 		s.cfg.Logger.Info("BotGuard sidecar restarted",
-			"attempt", attempt+1, "restarts", n)
+			"rung", attempt+1, "restarts", n)
 		PublishHealth(Health{Healthy: true, Restarts: n, Since: time.Now()})
 		if fn := s.onUp.Load(); fn != nil {
 			s.callOnUp(*fn)

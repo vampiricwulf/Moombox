@@ -547,6 +547,9 @@ func BenchmarkExtractChatContinuation(b *testing.B) {
 const chatContinuationAllocCeiling = 16
 
 func TestExtractChatContinuationAllocationCeiling(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation budget is not meaningful under the race detector")
+	}
 	page := synthChatPage(500)
 	if got := testing.AllocsPerRun(20, func() {
 		if _, _, err := extractChatContinuation(page); err != nil {

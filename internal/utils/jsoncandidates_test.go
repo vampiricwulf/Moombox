@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"regexp"
 	"testing"
 )
@@ -47,7 +48,7 @@ func TestScanBalancedJSONObjectIgnoresBracesInsideQuotes(t *testing.T) {
 // itself: a candidate the accept function rejects must not end it.
 //
 // Mutant this kills: returning on the first match (the pre-change control
-// flow of extractYtInitialData and chat.ExtractChatContinuation — one
+// flow of extractYtInitialDataInto and chat.ExtractChatContinuation — one
 // FindIndex, one scan). It returns the forged `{}` instead of the real
 // object, which is how a page-authored `var X = {}` denied the real document.
 func TestFindJSONObjectCandidateReturnsTheFirstAcceptedLiteral(t *testing.T) {
@@ -57,7 +58,12 @@ func TestFindJSONObjectCandidateReturnsTheFirstAcceptedLiteral(t *testing.T) {
 	var seen []string
 	obj, ok := FindJSONObjectCandidate(page, anchors, func(o []byte) bool {
 		seen = append(seen, string(o))
-		return IsNonEmptyJSONObject(o)
+		// A stand-in for a real consumer's accept: something between the
+		// braces AND a successful decode. (IsNonEmptyJSONObject used to be
+		// spelled here; it had no production caller and was deleted —
+		// close-review Finding 15.)
+		var cand map[string]any
+		return IsNonEmptyJSONBody(o) && json.Unmarshal(o, &cand) == nil
 	})
 	if !ok {
 		t.Fatal("FindJSONObjectCandidate found nothing — a rejected candidate ended the search")
@@ -98,38 +104,6 @@ func TestFindJSONObjectCandidateDoesNotRescanRejectedOffsets(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("accept was called %d times, want 2 — one per distinct `{`; a later anchor must not re-offer an offset an earlier one already rejected", calls)
-	}
-}
-
-// TestIsNonEmptyJSONObjectRejectsTheTrivialShapes pins the default accept.
-// `{}` scans and decodes fine, so without the emptiness half a forged empty
-// object wins the search; `{ x }` balances but is not JSON, which is the
-// other shape page-authored text can reach.
-//
-// Mutant this kills: `return json.Valid(obj)` alone — the `{}` and `{  }`
-// rows then pass.
-//
-// The "" and "{" rows pin the `len(obj) < 2` guard: every real caller's obj
-// comes from ScanBalancedJSONObject and is at least `{}`, but the function is
-// exported. Mutant this kills: deleting the guard — both rows then panic on
-// the `obj[1:len(obj)-1]` slice instead of returning false.
-func TestIsNonEmptyJSONObjectRejectsTheTrivialShapes(t *testing.T) {
-	for _, tc := range []struct {
-		in   string
-		want bool
-	}{
-		{`{"a":1}`, true},
-		{`{}`, false},
-		{`{  }`, false},
-		{"{\n\t}", false},
-		{`{ x }`, false},
-		{`{"a":}`, false},
-		{``, false},
-		{`{`, false},
-	} {
-		if got := IsNonEmptyJSONObject([]byte(tc.in)); got != tc.want {
-			t.Errorf("IsNonEmptyJSONObject(%q) = %v, want %v", tc.in, got, tc.want)
-		}
 	}
 }
 
