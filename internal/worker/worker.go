@@ -423,6 +423,20 @@ func (w *DownloadWorker) WaitForJobExit(jobID string, timeout time.Duration) boo
 	}
 }
 
+// muxOnRestart reports whether an interrupted Muxing row should be re-muxed
+// from what is already staged instead of re-processed from the start (owner
+// decision O-B). Three terms, each load-bearing: the row must actually be in
+// Muxing; its staging must still hold recognised media or seg_N parts (else
+// muxFromStaging has nothing to work with); and it must NOT be flagged
+// incomplete_tail — that row's recording is known to be short, so it still
+// needs the post-live VOD-refresh loop that only the download path runs.
+func muxOnRestart(job *database.Job, stagingBase string) bool {
+	if job == nil || job.Status != database.StatusMuxing || job.IncompleteTail {
+		return false
+	}
+	return HasSegmentFiles(stagingBase, job.ID)
+}
+
 func (w *DownloadWorker) enqueueExistingJobs() {
 	jobs, err := w.db.GetAllJobs()
 	if err != nil {
@@ -430,12 +444,33 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 		return
 	}
 
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+
 	for _, job := range jobs {
-		// Reset Muxing jobs to Downloading — muxing was interrupted by shutdown
-		// and is idempotent (partial output is overwritten). Clear any stale
-		// error string so the UI doesn't show a prior error alongside the fresh
-		// Downloading state (per audit reports/worker.md Finding 24).
 		if job.Status == database.StatusMuxing {
+			if muxOnRestart(job, stagingBase) {
+				// Owner decision O-B: mux what is staged. The previous reset
+				// to Downloading re-probed the (now post-live) stream, routed
+				// it to the manifest-free strategy whose dbResumeSeq seeds 0,
+				// and truncated the complete recording (sweep-2 ENGINE-1).
+				// The Mux action's path needs no network and no re-download.
+				w.logger.Info("resuming interrupted mux from staged media", "jobID", job.ID)
+				w.db.UpdateJobFields(job.ID, map[string]any{"error": ""})
+				if err := w.MuxJob(job.ID); err != nil {
+					// Only reachable if staging vanished between the check and
+					// the call; fall back to the historical reset.
+					w.logger.Warn("re-mux from staging refused; falling back to re-processing",
+						"jobID", job.ID, "err", err)
+				} else {
+					continue
+				}
+			}
+			// No staged media, or incomplete_tail: there is nothing to mux, or
+			// the post-live VOD-refresh loop still has a tail to fetch. Reset
+			// to Downloading and clear any stale error string so the UI does
+			// not show a prior error alongside the fresh state (per audit
+			// reports/worker.md Finding 24).
 			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
 			w.db.UpdateJobFields(job.ID, map[string]any{
 				"status": database.StatusDownloading,

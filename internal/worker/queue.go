@@ -107,6 +107,15 @@ func (q *JobQueue) Enqueue(jobID string, status database.JobStatus) {
 	}
 }
 
+// isPending reports whether jobID is waiting in the backlog. Test-facing
+// read of state Enqueue owns; kept here so the mutex stays private.
+func (q *JobQueue) isPending(jobID string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_, ok := q.pendingSet[jobID]
+	return ok
+}
+
 // Dequeue returns the next job ID and a per-job cancellable context when a lifecycle slot
 // is available. Selects the highest-priority pending job (FIFO among ties).
 // Blocks until a job is available or the parent context is cancelled.

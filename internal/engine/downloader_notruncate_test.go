@@ -45,7 +45,9 @@ func TestStartRefusesToTruncateStagedMedia(t *testing.T) {
 		OutputFile: path,
 	})
 
-	err := d.Start(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := d.Start(ctx)
 	if !errors.Is(err, ErrStagedMediaPresent) {
 		t.Fatalf("Start = %v, want ErrStagedMediaPresent", err)
 	}
