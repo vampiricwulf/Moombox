@@ -175,6 +175,18 @@ type TaskListModel struct {
 
 	// Transient flag: set when setup wizard completes, shown once in empty state.
 	JustCompletedSetup bool
+
+	// rebuildSeq increments in rebuildVirtualList — the ONE funnel every
+	// content change (SetJobs, AddJob, RemoveJob, UpdateJob, CycleFilter,
+	// ToggleArchive, applyQuery, ResweepArchive, SetHideFinishedAgeDays)
+	// ends in. Everything else the frame depends on is read directly off the
+	// model or the embedded list in taskListKey, so no mutator can forget to
+	// invalidate the cache.
+	rebuildSeq uint64
+	// renderCache / cacheKey memoise View(). bubbletea renders after every
+	// message (~120/s with one active download); most carry no list change.
+	renderCache string
+	cacheKey    taskListKey
 }
 
 // NewTaskListModel creates a new task list model.
@@ -793,6 +805,7 @@ func (m *TaskListModel) ResweepArchive() bool {
 }
 
 func (m *TaskListModel) rebuildVirtualList() {
+	m.rebuildSeq++
 	prevSelectedID := m.captureSelection()
 
 	now := time.Now()
@@ -894,8 +907,79 @@ func (m *TaskListModel) passes(j *database.Job) bool {
 	return jobfilter.Match(m.tokens, j)
 }
 
+// taskListKey is every input TaskListModel.View() reads, as a comparable
+// struct so a cache hit is one ==.
+//
+//   - rebuildSeq covers the rows themselves (rebuildVirtualList is the only
+//     writer of m.list's items).
+//   - progressRev covers each active row's live percent, which is read from
+//     the progress store at render time by a code path the model never sees.
+//   - sec covers renderHeader's monitor countdowns (time.Until) — without it
+//     the countdown would freeze for as long as nothing else moved
+//     (spec §5 ruling).
+//   - marqueeOffset covers the scrolling selected title.
+//   - selectedCount is faithful because ToggleSelection always moves the
+//     count by one.
+type taskListKey struct {
+	rebuildSeq    uint64
+	progressRev   uint64
+	sec           int64
+	width         int
+	height        int
+	focused       bool
+	cursor        int
+	page          int
+	items         int
+	selectedCount int
+	marqueeOffset int
+	summary       string
+	query         string
+	justSetup     bool
+	nextFeed      time.Time
+	nextDecapi    time.Time
+	nextTwitch    time.Time
+}
+
+func (m *TaskListModel) taskListKey() taskListKey {
+	var rev uint64
+	if m.progressStore != nil {
+		rev = m.progressStore.Rev()
+	}
+	return taskListKey{
+		rebuildSeq:    m.rebuildSeq,
+		progressRev:   rev,
+		sec:           time.Now().Unix(),
+		width:         m.width,
+		height:        m.height,
+		focused:       m.focused,
+		cursor:        m.list.Index(),
+		page:          m.list.Paginator.Page,
+		items:         len(m.list.Items()),
+		selectedCount: len(m.selected),
+		marqueeOffset: m.marquee.offset,
+		summary:       m.statusSummary,
+		query:         m.queryText,
+		justSetup:     m.JustCompletedSetup,
+		nextFeed:      m.NextFeedCheck,
+		nextDecapi:    m.NextDecapiCheck,
+		nextTwitch:    m.NextTwitchCheck,
+	}
+}
+
+// invalidate drops the memoised frame.
+func (m *TaskListModel) invalidate() {
+	m.renderCache = ""
+}
+
 // View renders the task list panel.
 func (m *TaskListModel) View() string {
+	// The search box renders a blinking textinput cursor whose state is not
+	// in the key, so while it is open the panel is rendered every frame.
+	if !m.searching {
+		if k := m.taskListKey(); m.renderCache != "" && k == m.cacheKey {
+			return m.renderCache
+		}
+	}
 	contentW := max(m.width-2, 1)
 
 	header := m.renderHeader(contentW)
@@ -926,7 +1010,14 @@ func (m *TaskListModel) View() string {
 		style = FocusedBorder
 	}
 
-	return style.Width(m.width).Height(m.height).Render(content)
+	out := style.Width(m.width).Height(m.height).Render(content)
+	if !m.searching {
+		m.renderCache = out
+		m.cacheKey = m.taskListKey()
+	} else {
+		m.renderCache = ""
+	}
+	return out
 }
 
 func (m *TaskListModel) renderHeader(w int) string {

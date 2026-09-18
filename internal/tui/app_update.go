@@ -141,7 +141,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.marqueeTicking = false
 			return a, nil
 		}
-		a.taskList.marquee.Tick()
+		if a.taskList.marquee.Tick() {
+			// The offset is part of taskListKey, so the cache already
+			// follows it; invalidate explicitly so the dependency is stated
+			// at the mutation site rather than inferred from the key.
+			a.taskList.invalidate()
+		}
 		// The details panel bakes its title frame into the viewport content
 		// (renderRow runs from updateViewportContent, not per render frame) —
 		// re-render it when the offset moved so the scrolling title advances
