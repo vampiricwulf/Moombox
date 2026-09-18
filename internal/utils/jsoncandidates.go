@@ -116,16 +116,20 @@ func FindJSONObjectCandidate(page []byte, anchors []*regexp.Regexp, accept func(
 	return nil, false
 }
 
-// IsNonEmptyJSONObject is the accept predicate the two raw-literal consumers
-// pass to FindJSONObjectCandidate — there is no default: the literal must be
-// real JSON and must carry something between its braces.
+// IsNonEmptyJSONObject is the accept predicate for a caller that does NOT
+// decode the literal afterwards — FindJSONObjectCandidate has no default, so
+// the caller must say what a real candidate is: valid JSON carrying something
+// between its braces.
 //
-// json.Valid is a scan, not a decode — it allocates nothing and does not build
-// the map or envelope the caller is about to build anyway — so a caller that
-// unmarshals afterwards pays one extra pass, not one extra decode. The
-// emptiness half is load-bearing on its own: `{}` scans and decodes perfectly
-// well, so without it a forged empty object would win the search exactly as a
-// forged non-object cannot.
+// Every candidate consumer in this tree now decodes, so each passes its own
+// decode as the acceptance and uses IsNonEmptyJSONBody for the cheap half (see
+// that function). This one is kept for a future raw-literal consumer, and
+// because it is the predicate the decode-as-acceptance shape is measured
+// against.
+//
+// The emptiness half is load-bearing on its own: `{}` scans and decodes
+// perfectly well, so without it a forged empty object would win the search
+// exactly as a forged non-object cannot.
 func IsNonEmptyJSONObject(obj []byte) bool {
 	if len(obj) < 2 {
 		return false

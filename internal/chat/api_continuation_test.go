@@ -39,6 +39,37 @@ func TestExtractChatContinuationSkipsAForgedCandidate(t *testing.T) {
 	}
 }
 
+// TestExtractChatContinuationSkipsAMalformedCandidate pins the acceptance test
+// after the decode became it (report #60 / YOUTUBE-15, the chat twin of
+// internal/youtube's extractChatContinuation). The old predicate was
+// utils.IsNonEmptyJSONObject — a json.Valid scan over a multi-megabyte literal
+// FOLLOWED by a full map decode of the same bytes, two passes answering one
+// question. The map decode alone answers it, so only the emptiness half
+// (utils.IsNonEmptyJSONBody) runs ahead of it.
+//
+// A page-authored candidate that scans balanced but is not valid JSON is
+// exactly what json.Valid used to reject, so it is what the decode must reject
+// now — otherwise the search ends on it and the real blob behind it is lost.
+//
+// Mutant this kills: accepting on utils.IsNonEmptyJSONBody alone (the decode's
+// error ignored, or moved back after the search). The forged candidate then
+// wins and the function reports "no liveChatRenderer found" instead of
+// returning MALFORMEDOK — chat capture silently off for that stream.
+func TestExtractChatContinuationSkipsAMalformedCandidate(t *testing.T) {
+	// Balanced braces, a non-empty body, and a trailing comma json.Unmarshal
+	// rejects as a syntax error.
+	page := `<p>var ytInitialData = {"contents":{"twoColumnWatchNextResults":{},},}</p>` +
+		chatPage(`var ytInitialData = `, "MALFORMEDOK")
+
+	tok, _, err := ExtractChatContinuation([]byte(page))
+	if err != nil {
+		t.Fatalf("ExtractChatContinuation: %v — a malformed candidate ahead of the real assignment ended the search", err)
+	}
+	if tok != "MALFORMEDOK" {
+		t.Errorf("token = %q, want %q", tok, "MALFORMEDOK")
+	}
+}
+
 // TestExtractChatContinuationReadsTheWindowAssignmentForm pins the second
 // anchor. The lazy regex this replaces matched only `var ytInitialData = `
 // with exactly one space and required a `;</script>` terminator, so the

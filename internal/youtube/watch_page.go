@@ -172,11 +172,17 @@ type WatchPageResult struct {
 	// available" with diagnostic context for the caller's debug log.
 	ChatErr error
 	// AttestationChallenge is the compact JSON of the BotGuard bgChallenge
-	// YouTube embedded in this page load via window.ytAtN(...) — the
-	// session's own attestation challenge, used to mint session-coherent
-	// GVS PO tokens (moonarchive 96344fe parity). Empty when the page did
-	// not carry one or it failed to parse; consumers must treat empty as
-	// "fall back to the sidecar's /att/get flow".
+	// YouTube embedded in this page load via window.ytAtN(...) — the session's
+	// own attestation challenge (moonarchive 96344fe parity). Empty when the
+	// page did not carry one or it failed to parse.
+	//
+	// NOT used to mint anything. The challenge-sourced GVS mint it was
+	// extracted for was deleted by owner ruling R1 (2026-09-15); the field's
+	// only readers are the two "no attestation challenge from watch page"
+	// Debug lines in player_api_strategy.go, which test it for emptiness and
+	// report AttestationReason. It is kept deliberately (that same ruling) so
+	// restoring the path is a one-line call, and because the reason string
+	// beside it is the diagnostic a premiere's 403s would be read from.
 	AttestationChallenge string
 	// AttestationReason names WHY AttestationChallenge is empty (one of the
 	// atn* constants). A genuine absence and a silently-broken extractor both

@@ -823,6 +823,7 @@ func TestCookielessFallbacksDoNotRecollectAPooledPrefetch(t *testing.T) {
 //   - the "HTTP %d" prefix replaced       → the prefix check fails
 //   - a non-JSON body crashing or leaking → the second subtest fails
 //   - the detail put BEFORE the prefix    → the differential subtest fails
+//   - the " — " separator reworded        → the separator subtest fails
 func TestInnertubeErrorCarriesYouTubesOwnMessage(t *testing.T) {
 	t.Run("json error body", func(t *testing.T) {
 		got := innertubeErrorDetail([]byte(`{"error":{"code":403,"message":"Precondition check failed.","status":"FAILED_PRECONDITION"}}`))
@@ -860,6 +861,36 @@ func TestInnertubeErrorCarriesYouTubesOwnMessage(t *testing.T) {
 						tc.name, code, got, want)
 				}
 			}
+		}
+	})
+
+	// The delimiter itself, pinned on the YOUTUBE side. probe_classify.go's
+	// string fallback (internal/worker/probe_classify.go, the
+	// `strings.Index(msg, " — ")` window cut) throws away everything after
+	// this exact sequence before it reads the status code, because YouTube's
+	// own message can contain "backend timeout" and would beat the code on the
+	// transient arm. Nothing in internal/youtube pinned the separator, so both
+	// packages stayed green while the flip came back.
+	//
+	// Mutant this kills: the separator changed to ": " or to an EN dash "–"
+	// (U+2013) in innertubeHTTPError's format string. probe_classify.go's
+	// window then never cuts, a terminal 404 whose message reads "Backend
+	// timeout …" classifies transient, the give-up counter never advances, and
+	// the probe casts a false "network down" vote into the connectivity
+	// oracle.
+	t.Run("the separator is exactly an em dash between spaces", func(t *testing.T) {
+		const sep = " — " // space, EM DASH (U+2014), space
+		body := `{"error":{"message":"Precondition check failed.","status":"FAILED_PRECONDITION"}}`
+		got := innertubeHTTPError("WEB", 404, []byte(body)).Error()
+		detail := innertubeErrorDetail([]byte(body))
+		want := "WEB API error: HTTP 404" + sep + detail
+		if got != want {
+			t.Errorf("innertubeHTTPError = %q, want %q — probe_classify.go cuts on %q before reading the status code",
+				got, want, sep)
+		}
+		if head, _, ok := strings.Cut(got, sep); !ok || head != "WEB API error: HTTP 404" {
+			t.Errorf("cutting %q on %q gave (%q, %v), want (%q, true)",
+				got, sep, head, ok, "WEB API error: HTTP 404")
 		}
 	})
 
