@@ -294,6 +294,82 @@ func TestVodChatWaitStopsPromptlyWhenAlreadyCancelled(t *testing.T) {
 	}
 }
 
+// deadCtxVerdictRuns is the repeat count for the two rows below. The defect
+// they pin was a 50/50 select race, so a single run proves nothing: 200
+// identical runs make a surviving race a certainty rather than a coin flip
+// (p ≈ 2⁻²⁰⁰ of a race passing), and both rows finish in milliseconds.
+const deadCtxVerdictRuns = 200
+
+// TestVodChatWaitDeadCtxKeepsACompletedPagersVerdict pins the round-2 fix. A
+// context that is already dead on entry — ExecuteTwitch's outage-finalize path
+// — used to collapse the bound to zero unconditionally, which made
+// resolveChatOutcome's first select a race between time.NewTimer(0) and an
+// already-closed done: a VOD whose chat pager had ALREADY finished recorded
+// "incomplete" half the time, firing the staging keep and the warning badge on
+// a complete archive. The pager's own state is now consulted first,
+// non-blocking, so its verdict wins.
+//
+// Mutant: round 1's bare `wait = 0` in the dead-ctx branch — the verdict flips
+// to "incomplete" on roughly half of the runs below.
+func TestVodChatWaitDeadCtxKeepsACompletedPagersVerdict(t *testing.T) {
+	o := &DownloadOrchestrator{logger: discardLogger{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	finished := 0
+	for i := 0; i < deadCtxVerdictRuns; i++ {
+		var rec chatOutcome // the pager ran out of chat to fetch: nil verdict
+		done := make(chan struct{})
+		close(done) // ...and its goroutine has already signalled completion
+		dl := &instantChatSource{count: 5000}
+
+		got := o.resolveVodChatOutcome(ctx, dl, &rec, done, &database.Job{ID: "vod_done"})
+		if chatStatusForOutcome(dl.MessageCount(), got) == "finished" {
+			finished++
+		}
+	}
+	if finished != deadCtxVerdictRuns {
+		t.Errorf("a chat pager that had already completed was recorded finished %d/%d times — "+
+			"a dead context must report the pager's own verdict, not race a zero timer against "+
+			"its completion signal", finished, deadCtxVerdictRuns)
+	}
+}
+
+// TestVodChatWaitDeadCtxReportsAStoppedPagerIncomplete is the other half of the
+// same rule: consulting done first must NOT turn a pager that was still paging
+// into "finished". Every real downloader returns nil from its Stop()-exit, so
+// only the wait can report this one honestly.
+//
+// Mutant: returning rec.verdict() directly in the dead-ctx branch ("trust the
+// pager") — a Stop()'d capture then reports finished on every run below.
+func TestVodChatWaitDeadCtxReportsAStoppedPagerIncomplete(t *testing.T) {
+	o := &DownloadOrchestrator{logger: discardLogger{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	incomplete := 0
+	for i := 0; i < deadCtxVerdictRuns; i++ {
+		var rec chatOutcome
+		done := make(chan struct{})
+		dl := &stopUnwoundChatSource{started: make(chan struct{}), release: make(chan struct{})}
+		go func() {
+			defer close(done)
+			rec.record(dl.Start(context.Background()))
+		}()
+		<-dl.started
+
+		got := o.resolveVodChatOutcome(ctx, dl, &rec, done, &database.Job{ID: "vod_paging"})
+		if chatStatusForOutcome(dl.MessageCount(), got) == chatStatusIncomplete {
+			incomplete++
+		}
+	}
+	if incomplete != deadCtxVerdictRuns {
+		t.Errorf("a chat pager still paging when the job was stopped was recorded incomplete "+
+			"%d/%d times — a Stop()-exit's nil verdict must never read as finished",
+			incomplete, deadCtxVerdictRuns)
+	}
+}
+
 // slotWatchingChatSource is a ChatSource whose Start returns as soon as its
 // job's download slot is free — the exact handshake owner decision O-A is
 // about, driven through the real ExecuteTwitch. It gives up after a bounded

@@ -281,20 +281,38 @@ func (o *DownloadOrchestrator) resolveVodChatOutcome(ctx context.Context, dl Cha
 	o.logger.Debug("waiting for VOD chat to finish paging", "jobID", jobID, "bound", wait)
 
 	if ctx != nil && done != nil {
+		// collapse ends the bound — UNLESS the chat goroutine has already
+		// signalled completion, in which case the bound is left intact so
+		// resolveChatOutcome's own select takes the closed channel below and
+		// returns the pager's verdict.
+		//
+		// The non-blocking read is what makes that deterministic. wait = 0
+		// there instead would leave resolveChatOutcome's first select with
+		// BOTH arms ready — a closed done and a zero timer — and Go picks a
+		// ready arm uniformly at random: a VOD whose chat had genuinely
+		// finished recorded "incomplete" on half its runs, firing the M5
+		// staging keep and the warning badge on a complete archive
+		// (round-2 re-review: 200 of 400 runs). A closed done always wins now;
+		// only a pager that is still paging gets the cut-short verdict.
+		collapse := func() {
+			select {
+			case <-done:
+			default:
+				wait = 0
+			}
+		}
 		if ctx.Err() != nil {
-			wait = 0
+			collapse()
 		} else {
 			timer := time.NewTimer(wait)
 			select {
 			case <-done:
-				// resolveChatOutcome's own select takes the closed channel
-				// immediately below; the bound is left intact for it.
 				timer.Stop()
 			case <-ctx.Done():
-				wait = 0
 				timer.Stop()
+				collapse()
 			case <-timer.C:
-				wait = 0
+				collapse()
 			}
 		}
 	}
