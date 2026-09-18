@@ -1214,7 +1214,7 @@ Resume state is saved after each disk flush. On restart, the downloader loads th
 |---------|-----------|-----|-----------|-------------------|-----|
 | YouTube Visitor Data | Memory (single value) | None | 1 entry | Overwrite | N/A |
 | YouTube STS | Memory map | None | 150 entries | Random eviction when full | SHA256(playerURL) |
-| Twitch Emotes | Memory LRU | Unbounded (no expiry) | 200 channels | Oldest by insertion order | lowercased channelLogin |
+| Twitch Emotes | Memory LRU + TTL | 24 h (`emoteCacheTTL`, `internal/twitch/emotes.go`) | 200 channels | Oldest by insertion order | lowercased channelLogin |
 | Cipher (Disk) | Disk files | 14 days | Unbounded | File age check on read; startup sweep | SHA256(playerURL) |
 | Cipher (Memory) | Memory LRU | Unbounded (no expiry) | 10 solvers | Oldest by insertion order | SHA256(playerURL) |
 | BotGuard Session | Memory map | 6 hours | Unbounded | TTL check at start of each generation | contentBinding |
@@ -1237,7 +1237,7 @@ Resume state is saved after each disk flush. On restart, the downloader loads th
 
 ### Source Files
 - `internal/youtube/` -- Service facade, PlayerAPI, Auth, FormatSelector, WatchPage, Types (7 files, ~2,000 lines).
-- `internal/twitch/` -- Service, API, Auth, HLS, Chat, VodChat, Emotes, Types (9 files, ~3,200 lines).
+- `internal/twitch/` -- Service, API, Auth, HLS, Chat (IRC + recording + file), VodChat, Emotes, PlaybackToken, LivenessProbe, Delays, Types (14 files, ~6,350 lines).
 - `internal/bgutils/` -- PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter, ColdStart, Types (8 files, ~1,400 lines).
 - `internal/cipher/` -- Solver, PlayerCache, Extractor, STS, Decrypt, ResolveURL, Types (9 files, ~1,500 lines).
 - `internal/goja/` -- Runtime, DOMShim, Encoding, Timer (4 files, ~700 lines).
