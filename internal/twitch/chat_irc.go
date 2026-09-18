@@ -27,6 +27,16 @@ const anonymousIRCPass = "PASS SCHMOOPIIE"
 // IRC commands.
 const ircRowBreakingChars = " \t\r\n\x00"
 
+// ircCapRequest is the capability line every session sends.
+//
+// twitch.tv/tags carries the emote ranges, badges, message ids and timestamps
+// Moombox archives; twitch.tv/commands carries USERNOTICE, NOTICE and
+// RECONNECT. twitch.tv/membership is deliberately ABSENT (owner decision O-S):
+// it delivers JOIN and PART for channels under 1,000 chatters, parseLine drops
+// both, and chatterino only asks for it because it renders a user list
+// (references/chatterino7 TwitchIrcServer.cpp).
+const ircCapRequest = "CAP REQ :twitch.tv/tags twitch.tv/commands"
+
 // hasRowBreakingChar reports whether login cannot be spoken as one IRC
 // parameter, and therefore is not a usable identity.
 //
@@ -237,7 +247,7 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	}
 
 	// Request capabilities
-	if err := conn.Write(sessionCtx, websocket.MessageText, []byte("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership")); err != nil {
+	if err := conn.Write(sessionCtx, websocket.MessageText, []byte(ircCapRequest)); err != nil {
 		return fmt.Errorf("IRC CAP REQ failed: %w", err)
 	}
 
@@ -679,7 +689,7 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 	messageText, isAction := stripActionWrapper(messageText)
 
 	// Author name fallback chain
-	authorName := tags["display-name"]
+	authorName := unescapeIRCTag(tags["display-name"])
 	if authorName == "" {
 		authorName = tags["login"]
 	}
@@ -734,8 +744,8 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 		normalizedType = "announcement"
 	}
 
-	// System message (unescape \s to space)
-	systemMsg := strings.ReplaceAll(tags["system-msg"], `\s`, " ")
+	// System message (IRCv3 tag escapes decoded: \s \: \\ \r \n)
+	systemMsg := unescapeIRCTag(tags["system-msg"])
 
 	var messageText string
 	if len(parts) >= 4 {
@@ -748,7 +758,7 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 	}
 
 	// Author name fallback chain
-	authorName := tags["display-name"]
+	authorName := unescapeIRCTag(tags["display-name"])
 	if authorName == "" {
 		authorName = tags["login"]
 	}
@@ -776,7 +786,7 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 	if v := tags["msg-param-sub-plan"]; v != "" {
 		msg.SubPlan = v
 	}
-	if v := tags["msg-param-recipient-display-name"]; v != "" {
+	if v := unescapeIRCTag(tags["msg-param-recipient-display-name"]); v != "" {
 		msg.GiftRecipient = v
 	}
 	if v, err := strconv.Atoi(tags["msg-param-viewerCount"]); err == nil && v > 0 {
@@ -790,11 +800,15 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 }
 
 // parseIRCTags parses IRC tags from a string like "key=value;key2=value2".
+//
+// Returns nil for a tagless line. Every consumer only ever READS the map, and
+// reads of a nil map are legal, so the 16-slot allocation a JOIN/PART/PONG/
+// CAP/ROOMSTATE used to pay for (1,240 B / 4 allocs, measured) buys nothing.
 func parseIRCTags(s string) map[string]string {
-	tags := make(map[string]string, 16)
 	if s == "" {
-		return tags
+		return nil
 	}
+	tags := make(map[string]string, 16)
 	for pair := range strings.SplitSeq(s, ";") {
 		key, value, ok := strings.Cut(pair, "=")
 		if ok {
@@ -804,6 +818,57 @@ func parseIRCTags(s string) map[string]string {
 		}
 	}
 	return tags
+}
+
+// unescapeIRCTag decodes the IRCv3 message-tags escape alphabet:
+//
+//	\:  ->  ;      (the tag separator, so this one is unavoidable on the wire)
+//	\s  ->  space
+//	\\  ->  \
+//	\r  ->  CR
+//	\n  ->  LF
+//
+// A backslash before anything else yields that character with the backslash
+// dropped, and a lone TRAILING backslash is dropped — both are the spec's own
+// fallbacks. (chatterino's parseTagString keeps a trailing backslash because
+// its in-place walk stops one character short; that is a quirk of the walk,
+// not a rule, and Twitch does not emit one.)
+//
+// Applied to system-msg, display-name and msg-param-recipient-display-name —
+// the same three chatterino decodes. Before this, only \s was decoded and only
+// in system-msg, so a system message quoting a semicolon archived as "Bo\:"
+// (TWITCH-7).
+func unescapeIRCTag(v string) string {
+	if !strings.Contains(v, `\`) {
+		return v
+	}
+	var b strings.Builder
+	b.Grow(len(v))
+	for i := 0; i < len(v); i++ {
+		if v[i] != '\\' {
+			b.WriteByte(v[i])
+			continue
+		}
+		if i+1 >= len(v) {
+			break // lone trailing backslash: dropped
+		}
+		i++
+		switch v[i] {
+		case ':':
+			b.WriteByte(';')
+		case 's':
+			b.WriteByte(' ')
+		case 'r':
+			b.WriteByte('\r')
+		case 'n':
+			b.WriteByte('\n')
+		case '\\':
+			b.WriteByte('\\')
+		default:
+			b.WriteByte(v[i])
+		}
+	}
+	return b.String()
 }
 
 // parseBadges parses badge strings like "subscriber/12,moderator/1".
@@ -859,27 +924,23 @@ func stripActionWrapper(text string) (string, bool) {
 // as before, so a malformed tag costs one unrendered emote rather than the
 // session. The `start <= end` half of the guard is load-bearing — without it
 // an inverted range slices backwards and panics inside the read loop.
+//
+// The index table is built ONLY when the message actually contains a rune
+// outside the BMP. For text that does not — which is almost every message —
+// the code-point space and the UTF-16 space are the same space, so the wire
+// Start/End are already the values to emit and the table would be the identity
+// mapping (1,320 B / 8 allocs per emote message, measured).
 func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 	if emotesStr == "" {
 		return nil
 	}
 
 	runes := []rune(message)
-	// cpToUnit[i] is the UTF-16 index at which code point i begins. The extra
-	// entry at len(runes) holds the message's total UTF-16 length, which is
-	// what makes End computable as cpToUnit[end+1]-1 with no special case for
-	// a range that ends on the last code point.
-	cpToUnit := make([]int, len(runes)+1)
-	units := 0
-	for i, r := range runes {
-		cpToUnit[i] = units
-		if r >= 0x10000 {
-			units += 2 // surrogate pair
-		} else {
-			units++
-		}
+	// nil when the message is BMP-only: see the paragraph above.
+	var cpToUnit []int
+	if messageHasNonBMP(runes) {
+		cpToUnit = buildCPToUnit(runes)
 	}
-	cpToUnit[len(runes)] = units
 
 	var refs []TwitchEmoteRef
 	for group := range strings.SplitSeq(emotesStr, "/") {
@@ -902,12 +963,44 @@ func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 			ref := TwitchEmoteRef{ID: emoteID, Start: start, End: end}
 			if start >= 0 && start <= end && end < len(runes) {
 				ref.Name = string(runes[start : end+1])
-				ref.Start = cpToUnit[start]
-				ref.End = cpToUnit[end+1] - 1
+				if cpToUnit != nil {
+					ref.Start = cpToUnit[start]
+					ref.End = cpToUnit[end+1] - 1
+				}
 			}
 			refs = append(refs, ref)
 		}
 	}
 
 	return refs
+}
+
+// messageHasNonBMP reports whether any rune needs a UTF-16 surrogate pair.
+func messageHasNonBMP(runes []rune) bool {
+	for _, r := range runes {
+		if r >= 0x10000 {
+			return true
+		}
+	}
+	return false
+}
+
+// buildCPToUnit maps code-point index -> UTF-16 index. cpToUnit[i] is the
+// UTF-16 index at which code point i begins; the extra entry at len(runes)
+// holds the message's total UTF-16 length, which is what makes End computable
+// as cpToUnit[end+1]-1 with no special case for a range ending on the last
+// code point.
+func buildCPToUnit(runes []rune) []int {
+	cpToUnit := make([]int, len(runes)+1)
+	units := 0
+	for i, r := range runes {
+		cpToUnit[i] = units
+		if r >= 0x10000 {
+			units += 2 // surrogate pair
+		} else {
+			units++
+		}
+	}
+	cpToUnit[len(runes)] = units
+	return cpToUnit
 }

@@ -452,11 +452,15 @@ Both include these query parameters:
 - `allow_spectre=true` -- Allow spectre (transcoded) variants.
 - `fast_bread=true` -- Low-latency mode.
 - `p={random}` -- Random integer (0 to 10 million) to bypass CDN caching.
+- `platform=web` -- Enhanced-broadcast opt-in (see below).
 - `player=twitchweb` -- Player identifier.
 - `playlist_include_framerate=true` -- Include frame rate metadata.
 - `sig={token.Signature}` -- Access token signature.
+- `supported_codecs=av1,h265,h264` -- Enhanced-broadcast opt-in (see below).
 - `token={token.Value}` -- Access token value.
 - `type=any` -- Accept any stream type.
+
+`platform` and `supported_codecs` are byte-for-byte what yt-dlp sends (`references/yt-dlp/yt_dlp/extractor/twitch.py`, `_extract_twitch_m3u8_formats`), on the live and the VOD URL alike. They are the opt-in to Twitch **enhanced broadcasts**: a channel that multi-encodes then offers an HEVC or AV1 source alongside the H.264 one, typically at a higher resolution, and without them Usher never lists it and the capture takes the H.264 transcode. The short names here are the REQUEST spelling; the playlist answers in RFC 6381 codec ids (`av01…`, `hev1…`/`hvc1…`, `avc1…`). No container work follows from an AV1 source: yt-dlp forces `-f mp4` on its own ffmpeg downloader because that downloader would otherwise keep the mpegts container end to end, whereas Moombox writes raw segments (`internal/engine`) and always muxes to MP4 with `-c copy` (`Muxer.buildArgs` in `internal/engine/muxer.go`) — the state that flag exists to force.
 
 #### Master Playlist Parsing
 
@@ -468,6 +472,9 @@ Both include these query parameters:
 | `RESOLUTION` | `RESOLUTION=(\d+)x(\d+)` | `Width`, `Height` |
 | `FRAME-RATE` | `FRAME-RATE=([\d.]+)` | `FPS` |
 | `VIDEO` | `VIDEO="([^"]+)"` | `VideoGroup` |
+| `CODECS` | `CODECS="([^"]*)"` | `Codecs`, and `VideoCodec` via `videoCodecFamily` |
+
+`videoCodecFamily` (`internal/twitch/hls.go`) normalizes the raw list to `"av01"`, `"hevc"`, `"avc1"` or `""`. It scans the list in order rather than reading its first entry: the video codec is not always first, and an audio-only rendition's single `mp4a` entry must not be read as one. Twitch usher playlists DO carry `CODECS` without the enhanced-broadcast opt-in (`internal/engine/manifest_test.go`'s Twitch fixture; the live gate reads `avc1` on five of six variants) — a pre-enhanced playlist simply lists only H.264 renditions, so every source in one reports `"avc1"`. The fields stay empty only for a variant with no video track, or a playlist that sends no `CODECS` at all.
 
 Source quality detection: a variant `IsSource` is true if `VideoGroup` equals `"chunked"` or contains the string `"source"` (case-insensitive).
 
@@ -485,8 +492,12 @@ Variant naming: if `VideoGroup` is set, use it as the name. Otherwise, construct
    - Try exact height match. If FPS is specified, prefer highest bandwidth among FPS matches.
    - If no exact match, descend to the next lower available height.
    - If preference is a non-numeric string, do substring matching on variant names.
-5. **Source preference**: If no quality preference matched, prefer the `IsSource` variant.
+5. **Source preference** (codec-aware): if no quality preference matched, take the best `IsSource` variant via `selectSourceVariant` (`internal/twitch/hls.go`). The incumbent is the FIRST source in playlist order — the rule that applied before enhanced broadcasts, when a Twitch playlist held exactly one `VIDEO="chunked"` rendition. It is displaced only by a strictly better video family (`codecRank`: AV1 > HEVC > H.264 > absent) or, once that family already beats H.264, by a larger frame at the same family. A pre-enhanced playlist lists only H.264 renditions, so every source ties at `avc1` and the `> codecRank("avc1")` guard keeps playlist order — the selection is byte-identical for every playlist Twitch served before the opt-in. An ABSENT family ranks below H.264, so a `CODECS`-less playlist ties the same way one rank lower. Both shapes are pinned by `TestSelectBestVariantIsUnchangedWithoutCodecs` (`internal/twitch/hls_test.go`).
 6. **Bandwidth fallback**: Select the variant with highest bandwidth.
+
+The codec preference is the SOURCE step's tie-break, not an override: an operator who asked for `1080p60` still gets a 1080-high variant.
+
+**The resolution cap decides whether an enhanced source is ever a candidate.** Step 3 runs FIRST — before the quality preference and before the codec-aware source step — and it compares the LONG edge: a variant survives only when `max(width, height) <= max_video_resolution` (the `[downloader]` config key; default `2160`, set in `internal/config/config.go`). Every Twitch caller passes that config value unconditionally (`internal/worker/stream_processor_twitch.go` for live and VOD, `internal/worker/orchestrator_twitch.go` for the 30 s quality probe and `refreshBestVariant`). So under the shipped default a 2560x1440 enhanced source (long edge 2560) and a 3840x2160 one (long edge 3840) are removed from the candidate list before `selectSourceVariant` ever sees them, and the job archives the H.264 transcode even though the usher request opted in and the playlist listed the enhanced rendition. **To receive an enhanced source the operator must raise `max_video_resolution` to at least 2560 for 1440p, or 3840 for 4K.** The long-edge rule is deliberate (it is what makes a 720x1280 portrait stream count as 1280p rather than 720p, and it is the same rule `internal/youtube/format_selector.go` applies), and it is unchanged by enhanced-broadcast support. Pinned by `TestSelectBestVariantEnhancedSourceUnderTheDefaultCap` (`internal/twitch/hls_test.go`): at a cap of `2160` the 1920x1080 H.264 source is selected, at `2560` the 2560x1440 HEVC source is.
 
 ### Twitch Authentication
 
@@ -517,7 +528,7 @@ Twitch auth is a single bearer token, and Moombox is **validate-only** on it: no
 
 Authenticated requires a non-empty token AND a non-empty login AND a login with no row-breaking character (`hasRowBreakingChar`: space, tab, CR, LF, NUL — a value that cannot be spoken as one IRC parameter is not a usable identity). Anything else falls all the way back to the anonymous pair. The hybrid — a real token beside the `justinfan` nickname — is what Twitch answers with `Login authentication failed` or silently downgrades, and the handshake decision does not depend on parsing NOTICE (`ircIsLoginFailureNotice` in `chat_irc.go` only classifies the reply afterwards), so the two lines must not come from two conditions that can drift apart. Before this pairing existed the NICK was always `justinfan`, so a session holding a perfectly good token authenticated as nobody. Upstream shape: `references/chatterino7/src/providers/twitch/TwitchIrcServer.cpp`.
 
-Then `CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership` (rich metadata — emote tags, sub events, join/part events) and `JOIN #{channel_login}` (lowercased).
+Then `ircCapRequest` (`internal/twitch/chat_irc.go`) — `CAP REQ :twitch.tv/tags twitch.tv/commands` — and `JOIN #{channel_login}` (lowercased). `twitch.tv/tags` carries the emote ranges, badges, message ids and timestamps the archive is made of; `twitch.tv/commands` carries USERNOTICE, NOTICE and RECONNECT. `twitch.tv/membership` is deliberately NOT requested (owner decision O-S): it delivers JOIN/PART bursts for channels under 1,000 chatters, `parseLine` drops both, and chatterino asks for it only because it renders a user list (`references/chatterino7` TwitchIrcServer.cpp).
 
 #### Anonymous Fallback and the Downgrade Report
 
@@ -553,8 +564,9 @@ The IRC parser handles two message types:
 
 **USERNOTICE** (subs, raids, memberships):
 - Tag fields extracted: same as PRIVMSG plus `msg-id`, `system-msg`, `msg-param-sub-plan`, `msg-param-recipient-display-name`, `msg-param-viewerCount`.
-- `system-msg` is unescaped (`\s` to space).
 - Message type normalization: `sub` -> `"sub"`, `resub` -> `"resub"`, `subgift`/`submysterygift` -> `"subgift"`, `raid` -> `"raid"`, everything else -> `"system"`.
+
+IRCv3 tag values are decoded through `unescapeIRCTag` (`internal/twitch/chat_irc.go`) — `\:` to `;`, `\s` to a space, `\\`, `\r` and `\n`, with an unknown escape yielding its character and a lone trailing backslash dropped. It is applied to `system-msg`, `display-name` and `msg-param-recipient-display-name`, the same three chatterino decodes (`references/chatterino7` IrcHelpers.hpp). The reachable case is a system message that quotes a semicolon: `;` separates tags on the wire, so Twitch must escape it.
 
 **PING handling**: a server `PING` is answered with `PONG :tmi.twitch.tv`.
 
@@ -563,6 +575,8 @@ The IRC parser handles two message types:
 **And the ORDER inside the verdict is load-bearing.** The verdict is PUBLISHED — `keepaliveFailed` closed — before anything closes the socket: everything that ends a session also closes it, and the read loop wakes from a closed socket instantly, burning all of `chatMaxConsecutiveErrs` on `net.ErrClosed` reads in the time one log line takes to format. It would then return "too many IRC errors", which is not `errors.Is`-able to the sentinel and IS charged — inverting the one guarantee the mechanism exists to make. So the channel closes first, `sessionCancel` second, the Warn last. For the same reason the PING write is bounded by a timer this code owns rather than by a deadline on the context handed to the library: `coder/websocket` installs a write deadline as a `context.AfterFunc` that CLOSES the connection on expiry, from another goroutine, so the timer declares the verdict FIRST and cancels SECOND. The durations live in `chatDelays` (`internal/twitch/delays.go`) so the tests drive the whole cycle in milliseconds. Upstream shape: `references/chatterino7/src/providers/twitch/IrcConnection2.cpp`.
 
 **A server-requested reconnect is a sentinel for the same reason.** Twitch sends a bare `RECONNECT` line when it takes a chat edge out of service. `runIRCSession` (`internal/twitch/chat_irc.go`) returns `errServerReconnect` (`internal/twitch/chat.go`) on it, and `Start` reconnects on that value WITHOUT charging `reconnectAttempts` and without the reauth path's `immediate` — the keepalive's accounting exactly, not a second mechanism. It previously returned `nil`, which is `Start`'s CLEAN-EXIT value: the loop returned, the chat goroutine in `ExecuteTwitch` (`internal/worker/orchestrator_twitch.go`) closed its done channel, and nothing relaunched chat for the rest of the job, because that orchestrator relaunches chat only when a connectivity outage is declared over. A routine maintenance message therefore ended chat capture on a live stream with no error anywhere to say so. Charging the directive would be worse than charging a keepalive verdict: a server rotating its edges can issue several in one marathon stream, none of them after the five minutes of uptime that clears the counter, so ten would exhaust `maxReconnects`. The socket is force-closed with `CloseNow` before the sentinel is returned, because `coder/websocket`'s ordinary `Close` — the deferred one at the top of the session — waits up to five seconds (a library constant) for a peer close-frame ack the departing edge need not send, which would be a real chat gap on every directive. The session flushes first, as every other re-dialling path does, and the directive is logged once — at the loop, where the budget decision is made. The directive is also not a verdict on OUR credentials: `runIRCSession` remembers that it arrived, and the anonymous-fallback check the same function runs on its way out (`noteHandshakeOutcome`, `internal/twitch/chat.go`) is skipped when it did. A directive that beats RPL_WELCOME otherwise looks exactly like a refused login — heard from Twitch, never welcomed — and, now that chat SURVIVES the directive, would run the rest of the job anonymously (the latch is cleared only by `Reauthenticate`) while reporting a downgrade Twitch never rendered.
+
+The read loop reports progress with the chat mutex RELEASED: `addMessage` (`internal/twitch/chat.go`) snapshots the running total inside `cd.mu` and calls the progress callback outside it. That callback reaches the job row through `ProgressTracker` under the database's FULL sync, up to ~60 times a second on a busy channel, and holding the mutex across it queued the flush ticker, `RollFile` and every `MessageCount()` behind an fsync. The YouTube twin (`internal/chat/downloader.go`) has always released first.
 
 #### Deduplication
 
@@ -585,7 +599,7 @@ Chat messages are written to disk using a **message-triggered timer** pattern:
 - **Max reconnects**: 10.
 - **Backoff**: Exponential, `1000 * 2^attempt` milliseconds, capped at 30 seconds.
 - **Max consecutive errors**: 20 per session. Exceeding this triggers reconnection (not abort).
-- **State preservation**: `flush()` is called before each reconnect. Resume state is saved to `{outputPath}.resume.json`.
+- **State preservation**: `flush()` is called before each reconnect. Resume state is written to `{outputPath}.resume.json`, at most once per `ircResumeSaveFloor` (`internal/twitch/chat.go`, 5 s) — `saveResumeStateThrottled` (same file) is what the periodic flush calls, so a busy channel no longer pays a ~39 KB marshal, fsync and rename once a second beside the chat.json append fsync. The floor is cleared at every part boundary (`RollFile`, `internal/twitch/chat_recording.go`) so a new part's first flush always writes its own sidecar, and the DEFERRED save on stop is never throttled — that one is what a restart reads. The cost of the floor does NOT self-heal: `restoreResumeState` seeds `fileCount`/`totalCount` straight from a stale sidecar and sets `flushedToDisk`, which makes `Start` skip `adoptExistingPartFile` — the only path that re-counts the file — so a crash inside the floor window leaves that part's header count short by the unsaved messages until the next part roll — and the JOB's chat total short by them for the life of the job. `totalCount` is cumulative, survives `RollFile` by design, is never re-derived, and is what `MessageCount()` reports as `total_chat_messages`, so the roll that repairs the part header does not repair the job total. No message is lost; the chat file itself is written every flush regardless.
 
 #### Resume State
 
@@ -595,11 +609,13 @@ The sidecar `.resume.json` file contains:
 {
   "messageCount": 1234,
   "lastTimestampMs": 1709000000000,
-  "timestamp": 1709000000,
+  "timestamp": 1709000000000,
   "streamId": "12345678",
   "recentIds": ["msg-id-1", "msg-id-2", ...]
 }
 ```
+
+`timestamp` is epoch MILLISECONDS on both chat paths (`ChatResumeState`, `internal/twitch/types.go`). Nothing loads it — it is there so a human reading a sidecar can see when it was written — and until sweep 2 the IRC writer used milliseconds while the VOD writer used seconds, so two files in the same staging tree disagreed about the unit by a factor of a thousand.
 
 On restart, if the `streamId` matches, the downloader resumes with the saved message count, last timestamp, and dedup set. The resume file is deleted on clean completion. A part whose chat file is on disk but whose sidecar is GONE or REFUSED — for example a re-go-live, which changes the stream ID so `loadResumeState` refuses the old sidecar, when the job resumes into the same part; or a crash in the window between the file write and the sidecar write, a sidecar cleared by a stream-end drain, or one deleted by hand — is adopted rather than overwritten (`adoptExistingPartFile`, `internal/twitch/chat.go`): the file is streamed to count its messages array, `flushedToDisk` is set so the first write appends instead of rewriting the part from the new batch alone, and the tail of its IDs seeds the dedup; a file whose bytes read fine but are not chat JSON is preserved beside itself as `<file>.corrupt` and the part starts fresh, never silently overwritten, while a file that could not be READ at all (a lock, a directory in its place) is left exactly where it is. The adoption runs only when no sidecar restored the part, so an ordinary resume neither pays the full read nor can reach the rename.
 
@@ -636,7 +652,7 @@ Similar to IRC, but tracks `lastOffsetSeconds` instead of `lastTimestampMs`:
 {
   "messageCount": 5678,
   "lastOffsetSeconds": 3600.5,
-  "timestamp": 1709000000,
+  "timestamp": 1709000000000,
   "streamId": "v1234567890",
   "recentIds": ["comment-id-1", ...]
 }
@@ -650,7 +666,7 @@ Both chat downloaders cap their sidecar at the newest 1000 dedup IDs — one con
 
 #### Fetch Strategy
 
-All three providers are fetched in parallel using a `sync.WaitGroup`. Each has an 8-second timeout (`emoteTimeout`). Each returns its emotes AND whether it ANSWERED — a channel with no third-party emotes is a real answer; only a provider that could not be reached or whose body could not be read is a failure. Failures are logged at warn level and are non-fatal.
+All three providers are fetched in parallel using a `sync.WaitGroup`. Each has an 8-second timeout (`emoteTimeout`). Each returns its emotes AND whether it ANSWERED. Two shapes are answers: a 200 listing no emotes, and a **404** — BTTV, FFZ and 7TV all answer 404 for a channel that never registered with them, and a channel registered with none of the three answers 404 on all three (`errEmoteProviderNotFound`, `internal/twitch/emotes.go`). Only a provider that could not be reached, that answered 5xx, or whose body could not be parsed is a failure. Reading the 404 as a failure meant nothing was cached for such a channel, so `Resolve` re-fired three requests and four Warn lines on every part roll and stream end of every job on it. Failures are logged at warn level and are non-fatal; a 404 logs at debug level.
 
 #### Provider Details
 
@@ -1200,7 +1216,7 @@ Resume state is saved after each disk flush. On restart, the downloader loads th
 |---------|-----------|-----|-----------|-------------------|-----|
 | YouTube Visitor Data | Memory (single value) | None | 1 entry | Overwrite | N/A |
 | YouTube STS | Memory map | None | 150 entries | Random eviction when full | SHA256(playerURL) |
-| Twitch Emotes | Memory LRU | Unbounded (no expiry) | 200 channels | Oldest by insertion order | lowercased channelLogin |
+| Twitch Emotes | Memory LRU + TTL | 24 h (`emoteCacheTTL`, `internal/twitch/emotes.go`) | 200 channels | Oldest by insertion order | lowercased channelLogin |
 | Cipher (Disk) | Disk files | 14 days | Unbounded | File age check on read; startup sweep | SHA256(playerURL) |
 | Cipher (Memory) | Memory LRU | Unbounded (no expiry) | 10 solvers | Oldest by insertion order | SHA256(playerURL) |
 | BotGuard Session | Memory map | 6 hours | Unbounded | TTL check at start of each generation | contentBinding |
@@ -1223,7 +1239,7 @@ Resume state is saved after each disk flush. On restart, the downloader loads th
 
 ### Source Files
 - `internal/youtube/` -- Service facade, PlayerAPI, Auth, FormatSelector, WatchPage, Types (7 files, ~2,000 lines).
-- `internal/twitch/` -- Service, API, Auth, HLS, Chat, VodChat, Emotes, Types (9 files, ~3,200 lines).
+- `internal/twitch/` -- Service, API, Auth, HLS, Chat (IRC + recording + file), VodChat, Emotes, PlaybackToken, LivenessProbe, Delays, Types (14 files, ~6,350 lines).
 - `internal/bgutils/` -- PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter, ColdStart, Types (8 files, ~1,400 lines).
 - `internal/cipher/` -- Solver, PlayerCache, Extractor, STS, Decrypt, ResolveURL, Types (9 files, ~1,500 lines).
 - `internal/goja/` -- Runtime, DOMShim, Encoding, Timer (4 files, ~700 lines).
