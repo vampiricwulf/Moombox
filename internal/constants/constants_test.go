@@ -100,35 +100,19 @@ func TestNativeAppUserAgentsNotStale(t *testing.T) {
 	}
 }
 
-// TestIOSClientInternallyConsistent ensures the iOS client version is not
-// updated in one place and forgotten in another — the UA, the struct field,
-// and the Innertube context must all agree, or YouTube sees a contradictory
-// iOS fingerprint.
-func TestIOSClientInternallyConsistent(t *testing.T) {
-	if IOSClient.ClientVersion != IOSClient.Context["clientVersion"] {
-		t.Errorf("IOSClient.ClientVersion %q != Context[clientVersion] %v",
-			IOSClient.ClientVersion, IOSClient.Context["clientVersion"])
-	}
-	if !strings.Contains(UserAgents.IOS, IOSClient.ClientVersion) {
-		t.Errorf("UserAgents.IOS %q does not contain client version %q", UserAgents.IOS, IOSClient.ClientVersion)
-	}
-}
-
 // TestWebClientInternallyConsistent, TestWebSafariClientInternallyConsistent,
-// and TestWebEmbeddedClientInternallyConsistent mirror
-// TestIOSClientInternallyConsistent for the three WEB-family clients: each
-// struct's ClientVersion field must agree with its own Innertube
-// Context["clientVersion"] entry, or YouTube sees a contradictory
-// fingerprint from the same process.
+// and TestWebEmbeddedClientInternallyConsistent each assert that a client
+// struct's ClientVersion field agrees with its own Innertube
+// Context["clientVersion"] entry, or YouTube sees a contradictory fingerprint
+// from the same process.
 //
-// These three intentionally omit the UA-contains-version check that closes
-// out the iOS test. That check only makes sense for native-app clients,
-// whose UserAgent literally embeds the app version yt-dlp's clientVersion
-// tracks (e.g. "com.google.ios.youtube/21.26.4"). The WEB-family clients'
-// UserAgent is a real browser UA (desktop Chrome or Safari) whose version
-// numbering is unrelated to the Innertube WEB clientVersion string — Chrome's
-// major and YouTube's internal WEB build number do not correspond, so there
-// is nothing for a "UA contains it" assertion to pin here.
+// They intentionally omit a UA-contains-version check. That only makes sense
+// for native-app clients, whose UserAgent literally embeds the app version
+// yt-dlp's clientVersion tracks (e.g. "com.google.ios.youtube/21.26.4"); the
+// WEB-family clients' UserAgent is a real browser UA whose version numbering
+// is unrelated to the Innertube WEB build number, so there is nothing for such
+// an assertion to pin here. TestNativeAppUserAgentsNotStale covers the native
+// UA strings themselves.
 func TestWebClientInternallyConsistent(t *testing.T) {
 	if WebClient.ClientVersion != WebClient.Context["clientVersion"] {
 		t.Errorf("WebClient.ClientVersion %q != Context[clientVersion] %v",
@@ -147,5 +131,41 @@ func TestWebEmbeddedClientInternallyConsistent(t *testing.T) {
 	if WebEmbeddedClient.ClientVersion != WebEmbeddedClient.Context["clientVersion"] {
 		t.Errorf("WebEmbeddedClient.ClientVersion %q != Context[clientVersion] %v",
 			WebEmbeddedClient.ClientVersion, WebEmbeddedClient.Context["clientVersion"])
+	}
+}
+
+// TestClientRosterIsExactlyTheWiredClients pins the roster against re-growing
+// dead weight. IOSClient and WebRemixClient sat in this file for months with
+// no production caller, citing an audit proposal ("reports/youtube.md T2")
+// that was never wired, their pinned clientVersions rotting silently — which
+// is worse than absent, because a reader takes a pinned version for a
+// maintained one.
+//
+// The list below is every client with a real call site in internal/youtube.
+// Adding one here without wiring it, or reinstating either deleted constant,
+// makes this test and the grep in the task's Step 1 disagree.
+//
+// Mutant this kills: a count or a name changed without a call site → the
+// length assertion fails, or the file no longer compiles.
+func TestClientRosterIsExactlyTheWiredClients(t *testing.T) {
+	wired := map[string]YouTubeClientConfig{
+		"TVDowngradedClient": TVDowngradedClient,
+		"WebCreatorClient":   WebCreatorClient,
+		"WebClient":          WebClient,
+		"WebSafariClient":    WebSafariClient,
+		"WebEmbeddedClient":  WebEmbeddedClient,
+		"VisionOSClient":     VisionOSClient,
+		"AndroidVRClient":    AndroidVRClient,
+	}
+	if len(wired) != 7 {
+		t.Fatalf("the roster lists %d clients, want 7 — every one must have a production call site", len(wired))
+	}
+	for name, c := range wired {
+		if c.ClientName == "" || c.ClientID == "" || c.ClientVersion == "" {
+			t.Errorf("%s is incompletely defined: %+v", name, c)
+		}
+		if c.Context["clientName"] != c.ClientName {
+			t.Errorf("%s: Context[clientName] = %v, want %q", name, c.Context["clientName"], c.ClientName)
+		}
 	}
 }

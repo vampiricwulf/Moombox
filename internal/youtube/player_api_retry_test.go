@@ -21,6 +21,10 @@ func scaleRetryBackoff(t *testing.T, base time.Duration) {
 	t.Cleanup(func() { playerRetryBackoffBase = previous })
 }
 
+// newRetryTestAPI builds a PlayerAPI with a real (empty, in-memory) cookie
+// jar. The retry path and the cascade entry points both reach
+// Auth.GenerateAPIHeaders, which dereferences the jar, so a nil Auth would
+// panic before the first request is ever made.
 func newRetryTestAPI() *PlayerAPI {
 	return NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), noopLogger{})
 }
@@ -55,7 +59,7 @@ func TestDoRetryRequestStopsWhenTheBackoffWouldOutlastTheDeadline(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
 
-	_, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube")
+	_, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
 	if err == nil {
 		t.Fatal("a 503-forever server must produce an error")
 	}
@@ -98,7 +102,7 @@ func TestDoRetryRequestReservesOneBackoffBaseForTheRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
 
-	_, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube")
+	_, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
 	if err == nil {
 		t.Fatal("a 503-forever server must produce an error")
 	}
@@ -132,7 +136,7 @@ func TestDoRetryRequestKeepsRetryingInsideABudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	info, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube")
+	info, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
 	if err != nil {
 		t.Fatalf("doRetryRequest: %v", err)
 	}
@@ -161,7 +165,7 @@ func TestDoRetryRequestWithoutADeadlineUsesEveryAttempt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newRetryTestAPI().doRetryRequest(context.Background(), srv.URL, []byte(`{}`), nil, nil, "Innertube")
+	_, err := newRetryTestAPI().doRetryRequest(context.Background(), srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
 	if err == nil {
 		t.Fatal("a 503-forever server must produce an error")
 	}

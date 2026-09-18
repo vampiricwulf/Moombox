@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -73,7 +74,12 @@ func startWithScript(t *testing.T, cd *ChatDownloader, resps ...map[string]any) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := cd.Start(ctx); err != nil {
+	// errStaleRecoveryExhausted is the EXPECTED outcome of the stale exit most
+	// of these fixtures drive (testRecoveryOverride returning false), now that
+	// the inner cap records its give-up like the outer one — the callers here
+	// assert on disk and sidecar state, and the verdict has its own tests in
+	// stale_recovery_test.go.
+	if err := cd.Start(ctx); err != nil && !errors.Is(err, errStaleRecoveryExhausted) {
 		t.Fatalf("Start: %v", err)
 	}
 	if ctx.Err() != nil {
@@ -102,7 +108,7 @@ func readSidecar(t *testing.T, path string) (state ChatResumeState, ok bool) {
 // TestStaleExitKeepsResumeSidecar is the regression test for the reported
 // wipe. A waiting-room chat that YouTube resets after inactivity comes back
 // as IsComplete with no continuation; recoverStaleContinuation then fails for
-// the whole ~50-minute budget and the run leaves. That is NOT the stream
+// the whole ~35-minute budget and the run leaves. That is NOT the stream
 // ending, and the sidecar is the ONLY thing that tells the next run chat.json
 // already holds history — clearing it made the next run start at count 0 and
 // full-write over the archive on its first message.
@@ -416,7 +422,9 @@ func startAndRecordTokens(t *testing.T, cd *ChatDownloader, resps ...map[string]
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := cd.Start(ctx); err != nil {
+	// Same rule as startWithScript: the stale exit these fixtures drive is now
+	// reported, and these callers assert on the tokens, not the verdict.
+	if err := cd.Start(ctx); err != nil && !errors.Is(err, errStaleRecoveryExhausted) {
 		t.Fatalf("Start: %v", err)
 	}
 	if ctx.Err() != nil {

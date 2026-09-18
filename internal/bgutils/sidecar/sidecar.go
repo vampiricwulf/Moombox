@@ -68,7 +68,15 @@ type Config struct {
 	RequestTimeout time.Duration
 	V8HardLimitMB  int
 	ExposeGC       bool
-	Logger         Logger
+	// OnUnhealthy, when non-nil, is called ONCE each time the sidecar goes
+	// from healthy to unhealthy for a reason other than Stop — stdout EOF
+	// after a crash or a V8 OOM-abort, or a readPump panic. It runs ON THE
+	// readPump GOROUTINE with the health flag already flipped and the pending
+	// requests already drained, so it MUST NOT block: the Supervisor wired to
+	// it does a non-blocking channel send and nothing else. A panic in the
+	// callback is recovered and logged rather than taking the pump down.
+	OnUnhealthy func(reason string)
+	Logger      Logger
 }
 
 // Sidecar manages one Node subprocess running the BotGuard JS sidecar.
@@ -108,11 +116,32 @@ type Sidecar struct {
 	readyCh   chan struct{}
 	readyErr  error // set inside readyOnce.Do before close(readyCh)
 
-	// Lifecycle. closed signals to readPump/stderrPump that Stop() was
-	// called and they should exit silently rather than mark unhealthy.
-	stopOnce  sync.Once
+	// Lifecycle. stopping signals to readPump/stderrPump that a teardown is
+	// under way and they should exit silently rather than mark unhealthy.
 	stopping  atomic.Bool
 	pumpsDone sync.WaitGroup
+
+	// Lifecycle serialisation. Start, Stop and Restart all mutate the process
+	// fields above and each other's guards, and in production they run on
+	// different goroutines: shutdown.go calls Stop while the supervisor loop
+	// may be inside Restart. lifecycleMu makes exactly one of them run at a
+	// time, so the reset of a dead child's state can never interleave with a
+	// teardown reading it. It is held ACROSS Start (Restart's included).
+	lifecycleMu sync.Mutex
+
+	// stateMu guards the two fields Stop must reach WITHOUT waiting for
+	// lifecycleMu. That is what lets a Stop cancel a Restart already inside
+	// Start instead of queueing behind its whole StartupTimeout budget.
+	stateMu sync.Mutex
+	stopped bool // Stop() was called; terminal
+	// Cancels the RUNNING Restart, if any — registered under lifecycleMu and
+	// cleared before it is released, so a Restart merely queued for that lock
+	// can never displace the one Stop has to cancel.
+	restartCancel context.CancelFunc
+
+	// start is a test seam for the one transition a unit test cannot run (it
+	// spawns Node). Production leaves it as startLocked.
+	start func(ctx context.Context) error
 }
 
 type rpcRequest struct {
@@ -126,6 +155,11 @@ type rpcResponse struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
 }
+
+// ErrStopped is returned by Restart once Stop has been called. Stop is
+// terminal — cmd/moombox only calls it from the shutdown path — so a
+// supervisor restart that races shutdown must not bring the child back.
+var ErrStopped = errors.New("sidecar: stopped")
 
 // New constructs a Sidecar. Does not start the subprocess; call Start.
 func New(cfg Config) *Sidecar {
@@ -141,10 +175,12 @@ func New(cfg Config) *Sidecar {
 		// exists for, where previously callers hung for the job lifetime).
 		cfg.RequestTimeout = 90 * time.Second
 	}
-	return &Sidecar{
+	s := &Sidecar{
 		cfg:     cfg,
 		pending: make(map[uint64]chan rpcResponse),
 	}
+	s.start = s.startLocked
+	return s
 }
 
 // Start extracts the embedded blobs (if needed), launches the Node
@@ -154,6 +190,24 @@ func New(cfg Config) *Sidecar {
 // Returns an error if extraction, launch, or the ready handshake fails;
 // the caller should fall back to the goja path on error.
 func (s *Sidecar) Start(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.startLocked(ctx)
+}
+
+// startLocked is Start's body. The caller holds lifecycleMu — which is why
+// its failure paths call teardownLocked rather than Stop: Stop would deadlock
+// on the mutex, and worse, it would latch the terminal stopped flag and make
+// every future supervisor restart a no-op.
+func (s *Sidecar) startLocked(ctx context.Context) error {
+	// The terminal latch, not just the live child. teardownLocked ends by
+	// clearing s.cmd, so the guard below alone would let a Start after a real
+	// Stop extract, spawn and hand-shake a Node child that nothing supervises
+	// and nothing reaps. Restart already latches before it reaches here, so
+	// this costs one atomic read on the one path that can still be wrong.
+	if s.isStopped() {
+		return ErrStopped
+	}
 	if s.cmd != nil {
 		return errors.New("sidecar: already started")
 	}
@@ -207,11 +261,19 @@ func (s *Sidecar) Start(ctx context.Context) error {
 		return fmt.Errorf("start node: %w", err)
 	}
 
+	// Under writeMu, mirroring Restart's own reset of the same fields:
+	// writeRequest reads s.stdin under that lock, and a caller stalled
+	// between its healthy.Load() and writeRequest can span the whole restart
+	// window. The race detector cannot see it (the stall has to cross the
+	// ladder's 5 s floor), which is exactly why the lock is the fix rather
+	// than an argument that it cannot happen.
+	s.writeMu.Lock()
 	s.cmd = cmd
 	s.stdin = stdin
 	s.stdout = stdout
 	s.stderr = stderr
 	s.readyCh = make(chan struct{})
+	s.writeMu.Unlock()
 
 	// Pin the child to a Job Object so it dies when Moombox dies. On
 	// Linux processJob is a no-op — PR_SET_PDEATHSIG (configured before
@@ -226,7 +288,9 @@ func (s *Sidecar) Start(ctx context.Context) error {
 			job = nil
 		}
 	}
+	s.writeMu.Lock()
 	s.job = job
+	s.writeMu.Unlock()
 
 	s.pumpsDone.Add(2)
 	go s.readPump()
@@ -244,11 +308,11 @@ func (s *Sidecar) Start(ctx context.Context) error {
 	select {
 	case <-s.readyCh:
 		if s.readyErr != nil {
-			_ = s.Stop()
+			_ = s.teardownLocked()
 			return fmt.Errorf("ready: %w", s.readyErr)
 		}
 	case <-readyCtx.Done():
-		_ = s.Stop()
+		_ = s.teardownLocked()
 		return fmt.Errorf("ready: %w", readyCtx.Err())
 	}
 
@@ -258,87 +322,224 @@ func (s *Sidecar) Start(ctx context.Context) error {
 }
 
 // Stop gracefully shuts down the sidecar. Sends a shutdown JSON-RPC,
-// waits briefly, then hard-kills + closes the Job Object.
+// waits briefly, then hard-kills + closes the Job Object. Safe to call
+// multiple times; subsequent calls are no-ops.
 //
 // Total wall-time bound: ~3s (1s for the JSON-RPC bye response, 2s for
 // the process to exit on its own, then Kill). This stays well below the
 // shutdown.go force-exit budget so a hung sidecar can't starve the rest
 // of Moombox's shutdown sequence (web server, DB unsubscribe, DB close).
 //
-// Safe to call multiple times; subsequent calls are no-ops.
+// Stop is also TERMINAL: once it has been called the handle stays down, and a
+// Restart racing it from the supervisor goroutine returns ErrStopped rather
+// than resurrecting a child nothing will reap.
+//
+// The latch and the cancel happen BEFORE lifecycleMu is taken, on purpose. A
+// Restart in flight holds that mutex for its whole StartupTimeout budget, so
+// queueing behind it would add up to a minute to shutdown; cancelling its
+// context instead makes the restart unwind and hand the mutex over.
 func (s *Sidecar) Stop() error {
-	var firstErr error
-	s.stopOnce.Do(func() {
-		// Mark stopping so readPump exits silently on EOF instead of
-		// flagging the sidecar unhealthy mid-shutdown. Crucially, do NOT
-		// flip s.healthy yet -- the graceful shutdown JSON-RPC below goes
-		// through call(), which short-circuits on !healthy.
-		s.stopping.Store(true)
-
-		if s.cmd == nil || s.cmd.Process == nil {
-			s.healthy.Store(false)
-			return
-		}
-
-		// Best-effort graceful shutdown via JSON-RPC. The sidecar JS
-		// writes its "bye" response and then process.exit(0)s on the
-		// next tick. 1s is generous for that round-trip; longer just
-		// extends shutdown latency for no benefit.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		_ = s.callRaw(shutdownCtx, "shutdown", nil)
+	s.stateMu.Lock()
+	s.stopped = true
+	cancel := s.restartCancel
+	s.stateMu.Unlock()
+	if cancel != nil {
 		cancel()
+	}
 
-		// Now stop accepting new work; any inflight requests waiting on
-		// channels will be drained below.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.teardownLocked()
+}
+
+// isStopped reports whether Stop has been called.
+func (s *Sidecar) isStopped() bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.stopped
+}
+
+// teardownLocked stops whatever child exists and leaves the handle quiescent.
+// The caller holds lifecycleMu.
+//
+// Idempotent by SHAPE rather than by a sync.Once: it clears s.cmd on the way
+// out, so a second call takes the no-child fast path. The Once it replaces was
+// the bug — Restart had to reset it, and that reset raced Stop's Do.
+func (s *Sidecar) teardownLocked() error {
+	var firstErr error
+	// Mark stopping so readPump exits silently on EOF instead of
+	// flagging the sidecar unhealthy mid-shutdown. Crucially, do NOT
+	// flip s.healthy yet -- the graceful shutdown JSON-RPC below goes
+	// through call(), which short-circuits on !healthy.
+	s.stopping.Store(true)
+
+	if s.cmd == nil || s.cmd.Process == nil {
 		s.healthy.Store(false)
+		return nil
+	}
 
-		// Wait briefly for the process to exit on its own. The Node side
-		// already scheduled process.exit(0) so this is just signal
-		// latency -- 2s covers a slow tick + kernel reap, beyond which
-		// we kill rather than starve the wider shutdown budget.
-		done := make(chan error, 1)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Must still deliver — a lost send would deadlock the
-					// receive below.
-					done <- fmt.Errorf("sidecar wait panic: %v", r)
-				}
-			}()
-			done <- s.cmd.Wait()
+	// Best-effort graceful shutdown via JSON-RPC. The sidecar JS
+	// writes its "bye" response and then process.exit(0)s on the
+	// next tick. 1s is generous for that round-trip; longer just
+	// extends shutdown latency for no benefit.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	_ = s.callRaw(shutdownCtx, "shutdown", nil)
+	cancel()
+
+	// Now stop accepting new work; any inflight requests waiting on
+	// channels will be drained below.
+	s.healthy.Store(false)
+
+	// Wait briefly for the process to exit on its own. The Node side
+	// already scheduled process.exit(0) so this is just signal
+	// latency -- 2s covers a slow tick + kernel reap, beyond which
+	// we kill rather than starve the wider shutdown budget.
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Must still deliver — a lost send would deadlock the
+				// receive below.
+				done <- fmt.Errorf("sidecar wait panic: %v", r)
+			}
 		}()
-		select {
-		case err := <-done:
-			if err != nil {
-				s.cfg.Logger.Debug("sidecar exited", "err", err)
-			}
-		case <-time.After(2 * time.Second):
-			s.cfg.Logger.Warn("sidecar shutdown timed out, killing process", "pid", s.cmd.Process.Pid)
-			if killErr := s.cmd.Process.Kill(); killErr != nil {
-				firstErr = killErr
-			}
-			<-done
+		done <- s.cmd.Wait()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			s.cfg.Logger.Debug("sidecar exited", "err", err)
 		}
-
-		// Close pipes BEFORE the Job Object so readPump/stderrPump exit
-		// on EOF rather than on Job Object teardown which is more abrupt.
-		_ = s.stdin.Close()
-		_ = s.stdout.Close()
-		_ = s.stderr.Close()
-
-		// Close Job Object — kills any straggling children too.
-		if s.job != nil {
-			s.job.close()
-			s.job = nil
+	case <-time.After(2 * time.Second):
+		s.cfg.Logger.Warn("sidecar shutdown timed out, killing process", "pid", s.cmd.Process.Pid)
+		if killErr := s.cmd.Process.Kill(); killErr != nil {
+			firstErr = killErr
 		}
+		<-done
+	}
 
-		// Drain any remaining pending requests with an error.
-		s.drainPending("sidecar stopped")
+	// Close pipes BEFORE the Job Object so readPump/stderrPump exit
+	// on EOF rather than on Job Object teardown which is more abrupt.
+	_ = s.stdin.Close()
+	_ = s.stdout.Close()
+	_ = s.stderr.Close()
 
-		// Wait for pumps to finish so callers can observe a quiescent state.
-		s.pumpsDone.Wait()
-	})
+	// Close Job Object — kills any straggling children too.
+	if s.job != nil {
+		s.job.close()
+		s.job = nil
+	}
+
+	// Drain any remaining pending requests with an error.
+	s.drainPending("sidecar stopped")
+
+	// Wait for pumps to finish so callers can observe a quiescent state.
+	s.pumpsDone.Wait()
+
+	// Last: with no cmd, a second teardown takes the fast path above. This is
+	// what makes teardownLocked idempotent without a sync.Once for Restart to
+	// reset — and Restart's own reset can rely on the pumps being gone.
+	s.cmd = nil
 	return firstErr
+}
+
+// Restart brings a dead sidecar back ON THE SAME HANDLE: it stops whatever is
+// left of the old child, resets the per-process state, and runs Start again.
+//
+// The handle's identity is preserved deliberately. cmd/moombox stores one
+// *Sidecar on its run state for shutdown and hands the same pointer to
+// PotProvider, so swapping in a fresh instance would leave both pointing at a
+// corpse — the shutdown path would stop the dead one and leak the live one.
+// What DOES have to be rebuilt is the cipher sidecar solver: its per-player
+// "already sent" map describes the memory of the child that just died. That
+// rebuild belongs to the caller (Supervisor.SetOnUp).
+//
+// Restart is serialised against Stop and against itself by lifecycleMu, and it
+// loses to Stop: a restart that starts after Stop is a no-op returning
+// ErrStopped, and a Stop that arrives mid-restart cancels it. Concurrent RPC
+// callers are safe throughout: healthy is false for the whole window, call()
+// short-circuits on it, and writeRequest refuses a nil stdin.
+func (s *Sidecar) Restart(ctx context.Context) error {
+	// A context of our own so Stop can cut the startup short without touching
+	// the caller's.
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Cheap entry check off the lifecycle mutex: a Restart that arrives after
+	// shutdown gives up without queueing behind anything.
+	if s.isStopped() {
+		return ErrStopped
+	}
+
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	// Register the cancel only once THIS Restart is the one running. Doing it
+	// before the lock let a second, queued Restart overwrite the running one's
+	// cancel, and its deferred clear (which ran after the unlock, LIFO) then
+	// wiped the survivor's — leaving Stop with nothing to cancel and a whole
+	// startup budget to wait out on lifecycleMu.
+	//
+	// The latch is re-read inside the same stateMu section that registers, so
+	// this is atomic against Stop's latch-then-read: either Stop sees this
+	// cancel, or this sees Stop's latch and never reaches start.
+	s.stateMu.Lock()
+	if s.stopped {
+		s.stateMu.Unlock()
+		return ErrStopped
+	}
+	s.restartCancel = cancel
+	s.stateMu.Unlock()
+	// Registered AFTER defer s.lifecycleMu.Unlock(), so LIFO runs it FIRST:
+	// the slot is cleared while this Restart still holds the lifecycle lock,
+	// before any queued Restart can put its own cancel there.
+	defer func() {
+		s.stateMu.Lock()
+		s.restartCancel = nil
+		s.stateMu.Unlock()
+	}()
+
+	// teardownLocked is idempotent and, when a child existed, waits for both
+	// pumps — so afterwards nothing else touches the fields reset below.
+	_ = s.teardownLocked()
+
+	s.writeMu.Lock()
+	s.cmd = nil
+	s.stdin = nil
+	s.stdout = nil
+	s.stderr = nil
+	s.job = nil
+	s.readyOnce = sync.Once{}
+	s.readyCh = nil
+	s.readyErr = nil
+	s.stopping.Store(false)
+	s.healthy.Store(false)
+	s.writeMu.Unlock()
+
+	s.pendingMu.Lock()
+	s.pending = make(map[uint64]chan rpcResponse)
+	s.pendingMu.Unlock()
+
+	if err := s.start(rctx); err != nil {
+		// Stop cancelled rctx: the start did not fail, it was called off. The
+		// raw context error would read as a transient failure to the
+		// supervisor — a spurious "restart failed" Warn on an ordinary
+		// shutdown, and one more ladder rung burnt against a handle that can
+		// never come back.
+		if s.isStopped() {
+			return ErrStopped
+		}
+		return err
+	}
+
+	// Stop latched while the child was coming up: it cancelled rctx, but a
+	// start that had already seen its ready event returns nil and leaves a
+	// live Node process behind. Take it back down — Stop wins.
+	if s.isStopped() {
+		_ = s.teardownLocked()
+		return ErrStopped
+	}
+	return nil
 }
 
 // IsHealthy reports whether the sidecar is currently usable. False after
@@ -670,6 +871,12 @@ func (s *Sidecar) writeRequest(req rpcRequest) error {
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if s.stdin == nil {
+		// Between a crash and the supervisor's Restart there is no pipe. A
+		// caller that passed the healthy check microseconds before
+		// markUnhealthy flipped it must get an error, not a nil dereference.
+		return errors.New("sidecar: not running")
+	}
 	if _, err := s.stdin.Write(data); err != nil {
 		return fmt.Errorf("stdin write: %w", err)
 	}
@@ -823,13 +1030,28 @@ func isHarmlessJSDOMStderr(line string) bool {
 }
 
 // markUnhealthy flips the healthy flag and drains pending requests with an
-// error so callers blocked on a response wake up promptly.
+// error so callers blocked on a response wake up promptly, then hands the
+// reason to OnUnhealthy so a supervisor can bring the child back.
 func (s *Sidecar) markUnhealthy(reason string) {
 	if !s.healthy.CompareAndSwap(true, false) {
 		return
 	}
 	s.cfg.Logger.Warn("sidecar marked unhealthy", "reason", reason)
 	s.drainPending(reason)
+	if s.cfg.OnUnhealthy != nil {
+		s.callOnUnhealthy(reason)
+	}
+}
+
+// callOnUnhealthy isolates the callback from readPump: a panic in a
+// supervisor's notify path must not kill the goroutine draining stdout.
+func (s *Sidecar) callOnUnhealthy(reason string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.cfg.Logger.Error("sidecar: OnUnhealthy panic", "panic", fmt.Sprint(r))
+		}
+	}()
+	s.cfg.OnUnhealthy(reason)
 }
 
 func (s *Sidecar) drainPending(reason string) {

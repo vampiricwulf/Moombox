@@ -1,7 +1,16 @@
 package youtube
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"slices"
+	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 func TestParsePlayabilityStatus_NilStatus(t *testing.T) {
@@ -394,7 +403,7 @@ func TestDeduplicateFormats(t *testing.T) {
 		{Itag: 999, URL: "", AuthLevel: &webAuth}, // no URL, should be filtered
 	}
 
-	result := deduplicateFormats(pool)
+	result := deduplicateFormats(context.Background(), pool)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 deduplicated formats, got %d", len(result))
@@ -448,7 +457,7 @@ func TestParseFormats_DefersCipherDecryption(t *testing.T) {
 		},
 	}
 
-	got := pa.parseFormats(streamingData)
+	got, _ := pa.parseFormats(context.Background(), streamingData)
 
 	if len(got) != 2 {
 		t.Fatalf("expected 2 formats, got %d", len(got))
@@ -507,7 +516,7 @@ func TestParseFormats_DefaultsSigKey(t *testing.T) {
 		},
 	}
 
-	got := pa.parseFormats(streamingData)
+	got, _ := pa.parseFormats(context.Background(), streamingData)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 format, got %d", len(got))
 	}
@@ -527,7 +536,7 @@ func TestDeduplicateFormats_SameAuthPrefersFirstInsertion(t *testing.T) {
 		{Itag: 137, URL: "https://example.com/muxed", AuthLevel: &webAuth, Source: "muxed"},
 	}
 
-	result := deduplicateFormats(pool)
+	result := deduplicateFormats(context.Background(), pool)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 deduplicated format, got %d", len(result))
 	}
@@ -537,7 +546,7 @@ func TestDeduplicateFormats_SameAuthPrefersFirstInsertion(t *testing.T) {
 }
 
 func TestDeduplicateFormats_EmptyPool(t *testing.T) {
-	result := deduplicateFormats(nil)
+	result := deduplicateFormats(context.Background(), nil)
 	if len(result) != 0 {
 		t.Errorf("expected 0 formats, got %d", len(result))
 	}
@@ -862,4 +871,648 @@ func playerWith(lbd map[string]any, uploadDate string) map[string]any {
 		m["uploadDate"] = uploadDate
 	}
 	return m
+}
+
+// decodePlayerJSON is a small helper for the parse tests: the parser takes the
+// already-decoded map YouTube's body unmarshals into.
+func decodePlayerJSON(t *testing.T, s string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatalf("fixture is not JSON: %v", err)
+	}
+	return m
+}
+
+// TestParsePlayerResponseRejectsASubstituteVideo pins yt-dlp's
+// _invalid_player_response (_video.py:3022-3025). A blocked source IP is
+// served a DIFFERENT video's player response; accepting it hands this job the
+// substitute's status and formats, and the waiting-room probe then archives
+// the wrong video under this job's ID.
+//
+// Mutants this kills:
+//   - the comparison dropped entirely      → err is nil
+//   - the mismatch only logged, not raised → err is nil
+//   - the error not naming both IDs        → the two Contains checks fail
+func TestParsePlayerResponseRejectsASubstituteVideo(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	data := decodePlayerJSON(t, `{
+        "playabilityStatus": {"status": "OK"},
+        "videoDetails": {"videoId": "OTHERvideo1", "title": "Substitute Video", "author": "Other Ch"},
+        "streamingData": {"adaptiveFormats": [
+            {"itag": 137, "url": "https://example.com/v", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080},
+            {"itag": 140, "url": "https://example.com/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+        ]}
+    }`)
+
+	info, err := p.parsePlayerResponse(context.Background(), data, "", nil, "REQUESTEDvid")
+	if err == nil {
+		t.Fatalf("parsePlayerResponse accepted a substitute video: %+v", info)
+	}
+	var mm *VideoIDMismatchError
+	if !errors.As(err, &mm) {
+		t.Fatalf("err = %T (%v), want *VideoIDMismatchError", err, err)
+	}
+	if mm.Requested != "REQUESTEDvid" || mm.Got != "OTHERvideo1" {
+		t.Errorf("mismatch = %+v, want Requested REQUESTEDvid / Got OTHERvideo1", mm)
+	}
+	if !strings.Contains(err.Error(), "REQUESTEDvid") || !strings.Contains(err.Error(), "OTHERvideo1") {
+		t.Errorf("error text %q names neither both IDs", err.Error())
+	}
+	if info != nil {
+		t.Errorf("a rejected response still returned info: %+v", info)
+	}
+}
+
+// TestVideoIDMismatchErrorBoundsTheSubstituteID is close-review Finding 4.
+// Got comes straight off the wire (videoDetails.videoId) and was rendered
+// unbounded: a 14,000-byte id produced a 22,129-byte Error(), which reaches
+// the job's `error` column through `full fetch failed: %w` on the confirmatory
+// fetch and the IP-block verdict's `substitute` log field. A real substitute
+// id is 11 characters.
+//
+// The FIELD stays intact — a caller comparing or logging it deliberately gets
+// the whole thing; only the rendered text is bounded, and on a RUNE boundary
+// so the %q output stays valid UTF-8.
+//
+// Mutants this kill:
+//   - the cap removed from Error()            → the length check fails
+//   - the cap applied as a byte slice         → the UTF-8 check fails
+//   - the cap applied to the Got field itself → the "field intact" check fails
+func TestVideoIDMismatchErrorBoundsTheSubstituteID(t *testing.T) {
+	huge := strings.Repeat("あ", 14000) // 42,000 bytes of three-byte runes
+	mm := &VideoIDMismatchError{Requested: "test1234567", Got: huge}
+
+	got := mm.Error()
+	if len(got) > 300 {
+		t.Errorf("Error() is %d bytes for a %d-byte substitute id, want a bounded string", len(got), len(huge))
+	}
+	// Asserted on the CAPPED ID, not on Error()'s output: %q escapes an
+	// invalid byte as \xe3, which is itself valid UTF-8, so the rendered
+	// string can never catch a byte-sliced cut.
+	if !utf8.ValidString(capSubstituteID(huge)) {
+		t.Errorf("capSubstituteID = %q is not valid UTF-8 — the cut must fall on a rune boundary", capSubstituteID(huge))
+	}
+	if strings.Contains(got, `\x`) {
+		t.Errorf("Error() = %q carries an escaped invalid byte — the cut split a rune", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("Error() = %q, want the truncation marked", got)
+	}
+	if !strings.Contains(got, "test1234567") {
+		t.Errorf("Error() = %q, want the REQUESTED id named in full", got)
+	}
+	if mm.Got != huge {
+		t.Errorf("Got was truncated in place (%d bytes) — the field is the caller's, only the text is bounded", len(mm.Got))
+	}
+
+	// An ordinary 11-character id is untouched.
+	short := (&VideoIDMismatchError{Requested: "test1234567", Got: "OTHERvideo1"}).Error()
+	if !strings.Contains(short, `"OTHERvideo1"`) || strings.Contains(short, "…") {
+		t.Errorf("Error() = %q, want a real substitute id rendered whole", short)
+	}
+}
+
+// TestParsePlayerResponseKeepsAResponseWithNoVideoID pins upstream's EFFECTIVE
+// rule, which Moombox matches. _invalid_player_response returns the id rather
+// than a bool (_video.py:3022-3026) and both call sites test that return for
+// truthiness (:3038, :3122), so an absent or empty videoId keeps the response
+// upstream too. Go has no truthiness, so the guard spells it out.
+//
+// It is load-bearing: TV is this cascade's playability AUTHORITY and some of
+// its refusals arrive as a playabilityStatus with no videoDetails at all, so
+// the members-only verdict every downstream error string is built from travels
+// on exactly the shape this test pins.
+//
+// Mutants this kills:
+//   - "absent-is-mismatch" — the literal `got != requestedVideoID` a future
+//     porter might write believing it re-aligns with upstream → err non-nil
+//     here, and the members-only verdict path breaks with it
+//   - skipping the check when the response carries a DIFFERENT non-empty id
+//     → caught by TestParsePlayerResponseRejectsASubstituteVideo above
+func TestParsePlayerResponseKeepsAResponseWithNoVideoID(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+
+	noDetails := decodePlayerJSON(t, `{"playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access"}}`)
+	info, err := p.parsePlayerResponse(context.Background(), noDetails, "", nil, "REQUESTEDvid")
+	if err != nil {
+		t.Fatalf("a members-only verdict with no videoDetails was rejected: %v", err)
+	}
+	if info.PlayabilityError != PlayabilityMembersOnly {
+		t.Errorf("PlayabilityError = %q, want members_only — the verdict must survive", info.PlayabilityError)
+	}
+
+	emptyID := decodePlayerJSON(t, `{"playabilityStatus": {"status": "OK"}, "videoDetails": {"videoId": "", "title": "t"}}`)
+	if _, err := p.parsePlayerResponse(context.Background(), emptyID, "", nil, "REQUESTEDvid"); err != nil {
+		t.Fatalf("an empty videoId was treated as a mismatch: %v", err)
+	}
+
+	matching := decodePlayerJSON(t, `{"playabilityStatus": {"status": "OK"}, "videoDetails": {"videoId": "REQUESTEDvid", "title": "t"}}`)
+	if _, err := p.parsePlayerResponse(context.Background(), matching, "", nil, "REQUESTEDvid"); err != nil {
+		t.Fatalf("a matching videoId was rejected: %v", err)
+	}
+}
+
+// TestParseFormatsSkipsDRMAndKeepsTrackIdentity pins both halves of upstream's
+// format identity. DRM formats are dropped at parse — yt-dlp reports them as
+// skipped (_video.py:3418-3428, the tv-client DRM experiment, issue #12563)
+// and YoutubeDL.py:2930 filters them out — because muxing encrypted samples
+// produces an unplayable archive. The three track fields are kept because
+// they are two thirds of upstream's stream identity.
+//
+// Mutants this kills:
+//   - drmFamilies ignored        → the DRM itag 137 survives
+//   - audioTrack not parsed      → AudioTrackID is ""
+//   - isDrc not parsed           → IsDrc is false for the DRC entry
+func TestParseFormatsSkipsDRMAndKeepsTrackIdentity(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	sd := decodePlayerJSON(t, `{"adaptiveFormats": [
+		{"itag": 137, "url": "https://tv/v-drm", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080, "drmFamilies": ["WIDEVINE"]},
+		{"itag": 136, "url": "https://tv/v-clean", "mimeType": "video/mp4; codecs=\"avc1.4d401f\"", "width": 1280, "height": 720},
+		{"itag": 140, "url": "https://tv/a-orig", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "audioTrack": {"id": "en.4", "displayName": "English original", "audioIsDefault": true}},
+		{"itag": 140, "url": "https://tv/a-drc", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "isDrc": true, "audioTrack": {"id": "en.4", "displayName": "English original", "audioIsDefault": true}}
+	]}`)
+
+	formats, _ := p.parseFormats(context.Background(), sd)
+
+	for _, f := range formats {
+		if f.Itag == 137 {
+			t.Errorf("a DRM-protected format survived parse: %+v", f)
+		}
+	}
+	var orig, drc *Format
+	for i := range formats {
+		switch {
+		case formats[i].Itag == 140 && formats[i].IsDrc:
+			drc = &formats[i]
+		case formats[i].Itag == 140:
+			orig = &formats[i]
+		}
+	}
+	if orig == nil || drc == nil {
+		t.Fatalf("want both itag-140 renditions, got %+v", formats)
+	}
+	if orig.AudioTrackID != "en.4" || orig.AudioTrackName != "English original" || !orig.AudioIsDefault {
+		t.Errorf("track fields = %+v, want id en.4 / name \"English original\" / default true", orig)
+	}
+	if drc.IsDrc != true {
+		t.Errorf("the isDrc rendition parsed with IsDrc=false: %+v", drc)
+	}
+}
+
+// TestParseFormatsWarnsOnceForSkippedDRM pins the LEVEL and the CARDINALITY of
+// the DRM-skip report. Upstream reports it with
+// `self.report_warning(msg, video_id, only_once=True)` (_video.py:3420-3428,
+// the call itself on 3428),
+// and a silently DRM-stripped pool is the difference between "this video has
+// no 1080p" and "this ACCOUNT gets no 1080p" — the operator has to see it at
+// the default level, once, with the count.
+//
+// This is the single-response half: one parse, one line, carrying that
+// response's count. TestDRMWarnIsOncePerExtractionNotPerResponse pins the
+// other half — several responses in one cascade still get one line.
+//
+// Mutants this kills:
+//   - the line demoted back to Debug  → no Warn captured
+//   - one line per dropped format     → two Warns instead of one
+//   - the count dropped from the line → the count assertion fails
+func TestParseFormatsWarnsOnceForSkippedDRM(t *testing.T) {
+	lg := &warnCapturingLogger{}
+	p := NewPlayerAPI(nil, lg)
+	sd := decodePlayerJSON(t, `{"adaptiveFormats": [
+		{"itag": 137, "url": "https://tv/v-drm", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "drmFamilies": ["WIDEVINE"]},
+		{"itag": 248, "url": "https://tv/v-drm2", "mimeType": "video/webm; codecs=\"vp9\"", "drmFamilies": ["PLAYREADY"]},
+		{"itag": 136, "url": "https://tv/v-clean", "mimeType": "video/mp4; codecs=\"avc1.4d401f\""}
+	]}`)
+
+	kept, _ := p.parseFormats(context.Background(), sd)
+	if got := len(kept); got != 1 {
+		t.Fatalf("parseFormats kept %d formats, want only the clean one", got)
+	}
+	if len(lg.warns) != 1 {
+		t.Fatalf("warns = %q, want exactly one DRM line for the whole response", lg.warns)
+	}
+	if !strings.Contains(lg.warns[0], "DRM") {
+		t.Errorf("the Warn %q does not say what was skipped", lg.warns[0])
+	}
+	if !strings.Contains(lg.warns[0], "2") {
+		t.Errorf("the Warn %q does not name the count of skipped formats", lg.warns[0])
+	}
+}
+
+// TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity pins get_stream_id
+// (_video.py:3396-3397) through the collapsed output. The 3-part key is what
+// keeps every rendition ALIVE long enough to be ranked: the auth-level
+// tie-break only applies WITHIN one stream identity, so a dubbed or DRC
+// rendition from a lower-auth client must not evict the original that only a
+// higher-auth client returned. Here the es.3 dub and the DRC twin come from
+// tv (auth 1) and the English original from web (auth 5) — the arrangement
+// that makes each part of the key observable after the collapse.
+//
+// Mutants this kills:
+//   - keying on itag alone        → the tv es.3 dub wins the auth tie-break
+//     before anything ranks the tracks, and the original never reaches the
+//     collapse
+//   - dropping audioTrackID       → the two CLEAN renditions collide (es.3 from
+//     tv, en.4 from web), tv wins that key on auth, and the collapse then ranks
+//     the surviving es.3 dub against tv's en.4 DRC twin — which the track score
+//     prefers, so itag 140 resolves to https://x/en-drc. Measured; the doc used
+//     to say the dub won (close-review Finding 13d)
+//   - dropping isDrc from the key → tv's DRC twin evicts the clean original
+func TestDeduplicateFormatsKeysOnUpstreamsStreamIdentity(t *testing.T) {
+	tv, web := AuthLevelTVAuth, AuthLevelWeb
+	mk := func(track, name string, def, drc bool, lvl *int, source, url string) Format {
+		return Format{Itag: 140, URL: url, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"",
+			AudioTrackID: track, AudioTrackName: name, AudioIsDefault: def, IsDrc: drc,
+			Source: source, AuthLevel: lvl}
+	}
+	pool := []Format{
+		mk("es.3", "Spanish", true, false, &tv, "tv_auth", "https://x/es"),
+		mk("en.4", "English original", false, true, &tv, "tv_auth", "https://x/en-drc"),
+		mk("en.4", "English original", false, false, &web, "web", "https://x/en"),
+	}
+
+	got := deduplicateFormats(context.Background(), pool)
+	if len(got) != 1 {
+		t.Fatalf("itag 140 must reach the consumers once, got %d rows: %+v", len(got), got)
+	}
+	if got[0].URL != "https://x/en" || got[0].IsDrc {
+		t.Errorf("itag 140 resolved to %q (track %q, drc=%v), want the clean en.4 original https://x/en",
+			got[0].URL, got[0].AudioTrackID, got[0].IsDrc)
+	}
+}
+
+// dubbedPool is the real-shaped auto-dubbed response the collapse tests read:
+// two video itags plus itag 140 in four renditions (a dubbed default, a
+// descriptive track, the English original and the original's DRC twin) and
+// itag 251 in two, all from ONE client at ONE auth level — which is how
+// YouTube actually serves an auto-dubbed video. The dub carries the higher
+// bitrate on purpose: it is what wins every itag-keyed lookup downstream when
+// nothing ranks the tracks.
+func dubbedPool() []Format {
+	lvl := AuthLevelTVAuth
+	mk := func(itag int, mime, track, name string, def, drc bool, bitrate int, url string) Format {
+		return Format{Itag: itag, URL: url, MimeType: mime, Bitrate: bitrate,
+			AudioTrackID: track, AudioTrackName: name, AudioIsDefault: def, IsDrc: drc,
+			Source: "tv_auth", AuthLevel: &lvl}
+	}
+	const aac = "audio/mp4; codecs=\"mp4a.40.2\""
+	const opus = "audio/webm; codecs=\"opus\""
+	w, h := 1920, 1080
+	return []Format{
+		{Itag: 137, URL: "https://r1/v137", MimeType: "video/mp4; codecs=\"avc1.640028\"",
+			Bitrate: 4000000, Width: &w, Height: &h, Source: "tv_auth", AuthLevel: &lvl},
+		mk(140, aac, "es.3", "Spanish", true, false, 131000, "https://r1/a140-es"),
+		mk(140, aac, "en.10", "English descriptive", false, false, 130000, "https://r1/a140-en-desc"),
+		mk(140, aac, "en.4", "English original", false, false, 129000, "https://r1/a140-en"),
+		mk(140, aac, "en.4", "English original", false, true, 130500, "https://r1/a140-en-drc"),
+		mk(251, opus, "en.4", "English original", false, false, 141000, "https://r1/a251-en"),
+		mk(251, opus, "es.3", "Spanish", true, false, 144000, "https://r1/a251-es"),
+	}
+}
+
+// TestDeduplicateFormatsCollapsesEachItagToThePreferredRendition pins the
+// invariant every itag-keyed consumer depends on: after dedup, ONE rendition
+// per itag reaches VideoInfo.Formats, and it is the one the audio-track
+// preference would choose. internal/worker looks formats up by itag alone —
+// SelectBestDashStream picks by bandwidth among same-itag entries, and
+// resolveFormatURLByItag returns the FIRST entry of that itag at setup and on
+// every 403 credential refresh — so a pool holding several renditions of one
+// itag lets the live path archive the dub, or splice a second language into a
+// file already half written. Upstream keeps all of them and carries the
+// identity into its format ids; Moombox collapses instead, because its
+// consumers key on the itag.
+//
+// Mutants this kills:
+//   - no collapse at all               → 4 itag-140 rows survive
+//   - collapse keeps the first-listed  → the en.10 descriptive rendition wins
+//     itag 140 (the 3-part sort orders the renditions by track id, so
+//     "first" is en.10, not the dub)
+//   - collapse ranks by bandwidth, as SelectBestDashStream does → the es.3
+//     dub wins itag 140 and itag 251, which is the downstream bug itself
+//
+// The DRC rung IS observable at this layer (close-review Finding 13a): the
+// collapse ranks by audioTrackScore, which scores a clean rendition 20 against
+// its DRC twin's 19, so there is no tie and the penalty decides. The sentence
+// that used to stand here claimed the opposite on both halves. The dedicated
+// pin lives in TestSelectBestAudioPrefersTheOriginalNonDRCTrack, where the
+// penalty is the only thing under test.
+func TestDeduplicateFormatsCollapsesEachItagToThePreferredRendition(t *testing.T) {
+	got := deduplicateFormats(context.Background(), dubbedPool())
+
+	perItag := map[int][]Format{}
+	var order []int
+	for _, f := range got {
+		if _, seen := perItag[f.Itag]; !seen {
+			order = append(order, f.Itag)
+		}
+		perItag[f.Itag] = append(perItag[f.Itag], f)
+	}
+	for _, itag := range order {
+		if n := len(perItag[itag]); n != 1 {
+			t.Errorf("itag %d reaches the consumers as %d renditions, want exactly 1: %+v", itag, n, perItag[itag])
+		}
+	}
+	for itag, wantURL := range map[int]string{140: "https://r1/a140-en", 251: "https://r1/a251-en"} {
+		if len(perItag[itag]) == 0 {
+			t.Fatalf("itag %d vanished: %+v", itag, got)
+		}
+		// The FIRST entry of the itag is what resolveFormatURLByItag returns,
+		// so the preferred rendition has to be that one.
+		if first := perItag[itag][0]; first.URL != wantURL {
+			t.Errorf("itag %d resolves to %q (track %q, drc=%v), want the clean original %q",
+				itag, first.URL, first.AudioTrackName, first.IsDrc, wantURL)
+		}
+	}
+	if len(perItag[137]) != 1 || perItag[137][0].URL != "https://r1/v137" {
+		t.Errorf("the video itag must pass through untouched: %+v", perItag[137])
+	}
+}
+
+// TestDeduplicateFormatsLeavesAnOrdinaryPoolUnchanged is the differential pin
+// for the collapse: a response with no audioTrack and no isDrc anywhere — every
+// ordinary video — must come out of dedup exactly as it did before the collapse
+// existed. One row per itag, the lowest auth level winning each itag, sorted by
+// itag ascending. The collapse can only ever fire where the 3-part key already
+// produced two rows for one itag, which needs a track id or a DRC flag.
+//
+// Mutants this kills:
+//   - the collapsed rows emitted in map order → the itag order breaks
+//   - the collapse running before the auth tie-break → the WEB row wins itag 140
+//   - the collapse dropping a distinct itag    → fewer than 3 rows
+func TestDeduplicateFormatsLeavesAnOrdinaryPoolUnchanged(t *testing.T) {
+	tv, web, vr := AuthLevelTVAuth, AuthLevelWeb, AuthLevelAndroidVR
+	pool := []Format{
+		{Itag: 248, URL: "https://web/v248", MimeType: "video/webm; codecs=\"vp9\"", Source: "web", AuthLevel: &web},
+		{Itag: 140, URL: "https://web/a140", MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Source: "web", AuthLevel: &web},
+		{Itag: 140, URL: "https://tv/a140", MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Source: "tv_auth", AuthLevel: &tv},
+		{Itag: 137, URL: "https://vr/v137", MimeType: "video/mp4; codecs=\"avc1.640028\"", Source: "android_vr", AuthLevel: &vr},
+		{Itag: 137, URL: "https://web/v137", MimeType: "video/mp4; codecs=\"avc1.640028\"", Source: "web", AuthLevel: &web},
+	}
+
+	got := deduplicateFormats(context.Background(), pool)
+
+	want := []struct {
+		itag int
+		url  string
+	}{{137, "https://web/v137"}, {140, "https://tv/a140"}, {248, "https://web/v248"}}
+	if len(got) != len(want) {
+		t.Fatalf("dedup returned %d rows, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].Itag != w.itag || got[i].URL != w.url {
+			t.Errorf("row %d = itag %d %q, want itag %d %q (the pre-collapse output, row for row)",
+				i, got[i].Itag, got[i].URL, w.itag, w.url)
+		}
+	}
+}
+
+// TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsDRM pins the
+// classification input. Dropping DRM formats at parse changed what
+// classifyStream is told: a finished broadcast whose formats are ALL DRM now
+// reports zero formats, and `!hasFormats && lbd != nil` returns upcoming. The
+// authenticated cascade absorbs that (an empty pool falls through to the next
+// client), but ProbeVideoStatusAuthenticated is ONE tv fetch with no fallback
+// and it is what the waiting-room poller reads — so the account the yt-dlp
+// #12563 experiment hits would wait forever on a stream that already ended.
+// The response HAD formats; classification must be told so.
+//
+// Mutants this kills:
+//   - classifying on the post-filter count (len(formats) > 0) → upcoming
+func TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsDRM(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	data := decodePlayerJSON(t, `{
+		"playabilityStatus": {"status": "OK"},
+		"videoDetails": {"videoId": "DRMonlyVid1", "title": "Ended Broadcast", "author": "Ch", "isLiveContent": true},
+		"microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {
+			"isLiveNow": false, "startTimestamp": "2026-09-16T10:00:00+00:00", "endTimestamp": "2026-09-16T12:30:00+00:00"}}},
+		"streamingData": {"adaptiveFormats": [
+			{"itag": 137, "url": "https://tv/v", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "drmFamilies": ["WIDEVINE"]},
+			{"itag": 140, "url": "https://tv/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "drmFamilies": ["WIDEVINE"]}
+		]}
+	}`)
+
+	info, err := p.parsePlayerResponse(context.Background(), data, "", nil, "DRMonlyVid1")
+	if err != nil {
+		t.Fatalf("parsePlayerResponse: %v", err)
+	}
+	if len(info.Formats) != 0 {
+		t.Fatalf("the DRM formats must still be dropped, got %+v", info.Formats)
+	}
+	if info.StreamStatus != StreamPostLive || !info.IsPostLiveDVR || info.IsUpcoming {
+		t.Errorf("status = %q (postLiveDVR=%v upcoming=%v), want post_live — a DRM-only response still HAD formats",
+			info.StreamStatus, info.IsPostLiveDVR, info.IsUpcoming)
+	}
+}
+
+// TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsSABR is the URL-less
+// half of the rule the DRM test above pins. A client YouTube has forced onto
+// SABR returns formats with neither `url` nor `signatureCipher` — the response
+// still PROVES the broadcast has media, but every entry is dropped, so
+// classifying on the post-filter count turns a finished stream into
+// `upcoming`. That is the same stall for the same reason: the single-client
+// ProbeVideoStatusAuthenticated path has no fallback, and the waiting-room
+// poller would wait forever on a stream that already ended.
+//
+// Mutants this kills:
+//   - classifying on len(formats) alone, i.e. URLlessFormats not folded into
+//     the hasFormats predicate → upcoming
+func TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsSABR(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	data := decodePlayerJSON(t, `{
+		"playabilityStatus": {"status": "OK"},
+		"videoDetails": {"videoId": "SABRonlyVid", "title": "Ended Broadcast", "author": "Ch", "isLiveContent": true},
+		"microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {
+			"isLiveNow": false, "startTimestamp": "2026-09-16T10:00:00+00:00", "endTimestamp": "2026-09-16T12:30:00+00:00"}}},
+		"streamingData": {
+			"serverAbrStreamingUrl": "https://rr1---sn-x.googlevideo.com/videoplayback?...",
+			"adaptiveFormats": [
+				{"itag": 137, "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080},
+				{"itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+			]
+		}
+	}`)
+
+	info, err := p.parsePlayerResponse(context.Background(), data, "", nil, "SABRonlyVid")
+	if err != nil {
+		t.Fatalf("parsePlayerResponse: %v", err)
+	}
+	if len(info.Formats) != 0 {
+		t.Fatalf("the URL-less formats must still be dropped, got %+v", info.Formats)
+	}
+	if info.StreamStatus != StreamPostLive || !info.IsPostLiveDVR || info.IsUpcoming {
+		t.Errorf("status = %q (postLiveDVR=%v upcoming=%v), want post_live — a SABR-forced response still HAD formats",
+			info.StreamStatus, info.IsPostLiveDVR, info.IsUpcoming)
+	}
+}
+
+// drmOKBody is an otherwise-adequate player response whose pool also carries a
+// DRM-protected rendition — the shape an account in YouTube's tv-client DRM
+// experiment gets back from MOST clients in a cascade (yt-dlp issue #12563).
+const drmOKBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"},
+	"streamingData": {"adaptiveFormats": [
+		{"itag": 299, "url": "https://example.com/v", "mimeType": "video/mp4; codecs=\"avc1.64002a\"", "width": 1920, "height": 1080},
+		{"itag": 140, "url": "https://example.com/a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""},
+		{"itag": 137, "url": "https://example.com/drm", "mimeType": "video/mp4; codecs=\"avc1.640028\"", "drmFamilies": ["WIDEVINE"]}
+	]}
+}`
+
+// TestDRMWarnIsOncePerExtractionNotPerResponse pins the DRM-skip report to
+// upstream's cardinality: `report_warning(..., only_once=True)`
+// (_video.py:3420-3428) fires ONCE per run, not once per player response. This
+// cascade parses several responses per extraction, and for an account in the
+// tv-client DRM experiment nearly all of them carry DRM formats — a per-
+// response Warn turns one diagnosis into a repeating wall at the default log
+// level.
+//
+// Both responses here really are parsed: the watch page's own player response
+// and the TV client's, which is why the transport call assertion is part of the
+// test — without it a cascade that gave up after the watch page would pass
+// vacuously.
+//
+// Mutants this kills:
+//   - the Warn left per response → two DRM lines from one cascade
+//   - the dedupe flag hoisted to a package-level var or onto PlayerAPI, i.e.
+//     made per-process instead of per-extraction → the second cascade stays
+//     silent
+func TestDRMWarnIsOncePerExtractionNotPerResponse(t *testing.T) {
+	origFetch := fetchWatchPage
+	fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
+		return &WatchPageResult{
+			Ytcfg:          DefaultYtcfg(),
+			PlayerResponse: decodePlayerJSON(t, drmOKBody),
+		}, nil
+	}
+	t.Cleanup(func() { fetchWatchPage = origFetch })
+
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{
+		"7": {http.StatusOK, drmOKBody}, // TV_DOWNGRADED
+	}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	lg := &warnCapturingLogger{}
+	p := NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), lg)
+
+	drmWarns := func() []string {
+		var out []string
+		for _, w := range lg.warns {
+			if strings.Contains(w, "DRM") {
+				out = append(out, w)
+			}
+		}
+		return out
+	}
+
+	if _, err := p.GetVideoInfoPublic(context.Background(), "test1234567"); err != nil {
+		t.Fatalf("cascade failed before the cardinality could be judged: %v", err)
+	}
+	if !slices.Contains(tr.calls, "7") {
+		t.Fatalf("the TV client was never asked (calls = %v), so only one response was parsed", tr.calls)
+	}
+	if got := drmWarns(); len(got) != 1 {
+		t.Fatalf("one extraction logged %d DRM lines, want exactly 1: %q", len(got), got)
+	}
+
+	// A second extraction is a second run: it must report again, or an
+	// operator only ever learns about the DRM experiment once per process.
+	if _, err := p.GetVideoInfoPublic(context.Background(), "test1234567"); err != nil {
+		t.Fatalf("second cascade failed: %v", err)
+	}
+	if got := drmWarns(); len(got) != 2 {
+		t.Fatalf("two extractions logged %d DRM lines, want exactly 2: %q", len(got), got)
+	}
+}
+
+// TestParsePlayabilityStatusRecognisesEveryAgeGateShape ports yt-dlp's
+// _is_agegated (_video.py:2894-2904). The bypass gate downstream
+// (player_api_strategy.go:382 and :557) matches PlayabilityAgeRestricted
+// LITERALLY, so an "unknown" verdict never reaches the web_embedded age path
+// at all.
+//
+// The reason substrings are the load-bearing half: upstream's status entries
+// are lower-case and substring-matched against the raw upper-case `status`, so
+// upstream in practice recognises these responses through their REASON.
+//
+// Mutants this kills:
+//   - the AGE_CHECK_REQUIRED arm dropped        → the reason-less row reports "unknown"
+//   - the reason substrings dropped             → the inappropriate/confirm rows report "unknown"
+//   - desktopLegacyAgeGateReason not consulted  → that row reports "unknown"
+//   - the `statusCode != "OK"` guard dropped, letting the age block preempt
+//     the OK arm                                → the two OK rows report "age_restricted",
+//     i.e. a playable response aborts the job
+//   - hasDesktopLegacyAgeGate's default arm calling an empty container truthy
+//     → the empty-map/empty-list rows report "age_restricted"
+//   - the age match hoisted above the upcoming check → the synthetic ordering
+//     row reports "age_restricted"
+//
+// The brief's other ordering half — "the age match placed above the
+// members-only arm" — describes the SHIPPED code and so can never be a mutant:
+// the members-only tests live inside `case "LOGIN_REQUIRED"` / `case
+// "UNPLAYABLE"`, already below the age block. The four regression rows at the
+// end are guards rather than mutant-killers for that half: none of the three
+// substrings occurs in YouTube's membership ("Join this channel to get access
+// to members-only content") or waiting-room text, and that disjointness is
+// what makes the placement safe. They are what would fail if a future edit
+// widened the substring list far enough to overlap either message (a list
+// carrying "content", for one) or YouTube reworded them.
+func TestParsePlayabilityStatusRecognisesEveryAgeGateShape(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		want   PlayabilityError
+	}{
+		{"AGE_CHECK_REQUIRED", `{"status": "AGE_CHECK_REQUIRED", "reason": "Sign in to confirm your age"}`, PlayabilityAgeRestricted},
+		// Added to the brief's table: with a reason present, the substring half
+		// already catches AGE_CHECK_REQUIRED, so the status arm's own mutant
+		// ("the AGE_CHECK_REQUIRED arm dropped") survives every other row. This
+		// reason-less shape is the one that reaches the status switch, and
+		// YouTube does serve the code with no reason text on some clients.
+		{"AGE_CHECK_REQUIRED without a reason", `{"status": "AGE_CHECK_REQUIRED"}`, PlayabilityAgeRestricted},
+		{"AGE_VERIFICATION_REQUIRED", `{"status": "AGE_VERIFICATION_REQUIRED", "reason": "This video may be inappropriate for some users."}`, PlayabilityAgeRestricted},
+		{"UNPLAYABLE inappropriate", `{"status": "UNPLAYABLE", "reason": "This video may be inappropriate for some users."}`, PlayabilityAgeRestricted},
+		{"UNPLAYABLE age-restricted", `{"status": "UNPLAYABLE", "reason": "This video is age-restricted and can only be watched on YouTube."}`, PlayabilityAgeRestricted},
+		{"LOGIN_REQUIRED confirm your age", `{"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm your age"}`, PlayabilityAgeRestricted},
+		{"desktopLegacyAgeGateReason", `{"status": "UNPLAYABLE", "reason": "", "desktopLegacyAgeGateReason": 1}`, PlayabilityAgeRestricted},
+
+		// A response YouTube itself marks PLAYABLE is not an error, whatever
+		// age markers ride along with it. checkPlayability
+		// (internal/worker/stream_processor.go) aborts the job for every
+		// non-ok verdict, and the age_restricted arm suppresses the
+		// notification — so reclassifying an OK response ends a downloadable
+		// stream in silence. Upstream never creates the conflict: _is_agegated
+		// only ever APPENDS clients (_video.py:3157-3175), it does not
+		// override a playability verdict.
+		{"OK with a legacy age gate stays ok", `{"status": "OK", "desktopLegacyAgeGateReason": 1}`, PlayabilityOK},
+		{"OK with an age-flavoured reason stays ok", `{"status": "OK", "reason": "This video may be inappropriate for some users."}`, PlayabilityOK},
+
+		// An empty container is FALSY in Python, so upstream's truthiness test
+		// does not see an age gate here either.
+		{"empty-map legacy gate is not a gate", `{"status": "UNPLAYABLE", "reason": "Playback on other websites has been disabled", "desktopLegacyAgeGateReason": {}}`, PlayabilityUnknown},
+		{"empty-list legacy gate is not a gate", `{"status": "UNPLAYABLE", "reason": "Playback on other websites has been disabled", "desktopLegacyAgeGateReason": []}`, PlayabilityUnknown},
+
+		// Synthetic — NOT a YouTube-observed reason. It pins the evaluation
+		// ORDER contract rather than a wire shape: a waiting room is never an
+		// error, even if its reason text ever carried an age substring.
+		{"upcoming wins over an age substring (synthetic)", `{"status": "LIVE_STREAM_OFFLINE", "reason": "This live event may be inappropriate for some users"}`, PlayabilityOK},
+
+		// Regressions the new match must NOT cause.
+		{"members only stays members only", `{"status": "LOGIN_REQUIRED", "reason": "Join this channel to get access to members-only content"}`, PlayabilityMembersOnly},
+		{"upcoming stays ok", `{"status": "LIVE_STREAM_OFFLINE", "reason": "Premieres in 3 hours"}`, PlayabilityOK},
+		{"private stays private", `{"status": "UNPLAYABLE", "reason": "This video is private."}`, PlayabilityPrivate},
+		{"plain unplayable stays unknown", `{"status": "UNPLAYABLE", "reason": "Playback on other websites has been disabled"}`, PlayabilityUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := parsePlayabilityStatus(decodePlayerJSON(t, tc.status))
+			if got != tc.want {
+				t.Errorf("parsePlayabilityStatus(%s) = %q, want %q", tc.status, got, tc.want)
+			}
+		})
+	}
 }

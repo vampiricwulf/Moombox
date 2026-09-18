@@ -9,13 +9,14 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/chat"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // TestEarlyChatNeedsRestart pins the upcoming-wait loop's restart decision.
 //
 // The loop used to gate the retry on `chatDl == nil` alone, so a downloader
 // whose run had ENDED — YouTube resets a waiting-room chat after a period of
-// inactivity, recoverStaleContinuation then exhausts its ~50-minute budget and
+// inactivity, recoverStaleContinuation then exhausts its ~35-minute budget and
 // the run leaves — stayed non-nil forever and nothing captured the waiting
 // room again until the process restarted.
 //
@@ -271,5 +272,49 @@ func TestWaitForLiveRestartsEarlyChatInOrder(t *testing.T) {
 	if armed <= start {
 		t.Errorf("chatStartedAt (line %d) must be re-armed AFTER sp.tryStartEarlyChat (line %d) — it times the run that was just started",
 			fset.Position(armed).Line, fset.Position(start).Line)
+	}
+}
+
+// TestWaitingRoomAuthFlipCoversEveryAuthWall is close-review Finding 18. The
+// waiting-room poll (B1) switched to the cookied probe on members_only and
+// login_required only, while the twin predicate every OTHER auth-wall decision
+// in this package uses — isAuthWalledPlayability — also names age_restricted.
+// An age-restricted upcoming stream therefore polled cookielessly for the
+// whole wait and never used the cookies from an age-verified account, which
+// are the documented remedy for exactly that wall.
+//
+// Cookies are still required: without them the flip would trade a bot-walled
+// cookieless probe for a bot-walled cookied one.
+//
+// Mutants this kills:
+//   - the predicate reverted to `members_only || login_required` → the
+//     age_restricted row goes false
+//   - the hasCookies guard dropped → the cookieless rows go true
+//   - the nil guard dropped → the nil row panics
+func TestWaitingRoomAuthFlipCoversEveryAuthWall(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		playability youtube.PlayabilityError
+		want        bool
+	}{
+		{"members only", youtube.PlayabilityMembersOnly, true},
+		{"login required", youtube.PlayabilityLoginRequired, true},
+		{"age restricted", youtube.PlayabilityAgeRestricted, true},
+		{"playable", youtube.PlayabilityOK, false},
+		{"unknown", youtube.PlayabilityUnknown, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &youtube.VideoInfo{PlayabilityError: tc.playability}
+			if got := waitingRoomAuthFlip(info, true); got != tc.want {
+				t.Errorf("waitingRoomAuthFlip(%q, cookies) = %v, want %v", tc.playability, got, tc.want)
+			}
+			if got := waitingRoomAuthFlip(info, false); got {
+				t.Errorf("waitingRoomAuthFlip(%q, no cookies) = true — a cookieless install has nothing to switch to", tc.playability)
+			}
+		})
+	}
+
+	if waitingRoomAuthFlip(nil, true) {
+		t.Error("a nil probe answer must not flip the poll")
 	}
 }

@@ -1,7 +1,10 @@
 // Package youtube provides YouTube Innertube API integration.
 package youtube
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // StreamStatus indicates the current state of a YouTube video.
 type StreamStatus string
@@ -86,6 +89,17 @@ type VideoInfo struct {
 	// cause instead of always to "your cookies expired".
 	SessionAuth SessionAuthState `json:"-"`
 
+	// Chat carries what the watch page already said about live chat, so chat
+	// setup does not fetch that page a second time. In-process hand-off only.
+	Chat ChatSource `json:"-"`
+
+	// FormatDiag records what this info's format list LOST on the way here
+	// (see FormatDiag). Diagnostic only — nothing downloads differently
+	// because of it — but it is what distinguishes "this client was forced
+	// onto SABR" and "every format was DRM" from "streamingData was empty",
+	// all three of which used to read as "formats 0".
+	FormatDiag FormatDiag `json:"-"`
+
 	// GvsBinding is the content binding GVS (segment-URL) PO tokens for this
 	// video must carry, and GvsBindingKind names the rule that produced it
 	// ("videoID", "datasyncID", "visitorData", "channelID"). Resolved once in
@@ -106,6 +120,92 @@ type VideoInfo struct {
 	// "day" (microformat uploadDate/publishDate fallback). Empty when
 	// PublishedAt is empty.
 	PublishedPrecision string `json:"publishedPrecision,omitempty"`
+}
+
+// ChatSource carries the chat-setup facts the WATCH PAGE this VideoInfo was
+// extracted from already yielded. FetchWatchPage extracts them on every call
+// and the strategies used to discard them, so both chat-start sites paid for a
+// SECOND 1-5 MB authenticated page moments after the first.
+//
+// The zero value means "no page was parsed for this info" — which is exactly
+// what a cookieless ANDROID_VR probe returns — and a consumer must fall back
+// to FetchWatchPage then.
+type ChatSource struct {
+	// FetchedAt is when the PAGE was fetched (WatchPageResult.FetchedAt),
+	// which is what the age window has to measure: a cascade can run for tens
+	// of seconds after the page arrived, so stamping this at the extraction's
+	// end made a token look fresher than it was (close-review Finding 10). A
+	// continuation is short-lived, so a consumer checks Usable rather than
+	// trusting the token forever.
+	FetchedAt time.Time
+	// Continuation is the chat continuation token. Empty means the page had
+	// no chat.
+	Continuation string
+	// IsReplay says which chat endpoint the token belongs to.
+	IsReplay bool
+	// Err is why extraction failed, for the consumer's debug log. Non-nil with
+	// an empty Continuation means "no chat available" with context.
+	Err error
+	// VisitorData is the page's own visitor data, which the chat poller sends
+	// as X-Goog-Visitor-Id.
+	VisitorData string
+}
+
+// chatSourceMaxAge bounds how long a carried continuation is trusted. Short,
+// because the token is short-lived; generous enough to cover the gap between
+// GetVideoInfo and the orchestrator actually starting chat. Past it the
+// consumer re-fetches, which is the old behaviour.
+const chatSourceMaxAge = 2 * time.Minute
+
+// Usable reports whether this source is recent enough to start a chat
+// downloader from without re-fetching the watch page.
+func (c ChatSource) Usable() bool {
+	return c.Continuation != "" && !c.FetchedAt.IsZero() && time.Since(c.FetchedAt) <= chatSourceMaxAge
+}
+
+// FormatDiag records why a client's format list came out the size it did.
+//
+// A client YouTube has forced onto SABR returns formats with neither `url`
+// nor `signatureCipher` plus a `streamingData.serverAbrStreamingUrl` — yt-dlp
+// says so out loud ("YouTube is forcing SABR streaming for this client",
+// _video.py:3527-3548). Moombox skipped those formats silently, so the death
+// of a client looked exactly like an empty response.
+//
+// The four counters are read at two different scopes, and the doc on each
+// says which:
+//
+//   - URLlessFormats and SabrForced describe the ONE response this VideoInfo
+//     was parsed from, because "which client was forced onto SABR" is a
+//     per-client fact and the per-client result log lines print them.
+//   - DRMSkipped and CollapsedRenditions describe the whole EXTRACTION: the
+//     cascade's single exit (finishExtraction) restamps them on the VideoInfo
+//     it returns, which is the object the worker reads when it has to explain
+//     why no suitable formats were found. On a VideoInfo that never went
+//     through a cascade — a probe, a direct parse — they hold that one
+//     response's figures instead.
+type FormatDiag struct {
+	// URLlessFormats — PER RESPONSE. Entries skipped for carrying no
+	// fetchable URL (no `url`, no usable `signatureCipher`).
+	URLlessFormats int
+	// SabrForced — PER RESPONSE. True when this response's streamingData
+	// carried serverAbrStreamingUrl.
+	SabrForced bool
+	// DRMSkipped — PER EXTRACTION on the VideoInfo a cascade returned; per
+	// response on any other. Entries dropped for carrying drmFamilies,
+	// SUMMED over the extraction's responses. A DRM entry never reaches the
+	// format pool, so there is no pool identity to collapse the copies
+	// several clients each returned against; the figure is entries dropped,
+	// and the per-client log lines are what attribute them to a client.
+	DRMSkipped int
+	// CollapsedRenditions — PER EXTRACTION on the VideoInfo a cascade
+	// returned; zero on any other, because nothing else builds a pool. The
+	// alternate audio renditions the POOL lost: dubbed and DRC entries that
+	// shared an itag with the rendition the audio-track preference kept.
+	// Counted where the collapse happens, in deduplicateFormats, and
+	// therefore AFTER the cross-client merge — a rendition three clients each
+	// returned counts once, where summing the per-response figures would
+	// count it three times.
+	CollapsedRenditions int
 }
 
 // Format contains video/audio format information from YouTube API.
@@ -136,6 +236,22 @@ type Format struct {
 	Fps             *int   `json:"fps,omitempty"`
 	Source          string `json:"source,omitempty"`
 	AuthLevel       *int   `json:"authLevel,omitempty"`
+
+	// AudioTrackID is `audioTrack.id` — the per-language identity of a dubbed
+	// audio rendition ("en.4", "ja.3"). Two thirds of upstream's stream
+	// identity live here and in IsDrc: a dubbed video lists SEVERAL itag-140
+	// entries from the same client that differ only by this field.
+	AudioTrackID string `json:"audioTrackId,omitempty"`
+	// AudioTrackName is `audioTrack.displayName`. The only place upstream can
+	// read "original" or "descriptive" from, so it is what ranks the tracks.
+	AudioTrackName string `json:"audioTrackName,omitempty"`
+	// AudioIsDefault mirrors `audioTrack.audioIsDefault` — YouTube's own pick
+	// for this viewer, upstream's DEFAULT_LANG_VALUE.
+	AudioIsDefault bool `json:"audioIsDefault,omitempty"`
+	// IsDrc marks a Dynamic Range Compression (loudness-normalised) rendition.
+	// A separate STREAM upstream, not a variant of the clean one, so it must
+	// not evict its twin — and the clean one is preferred when both exist.
+	IsDrc bool `json:"isDrc,omitempty"`
 
 	// EncryptedSig is the `s` field from a signatureCipher entry, captured
 	// at parse-time and decrypted on demand by cipher.ResolveFormatURL.

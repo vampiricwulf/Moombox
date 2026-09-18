@@ -41,7 +41,7 @@ func isTerminalPlayability(p youtube.PlayabilityError) bool {
 //
 // The finished arm is the fix for the waiting-room wipe. YouTube resets a
 // waiting-room chat after a period of inactivity; the run then exhausts
-// recoverStaleContinuation's ~50-minute budget and leaves. The downloader
+// recoverStaleContinuation's ~35-minute budget and leaves. The downloader
 // stays non-nil, so a `chatDl == nil` gate never restarted it and nothing
 // captured the waiting room again until the process restarted.
 //
@@ -80,6 +80,25 @@ func runEarlyChat(finished *atomic.Bool, onPanic func(r any), run func()) {
 		}
 	}()
 	run()
+}
+
+// waitingRoomAuthFlip is the waiting-room poll's B1 decision: whether this
+// probe answer means the cookieless ANDROID_VR probe can no longer see the
+// stream and the poll must switch to the cookied TV one for the rest of the
+// wait.
+//
+// It is isAuthWalledPlayability — the SAME predicate `interruptionSignal.observe`
+// and `runLiveStreamDownload`'s requiresAuthProbe use — rather than its own
+// disjunction, because the two drifted: B1 listed members_only and
+// login_required only, so an AGE-RESTRICTED stream kept polling cookielessly
+// for the whole wait and never used the cookies from the age-verified account
+// that are the documented remedy (close-review Finding 18). One predicate is
+// what stops that happening again.
+//
+// hasCookies is passed in rather than read here so the decision is testable
+// without a network-capable *youtube.Service.
+func waitingRoomAuthFlip(info *youtube.VideoInfo, hasCookies bool) bool {
+	return info != nil && hasCookies && isAuthWalledPlayability(info.PlayabilityError)
 }
 
 func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, initialInfo *youtube.VideoInfo) (*StreamProcessResult, error) {
@@ -326,13 +345,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			chatStartedAt = time.Now()
 		}
 
-		// B1: Handle transition to members-only during upcoming
-		if !membersOnly &&
-			(probeInfo.PlayabilityError == youtube.PlayabilityMembersOnly ||
-				probeInfo.PlayabilityError == youtube.PlayabilityLoginRequired) &&
-			sp.yt.Auth.HasAuthCookies() {
-			sp.logger.Info("stream became members-only, switching to authenticated probe",
-				"videoID", job.VideoID)
+		// B1: the wall went up mid-wait — switch to the cookied probe.
+		if !membersOnly && waitingRoomAuthFlip(probeInfo, sp.yt.Auth.HasAuthCookies()) {
+			sp.logger.Info("stream is auth-walled, switching to the authenticated probe",
+				"videoID", job.VideoID, "playability", string(probeInfo.PlayabilityError))
 			membersOnly = true
 		}
 
@@ -470,30 +486,29 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 // flag has no reader left, which is harmless — the orchestrator never wires
 // OnFinish itself.
 func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.Job, info *youtube.VideoInfo, onProgress func(chat.ChatProgress)) (*chat.ChatDownloader, *atomic.Bool) {
-	// Fetch watch page to get chat continuation token. One-shot call, so a
-	// snapshot is correct here; the chat downloader below gets a live getter.
+	// The cookie header is only needed for the FALLBACK watch-page fetch.
+	// One-shot call, so a snapshot is correct here; the chat downloader below
+	// gets a live getter.
 	cookieHeader := ""
 	if sp.yt != nil && sp.yt.Auth != nil {
 		cookieHeader = sp.yt.Auth.GetCookieHeader()
 	}
 
-	watchResult, err := youtube.FetchWatchPage(ctx, job.VideoID, cookieHeader)
+	// This site is usually called with a ProbeVideoStatus info (ANDROID_VR, no
+	// watch page), whose Chat is the zero value — so it normally falls back and
+	// behaves exactly as before. When the caller does hold a freshly parsed
+	// page (a full fetch's VideoInfo), the carried source saves the second
+	// 1-5 MB download.
+	src, err := chatSourceFor(ctx, info, job.VideoID, cookieHeader)
 	if err != nil {
 		sp.logger.Debug("failed to fetch watch page for early chat", "err", err, "videoID", job.VideoID)
 		return nil, nil
 	}
-
-	continuation := watchResult.ChatContinuation
-	isReplay := watchResult.ChatIsReplay
-	if continuation == "" {
-		sp.logger.Debug("no chat continuation for early chat", "videoID", job.VideoID, "err", watchResult.ChatErr)
+	if src.Continuation == "" {
+		sp.logger.Debug("no chat continuation for early chat", "videoID", job.VideoID, "err", src.Err)
 		return nil, nil
 	}
-
-	visitorData := ""
-	if watchResult.Ytcfg != nil {
-		visitorData = watchResult.Ytcfg.VisitorData
-	}
+	continuation, isReplay, visitorData := src.Continuation, src.IsReplay, src.VisitorData
 
 	// Create staging dir for early chat output (matches TypeScript behavior)
 	var stagingBase string

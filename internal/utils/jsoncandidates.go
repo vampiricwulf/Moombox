@@ -2,7 +2,6 @@ package utils
 
 import (
 	"bytes"
-	"encoding/json"
 	"regexp"
 )
 
@@ -116,20 +115,35 @@ func FindJSONObjectCandidate(page []byte, anchors []*regexp.Regexp, accept func(
 	return nil, false
 }
 
-// IsNonEmptyJSONObject is the accept predicate the two raw-literal consumers
-// pass to FindJSONObjectCandidate — there is no default: the literal must be
-// real JSON and must carry something between its braces.
+// IsNonEmptyJSONBody is the cheap half of an accept predicate for
+// FindJSONObjectCandidate, which has no default: it checks ONLY that the
+// literal has something between its braces.
 //
-// json.Valid is a scan, not a decode — it allocates nothing and does not build
-// the map or envelope the caller is about to build anyway — so a caller that
-// unmarshals afterwards pays one extra pass, not one extra decode. The
-// emptiness half is load-bearing on its own: `{}` scans and decodes perfectly
-// well, so without it a forged empty object would win the search exactly as a
-// forged non-object cannot.
-func IsNonEmptyJSONObject(obj []byte) bool {
+// For a caller that decodes the literal into a typed envelope immediately
+// afterwards, the decode IS the validity test — json.Unmarshal runs the very
+// same check over the whole input before it decodes anything — and json.Valid
+// is therefore a second full pass over a multi-megabyte literal (measured at
+// ~3 ms of an 18 ms chat-continuation extraction on a 4.7 MB page).
+//
+// On go1.27 `encoding/json` is jsonv2-backed, and the guarantee that holds is
+// DefaultOptionsV1's ReportErrorsWithLegacySemantics option: "the syntactic
+// structure of the JSON input is fully validated before performing the
+// semantic unmarshaling". Named so the next Go bump does not read the
+// paragraph above as a stale v1 implementation detail.
+//
+// extractPlayerResponse has always worked this way. The emptiness half stays:
+// `{}` scans and decodes perfectly well, so without it a forged empty object
+// would win the search exactly as a forged non-object cannot.
+//
+// There is no validating twin any more: IsNonEmptyJSONObject ran json.Valid as
+// well, and every candidate consumer in this tree decodes, so it had no
+// production caller and was deleted (close-review Finding 15). A future
+// raw-literal consumer that genuinely does not decode must pair this with its
+// own validity check.
+func IsNonEmptyJSONBody(obj []byte) bool {
 	if len(obj) < 2 {
 		return false
 	}
 	// obj always comes from ScanBalancedJSONObject, so it is at least `{}`.
-	return len(bytes.TrimSpace(obj[1:len(obj)-1])) > 0 && json.Valid(obj)
+	return len(bytes.TrimSpace(obj[1:len(obj)-1])) > 0
 }

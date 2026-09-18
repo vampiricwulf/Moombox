@@ -57,6 +57,38 @@ func SelectBestFormatsWithLogger(formats []Format, maxResolution int, prefer60fp
 	return selectBestFormatsImpl(formats, maxResolution, prefer60fps, logger)
 }
 
+// audioTrackScore ranks one audio format's TRACK against the others. Ported
+// from yt-dlp's get_language_code_and_preference (_video.py:3277-3291), whose
+// constants are ORIGINAL_LANG_VALUE = 10 and DEFAULT_LANG_VALUE = 5, with
+// 'descriptive' at -10 and everything else at -1.
+//
+// The DRC penalty is upstream's too, and sits in the same relative position:
+// yt-dlp folds it into the `quality` rung (`q(quality) - bool(isDrc) / 2`,
+// _video.py:3467), and `quality` falls between `lang` and `acodec`/`br` in the
+// default sort (utils/_utils.py:5357) — exactly where this applies it. Only
+// the encoding differs: doubled rungs and a -1 here, a -0.5 there. It is a
+// TIE-BREAK inside a track, never across tracks: a loudness-normalised
+// rendition is a processed copy of the same audio, so given both we archive
+// the untouched one.
+func audioTrackScore(f *Format) int {
+	name := strings.ToLower(f.AudioTrackName)
+	score := -1
+	switch {
+	case strings.Contains(name, "descriptive"):
+		score = -10
+	case strings.Contains(name, "original"):
+		score = 10
+	case f.AudioIsDefault:
+		score = 5
+	}
+	// ×2 so the DRC penalty can never move a format across a track boundary.
+	score *= 2
+	if f.IsDrc {
+		score--
+	}
+	return score
+}
+
 func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool, logger interface {
 	Debug(msg string, args ...any)
 }) SelectedFormats {
@@ -195,6 +227,18 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 			if bestAudio == nil {
 				bestAudio = f
 				bestAudioCodecScore = cachedAudioCodecScore(f.MimeType)
+				continue
+			}
+
+			// Track identity first: archiving the wrong LANGUAGE is worse than
+			// archiving a lesser encoder, so this outranks codec and bitrate.
+			fTrack := audioTrackScore(f)
+			bestTrack := audioTrackScore(bestAudio)
+			if fTrack != bestTrack {
+				if fTrack > bestTrack {
+					bestAudio = f
+					bestAudioCodecScore = cachedAudioCodecScore(f.MimeType)
+				}
 				continue
 			}
 

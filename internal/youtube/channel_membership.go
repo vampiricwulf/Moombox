@@ -193,15 +193,19 @@ type ytInitialTabs struct {
 // back to the channel Home tab (or a join upsell with no selected tab), which
 // this reports as (nil, false) so the caller ingests zero public videos.
 func parseMembershipTab(data []byte) ([]MembershipVideo, bool) {
-	raw, ok := extractYtInitialData(data)
-	if !ok {
-		return nil, false
-	}
-
 	// Decode only the tab wrapper; each tab body stays raw so we skip the deep
 	// parse of every non-selected tab (and skip it entirely for a non-member).
+	// That decode is also the candidate acceptance test, so a forged literal
+	// this envelope cannot read is skipped rather than ending the search.
 	var env ytInitialTabs
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if !extractYtInitialDataInto(data, func(obj []byte) bool {
+		var cand ytInitialTabs
+		if json.Unmarshal(obj, &cand) != nil {
+			return false
+		}
+		env = cand
+		return true
+	}) {
 		return nil, false
 	}
 
@@ -351,20 +355,29 @@ func rendererTitle(r map[string]any) string {
 	return b.String()
 }
 
-// extractYtInitialData pulls the ytInitialData JSON object out of a channel
-// (or watch) page: an anchored assignment prefix, then a string-aware
-// brace-depth scan from the `{` the match ends on. Returns a sub-slice of the
-// input (no copy) and true on success. Balancing braces rather than using a
-// non-greedy regex is necessary because the channel payload is large and
-// deeply nested; working on []byte avoids copying the ~1 MB page.
+// extractYtInitialDataInto locates the ytInitialData JSON object on a channel
+// (or watch) page — an anchored assignment prefix, then a string-aware
+// brace-depth scan from the `{` the match ends on — and offers each candidate
+// to decode, which is BOTH the consumer's typed decode and the acceptance
+// test: the shape extractPlayerResponse has always used. Reports whether any
+// candidate was accepted. Balancing braces rather than using a non-greedy
+// regex is necessary because the channel payload is large and deeply nested;
+// working on []byte avoids copying the ~1 MB page, and the literal decode
+// reads is a sub-slice of it.
 //
-// Candidates are iterated, not first-matched (utils.FindJSONObjectCandidate).
-// The acceptance test is deliberately cheap — valid, non-empty JSON, by scan
-// rather than by decode — because both callers (parseMembershipTab,
-// extractChatContinuation) unmarshal the literal into their own typed
-// envelopes immediately afterwards, and a full map decode of a megabyte-scale
-// literal purely to decide whether to accept it would cost more than the
-// parse it guards.
-func extractYtInitialData(data []byte) ([]byte, bool) {
-	return utils.FindJSONObjectCandidate(data, ytInitialDataAnchors, utils.IsNonEmptyJSONObject)
+// Candidates are iterated, not first-matched (utils.FindJSONObjectCandidate),
+// and there is NO cap on how many are tried: a cap re-opens the denial the
+// iterator exists to close (Arc 3 fix-wave ruling, 2026-09-15).
+//
+// The acceptance used to be a json.Valid scan FOLLOWED by the caller's decode
+// — two full passes over a ~4.4 MB literal, three counting the validity check
+// json.Unmarshal runs itself (report #60 / YOUTUBE-15). The decode alone
+// answers the same question, so the cheap half of the old predicate
+// (utils.IsNonEmptyJSONBody: something between the braces, which `{}` fails
+// and a decode would not) is all that runs ahead of it.
+func extractYtInitialDataInto(data []byte, decode func(obj []byte) bool) bool {
+	_, ok := utils.FindJSONObjectCandidate(data, ytInitialDataAnchors, func(obj []byte) bool {
+		return utils.IsNonEmptyJSONBody(obj) && decode(obj)
+	})
+	return ok
 }
