@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 // TrimOptions configures trimming and encoding during muxing.
@@ -70,12 +71,27 @@ var ffmpegPathOS = runtime.GOOS
 // policy (sweep-2 ENGINE-12). Only paths that actually need the prefix get it,
 // so the ordinary case is byte-identical to before and carries no risk from
 // FFmpeg's own path parsing.
+//
+// Both halves of "actually need" have to be measured the way Windows measures
+// them, or that containment claim is false:
+//
+//   - MAX_PATH counts UTF-16 CODE UNITS. len(p) counts UTF-8 bytes — three per
+//     CJK rune, four per emoji — so a 140-unit Japanese title (380 bytes) or a
+//     220-unit emoji one (420 bytes) used to be rewritten for nothing. For a
+//     VTuber-stream archiver those are the characteristic filenames, not
+//     exotic inputs.
+//   - the string FFmpeg has to open is the RESOLVED path, so the length is
+//     measured after filepath.Abs. A relative argument still comes back
+//     byte-identical when it resolves to something short.
 func ffmpegPathArg(p string) string {
-	if ffmpegPathOS != "windows" || p == "" || len(p) < 260 || strings.HasPrefix(p, `\\?\`) {
+	if ffmpegPathOS != "windows" || p == "" || strings.HasPrefix(p, `\\?\`) {
 		return p
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
+		return p
+	}
+	if len(utf16.Encode([]rune(abs))) < 260 {
 		return p
 	}
 	if strings.HasPrefix(abs, `\\`) {

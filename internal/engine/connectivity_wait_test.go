@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -76,5 +77,22 @@ func TestCallIsOnlineSingleFlight(t *testing.T) {
 
 	if n := starts.Load(); n != 1 {
 		t.Fatalf("probe invocations = %d, want 1 — callIsOnline is not single-flighted", n)
+	}
+
+	// Do not return while this flight is still registered. The probe goroutine
+	// clears isOnlineInFlight in its deferred func, and a test that started
+	// inside that window would attach to the finished flight and get `true`
+	// WITHOUT invoking its own probe — two engine tests count their own probe
+	// invocations (downloader_dash_headseq_test.go,
+	// downloader_hls_maxtimeout_test.go), so leaving it registered is a latent
+	// order-dependent flake.
+	for {
+		isOnlineMu.Lock()
+		retired := isOnlineInFlight == nil
+		isOnlineMu.Unlock()
+		if retired {
+			return
+		}
+		runtime.Gosched()
 	}
 }

@@ -153,9 +153,11 @@ const (
 // t.Cleanup-restored assignment and exercise a genuine deadline without an
 // actual 30s wait; production code never mutates it. The rule that assignment
 // imposes is narrow: a test that MUTATES this var (or any other package-level
-// seam, e.g. syncMediaFile) must stay serial, because a parallel test reading
-// it while another writes it is a data race. It is NOT a ban on t.Parallel()
-// in this package — twenty-one tests here are parallel and must stay so. The
+// seam, e.g. syncMediaFile or ffmpegPathOS) must stay serial, because a
+// parallel test reading it while another writes it is a data race. It is NOT a
+// ban on t.Parallel() in this package — many tests here are parallel (the DASH
+// integration, interruption, catch-up and eviction-probe suites) and must stay
+// so; no count is quoted here because it would go stale. The
 // canonical statement of the rule sits on the mutating test itself, at
 // downloader_fetch_cancel_test.go's
 // TestFetchSegmentDerivedTimeoutIsAConnectivityFailure ("Do not add

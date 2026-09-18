@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestParseFFmpegTime(t *testing.T) {
@@ -310,6 +312,9 @@ func TestHasTrim(t *testing.T) {
 //     not parse.
 //   - never prefixing: the long path reaches FFmpeg raw, which is the bug.
 //   - prefixing on non-Windows: POSIX paths are corrupted.
+//
+// Do not add t.Parallel(): mutates the package-level ffmpegPathOS seam (see
+// the rule on SegmentTimeout in downloader.go).
 func TestFFmpegPathArg(t *testing.T) {
 	long := `C:\out\` + strings.Repeat("a", 300) + ".mp4"
 	short := `C:\out\clip.mp4`
@@ -334,49 +339,214 @@ func TestFFmpegPathArg(t *testing.T) {
 	}
 }
 
-// TestBuildArgsAppliesFfmpegPathArg is the differential half of ENGINE-12:
-// every path argument in the argv — both inputs and the output — goes through
-// ffmpegPathArg, and on a non-Windows host the argv is byte-identical to the
-// one built before this row existed.
+// utf16Len is what Windows counts against MAX_PATH. Deliberately computed here
+// rather than borrowed from the implementation, so a production switch back to
+// len() (UTF-8 bytes) is measured against an independent yardstick.
+func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
+
+// hostAbsPath builds a path that is already absolute ON THE RUNNING OS, so
+// filepath.Abs leaves it alone and the UTF-16 length a row claims is the
+// length ffmpegPathArg actually measures — on the Windows dev box and on the
+// Linux CI runner alike. (The Windows branch is exercised everywhere via the
+// ffmpegPathOS seam, and what the prefixed result looks like for a POSIX root
+// does not matter: every assertion here is "prefixed" or "not prefixed".)
+func hostAbsPath(t *testing.T, tail string) string {
+	t.Helper()
+	root := `C:\staging\`
+	if runtime.GOOS != "windows" {
+		root = "/staging/"
+	}
+	p := root + tail
+	abs, err := filepath.Abs(p)
+	if err != nil || abs != p {
+		t.Fatalf("fixture %q is not already absolute on %s (Abs = %q, err = %v)", p, runtime.GOOS, abs, err)
+	}
+	return p
+}
+
+// TestFFmpegPathArgMeasuresResolvedUTF16Length pins the two halves of the
+// measurement that the first cut of ENGINE-12 got wrong. MAX_PATH counts
+// UTF-16 code units, not UTF-8 bytes, and the string FFmpeg has to open is the
+// RESOLVED path, not the argument as written:
 //
-// Mutants: prefixing only the output (the inputs still reach FFmpeg raw, which
-// is the failure the row describes — FFmpeg opens the inputs first), and
-// applying the helper regardless of ffmpegPathOS (the Linux argv changes).
-func TestBuildArgsAppliesFfmpegPathArg(t *testing.T) {
+//   - a Japanese title (three bytes per unit) or an emoji-laden one (four
+//     bytes per two units) crosses 260 BYTES while sitting nowhere near 260
+//     units, and used to be rewritten for nothing — which falsified the row's
+//     whole containment claim on this archiver's characteristic filenames;
+//   - a relative path shorter than 260 whose absolute form is longer used to
+//     escape the prefix it needs.
+//
+// Mutants, one per group:
+//   - measuring len(p) (UTF-8 bytes): the CJK and emoji rows gain a prefix.
+//   - measuring before filepath.Abs: the relative row loses its prefix.
+//
+// Do not add t.Parallel(): mutates the package-level ffmpegPathOS seam.
+func TestFFmpegPathArgMeasuresResolvedUTF16Length(t *testing.T) {
+	prev := ffmpegPathOS
+	t.Cleanup(func() { ffmpegPathOS = prev })
+	ffmpegPathOS = "windows"
+
+	// 40x 日本語 = 120 units / 360 bytes; with root + suffix: 140 units on
+	// Windows, 138 on a POSIX root — both far below 260 units and far above
+	// 260 bytes, which is the whole point of the row.
+	cjk := hostAbsPath(t, strings.Repeat("日本語", 40)+".video.ts")
+	emoji := hostAbsPath(t, strings.Repeat("🎬", 100)+".video.ts")
+
+	pad := func(units int) string {
+		root := `C:\`
+		if runtime.GOOS != "windows" {
+			root = "/"
+		}
+		return root + strings.Repeat("a", units-len(root))
+	}
+
+	for _, tc := range []struct {
+		name          string
+		path          string
+		wantPrefix    bool
+		wantUnder     bool // the row claims "under 260 UTF-16 units"
+		wantBytesOver bool // …while being over 260 UTF-8 BYTES
+	}{
+		{"CJK title: 260+ bytes, far under 260 units", cjk, false, true, true},
+		{"emoji title: 260+ bytes, under 260 units", emoji, false, true, true},
+		{"259 UTF-16 units", pad(259), false, true, false},
+		{"260 UTF-16 units", pad(260), true, false, false},
+		{"300 ASCII characters", pad(300), true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The fixture must really have the shape the row names, or the
+			// assertion below proves nothing.
+			if under := utf16Len(tc.path) < 260; under != tc.wantUnder {
+				t.Fatalf("fixture has %d UTF-16 units (%d bytes); row claims under-260 = %v",
+					utf16Len(tc.path), len(tc.path), tc.wantUnder)
+			}
+			if tc.wantBytesOver && len(tc.path) < 260 {
+				t.Fatalf("fixture %q is %d bytes — under 260 in BOTH measures, so it cannot discriminate units from bytes",
+					tc.path, len(tc.path))
+			}
+			got := ffmpegPathArg(tc.path)
+			if gotPrefix := strings.HasPrefix(got, `\\?\`); gotPrefix != tc.wantPrefix {
+				t.Fatalf("ffmpegPathArg prefixed = %v, want %v (%d units, %d bytes)",
+					gotPrefix, tc.wantPrefix, utf16Len(tc.path), len(tc.path))
+			}
+			if !tc.wantPrefix && got != tc.path {
+				t.Fatalf("ffmpegPathArg rewrote a path it must leave alone: %q", got)
+			}
+		})
+	}
+
+	// A RELATIVE path under the limit whose resolved form is over it: the
+	// string FFmpeg opens is the resolved one, so this needs the prefix.
+	rel := strings.Repeat("r", 255) + ".mp4"
+	if utf16Len(rel) >= 260 {
+		t.Fatalf("relative fixture is %d units, want under 260", utf16Len(rel))
+	}
+	absRel, err := filepath.Abs(rel)
+	if err != nil {
+		t.Fatalf("Abs(rel): %v", err)
+	}
+	if utf16Len(absRel) < 260 {
+		t.Skipf("working directory too short to build the relative-path row (%d units resolved)", utf16Len(absRel))
+	}
+	if got := ffmpegPathArg(rel); !strings.HasPrefix(got, `\\?\`) {
+		t.Fatalf("ffmpegPathArg(relative, resolves to %d units) = %q, want the prefix", utf16Len(absRel), got[:min(12, len(got))])
+	}
+}
+
+// TestEveryFfmpegArgvBuilderAppliesThePathSeam is the differential half of
+// ENGINE-12, over EVERY argv this package hands to FFmpeg — not just the
+// archive mux. The row names FFmpeg's path ARGUMENTS in the plural, and the
+// two-pass encode and the Trim/concat builders carry the same user-composed
+// output path (output dir + channel subdir + title) as the mux does.
+//
+// For each builder: on the non-Windows OS value the argv is byte-identical to
+// what it was before the seam existed, and on Windows exactly that builder's
+// path arguments carry the prefix while every other argument and the argv
+// length are untouched.
+//
+// Mutants: leaving any ONE builder's path raw (that builder's row reports the
+// unprefixed argument), and applying the seam regardless of ffmpegPathOS (the
+// non-Windows argv changes).
+//
+// Do not add t.Parallel(): mutates the package-level ffmpegPathOS seam.
+func TestEveryFfmpegArgvBuilderAppliesThePathSeam(t *testing.T) {
 	m := NewMuxer("ffmpeg", &testLogger{})
 	stem := strings.Repeat("b", 300)
-	video := `C:\staging\` + stem + `.video.ts`
-	audio := `C:\staging\` + stem + `.audio.ts`
-	output := `C:\archive\` + stem + `.mp4`
+	video := hostAbsPath(t, stem+".video.ts")
+	audio := hostAbsPath(t, stem+".audio.m4a")
+	output := hostAbsPath(t, stem+".mp4")
+	// The concat list lives in an os.MkdirTemp directory, never in the user's
+	// output tree, so it is deliberately NOT a long path here — and it is
+	// deliberately not wrapped in production either (see buildConcatArgs).
+	list := filepath.Join(t.TempDir(), "concat.txt")
+	passLog := filepath.Join(t.TempDir(), "passlog")
+
+	opts := &TrimOptions{
+		TrimStartOffset: 1.5,
+		TrimDuration:    30,
+		VideoBitrate:    5000,
+		AudioBitrate:    128,
+		UsePreciseTrim:  true,
+		TwoPass:         true,
+	}
+	seg := TrimSegmentInput{InputPath: video, StartTime: 1.5, Duration: 30, NeedScale: true}
+
+	builders := []struct {
+		name  string
+		build func() []string
+		paths []string
+	}{
+		{"buildArgs", func() []string { return m.buildArgs(video, audio, output, opts, true) },
+			[]string{video, audio, output}},
+		{"buildTwoPassArgs/pass1", func() []string { a1, _ := m.buildTwoPassArgs(video, audio, output, passLog, opts); return a1 },
+			[]string{video}},
+		{"buildTwoPassArgs/pass2", func() []string { _, a2 := m.buildTwoPassArgs(video, audio, output, passLog, opts); return a2 },
+			[]string{video, audio, output}},
+		{"buildTrimSegmentArgs", func() []string { return m.buildTrimSegmentArgs(seg, output, 1920, 1080, 30, 18, 128) },
+			[]string{video, output}},
+		{"buildConcatArgs", func() []string { return m.buildConcatArgs(list, output) },
+			[]string{output}},
+	}
 
 	prev := ffmpegPathOS
 	t.Cleanup(func() { ffmpegPathOS = prev })
 
-	ffmpegPathOS = "linux"
-	posix := m.buildArgs(video, audio, output, nil, false)
-	if !slices.Contains(posix, video) || !slices.Contains(posix, audio) || !slices.Contains(posix, output) {
-		t.Fatalf("non-Windows argv rewrote a path: %v", posix)
-	}
+	for _, b := range builders {
+		t.Run(b.name, func(t *testing.T) {
+			ffmpegPathOS = "linux"
+			posix := b.build()
+			for _, p := range b.paths {
+				if !slices.Contains(posix, p) {
+					t.Fatalf("non-Windows argv rewrote %q: %v", p, posix)
+				}
+			}
 
-	ffmpegPathOS = "windows"
-	win := m.buildArgs(video, audio, output, nil, false)
-	if len(win) != len(posix) {
-		t.Fatalf("argv length changed with the prefix: %d vs %d", len(win), len(posix))
-	}
-	for i, raw := range posix {
-		switch raw {
-		case video, audio, output:
-			if !strings.HasPrefix(win[i], `\\?\`) {
-				t.Errorf("argv[%d] = %q, want the extended-length prefix", i, win[i])
+			ffmpegPathOS = "windows"
+			win := b.build()
+			if len(win) != len(posix) {
+				t.Fatalf("argv length changed with the prefix: %d vs %d", len(win), len(posix))
 			}
-			if !strings.HasSuffix(win[i], strings.TrimPrefix(raw, `C:\`)) {
-				t.Errorf("argv[%d] = %q, want it to still end in the original path", i, win[i])
+			prefixed := 0
+			for i, raw := range posix {
+				if slices.Contains(b.paths, raw) {
+					if !strings.HasPrefix(win[i], `\\?\`) {
+						t.Errorf("argv[%d] = %q, want the extended-length prefix", i, win[i])
+						continue
+					}
+					if !strings.HasSuffix(win[i], filepath.Base(raw)) {
+						t.Errorf("argv[%d] = %q, want it to still end in the original path", i, win[i])
+					}
+					prefixed++
+					continue
+				}
+				if win[i] != raw {
+					t.Errorf("argv[%d] = %q, want the non-path argument %q untouched", i, win[i], raw)
+				}
 			}
-		default:
-			if win[i] != raw {
-				t.Errorf("argv[%d] = %q, want the non-path argument %q untouched", i, win[i], raw)
+			if prefixed == 0 {
+				t.Fatalf("no path argument was prefixed; argv = %v", win)
 			}
-		}
+		})
 	}
 }
 

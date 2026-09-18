@@ -22,6 +22,9 @@ import (
 //
 // Mutant: dropping the syncMediaFile call — syncs is 0 and the persisted
 // position can outrun the bytes it describes.
+//
+// Do not add t.Parallel(): mutates the package-level syncMediaFile seam (see
+// the rule on SegmentTimeout in downloader.go).
 func TestSaveResumeFsyncsMediaFirst(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "video.ts")
@@ -59,6 +62,8 @@ func TestSaveResumeFsyncsMediaFirst(t *testing.T) {
 //
 // Mutant: logging the error and saving anyway — the sidecar advances past
 // data that may never reach the platter.
+//
+// Do not add t.Parallel(): mutates the package-level syncMediaFile seam.
 func TestSaveResumeSkipsSaveWhenFsyncFails(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "video.ts")
@@ -116,6 +121,8 @@ func TestSaveResumeSkipsZeroByteHunt(t *testing.T) {
 //   - fsyncing per written segment (or per playlist reload): syncs is 12+
 //     against 2 saves, which is the cost O-G bounded at ~4/min.
 //   - dropping the fsync from saveResume: syncs is 0 against 2 saves.
+//
+// Do not add t.Parallel(): mutates the package-level syncMediaFile seam.
 func TestMediaFsyncMatchesResumeSaveCount(t *testing.T) {
 	const liveReloads = 12
 	srv := hlsAdvancingServer(t, liveReloads)
@@ -368,6 +375,10 @@ func readResumeSidecar(t *testing.T, path string) ResumeState {
 // TestDirectResumeIntervalIsFiftyMegabytes pins the production cadence the
 // two rows above exercise through their override seam, so shrinking the
 // constant cannot pass unnoticed.
+//
+// Mutant: shrinking directResumeInterval (say to DownloadChunkSize) — the two
+// override-driven rows above would still pass while production checkpointed,
+// and fsynced, ten times as often as owner decision O-G priced.
 func TestDirectResumeIntervalIsFiftyMegabytes(t *testing.T) {
 	if got, want := int64(directResumeInterval), int64(50<<20); got != want {
 		t.Fatalf("directResumeInterval = %d bytes, want %d (50 MB)", got, want)
