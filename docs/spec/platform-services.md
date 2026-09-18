@@ -517,7 +517,7 @@ Twitch auth is a single bearer token, and Moombox is **validate-only** on it: no
 
 Authenticated requires a non-empty token AND a non-empty login AND a login with no row-breaking character (`hasRowBreakingChar`: space, tab, CR, LF, NUL — a value that cannot be spoken as one IRC parameter is not a usable identity). Anything else falls all the way back to the anonymous pair. The hybrid — a real token beside the `justinfan` nickname — is what Twitch answers with `Login authentication failed` or silently downgrades, and the handshake decision does not depend on parsing NOTICE (`ircIsLoginFailureNotice` in `chat_irc.go` only classifies the reply afterwards), so the two lines must not come from two conditions that can drift apart. Before this pairing existed the NICK was always `justinfan`, so a session holding a perfectly good token authenticated as nobody. Upstream shape: `references/chatterino7/src/providers/twitch/TwitchIrcServer.cpp`.
 
-Then `CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership` (rich metadata — emote tags, sub events, join/part events) and `JOIN #{channel_login}` (lowercased).
+Then `ircCapRequest` (`internal/twitch/chat_irc.go`) — `CAP REQ :twitch.tv/tags twitch.tv/commands` — and `JOIN #{channel_login}` (lowercased). `twitch.tv/tags` carries the emote ranges, badges, message ids and timestamps the archive is made of; `twitch.tv/commands` carries USERNOTICE, NOTICE and RECONNECT. `twitch.tv/membership` is deliberately NOT requested (owner decision O-S): it delivers JOIN/PART bursts for channels under 1,000 chatters, `parseLine` drops both, and chatterino asks for it only because it renders a user list (`references/chatterino7` TwitchIrcServer.cpp).
 
 #### Anonymous Fallback and the Downgrade Report
 
