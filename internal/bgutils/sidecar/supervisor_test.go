@@ -317,3 +317,169 @@ func TestSubscribeHealthFansOutAndUnsubscribes(t *testing.T) {
 		t.Errorf("second call = %+v, want the published update", got[1])
 	}
 }
+
+// TestSupervisorObservesADeathInsideTheRestartWindow: the notice slot must NOT
+// be drained after a successful restart. A "stale" notice is impossible —
+// markUnhealthy only emits through a CompareAndSwap(true, false) and healthy is
+// false continuously from the first death until the new child's ready event —
+// so the only thing such a drain can ever discard is the NEW child's death.
+// Discarding it re-latched the exact bug this row fixes: healthy stays false
+// forever (no further markUnhealthy can fire), the supervisor idles with an
+// empty queue, and the published snapshot reads Healthy: true over a dead child.
+//
+// Mutant this kills: restore the post-success
+// `select { case <-s.notices: default: }` drain → only one restart happens and
+// the test times out waiting for the second.
+func TestSupervisorObservesADeathInsideTheRestartWindow(t *testing.T) {
+	resetHealth(t)
+
+	var attempts atomic.Int64
+	var notifiedFromOnUp atomic.Bool
+	restarted := make(chan struct{}, 4)
+
+	sup := NewSupervisor(SupervisorConfig{
+		Logger:  silentLogger{},
+		Restart: func(context.Context) error { attempts.Add(1); return nil },
+	})
+	sup.sleep = func(context.Context, time.Duration) {}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sup.SetOnUp(func() {
+		// The replacement child dies while the supervisor is still inside the
+		// successful restart — precisely the window the drain used to swallow.
+		if notifiedFromOnUp.CompareAndSwap(false, true) {
+			sup.Notify("stdout EOF (new child)")
+		}
+		restarted <- struct{}{}
+	})
+
+	done := make(chan struct{})
+	go func() { defer close(done); sup.Run(ctx) }()
+	sup.Notify("stdout EOF")
+
+	for i := range 2 {
+		select {
+		case <-restarted:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("restart %d never happened (attempts=%d) — the death inside the restart window was swallowed", i+1, attempts.Load())
+		}
+	}
+	cancel()
+	<-done
+
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("Restart attempts = %d, want 2 (the original death plus the one inside the window)", got)
+	}
+}
+
+// TestSupervisorLadderClimbsAcrossRepeatOutages: the failure the ladder exists
+// for is a V8 OOM-abort under a BotGuard burst — a child that STARTS fine and
+// dies on the next mint. Every attempt "succeeds", so a ladder reset per outage
+// never leaves its first rung: the reviewer measured [5s x8] across 8
+// successful restarts, i.e. a Node spawn plus a jsdom init every ~5-8 s for the
+// rest of a 24/7 run. The rung has to carry across outages.
+//
+// Mutant this kills: reset the attempt counter on every success (restartLoop
+// entered with 0 per notice) → delays == [5s 5s 5s 5s].
+func TestSupervisorLadderClimbsAcrossRepeatOutages(t *testing.T) {
+	resetHealth(t)
+
+	var delays []time.Duration
+	restarted := make(chan struct{}, 8)
+
+	sup := NewSupervisor(SupervisorConfig{
+		Logger:  silentLogger{},
+		Restart: func(context.Context) error { return nil },
+	})
+	sup.sleep = func(_ context.Context, d time.Duration) { delays = append(delays, d) }
+	sup.SetOnUp(func() { restarted <- struct{}{} })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); sup.Run(ctx) }()
+
+	// Four outages, each arriving immediately after the child came back: no
+	// meaningful uptime, so nothing resets the counter.
+	for i := range 4 {
+		sup.Notify("stdout EOF")
+		select {
+		case <-restarted:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("outage %d never completed a restart", i+1)
+		}
+	}
+	cancel()
+	<-done
+
+	want := []time.Duration{5 * time.Second, 15 * time.Second, 60 * time.Second, 5 * time.Minute}
+	if len(delays) != len(want) {
+		t.Fatalf("delays = %v, want %v", delays, want)
+	}
+	for i := range want {
+		if delays[i] != want[i] {
+			t.Errorf("delays[%d] = %v, want %v", i, delays[i], want[i])
+		}
+	}
+}
+
+// TestSupervisorLadderResetsAfterTheChildStaysUp: the counter carries only
+// while the child is FLAPPING. One that came back and then ran for LONGER than
+// the rung it came back on is a healthy child that later had an unrelated
+// death, and punishing it with the previous outage's ceiling would leave a
+// working install down for five minutes over a one-off crash.
+//
+// Mutant this kills: never reset the counter (always lastAttempt+1) →
+// delays[1] == 15s, not 5s.
+func TestSupervisorLadderResetsAfterTheChildStaysUp(t *testing.T) {
+	resetHealth(t)
+
+	var delays []time.Duration
+	var clockNanos atomic.Int64
+	restarted := make(chan struct{}, 4)
+
+	sup := NewSupervisor(SupervisorConfig{
+		Logger:  silentLogger{},
+		Restart: func(context.Context) error { return nil },
+	})
+	sup.sleep = func(_ context.Context, d time.Duration) { delays = append(delays, d) }
+	sup.now = func() time.Time { return time.Unix(0, clockNanos.Load()) }
+	sup.SetOnUp(func() { restarted <- struct{}{} })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); sup.Run(ctx) }()
+
+	sup.Notify("stdout EOF")
+	select {
+	case <-restarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first outage never completed a restart")
+	}
+
+	// The replacement child ran for ten minutes — far longer than the 5 s rung
+	// it came back on — before dying again.
+	clockNanos.Store(int64(10 * time.Minute))
+
+	sup.Notify("stdout EOF, much later")
+	select {
+	case <-restarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second outage never completed a restart")
+	}
+	cancel()
+	<-done
+
+	want := []time.Duration{5 * time.Second, 5 * time.Second}
+	if len(delays) != len(want) {
+		t.Fatalf("delays = %v, want %v", delays, want)
+	}
+	for i := range want {
+		if delays[i] != want[i] {
+			t.Errorf("delays[%d] = %v, want %v (an outage after real uptime starts at rung 0)", i, delays[i], want[i])
+		}
+	}
+}

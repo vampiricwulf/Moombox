@@ -54,8 +54,21 @@ type Supervisor struct {
 	notices  chan string
 	onUp     atomic.Pointer[func()]
 	restarts atomic.Uint64
-	// sleep is a test seam. Production leaves it as sleepCtx.
+
+	// Ladder position carried ACROSS outages. Touched only by the Run
+	// goroutine (Run and restartLoop are the same goroutine), so no lock.
+	//
+	// A child that dies on the next mint after coming back up — the V8
+	// OOM-abort this ladder exists for — makes every attempt "succeed", so a
+	// counter reset per outage would pin the process to the first rung and
+	// respawn Node every few seconds for the rest of a 24/7 run.
+	lastAttempt int           // rung index of the last SUCCESSFUL restart
+	lastRung    time.Duration // the delay that preceded that restart
+	lastUp      time.Time     // when it came back; zero before the first restart
+	// sleep and now are test seams. Production leaves them as sleepCtx and
+	// time.Now.
 	sleep func(ctx context.Context, d time.Duration)
+	now   func() time.Time
 }
 
 // NewSupervisor builds a Supervisor. It does not start anything; call Run in a
@@ -70,10 +83,12 @@ func NewSupervisor(cfg SupervisorConfig) *Supervisor {
 	return &Supervisor{
 		cfg: cfg,
 		// Buffered: Notify runs on readPump and must never block. One slot is
-		// enough — a second death cannot happen before the first restart, and
-		// a notice that arrives DURING a restart is already covered by it.
+		// enough — the child that just died cannot die twice, so the only
+		// notice that can arrive before the loop drains this one is the
+		// REPLACEMENT child's, and that one must be kept, not coalesced away.
 		notices: make(chan string, 1),
 		sleep:   sleepCtx,
+		now:     time.Now,
 	}
 }
 
@@ -85,8 +100,11 @@ func (s *Supervisor) SetOnUp(fn func()) {
 }
 
 // Notify records that the sidecar died. Safe to call from readPump: the send
-// is non-blocking, so a notice arriving while a restart is already running is
-// dropped rather than stalling the pump that drains the child's stdout.
+// is non-blocking, so it can never stall the pump that drains the child's
+// stdout. It is dropped only when a death is ALREADY queued and unread, which
+// coalesces two reports of the same outage — a death that arrives while a
+// restart is in flight finds the slot empty and is kept, because that one is
+// the replacement child's.
 func (s *Supervisor) Notify(reason string) {
 	select {
 	case s.notices <- reason:
@@ -111,18 +129,38 @@ func (s *Supervisor) Run(ctx context.Context) {
 				Restarts: s.restarts.Load(),
 				Since:    time.Now(),
 			})
-			if !s.restartLoop(ctx, reason) {
+			if !s.restartLoop(ctx, reason, s.nextRung()) {
 				return
 			}
 		}
 	}
 }
 
-// restartLoop retries Restart on the ladder until it succeeds. Returns false
-// only when ctx ended, which is the one case Run must stop on.
-func (s *Supervisor) restartLoop(ctx context.Context, reason string) bool {
-	for attempt := 0; ; attempt++ {
-		s.sleep(ctx, s.cfg.Backoff[min(attempt, len(s.cfg.Backoff)-1)])
+// nextRung is the ladder rung the coming outage starts on.
+//
+// The counter carries across outages while the child is FLAPPING, and resets
+// only once a child has stayed up longer than the rung it came back on: that
+// is a healthy child which later had an unrelated death, and making it wait
+// out the previous outage's ceiling would keep a working install down for five
+// minutes over a one-off crash. "Stayed up" is measured from the successful
+// restart to this death, against that restart's own rung.
+func (s *Supervisor) nextRung() int {
+	if s.lastUp.IsZero() {
+		return 0 // first outage of the process
+	}
+	if s.now().Sub(s.lastUp) > s.lastRung {
+		return 0
+	}
+	return s.lastAttempt + 1
+}
+
+// restartLoop retries Restart on the ladder until it succeeds, beginning at
+// startAttempt (the rung Run carried in). Returns false only when ctx ended or
+// the handle is terminally stopped — the two cases Run must stop on.
+func (s *Supervisor) restartLoop(ctx context.Context, reason string, startAttempt int) bool {
+	for attempt := startAttempt; ; attempt++ {
+		rung := s.cfg.Backoff[min(attempt, len(s.cfg.Backoff)-1)]
+		s.sleep(ctx, rung)
 		if ctx.Err() != nil {
 			return false
 		}
@@ -144,6 +182,10 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string) bool {
 			continue
 		}
 
+		s.lastAttempt = attempt
+		s.lastRung = rung
+		s.lastUp = s.now()
+
 		n := s.restarts.Add(1)
 		s.cfg.Logger.Info("BotGuard sidecar restarted",
 			"attempt", attempt+1, "restarts", n)
@@ -151,13 +193,13 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string) bool {
 		if fn := s.onUp.Load(); fn != nil {
 			s.callOnUp(*fn)
 		}
-		// A death notice queued while we were restarting describes the child
-		// we just replaced. Drop it rather than immediately tearing down a
-		// healthy sidecar.
-		select {
-		case <-s.notices:
-		default:
-		}
+		// The notice slot is deliberately NOT drained here. A notice left over
+		// from the child that just died is impossible — markUnhealthy emits
+		// only through a CompareAndSwap(true, false), and healthy is false
+		// continuously from that death until the replacement's ready event —
+		// so anything queued by now is the REPLACEMENT child reporting its own
+		// death, and swallowing it would latch the process unhealthy for good
+		// behind a snapshot that still read Healthy: true.
 		return true
 	}
 }
