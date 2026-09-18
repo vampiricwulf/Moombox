@@ -98,13 +98,47 @@ type FFmpegDeps struct {
 		Info(msg string, args ...any)
 		Error(msg string, args ...any)
 	}
+	// OnFfmpegPathChange re-applies a newly verified path to the consumers
+	// that captured it when their muxers were built (the trim service and the
+	// download orchestrator). Same field name and signature as
+	// ConfigRoutesCallbacks.OnFfmpegPathChange so both wire sites read alike.
+	//
+	// Without it, POST /api/ffmpeg/check saved a working path while every mux
+	// kept using the broken boot value, and a later PUT /api/config could not
+	// repair it: the config diff compares old != new, and the save had already
+	// made them equal (WEB-2). Optional; nil is a no-op.
+	OnFfmpegPathChange func(path string)
+}
+
+// applyValidatedFfmpegPath persists a path that has already answered
+// `-version` and then hands it to onChange. Save FIRST: a path the muxers hold
+// but the config does not would come back wrong on the next restart, so a
+// failed save leaves both untouched and reports the error.
+//
+// onChange runs AFTER the write lock is released — the same rule the config
+// PUT's hot-reload block follows, so a callback that reads the config (or
+// takes another lock that a config reader holds) cannot invert the lock order.
+func applyValidatedFfmpegPath(store *config.Store, path string, onChange func(string)) error {
+	mu := store.RWMutex()
+	cfg := store.Config()
+	mu.Lock()
+	old := cfg.Paths.FfmpegPath
+	cfg.Paths.FfmpegPath = path
+	if err := store.SaveLocked(); err != nil {
+		cfg.Paths.FfmpegPath = old
+		mu.Unlock()
+		return err
+	}
+	mu.Unlock()
+	if onChange != nil {
+		onChange(path)
+	}
+	return nil
 }
 
 // FFmpegRoutes registers FFmpeg validation and installation endpoints.
 func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 	store := deps.Store
-	mu := store.RWMutex()
-	cfg := store.Config()
 
 	// GET /api/ffmpeg/check — check if ffmpeg is available on PATH or configured path
 	r.Get("/api/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
@@ -159,12 +193,9 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 
 		valid, version, warning := checkFFmpeg(path)
 		if valid {
-			mu.Lock()
-			cfg.Paths.FfmpegPath = path
-			if err := store.SaveLocked(); err != nil {
+			if err := applyValidatedFfmpegPath(store, path, deps.OnFfmpegPathChange); err != nil {
 				deps.Logger.Error("Failed to save ffmpeg path to config", "error", err.Error())
 			}
-			mu.Unlock()
 		}
 
 		jsonResponse(rw, map[string]any{

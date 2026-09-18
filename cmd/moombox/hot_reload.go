@@ -9,9 +9,11 @@ import (
 
 // The three settings that are read once at startup and re-applied here on
 // every config save from either UI (the web PUT via ConfigRoutesCallbacks,
-// the TUI via OnSaveConfig). Each is idempotent and cheap, so the TUI path
-// — which has no pre-mutation snapshot to diff against — calls them
-// unconditionally.
+// the TUI via OnSaveConfig) — and, for the ffmpeg path, from a third writer:
+// POST /api/ffmpeg/check via FFmpegDeps.OnFfmpegPathChange, which persists a
+// verified path with no restart in between. Each is idempotent and cheap, so
+// the TUI path — which has no pre-mutation snapshot to diff against — calls
+// them unconditionally.
 
 // bootMemoryLimit is Go's memory limit as it stood before any service applied
 // the config — math.MaxInt64 normally, or whatever GOMEMLIMIT was set to in the
@@ -43,6 +45,8 @@ func (s *runState) applyTrustForwardedProto(trust bool) {
 // it when their muxers were built: the trim service, and the download worker's
 // orchestrator (mux, probe and part merge for every download). Each is reached
 // independently — a nil one must not skip the other.
+// Three callers: the config PUT's diff, the TUI save, and POST
+// /api/ffmpeg/check (WEB-2).
 func (s *runState) applyFfmpegPath(path string) {
 	if s.trimSvc != nil {
 		s.trimSvc.SetFfmpegPath(path)

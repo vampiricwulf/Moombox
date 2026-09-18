@@ -862,7 +862,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 |--------|------|-------|
 | `GET` | `/api/ffmpeg/check` | Check if FFmpeg is on PATH and return version info. |
 | `GET` | `/api/ffmpeg/install-suggestion` | Returns the distro-appropriate package manager command for FFmpeg installation (e.g., `apt install ffmpeg`, `dnf install ffmpeg`, `pacman -S ffmpeg`). Linux only; returns empty on Windows. |
-| `POST` | `/api/ffmpeg/check` | Re-check FFmpeg availability. Rate limited. |
+| `POST` | `/api/ffmpeg/check` | Validate a specific FFmpeg path (`{ path }`) and, when it answers `-version`, persist it to `paths.ffmpeg_path` **and** re-apply it to the live trim service and download orchestrator through `FFmpegDeps.OnFfmpegPathChange` (`internal/web/routes/ffmpeg.go`). The post-boot FFmpeg overlay saves and resumes with no restart, so without that hot reload every mux and trim would keep the failing boot value. Rate limited. |
 | `GET` | `/api/ffmpeg/install-options` | Get available FFmpeg installation options (download sources). |
 | `POST` | `/api/ffmpeg/install` | Begin FFmpeg download/installation. Rate limited. |
 | `POST` | `/api/ffmpeg/install/confirm` | Confirm FFmpeg installation to a specific location. Rate limited. |

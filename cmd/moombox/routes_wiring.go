@@ -153,6 +153,11 @@ func (s *runState) wireRoutes() func() {
 		Store:     s.configStore,
 		RateLimit: s.apiRL,
 		Logger:    s.log,
+		// The same hot reload the config PUT gets. The FFmpeg overlay's
+		// "check this path" flow saves and then calls initializeApp() with no
+		// restart in between, so without this the muxers keep the boot value
+		// that had just failed (WEB-2).
+		OnFfmpegPathChange: s.applyFfmpegPath,
 	})
 	routes.LogRoutes(s.r, s.log.GetRecentLines)
 	importCleanup := routes.ImportRoutes(s.r, s.db, s.configStore)
