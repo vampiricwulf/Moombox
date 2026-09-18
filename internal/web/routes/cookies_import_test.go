@@ -593,3 +593,113 @@ func TestCookieImportRouteLeaksNoValueAnywhere(t *testing.T) {
 		scan(t, rec, log)
 	})
 }
+
+// TestCookieImportAnswers409WhileARefreshRuns pins the wire half of O-D. The
+// arm has to sit AHEAD of the `result.Wrote` and default arms: Wrote is false
+// here, so without its own case the refusal would answer 500 "cookie import
+// failed" — a server fault for a condition the operator fixes by waiting two
+// minutes, which is the same answer StartSetup already gives for the same
+// sentinel.
+//
+// THE COLLISION IS REPRODUCED THROUGH THE REAL SLOT rather than by reaching
+// into the service: refreshCmd is an unexported field of internal/cookies, so
+// the only thing this package can do is run something that claims it. Since
+// O-D an import claims it too, and holding the first one inside its PRE-WRITE
+// verification — the blocking callback below, released after the second
+// request has been answered — puts the second request in exactly the
+// read -> verify -> write gap the finding is about, with nothing on disk
+// changed yet.
+//
+// Mutants:
+//   - drop the ErrRefreshInProgress case -> 500.
+//   - answer 503 (the ErrServiceStopped shape) -> the status assertion fails;
+//     503 says "this never clears", and this one clears on its own.
+//   - answer 401 -> app.js's global fetch interceptor treats 401 as an expired
+//     session and RELOADS the page, losing the operator's paste.
+//   - let the refused import write anyway -> the on-disk assertion fails: a
+//     409 must never leave a partial write.
+func TestCookieImportAnswers409WhileARefreshRuns(t *testing.T) {
+	seed := importHeader + importYouTube + importTwitch
+	r, path, _, svc := importRouter(t, seed, nil)
+
+	// Blocks the FIRST verification of the first import and nothing else, so
+	// the retry after release — and the second request in the RED case — run
+	// at full speed. Selects on the context too: checkPlatformAuth gives each
+	// verifier one authVerifyTimeout, and a callback that ignored it would
+	// outlive the test rather than fail it.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	gate := func(ctx context.Context) (bool, error) {
+		first := false
+		once.Do(func() { first = true })
+		if !first {
+			return true, nil
+		}
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return true, nil
+	}
+	svc.VerifyYouTubeAuth = gate
+	svc.VerifyTwitchAuth = gate
+
+	type run struct {
+		rec *httptest.ResponseRecorder
+		pan any
+	}
+	held := make(chan run, 1)
+	go func() {
+		out := run{}
+		defer func() {
+			if p := recover(); p != nil {
+				out.pan = p
+			}
+			held <- out
+		}()
+		out.rec = postImport(t, r, "text/plain", importPaste())
+	}()
+
+	select {
+	case <-entered:
+	case got := <-held:
+		if got.pan != nil {
+			t.Fatalf("the holding import panicked: %v", got.pan)
+		}
+		t.Fatalf("the first import finished before it ever reached its pre-write verification "+
+			"(status %d) — the collision this test exists for never happened", got.rec.Code)
+	case <-time.After(60 * time.Second):
+		t.Fatal("the first import never reached its pre-write verification")
+	}
+
+	rec := postImport(t, r, "text/plain", importPaste())
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status %d, want 409 — an import that lands inside a pass must be refused, not "+
+			"answered as a server fault or accepted into a file the pass is about to overwrite: %s",
+			rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cookie refresh in progress") {
+		t.Errorf("the refusal does not carry the sentinel's own sentence, so nothing tells the "+
+			"operator to retry: %s", rec.Body.String())
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back cookies.txt: %v", err)
+	}
+	if string(onDisk) != seed {
+		t.Error("cookies.txt changed while a pass held the slot — a refused import must leave no " +
+			"partial write, and the holding pass has not written yet")
+	}
+
+	close(release)
+	got := <-held
+	if got.pan != nil {
+		t.Fatalf("the holding import panicked: %v", got.pan)
+	}
+	if got.rec.Code != http.StatusOK {
+		t.Fatalf("the import that held the slot answered %d, want 200 — the slot must be claimed "+
+			"for the whole call and released on the way out: %s", got.rec.Code, got.rec.Body.String())
+	}
+}

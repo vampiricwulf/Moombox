@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -506,5 +507,62 @@ func TestFlagManualReloginTouchesOnlyTheNamedPlatform(t *testing.T) {
 	if len(s.ReloginStatus()) != 2 {
 		t.Errorf("an unrecognised platform was added to the map: %v — the wire shape is two keys and "+
 			"the frontend iterates it", s.ReloginStatus())
+	}
+}
+
+// TestImportCookiesIsRefusedWhileARefreshHoldsTheSlot is COOKIES-1 / owner
+// decision O-D. ImportCookies used to take no slot at all, so a paste landing
+// inside a browser-refresh or recovery pass's read -> verify (<=12 s) -> write
+// gap was overwritten by that pass's merge of the PRE-paste file — and the
+// import reported Wrote=true with both platforms ok while it happened. On the
+// recovery path the rows that replace the paste are the dead ones that raised
+// the alarm.
+//
+// A 409 the operator retries within ~2 minutes is the trade O-D chose over
+// re-reading and re-merging in every pass. The no-lock property is kept: this
+// is the SAME sentinel StartSetup and RefreshCookiesDetailed already gate on,
+// not a new mutex over cookies.txt.
+//
+// Mutants:
+//   - drop the refreshCmd check -> err is nil, Wrote is true, and the file on
+//     disk carries the paste that the pass is about to overwrite.
+//   - claim the slot but never release it -> the second half fails: every
+//     later import (and every refresh, and StartSetup) is refused forever.
+func TestImportCookiesIsRefusedWhileARefreshHoldsTheSlot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	s := NewAutoCookieService(dir, path, NewCookieJar(), nopAutoCookieLogger{})
+
+	// The slot as RefreshCookiesDetailed claims it: a sentinel with no process.
+	s.mu.Lock()
+	s.refreshCmd = &exec.Cmd{}
+	s.mu.Unlock()
+
+	res, err := s.ImportCookies(context.Background(), netscapeHeader+fakeYouTubeRows)
+	if !errors.Is(err, ErrRefreshInProgress) {
+		t.Fatalf("err = %v, want ErrRefreshInProgress — an import that lands inside a pass is silently destroyed by it", err)
+	}
+	if res.Wrote {
+		t.Error("Wrote = true on a refused import — nothing may be written while a pass holds the slot")
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("cookies.txt exists after a refused import (stat err = %v)", statErr)
+	}
+
+	// Releasing the slot lets the retry through, and the import releases the
+	// slot it claims.
+	s.mu.Lock()
+	s.refreshCmd = nil
+	s.mu.Unlock()
+
+	res, err = s.ImportCookies(context.Background(), netscapeHeader+fakeYouTubeRows)
+	if err != nil || !res.Wrote {
+		t.Fatalf("the retry after the pass finished must succeed: res=%+v err=%v", res, err)
+	}
+	s.mu.Lock()
+	held := s.refreshCmd
+	s.mu.Unlock()
+	if held != nil {
+		t.Error("ImportCookies did not release the refresh slot — every later refresh, setup and import would be refused for the life of the process")
 	}
 }

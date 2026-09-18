@@ -633,6 +633,16 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		if err != nil {
 			switch {
+			// A CONDITION that clears on its own, so 409 and "try again
+			// shortly" — the identical answer /auto-setup/start gives for the
+			// identical sentinel. It must sit ahead of the `result.Wrote` and
+			// default arms: Wrote is false on this exit, so without its own
+			// case a refusal would read as a 500 server fault for something
+			// the operator fixes by waiting two minutes. Never 401 — app.js's
+			// global fetch interceptor treats 401 as an expired session and
+			// reloads the page, which would throw the paste away.
+			case errors.Is(err, cookies.ErrRefreshInProgress):
+				jsonError(rw, err.Error(), http.StatusConflict)
 			// The three refusals, verbatim. Each names the operator's next move
 			// and none of them quotes the submitted text; flattening them to a
 			// 500 would answer a bad export with a server fault.
