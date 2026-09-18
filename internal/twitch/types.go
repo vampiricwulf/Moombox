@@ -33,7 +33,14 @@ type TwitchHLSVariant struct {
 	Height     int     `json:"height,omitempty"`
 	FPS        float64 `json:"fps,omitempty"`
 	VideoGroup string  `json:"videoGroup,omitempty"`
-	IsSource   bool    `json:"isSource"`
+	// Codecs is the raw CODECS attribute (RFC 6381 ids, comma-separated) and
+	// VideoCodec the normalized family derived from it: "av01", "hevc",
+	// "avc1", or "" when the playlist carries no CODECS or the variant has no
+	// video track. Populated only once the usher request opts in to enhanced
+	// broadcasts — see BuildUsherLiveURL.
+	Codecs     string `json:"codecs,omitempty"`
+	VideoCodec string `json:"videoCodec,omitempty"`
+	IsSource   bool   `json:"isSource"`
 }
 
 // TwitchVodInfo contains VOD metadata from Twitch GQL.

@@ -18,6 +18,7 @@ var (
 	hlsResolutionRe = regexp.MustCompile(`RESOLUTION=(\d+)x(\d+)`)
 	hlsFrameRateRe  = regexp.MustCompile(`FRAME-RATE=([\d.]+)`)
 	hlsVideoGroupRe = regexp.MustCompile(`VIDEO="([^"]+)"`)
+	hlsCodecsRe     = regexp.MustCompile(`CODECS="([^"]*)"`)
 )
 
 // ParseHLSMasterPlaylist parses a Twitch HLS master playlist into variants.
@@ -46,6 +47,10 @@ func ParseHLSMasterPlaylist(content string) []TwitchHLSVariant {
 		}
 		if m := hlsVideoGroupRe.FindStringSubmatch(line); m != nil {
 			variant.VideoGroup = m[1]
+		}
+		if m := hlsCodecsRe.FindStringSubmatch(line); m != nil {
+			variant.Codecs = m[1]
+			variant.VideoCodec = videoCodecFamily(m[1])
 		}
 
 		// Next non-empty line is the URL
@@ -80,6 +85,85 @@ func ParseHLSMasterPlaylist(content string) []TwitchHLSVariant {
 	}
 
 	return variants
+}
+
+// videoCodecFamily normalizes an HLS CODECS attribute to the video family it
+// carries: "av01", "hevc", "avc1", or "" when the list holds no recognised
+// video codec (an audio-only rendition, or a playlist that sends no CODECS at
+// all — every playlist Twitch serves without the enhanced-broadcast opt-in).
+//
+// The list is scanned in order rather than read at index 0: the video entry is
+// not always first, and an audio-only rendition's single mp4a entry must not be
+// mistaken for one. Matching is on the RFC 6381 ids a PLAYLIST uses
+// (av01…/hev1…/hvc1…/avc1…/avc3…), not the short names the usher REQUEST sends.
+func videoCodecFamily(codecs string) string {
+	for entry := range strings.SplitSeq(codecs, ",") {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		switch {
+		case strings.HasPrefix(entry, "av01"):
+			return "av01"
+		case strings.HasPrefix(entry, "hev1"), strings.HasPrefix(entry, "hvc1"):
+			return "hevc"
+		case strings.HasPrefix(entry, "avc1"), strings.HasPrefix(entry, "avc3"):
+			return "avc1"
+		}
+	}
+	return ""
+}
+
+// codecRank orders the video families an enhanced broadcast can offer.
+//
+// An ABSENT family ranks 0, below avc1's 1, and that is what makes the whole
+// feature byte-compatible: on a playlist with no CODECS attribute every
+// candidate ranks 0, every comparison in selectSourceVariant ties, and the
+// incumbent — the first source in playlist order — wins exactly as before.
+func codecRank(family string) int {
+	switch family {
+	case "av01":
+		return 3
+	case "hevc":
+		return 2
+	case "avc1":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// pixelArea is the variant's frame area, 0 when the playlist gave no RESOLUTION.
+func pixelArea(v *TwitchHLSVariant) int { return v.Width * v.Height }
+
+// selectSourceVariant returns the best SOURCE variant, or nil when the playlist
+// carries none.
+//
+// The incumbent is the FIRST source in playlist order — the rule that shipped
+// before enhanced broadcasts, and the only rule that ever applied, because a
+// pre-enhanced Twitch playlist holds exactly one VIDEO="chunked" rendition. It
+// is displaced only by a strictly BETTER video family, or by a larger frame at
+// the same family once that family is already better than H.264. Nothing about
+// bandwidth or resolution alone can reorder a playlist that carries no CODECS.
+func selectSourceVariant(variants []TwitchHLSVariant) *TwitchHLSVariant {
+	best := -1
+	for i := range variants {
+		if !variants[i].IsSource {
+			continue
+		}
+		if best < 0 {
+			best = i
+			continue
+		}
+		cur, cand := codecRank(variants[best].VideoCodec), codecRank(variants[i].VideoCodec)
+		switch {
+		case cand > cur:
+			best = i
+		case cand == cur && cand > codecRank("avc1") && pixelArea(&variants[i]) > pixelArea(&variants[best]):
+			best = i
+		}
+	}
+	if best < 0 {
+		return nil
+	}
+	return &variants[best]
 }
 
 // SelectBestVariant selects the best HLS variant based on preferences.
@@ -171,11 +255,9 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 		}
 	}
 
-	// Prefer source quality
-	for i := range filtered {
-		if filtered[i].IsSource {
-			return &filtered[i]
-		}
+	// Prefer source quality (codec-aware — see selectSourceVariant).
+	if src := selectSourceVariant(filtered); src != nil {
+		return src
 	}
 
 	// Highest bandwidth

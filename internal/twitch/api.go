@@ -885,6 +885,14 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 }
 
 // BuildUsherLiveURL constructs the Usher HLS master playlist URL for a live channel.
+//
+// platform=web and supported_codecs=av1,h265,h264 are the ENHANCED-BROADCAST
+// opt-in, byte-for-byte what yt-dlp sends (references/yt-dlp
+// yt_dlp/extractor/twitch.py, _extract_twitch_m3u8_formats). Without them
+// Twitch never offers the HEVC/AV1 1440p/4K source of a channel that
+// multi-encodes, and the capture takes the H.264 transcode. The short names
+// here are the request spelling; the playlist answers in RFC 6381 codec ids
+// (av01…/hev1…/hvc1…) — see videoCodecFamily in hls.go.
 func BuildUsherLiveURL(channelLogin string, token *TwitchAccessToken) string {
 	params := url.Values{
 		"allow_source":               {"true"},
@@ -892,9 +900,11 @@ func BuildUsherLiveURL(channelLogin string, token *TwitchAccessToken) string {
 		"allow_spectre":              {"true"},
 		"fast_bread":                 {"true"},
 		"p":                          {strconv.Itoa(rand.IntN(10_000_000))},
+		"platform":                   {"web"},
 		"player":                     {"twitchweb"},
 		"playlist_include_framerate": {"true"},
 		"sig":                        {token.Signature},
+		"supported_codecs":           {"av1,h265,h264"},
 		"token":                      {token.Value},
 		"type":                       {"any"},
 	}
@@ -906,15 +916,19 @@ func BuildUsherLiveURL(channelLogin string, token *TwitchAccessToken) string {
 }
 
 // BuildUsherVodURL constructs the Usher HLS master playlist URL for a VOD.
+// platform / supported_codecs: see BuildUsherLiveURL — yt-dlp sends the same
+// pair for both paths, and enhanced-broadcast VODs exist.
 func BuildUsherVodURL(vodID string, token *TwitchAccessToken) string {
 	params := url.Values{
 		"allow_source":               {"true"},
 		"allow_audio_only":           {"true"},
 		"allow_spectre":              {"true"},
 		"p":                          {strconv.Itoa(rand.IntN(10_000_000))},
+		"platform":                   {"web"},
 		"player":                     {"twitchweb"},
 		"playlist_include_framerate": {"true"},
 		"sig":                        {token.Signature},
+		"supported_codecs":           {"av1,h265,h264"},
 		"token":                      {token.Value},
 		"type":                       {"any"},
 	}

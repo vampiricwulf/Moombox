@@ -452,11 +452,15 @@ Both include these query parameters:
 - `allow_spectre=true` -- Allow spectre (transcoded) variants.
 - `fast_bread=true` -- Low-latency mode.
 - `p={random}` -- Random integer (0 to 10 million) to bypass CDN caching.
+- `platform=web` -- Enhanced-broadcast opt-in (see below).
 - `player=twitchweb` -- Player identifier.
 - `playlist_include_framerate=true` -- Include frame rate metadata.
 - `sig={token.Signature}` -- Access token signature.
+- `supported_codecs=av1,h265,h264` -- Enhanced-broadcast opt-in (see below).
 - `token={token.Value}` -- Access token value.
 - `type=any` -- Accept any stream type.
+
+`platform` and `supported_codecs` are byte-for-byte what yt-dlp sends (`references/yt-dlp/yt_dlp/extractor/twitch.py`, `_extract_twitch_m3u8_formats`), on the live and the VOD URL alike. They are the opt-in to Twitch **enhanced broadcasts**: a channel that multi-encodes then offers an HEVC or AV1 source alongside the H.264 one, typically at a higher resolution, and without them Usher never lists it and the capture takes the H.264 transcode. The short names here are the REQUEST spelling; the playlist answers in RFC 6381 codec ids (`av01…`, `hev1…`/`hvc1…`, `avc1…`). No container work follows from an AV1 source: yt-dlp forces `-f mp4` on its own ffmpeg downloader because that downloader would otherwise keep the mpegts container end to end, whereas Moombox writes raw segments (`internal/engine`) and always muxes to MP4 with `-c copy` (`Muxer.buildArgs` in `internal/engine/muxer.go`) — the state that flag exists to force.
 
 #### Master Playlist Parsing
 
@@ -468,6 +472,9 @@ Both include these query parameters:
 | `RESOLUTION` | `RESOLUTION=(\d+)x(\d+)` | `Width`, `Height` |
 | `FRAME-RATE` | `FRAME-RATE=([\d.]+)` | `FPS` |
 | `VIDEO` | `VIDEO="([^"]+)"` | `VideoGroup` |
+| `CODECS` | `CODECS="([^"]*)"` | `Codecs`, and `VideoCodec` via `videoCodecFamily` |
+
+`videoCodecFamily` (`internal/twitch/hls.go`) normalizes the raw list to `"av01"`, `"hevc"`, `"avc1"` or `""`. It scans the list in order rather than reading its first entry: the video codec is not always first, and an audio-only rendition's single `mp4a` entry must not be read as one. A playlist served without the enhanced-broadcast opt-in carries no `CODECS` attribute at all, so both fields stay empty.
 
 Source quality detection: a variant `IsSource` is true if `VideoGroup` equals `"chunked"` or contains the string `"source"` (case-insensitive).
 
@@ -485,8 +492,10 @@ Variant naming: if `VideoGroup` is set, use it as the name. Otherwise, construct
    - Try exact height match. If FPS is specified, prefer highest bandwidth among FPS matches.
    - If no exact match, descend to the next lower available height.
    - If preference is a non-numeric string, do substring matching on variant names.
-5. **Source preference**: If no quality preference matched, prefer the `IsSource` variant.
+5. **Source preference** (codec-aware): if no quality preference matched, take the best `IsSource` variant via `selectSourceVariant` (`internal/twitch/hls.go`). The incumbent is the FIRST source in playlist order — the rule that applied before enhanced broadcasts, when a Twitch playlist held exactly one `VIDEO="chunked"` rendition. It is displaced only by a strictly better video family (`codecRank`: AV1 > HEVC > H.264 > absent) or, once that family already beats H.264, by a larger frame at the same family. An ABSENT family ranks below H.264, so on a playlist with no `CODECS` attribute every candidate ties and the first source wins exactly as before — the selection is byte-identical for every playlist Twitch served before the opt-in.
 6. **Bandwidth fallback**: Select the variant with highest bandwidth.
+
+The codec preference is the SOURCE step's tie-break, not an override: an operator who asked for `1080p60` still gets a 1080-high variant, and `max_resolution` still filters an enhanced 1440p source out of a 1080-capped job.
 
 ### Twitch Authentication
 
