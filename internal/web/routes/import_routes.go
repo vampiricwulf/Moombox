@@ -249,8 +249,19 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 			}
 		}
 
-		// Use chat metadata videoId if we generated a random one
-		if videoID == "" && meta.VideoID != "" {
+		// Use chat metadata videoId if the filename carried no [bracket] id.
+		//
+		// utils.IsVideoID, not a bare non-empty check (WEB-1 / O-AA): this
+		// value comes out of the UPLOADED zip and is interpolated into the
+		// output filename below. filepath.Join CLEANS what it joins, so an id
+		// beginning "/.." promotes the following ".." elements to real path
+		// segments and walks out of imports/ — and os.Create truncates
+		// whatever it lands on. The bracket-regex path (bracketIDRe) is
+		// already constrained to the same shape; this is the path that was
+		// not. An id that fails the check falls back to the generated one
+		// rather than failing the import: O-AA chose "imports everything"
+		// over "surfaces bad archives".
+		if videoID == "" && utils.IsVideoID(meta.VideoID) {
 			videoID = meta.VideoID
 		}
 		if videoID == "" {
@@ -296,6 +307,16 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		videoOutName := filepath.Join("imports", baseFilename+videoExt)
 		videoOutPath := filepath.Join(outputDir, videoOutName)
 
+		// Belt and braces on top of the id validation above: every WRITE now
+		// goes through the same canonical containment check the read routes
+		// use, so a future change to how baseFilename is built cannot re-open
+		// WEB-1. CanonicalPath resolves the nearest existing ancestor, so this
+		// is valid on a path that does not exist yet.
+		if _, ok := validatePathTraversal(videoOutPath, outputDir); !ok {
+			jsonError(rw, "invalid output path", http.StatusBadRequest)
+			return
+		}
+
 		// Extract video file
 		if err := extractZipEntry(videoFile, videoOutPath); err != nil {
 			jsonError(rw, "failed to extract video", http.StatusInternalServerError)
@@ -307,7 +328,9 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		if chatFile != nil {
 			chatOutName = filepath.Join("imports", baseFilename+".chat.json")
 			chatOutPath := filepath.Join(outputDir, chatOutName)
-			if err := extractZipEntry(chatFile, chatOutPath); err != nil {
+			if _, ok := validatePathTraversal(chatOutPath, outputDir); !ok {
+				chatOutName = ""
+			} else if err := extractZipEntry(chatFile, chatOutPath); err != nil {
 				// Non-fatal, just skip chat
 				chatOutName = ""
 			}
