@@ -44,6 +44,26 @@ func validateDownloadedMP4(path string) error {
 	return nil
 }
 
+// directResumeInterval is how many bytes a whole-file download writes between
+// resume checkpoints — ten 5 MB chunks. An interrupted multi-GB VOD then
+// resumes from its last checkpoint instead of re-downloading from byte 0, and
+// the cadence keeps the save (which now fsyncs the media first, owner decision
+// O-G) off the hot path: once per 50 MB is nothing beside the transfer itself.
+//
+// BOTH whole-file paths save on it — the chunked loop and the streaming
+// fallback — deliberately through the one constant rather than a second
+// cadence of the fallback's own.
+const directResumeInterval = 10 * DownloadChunkSize
+
+// directResumeIntervalBytes is directResumeInterval, or the test override when
+// one is set (see SegmentDownloader.directResumeIntervalOverride).
+func (d *SegmentDownloader) directResumeIntervalBytes() int64 {
+	if d.directResumeIntervalOverride > 0 {
+		return d.directResumeIntervalOverride
+	}
+	return directResumeInterval
+}
+
 // runDirectDownload downloads a complete file from a direct URL (for VODs).
 // Uses 5MB chunked Range requests with per-chunk retry and percentage progress.
 // Falls back to streaming download if the server doesn't support Range requests.
@@ -68,10 +88,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	// can never splice a torn tail. Fresh runs start at 0 (bytesWritten==0).
 	offset := d.bytesWritten.Load()
 	lastSavedOffset := offset
-	// Persist progress every ~10 chunks so an interrupted multi-GB VOD
-	// resumes instead of re-downloading from byte 0. saveResume fsyncs the
-	// sidecar (durability); the ~50MB cadence keeps it off the hot path.
-	const directResumeInterval = 10 * DownloadChunkSize
+	resumeInterval := d.directResumeIntervalBytes()
 	lastProgressTime := time.Time{}
 
 	for offset < totalSize {
@@ -120,7 +137,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		d.bytesWritten.Store(offset)
 
 		// Persist resume progress periodically (see directResumeInterval).
-		if offset-lastSavedOffset >= directResumeInterval {
+		if offset-lastSavedOffset >= resumeInterval {
 			d.saveResume()
 			lastSavedOffset = offset
 		}
@@ -269,6 +286,13 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 
 	buf := make([]byte, 64*1024) // 64KB buffer
 	var lastProgressTime time.Time
+	// Read AFTER the switch above: a discard there reset the counter to zero,
+	// and the checkpoint cadence measures from wherever this transfer starts.
+	// Without these saves the fallback streamed gigabytes with nothing on disk
+	// describing them, so an interruption cost the whole partial — the chunked
+	// loop's 50 MB cadence, applied to the path that has no chunks.
+	lastSavedOffset := d.bytesWritten.Load()
+	resumeInterval := d.directResumeIntervalBytes()
 	for {
 		// The CALLER's context, not the derived one: an idle stall is a
 		// network failure the read below surfaces as such, while a cancel
@@ -284,7 +308,13 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 			if writeErr != nil {
 				return fmt.Errorf("write: %w", writeErr)
 			}
-			d.bytesWritten.Add(int64(written))
+			stagedBytes := d.bytesWritten.Add(int64(written))
+
+			// Same cadence as the chunked loop (directResumeInterval).
+			if stagedBytes-lastSavedOffset >= resumeInterval {
+				d.saveResume()
+				lastSavedOffset = stagedBytes
+			}
 
 			if d.OnProgress != nil && time.Since(lastProgressTime) >= ProgressThrottle {
 				lastProgressTime = time.Now()

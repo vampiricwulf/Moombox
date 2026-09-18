@@ -89,8 +89,10 @@ func TestStartDiscardStagedMediaOptIn(t *testing.T) {
 
 // TestStartDirectURLKeepsLegacyTruncate pins the guard's scope: whole-file
 // direct downloads are NOT segmented staged media and keep their pre-arc
-// restart-from-byte-0 behaviour (their partial loss is bounded by the
-// 50 MB sidecar cadence, and Task 4 removes the truncation they actually hit).
+// restart-from-byte-0 behaviour (their partial loss is bounded by the 50 MB
+// sidecar cadence — really bounded, since Task 10 made saveResume write for
+// the direct path at all — and Task 4 removes the truncation they actually
+// hit).
 //
 // Mutant: widening the guard to IsDirectURL — a half-downloaded VOD whose
 // sidecar was lost errors instead of restarting.

@@ -300,6 +300,86 @@ func TestHasTrim(t *testing.T) {
 	}
 }
 
+// TestFFmpegPathArg pins ENGINE-12 (report #48): Go opens a >260-character
+// path through \\?\, FFmpeg and ffprobe receive the raw string and fail on a
+// Windows host without the LongPathsEnabled policy. Short paths are untouched
+// so the common case carries no risk at all.
+//
+// Mutants, one per row:
+//   - prefixing unconditionally: every ordinary path grows a \\?\ FFmpeg may
+//     not parse.
+//   - never prefixing: the long path reaches FFmpeg raw, which is the bug.
+//   - prefixing on non-Windows: POSIX paths are corrupted.
+func TestFFmpegPathArg(t *testing.T) {
+	long := `C:\out\` + strings.Repeat("a", 300) + ".mp4"
+	short := `C:\out\clip.mp4`
+
+	prev := ffmpegPathOS
+	t.Cleanup(func() { ffmpegPathOS = prev })
+
+	ffmpegPathOS = "windows"
+	if got := ffmpegPathArg(short); got != short {
+		t.Errorf("ffmpegPathArg(short) = %q, want it unchanged", got)
+	}
+	if got := ffmpegPathArg(long); !strings.HasPrefix(got, `\\?\`) {
+		t.Errorf("ffmpegPathArg(long) = %q, want a \\\\?\\ prefix", got[:12])
+	}
+	if got := ffmpegPathArg(`\\?\` + long); strings.HasPrefix(got, `\\?\\\?\`) {
+		t.Error("ffmpegPathArg double-prefixed an already-prefixed path")
+	}
+
+	ffmpegPathOS = "linux"
+	if got := ffmpegPathArg(long); got != long {
+		t.Errorf("ffmpegPathArg(long) on linux = %q, want it unchanged", got)
+	}
+}
+
+// TestBuildArgsAppliesFfmpegPathArg is the differential half of ENGINE-12:
+// every path argument in the argv — both inputs and the output — goes through
+// ffmpegPathArg, and on a non-Windows host the argv is byte-identical to the
+// one built before this row existed.
+//
+// Mutants: prefixing only the output (the inputs still reach FFmpeg raw, which
+// is the failure the row describes — FFmpeg opens the inputs first), and
+// applying the helper regardless of ffmpegPathOS (the Linux argv changes).
+func TestBuildArgsAppliesFfmpegPathArg(t *testing.T) {
+	m := NewMuxer("ffmpeg", &testLogger{})
+	stem := strings.Repeat("b", 300)
+	video := `C:\staging\` + stem + `.video.ts`
+	audio := `C:\staging\` + stem + `.audio.ts`
+	output := `C:\archive\` + stem + `.mp4`
+
+	prev := ffmpegPathOS
+	t.Cleanup(func() { ffmpegPathOS = prev })
+
+	ffmpegPathOS = "linux"
+	posix := m.buildArgs(video, audio, output, nil, false)
+	if !slices.Contains(posix, video) || !slices.Contains(posix, audio) || !slices.Contains(posix, output) {
+		t.Fatalf("non-Windows argv rewrote a path: %v", posix)
+	}
+
+	ffmpegPathOS = "windows"
+	win := m.buildArgs(video, audio, output, nil, false)
+	if len(win) != len(posix) {
+		t.Fatalf("argv length changed with the prefix: %d vs %d", len(win), len(posix))
+	}
+	for i, raw := range posix {
+		switch raw {
+		case video, audio, output:
+			if !strings.HasPrefix(win[i], `\\?\`) {
+				t.Errorf("argv[%d] = %q, want the extended-length prefix", i, win[i])
+			}
+			if !strings.HasSuffix(win[i], strings.TrimPrefix(raw, `C:\`)) {
+				t.Errorf("argv[%d] = %q, want it to still end in the original path", i, win[i])
+			}
+		default:
+			if win[i] != raw {
+				t.Errorf("argv[%d] = %q, want the non-path argument %q untouched", i, win[i], raw)
+			}
+		}
+	}
+}
+
 // testLogger is a simple logger for tests.
 type testLogger struct{}
 

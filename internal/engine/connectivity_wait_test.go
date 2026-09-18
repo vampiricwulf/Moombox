@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,5 +48,33 @@ func TestWaitForConnectivity_ContextCancelled(t *testing.T) {
 	err := waitForConnectivity(ctx, func() bool { return false }, connectivityPollInterval)
 	if err != context.DeadlineExceeded {
 		t.Fatalf("expected DeadlineExceeded, got %v", err)
+	}
+}
+
+// TestCallIsOnlineSingleFlight pins ENGINE-15 (report #51): a hung IsOnline
+// probe used to leak one goroutine per 5 s poll for the whole outage, and
+// every live downloader polls independently. Concurrent callers now share the
+// one in-flight probe.
+//
+// Mutant: restoring the per-call `go func()` — starts counts 5 instead of 1.
+func TestCallIsOnlineSingleFlight(t *testing.T) {
+	var starts atomic.Int32
+	block := make(chan struct{})
+	probe := func() bool {
+		starts.Add(1)
+		<-block
+		return true
+	}
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() { defer wg.Done(); callIsOnline(probe) }()
+	}
+	wg.Wait() // every caller gives up at isOnlineProbeTimeout
+	close(block)
+
+	if n := starts.Load(); n != 1 {
+		t.Fatalf("probe invocations = %d, want 1 — callIsOnline is not single-flighted", n)
 	}
 }

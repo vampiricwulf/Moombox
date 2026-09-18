@@ -276,7 +276,11 @@ func TestProbeFileSizeDrainIsBounded(t *testing.T) {
 // restarting it costs bandwidth, not footage — unlike a live recording, whose
 // staged segments the CDN has already evicted. Widening the guard would turn
 // the ordinary "interrupted below the first 50 MB sidecar checkpoint" case
-// into a hard job error that only a manual Retry clears.
+// into a hard job error that only a manual Retry clears. That checkpoint is a
+// real one as of Task 10: saveResume used to return early on every whole-file
+// download (no currentSeq), so until then the case was "interrupted at any
+// point whatsoever" — see TestDirectDownloadCheckpointsFreshRunAndResumes and
+// TestDirectFallbackCheckpointsMidStream.
 //
 // Mutant: dropping !d.opts.IsDirectURL from the guard in Start — this Start
 // returns ErrStagedMediaPresent instead of downloading.

@@ -151,10 +151,15 @@ const (
 // that ends a body trickling just fast enough to keep resetting this bound.
 // A package var rather than a const purely so a test can shrink it under
 // t.Cleanup-restored assignment and exercise a genuine deadline without an
-// actual 30s wait; production code never mutates it. That assignment is why
-// no test in this package may call t.Parallel(): several shrink this var, and
-// a parallel test reading it while another writes it is a data race (-race
-// is clean today only because no engine test is parallel).
+// actual 30s wait; production code never mutates it. The rule that assignment
+// imposes is narrow: a test that MUTATES this var (or any other package-level
+// seam, e.g. syncMediaFile) must stay serial, because a parallel test reading
+// it while another writes it is a data race. It is NOT a ban on t.Parallel()
+// in this package — twenty-one tests here are parallel and must stay so. The
+// canonical statement of the rule sits on the mutating test itself, at
+// downloader_fetch_cancel_test.go's
+// TestFetchSegmentDerivedTimeoutIsAConnectivityFailure ("Do not add
+// t.Parallel(): shrinks the package-global SegmentTimeout").
 var SegmentTimeout = 30 * time.Second
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced
@@ -432,6 +437,14 @@ type SegmentDownloader struct {
 	hlsInitURI     string
 	hlsInitHash    string
 
+	// mediaSyncWarned latches the one Warn for a failed media fsync (owner
+	// decision O-G, saveResume) so a volume that has gone read-only mid-
+	// recording does not write a log line every cadence tick for hours.
+	// saveResume and every media write run on the download-loop goroutine —
+	// the same ownership hlsInitWritten above relies on — so a plain bool
+	// needs no atomic.
+	mediaSyncWarned bool
+
 	// streamEndVerified latches an "ended" verdict from CheckStreamStatus
 	// within one continuous gone-burst so the behind-head retry loop in
 	// handleGoneError doesn't re-probe the API every iteration. Reset when
@@ -509,6 +522,16 @@ type SegmentDownloader struct {
 	// size of the VOD. Same ceiling as the DASH catch-up twin, which has had
 	// one since Arc 3.
 	hlsVodBufferBytesOverride int
+
+	// directResumeIntervalOverride is the same seam again for the whole-file
+	// download's sidecar cadence (directResumeInterval, 50 MB — see both call
+	// sites in downloader_direct.go). Zero (the default) means "use
+	// directResumeInterval"; production code never sets this. A test that had
+	// to move 100 MB through an httptest server to observe two checkpoints
+	// would cost seconds and hundreds of megabytes of RAM to pin a rule that
+	// is about the cadence, not the constant — which is itself pinned, by
+	// TestDirectResumeIntervalIsFiftyMegabytes.
+	directResumeIntervalOverride int64
 
 	// onResumeSaved is a TEST SEAM, like delays and
 	// catchUpBufferBytesOverride: production code never sets it. When
@@ -859,7 +882,14 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	//
 	// IsDirectURL is out of scope for both: a whole-file VOD download is not
 	// segmented staged media and its partial is always re-fetchable from the
-	// same static URL, so restarting it costs bandwidth, not footage.
+	// same static URL, so restarting it costs bandwidth, not footage. What it
+	// costs is now genuinely bounded by the 50 MB sidecar cadence, which the
+	// direct paths did not actually write until Task 10 — saveResume's
+	// `currentSeq > 0` guard returned early on every whole-file download, so
+	// the clause this comment leaned on was aspirational and an interrupted
+	// VOD restarted from byte 0 however far it had got (directResumeInterval,
+	// downloader_direct.go, now saves on both the chunked and the streaming
+	// path).
 	if !resuming && !d.opts.IsDirectURL {
 		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
 			if !d.opts.DiscardStaged {

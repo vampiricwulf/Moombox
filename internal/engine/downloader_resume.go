@@ -123,8 +123,10 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 		return nil, err
 	}
 	// Guard against empty / corrupted resume files that round-trip a zero
-	// LastSeq + zero BytesWritten. saveResume() skips writing until seq > 0
-	// but a manually corrupted file could still have this shape. Treating
+	// LastSeq + zero BytesWritten. saveResume() never writes a position that
+	// describes no bytes (and the segmented paths additionally require
+	// seq > 0), but a manually corrupted file could still have this shape,
+	// and LastSeq 0 with BYTES is the direct path's ordinary state. Treating
 	// it as valid would cause the caller to advance currentSeq to
 	// LastSeq+1 = 1 and skip segment 0 entirely, losing the first segment
 	// for YouTube live DASH (StartNumber=0) on resume.
@@ -145,16 +147,40 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 	return &state, nil
 }
 
+// syncMediaFile is os.File.Sync, swappable in tests. Production never
+// reassigns it.
+var syncMediaFile = (*os.File).Sync
+
 // saveResume writes the current download state to a temp file and atomically
 // renames it over the resume file to avoid corruption from crashes.
 func (d *SegmentDownloader) saveResume() {
+	// ENGINE-13: the first-segment hunt advances currentSeq up to 20 with
+	// nothing written, and loadResume accepts a LastSeq>0/BytesWritten=0
+	// sidecar — so every Resume hunted 20 further and, from the second
+	// attempt, CurrentSeq exceeded maxEvictionHuntAdvance and silenced
+	// diagnoseEvictedStart. A position that describes no bytes is not a
+	// position. It is also the whole-file path's only guard (below).
+	written := d.bytesWritten.Load()
+	if written == 0 {
+		return
+	}
 	seq := int(d.currentSeq.Load())
-	if seq <= 0 {
+	if !d.opts.IsDirectURL && seq <= 0 {
 		return // Nothing downloaded yet — no useful state to persist.
 	}
+	// The whole-file (direct) path NEVER advances currentSeq — its checkpoint
+	// is the byte offset — so the seq guard above used to return early on
+	// every fresh VOD and directResumeInterval had never once written a
+	// sidecar in production (sweep-2, Task 4 rounds). LastSeq stays 0 there,
+	// which loadResume accepts alongside a non-zero BytesWritten, and Start's
+	// direct path reads the offset, not the sequence.
+	lastSeq := seq - 1
+	if lastSeq < 0 {
+		lastSeq = 0
+	}
 	state := ResumeState{
-		LastSeq:      seq - 1,
-		BytesWritten: d.bytesWritten.Load(),
+		LastSeq:      lastSeq,
+		BytesWritten: written,
 		Timestamp:    time.Now().Unix(),
 		BaseURL:      d.getBaseURL(),
 		StreamID:     d.opts.StreamID,
@@ -165,6 +191,27 @@ func (d *SegmentDownloader) saveResume() {
 	data, err := json.Marshal(state)
 	if err != nil {
 		return
+	}
+	// Owner decision O-G: fsync the MEDIA before the sidecar, and nowhere
+	// else. The sidecar is written with fsync+rename and the DB's last_*_seq
+	// sits under FULL sync, so both durable positions could lead the durable
+	// media after a power loss — Start would then reject the sidecar on its
+	// size check and the DB fallback would append after a torn or zero-filled
+	// (NTFS valid-data-length) tail. Bounded cost at the existing cadence:
+	// ~4/min on HLS live, up to ~18/min per track during catch-up, and once
+	// per 50 MB on a direct VOD. A failed Sync skips THIS save rather than
+	// writing a position it cannot back — the previous sidecar still points
+	// at bytes that are definitely on disk — but it never fails the capture:
+	// the loop keeps downloading and the next save tries again.
+	if f := d.outputFile; f != nil {
+		if syncErr := syncMediaFile(f); syncErr != nil {
+			if !d.mediaSyncWarned {
+				d.mediaSyncWarned = true
+				d.logger.Warn("[Downloader] Media fsync failed; resume position not advanced",
+					"file", d.opts.OutputFile, "error", syncErr)
+			}
+			return
+		}
 	}
 	tmpFile := d.opts.ResumeFile + ".tmp"
 	// Write + fsync + rename: without the fsync a power loss can journal the

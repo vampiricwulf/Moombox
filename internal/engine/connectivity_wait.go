@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -17,29 +18,64 @@ const (
 	isOnlineProbeTimeout = 2 * time.Second
 )
 
+// onlineProbe is one in-flight IsOnline call. ok is written by the probe
+// goroutine strictly before done closes, so every waiter that receives from
+// done sees the finished value — and because each flight owns its own struct,
+// a later flight can never overwrite an earlier one's answer.
+type onlineProbe struct {
+	done chan struct{}
+	ok   bool
+}
+
+// isOnlineInFlight is the probe currently running, if any, under isOnlineMu.
+// A hung IsOnline used to leak one goroutine per 5 s poll for the whole
+// outage, and every live downloader polls independently (sweep-2 ENGINE-15).
+var (
+	isOnlineMu       sync.Mutex
+	isOnlineInFlight *onlineProbe
+)
+
 // callIsOnline invokes the caller-supplied probe with a hard timeout. If the
 // probe doesn't return within isOnlineProbeTimeout, we treat it as offline
 // (returns false) so the polling loop keeps trying rather than wedging on a
 // hung callback. ctx is not honored inside the goroutine — the probe runs to
-// completion in the background, but we stop waiting on it.
+// completion in the background — but while one is running no second probe is
+// started, so a hung callback costs ONE goroutine for the whole outage rather
+// than one per poll per downloader.
+//
+// The probe's own design is untouched: the monitor decides what "online"
+// means and how often it is asked; this is only the engine's wrapper around
+// calling it.
 func callIsOnline(isOnline func() bool) bool {
 	if isOnline == nil {
 		return true
 	}
-	resultCh := make(chan bool, 1)
-	go func() {
-		defer func() {
-			// A panic inside the caller's probe must not kill the engine.
-			if r := recover(); r != nil {
-				resultCh <- false
-				return
-			}
+
+	isOnlineMu.Lock()
+	p := isOnlineInFlight
+	if p == nil {
+		p = &onlineProbe{done: make(chan struct{})}
+		isOnlineInFlight = p
+		go func() {
+			defer func() {
+				// A panic inside the caller's probe must not kill the engine;
+				// p.ok is already false, so the flight simply reads offline.
+				if r := recover(); r != nil {
+					p.ok = false
+				}
+				isOnlineMu.Lock()
+				isOnlineInFlight = nil
+				isOnlineMu.Unlock()
+				close(p.done)
+			}()
+			p.ok = isOnline()
 		}()
-		resultCh <- isOnline()
-	}()
+	}
+	isOnlineMu.Unlock()
+
 	select {
-	case ok := <-resultCh:
-		return ok
+	case <-p.done:
+		return p.ok
 	case <-time.After(isOnlineProbeTimeout):
 		return false
 	}
