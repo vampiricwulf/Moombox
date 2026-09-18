@@ -69,6 +69,19 @@ type VodChatDownloader struct {
 	// reports/worker.md F3).
 	onProgressMu sync.RWMutex
 	onProgress   func(count int)
+
+	// sessionCancel aborts the page fetch in flight. Stop() fires it so a
+	// goroutine parked in a GQL round trip unwinds inside the orchestrator's
+	// 2 s grace instead of outliving the job's staging removal (TWITCH-11).
+	// The IRC path's interruptSession is the same shape.
+	sessionCancelMu sync.Mutex
+	sessionCancel   context.CancelFunc
+
+	// wroteFile records that this downloader has successfully written its
+	// chat file at least once — the precondition for reading a missing output
+	// directory as "the job removed staging under us" rather than "the first
+	// write has not happened yet". See outputDirGone.
+	wroteFile atomic.Bool
 }
 
 // SetOnProgress installs the progress callback. Safe to call before or
@@ -145,6 +158,13 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Derive a cancellable context so Stop() can abort a page fetch in flight.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	vcd.sessionCancelMu.Lock()
+	vcd.sessionCancel = cancel
+	vcd.sessionCancelMu.Unlock()
+
 	vcd.logger.Info("starting VOD chat download", "vodID", vcd.vodID)
 
 	var contentOffset float64
@@ -175,14 +195,25 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 	for vcd.running.Load() {
 		select {
 		case <-ctx.Done():
-			vcd.flush()
-			vcd.saveResumeState(contentOffset)
+			vcd.finishInterrupted(contentOffset)
 			return nil
 		default:
 		}
 
 		edges, hasNext, err := vcd.api.GetVodComments(ctx, vcd.vodID, contentOffset, cursor, vcd.currentAuthToken())
 		if err != nil {
+			// A cancelled session is not a fetch error. Stop() fires
+			// sessionCancel while a page is in flight, so this arm saw
+			// context.Canceled on EVERY mid-page stop and reported a
+			// deliberate shutdown as a failure — counted against
+			// vodChatMaxConsecutiveErrors and written at WARN, the default
+			// log level. Finish exactly as the ctx.Done arm above does
+			// (flush, sidecar, one Info line) so the outcome is still
+			// `incomplete` with a consistent resume offset.
+			if ctx.Err() != nil {
+				vcd.finishInterrupted(contentOffset)
+				return ctx.Err()
+			}
 			consecutiveErrors++
 			if consecutiveErrors >= vodChatMaxConsecutiveErrors {
 				vcd.flush()
@@ -192,6 +223,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			vcd.logger.Warn("vod chat fetch error", "err", err, "consecutive", consecutiveErrors)
 			select {
 			case <-ctx.Done():
+				vcd.finishInterrupted(contentOffset)
 				return ctx.Err()
 			case <-time.After(2 * time.Duration(consecutiveErrors) * time.Second):
 			}
@@ -331,10 +363,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 	// (internal/worker/orchestrator_chat.go) reports the timeout rather than
 	// this nil, so the row records incomplete.
 	if !vcd.running.Load() {
-		vcd.flush()
-		vcd.saveResumeState(contentOffset)
-		vcd.logger.Info("VOD chat download stopped before completion; resume state preserved",
-			"vodID", vcd.vodID, "offset", contentOffset, "messages", vcd.totalCount.Load())
+		vcd.finishInterrupted(contentOffset)
 		return nil
 	}
 
@@ -406,8 +435,46 @@ func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reaso
 	return fmt.Errorf("vod chat paging stalled at offset %v cursor %q: %s", contentOffset, cursor, reason)
 }
 
+// finishInterrupted is the exit every path that ends BEFORE the VOD's last
+// page shares: flush what is buffered and keep the resume sidecar, so a
+// relaunch inside the same job (or a restart of a still-Downloading job)
+// continues from this offset. It never deletes the sidecar and never enriches:
+// an enriched file must not receive further appends.
+//
+// Reaching it through a context cancellation is new. Before Stop() cancelled
+// the session, the fetch-error branch's cancel arm returned ctx.Err() with no
+// flush and no save at all — which, once Stop() starts cancelling, would have
+// thrown away exactly the batch the pre-cancel code preserved.
+func (vcd *VodChatDownloader) finishInterrupted(contentOffset float64) {
+	vcd.flush()
+	vcd.saveResumeState(contentOffset)
+	vcd.logger.Info("VOD chat download stopped before completion; resume state preserved",
+		"vodID", vcd.vodID, "offset", contentOffset, "messages", vcd.totalCount.Load())
+}
+
+// outputDirGone reports whether the directory that held the chat file has been
+// removed under this downloader — the finalize race of TWITCH-11: the job
+// removed its staging tree while this goroutine was mid-GQL. Only meaningful
+// once a file has been written; before that the directory is the worker's
+// freshly-created staging dir and creating it is the ordinary first-write path.
+func (vcd *VodChatDownloader) outputDirGone() bool {
+	if vcd.outputPath == "" || !vcd.wroteFile.Load() {
+		return false
+	}
+	_, err := os.Stat(filepath.Dir(vcd.outputPath))
+	return err != nil && os.IsNotExist(err)
+}
+
 func (vcd *VodChatDownloader) flush() {
 	if len(vcd.messages) == 0 || vcd.outputPath == "" {
+		return
+	}
+	if vcd.outputDirGone() {
+		// The job finalized and removed staging while this goroutine was still
+		// paging. MkdirAll here would REBUILD <staging>/<jobID>/ around a
+		// chat.json and a resume sidecar nothing ever cleans (TWITCH-11).
+		vcd.logger.Warn("[TwitchVodChat] output directory is gone; dropping the exit flush",
+			"path", vcd.outputPath, "pending", len(vcd.messages))
 		return
 	}
 
@@ -463,6 +530,7 @@ func (vcd *VodChatDownloader) flush() {
 
 	// Clear messages from memory after successful write to prevent unbounded growth
 	vcd.messages = vcd.messages[:0]
+	vcd.wroteFile.Store(true)
 }
 
 // writeFullFile writes the complete file atomically using the shared helper.
@@ -512,7 +580,7 @@ func (vcd *VodChatDownloader) loadResumeState() (*ChatResumeState, error) {
 
 // saveResumeState writes the current resume state to the sidecar JSON file.
 func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
-	if vcd.outputPath == "" {
+	if vcd.outputPath == "" || vcd.outputDirGone() {
 		return
 	}
 	// Deterministic insertion-order snapshot capped to bound the resume file.
@@ -521,7 +589,7 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 	state := ChatResumeState{
 		MessageCount:      int(vcd.totalCount.Load()),
 		LastOffsetSeconds: contentOffset,
-		Timestamp:         time.Now().Unix(),
+		Timestamp:         time.Now().UnixMilli(),
 		StreamID:          vcd.vodID,
 		RecentIDs:         recentIDs,
 	}
@@ -553,9 +621,19 @@ func (vcd *VodChatDownloader) IsRunning() bool {
 	return vcd.running.Load()
 }
 
-// Stop cancels the VOD chat download.
+// Stop cancels the VOD chat download: the loop stops paging AND the page fetch
+// in flight is aborted, so the goroutine unwinds inside the orchestrator's
+// grace window rather than minutes later, after staging has been removed
+// (TWITCH-11). running is cleared FIRST so the exit path takes the
+// "stopped before completion" branch, which preserves the resume sidecar.
 func (vcd *VodChatDownloader) Stop() {
 	vcd.running.Store(false)
+	vcd.sessionCancelMu.Lock()
+	cancel := vcd.sessionCancel
+	vcd.sessionCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // MarkStreamEnded signals that the stream has ended (no-op for VODs).
