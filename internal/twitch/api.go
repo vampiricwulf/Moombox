@@ -48,8 +48,10 @@ var ErrChannelNotFound = errors.New("twitch channel not found (renamed, banned, 
 // a GQL error or null data). Distinct from ErrChannelNotFound so the
 // monitor's health tracker counts it as an ordinary recoverable streak
 // error, not a definitive renamed/banned channel. The single GetStreamInfo
-// swallows it to (nil, nil) — same as the historical offline behavior for
-// that shape — so worker callers are unaffected.
+// now PROPAGATES it (owner decision O-C): the worker confirms an end from two
+// samples, so a transient slot failure must reach it as an error rather than
+// as "offline" — collapsing it to (nil, nil) is what let one flap finalize a
+// live recording mid-broadcast. See collapseStreamInfoError.
 var errStreamSlotUnavailable = errors.New("twitch stream metadata slot unavailable")
 
 // twitchHTTPClient is a shared HTTP client for all Twitch GQL + Helix

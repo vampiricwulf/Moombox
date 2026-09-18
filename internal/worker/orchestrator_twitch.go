@@ -491,6 +491,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// ends, the broadcast changes, or a terminal interrupt arrives.
 sessionLoop:
 	for {
+		// Each session decides its own verdict. A latch taken in a session
+		// that then RESUMED after a connectivity outage is stale: the check
+		// that failed did so because the monitor cancelled the session from
+		// inside the re-verify's own 5-35 s window, and the resumed session
+		// may run to a clean, confirmed end. Carrying it forward marked a
+		// completed capture Error and skipped its final mux (fix round 1).
+		unconfirmedEndErr = nil
+
 		// Quality- and gap-aware download loop
 		for ctx.Err() == nil {
 
@@ -834,6 +842,33 @@ sessionLoop:
 
 	tracker.Finalize()
 
+	// Unknown-verdict exit: stop chat, record its verdict so the row is
+	// honest, and return the download error. processJob's setJobError path
+	// returns before os.RemoveAll(jobCtx.StagingDir), so staging AND the
+	// resume sidecar survive.
+	//
+	// It sits AHEAD of the `status: Muxing` write below because this job is
+	// on its way to Error and never muxes its final part — advertising it as
+	// Muxing first would be a lie the UI shows (fix round 1). The background
+	// part muxes still have to land, so their Wait happens here too.
+	//
+	// The chat wait is deliberately short and asymmetric with the finalize
+	// path's (which drains via MarkStreamEnded on a chatWaitTimeout bound):
+	// chat was Stop()'d, the file on disk is complete through its last flush,
+	// and the job is going to Error with staging intact, so waiting out
+	// chatWaitTimeout buys nothing. A Retry re-runs the whole capture.
+	if unconfirmedEndErr != nil && ctx.Err() == nil {
+		segmentMuxWg.Wait()
+		if twitchChatDl != nil {
+			if twitchChatDl.IsRunning() {
+				twitchChatDl.Stop()
+			}
+			outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, 2*time.Second, 2*time.Second)
+			o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
+		}
+		return unconfirmedEndErr
+	}
+
 	// Stream is no longer downloading. Flip status to Muxing now so the
 	// UI reflects reality during background-mux Wait + the final-segment
 	// mux below — the prior single-flip in finalizeMultiSegmentJob /
@@ -874,21 +909,6 @@ sessionLoop:
 			twitchChatDl.Stop()
 		}
 		// IMPORTANT: Fall through to muxing logic below.
-	}
-
-	// Unknown-verdict exit: stop chat, record its verdict so the row is
-	// honest, and return the download error. processJob's setJobError path
-	// returns before os.RemoveAll(jobCtx.StagingDir), so staging AND the
-	// resume sidecar survive.
-	if unconfirmedEndErr != nil && ctx.Err() == nil {
-		if twitchChatDl != nil {
-			if twitchChatDl.IsRunning() {
-				twitchChatDl.Stop()
-			}
-			outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, 2*time.Second, 2*time.Second)
-			o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
-		}
-		return unconfirmedEndErr
 	}
 
 	// After the fall-through from connectivity loss, use a fresh context for muxing
