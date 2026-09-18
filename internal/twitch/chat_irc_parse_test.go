@@ -124,3 +124,80 @@ func TestIRCSessionSendsTheCapRequestVerbatim(t *testing.T) {
 		t.Errorf("the session wrote %q, want ircCapRequest (%q)", cap, ircCapRequest)
 	}
 }
+
+// TestUnescapeIRCTag is TWITCH-7 (report row #94). IRCv3 message-tag values
+// escape five things on the wire; Moombox decoded one of them, in one tag.
+// chatterino applies its equivalent (parseTagString,
+// references/chatterino7/src/util/IrcHelpers.hpp) to system-msg, display-name
+// and msg-param-recipient-display-name alike.
+//
+// The last two rows are the spec's own fallbacks and are where implementations
+// differ: an unknown escape yields the character with the backslash dropped,
+// and a lone TRAILING backslash is dropped. (chatterino keeps the trailing one
+// because its in-place walk stops a character short — a quirk, not a rule.)
+//
+// Mutants: keeping strings.ReplaceAll(v, `\s`, " ") (every row but the first
+// and the last fails); decoding `\:` to ':' rather than ';'; emitting the
+// backslash for an unknown escape.
+func TestUnescapeIRCTag(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"space", `User\ssubscribed\sat\sTier\s1`, "User subscribed at Tier 1"},
+		{"semicolon", `a\:b`, "a;b"},
+		{"backslash", `a\\b`, `a\b`},
+		{"cr and lf", "a\\rb\\nc", "a\rb\nc"},
+		{"unknown escape drops the backslash", `a\qb`, "aqb"},
+		{"lone trailing backslash is dropped", `trailing\`, "trailing"},
+		{"nothing to do", "plain text", "plain text"},
+		{"empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unescapeIRCTag(tc.in); got != tc.want {
+				t.Errorf("unescapeIRCTag(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUsernoticeUnescapesEveryTextTag pins the three call sites. A resub
+// message quoting a semicolon is the reachable case: Twitch escapes it as \:
+// because ';' is the tag separator.
+//
+// Mutants: leaving any one of the three tags un-decoded — each assertion names
+// its own tag.
+func TestUsernoticeUnescapesEveryTextTag(t *testing.T) {
+	cd := newSidecarTestChatDownloader(t)
+	line := `@id=un-1;msg-id=subgift;system-msg=Ann\sgifted\sa\ssub\sto\sBo\:\snice!;` +
+		`display-name=Ann\sB;msg-param-recipient-display-name=Bo\sC;tmi-sent-ts=1700000000000 ` +
+		`:tmi.twitch.tv USERNOTICE #testchan :thanks`
+	msg := cd.parseLine(line)
+	if msg == nil {
+		t.Fatal("parseLine returned nil for a well-formed USERNOTICE")
+	}
+	if msg.SystemMsg != "Ann gifted a sub to Bo; nice!" {
+		t.Errorf("SystemMsg = %q, want %q (system-msg)", msg.SystemMsg, "Ann gifted a sub to Bo; nice!")
+	}
+	if msg.AuthorName != "Ann B" {
+		t.Errorf("AuthorName = %q, want %q (display-name)", msg.AuthorName, "Ann B")
+	}
+	if msg.GiftRecipient != "Bo C" {
+		t.Errorf("GiftRecipient = %q, want %q (msg-param-recipient-display-name)",
+			msg.GiftRecipient, "Bo C")
+	}
+}
+
+// TestPrivmsgUnescapesTheDisplayName is the fourth call site: parsePrivmsg's
+// author-name fallback chain reads the same tag.
+//
+// Mutant: leaving parsePrivmsg's `tags["display-name"]` bare.
+func TestPrivmsgUnescapesTheDisplayName(t *testing.T) {
+	cd := newSidecarTestChatDownloader(t)
+	line := `@id=pm-1;display-name=Ann\sB;tmi-sent-ts=1700000000000 ` +
+		`:ann!ann@ann.tmi.twitch.tv PRIVMSG #testchan :hello`
+	msg := cd.parseLine(line)
+	if msg == nil {
+		t.Fatal("parseLine returned nil for a well-formed PRIVMSG")
+	}
+	if msg.AuthorName != "Ann B" {
+		t.Errorf("AuthorName = %q, want %q", msg.AuthorName, "Ann B")
+	}
+}

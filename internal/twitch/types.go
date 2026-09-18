@@ -161,6 +161,12 @@ type VodCommentEdge struct {
 // until the first RollFile). States written before part-splitting existed
 // lack TotalCount — readers fall back to MessageCount, which was cumulative
 // by definition when there was only ever one file.
+//
+// Timestamp is epoch MILLISECONDS on BOTH paths. It exists only so a human
+// reading a sidecar can see when it was written — nothing loads it — and until
+// sweep 2 the IRC writer used milliseconds while the VOD writer used seconds,
+// so two files in the same staging tree disagreed about the unit by a factor
+// of a thousand (TWITCH-8).
 type ChatResumeState struct {
 	MessageCount      int      `json:"messageCount"`
 	TotalCount        int      `json:"totalCount,omitempty"`

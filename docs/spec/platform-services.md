@@ -556,6 +556,8 @@ The IRC parser handles two message types:
 - `system-msg` is unescaped (`\s` to space).
 - Message type normalization: `sub` -> `"sub"`, `resub` -> `"resub"`, `subgift`/`submysterygift` -> `"subgift"`, `raid` -> `"raid"`, everything else -> `"system"`.
 
+IRCv3 tag values are decoded through `unescapeIRCTag` (`internal/twitch/chat_irc.go`) — `\:` to `;`, `\s` to a space, `\\`, `\r` and `\n`, with an unknown escape yielding its character and a lone trailing backslash dropped. It is applied to `system-msg`, `display-name` and `msg-param-recipient-display-name`, the same three chatterino decodes (`references/chatterino7` IrcHelpers.hpp). The reachable case is a system message that quotes a semicolon: `;` separates tags on the wire, so Twitch must escape it.
+
 **PING handling**: a server `PING` is answered with `PONG :tmi.twitch.tv`.
 
 **The session also speaks first.** `ircReadDeadline` (6 minutes) is the OUTER bound only. A half-open socket — one the OS still believes is connected — used to cost up to six minutes of chat, and Twitch IRC has no replay, so those messages are absent from the archive rather than late to it. A keepalive goroutine inside `runIRCSession` (`internal/twitch/chat_irc.go`) therefore sends `ircKeepalivePing` (`internal/twitch/chat.go` — the line `PING :moombox`) after `ircKeepaliveIdle` (45 s) without ANY inbound frame, and declares the socket dead if no inbound frame of any kind arrives within `ircKeepalivePongWait` (10 s); both windows are evaluated every `ircKeepaliveCheck` (15 s), so the detection bound is about 70 seconds. Any frame answers — a PONG, a chat line, a server PING — because the question is whether the IRC layer is still serving us, not which verb it used. It is a goroutine rather than a shorter read deadline because `coder/websocket` CLOSES the connection when a read context fires, so a 15-second read deadline would kill the socket on every quiet fifteen seconds. The verdict is a SENTINEL, not merely an error. The keepalive closes `keepaliveFailed`, the read loop wakes on it and returns `errKeepaliveTimeout` (`internal/twitch/chat.go`), and `Start` (`internal/twitch/chat.go`) reconnects on that value WITHOUT charging `reconnectAttempts` — which is the whole reason the sentinel exists. A keepalive verdict lands at about 70 seconds, BELOW the `reconnectResetUptime` (5 minutes) that clears the counter, so charging it would walk a PONG-swallowing middlebox through all ten reconnects in about fifteen minutes and abandon chat for the rest of the job — on a network the old six-minute detector retried against forever. A faster detector must not turn a recoverable network into a surrendered one. It is not the reauth path's `immediate` either: at budget 0 the `continue` re-dials at once and the ~70 s the verdict itself took is the only wait, while a budget carried from EARLIER real failures is applied unchanged by the loop head's backoff. The session flushes first, so the tail of the lost session's chat reaches disk instead of waiting for the next session's flusher tick.
@@ -597,11 +599,13 @@ The sidecar `.resume.json` file contains:
 {
   "messageCount": 1234,
   "lastTimestampMs": 1709000000000,
-  "timestamp": 1709000000,
+  "timestamp": 1709000000000,
   "streamId": "12345678",
   "recentIds": ["msg-id-1", "msg-id-2", ...]
 }
 ```
+
+`timestamp` is epoch MILLISECONDS on both chat paths (`ChatResumeState`, `internal/twitch/types.go`). Nothing loads it — it is there so a human reading a sidecar can see when it was written — and until sweep 2 the IRC writer used milliseconds while the VOD writer used seconds, so two files in the same staging tree disagreed about the unit by a factor of a thousand.
 
 On restart, if the `streamId` matches, the downloader resumes with the saved message count, last timestamp, and dedup set. The resume file is deleted on clean completion. A part whose chat file is on disk but whose sidecar is GONE or REFUSED — for example a re-go-live, which changes the stream ID so `loadResumeState` refuses the old sidecar, when the job resumes into the same part; or a crash in the window between the file write and the sidecar write, a sidecar cleared by a stream-end drain, or one deleted by hand — is adopted rather than overwritten (`adoptExistingPartFile`, `internal/twitch/chat.go`): the file is streamed to count its messages array, `flushedToDisk` is set so the first write appends instead of rewriting the part from the new batch alone, and the tail of its IDs seeds the dedup; a file whose bytes read fine but are not chat JSON is preserved beside itself as `<file>.corrupt` and the part starts fresh, never silently overwritten, while a file that could not be READ at all (a lock, a directory in its place) is left exactly where it is. The adoption runs only when no sidecar restored the part, so an ordinary resume neither pays the full read nor can reach the rename.
 
@@ -638,7 +642,7 @@ Similar to IRC, but tracks `lastOffsetSeconds` instead of `lastTimestampMs`:
 {
   "messageCount": 5678,
   "lastOffsetSeconds": 3600.5,
-  "timestamp": 1709000000,
+  "timestamp": 1709000000000,
   "streamId": "v1234567890",
   "recentIds": ["comment-id-1", ...]
 }

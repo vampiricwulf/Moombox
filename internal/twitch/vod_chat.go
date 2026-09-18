@@ -521,7 +521,7 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 	state := ChatResumeState{
 		MessageCount:      int(vcd.totalCount.Load()),
 		LastOffsetSeconds: contentOffset,
-		Timestamp:         time.Now().Unix(),
+		Timestamp:         time.Now().UnixMilli(),
 		StreamID:          vcd.vodID,
 		RecentIDs:         recentIDs,
 	}

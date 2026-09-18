@@ -689,7 +689,7 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 	messageText, isAction := stripActionWrapper(messageText)
 
 	// Author name fallback chain
-	authorName := tags["display-name"]
+	authorName := unescapeIRCTag(tags["display-name"])
 	if authorName == "" {
 		authorName = tags["login"]
 	}
@@ -744,8 +744,8 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 		normalizedType = "announcement"
 	}
 
-	// System message (unescape \s to space)
-	systemMsg := strings.ReplaceAll(tags["system-msg"], `\s`, " ")
+	// System message (IRCv3 tag escapes decoded: \s \: \\ \r \n)
+	systemMsg := unescapeIRCTag(tags["system-msg"])
 
 	var messageText string
 	if len(parts) >= 4 {
@@ -758,7 +758,7 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 	}
 
 	// Author name fallback chain
-	authorName := tags["display-name"]
+	authorName := unescapeIRCTag(tags["display-name"])
 	if authorName == "" {
 		authorName = tags["login"]
 	}
@@ -786,7 +786,7 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 	if v := tags["msg-param-sub-plan"]; v != "" {
 		msg.SubPlan = v
 	}
-	if v := tags["msg-param-recipient-display-name"]; v != "" {
+	if v := unescapeIRCTag(tags["msg-param-recipient-display-name"]); v != "" {
 		msg.GiftRecipient = v
 	}
 	if v, err := strconv.Atoi(tags["msg-param-viewerCount"]); err == nil && v > 0 {
@@ -818,6 +818,57 @@ func parseIRCTags(s string) map[string]string {
 		}
 	}
 	return tags
+}
+
+// unescapeIRCTag decodes the IRCv3 message-tags escape alphabet:
+//
+//	\:  ->  ;      (the tag separator, so this one is unavoidable on the wire)
+//	\s  ->  space
+//	\\  ->  \
+//	\r  ->  CR
+//	\n  ->  LF
+//
+// A backslash before anything else yields that character with the backslash
+// dropped, and a lone TRAILING backslash is dropped — both are the spec's own
+// fallbacks. (chatterino's parseTagString keeps a trailing backslash because
+// its in-place walk stops one character short; that is a quirk of the walk,
+// not a rule, and Twitch does not emit one.)
+//
+// Applied to system-msg, display-name and msg-param-recipient-display-name —
+// the same three chatterino decodes. Before this, only \s was decoded and only
+// in system-msg, so a system message quoting a semicolon archived as "Bo\:"
+// (TWITCH-7).
+func unescapeIRCTag(v string) string {
+	if !strings.Contains(v, `\`) {
+		return v
+	}
+	var b strings.Builder
+	b.Grow(len(v))
+	for i := 0; i < len(v); i++ {
+		if v[i] != '\\' {
+			b.WriteByte(v[i])
+			continue
+		}
+		if i+1 >= len(v) {
+			break // lone trailing backslash: dropped
+		}
+		i++
+		switch v[i] {
+		case ':':
+			b.WriteByte(';')
+		case 's':
+			b.WriteByte(' ')
+		case 'r':
+			b.WriteByte('\r')
+		case 'n':
+			b.WriteByte('\n')
+		case '\\':
+			b.WriteByte('\\')
+		default:
+			b.WriteByte(v[i])
+		}
+	}
+	return b.String()
 }
 
 // parseBadges parses badge strings like "subscriber/12,moderator/1".
