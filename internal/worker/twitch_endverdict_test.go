@@ -5,6 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -330,5 +333,226 @@ func TestUnconfirmedEndLatchDoesNotOutliveItsSession(t *testing.T) {
 	if errors.Is(err, engine.ErrQualityLost) {
 		t.Errorf("ExecuteTwitch = %v — session 1's unconfirmed-end latch outlived its session and "+
 			"errored a capture that session 2 completed cleanly", err)
+	}
+}
+
+// watchStatuses records every status this job is written with until the
+// returned stop func is called, which returns the sequence. The finalize path
+// is the only one that writes Muxing, so its presence says which exit
+// ExecuteTwitch took.
+func (h *endVerdictHarness) watchStatuses() func() []database.JobStatus {
+	var mu sync.Mutex
+	var seq []database.JobStatus
+	unsubscribe := h.db.OnJobUpdate(func(j *database.Job) {
+		if j.ID != h.job.ID {
+			return
+		}
+		mu.Lock()
+		seq = append(seq, j.Status)
+		mu.Unlock()
+	})
+	return func() []database.JobStatus {
+		unsubscribe()
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]database.JobStatus(nil), seq...)
+	}
+}
+
+func sawMuxing(seq []database.JobStatus) bool {
+	for _, s := range seq {
+		if s == database.StatusMuxing {
+			return true
+		}
+	}
+	return false
+}
+
+// errUsher stands in for the master-playlist failures a variant refresh really
+// meets — a usher 5xx, a rate limit, an access-token blip — none of which say
+// anything about whether the broadcast is over.
+var errUsher = errors.New("usher 503")
+
+// TestVariantRefreshFailureOnALiveBroadcastLandsInError is sweep-2 residual R2
+// (graded Important by the fix-round-1 re-review, reproduced there as
+// "CheckStreamFn calls = 1; status sequence = [Downloading Muxing Muxing
+// Muxing]"). ErrQualityLost is only ever produced by the engine's verdictLive
+// arm, which post-O-C means the broadcast was CONFIRMED live — so a
+// master-playlist refresh failing right after it must not finalize the job.
+//
+// Mutant: the bare `break` this site used to take (no latchIfUnconfirmed) —
+// the job goes down the finalize path instead, so Muxing appears, the
+// returned error is the mux failure rather than the refresh failure, and
+// CheckStreamFn is called once instead of twice.
+func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
+	h := newEndVerdictHarness(t, "tw_refresh_live")
+	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
+		h.checks.Add(1)
+		return true, nil // live at the engine's consult AND at the re-verify
+	}
+	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+		return nil, errUsher
+	}
+
+	statuses := h.watchStatuses()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
+	seq := statuses()
+
+	if !errors.Is(err, errUsher) {
+		t.Fatalf("ExecuteTwitch = %v, want the refresh failure (%v) — a variant refresh that fails "+
+			"on a broadcast the consult just confirmed LIVE must land the job in Error, never "+
+			"Finished", err, errUsher)
+	}
+	if got := h.checks.Load(); got != 2 {
+		t.Errorf("CheckStreamFn calls = %d, want 2 (the engine's 404 consult and the refresh "+
+			"site's re-verify)", got)
+	}
+	if sawMuxing(seq) {
+		t.Errorf("status sequence = %v — the refresh-failure exit returns an error, so it must not "+
+			"advertise the job as Muxing", seq)
+	}
+	if _, statErr := os.Stat(h.jobCtx.StagingDir); statErr != nil {
+		t.Errorf("staging dir: %v — it must survive; the non-nil return is what makes processJob "+
+			"take setJobError and skip os.RemoveAll", statErr)
+	}
+}
+
+// TestVariantRefreshFailureOnAnEndedBroadcastFinalizes is the other half of
+// the same rule: the re-verify is what decides, so a refresh failure on a
+// broadcast that HAS ended still finalizes exactly as before. (The broadcast
+// ends between the engine's consult — which had to answer live to produce
+// ErrQualityLost at all — and the re-verify.)
+//
+// Mutant: latching regardless of the re-verify's answer — the job would then
+// land in Error on every refresh failure, so the finalize path is never taken
+// and Muxing never appears.
+func TestVariantRefreshFailureOnAnEndedBroadcastFinalizes(t *testing.T) {
+	h := newEndVerdictHarness(t, "tw_refresh_ended")
+	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
+		return h.checks.Add(1) == 1, nil // live at the consult, over at the re-verify
+	}
+	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+		return nil, errUsher
+	}
+
+	statuses := h.watchStatuses()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
+	seq := statuses()
+
+	if errors.Is(err, errUsher) {
+		t.Errorf("ExecuteTwitch = %v — a CONFIRMED end must still finalize what was captured, not "+
+			"latch the refresh failure", err)
+	}
+	if got := h.checks.Load(); got != 2 {
+		t.Errorf("CheckStreamFn calls = %d, want 2", got)
+	}
+	if !sawMuxing(seq) {
+		t.Errorf("status sequence = %v — a confirmed end takes the finalize path, which flips the "+
+			"row to Muxing", seq)
+	}
+}
+
+// TestAdvanceToNewPartFailureLandsInError covers the other four early exits:
+// the part advance failed, which only happens when os.MkdirAll for the next
+// part dir failed. Staging is unusable, so the job must land in Error with
+// what it has — never Finished. No re-verify is involved: the failure is
+// local, not a statement about the broadcast, which is why CheckStreamFn is
+// called once (the engine's consult) and not twice.
+//
+// The quality-split break is the one reachable from a harness; the other
+// three are pinned by TestAdvanceToNewPartCallSitesAllLatch.
+//
+// Mutant: the bare `break` these sites used to take — no latch, so the job
+// takes the finalize path (Muxing appears) and the MkdirAll cause never
+// reaches the row.
+func TestAdvanceToNewPartFailureLandsInError(t *testing.T) {
+	h := newEndVerdictHarness(t, "tw_advance_fail")
+	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
+		h.checks.Add(1)
+		return true, nil
+	}
+	// A DIFFERENT quality, so the refresh routes into the quality-split
+	// branch and its advanceToNewPart.
+	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+		return []twitch.TwitchHLSVariant{{
+			URL: "http://127.0.0.1:1/x.m3u8", Name: "480p", Width: 854, Height: 480, FPS: 30,
+		}}, nil
+	}
+	// The part is younger than minSegmentDuration, so the split discards it
+	// and reuses index 0: a plain FILE where seg_0 must be makes MkdirAll
+	// fail without touching permissions (which behave differently per OS).
+	blocker := filepath.Join(h.jobCtx.StagingDir, "seg_0")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	statuses := h.watchStatuses()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
+	seq := statuses()
+
+	if err == nil || !strings.Contains(err.Error(), "advance to new part") {
+		t.Fatalf("ExecuteTwitch = %v, want an error naming the failed part advance — a job whose "+
+			"staging could not be extended must land in Error, not Finished", err)
+	}
+	if !strings.Contains(err.Error(), "seg_0") {
+		t.Errorf("ExecuteTwitch = %v — the latched error must carry the MkdirAll cause so the row "+
+			"says which path failed", err)
+	}
+	if got := h.checks.Load(); got != 1 {
+		t.Errorf("CheckStreamFn calls = %d, want 1 — a local I/O failure is not a stream verdict, "+
+			"so this exit must not spend a re-verify on it", got)
+	}
+	if sawMuxing(seq) {
+		t.Errorf("status sequence = %v — this exit returns an error, so it must not advertise the "+
+			"job as Muxing", seq)
+	}
+	if _, statErr := os.Stat(h.jobCtx.StagingDir); statErr != nil {
+		t.Errorf("staging dir: %v — it must survive", statErr)
+	}
+}
+
+// TestAdvanceToNewPartCallSitesAllLatch pins the three part-advance breaks a
+// harness cannot reach (the gap/init "continue the tail" sub-path, the
+// init-segment-change split and the gap split) plus the post-outage one, by
+// source inspection — the same technique
+// TestYouTubeVodChatWaitRoutesThroughResolveVodChatOutcome uses for a site
+// that cannot be driven with a fake. Every call site must take the
+// `if err := advanceToNewPart(...); err != nil { latchPartFailure(err); ... }`
+// shape, so a future break added beside them cannot silently finalize a job
+// whose staging is unusable.
+//
+// Mutant: reverting any one call site to a bare `break` on failure — the
+// three counts stop agreeing.
+func TestAdvanceToNewPartCallSitesAllLatch(t *testing.T) {
+	src, err := os.ReadFile("orchestrator_twitch.go")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(src)
+
+	// The declaration reads "advanceToNewPart := func(", so this counts call
+	// sites only.
+	calls := strings.Count(text, "advanceToNewPart(")
+	guarded := strings.Count(text, "if err := advanceToNewPart(")
+	latches := strings.Count(text, "latchPartFailure(err)")
+
+	if calls < 5 {
+		t.Fatalf("advanceToNewPart call sites = %d, want at least the 5 known ones — this test is "+
+			"reading the wrong thing", calls)
+	}
+	if guarded != calls {
+		t.Errorf("%d of %d advanceToNewPart call sites take the `if err := …; err != nil` shape — "+
+			"one that does not cannot report the MkdirAll cause", guarded, calls)
+	}
+	if latches != calls {
+		t.Errorf("latchPartFailure(err) appears %d times for %d advanceToNewPart call sites — a "+
+			"site that breaks without latching finalizes the job Finished on unusable staging",
+			latches, calls)
 	}
 }

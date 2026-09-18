@@ -415,15 +415,19 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// dropped); gap splits always mux — that data is irreplaceable. When the
 	// reused dir IS the current dir, the chat deliberately keeps its file:
 	// rolling onto the same path would rewrite it from scratch.
-	advanceToNewPart := func(muxCurrent bool, segmentEndTime int64) bool {
+	//
+	// Returns the reason the advance failed — os.MkdirAll is the only one —
+	// so the caller can latch it. A part advance that cannot create its next
+	// staging dir must never let the job finalize Finished (sweep-2 R2).
+	advanceToNewPart := func(muxCurrent bool, segmentEndTime int64) error {
 		nextIdx := segmentIndex
 		if muxCurrent {
 			nextIdx = segmentIndex + 1
 		}
 		nextDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", nextIdx))
 		if err := os.MkdirAll(nextDir, 0o755); err != nil {
-			o.logger.Error("failed to create part staging dir", "err", err, "jobID", jobCtx.Job.ID)
-			return false
+			o.logger.Error("failed to create part staging dir", "err", err, "dir", nextDir, "jobID", jobCtx.Job.ID)
+			return fmt.Errorf("create part staging dir %s: %w", nextDir, err)
 		}
 		var closedChat string
 		var enrich func(context.Context)
@@ -464,7 +468,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		curStagingDir = nextDir
 		segmentStartTime = time.Now().Unix()
 		partResumed = false // the next span is watched from birth
-		return true
+		return nil
 	}
 
 	// outageFinalize marks "finalize what was captured" exits: the broadcast
@@ -483,6 +487,45 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// what a Retry or a monitor re-enqueue needs. Not "resumable": /resume
 	// refuses every non-YouTube job.
 	var unconfirmedEndErr error
+
+	// latchIfUnconfirmed takes that latch unless the broadcast is CONFIRMED
+	// over, and reports whether it did. Every inner-loop exit that leaves on
+	// a failure routes through this one rule (owner decision O-C, sweep-2
+	// R2): the consult is the worker's two-sample CheckStreamFn closure, so
+	// "still live" and "the check itself failed" both mean the verdict is
+	// unknown and the job must land in Error with its staging and resume
+	// sidecar intact. Only a confirmed end falls through to finalize.
+	//
+	// The guards keep the sites honest: a VOD has no live verdict to ask
+	// for, an unwired CheckStreamFn can contradict nothing, a nil cause is
+	// not a failure, and a dead ctx means we are shutting down rather than
+	// judging a broadcast.
+	latchIfUnconfirmed := func(ctx context.Context, cause error) bool {
+		if isVod || variant.CheckStreamFn == nil || cause == nil || ctx.Err() != nil {
+			return false
+		}
+		stillLive, checkErr := variant.CheckStreamFn(ctx)
+		if checkErr == nil && !stillLive {
+			return false
+		}
+		o.logger.Warn("Twitch download ended without a confirmed stream end — keeping staging for recovery",
+			"jobID", jobCtx.Job.ID, "stillLive", stillLive, "checkErr", checkErr)
+		unconfirmedEndErr = cause
+		return true
+	}
+
+	// latchPartFailure routes a failed part advance to the same
+	// Error-with-staging exit. os.MkdirAll is advanceToNewPart's only failure
+	// mode, so the staging this capture needs in order to continue is
+	// unusable — the job must not be advertised Finished whatever the
+	// broadcast is doing. No re-verify: this is a local I/O failure, not a
+	// statement about the stream, so it would be a GQL call spent on a
+	// question nobody asked.
+	latchPartFailure := func(err error) {
+		o.logger.Error("Twitch part advance failed — keeping staging, finishing in Error",
+			"err", err, "jobID", jobCtx.Job.ID)
+		unconfirmedEndErr = fmt.Errorf("advance to new part: %w", err)
+	}
 
 	// Session loop: each iteration is one connectivity session. Connectivity
 	// loss cancels the inner download via the session context; the outage
@@ -573,7 +616,8 @@ sessionLoop:
 							o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
 						}
 						nextSeq := videoDl.CurrentSeq()
-						if !advanceToNewPart(true, segmentEndTime) {
+						if err := advanceToNewPart(true, segmentEndTime); err != nil {
+							latchPartFailure(err)
 							break
 						}
 						videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
@@ -581,7 +625,22 @@ sessionLoop:
 						drainQualityCh()
 						continue
 					}
+					// A master-playlist refresh failing here says NOTHING about
+					// whether the broadcast is over — a usher 5xx, a rate
+					// limit and an access-token blip all look the same as the
+					// 404 an ended stream returns. And the round that brought
+					// us here was ErrQualityLost, which post-O-C means the
+					// engine's consult had just CONFIRMED the broadcast live.
+					// Finalizing on that was sweep-2 R2: the row went
+					// Finished mid-broadcast and the monitor, seeing a
+					// finished job for that stream ID, never re-archived the
+					// rest. Re-verify and only fall through when the end is
+					// confirmed.
 					o.logger.Error("failed to refresh Twitch variants", "err", fetchErr, "jobID", jobCtx.Job.ID)
+					if !latchIfUnconfirmed(ctx, fmt.Errorf("refresh Twitch variants: %w", fetchErr)) {
+						o.logger.Info("Twitch broadcast confirmed over after the failed variant refresh; finalizing captured parts",
+							"jobID", jobCtx.Job.ID)
+					}
 					break
 				}
 				newQuality := qualityInfoFromVariant(newVariant)
@@ -603,7 +662,8 @@ sessionLoop:
 					}
 
 					nextSeq := videoDl.CurrentSeq()
-					if !advanceToNewPart(true, segmentEndTime) {
+					if err := advanceToNewPart(true, segmentEndTime); err != nil {
+						latchPartFailure(err)
 						break
 					}
 					currentQuality = newQuality
@@ -640,7 +700,8 @@ sessionLoop:
 					}
 
 					nextSeq := videoDl.CurrentSeq()
-					if !advanceToNewPart(true, segmentEndTime) {
+					if err := advanceToNewPart(true, segmentEndTime); err != nil {
+						latchPartFailure(err)
 						break
 					}
 					currentQuality = newQuality
@@ -678,7 +739,8 @@ sessionLoop:
 						"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
 						"jobID", jobCtx.Job.ID)
 				}
-				if !advanceToNewPart(!shortSegment, segmentEndTime) {
+				if err := advanceToNewPart(!shortSegment, segmentEndTime); err != nil {
+					latchPartFailure(err)
 					break
 				}
 				currentQuality = newQuality
@@ -695,14 +757,7 @@ sessionLoop:
 			// the broadcast is CONFIRMED over.
 			if dlErr != nil && ctx.Err() == nil {
 				o.logger.Error("Twitch HLS download error", "err", dlErr, "jobID", jobCtx.Job.ID)
-				if !isVod && variant.CheckStreamFn != nil {
-					stillLive, checkErr := variant.CheckStreamFn(ctx)
-					if checkErr != nil || stillLive {
-						o.logger.Warn("Twitch download ended without a confirmed stream end — keeping staging for recovery",
-							"jobID", jobCtx.Job.ID, "stillLive", stillLive, "checkErr", checkErr)
-						unconfirmedEndErr = dlErr
-					}
-				}
+				latchIfUnconfirmed(ctx, dlErr)
 			}
 			break
 		}
@@ -816,7 +871,8 @@ sessionLoop:
 		if newQuality.Changed(currentQuality) {
 			// Quality moved while we were gone — mixed-codec appends are
 			// never safe, so close the current part now.
-			if !advanceToNewPart(true, time.Now().Unix()) {
+			if err := advanceToNewPart(true, time.Now().Unix()); err != nil {
+				latchPartFailure(err)
 				break sessionLoop
 			}
 			currentQuality = newQuality
