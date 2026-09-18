@@ -85,7 +85,14 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// post-filter count turns a finished stream into `upcoming` — a stall the
 	// single-client ProbeVideoStatusAuthenticated path never recovers from,
 	// for exactly the accounts the tv-client DRM experiment hits.
-	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0 || formatDiag.DRMSkipped > 0)
+	//
+	// URL-less entries count for the same reason and by the same argument: a
+	// client YouTube has forced onto SABR returns a full format list with the
+	// per-format URLs stripped, so the response proves the media exists just
+	// as loudly, and nothing about "this client cannot fetch it" makes a
+	// finished broadcast upcoming.
+	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat,
+		len(formats) > 0 || formatDiag.DRMSkipped > 0 || formatDiag.URLlessFormats > 0)
 
 	// Metadata
 	title := getStr(videoDetails, "title")

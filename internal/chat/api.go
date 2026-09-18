@@ -161,9 +161,23 @@ func NewChatAPI(apiKey, visitorData string, cookieHeader func() string) *ChatAPI
 	}
 }
 
+// freshContinuationWatchURL builds the watch-page URL this package fetches a
+// continuation from. bpctr and has_verified are yt-dlp's age-gate bypass pair
+// (_video.py:3809, `query = {'bpctr': '9999999999', 'has_verified': '1'}`):
+// without them an age-restricted stream answers with the age-gate shell, whose
+// ytInitialData carries no liveChatRenderer at all — so the continuation is
+// read as "this stream has no chat" rather than read.
+//
+// The two parameters are spelled out here rather than shared with
+// internal/youtube's watchPageURL (which is unexported, and whose package this
+// one deliberately does not depend on); both cite the same upstream line.
+func freshContinuationWatchURL(videoID string) string {
+	return fmt.Sprintf("%s/watch?v=%s&bpctr=9999999999&has_verified=1", youtubeBase, videoID)
+}
+
 // FetchFreshContinuation fetches a chat continuation token from the watch page.
 func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) (continuation string, isReplay bool, err error) {
-	url := fmt.Sprintf("%s/watch?v=%s", youtubeBase, videoID)
+	url := freshContinuationWatchURL(videoID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

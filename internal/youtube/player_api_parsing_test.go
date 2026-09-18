@@ -1249,6 +1249,47 @@ func TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsDRM(t *testing.T) {
 	}
 }
 
+// TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsSABR is the URL-less
+// half of the rule the DRM test above pins. A client YouTube has forced onto
+// SABR returns formats with neither `url` nor `signatureCipher` — the response
+// still PROVES the broadcast has media, but every entry is dropped, so
+// classifying on the post-filter count turns a finished stream into
+// `upcoming`. That is the same stall for the same reason: the single-client
+// ProbeVideoStatusAuthenticated path has no fallback, and the waiting-room
+// poller would wait forever on a stream that already ended.
+//
+// Mutants this kills:
+//   - classifying on len(formats) alone, i.e. URLlessFormats not folded into
+//     the hasFormats predicate → upcoming
+func TestParsePlayerResponseKeepsPostLiveWhenEveryFormatIsSABR(t *testing.T) {
+	p := NewPlayerAPI(nil, noopLogger{})
+	data := decodePlayerJSON(t, `{
+		"playabilityStatus": {"status": "OK"},
+		"videoDetails": {"videoId": "SABRonlyVid", "title": "Ended Broadcast", "author": "Ch", "isLiveContent": true},
+		"microformat": {"playerMicroformatRenderer": {"liveBroadcastDetails": {
+			"isLiveNow": false, "startTimestamp": "2026-09-16T10:00:00+00:00", "endTimestamp": "2026-09-16T12:30:00+00:00"}}},
+		"streamingData": {
+			"serverAbrStreamingUrl": "https://rr1---sn-x.googlevideo.com/videoplayback?...",
+			"adaptiveFormats": [
+				{"itag": 137, "mimeType": "video/mp4; codecs=\"avc1.640028\"", "width": 1920, "height": 1080},
+				{"itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\""}
+			]
+		}
+	}`)
+
+	info, err := p.parsePlayerResponse(context.Background(), data, "", nil, "SABRonlyVid")
+	if err != nil {
+		t.Fatalf("parsePlayerResponse: %v", err)
+	}
+	if len(info.Formats) != 0 {
+		t.Fatalf("the URL-less formats must still be dropped, got %+v", info.Formats)
+	}
+	if info.StreamStatus != StreamPostLive || !info.IsPostLiveDVR || info.IsUpcoming {
+		t.Errorf("status = %q (postLiveDVR=%v upcoming=%v), want post_live — a SABR-forced response still HAD formats",
+			info.StreamStatus, info.IsPostLiveDVR, info.IsUpcoming)
+	}
+}
+
 // drmOKBody is an otherwise-adequate player response whose pool also carries a
 // DRM-protected rendition — the shape an account in YouTube's tv-client DRM
 // experiment gets back from MOST clients in a cascade (yt-dlp issue #12563).

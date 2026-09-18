@@ -1,6 +1,9 @@
 package chat
 
-import "testing"
+import (
+	"net/url"
+	"testing"
+)
 
 // chatPage renders a watch page whose ytInitialData carries a chat
 // continuation, in the given assignment form. It mirrors watchPageHTML in
@@ -67,5 +70,30 @@ func TestExtractChatContinuationReportsAMissingBlob(t *testing.T) {
 	if _, _, err := ExtractChatContinuation([]byte(`<html><body>nothing here</body></html>`)); err == nil ||
 		err.Error() != "ytInitialData not found" {
 		t.Errorf("err = %v, want %q", err, "ytInitialData not found")
+	}
+}
+
+// TestFreshContinuationWatchURLCarriesTheAgeGateBypass is row #59's twin in
+// this package. FetchFreshContinuation is the chat path's own watch-page
+// fetch, and without yt-dlp's bpctr / has_verified pair (_video.py:3809) an
+// age-restricted stream answers with the age-gate shell — whose ytInitialData
+// carries no liveChatRenderer, so the continuation is read as "no chat"
+// instead of being read at all.
+//
+// The whole query string is pinned: the two parameters are APPENDED to the URL
+// that already worked, so a rewrite that drops or reorders `v=` fails here too.
+//
+// Mutant this kills: the two parameters dropped → the query check fails.
+func TestFreshContinuationWatchURLCarriesTheAgeGateBypass(t *testing.T) {
+	got := freshContinuationWatchURL("dQw4w9WgXcQ")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("freshContinuationWatchURL produced an unparseable URL %q: %v", got, err)
+	}
+	if want := "https://www.youtube.com/watch"; u.Scheme+"://"+u.Host+u.Path != want {
+		t.Errorf("endpoint = %q, want %q", u.Scheme+"://"+u.Host+u.Path, want)
+	}
+	if want := "v=dQw4w9WgXcQ&bpctr=9999999999&has_verified=1"; u.RawQuery != want {
+		t.Errorf("query = %q, want exactly %q", u.RawQuery, want)
 	}
 }

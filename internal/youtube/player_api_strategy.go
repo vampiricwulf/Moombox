@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -35,6 +36,12 @@ type mismatchTally struct {
 	mismatched int
 	survived   int
 	got        string // the first substitute id seen, for the verdict's log line
+	// lastErr is the last non-mismatch client failure. It is what the
+	// exhaustion verdict wraps, so the client's own "HTTP <code>" survives
+	// into the string worker/probe_classify.go reads. Only the LAST is kept:
+	// the clients answer the same question, so the earlier errors are
+	// duplicates of it or of each other, and all of them are already logged.
+	lastErr error
 }
 
 // note records one client attempt and passes its result through unchanged, so
@@ -55,8 +62,22 @@ func (t *mismatchTally) note(info *VideoInfo, err error) (*VideoInfo, error) {
 		}
 	case err == nil:
 		t.survived++
+	default:
+		t.lastErr = err
 	}
 	return info, err
+}
+
+// exhausted is upstream's OTHER raise condition, the one beside the IP block:
+// `elif not prs: raise ExtractorError('Failed to extract any player response')`
+// (_video.py:3188-3189). Nothing usable exists — every client this cascade
+// asked errored, and the watch page carried no player response of its own.
+//
+// It cannot fire on a path that produced anything: the O-I waiting room, a
+// members-only verdict and every successful extraction all leave a TV (or
+// later) response in survived.
+func (t *mismatchTally) exhausted(wpParsed *VideoInfo) bool {
+	return t.survived == 0 && wpParsed == nil
 }
 
 // ipBlockShape is upstream's `if skipped_clients: ... if not prs: raise`
@@ -98,7 +119,35 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 			"clients", tally.attempts, "mismatched", tally.mismatched)
 		return nil, ErrAllClientsMismatched
 	}
+	if tally.exhausted(wpParsed) {
+		// Upstream's sibling raise (see exhausted). Returning the empty
+		// VideoInfo instead hands the worker "unhandled status: " with no
+		// cause anywhere in it — the same dead end ipBlockShape's doc names.
+		// AFTER the IP-block branch on purpose: a positive substitution
+		// signal is a better diagnosis than plain exhaustion, so Task 3's
+		// verdict keeps its precedence.
+		p.logger.Warn("[PlayerApi] no Innertube client produced a player response",
+			"videoID", videoID, "clients", tally.attempts, "lastError", errText(tally.lastErr))
+		if tally.lastErr != nil {
+			// Wrapped, not replaced: probe_classify.go keys on the
+			// "HTTP <code>" this carries.
+			return nil, fmt.Errorf("failed to extract any player response: %w", tally.lastErr)
+		}
+		// Unreachable from either cascade today — both always attempt at
+		// least one client, so an exhausted tally always holds its error —
+		// but the verdict must not depend on that to stay a sentence.
+		return nil, errors.New("failed to extract any player response")
+	}
 	return withAttestation(info, wp, videoID), nil
+}
+
+// errText renders an optional error for a log field without the "%!v(<nil>)"
+// an absent one would otherwise print.
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // withAttestation stamps the watch page's session verdict, its chat facts and
@@ -547,6 +596,12 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 					"client", "watch_page",
 					"videoID", videoID,
 					"formats", len(wpParsed.Formats),
+					// The page's embedded player response carries streamingData
+					// like any client's, and can be SABR-forced like any
+					// client's — and this is the line the authenticated
+					// members-only verdict is read from.
+					"urllessFormats", wpParsed.FormatDiag.URLlessFormats,
+					"sabrForced", wpParsed.FormatDiag.SabrForced,
 					"streamStatus", wpParsed.StreamStatus,
 					"playability", string(wpParsed.PlayabilityError))
 				return p.finishExtraction(ctx, wpParsed, wp, videoID, tally, wpParsed)
@@ -1119,7 +1174,8 @@ const innertubeErrorDetailMax = 512
 //
 // The body is DECODED rather than truncated first: chopping at 512 bytes would
 // break the JSON and lose the message this exists to surface. The bound is
-// applied to the OUTPUT instead.
+// applied to the OUTPUT instead, on a rune boundary — YouTube localises
+// error.message, and a string slice is a BYTE operation.
 func innertubeErrorDetail(body []byte) string {
 	var e struct {
 		Error struct {
@@ -1130,15 +1186,37 @@ func innertubeErrorDetail(body []byte) string {
 	if json.Unmarshal(body, &e) != nil {
 		return ""
 	}
-	detail := strings.TrimSpace(strings.TrimPrefix(e.Error.Status+": "+e.Error.Message, ": "))
+	detail := sanitizeErrorDetail(e.Error.Status + ": " + e.Error.Message)
+	detail = strings.TrimSpace(strings.TrimPrefix(detail, ": "))
 	detail = strings.TrimSuffix(detail, ":")
 	if detail == "" {
 		return ""
 	}
 	if len(detail) > innertubeErrorDetailMax {
 		detail = detail[:innertubeErrorDetailMax]
+		// Walk back off a rune the cut split. sanitizeErrorDetail left the
+		// string valid UTF-8, so this runs at most three times.
+		for len(detail) > 0 && !utf8.ValidString(detail) {
+			detail = detail[:len(detail)-1]
+		}
 	}
 	return detail
+}
+
+// sanitizeErrorDetail makes YouTube's own text safe to put in a one-line log
+// record and in the job's error column. That text is attacker-adjacent — it
+// comes back from a remote service and is not ours to trust — so every control
+// character becomes a space: a newline would split the log line, and an ESC is
+// the lead byte of an ANSI sequence a terminal would obey. strings.Map decodes
+// runes, so invalid UTF-8 in the message is replaced with U+FFFD on the same
+// pass and the result is always a valid string.
+func sanitizeErrorDetail(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // innertubeHTTPError formats a non-200 Innertube failure. The "<label> API

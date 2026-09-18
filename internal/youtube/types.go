@@ -180,22 +180,27 @@ func (c ChatSource) Usable() bool {
 //     through a cascade — a probe, a direct parse — they hold that one
 //     response's figures instead.
 type FormatDiag struct {
-	// URLlessFormats counts entries skipped for carrying no fetchable URL.
+	// URLlessFormats — PER RESPONSE. Entries skipped for carrying no
+	// fetchable URL (no `url`, no usable `signatureCipher`).
 	URLlessFormats int
-	// SabrForced is true when streamingData carried serverAbrStreamingUrl.
+	// SabrForced — PER RESPONSE. True when this response's streamingData
+	// carried serverAbrStreamingUrl.
 	SabrForced bool
-	// DRMSkipped counts entries dropped for carrying drmFamilies, SUMMED
-	// over the extraction's responses. A DRM entry never reaches the format
-	// pool, so there is no pool identity to collapse the copies several
-	// clients each returned against; the figure is entries dropped, and the
-	// per-client Debug lines are what attribute them to a client.
+	// DRMSkipped — PER EXTRACTION on the VideoInfo a cascade returned; per
+	// response on any other. Entries dropped for carrying drmFamilies,
+	// SUMMED over the extraction's responses. A DRM entry never reaches the
+	// format pool, so there is no pool identity to collapse the copies
+	// several clients each returned against; the figure is entries dropped,
+	// and the per-client log lines are what attribute them to a client.
 	DRMSkipped int
-	// CollapsedRenditions counts the alternate audio renditions the POOL
-	// lost — dubbed and DRC entries that shared an itag with the rendition
-	// the audio-track preference kept. Counted where the collapse happens,
-	// at deduplicateFormats, and therefore AFTER the cross-client merge: a
-	// rendition three clients each returned counts once, where summing the
-	// per-response figures would count it three times.
+	// CollapsedRenditions — PER EXTRACTION on the VideoInfo a cascade
+	// returned; zero on any other, because nothing else builds a pool. The
+	// alternate audio renditions the POOL lost: dubbed and DRC entries that
+	// shared an itag with the rendition the audio-track preference kept.
+	// Counted where the collapse happens, in deduplicateFormats, and
+	// therefore AFTER the cross-client merge — a rendition three clients each
+	// returned counts once, where summing the per-response figures would
+	// count it three times.
 	CollapsedRenditions int
 }
 

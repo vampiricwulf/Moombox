@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -484,16 +486,16 @@ func TestEveryClientSubstitutedIsReportedAsAnIPBlock(t *testing.T) {
 	})
 
 	// The mirror image: no substitute anywhere, every client simply failed.
-	// The verdict must NOT fire on absence of evidence.
+	// The IP-block verdict must NOT fire on absence of evidence — upstream's
+	// OTHER raise covers this shape (`elif not prs: raise ExtractorError(
+	// 'Failed to extract any player response')`, _video.py:3188-3189), and
+	// that is what the cascade returns here.
 	//
 	// What this subtest can no longer assert is the TV client's own HTTP error
-	// coming back verbatim: row #58 (YOUTUBE-12) made the public path mirror
-	// the authenticated one, which has always logged a TV failure and carried
-	// on, so a cascade in which everything fails now ends the way the
-	// authenticated cascade ends — an empty VideoInfo, no error — instead of
-	// returning TV's status with VISIONOS and ANDROID_VR never asked. Trying
-	// them is the point of the row, and the tally still sees no substitution
-	// signal, which is what this subtest exists for.
+	// coming back BARE: row #58 (YOUTUBE-12) made the public path mirror the
+	// authenticated one, which has always logged a TV failure and carried on,
+	// so the cascade asks VISIONOS and ANDROID_VR first and reports the
+	// exhaustion, with the last client error wrapped inside it.
 	t.Run("no substitute at all, every client failing", func(t *testing.T) {
 		stubWatchPage(t)
 		tr := &clientKeyedTransport{responses: map[string]struct {
@@ -506,11 +508,11 @@ func TestEveryClientSubstitutedIsReportedAsAnIPBlock(t *testing.T) {
 		if errors.Is(err, ErrAllClientsMismatched) {
 			t.Fatalf("flakiness alone raised the IP-block verdict: %v", err)
 		}
-		if err != nil {
-			t.Fatalf("err = %v, want the authenticated path's shape — log the failure and carry on", err)
+		if err == nil || !strings.Contains(err.Error(), "failed to extract any player response") {
+			t.Fatalf("err = %v (info %+v), want the exhaustion verdict", err, info)
 		}
-		if info == nil || len(info.Formats) != 0 {
-			t.Errorf("info = %+v, want an empty VideoInfo", info)
+		if info != nil {
+			t.Errorf("info = %+v, want nil alongside that error", info)
 		}
 		for _, want := range []string{"101", "28"} {
 			if !slices.Contains(tr.calls, want) {
@@ -861,6 +863,53 @@ func TestInnertubeErrorCarriesYouTubesOwnMessage(t *testing.T) {
 		}
 	})
 
+	// YouTube localises error.message, so the 512-byte bound can land in the
+	// middle of a multi-byte rune — and a string slice is a BYTE operation.
+	// Invalid UTF-8 then goes into a log line and, through the error, into the
+	// job's error column.
+	//
+	// Mutant this kills: the bound applied as a plain byte slice.
+	t.Run("the bound cuts on a rune boundary", func(t *testing.T) {
+		// Three-byte runes, so the 512-byte bound falls inside one.
+		body := `{"error":{"status":"FAILED_PRECONDITION","message":"` + strings.Repeat("あ", 400) + `"}}`
+		got := innertubeErrorDetail([]byte(body))
+		if len(got) > innertubeErrorDetailMax {
+			t.Errorf("detail is %d bytes, want at most %d", len(got), innertubeErrorDetailMax)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("detail is not valid UTF-8 after the bound: %q", got)
+		}
+		if !strings.HasPrefix(got, "FAILED_PRECONDITION: あ") {
+			t.Errorf("detail = %q, want YouTube's status and the start of its message", got)
+		}
+	})
+
+	// error.message is attacker-adjacent text that lands in a single-line slog
+	// record and in the job's error column. A newline in it splits the log
+	// line; a NUL or an escape sequence is worse.
+	//
+	// Mutant this kills: the control-character strip removed.
+	t.Run("control characters are replaced", func(t *testing.T) {
+		// Built rather than written out, so the fixture carries the real
+		// bytes: a newline, a carriage return, a tab, a NUL, and an ESC — the
+		// lead byte of an ANSI sequence a terminal would obey.
+		msg := "line one\nline two\r\tand" + string(rune(0)) + "a nul" + string(rune(0x1b)) + "[31m"
+		body, mErr := json.Marshal(map[string]any{"error": map[string]any{"status": "NOT_FOUND", "message": msg}})
+		if mErr != nil {
+			t.Fatalf("marshal fixture: %v", mErr)
+		}
+
+		got := innertubeErrorDetail(body)
+		for _, bad := range []string{"\n", "\r", "\t", string(rune(0)), string(rune(0x1b))} {
+			if strings.Contains(got, bad) {
+				t.Errorf("detail %q still carries %q", got, bad)
+			}
+		}
+		if !strings.Contains(got, "line one line two") {
+			t.Errorf("detail = %q, want the text itself preserved with the control characters spaced out", got)
+		}
+	})
+
 	t.Run("the prefix survives on the wire too", func(t *testing.T) {
 		tr := &clientKeyedTransport{responses: map[string]struct {
 			status int
@@ -1084,6 +1133,130 @@ func TestFormatDiagCarriesThePoolLevelCounts(t *testing.T) {
 		t.Errorf("CollapsedRenditions = %d, want 1 — both clients returned the same ja.3 rendition, and the pool collapses it once",
 			info.FormatDiag.CollapsedRenditions)
 	}
+}
+
+// TestAllClientsFailedIsReportedAsAnError is upstream's second raise:
+// `elif not prs: raise ExtractorError('Failed to extract any player response')`
+// (_video.py:3188-3189), the sibling of the IP-block verdict Task 3 ported.
+//
+// Row #58 made the public path carry on past a TV failure like the
+// authenticated one — which meant a cascade where EVERY client fails and the
+// watch page carried no player response returned (&VideoInfo{}, nil), and the
+// worker rendered that as its diagnosis-free "unhandled status: ". Both paths
+// had that hole; the single exit closes both. The last client error is wrapped
+// rather than replaced, so worker/probe_classify.go still finds the
+// "HTTP <code>" it keys on.
+//
+// Mutants this kills:
+//   - the guard removed                    → the first two subtests get (&VideoInfo{}, nil)
+//   - the guard placed BEFORE the IP-block
+//     branch                               → "a substitution still wins" gets the wrong error
+//   - the error not wrapping tally.lastErr → the "HTTP 404" assertion fails
+//   - the guard ignoring wpParsed          → "a watch-page response is a survivor" fails
+//   - the guard firing when a client
+//     survived                             → "one clean client is unaffected" fails
+func TestAllClientsFailedIsReportedAsAnError(t *testing.T) {
+	noClientAnswers := func(t *testing.T) {
+		t.Helper()
+		orig := apiClient
+		apiClient = &http.Client{Transport: &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{}}}
+		t.Cleanup(func() { apiClient = orig })
+	}
+
+	t.Run("public", func(t *testing.T) {
+		stubWatchPage(t)
+		noClientAnswers(t)
+
+		info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		if err == nil {
+			t.Fatalf("info = %+v, err = nil — the worker renders that as \"unhandled status: \"", info)
+		}
+		if info != nil {
+			t.Errorf("info = %+v, want nil alongside the error", info)
+		}
+		if !strings.HasPrefix(err.Error(), "failed to extract any player response: ") {
+			t.Errorf("err = %q, want upstream's wording first", err)
+		}
+		if !strings.Contains(err.Error(), "HTTP 404") {
+			t.Errorf("err = %q — the last client error must be WRAPPED, so probe_classify.go still sees the status", err)
+		}
+	})
+
+	t.Run("authenticated", func(t *testing.T) {
+		stubWatchPage(t)
+		noClientAnswers(t)
+
+		info, err := newRetryTestAPI().GetVideoInfoAuthenticated(context.Background(), "test1234567")
+		if err == nil {
+			t.Fatalf("info = %+v, err = nil — the authenticated path had the same hole", info)
+		}
+		if !strings.HasPrefix(err.Error(), "failed to extract any player response: ") {
+			t.Errorf("err = %q, want upstream's wording first", err)
+		}
+		if !strings.Contains(err.Error(), "HTTP 404") {
+			t.Errorf("err = %q, want the last client error wrapped", err)
+		}
+	})
+
+	t.Run("one clean client is unaffected", func(t *testing.T) {
+		stubWatchPage(t)
+		orig := apiClient
+		apiClient = &http.Client{Transport: &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{
+			"101": {http.StatusOK, adequateOKBody}, // VISIONOS survives
+		}}}
+		t.Cleanup(func() { apiClient = orig })
+
+		info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		if err != nil {
+			t.Fatalf("err = %v, want none — one client survived", err)
+		}
+		if info == nil || len(info.Formats) == 0 {
+			t.Fatalf("info = %+v, want VISIONOS's formats", info)
+		}
+	})
+
+	t.Run("a watch-page response is a survivor", func(t *testing.T) {
+		origFetch := fetchWatchPage
+		fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
+			return &WatchPageResult{
+				Ytcfg:          DefaultYtcfg(),
+				PlayerResponse: decodePlayerJSON(t, adequateOKBody),
+			}, nil
+		}
+		t.Cleanup(func() { fetchWatchPage = origFetch })
+		noClientAnswers(t)
+
+		info, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		if err != nil {
+			t.Fatalf("err = %v, want none — the watch page's own player response is in `prs`", err)
+		}
+		if info == nil || len(info.Formats) == 0 {
+			t.Fatalf("info = %+v, want the watch page's formats", info)
+		}
+	})
+
+	t.Run("a substitution still wins the verdict", func(t *testing.T) {
+		stubWatchPage(t)
+		orig := apiClient
+		apiClient = &http.Client{Transport: &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{
+			"7": {http.StatusOK, substituteBody}, // the rest 404
+		}}}
+		t.Cleanup(func() { apiClient = orig })
+
+		_, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
+		if !errors.Is(err, ErrAllClientsMismatched) {
+			t.Fatalf("err = %v, want ErrAllClientsMismatched — a positive substitution signal outranks plain exhaustion", err)
+		}
+	})
 }
 
 // TestDRMSkipIsSilentOnProbesAndNamesTheClientOnce covers the two halves of

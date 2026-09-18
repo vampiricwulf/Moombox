@@ -75,6 +75,19 @@ func classifyProbeErr(err error) probeErrClass {
 
 	// String fallback for lossy wraps where the transport detail was flattened.
 	msg := strings.ToLower(err.Error())
+
+	// Only the "<client> API error: HTTP <code>" head is a classification
+	// signal. Since YOUTUBE-7 a non-200 Innertube failure appends YouTube's
+	// own error.status/message after " — ", and that text is not ours: a
+	// terminal 404 whose message reads "Backend timeout …" would match the
+	// transient arm below — which is tested FIRST — and beat the status code
+	// this fallback exists to read. The consequences are not symmetric with
+	// the asymmetric default: the give-up counter would never advance on a
+	// deleted video, and reportProbeResult would cast a false "the network is
+	// down" vote into the passive connectivity oracle.
+	if i := strings.Index(msg, " — "); i >= 0 {
+		msg = msg[:i]
+	}
 	switch {
 	case strings.Contains(msg, "http 429"), // rate limited — transient
 		strings.Contains(msg, "http 401"), // auth expired — cookie refresh can remediate; keep waiting
